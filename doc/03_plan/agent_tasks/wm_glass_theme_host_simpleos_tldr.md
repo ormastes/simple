@@ -6,6 +6,9 @@
   Metal receipt identity, canonical hosted browser event routing, UTF-8 input,
   clipped theme-derived input Draw IR, and single-line caret/selection overlays
   are source-fixed and reviewed.
+- Runtime switching has a reviewed bounded `ThemeChangedV1` protocol and
+  BrowserBackend cache identity; kernel payload/source authentication,
+  transactional package refresh, and ThemeService delivery remain blocked.
 - Live host pixels/events remain open until an admitted source-matched
   pure-Simple runtime and required native capability are available.
 - The Endpoint Security collector is source-verified and fail-closed; policy

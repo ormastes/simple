@@ -1011,3 +1011,17 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   Independent highest-capability static review accepted commit `63205f9e8f`.
   No admitted runtime existed, so no executed PASS is inferred. Textarea
   overlays and live pixels/events/timing/RSS remain open.
+
+- continuation-2026-07-27-theme-notification-foundation: **SOURCE FOUNDATION
+  ACCEPTED / RUNTIME SWITCHING STILL BLOCKED.** Added the common-only bounded
+  `ThemeChangedV1` method-4 codec, strict canonical identity/hash/revision
+  validation, injected synchronous-copy/non-reentrant transport contract, and
+  stable all-subscriber dedupe/status policy. BrowserBackend static-frame,
+  static-shell, layout, and present caches now include canonical theme id plus
+  source-manifest and material hashes. Focused specs were added, direct-env
+  audits and diff checks passed, and independent highest-capability static
+  review found no P0/P1. The checked-in self-hosted launcher resolves to a
+  Linux binary on this macOS host, so no runtime test or live switching PASS is
+  inferred. Kernel-owned payload queuing/authenticated source identity,
+  transactional package refresh, ThemeService delivery, monotonic consumers,
+  and the intentional fail-fast system contract remain open.

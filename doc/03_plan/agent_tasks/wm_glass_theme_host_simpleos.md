@@ -81,7 +81,7 @@ overlapping dirty work and remains read-only for this lane.
 | Simple GUI theme handoff | SOURCE FIXED; product proof pending | resolved snapshot now reaches canonical widget Draw IR; 2 bootstrap-driver scenarios pass diagnostically |
 | Simple Web theme authority | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | canonical package output keeps the complete structural/event adapter while Aetheric package CSS owns every paint/material token; live parser/Draw-IR/pixel/event proof still requires an admitted runtime |
 | WM glass material projection | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | CPU preserves parent sampling/500/930 opacity; opaque Metal uses session-owned identity and exact per-request receipts; sub-opaque Metal fails before dispatch until a GPU-only delta path exists |
-| Runtime theme switching | ABI BLOCKED; fail-fast system contract | numeric subscriber ports have no `IpcOutputPort`/send adapter, message schema, source identity, or delivery-failure policy |
+| Runtime theme switching | PROTOCOL/CACHE FOUNDATION SOURCE ACCEPTED; ABI BLOCKED; fail-fast system contract | `ThemeChangedV1` now fixes the bounded notification wire format, injected synchronous-copy transport policy, subscriber dedupe/status behavior, and BrowserBackend cache identity; kernel-owned payload queuing/authenticated source identity plus transactional package refresh and real ThemeService/consumer wiring remain prerequisites |
 
 ### Historical parallel ownership — completed
 
