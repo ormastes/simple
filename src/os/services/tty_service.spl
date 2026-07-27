@@ -105,6 +105,22 @@ struct PtyPair:
     master: Entity
     slave: Entity
 
+struct TermCtl:
+    """Controlling-terminal ownership + pending-signal model for a TTY.
+
+    session_id / foreground_pgrp implement the POSIX controlling-terminal
+    model: only a caller in the TTY's session may change the foreground
+    process group (tty_set_foreground, deny-wins). pending_signal records
+    the line discipline's ISIG action as a MODEL (no extern delivery on
+    this path): a VINTR byte with ISIG on sets pending_signal = SIGINT
+    and pending_signal_pgrp = the foreground pgrp at that instant.
+    pending_signal == 0 means "no signal pending".
+    """
+    session_id: i64
+    foreground_pgrp: i64
+    pending_signal: i64
+    pending_signal_pgrp: i64
+
 # ============================================================================
 # TtyWorld — ECS world for all TTY state
 # ============================================================================
@@ -121,12 +137,13 @@ struct TtyWorld:
     input_bufs:     ComponentStore<InputBuf>
     kinds:          ComponentStore<TtyKind>
     pty_pairs:      ComponentStore<PtyPair>
+    term_ctls:      ComponentStore<TermCtl>
 
-# ============================================================================
-# Extern — kernel wires these at boot
-# ============================================================================
-
-extern fn signal_deliver(target_pid: u64, signo: i32) -> i32
+# NOTE(TERM): the `extern fn signal_deliver` declaration that lived here is
+# gone with its last in-file caller — VINTR now records into the TermCtl
+# pending-signal model and the kernel-side consumer (which declares its own
+# extern, as pm_service.spl does) performs real delivery after draining
+# tty_take_pending_signal.
 
 # ============================================================================
 # TtyService — public API
@@ -159,7 +176,8 @@ impl TtyService:
                 output_bufs:    ComponentStore.new(),
                 input_bufs:     ComponentStore.new(),
                 kinds:          ComponentStore.new(),
-                pty_pairs:      ComponentStore.new()
+                pty_pairs:      ComponentStore.new(),
+                term_ctls:      ComponentStore.new()
             ),
             initialized: true,
             default_cc: cc
@@ -210,16 +228,35 @@ impl TtyService:
         var input_bufs_store = self.world.input_bufs
         input_bufs_store.insert(e, InputBuf(bytes: []), t)
         self.world.input_bufs = input_bufs_store
-        self.world.line_bufs.insert(e,
-            LineBuf(bytes: [], cap: 4096), t)
-        self.world.termios.insert(e,
+        # Same extract-mutate-writeback requirement (two-hop landmine).
+        # Defaults: no session (0), no foreground pgrp (0), no pending signal.
+        var term_ctls_store = self.world.term_ctls
+        term_ctls_store.insert(e, TermCtl(
+            session_id: 0, foreground_pgrp: 0,
+            pending_signal: 0, pending_signal_pgrp: 0), t)
+        self.world.term_ctls = term_ctls_store
+        # TERM increment: these five stores previously used the direct
+        # two-hop chained insert form — verified LOST under both available
+        # verification binaries on this host (termios/kinds/line_bufs
+        # lookups all came back get_slot=-1, turning the whole line
+        # discipline and the pre-existing tty_service_spec red). Converted
+        # to the same extract-mutate-writeback pattern as the stores above.
+        var line_bufs_store = self.world.line_bufs
+        line_bufs_store.insert(e, LineBuf(bytes: [], cap: 4096), t)
+        self.world.line_bufs = line_bufs_store
+        var termios_store = self.world.termios
+        termios_store.insert(e,
             Termios(iflag: 0, oflag: 0, lflag: ICANON | ECHO | ISIG, cc: cc), t)
-        self.world.fg_pgids.insert(e,
-            ForegroundPgid(value: 0), t)
-        self.world.input_sources.insert(e,
-            InputSource(endpoint: input_ep), t)
-        self.world.kinds.insert(e,
-            TtyKind(kind: kind), t)
+        self.world.termios = termios_store
+        var fg_pgids_store = self.world.fg_pgids
+        fg_pgids_store.insert(e, ForegroundPgid(value: 0), t)
+        self.world.fg_pgids = fg_pgids_store
+        var input_sources_store = self.world.input_sources
+        input_sources_store.insert(e, InputSource(endpoint: input_ep), t)
+        self.world.input_sources = input_sources_store
+        var kinds_store = self.world.kinds
+        kinds_store.insert(e, TtyKind(kind: kind), t)
+        self.world.kinds = kinds_store
         e
 
     me tty_set_termios(tty: Entity, iflag: u32, oflag: u32, lflag: u32):
@@ -228,8 +265,11 @@ impl TtyService:
         if slot >= 0:
             val old_cc = self.world.termios.dense[slot].cc
             val t = self.world.base.now()
-            self.world.termios.insert(tty,
+            # Extract-mutate-writeback (two-hop chained insert is lost).
+            var termios_store = self.world.termios
+            termios_store.insert(tty,
                 Termios(iflag: iflag, oflag: oflag, lflag: lflag, cc: old_cc), t)
+            self.world.termios = termios_store
 
     fn tty_get_termios(tty: Entity) -> Termios?:
         """Return the Termios for a TTY, or nil if entity not found."""
@@ -247,7 +287,10 @@ impl TtyService:
         if slot < 0:
             return false
         val t = self.world.base.now()
-        self.world.fg_pgids.insert(tty, ForegroundPgid(value: pgid), t)
+        # Extract-mutate-writeback (two-hop chained insert is lost).
+        var fg_pgids_store = self.world.fg_pgids
+        fg_pgids_store.insert(tty, ForegroundPgid(value: pgid), t)
+        self.world.fg_pgids = fg_pgids_store
         true
 
     fn tty_fg_pgid(tty: Entity) -> u32:
@@ -277,14 +320,27 @@ impl TtyService:
         val is_canon = (tios.lflag & ICANON) != 0
         val is_sig   = (tios.lflag & ISIG) != 0
 
-        # Check VINTR (Ctrl-C = ETX = 3 by default)
+        # Check VINTR (Ctrl-C = ETX = 3 by default).
+        # TERM increment: records the SIGINT in the TermCtl pending-signal
+        # model (targeted at the TERM foreground pgrp) instead of calling
+        # the kernel-wired `signal_deliver` extern directly — the extern is
+        # only resolvable in-guest, so the direct call made this path
+        # unverifiable (and failing) on host. The kernel-side consumer
+        # drains via tty_take_pending_signal and performs real delivery.
         if is_canon and is_sig:
             val vintr_char = tios.cc[VINTR]
             if ch == vintr_char:
-                val pgid_slot = self.world.fg_pgids.get_slot(tty)
-                if pgid_slot >= 0:
-                    val pgid = self.world.fg_pgids.dense[pgid_slot].value
-                    signal_deliver(pgid as u64, SIGINT)
+                val ctl_slot = self.world.term_ctls.get_slot(tty)
+                if ctl_slot >= 0:
+                    val old_ctl = self.world.term_ctls.dense[ctl_slot]
+                    val t0 = self.world.base.now()
+                    var ctl_store = self.world.term_ctls
+                    ctl_store.insert(tty, TermCtl(
+                        session_id: old_ctl.session_id,
+                        foreground_pgrp: old_ctl.foreground_pgrp,
+                        pending_signal: SIGINT as i64,
+                        pending_signal_pgrp: old_ctl.foreground_pgrp), t0)
+                    self.world.term_ctls = ctl_store
                 return 0
 
         if is_canon:
@@ -295,8 +351,11 @@ impl TtyService:
             val old_buf = self.world.line_bufs.dense[buf_slot]
             val new_bytes = old_buf.bytes.push(ch)
             val t = self.world.base.now()
-            self.world.line_bufs.insert(tty,
+            # Extract-mutate-writeback (two-hop chained insert is lost).
+            var line_bufs_store = self.world.line_bufs
+            line_bufs_store.insert(tty,
                 LineBuf(bytes: new_bytes, cap: old_buf.cap), t)
+            self.world.line_bufs = line_bufs_store
             # Deliver only when newline arrives
             if ch == 10:
                 return 1
@@ -328,8 +387,11 @@ impl TtyService:
         # Drain the buffer
         val result = old_buf.bytes
         val t = self.world.base.now()
-        self.world.line_bufs.insert(tty,
+        # Extract-mutate-writeback (two-hop chained insert is lost).
+        var line_bufs_store = self.world.line_bufs
+        line_bufs_store.insert(tty,
             LineBuf(bytes: [], cap: old_buf.cap), t)
+        self.world.line_bufs = line_bufs_store
         result
 
     me tty_write(tty: Entity, bytes: [u8]) -> i32:
@@ -494,6 +556,211 @@ impl TtyService:
             return []
         val pair = self.world.pty_pairs.dense[pair_slot]
         self.tty_read_output(pair.slave)
+
+    # ------------------------------------------------------------------
+    # Controlling terminal / session / foreground process group (TERM)
+    # ------------------------------------------------------------------
+
+    me tty_set_session(tty: Entity, session_id: i64) -> bool:
+        """Attach this TTY as the controlling terminal of `session_id`.
+
+        Preserves foreground_pgrp and any pending signal. Returns false
+        (fail closed) if the TTY entity does not exist.
+        """
+        val slot = self.world.term_ctls.get_slot(tty)
+        if slot < 0:
+            return false
+        val old = self.world.term_ctls.dense[slot]
+        val t = self.world.base.now()
+        var ctl_store = self.world.term_ctls
+        ctl_store.insert(tty, TermCtl(
+            session_id: session_id,
+            foreground_pgrp: old.foreground_pgrp,
+            pending_signal: old.pending_signal,
+            pending_signal_pgrp: old.pending_signal_pgrp), t)
+        self.world.term_ctls = ctl_store
+        true
+
+    fn tty_session_id(tty: Entity) -> i64:
+        """Return the owning session id (0 = no controlling session / not found)."""
+        val slot = self.world.term_ctls.get_slot(tty)
+        if slot < 0:
+            return 0
+        self.world.term_ctls.dense[slot].session_id
+
+    me tty_set_foreground(tty: Entity, caller_session: i64, pgrp: i64) -> bool:
+        """Set the foreground process group — session-checked, deny-wins.
+
+        Succeeds ONLY when the caller's session equals the TTY's owning
+        session. Unknown entity or session mismatch both fail closed
+        (return false, foreground_pgrp unchanged).
+        """
+        val slot = self.world.term_ctls.get_slot(tty)
+        if slot < 0:
+            return false
+        val old = self.world.term_ctls.dense[slot]
+        if caller_session != old.session_id:
+            return false
+        val t = self.world.base.now()
+        var ctl_store = self.world.term_ctls
+        ctl_store.insert(tty, TermCtl(
+            session_id: old.session_id,
+            foreground_pgrp: pgrp,
+            pending_signal: old.pending_signal,
+            pending_signal_pgrp: old.pending_signal_pgrp), t)
+        self.world.term_ctls = ctl_store
+        true
+
+    fn tty_foreground_pgrp(tty: Entity) -> i64:
+        """Return the foreground process group (0 = none / not found)."""
+        val slot = self.world.term_ctls.get_slot(tty)
+        if slot < 0:
+            return 0
+        self.world.term_ctls.dense[slot].foreground_pgrp
+
+    fn tty_pending_signal(tty: Entity) -> i64:
+        """Return the pending signal number recorded by ISIG (0 = none)."""
+        val slot = self.world.term_ctls.get_slot(tty)
+        if slot < 0:
+            return 0
+        self.world.term_ctls.dense[slot].pending_signal
+
+    fn tty_pending_signal_pgrp(tty: Entity) -> i64:
+        """Return the pgrp the pending signal targets (0 = none)."""
+        val slot = self.world.term_ctls.get_slot(tty)
+        if slot < 0:
+            return 0
+        self.world.term_ctls.dense[slot].pending_signal_pgrp
+
+    me tty_take_pending_signal(tty: Entity) -> i64:
+        """Consume and return the pending signal (0 if none); clears it."""
+        val slot = self.world.term_ctls.get_slot(tty)
+        if slot < 0:
+            return 0
+        val old = self.world.term_ctls.dense[slot]
+        val signo = old.pending_signal
+        if signo == 0:
+            return 0
+        val t = self.world.base.now()
+        var ctl_store = self.world.term_ctls
+        ctl_store.insert(tty, TermCtl(
+            session_id: old.session_id,
+            foreground_pgrp: old.foreground_pgrp,
+            pending_signal: 0,
+            pending_signal_pgrp: 0), t)
+        self.world.term_ctls = ctl_store
+        signo
+
+    # ------------------------------------------------------------------
+    # Termios line discipline across the PTY boundary (TERM)
+    # ------------------------------------------------------------------
+
+    me tty_ld_input(tty: Entity, ch: u8) -> i32:
+        """Run ONE input byte through this TTY's termios line discipline.
+
+        The TTY entity itself is the terminal (for a PTY this is the
+        SLAVE): delivered bytes land in its InputBuf (drained by
+        tty_read_input, the shell-read side), echo lands in its OutputBuf
+        (drained by pty_master_read, the master-readable side).
+
+        Order (matches POSIX intent, simplest model):
+          1. ISIG on + ch == cc[VINTR]  -> record pending SIGINT targeted
+             at the current foreground pgrp; byte NEVER enters the input
+             stream and is not echoed. Returns 0.
+          2. ECHO on                    -> byte appended to OutputBuf.
+          3. ICANON on: accumulate in LineBuf; on '\\n' the whole line
+             (newline included) is flushed to InputBuf (returns 1); on
+             cc[VEOF] the accumulated partial line (EOF byte excluded) is
+             flushed (returns 1 if anything flushed, else 0); otherwise
+             returns 0 (line still gated).
+             ICANON off: byte delivered to InputBuf immediately (returns 1).
+        Returns -1 if the TTY has no Termios (unknown entity).
+        """
+        val tios_slot = self.world.termios.get_slot(tty)
+        if tios_slot < 0:
+            return -1
+        val tios = self.world.termios.dense[tios_slot]
+        val is_sig   = (tios.lflag & ISIG) != 0
+        val is_echo  = (tios.lflag & ECHO) != 0
+        val is_canon = (tios.lflag & ICANON) != 0
+
+        # 1. ISIG: VINTR is swallowed and recorded, never delivered.
+        if is_sig and ch == tios.cc[VINTR]:
+            val ctl_slot = self.world.term_ctls.get_slot(tty)
+            if ctl_slot >= 0:
+                val old = self.world.term_ctls.dense[ctl_slot]
+                val t0 = self.world.base.now()
+                var ctl_store = self.world.term_ctls
+                ctl_store.insert(tty, TermCtl(
+                    session_id: old.session_id,
+                    foreground_pgrp: old.foreground_pgrp,
+                    pending_signal: SIGINT as i64,
+                    pending_signal_pgrp: old.foreground_pgrp), t0)
+                self.world.term_ctls = ctl_store
+            return 0
+
+        # 2. ECHO: input byte echoed to the master-readable output queue.
+        if is_echo:
+            val echo_bytes: [u8] = [ch]
+            self.tty_write(tty, echo_bytes)
+
+        # 3. Canonical gating vs raw passthrough.
+        if is_canon:
+            val buf_slot = self.world.line_bufs.get_slot(tty)
+            if buf_slot < 0:
+                return -1
+            val old_buf = self.world.line_bufs.dense[buf_slot]
+            val t = self.world.base.now()
+            if ch == tios.cc[VEOF]:
+                # EOF: flush the partial line (EOF byte excluded).
+                val pending = old_buf.bytes
+                var lb_eof = self.world.line_bufs
+                lb_eof.insert(tty, LineBuf(bytes: [], cap: old_buf.cap), t)
+                self.world.line_bufs = lb_eof
+                if pending.len() == 0:
+                    return 0
+                self.tty_write_input(tty, pending)
+                return 1
+            val new_bytes = old_buf.bytes.push(ch)
+            if ch == 10:
+                # Newline: line (incl. '\n') becomes readable by the slave.
+                var lb_nl = self.world.line_bufs
+                lb_nl.insert(tty, LineBuf(bytes: [], cap: old_buf.cap), t)
+                self.world.line_bufs = lb_nl
+                self.tty_write_input(tty, new_bytes)
+                return 1
+            # Still gated: keep accumulating (extract-mutate-writeback).
+            var lb_acc = self.world.line_bufs
+            lb_acc.insert(tty, LineBuf(bytes: new_bytes, cap: old_buf.cap), t)
+            self.world.line_bufs = lb_acc
+            return 0
+        else:
+            # Raw mode: deliver immediately.
+            val one: [u8] = [ch]
+            self.tty_write_input(tty, one)
+            return 1
+
+    me pty_master_write_ld(master: Entity, bytes: [u8]) -> i32:
+        """PTY master write THROUGH the slave's termios line discipline.
+
+        The line-discipline sibling of pty_master_write (which stays the
+        raw queue op): each byte runs through tty_ld_input on the linked
+        SLAVE, so canonical mode gates lines until '\\n'/VEOF, ECHO
+        reflects bytes into the master-readable queue, and ISIG turns
+        VINTR into a pending SIGINT for the slave's foreground pgrp.
+        Returns the number of bytes consumed, or -1 if `master` has no
+        linked pair.
+        """
+        val pair_slot = self.world.pty_pairs.get_slot(master)
+        if pair_slot < 0:
+            return -1
+        val pair = self.world.pty_pairs.dense[pair_slot]
+        var i = 0
+        val n = bytes.len()
+        while i < n:
+            self.tty_ld_input(pair.slave, bytes[i])
+            i = i + 1
+        n as i32
 
     fn tty_count(self) -> i32:
         """Return the number of live TTY entities (tracked via kinds store)."""
