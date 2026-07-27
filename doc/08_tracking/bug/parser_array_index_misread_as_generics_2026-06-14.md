@@ -44,3 +44,30 @@ Make the generics-migration / parser disambiguation treat `identifier[expr]` as
 indexing (not a generic) when `identifier` resolves to a value binding, or when
 the bracket contents are an expression rather than a type. Then `common.ui.style`
 loads without edits.
+
+## Further occurrence — 2026-07-27, vhdl_gen
+
+Still reproducing, now in the RTL generator. `src/lib/hardware/vhdl_gen/tb_single_lane_types.spl:182`
+
+```simple
+while k < rows[r]:          # rows is a fn parameter of type [i64]
+```
+
+emits, twice per run:
+
+```
+Use angle brackets: rows<...> instead of rows[...]
+```
+
+Repro: `bin/simple run test/01_unit/lib/hardware/vhdl_gen/probe_tb_single_lane_gen.spl`
+
+Non-fatal here — the probe still reports `ALL PASS` and all five generated
+testbenches stay byte-identical to their goldens — so this occurrence is noise,
+not a blocker. Recorded rather than worked around: the natural fix would be to
+rename or restructure the parameter, which would be normalizing a compiler
+defect into the source.
+
+Note this instance narrows the trigger usefully: `rows` here is a **function
+parameter** declared `rows: [i64]`, not a local `var`. So the disambiguation
+fails for parameter bindings too, not just locals — worth covering in whatever
+fix lands. Sibling report: `u8_index_generics_deprecation_false_positive_test_path_2026-06-28.md`.

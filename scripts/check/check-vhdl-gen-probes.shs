@@ -1,0 +1,132 @@
+#!/bin/sh
+# check-vhdl-gen-probes.shs — run every vhdl_gen generator probe, fail closed.
+#
+# Why this exists: the probes under test/01_unit/lib/hardware/vhdl_gen/ prove the
+# generated RTL is byte-identical to its golden, but nothing ran them
+# automatically. Several agents share emitter modules (generalizing them rather
+# than forking), so a behaviour-preserving-looking refactor in one family can
+# silently break another family's byte-identity. A hand-run probe is a snapshot;
+# this gate makes it standing.
+#
+# Probes are DISCOVERED by glob, not listed. A hardcoded list is exactly how
+# tb_rv32_nvme_bram_soc.vhd stayed invisible to the golden gate for weeks.
+#
+# Usage: check-vhdl-gen-probes.shs [--selftest]
+#   --selftest   calibration: prove this gate can actually go red, by running a
+#                temporary probe that fails. A gate that cannot fail is not a gate.
+#
+# Summary keys:
+#   vhdl_gen_probes_total=<n>
+#   vhdl_gen_probes_pass=<n>
+#   vhdl_gen_probes_fail=<n>
+#   vhdl_gen_probes_ok=true|false
+#
+# Exit 0 = all probes passed, 1 = any probe failed / produced no PASS lines,
+# 2 = environment problem (no probes found, no runner).
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+PROBE_DIR="$ROOT/test/01_unit/lib/hardware/vhdl_gen"
+RUNNER="$ROOT/bin/simple"
+SELFTEST=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) SELFTEST=1 ;;
+        *)
+            echo "check-vhdl-gen-probes: unknown argument: $arg" >&2
+            echo "usage: check-vhdl-gen-probes.shs [--selftest]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+[ -x "$RUNNER" ] || { echo "check-vhdl-gen-probes: runner missing: $RUNNER" >&2; exit 2; }
+
+# run_probe <path> -> 0 pass / 1 fail. Fail-closed on every ambiguous outcome:
+# a probe that prints nothing, prints no PASS lines, or exits non-zero is a
+# FAIL, not a skip. This is the guard against the false-green that bit an agent
+# here: "ALL PASS" printed while every file write had silently failed.
+run_probe() {
+    _p="$1"
+    _out=$("$RUNNER" run "$_p" 2>&1)
+    _rc=$?
+    _npass=$(printf '%s\n' "$_out" | grep -c '^PASS ')
+    _nfail=$(printf '%s\n' "$_out" | grep -c '^FAIL ')
+    _banner=$(printf '%s\n' "$_out" | grep -c 'ALL PASS')
+    if [ "$_rc" -ne 0 ]; then
+        echo "PROBE FAIL: $(basename "$_p") — runner exited $_rc"
+        return 1
+    fi
+    if [ "$_nfail" -ne 0 ]; then
+        echo "PROBE FAIL: $(basename "$_p") — $_nfail FAIL line(s)"
+        printf '%s\n' "$_out" | grep '^FAIL ' | sed 's/^/    /'
+        return 1
+    fi
+    if [ "$_npass" -eq 0 ]; then
+        echo "PROBE FAIL: $(basename "$_p") — no PASS lines (probe did not really run)"
+        return 1
+    fi
+    if [ "$_banner" -eq 0 ]; then
+        echo "PROBE FAIL: $(basename "$_p") — missing ALL PASS banner"
+        return 1
+    fi
+    echo "PROBE OK:   $(basename "$_p") ($_npass checks)"
+    return 0
+}
+
+if [ "$SELFTEST" = "1" ]; then
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/vhdl-gen-probes-selftest.XXXXXX") || exit 2
+    trap 'rm -rf "$tmp"' EXIT INT TERM
+    cat > "$tmp/probe_deliberate_red.spl" <<'RED'
+fn main():
+    print("FAIL deliberate-red fixture")
+    print("ALL PASS")
+RED
+    if run_probe "$tmp/probe_deliberate_red.spl" >/dev/null 2>&1; then
+        echo "selftest: FAIL — a probe printing a FAIL line was classified OK" >&2
+        echo "  the gate cannot go red; it is not a gate" >&2
+        exit 1
+    fi
+    echo "selftest: deliberate-red ok (FAIL line beats an ALL PASS banner)"
+    cat > "$tmp/probe_silent.spl" <<'SILENT'
+fn main():
+    print("nothing useful here")
+SILENT
+    if run_probe "$tmp/probe_silent.spl" >/dev/null 2>&1; then
+        echo "selftest: FAIL — a probe with no PASS lines was classified OK" >&2
+        exit 1
+    fi
+    echo "selftest: no-PASS-lines ok (a silent probe fails, never skips)"
+    echo "vhdl_gen_probes_selftest=ok"
+    exit 0
+fi
+
+total=0
+passed=0
+failed=0
+for probe in "$PROBE_DIR"/probe_*.spl; do
+    [ -e "$probe" ] || continue
+    total=$((total + 1))
+    if run_probe "$probe"; then
+        passed=$((passed + 1))
+    else
+        failed=$((failed + 1))
+    fi
+done
+
+if [ "$total" -eq 0 ]; then
+    echo "check-vhdl-gen-probes: no probes found in $PROBE_DIR" >&2
+    exit 2
+fi
+
+echo "vhdl_gen_probes_total=$total"
+echo "vhdl_gen_probes_pass=$passed"
+echo "vhdl_gen_probes_fail=$failed"
+if [ "$failed" -ne 0 ]; then
+    echo "vhdl_gen_probes_ok=false"
+    exit 1
+fi
+echo "vhdl_gen_probes_ok=true"
+exit 0
