@@ -687,7 +687,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     web_window.id, web_window.content,
                     web_window.w - 8, web_content_height,
                     wall_clock_ms,
-                    web_window.id == browser_profile_window_id
+                    false
                 )
                 if changed:
                     comp = host_compositor_update_window_content(
@@ -695,6 +695,15 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         web_sessions.body_html(web_window.id)
                     )
                     other_dirty = true
+                if web_window.app_id == "browser":
+                    val web_address = web_sessions.address_text(
+                        web_window.id
+                    )
+                    if web_address != "" and web_window.title != web_address:
+                        comp = host_compositor_update_window_title(
+                            comp, web_window.id, web_address
+                        )
+                        other_dirty = true
             web_window_index = web_window_index + 1
         if comp.web_animation_dirty_due(now_micros):
             other_dirty = true
@@ -817,7 +826,32 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     semantic_event_id = semantic_event_id + 1
                     var action_reason = ""
                     var callback_count: i64 = 0
-                    if pressed:
+                    var semantic_target_id = (
+                        "browser:parent#{target.control}"
+                    )
+                    var mutation_revision = comp.render_revision
+                    if target.window_id != browser_profile_window_id:
+                        val dispatch = (
+                            web_sessions.dispatch_chrome_pointer(
+                                semantic_event_id, target.window_id,
+                                target.control, pressed, wall_clock_ms
+                            )
+                        )
+                        action_reason = dispatch.reason
+                        callback_count = dispatch.callback_count
+                        semantic_target_id = dispatch.semantic_target_id
+                        mutation_revision = dispatch.mutation_revision
+                        if dispatch.callback_count > 0:
+                            comp = host_compositor_update_window_content(
+                                comp, target.window_id,
+                                web_sessions.body_html(target.window_id)
+                            )
+                        if dispatch.semantic_target_id != "":
+                            comp = host_compositor_update_window_title(
+                                comp, target.window_id,
+                                web_sessions.address_text(target.window_id)
+                            )
+                    elif pressed:
                         browser_pressed_control = target.control
                         if target.control == "address":
                             browser_address_editing = true
@@ -883,10 +917,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                     Err(reason): action_reason = reason
                     input_receipt = host_wm_input_record_semantic(
                         input_receipt, semantic_event_id, target.window_id,
-                        "browser:parent#{target.control}", callback_count,
-                        comp.render_revision, action_reason
+                        semantic_target_id, callback_count,
+                        mutation_revision, action_reason
                     )
-                    print "[hosted-wm] semantic event_origin=browser-chrome event_id={semantic_event_id} wm_target_id={target.window_id} semantic_target_id=browser:parent#{target.control} callback_count={callback_count} reason={action_reason}"
+                    print "[hosted-wm] semantic event_origin=browser-chrome event_id={semantic_event_id} wm_target_id={target.window_id} semantic_target_id={semantic_target_id} callback_count={callback_count} reason={action_reason}"
                 elif button == 0 and content_target != nil:
                     val target = content_target.unwrap()
                     semantic_event_id = semantic_event_id + 1
@@ -1020,10 +1054,17 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         dispatch.callback_count,
                         dispatch.mutation_revision, dispatch.reason
                     )
-                    if dispatch.mutation_revision > 0:
+                    if dispatch.callback_count > 0:
                         comp = host_compositor_update_window_content(
                             comp, focused,
                             web_sessions.body_html(focused)
+                        )
+                    if dispatch.semantic_target_id == (
+                        "browser:session#address"
+                    ):
+                        comp = host_compositor_update_window_title(
+                            comp, focused,
+                            web_sessions.address_text(focused)
                         )
                 if pressed_key and keycode == KEY_F11:
                     display_nonce = display_nonce + 1
@@ -1129,10 +1170,17 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             dispatch.callback_count,
                             dispatch.mutation_revision, dispatch.reason
                         )
-                        if dispatch.mutation_revision > 0:
+                        if dispatch.callback_count > 0:
                             comp = host_compositor_update_window_content(
                                 comp, focused,
                                 web_sessions.body_html(focused)
+                            )
+                        if dispatch.semantic_target_id == (
+                            "browser:session#address"
+                        ):
+                            comp = host_compositor_update_window_title(
+                                comp, focused,
+                                web_sessions.address_text(focused)
                             )
                     print "[hosted-wm] event text count={text_events} committed={committed_text}"
                     other_dirty = true

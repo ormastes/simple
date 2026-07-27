@@ -13,7 +13,9 @@ use os.compositor.host_compositor_core.{
     host_compositor_update_window_content,
     host_compositor_update_window_title
 }
-use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use os.hosted.hosted_web_content_session.{
+    HostedWebContentRegistry, HostedWebContentSession
+}
 use os.compositor.simple_web_window_renderer.{
     simple_web_content_revision_with_theme
 }
@@ -479,6 +481,69 @@ describe "hosted Web content session":
         expect(checksum(pixels)).to_be_greater_than(0)
         expect(pixels[90 * 420 + 300]).to_equal(0xFFFFFFFFu32)
         raster.shutdown()
+
+    # @req REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009
+    it "isolates address history and page state between browser windows":
+        var registry = HostedWebContentRegistry.create()
+        val _ = registry.advance_window(
+            71, "<div id='first'>First</div>", 120, 60, 1000, false
+        )
+        val _ = registry.advance_window(
+            72, "<div id='second'>Second</div>", 120, 60, 1000, false
+        )
+        val first_body = registry.body_html(71)
+        val first_address = registry.address_text(71)
+        var second = registry.sessions[1]
+        second.browser.register_resource(
+            "https://second.test/target",
+            "<html><body><div id='target'>Target</div></body></html>"
+        )
+        registry.sessions[1] = second
+
+        val address_down = registry.dispatch_chrome_pointer(
+            73, 72, "address", true, 1001
+        )
+        val address_up = registry.dispatch_chrome_pointer(
+            74, 72, "address", false, 1001
+        )
+        val edited = registry.dispatch_text(
+            75, 72, "https://second.test/target"
+        )
+        val submitted = registry.dispatch_key(76, 72, 13, true)
+        expect(address_down.reason).to_equal("chrome-pressed")
+        expect(address_up.reason).to_equal("address-focused")
+        expect(edited.callback_count).to_equal(1)
+        expect(submitted.callback_count).to_equal(1)
+        expect(registry.address_text(72)).to_equal(
+            "https://second.test/target"
+        )
+        expect(registry.body_html(72)).to_contain("Target")
+        expect(registry.address_text(71)).to_equal(first_address)
+        expect(registry.body_html(71)).to_equal(first_body)
+
+        val back_down = registry.dispatch_chrome_pointer(
+            77, 72, "back", true, 1002
+        )
+        val back_up = registry.dispatch_chrome_pointer(
+            78, 72, "back", false, 1002
+        )
+        expect(back_down.reason).to_equal("chrome-pressed")
+        expect(back_up.callback_count).to_equal(1)
+        expect(registry.body_html(72)).to_contain("second")
+        expect(registry.body_html(71)).to_equal(first_body)
+
+        val favorite_down = registry.dispatch_chrome_pointer(
+            79, 72, "favorite", true, 1003
+        )
+        val favorite_up = registry.dispatch_chrome_pointer(
+            80, 72, "favorite", false, 1003
+        )
+        expect(favorite_down.reason).to_equal("chrome-pressed")
+        expect(favorite_up.callback_count).to_equal(0)
+        expect(favorite_up.reason).to_equal("profile-unavailable")
+        expect(registry.sessions[1].browser.is_favorite(
+            registry.address_text(72)
+        )).to_be(false)
 
     # @req REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
     it "carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame":

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,6 +78,14 @@ expect(unfocused.mutation_revision).to_equal(0)
   path while Space keyup reaches its listener.
 
 #### keeps trusted browser chrome outside hostile page hit testing
+
+#### isolates address history and page state between browser windows
+
+- Address focus, text, Enter, and Back target only the selected hosted browser
+  session.
+- The other browser window retains its address and page body unchanged.
+- Favorite rejects without mutating memory when durable profile ownership is
+  unavailable.
 
 - The WM-owned toolbar and address field occupy a reserved region above the
   hostile page frame.

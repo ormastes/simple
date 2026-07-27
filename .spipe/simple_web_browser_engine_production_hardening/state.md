@@ -924,3 +924,18 @@ implementation in progress / target evidence blocked
   runs before the host can rebuild the canonical DOM bridge. Production parity
   requires a synchronous DOM mutation hook in the JS host-property assignment
   path plus same-callback pixel evidence; no false completion is claimed.
+- Secondary browser chrome routing: Hosted pointer, address text/key, Back,
+  Forward, Stop, Reload, and Home events now route by toolbar `window_id`
+  through that window's `HostedWebContentSession`; only the primary external
+  renderer touches the primary globals. Address/title and body refreshes follow
+  the same per-window receipt, and keyboard dispatch now returns the actual
+  post-event focused DOM id instead of an undefined value. Focused two-window
+  evidence preserves the first window while address navigation and Back mutate
+  the second; executable Simple evidence remains compiler-blocked and was not
+  rerun.
+- Remaining multi-window bookmark blocker: Giving the secondary registry a
+  second long-lived default-profile handle would permit stale whole-snapshot
+  saves to overwrite primary bookmark/HSTS changes. Secondary Favorite remains
+  fail-closed with `profile-unavailable` and no in-memory mutation until
+  profile persistence has one shared broker or transactional per-key merge
+  semantics; no false persistence claim is made.
