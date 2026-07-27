@@ -17,7 +17,8 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity_at_element_path, be_dom_focused_id
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    simple_web_layout_hit_test_target_at_time,
+    SimpleWebLayoutHitIndex,
+    simple_web_layout_hit_test_index,
     simple_web_layout_render_html_draw_ir_result_at_time
 }
 use std.gc_async_mut.web.browser_session.{
@@ -42,6 +43,7 @@ pub struct HostedBrowserRendererWorkerResult:
     initialized: bool
     animation_time_ms: i64
     wire: text
+    hit_index: SimpleWebLayoutHitIndex?
 
 fn _worker_result_reject(
     reason: text,
@@ -53,7 +55,8 @@ fn _worker_result_reject(
         reason: reason,
         initialized: initialized,
         animation_time_ms: animation_time_ms,
-        wire: ""
+        wire: "",
+        hit_index: nil
     )
 
 fn _worker_next_animation_ms(
@@ -93,7 +96,7 @@ fn _worker_frame(
         session, animation_time_ms
     )
     val layout = simple_web_layout_render_html_draw_ir_result_at_time(
-        session.current_style_html + session.current_body_html,
+        session.render_html_document(),
         width,
         height,
         document_animation_time_ms
@@ -126,7 +129,8 @@ fn _worker_frame(
         reason: "ok",
         initialized: true,
         animation_time_ms: animation_time_ms,
-        wire: encoded.wire
+        wire: encoded.wire,
+        hit_index: Some(layout.hit_index)
     )
 
 pub class HostedBrowserRendererWorkerSession:
@@ -141,6 +145,7 @@ pub class HostedBrowserRendererWorkerSession:
     pressed_chrome_control: text
     chrome_focus: text
     address_replace_on_text: bool
+    last_hit_index: SimpleWebLayoutHitIndex?
 
     static fn create(width: i32, height: i32) -> HostedBrowserRendererWorkerSession:
         HostedBrowserRendererWorkerSession(
@@ -154,20 +159,16 @@ pub class HostedBrowserRendererWorkerSession:
             pressed_target_id: "",
             pressed_chrome_control: "",
             chrome_focus: "",
-            address_replace_on_text: false
+            address_replace_on_text: false,
+            last_hit_index: nil
         )
 
     me _target_at(x: i64, y: i64) -> text:
+        if self.last_hit_index == nil:
+            return ""
         val root = self.browser.dom_root()
-        val target_key = simple_web_layout_hit_test_target_at_time(
-            self.browser.render_html_document(),
-            self.width,
-            self.height,
-            x.to_i32(),
-            y.to_i32(),
-            _worker_document_animation_time_ms(
-                self.browser, self.animation_time_ms
-            )
+        val target_key = simple_web_layout_hit_test_index(
+            self.last_hit_index.unwrap(), x.to_i32(), y.to_i32()
         )
         if target_key.starts_with("id:"):
             return target_key.slice(3, target_key.len())
@@ -439,12 +440,16 @@ pub class HostedBrowserRendererWorkerSession:
                 reason: "ok",
                 initialized: true,
                 animation_time_ms: self.animation_time_ms,
-                wire: encoded.wire
+                wire: encoded.wire,
+                hit_index: nil
             )
-        _worker_frame(
+        val frame = _worker_frame(
             self.browser, message, self.width, self.height,
             self.animation_time_ms, response_id
         )
+        if frame.hit_index != nil:
+            self.last_hit_index = frame.hit_index
+        frame
 
 pub fn hosted_browser_renderer_handle_request(
     session: BrowserSession,
@@ -510,7 +515,7 @@ pub fn hosted_browser_renderer_handle_init(
         session, animation_time_ms
     )
     val layout = simple_web_layout_render_html_draw_ir_result_at_time(
-        session.current_style_html + session.current_body_html,
+        session.render_html_document(),
         width,
         height,
         document_animation_time_ms
