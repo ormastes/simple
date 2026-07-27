@@ -48,3 +48,13 @@ perf fix once the tip links cleanly.
    appears to bare-extern calls to functions with fn-type params (same family as the
    _text_index_len bare-extern, mangle.rs). Needs the compiler-side mangler fix
    (Codex), not a per-site source change — the call site is already correct.
+
+## Refinement 2026-07-28 (after theme fix landed)
+Rebuild with the theme fix pushed: `resolved_theme_fingerprint` is GONE, leaving
+EXACTLY ONE undefined symbol — `_run_test_api_server_with_inject`. So the
+bare-extern is NOT broadly systemic (a general fn-param mangler bug would leave
+many undefined symbols); it is specific to this single call. Narrows the Codex
+investigation: not "all fn-param calls" but something particular to this
+function/callsite (candidates: the `ui.standalone` dotted package-name path, the
+specific fn-type param signature `fn(UIEvent)`, or this module's discovery/export
+into the closure). One symbol from a clean full-CLI link + deploy.
