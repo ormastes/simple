@@ -395,8 +395,10 @@ fn validate_selected_font_bundle_root(root: text) -> bool:
     val base = _font_asset_normalized_root(root)
     val pins = selected_font_bundle_asset_pins()
     val assets_root = if base == "": "assets/fonts" else: _font_asset_path_beneath_root(base, "assets/fonts")
-    if base != "":
-        val (_, _, root_link_exit) = process_run("test", ["-L", base])
+    val assets_parent = if base == "": "assets" else: _font_asset_path_beneath_root(base, "assets")
+    val guarded_roots = if base == "": [assets_parent, assets_root] else: [base, assets_parent, assets_root]
+    for guarded_root in guarded_roots:
+        val (_, _, root_link_exit) = process_run("test", ["-L", guarded_root])
         if root_link_exit != 1: return false
     val (links, _, link_walk_exit) = process_run(
         "find", [assets_root, "-type", "l", "-print", "-quit"])
@@ -592,11 +594,8 @@ pub fn font_registry_force_native_digest_route():
 fn _validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValidation:
     _validate_selected_font_asset_with_digest(path, blob, "")
 
-# `precomputed_sha256_hex` is a digest of the SAME bytes, obtained by a cheaper
-# route than hashing `blob` in interpreted Simple. It is used only when it is a
-# well-formed 64-char lowercase hex string; anything else (including the ""
-# default and any host-extern failure return) falls back to hashing the blob
-# here, so a broken or absent fast path can never turn into an accepted asset.
+# A malformed or absent precomputed digest falls back to hashing the same blob,
+# so the fast path cannot turn invalid bytes into an accepted asset.
 fn _validate_selected_font_asset_with_digest(path: text, blob: [u8],
                                              precomputed_sha256_hex: text) -> FontAssetRuntimeValidation:
     val root = env_get("SIMPLE_ASSET_ROOT")
@@ -608,26 +607,10 @@ fn _validate_selected_font_asset_with_digest(path: text, blob: [u8],
     if blob.len() != candidate.byte_len:
         return _font_asset_validation(true, false, candidate.family, "byte-length")
     val runtime_mode = env_get("SIMPLE_RUNTIME_MODE")
-    # PERF (2026-07-26): hashing the blob here is ~99% of Engine2D.load_font on
-    # the interpreter lane — measured 43.4s of a 41.6s load for the 119KB Bungee
-    # face (~2.9 KB/s), and the pinned default is the 17.8MB NotoSansSC, i.e.
-    # ~1.7 hours. It is not an antipattern in the SHA-256 code (sha256_u8_hex,
-    # the allocation-light variant, measures within 2% of sha256_bytes) — 64-byte
-    # blocks of interpreted bit-twiddling simply cost ~23ms each. So the fix is
-    # to not do it interpreted at all when a native digest of the same bytes is
-    # available; see load_selected_font_file. Digest value is unchanged.
+    # Interpreted SHA-256 is ~3KB/s; reuse a verified native digest when present.
+    # Interpreter fallback hashes the same bytes, while freestanding callers
+    # explicitly select the native route. Evidence:
     # doc/08_tracking/bug/engine2d_load_font_interpreter_3kb_per_sec_2026-07-25.md
-    #
-    # Seed-mode compatibility path: avoid the u8-tail implementation's deep
-    # interpreter crash in selected-font validation (seed/JIT stack-depth pressure).
-    # Self-hosted builds keep the allocator-light sha256_u8_hex path for
-    # throughput; interpreter-mode fallback computes the same digest through
-    # sha256_bytes for parity over byte data.
-    # Freestanding kernels have no env, so the unset-env default would send
-    # them into the sha256_bytes fallback — whose [i64] digest return is a
-    # lost channel on freestanding builds (wrong hex -> honest asset rejected
-    # with reason=sha256). The kernel entry declares the native route
-    # explicitly via font_registry_force_native_digest_route().
     val digest_route_interp = if _font_digest_native_route_forced:
         false
     else:
@@ -674,14 +657,8 @@ fn font_registry_debug_expected_names(path: text) -> text:
     "|" + family + "|" + style + "|" + full_name + "|" + postscript + "|" + version
 
 fn load_selected_font_file(path: text) -> ([u8], FontAssetRuntimeValidation):
-    """Read and validate the exact bytes returned to the caller.
-
-    Existence-gate the raw read: on freestanding/baremetal targets
-    rt_file_read_bytes is a hosted-only trap stub that HALTS the kernel,
-    while rt_file_exists is either VFS-backed (kernel export) or a plain
-    hosted check. A missing font must fail SOFT into the bitmap fallback,
-    not take down the first desktop compose (proven live 2026-07-16:
-    first-frame render halted in [TRAP] rt_file_read_bytes)."""
+    """Read and validate exact bytes; missing freestanding files fail softly
+    before the hosted-only raw-read trap."""
     val physical_path = selected_font_asset_physical_path(path)
     val exists = rt_file_exists(physical_path)
     if not exists:

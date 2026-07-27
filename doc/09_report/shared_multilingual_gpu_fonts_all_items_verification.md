@@ -9,49 +9,23 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
-This is the current all-lane audit at HEAD `7a161abfabb` plus the current
-working changes, not a runtime or native PASS. Static source and executable
-coverage is broad, but no fresh pure-Simple full CLI has been admitted. The
-continuation admitted bootstrap Stage 2 and Stage 3 for stage progression,
-parsed the prior `SyscallId` enum blocker successfully, and cleared the
-GPOS-data block-form parse error. `e331a5700ab`, integrated as HEAD
-`7a161abfabb`, fixed impl-only bootstrap function accumulation. The final
-cycle-3 Stage 4 check then localized the remaining nil receiver inside the HIR
-error collector. The typed-index collector fix and its direct regression are
-implemented in the working tree but bootstrap-unverified. Those stage
-compilers are not a full font-test CLI.
-The retained history and resume contract are in
-`doc/08_tracking/bug/shared_font_stage4_stale_compiler_backfill_2026-07-26.md`.
-Consequently runner calibration, focused execution, zero-stub docgen, native
-promotion, QEMU pixels, and performance remain unaccepted.
+This is the current all-lane audit, not a runtime or native PASS.
+Compiler-enablement work is not a shared-font acceptance criterion and cannot
+promote a font row. The branch nevertheless retains the minimal HirBlock,
+lowering-error collector, native-arena, and direct-entry repairs needed to
+produce the pure-Simple prerequisite.
 
 ### Current bootstrap blocker
 
-- Stage 2:
-  `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/stage2/x86_64-unknown-linux-gnu/simple`,
-  SHA-256
-  `63523bc1f33c4705512279d126b1083b75296982699c5d51ca8d65b586b5b0ea`.
-- Stage 3:
-  `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/stage3/x86_64-unknown-linux-gnu/simple`,
-  SHA-256
-  `efe455723c76643c327312292769262f0a9326d91d424773e11d45611742103b`.
-  Both stages passed their sanity gates at commit `033c0f9e6ae`; commit
-  `dd1d266dc9e` then rewrote the GPOS block form.
-- Stage 4/full CLI is absent. Cached cycle 2 cleared parsing, reached HIR, and
-  exited 132 on a nil receiver.
-- The retained pre-fix log showed that
-  `src/compiler/backend/backend/compiler.spl` completed all fifteen impl
-  methods but published zero accumulated functions. `e331a5700ab`/HEAD
-  `7a161abfabb` adds impl methods to the bootstrap accumulator and adds direct
-  0+2/1+2 no-drop/no-duplication coverage.
-- The final cycle-3 check reached
-  `bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=15`,
-  completed constructor, wrapper, module-store, and functions-field markers,
-  then failed immediately after `driver:errors-read:done`. This localizes the
-  nil receiver inside `_driver_collect_hir_errors`.
-- The current working change uses a typed indexed `LoweringError` loop and adds
-  `hir_lowering_error_collection_spec.spl` for empty, recovered, and fatal
-  arrays. It has not been exercised by a post-fix bootstrap.
+The last pushed checkpoint before the current source/evidence correction was
+`2eb2bbf93f10`, matching
+`origin/codex/shared-font-all-items-20260726`. Its completion-time identity and
+divergence still require the final fetch/rebase/file-count gate.
+At the earlier source checkpoint `deb90cd8a9c`, both direct-runtime guards,
+both numbered-artifact guards, `git diff --check`, and the
+zero-executable-specs-under-`doc/06_spec` layout gate passed. Those retained
+static results do not prove the current checkout, runtime behavior, or a
+native row.
 
 No Stage 4 CLI/core-C identity was published and no global runner calibration
 ran. The three-check cap is reached; no further retry is permitted this
@@ -107,9 +81,9 @@ are `build/mini_builds/full_cli_incremental_cycle1.log`
 (`c1e4e61d1cf919478793017859c09cc021938863a651ab198e48f37759f1f8dd`),
 and `full_cli_incremental_cycle3.log`
 (`4bab47a3a0ff2164508db9ada5433cfbe85b8fdeb100756328b8869450e39dc7`).
-Next session must batch-preflight the canonicalized closure, build a
-noncommitted compatibility bridge in a fresh detached worktree, then use that
-bridge to build and admit the clean font commit. Only the genuine
+The historical continuation at that checkpoint called for a canonicalized
+closure preflight and an isolated compatibility bridge. That instruction is
+superseded by the current fresh-Stage2 plan below. Only the genuine
 current-language `class` local corrections in
 `src/lib/skia/feature/shaper/ot_layout_gpos.spl:123,602` belong in the font
 branch; the 13-file bridge overlay remains isolated, uncommitted, and
@@ -130,9 +104,9 @@ type resolution (`SettingsViewState.categories` is lowered as `ANY` in
 `1a4c04ee995bb80ac55e3650e7088e773326f8b16bc25d9c8952d016b3886def`,
 `43e9dff528a8ce0f33746be503368bcbd416c6eb22c85c43867bcc06d89adc7a`,
 and `09e3e54a99ab7d76681ca2a27cd285b8ebb71932b27fed65a15ee133c0508c12`.
-No essential-tools smoke ran because no candidate existed. The session cap is
-reached; a fresh compiler/runtime owner must resume from these exact blockers,
-not rerun this bridge.
+No essential-tools smoke ran because no candidate existed. The session cap was
+reached; its former resume instruction is historical and superseded by the
+current fresh-Stage2 plan.
 
 The next isolated continuation used detached worktree
 `/tmp/simple-cli-bridge-20260727-3` at `fefcfe011fc0053d0ab3e01a13005bb841db5023`
@@ -147,8 +121,8 @@ retained parser rejected `loop.induction_var` in
 `auto_vectorize_analysis.spl`. Log SHA-256 prefixes are `b5db2444`,
 `567d1e0d`, and `7732687e`. No ELF or smoke result exists. The genuine bounded
 GSUB helper is integrated; all remaining compatibility edits stay isolated.
-The three-cycle cap is reached. A fresh runtime owner must resume the retained
-cache with the already-applied `loop` to `loop_info` bridge rename.
+The three-cycle cap was reached. Its retained-cache resume instruction is
+historical and superseded by the current fresh-Stage2 plan.
 
 A later fresh three-cycle bridge window reused the same Stage3 SHA-256
 `704f67af420bd8788dda809b46112d0a9a76cec64601ebfe2a6958a894aa380f`
@@ -162,8 +136,8 @@ stopped at the sparse ABI enum discriminants beginning with
 `6559f179b3058111fc72718864d1dc9ee642cf401f93a1f684781b05aacdc48d`,
 and `f8bb267073a05f345319d36c1622d5477751be45249ff0d6b1063f3664fc8a32`.
 No ELF, Stage5, or essential-tools smoke exists. The bridge remains isolated;
-the next fresh window must preserve the sparse syscall ABI through an explicit
-numeric conversion pattern rather than stripping discriminants.
+the former sparse-ABI continuation is historical and superseded by the current
+fresh-Stage2 plan.
 
 Fresh admission lane `/tmp/simple-cli-admission-20260727-4` then preserved all
 106 sparse ABI values through exhaustive enum-to-number converters and reused
@@ -213,10 +187,11 @@ spec stacks after requiring a nonempty selected font identity, explicit
 Arabic/Urdu/Hindi direction, and exact Web advance-width propagation through
 the proof validator. It rejected the first manifest/distribution rewrite for
 private production imports and added heavyweight fixed-`/tmp` unit staging.
-The replacement retains only frozen step vocabulary and canonical matcher
-changes; behavioral distribution evidence remains blocked on an admitted
-runtime and a sound public entrypoint. None of these source-only results
-promotes a requirement or NFR without the admitted runtime.
+The current replacement uses the existing public font-registry APIs, validates
+the real immutable bundle root, and rejects an intermediate `assets` symlink
+before walking or hashing bundle files. It adds no duplicate facade or staged
+font copy. These source-only results remain blocked on the admitted runtime and
+do not promote a requirement or NFR.
 
 ### Deployed-runtime boundary
 
@@ -251,7 +226,7 @@ Current count: `0 pass`, `14 active`, `9 blocked`.
 | REQ-011 | active | D+E surfaces/native | aggregate surfaces/route plus the six production capability rows below exist; working changes add fail-closed degenerate Web status, ancestor-clipped nested IMAGE projection, trait/concrete-pixel-buffer and Draw IR/Engine2D clip parity, full-buffer no-nesting parity, and shared nested-collector cases for valid collection plus stale/duplicate/orphan rejection | changes are source-present but runtime-unverified; deployed pure-Simple runtime, hosted frame and QEMU pixels required; complete all six rows below | `/root` |
 | REQ-012 | blocked | E native 2D/3D/perf | native readback source contains HUD/world, handles, submit, fence, depth/transform and readback gates; working source also records durable successful atlas/vertex upload counts and byte totals and requires all four receipts for 3D promotion | source changes are runtime-unverified; deployed pure-Simple runtime plus real graphics device required; run E native command | `/root` |
 | REQ-013 | blocked | E native 2D/3D/perf | native readback source rejects unavailable and forged promotion and now fails promotion closed when durable 3D upload receipts are missing | one real backend must pass both 2D and 3D through E native command | `/root` |
-| REQ-014 | blocked | B–E generation / F audit | among 32 changed/new specs, 13 mirrors are missing, 19 are stale, zero are current, and no retained log proves `0 stubs` | deployed pure-Simple runtime; run all 32 docgen commands below; review manuals | `/root` |
+| REQ-014 | blocked | B–E generation / F audit | among 34 changed/new specs, 14 mirrors are missing, 20 are stale, zero are current, and no retained log proves `0 stubs` | deployed pure-Simple runtime; run all 34 docgen commands below; review manuals | `/root` |
 | REQ-015 | active | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection; working changes canonicalize HIP to ROCm on the prepared batch | batch change is unverified; deployed pure-Simple runtime required; run aggregate/C commands | `/root` |
 | REQ-016 | active | I–N full OpenType layout | source integration covers GSUB 1–8, GPOS 1–9, LookupFlag/GDEF filtering, FeatureVariations, Device/VariationIndex and anchors, named context/data facades, nested contextual remaps, ppem/coordinates/LangSys, pixel/design-unit separation, and fail-closed selected preprocessing; focused regressions cover the reviewed P1s | execute all focused specs on an admitted pure-Simple CLI and regenerate/review all affected manuals | `/root` |
 | NFR-001 | active | B manifest/distribution | manifest and SimpleOS bundle source gates cover immutable hashes, deterministic generation and corruption rejection | deployed pure-Simple runtime; run B command set | `/root` |
@@ -301,10 +276,13 @@ runtime/native requirement.
 
 ## Canonical executable/manual audit
 
-The authoritative inventory contains 32 executable specs changed or added since
-`origin/main`, including current working-tree changes. Eighteen mirrored manuals
-are missing, 14 are present but stale, zero are current, and zero retained owner
-docgen `{out,err}` files exist. Therefore all 32 require post-admission docgen
+The authoritative inventory contains 34 executable specs changed or added since
+`origin/main`, after excluding the compiler-only specs and adding the focused
+runner contract, SimpleOS producer/consumer artifact-root contract, four
+REQ-016 full-layout specs, and changed selected-Devanagari policy spec.
+Fourteen mirrored manuals are missing, 20 are
+present but stale, zero are current, and zero retained owner docgen `{out,err}`
+files exist. Therefore all 34 require focused deployed-runtime docgen
 and zero manuals have accepted current `0 stubs` evidence.
 
 The eleven original acceptance specs are accounted for, but their mirrors are
@@ -322,16 +300,9 @@ production-surface acceptance mirrors exist for:
 evidence, not an independent REQ-011 producer acceptance row; its absent manual
 does not replace any canonical pair.
 
-Eighteen changed/new specs currently lack mirrors:
+Fourteen changed/new specs currently lack mirrors:
 
-- `doc/06_spec/01_unit/compiler/bootstrap/address_of_parser_spec.md`
-- `doc/06_spec/01_unit/compiler/bootstrap/explicit_enum_discriminant_parser_spec.md`
-- `doc/06_spec/01_unit/compiler/bootstrap/hir_lowering_error_collection_spec.md`
-- `doc/06_spec/01_unit/compiler/bootstrap/legacy_core_enum_discriminant_spec.md`
-- `doc/06_spec/01_unit/compiler/bootstrap/pub_mod_parser_spec.md`
-- `doc/06_spec/01_unit/compiler/hir/bootstrap_impl_function_accumulation_spec.md`
-- `doc/06_spec/01_unit/compiler/mir/address_of_lowering_spec.md`
-- `doc/06_spec/01_unit/compiler/parser/explicit_enum_discriminant_spec.md`
+- `doc/06_spec/01_unit/lib/test_runner_result_wrapper_spec.md`
 - `doc/06_spec/01_unit/lib/common/text_layout/font_render_config_spec.md`
 - `doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_apply_spec.md`
@@ -343,7 +314,7 @@ Eighteen changed/new specs currently lack mirrors:
 - `doc/06_spec/02_integration/compiler/explicit_enum_discriminant_runtime_spec.md`
 - `doc/06_spec/02_integration/rendering/wm_nested_content_frame_spec.md`
 
-Fourteen existing mirrors are stale because their executable sources changed in this
+Twenty existing mirrors are stale because their executable sources changed in this
 all-items worktree and no current pure-Simple docgen result exists:
 
 - `install_font_assets_spec.md`
@@ -359,6 +330,7 @@ all-items worktree and no current pure-Simple docgen result exists:
 - `linux_hosted_wm_live_window_spec.md`
 - `simpleos_wm_fullscreen_spec.md`
 - `rv64_simpleos_wm_font_input_spec.md`
+- `simpleos_wm_qemu_evidence_contract_spec.md`
 - `shared_multilingual_gpu_fonts_perf_spec.md`
 
 The aggregate `shared_font_surfaces_spec.spl` now uses the frozen
@@ -383,8 +355,9 @@ the behavioral cases have not run on an admitted CLI.
 The retained pre-REQ-016 audit found no `pass_todo`, tautological
 `expect(true).to_equal(true)`, `to_raise`, or empty scenario body. Its
 scenario/expect counts predate the four REQ-016 specs and the changed
-selected-Devanagari policy spec, so they are not current 32-source evidence;
-lane F must audit all 32 sources after an admitted runtime is available.
+selected-Devanagari policy spec and omitted the two evidence-contract specs, so
+they are not current 34-source evidence; lane F must audit all 34 sources after
+an admitted runtime is available.
 The four `pass_do_nothing` calls in
 `wm_nested_content_frame_spec.spl` are explicitly justified no-op methods on
 the pixel-only fixture (`draw_text`, `draw_char_8x16`, `present`, and
@@ -426,50 +399,152 @@ coordinates and LangSys; GSUB preserves device fields; and contextual edits
 compose old-to-new position maps. Focused source regressions exist, but no
 full-layout claim is valid until they execute on the admitted runtime.
 
-Each row selects both GSUB and GPOS plans. Acceptance remains limited to the
-exact pinned Hindi, Arabic, and Urdu witnesses and the recorded simple-script
-identity cases; it does not claim general GSUB/GPOS, BiDi, mark, language, or
-arbitrary-font support.
-
-Of the 14 stale manuals, six still contain every current scenario title and
-eight omit at least one current title. `font_asset_manifest_spec.md` and
+The four new full-layout specs, changed selected-Devanagari policy spec, focused
+runner contract, and SimpleOS artifact-root contract raise the changed/new
+manual scope to 34: 14 mirrors are absent and 20 are
+stale. The previous title-coverage split is invalidated by the newly changed
+specs. `font_asset_manifest_spec.md` and
 `gui_entry_desktop_production_render_contract_spec.md` explicitly identify
 themselves as manually synchronized/docgen-pending. Hand synchronization is not
-generated evidence. The nine absent mirrors and all 14 stale mirrors therefore
+generated evidence. The 14 absent mirrors and all 20 stale mirrors therefore
 remain rejected until deterministic docgen succeeds with `0 stubs`.
 
 ## Exact owner commands
 
-The authoritative docgen scope is the 32 changed/new specs classified above.
-Each source owner retains stdout and stderr separately under
-`docgen/preflight/<path-derived-basename>.{out,err}`; lane F audits all 32.
+The authoritative docgen scope is the 34 changed/new specs classified above.
+Each source owner retains the command, stdout, stderr, exit, and output-manual
+hash under an immutable attempt directory; lane F audits all 34.
 
 All retained paths are below
-`build/test-artifacts/shared_multilingual_gpu_fonts/`. For each assigned source
-path, the owner runs:
+`build/test-artifacts/shared_multilingual_gpu_fonts/`. The exact deterministic
+input set and immutable runner are frozen below. This command has not been run
+and does not imply generated evidence:
 
 ```bash
-"$CLI" spipe-docgen <assigned-spec> --output doc/06_spec --no-index \
-  > "build/test-artifacts/shared_multilingual_gpu_fonts/docgen/lane-<owner>/<basename>.out" \
-  2> "build/test-artifacts/shared_multilingual_gpu_fonts/docgen/lane-<owner>/<basename>.err"
+set -euo pipefail
+: "${CLI:?set CLI to the deployed pure-Simple runtime}"
+: "${CLI_SHA:?set CLI_SHA to the admitted CLI SHA-256}"
+: "${CORE_C_DIR:?set CORE_C_DIR to the matching core-C directory}"
+: "${CORE_C_SHA:?set CORE_C_SHA to the admitted core-C archive SHA-256}"
+: "${CHECKPOINT_SHA:?set CHECKPOINT_SHA to the clean source checkpoint}"
+: "${DOCGEN_ATTEMPT:=1}"
+case "$DOCGEN_ATTEMPT" in
+  1|2|3) ;;
+  *) echo "invalid docgen attempt: $DOCGEN_ATTEMPT" >&2; exit 2 ;;
+esac
+[ "$(git rev-parse HEAD)" = "$CHECKPOINT_SHA" ]
+[ -z "$(git status --porcelain --untracked-files=normal)" ]
+[ "$(sha256sum "$CLI" | awk '{print $1}')" = "$CLI_SHA" ]
+[ "$(sha256sum "$CORE_C_DIR/libsimple_runtime.a" | awk '{print $1}')" = "$CORE_C_SHA" ]
+DOCGEN_ROOT="build/test-artifacts/shared_multilingual_gpu_fonts/docgen/attempt-$DOCGEN_ATTEMPT"
+mkdir -p "$DOCGEN_ROOT"
+
+run_docgen_spec() {
+  spec=$1
+  name=${spec#test/}
+  name=${name//\//_}
+  manual="doc/06_spec/${spec#test/}"
+  manual=${manual%.spl}.md
+  base="$DOCGEN_ROOT/$name"
+  for suffix in command out err exit manual.sha256; do
+    if [ -e "$base.$suffix" ]; then
+      echo "refusing duplicate docgen execution: $spec" >&2
+      return 125
+    fi
+  done
+  spec_sha=$(sha256sum "$spec" | awk '{print $1}')
+  manual_before=missing
+  if [ -f "$manual" ]; then
+    manual_before=$(sha256sum "$manual" | awk '{print $1}')
+  fi
+  {
+    printf 'checkpoint_sha=%s\ncheckpoint_clean=true\n' "$CHECKPOINT_SHA"
+    printf 'cli=%s\ncli_sha256=%s\n' "$CLI" "$CLI_SHA"
+    printf 'core_c_dir=%s\ncore_c_sha256=%s\n' "$CORE_C_DIR" "$CORE_C_SHA"
+    printf 'spec=%s\nspec_sha256=%s\n' "$spec" "$spec_sha"
+    printf 'manual=%s\nmanual_before_sha256=%s\n' "$manual" "$manual_before"
+    printf 'command'
+    printf ' %q' "$CLI" spipe-docgen "$spec" --output doc/06_spec --no-index
+    printf '\n'
+  } >"$base.command"
+  if [ "$(sha256sum "$CLI" | awk '{print $1}')" != "$CLI_SHA" ] ||
+      [ "$(sha256sum "$CORE_C_DIR/libsimple_runtime.a" | awk '{print $1}')" != "$CORE_C_SHA" ]; then
+    rc=1
+    : >"$base.out"
+    printf '%s\n' "admitted CLI/core-C changed before docgen" >"$base.err"
+  elif "$CLI" spipe-docgen "$spec" --output doc/06_spec --no-index \
+      >"$base.out" 2>"$base.err"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 0 ] &&
+      ! grep -Eq '^DONE Generated [0-9]+ docs \([0-9]+ complete, 0 stubs\)$' "$base.out"; then
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ] && [ ! -f "$manual" ]; then
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ] &&
+      { [ "$(sha256sum "$spec" | awk '{print $1}')" != "$spec_sha" ] ||
+        [ "$(sha256sum "$CLI" | awk '{print $1}')" != "$CLI_SHA" ] ||
+        [ "$(sha256sum "$CORE_C_DIR/libsimple_runtime.a" | awk '{print $1}')" != "$CORE_C_SHA" ]; }; then
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    printf 'manual_sha256=%s\n' \
+      "$(sha256sum "$manual" | awk '{print $1}')" >"$base.manual.sha256"
+  fi
+  printf '%s\n' "$rc" >"$base.exit"
+  if [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
+}
+
+while IFS= read -r spec; do
+  run_docgen_spec "$spec"
+done <<'SPECS'
+test/01_unit/app/release/install_font_assets_spec.spl
+test/01_unit/app/release/release_archive_layout_spec.spl
+test/01_unit/lib/common/encoding/font_asset_manifest_spec.spl
+test/01_unit/lib/common/text_layout/font_render_config_spec.spl
+test/01_unit/lib/common/text_layout/font_renderer_spec.spl
+test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.spl
+test/01_unit/lib/test_runner_result_wrapper_spec.spl
+test/01_unit/lib/skia/ot_layout_apply_spec.spl
+test/01_unit/lib/skia/ot_layout_gsub_full_spec.spl
+test/01_unit/lib/skia/ot_layout_gpos_spec.spl
+test/01_unit/lib/skia/ot_layout_gpos_full_spec.spl
+test/01_unit/lib/skia/ot_layout_gpos_variation_spec.spl
+test/01_unit/lib/skia/ot_layout_lookup_flags_spec.spl
+test/01_unit/lib/skia/ot_layout_pinned_inventory_spec.spl
+test/01_unit/lib/skia/ot_parser_layout_selector_spec.spl
+test/01_unit/lib/skia/ot_parser_spec.spl
+test/01_unit/lib/skia/selected_devanagari_spec.spl
+test/01_unit/lib/skia/shaper_spec.spl
+test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
+test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl
+test/01_unit/os/port/simpleos_font_bundle_spec.spl
+test/02_integration/os/port/simpleos_font_asset_staging_spec.spl
+test/02_integration/rendering/wm_nested_content_frame_spec.spl
+test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl
+test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl
+test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl
+test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl
+test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl
+test/03_system/gui/feature/gui_font_event_surface_spec.spl
+test/03_system/gui/linux_hosted_wm_live_window_spec.spl
+test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl
+test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
+test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
+SPECS
 ```
 
-Lane A must first produce and admit one pure-Simple full CLI in a fresh bounded
-session, using the retained resume contract:
-
-```bash
-timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \
-  scripts/bootstrap/bootstrap-from-scratch.sh \
-  --backend=cranelift \
-  --output=build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap \
-  --full-bootstrap --full-cli --no-mcp --jobs=4
-```
-
-Only an exit-0 wrapper result may publish the candidate. Run
-`scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact
-candidate, then retain its absolute path and SHA-256 plus the core-C directory
-and `libsimple_runtime.a` SHA-256. A Rust seed or exit `2`, `124`, `132`, or
-`139` is a blocker.
+Lane A records the deployed pure-Simple runtime and matching core-C identity
+used for focused checks. Rust-seed Stage2 generation is bootstrap-only
+enablement; a Rust binary or exit `2`, `124`, `132`, or `139` remains
+non-evidence.
 
 After lane A publishes those immutable values, set:
 
@@ -575,6 +650,18 @@ variables: `SIMPLE_BIN`, `SIMPLE_BINARY`, `SIMPLE_WEB_FONT_RUN_ID`,
 host state.
 
 ```bash
+set -euo pipefail
+: "${CLI:?set CLI to the admitted pure-Simple runtime}"
+: "${CLI_SHA:?set CLI_SHA to the admitted CLI SHA-256}"
+: "${CORE_C_DIR:?set CORE_C_DIR to the matching core-C directory}"
+: "${CORE_C_SHA:?set CORE_C_SHA to the admitted core-C archive SHA-256}"
+: "${CHECKPOINT_SHA:?set CHECKPOINT_SHA to the clean source checkpoint}"
+[ "$(git rev-parse HEAD)" = "$CHECKPOINT_SHA" ]
+[ -z "$(git status --porcelain --untracked-files=normal)" ]
+[ "$(sha256sum "$CLI" | awk '{print $1}')" = "$CLI_SHA" ]
+[ "$(sha256sum "$CORE_C_DIR/libsimple_runtime.a" | awk '{print $1}')" = "$CORE_C_SHA" ]
+RUNNER_SOURCE=src/app/test/font_evidence_runner.spl
+RUNNER_SHA=$(sha256sum "$RUNNER_SOURCE" | awk '{print $1}')
 FOCUSED_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/focused
 FOCUSED_ATTEMPT=${FOCUSED_ATTEMPT:-1}
 case "$FOCUSED_ATTEMPT" in
@@ -586,15 +673,22 @@ run_focused_spec() {
   spec=$1
   name=${spec#test/}
   name=${name//\//_}
+  spec_sha=$(sha256sum "$spec" | awk '{print $1}')
   root="$FOCUSED_ROOT/attempt-$FOCUSED_ATTEMPT"
   mkdir -p "$root"
-  [ ! -e "$root/$name.command" ] || {
-    echo "refusing duplicate focused execution: $spec" >&2
-    return 125
-  }
+  for suffix in command out err exit; do
+    if [ -e "$root/$name.$suffix" ]; then
+      echo "refusing duplicate focused execution: $spec" >&2
+      return 125
+    fi
+  done
   {
-    printf 'checkpoint_sha=%s\nattempt=%s\nspec=%s\n' \
-      "$CHECKPOINT_SHA" "$FOCUSED_ATTEMPT" "$spec"
+    printf 'checkpoint_sha=%s\ncheckpoint_clean=true\nattempt=%s\n' \
+      "$CHECKPOINT_SHA" "$FOCUSED_ATTEMPT"
+    printf 'spec=%s\nspec_sha256=%s\nrunner_sha256=%s\n' \
+      "$spec" "$spec_sha" "$RUNNER_SHA"
+    printf 'cli=%s\ncli_sha256=%s\ncore_c_dir=%s\ncore_c_sha256=%s\n' \
+      "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA"
     printf 'SIMPLE_BIN=%s\nSIMPLE_WEB_FONT_RUN_ID=%s\n' \
       "${SIMPLE_BIN:-}" "${SIMPLE_WEB_FONT_RUN_ID:-}"
     printf 'SIMPLE_BINARY=%s\nAETHERIC_HOST_WEB_GUI_SIMPLE_BIN=%s\n' \
@@ -619,16 +713,35 @@ run_focused_spec() {
   else
     rc=$?
   fi
+  if [ "$rc" -eq 0 ] &&
+      { [ "$(sha256sum "$spec" | awk '{print $1}')" != "$spec_sha" ] ||
+        [ "$(sha256sum "$RUNNER_SOURCE" | awk '{print $1}')" != "$RUNNER_SHA" ] ||
+        [ "$(sha256sum "$CLI" | awk '{print $1}')" != "$CLI_SHA" ] ||
+        [ "$(sha256sum "$CORE_C_DIR/libsimple_runtime.a" | awk '{print $1}')" != "$CORE_C_SHA" ]; }; then
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ] &&
+      ! grep -Fq 'test-runner: native result wrapper complete' "$root/$name.out"; then
+    rc=1
+  fi
   printf '%s\n' "$rc" >"$root/$name.exit"
-  [ "$rc" -eq 0 ]
-  grep -Fq 'test-runner: native result wrapper complete' "$root/$name.out"
+  if [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
 }
 ```
 
 Attempt 1 is the only initial execution. Attempts 2 and 3 are reserved for an
 owner repair that changes the failing source; an unchanged green or unchanged
 failure is never rerun. The command, both streams, and exit code remain
-immutable under the attempt directory.
+immutable under the attempt directory. Focused execution starts from the clean
+checkpoint before docgen writes any manuals.
+
+Before any lane relies on the helper, run its changed source contract once:
+
+```bash
+run_focused_spec test/01_unit/lib/test_runner_result_wrapper_spec.spl
+```
 
 Lane B executes once each:
 
@@ -685,6 +798,7 @@ run_focused_spec test/03_system/gui/feature/gui_font_event_surface_spec.spl
 # this focused spec consumes and validates that retained bundle.
 run_focused_spec test/03_system/gui/linux_hosted_wm_live_window_spec.spl
 export SIMPLE_BIN="$CLI"
+run_focused_spec test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl
 run_focused_spec test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
 export BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live
 export REPORT_PATH="$BUILD_DIR/report.md"
@@ -703,13 +817,15 @@ run_focused_spec test/03_system/app/simple_2d/feature/native_gpu_font_readback_s
 run_focused_spec test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
 ```
 
-The B–E command graph contains 37 unique focused executions: 6 in B, 17 in C,
-10 in D including its Engine2D prerequisite, and 4 in E. No path appears in
-more than one group.
+The authoritative command graph contains 39 unique focused executions: one
+runner preflight, 6 in B, 17 in C, 11 in D including its Engine2D prerequisite
+and SimpleOS artifact-root contract, and 4 in E. No path appears in more than
+one group.
 
-Each of the 32 docgen commands must exit zero and report the affected spec
-complete with `0 stubs`. The owner retains both output streams; lane F reviews
-the generated operator flow.
+Each of the 34 docgen commands must exit zero and report the affected spec
+complete with `0 stubs`. The owner retains the immutable identity, command,
+both streams, exit, and manual hash; lane F reviews the generated operator
+flow.
 
 ## Final gates owned by `/root`
 
@@ -731,13 +847,21 @@ a blocker rather than a synthetic or static PASS.
 The minimal native-arena fix and its two regressions passed independent static
 review with no P0/P1 finding. The final allowed retained-Stage3 generation
 cycle exported `SIMPLE_NATIVE_ARENA_DECLS=1`, eliminating the earlier NUL
-environment panic, but stopped during HIR lowering with exit 132 and
-`runtime error: field access on nil receiver`. Its private cache still contains
-675 objects and no candidate ELF was created. Evidence is retained at
+environment panic. It then stopped with exit 132 at RIP `0x88034b`, the
+`_format_hir_lowering_error+0x7b` nil trap: the obsolete `rt_for_iterable`
+collector passed a nonnil `LoweringError` whose `span` was nil before
+`err.span.file`. This is distinct from the earlier full-CLI MethodResolver trap
+at RIP `0x559924`; the current typed indexed collector was absent from the
+executing Stage3 producer. Its private cache still contains 675 objects and no
+candidate ELF was created. Evidence is retained at
 `/tmp/simple-cli-admission-20260727-6.isfZoU/build/mini_builds/minimal_repaired_compiler_final_fb09.log`
 (SHA-256
 `5cd89facfb881ee5a5f5003941e9bdf486f87b90dc0fe36573ec6e7482b5e034`).
 The hard three-cycle cap prevents another build in this verification window;
-the 37 focused runs, 32 docgens, and essential-tools smoke remain blocked.
+the 39 focused runs, 34 docgens, and essential-tools smoke remain blocked.
+The only authoritative resume contract is the fresh Rust-seed Stage2 →
+pure-Simple Stage3 plan in
+`doc/03_plan/agent_tasks/shared_multilingual_gpu_fonts_all_items_2026-07-26.md`;
+the older bridge/cache imperatives above are retained as history only.
 
 `STATUS: FAIL`

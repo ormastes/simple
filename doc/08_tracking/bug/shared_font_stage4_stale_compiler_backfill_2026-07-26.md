@@ -316,3 +316,52 @@ at 675 objects. The retained log is
 with SHA-256
 `5cd89facfb881ee5a5f5003941e9bdf486f87b90dc0fe36573ec6e7482b5e034`.
 The three-cycle cap is reached; do not retry this command unchanged.
+
+## Corrected final-cycle crash localization
+
+The generic final-cycle localization above is superseded by the host kernel
+record. At `2026-07-27 04:58:53 UTC`, process `simple[3533100]` trapped
+`SIGILL` at RIP `0x88034b`:
+
+```text
+traps: simple[3533100] trap invalid opcode ip:88034b sp:7ffc14540750 error:0 in simple[404000+9b1000]
+```
+
+The producer was the retained Stage3 executable
+`/home/ormastes/dev/pub/simple-bootstrap/build/bootstrap-memory-lexer-fix/stage3/x86_64-unknown-linux-gnu/simple`,
+SHA-256
+`704f67af420bd8788dda809b46112d0a9a76cec64601ebfe2a6958a894aa380f`.
+In that exact ELF, `0x88034b` is the `ud2` at
+`driver__driver___format_hir_lowering_error+0x7b`. The function has already
+accepted a non-nil `LoweringError`, loads its `span` field, detects that span
+as nil, prints the standard nil-receiver diagnostic, and traps before reading
+`err.span.file`. This is not the earlier `MethodResolver.resolve_expr` guard.
+
+The statically resolved call chain in the retained ELF is:
+
+```text
+cli.bootstrap_main.run_native_build_bootstrap
+  -> compiler_driver_run_compile
+  -> CompilerDriver.compile
+  -> CompilerDriver.lower_and_check_impl
+  -> _driver_collect_hir_errors
+  -> _format_hir_lowering_error
+  -> err.span.file
+```
+
+The retained Stage3 implementation of `_driver_collect_hir_errors` begins by
+calling `rt_for_iterable(errors)`, indexes that materialized iterable, and
+passes each resulting record to `_format_hir_lowering_error`. It therefore
+does not contain the current source's typed indexed collector (`while
+error_idx < errors.len()` plus `val err: LoweringError =
+errors[error_idx]`). The kernel evidence localizes the malformed record at the
+old collector/formatter boundary; it does not independently prove which
+earlier operation made `span` nil.
+
+No core was retained; `coredumpctl` is unavailable and the host core pattern
+routes through apport. There is therefore no postmortem register or heap image
+beyond the kernel RIP and static ELF mapping. The next producer used for this
+lane must itself contain the current typed indexed lowering-error collector
+fix. Re-running the retained Stage3 cannot activate source code that is absent
+from that producer. The three-cycle cap remains binding: no unchanged retry or
+further build is authorized.

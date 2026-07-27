@@ -156,10 +156,12 @@ with the one `FontRenderConfig`; no parallel step/helper vocabulary is added.
 Each listed case count is a minimum and includes happy, boundary, and failure
 behavior.
 
-The current all-items classification is 32 changed/new specs since
-`origin/main`: 13 mirrors are missing, 19 are stale, zero are current, and all
-32 require focused docgen through the deployed pure-Simple runtime. The exact paths, owner commands, and
-runtime/native blockers are authoritative in
+The current all-items classification is 34 changed/new specs since
+`origin/main`: 14 mirrors are missing, 20 are stale, zero are current, and all
+34 require focused docgen through the deployed pure-Simple runtime. The
+authoritative 39-command graph is one runner-contract preflight, B6, C17, D11,
+and E4. The exact paths, immutable owner commands, and runtime/native blockers
+are authoritative in
 `doc/09_report/shared_multilingual_gpu_fonts_all_items_verification.md`.
 Historical rows below remain useful evidence history, but do not override that
 current report or promote a row from static evidence.
@@ -176,7 +178,7 @@ current report or promote a row from static evidence.
 | REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 3/3 source; refreshed literal variable oracle execution blocked |
 | REQ-009 | `font_renderer_spec.spl`, backend font unit specs, `shared_font_surfaces_spec.spl`, `check-runtime-rocm-provider.shs`, and `check-rocm-engine2d-font-readback.shs` | live font-identity separation; bounded glyph-cache counters; backend-local atlas owner + generation; shared program-version/transform rejection; ROCm reject-to-CPU replay; hosted HIP/HIPRTC ABI, UUID identity, transfer/sync failure gates; exact straight-ARGB transparent/translucent pixels; admitted configured-font device readback; warm/dirty regions | source gate includes GPU-less ROCm invalid/uninitialized rejection and quad-zero CPU replay; mock libraries prove provider ABI plus exact C pixels but remain non-real; configured harness uses strict Engine2D, Required ROCm, exact CPU parity, immutable hashes, and retained provider/device provenance; rotation/skew/subpixel/nonuniform CTM stay unsupported and retained native AMD execution remains pending |
 | REQ-010 | `gpu_font_emission_spec.spl`, `cuda_generated_font_handoff_spec.spl`, portable toolchain checker, and CUDA device readback checker | five source targets; exact shared HIP source identity; Vulkan contract; deterministic failures/hashes; selected-target bounded compilation; explicit candidate/validation/pin states; semantics revision; provenance-bound SPIR-V validation; strict final aggregate exit; native artifact exports the versioned font entry; source-tracked CUDA PTX binds immutable source/version/artifact hashes, ABI version, and compositor semantics revision; canonical construction rejects stale semantics without disabling primitive CUDA; tampering rejects before mutation; regenerated device readback matches the CPU oracle | current-host CUDA source generation is bound to a pure-Simple cached emitter, `nvcc` compiles and validates both artifacts, and exact device readback passes for the primitive kernels plus the four-pixel straight-ARGB font oracle with immutable PTX hashes and zero tolerance; retained font pin identity remains false, Vulkan compilation is unavailable on this host, and all three focused native spec cycles still exit 132 before a summary |
-| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, `wm_nested_content_frame_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical-owner legacy atlas/pipeline dependency exclusion; canonical SimpleOS pixels; shared nested-frame collection and fail-closed rejection | canonical-owner exclusion, the `taskbar-clock` route, dynamic crop, and QEMU hash recomputation are source-covered; the shared nested collector has behavioral source cases for a valid reachable collection and stale, duplicate, and orphan rejection, but is runtime-unverified; hosted image/motion/nested parity and a current retained QEMU PASS remain pending |
+| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, `wm_nested_content_frame_spec.spl`, production host route contract, `simpleos_wm_qemu_evidence_contract_spec.spl`, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical-owner legacy atlas/pipeline dependency exclusion; shared producer/consumer artifact root; canonical SimpleOS pixels; shared nested-frame collection and fail-closed rejection | canonical-owner exclusion, the `taskbar-clock` route, dynamic crop, shared artifact-root contract, and QEMU hash recomputation are source-covered; the shared nested collector has behavioral source cases for a valid reachable collection and stale, duplicate, and orphan rejection, but is runtime-unverified; hosted image/motion/nested parity and a current retained QEMU PASS remain pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
 | REQ-014 | eleven executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 11/11 canonical manuals now regenerate with zero stubs and preserve module scope prose, but their executable specs remain unadmitted, so 0/11 pairs are accepted |
@@ -239,15 +241,13 @@ graphics backend/driver; other backends may provide compile-only rows. Pin
 fixtures, viewport, premultiplication, rounding, warmups, samples, and percentile
 method.
 
-For each changed spec, run native execution and generate its manual once:
-
-```text
-SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native
-bin/simple spipe-docgen <spec> --output doc/06_spec --no-index
-```
-
-Run that canonical `spipe-docgen` command for every executable/manual pair and
-accept a manual only when the command completes and reports zero stubs.
+For each changed spec, use the immutable focused and docgen helpers under
+`Exact owner commands` in
+`doc/09_report/shared_multilingual_gpu_fonts_all_items_verification.md`.
+Unretained direct `test` or `spipe-docgen` commands do not count. Each docgen
+attempt binds a clean checkpoint, admitted CLI/core-C identities, source and
+manual hashes, command, both streams, and exit; accept it only when the command
+exits zero and reports complete with `0 stubs`.
 
 Focused native execution must reuse `preprocess_spipe_native_result_file`
 through `src/app/test/font_evidence_runner.spl`. Supply the selected pure-Simple
@@ -280,7 +280,7 @@ compatibility bitmap renderers as supporting evidence rather than PASS.
 
 ## Pass/fail
 
-Pass requires every REQ/NFR row above, eleven zero-stub manuals, one real promoted
+Pass requires every REQ/NFR row above, 34 zero-stub manuals, one real promoted
 graphics backend for both 2D and 3D, and all selected thresholds. Missing
 hardware is not a failure for non-promoted rows, but no promoted native row is a
 release failure. Placeholder assertions, environment-only payloads, mirrors, or

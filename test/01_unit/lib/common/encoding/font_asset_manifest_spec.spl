@@ -6,8 +6,9 @@ This specification makes no renderer or native GPU claim.
 """
 
 use std.spec.{describe, it, expect, step}
-use std.io_runtime.{file_read}
-use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_candidate_for_path, _selected_font_asset_candidate_for_path_with_root, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, _selected_font_asset_physical_path_from_root, validate_selected_font_asset, load_selected_font_file, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix, selected_font_coverage_cell, selected_font_simple_tuple_accepted}
+use std.io_runtime.{dir_create, dir_remove_all, getpid, is_dir, process_run}
+use std.env.variables.{env_get, env_set, env_unset}
+use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_physical_path, validate_selected_font_asset, validate_selected_font_bundle_root, load_selected_font_file, selected_font_language_ranking_source, font_language_ranking_evidence, selected_font_language_ranks, selected_font_coverage_languages, selected_font_coverage_categories, selected_font_coverage_matrix, selected_font_coverage_cell, selected_font_simple_tuple_accepted}
 use std.nogc_sync_mut.sffi.io.{file_exists, file_read_bytes}
 use std.common.crypto.sha256.{sha256_u8_hex}
 
@@ -37,15 +38,12 @@ describe "selected font asset manifest":
         val static_asset = assets[13]
         val static_blob = file_read_bytes(static_asset.local_path)
         expect(selected_font_asset_candidate_for_path(static_asset.local_path).?.family).to_equal(static_asset.family)
-        val installed_path = "/opt/simple/share/simple/" + static_asset.local_path
-        expect(_selected_font_asset_candidate_for_path_with_root(installed_path, "/opt/simple/share/simple").?.family).to_equal(static_asset.family)
-        expect(_selected_font_asset_candidate_for_path_with_root(installed_path, "/opt/other/share/simple")).to_be_nil()
-        expect(_selected_font_asset_candidate_for_path_with_root("/opt/unmanaged/" + static_asset.local_path, "/opt/simple/share/simple")).to_be_nil()
         expect(selected_font_asset_candidate_for_path("tmp/unmanaged.ttf")).to_be_nil()
         val identity = selected_font_asset_identity(static_asset)
         expect(selected_font_asset_candidate_for_identity(identity).?.local_path).to_equal(static_asset.local_path)
         expect(selected_font_asset_candidate_for_identity("sha256=unknown;axes=static")).to_be_nil()
         expect(validate_selected_font_asset(static_asset.local_path, []).reason).to_equal("byte-length")
+        expect(validate_selected_font_bundle_root("")).to_be(true)
 
         var malformed = static_blob
         malformed[malformed.len() - 1] = (malformed[malformed.len() - 1].to_i64() ^ 1).to_u8()
@@ -61,37 +59,54 @@ describe "selected font asset manifest":
     it "should resolve selected assets beneath share, portable, and Windows roots":
         step("Load the pinned multilingual font manifest")
         val path = selected_font_asset_candidates()[15].local_path
-        expect(_selected_font_asset_physical_path_from_root(path, "/opt/simple/share/simple")).to_equal(
-            "/opt/simple/share/simple/" + path)
-        expect(_selected_font_asset_physical_path_from_root(path, "/opt/simple/share/simple/")).to_equal(
-            "/opt/simple/share/simple/" + path)
-        expect(_selected_font_asset_physical_path_from_root(path, "/opt/simple-package/")).to_equal(
-            "/opt/simple-package/" + path)
-        expect(_selected_font_asset_physical_path_from_root(path, "C:\\Simple\\")).to_equal(
-            "C:/Simple/" + path)
-        expect(_selected_font_asset_candidate_for_path_with_root(
-            "C:\\Simple\\" + path.replace("/", "\\"), "C:\\Simple\\").?.local_path).to_equal(path)
-        expect(_selected_font_asset_candidate_for_path_with_root(path, "C:\\Simple\\").?.local_path).to_equal(path)
-        expect(_selected_font_asset_physical_path_from_root(path, "")).to_equal(path)
-        expect(_selected_font_asset_physical_path_from_root("tmp/unmanaged.ttf", "/opt/simple/share/simple")).to_equal(
-            "tmp/unmanaged.ttf")
-        val registry_source = file_read("src/lib/common/encoding/font_registry.spl")
-        val resolver_start = registry_source.index_of(
-            "fn _selected_font_asset_physical_path_from_root"
-        ) ?? 0
-        val resolver_end = registry_source.index_of(
-            "fn selected_font_asset_physical_path("
-        ) ?? registry_source.len()
-        expect(resolver_start).to_be_greater_than(0)
-        expect(resolver_end).to_be_greater_than(resolver_start)
-        val resolver_source = registry_source.slice(resolver_start, resolver_end)
-        expect(resolver_source).to_contain(
-            "_selected_font_asset_candidate_index_for_path_with_root"
-        )
-        expect(resolver_source).to_contain(
-            "val candidate = candidates[candidate_index]"
-        )
-        expect(resolver_source.contains("candidate.?.local_path")).to_be(false)
+        val old_asset_root = env_get("SIMPLE_ASSET_ROOT")
+
+        env_set("SIMPLE_ASSET_ROOT", "/opt/simple/share/simple/")
+        val share_path = selected_font_asset_physical_path(path)
+        val share_candidate = selected_font_asset_candidate_for_path(share_path)
+        val wrong_root_candidate = selected_font_asset_candidate_for_path(
+            "/opt/other/share/simple/" + path)
+        val unmanaged_path = selected_font_asset_physical_path("tmp/unmanaged.ttf")
+
+        env_set("SIMPLE_ASSET_ROOT", "/opt/simple-package/")
+        val portable_path = selected_font_asset_physical_path(path)
+
+        env_set("SIMPLE_ASSET_ROOT", "C:\\Simple\\")
+        val windows_path = selected_font_asset_physical_path(path)
+        val windows_candidate = selected_font_asset_candidate_for_path(
+            "C:\\Simple\\" + path.replace("/", "\\"))
+        val windows_relative_candidate = selected_font_asset_candidate_for_path(path)
+
+        env_set("SIMPLE_ASSET_ROOT", "")
+        val local_path = selected_font_asset_physical_path(path)
+        val asset_root_restored = if old_asset_root == nil:
+            env_unset("SIMPLE_ASSET_ROOT")
+        else:
+            env_set("SIMPLE_ASSET_ROOT", old_asset_root)
+
+        expect(asset_root_restored).to_be(true)
+        expect(share_path).to_equal("/opt/simple/share/simple/" + path)
+        expect(share_candidate.?.local_path).to_equal(path)
+        expect(wrong_root_candidate).to_be_nil()
+        expect(unmanaged_path).to_equal("tmp/unmanaged.ttf")
+        expect(portable_path).to_equal("/opt/simple-package/" + path)
+        expect(windows_path).to_equal("C:/Simple/" + path)
+        expect(windows_candidate.?.local_path).to_equal(path)
+        expect(windows_relative_candidate.?.local_path).to_equal(path)
+        expect(local_path).to_equal(path)
+
+    # @req REQ-004 REQ-005
+    # @req NFR-001
+    it "should reject an intermediate asset-directory symlink":
+        step("Load the pinned multilingual font manifest")
+        val root = "/tmp/simple_font_bundle_link_" + getpid().to_text()
+        if is_dir(root):
+            expect(dir_remove_all(root)).to_be(true)
+        expect(dir_create(root, recursive: true)).to_be(true)
+        val (_, _, link_exit) = process_run("ln", ["-s", "/tmp", root + "/assets"])
+        expect(link_exit).to_equal(0)
+        expect(validate_selected_font_bundle_root(root)).to_be(false)
+        expect(dir_remove_all(root)).to_be(true)
 
     # @req REQ-001 REQ-002
     it "should pin the deterministic CLDR top ten and eleventh-place boundary":

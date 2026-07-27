@@ -21,12 +21,16 @@ Six non-overlapping lanes own every selected REQ-001–015 and NFR-001–008 row
 - `FontRenderer`/`FontRenderBatch`, SSpec steps, and checker names remain frozen.
 - Old-plan lane letters are historical: old A/B/C/D/E/F/G map to current
   B/C/E/E/F/D/D; the obsolete eleven-manual count must not be dispatched.
-- The current manual inventory is 32 changed/new specs: 13 mirrors missing,
-  19 stale, zero current; all 32 require owner docgen and F review with `0 stubs`.
+- The current manual inventory is 34 changed/new specs: 14 mirrors missing,
+  20 stale, zero current; all 34 require immutable owner docgen and F review
+  with `0 stubs`.
+- The authoritative focused graph is 39 commands: one runner-contract
+  preflight, B6, C17, D11, and E4.
 - Production rows are Engine2D, Web, GUI, hosted WM, x86 SimpleOS, and RV64
   SimpleOS; unavailable hardware remains blocked, never simulated PASS.
-- P0 belongs to a separate compiler/runtime owner. T3/compiler changes remain
-  outside the font branch under `f1bcd0db5be`.
+- P0 is compiler-enablement only. The next fresh window uses the Rust seed once
+  to build repaired pure-Simple Stage2 from current source; Stage2 rebuilds
+  Stage3, and only Stage3/full CLI may supply admission or font evidence.
 
 ## Open Next
 

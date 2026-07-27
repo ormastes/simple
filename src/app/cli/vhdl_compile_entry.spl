@@ -4,8 +4,8 @@
 #   simple-vhdl <source.spl> [-o <output.vhd>]
 
 extern fn rt_cli_get_args() -> [text]
-extern fn rt_env_set(key: text, value: text) -> bool
 
+use app.io.env_ops.{env_get, env_set, env_unset}
 use compiler.common.driver_core_types.{
     CompileMode, compile_result_is_success, compile_result_errors,
     driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
@@ -55,11 +55,15 @@ fn main() -> i64:
     if output == "":
         output = vhdl_entry_default_output(source)
 
-    if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", source):
+    if not env_set("SIMPLE_NATIVE_BUILD_ENTRY", source):
         print "error: failed to select VHDL entry closure"
         return 1
-    if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0"):
+    if not env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0"):
         print "error: failed to initialize VHDL entry closure"
+        return 1
+    val old_native_arena_decls = env_get("SIMPLE_NATIVE_ARENA_DECLS")
+    if not env_set("SIMPLE_NATIVE_ARENA_DECLS", "1"):
+        print "error: failed to enable native AST arenas"
         return 1
 
     var options = driver_core_compile_options_default()
@@ -69,6 +73,13 @@ fn main() -> i64:
     options.backend = "vhdl"
     options = compileoptions_normalize_mir_optimization(options)
     val result = compiler_driver_run_vhdl(compiler_driver_create(options))
+    val arena_restored = if old_native_arena_decls == nil:
+        env_unset("SIMPLE_NATIVE_ARENA_DECLS")
+    else:
+        env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+    if not arena_restored:
+        print "error: failed to restore native AST arena mode"
+        return 1
     if compile_result_is_success(result):
         print "Output: {output}"
         return 0

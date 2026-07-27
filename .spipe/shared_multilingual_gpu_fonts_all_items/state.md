@@ -16,14 +16,14 @@ Finish every selected shared-multilingual-font requirement and NFR by integratin
 
 - AC-1: One current matrix classifies every REQ-001–015 and NFR-001–008 row as `pass`, `active`, or `blocked`; every non-pass row has an owner, writable scope, exact command/evidence, dependency, and final reviewer.
 - AC-2: The completed `codex/gsub-gpos-complete-20260725` implementation is integrated without importing superseded `gsub-gpos-stage1` duplicates, losing tracked files, or overwriting unrelated work.
-- AC-3: Before any font evidence is accepted, one fresh pure-Simple full CLI and matching core-C identity are hash-bound and admitted by `scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact binary, including the required test-runner, lint, duplicate-check, and aggregate pass markers, followed exactly once by deliberate-red and zero-example calibration retained under `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`. Producing or repairing that CLI is an explicit compiler/runtime enabling dependency owned outside this font implementation scope; compiler, interpreter, bootstrap, and bootstrap/runtime changes remain excluded under `f1bcd0db5be`.
-- AC-4: Each selected parser, shaping, material, surface, configuration, and SSpec command runs once against that admitted hash-bound pure-Simple runtime with nonzero examples and an authoritative summary.
+- AC-3: Before any font evidence is accepted, one fresh pure-Simple full CLI and matching core-C identity are hash-bound and admitted by `scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact binary, including the required test-runner, lint, duplicate-check, and aggregate pass markers, followed exactly once by deliberate-red and zero-example calibration retained under `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`. Minimal compiler-enablement fixes may produce this prerequisite, but they never promote a font requirement; Rust seed use is bootstrap-only and stops after generating repaired pure-Simple Stage2.
+- AC-4: The authoritative 39-command graph (one runner preflight, B6, C17, D11, E4) runs once against that admitted hash-bound pure-Simple runtime with nonzero examples and an authoritative summary.
 - AC-5: REQ-001–005 and NFR-001/003 have executable deterministic manifest, license, byte-identity, package, archive, and SimpleOS projection evidence with no missing generated manual.
 - AC-6: REQ-006–011/015 have executable exact-face shaping, bounded cache/lifecycle, shared `FontRenderBatch`, configuration-policy, Draw IR round-trip, Engine2D, Web, GUI, hosted-WM, and current-host SimpleOS/QEMU evidence without a private font path.
 - AC-7: REQ-012/013 and NFR-002/005–008 prove at least one real promoted native backend through texture/upload/bind/draw/fence/device-origin readback for both Engine2D and Engine3D, or remain explicitly blocked with retained artifacts and an exact native-host resume contract; simulation and CPU mirrors never count as native pass.
 - AC-8: NFR-004–006 performance evidence records the selected fixture, warmup/sample protocol, cache hit rate, p95 latency, CPU/GPU comparison, RSS/VRAM, upload behavior, hashes, host, device, and driver, and checks the selected numeric thresholds.
 - AC-9: Every unavailable cross-host/capability row remains active in the matrix and executable/manual evidence as `blocked` or `unsupported`, with prerequisite, exact resume command, retained artifact paths, owner, and final reviewer; no row is silently skipped or excluded.
-- AC-10: All changed executable SSpecs use the frozen `step("...")` vocabulary, real canonical matchers, absolute oracles, and fail-fast helpers; mirrored manuals report `0 stubs`, read as operator manuals, and `doc/06_spec` contains zero executable `.spl` files.
+- AC-10: All 34 changed executable SSpecs use the frozen `step("...")` vocabulary, real canonical matchers, absolute oracles, and fail-fast helpers; mirrored manuals report `0 stubs`, read as operator manuals, and `doc/06_spec` contains zero executable `.spl` files.
 - AC-11: A highest-capability final review maps every requirement to current evidence, runs the direct-runtime guards and scoped verification once, records `STATUS: PASS` only when all required rows pass, and otherwise leaves precise open blockers without weakening the goal.
 - AC-12: The isolated branch is cleanly rebased onto current `origin/main` with the file-count guard, committed, and pushed only after the applicable verification state is recorded; unrelated dirty work is untouched.
 
@@ -35,9 +35,9 @@ Finish every selected shared-multilingual-font requirement and NFR by integratin
 
 ## Cooperative Review
 
-- Merge owner: `/root` in `/tmp/simple-shared-font-all-items-20260726`.
-- Final reviewer and generated-manual acceptance owner: highest-capability primary model after all lane handoffs; lanes B–E run their frozen docgen sets and lane F audits all 26 results.
-- Parallel lanes: bootstrap/runner; manifests/distribution; shaping/material/configuration; production surfaces/SimpleOS; native 2D/3D/performance; specs/manuals/evidence audit.
+- Merge owner: `/root` in `/tmp/simple-font-sync-20260727`.
+- Final reviewer and generated-manual acceptance owner: highest-capability primary model after all lane handoffs; A–E run their focused docgen sets and lane F audits all 34 immutable results.
+- Parallel lanes: admitted-runtime calibration; manifests/distribution; shaping/material/configuration; production surfaces/SimpleOS; native 2D/3D/performance; specs/manuals/evidence audit.
 - Frozen owners/interfaces: `FontRenderer`, `FontRenderQuad`, `FontRenderBatch`, `FontRenderConfig`, `FontExecutionPolicy`, `emit_portable_font_atlas_composite_kernel`, `draw_text_hud`, and `draw_text_world`. No parallel renderer, emitter, atlas, cache, or runtime facade.
 - Frozen manual steps: `step("Load the pinned multilingual font manifest")`, `step("Accept exact-face-bound simple-script shaping")`, `step("Prepare one shared font batch for 2D and 3D")`, `step("Emit the selected font composite program and plan compilation")`, `step("Prove native submission and device readback")`, `step("Render legacy Web GUI and WM text through DrawIR")`, `step("Capture SimpleOS pinned-font pixels")`, and `step("Measure warm font rendering and resource bounds")`.
 - Frozen setup/checkers: `setup_shared_font_fixture`, `expect_font_license`, `expect_language_coverage`, `expect_shared_font_batch`, `expect_selected_unicode_shaping`, `expect_backend_emission`, `expect_font_render_parity`, `expect_engine3d_font_readback`, `expect_simpleos_font_pixel_oracle`, and `expect_font_perf_budget`.
@@ -45,7 +45,7 @@ Finish every selected shared-multilingual-font requirement and NFR by integratin
 
 ## Runtime Boundary Decision
 
-- runtime_need: only the bootstrap/runner owner may change compiler/runtime owners after a focused reproduced defect.
+- runtime_need: one hash-bound pure-Simple full CLI that passes the essential-tools admission gate is a hard enabling dependency for font execution evidence. Minimal HirBlock, lowering-error collection, native-arena, and direct-entry fixes are retained solely to produce that prerequisite; they are not font evidence and do not promote a REQ/NFR row.
 - facade_checked: every product/test lane must reuse `std.io_runtime`, app process/env facades, `FontRenderer`, Draw IR, Engine2D, and existing native backend facades.
 - chosen_path: `reuse-facade`; then `add-smallest-owner-facade` only with evidence.
 - rejected_shortcuts: raw local `rt_*` aliases, fixture-only device success, environment-only GPU proof, stale binaries, Rust-seed production evidence, CPU mirrors promoted as native, and direct backend field pokes.
@@ -54,24 +54,14 @@ Finish every selected shared-multilingual-font requirement and NFR by integratin
 
 verify-pending
 
-## Open bootstrap TODO
+## Compiler-enablement boundary
 
-| ID | Status | Owner | Required evidence and bounded continuation |
-|---|---|---|---|
-| HIR-BOOTSTRAP-NIL-001 | FAIL — fixes implemented, bootstrap unverified, three-check cap reached | compiler/bootstrap owner in a fresh session | The impl-only boundary was fixed in `e331a5700ab` and integrated as HEAD `7a161abfabb`: impl methods now enter the bootstrap function accumulator, typed wrapper values are retained, and `bootstrap_impl_function_accumulation_spec.spl` covers 0 free + 2 impl and 1 free + 2 impl methods without drops or duplicates. The final cycle-3 Stage 4 check then reported `bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=15`, completed the typed wrapper/store/function-field markers, and failed immediately after `driver:errors-read:done`, localizing the nil receiver inside `_driver_collect_hir_errors`. The current working change replaces that `for` traversal with a typed indexed loop and adds `hir_lowering_error_collection_spec.spl`; both are bootstrap-unverified. No further check is permitted this session. The full CLI is absent; all admission, font, docgen, native, and surface gates remain blocked. |
-
-Fresh-session resume command:
-
-```sh
-timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \
-  scripts/bootstrap/bootstrap-from-scratch.sh \
-  --backend=cranelift \
-  --output=build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap \
-  --full-bootstrap --full-cli --no-mcp --jobs=4
-```
-
-Only wrapper exit 0 may admit the CLI and authorize essential-tools, direct
-HIR regressions, runner calibration, focused specs, or docgen.
+`HIR-BOOTSTRAP-NIL-001` is not a font requirement. Its minimal current-source
+repairs and focused source contracts are retained only because the admitted
+pure-Simple CLI cannot otherwise be produced. The authoritative diagnostic is
+`doc/08_tracking/bug/shared_font_stage4_stale_compiler_backfill_2026-07-26.md`;
+delivery and essential-tools admission of one usable pure-Simple full CLI remain
+blocking prerequisites for runtime-dependent font evidence.
 
 ## Log
 
@@ -96,3 +86,5 @@ HIR regressions, runner calibration, focused specs, or docgen.
 - spec-hardening-2026-07-27: Independent review accepted the shaping/material and surface/native stacks only after making selected font identity non-vacuous, asserting Arabic/Urdu/Hindi direction, and carrying exact Web advance widths through the proof validator. The first manifest/distribution rewrite was rejected because it imported private production symbols and added heavyweight fixed-`/tmp` staging to unit specs; its replacement retains only frozen step vocabulary and canonical matcher changes. Behavioral distribution evidence remains blocked on an admitted runtime and a sound public entrypoint. These are source-quality results only and do not promote any runtime-dependent row.
 - evidence-graph-audit-2026-07-27: Read-only checkpoint audit validated 32 unique changed docgen sources, 19 present/13 missing canonical mirrors, and unique retained log names. The corrected runtime graph has 37 unique focused executions: B6, C17, D10 including the previously omitted Engine2D prerequisite, and E4. Essential-tools lint/duplicate probes execute only inside their admission gate; expected-failure calibration is `set -e` safe and retains commands, identity, streams, and exits under the canonical `runner-calibration` path; every focused run retains command/streams/exit and refuses overwrite. Runner source commit `2ac3be166b2` forwards only the ten reviewed native variables. Web receives its immutable run ID, admitted Aetheric Simple binary, and absolute retained production proof; x86 and RV64 receive their exact child-process inputs, while their live wrappers execute only inside their focused specs. This is an execution-contract correction only: no command ran, no manual was generated, and `verify-pending` / `STATUS: FAIL` remain unchanged.
 - p0-runtime-repaired-compiler-cap-2026-07-27: Direct bootstrap compiler paths now use the existing native-AST-arena guard, with source-contract and embedded-NUL regressions; independent review found no P0/P1 issue. The third and final bounded compiler cycle supplied `SIMPLE_NATIVE_ARENA_DECLS=1` to retained pure-Simple Stage3, clearing the prior Rust environment NUL panic and reaching HIR lowering, but then stopped with exit 132 and `runtime error: field access on nil receiver`. No candidate ELF or smoke exists. Retained log: `/tmp/simple-cli-admission-20260727-6.isfZoU/build/mini_builds/minimal_repaired_compiler_final_fb09.log`, SHA-256 `5cd89facfb881ee5a5f5003941e9bdf486f87b90dc0fe36573ec6e7482b5e034`; the exclusive cache remained at 675 objects. The three-cycle cap is reached, so no retry or full-CLI build ran; `verify-pending` and `STATUS: FAIL` remain unchanged.
+- evidence-runbook-correction-2026-07-27: Supersedes the historical 32-manual/37-command accounting without rewriting those earlier log entries. The authoritative scope is 34 manuals (14 missing, 20 stale) and 39 focused commands: one runner-contract preflight, B6, C17, D11, and E4. The focused helper now returns any nonzero spec exit before marker validation. Docgen uses clean-checkpoint and admitted CLI/core-C validation, immutable attempt/refusal semantics, command/stdout/stderr/exit retention, spec and generated-manual SHA-256 fields, and an explicit complete/`0 stubs` gate. The newly accounted sources are `test/01_unit/lib/test_runner_result_wrapper_spec.spl` and `test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl`; no command ran, no manual was generated, and `verify-pending` / `STATUS: FAIL` remain unchanged.
+- host-independent-hardening-2026-07-27: The remaining interpreter HirBlock consumer now gates only on `block.has`; the live VHDL direct compiler path requires native-arena enablement and exact set/unset restoration; and the manifest spec uses public registry APIs plus the real bundle-root validator. Bundle validation now rejects root, intermediate `assets`, and `assets/fonts` symlinks before traversal. Focused source/behavioral regressions are present, but no admitted-runtime command ran, so no REQ/NFR or overall status is promoted.
