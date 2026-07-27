@@ -1,7 +1,7 @@
 # @Feature 703.1: Simple linter
 # @Description: Test the Simple language linter
 
-use compiler.tools.lint.main.{lint_accessor_and_parent_names}
+use compiler.tools.lint.main.{lint_accessor_and_parent_names, Linter}
 use compiler.tools.fix.rules.impl_.lint_annotation.{check_unknown_attribute, check_unknown_decorator}
 
 # NOTE: describe, it, expect are built-in - no imports needed
@@ -221,3 +221,24 @@ describe "Linter - accessor and inherited name checks":
             "        pass\n"
         expect(check_unknown_decorator(source, "sample.spl").len()).to_equal(0)
         expect(check_unknown_attribute(source, "sample.spl").len()).to_equal(0)
+
+    # Regression: is_pascal_case used `name.get(0)`, which does not exist on
+    # String. Every `class ` line reached it, so linting ANY file declaring a
+    # class aborted with "method `get` not found on type `str`".
+    it "lints a class declaration without aborting on the receiver type":
+        var linter = Linter.new()
+        val results = linter.lint_source("sample.spl", "class Foo:\n    x: i64\n")
+        expect(results.len()).to_equal(0)
+
+    # The ST002 lint itself is in the `style_convention` group, which is Allow
+    # (off) by default, so it is filtered out of lint_source results. Assert on
+    # is_pascal_case directly instead -- that is the function the `get` bug was
+    # in, and it still has to classify correctly, not just avoid aborting.
+    it "classifies PascalCase correctly after the receiver fix":
+        var linter = Linter.new()
+        expect(linter.is_pascal_case("ValidName")).to_equal(true)
+        expect(linter.is_pascal_case("invalid_name")).to_equal(false)
+        # non-cased first chars have upper() == lower(); must report false
+        expect(linter.is_pascal_case("9abc")).to_equal(false)
+        expect(linter.is_pascal_case("_Foo")).to_equal(false)
+        expect(linter.is_pascal_case("")).to_equal(false)

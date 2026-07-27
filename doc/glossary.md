@@ -2,6 +2,47 @@
 
 ## Sub-Glossaries
 - [Simple Feature Module (SFM)](simple_feature_module_glossary.md) — `.sfm` feature-module format, layers, DI/AOP, security level, profiles, VERSION.md ([tldr](simple_feature_module_glossary_tldr.md)).
+- [SQLite counterparts in Simple](07_guide/lib/database/sqlite_counterparts.md) — which in-tree pure-Simple module replaces each piece of C SQLite, and which paths really are C-blocked.
+
+## In-Tree Counterpart Rule
+**Before recording an "external port" blocker, search for the pure-Simple
+counterpart.** Three roadmap blockers turned out to be stale on 2026-07-27
+because a working in-tree implementation already existed and nobody had looked:
+
+| "Blocked on…" | What actually exists in-tree |
+|---|---|
+| a crypto stack | `src/lib/common/crypto/` (25 files, 12,183 lines, zero stub markers) + `src/os/crypto/` (46,404 lines); **Ed25519 passes its RFC 8032 KAT — 15 examples, 0 failures**; 60 crypto spec files |
+| an OpenSSH port | `src/os/apps/sshd/` — 27 files, 9,576 lines of pure-Simple SSH **server**, wired to `os.crypto.{ed,sha,curve}*` and a real socket facade, advertising `curve25519-sha256`, `ssh-ed25519`, `chacha20-poly1305@`, `aes*-gcm@`, `hmac-sha2-256/512`. The **client** is the real gap (today it is an SFFI wrapper over libssh2) |
+| a C toolchain for SQLite | `src/lib/nogc_sync_mut/database/pure_sql/` — `PureDatabase`, ~4,440 lines of pure-Simple SQL |
+
+The blocker is usually narrower than the row says: it names the *C-linked
+wrapper*, not the capability. Check `src/lib/**` and `src/os/**` for a
+same-named module first, run its specs, and only then call it blocked.
+
+## SQLite counterparts (pure-Simple SQL)
+Simple has its own SQL engine; the C amalgamation is neither required nor usable
+in-guest. Full table: [doc/07_guide/lib/database/sqlite_counterparts.md](07_guide/lib/database/sqlite_counterparts.md).
+
+- **SQL engine:** `src/lib/nogc_sync_mut/database/pure_sql/` → `PureDatabase`
+  (DDL, DML, `WHERE`, `BEGIN`/`COMMIT`/`ROLLBACK`, `last_insert_rowid`, `changes`)
+- **Row store:** `database/core.spl` (`SdnDatabase`/`SdnTable`/`SdnRow`)
+- **Durability:** `database/atomic.spl` (`atomic_write` = `FileLock` + `.tmp` +
+  `rt_file_sync` + rename), `database/wal.spl`, `database/server/durability.spl`
+- **Index / FTS / query:** `database/{index,fts,query}.spl`
+- **Server tier:** `database/server/` (sessions, txn scoping, capability, framing)
+- **Engine internals:** `src/lib/nogc_async_mut/db/dbfs_engine/` (pager, MVCC,
+  B-tree, checkpoint ring, intent log)
+- **Genuinely C-blocked:** `src/lib/*/io/sqlite_sffi.spl` and
+  `src/app/io/sqlite_ffi.spl` (SFFI over libsqlite3), and the
+  `src/os/port/sqlite/sqlite_vfs_contract.spl` surface a ported C SQLite
+  would sit on.
+
+Landmines: `use std.X` resolves `nogc_async_mut` **first**, so confirm which
+`pure_sql` copy executes before editing; the Rust seed's SQLite shim
+(`sffi_db.rs`) implements only CREATE TABLE / INSERT / DELETE, so
+`CREATE INDEX IF NOT EXISTS` fails on the seed; and `Some(<i64>)` returns **8×n**
+on the JIT, which made every integer column in `core.spl` read back eight times
+too large.
 
 ## Simple Codebase
 Operator shorthand for the production codebase-memory MCP surface. It is not a
