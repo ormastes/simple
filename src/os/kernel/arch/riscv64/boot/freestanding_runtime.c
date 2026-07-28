@@ -1492,6 +1492,18 @@ spl_i64 rt_time_now_unix_micros(void) {
     return (spl_i64)(cycles / 10ULL);
 }
 
+/* Monotonic nanoseconds from the same `time` CSR the micros owner above uses.
+ * QEMU virt (and the FPGA CLINT platform) run the timebase at 10 MHz -- see
+ * TIMER_FREQ_HZ in src/os/kernel/arch/riscv64/timer.spl -- so one tick is
+ * exactly 100 ns. Declared by src/lib/nogc_sync_mut/io/time_ops.spl and
+ * src/lib/common/time_utils.spl; without an owner here the RV64 freestanding
+ * link leaves it undefined. */
+spl_i64 rt_time_now_nanos(void) {
+    spl_u64 ticks;
+    __asm__ volatile("rdtime %0" : "=r"(ticks));
+    return (spl_i64)(ticks * 100ULL);
+}
+
 void rt_thread_sleep(spl_i64 millis) {
     spl_i64 start;
     spl_i64 target_delta;
@@ -4336,6 +4348,16 @@ spl_i64 rt_string_to_upper(spl_i64 value) {
         }
     }
     return out_value;
+}
+
+/* Full memory barrier. The portable MMIO/DMA layers
+ * (os.kernel.boot.mmio_hardware, os.drivers.virtio.virtio_gpu,
+ * std.io.volatile_ops) call rt_memory_barrier around device-visible reads and
+ * writes. `fence rw,rw` is the RISC-V equivalent of the arm64 owner's `dsb sy`
+ * (examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c). Without
+ * an owner here the RV64 freestanding link leaves it undefined. */
+void rt_memory_barrier(void) {
+    __asm__ volatile("fence rw,rw" ::: "memory");
 }
 
 /* TLB invalidation. The portable kernel MMIO layer (os.kernel.boot.mmio)
