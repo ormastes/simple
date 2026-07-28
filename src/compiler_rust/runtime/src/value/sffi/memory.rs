@@ -6,8 +6,8 @@ use crate::value::heap::HeapHeader;
 
 mod c_sffi {
     extern "C" {
-        pub(super) fn rt_alloc(size: u64) -> *mut u8;
-        pub(super) fn rt_free(ptr: *mut u8, size: u64);
+        pub(super) fn rt_alloc(size: i64) -> *mut u8;
+        pub(super) fn rt_free(ptr: *mut u8);
         pub(super) fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64;
         pub(super) fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32;
         pub(super) fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64);
@@ -22,11 +22,15 @@ mod c_sffi {
 
 #[inline(always)]
 pub fn rt_alloc(size: u64) -> *mut u8 {
-    unsafe { c_sffi::rt_alloc(size) }
+    if size > i64::MAX as u64 {
+        return std::ptr::null_mut();
+    }
+    unsafe { c_sffi::rt_alloc(size as i64) }
 }
 #[inline(always)]
 pub fn rt_free(ptr: *mut u8, size: u64) {
-    unsafe { c_sffi::rt_free(ptr, size) }
+    let _ = size;
+    unsafe { c_sffi::rt_free(ptr) }
 }
 #[inline(always)]
 pub fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64 {

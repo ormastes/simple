@@ -109,7 +109,7 @@ pub extern "C" fn rt_object_new(class_id: u32, field_count: u32) -> RuntimeValue
             *field = RuntimeValue::NIL;
         }
 
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+        super::collections::track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 
@@ -189,7 +189,7 @@ pub extern "C" fn rt_closure_new(func_ptr: *const u8, capture_count: u32) -> Run
         (*ptr).capture_count = capture_count;
         (*ptr).reserved = 0;
 
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+        super::collections::track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 
@@ -287,7 +287,7 @@ pub extern "C" fn rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeV
         (*ptr).discriminant = discriminant;
         (*ptr).payload = payload;
 
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+        super::collections::track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 

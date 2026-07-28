@@ -22,19 +22,19 @@ use simple_simd::{active_simd_tier, SimdTier};
 
 thread_local! {
     static U8_ARRAY_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    static TRANSIENT_ARRAY_SCOPE: RefCell<Option<TransientArrayScope>> = const { RefCell::new(None) };
+    static TRANSIENT_HEAP_SCOPE: RefCell<Option<TransientHeapScope>> = const { RefCell::new(None) };
 }
 
-struct TransientArrayScope {
+struct TransientHeapScope {
     paused: bool,
-    arrays: Vec<RuntimeValue>,
+    objects: Vec<RuntimeValue>,
 }
 
-fn track_transient_array(value: RuntimeValue) -> RuntimeValue {
-    TRANSIENT_ARRAY_SCOPE.with(|slot| {
+pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
         if let Some(scope) = slot.borrow_mut().as_mut() {
             if !scope.paused {
-                scope.arrays.push(value);
+                scope.objects.push(value);
             }
         }
     });
@@ -459,7 +459,7 @@ pub extern "C" fn rt_array_new(capacity: u64) -> RuntimeValue {
         (*ptr).capacity = capacity;
         (*ptr).data = data;
 
-        track_transient_array(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
+        track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 
@@ -490,7 +490,7 @@ fn rt_array_new_uninit(capacity: u64) -> RuntimeValue {
         (*ptr).capacity = capacity;
         (*ptr).data = data;
 
-        track_transient_array(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
+        track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 
@@ -531,7 +531,7 @@ pub extern "C" fn rt_byte_array_new(capacity: u64) -> RuntimeValue {
         (*ptr).capacity = capacity;
         (*ptr).data = data;
 
-        track_transient_array(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
+        track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 
@@ -1457,18 +1457,29 @@ pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
     }
 }
 
-/// Reclaim flat-parser scratch arrays after conversion creates owned frontend
-/// values. Each parser thread owns at most one scope.
+/// Reclaim flat-parser scratch heap objects after conversion creates owned
+/// frontend values. Each parser thread owns at most one scope.
+extern "C" {
+    fn rt_transient_raw_scope_begin() -> i32;
+    fn rt_transient_raw_scope_pause() -> i32;
+    fn rt_transient_raw_scope_end() -> i32;
+    fn rt_transient_raw_words(value: i64, words: *mut *const usize, canonical_ptr: *mut usize) -> i64;
+    fn rt_transient_raw_promote(ptr: usize) -> i32;
+}
+
 #[no_mangle]
 pub extern "C" fn rt_transient_array_scope_begin() -> bool {
-    TRANSIENT_ARRAY_SCOPE.with(|slot| {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_some() {
             return false;
         }
-        *slot = Some(TransientArrayScope {
+        if unsafe { rt_transient_raw_scope_begin() } == 0 {
+            return false;
+        }
+        *slot = Some(TransientHeapScope {
             paused: false,
-            arrays: Vec::new(),
+            objects: Vec::new(),
         });
         true
     })
@@ -1476,11 +1487,14 @@ pub extern "C" fn rt_transient_array_scope_begin() -> bool {
 
 #[no_mangle]
 pub extern "C" fn rt_transient_array_scope_pause() -> bool {
-    TRANSIENT_ARRAY_SCOPE.with(|slot| {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(scope) = slot.as_mut() else {
             return false;
         };
+        if unsafe { rt_transient_raw_scope_pause() } == 0 {
+            return false;
+        }
         scope.paused = true;
         true
     })
@@ -1539,13 +1553,34 @@ fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
     }
 }
 
-/// Keep transient arrays reachable from a retained graph when the scope ends.
+fn free_transient_heap(value: RuntimeValue) {
+    match value.heap_type() {
+        Some(HeapObjectType::Array) => rt_array_free(value),
+        Some(HeapObjectType::Tuple) => rt_tuple_free(value),
+        Some(HeapObjectType::Dict) => super::dict::rt_dict_free(value),
+        Some(HeapObjectType::Object | HeapObjectType::Closure | HeapObjectType::Enum | HeapObjectType::Float) => unsafe {
+            let ptr = value.as_heap_ptr();
+            let size = (*ptr).size as usize;
+            if let Ok(layout) = std::alloc::Layout::from_size_align(size, 8) {
+                if unregister_heap_ptr_checked(ptr) {
+                    std::alloc::dealloc(ptr as *mut u8, layout);
+                }
+            }
+        },
+        _ => (),
+    }
+}
+
+/// Keep transient heap objects reachable from a retained graph when the scope ends.
 #[no_mangle]
 pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
-    if !value.is_heap() || value.heap_type().is_none() {
+    let mut root_words = std::ptr::null();
+    let mut root_ptr = 0usize;
+    let root_raw = unsafe { rt_transient_raw_words(value.0 as i64, &mut root_words, &mut root_ptr) >= 0 };
+    if !root_raw && (!value.is_heap() || value.heap_type().is_none()) {
         return false;
     }
-    TRANSIENT_ARRAY_SCOPE.with(|slot| {
+    TRANSIENT_HEAP_SCOPE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(scope) = slot.as_mut() else {
             return false;
@@ -1555,31 +1590,52 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         }
 
         let mut pending = vec![value];
-        let mut reachable = HashSet::new();
+        let mut reachable_heap = HashSet::new();
+        let mut reachable_raw = HashSet::new();
         while let Some(current) = pending.pop() {
-            if !reachable.insert(current.0) {
+            let mut words = std::ptr::null();
+            let mut canonical_ptr = 0usize;
+            let word_count = unsafe { rt_transient_raw_words(current.0 as i64, &mut words, &mut canonical_ptr) };
+            if word_count >= 0 {
+                if !reachable_raw.insert(canonical_ptr) {
+                    continue;
+                }
+                if word_count > 0 {
+                    if words.is_null() {
+                        return false;
+                    }
+                    let raw_words = unsafe { std::slice::from_raw_parts(words, word_count as usize) };
+                    pending.extend(raw_words.iter().map(|word| RuntimeValue(*word as u64)));
+                }
                 continue;
             }
-            let Some(children) = transient_heap_children(current) else {
-                return false;
-            };
-            pending.extend(children);
+            if !reachable_heap.insert(current.0) {
+                continue;
+            }
+            if let Some(children) = transient_heap_children(current) {
+                pending.extend(children);
+            }
         }
-        scope.arrays.retain(|array| !reachable.contains(&array.0));
+        for ptr in reachable_raw {
+            if unsafe { rt_transient_raw_promote(ptr) } == 0 {
+                return false;
+            }
+        }
+        scope.objects.retain(|object| !reachable_heap.contains(&object.0));
         true
     })
 }
 
 #[no_mangle]
 pub extern "C" fn rt_transient_array_scope_end() -> bool {
-    let scope = TRANSIENT_ARRAY_SCOPE.with(|slot| slot.borrow_mut().take());
+    let scope = TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow_mut().take());
     let Some(scope) = scope else {
         return false;
     };
-    for array in scope.arrays {
-        rt_array_free(array);
+    for object in scope.objects {
+        free_transient_heap(object);
     }
-    true
+    unsafe { rt_transient_raw_scope_end() != 0 }
 }
 
 /// Create an array from a slice of RuntimeValues
@@ -1683,7 +1739,7 @@ pub extern "C" fn rt_tuple_new(len: u64) -> RuntimeValue {
         (*ptr).header = HeapHeader::new(HeapObjectType::Tuple, size as u32);
         (*ptr).len = len;
 
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+        track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 

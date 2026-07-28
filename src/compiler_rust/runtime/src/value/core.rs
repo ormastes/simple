@@ -247,7 +247,7 @@ impl RuntimeValue {
             }
             (*ptr).header = super::heap::HeapHeader::new(HeapObjectType::Float, size as u32);
             (*ptr).value = f;
-            Self::from_heap_ptr(ptr as *mut HeapHeader)
+            super::collections::track_transient_heap(Self::from_heap_ptr(ptr as *mut HeapHeader))
         }
     }
 

@@ -118,7 +118,7 @@ pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
         (*ptr).capacity = capacity;
         (*ptr).data = data;
 
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+        super::collections::track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 

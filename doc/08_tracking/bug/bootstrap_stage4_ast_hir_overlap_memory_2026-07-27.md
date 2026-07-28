@@ -361,3 +361,33 @@ runner could not execute the source contract because this worktree lacks its
 `simple_seed` sibling and `std.spec` names did not resolve; that infrastructure
 failure is not counted as Stage-4 evidence. The next bounded strict retry must
 still prove live slope, deployment, and NVMe SSpec/docgen.
+
+## 2026-07-28 Rust-provider parity repair
+
+Retry 8 rebuilt current Rust authority, completed and sanity-checked Stage 2
+and Stage 3, passed source attestation, and entered Stage 4. It again failed on
+the first physical source with `module surface promotion failed for
+src/app/cli/main.spl`. The run took 38m17s, peaked at 2,557,968 KiB RSS, and
+performed zero swaps. Stage 2 SHA-256 was
+`eedae92e756f12d93450355a411c61f35cc832f1c374404cbfe3fb395ee7e2c3`;
+Stage 3 SHA-256 was
+`7237281a2a0cd12a46f021f46e5c6eeb7077779290d45155cad546a0a0067a0a`.
+
+GDB stopped at the actual Stage-3 `rt_transient_heap_promote` call and captured
+argument `0x56d0b2f1`. Masking the tag produced readable `ModuleSurface`
+storage at `0x56d0b2f0`, including source index zero, tagged path/name strings,
+and content length 773. Disassembly then proved Stage 3 supplied the 46-byte
+Rust promotion function while `rt_alloc` came from `runtime_memory.c`; the
+core-C raw registry fixed after retry 7 was not this process's provider.
+
+`runtime_memory.c` now tracks scope-owned raw allocations with native-width
+words and exposes promotion/lifecycle hooks to the Rust runtime. Its allocation
+and free signatures match the public ABI. The Rust graph walk treats scalar tag
+collisions as leaves, handles tagged or untagged raw roots, heap-to-raw edges,
+cycles, and repeated promotion, and scopes arrays, tuples, dictionaries,
+objects, closures, enums, and boxed floats. The focused offline Rust test
+`transient_heap_promotion_retains_reachable_cycle_only` passed on the third
+bounded verification cycle; tuple/all-kind assertions were then added by
+static review without a prohibited fourth rerun. A new strict bootstrap is
+still required to rebuild Stage 2/3 with this parity fix and prove Stage-4 live
+slope, deployment, and NVMe SSpec/docgen.

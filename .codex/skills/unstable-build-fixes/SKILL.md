@@ -50,6 +50,11 @@ Goal: produce the requested Simple executable without throwing away useful cache
   scope and state side effects (`push_scope`/`pop_scope`, `has` flags, call-frame
   snapshots). Fast paths may avoid fragile payload extraction, but not semantic
   state.
+- When a self-hosted compiler rejects an extern/runtime value that passes a
+  core-C self-check, inspect the candidate symbol provider with `nm`/`objdump`.
+  Stage 2/3 may execute the Rust runtime plus `runtime_memory.c`; keep ownership
+  helpers behaviorally paired with `runtime_native.c` instead of assuming the
+  final core-C bundle is already authoritative.
 
 ## Error Triage
 

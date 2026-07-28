@@ -2006,23 +2006,54 @@ fn transient_array_scope_reclaims_only_pre_pause_arrays() {
 
 #[test]
 fn transient_heap_promotion_retains_reachable_cycle_only() {
+    extern "C" {
+        fn rt_alloc(size: i64) -> *mut u8;
+        fn rt_free(ptr: *mut u8);
+    }
+
     assert!(super::rt_transient_array_scope_begin());
     let kept_a = super::rt_array_new(1);
     let kept_b = super::rt_array_new(1);
     let reclaimed = super::rt_array_new(1);
-    assert!(super::rt_array_push(kept_a, kept_b));
+    let reclaimed_tuple = super::rt_tuple_new(1);
+    let reclaimed_dict = crate::value::dict::rt_dict_new(0);
+    let reclaimed_enum = crate::value::objects::rt_enum_new(77, 3, RuntimeValue::NIL);
+    let reclaimed_object = crate::value::objects::rt_object_new(7, 1);
+    let closure_fn = rt_alloc as *const () as *const u8;
+    let reclaimed_closure = crate::value::objects::rt_closure_new(closure_fn, 1);
+    let reclaimed_float = RuntimeValue::from_float(0.125);
+    let raw_child = unsafe { rt_alloc(24) as *mut u64 };
+    assert!(!raw_child.is_null());
+    unsafe {
+        *raw_child = kept_b.0;
+        *raw_child.add(1) = 1;
+        *raw_child.add(2) = 9;
+    }
+    assert!(super::rt_array_push(kept_a, RuntimeValue((raw_child as u64) | 1)));
     assert!(super::rt_array_push(kept_b, kept_a));
     assert!(super::rt_transient_array_scope_pause());
 
-    let root = super::rt_array_new(1);
-    assert!(super::rt_array_push(root, kept_a));
+    let raw_root = unsafe { rt_alloc(8) as *mut u64 };
+    assert!(!raw_root.is_null());
+    unsafe { *raw_root = kept_a.0 };
+    let root = RuntimeValue((raw_root as u64) | 1);
+    assert!(super::rt_transient_heap_promote(root));
     assert!(super::rt_transient_heap_promote(root));
     assert!(super::rt_transient_array_scope_end());
 
     assert_eq!(super::rt_array_len(kept_a), 1);
     assert_eq!(super::rt_array_len(kept_b), 1);
     assert_eq!(super::rt_array_len(reclaimed), -1);
-    super::rt_array_free(root);
+    assert_eq!(super::rt_tuple_len(reclaimed_tuple), -1);
+    assert_eq!(crate::value::dict::rt_dict_len(reclaimed_dict), -1);
+    assert_eq!(crate::value::objects::rt_enum_discriminant(reclaimed_enum), -1);
+    assert_eq!(crate::value::objects::rt_object_field_count(reclaimed_object), -1);
+    assert!(crate::value::objects::rt_closure_func_ptr(reclaimed_closure).is_null());
+    assert!(reclaimed_float.heap_type().is_none());
+    unsafe {
+        rt_free(raw_root as *mut u8);
+        rt_free(raw_child as *mut u8);
+    }
     super::rt_array_free(kept_a);
     super::rt_array_free(kept_b);
 }
