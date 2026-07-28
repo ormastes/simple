@@ -68,6 +68,81 @@ is right**, and whether a manual proof depends on the diverged export.
 
 ---
 
+## 1.3 RESULTS — R1, R2, R3 complete (2026-07-28, same day)
+
+Re-run and independently confirmed by the coordinator on `origin/main`:
+
+| Gate | Was | Now |
+|---|---|---|
+| `check-riscv-hardware-gates.shs` | 1, 21/22 | **0, 22/22 PASS** |
+| `check-riscv-budget-evidence.shs` | 1 | **0** (`WARN target-metadata-only` = normal no-Vivado path) |
+
+**R1 — `addr4g_probe`: the probe's setup was stale, not rv64 addressing.**
+`soc64_dtb_read` fetches the FDT from DRAM at +128 MiB, but the probe built a
+**4 MiB** SoC that has neither the window nor the blob, so the read was simply
+out-of-DRAM → 0. Git-proven: at the probe's authoring commit the DTB came from a
+*pure function*, so the 4 MiB SoC was legitimate then; the DTB later became a
+RAM-backed overlay and the probe was never updated. Overlay *semantics* were
+always correct. Fixed by running the overlay checks against the production path,
+plus a non-vacuity guard asserting the DTB window lies inside DRAM — without it
+the store is dropped as unmapped and read-only passes without exercising the guard.
+
+**§1.2's "the two sub-checks may be dependent" suspicion is REFUTED**, independently,
+by R3: with the write-guard removed and the DTB present, magic-byte passes while
+read-only fails **alone**. The relation is *subsumption* (same read, same expected
+value), not vacuity — it never passes spuriously. The plan's `rc=2` was the probe's
+failure *count*, and the "ALL PASS" in its log was a shared-log-path race.
+
+**R2 — the checked-in BYL was asserting things that were false.**
+Four facts diverged. The generator is authoritative: `XLen.linux_abi()` returns
+soft-float because the cores have no F/D unit, and its sibling validator *actively
+rejects* `ilp32d`/`lp64d` — the checked-in file asserted an ABI the generator
+refuses to emit. Worse, `formal_gate = "rvfi+sby"` claimed a formal pass that never
+ran, while the generated VHDL is a placeholder emitting
+`GENERATED_RTL_NOT_IMPLEMENTED` — the exact fabricated-evidence class
+`check-riscv-rtl-truth.shs` exists to catch.
+
+The manual proof layer **did** depend on it: `Constraints.lean` asserted
+`Abi.ilp32d`/`lp64d` and `FormalGate.rvfiSby`, and `Generated.lean` could not even
+*express* the honest values. Regenerating only the BYL would have left the proof
+layer certifying hard-float and a passing formal gate while the interchange surface
+said the opposite. Both were updated together; intent was preserved rather than
+dropped (`formal_flow` still names the designated track), and three new theorems
+were added so the honest state is *enforced*, not merely recorded. Proved the proof
+gates by injection: re-introducing either false claim breaks `lake build`.
+
+**Two gates were mutually unsatisfiable.** `check-riscv-formal-dual-track.shs:102`
+and `check-simpleos-byl-sby-artifacts.shs:56` *required* `formal_gate = "rvfi+sby"`
+in the same file `check-riscv-budget-evidence.shs` required to equal a generator
+output containing `placeholder-rejected`. **No possible file satisfied both.** It
+went unnoticed because both claimants also fail earlier on the R4-blocked seed
+identity self-test.
+
+**R3 — all 22 gates injected with the defect each claims to catch. No fail-open
+gate found**; 21 gate correctly and name the injected defect. Three findings filed:
+`ghdl_validate_rv32` runs `--analyze` only, so it proves the VHDL *parses* and
+nothing more (every historical fake-CPU artifact would pass it, yet it counts
+toward a hardware claim); the jtag STAGE1 IDCODE check is **self-referential** (the
+testbench feeds the DUT its own `EXPECTED_IDCODE` via generic map, so a wrong
+IDCODE cannot fail it); and the runner shares a log path across probes, which
+raced. Two FPU probes initially *looked* fail-open — that was an out-of-coverage
+mutation, not a gate defect, caught by re-injecting in scope. Worth repeating: a
+gate that survives one injection is not proven; the mutation must be in scope.
+
+### Still open
+
+- **R4 (HIR facade sweep) — critical path.** Three gates remain blocked on the
+  self-hosted deploy, exactly as §1.1 predicted.
+- `check-riscv-fpga-sidecar-contract.shs` is **stale beyond the line R2 fixed**:
+  ~line 124 still demands `"gate": "rvfi_port_manifest", "status": "rvfi-ready"`
+  while the generator has emitted `placeholder-rejected` / `contract-not-ready`
+  since the truth campaign. **It will still fail after R4 lands the deploy.**
+- Pre-existing, unrelated: `soc_top_64` fails `bin/simple compile`
+  (`undefined identifier: lsu64_load`, present at HEAD, de-JITs
+  `core64_combinational` to the interpreter on every run);
+  `soc_top_64_protected_spec.spl` fails with `parse: expected Let, found Dot`;
+  `riscv_fpga_linux.spl` fails with `undefined identifier: CORE32_S_INTERRUPT_MASK`.
+
 ## 2. Standing rules for every lane
 
 Inherited from the 2026-07-27 plan §2, plus these, all learned the hard way today:
