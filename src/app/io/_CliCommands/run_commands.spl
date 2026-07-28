@@ -10,7 +10,7 @@ use compiler.loader.runtime.{moduleloader_execute_smf}
 use lazy compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator, apply_fixes_to_disk, fix_read_source}
 use lazy compiler.tools.fix.rules.{check_simd_opportunities, check_short_grammar_refactor, easyfix_id_text, easyfix_description_text}
-use compiler.tools.lint.main.{LintConfig, LintLevel, Linter}
+use compiler.tools.lint.main.{run_lint_file}
 use std.tooling.easy_fix.{FixConfidence}
 use std.tooling.easy_fix.types.{fixreport_applied, fixreport_details}
 use compiler.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
@@ -281,20 +281,16 @@ fn cli_run_lint(args: [text]) -> i64:
             continue
 
         val source = rt_file_read_text(file_path)
-        var linter = Linter.new()
-        val results = linter.lint_source(file_path, source)
-        var visible_count = 0
-        for result in results:
-            visible_count = visible_count + 1
-            var level_text = "info"
-            match result.lint.level:
-                case LintLevel.Deny:
-                    level_text = "error"
-                case LintLevel.Warn:
-                    level_text = "warning"
-                case LintLevel.Allow:
-                    level_text = "info"
-            print "{file_path}:{result.line}: {level_text}[{result.lint.code}]: {result.lint.message}"
+        # Route through run_lint_file() rather than calling linter.lint_source()
+        # directly. lint_source() only runs the pattern lints; it never parses,
+        # so this loop had no PARSE001 gate and printed "lint: <file> OK" on
+        # files the compiler rejects outright — the same fail-open shape fixed
+        # on the `simple_lint` path in f4adc39bf39d. run_lint_file() is the
+        # shared entry that applies simple.sdn config, @profile() tiers, the
+        # PARSE001 parse gate and --fix/--json handling, and it prints its own
+        # per-result report.
+        # See doc/08_tracking/bug/module_global_write_lost_on_frame_pop_2026-07-28.md
+        val visible_count = run_lint_file(file_path, args)
 
         # SIMD opportunity pass — info severity, never increments exit code
         if run_simd:
