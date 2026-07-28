@@ -1,6 +1,6 @@
 //! Direct and indirect function call expression lowering.
 
-use super::lowering_core::{MirLowerResult, MirLowerer};
+use super::lowering_core::{MirLowerError, MirLowerResult, MirLowerer};
 use crate::hir::{DispatchMode, HirExpr, HirExprKind, HirType, TypeId};
 use crate::method_registry::GLOBAL_REGISTRY;
 use crate::mir::effects::CallTarget;
@@ -21,6 +21,23 @@ impl<'a> MirLowerer<'a> {
             return matches!(registry.get(fallback_ty), Some(crate::hir::HirType::Enum { .. }));
         }
         false
+    }
+
+    /// Whether `enum_name` positively resolves to an enum type whose declared
+    /// variant list contains `variant_name`.
+    ///
+    /// `None` means "cannot tell": the head does not resolve to a concrete
+    /// enum in the type registry (unknown name, generic template not yet
+    /// specialized, no registry at all). Callers MUST treat `None` as
+    /// permissive and keep the previous behavior — only `Some(false)` is a
+    /// positive "this enum does not have that name".
+    pub(super) fn enum_declares_variant(&self, enum_name: &str, variant_name: &str) -> Option<bool> {
+        let registry = self.type_registry?;
+        let type_id = registry.lookup(enum_name)?;
+        match registry.get(type_id) {
+            Some(HirType::Enum { variants, .. }) => Some(variants.iter().any(|(name, _)| name == variant_name)),
+            _ => None,
+        }
     }
 
     fn enum_payload_type_for_call_receiver(&self, ty: TypeId) -> Option<TypeId> {
@@ -409,6 +426,32 @@ impl<'a> MirLowerer<'a> {
 
                 // Check if this is an enum type via the type registry or callee type
                 let is_enum = self.is_known_enum_type_for_variant(enum_name, callee.ty);
+
+                // A dotted callee whose head is a KNOWN enum but whose tail is
+                // neither a declared variant, nor a declared enum method
+                // (registered as `Enum.method` in HIR globals), nor any lowered
+                // function, must NOT be fabricated into an enum value.
+                //
+                // The `EnumUnit`/`EnumWith` emissions below do not consult the
+                // enum's variant list, so `E1.no_such_name()` used to lower to
+                // an enum-shaped value whose discriminant is a hash of the
+                // undeclared name — matching no `case` arm and reported as no
+                // error at all, while the interpreter correctly rejected the
+                // same program. Report the miss instead of inventing a value.
+                //
+                // `enum_declares_variant` returns `None` whenever the head does
+                // not positively resolve to a concrete enum, so unresolved and
+                // generic-template heads keep the previous permissive path.
+                if is_enum
+                    && self.enum_declares_variant(enum_name, variant_name) == Some(false)
+                    && !self.global_types.contains_key(name.as_str())
+                    && !self.available_functions.contains(name.as_str())
+                {
+                    return Err(MirLowerError::Unsupported(format!(
+                        "unknown variant or method '{}' on enum {}",
+                        variant_name, enum_name
+                    )));
+                }
 
                 if is_enum && !arg_regs.is_empty() {
                     // Single-arg variants store the argument directly as the
