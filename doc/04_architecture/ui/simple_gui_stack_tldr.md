@@ -59,6 +59,8 @@ Host input
   readback; processing backends own compute kernels, generated artifacts,
   filters, and offload. Combined backends are explicit lane plans.
 - Wrappers own: host process/window/webview integration and input/present IPC.
+- Sandboxed browser wheel deltas use one bounded coalescing slot; the worker
+  owns clamped scroll plus matching Draw IR and hit-index coordinates.
 - TUI boundary: `app.ui.tui` and the TUI widget shim must not import GUI, web,
   TUI-web, browser, HTML renderer, or CSS implementations.
 - Renderer capabilities: `app.ui.render.capability` declares HTML/CSS/TUI

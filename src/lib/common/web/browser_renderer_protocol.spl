@@ -16,6 +16,7 @@ pub val BROWSER_RENDERER_MAX_HEADER_BYTES: i64 = 256
 pub val BROWSER_RENDERER_MAX_PAYLOAD_BYTES: i64 = 1048576
 pub val BROWSER_RENDERER_MAX_COMMANDS: i64 = 1024
 pub val BROWSER_RENDERER_MAX_VIEWPORT: i64 = 4096
+pub val BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI: i64 = 1048576000
 pub val BROWSER_RENDERER_WORKER_ARG: text = "--__simple-web-renderer-worker"
 val BROWSER_RENDERER_MAX_READ_CHUNK_BYTES: i64 = 8192
 val BROWSER_RENDERER_MAX_COORDINATE: i64 = 1048576
@@ -139,8 +140,9 @@ fn _browser_renderer_reject_encode(reason: text) -> BrowserRendererEncodeResult:
     BrowserRendererEncodeResult(ok: false, reason: reason, wire: "")
 
 fn _browser_renderer_kind_valid(kind: text) -> bool:
-    (kind == "init" or kind == "advance" or kind == "pointer" or kind == "text" or
-        kind == "key" or kind == "chrome" or kind == "navigation" or
+    (kind == "init" or kind == "advance" or kind == "pointer" or
+        kind == "scroll" or kind == "text" or kind == "key" or
+        kind == "chrome" or kind == "navigation" or kind == "resize" or
         kind == "network_response" or
         kind == "shutdown" or kind == "ready" or kind == "fetch_request" or
         kind == "frame" or kind == "dispatch_result" or kind == "state" or
@@ -428,6 +430,21 @@ pub fn browser_renderer_pointer_encode(
     browser_renderer_message_encode(
         "pointer", generation, request_id,
         "P1\t{event_id}\t{x}\t{y}\t{flag}"
+    )
+
+pub fn browser_renderer_scroll_encode(
+    generation: i64,
+    request_id: i64,
+    event_id: i64,
+    delta_milli_y: i64
+) -> BrowserRendererEncodeResult:
+    if (event_id <= 0 or
+        delta_milli_y < 0 - BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI or
+        delta_milli_y > BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI):
+        return _browser_renderer_reject_encode("invalid-action")
+    browser_renderer_message_encode(
+        "scroll", generation, request_id,
+        "W1\t{event_id}\t{delta_milli_y}"
     )
 
 pub fn browser_renderer_key_encode(
@@ -742,6 +759,19 @@ pub fn browser_renderer_action_decode(
         return _browser_renderer_action(
             "pointer", 0, fields[1].to_i64() ?? 0, x, y, 0,
             _browser_renderer_flag(fields[4]) == 1, false, ""
+        )
+    if message.kind == "scroll":
+        if (fields.len() != 3 or fields[0] != "W1" or
+            _browser_renderer_positive_i64(fields[1]) < 0 or
+            not _browser_renderer_canonical_i64(fields[2])):
+            return _browser_renderer_action_reject("malformed-action")
+        val delta_milli_y = fields[2].to_i64() ?? 0
+        if (delta_milli_y < 0 - BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI or
+            delta_milli_y > BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI):
+            return _browser_renderer_action_reject("invalid-scroll-delta")
+        return _browser_renderer_action(
+            "scroll", 0, fields[1].to_i64() ?? 0,
+            0, delta_milli_y, 0, false, false, ""
         )
     if message.kind == "key":
         val is_v1 = fields.len() == 4 and fields[0] == "K1"

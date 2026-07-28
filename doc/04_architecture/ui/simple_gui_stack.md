@@ -359,6 +359,14 @@ and local coordinates onto a Draw IR batch, surface/component id, source kind,
 and backend target, while rejecting stale scene keys before the renderer or
 future GPU plugin receives the event context.
 
+Sandboxed browser wheel input follows the same ownership boundary: the host
+translates the pointer to a browser content target, coalesces signed wheel
+deltas in one bounded renderer slot without consuming the discrete input queue,
+and sends them only while the renderer is idle. The worker keeps the resolved
+scroll offset, shifts the shared HTML layout once for both Draw IR and hit
+testing, and culls boxes outside the viewport before bounded IPC encoding.
+Non-browser windows retain the compositor-owned scroll path.
+
 ### Engine2D and Primitive Draw
 
 Engine2D remains the shared drawing and processing execution layer. It should

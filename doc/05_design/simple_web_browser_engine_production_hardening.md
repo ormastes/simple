@@ -173,6 +173,12 @@ Default actions:
 - Tab/Shift+Tab: focus traversal;
 - Enter/Space: control-specific activation.
 
+Wheel input over browser content is coalesced into one bounded signed delta
+while the renderer is busy. The worker applies it to document-owned scroll
+state, clamps against the laid-out content bottom, and uses the same shifted
+layout for paint and hit testing. A successful document commit resets scroll;
+failed or blocked navigation keeps the current document position.
+
 ## Chrome/UI access
 
 Stable chrome IDs:
@@ -206,6 +212,10 @@ composition/pixels are reused.
 One monotonic `now_us` drives microtasks, timers, rAF, CSS animation, and the
 rendering opportunity. Due timers run before the one rAF batch. Script and
 animation mutations merge into a single invalidation before paint.
+
+Scrolling preserves the real viewport dimensions so viewport-relative CSS
+and flex layout do not change with scroll depth. Paint culls boxes wholly
+outside that viewport before Draw IR submission.
 
 ## Engine2D lifecycle
 

@@ -11,6 +11,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_navigation_encode,
     browser_renderer_network_response_encode,
     browser_renderer_resize_encode,
+    browser_renderer_scroll_encode,
     browser_renderer_text_encode
 }
 use os.hosted.hosted_browser_renderer_worker.{
@@ -20,6 +21,9 @@ use os.hosted.hosted_browser_renderer_worker.{
     hosted_browser_renderer_worker_main
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_id}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_hit_test_index
+}
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
 
@@ -198,6 +202,80 @@ describe "hosted browser renderer worker":
         expect(worker.width).to_equal(96)
         expect(worker.height).to_equal(64)
 
+    it "scrolls pixels and hit testing together within document bounds":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 50)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{margin:0}#top{height:20px;background:#ef4444}#space{height:80px}#below{display:block;width:40px;height:20px;background:#2563eb}</style><div id='top'></div><div id='space'></div><button id='below'>Below</button>"
+        ))
+        val initial_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), initialized.wire
+            ).message,
+            80, 50
+        )
+        expect(initial_frame.ok).to_be(true)
+        expect(_worker_command_index(
+            initial_frame.composition.batches[0].commands, "below"
+        )).to_equal(-1)
+
+        val half_a = browser_renderer_scroll_encode(7, 3, 1, 500)
+        expect(worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), half_a.wire
+        ).message).ok).to_be(true)
+        expect(worker.scroll_milli_y).to_equal(500)
+        val half_b = browser_renderer_scroll_encode(7, 4, 2, 500)
+        expect(worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), half_b.wire
+        ).message).ok).to_be(true)
+        expect(worker.scroll_milli_y).to_equal(1000)
+        val encoded = browser_renderer_scroll_encode(7, 5, 3, 69000)
+        val scrolled = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), encoded.wire
+        ).message)
+        val scrolled_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), scrolled.wire
+            ).message,
+            80, 50
+        )
+        expect(scrolled_frame.ok).to_be(true)
+        expect(_worker_command_index(
+            scrolled_frame.composition.batches[0].commands, "below"
+        )).to_be_greater_than(-1)
+        expect(worker.scroll_milli_y).to_equal(70000)
+        expect(simple_web_layout_hit_test_index(
+            worker.last_hit_index.unwrap(), 5, 35
+        )).to_equal("id:below")
+
+    it "clips hidden descendants from scrolling painting and hit testing":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 50)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{margin:0}#clip{position:relative;width:10px;height:20px;overflow:hidden}button{position:absolute;width:20px;height:10px}#hidden{left:20px;top:0}#deep{left:0;top:100px}</style><div id='clip'><button id='hidden'>Hidden</button><button id='deep'>Deep</button></div>"
+        )).ok).to_be(true)
+        expect(simple_web_layout_hit_test_index(
+            worker.last_hit_index.unwrap(), 25, 5
+        ) == "id:hidden").to_be(false)
+        val encoded = browser_renderer_scroll_encode(7, 3, 1, 100000)
+        val scrolled = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), encoded.wire
+        ).message)
+        val frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), scrolled.wire
+            ).message,
+            80, 50
+        )
+        expect(frame.ok).to_be(true)
+        expect(worker.scroll_milli_y).to_equal(0)
+        expect(_worker_command_index(
+            frame.composition.batches[0].commands, "hidden"
+        )).to_equal(-1)
+        expect(_worker_command_index(
+            frame.composition.batches[0].commands, "deep"
+        )).to_equal(-1)
+
     it "starts navigated CSS animation on the document clock":
         var worker = HostedBrowserRendererWorkerSession.create(64, 48)
         expect(worker.handle(BrowserRendererMessage(
@@ -208,6 +286,7 @@ describe "hosted browser renderer worker":
             kind: "advance", generation: 7, request_id: 3,
             payload: "5000"
         )).ok).to_be(true)
+        worker.scroll_milli_y = 12000
         val navigation = browser_renderer_navigation_encode(
             7, 4, "open", "https://example.test/", "GET", "", "", ""
         )
@@ -237,6 +316,7 @@ describe "hosted browser renderer worker":
         )
         expect(frame.ok).to_be(true)
         expect(worker.browser.animation_start_time_ms).to_equal(5000)
+        expect(worker.scroll_milli_y).to_equal(0)
         expect(frame.next_animation_ms).to_equal(5016)
 
     it "keeps DOM focus and trusted chrome state across bounded actions":

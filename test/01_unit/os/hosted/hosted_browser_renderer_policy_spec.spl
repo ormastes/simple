@@ -269,6 +269,26 @@ describe "hosted browser renderer broker policy":
         expect(broker.expected_reply_to_request_id).to_equal(0)
         expect(broker.next_request_id).to_equal(2)
 
+    it "coalesces wheel input without occupying the discrete command slot":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.state = "active"
+        expect(broker.queue_scroll(1, 500).is_ok()).to_be(true)
+        expect(broker.queue_scroll(2, 750).is_ok()).to_be(true)
+        expect(broker.pending_scroll_delta_milli_y).to_equal(1250)
+        expect(broker.pending_wire).to_equal("")
+
+        broker.command_deadline_ms = 100
+        broker.pending_operation = "navigation"
+        expect(broker.flush_scroll(1000).is_err()).to_be(true)
+        expect(broker.pending_scroll_delta_milli_y).to_equal(1250)
+        expect(broker.pending_operation).to_equal("navigation")
+
+        broker.command_deadline_ms = 0
+        broker.pending_operation = ""
+        expect(broker.flush_scroll(1000).is_ok()).to_be(true)
+        expect(broker.pending_wire).to_start_with("SBR1\tscroll")
+        expect(broker.pending_scroll_delta_milli_y).to_equal(0)
+
     it "does not let page input replace a pending navigation":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"

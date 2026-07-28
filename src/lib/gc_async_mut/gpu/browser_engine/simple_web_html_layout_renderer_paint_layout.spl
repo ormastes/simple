@@ -11,7 +11,7 @@ fn has_visible_overflow_clip(styles: [Style]) -> bool:
     val style_count = styles.len()
     while i < style_count:
         val st = styles[i]
-        if st.overflow_hidden and st.display != "none":
+        if (st.overflow_hidden or st.overflow_auto_y) and st.display != "none":
             return true
         i = i + 1
     false
@@ -29,7 +29,7 @@ fn build_ancestor_clip_cache(nodes: [HNode], styles: [Style], bx: [i32], by: [i3
         if p >= 0:
             clip = clips[p]
             val pst = styles[p]
-            if pst.overflow_hidden and pst.display != "none":
+            if (pst.overflow_hidden or pst.overflow_auto_y) and pst.display != "none":
                 val cx0 = bx[p] + pst.border_l
                 val cy0 = by[p] + pst.border_t
                 val cx1 = bx[p] + bw[p] - pst.border_r
@@ -1384,7 +1384,13 @@ fn _html_draw_ir_overlay_rect(
         )
     )
 
-fn _html_draw_ir_visible(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32) -> bool:
+fn _html_draw_ir_abs_i32(value: i32) -> i64:
+    if value < 0: 0 - value.to_i64() else: value.to_i64()
+
+fn _html_draw_ir_visible(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    i: i32, clip: ClipRect
+) -> bool:
     if i <= 0:
         return false
     val display = styles[i].display
@@ -1401,12 +1407,83 @@ fn _html_draw_ir_visible(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
         return false
     if box_h <= 0:
         return false
+    if clip.x1 <= clip.x0 or clip.y1 <= clip.y0:
+        return false
+    val st = styles[i]
+    val effect_x = (
+        st.outline_w.to_i64() + _html_draw_ir_abs_i32(st.outline_offset_px) +
+        _html_draw_ir_abs_i32(st.box_shadow_x_px) +
+        st.box_shadow_blur_px.to_i64() +
+        _html_draw_ir_abs_i32(st.text_shadow_x_px)
+    )
+    val effect_y = (
+        st.outline_w.to_i64() + _html_draw_ir_abs_i32(st.outline_offset_px) +
+        _html_draw_ir_abs_i32(st.box_shadow_y_px) +
+        st.box_shadow_blur_px.to_i64() +
+        _html_draw_ir_abs_i32(st.text_shadow_y_px) +
+        _html_draw_ir_abs_i32(st.text_underline_offset_px) +
+        st.text_decoration_thickness_px.to_i64()
+    )
+    var x0 = boxes.bx[i].to_i64() - effect_x
+    var y0 = boxes.by[i].to_i64() - effect_y
+    var x1 = boxes.bx[i].to_i64() + box_w.to_i64() + effect_x
+    var y1 = boxes.by[i].to_i64() + box_h.to_i64() + effect_y
+    if st.box_shadow_raw != "":
+        val layers = split_top_level_commas(st.box_shadow_raw)
+        for layer in layers:
+            if not layer.contains("inset"):
+                val prefix = shadow_length_prefix(layer)
+                val ox = parse_signed_nth_int(prefix, 0)
+                val oy = parse_signed_nth_int(prefix, 1)
+                if ox != -1000000 and oy != -1000000:
+                    var blur = parse_signed_nth_int(prefix, 2)
+                    if blur == -1000000 or blur <= 0:
+                        blur = 1
+                    val shadow_x0 = (
+                        boxes.bx[i].to_i64() + ox.to_i64() - blur.to_i64()
+                    )
+                    val shadow_y0 = (
+                        boxes.by[i].to_i64() + oy.to_i64() - blur.to_i64()
+                    )
+                    val shadow_x1 = (
+                        boxes.bx[i].to_i64() + ox.to_i64() +
+                        box_w.to_i64() + blur.to_i64()
+                    )
+                    val shadow_y1 = (
+                        boxes.by[i].to_i64() + oy.to_i64() +
+                        box_h.to_i64() + blur.to_i64()
+                    )
+                    if shadow_x0 < x0: x0 = shadow_x0
+                    if shadow_y0 < y0: y0 = shadow_y0
+                    if shadow_x1 > x1: x1 = shadow_x1
+                    if shadow_y1 > y1: y1 = shadow_y1
+    if (x1 <= clip.x0.to_i64() or y1 <= clip.y0.to_i64() or
+        x0 >= clip.x1.to_i64() or y0 >= clip.y1.to_i64()):
+        return false
     true
+
+fn _html_draw_ir_visible_nodes(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    width: i32, height: i32
+) -> [bool]:
+    val clip_cache = build_ancestor_clip_cache(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
+        width, height
+    )
+    var visible: [bool] = [false; nodes.len()]
+    var i: i32 = 0
+    while i < nodes.len():
+        visible[i] = _html_draw_ir_visible(
+            nodes, styles, boxes, i, paint_clip_at(clip_cache, i)
+        )
+        i = i + 1
+    visible
 
 fn _html_draw_ir_commands(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     width: i32, height: i32, vector_fonts: bool,
-    target_keys: [text], overlay: BrowserTextInputOverlay
+    target_keys: [text], overlay: BrowserTextInputOverlay,
+    visible_nodes: [bool]
 ) -> [DrawIrCommand]:
     val clip_cache = build_ancestor_clip_cache(
         nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
@@ -1415,7 +1492,7 @@ fn _html_draw_ir_commands(
     var i: i32 = 0
     val node_count = nodes.len()
     while i < node_count:
-        if _html_draw_ir_visible(nodes, styles, boxes, i):
+        if i < visible_nodes.len() and visible_nodes[i]:
             commands.push(_html_draw_ir_command(
                 nodes, styles, boxes, i, width, height, vector_fonts
             ))

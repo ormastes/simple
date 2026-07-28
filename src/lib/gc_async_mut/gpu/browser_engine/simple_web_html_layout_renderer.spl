@@ -129,19 +129,30 @@ fn _simple_web_node_target_key(
 
 fn _simple_web_hit_target_key(
     nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
-    boxes: LayoutResult, x: i32, y: i32
+    boxes: LayoutResult, width: i32, height: i32, x: i32, y: i32
 ) -> text:
+    val clip_cache = build_ancestor_clip_cache(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
+        width, height
+    )
     var best = -1
     var best_z = -2147483647
     var i = 0
     while i < nodes.len():
         val node = nodes[i]
         val style = styles[i]
+        val clip = paint_clip_at(clip_cache, i)
+        val hit_x = x.to_i64()
+        val hit_y = y.to_i64()
+        val box_x = boxes.bx[i].to_i64()
+        val box_y = boxes.by[i].to_i64()
         val inside = (
             boxes.bw[i] > 0 and boxes.bh[i] > 0 and
-            x >= boxes.bx[i] and y >= boxes.by[i] and
-            x < boxes.bx[i] + boxes.bw[i] and
-            y < boxes.by[i] + boxes.bh[i]
+            hit_x >= box_x and hit_y >= box_y and
+            hit_x < box_x + boxes.bw[i].to_i64() and
+            hit_y < box_y + boxes.bh[i].to_i64() and
+            x >= clip.x0 and y >= clip.y0 and
+            x < clip.x1 and y < clip.y1
         )
         if (
             inside and node.tag != "#text" and node.tag != "#root" and
@@ -179,7 +190,7 @@ pub fn simple_web_layout_hit_test_target_at_time(
         neg_one_i32_list(node_count)
     )
     _simple_web_hit_target_key(
-        nodes, styles, child_index, boxes, x, y
+        nodes, styles, child_index, boxes, width, height, x, y
     )
 
 pub struct SimpleWebInputTextHitMap:
@@ -196,13 +207,16 @@ class SimpleWebLayoutHitIndex:
     styles: [Style]
     child_index: HtmlChildIndex
     boxes: LayoutResult
+    width: i32
+    height: i32
     input_text_hits: [SimpleWebInputTextHitMap]
 
 pub fn simple_web_layout_hit_test_index(
     index: SimpleWebLayoutHitIndex, x: i32, y: i32
 ) -> text:
     _simple_web_hit_target_key(
-        index.nodes, index.styles, index.child_index, index.boxes, x, y
+        index.nodes, index.styles, index.child_index, index.boxes,
+        index.width, index.height, x, y
     )
 
 class SimpleWebLayoutDrawIrResult:
@@ -212,6 +226,76 @@ class SimpleWebLayoutDrawIrResult:
     animation_end_ms: i64
     hit_index: SimpleWebLayoutHitIndex
     resolved_input_view_start_byte: i64
+    resolved_scroll_y: i32
+    max_scroll_y: i32
+
+class _SimpleWebScrolledLayout:
+    boxes: LayoutResult
+    resolved_scroll_y: i32
+    max_scroll_y: i32
+
+fn _simple_web_scrolled_layout(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    viewport_width: i32, viewport_height: i32, scroll_y: i32
+) -> _SimpleWebScrolledLayout:
+    var raw_bottom = boxes.height.to_i64()
+    var i = 0
+    while i < boxes.by.len():
+        val bottom = boxes.by[i].to_i64() + boxes.bh[i].to_i64()
+        if bottom > raw_bottom:
+            raw_bottom = bottom
+        i = i + 1
+    val extent_height = if raw_bottom > 2147483647:
+        2147483647
+    elif raw_bottom > viewport_height.to_i64():
+        raw_bottom.to_i32()
+    else:
+        viewport_height
+    val clip_cache = build_ancestor_clip_cache(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
+        viewport_width, extent_height
+    )
+    var content_bottom = viewport_height.to_i64()
+    i = 0
+    while i < boxes.by.len():
+        val clip = paint_clip_at(clip_cache, i)
+        val node_x0 = boxes.bx[i].to_i64()
+        val node_y0 = boxes.by[i].to_i64()
+        val node_x1 = node_x0 + boxes.bw[i].to_i64()
+        val node_y1 = node_y0 + boxes.bh[i].to_i64()
+        if (node_x1 > clip.x0.to_i64() and node_x0 < clip.x1.to_i64() and
+            node_y1 > clip.y0.to_i64() and node_y0 < clip.y1.to_i64()):
+            val clipped_bottom = if node_y1 < clip.y1.to_i64():
+                node_y1
+            else:
+                clip.y1.to_i64()
+            if clipped_bottom > content_bottom:
+                content_bottom = clipped_bottom
+        i = i + 1
+    var max_scroll = content_bottom - viewport_height.to_i64()
+    if max_scroll < 0:
+        max_scroll = 0
+    var resolved = if scroll_y > 0: scroll_y.to_i64() else: 0
+    if resolved > max_scroll:
+        resolved = max_scroll
+    val shifted = if resolved == 0:
+        boxes
+    else:
+        LayoutResult(
+            bx: boxes.bx,
+            by: shifted_i32_list(boxes.by, 0 - resolved.to_i32()),
+            bw: boxes.bw,
+            bh: boxes.bh,
+            wrap_starts: boxes.wrap_starts,
+            wrap_ends: boxes.wrap_ends,
+            intrinsic_widths: boxes.intrinsic_widths,
+            height: boxes.height
+        )
+    _SimpleWebScrolledLayout(
+        boxes: shifted,
+        resolved_scroll_y: resolved.to_i32(),
+        max_scroll_y: max_scroll.to_i32()
+    )
 
 class SimpleWebLayoutMaterialWitness:
     cpu_composited_count: i32
@@ -362,6 +446,34 @@ fn _simple_web_material_witness_from_sidecar(
         solid_material_sha256:
             if solid_count > 0: sha256_text(entries[1]) else: "")
 
+fn _simple_web_visible_material_witness(
+    entries: [text], cpu_nodes: [i32], solid_nodes: [i32],
+    visible_nodes: [bool]
+) -> SimpleWebLayoutMaterialWitness:
+    if entries.len() < 2:
+        return _simple_web_material_witness_from_sidecar([], [])
+    val cpu_lines = entries[0].split("\n")
+    val solid_lines = entries[1].split("\n")
+    var filtered: [text] = [
+        cpu_lines[0], solid_lines[0]
+    ]
+    var counts: [i64] = [0, 0]
+    var i = 0
+    while i < cpu_nodes.len() and i + 1 < cpu_lines.len():
+        val node = cpu_nodes[i]
+        if node >= 0 and node < visible_nodes.len() and visible_nodes[node]:
+            filtered[0] = filtered[0] + "\n" + cpu_lines[i + 1]
+            counts[0] = counts[0] + 1
+        i = i + 1
+    i = 0
+    while i < solid_nodes.len() and i + 1 < solid_lines.len():
+        val node = solid_nodes[i]
+        if node >= 0 and node < visible_nodes.len() and visible_nodes[node]:
+            filtered[1] = filtered[1] + "\n" + solid_lines[i + 1]
+            counts[1] = counts[1] + 1
+        i = i + 1
+    _simple_web_material_witness_from_sidecar(filtered, counts)
+
 fn _animation_direction_progress(progress: f64, direction: text, iteration: i64) -> f64:
     if direction == "reverse":
         return 1.0 - progress
@@ -470,7 +582,8 @@ pub fn simple_web_layout_animation_end_ms(
 
 fn _simple_web_layout_render_html_draw_ir_result_at_time(
     html: text, width: i32, height: i32, vector_fonts: bool,
-    animation_time_ms: i64, overlay: BrowserTextInputOverlay
+    animation_time_ms: i64, scroll_y: i32,
+    overlay: BrowserTextInputOverlay
 ) -> SimpleWebLayoutDrawIrResult:
     val render_start_us = rt_time_now_micros()
     val env_override = _web_render_budget_ms_env_override()
@@ -549,9 +662,12 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
     var material_entries: [text] = ["", ""]
     var material_counts: [i64] = [0, 0]
+    var cpu_material_nodes: [i32] = []
+    var solid_material_nodes: [i32] = []
     var styles = compute_styles_with_material(
         nodes, rules, child_index, false, vector_fonts,
-        material_entries, material_counts)
+        material_entries, material_counts,
+        cpu_material_nodes, solid_material_nodes)
     val animation_registry = extract_keyframes(html)
     val animation_end_ms = _simple_web_layout_animation_end_from_styles(
         styles, animation_registry
@@ -564,7 +680,7 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
     val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
     val empty_ends = empty_i32_lists(node_count)
-    val boxes = layout(
+    val raw_boxes = layout(
         nodes,
         styles,
         child_index,
@@ -581,22 +697,31 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
         empty_ends,
         neg_one_i32_list(node_count)
     )
+    val scrolled = _simple_web_scrolled_layout(
+        nodes, styles, raw_boxes, width, height, scroll_y
+    )
+    val boxes = scrolled.boxes
     val source = draw_ir_source_html_ast("simple_web_html_layout_renderer", "html", "", "", "", "layout", "1")
     val embedding = draw_ir_embedding_config("html", "document", 0, 0, width, height, 0, 1000, true)
     val input_hit_build = _simple_web_input_text_hit_build(
         nodes, styles, child_index, boxes, width, height, overlay
     )
+    val visible_nodes = _html_draw_ir_visible_nodes(
+        nodes, styles, boxes, width, height
+    )
     var commands = _html_draw_ir_commands(
         nodes, styles, boxes, width, height, vector_fonts,
-        input_hit_build.target_keys, overlay
+        input_hit_build.target_keys, overlay, visible_nodes
     )
     val canvas_color = _web_canvas_background(nodes, styles, argb(255, 255, 255))
     commands = [_html_draw_ir_canvas_command(width, height, canvas_color)] + commands
     val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, commands, source)
     val batches = [batch]
     val composition = draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches)
-    val material_witness = _simple_web_material_witness_from_sidecar(
-        material_entries, material_counts)
+    val material_witness = _simple_web_visible_material_witness(
+        material_entries, cpu_material_nodes, solid_material_nodes,
+        visible_nodes
+    )
     SimpleWebLayoutDrawIrResult(
         composition: composition,
         material_fallback: simple_web_layout_material_provenance_after_execution(
@@ -608,15 +733,19 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
             styles: styles,
             child_index: child_index,
             boxes: boxes,
+            width: width,
+            height: height,
             input_text_hits: input_hit_build.hits
         ),
         resolved_input_view_start_byte:
-            input_hit_build.resolved_view_start_byte
+            input_hit_build.resolved_view_start_byte,
+        resolved_scroll_y: scrolled.resolved_scroll_y,
+        max_scroll_y: scrolled.max_scroll_y
     )
 
 fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result_at_time(
-        html, width, height, vector_fonts, -1,
+        html, width, height, vector_fonts, -1, 0,
         browser_text_input_overlay_empty()
     )
 
@@ -628,7 +757,7 @@ pub fn simple_web_layout_render_html_draw_ir_result(html: text, width: i32, heig
 
 pub fn simple_web_layout_render_html_draw_ir_result_at_time(html: text, width: i32, height: i32, animation_time_ms: i64) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result_at_time(
-        html, width, height, true, animation_time_ms,
+        html, width, height, true, animation_time_ms, 0,
         browser_text_input_overlay_empty()
     )
 
@@ -637,7 +766,15 @@ pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
     overlay: BrowserTextInputOverlay
 ) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result_at_time(
-        html, width, height, true, animation_time_ms, overlay
+        html, width, height, true, animation_time_ms, 0, overlay
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    scroll_y: i32, overlay: BrowserTextInputOverlay
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, scroll_y, overlay
     )
 
 pub fn simple_web_layout_render_html_draw_ir_cpu_bitmap(html: text, width: i32, height: i32) -> DrawIrComposition:
@@ -718,9 +855,12 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
     var material_entries: [text] = ["", ""]
     var material_counts: [i64] = [0, 0]
+    var cpu_material_nodes: [i32] = []
+    var solid_material_nodes: [i32] = []
     val styles = compute_styles_with_material(
         nodes, rules, child_index, false, true,
-        material_entries, material_counts)
+        material_entries, material_counts,
+        cpu_material_nodes, solid_material_nodes)
     # Layout always gets a slice up to 90%, even if style spent its whole 70%.
     _web_budget_rearm(render_start_us + budget_us * 9 / 10)
     val node_count = nodes.len() as i32
@@ -752,8 +892,10 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
     var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
     painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
-    val material_witness = _simple_web_material_witness_from_sidecar(
-        material_entries, material_counts)
+    val material_witness = _simple_web_visible_material_witness(
+        material_entries, cpu_material_nodes, solid_material_nodes,
+        _html_draw_ir_visible_nodes(nodes, styles, boxes, width, height)
+    )
     SimpleWebLayoutPixelResult(
         pixels: painted,
         material_fallback: simple_web_layout_material_provenance_after_execution(
@@ -898,15 +1040,13 @@ pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i
     painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
     WebGpuPaintFrame(fb: painted, fill_ops: fill_ops, width: width, height: height, cpu_paint_pixels: width * height)
 
-# Render at a scroll offset: lay out with the full scroll extent, then shift
-# paint coordinates into the viewport so allocation stays bounded by WxH.
+# Render at a scroll offset: preserve viewport layout, then shift paint
+# coordinates so allocation stays bounded by WxH.
 # This re-render approach keeps each call stateless.
 pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width: i32, height: i32, scroll_y: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
     _web_budget_begin(budget_ms)
     if width <= 0 or height <= 0:
         return []
-    val clamp_scroll = if scroll_y < 0: 0 else: scroll_y
-    val virtual_h = height + clamp_scroll
     val nodes = parse_html(html)
     # Pass every parameter explicitly. An omitted trailing default was
     # observed taking a non-default value in the freestanding SimpleOS kernel
@@ -927,7 +1067,7 @@ pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width
         0,
         0,
         width,
-        virtual_h,
+        height,
         zero_i32_list(node_count),
         zero_i32_list(node_count),
         zero_i32_list(node_count),
@@ -936,12 +1076,25 @@ pub fn simple_web_layout_render_html_software_pixels_at_scroll(html: text, width
         empty_ends,
         neg_one_i32_list(node_count)
     )
+    val scrolled = _simple_web_scrolled_layout(
+        nodes, styles, boxes, width, height, scroll_y
+    )
+    val shifted_boxes = scrolled.boxes
     val white = argb(255, 255, 255)
     val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
     val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
     var fb = browser_layout_framebuffer_filled(base, width, height)
-    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
-    val shifted_by = shifted_i32_list(boxes.by, 0 - clamp_scroll)
-    var painted = paint(nodes, styles, boxes.bx, shifted_by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
-    painted = _web_paint_iframes(nodes, styles, boxes.bx, shifted_by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
+    val wrap_cache = TextWrapCache(
+        starts: shifted_boxes.wrap_starts, ends: shifted_boxes.wrap_ends
+    )
+    var painted = paint(
+        nodes, styles, shifted_boxes.bx, shifted_boxes.by,
+        shifted_boxes.bw, shifted_boxes.bh, wrap_cache,
+        fb, width, height, widget_mode
+    )
+    painted = _web_paint_iframes(
+        nodes, styles, shifted_boxes.bx, shifted_boxes.by,
+        shifted_boxes.bw, shifted_boxes.bh, rules,
+        painted, width, height, 0
+    )
     painted

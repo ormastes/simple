@@ -1294,6 +1294,19 @@ implementation in progress / target evidence blocked
   The same lifecycle owner clears matching drag, resize, and armed-chrome state
   so programmatic close cannot leave a stuck interaction.
 - Wheel input over renderer-owned browser windows no longer records a parent
-  compositor offset or dirties an unchanged external frame. Actual browser
-  scrolling remains a separate sandbox protocol/worker lane; this change only
-  removes the proven no-op allocation and redraw.
+  compositor offset or dirties an unchanged external frame.
+- Sandboxed browser scrolling now routes primary and secondary content targets
+  through one bounded, saturating per-renderer delta slot. The process encodes
+  only while idle, preserving the discrete command/deferred slot; the worker
+  preserves fractional trackpad deltas, clamps scroll to clipped document
+  bounds, resets on committed documents, and renders the same shifted layout
+  into Draw IR and its hit index. The host safely inverts the native wheel sign
+  once. Ancestor-clipped and offscreen nodes are excluded from hit testing,
+  Draw IR commands, and material witnesses before IPC budgets; the legacy
+  software scroll path no longer inflates viewport height or changes
+  `vh`/flex-fill semantics.
+- Wheel-scroll verification: working/staged direct-env runtime guards,
+  rendering source coupling, whitespace/artifact scans, and the
+  `doc/06_spec/*_spec.spl == 0` layout gate pass. Two independent focused
+  reviews pass. Live Simple unit execution remains unavailable for the
+  admitted pure-runtime ABI failure; no bootstrap or Rust seed was used.

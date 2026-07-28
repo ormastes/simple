@@ -4,6 +4,7 @@ use std.common.ui.draw_ir.{DrawIrComposition, draw_ir_composition}
 use common.string_builder.{StringBuilder}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_WORKER_ARG,
+    BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI,
     BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES,
     BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES,
     BrowserRendererDecoder, BrowserRendererEncodeResult,
@@ -19,6 +20,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_navigation_encode,
     browser_renderer_network_response_encode,
     browser_renderer_pointer_encode, browser_renderer_resize_encode,
+    browser_renderer_scroll_encode,
     browser_renderer_text_encode
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
@@ -193,6 +195,8 @@ pub class HostedBrowserRendererProcess:
     deferred_timeout_ms: i64
     deferred_resize_width: i32
     deferred_resize_height: i32
+    pending_scroll_event_id: i64
+    pending_scroll_delta_milli_y: i64
     document_url: text
     document_origin: text
     navigation_permit: HostedBrowserNavigationPermit
@@ -243,6 +247,8 @@ pub class HostedBrowserRendererProcess:
             deferred_timeout_ms: 0,
             deferred_resize_width: 0,
             deferred_resize_height: 0,
+            pending_scroll_event_id: 0,
+            pending_scroll_delta_milli_y: 0,
             document_url: "",
             document_origin: "",
             navigation_permit: hosted_browser_empty_navigation_permit(),
@@ -402,6 +408,8 @@ pub class HostedBrowserRendererProcess:
         self.deferred_timeout_ms = 0
         self.deferred_resize_width = 0
         self.deferred_resize_height = 0
+        self.pending_scroll_event_id = 0
+        self.pending_scroll_delta_milli_y = 0
         self._cancel_network_job()
         self.command_deadline_ms = 0
         self.pending_operation = ""
@@ -436,6 +444,8 @@ pub class HostedBrowserRendererProcess:
         self.deferred_timeout_ms = 0
         self.deferred_resize_width = 0
         self.deferred_resize_height = 0
+        self.pending_scroll_event_id = 0
+        self.pending_scroll_delta_milli_y = 0
         if self.pid > 0:
             if not process_close_piped(self.pid):
                 return false
@@ -1217,7 +1227,7 @@ pub class HostedBrowserRendererProcess:
     ) -> Result<bool, text>:
         if self.state != "active":
             return Err("invalid-renderer-state")
-        self._begin_frame_request(browser_renderer_navigation_encode(
+        val started = self._begin_frame_request(browser_renderer_navigation_encode(
             self.generation,
             self.next_request_id,
             action,
@@ -1227,6 +1237,11 @@ pub class HostedBrowserRendererProcess:
             body,
             content_type
         ), operation, timeout_ms)
+        if action != "stop":
+            if val Ok(_) = started:
+                self.pending_scroll_event_id = 0
+                self.pending_scroll_delta_milli_y = 0
+        started
 
     me begin_navigate(
         url: text,
@@ -1420,6 +1435,50 @@ pub class HostedBrowserRendererProcess:
             self.generation, self.next_request_id,
             event_id, x, y, pressed
         ), "pointer", timeout_ms)
+
+    me queue_scroll(
+        event_id: i64, delta_milli_y: i64
+    ) -> Result<bool, text>:
+        if self.state != "active":
+            return Err("invalid-renderer-state")
+        if event_id <= 0:
+            return Err("invalid-action")
+        var bounded = delta_milli_y
+        if bounded > BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI:
+            bounded = BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI
+        elif bounded < 0 - BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI:
+            bounded = 0 - BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI
+        var combined = self.pending_scroll_delta_milli_y + bounded
+        if combined > BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI:
+            combined = BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI
+        elif combined < 0 - BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI:
+            combined = 0 - BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI
+        self.pending_scroll_event_id = event_id
+        self.pending_scroll_delta_milli_y = combined
+        Ok(combined != 0)
+
+    me flush_scroll(timeout_ms: i64) -> Result<bool, text>:
+        if self.pending_scroll_delta_milli_y == 0:
+            self.pending_scroll_event_id = 0
+            return Ok(false)
+        if self.state != "active":
+            return Err("invalid-renderer-state")
+        if self.command_deadline_ms > 0:
+            return Err("renderer-busy")
+        val started = self._begin_frame_request(
+            browser_renderer_scroll_encode(
+                self.generation,
+                self.next_request_id,
+                self.pending_scroll_event_id,
+                self.pending_scroll_delta_milli_y
+            ),
+            "scroll",
+            timeout_ms
+        )
+        if val Ok(_) = started:
+            self.pending_scroll_event_id = 0
+            self.pending_scroll_delta_milli_y = 0
+        started
 
     me key(
         event_id: i64, key_code: i64, pressed: bool, timeout_ms: i64

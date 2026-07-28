@@ -361,6 +361,16 @@ pub class HostedBrowserRendererRegistry:
                 Ok(_):
                     self.entries[index] = entry
             return "none"
+        if entry.renderer.command_deadline_ms <= 0:
+            match entry.renderer.flush_scroll(2000):
+                Err(reason):
+                    self.entries[index] = entry
+                    if reason != "renderer-busy":
+                        return self._fail(index, reason)
+                Ok(started):
+                    self.entries[index] = entry
+                    if started:
+                        return "none"
         val animation_time_ms = (
             now_micros - entry.animation_origin_micros
         ) / 1000
@@ -442,6 +452,24 @@ pub class HostedBrowserRendererRegistry:
                     self.pressed_window_id = window_id
                 elif self.pressed_window_id == window_id:
                     self.pressed_window_id = 0
+                _dispatch(event_id, window_id, "browser:page", 1,
+                    entry.mutation_revision, "")
+
+    me dispatch_scroll(
+        event_id: i64, window_id: i64, delta_milli_y: i64
+    ) -> HostedBrowserRendererDispatch:
+        val index = self._index(window_id)
+        if index < 0 or not self.entries[index].ready:
+            return _dispatch(event_id, window_id, "browser:page", 0, 0,
+                "renderer-unavailable")
+        var entry = self.entries[index]
+        val queued = entry.renderer.queue_scroll(event_id, delta_milli_y)
+        self.entries[index] = entry
+        match queued:
+            Err(reason):
+                _dispatch(event_id, window_id, "browser:page", 0,
+                    entry.mutation_revision, reason)
+            Ok(_):
                 _dispatch(event_id, window_id, "browser:page", 1,
                     entry.mutation_revision, "")
 

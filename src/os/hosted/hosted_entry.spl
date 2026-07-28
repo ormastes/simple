@@ -46,6 +46,7 @@ use common.ui.window_scene.{shared_wm_motion_background_next_due_micros, shared_
 use common.ui.window_scene_draw_ir.{WM_BROWSER_TOOLBAR_HEIGHT}
 use std.nogc_sync_mut.io.window_winit.{winit_event_text}
 use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI,
     BROWSER_RENDERER_MAX_VIEWPORT,
     BROWSER_RENDERER_WORKER_ARG
 }
@@ -1072,10 +1073,57 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 print "[hosted-wm] event mouse_button count={mouse_button_events} button={button} pressed={pressed}"
                 other_dirty = true
             elif kind == EVT_MOUSE_WHEEL:
-                val wheel_dx = rt_winit_event_wheel_x_milli(ev).to_f64() / 1000.0
-                val wheel_dy = rt_winit_event_wheel_y_milli(ev).to_f64() / 1000.0
-                comp.handle_mouse_wheel(wheel_dx, wheel_dy)
-                other_dirty = true
+                val wheel_x_milli = rt_winit_event_wheel_x_milli(ev)
+                val wheel_y_milli = rt_winit_event_wheel_y_milli(ev)
+                var bounded_wheel_y_milli = wheel_y_milli
+                if bounded_wheel_y_milli > BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI:
+                    bounded_wheel_y_milli = BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI
+                elif bounded_wheel_y_milli < 0 - BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI:
+                    bounded_wheel_y_milli = 0 - BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI
+                val browser_scroll_y_milli = 0 - bounded_wheel_y_milli
+                val content_target = comp.content_target(
+                    comp.pointer_x, comp.pointer_y
+                )
+                var browser_wheel = false
+                if content_target != nil:
+                    val target = content_target.unwrap()
+                    if target.window_id == browser_profile_window_id:
+                        browser_wheel = true
+                        semantic_event_id = semantic_event_id + 1
+                        var reason = ""
+                        var callback_count: i64 = 0
+                        match browser_renderer.queue_scroll(
+                            semantic_event_id, browser_scroll_y_milli
+                        ):
+                            Ok(_): callback_count = 1
+                            Err(error): reason = error
+                        input_receipt = host_wm_input_record_semantic(
+                            input_receipt, semantic_event_id,
+                            target.window_id, "browser:page",
+                            callback_count, comp.render_revision,
+                            reason, input_received_us
+                        )
+                    elif comp.is_browser_window(target.window_id):
+                        browser_wheel = true
+                        semantic_event_id = semantic_event_id + 1
+                        val dispatch = browser_renderers.dispatch_scroll(
+                            semantic_event_id, target.window_id,
+                            browser_scroll_y_milli
+                        )
+                        input_receipt = host_wm_input_record_semantic(
+                            input_receipt, dispatch.event_id,
+                            dispatch.wm_target_id,
+                            dispatch.semantic_target_id,
+                            dispatch.callback_count,
+                            dispatch.mutation_revision, dispatch.reason,
+                            input_received_us
+                        )
+                if not browser_wheel:
+                    comp.handle_mouse_wheel(
+                        wheel_x_milli.to_f64() / 1000.0,
+                        wheel_y_milli.to_f64() / 1000.0
+                    )
+                    other_dirty = true
             elif kind == EVT_KEY:
                 val scan_code = rt_winit_event_key_scancode(ev)
                 val keycode = rt_winit_event_key_keycode(ev)
@@ -1337,7 +1385,17 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         val browser_animation_time_ms = (
             now_micros - browser_animation_origin_micros
         ) / 1000
+        var browser_scroll_started = false
         if (browser_renderer_ready and
+            browser_renderer.command_deadline_ms <= 0 and
+            browser_renderer.pending_scroll_delta_milli_y != 0):
+            match browser_renderer.flush_scroll(2000):
+                Ok(started): browser_scroll_started = started
+                Err(reason):
+                    browser_renderer_ready = false
+                    print "[hosted-wm] browser-scroll-failed reason={reason}"
+        if (browser_renderer_ready and
+            not browser_scroll_started and
             browser_renderer.command_deadline_ms <= 0 and
             browser_renderer.next_animation_ms >= 0 and
             browser_animation_time_ms >=

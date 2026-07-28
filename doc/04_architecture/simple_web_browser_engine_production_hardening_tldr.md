@@ -26,6 +26,8 @@ DrawIrComposition -> persistent Engine2dCompositorBackend
   missing frames stay blank, hidden windows poll cleanup without animation.
 - Navigation/close clears document references; warnings are deduplicated and
   bounded; diagnostics are prefix-only and failed child cleanup is retried.
+- Wheel deltas coalesce in one bounded renderer slot; the sandbox worker owns
+  clamped scroll, shifted Draw IR/hit testing, and viewport culling.
 - Broker owns URLs/origins, Fetch/CORS/CSP, cookies, TLS/HSTS, and host access.
 - Linux/macOS/Windows sandbox failure blocks production startup.
 

@@ -381,8 +381,13 @@ or native TLS behavior.
   request policy and FetchEngine to authorize CSS/script/module requests after
   the document response, while committed chrome URL/history still wait for a
   validated frame; legacy synchronous calls wrap that same pump.
-  Production chrome now uses the broker for Stop and resize. Renderer wheel/
-  scroll forwarding plus parent-owned cookie state remain incomplete. Windows
+  Production chrome now uses the broker for Stop and resize. Wheel input over
+  browser content is retained as one bounded, saturating delta per renderer,
+  encoded only when its discrete command slot is idle, and applied by the
+  sandbox worker to one viewport-preserving layout shared by Draw IR paint and
+  hit testing. Offscreen Draw IR nodes are culled before the protocol budget;
+  document commit resets scroll, while resize reclamps it. Parent-owned cookie
+  state remains incomplete. Windows
   AppContainer and the signed macOS helper also remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;
 - existing browser interaction evidence can pass when its artifact is absent.

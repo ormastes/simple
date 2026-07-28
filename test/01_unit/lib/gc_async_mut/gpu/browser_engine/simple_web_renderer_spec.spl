@@ -378,6 +378,37 @@ describe "SimpleWebRenderer":
         expect(execution.material_fallback.kind).to_equal("cpu-composited-material")
         expect(execution.material_fallback.material_sha256).to_equal(layout.material_witness.cpu_composited_sha256)
 
+    it "excludes offscreen material commands from the frame witness":
+        val attrs = " data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456'"
+        val material = "background:rgba(31,31,33,0.80);backdrop-filter:blur(4px) saturate(120%)"
+        val html = "<html><body><section id='visible'" + attrs + " style='position:absolute;top:0;width:12px;height:8px;" + material + "'></section><section id='offscreen'" + attrs + " style='position:absolute;top:200px;width:12px;height:8px;" + material + "'></section></body></html>"
+        val layout = simple_web_layout_render_html_draw_ir_result(
+            html, 32, 20
+        )
+
+        expect(_draw_ir_command_by_id(
+            layout.composition.batches[0].commands, "visible"
+        ).component_id).to_equal("visible")
+        expect(_draw_ir_command_by_id(
+            layout.composition.batches[0].commands, "offscreen"
+        ).component_id == "offscreen").to_be(false)
+        expect(layout.material_witness.cpu_composited_count).to_equal(1)
+        expect(layout.material_witness.cpu_composited_sha256.len()).to_equal(64)
+
+    it "culls dense offscreen raw shadows before the frame command cap":
+        var html = "<style>.off{position:absolute;top:200px;width:8px;height:8px;box-shadow:2px 3px 6px #000}</style>"
+        var i = 0
+        while i < 1100:
+            html = html + "<div class='off'></div>"
+            i = i + 1
+        val layout = simple_web_layout_render_html_draw_ir_result(
+            html, 32, 20
+        )
+
+        expect(
+            layout.composition.batches[0].commands.len()
+        ).to_be_less_than(1024)
+
     it "software-composites Aetheric gradient stops over its translucent base":
         val html = "<html><head><style>html,body{margin:0;padding:0;width:2px;height:2px;background:#ffffff}#aetheric{display:block;width:2px;height:2px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80)}</style></head><body><section id='aetheric'></section></body></html>"
         val pixels = simple_web_layout_render_html_software_pixels(html, 2, 2)
