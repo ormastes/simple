@@ -618,3 +618,58 @@ fn _decl_over_quota(decls: text) -> bool:
     if pos < n and decls.substring(pos, n).trim().len() > 0:
         count = count + 1
     count > WEB_RULE_DECL_QUOTA
+
+class CssDeclarationPrioritySplit:
+    normal: text
+    important: text
+
+fn css_important_marker_start(raw_value: text) -> i64:
+    val keyword = "important"
+    val lower_value = raw_value.lower()
+    if not lower_value.ends_with(keyword):
+        return -1
+    var marker_start = raw_value.len() - keyword.len() - 1
+    while marker_start >= 0:
+        val code = raw_value.char_code_at(marker_start)
+        if (
+            code == 9 or code == 10 or code == 12 or
+            code == 13 or code == 32
+        ):
+            marker_start = marker_start - 1
+        else:
+            break
+    if (
+        marker_start >= 0 and
+        raw_value.substring(marker_start, marker_start + 1) == "!"
+    ):
+        return marker_start
+    -1
+
+fn css_declaration_priority_split(decls: text) -> CssDeclarationPrioritySplit:
+    # Preserve the existing all-or-nothing per-rule quota before splitting;
+    # otherwise two individually-small priority lanes could admit an oversized
+    # source block that apply_decls previously rejected.
+    if _decl_over_quota(decls):
+        return CssDeclarationPrioritySplit(normal: "", important: "")
+    var normal = ""
+    var important = ""
+    var pos = 0
+    val decls_len = decls.len()
+    while pos < decls_len:
+        val semi = find_from(decls, ";", pos)
+        val end = if semi >= 0: semi else: decls_len
+        val colon = find_from(decls, ":", pos)
+        if colon >= 0 and colon < end:
+            val name = decls.substring(pos, colon).trim().lower()
+            val raw_value = decls.substring(colon + 1, end).trim()
+            val important_marker = css_important_marker_start(raw_value)
+            if name != "" and important_marker >= 0:
+                val value = raw_value.substring(0, important_marker).trim()
+                if value != "":
+                    important = important + name + ":" + value + ";"
+            elif name != "" and raw_value != "":
+                normal = normal + name + ":" + raw_value + ";"
+        if semi < 0:
+            break
+        pos = semi + 1
+    CssDeclarationPrioritySplit(normal: normal, important: important)

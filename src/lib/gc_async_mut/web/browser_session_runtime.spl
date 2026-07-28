@@ -55,6 +55,9 @@ use std.common.convert.{digit_value}
 
 extern fn rt_text_to_bytes(value: text) -> [u8]
 
+val BROWSER_STORAGE_MAX_ORIGINS: i32 = 64
+val BROWSER_STORAGE_MAX_RETAINED_BYTES: i64 = 16777216
+
 fn _browser_session_previous_utf8_boundary(value: text, index: i64) -> i64:
     val bytes = rt_text_to_bytes(value)
     if index <= 0 or bytes.len() == 0:
@@ -203,22 +206,47 @@ fn browser_storage_entries_for_origin(
             return bucket.entries
     []
 
+fn browser_storage_bucket_retained_bytes(
+    bucket: BrowserOriginStorage
+) -> i64:
+    var retained = bucket.origin.len()
+    for entry in bucket.entries:
+        val entry_bytes = entry.first.len() + entry.second.len()
+        if entry_bytes > BROWSER_STORAGE_MAX_RETAINED_BYTES - retained:
+            return BROWSER_STORAGE_MAX_RETAINED_BYTES + 1
+        retained = retained + entry_bytes
+    retained
+
 fn browser_storage_replace_origin(
     buckets: [BrowserOriginStorage],
     origin: text,
     entries: [Pair<text, text>]
 ) -> [BrowserOriginStorage]:
-    var next: [BrowserOriginStorage] = []
-    var replaced = false
+    var candidates: [BrowserOriginStorage] = []
     for bucket in buckets:
-        if bucket.origin == origin:
-            next.push(BrowserOriginStorage(origin: origin, entries: entries))
-            replaced = true
-        else:
-            next.push(bucket)
-    if not replaced:
-        next.push(BrowserOriginStorage(origin: origin, entries: entries))
-    next
+        if bucket.origin != origin and bucket.entries.len() > 0:
+            candidates.push(bucket)
+    if entries.len() > 0:
+        candidates.push(BrowserOriginStorage(origin: origin, entries: entries))
+
+    var start = candidates.len()
+    var retained_origins = 0
+    var retained_bytes: i64 = 0
+    while start > 0 and retained_origins < BROWSER_STORAGE_MAX_ORIGINS:
+        val bucket_bytes = browser_storage_bucket_retained_bytes(
+            candidates[start - 1]
+        )
+        if bucket_bytes > BROWSER_STORAGE_MAX_RETAINED_BYTES - retained_bytes:
+            break
+        start = start - 1
+        retained_origins = retained_origins + 1
+        retained_bytes = retained_bytes + bucket_bytes
+
+    var retained: [BrowserOriginStorage] = []
+    while start < candidates.len():
+        retained.push(candidates[start])
+        start = start + 1
+    retained
 
 fn _browser_session_dom_node_count(node: BeDomNode) -> i32:
     var count = 1
@@ -1056,6 +1084,7 @@ impl BrowserSession:
                 own_text(cookie_text)
             )
             state.runtime.interpreter.timer_current_time_ms = self.monotonic_time_ms
+            state.runtime.interpreter.timer_time_origin_ms = self.monotonic_time_ms
             var runtime = state.runtime
             match runtime.eval(
                 "typeof require + ':' + typeof process + ':' + typeof Buffer"
@@ -1150,6 +1179,7 @@ impl BrowserSession:
             cookie_text
         )
         state.runtime.interpreter.timer_current_time_ms = self.monotonic_time_ms
+        state.runtime.interpreter.timer_time_origin_ms = self.animation_start_time_ms
         state.bind_dom(self.current_dom)
         self.runtime_state = Some(state)
         Some(state)

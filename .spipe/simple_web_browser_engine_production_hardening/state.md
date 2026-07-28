@@ -1394,3 +1394,26 @@ implementation in progress / target evidence blocked
   promotion failure, then Stage 4 crashed with SIGSEGV immediately after
   releasing the first `src/app/cli/main.spl` surface. No executable browser
   PASS is claimed and the build was not retried.
+- Text editing now dispatches `focus` only on an actual focus transition, so
+  repeated keystrokes do not rerun authored focus handlers or force redundant
+  JS/layout/repaint work. Busy address submissions preserve their draft/focus.
+- Linux renderer stage-two seccomp now denies `fcntl`/`fcntl64`/`ioctl`, and
+  the native sandbox gate proves inherited IPC cannot arm asynchronous owner
+  signals against the broker.
+- Web Storage persistence now drops empty buckets and retains at most 64 MRU
+  origins / 16 MiB per storage kind, bounding unique-origin retention and its
+  cumulative copy/scan cost. Focused specs cover count, MRU, empty, and byte
+  eviction branches.
+- Author `!important` declarations are split once at rule admission and cascade
+  after all normal declarations, including inline normal style; exact pixel
+  regressions cover specificity, inline precedence, case, and CSS whitespace.
+- Browser rAF timestamps now use the current document time origin while timer
+  deadlines remain on the absolute session clock, keeping late-navigation JS
+  frames aligned with document-relative CSS animation.
+- verify: working/staged direct-env guards, rendering-source coupling, conflict
+  marker scan, and the `doc/06_spec/*_spec.spl == 0` layout gate pass. The
+  deployed pure-Simple wrapper still fails its bounded test-ABI admission probe,
+  so focused Simple specs remain source-reviewed but unexecuted; no bootstrap or
+  Rust seed fallback was used.
+- open: worker `history.pushState()` state is not yet synchronized into broker
+  chrome/history, so parent Back can reject after a same-origin pushState.

@@ -4,6 +4,7 @@ class Rules:
     group_parts: [[[text]]]
     group_specificities: [[i32]]
     decls: [text]
+    important_decls: [text]
 
 # Named transport for the three parallel rule-scan arrays. Returning these as
 # an anonymous [[text]] loses the inner RuntimeArray identity in native code.
@@ -405,7 +406,10 @@ fn _extract_css_vw_with_rule_limit(
     if (rule_limit == 0 or not _simple_web_html_source_admitted(
         html, SIMPLE_WEB_MAX_HTML_BYTES
     )):
-        return Rules(group_parts: [], group_specificities: [], decls: [])
+        return Rules(
+            group_parts: [], group_specificities: [], decls: [],
+            important_decls: []
+        )
     # First pass: collect CSS custom properties from all :root blocks
     var html_tag = find_from(html, "<html", 0)
     var html_tag_guard = 0
@@ -446,6 +450,7 @@ fn _extract_css_vw_with_rule_limit(
     var group_parts: [[[text]]] = []
     var group_specificities: [[i32]] = []
     var decls: [text] = []
+    var important_decls: [text] = []
     var pos = 0
     var guard = 0
     var total_candidates = 0
@@ -489,6 +494,7 @@ fn _extract_css_vw_with_rule_limit(
         var block_group_parts: [[[text]]] = [[[]]; block_cap]
         var block_group_specificities: [[i32]] = [[]; block_cap]
         var block_decls: [text] = [""; block_cap]
+        var block_important_decls: [text] = [""; block_cap]
         var out_i = 0
         var bi = 0
         while bi < candidate_count and out_i < remaining_rules:
@@ -521,7 +527,9 @@ fn _extract_css_vw_with_rule_limit(
                     rgi = rgi + 1
                 block_group_parts[out_i] = rule_parts
                 block_group_specificities[out_i] = rule_specificities
-                block_decls[out_i] = decl
+                val priority_decls = css_declaration_priority_split(decl)
+                block_decls[out_i] = priority_decls.normal
+                block_important_decls[out_i] = priority_decls.important
                 out_i = out_i + 1
             bi = bi + 1
         # INLINED on purpose (was group_parts_list_prefix): same aggregate
@@ -533,11 +541,15 @@ fn _extract_css_vw_with_rule_limit(
             group_specificities = group_specificities + [block_group_specificities[gi]]
             gi = gi + 1
         decls = decls + text_list_prefix(block_decls, out_i)
+        important_decls = important_decls + text_list_prefix(
+            block_important_decls, out_i
+        )
         pos = close + 1
     val result = Rules(
         group_parts: group_parts,
         group_specificities: group_specificities,
-        decls: decls)
+        decls: decls,
+        important_decls: important_decls)
     if trace_stages:
         print "[layout-trace] css_result rules={result.group_parts.len()} decls={result.decls.len()}"
     # Silent-on-healthy attribution receipt: scanned at least one candidate
@@ -1919,6 +1931,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             print "[layout-trace] style_stage=candidates-sorted index={i} count={candidates.len()}"
         var candidate_i = 0
         val candidate_count = candidates.len()
+        var has_important_candidates = false
         while candidate_i < candidate_count:
             # Budget guard (inner): this is the apply_decls call site loop where a
             # single node can match thousands of rules (the hostile case). Sample
@@ -1933,17 +1946,68 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 continue
             if rule_specificities[r] >= 0:
                 val empty_cells_decl = decl_get(rules.decls[r], "empty-cells")
-                if empty_cells_decl.trim().lower() == "hide":
-                    empty_cells_hide = true
-                st = apply_decls(st, rules.decls[r], em_base)
+                if empty_cells_decl != "":
+                    empty_cells_hide = (
+                        empty_cells_decl.trim().lower() == "hide"
+                    )
+                if rules.decls[r] != "":
+                    st = apply_decls(st, rules.decls[r], em_base)
+                if rules.important_decls[r] != "":
+                    has_important_candidates = true
             candidate_i = candidate_i + 1
         if trace_stages:
             print "[layout-trace] style_stage=inline-input index={i} len={nd.style_attr.len()}"
-        if nd.style_attr.len() > 0:
-            val inline_empty_cells_decl = decl_get(nd.style_attr, "empty-cells")
-            if inline_empty_cells_decl.trim().lower() == "hide":
-                empty_cells_hide = true
-            st = apply_decls(st, nd.style_attr, em_base)
+        var inline_normal = ""
+        var inline_important = ""
+        if nd.style_attr != "":
+            val inline_priority = css_declaration_priority_split(nd.style_attr)
+            inline_normal = inline_priority.normal
+            inline_important = inline_priority.important
+        if inline_normal != "":
+            val inline_empty_cells_decl = decl_get(
+                inline_normal, "empty-cells"
+            )
+            if inline_empty_cells_decl != "":
+                empty_cells_hide = (
+                    inline_empty_cells_decl.trim().lower() == "hide"
+                )
+            st = apply_decls(st, inline_normal, em_base)
+        # Author-important declarations outrank every author-normal declaration,
+        # including inline style. Within the important origin, retain the same
+        # specificity/source order as the normal author cascade.
+        if has_important_candidates:
+            candidate_i = 0
+            while candidate_i < candidate_count:
+                if (candidate_i & 255) == 0 and _web_budget_expired():
+                    break
+                val r = candidates[candidate_i]
+                if r >= WEB_STYLE_RULE_QUOTA:
+                    candidate_i = candidate_i + 1
+                    continue
+                if (
+                    rule_specificities[r] >= 0 and
+                    rules.important_decls[r] != ""
+                ):
+                    val important_empty_cells_decl = decl_get(
+                        rules.important_decls[r], "empty-cells"
+                    )
+                    if important_empty_cells_decl != "":
+                        empty_cells_hide = (
+                            important_empty_cells_decl.trim().lower() == "hide"
+                        )
+                    st = apply_decls(
+                        st, rules.important_decls[r], em_base
+                    )
+                candidate_i = candidate_i + 1
+        if inline_important != "":
+            val inline_important_empty_cells_decl = decl_get(
+                inline_important, "empty-cells"
+            )
+            if inline_important_empty_cells_decl != "":
+                empty_cells_hide = (
+                    inline_important_empty_cells_decl.trim().lower() == "hide"
+                )
+            st = apply_decls(st, inline_important, em_base)
         # The shared WM supplies the package's named solid material for the
         # legacy fallback mode. A producer may opt into the CPU-composited
         # material contract only with the exact mode value, preserving the
