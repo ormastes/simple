@@ -167,6 +167,60 @@ main()
         }
     }
 
+    /// Bug: string_literal_brace_breaks_concat_2026-06-29.
+    /// A literal `{` on the SAME line as a `+` concatenation must not let the
+    /// interpolation scanner swallow the closing quote and the `+` operators,
+    /// which emitted the source `" + x + "` verbatim (blank CSS/JSON render).
+    /// The newline guard cannot see this case -- it is all one line.
+    #[test]
+    fn test_literal_brace_does_not_swallow_same_line_concat() {
+        let tokens = get_fstring_tokens(r#"print "p { " + x + " }""#);
+        assert_eq!(
+            tokens,
+            vec![
+                TokenKind::FString(vec![FStringToken::Literal("p { ".to_string())]),
+                TokenKind::FString(vec![FStringToken::Literal(" }".to_string())]),
+            ],
+            "a literal brace must not consume the concatenation operators"
+        );
+    }
+
+    #[test]
+    fn test_literal_brace_with_colon_does_not_swallow_same_line_concat() {
+        let tokens = get_fstring_tokens(r#"val css = "p { q: " + x + "; }""#);
+        assert_eq!(
+            tokens,
+            vec![
+                TokenKind::FString(vec![FStringToken::Literal("p { q: ".to_string())]),
+                TokenKind::FString(vec![FStringToken::Literal("; }".to_string())]),
+            ],
+            "a literal brace with a colon must not consume the concatenation operators"
+        );
+    }
+
+    /// Operand-position quotes at paren_depth 0 stay real interpolation:
+    /// a comparison against a string literal, and inline-if string branches.
+    #[test]
+    fn test_top_level_quote_in_operand_position_is_still_interpolation() {
+        let tokens = get_fstring_tokens(r#"print "found={key != ""}""#);
+        assert_eq!(
+            tokens,
+            vec![TokenKind::FString(vec![
+                FStringToken::Literal("found=".to_string()),
+                FStringToken::Expr("key != \"\"".to_string()),
+            ])]
+        );
+
+        let tokens = get_fstring_tokens(r#"print "mode: {if dry: "on" else: "off"}""#);
+        assert_eq!(
+            tokens,
+            vec![TokenKind::FString(vec![
+                FStringToken::Literal("mode: ".to_string()),
+                FStringToken::Expr("if dry: \"on\" else: \"off\"".to_string()),
+            ])]
+        );
+    }
+
     #[test]
     fn test_nested_string_literal_in_interpolation() {
         let tokens = get_fstring_tokens(r#"val j = "j={xs.join("-")}""#);

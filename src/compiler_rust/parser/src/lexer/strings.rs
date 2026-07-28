@@ -315,11 +315,28 @@ impl<'a> super::Lexer<'a> {
                     // interpolation depth. Escaped quotes are handled by the
                     // backslash arm above. Runaway unmatched `{` across lines
                     // is separately contained by the newline guard above.
+                    //
+                    // A nested string may only OPEN where an operand is
+                    // genuinely expected: inside a call/index (`paren_depth >
+                    // 0`, e.g. `{xs.join("-")}`), after a binary/logical
+                    // operator (`{k != ""}`), or inside an inline conditional
+                    // (`{if c: "y" else: "n"}`). Anywhere else at
+                    // `paren_depth == 0` the quote closes the OUTER string,
+                    // i.e. the `{` was a literal brace -- stop and backtrack,
+                    // otherwise the scanner swallows the concatenation
+                    // operators of `"p { " + x + " }"` and emits `" + x + "`
+                    // verbatim. Triple f-strings keep the permissive form.
                     if c == '"' {
                         if let Some(quote) = in_string {
                             if quote == c {
                                 in_string = None; // End of string
                             }
+                        } else if paren_depth == 0
+                            && !is_triple
+                            && !Self::nested_string_may_open(&expr)
+                        {
+                            expr_failed = true;
+                            break;
                         } else {
                             in_string = Some(c); // Start of string
                         }
@@ -467,6 +484,67 @@ impl<'a> super::Lexer<'a> {
     /// We use a heuristic: the spec must be non-empty and consist only of valid
     /// format spec characters — no alphanumeric identifiers, no operators like `=`, etc.
     /// that would indicate this is actually a dict literal or ternary expression.
+    /// May an unescaped `"` open a NESTED string here, given the interpolation
+    /// expression text scanned so far, at `paren_depth == 0` of a single-line
+    /// f-string?
+    ///
+    /// Only where an operand is genuinely expected. Otherwise the quote is the
+    /// OUTER string's closing quote and the `{` was a literal brace -- see bug
+    /// `string_literal_brace_breaks_concat_2026-06-29`, where `"p { " + x + " }"`
+    /// had its `+` operators swallowed and emitted verbatim.
+    fn nested_string_may_open(expr: &str) -> bool {
+        fn is_word_byte(b: u8) -> bool {
+            b.is_ascii_alphanumeric() || b == b'_'
+        }
+        fn has_word(text: &str, word: &str) -> bool {
+            let bytes = text.as_bytes();
+            let mut from = 0;
+            while let Some(rel) = text[from..].find(word) {
+                let start = from + rel;
+                let end = start + word.len();
+                let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
+                let after_ok = end == bytes.len() || !is_word_byte(bytes[end]);
+                if before_ok && after_ok {
+                    return true;
+                }
+                from = start + 1;
+            }
+            false
+        }
+
+        // Inline conditional / match arms legitimately hold bare string literals.
+        if has_word(expr, "if") || has_word(expr, "else") || has_word(expr, "match") {
+            return true;
+        }
+        let trimmed = expr.trim_end();
+        if trimmed.is_empty() {
+            // `{ "` -- nothing to be an operand OF.
+            return false;
+        }
+        // Binary / logical operator => an operand must follow.
+        for op in ["==", "!=", "<=", ">="] {
+            if trimmed.ends_with(op) {
+                return true;
+            }
+        }
+        if trimmed.ends_with(['<', '>', '+', '-', '*', '/', '%', ',', '(', '[']) {
+            return true;
+        }
+        for kw in ["and", "or", "not", "in"] {
+            if trimmed.ends_with(kw) {
+                let head = &trimmed[..trimmed.len() - kw.len()];
+                if head.is_empty() || !Self::is_word_byte(head.as_bytes()[head.len() - 1]) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn is_word_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+
     fn is_format_spec(s: &str) -> bool {
         if s.is_empty() {
             return false;
