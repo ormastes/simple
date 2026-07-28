@@ -7978,8 +7978,14 @@ impl JsInterpreter:
             callback_args.push(arg_vals[arg_i])
             arg_i = arg_i + 1
         if timer_type == "animationFrame":
-            callback_args = [JsValue.Number(v: (self.timer_current_time_ms + delay_ms).to_f64())]
-        self.pending_timer_tasks.push(PendingTimerTask.create_with_args(timer_id, callback_id, callback_args, delay_ms, self.timer_current_time_ms, is_interval))
+            self.pending_timer_tasks.push(PendingTimerTask.create_animation_frame(
+                timer_id, callback_id, delay_ms, self.timer_current_time_ms
+            ))
+        else:
+            self.pending_timer_tasks.push(PendingTimerTask.create_with_args(
+                timer_id, callback_id, callback_args, delay_ms,
+                self.timer_current_time_ms, is_interval
+            ))
         if not self.node_compat_enabled:
             return JsValue.Number(v: timer_id.to_f64())
         val handle_id = self.create_object()
@@ -8097,7 +8103,13 @@ impl JsInterpreter:
         while i < self.pending_timer_tasks.len():
             val task = self.pending_timer_tasks[i]
             if task.id == timer_id:
-                rest.push(PendingTimerTask.create_with_args(task.id, task.callback_id, task.callback_args, task.delay_ms, self.timer_current_time_ms, task.is_interval))
+                if task.is_animation_frame:
+                    rest.push(PendingTimerTask.create_animation_frame(
+                        task.id, task.callback_id, task.delay_ms,
+                        self.timer_current_time_ms
+                    ))
+                else:
+                    rest.push(PendingTimerTask.create_with_args(task.id, task.callback_id, task.callback_args, task.delay_ms, self.timer_current_time_ms, task.is_interval))
                 refreshed = true
             else:
                 rest.push(task)
@@ -8126,7 +8138,17 @@ impl JsInterpreter:
                 while callback_arg_i < callback_arg_count:
                     callback_args.push(self.get_object_property(handle_id, "__simple_timer_callback_arg_" + callback_arg_i.to_text()))
                     callback_arg_i = callback_arg_i + 1
-                self.pending_timer_tasks.push(PendingTimerTask.create_with_args(timer_id, callback_id, callback_args, delay_ms, self.timer_current_time_ms, false))
+                var timer_type = ""
+                match self.get_object_property(handle_id, "timerType"):
+                    JsValue.String(v): timer_type = v
+                    _:
+                        pass_dn
+                if timer_type == "animationFrame":
+                    self.pending_timer_tasks.push(PendingTimerTask.create_animation_frame(
+                        timer_id, callback_id, delay_ms, self.timer_current_time_ms
+                    ))
+                else:
+                    self.pending_timer_tasks.push(PendingTimerTask.create_with_args(timer_id, callback_id, callback_args, delay_ms, self.timer_current_time_ms, false))
                 refreshed = true
             self.set_object_property(handle_id, "refreshed", JsValue.Boolean(v: refreshed))
             self.set_object_property(handle_id, "refreshedAt", JsValue.Number(v: self.timer_current_time_ms.to_f64()))

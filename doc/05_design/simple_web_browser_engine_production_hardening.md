@@ -211,7 +211,8 @@ composition/pixels are reused.
 
 One monotonic `now_us` drives microtasks, timers, rAF, CSS animation, and the
 rendering opportunity. Due timers run before the one rAF batch. Script and
-animation mutations merge into a single invalidation before paint.
+animation mutations merge into a single invalidation before paint. rAF receives
+the current rendering-opportunity time even when its deadline was missed.
 
 Scrolling preserves the real viewport dimensions so viewport-relative CSS
 and flex layout do not change with scroll depth. Paint culls boxes wholly

@@ -213,6 +213,9 @@ session. The same timestamp drives:
 4. CSS transition/animation updates;
 5. invalidation and one render/present.
 
+Each rAF callback receives that render-opportunity timestamp, not its scheduled
+deadline, so delayed frames do not report stale time or accumulate animation lag.
+
 Resume deltas are clamped to 100 ms. A deterministic test clock supplies exact
 timestamps. Timer/animation modules do not read wall time independently.
 

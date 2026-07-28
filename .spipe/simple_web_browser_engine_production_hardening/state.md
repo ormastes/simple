@@ -1322,3 +1322,8 @@ implementation in progress / target evidence blocked
   coverage checks both paths, closing the browser-raster teardown leak that
   could otherwise retain an 8K ARGB frame for process lifetime; executable
   Simple evidence remains compiler-blocked and was not rerun.
+- requestAnimationFrame tasks now retain their task kind and replace the
+  scheduled deadline with the actual render-opportunity time at dispatch. The
+  focused browser-session regression advances directly to 33 ms and requires
+  the callback to observe 33, preventing delayed-frame animation lag. Timer
+  handle refresh preserves the frame kind and does not retain a stale arg.
