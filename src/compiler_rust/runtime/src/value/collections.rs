@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use super::byte_kernels::{
@@ -15,7 +16,7 @@ use super::heap::{
     gc_flags, get_typed_ptr, get_typed_ptr_mut, register_heap_ptr, unregister_heap_ptr, unregister_heap_ptr_checked,
     HeapHeader, HeapObjectType,
 };
-use super::objects::rt_closure_func_ptr;
+use super::objects::{rt_closure_func_ptr, RuntimeClosure, RuntimeEnum, RuntimeObject};
 use super::primitive_sort;
 use simple_simd::{active_simd_tier, SimdTier};
 
@@ -1481,6 +1482,90 @@ pub extern "C" fn rt_transient_array_scope_pause() -> bool {
             return false;
         };
         scope.paused = true;
+        true
+    })
+}
+
+fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
+    if !value.is_heap() {
+        return Some(Vec::new());
+    }
+    match value.heap_type()? {
+        HeapObjectType::Array => {
+            let ptr = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+            unsafe {
+                if (*ptr).is_byte_packed() || (*ptr).is_u64_packed() {
+                    Some(Vec::new())
+                } else {
+                    Some((*ptr).as_slice().to_vec())
+                }
+            }
+        }
+        HeapObjectType::Tuple => {
+            let ptr = get_typed_ptr::<RuntimeTuple>(value, HeapObjectType::Tuple)?;
+            unsafe { Some((*ptr).as_slice().to_vec()) }
+        }
+        HeapObjectType::Dict => {
+            let ptr = get_typed_ptr::<RuntimeDict>(value, HeapObjectType::Dict)?;
+            unsafe {
+                if (*ptr).data.is_null() {
+                    return Some(Vec::new());
+                }
+                let mut children = Vec::with_capacity((*ptr).len as usize * 2);
+                for index in 0..(*ptr).capacity as usize {
+                    let key = *(*ptr).data.add(index * 2);
+                    if key.is_nil() {
+                        continue;
+                    }
+                    children.push(key);
+                    children.push(*(*ptr).data.add(index * 2 + 1));
+                }
+                Some(children)
+            }
+        }
+        HeapObjectType::Object => {
+            let ptr = get_typed_ptr::<RuntimeObject>(value, HeapObjectType::Object)?;
+            unsafe { Some((*ptr).fields().to_vec()) }
+        }
+        HeapObjectType::Closure => {
+            let ptr = get_typed_ptr::<RuntimeClosure>(value, HeapObjectType::Closure)?;
+            unsafe { Some((*ptr).captures().to_vec()) }
+        }
+        HeapObjectType::Enum => {
+            let ptr = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)?;
+            unsafe { Some(vec![(*ptr).payload]) }
+        }
+        _ => Some(Vec::new()),
+    }
+}
+
+/// Keep transient arrays reachable from a retained graph when the scope ends.
+#[no_mangle]
+pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
+    if !value.is_heap() || value.heap_type().is_none() {
+        return false;
+    }
+    TRANSIENT_ARRAY_SCOPE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(scope) = slot.as_mut() else {
+            return false;
+        };
+        if !scope.paused {
+            return false;
+        }
+
+        let mut pending = vec![value];
+        let mut reachable = HashSet::new();
+        while let Some(current) = pending.pop() {
+            if !reachable.insert(current.0) {
+                continue;
+            }
+            let Some(children) = transient_heap_children(current) else {
+                return false;
+            };
+            pending.extend(children);
+        }
+        scope.arrays.retain(|array| !reachable.contains(&array.0));
         true
     })
 }

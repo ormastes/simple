@@ -2003,3 +2003,26 @@ fn transient_array_scope_reclaims_only_pre_pause_arrays() {
     assert!(crate::value::heap::is_registered_heap_ptr(permanent.as_heap_ptr()));
     rt_array_free(permanent);
 }
+
+#[test]
+fn transient_heap_promotion_retains_reachable_cycle_only() {
+    assert!(super::rt_transient_array_scope_begin());
+    let kept_a = super::rt_array_new(1);
+    let kept_b = super::rt_array_new(1);
+    let reclaimed = super::rt_array_new(1);
+    assert!(super::rt_array_push(kept_a, kept_b));
+    assert!(super::rt_array_push(kept_b, kept_a));
+    assert!(super::rt_transient_array_scope_pause());
+
+    let root = super::rt_array_new(1);
+    assert!(super::rt_array_push(root, kept_a));
+    assert!(super::rt_transient_heap_promote(root));
+    assert!(super::rt_transient_array_scope_end());
+
+    assert_eq!(super::rt_array_len(kept_a), 1);
+    assert_eq!(super::rt_array_len(kept_b), 1);
+    assert_eq!(super::rt_array_len(reclaimed), -1);
+    super::rt_array_free(root);
+    super::rt_array_free(kept_a);
+    super::rt_array_free(kept_b);
+}

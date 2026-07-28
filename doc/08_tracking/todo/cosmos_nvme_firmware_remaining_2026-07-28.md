@@ -3,7 +3,7 @@
 These items are deliberately separate from completed host/ARM contract work.
 Postponed hardware rows remain open and must not be converted into host PASS.
 
-# TODO: [bootstrap][P0] Bound Stage-4 full-CLI memory below the measured 64,552,584 KiB RSS peak, deploy it, then execute SSpec/docgen gates.
+# TODO: [bootstrap][P0] Retry the strict full bootstrap after the Stage-2 `rt_transient_heap_promote` runtime-parity repair, admit/deploy Stage 4, then execute SSpec/docgen gates; the latest failed attempt peaked at 2,558,872 KiB RSS rather than the prior 64,552,584 KiB runaway.
 # DONE: [nvme][P0] GHDL runs host-issued Create CQ/SQ, Identify, Write, Flush, and Read against `build/nvme_fw_rv32_service.elf`, retaining MMIO/DMA/IRQ/recovery/remap evidence.
 # DONE: [nvme][P1] QEMU runs the same firmware command/recovery sequence through a GDB-driven guest-RAM mailbox; GHDL remains the AXI/DMA/IRQ authority.
 # DONE: [cosmos][P1] Package manifest v3 binds a clean repository revision, compiler/linker/Bootgen identities, bound profile/contract, board serial/revision, boot mode, DMA bounds, and immutable artifact hashes; self-tests reject omissions and mismatches.

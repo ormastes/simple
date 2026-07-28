@@ -224,3 +224,28 @@ failed on unrelated concurrent work. Its stale test runner could not resolve
 `std.spec`. A fresh Stage 4 compiler and the required live registry/RSS slope
 remain the next evidence; none of the acceptance items above is marked complete
 from static contracts or the C selfcheck alone.
+
+## 2026-07-28 bootstrap runtime parity repair
+
+The first source-current strict full-bootstrap attempt reached Stage 2 and
+failed at link time because `module_surface_promote` requested
+`rt_transient_heap_promote`, while the Rust bootstrap runtime exported only the
+transient scope begin/pause/end functions. The C production runtime already
+implemented recursive promotion. The attempt took 22m56s, peaked at
+2,558,872 KiB RSS, performed zero swaps, and retained the failed objects under
+`build/bootstrap/stage3/x86_64-unknown-linux-gnu/native-objects-FDWaEJ`.
+
+The Rust bootstrap runtime now implements the same reachable-graph operation
+for its array-only transient ownership scope. Traversal is cycle-safe across
+arrays, tuples, dictionaries, objects, closures, and enums; scope end reclaims
+only arrays unreachable from the promoted root. The focused offline unit gate
+passed:
+
+```sh
+env CARGO_BUILD_JOBS=1 cargo test --locked --offline \
+  --manifest-path src/compiler_rust/Cargo.toml -p simple-runtime \
+  transient_heap_promotion_retains_reachable_cycle_only -- --nocapture
+```
+
+This closes the Stage-2 symbol divergence only. Stage-4 admission, live slope,
+deployment, and production SSpec/docgen remain pending the final strict retry.
