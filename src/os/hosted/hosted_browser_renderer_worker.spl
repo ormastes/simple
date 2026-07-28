@@ -499,12 +499,31 @@ pub class HostedBrowserRendererWorkerSession:
         val navigation = browser_renderer_navigation_decode(message)
         if not navigation.ok:
             return navigation.reason
+        if navigation.action == "back":
+            if not self.browser.can_go_back():
+                return "cannot go back"
+            if self.browser.history_back_url() != navigation.url:
+                return "navigation-target-mismatch"
+        elif navigation.action == "forward":
+            if not self.browser.can_go_forward():
+                return "cannot go forward"
+            if self.browser.history_forward_url() != navigation.url:
+                return "navigation-target-mismatch"
+        elif navigation.action == "reload":
+            match self.browser.reload_target_url():
+                Err(reason): return reason
+                Ok(url):
+                    if url != navigation.url:
+                        return "navigation-target-mismatch"
         self.pressed_target_id = ""
         self.pressed_pointer_default_prevented = false
         self.pressed_chrome_control = ""
         self.chrome_focus = ""
         self.address_replace_on_text = false
-        self._clear_page_text_focus_state()
+        self.browser.discard_dom_focus_for_navigation()
+        self.input_view_target_key = ""
+        self.input_view_start_byte = 0
+        self.caret_blink_epoch_ms = 0
         if navigation.action == "stop":
             self.browser.stop_loading()
             return ""
@@ -519,11 +538,11 @@ pub class HostedBrowserRendererWorkerSession:
                 navigation.content_type
             )
         elif navigation.action == "back":
-            self.browser.go_back()
+            self.browser.go_back_to(navigation.url)
         elif navigation.action == "forward":
-            self.browser.go_forward()
+            self.browser.go_forward_to(navigation.url)
         else:
-            self.browser.reload()
+            self.browser.reload_to(navigation.url)
         if val Err(reason) = result:
             return reason
         val actual_url = if self.browser.pending_url != "":

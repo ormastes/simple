@@ -1587,11 +1587,7 @@ impl BrowserSession:
         Ok(true)
 
     me begin_network_reload() -> Result<bool, text>:
-        if self.current_index < 0 or self.current_index >= self.history.len():
-            return Err("no page to reload")
-        val entry = self.history[self.current_index]
-        val normalized_input = normalize_network_navigation_url(entry.url)?
-        val normalized = self._hsts_upgrade_url(normalized_input)
+        val normalized = self.reload_target_url()?
         self.begin_navigation(normalized)
         self.pending_navigation_target_index = self.current_index
         self.pending_navigation_push_history = false
@@ -1600,6 +1596,16 @@ impl BrowserSession:
         ))
         self._flush_runtime_side_effects()
         Ok(true)
+
+    me reload_target_url() -> Result<text, text>:
+        if self.current_index < 0 or self.current_index >= self.history.len():
+            return Err("no page to reload")
+        val url = self.history[self.current_index].url
+        if url.starts_with("http://") or url.starts_with("https://"):
+            return Ok(self._hsts_upgrade_url(
+                normalize_network_navigation_url(url)?
+            ))
+        Ok(url)
 
     me take_pending_request() -> BrowserRequest?:
         while self.pending_request_head < self.pending_requests.len():
@@ -2407,6 +2413,11 @@ impl BrowserSession:
         self.stop_requested = false
         self._load_page_source(entry.url, entry.source_html, self.current_index, false)
 
+    me reload_to(target_url: text) -> Result<bool, text>:
+        if self.reload_target_url()? != target_url:
+            return Err("navigation-target-mismatch")
+        self.reload()
+
     me go_back() -> Result<bool, text>:
         if not self.can_go_back():
             return Err("cannot go back")
@@ -2419,6 +2430,13 @@ impl BrowserSession:
         self.stop_requested = false
         self._load_page_source(entry.url, entry.source_html, target, false)
 
+    me go_back_to(target_url: text) -> Result<bool, text>:
+        if not self.can_go_back():
+            return Err("cannot go back")
+        if self.history_back_url() != target_url:
+            return Err("navigation-target-mismatch")
+        self.go_back()
+
     me go_forward() -> Result<bool, text>:
         if not self.can_go_forward():
             return Err("cannot go forward")
@@ -2430,6 +2448,13 @@ impl BrowserSession:
         self.is_loading = false
         self.stop_requested = false
         self._load_page_source(entry.url, entry.source_html, target, false)
+
+    me go_forward_to(target_url: text) -> Result<bool, text>:
+        if not self.can_go_forward():
+            return Err("cannot go forward")
+        if self.history_forward_url() != target_url:
+            return Err("navigation-target-mismatch")
+        self.go_forward()
 
     me can_go_back() -> bool:
         self.current_index > 0

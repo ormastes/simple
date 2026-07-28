@@ -1555,3 +1555,14 @@ implementation in progress / target evidence blocked
   trailing-message rejection, and the animation -> network -> deferred-input
   sequence. Executable Simple evidence remains compiler-blocked; no bootstrap
   or seed fallback was used.
+- Hosted Back, Forward, and Reload commands now validate the BrowserSession-
+  owned target before clearing focus or mutating history/runtime state. Page
+  focus is discarded without callbacks at the committed navigation boundary,
+  with DOM/JS-host focus, selection, and dirty-edit state kept synchronized, so
+  blur JavaScript cannot rewrite the validated target or Stop preserve a delayed
+  change. Target-bound session operations revalidate immediately before
+  traversal. Reload preflight
+  reuses the session's normalization and HSTS upgrade policy. The former
+  rollback-based worker regression now proves a
+  rejected target preserves history, interaction state, scroll, and request
+  correlation before a same-ID corrected retry.
