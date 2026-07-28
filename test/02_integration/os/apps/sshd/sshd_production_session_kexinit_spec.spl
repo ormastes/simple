@@ -38,7 +38,15 @@ fn _hex_digit(c: text) -> i64:
     -1
 
 describe "SSHD production session KEXINIT":
-    it "uses daemon-selected host material and certificates for accepted sessions":
+    # Production policy: SshDaemon.build_host_keys_for_session() and
+    # build_host_certificates_for_session() hard-nil RSA, ECDSA and the RSA
+    # certificates (src/os/apps/sshd/sshd.spl). The live lane therefore stays on
+    # the Ed25519/X25519 surface only. These assertions are deliberately
+    # byte-for-byte on the whole advertised algorithm list -- a `to_contain`
+    # style check is what previously let this spec drift out of sync with the
+    # production hard-nil without anyone noticing.
+
+    it "advertises only Ed25519 host material even when RSA and ECDSA keys are supplied":
         val payload = sshd_build_production_session_kexinit_for_test(
             true,
             _seed(),
@@ -54,13 +62,19 @@ describe "SSHD production session KEXINIT":
         expect(parsed.is_ok()).to_equal(true)
         val kex = parsed.unwrap()
         expect(kex.kex_algorithms).to_equal("curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com")
-        expect(kex.server_host_key_algorithms).to_equal("ssh-ed25519-cert-v01@openssh.com,ssh-ed25519,rsa-sha2-256-cert-v01@openssh.com,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256")
+        # ABSOLUTE: the RSA/RSA-cert/ECDSA material passed in above is dropped by
+        # the daemon's hard-nil policy, so it must NOT appear anywhere here.
+        expect(kex.server_host_key_algorithms).to_equal("ssh-ed25519-cert-v01@openssh.com,ssh-ed25519")
         expect(kex.encryption_client_to_server).to_equal("aes256-gcm@openssh.com")
         expect(kex.encryption_server_to_client).to_equal("aes256-gcm@openssh.com")
         expect(kex.mac_client_to_server).to_equal("hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none")
         expect(kex.mac_server_to_client).to_equal("hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none")
 
-    it "does not advertise raw Ed25519 when the production daemon disables it":
+    it "advertises no host key algorithm at all when Ed25519 is disabled":
+        # Ed25519 off, and RSA material present in the daemon fields is still
+        # hard-nilled by build_host_keys_for_session(). Nothing is left to
+        # advertise, so the list is EMPTY -- the fail-closed outcome that
+        # host_key_policy_satisfiable() is there to refuse to serve on.
         val payload = sshd_build_production_session_kexinit_for_test(
             false,
             _seed(),
@@ -75,5 +89,12 @@ describe "SSHD production session KEXINIT":
         val parsed = ssh_parse_kexinit(payload)
         expect(parsed.is_ok()).to_equal(true)
         val kex = parsed.unwrap()
-        expect(kex.server_host_key_algorithms).to_equal("rsa-sha2-256,rsa-sha2-512")
+        # ABSOLUTE: empty, not "rsa-sha2-256,rsa-sha2-512".
+        expect(kex.server_host_key_algorithms).to_equal("")
+        expect(kex.kex_algorithms).to_equal("curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com")
+        expect(kex.encryption_client_to_server).to_equal("aes256-gcm@openssh.com")
         expect(kex.encryption_server_to_client).to_equal("aes256-gcm@openssh.com")
+        # No certificates at all takes the empty-certificate KEXINIT branch in
+        # ssh_build_kexinit_for_host_keys_and_certs(), which emits "none" MACs.
+        expect(kex.mac_client_to_server).to_equal("none")
+        expect(kex.mac_server_to_client).to_equal("none")
