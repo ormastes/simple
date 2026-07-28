@@ -216,7 +216,10 @@ impl CoreLexer:
                 hash = (hash * 131 + char_code(self.source_chars[hash_i])) % 2147483647
                 hash_i = hash_i + 1
             val key = hash * 1000003 + span_len
-            if val cached = core_token_text_intern.get(key):
+            # contains_key + index read, never `.get()`.
+            # See doc/07_guide/language/dict_native_pitfalls.md
+            if core_token_text_intern.contains_key(key):
+                val cached = core_token_text_intern[key]
                 if core_token_text_matches(self.source_chars, s, e, cached):
                     return cached
 
@@ -663,6 +666,7 @@ impl CoreLexer:
                     var la_depth: i64 = 1
                     var la_str: text = ""
                     var la_esc: bool = false
+                    var la_paren: i64 = 0
                     for j in 0..100000:
                         if la >= src_len:
                             break
@@ -678,11 +682,25 @@ impl CoreLexer:
                                 la_str = ""
                         else:
                             if lc == "\"":
+                                # Bug string_literal_brace_breaks_concat_2026-06-29
+                                # (seed parity: compiler_rust/parser/src/lexer/
+                                # strings.rs `nested_string_may_open`). A nested
+                                # string may only OPEN where an operand is
+                                # expected. Otherwise this quote closes the OUTER
+                                # string — the `{` was a literal brace — and
+                                # continuing would swallow the `+` operators of
+                                # `"p { " + x + " }"` and emit them verbatim.
+                                if not self.fs_nested_string_may_open(self.pos + 1, la, la_paren):
+                                    break
                                 la_str = lc
                             elif lc == "'":
                                 la_str = lc
                             elif lc == "{":
                                 la_depth = la_depth + 1
+                            elif lc == "(" or lc == "[":
+                                la_paren = la_paren + 1
+                            elif lc == ")" or lc == "]":
+                                la_paren = la_paren - 1
                             elif lc == "}":
                                 la_depth = la_depth - 1
                                 if la_depth == 0:
@@ -708,6 +726,107 @@ impl CoreLexer:
             core_token_text_save("")
         else:
             core_token_text_save(result)
+
+    # ----- Interpolation: may a nested string open here? -----
+
+    # Bug string_literal_brace_breaks_concat_2026-06-29 — seed parity with
+    # compiler_rust/parser/src/lexer/strings.rs `nested_string_may_open`.
+    #
+    # Given the interpolation expression text scanned so far —
+    # source_chars[expr_start, quote_pos) — may this unescaped `"` OPEN a
+    # nested string? Only where an operand is genuinely expected: inside a
+    # call/index (paren_depth > 0, e.g. `{xs.join("-")}`), immediately after a
+    # binary/logical operator (`{k != ""}`), or inside an inline conditional
+    # (`{if c: "y" else: "n"}`).
+    #
+    # Anywhere else the quote is the OUTER string's closing quote and the `{`
+    # was a literal brace, so `"p { " + x + " }"` keeps its `+` operators
+    # instead of swallowing them into the token text. Note the narrower
+    # historical guard — "any top-level quote closes the outer string" —
+    # miscompiles `{xs.join("-")}`; the operand-position test is what makes
+    # both directions correct. The caller's newline guard still contains
+    # multi-line runaway braces and is deliberately left in place.
+    # Triple-quoted strings never reach here (scan_string returns early).
+    fn fs_nested_string_may_open(expr_start: i64, quote_pos: i64, paren_depth: i64) -> bool:
+        if paren_depth > 0:
+            return true
+        # Inline conditional / match arms legitimately hold bare literals.
+        if self.fs_expr_has_word(expr_start, quote_pos, "if"):
+            return true
+        if self.fs_expr_has_word(expr_start, quote_pos, "else"):
+            return true
+        if self.fs_expr_has_word(expr_start, quote_pos, "match"):
+            return true
+        # Trim trailing spaces/tabs: `end` is one past the last significant char.
+        var end: i64 = quote_pos
+        for j in 0..100000:
+            if end <= expr_start:
+                break
+            val pc: text = self.source_chars[end - 1]
+            if pc == " " or pc == "\t":
+                end = end - 1
+            else:
+                break
+        if end <= expr_start:
+            # `{ "` — there is nothing for a string to be an operand OF.
+            return false
+        val last: text = self.source_chars[end - 1]
+        # Two-character comparison operators: == != <= >=
+        if end - expr_start >= 2:
+            val prev: text = self.source_chars[end - 2]
+            val two: bool = prev == "=" or prev == "!" or prev == "<" or prev == ">"
+            if last == "=" and two:
+                return true
+        # Single-character binary / opening operators => an operand must follow.
+        if last == "<" or last == ">" or last == "+" or last == "-":
+            return true
+        if last == "*" or last == "/" or last == "%" or last == ",":
+            return true
+        if last == "(" or last == "[":
+            return true
+        # Word operators.
+        if self.fs_expr_ends_with_word(expr_start, end, "and"):
+            return true
+        if self.fs_expr_ends_with_word(expr_start, end, "or"):
+            return true
+        if self.fs_expr_ends_with_word(expr_start, end, "not"):
+            return true
+        if self.fs_expr_ends_with_word(expr_start, end, "in"):
+            return true
+        return false
+
+    # Whole-word search for `word` within source_chars[from_pos, to_pos).
+    fn fs_expr_has_word(from_pos: i64, to_pos: i64, word: text) -> bool:
+        val wlen: i64 = word.len()
+        if wlen == 0:
+            return false
+        var i: i64 = from_pos
+        for j in 0..100000:
+            if i + wlen > to_pos:
+                break
+            if core_token_text_matches(self.source_chars, i, i + wlen, word):
+                var before_ok: bool = true
+                if i > from_pos:
+                    before_ok = not is_ident_char(self.source_chars[i - 1])
+                var after_ok: bool = true
+                if i + wlen < to_pos:
+                    after_ok = not is_ident_char(self.source_chars[i + wlen])
+                if before_ok and after_ok:
+                    return true
+            i = i + 1
+        return false
+
+    # Does source_chars[from_pos, to_pos) end with the word operator `word`,
+    # preceded by a non-identifier char so `band` does not match `and`?
+    fn fs_expr_ends_with_word(from_pos: i64, to_pos: i64, word: text) -> bool:
+        val wlen: i64 = word.len()
+        if to_pos - from_pos < wlen:
+            return false
+        if not core_token_text_matches(self.source_chars, to_pos - wlen, to_pos, word):
+            return false
+        if to_pos - wlen <= from_pos:
+            return true
+        return not is_ident_char(self.source_chars[to_pos - wlen - 1])
 
     # ----- Raw String Scanning (r"...") -----
 
