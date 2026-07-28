@@ -16,6 +16,7 @@
 use std.hardware.soc_rtl.soc_top.{SocState, soc_create_bytes, soc_mem_read, soc_mem_write}
 use std.hardware.soc_rtl.ram_sparse.{sparse_pages_allocated}
 use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init, soc64_mem_read, soc64_mem_write}
+use std.hardware.soc_rtl.soc_top_64.{soc_top_64_protected_init, soc_top_64_sim_preload_dtb}
 
 fn check(name: text, ok: bool) -> i64:
     if ok:
@@ -106,14 +107,33 @@ fn main() -> i64:
     # 0xC0000000 is above the 4 MiB DRAM window -> unmapped -> reads 0.
     fails = fails + check("rv64 @0xC0000000 out-of-DRAM reads 0 (no sign-flip misroute)", soc64_mem_read(soc64, 0xC0000000, 8) == 0)
 
+    # ══ rv64: DTB read-only overlay — PRODUCTION SoC, not the 4 MiB one ════
+    # The DTB is a RAM-BACKED overlay, not a synthesized constant: soc64_dtb_read
+    # fetches the shared asset out of DRAM at SOC64_DTB_BASE - SOC64_RAM_BASE
+    # (= +128 MiB). So the FDT header is only present on a SoC whose DRAM covers
+    # that offset AND which has had the blob preloaded — i.e. the production path
+    # soc_top_64_sim_preload_dtb(soc_top_64_protected_init()) (256 MiB DRAM).
+    # The 4 MiB `soc64` above has neither, so asserting overlay content on it is
+    # a category error: the window there is simply out-of-DRAM (reads 0).
+    var soc64p = soc_top_64_sim_preload_dtb(soc_top_64_protected_init())
+
     # DTB overlay wins: the FDT header at 0x8800_0000 is checked BEFORE DRAM, so
     # reads there return the magic bytes (0xD0 0x0D 0xFE 0xED, big-endian) and
     # writes are ignored (read-only overlay).
-    val dtb_b0 = soc64_mem_read(soc64, 0x88000000, 1)
+    val dtb_b0 = soc64_mem_read(soc64p, 0x88000000, 1)
     fails = fails + check("rv64 DTB overlay magic byte @0x88000000 == 0xD0", dtb_b0 == 0xD0)
-    val soc64_w = soc64_mem_write(soc64, 0x88000000, 4, 0xDEADBEEF)     # attempt overwrite
-    soc64 = soc64_w
-    fails = fails + check("rv64 DTB overlay is read-only (write ignored, still 0xD0)", soc64_mem_read(soc64, 0x88000000, 1) == 0xD0)
+
+    # Non-vacuity guard: the read-only assertion below only means something if
+    # the DTB window really is inside the DRAM range — otherwise the store would
+    # be dropped as unmapped and the check would pass without exercising the
+    # overlay guard in soc64_mem_write at all.
+    fails = fails + check("rv64 DTB window lies INSIDE DRAM (read-only guard is load-bearing)",
+        0x88000000 >= 0x80000000 and 0x88000000 < 0x80000000 + soc64p.ram.size)
+
+    # With the window inside DRAM, dropping the overlay guard would let this
+    # store land in RAM and the byte would read back 0xEF, not 0xD0.
+    soc64p = soc64_mem_write(soc64p, 0x88000000, 4, 0xDEADBEEF)     # attempt overwrite
+    fails = fails + check("rv64 DTB overlay is read-only (write ignored, still 0xD0)", soc64_mem_read(soc64p, 0x88000000, 1) == 0xD0)
 
     if fails == 0:
         print("ADDR4G_PROBE: ALL PASS")
