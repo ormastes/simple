@@ -182,7 +182,10 @@ class FetchEngine:
             val location = self.get_header(response.headers, "location")
             if val loc = location:
                 self.logger.info("fetch: redirect {response.status} -> {loc}")
-                val redirect_url = self.resolve_redirect_url(request.url, loc)
+                val resolved = self.resolve_redirect_url(request.url, loc)
+                if not resolved.?:
+                    return Err(network_error("Unparseable redirect Location: {loc}"))
+                val redirect_url = resolved!
                 if request.url.scheme == "https" and redirect_url.scheme != "https":
                     return Err(network_error(
                         "Blocked insecure redirect from {request.url.to_text()} to {redirect_url.to_text()}"
@@ -275,7 +278,7 @@ class FetchEngine:
 
     # Resolve a redirect Location URL against the original request URL.
     # Handles both absolute URLs and relative paths.
-    fn resolve_redirect_url(base: Url, location: text) -> Url:
+    fn resolve_redirect_url(base: Url, location: text) -> Option<Url>:
         resolve_fetch_redirect_url(base, location)
 
     # Create a new request for a redirect, adjusting the method per HTTP semantics.
@@ -375,19 +378,29 @@ fn request_cache_eligible(request: FetchRequest) -> bool:
     not headers.contains("authorization:") and not headers.contains("cookie:")
 
 # Determine whether an HTTP status code indicates a redirect.
-pub fn resolve_fetch_redirect_url(base: Url, location: text) -> Url:
+pub fn resolve_fetch_redirect_url(base: Url, location: text) -> Option<Url>:
+    """Resolve a `Location:` header against the request URL.
+
+    Fail-closed: `None` when the location cannot be parsed. A redirect is an
+    origin-crossing operation, so an unparseable target must abort the redirect
+    rather than resolve to a guessed origin.
+    """
+    if location == "":
+        return None
     if location.contains("://"):
         return Url.parse(location)
     if location.starts_with("//"):
         return Url.parse("{base.scheme}:{location}")
+    if base.opaque or base.host == "":
+        return None
     if location.starts_with("/"):
-        return Url.create(base.scheme, base.host, base.port, location)
+        return Some(Url.create(base.scheme, base.host, base.port, location))
     val base_dir = if base.path.contains("/"):
         val last_slash = base.path.last_index_of("/")
         base.path.substring(0, last_slash + 1)
     else:
         "/"
-    Url.create(base.scheme, base.host, base.port, "{base_dir}{location}")
+    Some(Url.create(base.scheme, base.host, base.port, "{base_dir}{location}"))
 
 fn should_redirect(status: i64) -> bool:
     status == 301 or status == 302 or status == 303 or status == 307 or status == 308

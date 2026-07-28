@@ -3,6 +3,16 @@
 
 CorsChecker implements same-origin policy enforcement and preflight logic
 per the Fetch specification. No network calls — pure logic.
+
+## Ownership
+
+This module makes NO origin decisions of its own. Every same-origin test and
+every "may the requester read this body?" test is delegated to
+`security/origin_policy.spl` — `same_origin` and `can_read_response`. The old
+serialized-origin string comparisons (`cors_url_origin`, `self._origin ==
+allowed_origin`) are gone; they treated a malformed origin as same-origin with
+another malformed origin and accepted a literal `Access-Control-Allow-Origin:
+null`.
 """
 
 #![allow(REQC001)]
@@ -10,6 +20,26 @@ per the Fetch specification. No network calls — pure logic.
 use std.gc_async_mut.gpu.browser_engine.net.entity.cors_types.{PreflightResult}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, RequestMode}
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url, Origin}
+use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{
+    same_origin,
+    can_read_response,
+    origin_from_url_text,
+    opaque_origin,
+    serialize_origin
+}
+
+pub fn cors_origin_of_url(url: Url) -> Origin:
+    """Security origin of a request target, derived by `origin_policy`.
+
+    Built from the (scheme, host, port) triple as a URL string rather than
+    field-copied, so that a target with no usable authority collapses to a
+    fresh opaque origin instead of a half-populated tuple. Never reads
+    `Url.opaque`, which is nil-filled at struct literals that omit it.
+    """
+    val nonce = "cors-target:" + url.scheme + "|" + url.host
+    if url.port <= 0:
+        return origin_from_url_text(url.scheme + "://" + url.host, nonce)
+    return origin_from_url_text(url.scheme + "://" + url.host + ":" + url.port.to_text(), nonce)
 
 pub fn is_simple_method(method: text) -> bool:
     """Return true if method is a CORS simple method (GET, POST, HEAD)."""
@@ -21,17 +51,11 @@ pub fn needs_preflight(req: FetchRequest, requester_origin: Origin) -> bool:
     Preflight is required when:
     - The origin differs from the request target, AND
     - The method is non-simple, OR the Content-Type is non-simple (application/json).
+
+    The same-origin test is `origin_policy.same_origin`, so a malformed or
+    opaque requester is never same-origin with anything and always preflights.
     """
-    # Same-origin: no preflight needed
-    val req_scheme = req.url.scheme
-    val req_host = req.url.host
-    val req_port = req.url.port
-    val same_origin = (
-        requester_origin.scheme == req_scheme and
-        requester_origin.host == req_host and
-        requester_origin.port == req_port
-    )
-    if same_origin:
+    if same_origin(requester_origin, cors_origin_of_url(req.url)):
         return false
 
     # Non-simple method requires preflight
@@ -60,20 +84,47 @@ pub fn create_preflight(original: FetchRequest) -> FetchRequest:
     }
 
 pub class CorsChecker:
-    """Validates CORS preflight responses for a given requester origin."""
+    """Validates CORS preflight responses for a given requester origin.
+
+    `_origin` is the serialized form used for the outgoing `Origin:` header;
+    `_requester` is the parsed origin every decision is actually made on.
+    """
     _origin: text
+    _requester: Origin
 
     static fn new(origin: text) -> CorsChecker:
-        """Create a CorsChecker for the given origin string."""
-        return CorsChecker { _origin: origin }
+        """Create a CorsChecker for the given origin string.
+
+        The string is parsed by `origin_policy.origin_from_url_text`, so an
+        empty or malformed origin becomes opaque and is refused everywhere.
+        """
+        return CorsChecker {
+            _origin: origin,
+            _requester: origin_from_url_text(origin, "cors-checker:" + origin)
+        }
 
     me set_origin(origin: text):
         self._origin = origin
+        self._requester = origin_from_url_text(origin, "cors-checker:" + origin)
+
+    me fn requester_origin() -> Origin:
+        return self._requester
 
     me fn is_same_origin(url: Url) -> bool:
-        if self._origin == "":
-            return false
-        self._origin == cors_url_origin(url)
+        return same_origin(self._requester, cors_origin_of_url(url))
+
+    me fn can_read_body(response_url: Url, response_headers: text, credentials: text) -> bool:
+        """May this requester read the body served from `response_url`?
+
+        The single enforcement point for a cross-origin response read.
+        """
+        val allowed = cors_header_value(response_headers, "access-control-allow-origin")
+        return can_read_response(
+            self._requester,
+            cors_origin_of_url(response_url),
+            allowed,
+            cors_credentials_include(credentials)
+        )
 
     me fn needs_preflight(request: FetchRequest) -> bool:
         if self.is_same_origin(request.url):
@@ -89,16 +140,20 @@ pub class CorsChecker:
         preflight
 
     me fn validate_response(response_headers: text, credentials: text) -> PreflightResult:
+        """Does the CORS grant in `response_headers` admit this requester?
+
+        Delegated to `origin_policy.can_read_response` against a deliberately
+        opaque response origin, so the same-origin shortcut can never fire and
+        the answer is purely "is there a valid explicit grant?".
+        """
         val allowed_origin = cors_header_value(response_headers, "access-control-allow-origin")
-        if self._origin == "":
-            return PreflightResult.Denied
-        if allowed_origin == "":
-            return PreflightResult.Denied
-        if allowed_origin == "*":
-            if cors_credentials_include(credentials):
-                return PreflightResult.Denied
-            return PreflightResult.Allowed
-        if allowed_origin == self._origin:
+        val cross = opaque_origin("cors-preflight-response")
+        if can_read_response(
+            self._requester,
+            cross,
+            allowed_origin,
+            cors_credentials_include(credentials)
+        ):
             return PreflightResult.Allowed
         PreflightResult.Denied
 
@@ -166,14 +221,10 @@ fn cors_credentials_include(credentials: text) -> bool:
         return true
     value.ends_with("::include")
 
-fn cors_url_origin(url: Url) -> text:
-    var default_port = false
-    if url.scheme == "http":
-        default_port = url.port == 80
-    if url.scheme == "https":
-        default_port = url.port == 443
-    if url.port <= 0:
-        return "{url.scheme}://{url.host}"
-    if default_port:
-        return "{url.scheme}://{url.host}"
-    "{url.scheme}://{url.host}:{url.port}"
+pub fn cors_url_origin_text(url: Url) -> text:
+    """Serialized origin of a URL. Delegates to `origin_policy.serialize_origin`.
+
+    Replaces the module's own default-port-elision copy, which disagreed with
+    the policy layer on every non-hierarchical scheme.
+    """
+    return serialize_origin(cors_origin_of_url(url))
