@@ -32,7 +32,7 @@ fn translate_interpolated_print(inner: text, types: text) -> text:
             val is_text = is_text_var(raw_expr, types)
             val is_dict_keys = c_expr.contains("simple_dict_keys")
             # Check if raw expr is a struct field that returns text
-            val raw_dot = raw_expr.index_of(".") ?? -1
+            val raw_dot = raw_expr.index_of(".")
             var is_struct_text_field = false
             if raw_dot >= 0:
                 val sf_obj = raw_expr.substring(0, raw_dot).trim()
@@ -91,7 +91,7 @@ fn translate_print(arg: text, types: text) -> text:
 # Returns "code<|TYPE|>;type_entries;" if loop var is registered as text
 fn translate_for_loop(trimmed: text, types: text) -> text:
     val body = trimmed.substring(4, trimmed.len() - 1).trim()
-    val in_idx = body.index_of(" in ") ?? -1
+    val in_idx = body.index_of(" in ")
     if in_idx < 0:
         return r"/* unsupported for: " + trimmed + r" */"
     val loop_var = body.substring(0, in_idx).trim()
@@ -100,7 +100,7 @@ fn translate_for_loop(trimmed: text, types: text) -> text:
     # range(start, end)
     if iterable.starts_with("range(") and iterable.ends_with(")"):
         val range_args = iterable.substring(6, iterable.len() - 1).trim()
-        val comma_idx = range_args.index_of(",") ?? -1
+        val comma_idx = range_args.index_of(",")
         if comma_idx >= 0:
             val start_expr = range_args.substring(0, comma_idx).trim()
             val end_expr = range_args.substring(comma_idx + 1).trim()
@@ -120,7 +120,7 @@ fn translate_for_loop(trimmed: text, types: text) -> text:
         return init
 
     # start..end range
-    val dotdot_idx = iterable.index_of("..") ?? -1
+    val dotdot_idx = iterable.index_of("..")
     if dotdot_idx >= 0:
         val start_expr = iterable.substring(0, dotdot_idx).trim()
         val end_expr = iterable.substring(dotdot_idx + 2).trim()
@@ -174,10 +174,10 @@ fn translate_case(trimmed: text, types: text) -> text:
         return r"if (strcmp(_match_val, " + case_body + r") == 0) " + "\{"
 
     # Check for destructuring pattern: Variant(field1, field2)
-    val dp_pos = case_body.index_of("(") ?? -1
+    val dp_pos = case_body.index_of("(")
     if dp_pos >= 0:
         val variant_name = case_body.substring(0, dp_pos).trim()
-        val dp_close = case_body.index_of(")") ?? -1
+        val dp_close = case_body.index_of(")")
         if dp_close > dp_pos + 1:
             val fields_str = case_body.substring(dp_pos + 1, dp_close).trim()
             val fields = fields_str.split(",")
@@ -187,7 +187,7 @@ fn translate_case(trimmed: text, types: text) -> text:
             for field in fields:
                 val fname = field.trim()
                 # Check if named or positional
-                val fc = fname.index_of(":") ?? -1
+                val fc = fname.index_of(":")
                 if fc >= 0:
                     val fvar = fname.substring(0, fc).trim()
                     result = result + r" const char* " + fvar + r" = _match_val.data." + variant_name + r"." + fvar + r";"
@@ -259,7 +259,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
 
     # Tuple destructuring: val (a, b) = expr
     if trimmed.starts_with("val (") or trimmed.starts_with("var ("):
-        val eq_idx = trimmed.index_of(" = ") ?? -1
+        val eq_idx = trimmed.index_of(" = ")
         if eq_idx >= 0:
             val lhs = trimmed.substring(4, eq_idx).trim()
             val rhs = trimmed.substring(eq_idx + 3).trim()
@@ -305,7 +305,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
         return r"if (" + translate_condition(cond, types) + r") " + "\{"
     # Inline if: "if cond: statement" (single-line if)
     if trimmed.starts_with("if ") and not trimmed.ends_with(":"):
-        val if_colon = trimmed.index_of(":") ?? -1
+        val if_colon = trimmed.index_of(":")
         if if_colon >= 0:
             val if_cond = trimmed.substring(3, if_colon).trim()
             val if_body = trimmed.substring(if_colon + 1).trim()
@@ -313,7 +313,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
             val body_result = translate_statement(if_body, types)
             # Don't include implicit return from body
             var c_body = body_result
-            val pipe_pos = c_body.index_of("<|TYPE|>") ?? -1
+            val pipe_pos = c_body.index_of("<|TYPE|>")
             if pipe_pos >= 0:
                 c_body = c_body.substring(0, pipe_pos)
             return "if (" + c_cond + ") \{ " + c_body + " }"
@@ -339,7 +339,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
         return translate_case(trimmed, types)
     # Inline case: case PATTERN: body_expr
     if trimmed.starts_with("case "):
-        val case_colon = trimmed.index_of(":") ?? -1
+        val case_colon = trimmed.index_of(":")
         if case_colon >= 0:
             val case_pattern = trimmed.substring(5, case_colon).trim()
             val case_inline_body = trimmed.substring(case_colon + 1).trim()
@@ -350,13 +350,13 @@ fn translate_statement(trimmed: text, types: text) -> text:
             if case_if.ends_with("\{"):
                 case_if = case_if.substring(0, case_if.len() - 1).trim()
             # Check if body is an assignment (statement) vs expression
-            val body_eq_pos = case_inline_body.index_of(" = ") ?? -1
+            val body_eq_pos = case_inline_body.index_of(" = ")
             val body_is_assignment = body_eq_pos >= 0 and not case_inline_body.starts_with("\"")
             if body_is_assignment:
                 # Translate as statement (not expression)
                 val case_stmt_raw = translate_statement(case_inline_body, types)
                 # Extract code part only (strip type annotations after <|TYPE|>)
-                val case_sep = case_stmt_raw.index_of("<|TYPE|>") ?? -1
+                val case_sep = case_stmt_raw.index_of("<|TYPE|>")
                 var case_stmt_code = case_stmt_raw
                 if case_sep >= 0:
                     case_stmt_code = case_stmt_raw.substring(0, case_sep)
@@ -373,7 +373,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
         return "/* pass */;"
 
     # Method calls as statements (e.g., arr.push("x"))
-    val push_pos = trimmed.index_of(".push(") ?? -1
+    val push_pos = trimmed.index_of(".push(")
     if push_pos >= 0:
         val obj = trimmed.substring(0, push_pos).trim()
         val arg_start = push_pos + 6
@@ -421,7 +421,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
             return r"simple_int_pop(&" + obj + r");"
 
     # Compound assignment
-    val plus_eq = trimmed.index_of(" += ") ?? -1
+    val plus_eq = trimmed.index_of(" += ")
     if plus_eq >= 0:
         val lhs = trimmed.substring(0, plus_eq).trim()
         val rhs = trimmed.substring(plus_eq + 4).trim()
@@ -436,17 +436,17 @@ fn translate_statement(trimmed: text, types: text) -> text:
             return cop_result
 
     # Variable assignment
-    val eq_idx = trimmed.index_of(" = ") ?? -1
+    val eq_idx = trimmed.index_of(" = ")
     if eq_idx >= 0:
         val lhs = trimmed.substring(0, eq_idx).trim()
         val rhs = trimmed.substring(eq_idx + 3).trim()
 
         # Dict indexing assignment: d[key] = value
-        val lhs_bracket = lhs.index_of("[") ?? -1
+        val lhs_bracket = lhs.index_of("[")
         if lhs_bracket >= 0:
             val dict_name = lhs.substring(0, lhs_bracket).trim()
             if is_dict_var(dict_name, types):
-                val lhs_close = lhs.index_of("]") ?? -1
+                val lhs_close = lhs.index_of("]")
                 if lhs_close > lhs_bracket + 1:
                     val key_expr = lhs.substring(lhs_bracket + 1, lhs_close).trim()
                     val c_rhs = translate_expr(rhs, types)
@@ -467,7 +467,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
             val arr_is_saa = is_str_arr_arr_var(arr_name, types)
             val arr_is_any = arr_is_int or arr_is_str or arr_is_iaa or arr_is_saa
             if arr_is_any:
-                val lhs_close = lhs.index_of("]") ?? -1
+                val lhs_close = lhs.index_of("]")
                 if lhs_close > lhs_bracket + 1:
                     val idx_expr = lhs.substring(lhs_bracket + 1, lhs_close).trim()
                     val c_idx = translate_expr(idx_expr, types)
@@ -479,7 +479,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
                     return arr_name + r".items[" + c_idx + r"] = " + c_rhs + r";"
 
         # Struct field assignment: obj.field = value
-        val lhs_dot = lhs.index_of(".") ?? -1
+        val lhs_dot = lhs.index_of(".")
         if lhs_dot >= 0:
             val lhs_obj = lhs.substring(0, lhs_dot).trim()
             val lhs_field = lhs.substring(lhs_dot + 1).trim()
@@ -505,7 +505,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
                     return lhs + r" = simple_new_struct_array();"
                 return lhs + r" = simple_new_int_array();"
             # Handle array concat: arr = arr + [elem] -> direct push (optimization)
-            val rhs_concat_pos = rhs.index_of(" + [") ?? -1
+            val rhs_concat_pos = rhs.index_of(" + [")
             if rhs_concat_pos >= 0 and rhs.ends_with("]"):
                 val arr_part = rhs.substring(0, rhs_concat_pos).trim()
                 val concat_elem = rhs.substring(rhs_concat_pos + 4, rhs.len() - 1).trim()
@@ -544,7 +544,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
     # Function call as statement - detect BEFORE comparison/logic check
     # to avoid treating comparison operators inside function arguments as bare comparisons
     # e.g., check_eq_bool("5 > 3", 5 > 3, true) should NOT be treated as a comparison
-    val paren_pos = trimmed.index_of("(") ?? -1
+    val paren_pos = trimmed.index_of("(")
     if paren_pos >= 0 and trimmed.ends_with(")"):
         val fn_part = trimmed.substring(0, paren_pos).trim()
         # If the part before ( is a simple name (no spaces = no operators), it's a function call
