@@ -170,12 +170,17 @@ fn extract_fn_name(line: text) -> text:
     if rest.starts_with("fn "):
         rest = rest[3:]
 
-    # Find first '(' or ':'
-    val paren_idx = rest.index_of("(") ?? 999999
-    val colon_idx = rest.index_of(":") ?? 999999
-    val end_idx = if paren_idx < colon_idx: paren_idx else: colon_idx
+    # Find first '(' or ':'. index_of returns a raw i64 (-1 when absent), never
+    # nil, so `?? 999999` never fired on a miss and instead silently rewrote a
+    # genuine index of 3 into the not-found sentinel (TAG_SPECIAL == 3): a
+    # 3-character name like `fn get(x):` lost its `(` and yielded "get(x)".
+    val paren_idx = rest.index_of("(")
+    val colon_idx = rest.index_of(":")
+    var end_idx = paren_idx
+    if end_idx < 0 or (colon_idx >= 0 and colon_idx < end_idx):
+        end_idx = colon_idx
 
-    if end_idx == 999999:
+    if end_idx < 0:
         return ""
 
     val name = rest[0:end_idx]
@@ -188,12 +193,16 @@ fn extract_type_name(line: text, prefix: text) -> text:
         return ""
 
     val after_prefix = trimmed[prefix.len():]
-    # Find first ':' or '<' (for generics)
-    val colon_idx = after_prefix.index_of(":") ?? 999999
-    val angle_idx = after_prefix.index_of("<") ?? 999999
-    val end_idx = if colon_idx < angle_idx: colon_idx else: angle_idx
+    # Find first ':' or '<' (for generics). Same raw-i64 hazard as
+    # extract_fn_name above: `?? 999999` was dead on a miss and corrupted a
+    # genuine index of 3.
+    val colon_idx = after_prefix.index_of(":")
+    val angle_idx = after_prefix.index_of("<")
+    var end_idx = colon_idx
+    if end_idx < 0 or (angle_idx >= 0 and angle_idx < end_idx):
+        end_idx = angle_idx
 
-    if end_idx == 999999:
+    if end_idx < 0:
         return ""
 
     val name = after_prefix[0:end_idx]
