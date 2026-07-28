@@ -463,7 +463,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Emitted by MIR lowering (lowering_expr_ops.rs) whenever both operands are
     // ANY-typed (untyped params / erased receivers, e.g. inside the Simple Web
     // HTML layout renderer). Must be force-kept or `native`/`.smf` execution of
-    // erased-add code fails to load with "Undefined symbol: rt_any_add".
+    // erased-add code fails to load with an undefined-symbol error for rt_any_add.
+    // (Quoted text must not appear in comments here: build.rs takes the first
+    // quoted token on every line in this list, so a quote creates a phantom name.)
     "rt_any_add",
     // String operations
     "rt_string_new",
@@ -2054,6 +2056,22 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_sleep_ms",
     "rt_str_hash",
     "rt_value_as_int",
+    // Vulkan graphics entry points defined unconditionally in the
+    // vulkan_graphics_runtime_* modules: a real implementation under the vulkan
+    // feature and a stub under its negation, so they are always linkable. Their
+    // siblings are already registered here.
+    "rt_vulkan_begin_graphics",
+    "rt_vulkan_bind_font_texture",
+    "rt_vulkan_copy_from_image",
+    "rt_vulkan_copy_to_image",
+    "rt_vulkan_create_font_graphics_pipeline",
+    "rt_vulkan_create_font_sampler",
+    "rt_vulkan_create_font_world_graphics_pipeline",
+    "rt_vulkan_create_offscreen_render_pass",
+    "rt_vulkan_discard_graphics_command",
+    "rt_vulkan_end_graphics",
+    "rt_vulkan_selected_device_name",
+    "rt_vulkan_submit_graphics_and_wait_fence",
     "rt_write_file",
     "sys_get_args",   // -> rt_get_args
     "sys_exit",       // -> rt_exit
