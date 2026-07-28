@@ -3,6 +3,20 @@
 use std.io_runtime.{file_read}
 use std.spec.*
 
+# End offset of a source section: the start of the next marker, or end-of-file
+# when that marker is absent.
+#
+# index_of returns a raw i64 (-1 when absent), never nil, so the `?? src.len()`
+# these call sites used was dead on a miss — a missing marker sliced to -1 and
+# silently produced an empty section body, passing every `to_contain` that
+# followed for the wrong reason. It also corrupted a genuine offset of 3 (the
+# nil sentinel) into src.len().
+fn _section_end(src: text, marker: text) -> i64:
+    val idx = src.index_of(marker)
+    if idx < 0:
+        return src.len()
+    idx
+
 describe "SimpleOS host GPU IMAGE and TEXT execution":
     it "admits resources only through the fresh-device Draw IR path with strict provenance":
         val daemon = file_read("src/app/simpleos_gpu_host/daemon_runner.spl")
@@ -16,19 +30,22 @@ describe "SimpleOS host GPU IMAGE and TEXT execution":
         expect(daemon).to_contain("result.backend_handle > 0")
         expect(daemon.contains("if decoded_resources.resources.len() > 0")).to_equal(false)
         val fresh_start = draw_ir.index_of("fn engine2d_draw_ir_adv_fresh_device_composition_with_images")
-        val shared_start = draw_ir.index_of("fn _engine2d_draw_ir_adv_composition_with_images") ?? draw_ir.len()
+        expect(fresh_start).to_be_greater_than(-1)
+        val shared_start = _section_end(draw_ir, "fn _engine2d_draw_ir_adv_composition_with_images")
         val fresh_body = draw_ir.slice(fresh_start, shared_start)
         expect(fresh_body).to_contain("_engine2d_draw_ir_fresh_device_reason")
         expect(fresh_body).to_contain("_engine2d_draw_ir_prepare_fresh_device_text")
         expect(fresh_body).to_contain("preflight_rejected")
         expect(fresh_body).to_contain("plan, 0, 1")
         val exact_start = draw_ir.index_of("fn _engine2d_draw_ir_fresh_device_command_supported")
-        val initializer_start = draw_ir.index_of("fn _engine2d_draw_ir_fresh_device_initializes_target") ?? draw_ir.len()
+        expect(exact_start).to_be_greater_than(-1)
+        val initializer_start = _section_end(draw_ir, "fn _engine2d_draw_ir_fresh_device_initializes_target")
         val exact_body = draw_ir.slice(exact_start, initializer_start)
         expect(exact_body).to_contain("command.kind == \"rect\"")
         expect(exact_body).to_contain("command.kind == \"text\"")
         val prepare_start = draw_ir.index_of("fn _engine2d_draw_ir_prepare_fresh_device_text")
-        val prepare_end = draw_ir.index_of("fn _engine2d_draw_ir_render_rect") ?? draw_ir.len()
+        expect(prepare_start).to_be_greater_than(-1)
+        val prepare_end = _section_end(draw_ir, "fn _engine2d_draw_ir_render_rect")
         val prepare_body = draw_ir.slice(prepare_start, prepare_end)
         expect(prepare_body).to_contain("eng.select_font_identity(identity)")
         expect(prepare_body).to_contain("fonts.prepare_text")
@@ -50,7 +67,8 @@ describe "SimpleOS host GPU IMAGE and TEXT execution":
         expect(exact_body.contains("if not wholly_bounded:\n        return false")).to_equal(false)
         expect(draw_ir).to_contain("_engine2d_draw_ir_image_is_opaque")
         val reason_start = draw_ir.index_of("fn _engine2d_draw_ir_fresh_device_reason")
-        val reason_end = draw_ir.index_of("fn _engine2d_draw_ir_prepare_fresh_device_text") ?? draw_ir.len()
+        expect(reason_start).to_be_greater_than(-1)
+        val reason_end = _section_end(draw_ir, "fn _engine2d_draw_ir_prepare_fresh_device_text")
         val reason_body = draw_ir.slice(reason_start, reason_end)
         expect(reason_body).to_contain("fresh-device-bounded-embedding-required")
         expect(reason_body).to_contain("fresh-device-embedded-surface-required")
@@ -126,16 +144,19 @@ describe "SimpleOS host GPU IMAGE and TEXT execution":
         expect(owner).to_contain("val descriptor_released = entry.descriptor <= 0 or vulkan_sffi_destroy_descriptor_set(entry.descriptor)")
         expect(owner).to_contain("val buffer_released = entry.buffer <= 0 or vulkan_sffi_free_buffer(entry.buffer)")
         val quarantine_start = owner.index_of("struct VulkanSffiDependencyQuarantine:")
-        val orphan_start = owner.index_of("struct VulkanSffiOrphanCommand:") ?? owner.len()
+        expect(quarantine_start).to_be_greater_than(-1)
+        val orphan_start = _section_end(owner, "struct VulkanSffiOrphanCommand:")
         val quarantine_body = owner.slice(quarantine_start, orphan_start)
         expect(quarantine_body.contains("command:")).to_equal(false)
         expect(quarantine_body.contains("fence:")).to_equal(false)
         expect(owner).to_contain("struct VulkanSffiOrphanCommand:")
         val owner_not_ready = owner.index_of("if not ready:")
-        val owner_submit = owner.index_of("val fence = vulkan_sffi_submit_and_wait_fence(cmd)") ?? owner.len()
+        expect(owner_not_ready).to_be_greater_than(-1)
+        val owner_submit = _section_end(owner, "val fence = vulkan_sffi_submit_and_wait_fence(cmd)")
         expect(owner.slice(owner_not_ready, owner_submit)).to_contain("vulkan_sffi_quarantine_unsubmitted_command(cmd, desc, 0)")
         val helper_not_ready = helper.index_of("if not ready:")
-        val helper_submit = helper.index_of("val fence = vulkan_sffi_submit_and_wait_fence(cmd)") ?? helper.len()
+        expect(helper_not_ready).to_be_greater_than(-1)
+        val helper_submit = _section_end(helper, "val fence = vulkan_sffi_submit_and_wait_fence(cmd)")
         expect(helper.slice(helper_not_ready, helper_submit)).to_contain("vulkan_sffi_quarantine_unsubmitted_command(cmd, desc, d_src)")
         expect(helper).to_contain("vulkan_sffi_quarantine_dependencies(desc, d_src, 0, 0)")
         expect(processing).to_contain("vulkan_sffi_quarantine_dependencies(0, buffer.handle, pipeline.handle, shader.handle)")
