@@ -968,18 +968,19 @@ int64_t rt_browser_renderer_write_protocol_some(
 /* ===== Process table ===== */
 
 #define RT_PROC_MAX 16
+#define RT_RENDERER_PROC_MAX 4
 #define RT_PROC_READ_BUF 8192
 
 struct RtProcSlot {
-    pid_t pid;       /* 0 = empty */
+    pid_t pid;       /* 0 = empty, -1 = reserved during spawn */
     int   stdin_fd;  /* parent writes here  → child's stdin */
     int   stdout_fd; /* parent reads here   ← child's stdout */
     bool  sandboxed_renderer;
 };
 
 static struct RtProcSlot s_procs[RT_PROC_MAX];
-static pthread_mutex_t s_renderer_slot_lock = PTHREAD_MUTEX_INITIALIZER;
-static bool s_renderer_slot_active;
+static pthread_mutex_t s_proc_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned int s_renderer_slots_active;
 
 /* Static read buffer — returned pointer is valid until the next call */
 static char s_read_buf[RT_PROC_READ_BUF];
@@ -994,34 +995,47 @@ static struct RtProcSlot* proc_find(pid_t pid) {
     return NULL;
 }
 
-static struct RtProcSlot* proc_alloc(void) {
-    for (int i = 0; i < RT_PROC_MAX; i++) {
-        if (s_procs[i].pid == 0) return &s_procs[i];
+static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return NULL;
+    if (sandboxed_renderer &&
+        s_renderer_slots_active >= RT_RENDERER_PROC_MAX) {
+        (void)pthread_mutex_unlock(&s_proc_lock);
+        return NULL;
     }
+    for (int i = 0; i < RT_PROC_MAX; i++) {
+        if (s_procs[i].pid == 0) {
+            s_procs[i].pid = -1;
+            s_procs[i].stdin_fd = -1;
+            s_procs[i].stdout_fd = -1;
+            s_procs[i].sandboxed_renderer = sandboxed_renderer;
+            if (sandboxed_renderer) s_renderer_slots_active++;
+            (void)pthread_mutex_unlock(&s_proc_lock);
+            return &s_procs[i];
+        }
+    }
+    (void)pthread_mutex_unlock(&s_proc_lock);
     return NULL;
-}
-
-static bool renderer_slot_reserve(void) {
-    if (pthread_mutex_lock(&s_renderer_slot_lock) != 0) return false;
-    bool reserved = !s_renderer_slot_active;
-    if (reserved) s_renderer_slot_active = true;
-    (void)pthread_mutex_unlock(&s_renderer_slot_lock);
-    return reserved;
-}
-
-static void renderer_slot_release(void) {
-    if (pthread_mutex_lock(&s_renderer_slot_lock) != 0) return;
-    s_renderer_slot_active = false;
-    (void)pthread_mutex_unlock(&s_renderer_slot_lock);
 }
 
 static void proc_free(struct RtProcSlot* slot) {
     if (!slot) return;
-    if (slot->stdin_fd >= 0)  { close(slot->stdin_fd);  slot->stdin_fd  = -1; }
-    if (slot->stdout_fd >= 0) { close(slot->stdout_fd); slot->stdout_fd = -1; }
-    if (slot->sandboxed_renderer) renderer_slot_release();
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return;
+    if (slot->pid == 0) {
+        (void)pthread_mutex_unlock(&s_proc_lock);
+        return;
+    }
+    int stdin_fd = slot->stdin_fd;
+    int stdout_fd = slot->stdout_fd;
+    if (slot->sandboxed_renderer && s_renderer_slots_active > 0) {
+        s_renderer_slots_active--;
+    }
+    slot->stdin_fd = -1;
+    slot->stdout_fd = -1;
     slot->sandboxed_renderer = false;
     slot->pid = 0;
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    if (stdin_fd >= 0) close(stdin_fd);
+    if (stdout_fd >= 0) close(stdout_fd);
 }
 
 static bool proc_signal_tree(pid_t pid, int signal_number, bool leader_reaped) {
@@ -1225,7 +1239,7 @@ static int64_t rt_process_spawn_piped_argv(
     if (sandboxed_renderer && cmd[0] != '/') return -1;
 #endif
 
-    struct RtProcSlot* slot = proc_alloc();
+    struct RtProcSlot* slot = proc_alloc(sandboxed_renderer);
     if (!slot) return -1;
 
     /* stdin_pipe[0] = child reads, stdin_pipe[1] = parent writes */
@@ -1235,13 +1249,20 @@ static int64_t rt_process_spawn_piped_argv(
 
 #ifdef __linux__
     if (sandboxed_renderer) {
-        if (!proc_renderer_socketpair(stdin_pipe, stdout_pipe)) return -1;
+        if (!proc_renderer_socketpair(stdin_pipe, stdout_pipe)) {
+            proc_free(slot);
+            return -1;
+        }
     } else
 #endif
     {
-        if (!proc_pipe_cloexec(stdin_pipe)) return -1;
+        if (!proc_pipe_cloexec(stdin_pipe)) {
+            proc_free(slot);
+            return -1;
+        }
         if (!proc_pipe_cloexec(stdout_pipe)) {
             close(stdin_pipe[0]); close(stdin_pipe[1]);
+            proc_free(slot);
             return -1;
         }
     }
@@ -1250,6 +1271,7 @@ static int64_t rt_process_spawn_piped_argv(
         !proc_move_pipe_fds_above_stdio(stdout_pipe)) {
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
+        proc_free(slot);
         return -1;
     }
 #endif
@@ -1258,11 +1280,7 @@ static int64_t rt_process_spawn_piped_argv(
         fcntl(stdin_pipe[1], F_SETFL, stdin_flags | O_NONBLOCK) != 0) {
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
-        return -1;
-    }
-    if (sandboxed_renderer && !renderer_slot_reserve()) {
-        close(stdin_pipe[0]); close(stdin_pipe[1]);
-        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        proc_free(slot);
         return -1;
     }
 
@@ -1278,9 +1296,9 @@ static int64_t rt_process_spawn_piped_argv(
 #endif
     pid_t pid = fork();
     if (pid < 0) {
-        if (sandboxed_renderer) renderer_slot_release();
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
+        proc_free(slot);
         return -1;
     }
 
@@ -1337,13 +1355,14 @@ static int64_t rt_process_spawn_piped_argv(
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
-        if (sandboxed_renderer) renderer_slot_release();
+        proc_free(slot);
         return -1;
     }
 #else
     if (pid < 0) {
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
+        proc_free(slot);
         return -1;
     }
 #endif
@@ -1355,10 +1374,9 @@ static int64_t rt_process_spawn_piped_argv(
     int flags = fcntl(stdout_pipe[0], F_GETFL, 0);
     if (flags >= 0) fcntl(stdout_pipe[0], F_SETFL, flags | O_NONBLOCK);
 
-    slot->pid       = pid;
-    slot->stdin_fd  = stdin_pipe[1];
+    slot->stdin_fd = stdin_pipe[1];
     slot->stdout_fd = stdout_pipe[0];
-    slot->sandboxed_renderer = sandboxed_renderer;
+    slot->pid = pid;
 
     return (int64_t)pid;
 }

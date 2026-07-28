@@ -310,30 +310,42 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         remove_sysv_objects(shmid, msgid, semid);
         return 0;
     }
-    int64_t pid = rt_browser_renderer_spawn_sandboxed(
+    int64_t first_pid = rt_browser_renderer_spawn_sandboxed(
+        "/proc/self/exe", &placeholder);
+    int64_t second_pid = rt_browser_renderer_spawn_sandboxed(
         "/proc/self/exe", &placeholder);
     close(inherited_fd);
     unsetenv("SIMPLE_BROWSER_RENDERER_SECRET");
-    if (pid <= 0) {
+    if (first_pid <= 0 || second_pid <= 0) {
+        if (first_pid > 0) rt_process_close_piped(first_pid);
+        if (second_pid > 0) rt_process_close_piped(second_pid);
         unlink(mutation_path);
         remove_sysv_objects(shmid, msgid, semid);
         return 0;
     }
-    int renderer_slot_bounded = rt_browser_renderer_spawn_sandboxed(
-        "/proc/self/exe", &placeholder) < 0;
-    if (!rt_process_write_stdin(pid, "small")) {
-        rt_process_close_piped(pid);
+    if (!rt_process_write_stdin(first_pid, "small")) {
+        rt_process_close_piped(first_pid);
+        rt_process_close_piped(second_pid);
         unlink(mutation_path);
         remove_sysv_objects(shmid, msgid, semid);
         return 0;
     }
     int saw_ok = 0;
     for (int i = 0; i < 2000 && !saw_ok; i++) {
-        const char* chunk = rt_process_read_stdout(pid);
+        const char* chunk = rt_process_read_stdout(first_pid);
         saw_ok = chunk && strcmp(chunk, "sandbox-ok") == 0;
         if (!saw_ok) usleep(1000);
     }
-    int closed = rt_process_close_piped(pid);
+    int first_closed = rt_process_close_piped(first_pid);
+    int second_independent = rt_process_is_alive(second_pid) &&
+        rt_process_write_stdin(second_pid, "small");
+    int second_saw_ok = 0;
+    for (int i = 0; i < 2000 && !second_saw_ok; i++) {
+        const char* chunk = rt_process_read_stdout(second_pid);
+        second_saw_ok = chunk && strcmp(chunk, "sandbox-ok") == 0;
+        if (!second_saw_ok) usleep(1000);
+    }
+    int second_closed = rt_process_close_piped(second_pid);
     int64_t restarted_pid = rt_browser_renderer_spawn_sandboxed(
         "/proc/self/exe", &placeholder);
     int renderer_slot_released = restarted_pid > 0 &&
@@ -346,8 +358,8 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         mutation_state.st_mtime == 1234567890;
     unlink(mutation_path);
     int cleaned = remove_sysv_objects(shmid, msgid, semid);
-    return saw_ok && closed && cleaned && renderer_slot_bounded &&
-        renderer_slot_released && mutation_blocked;
+    return saw_ok && first_closed && second_independent && second_saw_ok &&
+        second_closed && cleaned && renderer_slot_released && mutation_blocked;
 }
 
 static int stopped(pid_t pid) {

@@ -1208,3 +1208,25 @@ implementation in progress / target evidence blocked
   the parent instead of owning a `HostedBrowserRendererProcess`. This violates
   REQ-WEB-BROWSER-014 and needs a per-window broker registry (or a temporary
   fail-closed refusal); it is not accepted as production-complete.
+- Runtime boundary decision for per-window renderers:
+  `runtime_need=multiple independently sandboxed browser processes`;
+  `facade_checked=HostedBrowserRendererProcess already uses the canonical
+  rt_browser_renderer_spawn_sandboxed facade, whose private runtime slot is a
+  singleton despite the bounded 16-entry process table`;
+  `chosen_path=runtime-owned-change`;
+  `rejected_shortcuts=in-process secondary sessions, disabling sandboxing,
+  raw app-local process aliases, and multiplexing hostile pages in one worker`.
+- Runtime/process prerequisite candidate: atomically reserves a concrete
+  process-table row, publishes its PID last, rolls back every spawn failure,
+  and limits renderers to four so other process users retain headroom. The
+  focused C regression failed at sandbox case exit 9 before the fix, then
+  passed while proving two resident sandbox PIDs, independent close/liveness,
+  containment, and basic reuse. No Simple compiler or bootstrap was used.
+- Independent lifecycle and test reviews accepted the foundational two-window
+  contract and statically verified the dedicated four-renderer cap, atomic row
+  reservation, failure rollback, and idempotent release. A future cap-policy
+  change should add a four-live/fifth-rejected saturation case; no general
+  concurrent process-API safety claim is made.
+- Remaining security/lifecycle work: compositor frames and hosted browser state
+  are still singleton/in-process respectively; the secondary-window registry
+  and per-window frame ownership remain active and unverified.
