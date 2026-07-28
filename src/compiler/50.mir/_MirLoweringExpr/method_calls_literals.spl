@@ -2494,9 +2494,32 @@ impl MirLowering:
                 print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145)"
                 var b = self.builder
                 val temp = b.new_temp(MirType.i64())
-                # self.error only collects; returning an undefined temp here
+                # FAIL CLOSED (Task #145). The collected self.error above is
+                # dropped by every pipeline that does not read
+                # MirLowering.errors -- concretely
+                # driver_bootstrap.bootstrap_lower_to_mir_context, which
+                # returns `next_ctx.errors.len() == 0` and never copies the
+                # lowering errors into ctx (unlike the default lane, which
+                # calls _driver_collect_mir_errors in
+                # driver_pipeline.lower_to_mir). In that lane the const-0
+                # placeholder below reached codegen and shipped as a wrong
+                # value under exit 0.
+                #
+                # Emit rt_panic ahead of the placeholder so an unresolved
+                # method can never silently produce data, matching the two
+                # sibling failure sites that already fail closed:
+                # for-in over a non-array (mir_lowering_stmts.spl ~1908) and
+                # the match-guard path (expr_dispatch.spl ~2905). The const-0
+                # def is retained deliberately: returning an undefined temp
                 # produces a use-before-def local (NULL llvm::Value* -> ICmp
-                # SIGSEGV in llvm-lib). Give the placeholder a def.
+                # SIGSEGV in llvm-lib), so the placeholder still needs a def
+                # even though rt_panic makes it unreachable at runtime.
+                val panic_msg = b.emit_const_str("unresolved method call: {method}")
+                val panic_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_panic"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
+                ))
+                b.emit_call(panic_op, [mir_operand_copy(panic_msg)], MirType.unit())
                 b.emit_const(temp, MirConstValue.Int(0), MirType.i64())
                 self.builder = b
                 temp
