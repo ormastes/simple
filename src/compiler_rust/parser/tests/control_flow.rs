@@ -24,6 +24,13 @@ fn parse_if_else_statement() {
     parse_ok("if x > 0:\n    y = 1\nelse:\n    y = 0");
 }
 
+#[test]
+fn parse_method_statement_after_trailing_or_condition() {
+    parse_ok(
+        "class Session:\n    me reload():\n        if is_http() or\n            is_https():\n            return self.begin_reload()\n        self.begin_navigation()\n",
+    );
+}
+
 // Uses 'elif' not 'else if'
 #[test]
 fn parse_complex_if_else() {

@@ -334,11 +334,7 @@ impl<'a> Parser<'a> {
         // Consume deferred Dedent tokens from multi-line expression continuation.
         let deferred = self.deferred_dedent_count + deferred_before;
         self.deferred_dedent_count = 0;
-        for _ in 0..deferred {
-            if self.check(&TokenKind::Dedent) {
-                self.advance();
-            }
-        }
+        self.consume_dedents_for_method_chain(deferred);
 
         let mut elif_branches = Vec::new();
         while self.check(&TokenKind::Elif) {
