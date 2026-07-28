@@ -16,6 +16,7 @@ use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
+use compiler.core.{decl_get_span, span_is_valid, span_start, span_end, span_line, span_col}
 use compiler.core.{decl_is_gpu_kernel, decl_get_gpu_target_text, decl_get_gpu_backends_text}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts}
@@ -37,9 +38,25 @@ fn hir_lower_diag_enabled() -> bool:
         return true
     diag == "1"
 
+# Reads the parser-recorded span for a declaration index. Falls back to an
+# empty span only when the id is invalid, so a missing location stays visibly
+# empty rather than pointing at a wrong line.
+fn declaration_span_for(decl_idx: i64) -> Span:
+    val span_id = decl_get_span(decl_idx)
+    if not span_is_valid(span_id):
+        return Span.empty()
+    val s = span_start(span_id)
+    val e = span_end(span_id)
+    Span(start: s, end: e, line: span_line(span_id), col: span_col(span_id), file: "", length: e - s)
+
 impl HirLowering:
     me lower_bootstrap_flat_function(decl_idx: i64) -> HirFunction:
-        val span = Span.empty()
+        # Was Span.empty(), which made every bootstrap-path function report
+        # line 0 downstream (DWARF decl_line, MIR instruction spans,
+        # diagnostics). The parser does record a real span per declaration;
+        # read it. Mirrors decl_span_for in _FlatAstBridge/convert_nodes.spl,
+        # which fixes the same hole on the non-bootstrap path.
+        val span = declaration_span_for(decl_idx)
         val name = decl_get_name(decl_idx)
         eprint("[hir-lower] flat_function:start {name}")
         val symbol = bootstrap_hir_symbol_for_name(name)

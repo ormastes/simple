@@ -352,7 +352,29 @@ impl MirLowering:
         Some(result_arr)
 
     me lower_stmt(stmt: HirStmt):
-        """Lower HIR statement to MIR."""
+        """Lower HIR statement to MIR.
+
+        Thin save/set/restore wrapper around lower_stmt_impl, mirroring
+        lower_expr's wrapper in expr_dispatch.spl. Pushes this statement's own
+        span so the emit_* sites in mir_data.spl stamp a real location instead
+        of nil, then restores whatever the caller had. Nested blocks go through
+        lower_block rather than recursing through this name, so the restore
+        mainly guards a later same-scope emit from picking up an inner
+        statement's span.
+        """
+        var b_save = self.builder
+        val saved_span = b_save.current_span
+        if stmt != nil:
+            b_save.current_span = Some(stmt.span)
+        self.builder = b_save
+        self.lower_stmt_impl(stmt)
+        var b_restore = self.builder
+        b_restore.current_span = saved_span
+        self.builder = b_restore
+
+    me lower_stmt_impl(stmt: HirStmt):
+        """Body of lower_stmt. Only reached through the wrapper above, so the
+        span save/restore stays consistent."""
         # NOTE: previously declared `val stmt_kind: HirStmtKind` / `val
         # stmt_span: Span` without an initializer and assigned them inside
         # the `case HirStmt(kind, span):` arm below, then matched on
