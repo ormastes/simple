@@ -1,7 +1,9 @@
 # Bug: `while val Pattern(x) = expr:` loop body cannot see `x` (`variable not found`)
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/pattern_matching_advanced_spec.spl`)
+- **Status:** fixed
+- **Verified fixed (2026-07-28):** current `src/compiler_rust/compiler/src/interpreter_control.rs:352-373` (`exec_while`) matches the pattern, collects `bindings`, and inserts every bound name into `env` (`env.insert(name, val)`) before calling `exec_block` on the loop body — the described "body cannot see `x`" gap is not present in this code. (Note: the interpreter path was already correct per commit `a4ca4ee3d08`'s own message; that commit fixed a *separate* native-codegen HIR-lowering gap in `stmt_lowering.rs`, not this interpreter path — the original repro likely hit a stale deployed seed.)
+- **Status (original):** open (found triaging `test/feature/usage/pattern_matching_advanced_spec.spl`)
 - **Area:** `while val`/`while let` pattern-binding scope (interpreter or HIR
   lowering, not isolated further in this pass), deployed seed at
   `bin/release/x86_64-unknown-linux-gnu/simple`

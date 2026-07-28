@@ -3,6 +3,7 @@
 **Date:** 2026-07-04
 **Severity:** medium (silent-ish — semantic error at eval time, misleading message)
 **Status:** open — workaround in use
+**Verification needed:** Actually run the interpreter repro for `.get(i)` on a module-level array var to confirm the extern-lookup fallback still reproduces.
 
 ## Symptom
 

@@ -1,6 +1,7 @@
 # BUG: disk_image.spl FAT32 builder — 4 defects (payload iteration, silent truncate, dirent 8.3, FAT overflow)
 
-**Status:** open (all pre-existing; found while producing a >4 MiB streaming-loader test image)
+**Status:** fixed
+**Verified fixed (2026-07-28):** commit `2138b3d9fca6` (2026-07-11) fixes all 4 defects; confirmed in current source: `nested_payloads: [PayloadEntry] = []` field default (disk_image.spl:59), `_to_8_3_name()` used for dirents (:127, :516, :561, :592), dynamic FAT sizing from cluster count with capacity check (:660-693), and `rt_file_truncate` handles boxed `Value::UInt` with a regression test (file_io.rs:937-946, :1123-1132).
 **Severity:** medium-high (each silently produces an unusable/invalid image or blocks builds)
 **Component:** `src/os/port/disk_image.spl` (+ one interpreter extern)
 **Found:** 2026-07-11 (streaming PT_LOAD loader lane)

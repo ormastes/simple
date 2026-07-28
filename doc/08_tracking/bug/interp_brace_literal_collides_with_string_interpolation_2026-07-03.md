@@ -2,10 +2,18 @@
 
 **Date:** 2026-07-03
 **Severity:** P2 (silent wrong output, not a crash)
-**Status:** partially resolved 2026-07-17 — two root causes found and fixed
-in the native (pure-Simple) path; the original JSON/SDN-shaped repro (`s2`)
+**Status:** open (narrow sub-case) — 2 of 3 root causes found and fixed
+in the native (pure-Simple) path 2026-07-17; the original JSON/SDN-shaped repro (`s2`)
 is unchanged and now understood to be an intentional architectural fallback
 (see "2026-07-17 findings" below), matching the seed oracle's own behavior.
+A later 2026-07-17 follow-up (lane S47, task #178 round 2, see below) found a
+narrower whitespace-only nested-brace sub-case that silently swallows to an
+EMPTY string (worse than the documented verbatim fallback) and remains open,
+not yet root-caused.
+**Reconciled (2026-07-28):** header updated from "partially resolved" to
+"open (narrow sub-case)" to match body narrative — the body's own later
+follow-up section documents a distinct, still-unresolved regression (silent
+empty-string swallow) that the "partially resolved" wording did not capture.
 
 ## 2026-07-17 findings and fixes
 

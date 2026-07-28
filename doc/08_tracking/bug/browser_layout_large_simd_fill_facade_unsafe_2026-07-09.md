@@ -1,7 +1,8 @@
 # Browser Layout Large SIMD Fill Facade Unsafe
 
 - **Date:** 2026-07-09
-- **Status:** open
+- **Status:** superseded
+- **Superseded (2026-07-28):** see cpu_simd_external_cairo_8k_perf_gap_2026-07-09.md
 - **Severity:** high
 - **Area:** Simple Web layout, CPU-SIMD, runtime facade
 

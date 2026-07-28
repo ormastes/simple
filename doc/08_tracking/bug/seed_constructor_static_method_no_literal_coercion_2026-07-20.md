@@ -2,6 +2,7 @@
 
 - **Date:** 2026-07-20
 - **Status:** open (found triaging the `test/feature/scilib` cluster)
+- **Verification needed:** After resolving imported-class static methods under the SSpec test evaluator, re-run the 19 affected scilib specs under `bin/simple test` (live execution) to confirm the coercion fix becomes reachable and specs turn green.
 - **Area:** `src/compiler_rust/compiler/src/interpreter_method/special/objects.rs`
   (`handle_constructor_methods`, `constructor_overload_score`,
   `constructor_value_matches_type`, `constructor_value_type_matches_name`),

@@ -3,7 +3,8 @@
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign,
 `test/unit/lib/nogc_async_mut/src/map_insert_if_absent_spec.spl`
-**Status:** open — genuine defect/missing-feature, not a stale test
+**Status:** fixed
+**Verified fixed (2026-07-28):** `src/lib/nogc_sync_mut/src/map.spl:325` now defines `me insert_if_absent(self, key: K, value: V) -> bool`. Checked the dict-collision half too: only one `struct Map<K, V>` exists under `src/lib` (map.spl:20); `src/lib/nogc_async_mut/src/map.spl` is a pure re-export (`export use std.nogc_sync_mut.src.map.*`), no duplicate/colliding struct found at the source level.
 
 ## Symptom
 

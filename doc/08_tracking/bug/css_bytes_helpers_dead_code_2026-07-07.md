@@ -3,7 +3,9 @@
 - **Date:** 2026-07-07
 - **Area:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
   (`css_bytes_find` ~`:3707`, `css_bytes_match_close` ~`:3715`, `css_bytes_trimmed_eq` ~`:3730`).
-- **Status:** open — pre-existing on `main` (confirmed present on base, before the parse_html
+- **Status:** fixed
+- **Verified fixed (2026-07-28):** grep across `src/lib/gc_async_mut/gpu/browser_engine/` finds zero definitions of `css_bytes_find`/`css_bytes_match_close`/`css_bytes_trimmed_eq` — only two historical comments referencing the old names remain, consistent with the doc's own 2026-07-17 resolution note below.
+- **Status (historical):** open — pre-existing on `main` (confirmed present on base, before the parse_html
   linear-scan rewrite; not introduced by that change). Found during opus review of the
   parse_html event-scanner rewrite.
 - **Severity:** low (dead code, no runtime impact) but violates the project's

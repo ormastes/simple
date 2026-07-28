@@ -3,8 +3,9 @@
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign, cluster
 `test/unit/lib/{gc_async_immut,gc_sync_immut}`
-**Status:** open — genuine defect, reproduces under both `bin/simple run`
+**Status:** superseded — genuine defect, reproduces under both `bin/simple run`
 and `bin/simple test` (NOT the known test-vs-run static-method landmine)
+**Superseded (2026-07-28):** see jit_fallback_drops_second_static_method_registration_2026-07-20.md
 
 ## Symptom
 

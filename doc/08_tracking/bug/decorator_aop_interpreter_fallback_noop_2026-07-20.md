@@ -1,7 +1,9 @@
 # Bug (interpreter-path, unverified against compiled): `@decorator` wrapping and AOP `pc{}` weaving are no-ops under the tree-walking interpreter fallback
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/{decorators,aop,aop_pointcut}_spec.spl`, `collections_spec.spl` "Decorators" section)
+- **Status:** open — SCOPED (2026-07-28): narrowed to AOP `pc{}` weaving only; the `@decorator` portion is fixed (see note below)
+- **Verified partial fix (2026-07-28):** `interpreter_eval.rs:585-674` now performs real decorator application (evaluates decorator expr, applies args, wraps target in reverse order) — present at commit `37cda4befdc` (2026-07-25, after this bug was filed), so the `decorators_spec.spl`/`collections_spec.spl` "Decorators" symptoms described below should no longer reproduce. AOP `pc{}` pointcut weaving is NOT fixed: `pointcut` only appears in HIR lowering (`hir/lower/module_lowering/module_pass.rs`) and Lean codegen diagnostics, with zero references anywhere in `interpreter_eval.rs` or `interpreter/` — weaving is still compile-time-only, so `aop_spec.spl`/`aop_pointcut_spec.spl` failures likely still reproduce under the interpreter fallback. Status kept open, scoped to the AOP half of this doc's title.
+- **Original finding:** open (found triaging `test/feature/usage/{decorators,aop,aop_pointcut}_spec.spl`, `collections_spec.spl` "Decorators" section)
 - **Area:** interpreter fallback path (`bin/simple test` / `bin/simple run` on the
   deployed seed `bin/release/x86_64-unknown-linux-gnu/simple`, which falls back to
   tree-walking whenever JIT lowering fails — the default/only path available on

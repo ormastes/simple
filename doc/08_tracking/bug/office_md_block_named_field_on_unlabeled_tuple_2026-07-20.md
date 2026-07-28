@@ -1,6 +1,7 @@
 # `parse_markdown_document` accesses named fields on an unlabeled tuple return
 
-**Status:** open
+**Status:** fixed
+**Verified fixed (2026-07-28):** `src/app/office/file_formats.spl:189` `_md_block` now returns `MdBlockResult(block: ..., comments: ...)`, a named struct, at every return site; caller `parse_markdown_document` (line 239-240) accesses `r.block`/`r.comments` which now resolve.
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** `src/app/office/file_formats.spl`
 

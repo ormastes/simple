@@ -2,6 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Status:** fixed (2026-07-27, lane LINTCLS2)
+- **Verification needed:** Re-run `bin/simple lint` on a class-bearing file to confirm the fix against the current source — the current file has no `.get(` call sites at the cited lines.
 - **Severity:** high (lint unusable as a lane gate for class-bearing OS sources)
 - **Found by:** two independent SimpleOS harden lanes (P1 IPC, P3 VFS) on untouched control files
 

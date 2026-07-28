@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-04
 **Severity:** medium
-**Status:** open
+**Status:** fixed
+**Verified fixed (2026-07-28):** current `formula_regression_spec.spl` has `describe "TREND":` (line 182), `describe "GROWTH":` (line 221), `describe "PROB":` (line 269), and `describe "RANDARRAY":` (line 324) — all four sections now wrapped, matching the LINEST precedent.
 
 ## Symptom
 

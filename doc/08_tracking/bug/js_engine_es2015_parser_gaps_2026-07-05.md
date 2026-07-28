@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-05
 **Spec:** `test/03_system/feature/js/es2015_conformance_spec.spl`
-**Status:** open — 13 genuine failures now visible (25 pass)
+**Status:** fixed
+**Verified fixed (2026-07-28):** spec now imports `JsParser` (`std.js.engine.parser`). Current parser handles `Let`/`Const` (`parser.spl:153`), `class` declarations (`parser_statements.spl:343`), `for-in`/`for-of` (`parser_statements.spl:196-217`), destructuring-pattern checks and template literals/spread (`parser_statements.spl:18`, `parser_expressions.spl:347` + `js_token.spl`/`lexer.spl`/`ast_types.spl`) — none of this existed when the doc was filed (var-only parser).
 
 ## What happened
 

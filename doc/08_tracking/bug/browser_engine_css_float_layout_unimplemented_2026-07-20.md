@@ -1,6 +1,7 @@
 # browser_engine: CSS `float`/`clear` layout produces no visible geometry (all-zero pixel counts)
 
-**Status:** open
+**Status:** fixed
+**Verified fixed (2026-07-28):** `layout_float.spl` (185 lines: FloatContext/float_place/float_clear_y) is imported and actively used in `layout_core.spl` (`_layout_block_be`: `float_clear_y`, `float_place`, per-BFC `FloatContext`); `dom.spl:298,300` parses `float:`/`clear:` style props.
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** `src/lib/gc_async_mut/gpu/browser_engine/**` (contested GPU/browser-engine area;
 related to `browser_engine_text_metrics_api_drift_2026-07-20.md` filed same shard)

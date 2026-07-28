@@ -1,6 +1,7 @@
 # BUG: x86_64 sshd fails SSH version exchange under freestanding native-build
 
-**Status:** open
+**Status:** fixed
+**Verified fixed (2026-07-28):** commit `19e2f81e55f4` (2026-07-10) added the BYTE_PACKED packed-`[u8]` C<->Simple ABI contract; its own gate log states "x64 SSH version exchange now PASSES and reaches KEX". Current `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` still carries `BYTE_PACKED`/`gc_flags` handling (not reverted). Scope note: a separate downstream KEX-stage `[u8]` hazard was flagged as a known remaining issue in the same commit — that is a distinct bug from this doc's version-exchange symptom.
 **Severity:** high (blocks all x86_64 SSH login; rv64 SSH login is proven, x64 is not)
 **Component:** sshd version exchange / net recv facade under freestanding native-build
 **Found:** 2026-07-08, booting a merged ring-3 + sshd x86_64 kernel

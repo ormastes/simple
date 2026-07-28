@@ -1,6 +1,19 @@
 # Seed parser accepts `match` keyword as an identifier — divergence detonates at bootstrap Stage 4
 
 **Status:** open
+**Reconciled (2026-07-28):** header confirmed as "open" — independently
+verified in the live repo the bug is STILL PRESENT despite the "Interim guard
+(landed)" section below implying it was fixed by renaming. Commit
+`1310cf0f82f` (2026-07-27 08:12) did rename `val match` -> `val matched` in
+`src/lib/nogc_sync_mut/compression/gzip/lz77.spl:104` (and zlib.spl,
+lzma2_encoder.spl), but a later commit `69b1b2ab5dc` ("sync gh and push")
+silently REVERTED that exact hunk back to `val match = lz77_find_match(...)`
+(`git show 69b1b2ab5dc -- src/lib/nogc_sync_mut/compression/gzip/lz77.spl`
+shows the revert diff). Current `HEAD:src/lib/nogc_sync_mut/compression/gzip/lz77.spl`
+line 104 still reads `val match = lz77_find_match(data, pos, window_start, max_len)`.
+This matches the classic "stale-WC sync commit reverts a pushed fix" failure
+mode documented elsewhere in project memory — the fix needs to be relanded
+and the sync-guard process needs to catch this class of silent revert.
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane H bootstrap redeploy)
 **Area:** Rust seed parser (`src/compiler_rust/`) vs pure-Simple parser
 **Severity:** medium — lets invalid code land, then fails the full-CLI stage of every bootstrap
