@@ -1,0 +1,47 @@
+--- a/src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl
++++ b/src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl
+@@ -721,15 +721,38 @@
+                         if exp_deeper.found:
+                             return exp_deeper
+                 else:
+-                    val exp_parts = exp_item.split(":")
+-                    val exp_source = exp_parts[0]
+-                    val exp_local = if exp_parts.len() > 1: exp_parts[1] else: exp_source
++                    # `split(":")` allocates an array per visit, and this loop
++                    # runs once per export item PER wanted name -- O(E^2) on a
++                    # package facade. Only the aliased form ("src:local")
++                    # needs the split.
++                    var exp_source = exp_item
++                    var exp_local = exp_item
++                    if exp_item.contains(":"):
++                        val exp_parts = exp_item.split(":")
++                        exp_source = exp_parts[0]
++                        if exp_parts.len() > 1:
++                            exp_local = exp_parts[1]
++                        else:
++                            exp_local = exp_source
+                     if exp_local == wanted:
+                         if hir_module_declares_item(facade_mod, exp_source):
+                             return HirReexportSource(found: true, module_name: facade_name, item_name: exp_source)
+-                        val alias_source = self.find_reexport_source(facade_mod, facade_name, exp_source, depth + 1)
+-                        if alias_source.found:
+-                            return alias_source
++                        # A plain `export foo` (no alias) has exp_source ==
++                        # wanted, so this chase would re-enter with IDENTICAL
++                        # (facade_mod, facade_name, wanted) and only a smaller
++                        # depth budget -- it re-scans the whole export list to
++                        # rediscover THIS item and recurse again, all the way to
++                        # the depth bound. A deeper budget explores a strict
++                        # subset of what this invocation already explores, so
++                        # the self-hop can never contribute a hit; it only
++                        # multiplies the O(E^2) scan by the depth bound.
++                        # Measured on compiler.10.frontend.core.__init__ (1,367
++                        # export items): 26.0 M allocations / 162 s for ONE
++                        # importing file. Chase only a REAL alias hop.
++                        if exp_source != wanted:
++                            val alias_source = self.find_reexport_source(facade_mod, facade_name, exp_source, depth + 1)
++                            if alias_source.found:
++                                return alias_source
+                 exp_item_idx = exp_item_idx + 1
+             exp_idx = exp_idx + 1
+         HirReexportSource(found: false, module_name: "", item_name: "")

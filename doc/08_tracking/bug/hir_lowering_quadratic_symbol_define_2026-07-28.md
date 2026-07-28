@@ -477,3 +477,124 @@ Level-gated and default-off, in `module_lowering.spl`:
 `SIMPLE_HIR_SYMBOL_DUMP=1` (`[HIR-SYMS] <module>\t<name>\t<kind>\t<owner>`,
 for before/after symbol-set equivalence diffs). The symbol-set count is the
 cheap equivalence check: `unstub:flat_symbols:done n=` per module.
+
+## Fourth pass 2026-07-28 (lane R4): ROOT CAUSE FOUND, FIXED, MEASURED — 26x
+
+**Status: root cause identified and proven. Fix built, measured, and verified
+symbol-set-identical. NOT landed — see "Why not landed" below. Patch:
+`doc/08_tracking/bug/patch/hir_facade_selfhop_2026-07-28.patch` (applies cleanly
+to `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`).**
+
+### The mechanism (it is NOT the sweep, it is a self-recursion inside the chase)
+
+`resolve_package_sibling_symbols` sweeps `compiler.10.frontend.core.__init__`.
+That facade **declares nothing** and carries **447 `export` decls / 1,367 export
+items**, only ONE of which is a star form (`export dangerous_keywords.*`, line
+479). So for every one of the 1,367 names:
+
+1. `register_glob_imported_symbols_depth` calls `register_imported_symbol`.
+2. All seven `has_*` checks miss (the facade declares nothing), so it calls
+   `find_reexport_source(__init__, ..., wanted, 0)`.
+3. `find_reexport_source` walks the facade's **entire 1,367-item export list**
+   looking for `exp_local == wanted` — and finds the very item the caller is
+   already standing on.
+4. At that item, `hir_module_declares_item` is false, so it runs
+   `find_reexport_source(facade_mod, facade_name, exp_source, depth + 1)`.
+   For a plain `export foo` (no alias) `exp_source == wanted`, so this is a
+   **self-recursion with IDENTICAL arguments** and only a smaller depth budget.
+   It re-scans the list from 0, rediscovers the same item, and recurses again —
+   all the way to the depth-8 bound, then re-scans the tail on every unwind.
+
+Cost per name ≈ 14 x E; total ≈ 14 x E² with a `split(":")` array allocation on
+every single visit. Arithmetic check against the measurement:
+26,002,095 allocs / 1,367 names = **19,022 visits per name = 13.9 x E**. The
+model predicts the observed number to within 1%.
+
+This also explains every refuted hypothesis: the blowup is not in the *sweep*
+(so a visited set over swept modules cannot fire), not in `define()` (only 58 ms
+of 162,331 ms is real lowering), and not module-copy cost.
+
+### The fix (two changes, both provably result-preserving)
+
+In `find_reexport_source`, non-star export branch:
+
+1. **Skip the self-hop.** Only chase when `exp_source != wanted`. A call with
+   identical `(facade_mod, facade_name, wanted)` at `depth+1` explores a strict
+   subset of what the current invocation already explores (same imports loop,
+   same export list, same DFS order, strictly smaller budget), so it can never
+   contribute a hit the outer call does not already find. Kills the ~14x
+   multiplier.
+2. **Do not `split(":")` unless the item actually is an alias** (`"src:local"`).
+   Kills the per-visit array allocation on the remaining O(E²) scan.
+
+`find_reexport_source` is a **pure function** — it defines no symbols — so the
+only way it can change the symbol set is via its return value. Both changes are
+argued above to leave the return value unchanged, and that is confirmed
+empirically below.
+
+### Measured before/after (stage2 rebuild loop, same machine, load ~67/32 cores)
+
+Loop: rebuild stage2 from the modified tree with the seed (263 s), then
+`native-build --source src/compiler/10.frontend --source src/app/cli --entry
+src/app/cli/main.spl` under `SIMPLE_BOOTSTRAP_STAGE4=1
+SIMPLE_HIR_PERF_PROBE=1 SIMPLE_HIR_SYMBOL_DUMP=1`.
+
+`compiler.10.frontend.core.tokens`, `resolve_imports:done` -> `siblings:done`:
+
+| | ms | allocations | symbols |
+|---|---|---|---|
+| before | 206,210 | 26,011,720 | 2,574 |
+| after | **7,817** | **1,192,854** | **2,574** |
+| ratio | **26.4x faster** | **21.8x fewer** | unchanged |
+
+(The baseline reproduces the third pass exactly: 26,011,720 vs 26,011,445
+allocations, and n=2,574 both times. The larger ms is machine load, not a
+different defect.)
+
+**Whole-run progress in the same wall-clock window: 80 modules -> 994 modules
+(12.4x).** Zero HIR errors in both runs. Stage-4 now moves well past `tokens`;
+the run ended only on the harness `timeout`, mid-module, with no error.
+
+### Proof the resolved symbol set is unchanged
+
+`SIMPLE_HIR_SYMBOL_DUMP=1` emits `<module>\t<name>\t<kind>\t<owner>` per
+registered symbol. Comparing the **first-pass dump of every one of the 79
+modules both runs completed**: 47,273 symbol rows on each side,
+**byte-identical** after sort. `tokens` alone: 2,574 rows, byte-identical.
+Per-module `flat_symbols:done n=` counts: **0 mismatches across all 80**.
+
+Two traps when reproducing this comparison:
+- Grep the module path **anchored** (`awk -F'\t' '$1==path'`). An unanchored
+  `grep tokens.spl` also matches `cmm_tokens.spl` and invents 2,149 phantom
+  differences.
+- Compare only modules whose `flat_symbols:done` line is present in the *same
+  frozen snapshot*, and only the **first** dump block per module — a run that
+  gets further re-lowers some files in a later pass, which looks like 2,933
+  extra symbols when it is just the faster run doing more work.
+
+### Residual (follow-up, not a blocker)
+
+The self-hop is gone but the scan is still O(E²) per importing file: 8 modules
+still pay >1M allocations each (`src/compiler/__init__.spl` 11,883 ms /
+1,452,421 allocs; `ast_types`, `parser_cli` and others at ~1,193,500), together
+31% of all sibling-sweep time. The structural fix is to build the facade's
+`local -> source` export index **once per facade module** and reuse it, instead
+of rescanning the export list per wanted name. Filed as follow-up; the 26x above
+is what unblocks stage-4.
+
+### Why not landed
+
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` in the shared
+working copy carries **another session's uncommitted change** (a
+`m.type_aliases.contains_key(name)` arm added to `hir_module_declares_item`).
+`jj`/`git` commit at file granularity, so committing this fix would also land
+that untested WIP under this commit — exactly the clobber the VCS rules forbid.
+The fix is therefore parked as an applies-cleanly patch; land it with
+`git apply doc/08_tracking/bug/patch/hir_facade_selfhop_2026-07-28.patch` once
+that WIP is committed or reverted by its owner.
+
+### Do not repeat (added)
+
+- Do not look for the cost in `resolve_package_sibling_symbols` itself, in
+  `define()`, or in module-copy overhead. It is 100% inside
+  `find_reexport_source`'s export-list walk.
