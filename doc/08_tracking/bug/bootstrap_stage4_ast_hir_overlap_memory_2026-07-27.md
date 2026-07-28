@@ -249,3 +249,22 @@ env CARGO_BUILD_JOBS=1 cargo test --locked --offline \
 
 This closes the Stage-2 symbol divergence only. Stage-4 admission, live slope,
 deployment, and production SSpec/docgen remain pending the final strict retry.
+
+## 2026-07-28 final strict retry
+
+The third and final strict retry rebuilt the Rust authority, completed and
+sanity-checked both pure-Simple Stage 2 and self-hosted Stage 3, and therefore
+confirmed the transient-promotion runtime repair through the prior link
+failure. Stage 4 stopped before compilation because the fail-closed source
+fingerprint found `src/app/spostgre` dangling to
+`../../examples/spostgre/src/tool` and reported
+`could not fingerprint Stage 4 source authority`.
+
+The run took 37m35s, peaked at 2,558,236 KiB RSS, and performed zero swaps.
+Stage 2 SHA-256 was
+`5f3a4a4eb948ffb2cb2f19b159d2b7b1d344879fa275da7d57bf313636f302af`;
+Stage 3 SHA-256 was
+`94d193374dd212f962bce4ef6b3c62516cd4bfee0d7b728c0d40754d76de8343`.
+No Stage-4 candidate was admitted or deployed, so the NVMe post-bootstrap
+SSpec/docgen gate was not run. The next bounded session must repair or remove
+the dangling source link before one new strict bootstrap attempt.
