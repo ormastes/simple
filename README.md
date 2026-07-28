@@ -1,5 +1,7 @@
 # Simple Language
 
+[![MCP Toplist](https://mcptoplist.com/badge/pulsemcp%2Fsimple-language.svg)](https://mcptoplist.com/server/pulsemcp%2Fsimple-language)
+
 [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)](doc/archive/release/PRODUCTION_READY_SUMMARY.md)
 [![Tests](https://img.shields.io/badge/tests-4067%2F4067%20passing-brightgreen)](doc/09_report/session/full_test_suite_results_2026-02-14.md)
 [![Multiplatform Bootstrap](https://github.com/ormastes/simple/actions/workflows/rust-bootstrap-multiplatform.yml/badge.svg)](.github/workflows/rust-bootstrap-multiplatform.yml)
