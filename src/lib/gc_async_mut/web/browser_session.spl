@@ -23,6 +23,7 @@
 # - browser_session_loading.spl   — impl BrowserSession: stylesheet/script loading
 
 use common.string_builder.{StringBuilder}
+use common.web.browser_renderer_protocol.{BROWSER_RENDERER_MAX_PAYLOAD_BYTES}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
@@ -334,7 +335,9 @@ class BrowserLoadState:
     warnings: [text]
     style_sources: [BrowserStylesheetSource]
     next_style_idx: i32
-    current_style_html: text
+    stylesheet_source_bytes: i64
+    stylesheet_html_bytes: i64
+    stylesheet_html_chunks: [text]
     pending_module: BrowserPendingModuleEval?
 
     static fn create(document_url: text, source_html: text, target_index: i32, push_history: bool, script_blocks: [BrowserScriptBlock], style_sources: [BrowserStylesheetSource]) -> BrowserLoadState:
@@ -348,7 +351,9 @@ class BrowserLoadState:
             warnings: [],
             style_sources: style_sources,
             next_style_idx: 0,
-            current_style_html: "",
+            stylesheet_source_bytes: 0,
+            stylesheet_html_bytes: 0,
+            stylesheet_html_chunks: [],
             pending_module: nil
         )
 
@@ -365,6 +370,35 @@ impl BrowserLoadState:
             if existing == bounded:
                 return
         self.warnings.push(bounded)
+
+    me admit_stylesheet(
+        document_url: text, base_url: text, css_text: text
+    ) -> BrowserStylesheetExpansion?:
+        val source_bytes = css_text.len()
+        if (source_bytes > BROWSER_RENDERER_MAX_PAYLOAD_BYTES -
+            self.stylesheet_source_bytes):
+            self.append_warning(
+                "stylesheet byte limit reached; remaining styles ignored"
+            )
+            self.next_style_idx = self.style_sources.len()
+            return nil
+        val expanded = expand_stylesheet_text(document_url, base_url, css_text)
+        val html_bytes = expanded.html.len()
+        if (html_bytes > BROWSER_RENDERER_MAX_PAYLOAD_BYTES -
+            self.stylesheet_html_bytes):
+            self.append_warning(
+                "stylesheet byte limit reached; remaining styles ignored"
+            )
+            self.next_style_idx = self.style_sources.len()
+            return nil
+        self.stylesheet_source_bytes = self.stylesheet_source_bytes + source_bytes
+        self.stylesheet_html_bytes = self.stylesheet_html_bytes + html_bytes
+        if expanded.html != "":
+            self.stylesheet_html_chunks.push(expanded.html)
+        Some(expanded)
+
+    fn stylesheet_html() -> text:
+        self.stylesheet_html_chunks.join("")
 
 class BrowserRuntimeState:
     runtime: JsRuntime
@@ -2310,14 +2344,15 @@ impl BrowserSession:
                 load.append_warning("stylesheet load error: {response.error}")
             else:
                 self._apply_response_headers(response.headers, response.url)
-                val expanded = expand_stylesheet_text(load.document_url, response.url, response.body)
-                load.current_style_html = load.current_style_html + expanded.html
-                if expanded.sources.len() > 0:
-                    load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
-                    if load.style_sources.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
-                        load.append_warning(
-                            "stylesheet resource limit reached; additional styles ignored"
-                        )
+                if val Some(expanded) = load.admit_stylesheet(
+                    load.document_url, response.url, response.body
+                ):
+                    if expanded.sources.len() > 0:
+                        load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                        if load.style_sources.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+                            load.append_warning(
+                                "stylesheet resource limit reached; additional styles ignored"
+                            )
             # Persist the fetched stylesheet body (and any newly inserted @import
             # sources) back into the active load before re-entering the loader.
             # _advance_stylesheet_loading re-unwraps self.active_load, and a

@@ -20,7 +20,7 @@ use std.gc_async_mut.web.browser_session_url.{
 use common.web.public_suffix.{is_public_suffix}
 use common.web.host_policy.{is_ip_host_literal}
 use std.gc_async_mut.web.browser_session_html.{
-    expand_stylesheet_text, insert_stylesheet_sources, _guest_runtime_probe_url,
+    insert_stylesheet_sources, _guest_runtime_probe_url,
     html_to_text, escape_html_text
 }
 use std.gc_async_mut.web.browser_session_modules.{
@@ -460,15 +460,16 @@ impl BrowserSession:
                     ):
                         load.append_warning("CSP blocked inline style")
                         continue
-                    val expanded = expand_stylesheet_text(load.document_url, load.document_url, source.source)
-                    load.current_style_html = load.current_style_html + expanded.html
-                    if expanded.sources.len() > 0:
-                        load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
-                        if load.style_sources.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
-                            load.append_warning(
-                                "stylesheet resource limit reached; additional styles ignored"
-                            )
-                        style_source_count = load.style_sources.len()
+                    if val Some(expanded) = load.admit_stylesheet(
+                        load.document_url, load.document_url, source.source
+                    ):
+                        if expanded.sources.len() > 0:
+                            load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                            if load.style_sources.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+                                load.append_warning(
+                                    "stylesheet resource limit reached; additional styles ignored"
+                                )
+                            style_source_count = load.style_sources.len()
                     continue
                 if source.kind == "external":
                     val resolved = resolve_relative_url(load.document_url, source.source)
@@ -479,15 +480,16 @@ impl BrowserSession:
                         load.append_warning("CSP blocked style: {resolved}")
                         continue
                     if val Some(override_body) = pair_value(self.resource_overrides, resolved):
-                        val expanded = expand_stylesheet_text(load.document_url, resolved, override_body)
-                        load.current_style_html = load.current_style_html + expanded.html
-                        if expanded.sources.len() > 0:
-                            load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
-                            if load.style_sources.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
-                                load.append_warning(
-                                    "stylesheet resource limit reached; additional styles ignored"
-                                )
-                            style_source_count = load.style_sources.len()
+                        if val Some(expanded) = load.admit_stylesheet(
+                            load.document_url, resolved, override_body
+                        ):
+                            if expanded.sources.len() > 0:
+                                load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                                if load.style_sources.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+                                    load.append_warning(
+                                        "stylesheet resource limit reached; additional styles ignored"
+                                    )
+                                style_source_count = load.style_sources.len()
                         continue
                     # Persist the advanced cursor before suspending on the network
                     # request. A method-local Option unwrap only writes back on
@@ -503,11 +505,11 @@ impl BrowserSession:
                 self._finalize_active_load(load)
                 self.active_load = nil
                 return Ok(true)
-            # Persist the accumulated stylesheet state back into the active load
+            # Persist the accumulated stylesheet chunks back into the active load
             # before delegating to script loading. Method-local unwraps of
             # `self.active_load` only write back on return, so the nested
             # `_advance_script_loading` re-unwrap would otherwise observe a stale
-            # load with empty `current_style_html`.
+            # load with empty stylesheet state.
             self.active_load = Some(load)
         self._trace_guest("styles complete")
         self._advance_script_loading()
@@ -735,7 +737,7 @@ impl BrowserSession:
         self._trace_guest("finalize load start")
         if _guest_runtime_probe_url(load.document_url):
             self.current_url = load.document_url
-            self.current_style_html = load.current_style_html
+            self.current_style_html = load.stylesheet_html()
             self.animation_start_time_ms = self.monotonic_time_ms
             self._replace_warnings(load.warnings)
             self._trace_guest("finalize load done")
@@ -748,7 +750,7 @@ impl BrowserSession:
             self.active_load = nil
             val _ = self.begin_network_navigation(redirected_url, "GET", "", "", "")
             return
-        self.current_style_html = load.current_style_html
+        self.current_style_html = load.stylesheet_html()
         self.animation_start_time_ms = self.monotonic_time_ms
         self._update_history(load.document_url, load.source_html, load.target_index, load.push_history)
         self._replace_warnings(load.warnings)
@@ -758,7 +760,7 @@ impl BrowserSession:
         """Keep the document and resources completed before Stop was pressed."""
         if self.current_url != load.document_url:
             return
-        self.current_style_html = load.current_style_html
+        self.current_style_html = load.stylesheet_html()
         self.animation_start_time_ms = self.monotonic_time_ms
         self._update_history(load.document_url, load.source_html, load.target_index, load.push_history)
         self._replace_warnings(load.warnings)

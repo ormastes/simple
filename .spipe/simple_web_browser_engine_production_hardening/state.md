@@ -1523,3 +1523,13 @@ implementation in progress / target evidence blocked
   current request or mutate cookies/HSTS. Focused regressions prove the stale
   response is rejected, the current fetch remains commit-able, and URL mismatch
   retry succeeds without adding a counter, registry, or request-path scan.
+- Stylesheet loading now applies the architecture's shared 1 MiB source
+  envelope cumulatively to both raw CSS and retained expanded style HTML across
+  inline, override, network, and `@import` paths. Overflow preserves the
+  admitted prefix, warns once, and stops the remaining CSS lane before more
+  parsing/import work. Retained style chunks join once at finalization instead
+  of copying the cumulative string for every sheet. A boundary regression and
+  a real `#2563eb` rendered-pixel assertion cover the budget and normal CSS.
+  The optimizer/perf runner remains unexecuted because the admitted pure-Simple
+  CLI crash and three-cycle build cap are unchanged; no bootstrap/seed fallback
+  was used.

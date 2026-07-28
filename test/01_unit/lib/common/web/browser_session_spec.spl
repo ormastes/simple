@@ -1,8 +1,10 @@
 use std.spec.*
 
 use std.gc_async_mut.web.browser_session.{
-    BrowserRequest, BrowserResponse, BrowserSession
+    BrowserLoadState, BrowserRequest, BrowserResponse, BrowserSession,
+    BrowserStylesheetSource
 }
+use common.web.browser_renderer_protocol.{BROWSER_RENDERER_MAX_PAYLOAD_BYTES}
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_loading.*
 use std.js.types.js_types.{JsValue}
@@ -192,16 +194,54 @@ describe "BrowserSession page loading":
             Err(e) =>
                 fail("Expected inline style blocks to remain in rendered session document: {e}")
 
+    it "bounds cumulative stylesheet source and retained HTML bytes":
+        var load = BrowserLoadState.create(
+            "https://example.com/", "", -1, true, [],
+            [BrowserStylesheetSource.external("/later.css")]
+        )
+        val accepted_html = "<style>x</style>"
+        load.stylesheet_source_bytes = BROWSER_RENDERER_MAX_PAYLOAD_BYTES - 1
+        load.stylesheet_html_bytes = (
+            BROWSER_RENDERER_MAX_PAYLOAD_BYTES - accepted_html.len()
+        )
+
+        match load.admit_stylesheet(
+            "https://example.com/", "https://example.com/", "x"
+        ):
+            Some(expanded): expect(expanded.html).to_equal(accepted_html)
+            nil: fail("Expected exact stylesheet byte boundary to be admitted")
+        expect(load.stylesheet_source_bytes).to_equal(
+            BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+        )
+        expect(load.stylesheet_html_bytes).to_equal(
+            BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+        )
+        match load.admit_stylesheet(
+            "https://example.com/", "https://example.com/", "y"
+        ):
+            Some(_): fail("Expected stylesheet overflow to be rejected")
+            nil: expect(load.next_style_idx).to_equal(1)
+        expect(load.stylesheet_html()).to_equal(accepted_html)
+        expect(load.warnings.join("|")).to_contain(
+            "stylesheet byte limit reached; remaining styles ignored"
+        )
+
     it "loads linked stylesheets through the session request pump":
         var session = BrowserSession.new()
-        session.register_resource("https://example.com/site.css", "body { background: rgb(1, 2, 3); }")
+        session.register_resource(
+            "https://example.com/site.css",
+            ".card { width: 12px; height: 8px; background-color: #2563eb; }"
+        )
         val result = session.open_html(
             "https://example.com/index.html",
-            "<html><head><link rel='stylesheet' href='/site.css'></head><body>styled</body></html>"
+            "<html><head><link rel='stylesheet' href='/site.css'></head><body><div class='card'></div></body></html>"
         )
         match result:
             Ok(_) =>
-                expect(session.current_style_html).to_contain("background: rgb(1, 2, 3);")
+                expect(session.current_style_html).to_contain("background-color: #2563eb;")
+                expect(session.render(32, 24).pixel_data).to_contain(
+                    0xFF2563EBu32
+                )
                 expect(session.warnings.len()).to_equal(0)
             Err(e) =>
                 fail("Expected linked stylesheet resource to load through the session pump: {e}")
