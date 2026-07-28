@@ -78,6 +78,21 @@ fn be_dom_event_identity(node: BeDomNode) -> text:
         return author_id
     "node:{node.node_id}"
 
+fn be_dom_route_identity(node: BeDomNode) -> text:
+    "\u{0000}route-node:{node.node_id}"
+
+fn be_dom_route_node_id(target_id: text) -> i64:
+    val prefix = "\u{0000}route-node:"
+    if not target_id.starts_with(prefix):
+        return -1
+    target_id.substring(prefix.len(), target_id.len()).to_i64() ?? -1
+
+fn be_dom_matches_identity(node: BeDomNode, target_id: text) -> bool:
+    val route_node_id = be_dom_route_node_id(target_id)
+    if route_node_id >= 0:
+        return node.node_id == route_node_id
+    be_dom_event_identity(node) == target_id
+
 fn _be_dom_layout_element(node: BeDomNode) -> bool:
     (
         node.tag_name != "#text" and node.tag_name != "style" and
@@ -113,9 +128,11 @@ fn be_dom_event_identity_at_element_path(
     be_dom_event_identity(current)
 
 fn _be_dom_layout_target_key_from(
-    node: BeDomNode, target_id: text, path: text
+    node: BeDomNode, target_id: text, route_node_id: i64, path: text
 ) -> text:
-    if be_dom_event_identity(node) == target_id:
+    if route_node_id >= 0 and node.node_id == route_node_id:
+        return "path:{path}"
+    if route_node_id < 0 and be_dom_event_identity(node) == target_id:
         val author_id = be_dom_get_attr(node, "id")
         if author_id != "":
             return "id:{author_id}"
@@ -128,7 +145,7 @@ fn _be_dom_layout_target_key_from(
             else:
                 "{path}/{ordinal}"
             val found = _be_dom_layout_target_key_from(
-                child, target_id, child_path
+                child, target_id, route_node_id, child_path
             )
             if found != "":
                 return found
@@ -141,7 +158,9 @@ pub fn be_dom_layout_target_key(root: BeDomNode, target_id: text) -> text:
     val bodies = be_dom_find_by_tag(root, "body")
     if bodies.len() == 0:
         return ""
-    _be_dom_layout_target_key_from(bodies[0], target_id, "")
+    _be_dom_layout_target_key_from(
+        bodies[0], target_id, be_dom_route_node_id(target_id), ""
+    )
 
 fn _be_dom_void_tag(tag: text) -> bool:
     (
@@ -392,12 +411,14 @@ fn be_dom_create_pointer_event_with_modifiers(node: BeDomNode, event_type: text,
     event.shift_key = shift_key
     event
 
-fn _be_dom_empty_dispatch(event: BeDomEvent) -> BeDomEventDispatch:
+fn _be_dom_empty_dispatch(event: BeDomEvent, target_route_id: text) -> BeDomEventDispatch:
     BeDomEventDispatch(
         event: event,
+        target_route_id: target_route_id,
         actions: [],
         phases: [],
         current_target_ids: [],
+        current_target_route_ids: [],
         default_action: "",
         default_action_allowed: false
     )
@@ -417,6 +438,7 @@ fn _be_dom_append_action(dispatch: BeDomEventDispatch, node: BeDomNode, action: 
     next.actions.push(action)
     next.phases.push(phase)
     next.current_target_ids.push(be_dom_event_identity(node))
+    next.current_target_route_ids.push(be_dom_route_identity(node))
     next.event.current_target_id = be_dom_event_identity(node)
     next.event.current_target_tag = node.tag_name
     next.event = _be_dom_apply_listener_control(next.event, action)
@@ -487,14 +509,18 @@ fn be_dom_dispatch_event(node: BeDomNode, event_type: text, bubbles: bool, cance
 fn be_dom_dispatch_event_path(path: [BeDomNode], event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
     if path.len() == 0:
         val event = BeDomEvent.create(normalize_dom_event_type(event_type), "", "", "", "", bubbles, cancelable)
-        return _be_dom_empty_dispatch(event)
+        return _be_dom_empty_dispatch(event, "")
     val target = path[path.len() - 1]
     if normalize_dom_event_type(event_type) == "click" and
        be_dom_has_attr(target, "disabled"):
         return _be_dom_empty_dispatch(
-            be_dom_create_event(target, event_type, bubbles, cancelable)
+            be_dom_create_event(target, event_type, bubbles, cancelable),
+            be_dom_route_identity(target)
         )
-    var dispatch = _be_dom_empty_dispatch(be_dom_create_event(target, event_type, bubbles, cancelable))
+    var dispatch = _be_dom_empty_dispatch(
+        be_dom_create_event(target, event_type, bubbles, cancelable),
+        be_dom_route_identity(target)
+    )
     var i = 0
     while i + 1 < path.len():
         dispatch = _be_dom_dispatch_node(dispatch, path[i], "capture", "capture", false)
@@ -522,11 +548,18 @@ fn be_dom_dispatch_event_path(path: [BeDomNode], event_type: text, bubbles: bool
             ancestor = ancestor - 1
     _be_dom_finish_default_action(dispatch, target, event_type)
 
-fn be_dom_find_path_to_id(root: BeDomNode, target_id: text) -> [BeDomNode]:
-    if be_dom_event_identity(root) == target_id:
+fn _be_dom_find_path_to_identity(
+    root: BeDomNode, target_id: text, route_node_id: i64
+) -> [BeDomNode]:
+    if (
+        (route_node_id >= 0 and root.node_id == route_node_id) or
+        (route_node_id < 0 and be_dom_event_identity(root) == target_id)
+    ):
         return [root]
     for child in root.children:
-        val child_path = be_dom_find_path_to_id(child, target_id)
+        val child_path = _be_dom_find_path_to_identity(
+            child, target_id, route_node_id
+        )
         if child_path.len() > 0:
             var path: [BeDomNode] = [root]
             for item in child_path:
@@ -534,11 +567,25 @@ fn be_dom_find_path_to_id(root: BeDomNode, target_id: text) -> [BeDomNode]:
             return path
     []
 
+fn be_dom_find_path_to_id(root: BeDomNode, target_id: text) -> [BeDomNode]:
+    _be_dom_find_path_to_identity(
+        root, target_id, be_dom_route_node_id(target_id)
+    )
+
 fn be_dom_focused_id(root: BeDomNode) -> text:
     if be_dom_has_attr(root, "data-focused"):
         return be_dom_event_identity(root)
     for child in root.children:
         val focused_id = be_dom_focused_id(child)
+        if focused_id != "":
+            return focused_id
+    ""
+
+fn be_dom_focused_route_id(root: BeDomNode) -> text:
+    if be_dom_has_attr(root, "data-focused"):
+        return be_dom_route_identity(root)
+    for child in root.children:
+        val focused_id = be_dom_focused_route_id(child)
         if focused_id != "":
             return focused_id
     ""
@@ -575,7 +622,7 @@ fn _be_dom_is_focusable_node(node: BeDomNode) -> bool:
     focusable
 
 fn _be_dom_collect_focus_order(
-    node: BeDomNode, order: _BeDomFocusOrder
+    node: BeDomNode, order: _BeDomFocusOrder, route_ids: bool
 ):
     if be_dom_has_attr(node, "hidden") or be_dom_get_display(node) == "none":
         return
@@ -586,7 +633,10 @@ fn _be_dom_collect_focus_order(
         if val Some(parsed_tab_index) = raw_tab_index.to_i64():
             tab_index = parsed_tab_index
     if focusable:
-        val target_id = be_dom_event_identity(node)
+        val target_id = if route_ids:
+            be_dom_route_identity(node)
+        else:
+            be_dom_event_identity(node)
         if tab_index > 0:
             var insert_at = 0
             while (
@@ -599,15 +649,15 @@ fn _be_dom_collect_focus_order(
         else:
             order.regular_ids.push(target_id)
     for child in node.children:
-        _be_dom_collect_focus_order(child, order)
+        _be_dom_collect_focus_order(child, order, route_ids)
 
-fn be_dom_next_focus_id(
-    root: BeDomNode, current_id: text, reverse: bool
+fn _be_dom_next_focus_id(
+    root: BeDomNode, current_id: text, reverse: bool, route_ids: bool
 ) -> text:
     val order = _BeDomFocusOrder(
         positive_ids: [], positive_tab_indexes: [], regular_ids: []
     )
-    _be_dom_collect_focus_order(root, order)
+    _be_dom_collect_focus_order(root, order, route_ids)
     var ids = order.positive_ids
     for target_id in order.regular_ids:
         ids.push(target_id)
@@ -627,6 +677,16 @@ fn be_dom_next_focus_id(
     if current_index < 0 or current_index + 1 >= ids.len():
         return ids[0]
     ids[current_index + 1]
+
+fn be_dom_next_focus_id(
+    root: BeDomNode, current_id: text, reverse: bool
+) -> text:
+    _be_dom_next_focus_id(root, current_id, reverse, false)
+
+fn be_dom_next_focus_route_id(
+    root: BeDomNode, current_id: text, reverse: bool
+) -> text:
+    _be_dom_next_focus_id(root, current_id, reverse, true)
 
 fn be_dom_form_owner_id(root: BeDomNode, target_id: text) -> text:
     val path = be_dom_find_path_to_id(root, target_id)
@@ -648,6 +708,8 @@ fn be_dom_form_owner_id(root: BeDomNode, target_id: text) -> text:
     var ancestor = path.len() - 2
     while ancestor >= 0:
         if path[ancestor].tag_name == "form":
+            if target_id.starts_with("\u{0000}route-node:"):
+                return be_dom_route_identity(path[ancestor])
             return be_dom_event_identity(path[ancestor])
         ancestor = ancestor - 1
     ""
@@ -679,7 +741,10 @@ fn _be_dom_default_submitter_id(
         elif node.tag_name == "input":
             is_submitter = be_dom_get_attr(node, "type").lower() == "submit"
         if is_submitter:
-            val target_id = be_dom_event_identity(node)
+            val target_id = if form_id.starts_with("\u{0000}route-node:"):
+                be_dom_route_identity(node)
+            else:
+                be_dom_event_identity(node)
             if be_dom_form_owner_id(root, target_id) == form_id:
                 return target_id
     for child in node.children:
@@ -712,7 +777,10 @@ fn _be_dom_implicit_submit_blocker_count(
 ) -> i32:
     var count = 0
     if be_dom_input_blocks_implicit_submission(node):
-        val target_id = be_dom_event_identity(node)
+        val target_id = if form_id.starts_with("\u{0000}route-node:"):
+            be_dom_route_identity(node)
+        else:
+            be_dom_event_identity(node)
         if be_dom_form_owner_id(root, target_id) == form_id:
             count = 1
     for child in node.children:
@@ -736,7 +804,7 @@ fn be_dom_dispatch_event_to_id(root: BeDomNode, target_id: text, event_type: tex
     val path = be_dom_find_path_to_id(root, target_id)
     if path.len() == 0:
         val event = BeDomEvent.create(normalize_dom_event_type(event_type), "", "", "", "", bubbles, cancelable)
-        return _be_dom_empty_dispatch(event)
+        return _be_dom_empty_dispatch(event, "")
     be_dom_dispatch_event_path(path, event_type, bubbles, cancelable)
 
 fn be_dom_apply_default_action(node: BeDomNode, action: text) -> BeDomNode:
@@ -781,13 +849,16 @@ fn be_dom_checked_radio_id_for_target(root: BeDomNode, target_id: text) -> text:
             be_dom_get_attr(input, "name") == name and
             be_dom_has_attr(input, "checked")
         ):
-            val candidate_id = be_dom_event_identity(input)
+            val candidate_id = be_dom_route_identity(input)
             val candidate_path = be_dom_find_path_to_id(root, candidate_id)
             if _be_dom_radio_form_id(candidate_path) == form_id:
-                return candidate_id
+                return be_dom_route_identity(input)
     ""
 
-fn _be_dom_uncheck_radio_group(node: BeDomNode, name: text, form_id: i64, current_form_id: i64, target_id: text) -> BeDomNode:
+fn _be_dom_uncheck_radio_group(
+    node: BeDomNode, name: text, form_id: i64, current_form_id: i64,
+    target_id: text, target_route_node_id: i64
+) -> BeDomNode:
     var next = node
     var owner_id = current_form_id
     if next.tag_name == "form":
@@ -796,22 +867,35 @@ fn _be_dom_uncheck_radio_group(node: BeDomNode, name: text, form_id: i64, curren
         next.tag_name == "input" and
         be_dom_get_attr(next, "type").lower() == "radio" and
         be_dom_get_attr(next, "name") == name and owner_id == form_id and
-        be_dom_event_identity(next) != target_id
+        not (
+            (target_route_node_id >= 0 and
+             next.node_id == target_route_node_id) or
+            (target_route_node_id < 0 and
+             be_dom_event_identity(next) == target_id)
+        )
     ):
         next.remove_attr("checked")
     var children: [BeDomNode] = []
     for child in next.children:
         children.push(_be_dom_uncheck_radio_group(
-            child, name, form_id, owner_id, target_id
+            child, name, form_id, owner_id, target_id,
+            target_route_node_id
         ))
     be_dom_set_children(next, children)
 
-fn _be_dom_apply_default_action_to_id(node: BeDomNode, target_id: text, action: text) -> BeDomNode:
-    if be_dom_event_identity(node) == target_id:
+fn _be_dom_apply_default_action_to_id(
+    node: BeDomNode, target_id: text, route_node_id: i64, action: text
+) -> BeDomNode:
+    if (
+        (route_node_id >= 0 and node.node_id == route_node_id) or
+        (route_node_id < 0 and be_dom_event_identity(node) == target_id)
+    ):
         return be_dom_apply_default_action(node, action)
     var children: [BeDomNode] = []
     for child in node.children:
-        children.push(_be_dom_apply_default_action_to_id(child, target_id, action))
+        children.push(_be_dom_apply_default_action_to_id(
+            child, target_id, route_node_id, action
+        ))
     be_dom_set_children(node, children)
 
 fn _be_dom_clear_focus(node: BeDomNode) -> BeDomNode:
@@ -831,7 +915,8 @@ fn be_dom_apply_default_action_to_id(root: BeDomNode, target_id: text, action: t
         next = _be_dom_clear_focus(next)
         if action != "focus-element":
             next = _be_dom_apply_default_action_to_id(
-                next, target_id, "focus-element"
+                next, target_id, be_dom_route_node_id(target_id),
+                "focus-element"
             )
     if action == "input-radio-select":
         val path = be_dom_find_path_to_id(root, target_id)
@@ -839,9 +924,12 @@ fn be_dom_apply_default_action_to_id(root: BeDomNode, target_id: text, action: t
             val name = be_dom_get_attr(path[path.len() - 1], "name")
             if name != "":
                 next = _be_dom_uncheck_radio_group(
-                    next, name, _be_dom_radio_form_id(path), -1, target_id
+                    next, name, _be_dom_radio_form_id(path), -1, target_id,
+                    be_dom_route_node_id(target_id)
                 )
-    _be_dom_apply_default_action_to_id(next, target_id, action)
+    _be_dom_apply_default_action_to_id(
+        next, target_id, be_dom_route_node_id(target_id), action
+    )
 
 fn be_dom_dispatch_event_apply_default(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool) -> BeDomNode:
     val dispatch = be_dom_dispatch_event(node, event_type, bubbles, cancelable)
@@ -899,7 +987,9 @@ fn be_dom_set_children(node: BeDomNode, children: [BeDomNode]) -> BeDomNode:
 
 export be_dom_add_child, be_dom_get_children, be_dom_remove_child, be_dom_insert_before
 export be_dom_set_attr, be_dom_get_attr, be_dom_set_style, be_dom_get_style
-export be_dom_event_identity, be_dom_event_identity_at_element_path
+export be_dom_event_identity, be_dom_route_identity, be_dom_route_node_id
+export be_dom_matches_identity
+export be_dom_event_identity_at_element_path
 export be_dom_layout_target_key
 export be_dom_serialize_html, be_dom_serialize_children
 export be_dom_set_text_content, be_dom_get_text_content
@@ -919,8 +1009,8 @@ export be_dom_query_selector, be_dom_dispatch_event_actions
 export be_dom_get_event_listener_count
 export be_dom_create_event, be_dom_create_pointer_event, be_dom_create_pointer_event_with_modifiers
 export be_dom_dispatch_event, be_dom_dispatch_event_path, be_dom_dispatch_event_to_id
-export be_dom_find_path_to_id, be_dom_focused_id
-export be_dom_next_focus_id
+export be_dom_find_path_to_id, be_dom_focused_id, be_dom_focused_route_id
+export be_dom_next_focus_id, be_dom_next_focus_route_id
 export be_dom_form_owner_id, be_dom_submit_form_owner_id
 export be_dom_default_submitter_id
 export be_dom_form_allows_direct_implicit_submit

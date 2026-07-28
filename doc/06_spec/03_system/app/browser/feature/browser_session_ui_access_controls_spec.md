@@ -107,6 +107,12 @@ buttons/links and Space activates checkbox/radio controls through the identical
 click/default-action path. A cancelable bubbling `keydown` runs first; its
 mutation is visible to activation and `prevent-default` suppresses the click.
 
+#### routes duplicate author IDs by exact DOM node identity
+
+Editing the second of two inputs with the same author `id` changes, focuses,
+and dispatches the listener mutation only on that second input. The first input
+remains unchanged while public author IDs retain their original value.
+
 #### hides secret form state and edits textarea through one focused route
 
 Hidden controls are absent, password values are redacted, and textarea edits

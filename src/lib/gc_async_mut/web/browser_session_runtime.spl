@@ -17,13 +17,14 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_dispatch_event_to_id, be_dom_find_by_tag, be_dom_find_path_to_id,
-    be_dom_focused_id, be_dom_get_attr, be_dom_has_attr,
+    be_dom_focused_route_id, be_dom_get_attr, be_dom_has_attr,
+    be_dom_route_identity,
     be_dom_serialize_children,
     be_dom_serialize_html, be_dom_set_children,
     be_dom_submit_form_owner_id, be_dom_keyboard_activation_event_for_target,
     be_dom_checked_radio_id_for_target, be_dom_form_owner_id,
     be_dom_default_submitter_id, be_dom_form_allows_direct_implicit_submit,
-    be_dom_input_blocks_implicit_submission, be_dom_next_focus_id
+    be_dom_input_blocks_implicit_submission, be_dom_next_focus_route_id
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_build, html_tree_builder_build_with_scripts
@@ -279,6 +280,12 @@ fn _browser_session_focus_default(action: text) -> bool:
     action == "focus-element" or action == "button-activate" or
         action == "input-checkbox-toggle" or action == "input-radio-select"
 
+fn _browser_session_dom_route_id(root: BeDomNode, target_id: text) -> text:
+    val path = be_dom_find_path_to_id(root, target_id)
+    if path.len() == 0:
+        return target_id
+    be_dom_route_identity(path[path.len() - 1])
+
 fn _browser_session_checkable_click_action(
     root: BeDomNode, target_id: text, event_type: text
 ) -> text:
@@ -504,30 +511,33 @@ impl BrowserSession:
             self.runtime_state = Some(state)
 
     me dispatch_dom_event(target_id: text, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
+        val target_route_id = _browser_session_dom_route_id(
+            self.current_dom, target_id
+        )
         val checkable_action = _browser_session_checkable_click_action(
-            self.current_dom, target_id, event_type
+            self.current_dom, target_route_id, event_type
         )
         var checked_before = false
         var checked_radio_before = ""
         if checkable_action != "":
-            val focused_id = be_dom_focused_id(self.current_dom)
-            if focused_id != "" and focused_id != target_id:
+            val focused_id = be_dom_focused_route_id(self.current_dom)
+            if focused_id != "" and focused_id != target_route_id:
                 val _ = self._blur_dom_focus(focused_id)
-            val path = be_dom_find_path_to_id(self.current_dom, target_id)
+            val path = be_dom_find_path_to_id(self.current_dom, target_route_id)
             if path.len() > 0:
                 checked_before = be_dom_has_attr(
                     path[path.len() - 1], "checked"
                 )
             if checkable_action == "input-radio-select":
                 checked_radio_before = be_dom_checked_radio_id_for_target(
-                    self.current_dom, target_id
+                    self.current_dom, target_route_id
                 )
             self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, target_id, checkable_action, true
+                self.current_dom, target_route_id, checkable_action, true
             )
             self._sync_runtime_body_from_dom()
         val dispatch = be_dom_dispatch_event_to_id(
-            self.current_dom, target_id, event_type, bubbles, cancelable
+            self.current_dom, target_route_id, event_type, bubbles, cancelable
         )
         self.dom_callback_count = (
             self.dom_callback_count + dispatch.actions.len().to_i64()
@@ -538,7 +548,7 @@ impl BrowserSession:
             if _browser_session_dom_action(action):
                 self.current_dom = script_host_apply_action_to_id(
                     self.current_dom,
-                    dispatch.current_target_ids[action_index],
+                    dispatch.current_target_route_ids[action_index],
                     action,
                     false
                 )
@@ -552,11 +562,12 @@ impl BrowserSession:
             else:
                 "remove-attr:checked"
             self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, target_id, restore_action, false
+                self.current_dom, target_route_id, restore_action, false
             )
             if (
                 checkable_action == "input-radio-select" and
-                checked_radio_before != "" and checked_radio_before != target_id
+                checked_radio_before != "" and
+                checked_radio_before != target_route_id
             ):
                 self.current_dom = script_host_apply_action_to_id(
                     self.current_dom, checked_radio_before,
@@ -565,10 +576,10 @@ impl BrowserSession:
         if dispatch.default_action_allowed:
             var focus_changed = false
             if _browser_session_focus_default(dispatch.default_action):
-                val focused_id = be_dom_focused_id(self.current_dom)
-                focus_changed = focused_id != dispatch.event.target_id
+                val focused_id = be_dom_focused_route_id(self.current_dom)
+                focus_changed = focused_id != dispatch.target_route_id
                 if focused_id != "" and
-                   focused_id != dispatch.event.target_id:
+                   focused_id != dispatch.target_route_id:
                     val _ = self._blur_dom_focus(focused_id)
             if dispatch.default_action.starts_with("navigate:"):
                 val href = dispatch.default_action.substring(9, dispatch.default_action.len())
@@ -579,32 +590,32 @@ impl BrowserSession:
                 return dispatch
             if checkable_action == "":
                 self.current_dom = script_host_apply_action_to_id(
-                    self.current_dom, dispatch.event.target_id,
+                    self.current_dom, dispatch.target_route_id,
                     dispatch.default_action, true
                 )
             else:
                 self._sync_body_html_from_dom()
                 val _ = self.dispatch_dom_event(
-                    dispatch.event.target_id, "input", true, false
+                    dispatch.target_route_id, "input", true, false
                 )
                 val _ = self.dispatch_dom_event(
-                    dispatch.event.target_id, "change", true, false
+                    dispatch.target_route_id, "change", true, false
                 )
             if focus_changed:
                 if event_type != "focus":
                     val _ = self.dispatch_dom_event(
-                        dispatch.event.target_id, "focus", false, false
+                        dispatch.target_route_id, "focus", false, false
                     )
                 val _ = self.dispatch_dom_event(
-                    dispatch.event.target_id, "focusin", true, false
+                    dispatch.target_route_id, "focusin", true, false
                 )
             if event_type == "click" and dispatch.default_action == "button-activate":
                 val form_id = be_dom_submit_form_owner_id(
-                    self.current_dom, dispatch.event.target_id
+                    self.current_dom, dispatch.target_route_id
                 )
                 if form_id != "":
                     val _ = self._submit_dom_form(
-                        form_id, dispatch.event.target_id
+                        form_id, dispatch.target_route_id
                     )
         self._sync_body_html_from_dom()
         dispatch
@@ -791,21 +802,24 @@ impl BrowserSession:
             return self.dispatch_dom_keyboard_event(target_id, key, pressed)
         self.pending_space_activation_target = ""
         if target_id != "":
+            val current_route_id = _browser_session_dom_route_id(
+                self.current_dom, target_id
+            )
             val key_dispatch = self.dispatch_dom_event(
                 target_id, "keydown", true, true
             )
             if key_dispatch.event.default_prevented:
                 return Ok(key_dispatch)
-            val next_id = be_dom_next_focus_id(
-                self.current_dom, target_id, shift_key
+            val next_id = be_dom_next_focus_route_id(
+                self.current_dom, current_route_id, shift_key
             )
-            if next_id == "" or next_id == target_id:
+            if next_id == "" or next_id == current_route_id:
                 return Ok(key_dispatch)
             val _ = self._blur_dom_focus(target_id)
             return Ok(self.dispatch_dom_event(
                 next_id, "focus", false, false
             ))
-        val next_id = be_dom_next_focus_id(
+        val next_id = be_dom_next_focus_route_id(
             self.current_dom, "", shift_key
         )
         if next_id == "":
@@ -828,7 +842,8 @@ impl BrowserSession:
             not text_is_valid_utf8(suffix)
         ):
             return Err("DOM input value is not valid UTF-8")
-        if be_dom_focused_id(self.current_dom) != target_id:
+        val target_route_id = be_dom_route_identity(target)
+        if be_dom_focused_route_id(self.current_dom) != target_route_id:
             val _ = self.dispatch_dom_event(
                 target_id, "focus", false, false
             )
@@ -965,7 +980,7 @@ impl BrowserSession:
         self._blur_dom_focus(target_id)
 
     me clear_dom_focus():
-        val focused_id = be_dom_focused_id(self.current_dom)
+        val focused_id = be_dom_focused_route_id(self.current_dom)
         if focused_id != "":
             val _ = self._blur_dom_focus(focused_id)
         self.clear_dom_text_selection()

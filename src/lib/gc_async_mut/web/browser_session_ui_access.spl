@@ -16,8 +16,8 @@ use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_url.{resolve_relative_url}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_event_identity, be_dom_find_by_tag, be_dom_get_attr,
-    be_dom_get_text_content, be_dom_has_attr
+    be_dom_find_by_tag, be_dom_get_attr, be_dom_get_text_content,
+    be_dom_has_attr
 }
 
 val BROWSER_SESSION_SURFACE_ID = "browser:session"
@@ -81,6 +81,12 @@ fn _browser_node_prop(node: UiAccessNode, key: text) -> text:
             return prop.value
     ""
 
+fn _browser_dom_target(node: UiAccessNode) -> text:
+    val node_id = _browser_node_prop(node, "dom_target")
+    if node_id == "":
+        return ""
+    "\u{0000}route-node:{node_id}"
+
 fn _browser_collapse_parent_segments(url: text) -> text:
     var out = url
     while out.contains("/../"):
@@ -106,7 +112,7 @@ fn _browser_link_nodes(dom: BeDomNode, base_url: text) -> [UiAccessNode]:
             val resolved = _browser_collapse_parent_segments(resolve_relative_url(base_url, href))
             nodes.push(_browser_node(
                 "link_{index}", "link", label, true, false, ["click", "key"],
-                _browser_link_props(resolved, be_dom_event_identity(link))
+                _browser_link_props(resolved, link.node_id.to_text())
             ))
         index = index + 1
     nodes
@@ -135,7 +141,7 @@ fn _browser_page_control_nodes(dom: BeDomNode) -> [UiAccessNode]:
         var access_node = _browser_node(
             "page_button_{button_index}", "button", label,
             be_dom_has_attr(button, "disabled") == false, false, ["click", "key"],
-            _browser_dom_control_props("page_button", be_dom_event_identity(button))
+            _browser_dom_control_props("page_button", button.node_id.to_text())
         )
         access_node.focused = be_dom_has_attr(button, "data-focused")
         nodes.push(access_node)
@@ -154,7 +160,7 @@ fn _browser_page_control_nodes(dom: BeDomNode) -> [UiAccessNode]:
             var access_node = _browser_node(
                 "page_input_{input_index}", input_type, be_dom_get_attr(input, "value"),
                 enabled, be_dom_has_attr(input, "checked"), ["click", "key"],
-                _browser_dom_control_props("page_input", be_dom_event_identity(input))
+                _browser_dom_control_props("page_input", input.node_id.to_text())
             )
             access_node.focused = be_dom_has_attr(input, "data-focused")
             nodes.push(access_node)
@@ -162,7 +168,7 @@ fn _browser_page_control_nodes(dom: BeDomNode) -> [UiAccessNode]:
             var access_node = _browser_node(
                 "page_input_{input_index}", "button", be_dom_get_attr(input, "value"),
                 enabled, false, ["click", "key"],
-                _browser_dom_control_props("page_button", be_dom_event_identity(input))
+                _browser_dom_control_props("page_button", input.node_id.to_text())
             )
             access_node.focused = be_dom_has_attr(input, "data-focused")
             nodes.push(access_node)
@@ -172,7 +178,7 @@ fn _browser_page_control_nodes(dom: BeDomNode) -> [UiAccessNode]:
             var access_node = _browser_node(
                 "page_input_{input_index}", "textfield", visible_value,
                 editable, false, if editable: ["set_value", "blur"] else: [],
-                _browser_dom_control_props("page_input", be_dom_event_identity(input))
+                _browser_dom_control_props("page_input", input.node_id.to_text())
             )
             access_node.focused = be_dom_has_attr(input, "data-focused")
             nodes.push(access_node)
@@ -189,7 +195,7 @@ fn _browser_page_control_nodes(dom: BeDomNode) -> [UiAccessNode]:
             be_dom_get_text_content(textarea), editable, false,
             if editable: ["set_value", "blur"] else: [],
             _browser_dom_control_props(
-                "page_input", be_dom_event_identity(textarea)
+                "page_input", textarea.node_id.to_text()
             )
         )
         access_node.focused = be_dom_has_attr(textarea, "data-focused")
@@ -272,7 +278,7 @@ impl BrowserSession:
             return _browser_action_result(false, "unsupported_operation", "unsupported address action '{request.action}'", request.target_id, request.action)
         val control = _browser_node_prop(node, "control")
         if control == "page_input" and node.kind == "textfield":
-            val dom_target = _browser_node_prop(node, "dom_target")
+            val dom_target = _browser_dom_target(node)
             if request.action == "blur":
                 match self.blur_dom_text_input(dom_target):
                     Ok(_):
@@ -303,7 +309,7 @@ impl BrowserSession:
                 node.kind == "link" or node.kind == "button" or
                 node.kind == "checkbox" or node.kind == "radio"
             ):
-                val dom_target = _browser_node_prop(node, "dom_target")
+                val dom_target = _browser_dom_target(node)
                 match self.dispatch_dom_keyboard_activation(
                     dom_target, request.text_value
                 ):
@@ -353,7 +359,7 @@ impl BrowserSession:
                 Ok(_): return _browser_action_result(true, "ok", "opened bookmark", request.target_id, request.action)
                 Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
         if node.kind == "link":
-            val dom_target = _browser_node_prop(node, "dom_target")
+            val dom_target = _browser_dom_target(node)
             if dom_target == "":
                 return _browser_action_result(false, "action_failed", "link missing DOM target", request.target_id, request.action)
             val dispatch = self.dispatch_dom_event(dom_target, "click", true, true)
@@ -361,7 +367,7 @@ impl BrowserSession:
                 return _browser_action_result(true, "ok", "opened link", request.target_id, request.action)
             return _browser_action_result(true, "ok", "link event canceled", request.target_id, request.action)
         if control == "page_button" or control == "page_input":
-            val dom_target = _browser_node_prop(node, "dom_target")
+            val dom_target = _browser_dom_target(node)
             if dom_target == "":
                 return _browser_action_result(false, "action_failed", "control missing DOM target", request.target_id, request.action)
             val dispatch = self.dispatch_dom_event(dom_target, "click", true, true)

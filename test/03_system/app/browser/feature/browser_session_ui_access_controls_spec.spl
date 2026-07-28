@@ -12,6 +12,7 @@ use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_find_by_tag, be_dom_get_attr}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
@@ -296,6 +297,39 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(radios[0].selected).to_equal(false)
         expect(radios[1].selected).to_equal(true)
         expect(radios[1].focused).to_equal(true)
+
+    it "routes duplicate author IDs by exact DOM node identity":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/form",
+            "<html><body><input id='duplicate' value='first' oninput='set-attr:data-routed=wrong'><input id='duplicate' value='second' oninput='set-attr:data-routed=right'></body></html>"
+        )
+
+        val edited = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#page_input_1", action: "set_value",
+            text_value: "changed", x: 0, y: 0
+        ))
+
+        expect(edited.ok).to_equal(true)
+        val dom_inputs = be_dom_find_by_tag(session.current_dom, "input")
+        expect(dom_inputs.len()).to_equal(2)
+        expect(be_dom_get_attr(dom_inputs[0], "data-routed")).to_equal("")
+        expect(be_dom_get_attr(dom_inputs[1], "data-routed")).to_equal("right")
+        var first_value = ""
+        var second_value = ""
+        var first_focused = false
+        var second_focused = false
+        for node in session.ui_access_snapshot().nodes:
+            if node.widget_id == "page_input_0":
+                first_value = node.text_value
+                first_focused = node.focused
+            elif node.widget_id == "page_input_1":
+                second_value = node.text_value
+                second_focused = node.focused
+        expect(first_value).to_equal("first")
+        expect(second_value).to_equal("changed")
+        expect(first_focused).to_equal(false)
+        expect(second_focused).to_equal(true)
 
     it "hides secret form state and edits textarea through one focused route":
         var session = BrowserSession.new()

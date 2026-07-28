@@ -16,7 +16,8 @@ use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
 use std.gc_async_mut.gpu.browser_engine.script.script_runner.{ScriptRunner, run_script, run_script_file, script_runner_dom_dirty, script_runner_clear_dirty}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_apply_default_action_to_id, be_dom_dispatch_event_to_id,
-    be_dom_event_identity, be_dom_get_children, be_dom_set_children,
+    be_dom_event_identity, be_dom_get_children, be_dom_route_node_id,
+    be_dom_set_children,
     be_dom_submit_form_owner_id
 }
 use std.gc_async_mut.gpu.browser_engine.net.fetch_dispatch.{FetchDispatch}
@@ -54,15 +55,18 @@ pub fn script_host_apply_event_action(node: BeDomNode, action: text) -> BeDomNod
     node
 
 fn _script_host_apply_event_action_to_id(
-    root: BeDomNode, target_id: text, action: text
+    root: BeDomNode, target_id: text, route_node_id: i64, action: text
 ) -> BeDomNode?:
-    if be_dom_event_identity(root) == target_id:
+    if (
+        (route_node_id >= 0 and root.node_id == route_node_id) or
+        (route_node_id < 0 and be_dom_event_identity(root) == target_id)
+    ):
         return script_host_apply_event_action(root, action)
     val children = be_dom_get_children(root)
     var index: i64 = 0
     while index < children.len():
         val updated_child = _script_host_apply_event_action_to_id(
-            children[index], target_id, action
+            children[index], target_id, route_node_id, action
         )
         if updated_child != nil:
             var next_children: [BeDomNode] = []
@@ -76,7 +80,9 @@ fn _script_host_apply_event_action_to_id(
 pub fn script_host_apply_action_to_id(root: BeDomNode, target_id: text, action: text, default_action: bool) -> BeDomNode:
     if default_action:
         return be_dom_apply_default_action_to_id(root, target_id, action)
-    _script_host_apply_event_action_to_id(root, target_id, action) ?? root
+    _script_host_apply_event_action_to_id(
+        root, target_id, be_dom_route_node_id(target_id), action
+    ) ?? root
 
 pub class ScriptHost:
     """Host that manages Simple-script execution, event loop, and console buffer.
@@ -161,14 +167,15 @@ pub class ScriptHost:
         while action_index < dispatch.actions.len():
             self._dom_root = script_host_apply_action_to_id(
                 self._dom_root,
-                dispatch.current_target_ids[action_index],
+                dispatch.current_target_route_ids[action_index],
                 dispatch.actions[action_index],
                 false
             )
             action_index = action_index + 1
         if dispatch.default_action_allowed:
             self._dom_root = script_host_apply_action_to_id(
-                self._dom_root, event.target_id, dispatch.default_action, true
+                self._dom_root, dispatch.target_route_id,
+                dispatch.default_action, true
             )
             if (
                 event.event_type == "click" and

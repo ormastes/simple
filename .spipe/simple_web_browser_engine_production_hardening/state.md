@@ -1267,6 +1267,9 @@ implementation in progress / target evidence blocked
   direct env/runtime guards pass. Live Simple/JS/CSS/animation execution and
   docgen remain unavailable for the already-recorded admitted-CLI failures; no
   bootstrap or Rust seed fallback was used.
+- independent input/focus and transient-bridge reviews pass after public target
+  normalization and after keeping the NUL-prefixed internal route out of every
+  serialized UI-access property/result.
 - Leak/perf review fixes: dead renderer detection now retains the PID until the
   canonical piped-process close frees its table row and file descriptors;
   stable-window reconciliation returns without rebuilding entry arrays;
@@ -1451,3 +1454,16 @@ implementation in progress / target evidence blocked
   command targeting
   `test/02_integration/app/browser/probe_pending_request_queue.spl`; owner:
   browser hardening merge owner; final reviewer: highest-capability Codex.
+- DOM-backed UI access now routes links/buttons/inputs/textareas with the
+  parser-assigned `node_id` instead of reusing author `id`. Duplicate author
+  IDs therefore cannot redirect an action to the first matching element, while
+  public DOM event IDs remain unchanged. The shared matcher accepts both legacy
+  author IDs and exact internal routes, and script/default-action mutations use
+  it without adding a DOM scan or retained index. A focused system regression
+  edits the second of two duplicate-ID inputs and proves the first stays intact
+  and only the second handler runs.
+- verify: working/staged direct-env guards and rendering-source coupling pass;
+  conflict/layout scans pass. The focused Simple system spec remains
+  source-reviewed but unexecuted because no admitted working pure-Simple CLI is
+  available, and the three-cycle compiler/build cap was already reached. No
+  bootstrap or Rust seed fallback was used.
