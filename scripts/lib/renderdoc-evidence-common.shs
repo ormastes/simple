@@ -75,6 +75,14 @@ rdoc_missing_renderdoc_reason() {
     fi
 }
 
+rdoc_find_timeout_command() {
+    if command -v timeout >/dev/null 2>&1; then
+        command -v timeout
+    elif command -v gtimeout >/dev/null 2>&1; then
+        command -v gtimeout
+    fi
+}
+
 rdoc_install_hint() {
     uname_s="$(uname -s 2>/dev/null || echo unknown)"
     case "$uname_s" in
@@ -920,6 +928,7 @@ rdoc_capture_simple_vulkan() {
     out_dir="$3"
     prog="${RDOC_SIMPLE_PROG:-$root/src/app/test/renderdoc_vulkan_capture.spl}"
     simple_bin="${RDOC_SIMPLE_BIN:-}"
+    timeout_secs="${RDOC_CAPTURE_TIMEOUT_SECS:-45}"
     rdoc_prepare_output_dir "$out_dir"
     capture_frame_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
     capture_template="$out_dir/simple_gui_app-$capture_frame_id"
@@ -934,6 +943,19 @@ rdoc_capture_simple_vulkan() {
     else
         simple_bin_reason="provided-rdoc-simple-bin"
     fi
+    case "$timeout_secs" in
+        ""|*[!0-9]*|0)
+            rdoc_write_unavailable_capture "$out_dir" "simple" \
+                "${RDOC_SCENE:-vulkan-engine2d}" "invalid-capture-timeout"
+            return 1
+            ;;
+    esac
+    timeout_cmd="$(rdoc_find_timeout_command || true)"
+    if [ "$timeout_cmd" = "" ]; then
+        rdoc_write_unavailable_capture "$out_dir" "simple" \
+            "${RDOC_SCENE:-vulkan-engine2d}" "capture-timeout-command-missing"
+        return 1
+    fi
     {
         echo "rdoc_backend=simple"
         echo "rdoc_scene=${RDOC_SCENE:-vulkan-engine2d}"
@@ -947,6 +969,7 @@ rdoc_capture_simple_vulkan() {
     rdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
     rdoc_lib="$(rdoc_renderdoc_lib_path "$renderdoc_home")"
     rdoc_prepare_vulkan_layer_manifest "$root" "$renderdoc_home" "$out_dir" "$env_path" "rdoc_simple"
+    set +e
     LD_LIBRARY_PATH="$rdoc_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     DYLD_LIBRARY_PATH="$rdoc_lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
     VK_LAYER_PATH="$rdoc_layer_dir_abs" \
@@ -956,8 +979,11 @@ rdoc_capture_simple_vulkan() {
     RDOC_SIMPLE_CAPTURE_PATH="$capture_template" \
     RDOC_SIMPLE_OWNER_FRAME_ID="$capture_frame_id" \
     SIMPLE_EXECUTION_MODE=interpret \
+        "$timeout_cmd" -k 5s "${timeout_secs}s" \
         "$rdoc_cmd" capture -d "$root" -c "$out_dir/simple_gui" -w \
-        "$simple_bin" run "$prog" >"$out_dir/renderdoc-simple.log" 2>&1 || true
+        "$simple_bin" run "$prog" >"$out_dir/renderdoc-simple.log" 2>&1
+    capture_code=$?
+    set -e
     sed -n '1,120p' "$out_dir/renderdoc-simple.log"
     echo "rdoc_log_sha256=$(rdoc_sha256_file "$out_dir/renderdoc-simple.log" 2>/dev/null || true)" >> "$env_path"
     rdoc_emit_simple_runtime_metadata "$out_dir/renderdoc-simple.log" | tee -a "$env_path"
@@ -974,6 +1000,25 @@ rdoc_capture_simple_vulkan() {
     rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
     validate_code=$?
     set -e
+    if [ "$capture_code" -ne 0 ]; then
+        if [ "$capture_code" -eq 124 ] || [ "$capture_code" -eq 137 ]; then
+            capture_reason="simple-capture-timeout"
+        else
+            capture_reason="simple-capture-command-failed"
+        fi
+        sed -e 's/^rdoc_capture_status=.*/rdoc_capture_status=fail/' \
+            -e "s/^rdoc_capture_reason=.*/rdoc_capture_reason=$capture_reason/" \
+            -e 's/^rdoc_capture_file=.*/rdoc_capture_file=/' \
+            -e 's/^rdoc_capture_size=.*/rdoc_capture_size=0/' \
+            -e 's/^rdoc_capture_magic=.*/rdoc_capture_magic=/' \
+            -e 's/^rdoc_capture_sha256=.*/rdoc_capture_sha256=/' \
+            "$tmp_env" >"$tmp_env.command"
+        mv "$tmp_env.command" "$tmp_env"
+        find "$out_dir" -type f -name "$(basename "$capture_template")*.rdc" \
+            -exec rm -f -- {} +
+        validate_code=1
+    fi
+    echo "rdoc_capture_command_exit=$capture_code" >> "$env_path"
     cat "$tmp_env" >> "$env_path"
     return "$validate_code"
 }

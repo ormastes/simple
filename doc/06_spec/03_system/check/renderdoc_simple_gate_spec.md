@@ -27,7 +27,7 @@ renderdoc_simple_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -85,10 +85,82 @@ sh scripts/check/check-renderdoc-simple-gate.shs || true
   regular `.rdc` file before and after replay inspection.
 - The retained capture log path must occur exactly once, remain a regular
   non-symlink file, and match its lowercase SHA-256 at gate and host admission.
+- The producer and gate retain exactly one decimal capture-command exit.
+  Admission requires zero; missing, duplicate, malformed, timeout, and generic
+  nonzero exits remain typed failures.
+- Timeout and exit-7 fixtures pass producer evidence through the real gate.
+  The exit-7 fixture creates both an old orphan and a new partial `.rdc`, then
+  proves neither survives failed-capture cleanup. No live RenderDoc is used.
+- Capture-log SHA-256 is recomputed after replay, so replay-time mutation cannot
+  publish a stale pass. The `gtimeout` fallback is structurally reviewed but
+  not claimed as executed portability evidence.
 
 ## Scenarios
 
 ### RenderDoc Simple gate
+
+#### bounds the shared Simple capture producer and rejects timed out commands
+
+The bounded producer retains one command exit and passes its failure evidence
+through the real gate; timeout exit 124/137 cannot be promoted.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val root = "build/test-renderdoc-simple-capture-timeout"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/renderdoc/bin && " +
+    "printf '#!/bin/sh\\nsleep 5\\n' > " + root + "/renderdoc/bin/renderdoccmd && " +
+    "printf '#!/bin/sh\\nexit 0\\n' > " + root + "/fake-simple && chmod +x " + root + "/renderdoc/bin/renderdoccmd " + root + "/fake-simple && " +
+    ". scripts/lib/renderdoc-evidence-common.shs && RDOC_SIMPLE_BIN=" + root + "/fake-simple RDOC_CAPTURE_TIMEOUT_SECS=1 rdoc_capture_simple_vulkan \"$PWD\" " + root + "/renderdoc " + root + "/out >/dev/null || true; " +
+    "RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/out/evidence.env BUILD_DIR=" + root + "/gate REPORT_PATH=" + root + "/gate.md sh scripts/check/check-renderdoc-simple-gate.shs >/dev/null || true"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+val evidence = file_read(root + "/out/evidence.env")
+expect(evidence).to_contain("rdoc_capture_status=fail")
+expect(evidence).to_contain("rdoc_capture_reason=simple-capture-timeout")
+val capture_exit = _value_of(evidence, "rdoc_capture_command_exit")
+expect(capture_exit == "124" or capture_exit == "137").to_be(true)
+expect(_count_key(evidence, "rdoc_capture_command_exit")).to_equal(1)
+expect(_count_key(evidence, "rdoc_log")).to_equal(1)
+expect(_count_key(evidence, "rdoc_log_sha256")).to_equal(1)
+val gate = file_read(root + "/gate/evidence.env")
+expect(_value_of(gate, "rdoc_simple_gate_reason")).to_equal("capture-command-exit-nonzero")
+expect(_value_of(gate, "rdoc_simple_gate_capture_command_exit")).to_equal(capture_exit)
+expect(_count_key(gate, "rdoc_simple_gate_capture_command_exit")).to_equal(1)
+```
+
+</details>
+
+#### rejects a generic capture failure and removes partial and orphan captures
+
+An exit-7 producer writes a partial capture after an orphan was staged. The
+producer removes both and the real gate retains a typed nonzero-exit failure.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val root = "build/test-renderdoc-simple-capture-command-failure"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/renderdoc/bin " + root + "/out && " +
+    "printf orphan > " + root + "/out/orphan.rdc && " +
+    "printf '#!/bin/sh\\nprintf RDOCpartial > \"${RDOC_SIMPLE_CAPTURE_PATH}_0.rdc\"\\nexit 7\\n' > " + root + "/renderdoc/bin/renderdoccmd && " +
+    "printf '#!/bin/sh\\nexit 0\\n' > " + root + "/fake-simple && chmod +x " + root + "/renderdoc/bin/renderdoccmd " + root + "/fake-simple && " +
+    ". scripts/lib/renderdoc-evidence-common.shs && RDOC_SIMPLE_BIN=" + root + "/fake-simple rdoc_capture_simple_vulkan \"$PWD\" " + root + "/renderdoc " + root + "/out >/dev/null || true; " +
+    "test ! -e " + root + "/out/orphan.rdc && test -z \"$(find " + root + "/out -name '*.rdc' -print -quit)\" && " +
+    "(RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/out/evidence.env BUILD_DIR=" + root + "/gate REPORT_PATH=" + root + "/gate.md sh scripts/check/check-renderdoc-simple-gate.shs >/dev/null || true)"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+val evidence = file_read(root + "/out/evidence.env")
+expect(_value_of(evidence, "rdoc_capture_reason")).to_equal("simple-capture-command-failed")
+expect(_value_of(evidence, "rdoc_capture_command_exit")).to_equal("7")
+expect(_count_key(evidence, "rdoc_capture_command_exit")).to_equal(1)
+expect(_value_of(evidence, "rdoc_capture_file")).to_equal("")
+val gate = file_read(root + "/gate/evidence.env")
+expect(_value_of(gate, "rdoc_simple_gate_reason")).to_equal("capture-command-exit-nonzero")
+```
+
+</details>
 
 #### times out the real replay gate path and discards stale replay evidence
 
@@ -116,7 +188,7 @@ val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/
     "chmod +x " + root + "/renderdoc/bin/renderdoccmd " + root + "/fake-simple && " +
     "printf 'rdoc_simple_replay_status=pass\\nrdoc_simple_replay_reason=stale-pass\\nstale_replay_marker=present\\n' > " + root + "/out/replay/evidence.env && " +
     ". scripts/lib/renderdoc-evidence-common.shs && capture=" + root + "/source/simple_gui_app-frame-7_0.rdc && log=" + root + "/source/renderdoc-simple.log && digest=$(rdoc_sha256_file \"$capture\") && log_digest=$(rdoc_sha256_file \"$log\") && " +
-    "printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=%s\\nrdoc_capture_magic=RDOC\\nrdoc_capture_sha256=%s\\nrdoc_log=%s\\nrdoc_log_sha256=%s\\nrdoc_renderdoc_home=" + root + "/renderdoc\\nrdoc_simple_renderdoc_capture_template=" + root + "/source/simple_gui_app-frame-7\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=1\\nrdoc_simple_renderdoc_device=1\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash + "\\nrdoc_simple_record_hash=" + hash + "\\nrdoc_simple_pixel_hash=" + hash + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' \"$capture\" \"$digest\" \"$log\" \"$log_digest\" > " + root + "/source/evidence.env && " +
+    "printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_command_exit=0\\nrdoc_capture_file=%s\\nrdoc_capture_magic=RDOC\\nrdoc_capture_sha256=%s\\nrdoc_log=%s\\nrdoc_log_sha256=%s\\nrdoc_renderdoc_home=" + root + "/renderdoc\\nrdoc_simple_renderdoc_capture_template=" + root + "/source/simple_gui_app-frame-7\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=1\\nrdoc_simple_renderdoc_device=1\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash + "\\nrdoc_simple_record_hash=" + hash + "\\nrdoc_simple_pixel_hash=" + hash + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' \"$capture\" \"$digest\" \"$log\" \"$log_digest\" > " + root + "/source/evidence.env && " +
     "RDOC_SIMPLE_REPLAY_TIMEOUT_SECS=1 RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env RDOC_REPLAY_SIMPLE_BIN=" + root + "/fake-simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-simple-gate.shs >/dev/null"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
@@ -144,7 +216,7 @@ failures; last-write-wins `tail -n 1` parsing is forbidden. Runnable source:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -156,6 +228,11 @@ val gate = file_read("scripts/check/check-renderdoc-simple-gate.shs")
 expect(gate.contains("tail -n 1")).to_be(false)
 expect(gate).to_contain("duplicate-source-evidence-key")
 expect(gate).to_contain("duplicate-replay-evidence-key")
+
+val exit_command = "RDOC_SIMPLE_GATE_CAPTURE_COMMAND_EXIT_SELF_TEST=1 sh scripts/check/check-renderdoc-simple-gate.shs"
+val (exit_stdout, _exit_stderr, exit_code) = process_run("/bin/sh", ["-c", exit_command])
+expect(exit_code).to_equal(0)
+expect(exit_stdout).to_contain("rdoc_simple_gate_capture_command_exit_self_test_status=pass")
 expect(gate.split("echo \"rdoc_simple_gate_replay_xml_file_bytes=").len()).to_equal(2)
 expect(gate.split("echo \"rdoc_simple_gate_capture_log_path=").len()).to_equal(2)
 ```
@@ -233,7 +310,7 @@ Reproduction: this block contains the complete executable scenario source.
 val hash_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val hash_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 val hash_c = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-val command = "rm -rf build/test-renderdoc-simple-gate-pass && mkdir -p build/test-renderdoc-simple-gate-pass/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc && . scripts/lib/renderdoc-evidence-common.shs && capture_sha=$(rdoc_sha256_file build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc) && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_capture_sha256=%s\\nrdoc_renderdoc_home=build/missing-renderdoc\\nrdoc_simple_renderdoc_capture_template=build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_renderdoc_device=41\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash_a + "\\nrdoc_simple_record_hash=" + hash_b + "\\nrdoc_simple_pixel_hash=" + hash_c + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' \"$capture_sha\" > build/test-renderdoc-simple-gate-pass/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-pass/out REPORT_PATH=build/test-renderdoc-simple-gate-pass/report.md sh scripts/check/check-renderdoc-simple-gate.shs"
+val command = "rm -rf build/test-renderdoc-simple-gate-pass && mkdir -p build/test-renderdoc-simple-gate-pass/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc && . scripts/lib/renderdoc-evidence-common.shs && capture_sha=$(rdoc_sha256_file build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc) && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_command_exit=0\\nrdoc_capture_file=build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_capture_sha256=%s\\nrdoc_renderdoc_home=build/missing-renderdoc\\nrdoc_simple_renderdoc_capture_template=build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_renderdoc_device=41\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash_a + "\\nrdoc_simple_record_hash=" + hash_b + "\\nrdoc_simple_pixel_hash=" + hash_c + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' \"$capture_sha\" > build/test-renderdoc-simple-gate-pass/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-pass/out REPORT_PATH=build/test-renderdoc-simple-gate-pass/report.md sh scripts/check/check-renderdoc-simple-gate.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
@@ -298,7 +375,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val root = "build/test-renderdoc-simple-gate-frame-path"
 val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-val command = "rm -rf " + root + " && mkdir -p " + root + "/source && printf 'RDOCsynthetic simple capture\\n' > " + root + "/source/simple_gui_app-frame-8_0.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=" + root + "/source/simple_gui_app-frame-8_0.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_renderdoc_home=build/missing-renderdoc\\nrdoc_simple_renderdoc_capture_template=" + root + "/source/simple_gui_app-frame-8\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_renderdoc_device=41\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash + "\\nrdoc_simple_record_hash=" + hash + "\\nrdoc_simple_pixel_hash=" + hash + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' > " + root + "/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
+val command = "rm -rf " + root + " && mkdir -p " + root + "/source && printf 'RDOCsynthetic simple capture\\n' > " + root + "/source/simple_gui_app-frame-8_0.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_command_exit=0\\nrdoc_capture_file=" + root + "/source/simple_gui_app-frame-8_0.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_renderdoc_home=build/missing-renderdoc\\nrdoc_simple_renderdoc_capture_template=" + root + "/source/simple_gui_app-frame-8\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_renderdoc_device=41\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash + "\\nrdoc_simple_record_hash=" + hash + "\\nrdoc_simple_pixel_hash=" + hash + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' > " + root + "/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 val evidence = file_read(root + "/out/evidence.env")
@@ -321,7 +398,7 @@ Reproduction: this block contains the complete executable scenario source.
 val root = "build/test-renderdoc-simple-gate-symlink-artifact"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/source && " +
     "printf 'RDOCsynthetic simple capture\\n' > " + root + "/source/simple-real.rdc && ln -s simple-real.rdc " + root + "/source/simple.rdc && " +
-    "printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=" + root + "/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > " + root + "/source/evidence.env && " +
+    "printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_command_exit=0\\nrdoc_capture_file=" + root + "/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > " + root + "/source/evidence.env && " +
     "RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
@@ -344,7 +421,7 @@ Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-renderdoc-simple-gate-missing-runtime-metadata && mkdir -p build/test-renderdoc-simple-gate-missing-runtime-metadata/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-missing-runtime-metadata/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-missing-runtime-metadata/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-missing-runtime-metadata/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-missing-runtime-metadata/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-missing-runtime-metadata/out REPORT_PATH=build/test-renderdoc-simple-gate-missing-runtime-metadata/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
+val command = "rm -rf build/test-renderdoc-simple-gate-missing-runtime-metadata && mkdir -p build/test-renderdoc-simple-gate-missing-runtime-metadata/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-missing-runtime-metadata/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_command_exit=0\\nrdoc_capture_file=build/test-renderdoc-simple-gate-missing-runtime-metadata/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-missing-runtime-metadata/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-missing-runtime-metadata/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-missing-runtime-metadata/out REPORT_PATH=build/test-renderdoc-simple-gate-missing-runtime-metadata/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -367,7 +444,7 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-renderdoc-simple-gate-bad-file-magic && mkdir -p build/test-renderdoc-simple-gate-bad-file-magic/source && printf 'NOPEsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-bad-file-magic/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-bad-file-magic/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-bad-file-magic/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-bad-file-magic/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-bad-file-magic/out REPORT_PATH=build/test-renderdoc-simple-gate-bad-file-magic/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
+val command = "rm -rf build/test-renderdoc-simple-gate-bad-file-magic && mkdir -p build/test-renderdoc-simple-gate-bad-file-magic/source && printf 'NOPEsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-bad-file-magic/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_command_exit=0\\nrdoc_capture_file=build/test-renderdoc-simple-gate-bad-file-magic/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-bad-file-magic/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-bad-file-magic/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-bad-file-magic/out REPORT_PATH=build/test-renderdoc-simple-gate-bad-file-magic/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -389,7 +466,7 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-renderdoc-simple-gate-wrong-program && mkdir -p build/test-renderdoc-simple-gate-wrong-program/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-wrong-program/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/other_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-wrong-program/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-wrong-program/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-wrong-program/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-wrong-program/out REPORT_PATH=build/test-renderdoc-simple-gate-wrong-program/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
+val command = "rm -rf build/test-renderdoc-simple-gate-wrong-program && mkdir -p build/test-renderdoc-simple-gate-wrong-program/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-wrong-program/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/other_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_command_exit=0\\nrdoc_capture_file=build/test-renderdoc-simple-gate-wrong-program/source/simple.rdc\\nrdoc_capture_magic=RDOC\\n' > build/test-renderdoc-simple-gate-wrong-program/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-wrong-program/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-wrong-program/out REPORT_PATH=build/test-renderdoc-simple-gate-wrong-program/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -409,7 +486,7 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-renderdoc-simple-gate-runtime-backend && mkdir -p build/test-renderdoc-simple-gate-runtime-backend/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-runtime-backend/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-runtime-backend/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=software\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-renderdoc-simple-gate-runtime-backend/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-runtime-backend/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-runtime-backend/out REPORT_PATH=build/test-renderdoc-simple-gate-runtime-backend/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
+val command = "rm -rf build/test-renderdoc-simple-gate-runtime-backend && mkdir -p build/test-renderdoc-simple-gate-runtime-backend/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-runtime-backend/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_command_exit=0\\nrdoc_capture_file=build/test-renderdoc-simple-gate-runtime-backend/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=software\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-renderdoc-simple-gate-runtime-backend/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-runtime-backend/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-runtime-backend/out REPORT_PATH=build/test-renderdoc-simple-gate-runtime-backend/report.md sh scripts/check/check-renderdoc-simple-gate.shs || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
@@ -429,7 +506,8 @@ capture/XML hashes and byte counts. The receipt explicitly records passing XML
 file and hash status plus matching claimed/current XML hashes and byte counts.
 Missing, symlinked, or changed replay XML
 produces `replay-xml-missing`, `replay-xml-symlink`, or
-`replay-xml-hash-mismatch`. Removing the capture hash, replacing it with
+`replay-xml-hash-mismatch`; mutating the retained capture log during replay
+produces `capture-log-sha256-mismatch`. Removing the capture hash, replacing it with
 malformed text, or appending a byte to the `.rdc` produces
 `missing-capture-sha256`, `invalid-capture-sha256`, and
 `capture-sha256-mismatch`, respectively. Runnable source:
@@ -438,7 +516,7 @@ malformed text, or appending a byte to the `.rdc` produces
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -447,10 +525,11 @@ val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val command = "rm -rf " + root + " && mkdir -p " + root + "/source " + root + "/renderdoc/bin && " +
     "printf 'RDOCsynthetic capture\\n' > " + root + "/source/simple_gui_app-frame-7_0.rdc && printf 'capture log\\n' > " + root + "/source/renderdoc-simple.log && " +
     "printf '#!/bin/sh\\nexit 0\\n' > " + root + "/renderdoc/bin/renderdoccmd && " +
-    "printf '%s\\n' '#!/bin/sh' 'xml=$6/replay.xml' 'mkdir -p $6' 'rm -f $xml' 'printf replay-xml > $xml' 'xml_hash=0e7ba3dc516098a2f83448d059ea1e1f7b310ea2a43e7e190fdde1fa7969ea46' 'xml_bytes=10' 'if [ \"$FAKE_REPLAY_MODE\" = tamper ]; then printf x >> $xml; fi' 'if [ \"$FAKE_REPLAY_MODE\" = missing ]; then rm -f $xml; fi' 'if [ \"$FAKE_REPLAY_MODE\" = symlink ]; then printf target > $6/target.xml; rm -f $xml; ln -s target.xml $xml; fi' 'echo rdoc_simple_replay_status=pass' 'echo rdoc_simple_replay_reason=pass' 'echo rdoc_simple_replay_driver=vulkan' 'echo rdoc_simple_replay_capture_path=$5' 'echo rdoc_simple_replay_xml_path=$xml' 'echo rdoc_simple_replay_xml_hash=$xml_hash' 'echo rdoc_simple_replay_xml_bytes=$xml_bytes' 'echo rdoc_simple_replay_chunk_count=1' 'echo rdoc_simple_replay_relevant_action_count=1' 'echo rdoc_simple_replay_pipeline_count=1' 'echo rdoc_simple_replay_shader_count=1' 'echo rdoc_simple_replay_resource_count=1' 'echo rdoc_simple_replay_convert_exit_code=0' 'echo rdoc_simple_owner_agreement_status=pass' 'echo rdoc_simple_owner_api=vulkan' > " + root + "/fake-simple && " +
+    "printf '%s\\n' '#!/bin/sh' 'xml=$6/replay.xml' 'mkdir -p $6' 'rm -f $xml' 'printf replay-xml > $xml' 'xml_hash=0e7ba3dc516098a2f83448d059ea1e1f7b310ea2a43e7e190fdde1fa7969ea46' 'xml_bytes=10' 'if [ \"$FAKE_REPLAY_MODE\" = tamper ]; then printf x >> $xml; fi' 'if [ \"$FAKE_REPLAY_MODE\" = log-tamper ]; then printf x >> \"$FAKE_CAPTURE_LOG\"; fi' 'if [ \"$FAKE_REPLAY_MODE\" = missing ]; then rm -f $xml; fi' 'if [ \"$FAKE_REPLAY_MODE\" = symlink ]; then printf target > $6/target.xml; rm -f $xml; ln -s target.xml $xml; fi' 'echo rdoc_simple_replay_status=pass' 'echo rdoc_simple_replay_reason=pass' 'echo rdoc_simple_replay_driver=vulkan' 'echo rdoc_simple_replay_capture_path=$5' 'echo rdoc_simple_replay_xml_path=$xml' 'echo rdoc_simple_replay_xml_hash=$xml_hash' 'echo rdoc_simple_replay_xml_bytes=$xml_bytes' 'echo rdoc_simple_replay_chunk_count=1' 'echo rdoc_simple_replay_relevant_action_count=1' 'echo rdoc_simple_replay_pipeline_count=1' 'echo rdoc_simple_replay_shader_count=1' 'echo rdoc_simple_replay_resource_count=1' 'echo rdoc_simple_replay_convert_exit_code=0' 'echo rdoc_simple_owner_agreement_status=pass' 'echo rdoc_simple_owner_api=vulkan' > " + root + "/fake-simple && " +
     "chmod +x " + root + "/renderdoc/bin/renderdoccmd " + root + "/fake-simple && . scripts/lib/renderdoc-evidence-common.shs && capture=" + root + "/source/simple_gui_app-frame-7_0.rdc && log=" + root + "/source/renderdoc-simple.log && digest=$(rdoc_sha256_file \"$capture\") && log_digest=$(rdoc_sha256_file \"$log\") && " +
-    "printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=%s\\nrdoc_capture_magic=RDOC\\nrdoc_capture_sha256=%s\\nrdoc_log=%s\\nrdoc_log_sha256=%s\\nrdoc_renderdoc_home=" + root + "/renderdoc\\nrdoc_simple_renderdoc_capture_template=" + root + "/source/simple_gui_app-frame-7\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=1\\nrdoc_simple_renderdoc_device=1\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash + "\\nrdoc_simple_record_hash=" + hash + "\\nrdoc_simple_pixel_hash=" + hash + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' \"$capture\" \"$digest\" \"$log\" \"$log_digest\" > " + root + "/source/evidence.env && " +
+    "printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_command_exit=0\\nrdoc_capture_file=%s\\nrdoc_capture_magic=RDOC\\nrdoc_capture_sha256=%s\\nrdoc_log=%s\\nrdoc_log_sha256=%s\\nrdoc_renderdoc_home=" + root + "/renderdoc\\nrdoc_simple_renderdoc_capture_template=" + root + "/source/simple_gui_app-frame-7\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=1\\nrdoc_simple_renderdoc_device=1\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash + "\\nrdoc_simple_record_hash=" + hash + "\\nrdoc_simple_pixel_hash=" + hash + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' \"$capture\" \"$digest\" \"$log\" \"$log_digest\" > " + root + "/source/evidence.env && " +
     "RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env RDOC_REPLAY_SIMPLE_BIN=" + root + "/fake-simple BUILD_DIR=" + root + "/pass REPORT_PATH=" + root + "/pass.md sh scripts/check/check-renderdoc-simple-gate.shs >/dev/null && " +
+    "FAKE_REPLAY_MODE=log-tamper FAKE_CAPTURE_LOG=\"$log\" RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env RDOC_REPLAY_SIMPLE_BIN=" + root + "/fake-simple BUILD_DIR=" + root + "/tamper-log REPORT_PATH=" + root + "/tamper-log.md sh scripts/check/check-renderdoc-simple-gate.shs >/dev/null || true; printf 'capture log\\n' > \"$log\"; " +
     "FAKE_REPLAY_MODE=missing RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env RDOC_REPLAY_SIMPLE_BIN=" + root + "/fake-simple BUILD_DIR=" + root + "/missing-xml REPORT_PATH=" + root + "/missing-xml.md sh scripts/check/check-renderdoc-simple-gate.shs >/dev/null || true; " +
     "FAKE_REPLAY_MODE=symlink RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env RDOC_REPLAY_SIMPLE_BIN=" + root + "/fake-simple BUILD_DIR=" + root + "/symlink-xml REPORT_PATH=" + root + "/symlink-xml.md sh scripts/check/check-renderdoc-simple-gate.shs >/dev/null || true; " +
     "FAKE_REPLAY_MODE=tamper RDOC_SIMPLE_EVIDENCE_ENV=" + root + "/source/evidence.env RDOC_REPLAY_SIMPLE_BIN=" + root + "/fake-simple BUILD_DIR=" + root + "/tamper-xml REPORT_PATH=" + root + "/tamper-xml.md sh scripts/check/check-renderdoc-simple-gate.shs >/dev/null || true; " +
@@ -480,6 +559,7 @@ expect(_value_of(passing, "rdoc_simple_gate_replay_xml_bytes")).to_equal(
 expect(file_read(root + "/missing-xml/evidence.env")).to_contain("rdoc_simple_gate_reason=replay-xml-missing")
 expect(file_read(root + "/symlink-xml/evidence.env")).to_contain("rdoc_simple_gate_reason=replay-xml-symlink")
 expect(file_read(root + "/tamper-xml/evidence.env")).to_contain("rdoc_simple_gate_reason=replay-xml-hash-mismatch")
+expect(file_read(root + "/tamper-log/evidence.env")).to_contain("rdoc_simple_gate_reason=capture-log-sha256-mismatch")
 
 expect(file_read(root + "/missing/evidence.env")).to_contain("rdoc_simple_gate_reason=missing-capture-sha256")
 expect(file_read(root + "/invalid/evidence.env")).to_contain("rdoc_simple_gate_reason=invalid-capture-sha256")

@@ -137,6 +137,20 @@ regular_file_status() {
     fi
 }
 
+refresh_capture_log_evidence() {
+    capture_log_file_status="$(regular_file_status "$capture_log_path")"
+    capture_log_file_sha256=""
+    capture_log_hash_status="fail"
+    if [ "$capture_log_file_status" = "pass" ]; then
+        capture_log_file_sha256="$(rdoc_sha256_file "$capture_log_path" || true)"
+        if is_lower_hex_64 "$capture_log_sha256" \
+            && is_lower_hex_64 "$capture_log_file_sha256" \
+            && [ "$capture_log_sha256" = "$capture_log_file_sha256" ]; then
+            capture_log_hash_status="pass"
+        fi
+    fi
+}
+
 is_positive_int() {
     case "${1:-}" in
         ""|*[!0-9]*)
@@ -146,6 +160,39 @@ is_positive_int() {
             [ "$1" -gt 0 ]
             ;;
     esac
+}
+
+is_nonnegative_int() {
+    case "${1:-}" in
+        ""|*[!0-9]*) return 1 ;;
+    esac
+}
+
+capture_command_exit_failure_reason() {
+    if [ "${source_duplicate_key:-}" = "rdoc_capture_command_exit" ]; then
+        echo "duplicate-capture-command-exit"
+    elif [ "${capture_command_exit:-}" = "" ]; then
+        echo "missing-capture-command-exit"
+    elif ! is_nonnegative_int "$capture_command_exit"; then
+        echo "invalid-capture-command-exit"
+    elif [ "$capture_command_exit" != "0" ]; then
+        echo "capture-command-exit-nonzero"
+    fi
+}
+
+capture_command_exit_self_test() {
+    source_duplicate_key="rdoc_capture_command_exit"
+    capture_command_exit=""
+    [ "$(capture_command_exit_failure_reason)" = "duplicate-capture-command-exit" ] || return 1
+    source_duplicate_key=""
+    [ "$(capture_command_exit_failure_reason)" = "missing-capture-command-exit" ] || return 1
+    capture_command_exit="nope"
+    [ "$(capture_command_exit_failure_reason)" = "invalid-capture-command-exit" ] || return 1
+    capture_command_exit="7"
+    [ "$(capture_command_exit_failure_reason)" = "capture-command-exit-nonzero" ] || return 1
+    capture_command_exit="0"
+    [ "$(capture_command_exit_failure_reason)" = "" ] || return 1
+    echo "rdoc_simple_gate_capture_command_exit_self_test_status=pass"
 }
 
 is_lower_hex_64() {
@@ -208,6 +255,11 @@ if [ "${RDOC_SIMPLE_GATE_CAPTURE_LOG_SELF_TEST:-0}" = "1" ]; then
     exit $?
 fi
 
+if [ "${RDOC_SIMPLE_GATE_CAPTURE_COMMAND_EXIT_SELF_TEST:-0}" = "1" ]; then
+    capture_command_exit_self_test
+    exit $?
+fi
+
 append_missing_runtime_field() {
     field="$1"
     if [ -z "${missing_runtime_fields:-}" ]; then
@@ -262,6 +314,7 @@ write_evidence() {
         echo "rdoc_simple_gate_program=${program:-}"
         echo "rdoc_simple_gate_capture_status=${capture_status:-}"
         echo "rdoc_simple_gate_capture_reason=${capture_reason:-}"
+        echo "rdoc_simple_gate_capture_command_exit=${capture_command_exit:-}"
         echo "rdoc_simple_gate_capture_file=${capture_file:-}"
         echo "rdoc_simple_gate_capture_file_status=${capture_file_status:-}"
         echo "rdoc_simple_gate_capture_magic=${capture_magic:-}"
@@ -412,6 +465,7 @@ scene="$(value_of rdoc_scene "$SOURCE_ENV")"
 program="$(value_of rdoc_program "$SOURCE_ENV")"
 capture_status="$(value_of rdoc_capture_status "$SOURCE_ENV")"
 capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
+capture_command_exit="$(value_of rdoc_capture_command_exit "$SOURCE_ENV")"
 capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
 capture_file_status="$(file_exists_status "$capture_file")"
 capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
@@ -452,17 +506,7 @@ if [ "$capture_file_status" = "pass" ]; then
         capture_hash_status="pass"
     fi
 fi
-capture_log_file_status="$(regular_file_status "$capture_log_path")"
-capture_log_file_sha256=""
-capture_log_hash_status="fail"
-if [ "$capture_log_file_status" = "pass" ]; then
-    capture_log_file_sha256="$(rdoc_sha256_file "$capture_log_path" || true)"
-    if is_lower_hex_64 "$capture_log_sha256" \
-        && is_lower_hex_64 "$capture_log_file_sha256" \
-        && [ "$capture_log_sha256" = "$capture_log_file_sha256" ]; then
-        capture_log_hash_status="pass"
-    fi
-fi
+refresh_capture_log_evidence
 capture_identity_status="fail"
 if [ "$renderdoc_capture_template_set" = "1" ] \
     && [ "$owner_frame_id" != "" ] \
@@ -564,6 +608,7 @@ if [ "$capture_file_status" = "pass" ] \
         if ! is_lower_hex_64 "$capture_file_sha256" || [ "$capture_sha256" != "$capture_file_sha256" ]; then
             capture_hash_status="fail"
         fi
+        refresh_capture_log_evidence
     fi
 fi
 
@@ -582,9 +627,12 @@ if [ "$source_duplicate_key" = "" ] \
     && [ "$scene" = "$REQUIRED_SCENE" ] \
     && [ "$program_matches" = "1" ] \
     && [ "$capture_status" = "pass" ] \
+    && [ "$capture_command_exit" = "0" ] \
     && [ "$capture_magic" = "RDOC" ] \
     && [ "$capture_file_magic" = "RDOC" ] \
     && [ "$capture_hash_status" = "pass" ] \
+    && [ "$capture_log_file_status" = "pass" ] \
+    && [ "$capture_log_hash_status" = "pass" ] \
     && [ "$runtime_backend" = "vulkan" ] \
     && [ "$renderdoc_available" = "1" ] \
     && [ "$renderdoc_start" = "1" ] \
@@ -628,7 +676,10 @@ fi
 classify_runtime_metadata
 capture_log_reason="$(capture_log_failure_reason)"
 
-if [ "$source_duplicate_key" != "" ]; then
+capture_command_exit_reason="$(capture_command_exit_failure_reason)"
+if [ "$capture_command_exit_reason" != "" ]; then
+    write_evidence "fail" "$capture_command_exit_reason"
+elif [ "$source_duplicate_key" != "" ]; then
     write_evidence "fail" "duplicate-source-evidence-key"
 elif [ "$replay_duplicate_key" != "" ]; then
     write_evidence "fail" "duplicate-replay-evidence-key"

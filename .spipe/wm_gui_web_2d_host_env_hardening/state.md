@@ -1188,8 +1188,22 @@ Tracking split:
   regular no-follow file, and matching lowercase SHA-256 before pass. The host
   aggregate revalidates the gate-bound log with the `.rdc` and replay XML, and
   focused tests reject changed, deleted, and same-byte symlink log artifacts.
+  The gate also reopens and re-hashes the log after replay, rejecting mutation
+  during inspection rather than publishing a stale PASS.
   The gate output emits replay XML byte size exactly once, with a direct
   producer-to-duplicate-safe-classifier regression assertion.
+- renderdoc-simple-capture-timeout: The shared `capture-simple` producer now
+  requires a positive `RDOC_CAPTURE_TIMEOUT_SECS`, resolves portable
+  `timeout`/`gtimeout`, retains the command exit, and converts timeout or other
+  nonzero completion to typed fail evidence even when partial `.rdc` bytes
+  exist. A synthetic sleeping `renderdoccmd` fixture covers the owner boundary;
+  no live RenderDoc run is claimed.
+- renderdoc-simple-capture-exit-gate: The gate and host classifier now require
+  exactly one decimal `rdoc_capture_command_exit=0`, with typed missing,
+  duplicate, malformed, and nonzero failures. Synthetic timeout and generic
+  exit-7 fixtures pass through the gate; failed captures remove partial and
+  orphan `.rdc` files. The `gtimeout` fallback was reviewed statically but was
+  not executed, and no live RenderDoc run is claimed.
 - retained-performance-historical-baseline: The canonical 4K/8K producer now
   requires an explicit immutable v2 baseline and derives its bucket from
   producer-owned OS/arch/CPU/GPU/driver/compiler/runtime/executable SHA plus

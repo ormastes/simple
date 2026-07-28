@@ -85,6 +85,10 @@ stride, blank output, checksum zero, and absent/invalid RenderDoc artifacts.
 Display/input admission also requires exact `pass` values for the retained
 focus, pointer, keyboard, move, maximize, and restore status rows. Missing,
 malformed, or non-pass values fail closed before framebuffer admission.
+It additionally requires exactly one positive value for each of the six
+screen-originated event counters: key down, key up, pointer move, pointer button
+down, pointer button up, and text commit. A missing, zero, malformed, or
+duplicate counter rejects the row even when all summary statuses say `pass`.
 The live wrapper resolves the input receipt's WM target against the same
 snapshot's compositor window list, requires exactly one match, and retains the
 matched ID separately. The pure aggregate requires both retained IDs to be
@@ -93,7 +97,14 @@ The host aggregate also re-hashes the retained RenderDoc capture, capture-log,
 and replay XML paths, failing when any current artifact no longer matches its
 exact-one gate binding or is a symlink/non-regular path. The Simple producer
 records `rdoc_log` plus its lowercase SHA-256 after capture; the gate recomputes
-that digest before publishing its duplicate-safe log binding.
+that digest before replay and again before publishing its duplicate-safe log
+binding.
+The shared Simple capture command and replay inspector both have positive,
+portable timeout bounds. A timeout or other nonzero capture-command exit emits
+typed fail evidence, deletes partial `.rdc` bytes, and cannot pass the gate.
+The gate and host classifier require one decimal capture-command exit equal to
+zero. The `timeout` path is fixture-tested; `gtimeout` resolution remains a
+structurally reviewed portability branch rather than a live-host claim.
 Framebuffer admission requires both correlated backend values to be `vulkan`;
 matching CPU fallback values in retained evidence fail validation.
 The input frame must also retain `composition_id=wm-composite` and a positive
@@ -117,6 +128,17 @@ browser-backing env files all exist. RenderDoc, SIMD, and framebuffer artifacts
 referenced by an existing env file are validation inputs, so missing, changed,
 or substituted referenced artifacts make that retained row `fail`, not
 `blocked`.
+
+SIMD admission recomputes the retained frame receipt from architecture,
+executed feature, native execution environment, executed/bit-exact flags,
+positive native-hit count, every fill/copy/alpha/alpha-edge/scroll/diagram
+expected checksum, actual checksum, and mismatch count, plus canonical-source
+and compiler hashes. The architecture matrix then independently rechecks the
+requested architecture and exact compiler path, current regular non-symlink
+source/compiler bytes, architecture-specific feature, scalar-oracle equality,
+zero mismatches, positive hits/checksum, and receipt hash. Its bounded
+`--self-test` uses temporary artifacts and this same production validator; it
+proves fail-closed admission behavior but never counts as native SIMD evidence.
 
 For the SimpleOS remote-client row, validation also rejects owner port `0`,
 resident placeholder apps, missing focus/input IPC sends, missing

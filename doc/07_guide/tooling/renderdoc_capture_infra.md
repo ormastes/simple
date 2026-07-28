@@ -159,7 +159,9 @@ Common variables:
 - `RDOC_ELECTRON`: Electron binary for Electron HTML capture. If unset, the
   helper checks the repo-local `tools/electron-shell/node_modules` install.
 - `RDOC_OUTPUT_DIR`: base output directory.
-- `RDOC_CAPTURE_TIMEOUT_SECS`: bounded capture timeout.
+- `RDOC_CAPTURE_TIMEOUT_SECS`: positive bounded capture timeout. `capture-simple`
+  requires portable `timeout`/`gtimeout`; a timeout or other nonzero capture
+  command exit writes typed fail evidence and cannot admit an `.rdc`.
 - `RDOC_HTML_PATH`: HTML fixture for `capture-html`.
 - `RDOC_ELECTRON_WIDTH`, `RDOC_ELECTRON_HEIGHT`, `RDOC_ELECTRON_SETTLE_MS`:
   Electron capture viewport and settle controls.
@@ -1236,6 +1238,11 @@ Important keys:
   `rdoc_simple_gate_capture_log_*` bindings for host-aggregate revalidation.
 - `rdoc_capture_status`: `pass`, `fail`, or `unavailable`.
 - `rdoc_capture_reason`: concrete pass/fail/unavailable reason.
+- `rdoc_capture_command_exit`: retained `capture-simple` command exit; `124` or
+  `137` is classified as `simple-capture-timeout`. The Simple gate accepts
+  exactly one decimal value and requires `0`; missing, duplicate, malformed,
+  and nonzero values have distinct failure reasons. A failed command removes
+  partial `.rdc` files before evidence is published.
 - `rdoc_capture_file`: `.rdc` path when one exists.
 - `rdoc_capture_magic`: `RDOC` for a valid RenderDoc capture.
 - `rdoc_chromium_requested_api`: requested Chromium graphics API for Electron
