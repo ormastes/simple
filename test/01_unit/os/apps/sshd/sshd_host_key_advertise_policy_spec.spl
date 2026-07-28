@@ -1,6 +1,6 @@
 use os.apps.sshd.ssh_kex.{HostKeySet, host_key_set_advertised_algorithms}
 use os.apps.sshd.ssh_kex_primitives.{HostCertificateSet, host_key_set_has_any_algorithm, host_key_algorithms_with_certificates}
-use os.apps.sshd.sshd.{sshd_build_host_keys_for_session_for_test, sshd_host_key_policy_satisfiable_for_test, sshd_build_production_session_kexinit_for_test}
+use os.apps.sshd.sshd.{sshd_build_host_keys_for_session_for_test, sshd_host_key_policy_satisfiable_for_test, sshd_build_production_session_kexinit_for_test, sshd_start_verdict_for_test, sshd_daemon_host_key_policy_satisfiable_for_test}
 use os.apps.sshd.ssh_transport.{SshKexInit, ssh_parse_kexinit, ssh_negotiate_algorithms}
 
 fn _seed32() -> [u8]:
@@ -59,6 +59,48 @@ describe "SSHD host key policy fails closed":
 
     it "serves on a certificate alone when the raw key is disabled":
         expect(sshd_host_key_policy_satisfiable_for_test(false, _seed32(), nil, nil, [0x00u8, 0x01u8])).to_equal(true)
+
+describe "SSHD startup itself is gated by the host key policy":
+    # The examples above pin the POLICY FUNCTION. These pin the STARTUP PATH:
+    # they drive the real SshDaemon.start(), so a gate that exists but is never
+    # consulted by start() fails here instead of passing on a technicality.
+    it "refuses to start when no host key algorithm is enabled":
+        # Absolute oracle: start() must hand back the refusal Err, and must do
+        # so BEFORE binding a listener. Reaching the bind is itself the failure
+        # signal here — rt_boot_tcp_bind is a baremetal-only extern, so an
+        # unguarded start() dies on it rather than returning this text.
+        expect(sshd_start_verdict_for_test(false, _seed32(), nil, nil, nil))
+            .to_equal("sshd: no host key algorithm enabled")
+
+    it "still refuses when ed25519 is disabled and no other key or cert is set":
+        expect(sshd_start_verdict_for_test(false, _seed32(), nil, nil, nil).contains("no host key algorithm"))
+            .to_equal(true)
+
+    it "does not refuse a daemon that still has ed25519 enabled":
+        # Success half of the gate, evaluated on a real SshDaemon. start()
+        # cannot be run to completion on a host interpreter once the gate
+        # passes (it proceeds into the baremetal rt_boot_tcp_bind), so this
+        # asserts the very verdict start() branches on.
+        expect(sshd_daemon_host_key_policy_satisfiable_for_test(true, _seed32(), nil, nil, nil))
+            .to_equal(true)
+
+    it "does not refuse a daemon carrying only a host certificate":
+        expect(sshd_daemon_host_key_policy_satisfiable_for_test(false, _seed32(), nil, nil, [0x00u8, 0x01u8]))
+            .to_equal(true)
+
+    it "refuses a daemon whose only configured key is one this lane never advertises":
+        # Divergence pinned deliberately, and it is the fail-closed direction:
+        # build_host_keys_for_session() hardcodes rsa_pkcs8/ecdsa to nil because
+        # the live lane stays on the Ed25519/X25519 surface. So an RSA-only or
+        # ECDSA-only configuration leaves NOTHING advertisable and start() must
+        # refuse — even though the pure-policy hook above, which trusts the
+        # passed-in key material, reports such a config satisfiable.
+        expect(sshd_daemon_host_key_policy_satisfiable_for_test(false, _seed32(), [0x30u8], nil, nil))
+            .to_equal(false)
+        expect(sshd_daemon_host_key_policy_satisfiable_for_test(false, _seed32(), nil, [0x30u8], nil))
+            .to_equal(false)
+        expect(sshd_start_verdict_for_test(false, _seed32(), [0x30u8], nil, nil))
+            .to_equal("sshd: no host key algorithm enabled")
 
 fn _client_kexinit(host_key_algos: text) -> SshKexInit:
     """A client proposal that matches the daemon everywhere except host keys."""

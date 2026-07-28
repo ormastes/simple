@@ -247,6 +247,73 @@ pub fn sshd_host_key_policy_satisfiable_for_test(
     )
     host_key_set_has_any_algorithm(keys) or ed25519_cert != nil
 
+pub fn sshd_start_verdict_for_test(
+    advertise_ed25519: bool,
+    ed25519_seed: [u8],
+    rsa_pkcs8: [u8]?,
+    ecdsa_p256_pkcs8: [u8]?,
+    ed25519_cert: [u8]?
+) -> text:
+    """Drive the REAL SshDaemon.start() and report the verdict it returned.
+
+    Pins the fail-closed host-key gate at the startup boundary rather than at
+    the pure-policy-function boundary: an unsatisfiable policy must make
+    start() itself return Err before it ever reaches the listener bind.
+    Returns the Err text on refusal, or "started" when start() returned Ok.
+    """
+    var daemon = SshDaemon(
+        listen_fd: -1,
+        user_db: SshUserDb(users: []),
+        sessions: [],
+        running: false,
+        port: SSHD_PORT,
+        host_private_key: ed25519_seed,
+        host_public_key: [],
+        advertise_ed25519_host_key: advertise_ed25519,
+        host_rsa_pkcs8: rsa_pkcs8,
+        host_rsa_public_blob: nil,
+        host_ecdsa_p256_pkcs8: ecdsa_p256_pkcs8,
+        host_ed25519_cert: ed25519_cert,
+        host_rsa_sha2_256_cert: nil,
+        host_rsa_sha2_512_cert: nil
+    )
+    match daemon.start():
+        Ok(_): "started"
+        Err(e): e
+
+pub fn sshd_daemon_host_key_policy_satisfiable_for_test(
+    advertise_ed25519: bool,
+    ed25519_seed: [u8],
+    rsa_pkcs8: [u8]?,
+    ecdsa_p256_pkcs8: [u8]?,
+    ed25519_cert: [u8]?
+) -> bool:
+    """Evaluate the gate on a REAL SshDaemon — the exact expression start() branches on.
+
+    The success half of the gate cannot be pinned through start() itself on a
+    host interpreter: once the gate passes, start() proceeds into
+    bind_and_ready() and hits rt_boot_tcp_bind, a baremetal-only extern. This
+    hook pins the same daemon-level verdict start() consults, so a gate that
+    refused a satisfiable configuration is still caught.
+    """
+    var daemon = SshDaemon(
+        listen_fd: -1,
+        user_db: SshUserDb(users: []),
+        sessions: [],
+        running: false,
+        port: SSHD_PORT,
+        host_private_key: ed25519_seed,
+        host_public_key: [],
+        advertise_ed25519_host_key: advertise_ed25519,
+        host_rsa_pkcs8: rsa_pkcs8,
+        host_rsa_public_blob: nil,
+        host_ecdsa_p256_pkcs8: ecdsa_p256_pkcs8,
+        host_ed25519_cert: ed25519_cert,
+        host_rsa_sha2_256_cert: nil,
+        host_rsa_sha2_512_cert: nil
+    )
+    daemon.host_key_policy_satisfiable()
+
 pub fn sshd_build_production_session_kexinit_for_test(
     advertise_ed25519: bool,
     ed25519_seed: [u8],
