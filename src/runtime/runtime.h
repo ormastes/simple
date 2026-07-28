@@ -313,6 +313,7 @@ void     simple_contract_check_msg(
     int64_t message_len
 );
 int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
+int64_t  rt_string_free(int64_t value);
 /* Interned literal boxing: same ABI as rt_string_new but caches by the
  * literal's stable rodata (ptr, len). Static literal data ONLY. */
 int64_t  rt_string_new_literal(const uint8_t* bytes, uint64_t len);
@@ -330,6 +331,17 @@ int64_t  rt_string_char_code_at(int64_t string, int64_t index);
 int64_t  __simple_rt_string_char_code_at(int64_t string, int64_t index);
 int64_t  rt_string_char_at(int64_t string, int64_t index);
 int64_t  rt_string_concat(int64_t left, int64_t right);
+
+/* Optional hosted OpenSSL provider; absent from the core runtime link set. */
+int64_t  rt_tls_client_connect(int64_t host, int64_t port);
+int64_t  rt_tls_client_connect_with_sni(int64_t host, int64_t port, int64_t server_name);
+int64_t  rt_tls_client_connect_address_with_sni_timeout(int64_t address, int64_t port, int64_t server_name, int64_t timeout_ms);
+int64_t  rt_tls_client_write(int64_t handle, int64_t data);
+int64_t  rt_tls_client_write_timeout(int64_t handle, int64_t data, int64_t timeout_ms);
+int64_t  rt_tls_client_read(int64_t handle, int64_t max_bytes);
+int64_t  rt_tls_client_read_timeout(int64_t handle, int64_t max_bytes, int64_t timeout_ms);
+int64_t  rt_tls_get_protocol_version(int64_t handle);
+int8_t   rt_tls_client_close(int64_t handle);
 int64_t  rt_strcat_tagged(int64_t left, int64_t right);
 int64_t  rt_any_add(int64_t left, int64_t right);
 int64_t  rt_len(int64_t value);

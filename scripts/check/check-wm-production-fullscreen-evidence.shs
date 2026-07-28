@@ -36,6 +36,11 @@ SIMPLE_RUNTIME_C_DYLIB="${SIMPLE_WM_RUNTIME_C_DYLIB:-$ROOT_DIR/build/sffi/libsim
 # it has to arrive as an explicit provider or the link dies on 24 undefined
 # rt_sqlite_* symbols.
 SIMPLE_RUNTIME_SQLITE_DYLIB="${SIMPLE_WM_RUNTIME_SQLITE_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_sqlite_wm.$RUNTIME_DYLIB_EXT}"
+SIMPLE_RUNTIME_HTTPS_DYLIB="${SIMPLE_WM_RUNTIME_HTTPS_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_https_openssl_wm.so}"
+HTTPS_PROVIDER_REQUIRED=false
+case "$(uname -s)" in
+    Linux|FreeBSD) HTTPS_PROVIDER_REQUIRED=true ;;
+esac
 DRIVER_TIMEOUT_SECS="${WM_EVIDENCE_TIMEOUT_SECS:-20}"
 REQUESTED_GUI_BACKEND="$(printf '%s' "${SIMPLE_GUI_BACKEND:-}" | tr '[:upper:]' '[:lower:]')"
 VULKAN_EVIDENCE_REQUIRED=false
@@ -233,9 +238,25 @@ if [ ! -s "$SIMPLE_RUNTIME_SQLITE_DYLIB" ] || \
         exit 1
     fi
 fi
+if [ "$HTTPS_PROVIDER_REQUIRED" = true ] && \
+    { [ ! -s "$SIMPLE_RUNTIME_HTTPS_DYLIB" ] || \
+      find "$ROOT_DIR/src/runtime/runtime_https_openssl_core.c" \
+          "$ROOT_DIR/src/runtime/runtime.h" \
+          "$ROOT_DIR/scripts/build/build_simple_runtime_https_openssl_sffi.shs" \
+          -newer "$SIMPLE_RUNTIME_HTTPS_DYLIB" -print -quit | grep -q .; }; then
+    if ! sh scripts/build/build_simple_runtime_https_openssl_sffi.shs >"$BUILD_DIR/build-simple-runtime-https-sffi.log" 2>&1; then
+        emit_failure host-https-provider-build-failed "$snapshot_hook" "$capture_hook" "$input_hook"
+        exit 1
+    fi
+fi
 if [ ! -s "$SPL_WINIT_LIB" ] || [ ! -s "$SIMPLE_RUNTIME_DYLIB" ] || [ ! -s "$SIMPLE_RUNTIME_C_DYLIB" ] || \
     [ ! -s "$SIMPLE_RUNTIME_SQLITE_DYLIB" ]; then
     emit_failure host-runtime-bridge-missing "$snapshot_hook" "$capture_hook" "$input_hook"
+    exit 1
+fi
+if [ "$HTTPS_PROVIDER_REQUIRED" = true ] && \
+    [ ! -s "$SIMPLE_RUNTIME_HTTPS_DYLIB" ]; then
+    emit_failure host-https-provider-missing "$snapshot_hook" "$capture_hook" "$input_hook"
     exit 1
 fi
 if ! nm -g "$SIMPLE_RUNTIME_SQLITE_DYLIB" 2>/dev/null | grep -Eq '(_| )rt_sqlite_open$'; then
@@ -246,16 +267,26 @@ if ! nm -g "$SIMPLE_RUNTIME_C_DYLIB" 2>/dev/null | grep -Eq '(_| )rt_engine2d_ro
     emit_failure host-runtime-provider-incomplete "$snapshot_hook" "$capture_hook" "$input_hook"
     exit 1
 fi
+if [ "$HTTPS_PROVIDER_REQUIRED" = true ] && \
+    ! nm -g "$SIMPLE_RUNTIME_HTTPS_DYLIB" 2>/dev/null | grep -Eq '[[:space:]][Tt][[:space:]]_?rt_tls_client_connect_with_sni$'; then
+    emit_failure host-https-provider-incomplete "$snapshot_hook" "$capture_hook" "$input_hook"
+    exit 1
+fi
+
+EXTERNAL_PROVIDERS="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB:$SIMPLE_RUNTIME_C_DYLIB:$SIMPLE_RUNTIME_SQLITE_DYLIB"
+if [ "$HTTPS_PROVIDER_REQUIRED" = true ]; then
+    EXTERNAL_PROVIDERS="$SIMPLE_RUNTIME_HTTPS_DYLIB:$EXTERNAL_PROVIDERS"
+fi
 
 if [ -n "${HOSTED_WM_ARTIFACT:-}" ]; then
     if [ ! -x "$NATIVE_BIN" ]; then
         emit_failure cached-production-artifact-missing "$snapshot_hook" "$capture_hook" "$input_hook"
         exit 1
     fi
-elif [ ! -x "$NATIVE_BIN" ] || find src/os/hosted src/os/compositor src/lib/common/ui \
+elif [ ! -x "$NATIVE_BIN" ] || find src/os/hosted src/os/compositor src/lib/common/ui src/lib/gc_async_mut \
     -type f -name '*.spl' -newer "$NATIVE_BIN" -print -quit | grep -q .; then
     if ! SIMPLE_NO_STUB_FALLBACK=1 \
-        SIMPLE_LINK_OBJECTS="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB:$SIMPLE_RUNTIME_C_DYLIB:$SIMPLE_RUNTIME_SQLITE_DYLIB" \
+        SIMPLE_LINK_OBJECTS="$EXTERNAL_PROVIDERS" \
         SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BIN" native-build \
         --source "$ENTRY" --entry "$ENTRY" --entry-closure --strip \
         --backend cranelift \
@@ -291,6 +322,20 @@ for provider in "$SPL_WINIT_LIB" "$SIMPLE_RUNTIME_DYLIB" "$SIMPLE_RUNTIME_C_DYLI
         exit 1
     fi
 done
+if [ "$HTTPS_PROVIDER_REQUIRED" = true ] && \
+    ! provider_linked "$NATIVE_BIN" "$SIMPLE_RUNTIME_HTTPS_DYLIB"; then
+    emit_failure host-https-provider-not-linked "$snapshot_hook" "$capture_hook" "$input_hook"
+    exit 1
+fi
+if [ "$HTTPS_PROVIDER_REQUIRED" = true ]; then
+    tls_needed_line="$(readelf -d "$NATIVE_BIN" 2>/dev/null | grep -n "$(basename -- "$SIMPLE_RUNTIME_HTTPS_DYLIB")" | head -n 1 | cut -d: -f1)"
+    runtime_needed_line="$(readelf -d "$NATIVE_BIN" 2>/dev/null | grep -n "$(basename -- "$SIMPLE_RUNTIME_DYLIB")" | head -n 1 | cut -d: -f1)"
+    if [ -z "$tls_needed_line" ] || [ -z "$runtime_needed_line" ] || \
+        [ "$tls_needed_line" -ge "$runtime_needed_line" ]; then
+        emit_failure host-https-provider-precedence-invalid "$snapshot_hook" "$capture_hook" "$input_hook"
+        exit 1
+    fi
+fi
 
 case "$(uname -s)" in
     Darwin) [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || : ;; # winit uses the native session.

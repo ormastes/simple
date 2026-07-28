@@ -127,7 +127,10 @@ Reuse `src/lib/gc_async_mut/gpu/browser_engine/net/`:
 - CSP is enforced before queuing or executing script/style/connect/image work;
 - cookies use the existing network cookie owner extended with host-only,
   expiry, `Secure`, `HttpOnly`, and `SameSite`;
-- TLS delegates to the maintained platform runtime with SNI and platform trust.
+- TLS delegates to a maintained platform provider with SNI and platform trust.
+  Linux/FreeBSD hosted browser builds use the opt-in OpenSSL provider through
+  `SIMPLE_LINK_OBJECTS`; it is not part of freestanding or ordinary native
+  runtime links. Other hosts retain their native platform provider.
 
 The permissive BrowserSession cookie authority is retired after migration.
 Production TLS does not use string/CN test verifiers or HTTP fallback.

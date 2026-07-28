@@ -12,12 +12,13 @@ Delegates cryptographic operations to the hosted runtime via extern.
 use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{TlsConfig, CertChain, TlsVersion}
 use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserError, network_error}
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger}
-
-extern fn rt_tls_client_connect_with_sni(host: text, port: i64, server_name: text) -> i64
-extern fn rt_tls_client_write(conn: i64, data: text) -> i64
-extern fn rt_tls_client_read(conn: i64, max_bytes: i64) -> text
-extern fn rt_tls_client_close(conn: i64) -> bool
-extern fn rt_tls_get_protocol_version(conn: i64) -> text
+use std.nogc_sync_mut.io.browser_net_runtime.{
+    browser_runtime_string_free,
+    browser_tls_connect, browser_tls_connect_address,
+    browser_tls_write, browser_tls_write_timeout,
+    browser_tls_read, browser_tls_read_timeout,
+    browser_tls_close, browser_tls_protocol
+}
 
 pub class TlsConnection:
     host: text
@@ -36,13 +37,19 @@ pub class TlsConnection:
         "{ver} connection to {self.host}:{self.port} (cipher: {self.cipher})"
 
     fn write_text(data: text) -> i64:
-        rt_tls_client_write(self.handle, data)
+        browser_tls_write(self.handle, data)
+
+    fn write_text_timeout(data: text, timeout_ms: i64) -> i64:
+        browser_tls_write_timeout(self.handle, data, timeout_ms)
 
     fn read_text(max_bytes: i64) -> text:
-        rt_tls_client_read(self.handle, max_bytes)
+        browser_tls_read(self.handle, max_bytes)
+
+    fn read_text_timeout(max_bytes: i64, timeout_ms: i64) -> text:
+        browser_tls_read_timeout(self.handle, max_bytes, timeout_ms)
 
     fn close() -> bool:
-        rt_tls_client_close(self.handle)
+        browser_tls_close(self.handle)
 
 pub class TlsManager:
     config: TlsConfig
@@ -57,6 +64,17 @@ pub class TlsManager:
         )
 
     me handshake(host: text, port: i64) -> Result<TlsConnection, BrowserError>:
+        self._handshake_target(host, host, port, 5000, false)
+
+    me handshake_address(
+        address: text, host: text, port: i64, timeout_ms: i64
+    ) -> Result<TlsConnection, BrowserError>:
+        self._handshake_target(address, host, port, timeout_ms, true)
+
+    me _handshake_target(
+        address: text, host: text, port: i64, timeout_ms: i64,
+        resolved_address: bool
+    ) -> Result<TlsConnection, BrowserError>:
         self.logger.info("TLS handshake starting with {host}:{port}")
 
         if not self.config.verify_peer:
@@ -67,21 +85,30 @@ pub class TlsManager:
 
         if port <= 0 or port > 65535:
             return Err(network_error("TLS handshake: invalid port {port}"))
+        if timeout_ms <= 0:
+            return Err(network_error("TLS handshake: deadline exceeded"))
 
         val version = negotiate_version(self.config.min_version)
         val cipher = default_cipher(version)
 
-        val handle = rt_tls_client_connect_with_sni(host, port, host)
+        val handle = if resolved_address:
+            browser_tls_connect_address(
+                address, port, host, timeout_ms
+            )
+        else:
+            browser_tls_connect(host, port, host)
         if handle < 0:
             return Err(network_error("TLS handshake failed for {host}:{port}: runtime TLS transport unavailable or certificate verification failed"))
 
-        val negotiated = rt_tls_get_protocol_version(handle)
+        val negotiated = browser_tls_protocol(handle)
         match validated_negotiated_tls_version(negotiated, self.config.min_version):
             Ok(actual_version):
                 self.logger.info("TLS handshake complete for {host}:{port} ({negotiated})")
+                val _ = browser_runtime_string_free(negotiated)
                 Ok(TlsConnection.create(host, port, actual_version, cipher, handle))
             Err(error):
-                val _ = rt_tls_client_close(handle)
+                val _ = browser_runtime_string_free(negotiated)
+                val _ = browser_tls_close(handle)
                 Err(error)
 
 pub fn validated_negotiated_tls_version(protocol: text, min_version: TlsVersion) -> Result<TlsVersion, BrowserError>:

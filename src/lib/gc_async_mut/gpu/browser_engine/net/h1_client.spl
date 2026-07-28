@@ -17,6 +17,7 @@ use std.gc_async_mut.gpu.browser_engine.net.dns.DnsResolver
 use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserResult, BrowserError, network_error, parse_error}
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
 use std.js.types.pair.{Pair}
+use std.nogc_sync_mut.io.browser_net_runtime.{browser_monotonic_ms, browser_runtime_string_free}
 
 extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
 extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
@@ -28,7 +29,6 @@ extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
 extern fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64?) -> bool
 extern fn rt_bytes_to_text(data: [u8]) -> text
 extern fn rt_text_to_bytes(s: text) -> [u8]
-extern fn rt_time_now_monotonic_ms() -> i64
 
 val H1_TOTAL_TIMEOUT_MS: i64 = 5000
 
@@ -173,17 +173,37 @@ class H1Client:
 
         # ponytail: one-shot connections until response framing can preserve a
         # live socket; both response readers currently consume-to-EOF and close.
-        val deadline_ms = rt_time_now_monotonic_ms() + H1_TOTAL_TIMEOUT_MS
+        val deadline_ms = browser_monotonic_ms() + H1_TOTAL_TIMEOUT_MS
         var conn = self.get_connection(host, port, is_tls, deadline_ms)?
 
         if is_tls and conn.tls_conn.? == false:
-            val tls_conn = self.tls.handshake(host, port)?
+            val addresses = self.dns.resolve(host)?
+            var tls_conn: TlsConnection? = nil
+            for address in addresses:
+                val remaining = h1_deadline_remaining_ms(
+                    browser_monotonic_ms(), deadline_ms
+                )
+                if remaining == 0:
+                    break
+                match self.tls.handshake_address(
+                    address, host, port, remaining
+                ):
+                    Ok(connected):
+                        tls_conn = Some(connected)
+                        break
+                    Err(_):
+                        pass_dn
+            if tls_conn == nil:
+                return Err(network_error(
+                    "h1: TLS connection failed for {host}:{port}"
+                ))
+            val established = tls_conn.unwrap()
             if h1_deadline_remaining_ms(
-                rt_time_now_monotonic_ms(), deadline_ms
+                browser_monotonic_ms(), deadline_ms
             ) == 0:
-                val _ = tls_conn.close()
+                val _ = established.close()
                 return Err(network_error("h1: TLS handshake deadline exceeded"))
-            conn.tls_conn = tls_conn
+            conn.tls_conn = Some(established)
             self.logger.debug("h1: TLS established for {host}:{port}")
 
         val request_bytes = build_request_bytes(req)
@@ -199,8 +219,8 @@ class H1Client:
     ) -> Result<H1Connection>:
         var conn = H1Connection.create(host, port, is_tls, self.logger)
         if is_tls:
-            # The TLS runtime resolves and connects the authenticated host.
-            # Resolving here as well only duplicates DNS and discards the result.
+            # The request path resolves once, then passes each numeric address
+            # to TLS while retaining `host` for SNI/certificate identity.
             self.logger.debug("h1: deferring DNS and encrypted socket setup to TLS for {host}:{port}")
             return Ok(conn)
 
@@ -212,7 +232,7 @@ class H1Client:
         var fd: i64 = -1
         for address in addresses:
             val remaining = h1_deadline_remaining_ms(
-                rt_time_now_monotonic_ms(), deadline_ms
+                browser_monotonic_ms(), deadline_ms
             )
             if remaining == 0:
                 break
@@ -226,7 +246,7 @@ class H1Client:
         if fd < 0:
             return Err(network_error("h1: TCP connect failed for {host}:{port}"))
         val remaining = h1_deadline_remaining_ms(
-            rt_time_now_monotonic_ms(), deadline_ms
+            browser_monotonic_ms(), deadline_ms
         )
         if remaining == 0:
             val _ = rt_io_tcp_close(fd)
@@ -245,7 +265,7 @@ class H1Client:
         if conn.tcp_fd < 0:
             return Err(network_error("h1: missing TCP stream for {conn.host}:{conn.port}"))
         val write_budget = h1_deadline_remaining_ms(
-            rt_time_now_monotonic_ms(), deadline_ms
+            browser_monotonic_ms(), deadline_ms
         )
         if write_budget == 0:
             val _ = rt_io_tcp_close(conn.tcp_fd)
@@ -274,12 +294,15 @@ class H1Client:
         deadline_ms: i64
     ) -> Result<FetchResponse>:
         if val tls_conn = conn.tls_conn:
-            if h1_deadline_remaining_ms(
-                rt_time_now_monotonic_ms(), deadline_ms
-            ) == 0:
+            val write_budget = h1_deadline_remaining_ms(
+                browser_monotonic_ms(), deadline_ms
+            )
+            if write_budget == 0:
                 val _ = tls_conn.close()
                 return Err(network_error("h1: TLS write deadline exceeded"))
-            val written = tls_conn.write_text(request_bytes)
+            val written = tls_conn.write_text_timeout(
+                request_bytes, write_budget
+            )
             if not h1_write_complete(written, request_bytes.len()):
                 val _ = tls_conn.close()
                 return Err(network_error("h1: incomplete TLS write for {conn.host}:{conn.port}"))
@@ -370,7 +393,7 @@ fn read_tcp_response_bytes(fd: i64, deadline_ms: i64) -> Result<[u8]>:
     var bytes: [u8] = []
     while true:
         val remaining = h1_deadline_remaining_ms(
-            rt_time_now_monotonic_ms(), deadline_ms
+            browser_monotonic_ms(), deadline_ms
         )
         if remaining == 0:
             return Err(network_error("h1: TCP response deadline exceeded"))
@@ -378,7 +401,7 @@ fn read_tcp_response_bytes(fd: i64, deadline_ms: i64) -> Result<[u8]>:
         val chunk = rt_io_tcp_read(fd, 8192)
         if chunk.len() == 0:
             if h1_deadline_remaining_ms(
-                rt_time_now_monotonic_ms(), deadline_ms
+                browser_monotonic_ms(), deadline_ms
             ) == 0:
                 return Err(network_error("h1: TCP response deadline exceeded"))
             break
@@ -392,18 +415,20 @@ fn read_tls_response_bytes(
 ) -> Result<[u8]>:
     var response: [u8] = []
     while true:
-        if h1_deadline_remaining_ms(
-            rt_time_now_monotonic_ms(), deadline_ms
-        ) == 0:
+        val remaining = h1_deadline_remaining_ms(
+            browser_monotonic_ms(), deadline_ms
+        )
+        if remaining == 0:
             return Err(network_error("h1: TLS response deadline exceeded"))
-        val chunk = conn.read_text(8192)
+        val chunk = conn.read_text_timeout(8192, remaining)
         if chunk.len() == 0:
             if h1_deadline_remaining_ms(
-                rt_time_now_monotonic_ms(), deadline_ms
+                browser_monotonic_ms(), deadline_ms
             ) == 0:
                 return Err(network_error("h1: TLS response deadline exceeded"))
             break
         val chunk_bytes = rt_text_to_bytes(chunk)
+        val _ = browser_runtime_string_free(chunk)
         if not h1_response_size_allowed(response.len(), chunk_bytes.len()):
             return Err(network_error("h1: response exceeds 50 MiB limit"))
         response = response + chunk_bytes

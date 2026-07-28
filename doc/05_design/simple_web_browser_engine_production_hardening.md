@@ -104,10 +104,14 @@ ID. Duplicate, unknown, or late replies are rejected.
 9. Update broker cookie jar.
 10. Send only permitted response fields to renderer.
 
-Hosted TLS applies one five-second budget across resolved connect attempts and
-five-second socket read/write deadlines. A TLS read error or timeout invalidates
-the runtime handle; H1 rejects the response instead of parsing or committing
-partial bytes as an EOF-framed body.
+Hosted TLS applies one five-second budget across bounded DNS, resolved numeric
+connect attempts, the authenticated handshake, writes, and reads. The original
+hostname remains the SNI/service identity. Linux/FreeBSD use the optional
+OpenSSL provider with platform trust, TLS 1.2+, a 256-handle cap, per-handle
+locking, and SIGPIPE suppression. A TLS read error or timeout invalidates the
+runtime handle; H1 rejects the response instead of parsing or committing
+partial bytes as an EOF-framed body. H1 frees provider-owned read/protocol/DNS
+strings immediately after copying or validation.
 
 `file:` content is never read by BrowserSession. A user-selected exact root may
 be read by the broker through an explicit capability; page-originated file

@@ -1361,3 +1361,22 @@ implementation in progress / target evidence blocked
   graph after deriving its overlay and caret state, then installs the new hit
   graph after rendering. Animated and scrolled documents no longer retain two
   O(document) layout graphs across the peak allocation window.
+- Hosted bookmark clicks no longer load and rebuild an unused full-table
+  snapshot before the transactional toggle. HSTS startup loading is independent
+  of bookmark-table decoding, so a bookmark error cannot disable transport
+  security state.
+- Linux/FreeBSD hosted browser builds now have an opt-in OpenSSL TLS provider:
+  platform trust, SNI plus DNS/IP service identity, TLS 1.2+, bounded numeric
+  connect/read/write, SIGPIPE suppression, a 256-handle cap, and per-connection
+  lifetime pins. The browser resolves once through its bounded DNS owner and
+  passes the remaining request deadline into nonblocking connect/read/write;
+  each operation polls against one absolute monotonic deadline, so trickled TLS
+  records cannot reset the timeout. Runtime-owned
+  DNS, TLS protocol, and TLS chunk strings are released after copying/use.
+- Native C TLS evidence passes trusted localhost, wrong-host, unrelated-trust,
+  stalled-read, read-cap, stale-handle, and peer-reset/SIGPIPE scenarios. The
+  production fullscreen build requires the provider as a strong, fresh,
+  SONAME-bearing dependency ahead of the generic runtime provider. No Simple
+  compiler, bootstrap, or Rust seed was used for this evidence. A trickle-
+  handshake regression was added and compiles cleanly but was not executed
+  after the mandatory three-cycle verification cap.
