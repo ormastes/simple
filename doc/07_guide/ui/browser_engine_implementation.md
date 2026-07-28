@@ -157,6 +157,13 @@ WebSocket subprotocol bearer auth; query-string bearer fallback is deprecated
 and non-authorizing, including when `SIMPLE_UI_WEB_ALLOW_QUERY_TOKEN=1` is
 present.
 
+Hosted browser frames are admitted by `HostCompositor` per window. Admission
+requires the current content-box dimensions, Simple Web provenance, and a valid
+pixel checksum; four slots share a 16,777,216-pixel retention budget. Resize
+empties the affected slot and window destruction removes only that slot. The
+primary hosted browser uses this path today; secondary browser process routing
+remains incomplete and must not be described as sandboxed production evidence.
+
 ## Milestone History
 
 | Milestone | Gate | Status |

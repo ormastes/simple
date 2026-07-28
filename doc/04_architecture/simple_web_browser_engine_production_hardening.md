@@ -354,7 +354,12 @@ or native TLS behavior.
   parent-issued open/back/forward/home/reload/stop commands now cross the
   bounded protocol; the broker owns committed URL/origin plus a 256-entry
   history and commits only after a validated renderer frame. A fail-closed
-  external-frame compositor seam exists. The broker now also exposes a
+  external-frame compositor seam exists. It owns up to four receiver-indexed
+  window/frame pairs, rejects frames that do not match the live content box,
+  caps retained external pixels at 16,777,216, invalidates pixels on resize,
+  and releases only the closed window's frame. This is the compositor
+  prerequisite for secondary per-window renderer brokers; the hosted entry
+  still isolates only its primary browser window. The broker now also exposes a
   per-tick transaction pump, owns at most one parent HTTP job, and writes each
   queued response with one bounded nonblocking pipe operation per poll. Stop
   clears trusted pending state before cancel/free and issuing its correlated

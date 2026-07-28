@@ -1227,6 +1227,25 @@ implementation in progress / target evidence blocked
   reservation, failure rollback, and idempotent release. A future cap-policy
   change should add a four-live/fifth-rejected saturation case; no general
   concurrent process-API safety claim is made.
-- Remaining security/lifecycle work: compositor frames and hosted browser state
-  are still singleton/in-process respectively; the secondary-window registry
-  and per-window frame ownership remain active and unverified.
+- Remaining security/lifecycle work: hosted secondary-browser state is still
+  in-process; the renderer registry and fail-closed browser classification
+  remain active and unverified.
+- Compositor lifecycle/performance: replaced its singleton external frame with
+  four receiver-indexed window/frame slots. Admission now requires a live
+  window, exact content geometry, positive revision, trusted provenance and
+  checksum, with a 16,777,216-pixel aggregate retention cap. Resize empties the
+  affected stored frame, destroy removes only that window, and render no longer
+  rescans every accepted frame just to rewrite its checksum. Primary hosted
+  close paths release by window id instead of clearing all slots.
+- Evidence: added a focused real Engine2D raster scenario for two distinct
+  trusted frames and close-one/keep-one behavior, plus refreshed hosted source
+  contracts and architecture/operator docs. It is not executable in this
+  workspace: `bin/simple` is absent, `bin/release/simple` rejects the deployed
+  pure-Simple runtime's test ABI, `bin/simple_native --version` exits 139, and
+  the default checkout exposes only the forbidden Rust seed. No bootstrap or
+  seed fallback was used; executable/manual generation remains pending.
+- Security boundary remains open: secondary browser windows still use
+  `HostedWebContentRegistry` in the parent. The compositor prerequisite is
+  feature-preserving and does not yet classify every browser window as
+  external; enable that fail-closed rule only with the per-window renderer
+  registry so multi-window behavior is preserved rather than disabled.

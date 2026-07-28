@@ -22,6 +22,8 @@ DrawIrComposition -> persistent Engine2dCompositorBackend
 - One canonical DOM event path and one monotonic animation/timer/rAF clock.
 - One persistent render session with staged invalidation.
 - Engine2D owns device/font/cache state; no per-frame recreation.
+- The compositor owns four keyed external-frame slots with exact live geometry
+  and a 16.7M-pixel aggregate cap; resize/close releases retained pixels.
 - Navigation/close clears document references; profile and engine lifetimes
   remain separate.
 - Broker owns URLs/origins, Fetch/CORS/CSP, cookies, TLS/HSTS, and host access.

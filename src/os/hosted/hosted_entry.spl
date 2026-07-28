@@ -425,53 +425,58 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         print "[hosted-wm] browser-profile-disabled reason={error.message()}"
             Err(error):
                 print "[hosted-wm] browser-profile-disabled reason={error.message()}"
-        comp.require_external_web_frame(browser_profile_window_id)
+        val browser_frame_registered = comp.require_external_web_frame(
+            browser_profile_window_id
+        )
         val _ = browser_renderer.set_home_url(HOSTED_BROWSER_HOME_URL)
-        val started = browser_renderer.start(executable, 2000)
-        if started.ok:
-            val initial = browser_renderer.render(
-                "init", browser_initial_html, 2000
-            )
-            if initial.ok:
-                val rendered = browser_raster.render_draw_ir_composition(
-                    initial.composition, []
+        if browser_frame_registered:
+            val started = browser_renderer.start(executable, 2000)
+            if started.ok:
+                val initial = browser_renderer.render(
+                    "init", browser_initial_html, 2000
                 )
-                val active_theme = active_wm_theme_id()
-                val theme = if active_theme != "":
-                    active_theme
+                if initial.ok:
+                    val rendered = browser_raster.render_draw_ir_composition(
+                        initial.composition, []
+                    )
+                    val active_theme = active_wm_theme_id()
+                    val theme = if active_theme != "":
+                        active_theme
+                    else:
+                        default_theme_id()
+                    val revision = simple_web_content_revision_with_theme(
+                        theme, browser_initial_title, browser_initial_html,
+                        browser_content_width, browser_content_height, 0
+                    )
+                    val frame = simple_web_external_content_frame(
+                        browser_profile_window_id.to_text(),
+                        revision,
+                        theme,
+                        browser_content_width,
+                        browser_content_height,
+                        rendered,
+                        initial.cpu_composited_count,
+                        initial.cpu_composited_sha256,
+                        initial.solid_material_count,
+                        initial.solid_material_sha256
+                    )
+                    browser_renderer_ready = comp.set_external_web_frame(
+                        browser_profile_window_id, frame
+                    )
+                    if browser_renderer_ready:
+                        browser_animation_origin_micros = (
+                            rt_time_now_micros()
+                        )
+                        comp = host_compositor_update_window_title(
+                            comp, browser_profile_window_id,
+                            browser_address_draft
+                        )
                 else:
-                    default_theme_id()
-                val revision = simple_web_content_revision_with_theme(
-                    theme, browser_initial_title, browser_initial_html,
-                    browser_content_width, browser_content_height, 0
-                )
-                val frame = simple_web_external_content_frame(
-                    browser_profile_window_id.to_text(),
-                    revision,
-                    theme,
-                    browser_content_width,
-                    browser_content_height,
-                    rendered,
-                    initial.cpu_composited_count,
-                    initial.cpu_composited_sha256,
-                    initial.solid_material_count,
-                    initial.solid_material_sha256
-                )
-                browser_renderer_ready = comp.set_external_web_frame(
-                    browser_profile_window_id, frame
-                )
-                if browser_renderer_ready:
-                    browser_animation_origin_micros = (
-                        rt_time_now_micros()
-                    )
-                    comp = host_compositor_update_window_title(
-                        comp, browser_profile_window_id,
-                        browser_address_draft
-                    )
+                    print "[hosted-wm] browser-renderer-init-failed reason={initial.reason}"
             else:
-                print "[hosted-wm] browser-renderer-init-failed reason={initial.reason}"
+                print "[hosted-wm] browser-renderer-start-failed reason={started.reason}"
         else:
-            print "[hosted-wm] browser-renderer-start-failed reason={started.reason}"
+            print "[hosted-wm] browser-renderer-start-failed reason=external-frame-capacity"
     if browser_profile_window_id <= 0 or not browser_renderer_ready:
         if not browser_renderer.close():
             browser_resource_close_failed = true
@@ -829,8 +834,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         browser_renderer_ready = false
                         browser_raster_active = false
                         browser_profile = nil
+                        comp.release_external_web_frame(
+                            browser_profile_window_id
+                        )
                         browser_profile_window_id = 0
-                        comp.require_external_web_frame(0)
                 input_receipt = host_wm_input_record_pointer_button(input_receipt, button, pressed)
                 if button == 0 and chrome_target != nil:
                     val target = chrome_target.unwrap()
@@ -1125,7 +1132,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                     browser_renderer_ready = false
                                     browser_raster_active = false
                                     browser_profile = nil
-                                    comp.require_external_web_frame(0)
+                                    comp.release_external_web_frame(focused)
                                     comp.destroy_window(focused)
                                     browser_profile_window_id = 0
                             elif web_sessions.close_window(focused):
@@ -1268,7 +1275,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                 browser_renderer_ready = false
                                 browser_raster_active = false
                                 browser_profile = nil
-                                comp.require_external_web_frame(0)
+                                comp.release_external_web_frame(focused)
                                 comp.destroy_window(focused)
                                 browser_profile_window_id = 0
                         elif web_sessions.close_window(focused):
@@ -1326,8 +1333,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         browser_renderer_ready = false
                         browser_raster_active = false
                         browser_profile = nil
+                        comp.release_external_web_frame(
+                            browser_profile_window_id
+                        )
                         browser_profile_window_id = 0
-                        comp.require_external_web_frame(0)
                     input_receipt = host_wm_input_record_pointer_button(input_receipt, 0, command.down)
                     evidence_phase = if allow_evidence_close:
                         "applied"
