@@ -59,7 +59,9 @@ impl MacroExpander:
         return self.macros.contains_key(name)
 
     fn get_macro(name: &str) -> Option<&Macro>:
-        return self.macros.get(name)
+        if self.macros.contains_key(name):
+            return Some(self.macros[name])
+        return nil
 
 # Expand a macro invocation
 fn expand_macro(expander: &mut MacroExpander, name: &str, args: &Array<Expr>) -> Result<Expr, InterpreterError>:
@@ -188,11 +190,13 @@ fn apply_template(template: &MacroTemplate, bindings: &Dict<String, MacroBinding
             return Ok(Expr.Identifier(s.clone()))
 
         case MacroTemplate.Var(name):
-            match bindings.get(name):
-                case Some(MacroBinding.Single(expr)):
-                    return Ok(expr.clone())
-                case _:
-                    return Err(InterpreterError.MacroError("unbound variable: {name}".to_string()))
+            if bindings.contains_key(name):
+                match bindings[name]:
+                    case MacroBinding.Single(expr):
+                        return Ok(expr.clone())
+                    case _:
+                        return Err(InterpreterError.MacroError("unbound variable: {name}".to_string()))
+            return Err(InterpreterError.MacroError("unbound variable: {name}".to_string()))
 
         case MacroTemplate.Expr(expr):
             return Ok(*expr.clone())
@@ -208,17 +212,19 @@ fn apply_template(template: &MacroTemplate, bindings: &Dict<String, MacroBinding
             return Ok(Expr.Tuple(exprs))
 
         case MacroTemplate.Sequence(var_name, template, separator):
-            match bindings.get(var_name):
-                case Some(MacroBinding.Sequence(items)):
-                    val exprs: Array<Expr> = []
-                    for item in items:
-                        var item_bindings: Dict<String, MacroBinding> = {}
-                        item_bindings.set(var_name.clone(), MacroBinding.Single(item.clone()))
-                        val e = apply_template(template, &item_bindings)?
-                        exprs.push(e)
-                    return Ok(Expr.Array(exprs))
-                case _:
-                    return Err(InterpreterError.MacroError("expected sequence for: {var_name}".to_string()))
+            if bindings.contains_key(var_name):
+                match bindings[var_name]:
+                    case MacroBinding.Sequence(items):
+                        val exprs: Array<Expr> = []
+                        for item in items:
+                            var item_bindings: Dict<String, MacroBinding> = {}
+                            item_bindings.set(var_name.clone(), MacroBinding.Single(item.clone()))
+                            val e = apply_template(template, &item_bindings)?
+                            exprs.push(e)
+                        return Ok(Expr.Array(exprs))
+                    case _:
+                        return Err(InterpreterError.MacroError("expected sequence for: {var_name}".to_string()))
+            return Err(InterpreterError.MacroError("expected sequence for: {var_name}".to_string()))
 
         case _:
             return Err(InterpreterError.NotImplemented("macro template".to_string()))
