@@ -95,6 +95,80 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(foo_id.?).to_equal(true)
         expect(bar_id.?).to_equal(true)
 
+    it "glob import lowers trait defaults only when an impl needs them":
+        val log = make_logger()
+        val provider = parse_full_frontend(
+            "trait Greeter:\n    fn greet() -> i64:\n        42\n    fn farewell() -> i64:\n        1",
+            "trait_provider", "trait_provider", log
+        )
+        val unused = parse_full_frontend(
+            "use trait_provider.*", "trait_unused", "trait_unused", log
+        )
+        var modules: Dict<text, any> = {}
+        modules["trait_provider"] = provider
+        var unused_lowering = HirLowering.with_filename("trait_unused")
+        unused_lowering.modules_by_name = modules
+        val unused_hir = unused_lowering.lower_module(unused)
+
+        expect(unused_hir.symbols.lookup("Greeter").?).to_be(true)
+        expect(unused_lowering.lowered_traits.contains_key("Greeter")).to_be(false)
+
+        val used = parse_full_frontend(
+            "use trait_provider.*\nstruct Target:\n    n: i64\nimpl Greeter for Target:\n    fn farewell() -> i64:\n        7",
+            "trait_used", "trait_used", log
+        )
+        var used_lowering = HirLowering.with_filename("trait_used")
+        used_lowering.modules_by_name = modules
+        val used_hir = used_lowering.lower_module(used)
+
+        expect(used_hir.symbols.lookup("Greeter").?).to_be(true)
+        expect(used_lowering.lowered_traits.contains_key("Greeter")).to_be(true)
+        expect(used_lowering.lowered_traits["Greeter"].defaults.len()).to_equal(2)
+
+    it "keeps the first trait binding across glob and named collisions":
+        val log = make_logger()
+        val left = parse_full_frontend(
+            "trait Shared:\n    fn left() -> i64:\n        1",
+            "left_traits", "left_traits", log
+        )
+        val right = parse_full_frontend(
+            "trait Shared:\n    fn right() -> i64:\n        2",
+            "right_traits", "right_traits", log
+        )
+        val consumer = parse_full_frontend(
+            "use left_traits.*\nuse right_traits.{Shared}\nstruct Target:\n    n: i64\nimpl Shared for Target:\n    fn right() -> i64:\n        0",
+            "trait_collision", "trait_collision", log
+        )
+        var modules: Dict<text, any> = {}
+        modules["left_traits"] = left
+        modules["right_traits"] = right
+        var lowering = HirLowering.with_filename("trait_collision")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("Shared").?).to_be(true)
+        expect(lowering.lowered_traits["Shared"].defaults[0].name).to_equal("left")
+        expect(hir.impls[0].methods.contains_key("left")).to_be(true)
+
+    it "keeps an imported trait binding across a local collision":
+        val log = make_logger()
+        val provider = parse_full_frontend(
+            "trait Shared:\n    fn imported() -> i64:\n        1",
+            "provider_traits", "provider_traits", log
+        )
+        val consumer = parse_full_frontend(
+            "use provider_traits.{Shared}\ntrait Shared:\n    fn local() -> i64:\n        2\nstruct Target:\n    n: i64\nimpl Shared for Target:\n    fn local() -> i64:\n        0",
+            "local_trait_collision", "local_trait_collision", log
+        )
+        var modules: Dict<text, any> = {}
+        modules["provider_traits"] = provider
+        var lowering = HirLowering.with_filename("local_trait_collision")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(lowering.lowered_traits["Shared"].defaults[0].name).to_equal("imported")
+        expect(hir.impls[0].methods.contains_key("imported")).to_be(true)
+
     it "glob import follows a facade's named re-exports":
         val log = make_logger()
         val inner = parse_full_frontend("struct InnerType:\n    value: i64\npub fn inner_fn() -> i64:\n    42", "pkg.inner", "pkg.inner", log)
@@ -180,7 +254,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(hir.symbols.lookup("sibling_answer").?).to_equal(true)
         expect(lowering.errors.len()).to_equal(0)
 
-    it "aliased trait import lowers defaults with the local symbol":
+    it "unused aliased trait import defers defaults":
         val log = make_logger()
         val provider = parse_full_frontend("trait Greeter:\n    fn greet(self) -> i64:\n        42", "trait_provider", "trait_provider", log)
         val consumer = parse_full_frontend("use trait_provider." + "{" + "Greeter as G" + "}", "trait_consumer", "trait_consumer", log)
@@ -191,10 +265,24 @@ describe "resolve_import_symbols 2-pass import resolver":
         val hir = lowering.lower_module(consumer)
 
         expect(hir.symbols.lookup("G").?).to_equal(true)
+        expect(lowering.imported_traits.contains_key("G")).to_equal(true)
+        expect(lowering.lowered_traits.contains_key("G")).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "aliased trait import lowers defaults on impl":
+        val log = make_logger()
+        val provider = parse_full_frontend("trait Greeter:\n    fn greet() -> i64:\n        42\n    fn farewell() -> i64:\n        1", "trait_provider", "trait_provider", log)
+        val consumer = parse_full_frontend("use trait_provider." + "{" + "Greeter as G" + "}\nstruct Target:\n    n: i64\nimpl G for Target:\n    fn farewell() -> i64:\n        7", "trait_consumer", "trait_consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["trait_provider"] = provider
+        var lowering = HirLowering.with_filename("trait_consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("G").?).to_equal(true)
         expect(lowering.lowered_traits.contains_key("G")).to_equal(true)
-        val trait_hir = lowering.lowered_traits["G"]
-        expect(trait_hir.defaults.len()).to_equal(1)
-        expect(trait_hir.defaults[0].name).to_equal("greet")
+        expect(lowering.lowered_traits["G"].defaults.len()).to_equal(2)
+        expect(hir.impls[0].methods.contains_key("greet")).to_equal(true)
         expect(lowering.errors.len()).to_equal(0)
 
     it "keeps an alias distinct after an unaliased trait collision":
@@ -214,10 +302,10 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(left_id.?).to_equal(true)
         expect(right_id.?).to_equal(true)
         expect(left_id.unwrap().id == right_id.unwrap().id).to_equal(false)
-        expect(lowering.lowered_traits.contains_key("Shared")).to_equal(true)
-        expect(lowering.lowered_traits.contains_key("RightShared")).to_equal(true)
-        expect(lowering.lowered_traits["Shared"].defaults[0].name).to_equal("left")
-        expect(lowering.lowered_traits["RightShared"].defaults[0].name).to_equal("right")
+        expect(lowering.imported_traits.contains_key("Shared")).to_equal(true)
+        expect(lowering.imported_traits.contains_key("RightShared")).to_equal(true)
+        expect(lowering.lowered_traits.contains_key("Shared")).to_equal(false)
+        expect(lowering.lowered_traits.contains_key("RightShared")).to_equal(false)
         expect(lowering.errors.len()).to_equal(0)
 
     it "resolves a named export alias":

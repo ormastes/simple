@@ -75,6 +75,60 @@ largest families are explicit re-export/type-alias facades (`T32BridgeResult`,
 `FixConfidence`, `Replacement`, `EasyFix`) rather than the original memory or
 nested-diagnostic crash.
 
+## 2026-07-28 eager imported-trait amplifier
+
+A fresh isolated Stage 4 run exposed a later regression before browser
+verification could start: after 215 HIR modules it held about 203 million heap
+registry entries and 35 GiB RSS. Small re-export/sibling modules with zero or a
+few local functions added 11-26 million entries while resolving imports.
+
+The flat-function accumulator was initially suspected but falsified: it resets
+for every bootstrap module, live per-module counts are local, and core-C array
+pushes retain shallow handles. The dominant avoidable work is eager lowering of
+every imported trait default. That lowering is needed only when the importing
+module has an impl of the trait.
+
+The source repair records imported parser traits and lowers a trait on demand
+when `lower_impl` needs its defaults. Focused unit scenarios cover glob and
+named/aliased imports: unused traits stay unlowered, while imported traits used
+by an impl retain their defaults and first-binding collision semantics. The
+stale pure-Simple runner cannot execute the scenario; the
+explicit Rust diagnostic runner reached a pre-existing `Unknown type:
+ParseError` frontend failure, so no PASS or memory reduction is claimed yet.
+The unchanged-source Stage 4 build terminated without a candidate at about 97
+GiB RSS and 543 million heap registry entries. A first glob-only repair build
+was stopped at 101 million entries when review found named imports still took
+the same eager path; no memory reduction is claimed from that incomplete run.
+
+A cache-isolated Stage 3 diagnostic then lowered the repaired current-source
+`bootstrap_main` closure and emitted 695-709 objects without HIR/type failure.
+Both bounded attempts stopped at link on symbols outside the selected minimal
+core-C runtime lane, so they prove source/object emission only, not a runnable
+or admissible compiler.
+
+Three full-CLI verification cycles then isolated the remaining owner. The
+glob-only and all-import trait deferrals both reached about 203 million native
+registry entries at HIR module 215/216, matching the unfixed run. A final
+one-thread run with `SIMPLE_BOOTSTRAP_LOW_MEMORY=1` and per-expression phase
+tracing disabled followed the same slope and was stopped at the mandatory
+cycle cap after 64 minutes and about 80 GiB RSS, without a candidate.
+
+The core-C bootstrap registry has no reachability collector: it retains native
+arrays plus immortal strings, dicts, enums, and closures. Low-memory mode can
+drop raw source after parsing and AST/HIR/MIR only at whole-phase boundaries,
+but Stage 4 still holds every parsed `Module` while accumulating every
+`HirModule`. Import/package-sibling registration adds fanout, but the measured
+dominant bug is this whole-phase AST/HIR lifetime overlap. No safe per-module
+registry reset exists because it would also invalidate retained modules.
+
+One safe duplicate owner was removed before the next full measurement: Stage4
+normal MIR lowering reads `ctx.hir_modules`, but HIR finalization also copied
+every module's symbols, functions, constants, enums, structs, and classes into
+the bootstrap flat-HIR globals used only by the non-Stage4 bootstrap MIR path.
+Stage4 now skips both materializing and retaining that parallel aggregate;
+non-Stage4 entry-closure behavior is unchanged. This is a bounded retention
+repair, not yet evidence that the remaining whole-phase peak fits the host.
+
 ## Required structural fix
 
 Introduce a two-pass, streaming HIR pipeline using `ModuleSurface` as compact

@@ -1124,3 +1124,9 @@ implementation in progress / target evidence blocked
   deployed pure-Simple compiler segfaults in both hosted `native-build` and
   `check src/lib`. No bootstrap fallback was used; HTML/CSS, JavaScript/CSS
   animation, and the new fault scenario therefore remain unexecuted this run.
+- The essential compiler repair now defers glob/package-sibling trait-default
+  lowering until an actual impl needs it; explicit imports retain their prior
+  behavior. An isolated Stage 3 diagnostic emitted 695-709 current-source
+  objects without HIR/type failure, then stopped at the minimal core-C link
+  boundary. A full admitted CLI and measured Stage 4 memory receipt remain
+  required before browser verification resumes.
