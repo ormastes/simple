@@ -1,0 +1,222 @@
+# bin/simple log — Debug log management CLI
+#
+# Subcommands:
+#   enable [--pattern <pat>]  — Enable logging with optional filter pattern
+#   disable                    — Disable logging
+#   clear                      — Clear all log entries
+#   query [--since-id N] [--type T] [--max N]  — Query log entries
+#   tree [--format json|text]  — Render log entries as call tree
+#   status                     — Show current log status
+#
+# Storage: .build/debug_log/
+#   config.sdn      — enabled: true/false, pattern: "*"
+#   entries.jsonl    — one JSON object per line
+
+use std.fs.{file_read_text, file_write_text, file_exists, mkdir_p}
+use std.cli.cli_util.{get_cli_args}
+
+val LOG_DIR = ".build/debug_log"
+val CONFIG_PATH = ".build/debug_log/config.sdn"
+val ENTRIES_PATH = ".build/debug_log/entries.jsonl"
+
+fn ensure_log_dir():
+    mkdir_p(LOG_DIR)
+
+fn read_config() -> (bool, text):
+    """Returns (enabled, pattern)"""
+    if not file_exists(CONFIG_PATH):
+        return (false, "*")
+    val content = file_read_text(CONFIG_PATH) ?? ""
+    if content == "":
+        return (false, "*")
+    var enabled = false
+    var pattern = "*"
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("enabled:"):
+            val val_str = trimmed.replace("enabled:", "").trim()
+            enabled = val_str == "true"
+        elif trimmed.starts_with("pattern:"):
+            pattern = trimmed.replace("pattern:", "").trim()
+    (enabled, pattern)
+
+fn write_config(enabled: bool, pattern: text):
+    ensure_log_dir()
+    val enabled_str = if enabled: "true" else: "false"
+    val content = "enabled: " + enabled_str + "\npattern: " + pattern + "\n"
+    file_write_text(CONFIG_PATH, content)
+
+fn count_entries() -> i64:
+    if not file_exists(ENTRIES_PATH):
+        return 0
+    val content = file_read_text(ENTRIES_PATH) ?? ""
+    if content == "":
+        return 0
+    val lines = content.split("\n")
+    var count: i64 = 0
+    for line in lines:
+        if line.trim() != "":
+            count = count + 1
+    count
+
+fn cmd_enable(args: [text]):
+    var pattern = "*"
+    var i = 0
+    while i < args.len():
+        if args[i] == "--pattern" and i + 1 < args.len():
+            pattern = args[i + 1]
+            i = i + 2
+        else:
+            i = i + 1
+    write_config(true, pattern)
+    print("Debug logging enabled (pattern: {pattern})")
+
+fn cmd_disable():
+    write_config(false, "*")
+    print("Debug logging disabled")
+
+fn cmd_clear():
+    ensure_log_dir()
+    file_write_text(ENTRIES_PATH, "")
+    print("Debug log cleared (0 entries)")
+
+fn cmd_query(args: [text]):
+    var since_id: i64 = 0
+    var entry_type = ""
+    var max_results: i64 = 100
+    var i = 0
+    while i < args.len():
+        if args[i] == "--since-id" and i + 1 < args.len():
+            since_id = int(args[i + 1])
+            i = i + 2
+        elif args[i] == "--type" and i + 1 < args.len():
+            entry_type = args[i + 1]
+            i = i + 2
+        elif args[i] == "--max" and i + 1 < args.len():
+            max_results = int(args[i + 1])
+            i = i + 2
+        else:
+            i = i + 1
+
+    if not file_exists(ENTRIES_PATH):
+        print("{\"count\":0,\"entries\":[]}")
+        return
+
+    val content = file_read_text(ENTRIES_PATH) ?? ""
+    val lines = content.split("\n")
+    var filtered: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        var keep = true
+        if since_id > 0:
+            # Extract id from JSON line
+            val id_start = trimmed.index_of("\"id\":") ?? -1
+            if id_start >= 0:
+                val after = trimmed.substring(id_start + 5)
+                var id_str = ""
+                for ch in after:
+                    if ch >= "0" and ch <= "9":
+                        id_str = id_str + ch
+                    else:
+                        break
+                if id_str != "":
+                    val eid = int(id_str)
+                    if eid <= since_id:
+                        keep = false
+        if keep and entry_type != "":
+            if not trimmed.contains("\"entry_type\":\"" + entry_type + "\""):
+                keep = false
+        if keep:
+            filtered.push(trimmed)
+            if filtered.len() >= max_results:
+                break
+
+    print("{\"count\":" + str(filtered.len()) + ",\"entries\":[" + filtered.join(",") + "]}")
+
+fn cmd_tree(args: [text]):
+    var format = "text"
+    var i = 0
+    while i < args.len():
+        if args[i] == "--format" and i + 1 < args.len():
+            format = args[i + 1]
+            i = i + 2
+        else:
+            i = i + 1
+
+    if not file_exists(ENTRIES_PATH):
+        if format == "json":
+            print("{\"format\":\"json\",\"tree\":[]}")
+        else:
+            print("{\"format\":\"text\",\"tree\":\"(empty)\"}")
+        return
+
+    val content = file_read_text(ENTRIES_PATH) ?? ""
+    val lines = content.split("\n")
+
+    if format == "json":
+        var entries: [text] = []
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed != "":
+                entries.push(trimmed)
+        print("{\"format\":\"json\",\"tree\":[" + entries.join(",") + "]}")
+    else:
+        var tree_lines: [text] = []
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed == "":
+                continue
+            # Extract function_name and message
+            var fname = ""
+            var msg = ""
+            val fn_start = trimmed.index_of("\"function_name\":\"") ?? -1
+            if fn_start >= 0:
+                val after = trimmed.substring(fn_start + 17)
+                val end = after.index_of("\"") ?? -1
+                if end >= 0:
+                    fname = after.substring(0, end)
+            val msg_start = trimmed.index_of("\"message\":\"") ?? -1
+            if msg_start >= 0:
+                val after = trimmed.substring(msg_start + 11)
+                val end = after.index_of("\"") ?? -1
+                if end >= 0:
+                    msg = after.substring(0, end)
+            tree_lines.push(">> " + fname + " - " + msg)
+        print("{\"format\":\"text\",\"tree\":\"" + tree_lines.join("\\n") + "\"}")
+
+fn cmd_status():
+    val (enabled, pattern) = read_config()
+    val entry_count = count_entries()
+    val enabled_str = if enabled: "true" else: "false"
+    print("{\"enabled\":" + enabled_str + ",\"filter_pattern\":\"" + pattern + "\",\"entry_count\":" + str(entry_count) + ",\"stack_depth\":0}")
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() == 0:
+        cmd_status()
+        return 0
+
+    val subcmd = args[0]
+    val rest = if args.len() > 1: args[1:] else: []
+
+    match subcmd:
+        case "enable":
+            cmd_enable(rest)
+        case "disable":
+            cmd_disable()
+        case "clear":
+            cmd_clear()
+        case "query":
+            cmd_query(rest)
+        case "tree":
+            cmd_tree(rest)
+        case "status":
+            cmd_status()
+        case _:
+            print("Unknown log subcommand: {subcmd}")
+            print("Usage: simple log [enable|disable|clear|query|tree|status]")
+            return 1
+    0
