@@ -26,9 +26,9 @@ not finish, this document says so rather than guessing.
 | NewSessionTicket / PSK / 0-RTT | implemented | `new_session_ticket.spl` (337), `psk.spl` (349), `_Tls13/psk_connect.spl` |
 | Extension builders (SNI, supported_versions, ALPN, sig_algs, groups) | implemented | `handshake13_ext_builders.spl` (239) |
 | CertificateVerify signature verify (Ed25519 / RSA-PSS / ECDSA P-256/384/521) | implemented | `_CertVerify/signature_verify.spl:1-379`, `_CertVerify/der_parsing.spl` |
-| Certificate chain verification (issuer/subject, CA flag, anchor match) | implemented **but OFF BY DEFAULT** | `_CertVerify/signature_verify.spl:400-442`; only caller is `_Tls13/handshake.spl:587`, gated on `config.root_store.len() > 0`, and `tls13_default_client_config()` sets `root_store: []` (`_Tls13/psk_connect.spl:294-309`) |
-| **Hostname / SAN verification** | **WAS ABSENT — added by this lane** | see §4 |
-| Certificate validity period (notBefore/notAfter) | **absent** | zero hits for `not_after`/`not_before`/`expir` across `src/os/tls13/**` and `src/os/tls12/**` |
+| Certificate chain verification (issuer/subject, CA flag, anchor match) | implemented; was OFF BY DEFAULT when surveyed, **now unconditional** | `_CertVerify/signature_verify.spl:400-442`; was gated on a non-empty `root_store` with `tls13_default_client_config()` supplying `[]`; now driven by `_CertVerify/peer_policy.spl:57` — see §5 |
+| **Hostname / SAN verification** | **WAS ABSENT repo-wide — added by this lane** | `_CertVerify/hostname_verify.spl`; see §4, and §5 for where it is now called from |
+| Certificate validity period (notBefore/notAfter) | absent when surveyed, **CLOSED mid-session** | was zero hits across both trees; `_CertVerify/validity.spl` landed in a parallel session — see §5 |
 | Revocation (CRL / OCSP / stapling) | absent | no matches |
 | KeyUsage / ExtendedKeyUsage / pathLenConstraint enforcement | absent | `_extract_is_ca` (`der_parsing.spl:520`) reads BasicConstraints.cA only |
 | Alert protocol (send/receive, fatal alerts on violation) | **absent** | zero hits for `send_alert`/`fatal_alert`/`alert(` in either tree; protocol violations return `Tls13ConnectResult.Failed` and drop the socket without an alert |
@@ -79,13 +79,53 @@ Result: exactly 3 assertions went red — `*.com public suffix`, `no-SAN cert w/
 matching CN rejected`, `empty cert rejected` — and nothing else. Reverted; re-ran;
 `TLSVER_FAILS=0`. The specs discriminate.
 
-**Pre-existing TLS specs: NOT re-verified.** `bin/simple test
-test/03_system/os/os_tls_cert_chain_spec.spl` was started twice and did not produce
-a `Results:` line within 600s under the session load. No verdict is claimed for
-`os_tls_cert_chain_spec`, `os_tls_client_auth_spec`, `os_tls_diag_spec`,
-`os_tls_hosted_interop_basic_spec`, the 12 `test/*/os/tls13/*_spec.spl` files, or
+### `os_tls_cert_chain_spec.spl` — red on the SEED, GREEN once the seed bug is worked around
+
+`bin/simple test test/03_system/os/os_tls_cert_chain_spec.spl` (unpiped, full
+capture, ~35 min under load):
+
+```
+Results: 4 total, 1 passed, 3 failed
+  x parses leaf certificate pieces compatible with rsa_pss_sha256_verify
+      unexpected verify_cert_chain failure: unsupported certificate signature algorithm
+  x accepts a valid leaf -> intermediate chain anchored in the root store
+  x rejects the chain when the trust anchor is absent
+  v rejects an intermediate certificate that is not marked as a CA
+```
+
+**This is a SEED-PARSER artifact, not a TLS defect** (see §3), and the chain is
+exact: the RSA-PSS
+algorithm OID is `2a 86 48 86 f7 0d 01 01 0a`. With `_hex_digit("f") == 14`, the
+`f7` byte decodes as `e7`, so `_is_rsa_pss_oid` never matches,
+`_sig_scheme_from_algorithm_tlv` returns 0, and every signature check reports
+"unsupported certificate signature algorithm".
+
+Replacing this file's `_hex_digit` if-chain with a table lookup — **no other
+change to the spec or to any source file** — takes the same command to:
+
+```
+Results: 4 total, 4 passed, 0 failed
+```
+
+That is the causal proof, and it clears `verify_cert_chain`: the TLS
+chain-verification code was correct all along. In the 1/4 state the single
+"passing" example was passing vacuously — "rejects an intermediate certificate
+that is not marked as a CA" asserts only that a rejection occurs, and it got one
+from the corrupted-OID path rather than the BasicConstraints check it names.
+
+**MEASUREMENT TRAP — worth recording.** The first two attempts at this spec were
+run as `timeout 900 bin/simple test ... | tail -25`. The harness reported **exit
+code 0** and the captured output contained no `Results:` line, which reads like
+"the spec produced no examples". It is nothing of the sort: in a pipeline the exit
+status is `tail`'s, not `timeout`'s, so a `timeout`-killed run reports success.
+Always run these unpiped. I nearly filed "produces zero examples" as a finding.
+
+**Other pre-existing TLS specs: NOT run.** No verdict is claimed for
+`os_tls_client_auth_spec`, `os_tls_diag_spec`, `os_tls_hosted_interop_basic_spec`,
+the 12 `test/*/os/tls13/*_spec.spl` files, or
 `tls12_record_handshake_round_trip_spec`. Do not read this document as evidence
-that they pass.
+that they pass. Any of them that copied the same `_hex_digit` helper should be
+assumed affected until re-run.
 
 **A/B engine note:** the probe was run twice — default engine and
 `SIMPLE_EXECUTION_MODE=interpreter` — and both report `TLSVER_FAILS=0`,
@@ -98,34 +138,56 @@ verified". The module deliberately avoids the known divergence surfaces (no
 `Dict`, no `Option`, no `+=`, no struct-field mutation, no defaulted struct
 fields), but that is an argument, not a measurement.
 
-## 3. Compiler defects found while building this (NOT fixed here — off-lane)
+## 3. Seed parser defect — REDISCOVERED, already filed, and my first framing was WRONG
 
-**(a) Last arm of a long single-line `if`-chain returns the previous arm's value.**
+I hit this while writing fixtures and initially wrote it up as "the last arm of a
+long single-line `if`-chain returns the previous arm's value". **That framing is
+wrong and a parallel lane (IFCHAIN) had already filed the correct one the same
+day.** Recording the correction because the wrong diagnosis points at innocent
+code:
+
+- Bug: `doc/08_tracking/bug/if_chain_last_arm_returns_previous_value_2026-07-28.md`
+- Gate spec: `test/01_unit/compiler/if_chain_arm_value_spec.spl`
+- Root cause: `src/compiler_rust/parser/src/expressions/binary.rs:68-90` — the
+  leading-operator line-continuation path peeks through NEWLINE/INDENT without
+  comparing indentation.
+- Real rule: **any** line beginning with `-` or `+` at the **same indent** as the
+  previous statement is glued on as a *binary* operator. `if` is irrelevant, chain
+  length is irrelevant. `return 15` ⏎ `-1` parses as `return (15 - 1)` = 14, and
+  the function is left with no tail expression, so the fall-through returns **nil**.
+- **Rust seed only.** The pure-Simple parser is correct. Everything I measured this
+  session was on the seed (see the header note), which is why I saw it at all.
+
+This also subsumes what I had written up as a second, separate defect: the
+"reproducible core dump" on `build/tlsver_min.spl` is the *same* bug. The `-1`
+sentinel is swallowed, the miss path returns nil, and `print "z={rz}"` on nil
+aborts. One defect, not two.
+
+### Consequence for the TLS specs — and the correction that matters
+
+`os_tls_cert_chain_spec.spl` was **1/4 at HEAD on the seed** for exactly this
+reason (RSA-PSS OID `2a 86 48 86 f7 0d ...`; `f7` decoded as `e7`). After
+replacing its `_hex_digit` if-chain with a table lookup — **no other change** —
+the same command reports:
+
 ```
-fn hd(c: text) -> i64:
-    if c == "0": return 0
-    ... 15 more ...
-    if c == "f": return 15
-    -1
+Results: 4 total, 4 passed, 0 failed
 ```
-`hd("f")` returns **14**, not 15. `hd("e")`=14, `hd("a")`=10, `hd("9")`=9 are all
-correct — only the final arm is wrong. Confirmed directly on `bin/simple run`.
 
-Impact beyond this lane: **`test/03_system/os/os_tls_cert_chain_spec.spl:22-40`,
-`test/system/os_tls_cert_chain_spec.spl`, and every sibling spec that copied this
-`_hex_digit` helper decode every `f` nibble as `e`.** Their embedded RSA
-certificate fixtures are therefore corrupt in memory. Whatever those specs report,
-they are not exercising the certificates their authors wrote down. This should be
-re-checked by whoever owns those specs once the compiler defect is fixed.
-Workaround used here: table lookup over `"0123456789abcdef"` (see
-`test/03_system/os/os_tls_hostname_verify_spec.spl:28` and
-`build/tlsver_probe.spl:13`).
+So: **the three failures were a seed-parser artifact, NOT a defect in the TLS
+chain-verification code.** `verify_cert_chain` is fine. Do not read the earlier
+"red at HEAD" line as evidence against the TLS implementation; it was evidence
+against the seed. What *is* a real (if now-moot) observation is that the single
+example which passed at 1/4 passed vacuously — it asserts only that a rejection
+occurs, and it got one from the corrupted-OID path rather than from the
+BasicConstraints check it names.
 
-**(b) Reproducible core dump.** `build/tlsver_min.spl` (12 lines: a 3-arm
-single-line `if`-chain plus `main`) makes `bin/simple run` dump core, twice in a
-row, while larger files in the same directory run fine.
-
-Both belong to the compiler lane; `src/compiler/**` is out of scope for TLSVER.
+25 files repo-wide carry the same `_hex_digit` shape, including the shared
+`test/03_system/os/os_crypto_ref_helpers.spl` and several RSA/AES/Ed25519 KAT
+specs. **This does not undermine the "crypto is KAT-verified" claim** — the defect
+is seed-only, and those specs run correctly on the pure-Simple binary. I patched
+only the one TLS spec I was measuring; the rest are IFCHAIN's call, and the proper
+fix is the parser, not 25 copies of a workaround.
 
 ## 4. The fix — RFC 6125 hostname verification
 
@@ -169,24 +231,47 @@ and `test/03_system/os/os_tls_cert_chain_spec.spl` reports 1. The rule is
 mis-firing on byte arrays across this whole tree; the code was not distorted to
 satisfy it. `COLL006` on `[u8]` accumulation is worth a lint-lane bug.
 
-## 5. Honest residual risk
+## 5. Residual risk — SUPERSEDED by a parallel lane, mid-session
 
-The fix closes hostname verification **only for callers that supply a root store**.
-`tls13_connect(fd, hostname)` still uses `tls13_default_client_config()`, whose
-`root_store` is `[]`, so the default client performs **no chain verification and no
-hostname verification** — it authenticates only that the peer holds the key for
-whatever certificate it sent. That is still trivially MITM-able. Flipping the
-default is a behaviour change that would break the existing CN-only fixtures and
-every in-repo caller, so it is filed as the next increment, not smuggled in here.
+When I wrote this I recorded that the fix hardened only callers supplying a root
+store, because `tls13_default_client_config()` sets `root_store: []` and my check
+sat under that gate — so the default client still verified nothing. I filed
+"make verification the default" and "certificate validity period" as the next two
+increments.
 
-Next increments, in priority order:
-1. Make verification the default: a `verify_peer: bool` on `Tls13ClientConfig`
-   defaulting to true, with an explicit opt-out for the self-signed test fixtures.
-2. Certificate validity period (notBefore/notAfter) — currently absent entirely.
-3. RFC 8446 §4.1.3 downgrade-sentinel check on ServerHello.random.
-4. Alert protocol: send a fatal alert on protocol violation instead of silently
-   dropping the connection.
-5. Re-verify the cert-chain specs once compiler defect (a) is fixed.
+**Both landed while this lane was running, in a parallel session, and the result
+is better than what I would have written.** Recording it so nobody re-does it:
+
+- `src/os/tls13/_CertVerify/peer_policy.spl:57` now owns the whole policy:
+  `verify_peer_certificate(chain, root_store, hostname, now_unix,
+  insecure_disable_certificate_verification)` -> validity, then chain, then
+  hostname.
+- Verification is **unconditional**. An empty `root_store` is an explicit
+  *error* ("an empty trust store is not a request to skip verification"), not a
+  bypass. The single opt-out is
+  `config.insecure_disable_certificate_verification`, checked at exactly one site.
+- `src/os/tls13/_CertVerify/validity.spl` adds the notBefore/notAfter check that
+  §1 lists as absent — that row is now stale in my favour.
+- `_Tls13/handshake.spl:595-607` calls `verify_peer_certificate` and my earlier
+  inline `verify_hostname` call there is gone.
+
+**My work was adopted, not clobbered.** `peer_policy.spl:90` calls
+`verify_hostname(chain[0], hostname)` — this lane's function — and carries my
+RFC 6125 comment verbatim; `validity.spl:336` cites "the aliasing reason
+documented in hostname_verify.spl". `src/os/tls13/_CertVerify/hostname_verify.spl`
+is byte-identical to what this lane wrote (verified against the out-of-tree backup).
+
+I deliberately did **not** restore my inline call at the old site. Re-adding it
+would duplicate the check and partially revert their unconditional design — the
+"origin already supersedes you" case in `.claude/rules/vcs.md`. Probe re-run
+against the integrated tree: `TLSVER_FAILS=0`.
+
+Still open after all of this:
+1. RFC 8446 §4.1.3 downgrade-sentinel check on ServerHello.random — still absent.
+2. Alert protocol — still absent; violations drop the socket with no alert.
+3. Revocation (CRL/OCSP/stapling), KeyUsage/EKU/pathLen — still absent.
+4. `src/os/tls12/` remains scaffolding with no verification of any kind.
+5. The other pre-existing TLS specs still have no verdict (§2).
 
 ## 6. Lean — `src/verification/tls_isolation/`
 
