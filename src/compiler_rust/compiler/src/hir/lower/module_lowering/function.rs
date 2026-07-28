@@ -5,7 +5,7 @@ use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    ConcurrencyMode, FunctionLayoutHint, HirContract, HirFunction, LayoutAnchor, LayoutPhase, LocalVar, TypeId,
+    ConcurrencyMode, FunctionLayoutHint, HirContract, HirFunction, HirStmt, LayoutAnchor, LayoutPhase, LocalVar, TypeId,
 };
 
 /// Returns true when a Block represents a stub body that auto-synthesis may replace.
@@ -614,7 +614,29 @@ impl Lowerer {
         };
         let effective_body: &ast::Block = driver_synthesized.as_ref().unwrap_or(&f.body);
 
-        let body = self.lower_block(effective_body, &mut ctx)?;
+        let mut body = self.lower_block(effective_body, &mut ctx)?;
+
+        // Implicit-return counterpart of the `Node::Return` bool coercion in
+        // stmt_lowering: a function declared `-> bool` whose trailing
+        // expression is `x.?` is in boolean context, so `.?` must lower to the
+        // presence predicate rather than the `T?` value form. Otherwise the
+        // value escapes through the function boundary and every `if has(..):`
+        // caller branches on the non-zero nil sentinel and takes the wrong
+        // branch. Most of the 42 owned `-> bool` functions returning a bare
+        // `.?` use this implicit form rather than an explicit `return`.
+        //
+        // Rewritten structurally on the already-lowered HIR rather than by
+        // re-lowering the AST: a second `lower_expr` pass over the same tail
+        // re-registers whatever that subtree references, which perturbed the
+        // JIT's extern set (observed as a new "unresolved external symbol
+        // 'rt_index_of'" bailout demoting the whole browser-engine module to
+        // the interpreter). This transform allocates nothing and touches no
+        // lowering state.
+        if ctx.return_type == TypeId::BOOL {
+            if let Some(HirStmt::Expr(tail)) = body.last_mut() {
+                Lowerer::coerce_exists_value_to_bool_in_place(tail);
+            }
+        }
 
         // Detect suspension operators in function body for async/sync validation.
         // Synthesized bodies (from @driver ops= auto-synthesis) never contain

@@ -48,7 +48,7 @@ impl Lowerer {
         else_branch: Option<&Expr>,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        let cond_hir = Box::new(self.lower_expr(condition, ctx)?);
+        let cond_hir = Box::new(self.lower_condition(condition, ctx)?);
         let then_hir = Box::new(self.lower_expr(then_branch, ctx)?);
         let else_hir = if let Some(eb) = else_branch {
             Some(Box::new(self.lower_expr(eb, ctx)?))
@@ -972,25 +972,231 @@ impl Lowerer {
         })
     }
 
-    /// Lower an existence check expression (expr.?) to HIR
+    /// Lower an expression that appears in **condition position** — an
+    /// `if`/`elif`/`while`/`assert` test, a contract clause, a match guard, a
+    /// ternary test, or an operand of `and`/`or`/`not`.
     ///
-    /// The `.?` operator checks if a value is "present":
-    /// - For Option types: true if Some, false if None
-    /// - For collections: true if non-empty, false if empty
-    /// - For Result types: use result.ok.? or result.err.?
-    /// - For primitives: always true (they always exist)
+    /// The only expression that lowers differently here than in value position
+    /// is `expr.?` (`Expr::ExistsCheck`). In value position `.?` yields `T?`
+    /// (see `lower_exists_check`), and the nil sentinel is the non-zero integer
+    /// `3` (`lower_nil_expr`), so branching directly on that value would make
+    /// `if nil_opt.?:` truthy — a silent wrong-branch bug. Condition position
+    /// therefore keeps the boolean presence predicate.
     ///
-    /// Lower directly to the runtime presence predicate. Routing through
-    /// generic `expr != nil` selects native equality for erased optionals.
+    /// This mirrors what the interpreter already does: it evaluates `.?` to the
+    /// value and every condition site funnels through `is_condition_present`
+    /// (`interpreter_control.rs`), which special-cases `Expr::ExistsCheck` to
+    /// mean "not nil" rather than generic truthiness.
+    ///
+    /// `and`/`or`/`not` recurse so that `if a.? and b.?:` keeps both operands in
+    /// condition position.
+    pub(crate) fn lower_condition(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+        // A bare `.?` test: emit the presence predicate directly.
+        if let Expr::ExistsCheck(inner) = expr {
+            let inner_hir = self.lower_expr(inner, ctx)?;
+            return Ok(HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_is_some".to_string(),
+                    args: vec![inner_hir],
+                },
+                ty: TypeId::BOOL,
+            });
+        }
+
+        // Everything else goes through the normal dispatcher and is only
+        // post-rewritten. Hand-building the `and`/`or`/`not` HIR here instead
+        // bypassed whatever `lower_expr` does for those forms and perturbed
+        // the JIT's extern set — observed as an "unresolved external symbol
+        // 'rt_index_of'" bailout that demoted the whole browser-engine module
+        // to the interpreter (8s -> 384s on the showcase style pass).
+        let mut lowered = self.lower_expr(expr, ctx)?;
+        let is_logical_combinator = match expr {
+            Expr::Binary { op, .. } => matches!(op, ast::BinOp::And | ast::BinOp::Or),
+            Expr::Unary { op, .. } => matches!(op, ast::UnaryOp::Not),
+            _ => false,
+        };
+        if is_logical_combinator {
+            // `if a.? and b.?:` — the operands are conditions too.
+            Self::coerce_exists_value_to_bool_in_place(&mut lowered);
+        }
+        Ok(lowered)
+    }
+
+    /// Rewrite an already-lowered value-position `.?` into the boolean
+    /// presence predicate, in place, for the implicit-return tail of a
+    /// function declared `-> bool`.
+    ///
+    /// This is the implicit-return counterpart of `lower_bool_return_expr`
+    /// (which handles the explicit `return x.?` form before lowering). It
+    /// works on HIR rather than re-lowering the AST: a second `lower_expr`
+    /// pass over the same subtree re-registers whatever that subtree
+    /// references and perturbed the JIT's extern set — observed as a spurious
+    /// "unresolved external symbol 'rt_index_of'" bailout that demoted the
+    /// whole browser-engine module to the interpreter.
+    ///
+    /// Recognizes exactly the shape `lower_exists_check` emits —
+    /// `LetIn { value, body: If { condition: rt_is_some(Local(idx)), .. } }` —
+    /// and replaces it with `rt_is_some(value)`, dropping the now-unused
+    /// binding. Recurses through `and`/`or`/`not` so
+    /// `fn f() -> bool: a.? and b.?` is covered too.
+    pub(crate) fn coerce_exists_value_to_bool_in_place(expr: &mut HirExpr) {
+        match &mut expr.kind {
+            HirExprKind::Binary { op, left, right } if matches!(op, BinOp::And | BinOp::Or) => {
+                Self::coerce_exists_value_to_bool_in_place(left);
+                Self::coerce_exists_value_to_bool_in_place(right);
+                expr.ty = TypeId::BOOL;
+            }
+            HirExprKind::Unary { op, operand } if matches!(op, UnaryOp::Not) => {
+                Self::coerce_exists_value_to_bool_in_place(operand);
+                expr.ty = TypeId::BOOL;
+            }
+            HirExprKind::LetIn { local_idx, value, body } => {
+                let is_exists_shape = match &body.kind {
+                    HirExprKind::If { condition, .. } => matches!(
+                        &condition.kind,
+                        HirExprKind::BuiltinCall { name, args }
+                            if name == "rt_is_some"
+                                && matches!(
+                                    args.first().map(|a| &a.kind),
+                                    Some(HirExprKind::Local(idx)) if idx == local_idx
+                                )
+                    ),
+                    _ => false,
+                };
+                if is_exists_shape {
+                    let subject = std::mem::replace(
+                        value.as_mut(),
+                        HirExpr {
+                            kind: HirExprKind::Nil,
+                            ty: TypeId::NIL,
+                        },
+                    );
+                    expr.kind = HirExprKind::BuiltinCall {
+                        name: "rt_is_some".to_string(),
+                        args: vec![subject],
+                    };
+                    expr.ty = TypeId::BOOL;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Lower an expression in **bool-return position** — the value of a
+    /// `return` in, or the trailing expression of, a function declared
+    /// `-> bool`.
+    ///
+    /// A declared `-> bool` return is a boolean context, so `.?` must produce
+    /// the presence predicate here exactly as it does in an `if` test.
+    /// Otherwise the `T?` value form escapes through the function boundary and
+    /// every caller writing `if has(..):` branches on the non-zero nil
+    /// sentinel and takes the wrong branch — the same silent wrong-branch bug
+    /// `lower_condition` exists to prevent, just laundered through a return.
+    ///
+    /// This is not a special case for `.?`: it is the declared return type
+    /// being honoured. It also closes the divergence recorded in
+    /// `doc/08_tracking/bug/option_predicate_returns_payload_not_bool_2026-07-28.md`
+    /// (a `-> bool` function returning `opt.?` silently returning the object).
+    ///
+    /// Non-bool return types are unaffected and lower normally, so
+    /// `fn f() -> T?: x.?` still yields `T?` per spec.
+    pub(crate) fn lower_bool_return_expr(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+        if ctx.return_type == TypeId::BOOL {
+            return self.lower_condition(expr, ctx);
+        }
+        self.lower_expr(expr, ctx)
+    }
+
+    /// Lower an existence check expression (`expr.?`) in **value position** to HIR.
+    ///
+    /// `.?` returns `T?` — the payload itself when present, `nil` when absent
+    /// (`doc/07_guide/quick_reference/syntax_quick_reference.md`, "Existence
+    /// Check (`.?`) — Returns `T?`"). "Present" means non-nil, and for
+    /// Option/Result the Some/Ok arm.
+    ///
+    /// It must NOT collapse to a bare `rt_is_some` bool. That discarded the
+    /// payload, so `val u = x.?` bound `true` (integer 1); a following field
+    /// access masked the receiver with `~0x7` (`1 & ~7 == 0`), hit the
+    /// nil-receiver guard in `codegen/instr/fields.rs` and executed `ud2`
+    /// (SIGILL). See
+    /// `doc/08_tracking/bug/seed_exists_check_lowers_to_bool_field_access_sigill_2026-07-28.md`
+    /// and the native-smoke-matrix item "(14) Option/nil check (x.?)".
+    ///
+    /// The interpreter (`interpreter/expr.rs`) and the pure-Simple compiler
+    /// (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`, `ExistsCheck`
+    /// arm) already lower it this way; this is the port of that fix to the seed.
+    ///
+    /// The absent arm emits `HirExprKind::Nil`, which materializes the canonical
+    /// nil sentinel `3` (`lower_nil_expr`) — NOT `0`, so `rt_is_none` recognizes
+    /// it and an outer `if val v = x.?:` does not treat it as `Some(0)`.
+    ///
+    /// Condition position (`if x.?:`) does not come through here; it is handled
+    /// by `lower_condition`, because branching on the non-zero nil sentinel
+    /// would take the true branch for an absent value.
+    ///
+    /// The subject is bound to a `LetIn` temp so a side-effecting receiver
+    /// (`f().?`) is evaluated exactly once — the presence test and the unwrap
+    /// both read the temp.
     pub(super) fn lower_exists_check(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         let expr_hir = self.lower_expr(expr, ctx)?;
+        let subject_ty = expr_hir.ty;
 
-        Ok(HirExpr {
+        // Result type is the Option/Result payload when the subject carries a
+        // declared enum type. Struct-typed optionals often use the "raw
+        // migration form" (a bare struct pointer assigned to a `T?` binding
+        // without the canonical Some-wrap), in which case the subject type IS
+        // already the payload type — keeping it preserves the struct-name
+        // provenance a later `v.field` needs to resolve a field index.
+        let payload_ty = match self.result_like_payload_type(subject_ty) {
+            Some(ty) => ty,
+            None if subject_ty == TypeId::NIL => TypeId::ANY,
+            None => subject_ty,
+        };
+
+        let subject_idx = ctx.locals.len();
+        ctx.add_local("$exists_check_subject".to_string(), subject_ty, Mutability::Immutable);
+
+        let condition = HirExpr {
             kind: HirExprKind::BuiltinCall {
                 name: "rt_is_some".to_string(),
-                args: vec![expr_hir],
+                args: vec![HirExpr {
+                    kind: HirExprKind::Local(subject_idx),
+                    ty: subject_ty,
+                }],
             },
             ty: TypeId::BOOL,
+        };
+        // `rt_unwrap_or_self` handles both the wrapped enum form and the raw
+        // migration form, same helper `lower_null_coalesce` uses.
+        let present = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_unwrap_or_self".to_string(),
+                args: vec![HirExpr {
+                    kind: HirExprKind::Local(subject_idx),
+                    ty: subject_ty,
+                }],
+            },
+            ty: payload_ty,
+        };
+        let absent = HirExpr {
+            kind: HirExprKind::Nil,
+            ty: TypeId::NIL,
+        };
+
+        Ok(HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: subject_idx,
+                value: Box::new(expr_hir),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(present),
+                        else_branch: Some(Box::new(absent)),
+                    },
+                    ty: payload_ty,
+                }),
+            },
+            ty: payload_ty,
         })
     }
 

@@ -23,9 +23,19 @@ fn test_lower_while_loop() {
     assert!(matches!(func.body[1], HirStmt::While { .. }));
 }
 
+/// `.?` in VALUE position must branch on the presence predicate and yield the
+/// payload, never route through generic `expr != nil` equality (which selects
+/// native equality for erased optionals).
+///
+/// The absent arm is a real `Nil` (the canonical non-zero sentinel), so this
+/// no longer asserts the whole debug repr is Nil-free — only that there is no
+/// `NotEq` nil-comparison. Before the value-position fix the body collapsed to
+/// a bare `rt_is_some` bool, so `val u = x.?` bound `true` and a following
+/// field access executed `ud2`; see
+/// `doc/08_tracking/bug/seed_exists_check_lowers_to_bool_field_access_sigill_2026-07-28.md`.
 #[test]
 fn test_exists_check_uses_presence_predicate_without_nil_equality() {
-    let module = parse_and_lower("fn present(value: i64?) -> bool:\n    return value.?\n").unwrap();
+    let module = parse_and_lower("fn present(value: i64?) -> i64?:\n    return value.?\n").unwrap();
     let repr = format!("{:?}", module.functions[0].body);
 
     assert!(
@@ -33,8 +43,42 @@ fn test_exists_check_uses_presence_predicate_without_nil_equality() {
         "existence check did not use presence predicate: {repr}"
     );
     assert!(
-        !repr.contains("NotEq") && !repr.contains("Nil"),
+        !repr.contains("NotEq"),
         "existence check retained generic nil equality: {repr}"
+    );
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "existence check discarded the payload instead of unwrapping it: {repr}"
+    );
+    assert!(
+        repr.contains("Nil"),
+        "existence check did not emit the nil sentinel on the absent arm: {repr}"
+    );
+}
+
+/// The other half of the value-position fix: `.?` in CONDITION position must
+/// stay a boolean presence test. The nil sentinel is the non-zero integer 3,
+/// so branching on the value form would make `if nil_opt.?:` truthy — a silent
+/// wrong-branch bug, strictly worse than the loud SIGILL it replaces.
+#[test]
+fn test_exists_check_in_condition_position_stays_bool() {
+    let module = parse_and_lower("fn present(value: i64?) -> i64:\n    if value.?:\n        return 1\n    return 0\n").unwrap();
+    let func = &module.functions[0];
+
+    let HirStmt::If { condition, .. } = &func.body[0] else {
+        panic!("expected lowered if statement: {:?}", func.body)
+    };
+    assert_eq!(
+        condition.ty,
+        TypeId::BOOL,
+        "if-condition `.?` did not stay boolean: {condition:?}"
+    );
+    assert!(
+        matches!(
+            &condition.kind,
+            HirExprKind::BuiltinCall { name, .. } if name == "rt_is_some"
+        ),
+        "if-condition `.?` did not lower to the bare presence predicate: {condition:?}"
     );
 }
 

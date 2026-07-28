@@ -17,7 +17,7 @@ impl Lowerer {
     ) -> LowerResult<Vec<HirContractClause>> {
         let mut result = Vec::new();
         for clause in clauses {
-            let condition = self.lower_expr(&clause.condition, ctx)?;
+            let condition = self.lower_condition(&clause.condition, ctx)?;
             result.push(HirContractClause {
                 condition,
                 message: clause.message.clone(),
@@ -107,7 +107,7 @@ impl Lowerer {
                     },
                 ]);
             } else {
-                let condition = self.lower_expr(condition, ctx)?;
+                let condition = self.lower_condition(condition, ctx)?;
                 let then_block = self.lower_block(body, ctx)?;
                 else_block = Some(vec![HirStmt::If {
                     condition,
@@ -274,7 +274,16 @@ impl Lowerer {
 
             Node::Return(ret) => {
                 let value = if let Some(v) = &ret.value {
-                    let expr = self.lower_expr(v, ctx)?;
+                    // `fn has(..) -> bool: return opt.?` is bool-return
+                    // position: the declared return type demands the presence
+                    // predicate, not the T? payload. Without this, the value
+                    // form escapes through the function boundary and every
+                    // `if has(..):` caller branches on the non-zero nil
+                    // sentinel -- the same silent wrong-branch bug
+                    // `lower_condition` prevents at direct condition sites,
+                    // just laundered through a return. 42 owned `-> bool`
+                    // functions in this repo return a bare `.?`.
+                    let expr = self.lower_bool_return_expr(v, ctx)?;
 
                     // Check for returning local reference (E2005)
                     // If the return expression is a variable reference, check its origin
@@ -383,7 +392,7 @@ impl Lowerer {
                     Ok(result)
                 } else {
                     // Regular if (no pattern)
-                    let condition = self.lower_expr(&if_stmt.condition, ctx)?;
+                    let condition = self.lower_condition(&if_stmt.condition, ctx)?;
                     let then_block = self.lower_block(&if_stmt.then_block, ctx)?;
 
                     let else_block = if let Some(eb) = &if_stmt.else_block {
@@ -403,7 +412,7 @@ impl Lowerer {
             }
 
             Node::While(while_stmt) => {
-                let condition = self.lower_expr(&while_stmt.condition, ctx)?;
+                let condition = self.lower_condition(&while_stmt.condition, ctx)?;
                 let body = self.lower_block(&while_stmt.body, ctx)?;
                 let invariants = self.lower_contract_clauses(&while_stmt.invariants, ctx)?;
                 Ok(vec![HirStmt::While {
@@ -543,7 +552,7 @@ impl Lowerer {
             Node::Continue(_) => Ok(vec![HirStmt::Continue]),
 
             Node::Assert(assert_stmt) => {
-                let condition = self.lower_expr(&assert_stmt.condition, ctx)?;
+                let condition = self.lower_condition(&assert_stmt.condition, ctx)?;
                 Ok(vec![HirStmt::Assert {
                     condition,
                     message: assert_stmt.message.clone(),
@@ -551,7 +560,7 @@ impl Lowerer {
             }
 
             Node::Assume(assume_stmt) => {
-                let condition = self.lower_expr(&assume_stmt.condition, ctx)?;
+                let condition = self.lower_condition(&assume_stmt.condition, ctx)?;
                 Ok(vec![HirStmt::Assume {
                     condition,
                     message: assume_stmt.message.clone(),
@@ -559,7 +568,7 @@ impl Lowerer {
             }
 
             Node::Admit(admit_stmt) => {
-                let condition = self.lower_expr(&admit_stmt.condition, ctx)?;
+                let condition = self.lower_condition(&admit_stmt.condition, ctx)?;
                 Ok(vec![HirStmt::Admit {
                     condition,
                     message: admit_stmt.message.clone(),
@@ -657,7 +666,7 @@ impl Lowerer {
                 match &guard_stmt.condition {
                     Some(cond) => {
                         // ? condition -> result
-                        let cond_hir = self.lower_expr(cond, ctx)?;
+                        let cond_hir = self.lower_condition(cond, ctx)?;
                         Ok(vec![HirStmt::If {
                             condition: cond_hir,
                             then_block: vec![HirStmt::Return(Some(result_hir))],
@@ -1217,7 +1226,7 @@ impl Lowerer {
         let Some(guard) = guard else {
             return Ok((condition, binding_stmts));
         };
-        let guard_hir = self.lower_expr(guard, ctx)?;
+        let guard_hir = self.lower_condition(guard, ctx)?;
         if binding_stmts.is_empty() {
             return Ok((
                 HirExpr {

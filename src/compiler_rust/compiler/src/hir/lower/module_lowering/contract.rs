@@ -214,7 +214,7 @@ impl Lowerer {
 
         // Lower preconditions (purity checked via contract_ctx)
         for clause in &contract.preconditions {
-            let condition = self.lower_expr(&clause.condition, ctx)?;
+            let condition = self.lower_condition(&clause.condition, ctx)?;
             hir_contract.preconditions.push(HirContractClause {
                 condition,
                 message: clause.message.clone(),
@@ -223,7 +223,7 @@ impl Lowerer {
 
         // Lower invariants (purity checked via contract_ctx)
         for clause in &contract.invariants {
-            let condition = self.lower_expr(&clause.condition, ctx)?;
+            let condition = self.lower_condition(&clause.condition, ctx)?;
             hir_contract.invariants.push(HirContractClause {
                 condition,
                 message: clause.message.clone(),
@@ -240,7 +240,7 @@ impl Lowerer {
 
         // Lower postconditions (binding names are converted to ContractResult)
         for clause in &contract.postconditions {
-            let condition = self.lower_expr(&clause.condition, ctx)?;
+            let condition = self.lower_condition(&clause.condition, ctx)?;
             hir_contract.postconditions.push(HirContractClause {
                 condition,
                 message: clause.message.clone(),
@@ -249,7 +249,7 @@ impl Lowerer {
 
         // Lower error postconditions
         for clause in &contract.error_postconditions {
-            let condition = self.lower_expr(&clause.condition, ctx)?;
+            let condition = self.lower_condition(&clause.condition, ctx)?;
             hir_contract.error_postconditions.push(HirContractClause {
                 condition,
                 message: clause.message.clone(),

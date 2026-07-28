@@ -1,7 +1,7 @@
 # Rust seed lowers `.?` to a bare bool — value-position `x.?.field` SIGILLs
 
 - **Date:** 2026-07-28
-- **Status:** root-caused, PROVEN, not yet fixed (fix is in the Rust seed's HIR lowering)
+- **Status:** FIXED 2026-07-28 in the Rust seed's HIR lowering (see "Fix" at the bottom)
 - **Severity:** blocker — sole remaining blocker on the `web x headless` showcase cell
 - **Lane:** `bin/simple run` (which is the **Rust bootstrap seed**, see "Which binary" below)
 - **Not** the `class X with Trait` duck-dispatch `ud2` (that theory is REFUTED below)
@@ -187,6 +187,124 @@ bin/simple run <probe importing std.common.encoding.font_registry>
 # parse_html + extract_css_vw + build_child_index + compute_styles(.., true, true)
 # on examples/06_io/ui/browser_common_elements_showcase.html   -> exit 132
 ```
+
+## Fix (landed 2026-07-28)
+
+Position-split lowering in the seed, ported from the interpreter's design:
+
+- `lower_exists_check` (`hir/lower/expr/control.rs`) now lowers **value
+  position** to `LetIn($exists_check_subject = expr) { if rt_is_some(subject):
+  rt_unwrap_or_self(subject) else: Nil }`, typed as the Option payload (falling
+  back to the subject type so the raw-migration struct form keeps its
+  struct-name provenance for field-index resolution). The `LetIn` temp makes a
+  side-effecting receiver (`f().?`) evaluate exactly once. The absent arm emits
+  `HirExprKind::Nil`, which materializes the canonical sentinel `3`, not `0`.
+- A new `lower_condition` handles **condition position** and keeps the boolean
+  `rt_is_some` predicate there. This is the half the naive fix gets wrong: the
+  nil sentinel is non-zero, so branching on the value form would make
+  `if nil_opt.?:` truthy — a silent wrong-branch bug, strictly worse than the
+  loud SIGILL. Routed through it: `if`/`elif`/`while` conditions,
+  `assert`/`assume`/`admit`, guard statements (`? cond -> result`), match
+  guards, ternary/if-expression tests, and all boolean contract clauses
+  (`decreases` is a measure, not a condition, so it stays on `lower_expr`).
+  Only a bare `.?` is intercepted directly; everything else goes through the
+  normal `lower_expr` dispatcher and `and`/`or`/`not` operands are then
+  post-rewritten structurally, so `if a.? and b.?:` works without bypassing
+  the dispatcher (see the perf note below).
+- **Bool-return position** — `fn has(..) -> bool: opt.?` — also gets the
+  predicate, via `lower_bool_return_expr` for an explicit `return` and a
+  structural `coerce_exists_value_to_bool_in_place` rewrite for the implicit
+  trailing-expression form. Without this the `T?` value escapes through the
+  function boundary and every `if has(..):` caller branches on the non-zero
+  nil sentinel — the same wrong-branch bug, just laundered through a return.
+  **This is not optional: 42 owned `-> bool` functions return a bare `.?`**
+  (about 10 of them inside `src/compiler/` itself — `has_errors`,
+  `has_violations`, `is_resolved`, `has_default`, …), and an audit-then-A/B
+  proved they all regressed without it. Measured on the seed before the
+  coercion was added: `has_some()` returned `<special:7>` instead of `true`,
+  `has_none()` returned the nil sentinel instead of `false`, and
+  `if has_none():` took the TRUE branch.
+
+This is the same split the interpreter already used (`is_condition_present` in
+`interpreter_control.rs` special-cases `Expr::ExistsCheck` at every condition
+site while `interpreter/expr.rs` evaluates `.?` to the value).
+
+### Convergence with the `-> bool` report
+
+`doc/08_tracking/bug/option_predicate_returns_payload_not_bool_2026-07-28.md`
+reports the same operator from the other end and proposes, as one option,
+"lower `.?` to a real bool in both engines". **That option is this bug** — it is
+what the seed did, and it is what produced the SIGILL. The spec
+(`syntax_quick_reference.md`, "Existence Check (`.?`) — Returns `T?`"), the
+interpreter, and the pure-Simple compiler's own type inference
+(`src/compiler/30.types/type_system/expr_infer.spl:360`, "`.?` operator returns
+`T?`") all agree `.?` yields `T?`. So the correct reading of that report is its
+*other* option: a `-> bool` function returning `.?` needs the declared return
+type honoured. That is exactly what the bool-return coercion above implements,
+which closes that report's seed half. Its remaining half —
+`expect(x.?).to_equal(true)` — is simply wrong test code, as that report's own
+workaround concluded; `.?` is not a bool and never was.
+
+### Known remaining divergence (INFERRED, not executed)
+
+The **pure-Simple** compiler still lacks the condition-position split. Its
+`lower_if` (`src/compiler/50.mir/mir_lowering_stmts.spl:1333`) calls
+`self.lower_expr(cond)` with no `ExistsCheck` special case, so a bare
+`if opt.?:` there lowers to the value form and branches on the non-zero nil
+sentinel — i.e. always true. The `if val v = opt.?:` form is safe because the
+parser desugars it to a raw binding plus `v != nil`. This was read from source,
+**not executed**, because the pure-Simple compiler is not the deployed binary.
+It needs its own fix + bootstrap; filing it is follow-up work, not part of this
+change.
+
+Evidence, seed rebuilt from `origin/main` + this change, pre-fix binary =
+the deployed `bin/release/x86_64-unknown-linux-gnu/simple`:
+
+| case | pre-fix | post-fix |
+|---|---|---|
+| 13-line repro (`val u = r1.?` then `u.b`) | exit 132, "field access on nil receiver" | exit 0, `b=P1` / `a=p`, absent case yields nil |
+| `resolve_font_metrics_with_language("sans-serif", .., "en")` | exit 132 | exit 0, `width=125` |
+| same, CJK content (exercises `:2027` complex-script arm) | exit 132 | exit 0, `width=128` |
+| `compute_styles(.., vector_fonts: true)` on the showcase HTML | exit 132 | exit 0, 149 styles |
+| condition-position matrix (some/none/not/and/or/while/if-val) | 10 of 11 correct | byte-identical, no regression |
+| `-> bool` fn returning a bare `.?`, and its `if has():` caller | correct | correct (identical) |
+| native-smoke-matrix item "(14) Option/nil check (x.?)" | `pass=1` | `pass=1`, `codegen_fallback_hits=0` |
+| `test/03_system/feature/usage/exists_check_value_return_spec.spl` | 18/18 | 26/26 (6 new condition-position + 2 new value-position cases) |
+
+Engine note: every row above except the last was run through `simple run`
+(the Cranelift JIT), which is the lane this defect lives in. `simple test`
+hard-defaults to the tree-walk interpreter, so the spec row is interpreter
+evidence — the spec is the permanent regression home, but the JIT proof is the
+`run` rows.
+
+The downstream `.?` sites at `font_renderer.spl:2015/2017/2027` clear with the
+fix — `:2015`/`:2017` are exercised by the Latin probe and `:2027` by the CJK
+probe.
+
+Two things this fix does NOT change, both pre-existing and reproduced
+identically on the pre-fix binary:
+
+- `if some_i64_opt.?:` on a `Some(0)` payload takes the FALSE branch
+  (`native_i64opt_some0_collapses_to_nil`; `rt_is_some` cannot distinguish a
+  raw `0` payload from absence). Unrelated to the `.?` return type.
+### Perf note (found and fixed inside this change)
+
+A first cut of the condition/bool-return lowering hand-built the `and`/`or`/`not`
+HIR instead of going through `lower_expr`. That bypassed the normal dispatcher
+and perturbed the JIT's extern set, producing a spurious
+`unresolved external symbol 'rt_index_of'` bailout that demoted the whole
+browser-engine module to the interpreter — the showcase style pass went from
+JIT-compiled to **384 s interpreted**. Routing those forms back through
+`lower_expr` and only post-rewriting the lowered `.?` shape removed it; the
+final binary runs the showcase with `codegen_fallback_hits=0` and zero JIT
+fallbacks. The lesson is recorded here because the symptom (a perf cliff, not a
+wrong answer) is easy to ship unnoticed.
+
+Measurement caveat for anyone re-running these: this host was concurrently
+running another session's `stage2_*` jobs holding ~95 GB RSS at load average
+34, and the resource monitor SIGTERM'd the probe (exit 143) at 1.3 GB RSS
+several times. Those kills are environmental, not a defect — retry on an idle
+host.
 
 ## Related
 
