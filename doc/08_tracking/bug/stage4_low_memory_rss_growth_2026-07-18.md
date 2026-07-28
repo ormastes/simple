@@ -84,6 +84,28 @@ Observed on 2026-07-18:
 - the process was interrupted once with exit 130 under the runaway/budget
   guard; it was not retried.
 
+### 2026-07-28 bounded incremental follow-up
+
+A current-source pure-Simple Stage3 compiler was rebuilt incrementally on base
+`958db10638d`: 45 compiled, 647 cached, zero failed, 194.9 seconds, binary
+SHA-256 `a920123d919c4a4c384161e16fe35a1853d6e3da6bfd3a4a4e7291a2c072f04d`.
+The full-CLI cycle used that binary, `--low-memory`, two threads, the retained
+cache, and phase profiling. Source loading found 1,340 unique files. A local
+symbol-retention repair stopped caching imported/package-sibling symbols in
+every module; observed RSS was about 7.0 GiB at 15m38s, versus about 21.7 GiB
+in the preceding unfiltered run at 21m32s.
+
+The run still could not converge: only 50 HIR modules completed by 15m38s.
+Large directory packages repeatedly spend minutes in
+`resolve_package_sibling_symbols`, which scans every `modules_by_name` key and
+registers every direct sibling's symbols for each module. The process was
+stopped at the third-cycle cap with no ELF. Retained log:
+`build/native_probe/rebased-stage4-cycle3-final.log`, SHA-256
+`92efd6d06e9c5e27ad45e98f472a953873bc78943bed43e2cb3e5855f2656fea`.
+The next fix must replace repeated eager package-wide registration with an
+indexed or lazy sibling resolver and retain equivalent bare cross-file name
+semantics. No further build is permitted in this verification window.
+
 ## Required fix and regression
 
 1. Add bounded phase/progress reporting to the pure-Simple native-build driver

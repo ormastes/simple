@@ -976,4 +976,22 @@ pure-Simple Stage3 plan in
 `doc/03_plan/agent_tasks/shared_multilingual_gpu_fonts_all_items_2026-07-26.md`;
 the older bridge/cache imperatives above are retained as history only.
 
+## 2026-07-28 latest incremental profile
+
+The branch was incrementally rebuilt on `origin/main` base `958db10638d`.
+Pure-Simple Stage3 passed with 45 compiled, 647 cached, zero failed in 194.9s;
+binary SHA-256:
+`a920123d919c4a4c384161e16fe35a1853d6e3da6bfd3a4a4e7291a2c072f04d`.
+The third and final Stage4 cycle found 1,340 unique sources and reached 50 HIR
+modules by 15m38s. The local-symbol retention fix reduced observed RSS from
+about 21.7 GiB in the prior run to about 7.0 GiB, but eager package-sibling
+registration remained non-convergent. No full CLI, essential-tools smoke,
+focused font execution, or docgen result exists. Retained log:
+`build/native_probe/rebased-stage4-cycle3-final.log` (SHA-256
+`92efd6d06e9c5e27ad45e98f472a953873bc78943bed43e2cb3e5855f2656fea`).
+Afterward the source branch was completion-time rebased onto newer
+`origin/main` base `9c19489a6e6`; no fourth build is permitted.
+The remaining compiler performance blocker is tracked in
+`doc/08_tracking/bug/stage4_low_memory_rss_growth_2026-07-18.md`.
+
 `STATUS: FAIL`
