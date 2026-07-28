@@ -184,6 +184,20 @@ pub fn _driver_module_name_collision(sources: [SourceFile]) -> text:
     ""
 
 fn _driver_entry_closure_mode() -> bool:
+    """AMBIENT MODE FLAG — read at TWO independent sites that MUST agree.
+    1. here (80.driver/driver_source_loading.spl), gating the canonical/alias
+       branch of `_driver_module_aliases` for BOTH collectors
+       (`_driver_collect_sources` AND `_driver_collect_entry_import_source`);
+    2. `parse_all_impl` (80.driver/driver.spl, local `native_entry_closure`),
+       which gates the phase-2 branch that collapses the aliases again with
+       `entry_ctx.sources = _driver_unique_physical_sources(...)`.
+    The extra alias spellings emitted here are kept out of Phase 3 ONLY by (2).
+    Decoupling the two reads — e.g. turning this one into a call-site parameter
+    without threading the same value into `parse_all_impl` — feeds every alias
+    into lowering and reinstates the duplicate-HIR / duplicate-diagnostics
+    regression that `driver.spl` documents at `entry_ctx.sources`. A third read
+    in `driver.spl` (`nb_entry_closure`) suppresses the implicit whole-`src`
+    bulk load in the same mode and must stay in agreement too."""
     (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
 
 fn _driver_module_name_segment_is_tier(seg: text) -> bool:
@@ -223,6 +237,34 @@ pub fn _driver_canonical_module_name(module_name: text) -> text:
         return "lib." + canonical.substring(4)
     canonical
 
+fn _driver_module_name_from_repo_rel(rel: text) -> text:
+    """Dotted module name for a path ALREADY relative to the repo root.
+    `_driver_module_name_from_path` must not be used directly here: its `/src/`
+    (and `/examples/`) substring search truncates everything before a NESTED
+    source directory, so `examples/spostgre/src/tool/main.spl` collapses to the
+    bare `tool.main` and `src/lib/gc_async_mut/src/aop.spl` to the
+    single-segment `aop` — 75 files in this tree canonicalized to a
+    single-segment name, which additionally trips the `self_segs.len() < 2`
+    early return in `resolve_package_sibling_symbols`
+    (20.hir/hir_lowering/_Items/module_lowering.spl). Only the ONE leading
+    `src/` is a package root; every later `src` is an ordinary directory
+    segment. Sanitization is still delegated to the four-copy
+    `_driver_module_name_from_path`, but PER PATH SEGMENT, where a slash-free
+    segment can never match `/src/` — so the character rules stay in one
+    place."""
+    var stripped = rel
+    if stripped.starts_with("src/"):
+        stripped = stripped.substring(4)
+    var segs: [text] = []
+    for seg in stripped.split("/"):
+        if seg == "":
+            continue
+        val part = _driver_module_name_from_path(seg)
+        if part == "":
+            continue
+        segs = segs.push(part)
+    segs.join(".")
+
 fn _driver_physical_module_name(path: text, fallback: text) -> text:
     """Module name derived from the SYMLINK-RESOLVED path.
     `_driver_module_name_from_path` is lexical, so a file reached through
@@ -245,7 +287,7 @@ fn _driver_physical_module_name(path: text, fallback: text) -> text:
     val rel = resolved.substring(root.len() + 1)
     if not rel.starts_with("src/") and not rel.starts_with("examples/"):
         return fallback
-    _driver_module_name_from_path(rel)
+    _driver_module_name_from_repo_rel(rel)
 
 fn _driver_push_unique_module_name(names: [text], name: text) -> [text]:
     """Append a spelling once. Alias lists are a handful of entries, so a linear
@@ -276,11 +318,13 @@ pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [
     keep resolving; the canonical spelling is listed FIRST so
     `_driver_unique_physical_sources` (and therefore Phase 3 lowering) picks a
     name that no longer depends on discovery order.
-    The bulk collector is deliberately left on the narrow legacy branches:
-    `_driver_collect_sources` walks with `find` (no `-L`), so it never traverses
-    a symlink and already produces one uniform spelling — and unlike the closure
-    path (driver.spl: `entry_ctx.sources = unique_entry_sources`) it feeds every
-    alias entry into Phase 3, where an extra spelling would lower the file twice."""
+    CORRECTION (this paragraph used to claim the opposite): the branch below is
+    selected by the AMBIENT `_driver_entry_closure_mode()` flag, NOT by the call
+    site, so the bulk collector `_driver_collect_sources` takes it too whenever
+    the mode is on. That is safe only because the SAME flag makes
+    `parse_all_impl` collapse aliases before Phase 3 — see the coupling note on
+    `_driver_entry_closure_mode`. The legacy branches further down therefore
+    apply only when the mode is off."""
     if _driver_entry_closure_mode():
         val physical = _driver_physical_module_name(path, module_name)
         val canonical = _driver_canonical_module_name(physical)
@@ -289,9 +333,21 @@ pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [
         names = _driver_push_unique_module_name(names, module_name)
         names = _driver_push_unique_module_name(names, physical)
         names = _driver_push_unique_module_name(names, _driver_canonical_module_name(module_name))
-        # `src/std -> lib`: files walked through the symlink derive `std.*`, so
-        # both twins must exist for sibling lookup to cross the two spellings.
-        if canonical.starts_with("lib."):
+        # `src/std -> lib`: a file actually walked THROUGH the symlink derives a
+        # `std.*` spelling, and both twins must then exist so sibling lookup can
+        # cross them. CONDITIONAL on this file really having a `std.` spelling
+        # in play. Emitting the twin for every `lib.*` file instead grew the
+        # whole-tree alias population 1.76x (12,795 -> 22,504 SourceFile
+        # entries, 19,144 registry keys over 12,501 files) in a no-GC pipeline
+        # with a documented 64 GB OOM history and a 24 GB stage-4
+        # resource-monitor cap. It is not needed unconditionally: Phase 3 lowers
+        # each file under its CANONICAL (`lib.`) name, so
+        # `resolve_package_sibling_symbols` derives `self_name` in `lib.` space
+        # and finds every sibling there; a `std.` key is only required to
+        # satisfy a direct `use std....`, and the closure walk registers exactly
+        # that spelling on demand. Same simulation, conditional: 15,974 entries
+        # / 12,644 keys (1.25x over the pre-canonicalization 12,795).
+        if canonical.starts_with("lib.") and (module_name.starts_with("std.") or physical.starts_with("std.")):
             names = _driver_push_unique_module_name(names, "std." + canonical.substring(4))
         # `compiler.core.*` is not a symlink spelling but a rewrite-table import
         # spelling (_driver_resolve_numbered_compiler_import maps it to
