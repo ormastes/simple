@@ -361,6 +361,25 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
+    /// Tag a native integer VReg into a RuntimeValue when `ty` is an integer
+    /// type, mirroring the array-literal element boxing above. Non-integer
+    /// operands (strings, heap handles, floats, bools) pass through unchanged.
+    fn box_int_operand(&mut self, reg: VReg, ty: TypeId) -> MirLowerResult<VReg> {
+        let needs_int_boxing = matches!(
+            ty,
+            TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        );
+        if !needs_int_boxing {
+            return Ok(reg);
+        }
+        self.with_func(|func, current_block| {
+            let boxed = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::BoxInt { dest: boxed, value: reg });
+            boxed
+        })
+    }
+
     pub(super) fn lower_dict_expr(&mut self, pairs: &[(HirExpr, HirExpr)]) -> MirLowerResult<VReg> {
         // Create an empty dict and insert pairs
         // Dict is represented as a runtime value (i64 pointer)
@@ -390,9 +409,30 @@ impl<'a> MirLowerer<'a> {
             dest
         })?;
 
-        // Insert each pair
+        // Insert each pair.
+        //
+        // `rt_dict_set(dict, key, value)` takes TAGGED RuntimeValues: it hashes
+        // the key with `value_hash` and compares with `rt_value_eq`. Every dict
+        // READ path already tags an integer key (`d[k]` lowers to BoxInt +
+        // rt_index_get; `d.contains_key(k)` / `d.get(k)` wrap_value the key into
+        // rt_box_int), so a dict LITERAL that stored the RAW native integer
+        // hashed into a different bucket and every later read missed:
+        // `{1: 10, 2: 20}` gave `d[2] == nil` and `d.contains_key(1) == false`
+        // under the Cranelift JIT, while the interpreter — which boxes on both
+        // sides — was correct. Only key 0 survived, because `0 << 3 == 0`.
+        // Box on the WRITE side to match the reads and the runtime contract.
+        //
+        // KEYS ONLY. The stored VALUE has an analogous but NOT identical
+        // asymmetry (a raw integer value whose low 3 bits are 0 reads back as
+        // `v >> 3`, so `{"a": 8}` yields `d["a"] == 1`), yet tagging it here is
+        // not a self-contained fix: `d[k]` unboxes the result but the
+        // `Dict.get` lowering emits no UnboxInt at all, so boxing the value
+        // turns `{"a": 1}.get("a")` from an accidentally-correct `1` into `8`.
+        // That needs the missing unbox on the `Dict.get` read path first and is
+        // tracked separately. Floats/bools/strings are likewise untouched.
         for (key_expr, value_expr) in pairs {
             let key_reg = self.lower_expr(key_expr)?;
+            let key_reg = self.box_int_operand(key_reg, key_expr.ty)?;
             let value_reg = self.lower_expr(value_expr)?;
             let insert_target = CallTarget::from_name("rt_dict_set");
             self.with_func(|func, current_block| {

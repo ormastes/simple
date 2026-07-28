@@ -620,3 +620,64 @@ the `index_of` sibling there is **no `rt_dict_get_or` runtime function**. Adding
 the result type alone would emit a call to a nonexistent symbol and re-trigger
 the exact demotion just fixed. It needs either a runtime implementation or a
 lowering that expands to `contains_key` + `get` + select.
+
+### Correction: the dict key asymmetry is in the WRITE, not the read
+
+The section above says the inline-shift list at
+`codegen/instr/closures_structs.rs:1361` omits `rt_dict_contains` and
+`rt_dict_get`, and that this is why integer-keyed reads fail. **That is
+inverted, and the proposed fix would have been a no-op.**
+
+Verified against the runtime contract and the MIR:
+
+- `rt_dict_get` / `rt_dict_contains` / `rt_dict_set`
+  (`runtime/src/value/dict.rs:177,214,240`) all take **tagged** keys, hashed via
+  `value_hash` and compared with `rt_value_eq`. Tagged is the contract, so
+  boxing is the correct side to change.
+- `rt_dict_get` and `rt_dict_contains` **are never emitted by any Cranelift
+  lowering.** The only emission sites are `rt_index_get`, `rt_contains` and
+  `rt_dict_remove` — all three already in the `box_dict_key` list. Adding the
+  two names would have changed nothing.
+- `SIMPLE_DUMP_MIR` on `{1: 10, 2: 20}` shows the read already boxed
+  (`BoxInt` → `rt_index_get`) and the **write raw**:
+  `Call Pure("rt_dict_set") args [dict, ConstInt 1, ConstInt 10]`.
+- Decisive probes: `d[0]` on `{0: 99}` works, because `0 << 3 == 0` is the one
+  key that survives being stored unboxed; and an index-*write* `d[1] = 10`
+  (which does emit `BoxInt`) followed by `d[1]` reads back correctly. Only the
+  **literal** write path is raw.
+
+Real cause: `lower_dict_expr` in
+`mir/lower/lowering_expr_collection.rs` emits `rt_dict_set` with an unboxed
+integer key, unlike every sibling literal lowering (tuple, array) and unlike
+every dict read.
+
+### Scope limit of the fix — inferred dicts are still wrong
+
+The fix boxes the key in the dict-literal lowering. It resolves the annotated
+case only:
+
+| declaration | expression | JIT | interpreter |
+|---|---|---|---|
+| `val d: {i64: i64} = {1: 10, 2: 20}` | `d[2].to_string()` | `20` | `20` |
+| `val d: {i64: i64} = {1: 10, 2: 20}` | `"{d[2]}"` | `20` | `20` |
+| `val d = {1: 10, 2: 20}` | `d[2].to_string()` | **`<value:0x14>`** | `20` |
+| `val d = {1: 10, 2: 20}` | `"{d[2]}"` | **`<value:0x14>`** | `20` |
+
+`.to_string()` versus interpolation makes no difference — **the type annotation
+does.** The verifying lane's matrix used annotated declarations throughout, so
+it measured only the half that works. `0x14` is 20, so the value is stored and
+found correctly; it is the read that fails to unbox when the dict type was
+inferred.
+
+### Same-family gaps found and deliberately not fixed
+
+1. **Integer dict *values* have the same asymmetry.** `{"a": 8}` gives `1` on
+   the JIT against `8` interpreted. Not fixable at the same line: the
+   `Dict.get` lowering emits **no `UnboxInt` at all**, so boxing the value would
+   turn the accidentally-correct `{"a": 1}` case into `8`. The missing unbox on
+   the read path has to land first.
+2. **`Dict.insert` is still unrouted** — `Function 'Dict.insert' not found`,
+   exit 0. A separate dispatch gap from the `rt_dict_insert` → `rt_dict_set`
+   alias.
+3. **Interpreter `keys()` order is nondeterministic run to run** — the same
+   binary flips `a`/`b`. Any spec asserting key order is flaky.
