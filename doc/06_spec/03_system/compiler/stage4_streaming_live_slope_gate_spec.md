@@ -14,8 +14,9 @@ regression, and RSS regression are explicit failures. The bounded `--self-test`
 executes marker parser fixtures plus canonical-lane and smoke-receipt checks.
 Source attestation includes files under `examples/10_tooling` reached through
 supported `src/app` aliases and rejects aliases escaping the owned source roots.
-The production Stage 4 launcher explicitly enables the streaming-surface path;
-the memory algorithm is not accepted from a test-only environment override.
+The production Stage 4 launcher explicitly enables both the low-memory profile
+and streaming-surface path; the memory algorithm is not accepted from a
+test-only environment override.
 
 Executable source:
 `test/03_system/compiler/stage4_streaming_live_slope_gate_spec.spl`.

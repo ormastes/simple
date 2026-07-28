@@ -311,3 +311,22 @@ implementation described above was never selected. The shared Stage-4 launch
 function now sets that flag, and unit/system contracts plus the portability
 gate require it. The one-attempt cap leaves compilation, deployment, and NVMe
 post-bootstrap SSpec/docgen for the next bounded run.
+
+## 2026-07-28 paired low-memory admission repair
+
+The next bounded attempt again completed and sanity-checked Stage 2 and Stage
+3, passed source attestation, and entered Stage 4. It took 31m54s, peaked at
+2,923,468 KiB RSS, and performed zero swaps. Stage 2 SHA-256 was
+`6f48099e3ac49299897bf2b71f95f8386b94be11899f6fc4428b9debdfe01d15`;
+Stage 3 SHA-256 was
+`fb9929d4e89c368966ea85565af83c773383595970dfd11f3efd05a62e28cba8`.
+
+The log still took the legacy `phase2:parse:closure` branch and repeated the
+`compiler.core.ast_stmt` alias failure. Source tracing localized the remaining
+false predicate: `aot_native_project_with_backend_fixed` derives
+`options.low_memory` from `SIMPLE_BOOTSTRAP_LOW_MEMORY`, while the streaming
+selector requires both that option and `SIMPLE_STAGE4_STREAMING_SURFACES`.
+The production launcher now sets both flags, matching the existing bounded
+memory runner, and both unit/system contracts require the pair. The one-attempt
+cap leaves Stage-4 compilation, deployment, and NVMe post-bootstrap SSpec/docgen
+for the next bounded run.
