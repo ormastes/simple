@@ -1,0 +1,318 @@
+# X.509 hostname (identity) verification — RFC 6125 / RFC 5280 §4.2.1.6.
+#
+# Signature verification (CertificateVerify) proves the peer holds the private
+# key for the certificate it presented. Chain verification proves a trust anchor
+# issued that certificate. NEITHER proves the certificate was issued for the
+# name we intended to reach: without this check, any certificate signed by any
+# trusted CA — including one legitimately issued to an attacker for their own
+# domain — is accepted for every hostname. This module closes that gap.
+#
+# Scope / deliberate restrictions:
+#   - subjectAltName dNSName entries ONLY. The Subject CN fallback is NOT
+#     implemented and MUST NOT be added: RFC 6125 §6.4.4 deprecates it and
+#     CA/Browser Forum baseline requirements have forbidden CN-only certs since
+#     2017. A certificate with no SAN dNSName is a verification failure here.
+#   - IP address SANs (tag 0x87) are not matched; an IP literal peer name is
+#     rejected rather than silently accepted.
+#   - Wildcards follow the conservative browser rule (RFC 6125 §6.4.3):
+#     leftmost label only, exactly one "*", the wildcard label must be exactly
+#     "*" (no "foo*.example.com" partial matches), and the presented name must
+#     have at least three labels so "*.com" cannot match.
+#
+# All comparison happens in the byte domain with ASCII case folding, so a
+# non-ASCII or NUL-embedded SAN can never alias a legitimate name.
+
+use os.tls13.cert_verify.*
+
+val _HV_ASCII_PRINTABLE: text = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+# ============================================================================
+# Byte helpers (self-contained: no reliance on private helpers in sibling files)
+# ============================================================================
+
+fn _hv_lower(b: u8) -> u8:
+    """ASCII-fold one byte to lowercase. Non-ASCII bytes pass through unchanged."""
+    val v = b.to_u64().to_i64()
+    if v >= 65 and v <= 90:
+        return (v + 32).to_u8()
+    b
+
+fn _hv_slice(data: [u8], start: u64, length: u64) -> [u8]:
+    """Copy `length` bytes from `start`. Returns [] when the range is out of bounds."""
+    var out: [u8] = []
+    if length == 0u64:
+        return out
+    if start + length > data.len().to_u64():
+        return out
+    var i: u64 = 0
+    while i < length:
+        out.push(data[start + i])
+        i = i + 1u64
+    out
+
+fn _hv_fold_slice(data: [u8], start: u64, length: u64) -> [u8]:
+    """ASCII-fold a byte range to lowercase, returning a FRESH array.
+
+    This must stay a function rather than an inline loop over a `var` declared
+    inside the caller's loop body: a re-entered loop-local array is aliased by
+    every element pushed into the accumulator, which silently collapsed all SAN
+    entries onto the last one.
+    """
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length:
+        if start + i < data.len().to_u64():
+            out.push(_hv_lower(data[start + i]))
+        i = i + 1u64
+    out
+
+fn _hv_bytes_eq(a: [u8], b: [u8]) -> bool:
+    """Exact byte-string equality."""
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len().to_u64():
+        if a[i] != b[i]:
+            return false
+        i = i + 1u64
+    true
+
+fn _hv_text_to_lower_bytes(s: text) -> [u8]:
+    """Convert printable-ASCII text to lowercase bytes.
+
+    Any character outside printable ASCII yields an empty result, which callers
+    treat as a hard verification failure rather than a partial match.
+    """
+    var out: [u8] = []
+    var bad = false
+    val chars = s.split("")
+    for ch in chars:
+        if ch != "":
+            var idx: i64 = 0
+            var found = false
+            while idx < _HV_ASCII_PRINTABLE.len() and not found:
+                if _HV_ASCII_PRINTABLE[idx:idx + 1] == ch:
+                    out.push(_hv_lower((idx + 32).to_u8()))
+                    found = true
+                idx = idx + 1
+            if not found:
+                bad = true
+    if bad:
+        return []
+    out
+
+# ============================================================================
+# Minimal DER TLV reader
+# ============================================================================
+
+class HvTlv:
+    tag: u8
+    value_offset: u64
+    value_length: u64
+    total_length: u64
+    ok: bool
+
+fn _hv_read_tlv(data: [u8], offset: u64) -> HvTlv:
+    """Read one DER TLV at `offset`. `ok` is false for malformed or truncated input."""
+    val n = data.len().to_u64()
+    if offset + 2u64 > n:
+        return HvTlv(tag: 0u8, value_offset: 0u64, value_length: 0u64, total_length: 0u64, ok: false)
+    val tag = data[offset]
+    val len_byte = data[offset + 1u64].to_u64()
+    if len_byte < 128u64:
+        val vo = offset + 2u64
+        if vo + len_byte > n:
+            return HvTlv(tag: tag, value_offset: 0u64, value_length: 0u64, total_length: 0u64, ok: false)
+        return HvTlv(tag: tag, value_offset: vo, value_length: len_byte, total_length: 2u64 + len_byte, ok: true)
+    val num_bytes = len_byte - 128u64
+    if num_bytes == 0u64 or num_bytes > 4u64:
+        return HvTlv(tag: tag, value_offset: 0u64, value_length: 0u64, total_length: 0u64, ok: false)
+    if offset + 2u64 + num_bytes > n:
+        return HvTlv(tag: tag, value_offset: 0u64, value_length: 0u64, total_length: 0u64, ok: false)
+    var length: u64 = 0
+    var i: u64 = 0
+    while i < num_bytes:
+        length = (length * 256u64) + data[offset + 2u64 + i].to_u64()
+        i = i + 1u64
+    val vo2 = offset + 2u64 + num_bytes
+    if vo2 + length > n:
+        return HvTlv(tag: tag, value_offset: 0u64, value_length: 0u64, total_length: 0u64, ok: false)
+    HvTlv(tag: tag, value_offset: vo2, value_length: length, total_length: 2u64 + num_bytes + length, ok: true)
+
+# ============================================================================
+# subjectAltName dNSName extraction
+# ============================================================================
+
+fn extract_san_dns_names(cert_der: [u8]) -> [[u8]]:
+    """Extract lowercased subjectAltName dNSName entries from an X.509 certificate.
+
+    Returns [] when the certificate has no subjectAltName extension, when the
+    extension is malformed, or when it carries no dNSName GeneralName.
+    """
+    var names: [[u8]] = []
+    # OID 2.5.29.17 (subjectAltName), DER-encoded as an OBJECT IDENTIFIER TLV.
+    val san_oid = [0x06u8, 0x03, 0x55, 0x1D, 0x11]
+    val n = cert_der.len().to_u64()
+    if n == 0u64:
+        return names
+
+    # The OID is located by byte scan. A random 5-byte collision inside a modulus
+    # or signature is possible, so a candidate that fails to parse as a well-formed
+    # SAN extension does not abort the search — the scan continues. Every failure
+    # path leaves `names` empty, which callers treat as a verification failure.
+    var pos: u64 = 0
+    var found_ext = false
+    while (not found_ext) and pos + san_oid.len().to_u64() <= n:
+        var accepted = false
+        if _hv_bytes_eq(_hv_slice(cert_der, pos, san_oid.len().to_u64()), san_oid):
+            var field_pos = pos + san_oid.len().to_u64()
+            var usable = true
+            # Optional `critical` BOOLEAN between the OID and the OCTET STRING.
+            if field_pos < n and cert_der[field_pos] == 0x01u8:
+                val crit = _hv_read_tlv(cert_der, field_pos)
+                if crit.ok:
+                    field_pos = field_pos + crit.total_length
+                else:
+                    usable = false
+            if usable and field_pos < n:
+                val octets = _hv_read_tlv(cert_der, field_pos)
+                if octets.ok and octets.tag == 0x04u8:
+                    val seq = _hv_read_tlv(cert_der, octets.value_offset)
+                    if seq.ok and seq.tag == 0x30u8:
+                        var collected: [[u8]] = []
+                        var walk_ok = true
+                        val seq_end = seq.value_offset + seq.value_length
+                        var gn_pos = seq.value_offset
+                        while walk_ok and gn_pos < seq_end:
+                            val gn = _hv_read_tlv(cert_der, gn_pos)
+                            if not gn.ok:
+                                walk_ok = false
+                            else:
+                                if gn.tag == 0x82u8 and gn.value_length > 0u64:
+                                    collected.push(_hv_fold_slice(cert_der, gn.value_offset, gn.value_length))
+                                gn_pos = gn_pos + gn.total_length
+                        if walk_ok:
+                            names = collected
+                            accepted = true
+        if accepted:
+            found_ext = true
+        else:
+            pos = pos + 1u64
+    names
+
+# ============================================================================
+# RFC 6125 name matching
+# ============================================================================
+
+fn _hv_split_labels(name: [u8]) -> [[u8]]:
+    """Split a DNS name on '.'. An empty label anywhere yields [] (invalid name)."""
+    # Labels are cut with _hv_slice (a function returning a fresh array) rather
+    # than accumulated into a reset loop-local, which would alias every pushed
+    # element onto the last label.
+    var labels: [[u8]] = []
+    var start: u64 = 0
+    var i: u64 = 0
+    var bad = false
+    while i < name.len().to_u64():
+        val b = name[i]
+        if b == 0x2Eu8:
+            if i == start:
+                bad = true
+            labels.push(_hv_slice(name, start, i - start))
+            start = i + 1u64
+        else:
+            # Reject NUL and any non-printable byte: a NUL-embedded SAN must not
+            # be able to alias a shorter legitimate name.
+            val v = b.to_u64().to_i64()
+            if v < 33 or v > 126:
+                bad = true
+        i = i + 1u64
+    val tail_len = name.len().to_u64() - start
+    if tail_len == 0u64:
+        bad = true
+    labels.push(_hv_slice(name, start, tail_len))
+    if bad:
+        return []
+    labels
+
+fn dns_name_matches(pattern: [u8], host: [u8]) -> bool:
+    """Match a presented SAN dNSName against a lowercased reference hostname.
+
+    Wildcards are accepted only as a whole leftmost label ("*.example.com"), and
+    only when the presented name has at least three labels, so "*.com" and
+    "foo*.example.com" both fail.
+    """
+    if pattern.len() == 0 or host.len() == 0:
+        return false
+
+    val p_labels = _hv_split_labels(pattern)
+    val h_labels = _hv_split_labels(host)
+    if p_labels.len() == 0 or h_labels.len() == 0:
+        return false
+
+    # Reject any '*' outside the leftmost label position.
+    var li: u64 = 1
+    while li < p_labels.len().to_u64():
+        val lab = p_labels[li]
+        var ci: u64 = 0
+        while ci < lab.len().to_u64():
+            if lab[ci] == 0x2Au8:
+                return false
+            ci = ci + 1u64
+        li = li + 1u64
+
+    val first = p_labels[0]
+    var has_wildcard = false
+    var ci2: u64 = 0
+    while ci2 < first.len().to_u64():
+        if first[ci2] == 0x2Au8:
+            has_wildcard = true
+        ci2 = ci2 + 1u64
+
+    if not has_wildcard:
+        return _hv_bytes_eq(pattern, host)
+
+    # Wildcard label must be exactly "*" — no partial-label wildcards.
+    if first.len() != 1:
+        return false
+    # "*.com" must not match "example.com": require >= 3 labels.
+    if p_labels.len() < 3:
+        return false
+    if p_labels.len() != h_labels.len():
+        return false
+    # The wildcard covers exactly one label and never a label containing a dot,
+    # which _hv_split_labels already guarantees.
+    var idx: u64 = 1
+    while idx < p_labels.len().to_u64():
+        if not _hv_bytes_eq(p_labels[idx], h_labels[idx]):
+            return false
+        idx = idx + 1u64
+    h_labels[0].len() > 0
+
+fn verify_hostname(cert_der: [u8], hostname: text) -> CertVerifyResult:
+    """Verify that `cert_der` was issued for `hostname` (RFC 6125 SAN dNSName).
+
+    Fails closed: an unparsable name, an absent subjectAltName, a SAN with no
+    dNSName entry, and a non-ASCII reference name are all errors.
+    """
+    val host = _hv_text_to_lower_bytes(hostname)
+    if host.len() == 0:
+        return CertVerifyResult.Err(msg: "hostname verification: empty or non-ASCII reference hostname")
+
+    # Strip a single trailing root dot ("example.com." -> "example.com").
+    var ref_host: [u8] = host
+    if host[host.len().to_u64() - 1u64] == 0x2Eu8:
+        ref_host = _hv_slice(host, 0u64, host.len().to_u64() - 1u64)
+    if ref_host.len() == 0:
+        return CertVerifyResult.Err(msg: "hostname verification: empty reference hostname")
+
+    val names = extract_san_dns_names(cert_der)
+    if names.len() == 0:
+        return CertVerifyResult.Err(msg: "hostname verification: certificate has no subjectAltName dNSName")
+
+    var i: u64 = 0
+    while i < names.len().to_u64():
+        if dns_name_matches(names[i], ref_host):
+            return CertVerifyResult.Ok
+        i = i + 1u64
+    CertVerifyResult.Err(msg: "hostname verification: no subjectAltName dNSName matched the requested host")
