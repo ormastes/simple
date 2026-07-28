@@ -1192,3 +1192,10 @@ implementation in progress / target evidence blocked
   dropping nodes, repairing the existing depth scenario without token-count
   preallocation. The separate 65,536-node quota remains missing, and runtime
   timing is still compiler-blocked.
+- Layout/performance: percent-height, flex-stretch, and absolute-position
+  resolution now pass one node-local `Style` into recursive layout instead of
+  cloning the full style table at nine production call sites. This removes
+  O(N*K) temporary reference writes/allocation (O(N^2) in the affected worst
+  case) while keeping the base table for every descendant. Existing geometry
+  probes cover percentage and absolute sizing; execution remains blocked by
+  the recorded `JsValue.Symbol` compiler defect, so no bootstrap retry was made.
