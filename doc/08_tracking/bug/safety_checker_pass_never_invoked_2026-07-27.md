@@ -1,7 +1,19 @@
 # Bug: `safetychecker_check_module` (unsafe-context safety pass) has zero callers — no unsafe-boundary enforcement exists anywhere
 
 **Date:** 2026-07-27
-**Status:** open
+**Status:** partially fixed (2026-07-28) — `safetychecker_check_module` is now wired
+into `src/compiler/80.driver/driver.spl` warn-only and env-gated behind
+`SIMPLE_SAFETY_WARN=1` (default off, unset/anything-else = pass is skipped
+entirely, matching the `SIMPLE_TYPECHECK_WARN` convention at driver.spl:970-989).
+When enabled it only `log_warn`s formatted diagnostics — it never pushes to
+`ctx.errors`, so it cannot fail a build even when on. Fatal (build-breaking)
+enforcement remains **blocked**: at least 23 owned files have inline asm with
+no `unsafe:` block at all (see Migration blocker section below and
+`doc/09_report/unsafe_enforcement_port_plan_2026-07-27.md`) and must be
+remediated first. The two unconstructed variants
+(`RawPointerOutsideUnsafe`, `UnsafeFfiOutsideUnsafe`) and the missing
+`InlineAsmMatch` case in `safety_checker.spl` were left as-is per scope — only
+the existing single rule (`InlineAsmOutsideUnsafe`) is wired and surfaced.
 **Found:** side-finding while agents worked on other tasks, 2026-07-27
 **Area:** compiler / semantics (`src/compiler/35.semantics/safety_checker.spl`) — unsafe-context enforcement
 **Severity:** High — a security boundary that silently does nothing; neither compiler enforces it
