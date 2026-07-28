@@ -596,6 +596,7 @@ bootstrap_native_build_main() {
     SIMPLE_BOOTSTRAP_STAGE4=1 \
     SIMPLE_BOOTSTRAP_LOW_MEMORY=1 \
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
+    SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
     SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
     SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
@@ -1606,6 +1607,11 @@ full_bin="$(bootstrap_stage3_canonical_path "$(absolute_path "${full_dir}/simple
 rm -f "${full_bin}" "${full_bin}.provenance.env"
 run_logged stage4-native-build bootstrap_native_build_main \
   "${stage4_parent}" "${full_bin}"
+
+if grep -Eq '\[stmt_get_tag\] OOB|\[flat-bridge\] missing (stmt|expr) tag' "${log_dir}/stage4-native-build.log"; then
+  echo "error: Stage 4 emitted stale flat-AST index diagnostics" >&2
+  exit 1
+fi
 
 if [ ! -x "${full_bin}" ]; then
   echo "error: failed to compile full CLI binary from main.spl" >&2

@@ -391,3 +391,36 @@ bounded verification cycle; tuple/all-kind assertions were then added by
 static review without a prohibited fourth rerun. A new strict bootstrap is
 still required to rebuild Stage 2/3 with this parity fix and prove Stage-4 live
 slope, deployment, and NVMe SSpec/docgen.
+
+## 2026-07-28 declaration visibility recursion repair
+
+Retry 9 rebuilt current Rust authority, completed and sanity-checked Stage 2
+and Stage 3, passed the prior first-surface failure, and released 598 Stage-4
+module surfaces before terminating with SIGSEGV. It took 44m06s, peaked at
+2,559,008 KiB RSS, and performed zero swaps. Stage 2 SHA-256 was
+`c5c0f8afb9dcac98c0e6a55dd0c71c4968043c90fa091cff00d84a51eecc0ef1`;
+Stage 3 SHA-256 was
+`6ae43d4a2c2770966357e764eabb68418a6f1f0bd28d9c5b50c6f29605eca0ed`.
+
+An isolated GDB reproduction stopped in `getenv` after exhausting the stack.
+The repeated caller was `decl_get_visibility_text`: its out-of-range legacy
+fallback called `decl_get_is_pub`, which calls `decl_get_visibility_text`
+again. There is no independent public flag; visibility is the authoritative
+field and missing entries already default to private in arena mode. The
+out-of-range legacy branch now returns `private` directly, with a focused
+regression exercising a missing index while legacy storage is selected.
+
+The same run emitted statement indices from earlier files against the current
+small arena. Although the in-process native-build path attempts to enable
+arena mode, Retry 9 proved the Stage-4 driver still reached legacy getters.
+The production launcher and its live-slope gate now bind
+`SIMPLE_NATIVE_ARENA_DECLS=1` before process initialization, disabling stale
+declaration, statement, and expression environment mirrors for the entire
+Stage-4 process. Both the production bootstrap and live-slope gate also reject
+any residual out-of-range or missing flat-AST tag before admission, so the
+bridge's legacy `NilLit` fallback cannot yield a deployed compiler. The
+live-slope gate self-test and shell syntax checks pass.
+The focused Simple spec is present but could not run because Stage3 rejects
+the `test` command and the deployed CLI fails its bounded test-ABI probe;
+using the Rust seed would violate bootstrap policy. Deployment and NVMe
+SSpec/docgen remain pending the next bounded retry.
