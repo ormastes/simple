@@ -481,5 +481,5 @@ coverage. Aggregate thresholds remain a separate gate.
 
 The source-coverage denominator merges the compiler-emitted zero/zero decision
 manifest before runtime rows. Untouched sites therefore remain visible instead
-of disappearing behind an observed-only 100%. TODO589 still requires an
+of disappearing behind an observed-only 100%. TODO317 still requires an
 admitted pure-Simple run before the requested 98-100% result can be claimed.

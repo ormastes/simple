@@ -68,6 +68,8 @@ postponed—not complete—until their prerequisites exist. Use the exact prepar
 host commands and artifact checklist in the
 [SimpleOS QEMU external-host resume matrix](../../../03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md#resume-matrix)
 and the [QEMU postponement contract](../../platform/simpleos/qemu_system_tests.md#external-host-postponement-and-resume-contract).
+The authoritative cross-host completion matrix is
+[TODO317](../../../08_tracking/feature/wm_gui_web_2d_host_environment_acceptance_evidence_2026-07-28.md).
 
 The JSON schema is `simple-test-host-env-v1`. Its required rows are
 `x86_simd`, `arm_simd`, `riscv_simd`, `vulkan`, `renderdoc`,

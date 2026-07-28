@@ -129,8 +129,8 @@ introduce a global store, or call the worker a file/package owner.
 ### Runtime-proof parallel assignments — 2026-07-26
 
 The historical lanes above are completed ownership records, not active proof
-claims. The remaining critical work is **TODO 580 (P1)**. **TODO 583 (P3)**
-keeps Electron as a postponed optional wrapper and cannot gate the pure-Simple
+claims. The remaining critical work is **TODO317 (P1)**. Its Electron row is
+optional corroboration and cannot gate the pure-Simple
 WM/GUI/Web/Engine2D proof.
 
 All rows use package-owned `ThemeRenderSnapshot`/scalar projections,
@@ -199,11 +199,11 @@ WM -> canonical GUI widget/scene semantics
 
 Electron is only an optional presentation/evidence wrapper around that chain.
 Its live Aetheric render/event/capture run is noncritical and postponed under
-TODO 583. The pinned resolver and Aetheric identity/admission hardening are
+TODO317. The pinned resolver and Aetheric identity/admission hardening are
 integrated, but no Electron admission, launch, screenshot, event receipt, or
 PASS is required before the critical pure line proceeds.
 
-The pure line stays P1 and open under TODO 580. Execution is postponed only
+The pure line stays P1 and open under TODO317. Execution is postponed only
 until a prepared host has the matching device/runtime and an admitted
 source-matched pure-Simple compiler; postponement is not completion:
 
@@ -312,7 +312,7 @@ after the merge owner freezes the exact style keys:
 highest-capability review. No lane may edit the legacy CPU executor into a
 second material renderer.
 
-- External compiler/GPU owner: prepared-host operator under TODO 580 and
+- External compiler/GPU owner: prepared-host operator under TODO317 and
   `doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`.
 - Backend capture contract:
   `doc/03_plan/agent_tasks/engine2d_four_backend_capture.md`,

@@ -151,4 +151,4 @@ SHA-256: 69b033528c47c46a4e38597702d53c91751d29d91ca6086096ee4a0cb3b8b7e7
 
 The artifact reports `simple-bootstrap 1.0.0-beta` and rejects unsupported
 `run` with status 1. Stage 3, full-CLI deployment, and fresh GPU evidence remain
-under TODO 580; they are no longer blocked by this parser failure.
+under TODO317; they are no longer blocked by this parser failure.

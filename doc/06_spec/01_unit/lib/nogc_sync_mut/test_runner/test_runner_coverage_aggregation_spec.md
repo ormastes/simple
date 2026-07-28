@@ -54,7 +54,7 @@ Rejected input leaves the denominator empty; a valid zero-count manifest still
 pre-registers its decision afterward.
 
 The compiler now emits this manifest and the runner merges it before runtime
-rows. These focused scenarios prove the strict merge contract; TODO589 still
+rows. These focused scenarios prove the strict merge contract; TODO317 still
 owns the admitted-runtime 98-100% measurement and retained reports.
 
 <details>

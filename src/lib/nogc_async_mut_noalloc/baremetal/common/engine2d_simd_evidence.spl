@@ -1,0 +1,124 @@
+# codex-impl
+# Allocation-free evidence contract shared by SimpleOS target SIMD owners.
+
+val ENGINE2D_SIMD_ARCH_X86_64: u32 = 1u32
+val ENGINE2D_SIMD_ARCH_AARCH64: u32 = 2u32
+val ENGINE2D_SIMD_ARCH_RISCV64: u32 = 3u32
+
+val ENGINE2D_SIMD_FEATURE_SSE42: u32 = 1u32
+val ENGINE2D_SIMD_FEATURE_AVX2: u32 = 2u32
+val ENGINE2D_SIMD_FEATURE_NEON: u32 = 3u32
+val ENGINE2D_SIMD_FEATURE_RVV: u32 = 4u32
+
+val ENGINE2D_SIMD_OP_FILL: u32 = 1u32
+val ENGINE2D_SIMD_OP_COPY: u32 = 2u32
+val ENGINE2D_SIMD_OP_ALPHA: u32 = 3u32
+val ENGINE2D_SIMD_OP_ALPHA_EDGE: u32 = 4u32
+val ENGINE2D_SIMD_OP_SCROLL: u32 = 5u32
+val ENGINE2D_SIMD_OP_DIAGRAM: u32 = 6u32
+
+val ENGINE2D_SIMD_BLOCK_NONE: u32 = 0u32
+val ENGINE2D_SIMD_BLOCK_INTRINSIC_OWNER_UNLINKED: u32 = 1u32
+val ENGINE2D_SIMD_BLOCK_UNSUPPORTED_FEATURE: u32 = 2u32
+
+struct Engine2dSimdOperationEvidence:
+    operation_code: u32
+    dispatch_calls: u64
+    vector_chunks: u64
+    vector_lanes: u64
+    scalar_tail_pixels: u64
+    scalar_fallback_calls: u64
+    expected_checksum: u64
+    actual_checksum: u64
+    mismatch_count: u64
+
+struct Engine2dSimdProducerEvidence:
+    arch_code: u32
+    detected_feature_code: u32
+    required_feature_code: u32
+    vector_width_bits: u32
+    intrinsic_owner_linked: bool
+    blocked_reason_code: u32
+    fill: Engine2dSimdOperationEvidence
+    copy: Engine2dSimdOperationEvidence
+    alpha: Engine2dSimdOperationEvidence
+    alpha_edge: Engine2dSimdOperationEvidence
+    scroll: Engine2dSimdOperationEvidence
+    diagram: Engine2dSimdOperationEvidence
+    frame_checksum: u64
+
+fn engine2d_simd_empty_operation(operation_code: u32) -> Engine2dSimdOperationEvidence:
+    Engine2dSimdOperationEvidence(
+        operation_code: operation_code, dispatch_calls: 0u64,
+        vector_chunks: 0u64, vector_lanes: 0u64, scalar_tail_pixels: 0u64,
+        scalar_fallback_calls: 0u64, expected_checksum: 0u64,
+        actual_checksum: 0u64, mismatch_count: 0u64)
+
+fn engine2d_simd_operation_evidence(
+    operation_code: u32, dispatch_calls: u64, vector_chunks: u64,
+    vector_lanes: u64, scalar_tail_pixels: u64, scalar_fallback_calls: u64,
+    expected_checksum: u64, actual_checksum: u64, mismatch_count: u64
+) -> Engine2dSimdOperationEvidence:
+    Engine2dSimdOperationEvidence(
+        operation_code: operation_code, dispatch_calls: dispatch_calls,
+        vector_chunks: vector_chunks, vector_lanes: vector_lanes,
+        scalar_tail_pixels: scalar_tail_pixels,
+        scalar_fallback_calls: scalar_fallback_calls,
+        expected_checksum: expected_checksum, actual_checksum: actual_checksum,
+        mismatch_count: mismatch_count)
+
+fn engine2d_simd_blocked_producer(
+    arch_code: u32, required_feature_code: u32, reason_code: u32
+) -> Engine2dSimdProducerEvidence:
+    Engine2dSimdProducerEvidence(
+        arch_code: arch_code, detected_feature_code: 0u32,
+        required_feature_code: required_feature_code, vector_width_bits: 0u32,
+        intrinsic_owner_linked: false, blocked_reason_code: reason_code,
+        fill: engine2d_simd_empty_operation(ENGINE2D_SIMD_OP_FILL),
+        copy: engine2d_simd_empty_operation(ENGINE2D_SIMD_OP_COPY),
+        alpha: engine2d_simd_empty_operation(ENGINE2D_SIMD_OP_ALPHA),
+        alpha_edge: engine2d_simd_empty_operation(ENGINE2D_SIMD_OP_ALPHA_EDGE),
+        scroll: engine2d_simd_empty_operation(ENGINE2D_SIMD_OP_SCROLL),
+        diagram: engine2d_simd_empty_operation(ENGINE2D_SIMD_OP_DIAGRAM),
+        frame_checksum: 0u64)
+
+fn engine2d_simd_operation_passes(
+    evidence: Engine2dSimdOperationEvidence, expected_operation: u32
+) -> bool:
+    evidence.operation_code == expected_operation and
+        evidence.dispatch_calls > 0u64 and evidence.vector_chunks > 0u64 and
+        evidence.vector_lanes > 0u64 and evidence.scalar_fallback_calls == 0u64 and
+        evidence.expected_checksum > 0u64 and
+        evidence.actual_checksum == evidence.expected_checksum and
+        evidence.mismatch_count == 0u64
+
+fn engine2d_simd_arch_feature_passes(evidence: Engine2dSimdProducerEvidence) -> bool:
+    if evidence.arch_code == ENGINE2D_SIMD_ARCH_X86_64:
+        return (evidence.detected_feature_code == ENGINE2D_SIMD_FEATURE_AVX2 and
+            evidence.required_feature_code == ENGINE2D_SIMD_FEATURE_AVX2 and
+            evidence.vector_width_bits == 256u32) or
+            (evidence.detected_feature_code == ENGINE2D_SIMD_FEATURE_SSE42 and
+                evidence.required_feature_code == ENGINE2D_SIMD_FEATURE_SSE42 and
+                evidence.vector_width_bits == 128u32)
+    if evidence.arch_code == ENGINE2D_SIMD_ARCH_AARCH64:
+        return evidence.detected_feature_code == ENGINE2D_SIMD_FEATURE_NEON and
+            evidence.required_feature_code == ENGINE2D_SIMD_FEATURE_NEON and
+            evidence.vector_width_bits == 128u32
+    if evidence.arch_code == ENGINE2D_SIMD_ARCH_RISCV64:
+        return evidence.detected_feature_code == ENGINE2D_SIMD_FEATURE_RVV and
+            evidence.required_feature_code == ENGINE2D_SIMD_FEATURE_RVV and
+            evidence.vector_width_bits >= 128u32
+    false
+
+fn engine2d_simd_producer_passes(evidence: Engine2dSimdProducerEvidence) -> bool:
+    evidence.intrinsic_owner_linked and
+        evidence.blocked_reason_code == ENGINE2D_SIMD_BLOCK_NONE and
+        engine2d_simd_arch_feature_passes(evidence) and
+        engine2d_simd_operation_passes(evidence.fill, ENGINE2D_SIMD_OP_FILL) and
+        engine2d_simd_operation_passes(evidence.copy, ENGINE2D_SIMD_OP_COPY) and
+        engine2d_simd_operation_passes(evidence.alpha, ENGINE2D_SIMD_OP_ALPHA) and
+        engine2d_simd_operation_passes(evidence.alpha_edge, ENGINE2D_SIMD_OP_ALPHA_EDGE) and
+        engine2d_simd_operation_passes(evidence.scroll, ENGINE2D_SIMD_OP_SCROLL) and
+        engine2d_simd_operation_passes(evidence.diagram, ENGINE2D_SIMD_OP_DIAGRAM) and
+        evidence.frame_checksum > 0u64 and
+        evidence.frame_checksum == evidence.diagram.actual_checksum

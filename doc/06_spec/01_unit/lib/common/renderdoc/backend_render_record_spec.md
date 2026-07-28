@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -29,6 +29,12 @@ manual leads with the trusted record flow.
 
 ## Scenarios
 
+The production record now crosses a strict line-oriented serialization/parser
+boundary. Round-trip coverage preserves the supplied canonical hashes, while
+negative coverage rejects malformed wire records, wrong value kinds (including
+both required readback counters), and
+semantic/provenance class mutations.
+
 ### Detailed backend render records
 
 #### should expose every required rendering and provenance field
@@ -38,8 +44,8 @@ manual leads with the trusted record flow.
 - Validate the detailed record field inventory
    - Protocol capture: after_step
    - Evidence: protocol response verified by 2 expected checks
-   - Expected: valid.fields.len() equals `32`
-   - Expected: valid.schema_version equals `1`
+   - Expected: valid.fields.len() equals `87`
+   - Expected: valid.schema_version equals `2`
 
 
 <details>
@@ -54,8 +60,8 @@ val record = valid_vulkan_record("engine2d-owner")
 step("Validate the detailed record field inventory")
 match validate_backend_render_record(record):
     case Ok(valid):
-        expect(valid.fields.len()).to_equal(32)
-        expect(valid.schema_version).to_equal(1)
+        expect(valid.fields.len()).to_equal(87)
+        expect(valid.schema_version).to_equal(2)
     case Err(err): fail("Expected valid record, got {err.code} at {err.path}")
 ```
 
@@ -222,12 +228,38 @@ expect(diff.differences.len()).to_be_greater_than(0)
 
 </details>
 
+#### should reject missing and duplicate ordered backend identities
+
+The validator rejects an absent `commands.001.identity` as `missing-field` and
+a reused command identity as `duplicate-id`.
+
+#### should preserve command ordering in backend equivalence
+
+Swapping two unique command identities remains a semantic difference with two
+field-level differences; equal command counts cannot hide reordered work.
+The deterministic canonical serialization also includes the ordered command,
+viewport/scissor, pipeline/shader, resource, transition, and synchronization
+paths rather than reducing the record to `commands.count`.
+
+#### should reject collection count reference type enum and bounds defects
+
+Every indexed collection has an exact positive count. The validator rejects
+extra/missing entries, unresolved pipeline/resource/transition references,
+malformed decimals and hashes, unsupported command/resource/state/stage/access
+or sync enums, broken transition chains, and viewport/scissor overflow.
+
+#### should canonicalize caller field order and reject duplicate pipeline IDs
+
+Finalization insertion-sorts caller fields before hashing, so reverse input has
+the same record hash. A fully populated second pipeline that reuses an existing
+pipeline ID fails as `duplicate-id`.
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

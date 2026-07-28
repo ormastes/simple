@@ -1,4 +1,4 @@
-# SimpleOS backend render receipt producer/parser missing
+# SimpleOS backend render receipt target-operation completion
 
 - Status: open
 - Priority: P0
@@ -7,29 +7,40 @@
 ## Finding
 
 `BackendRenderReceiptHeader`, `BackendRenderReceiptEvent`, and
-`BackendRenderReceiptTrailer` now have fail-closed validators, a fixed-width
-allocation-free UART codec, and a bounded host parser. No production SimpleOS
-guest entry emits the ordered records yet. Current guest entries expose static
-frame markers, so QMP pixels still cannot be bound to firmware, boot, frame,
-surface, or operation identities.
+`BackendRenderReceiptTrailer` have fail-closed validators, a fixed-width
+allocation-free UART codec, and a bounded host parser. The production x86,
+ARM64, and RV64 display entries now emit a base BRR1 receipt after their real
+present/visual-commit paths, and x86 also implements the correlated hold,
+capture, and ACK control flow. The former “no producer/parser” finding is
+therefore resolved.
+
+This bug remains open for **local blocker B**: the target-owned no-allocation
+per-operation SIMD producers are absent. The implemented shared adapter can
+carry fill/copy/alpha/scroll/PRESENT hashes and telemetry, but current target
+boot glue does not provide complete native-vector operation evidence across
+x86_64, AArch64, and RV64. Host qualification cannot infer those events from a
+base frame receipt.
 
 The receipt now carries all four SHA-256 words. Target evidence separately
 tracks retained PPM artifact SHA-256 and decoded raw-pixel SHA-256.
 
 ## Required fix
 
-1. Emit one header, ordered fill/copy/alpha/scroll or backend-operation events,
-   and one trailer from each qualifying x86_64, AArch64, and RV64 guest entry.
-2. Inject a real build identity and per-boot identity; do not use constants.
-3. Reject corrupt, reordered, duplicated, truncated, incomplete, zero-hash, and
-   mismatched boot/frame records.
-4. Add guest hold/host capture/guest ACK correlation, then join the parsed
-   record to exact QMP framebuffer evidence without using the canned
-   `probe_qemu_vm_screendump` scene.
+1. Implement the x86_64, AArch64, and RV64 no-allocation per-operation SIMD
+   owners without duplicating the shared adapter or renderer.
+2. Emit real fill/copy/alpha/scroll and PRESENT hashes, executed-path counters,
+   fallback counters, and scalar-parity telemetry into the ordered BRR1 events.
+3. Join the parsed events to the existing build/boot/frame identity and exact
+   independently decoded QMP framebuffer digest.
+4. Keep corrupt, reordered, duplicated, truncated, incomplete, zero-hash,
+   mismatched, scalar-only, and missing-operation records red.
+5. Replace whole-frame temporary byte-array hashing with a bounded streaming
+   SHA path before framebuffer sizes exceed the current safe allocation bound.
 
 ## Acceptance
 
-- `simpleos_render_evidence_protocol_spec.spl` passes 4/4 on a fresh admitted
+- Focused wire/adapter/target-owner specs pass without placeholders, then
+  `simpleos_render_evidence_protocol_spec.spl` passes 4/4 on a fresh admitted
   Stage-4 binary and retains the serial log plus QMP PPM.
 - Aggregate row `simpleos_guest` promotes only after all required guest targets
   retain correlated receipts with zero pixel mismatches, including strict x86
@@ -41,9 +52,12 @@ tracks retained PPM artifact SHA-256 and decoded raw-pixel SHA-256.
 
 ## Current verification state
 
-- Allocation-free guest bytes and bounded host round-trip passed 5/5 before the
-  full target-evidence join was added.
+- Allocation-free guest bytes, bounded host round-trip, build/boot identity,
+  base x86/ARM64/RV64 emitters, and the shared per-operation adapter are
+  implemented. They do not complete the missing target SIMD owners.
 - The third codec cycle exposed an unparenthesized multi-line condition. Source
   is corrected, but the hard three-cycle cap forbids another run this session.
 - Resume exactly:
   `SIMPLE_LIB=src <fresh-stage4> test test/01_unit/lib/common/renderdoc/backend_render_receipt_wire_spec.spl --mode=interpreter --clean`.
+- TODO317 owns only the later admitted native/live-host evidence. This local
+  producer work must land before that evidence can promote a row.

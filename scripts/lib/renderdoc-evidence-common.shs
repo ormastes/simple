@@ -922,6 +922,23 @@ rdoc_prepare_vulkan_layer_manifest() {
     } | tee -a "$env_path"
 }
 
+rdoc_extract_simple_render_record() {
+    record_log="$1"
+    record_kind="$2"
+    record_out="$3"
+    begin="simple_renderdoc_record_begin=$record_kind"
+    end="simple_renderdoc_record_end=$record_kind"
+    [ "$(grep -Fxc "$begin" "$record_log" 2>/dev/null || true)" -eq 1 ] || return 1
+    [ "$(grep -Fxc "$end" "$record_log" 2>/dev/null || true)" -eq 1 ] || return 1
+    awk -v begin="$begin" -v end="$end" '
+        $0 == begin { inside = 1; next }
+        $0 == end { inside = 0; found = 1; next }
+        inside { print }
+        END { if (!found || inside) exit 1 }
+    ' "$record_log" >"$record_out"
+    [ -s "$record_out" ]
+}
+
 rdoc_capture_simple_vulkan() {
     root="$1"
     renderdoc_home="$2"
@@ -1017,6 +1034,48 @@ rdoc_capture_simple_vulkan() {
         find "$out_dir" -type f -name "$(basename "$capture_template")*.rdc" \
             -exec rm -f -- {} +
         validate_code=1
+    fi
+    if [ "$validate_code" -eq 0 ]; then
+        translation_log="$out_dir/renderdoc-translation.log"
+        capture_record="$out_dir/backend-render-capture.record"
+        translation_record="$out_dir/backend-render-translation.record"
+        compare_log="$out_dir/backend-render-compare.log"
+        translation_prog="$root/src/app/test/engine2d_vulkan_translation_probe.spl"
+        compare_prog="$root/src/app/test/backend_render_record_compare.spl"
+        set +e
+        SIMPLE_EXECUTION_MODE=interpret "$timeout_cmd" -k 5s "${timeout_secs}s" \
+            "$simple_bin" run "$translation_prog" >"$translation_log" 2>&1
+        translation_code=$?
+        set -e
+        record_code=0
+        rdoc_extract_simple_render_record "$out_dir/renderdoc-simple.log" capture "$capture_record" || record_code=1
+        rdoc_extract_simple_render_record "$translation_log" translation "$translation_record" || record_code=1
+        compare_code=1
+        if [ "$translation_code" -eq 0 ] && [ "$record_code" -eq 0 ]; then
+            set +e
+            SIMPLE_EXECUTION_MODE=interpret "$timeout_cmd" -k 5s "${timeout_secs}s" \
+                "$simple_bin" run "$compare_prog" -- "$capture_record" "$translation_record" >"$compare_log" 2>&1
+            compare_code=$?
+            set -e
+        fi
+        {
+            echo "rdoc_translation_log=$translation_log"
+            echo "rdoc_translation_command_exit=$translation_code"
+            echo "rdoc_capture_record=$capture_record"
+            echo "rdoc_translation_record=$translation_record"
+            echo "rdoc_record_extract_status=$(if [ "$record_code" -eq 0 ]; then echo pass; else echo fail; fi)"
+            echo "rdoc_record_compare_log=$compare_log"
+            echo "rdoc_record_compare_exit=$compare_code"
+            if [ -s "$compare_log" ]; then sed -n '/^simple_renderdoc_/p' "$compare_log"; fi
+        } >>"$env_path"
+        if [ "$translation_code" -ne 0 ] || [ "$record_code" -ne 0 ] || [ "$compare_code" -ne 0 ] || \
+            ! grep -Fxq 'simple_renderdoc_record_compare_status=pass reason=pass' "$compare_log" 2>/dev/null; then
+            validate_code=1
+            sed -e 's/^rdoc_capture_status=.*/rdoc_capture_status=fail/' \
+                -e 's/^rdoc_capture_reason=.*/rdoc_capture_reason=backend-render-record-compare-failed/' \
+                "$tmp_env" >"$tmp_env.compare"
+            mv "$tmp_env.compare" "$tmp_env"
+        fi
     fi
     echo "rdoc_capture_command_exit=$capture_code" >> "$env_path"
     cat "$tmp_env" >> "$env_path"

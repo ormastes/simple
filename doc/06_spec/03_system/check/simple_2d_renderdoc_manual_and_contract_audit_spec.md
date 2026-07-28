@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12,6 +12,10 @@
 # Simple 2d Renderdoc Manual And Contract Audit Specification
 
 ## Scenarios
+
+The audit requires both canonical producer markers, the shared shell extractor,
+and the production Simple parser/equivalence application. Its executable record
+check crosses the same serialized boundary as live evidence.
 
 ### Simple 2D RenderDoc documentation contract
 
@@ -152,12 +156,20 @@ expect(plan).to_contain("Sidecars were read-only design auditors")
 Tests covering:
 - Simple 2D RenderDoc documentation contract
 
+#### requires complete ordered backend render records at every canonical producer
+
+The audit requires command, pipeline/shader, resource binding/transition,
+synchronization, viewport, and scissor identities in both canonical producers,
+and keeps the pure record owner free of transient Engine2D/Vulkan objects. It
+also constructs native/translated fixtures, executes the production validator
+and semantic comparator, and proves reordered command identity is not equal.
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -5,7 +5,7 @@
 use std.common.crypto.sha256.{sha256_text}
 
 val BACKEND_RENDER_SCHEMA_NAME: text = "simple-backend-render-record"
-val BACKEND_RENDER_SCHEMA_VERSION: i32 = 1
+val BACKEND_RENDER_SCHEMA_VERSION: i32 = 2
 
 struct BackendRenderField:
     path: text
@@ -77,12 +77,17 @@ fn _required_paths() -> [text]:
         "commands.count",
         "frame.backend_handle",
         "frame.complete",
+        "pipelines.000.fragment_shader_id",
+        "pipelines.000.pipeline_id",
+        "pipelines.000.vertex_shader_id",
+        "pipelines.count",
         "producer.actual_backend",
         "producer.adapter",
         "producer.execution_kind",
         "producer.native_api",
         "producer.requested_backend",
         "producer.translation_layer",
+        "resources.count",
         "readback.content_hash",
         "readback.format",
         "readback.height",
@@ -91,11 +96,23 @@ fn _required_paths() -> [text]:
         "readback.source",
         "readback.stride",
         "readback.width",
+        "state.scissor.height",
+        "state.scissor.width",
+        "state.scissor.x",
+        "state.scissor.y",
+        "state.viewport.height",
+        "state.viewport.max_depth",
+        "state.viewport.min_depth",
+        "state.viewport.width",
+        "state.viewport.x",
+        "state.viewport.y",
+        "synchronization.count",
         "target.content_hash",
         "target.format",
         "target.height",
         "target.stride",
-        "target.width"
+        "target.width",
+        "transitions.count"
     ]
 
 fn _path_is_normalized(path: text) -> bool:
@@ -127,13 +144,29 @@ fn _canonical_unchecked(record: BackendRenderRecord, semantic_only: bool) -> tex
             out = out + _length_value(field.path) + "=" + _length_value(field.value_kind) + ":" + _length_value(value) + ";"
     out
 
+fn _canonical_sort_fields(fields: [BackendRenderField]) -> [BackendRenderField]:
+    var sorted: [BackendRenderField] = []
+    for field in fields:
+        var inserted = false
+        var next: [BackendRenderField] = []
+        for existing in sorted:
+            if not inserted and field.path < existing.path:
+                next = next.push(field)
+                inserted = true
+            next = next.push(existing)
+        if not inserted:
+            next = next.push(field)
+        sorted = next
+    sorted
+
 fn backend_render_record_finalize(producer_id: text, fields: [BackendRenderField]) -> BackendRenderRecord:
     """Create a record and compute both semantic and exact canonical hashes."""
+    val sorted_fields = _canonical_sort_fields(fields)
     val base = BackendRenderRecord(
         schema_name: BACKEND_RENDER_SCHEMA_NAME,
         schema_version: BACKEND_RENDER_SCHEMA_VERSION,
         producer_id: producer_id,
-        fields: fields,
+        fields: sorted_fields,
         semantic_hash: "",
         record_hash: ""
     )
@@ -159,11 +192,19 @@ fn _is_lower_hex_hash(value: text) -> bool:
         i = i + 1
     true
 
+fn _nonnegative_decimal(value: text) -> bool:
+    if value == "": return false
+    var index = 0
+    while index < value.len():
+        if not "0123456789".contains(value[index].to_text()): return false
+        index = index + 1
+    true
+
 fn _positive_i64(value: text) -> bool:
-    value.to_i64() > 0
+    _nonnegative_decimal(value) and value.to_i64() > 0
 
 fn _nonnegative_i64(value: text) -> bool:
-    value != "" and value.to_i64() >= 0
+    _nonnegative_decimal(value) and value.to_i64() >= 0
 
 fn _validate_required_fields(record: BackendRenderRecord) -> BackendRenderRecordError?:
     for path in _required_paths():
@@ -181,6 +222,10 @@ fn _validate_field_order(record: BackendRenderRecord) -> BackendRenderRecordErro
             return _record_error(code, field.path, "record fields must be unique and sorted by path")
         if field.value_kind != "text" and field.value_kind != "i64" and field.value_kind != "bool" and field.value_kind != "sha256":
             return _record_error("invalid-enum", field.path, "unsupported canonical value kind")
+        if field.value_kind == "i64" and not _nonnegative_decimal(field.value):
+            return _record_error("invalid-decimal", field.path, "i64 value must be unsigned canonical decimal text")
+        if field.value_kind == "bool" and field.value != "true" and field.value != "false":
+            return _record_error("invalid-enum", field.path, "bool value must be true or false")
         if field.value_kind == "sha256" and not _is_lower_hex_hash(field.value):
             return _record_error("invalid-hash", field.path, "SHA-256 value must be 64 lowercase hexadecimal characters")
         previous = field.path
@@ -201,6 +246,12 @@ fn _validate_dimensions(record: BackendRenderRecord) -> BackendRenderRecordError
         return _record_error("invalid-stride", "readback.stride", "ARGB stride must cover every pixel")
     if _field_value(record, "readback.pixel_count").to_i64() != read_width * read_height:
         return _record_error("invalid-readback", "readback.pixel_count", "pixel count must match dimensions")
+    val target_format = _field_value(record, "target.format")
+    val readback_format = _field_value(record, "readback.format")
+    if target_format != "argb-u32" and target_format != "rgba-u8":
+        return _record_error("invalid-enum", "target.format", "target format is unsupported")
+    if readback_format != target_format:
+        return _record_error("invalid-readback", "readback.format", "readback format must match the target")
     nil
 
 fn _validate_provenance(record: BackendRenderRecord) -> BackendRenderRecordError?:
@@ -218,8 +269,234 @@ fn _validate_provenance(record: BackendRenderRecord) -> BackendRenderRecordError
         return _record_error("contradictory-provenance", "producer.translation_layer", "translated execution requires an explicit layer")
     if execution == "software" and readback == "device_readback":
         return _record_error("contradictory-provenance", "readback.source", "software pixels cannot be labeled device readback")
+    if readback != "device_readback" and readback != "engine2d.read_pixels":
+        return _record_error("invalid-enum", "readback.source", "readback source is unsupported")
     if native_api == "" or actual == "":
         return _record_error("missing-field", "producer.native_api", "actual backend and native API are required")
+    nil
+
+fn _record_index(index: i64) -> text:
+    if index < 10: return "00" + index.to_text()
+    if index < 100: return "0" + index.to_text()
+    index.to_text()
+
+fn _indexed_suffix(path: text, prefix: text) -> text:
+    val start = prefix.len() + 1
+    if not path.starts_with(prefix + ".") or path.len() <= start: return ""
+    var separator = start
+    while separator < path.len() and path[separator] != '.':
+        separator = separator + 1
+    if separator == path.len() or separator + 1 >= path.len(): return ""
+    path[separator + 1:path.len()]
+
+fn _field_shape_known(path: text) -> bool:
+    if path == "producer.capture_path" or path == "producer.capture_log_path": return true
+    for required in _required_paths():
+        if path == required: return true
+    val command_suffix = _indexed_suffix(path, "commands")
+    if command_suffix == "identity" or command_suffix == "kind" or command_suffix == "pipeline_id" or command_suffix == "resource_id" or command_suffix == "pipeline_hash": return true
+    val pipeline_suffix = _indexed_suffix(path, "pipelines")
+    if pipeline_suffix == "pipeline_id" or pipeline_suffix == "pipeline_hash" or pipeline_suffix == "vertex_shader_id" or pipeline_suffix == "fragment_shader_id" or pipeline_suffix == "fragment_shader_hash": return true
+    val resource_suffix = _indexed_suffix(path, "resources")
+    if resource_suffix == "identity" or resource_suffix == "binding" or resource_suffix == "resource_id" or resource_suffix == "kind" or resource_suffix == "format" or resource_suffix == "size" or resource_suffix == "content_hash": return true
+    val transition_suffix = _indexed_suffix(path, "transitions")
+    if transition_suffix == "identity" or transition_suffix == "resource_id" or transition_suffix == "before" or transition_suffix == "after" or transition_suffix == "stage" or transition_suffix == "access": return true
+    val sync_suffix = _indexed_suffix(path, "synchronization")
+    sync_suffix == "identity" or sync_suffix == "kind" or sync_suffix == "resource_id" or sync_suffix == "transition_id"
+
+fn _expected_value_kind(path: text) -> text:
+    if path == "frame.complete": return "bool"
+    if path.ends_with("_hash") or path.ends_with(".content_hash") or path.ends_with(".pipeline_hash"): return "sha256"
+    if path == "readback.pixel_count" or path == "readback.nonblank_pixel_count" or path.ends_with(".count") or path.ends_with(".width") or path.ends_with(".height") or path.ends_with(".stride") or path.ends_with(".size") or path.ends_with(".x") or path.ends_with(".y") or path.ends_with(".min_depth") or path.ends_with(".max_depth") or path == "frame.backend_handle": return "i64"
+    "text"
+
+fn _expected_semantic(path: text) -> bool:
+    not path.starts_with("producer.") and path != "frame.backend_handle"
+
+fn _validate_field_shapes(record: BackendRenderRecord) -> BackendRenderRecordError?:
+    for field in record.fields:
+        if not _field_shape_known(field.path):
+            return _record_error("unexpected-field", field.path, "field is not part of backend-render schema v2")
+        if field.value_kind != _expected_value_kind(field.path):
+            return _record_error("invalid-value-kind", field.path, "field value kind does not match backend-render schema v2")
+        if field.semantic != _expected_semantic(field.path):
+            return _record_error("invalid-field-class", field.path, "field semantic/provenance class does not match backend-render schema v2")
+    nil
+
+fn _indexed_path_index(path: text, prefix: text) -> i64:
+    val start = prefix.len() + 1
+    if not path.starts_with(prefix + ".") or path.len() <= start: return -1
+    var end = start
+    while end < path.len() and path[end] != '.':
+        end = end + 1
+    if end == path.len(): return -1
+    val encoded = path[start:end]
+    if not _nonnegative_decimal(encoded): return -1
+    val index = encoded.to_i64()
+    if index >= 1000 or encoded != _record_index(index): return -1
+    index
+
+fn _validate_collection_layout(record: BackendRenderRecord, prefix: text, count_path: text) -> BackendRenderRecordError?:
+    val count_text = _field_value(record, count_path)
+    if not _positive_i64(count_text):
+        return _record_error("invalid-count", count_path, "collection count must be positive canonical decimal")
+    val count = count_text.to_i64()
+    if count > 1000:
+        return _record_error("invalid-count", count_path, "collection count exceeds the three-digit index range")
+    for field in record.fields:
+        if field.path.starts_with(prefix + ".") and field.path != count_path:
+            val index = _indexed_path_index(field.path, prefix)
+            if index < 0:
+                return _record_error("invalid-sequence", field.path, "indexed field must use a three-digit canonical index")
+            if index >= count:
+                return _record_error("count-mismatch", field.path, "indexed field exceeds the declared collection count")
+    nil
+
+fn _validate_identity_sequence(record: BackendRenderRecord, prefix: text, count_path: text, identity_suffix: text) -> BackendRenderRecordError?:
+    val count = _field_value(record, count_path).to_i64()
+    var identities: [text] = []
+    var index: i64 = 0
+    while index < count:
+        val path = prefix + "." + _record_index(index) + "." + identity_suffix
+        val identity = _field_value(record, path)
+        if identity == "":
+            return _record_error("missing-field", path, "ordered backend-render identity is missing")
+        for prior in identities:
+            if prior == identity:
+                return _record_error("duplicate-id", path, "ordered backend-render identities must be unique")
+        identities = identities.push(identity)
+        index = index + 1
+    nil
+
+fn _sequence_contains(record: BackendRenderRecord, prefix: text, count_path: text, identity_suffix: text, wanted: text) -> bool:
+    val count = _field_value(record, count_path).to_i64()
+    var index: i64 = 0
+    while index < count:
+        val path = prefix + "." + _record_index(index) + "." + identity_suffix
+        if _field_value(record, path) == wanted: return true
+        index = index + 1
+    false
+
+fn _validate_indexed_fields(record: BackendRenderRecord, prefix: text, count_path: text, suffixes: [text]) -> BackendRenderRecordError?:
+    val count = _field_value(record, count_path).to_i64()
+    var index: i64 = 0
+    while index < count:
+        for suffix in suffixes:
+            val path = prefix + "." + _record_index(index) + "." + suffix
+            if _field_value(record, path) == "":
+                return _record_error("missing-field", path, "ordered backend-render detail is missing")
+        index = index + 1
+    nil
+
+fn _validate_render_state(record: BackendRenderRecord) -> BackendRenderRecordError?:
+    val target_width = _field_value(record, "target.width").to_i64()
+    val target_height = _field_value(record, "target.height").to_i64()
+    val viewport_width = _field_value(record, "state.viewport.width").to_i64()
+    val viewport_height = _field_value(record, "state.viewport.height").to_i64()
+    val viewport_x = _field_value(record, "state.viewport.x").to_i64()
+    val viewport_y = _field_value(record, "state.viewport.y").to_i64()
+    val scissor_width = _field_value(record, "state.scissor.width").to_i64()
+    val scissor_height = _field_value(record, "state.scissor.height").to_i64()
+    val scissor_x = _field_value(record, "state.scissor.x").to_i64()
+    val scissor_y = _field_value(record, "state.scissor.y").to_i64()
+    if not _nonnegative_i64(_field_value(record, "state.viewport.x")) or not _nonnegative_i64(_field_value(record, "state.viewport.y")) or viewport_width <= 0 or viewport_height <= 0:
+        return _record_error("invalid-viewport", "state.viewport", "viewport origin must be nonnegative")
+    if viewport_x > target_width or viewport_y > target_height or viewport_width > target_width - viewport_x or viewport_height > target_height - viewport_y:
+        return _record_error("invalid-viewport", "state.viewport", "viewport must remain within the canonical target")
+    if not _nonnegative_i64(_field_value(record, "state.scissor.x")) or not _nonnegative_i64(_field_value(record, "state.scissor.y")) or scissor_width <= 0 or scissor_height <= 0:
+        return _record_error("invalid-scissor", "state.scissor", "scissor origin must be nonnegative")
+    if scissor_x > target_width or scissor_y > target_height or scissor_width > target_width - scissor_x or scissor_height > target_height - scissor_y:
+        return _record_error("invalid-scissor", "state.scissor", "scissor must remain within the canonical target")
+    if _field_value(record, "state.viewport.min_depth") != "0" or _field_value(record, "state.viewport.max_depth") != "1":
+        return _record_error("invalid-viewport", "state.viewport", "viewport depth must be the canonical zero-to-one range")
+    nil
+
+fn _transition_state_valid(value: text) -> bool:
+    value == "undefined" or value == "color-attachment" or value == "compute" or value == "readback" or value == "present" or value == "shader-read" or value == "shader-write"
+
+fn _transition_stage_valid(value: text) -> bool:
+    value == "top" or value == "compute" or value == "color-output" or value == "transfer" or value == "bottom"
+
+fn _access_valid(value: text) -> bool:
+    value == "none" or value == "read" or value == "write" or value == "read-write"
+
+fn _validate_collection_semantics(record: BackendRenderRecord) -> BackendRenderRecordError?:
+    var index: i64 = 0
+    val pipeline_count = _field_value(record, "pipelines.count").to_i64()
+    while index < pipeline_count:
+        val base = "pipelines." + _record_index(index)
+        if not _is_lower_hex_hash(_field_value(record, base + ".pipeline_hash")):
+            return _record_error("invalid-hash", base + ".pipeline_hash", "pipeline hash must be lowercase SHA-256")
+        index = index + 1
+    index = 0
+    val resource_count = _field_value(record, "resources.count").to_i64()
+    while index < resource_count:
+        val base = "resources." + _record_index(index)
+        val kind = _field_value(record, base + ".kind")
+        val format = _field_value(record, base + ".format")
+        if kind != "buffer" and kind != "image" and kind != "framebuffer":
+            return _record_error("invalid-enum", base + ".kind", "resource kind is unsupported")
+        if format != "argb-u32" and format != "rgba-u8" and format != "raw-u8":
+            return _record_error("invalid-enum", base + ".format", "resource format is unsupported")
+        if not _positive_i64(_field_value(record, base + ".size")):
+            return _record_error("invalid-decimal", base + ".size", "resource size must be positive decimal")
+        if not _is_lower_hex_hash(_field_value(record, base + ".content_hash")):
+            return _record_error("invalid-hash", base + ".content_hash", "resource hash must be lowercase SHA-256")
+        index = index + 1
+    index = 0
+    val command_count = _field_value(record, "commands.count").to_i64()
+    while index < command_count:
+        val base = "commands." + _record_index(index)
+        val kind = _field_value(record, base + ".kind")
+        if kind != "clear" and kind != "draw_rect_filled" and kind != "draw_circle_filled" and kind != "present" and kind != "readback":
+            return _record_error("invalid-enum", base + ".kind", "command kind is unsupported")
+        if not _sequence_contains(record, "pipelines", "pipelines.count", "pipeline_id", _field_value(record, base + ".pipeline_id")):
+            return _record_error("unresolved-reference", base + ".pipeline_id", "command pipeline reference does not resolve")
+        if not _sequence_contains(record, "resources", "resources.count", "resource_id", _field_value(record, base + ".resource_id")):
+            return _record_error("unresolved-reference", base + ".resource_id", "command resource reference does not resolve")
+        index = index + 1
+    var transition_resources: [text] = []
+    var transition_states: [text] = []
+    index = 0
+    val transition_count = _field_value(record, "transitions.count").to_i64()
+    while index < transition_count:
+        val base = "transitions." + _record_index(index)
+        val resource_id = _field_value(record, base + ".resource_id")
+        val before = _field_value(record, base + ".before")
+        val after = _field_value(record, base + ".after")
+        if not _sequence_contains(record, "resources", "resources.count", "resource_id", resource_id):
+            return _record_error("unresolved-reference", base + ".resource_id", "transition resource reference does not resolve")
+        if not _transition_state_valid(before) or not _transition_state_valid(after):
+            return _record_error("invalid-enum", base + ".state", "transition state is unsupported")
+        if not _transition_stage_valid(_field_value(record, base + ".stage")):
+            return _record_error("invalid-enum", base + ".stage", "transition stage is unsupported")
+        if not _access_valid(_field_value(record, base + ".access")):
+            return _record_error("invalid-enum", base + ".access", "transition access is unsupported")
+        var prior_index = 0
+        var prior_state = ""
+        while prior_index < transition_resources.len():
+            if transition_resources[prior_index] == resource_id:
+                prior_state = transition_states[prior_index]
+            prior_index = prior_index + 1
+        if prior_state == "" and before != "undefined":
+            return _record_error("invalid-transition-chain", base + ".before", "first resource transition must start from undefined")
+        if prior_state != "" and prior_state != before:
+            return _record_error("invalid-transition-chain", base + ".before", "transition before-state does not continue the resource state chain")
+        transition_resources = transition_resources.push(resource_id)
+        transition_states = transition_states.push(after)
+        index = index + 1
+    index = 0
+    val sync_count = _field_value(record, "synchronization.count").to_i64()
+    while index < sync_count:
+        val base = "synchronization." + _record_index(index)
+        val kind = _field_value(record, base + ".kind")
+        if kind != "queue-submit" and kind != "fence-signal" and kind != "fence-wait":
+            return _record_error("invalid-enum", base + ".kind", "synchronization kind is unsupported")
+        if not _sequence_contains(record, "resources", "resources.count", "resource_id", _field_value(record, base + ".resource_id")):
+            return _record_error("unresolved-reference", base + ".resource_id", "synchronization resource reference does not resolve")
+        if not _sequence_contains(record, "transitions", "transitions.count", "identity", _field_value(record, base + ".transition_id")):
+            return _record_error("unresolved-reference", base + ".transition_id", "synchronization transition reference does not resolve")
+        index = index + 1
     nil
 
 fn validate_backend_render_record(record: BackendRenderRecord) -> Result<BackendRenderRecord, BackendRenderRecordError>:
@@ -231,9 +508,28 @@ fn validate_backend_render_record(record: BackendRenderRecord) -> Result<Backend
     if record.producer_id == "":
         return Err(_record_error("missing-field", "producer_id", "producer identity is required"))
     if val err = _validate_field_order(record): return Err(err)
+    if val err = _validate_field_shapes(record): return Err(err)
     if val err = _validate_required_fields(record): return Err(err)
     if val err = _validate_dimensions(record): return Err(err)
     if val err = _validate_provenance(record): return Err(err)
+    if val err = _validate_render_state(record): return Err(err)
+    if val err = _validate_collection_layout(record, "commands", "commands.count"): return Err(err)
+    if val err = _validate_collection_layout(record, "pipelines", "pipelines.count"): return Err(err)
+    if val err = _validate_collection_layout(record, "resources", "resources.count"): return Err(err)
+    if val err = _validate_collection_layout(record, "transitions", "transitions.count"): return Err(err)
+    if val err = _validate_collection_layout(record, "synchronization", "synchronization.count"): return Err(err)
+    if val err = _validate_identity_sequence(record, "commands", "commands.count", "identity"): return Err(err)
+    if val err = _validate_indexed_fields(record, "commands", "commands.count", ["kind", "pipeline_id", "resource_id"]): return Err(err)
+    if val err = _validate_identity_sequence(record, "pipelines", "pipelines.count", "pipeline_id"): return Err(err)
+    if val err = _validate_indexed_fields(record, "pipelines", "pipelines.count", ["fragment_shader_id", "pipeline_hash", "vertex_shader_id"]): return Err(err)
+    if val err = _validate_identity_sequence(record, "resources", "resources.count", "identity"): return Err(err)
+    if val err = _validate_identity_sequence(record, "resources", "resources.count", "resource_id"): return Err(err)
+    if val err = _validate_indexed_fields(record, "resources", "resources.count", ["binding", "content_hash", "format", "kind", "resource_id", "size"]): return Err(err)
+    if val err = _validate_identity_sequence(record, "transitions", "transitions.count", "identity"): return Err(err)
+    if val err = _validate_indexed_fields(record, "transitions", "transitions.count", ["access", "after", "before", "resource_id", "stage"]): return Err(err)
+    if val err = _validate_identity_sequence(record, "synchronization", "synchronization.count", "identity"): return Err(err)
+    if val err = _validate_indexed_fields(record, "synchronization", "synchronization.count", ["kind", "resource_id", "transition_id"]): return Err(err)
+    if val err = _validate_collection_semantics(record): return Err(err)
     if _field_value(record, "frame.complete") != "true":
         return Err(_record_error("incomplete-frame", "frame.complete", "frame must be complete"))
     if not _positive_i64(_field_value(record, "frame.backend_handle")):
@@ -253,6 +549,69 @@ fn validate_backend_render_record(record: BackendRenderRecord) -> Result<Backend
     if record.record_hash != expected_record:
         return Err(_record_error("invalid-hash", "record_hash", "record hash does not match canonical fields"))
     Ok(record)
+
+fn _wire_text_safe(value: text) -> bool:
+    not value.contains("|") and not value.contains("\n") and not value.contains("\r")
+
+fn serialize_backend_render_record(record: BackendRenderRecord) -> Result<text, BackendRenderRecordError>:
+    """Serialize one validated record across the strict line-oriented evidence boundary."""
+    match validate_backend_render_record(record):
+        case Err(err): return Err(err)
+        case Ok(_valid): ()
+    if not _wire_text_safe(record.producer_id):
+        return Err(_record_error("invalid-wire-value", "producer_id", "producer identity contains a reserved wire character"))
+    var out = "schema_name|" + record.schema_name + "\n"
+    out = out + "schema_version|" + record.schema_version.to_text() + "\n"
+    out = out + "producer_id|" + record.producer_id + "\n"
+    for field in record.fields:
+        if not _wire_text_safe(field.path) or not _wire_text_safe(field.value) or not _wire_text_safe(field.value_kind):
+            return Err(_record_error("invalid-wire-value", field.path, "field contains a reserved wire character"))
+        out = out + "field|" + field.path + "|" + field.value_kind + "|" + field.semantic.to_text() + "|" + field.value + "\n"
+    out = out + "semantic_hash|" + record.semantic_hash + "\n"
+    out = out + "record_hash|" + record.record_hash + "\n"
+    Ok(out)
+
+fn parse_backend_render_record(serialized: text) -> Result<BackendRenderRecord, BackendRenderRecordError>:
+    """Parse and validate one strict serialized backend-render record without recomputing supplied hashes."""
+    var schema_name = ""
+    var schema_version = -1
+    var producer_id = ""
+    var semantic_hash = ""
+    var record_hash = ""
+    var fields: [BackendRenderField] = []
+    var schema_name_count = 0
+    var schema_version_count = 0
+    var producer_id_count = 0
+    var semantic_hash_count = 0
+    var record_hash_count = 0
+    for line in serialized.split("\n"):
+        if line == "": continue
+        val parts = line.split("|")
+        if parts.len() == 2 and parts[0] == "schema_name":
+            schema_name = parts[1]
+            schema_name_count = schema_name_count + 1
+        else if parts.len() == 2 and parts[0] == "schema_version":
+            if not _nonnegative_decimal(parts[1]): return Err(_record_error("malformed-wire-record", "schema_version", "schema version must be decimal"))
+            schema_version = parts[1].to_i64().to_i32()
+            schema_version_count = schema_version_count + 1
+        else if parts.len() == 2 and parts[0] == "producer_id":
+            producer_id = parts[1]
+            producer_id_count = producer_id_count + 1
+        else if parts.len() == 2 and parts[0] == "semantic_hash":
+            semantic_hash = parts[1]
+            semantic_hash_count = semantic_hash_count + 1
+        else if parts.len() == 2 and parts[0] == "record_hash":
+            record_hash = parts[1]
+            record_hash_count = record_hash_count + 1
+        else if parts.len() == 5 and parts[0] == "field":
+            if parts[3] != "true" and parts[3] != "false": return Err(_record_error("malformed-wire-record", parts[1], "field semantic class must be bool"))
+            fields = fields.push(backend_render_field(parts[1], parts[4], parts[2], parts[3] == "true"))
+        else:
+            return Err(_record_error("malformed-wire-record", "serialized", "record contains an unknown or malformed line"))
+    if schema_name_count != 1 or schema_version_count != 1 or producer_id_count != 1 or semantic_hash_count != 1 or record_hash_count != 1:
+        return Err(_record_error("malformed-wire-record", "serialized", "record requires exactly one schema name, version, producer, and hash pair"))
+    val record = BackendRenderRecord(schema_name: schema_name, schema_version: schema_version, producer_id: producer_id, fields: fields, semantic_hash: semantic_hash, record_hash: record_hash)
+    validate_backend_render_record(record)
 
 fn canonical_backend_render_record(record: BackendRenderRecord, semantic_only: bool) -> Result<text, BackendRenderRecordError>:
     """Return deterministic length-prefixed canonical text for a valid record."""
@@ -351,4 +710,3 @@ fn verify_backend_render_equivalence(left: BackendRenderRecord, right: BackendRe
     if oracle.oracle_mismatch_count != 0: return _equivalence_result(diff, independent, completed, handles, nonblank, oracle, false, "oracle-mismatch")
     if oracle.pair_mismatch_count != 0: return _equivalence_result(diff, independent, completed, handles, nonblank, oracle, false, "pairwise-mismatch")
     _equivalence_result(diff, independent, completed, handles, nonblank, oracle, true, "pass")
-

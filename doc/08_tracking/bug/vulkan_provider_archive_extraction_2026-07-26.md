@@ -4,7 +4,7 @@
 
 Source fixed. The focused linker regression passes 13/13, and the canonical
 external-provider owner repair has a host-independent archive fixture. A fresh
-source-matched Linux/Vulkan execution is still required before TODO 580 or any
+source-matched Linux/Vulkan execution is still required before TODO317 or any
 WM acceptance criterion can close.
 
 ## Evidence

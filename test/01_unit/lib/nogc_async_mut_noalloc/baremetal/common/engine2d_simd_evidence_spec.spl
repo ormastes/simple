@@ -1,0 +1,60 @@
+# codex-system-test
+# @req REQ-020 REQ-021
+
+use std.spec.*
+use std.nogc_async_mut_noalloc.baremetal.common.engine2d_simd_evidence.*
+
+fn passing_operation(code: u32) -> Engine2dSimdOperationEvidence:
+    engine2d_simd_operation_evidence(
+        code, 1u64, 2u64, 8u64, 1u64, 0u64, 101u64, 101u64, 0u64)
+
+fn x86_evidence() -> Engine2dSimdProducerEvidence:
+    Engine2dSimdProducerEvidence(
+        arch_code: ENGINE2D_SIMD_ARCH_X86_64,
+        detected_feature_code: ENGINE2D_SIMD_FEATURE_AVX2,
+        required_feature_code: ENGINE2D_SIMD_FEATURE_AVX2,
+        vector_width_bits: 256u32, intrinsic_owner_linked: true,
+        blocked_reason_code: ENGINE2D_SIMD_BLOCK_NONE,
+        fill: passing_operation(ENGINE2D_SIMD_OP_FILL),
+        copy: passing_operation(ENGINE2D_SIMD_OP_COPY),
+        alpha: passing_operation(ENGINE2D_SIMD_OP_ALPHA),
+        alpha_edge: passing_operation(ENGINE2D_SIMD_OP_ALPHA_EDGE),
+        scroll: passing_operation(ENGINE2D_SIMD_OP_SCROLL),
+        diagram: passing_operation(ENGINE2D_SIMD_OP_DIAGRAM),
+        frame_checksum: 101u64)
+
+describe "SimpleOS Engine2D SIMD evidence":
+
+    # @req REQ-020 REQ-021
+    it "requires every executed vector path and exact scalar parity":
+        var evidence = x86_evidence()
+        expect(engine2d_simd_producer_passes(evidence)).to_be(true)
+        evidence.copy.vector_chunks = 0u64
+        expect(engine2d_simd_producer_passes(evidence)).to_be(false)
+        evidence.copy.vector_chunks = 2u64
+        evidence.alpha.scalar_fallback_calls = 1u64
+        expect(engine2d_simd_producer_passes(evidence)).to_be(false)
+        evidence.alpha.scalar_fallback_calls = 0u64
+        evidence.alpha_edge.actual_checksum = 102u64
+        expect(engine2d_simd_producer_passes(evidence)).to_be(false)
+        evidence.alpha_edge.actual_checksum = 101u64
+        evidence.scroll.mismatch_count = 1u64
+        expect(engine2d_simd_producer_passes(evidence)).to_be(false)
+        evidence.scroll.mismatch_count = 0u64
+        evidence.diagram.dispatch_calls = 0u64
+        expect(engine2d_simd_producer_passes(evidence)).to_be(false)
+
+    # @req REQ-020
+    it "admits only architecture-correct features and linked intrinsic owners":
+        var evidence = x86_evidence()
+        evidence.detected_feature_code = ENGINE2D_SIMD_FEATURE_NEON
+        expect(engine2d_simd_producer_passes(evidence)).to_be(false)
+        evidence.detected_feature_code = ENGINE2D_SIMD_FEATURE_AVX2
+        evidence.intrinsic_owner_linked = false
+        evidence.blocked_reason_code = ENGINE2D_SIMD_BLOCK_INTRINSIC_OWNER_UNLINKED
+        expect(engine2d_simd_producer_passes(evidence)).to_be(false)
+        val blocked = engine2d_simd_blocked_producer(
+            ENGINE2D_SIMD_ARCH_RISCV64, ENGINE2D_SIMD_FEATURE_RVV,
+            ENGINE2D_SIMD_BLOCK_UNSUPPORTED_FEATURE)
+        expect(engine2d_simd_producer_passes(blocked)).to_be(false)
+        expect(blocked.frame_checksum).to_equal(0u64)

@@ -6,14 +6,26 @@
 
 ## Local implementation remaining
 
-1. Complete the detailed backend command/resource snapshot beyond the
-   now-implemented facade provenance record and software surface matrix.
-2. Add the guest ordered-receipt emitter/parser and complete live SimpleOS
-   QMP/serial, per-ISA SIMD, and guest-equivalence runs.
-3. Run the physical-board row with real identity, firmware, transcript, and
-   capture artifacts.
-4. Deploy the current pure-Simple release binary and measure 98–100% coverage
-   plus retained 4K performance.
+These are local blockers, not deferred host evidence. TODO317 cannot waive or
+close them:
+
+1. **Blocker A — strict RenderDoc join:** bind the capture producer, replay
+   inspector, and host classifier to one artifact/device/owner identity and
+   reject synthetic-magic-only admission.
+2. **Blocker B — target receipt completion:** add the absent x86_64, AArch64,
+   and RV64 no-allocation per-operation SIMD owners and feed their real
+   fill/copy/alpha/scroll/PRESENT hashes and telemetry through the implemented
+   BRR1 adapter and bounded host join.
+3. **Blocker C — serialized record boundary (resolved locally):** both the
+   native capture probe and translated probe now emit complete schema-v2
+   command/pipeline/shader/resource/transition/synchronization records. The
+   shared evidence helper extracts both records and invokes the production
+   parser, validator, and equivalence policy instead of comparing fixtures or
+   hashes alone.
+
+Only after A/B/C land may TODO317 run glyph calibration and admitted
+pure-Simple native/live-host qualification, including QEMU/board, coverage,
+and retained 4K/8K evidence.
 
 ## Resolved locally
 
@@ -86,7 +98,7 @@
   checksum and retained backend commit both succeed. Its system contract checks
   render/present, identity, trusted-dimension readback, and UART receipt order.
 
-## Current local blockers
+## Current local blockers A/B/C
 
 - The aggregate host classifier currently accepts only
   `rdoc_simple_gate_status=pass` plus four-byte `RDOC` magic, and the gate's
@@ -97,9 +109,6 @@
   capture lifecycle, semantic/record/pixel hashes, and owner agreement.
   Duplicate, empty, malformed, mixed-case/all-zero hash, path-alias, and
   synthetic-only evidence must fail closed under REQ-009.
-- Full execution needs a fresh admitted pure-Simple Stage-4 binary. The current
-  diagnostic runner has a stale interpreter extern table and its native SSpec
-  path delegates incorrectly to the Rust seed.
 - The shared per-operation BRR1 adapter now maps four full operation hashes and
   telemetry groups plus PRESENT into 17 ordered events; its focused unit passes
   2/2 and its generated manual has zero stubs. The x86_64/AArch64/RV64 noalloc
@@ -107,37 +116,42 @@
   honestly vectorized in current guest boot glue; copy/alpha/scroll are scalar
   or absent, RV64 V is disabled end-to-end, and the modern QEMU SIMD matrix
   therefore remains a fail-fast placeholder.
-- Detailed command/pipeline/resource/transition snapshots remain implementation
-  work; the facade capture accepts the producer-observed command count and does
-  not fabricate those details.
-- Live x86 QEMU promotion reaches the guest build gate but cannot run with the
-  current diagnostic toolchain: the modern system spec fails 0/2 before an ELF
-  is produced because no admitted pure-Simple Stage-4 compiler is available.
-  The receipt/control unit spec passes 2/2 and all four changed source files
-  pass focused `check`.
-- Live target-native SIMD receipts lack fill/copy/alpha/scroll evidence across
-  x86_64, AArch64, and RV64; the physical-board capture harness is external.
+- The local producer path records the actual public Engine2D execution receipt:
+  selected backend, RenderDoc device handle, completed present, exact readback,
+  and the probe-owned canonical command sequence. It does not claim a
+  backend-private driver snapshot. Adding and admitting that optional snapshot
+  facade remains a TODO317 live-host feature request, because no such API is
+  available in the current backend surface.
 - The focused RV64/adapter diagnostic `check` produced no diagnostics but made
   no progress for three minutes and was stopped once without retry. ARM64 BRR1
   source diagnostics are unavailable for the same source-mode/native-build
   reason. The unrelated stale macOS/HVF RAM-tail wrapper reversion in the ARM
   entry remains preserved and must be reconciled by its owner before commit.
 - The one-shot framebuffer receipt currently materializes pixel and canonical
-  byte arrays. The bounded streaming-SHA upgrade trigger and acceptance criteria
-  are tracked in
-  `doc/08_tracking/bug/simpleos_render_receipt_framebuffer_hash_allocation_2026-07-27.md`.
+  byte arrays. The bounded streaming-SHA upgrade trigger remains in the open
+  backend-render receipt bug referenced below; no separate bug document exists.
 - Host evidence validation now rejects non-Vulkan backends at the shared
   receipt boundary (11/11 focused unit scenarios pass). The CPU SIMD matrix no
   longer lets qemu-user C target helpers override failed or unavailable
-  pure-Simple architecture rows; see
-  `doc/08_tracking/bug/cpu_simd_matrix_target_helper_false_pass_2026-07-27.md`.
-- Coverage mode reran the focused host contract 11/11 but emitted no coverage
-  artifact from the diagnostic runner. The 98–100% target remains unproven.
-- The diagnostic firmware-identity spec remained 1/2 after its three-cycle
-  cap. Its assertion incorrectly compared postfix `.?` (the optional payload)
-  with `true`; that assertion is corrected but deliberately not rerun. Fresh
-  Stage-4 verification must execute
-  `test/01_unit/os/qemu_firmware_identity_spec.spl` once.
+  pure-Simple architecture rows. Current host-contract and architecture-matrix
+  specs cover that resolved behavior; no separate bug document is required.
+
+## Deferred acceptance evidence — TODO317
+
+- Add an opt-in backend-owned snapshot facade and validate its private
+  pipeline/resource/barrier receipts against the serialized public probe
+  record; current local evidence deliberately makes no backend-private claim.
+- Run and independently pin the Linux live glyph calibration, then rerun the
+  normal live gate against the reviewed glyph hash.
+- Deploy one admitted source-matched pure-Simple Stage-4/release CLI; reject
+  the stale interpreter extern table and Rust-seed native delegation.
+- Capture native x86/ARM NEON/RISC-V RVV, Linux X11/winit, Vulkan/device
+  readback, external and repo-native RenderDoc, Chrome/Electron parity,
+  retained 4K/8K, FreeBSD/QEMU, physical-board, macOS, and Windows evidence.
+- Produce the admitted 98–100% owned-lane coverage artifact and run the current
+  backend-receipt wire plus SimpleOS render-evidence protocol specs once on the
+  admitted binary. These are evidence runs, not local A/B/C implementation
+  substitutes.
 
 ## Existing proof
 
@@ -165,8 +179,8 @@
 - `doc/05_design/simple_2d_renderdoc_backend_equivalence.md`
 - `doc/00_llm_process/feature_expert/simple_renderdoc/skill.md`
 - `doc/08_tracking/bug/simpleos_backend_render_receipt_producer_parser_missing_2026-07-27.md`
-- `doc/08_tracking/bug/virtio_gpu_flush_response_ignored_2026-07-27.md`
 - `doc/08_tracking/todo/simple_renderdoc_external_host_postponed_2026-07-27.md`
+- `doc/08_tracking/feature/wm_gui_web_2d_host_environment_acceptance_evidence_2026-07-28.md`
 
 This standalone request avoids the concurrently modified shared feature
 database.

@@ -37,6 +37,7 @@ READONLY_STATIC_CACHE_DIR = Path(READONLY_STATIC_CACHE_DIR_TEXT) if READONLY_STA
 if READONLY_STATIC_CACHE_DIR is not None and not READONLY_STATIC_CACHE_DIR.is_absolute():
     READONLY_STATIC_CACHE_DIR = ROOT / READONLY_STATIC_CACHE_DIR
 renderdoc_evidence_tool = ROOT / "scripts/tool/renderdoc-evidence.shs"
+coverage_admission_tool = ROOT / "scripts/check/check-wm-gui-web-2d-coverage-admission.shs"
 
 def value_of(key: str, text: str) -> str:
     out = ""
@@ -3318,9 +3319,29 @@ gui_web_2d_vulkan_renderdoc_blocker_gate_count = len(renderdoc_blocker_gates)
 gui_web_2d_vulkan_renderdoc_blocker_gates = "|".join(renderdoc_blocker_gates)
 gui_web_2d_vulkan_renderdoc_blocker_doc = "" if gui_web_2d_vulkan_renderdoc_blocker_status == "pass" else "doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md"
 
+try:
+    coverage_admission_proc = subprocess.run(
+        ["sh", str(coverage_admission_tool)], cwd=ROOT, env=os.environ.copy(),
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        timeout=30, check=False,
+    )
+    coverage_admission_output = coverage_admission_proc.stdout
+    coverage_admission_code = coverage_admission_proc.returncode
+except subprocess.TimeoutExpired:
+    coverage_admission_output = "wm_gui_web_2d_coverage_admission_status=fail\nwm_gui_web_2d_coverage_admission_reason=coverage-admission-timeout\n"
+    coverage_admission_code = 124
+coverage_admission_status = value_of("wm_gui_web_2d_coverage_admission_status", coverage_admission_output)
+coverage_admission_reason = value_of("wm_gui_web_2d_coverage_admission_reason", coverage_admission_output)
+if coverage_admission_code != 0 or coverage_admission_status != "pass":
+    coverage_admission_status = "fail"
+    coverage_admission_reason = coverage_admission_reason or "coverage-admission-gate-failed"
+
 coverage_status = "pass"
 coverage_reason = "pass"
-if missing_dispatch:
+if coverage_admission_status != "pass":
+    coverage_status = "fail"
+    coverage_reason = coverage_admission_reason
+elif missing_dispatch:
     coverage_status = "fail"
     coverage_reason = "missing-widget-html-renderer-dispatch"
 elif traceability_status != "pass":
@@ -3368,6 +3389,18 @@ elif production_core_status != "pass":
 
 emit("gui_renderdoc_feature_coverage_status", coverage_status)
 emit("gui_renderdoc_feature_coverage_reason", coverage_reason)
+for coverage_key in [
+    "wm_gui_web_2d_coverage_admission_status", "wm_gui_web_2d_coverage_admission_reason",
+    "wm_gui_web_2d_coverage_classifier_threshold_percent", "wm_gui_web_2d_coverage_overall_threshold_percent",
+    "wm_gui_web_2d_coverage_classifier_decisions_covered", "wm_gui_web_2d_coverage_classifier_decisions_total",
+    "wm_gui_web_2d_coverage_overall_decisions_covered", "wm_gui_web_2d_coverage_overall_decisions_total",
+    "wm_gui_web_2d_coverage_owner_paths", "wm_gui_web_2d_coverage_owner_decision_counts",
+    "wm_gui_web_2d_coverage_evidence_path", "wm_gui_web_2d_coverage_report_path",
+    "wm_gui_web_2d_coverage_report_sha256", "wm_gui_web_2d_coverage_source_revision",
+    "wm_gui_web_2d_coverage_executable_path", "wm_gui_web_2d_coverage_executable_sha256",
+]:
+    emit(coverage_key, value_of(coverage_key, coverage_admission_output))
+emit("wm_gui_web_2d_coverage_admission_command", "sh scripts/check/check-wm-gui-web-2d-coverage-admission.shs")
 emit("widget_kind_source", rel(widget_kind_path))
 emit("widget_kind_count", len(widget_wires))
 emit("widget_html_renderer_source", rel(html_widgets_path))
@@ -4478,6 +4511,8 @@ emit("simple_renderdoc_capture_command", "RDOC_OUTPUT_DIR=build/renderdoc/canoni
 emit("html_renderdoc_capture_command", "RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs")
 emit("electron_renderdoc_capture_command", "RDOC_OUTPUT_DIR=build/renderdoc/electron-implicit-layer-default-autocapture scripts/tool/renderdoc-evidence.shs capture-electron-html")
 blocked_gates = [gate for gate in renderdoc_blocked_gates.split("|") if gate]
+if coverage_admission_status != "pass":
+    blocked_gates.insert(0, "fresh retained WM/GUI/web/2D coverage admission evidence")
 if widget_goal_status != "pass":
     for widget_blocker in [gate for gate in widget_goal_blocked_gates.split("|") if gate]:
         if widget_blocker not in blocked_gates:
@@ -4583,6 +4618,7 @@ report_optional_pair_line() {
     echo "- status: $status"
     echo "- reason: $reason"
     echo "- widget HTML renderer dispatch: $(sed -n 's/^widget_html_renderer_dispatch_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^widget_kind_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- WM/GUI/web/2D retained coverage admission: $(sed -n 's/^wm_gui_web_2d_coverage_admission_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^wm_gui_web_2d_coverage_admission_reason=//p' "$OUT_ENV" | tail -n 1); classifier $(sed -n 's/^wm_gui_web_2d_coverage_classifier_decisions_covered=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^wm_gui_web_2d_coverage_classifier_decisions_total=//p' "$OUT_ENV" | tail -n 1); overall $(sed -n 's/^wm_gui_web_2d_coverage_overall_decisions_covered=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^wm_gui_web_2d_coverage_overall_decisions_total=//p' "$OUT_ENV" | tail -n 1))"
     echo "- widget rendering fixture/spec coverage: $(sed -n 's/^gui_widget_rendering_fixture_coverage_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^gui_widget_rendering_fixture_coverage_spec_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^gui_widget_rendering_fixture_coverage_widget_kind_count=//p' "$OUT_ENV" | tail -n 1))"
     echo "- widget renderer class coverage: $(sed -n 's/^gui_widget_rendering_fixture_coverage_renderer_class_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^gui_widget_rendering_fixture_coverage_widget_kind_count=//p' "$OUT_ENV" | tail -n 1)"
     echo "- widget render fixture witnesses: $(sed -n 's/^gui_widget_rendering_fixture_coverage_render_fixture_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^gui_widget_rendering_fixture_coverage_widget_kind_count=//p' "$OUT_ENV" | tail -n 1)"
@@ -4676,6 +4712,7 @@ report_optional_pair_line() {
     echo "## Commands"
     echo
     echo "- HTML/CSS traceability: \`$(sed -n 's/^html_css_traceability_command=//p' "$OUT_ENV" | tail -n 1)\`"
+    echo "- WM/GUI/web/2D coverage admission: \`$(sed -n 's/^wm_gui_web_2d_coverage_admission_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- GUI widget rendering fixture coverage: \`$(sed -n 's/^gui_widget_rendering_fixture_coverage_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- HTML/CSS rendering manifest traceability: \`$(sed -n 's/^html_css_rendering_manifest_traceability_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- Web WM modern shell evidence: \`$(sed -n 's/^web_wm_modern_shell_evidence_command=//p' "$OUT_ENV" | tail -n 1)\`"

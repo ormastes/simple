@@ -281,3 +281,46 @@ implementation-in-progress
 - impl: Added a pure-Simple RenderDoc RDC→XML inspector using `renderdoccmd convert`; real canonical capture conversion exposed Vulkan driver/chunk/resource/shader/pipeline/dispatch content. Native inspector tests remain unverified after the three-cycle parser cap; blocker recorded at `doc/08_tracking/bug/native_renderdoc_inspector_else_parse_2026-07-10.md`.
 - impl: Hardened portable target/SIMD evidence against same-length malformed SHA-256 fields and duplicate required SIMD-operation rows; 13 native scenarios pass and the mirrored manual is current. The RenderDoc inspector fails before execution in both self-hosted test modes with the tracked location-free `Else` parser error.
 - impl: Rejected a facade-only Engine2D record adapter after direct native execution showed that the public readback surface cannot prove a completed frame and positive device handle simultaneously. Recorded the required backend-owned snapshot seam at `doc/08_tracking/bug/engine2d_completed_frame_snapshot_gap_2026-07-10.md`; no false completed record is retained.
+- impl: Completed the repo-native schema-v2 `BackendRenderRecord` inventory for
+  ordered command identities, viewport/scissor, pipeline and shader IDs,
+  resource bindings/transitions, and synchronization events. Canonical Vulkan
+  and translated producers now retain the primitive fields; validation rejects
+  missing/duplicate identities and equivalence rejects reordered identities.
+  Focused static checks only; live RenderDoc/Vulkan/bootstrap remain unclaimed.
+- impl-review: Schema-v2 finalization now canonical-sorts caller fields before
+  hashing. Exact collection counts, canonical decimals/hashes/enums, pipeline
+  and resource references, transition chains/stage/access, synchronization
+  references, and checked viewport/scissor bounds fail closed. The canonical
+  Simple RenderDoc producer and translated producer emit semantically identical
+  primitive records including pipeline hash; unit/component/system audit paths
+  execute validation/comparison. Canonical and legacy manuals are byte-equal.
+- impl-review: Added the strict schema-v2 wire boundary. Native-capture and
+  translated Engine2D probes serialize their observed execution/readback
+  receipts; the shared RenderDoc evidence helper extracts both and invokes a
+  production Simple parser/validator/equivalence app. Path-specific value kinds
+  and semantic/provenance classes fail closed. No backend-private snapshot is
+  claimed; that live-host extension remains TODO312.
+- impl: Added the planned noalloc SimpleOS Engine2D SIMD producer contract,
+  compile-time x86_64 AVX2/SSE4.2, AArch64 NEON, and RV64 RVV owner adapters,
+  and compositor target selection. Source readiness is now locally checkable;
+  target-intrinsic linkage, guest execution/disassembly, positive native hits,
+  and exact QMP framebuffer parity remain explicit blockers and no lane is
+  promoted by source presence.
+- impl: Closed the local SIMD-owner linkage blocker with 30 real freestanding
+  ABI definitions across x86_64 AVX2/SSE4.2, AArch64 NEON, and RV64 RVV.
+  Platform build catalogs include each owner, the compositor receipt closure
+  calls the target producer and strict validator, and the bounded checker
+  cross-compiles/disassembles all six operations. Only live guest execution,
+  guest-ELF instruction evidence, and exact QMP framebuffer parity remain
+  external evidence blockers.
+## 2026-07-28 — native SIMD qualification closure
+
+- Local owner evidence passes for x86_64 AVX2/SSE4.2, AArch64 NEON, and
+  RV64 RVV across all six operation ABIs.
+- Alpha-family and diagram kernels perform SIMD arithmetic and compare against
+  an independent scalar oracle.
+- RV64 uses the actual `rv64gc` build target, safe `misa.V`/`vlenb` gating, and
+  a V-enabled QEMU catalog CPU; no unsupported guest executes RVV.
+- Production guest entries reach the shared qualification closure.
+- External evidence still required: Simple guest link/build and live QEMU
+  qualification receipts for the target architectures.

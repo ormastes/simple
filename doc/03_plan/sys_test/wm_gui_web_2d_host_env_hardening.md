@@ -50,6 +50,18 @@ LinuxLiveSystem -> RenderDocArtifact
 The supporting structural scenario uses `Verify the retained contract binds a
 forward Vulkan revision`; it cannot promote a host row.
 
+The renderer-free external-host scenario uses the production
+`HostCapabilityRow`/`TestHostEnv` classifier to prove absent evidence remains
+`blocked`, present-but-invalid evidence remains `fail`, and neither state can
+be promoted by emulation, CPU mirrors, fallback, mocks, or synthetic evidence.
+It binds all six deferred native/live rows to TODO317 and
+`doc/08_tracking/todo/simple_renderdoc_external_host_postponed_2026-07-27.md`,
+then maps each row to the authoritative matrix in
+`doc/08_tracking/feature/wm_gui_web_2d_host_environment_acceptance_evidence_2026-07-28.md`.
+The display/readback rows also assert the live-only
+`GLYPH_RGB_SHA256=pending` calibration blocker. Local implementation lanes
+A/B/C stay with their owners and are not reclassified as external deferrals.
+
 ## Requirement Coverage
 
 | Requirement | Unit | Component | System |
@@ -61,6 +73,12 @@ forward Vulkan revision`; it cannot promote a host row.
 | REQ-009 | validator | capture/log/replay freshness | real `.rdc`/blocked |
 | REQ-010–012 | yes | yes | manual/audits |
 
+The REQ-001/007/008/009/010 external-host case covers six canonical rows, both
+unavailable states, exact reason/path/resume metadata, canonical JSON
+serialization, TODO317, and the authoritative deferred matrix.
+Pending glyph calibration remains a typed live-host blocker and cannot be
+satisfied by a fixture, synthetic crop, CPU mirror, fallback, or screenshot.
+
 ## Coverage and Performance
 
 Run the existing Simple coverage engine for the owned contract/bridge modules;
@@ -69,9 +87,18 @@ is a separate bounded run: 12 warm-up plus at least 20 samples, median/p95/max
 RSS, exact output first, compared only to the matching retained device bucket.
 Coverage evidence must contain stable decision rows with both true and false
 counts; line/function-only output cannot satisfy the branch threshold.
+Only executable specs that directly compile and execute a production owner use
+`# @cover`. Shell/live lanes instead pass
+`scripts/check/check-wm-gui-web-2d-coverage-admission.shs`, which binds the
+report to the current owner-source revision and exact admitted executable and
+report SHA-256 values. It requires the classifier owner at 100%, the six-owner
+aggregate at 98% or better, exact owner/count lists, and current regular
+single-link/no-follow artifacts; missing, duplicate, stale, or forged evidence
+fails the aggregate gate.
 Compiler inventory tests also require untouched zero/zero sites, branchless
 header-only manifests, generated-CFG exclusion, authored wrapper paths, and
 matching runtime counts through the Stage4 LLVM/core-C route.
+
 
 ## External Host Rows
 

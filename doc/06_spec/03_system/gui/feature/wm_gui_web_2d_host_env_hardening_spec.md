@@ -235,6 +235,145 @@ for prefix in audited_prefixes:
 
 </details>
 
+#### keeps unavailable external-host rows actionable and fail-closed
+
+TODO317 and its stable external-host feature-request ledger retain every
+unavailable native/live capability as an actionable blocked or failed row.
+This renderer-free scenario uses the production `TestHostEnv` contract; it is
+not native-host, QEMU, RenderDoc, or live-display execution evidence. Local
+implementation lanes A/B/C remain with their owners. The display/readback rows
+stay blocked while the reviewed live glyph calibration is pending.
+
+- Load TODO317 and its authoritative external-host matrix
+- Classify every deferred native and live capability
+- Serialize the canonical blocked TestHostEnv output
+- Reject substitute promotion paths in the production aggregate
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 114 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Load TODO317 and its authoritative external-host matrix")
+expect(file_exists(TODO_DB)).to_be(true)
+expect(file_exists(EXTERNAL_HOST_REQUEST)).to_be(true)
+expect(file_exists(EXTERNAL_HOST_FEATURE_REQUEST)).to_be(true)
+val todo_db = file_read(TODO_DB)
+val deferred = file_read(EXTERNAL_HOST_REQUEST)
+val acceptance = file_read(EXTERNAL_HOST_FEATURE_REQUEST)
+expect(todo_db).to_contain(TODO317_ROW)
+expect(deferred).to_contain("# Simple RenderDoc external-host qualification TODO")
+expect(deferred).to_contain("Authoritative acceptance ID: **TODO317**")
+expect(deferred).to_contain(EXTERNAL_HOST_FEATURE_REQUEST)
+expect(acceptance).to_contain("# TODO317 — WM/GUI/Web/2D cross-host acceptance evidence")
+expect(acceptance).to_contain("Ledger: `doc/08_tracking/todo/todo_db.sdn` ID 312")
+expect(acceptance).to_contain("Local implementation lanes A/B/C remain with their existing owners")
+expect(acceptance).to_contain("Only backend/native/live execution that genuinely requires a prepared external")
+expect(acceptance).to_contain("`GLYPH_RGB_SHA256=pending`")
+expect(acceptance).to_contain("fixture overrides, CPU mirrors, screenshots")
+
+step("Classify every deferred native and live capability")
+val names = [
+    "arm_simd", "riscv_simd", "vulkan", "renderdoc",
+    "display_input", "framebuffer_readback"
+]
+val reasons = [
+    "owner=scripts/check/check-cpu-simd-engine2d-arch-matrix.shs;prerequisite=native-aarch64-host-with-neon-and-admitted-pure-simple-cli;artifact=build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env",
+    "owner=scripts/check/check-cpu-simd-engine2d-arch-matrix.shs;prerequisite=native-riscv64-host-with-rvv-and-admitted-pure-simple-cli;artifact=build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env",
+    "validated-device-readback-browser-vulkan-and-parity-evidence-required",
+    "valid-rdoc-capture-required",
+    "screen-to-semantic-event-evidence-required",
+    "device-readback-and-exact-argb-required"
+]
+val paths = [
+    "build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env",
+    "build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env",
+    "build/gui-web-2d-vulkan-env-run-current/evidence.env",
+    "build/renderdoc/simple-gate/evidence.env",
+    "build/linux-hosted-wm-live-window-evidence/evidence.env",
+    "build/linux-hosted-wm-live-window-evidence/evidence.env"
+]
+val resumes = [
+    "CPU_SIMD_ARCH_MATRIX_AARCH64_SIMPLE_BIN=bin/simple sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs",
+    "CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN=bin/simple sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs",
+    "GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-browser-backing scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing && GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-run-current scripts/setup/setup-gui-web-2d-vulkan-env.shs --run",
+    "scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple",
+    "scripts/check/check-linux-hosted-wm-live-window-evidence.shs",
+    "scripts/check/check-linux-hosted-wm-live-window-evidence.shs"
+]
+val matrix_rows = [
+    "| Native AArch64 |", "| Native RISC-V |",
+    "| Prepared Linux Vulkan + RenderDoc + display |",
+    "| Prepared Linux Vulkan + RenderDoc + display |",
+    "| Prepared Linux Vulkan + RenderDoc + display |",
+    "| Prepared Linux Vulkan + RenderDoc + display |"
+]
+val feature_rows = [
+    "| Native ARM NEON |", "| Native RISC-V RVV |",
+    "| Linux Vulkan/device readback |",
+    "| External RenderDoc on Simple Vulkan |",
+    "| Linux X11/winit vertical slice |",
+    "| Linux Vulkan/device readback |"
+]
+var rows = [HostCapabilityRow.create(
+    "x86_simd", "pass", "", "build/cpu-simd-engine2d-evidence/evidence.env", ""
+)]
+var i = 0
+while i < names.len():
+    val blocked = host_capability_row_from_evidence(
+        names[i], true, false, reasons[i], paths[i], resumes[i]
+    )
+    expect(blocked.status).to_equal("blocked")
+    expect(blocked.status == "pass").to_be(false)
+    expect(blocked.reason).to_equal(reasons[i])
+    expect(blocked.evidence_path).to_equal(paths[i])
+    expect(blocked.resume_command).to_equal(resumes[i])
+    expect(blocked.validation_reason()).to_equal("")
+    expect(deferred).to_contain(matrix_rows[i])
+    expect(acceptance).to_contain(feature_rows[i])
+    rows.push(blocked)
+
+    val invalid_present = host_capability_row_from_evidence(
+        names[i], false, true, reasons[i], paths[i], resumes[i]
+    )
+    expect(invalid_present.status).to_equal("fail")
+    expect(invalid_present.status == "pass").to_be(false)
+    expect(invalid_present.reason).to_equal(reasons[i])
+    expect(invalid_present.evidence_path).to_equal(paths[i])
+    expect(invalid_present.resume_command).to_equal(resumes[i])
+    i += 1
+
+step("Serialize the canonical blocked TestHostEnv output")
+val env = TestHostEnv.create(rows)
+expect(env.validation_reason()).to_equal("")
+expect(env.ready()).to_be(false)
+val json = env.to_json()
+expect(json).to_contain("\"schema\":\"simple-test-host-env-v1\"")
+i = 1
+while i < rows.len():
+    expect(json).to_contain(rows[i].to_json())
+    i += 1
+
+step("Reject substitute promotion paths in the production aggregate")
+val app = file_read(HOST_ENV_APP)
+val wrapper = file_read(WRAPPER)
+expect(app).to_contain("Aggregate live host evidence without substituting emulation or CPU mirrors")
+expect(app).to_contain("host_simd_evidence_passes(evidence, arch, feature) and host_simd_artifacts_are_current(evidence)")
+expect(app).to_contain("host_vulkan_evidence_passes(vulkan) and")
+expect(app).to_contain("host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_artifacts_are_current(renderdoc)")
+expect(app).to_contain("host_display_input_evidence_passes(live)")
+expect(app).to_contain("host_readback_evidence_passes(live) and host_readback_captures_are_current(live)")
+expect(app.contains("mock")).to_be(false)
+expect(app.contains("synthetic")).to_be(false)
+expect(app.contains("fallback")).to_be(false)
+expect(wrapper).to_contain("GLYPH_RGB_SHA256=pending")
+expect(wrapper).to_contain("glyph_oracle_mode pending")
+```
+
+</details>
+
 #### keeps the wrapper and app on existing production owners
 
 This supporting structural check keeps the evidence app on the selected
