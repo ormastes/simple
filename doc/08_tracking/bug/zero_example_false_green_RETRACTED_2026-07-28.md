@@ -67,6 +67,35 @@ exit 0". This is exactly the standing rule
 *Measurement traps: harness not system — pipe `$?`*, which we then re-derived
 the hard way.
 
+## Sweep result — 68 specs, zero false greens
+
+Run sequentially (parallel runs corrupt the shared test database):
+
+| sweep | population | result |
+|---|---|---|
+| 1 | 30 random specs | 22 exit 0 (all with real examples), 7 exit 1, 1 exit 255 — **zero false greens** |
+| 2 | 38 static candidates with no `it` / `slow_it` | **38/38 exit 1**; 37 print `no examples executed` |
+
+Specs newly exposed by adding a guard: **0** — the guard predates this
+investigation. Specs that genuinely register zero examples and are *already*
+correctly failing: **38**.
+
+Deliberate red/green calibration:
+
+| case | exit | output |
+|---|---|---|
+| describe with no `it` | 1 | `0 examples, 0 failures` → `error: test-runner: no examples executed` |
+| one passing `it` | 0 | `1 example, 0 failures` |
+| directory of both | 4 | `EmptySelection` |
+
+## One latent fail-open, currently unreachable
+
+`test_executor_parsing.spl:366` returns a *passing* 0/0 result when output
+contains `Passed: 0` and `Failed: 0`. It is not live — the hardened child
+emits `Failed: 1` for zero examples, so that branch is never taken today. It
+is a real fail-open waiting for the child's behaviour to change, and should
+be made fail-closed on its own merits.
+
 ## What IS real
 
 A static scan found **38** spec files under
