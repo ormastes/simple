@@ -32,6 +32,36 @@ defined anywhere and fabricates an enum-shaped value for it.
 `Box.make()` runs and a free `fn` runs. The hijack is specific to `EnumName.`
 receivers.
 
+## Escalation: a *defined* associated function is equally broken
+
+The original writeup used an undefined method, which invited the reading that
+this is only a missing-diagnostic bug. It is not. A properly declared
+`static fn` is never called either:
+
+```
+enum E1:
+    A
+    B
+
+    static fn make() -> E1:
+        E1.B
+
+fn main():
+    val x = E1.make()
+    match x:
+        case E1.A: print "got A"
+        case E1.B: print "got B"
+        case _:    print "got NOTHING"
+```
+
+| engine | result |
+|---|---|
+| default (JIT) | `got NOTHING` — falls to the wildcard |
+| interpreter | `got B` |
+
+So every enum associated constructor in the tree returns a value matching no
+arm under the JIT. Reproduced by the coordinator.
+
 ## Likely cause
 
 `hir/lower/module_lowering/module_pass.rs` (~L402) registers every
