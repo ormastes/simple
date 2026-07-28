@@ -1905,9 +1905,293 @@ fn simpleos_objdump_normalized_insn(line: text) -> text:
             toks.push(tok)
     toks.join(" ")
 
+fn simpleos_riscv_operands(insn: text) -> [text]:
+    """Comma-split operand list for one RISC-V instruction, spelling-agnostic.
+
+    The two disassemblers disagree on whitespace: llvm-objdump prints
+    `li a0, 0x0` (space after the comma) while GNU objdump prints `li a0,0`.
+    Token-position matching -- what the x86/aarch64 branches above do -- would
+    therefore work under one tool and silently fail under the other, and a
+    silent classifier failure is exactly the fail-open shape this guard exists
+    to remove. Rejoining and splitting on `,` makes both spellings yield the
+    same list.
+
+    A trailing GNU comment (`addi a0,a0,-1 # fff <sym+0xfc7>`) is dropped, but
+    only from a token that is EXACTLY `#` -- aarch64 writes its immediates as
+    an attached `#0`, and those must survive untouched."""
+    var toks: [text] = []
+    for tok in insn.split(" "):
+        if tok != "":
+            toks.push(tok)
+    var rest = ""
+    var i = 1
+    while i < toks.len():
+        if toks[i] == "#":
+            break
+        rest = rest + toks[i]
+        i = i + 1
+    var ops: [text] = []
+    for op in rest.split(","):
+        val t = op.trim()
+        if t != "":
+            ops.push(t)
+    ops
+
+fn simpleos_riscv_is_zero_reg(reg: text) -> bool:
+    """`zero` (ABI name) and `x0` (numeric name) are the same hardwired zero."""
+    reg == "zero" or reg == "x0"
+
+fn simpleos_riscv_canon_reg(reg: text) -> text:
+    """RISC-V ABI register spelling, normalized.
+
+    ABI names ONLY -- `x0`/`x10`/`x2` are deliberately NOT mapped to
+    `zero`/`a0`/`sp`. Both disassemblers print ABI names unless `-M numeric` is
+    passed, and this guard never passes it, so the numeric aliases bought
+    nothing; what they cost was measured and severe. aarch64 also has registers
+    spelled `x0`/`x1`, so mapping `x0 -> zero` made this analyzer read an
+    aarch64 `add x0, x0, #7` (`return arg + 7` -- real work) as "add zero to
+    zero", conclude the return register was never touched, and report the
+    function as fabricated. That is the false-positive direction, the one that
+    blocks legitimate links and got the first version of this guard rejected.
+
+    With ABI names only, no aarch64 or x86-64 body can ever make `a0` constant,
+    so this analyzer is structurally incapable of accepting a non-RISC-V body
+    -- without having to sniff the architecture. A genuine RISC-V body printed
+    with `-M numeric` simply goes undetected, which is the safe direction."""
+    if reg == "fp":
+        return "s0"
+    reg
+
+fn simpleos_riscv_mem_base(operand: text) -> text:
+    """`0x8(sp)` -> `sp`; `""` when the operand is not a base+displacement."""
+    val open_parts = operand.split("(")
+    if open_parts.len() < 2:
+        return ""
+    val close_parts = open_parts[1].split(")")
+    simpleos_riscv_canon_reg(close_parts[0].trim())
+
+fn simpleos_riscv_is_frame_base(reg: text) -> bool:
+    """Stack pointer / frame pointer. Traffic through these is frame
+    scaffolding; traffic through any OTHER base is real memory access and is
+    refused."""
+    reg == "sp" or reg == "s0"
+
+fn simpleos_riscv_reg_is_const(consts: {text: bool}, reg: text) -> bool:
+    """`zero` is constant by definition; everything else must have been proven
+    constant by a preceding instruction in this same body."""
+    val r = simpleos_riscv_canon_reg(reg)
+    if r == "zero":
+        return true
+    consts.has(r) and consts[r]
+
+fn simpleos_riscv_body_is_trivial_constant(insns: [text]) -> bool:
+    """Abstract-interprets a RISC-V body and answers "does it do nothing but set
+    up a frame and return a constant?".
+
+    WHY THIS IS NOT A PER-INSTRUCTION CLASSIFIER. The x86-64/aarch64 predicate
+    above works instruction-at-a-time because those ABIs materialize a constant
+    return in one instruction. RISC-V does not, and the production SimpleOS
+    stub objects are compiled WITHOUT -O (see the `riscv64-unknown-elf-gcc`
+    invocations in `link_simpleos_riscv64` / `link_simpleos_riscv32`: no -O
+    flag), so a `return 0x80000000ULL` is measured to disassemble as
+
+        addi sp, sp, -0x10      <- frame
+        sd   s0, 0x8(sp)        <- frame
+        addi s0, sp, 0x10       <- frame
+        li   a5, 0x1            <- constant, staged in a TEMPORARY
+        slli a5, a5, 0x1f       <- still constant
+        mv   a0, a5             <- constant reaches the return register
+        ld   s0, 0x8(sp)        <- frame
+        addi sp, sp, 0x10       <- frame
+        ret
+
+    No single instruction here says "constant return"; the fact only exists in
+    the chain li -> slli -> mv. A stateless classifier scored this body 0 of 4
+    on the bug's probe. Tracking which registers hold constants is the smallest
+    model that can see it.
+
+    SOUNDNESS (the fail-safe direction is what matters -- a false positive
+    blocks a legitimate link, which is what got the first version of this guard
+    rejected). Three independent conditions must ALL hold to return true:
+
+      1. Every instruction was recognised. Any unknown mnemonic returns false
+         immediately, so an unmodelled encoding makes the guard MISS a fake
+         rather than accuse a real implementation.
+      2. Memory traffic touches ONLY sp/s0. A store through any other base is
+         an observable side effect, so it is real work. This is what stops a
+         body like `*(int*)a0 = 5; return 0;` from being called fabricated.
+      3. `a0`/`a1` -- the only registers that outlive the call -- are each
+         either provably constant or never written. Provably constant means the
+         constant was traced from an immediate through this body; a value
+         reloaded from the stack is NOT constant, which is what stops the -O0
+         shape of `return arg` (`sd a0,off(s0); ld a5,off(s0); mv a0,a5`) from
+         being accused, and stops a body that computes a1 for real while
+         holding a0 at a constant.
+
+    Registers other than a0/a1 are dead at return, so their values need no
+    constraint beyond having been produced by a recognised instruction.
+
+    Never consults the symbol name, prefix, or linkage -- the body is the only
+    trustworthy evidence. A hand-supplied "verified real" list was measured to
+    contain `rt_dma_bytes_to_array`, which is literally `return 0;`, while
+    `rt_dma_virt_of` and `rt_file_read_bytes`, which nobody listed, are real."""
+    var consts: {text: bool} = {}
+    var saw_return = false
+    var recognized = 0
+    for raw in insns:
+        if raw == "":
+            continue
+        var toks: [text] = []
+        for tok in raw.split(" "):
+            if tok != "":
+                toks.push(tok)
+        if toks.len() == 0:
+            continue
+        val op = toks[0]
+        val ops = simpleos_riscv_operands(raw)
+        val n = ops.len()
+
+        # --- the return itself, and true no-ops -------------------------
+        if op == "ret" or op == "c.ret":
+            saw_return = true
+            recognized = recognized + 1
+            continue
+        if op == "nop" or op == "c.nop":
+            recognized = recognized + 1
+            continue
+        if op == "jr" or op == "c.jr":
+            if n == 1 and simpleos_riscv_canon_reg(ops[0]) == "ra":
+                saw_return = true
+                recognized = recognized + 1
+                continue
+            return false
+        if op == "jalr":
+            # `ret` is a pseudo for `jalr x0, ra, 0`, printed either as three
+            # operands or with the base folded into `0x0(ra)`.
+            var is_ret_form = false
+            if n == 3 and simpleos_riscv_canon_reg(ops[0]) == "zero" and simpleos_riscv_canon_reg(ops[1]) == "ra":
+                is_ret_form = true
+            if n == 2 and simpleos_riscv_canon_reg(ops[0]) == "zero" and simpleos_riscv_mem_base(ops[1]) == "ra":
+                is_ret_form = true
+            if not is_ret_form:
+                return false
+            saw_return = true
+            recognized = recognized + 1
+            continue
+
+        # --- frame traffic: stores define nothing, loads define a
+        # --- NON-constant (a reloaded value is not a proven constant).
+        if (op == "sd" or op == "sw" or op == "sh" or op == "sb" or
+                op == "fsd" or op == "fsw" or op == "c.sdsp" or
+                op == "c.swsp" or op == "c.sd" or op == "c.sw"):
+            if n != 2 or not simpleos_riscv_is_frame_base(simpleos_riscv_mem_base(ops[1])):
+                return false
+            recognized = recognized + 1
+            continue
+        if (op == "ld" or op == "lw" or op == "lwu" or op == "lh" or
+                op == "lhu" or op == "lb" or op == "lbu" or op == "fld" or
+                op == "flw" or op == "c.ldsp" or op == "c.lwsp" or
+                op == "c.ld" or op == "c.lw"):
+            if n != 2 or not simpleos_riscv_is_frame_base(simpleos_riscv_mem_base(ops[1])):
+                return false
+            consts[simpleos_riscv_canon_reg(ops[0])] = false
+            recognized = recognized + 1
+            continue
+
+        # --- constants straight out of an immediate ----------------------
+        if op == "li" or op == "c.li" or op == "lui" or op == "c.lui":
+            if n != 2:
+                return false
+            consts[simpleos_riscv_canon_reg(ops[0])] = true
+            recognized = recognized + 1
+            continue
+
+        # --- register moves and unary forms: constant iff the source is ---
+        if (op == "mv" or op == "c.mv" or op == "neg" or op == "not" or
+                op == "sext.w" or op == "zext.b" or op == "zext.h" or
+                op == "zext.w" or op == "sext.b" or op == "sext.h"):
+            if n != 2:
+                return false
+            consts[simpleos_riscv_canon_reg(ops[0])] = simpleos_riscv_reg_is_const(consts, ops[1])
+            recognized = recognized + 1
+            continue
+
+        # --- immediate ALU / shifts: constant iff the source is -----------
+        if (op == "addi" or op == "addiw" or op == "andi" or op == "ori" or
+                op == "xori" or op == "slli" or op == "srli" or op == "srai" or
+                op == "slliw" or op == "srliw" or op == "sraiw"):
+            if n == 3:
+                consts[simpleos_riscv_canon_reg(ops[0])] = simpleos_riscv_reg_is_const(consts, ops[1])
+                recognized = recognized + 1
+                continue
+            return false
+        if (op == "c.addi" or op == "c.addiw" or op == "c.andi" or
+                op == "c.slli" or op == "c.srli" or op == "c.srai" or
+                op == "c.addi16sp"):
+            # Compressed: the destination is also the source.
+            if n != 2:
+                return false
+            val cd = simpleos_riscv_canon_reg(ops[0])
+            consts[cd] = simpleos_riscv_reg_is_const(consts, cd)
+            recognized = recognized + 1
+            continue
+        if op == "c.addi4spn":
+            if n != 3:
+                return false
+            consts[simpleos_riscv_canon_reg(ops[0])] = false
+            recognized = recognized + 1
+            continue
+
+        # --- register-register ALU: constant iff BOTH sources are ---------
+        if (op == "add" or op == "addw" or op == "sub" or op == "subw" or
+                op == "and" or op == "or" or op == "xor" or op == "sll" or
+                op == "srl" or op == "sra" or op == "sllw" or op == "srlw" or
+                op == "sraw" or op == "c.add" or op == "c.sub" or
+                op == "c.and" or op == "c.or" or op == "c.xor" or
+                op == "c.addw" or op == "c.subw"):
+            if n == 3:
+                val both = simpleos_riscv_reg_is_const(consts, ops[1]) and simpleos_riscv_reg_is_const(consts, ops[2])
+                consts[simpleos_riscv_canon_reg(ops[0])] = both
+                recognized = recognized + 1
+                continue
+            if n == 2:
+                val cd2 = simpleos_riscv_canon_reg(ops[0])
+                val both2 = simpleos_riscv_reg_is_const(consts, cd2) and simpleos_riscv_reg_is_const(consts, ops[1])
+                consts[cd2] = both2
+                recognized = recognized + 1
+                continue
+            return false
+
+        # Unknown mnemonic -- branches, calls, CSR access, atomics, float
+        # math, anything at all. Real work by construction.
+        return false
+
+    if not saw_return or recognized == 0:
+        return false
+    # `a0` must be PROVABLY constant -- not merely "never written". Accepting
+    # "never written" was measured to be unsound: it is exactly the state a
+    # foreign-architecture body presents (an aarch64 function writes `x0`, and
+    # nothing here is called `a0`), so it turned every recognisable aarch64
+    # body into a false positive. Demanding proof also means a RISC-V void stub
+    # that never touches `a0` goes undetected, which is the safe direction.
+    if not simpleos_riscv_reg_is_const(consts, "a0"):
+        return false
+    # `a1` carries the upper half of a wide return on rv32. It may be untouched
+    # (narrow return), but if the body computed it for real the value escapes
+    # and the function is not a constant-returner.
+    if consts.has("a1") and not consts["a1"]:
+        return false
+    true
+
 fn simpleos_trivial_insn_class(insn: text) -> i64:
     """0 = does real work, 1 = frame/no-op scaffolding, 2 = materializes a
     constant return value. Covers x86-64 and aarch64 forms.
+
+    RISC-V is deliberately NOT handled here. Its constant returns span several
+    instructions and stage through temporaries, so no instruction-at-a-time
+    verdict can see them; `simpleos_riscv_body_is_trivial_constant` analyses
+    the whole body instead, and `simpleos_body_is_trivial_constant` dispatches
+    to it.
 
     Unknown mnemonics deliberately classify as 0 (does real work), so an
     unrecognised encoding makes the guard MISS a fake rather than accuse a real
@@ -1939,6 +2223,43 @@ fn simpleos_trivial_insn_class(insn: text) -> i64:
         return if (arg == "w0," or arg == "x0,"): 2 else: 0
     0
 
+pub fn simpleos_body_is_trivial_constant(insns: [text]) -> bool:
+    """Does this already-normalized instruction sequence do nothing but set up a
+    frame and return a constant?
+
+    Split out of `simpleos_trivial_body_rt_symbols` so the predicate can be
+    tested against recorded disassembly without a cross-toolchain object on
+    disk. The guard shipped with no test at all, which is precisely how it went
+    a full architecture (RISC-V) without anyone noticing it detected nothing
+    there (doc/08_tracking/bug/simpleos_fabricated_rt_guard_riscv_classifier_inert_2026-07-28.md).
+
+    Two analyzers, each sound on its own, ORed together. The instruction-class
+    one covers x86-64/aarch64, where a constant return is a single recognisable
+    instruction. The RISC-V one abstract-interprets the body, because there a
+    constant return spans a chain (li -> slli -> mv) that no per-instruction
+    verdict can see. ORing is safe precisely BECAUSE each is individually
+    conservative: both answer false on anything they cannot fully account for,
+    so feeding an x86 body to the RISC-V analyzer (or the reverse) yields false
+    rather than a wrong accusation.
+
+    No arch is detected up front, deliberately. Sniffing the architecture would
+    be one more thing that can silently mis-fire; asking both analyzers cannot."""
+    var trivial = true
+    var constants = 0
+    var count = 0
+    for insn in insns:
+        if insn == "":
+            continue
+        count = count + 1
+        val cls = simpleos_trivial_insn_class(insn)
+        if cls == 2:
+            constants = constants + 1
+        elif cls == 0:
+            trivial = false
+    if trivial and count > 0 and constants <= 1:
+        return true
+    simpleos_riscv_body_is_trivial_constant(insns)
+
 fn simpleos_trivial_body_rt_symbols(objects: [text]) -> [text]:
     """Defined `rt_*` whose body only sets up a frame and returns a constant.
 
@@ -1964,32 +2285,23 @@ fn simpleos_trivial_body_rt_symbols(objects: [text]) -> [text]:
         if dcode != 0:
             continue
         var sym = ""
-        var trivial = true
-        var constants = 0
-        var insns = 0
+        var body: [text] = []
         for raw in dis.split("\n"):
             val line = raw.trim()
             if line.ends_with(">:") and line.contains(" <"):
-                if sym.starts_with("rt_") and trivial and insns > 0 and constants <= 1 and not seen.has(sym):
+                if sym.starts_with("rt_") and not seen.has(sym) and simpleos_body_is_trivial_constant(body):
                     seen[sym] = true
                     out.push(sym)
                 sym = simpleos_objdump_symbol_name(line)
-                trivial = true
-                constants = 0
-                insns = 0
+                body = []
                 continue
             if sym == "":
                 continue
             val insn = simpleos_objdump_normalized_insn(line)
             if insn == "":
                 continue
-            insns = insns + 1
-            val cls = simpleos_trivial_insn_class(insn)
-            if cls == 2:
-                constants = constants + 1
-            elif cls == 0:
-                trivial = false
-        if sym.starts_with("rt_") and trivial and insns > 0 and constants <= 1 and not seen.has(sym):
+            body.push(insn)
+        if sym.starts_with("rt_") and not seen.has(sym) and simpleos_body_is_trivial_constant(body):
             seen[sym] = true
             out.push(sym)
     out
@@ -2460,6 +2772,26 @@ fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool) -> R
     if init_code != 0:
         return Err("SimpleOS RISC-V module-init caller compilation failed: {init_out}{init_err}")
 
+    # Task #97 guard. Deliberately NOT added until `simpleos_trivial_insn_class`
+    # could actually see RISC-V: it recognised only x86-64 and aarch64
+    # mnemonics, so `li a0,0; ret` classified as "does real work" and the guard
+    # detected ZERO of four unambiguous fakes in a probe object. Calling it here
+    # in that state would have been false assurance -- the same fail-open shape
+    # the guard exists to remove
+    # (doc/08_tracking/bug/simpleos_fabricated_rt_guard_riscv_classifier_inert_2026-07-28.md).
+    #
+    # rv64 links no auto_stubs.c, so channel 1 has nothing to find here and
+    # channel 2 (trivial bodies) is the only channel that applies -- which is
+    # precisely why the classifier had to be fixed first rather than the call
+    # site added first.
+    val riscv_real_objects = if uses_freestanding_runtime:
+        [entry_o, runtime_o, init_o]
+    else:
+        [entry_o, stub_o, init_o]
+    match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, riscv_real_objects):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+
     val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if configured_script != "": configured_script else: "src/os/kernel/arch/riscv64/linker.ld"
     var args: [text] = [
@@ -2519,6 +2851,18 @@ fn link_simpleos_riscv32(user_objects: [text], output: text, verbose: bool) -> R
     ])
     if stub_code != 0:
         return Err("SimpleOS RV32 stub compilation failed: {stub_out}{stub_err}")
+
+    # Task #97 guard -- see the matching call in `link_simpleos_riscv64` for why
+    # this could not be added before `simpleos_trivial_insn_class` learned
+    # RISC-V. On rv32 the classifier has to cope with a 64-bit return arriving
+    # in the a0/a1 PAIR (`li a0,0; li a1,0; ret`), which is one constant spread
+    # over two writes; `simpleos_riscv_ret_reg_rank` is what keeps that from
+    # looking like two independent constants. That matters immediately: the
+    # `rt_pool_safepoint` stub written into `stub_c` a few lines above is
+    # literally `return 0;` and is exactly the shape being detected.
+    match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [stub_o]):
+        case Err(e): return Err(e)
+        case Ok(_): pass
 
     val linker_script_env = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if linker_script_env != "":
