@@ -94,7 +94,11 @@ impl ImportGraph:
     fn dfs_cycle(module: text, visited: mut Dict<text, bool>,
                  in_stack: mut Dict<text, bool>,
                  path: mut [text]) -> CyclicDependencyError?:
-        if in_stack.get(module) ?? false:
+        # NOTE: contains_key + index read, not `.get() ?? false` — under native
+        # codegen a Dict<_, bool> hit storing `true` compares `== nil` as true,
+        # so `?? false` collapses every present `true` to `false` and this cycle
+        # branch never fires (bug: native_dict_get_miss_returns_zero_not_nil).
+        if in_stack.contains_key(module) and in_stack[module]:
             # Found a cycle - extract it from path
             # index_of returns a plain i64 with -1 for not-found, not an
             # Option, so `?? 0` never coalesced and `-1` sliced from the end.
@@ -103,7 +107,7 @@ impl ImportGraph:
             val cycle = path[cycle_start:] + [module]
             return Some(CyclicDependencyError(cycle: cycle))
 
-        if visited.get(module) ?? false:
+        if visited.contains_key(module) and visited[module]:
             return nil
 
         visited[module] = true
@@ -186,7 +190,7 @@ impl ImportGraph:
                 val dep_low = lowlinks[dep]
                 if dep_low < lowlinks[module]:
                     lowlinks[module] = dep_low
-            elif on_stack.get(dep) ?? false:
+            elif on_stack.contains_key(dep) and on_stack[dep]:
                 val dep_idx = indices[dep]
                 if dep_idx < lowlinks[module]:
                     lowlinks[module] = dep_idx
@@ -211,7 +215,7 @@ impl ImportGraph:
 
     fn collect_transitive(module: text, visited: mut Dict<text, bool>, result: mut [text]):
         for dep in self.imports_of(module):
-            if not (visited.get(dep) ?? false):
+            if not (visited.contains_key(dep) and visited[dep]):
                 visited[dep] = true
                 result.push(dep)
                 self.collect_transitive(dep, visited, result)

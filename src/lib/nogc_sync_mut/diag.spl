@@ -153,7 +153,10 @@ fn dbg_stage(component: text, stage: text):
     if not _g_facet_stage and not _g_facet_watchdog:
         return
     val now = rt_time_now_monotonic_ms()
-    val last = _g_stage_last_ms.get(component) ?? now
+    # NOTE: contains_key + index read, not `.get() ?? now` — under native codegen
+    # a Dict<_, i64> miss decodes to 0 rather than nil, so `??` never fired and
+    # the first stage of every component reported a delta of the whole uptime.
+    val last = if _g_stage_last_ms.contains_key(component): _g_stage_last_ms[component] else: now
     val delta = now - last
     _g_stage_last_ms.set(component, now)
 
@@ -240,8 +243,10 @@ fn _breach(label: text, budget_ms: i64, elapsed_ms: i64):
 fn dbg_deadline_check(label: text) -> bool:
     if not dbg_watchdog_on():
         return false
-    val armed = _g_deadline_armed_at.get(label)
-    if armed == nil:
+    # NOTE: contains_key + index read, not `.get() == nil` — under native codegen
+    # a Dict<_, i64> miss decodes to 0, not nil, so an un-armed label fell
+    # through with armed=0 and breached instantly against the monotonic clock.
+    if not _g_deadline_armed_at.contains_key(label):
         return false
     # NOTE: index read + contains_key, not .get() — Dict<K, class> .get()
     # returns a corrupt payload under native codegen.
@@ -313,10 +318,13 @@ fn dbg_time_begin(label: text):
 fn dbg_time_end(label: text):
     if not dbg_timers_on():
         return
-    val start = _g_timer_begin.get(label)
-    if start == nil:
+    # NOTE: contains_key + index read, not `.get() == nil` — under native codegen
+    # a Dict<_, i64> miss decodes to 0, not nil, so an unpaired dbg_time_end()
+    # fell through with start=0 and recorded the whole uptime as one sample.
+    if not _g_timer_begin.contains_key(label):
         return
-    val elapsed = rt_time_now_monotonic_ms() - (start ?? 0)
+    val start = _g_timer_begin[label]
+    val elapsed = rt_time_now_monotonic_ms() - start
     _g_timer_begin.remove(label)
     if not _g_timer_stats.contains_key(label):
         _g_timer_stats.set(label, _TimerStat(label: label, count: 1, total_ms: elapsed, max_ms: elapsed))
@@ -331,10 +339,16 @@ fn dbg_time_end(label: text):
 fn dbg_count(label: text, delta: i64):
     if not dbg_timers_on():
         return
-    val cur = _g_counters.get(label)
-    if cur == nil:
+    # NOTE: contains_key + index read, not `.get() == nil` — under native codegen
+    # a Dict<_, i64> miss decodes to 0, not nil, so the first-sighting branch
+    # never ran, _g_counter_labels stayed empty and dbg_summary() printed no
+    # counter lines at all.
+    var cur = 0
+    if _g_counters.contains_key(label):
+        cur = _g_counters[label]
+    else:
         _g_counter_labels.push(label)
-    _g_counters.set(label, (cur ?? 0) + delta)
+    _g_counters.set(label, cur + delta)
 
 fn dbg_timer_stats(label: text) -> DiagTimerStats:
     if not _g_timer_stats.contains_key(label):
