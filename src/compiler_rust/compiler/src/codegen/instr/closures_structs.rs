@@ -69,6 +69,43 @@ fn erased_receiver_should_fall_through_ambiguous_method(receiver_ty: Option<Type
     matches!(receiver_ty, None | Some(TypeId::ANY)) && matches!(method, "to_string" | "to_text" | "str")
 }
 
+/// Default-off observability for the receiver-type-BLIND bare-method bind.
+///
+/// See `doc/08_tracking/bug/codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md`.
+/// When a method call's receiver type was ERASED, the call reaches codegen as a
+/// bare (dot-less) name and is bound to a `Type_dot_<method>` symbol by NAME
+/// SUFFIX ALONE — the receiver type is never consulted. When exactly one such
+/// symbol is linked into the module there is no ambiguity to report, so the
+/// existing `[CODEGEN-AMBIGUOUS-METHOD]` diagnostic stays silent and a wrong
+/// bind is only discovered later as a guest page fault (`starts_with`,
+/// `ends_with`, `slice` were each found that way).
+///
+/// This reports every such bind so the class can be enumerated at compile time.
+/// It is PURELY a report: it never changes which candidate is selected. Enable
+/// with `SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1` (alongside the existing
+/// `SIMPLE_DEBUG_METHOD_DISPATCH` knob).
+fn erased_receiver_bind_diag_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SIMPLE_DEBUG_ERASED_RECEIVER_BIND").is_ok())
+}
+
+fn report_erased_receiver_bind(
+    caller: &str,
+    method: &str,
+    arg_count: usize,
+    receiver_ty: Option<TypeId>,
+    candidate: &str,
+    candidate_count: usize,
+) {
+    if !erased_receiver_bind_diag_enabled() {
+        return;
+    }
+    eprintln!(
+        "[CODEGEN-ERASED-RECEIVER-BIND] in '{}' bare method '{}'({} args) receiver_ty={:?} bound by name-suffix alone to '{}' ({} candidate(s)) — receiver type is NOT checked; if the receiver is not that type this is a silent miscall",
+        caller, method, arg_count, receiver_ty, candidate, candidate_count
+    );
+}
+
 // `pub(crate)` so `mir/lower/lowering_expr_method.rs` can reuse the exact
 // same builtin-collision name set for its own defense-in-depth guard (bug
 // simpleos_native_build_bare_len_dynamic_dispatch_symbol_collision) instead
@@ -650,6 +687,14 @@ pub(crate) fn compile_method_call_static<M: Module>(
             let unique_ids: std::collections::HashSet<_> =
                 candidates.iter().map(|(_, id)| **id).collect();
             if type_qualifier.is_none() && candidates.len() > 1 && unique_ids.len() == 1 {
+                report_erased_receiver_bind(
+                    &ctx.func.name,
+                    method_part,
+                    args.len(),
+                    receiver_ty,
+                    candidates[0].0.as_str(),
+                    candidates.len(),
+                );
                 return Some(*candidates[0].1);
             }
             if type_qualifier.is_none()
@@ -677,7 +722,23 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 method_resolution_error = Some(message);
                 return None;
             }
-            candidates.iter().min_by_key(|(k, _)| k.len()).map(|(_, v)| **v)
+            // Reaching here means `type_qualifier` is None (a qualified lookup
+            // returned above) and `candidates.len() <= 1` (the >1 arms all
+            // returned). So this is EXACTLY the single-candidate
+            // erased-receiver bind that produced the known thefts, and it is
+            // silent today. Report it (default-off) without changing the pick.
+            let picked = candidates.iter().min_by_key(|(k, _)| k.len());
+            if let Some((cand_name, _)) = picked {
+                report_erased_receiver_bind(
+                    &ctx.func.name,
+                    method_part,
+                    args.len(),
+                    receiver_ty,
+                    cand_name.as_str(),
+                    candidates.len(),
+                );
+            }
+            picked.map(|(_, v)| **v)
         });
 
     if let Some(error) = method_resolution_error {
