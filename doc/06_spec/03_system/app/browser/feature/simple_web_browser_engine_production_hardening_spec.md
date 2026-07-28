@@ -2,6 +2,24 @@
 
 Source: `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl`
 
+## Static HTML, CSS, Draw IR, and Engine2D evidence
+
+The static rendering scenario requires the same admitted
+`HOSTED_WM_ARTIFACT` and `HOSTED_WM_ARTIFACT_SHA256` contract as the animation
+scenario. It starts one sandboxed `HostedBrowserRendererProcess` and submits
+the returned `DrawIrComposition` to one persistent software
+`Engine2dCompositorBackend`.
+The canonical live-window wrapper runs this focused scenario after source-
+manifest and artifact admission.
+
+The document uses a positioned `.card` rectangle with a red class background,
+then an ID rule that overrides it to blue. It also carries visible `Cascade
+text` at an explicit font size. Before cleanup, the scenario records Draw IR
+text-command evidence and Engine2D readback; after renderer/backend cleanup it
+requires nonempty Draw IR, no backend fallback, a 64 by 48 buffer, more than
+1,000 blue pixels, no red pixels, and no animation deadline. Missing artifact,
+digest mismatch, launch/frame failure, or cleanup failure is fatal.
+
 ## JavaScript, CSS, and compositor animation evidence
 
 The animation scenario requires `HOSTED_WM_ARTIFACT` and its admitted
@@ -38,7 +56,7 @@ corresponding red and blue pages after each transition.
 
 This proves hosted HTML/CSS rendering and address, Back, and Forward routing
 through `BrowserSession` structured UI access. It does not claim real HTTP,
-the installed browser executable, Stop/Reload/Home, bookmarks, or link-click
+the installed browser executable, Reload/Home, bookmarks, or link-click
 coverage. Those scenarios retain explicit fail-closed placeholders.
 
 ## Hosted form-control event evidence
@@ -53,5 +71,20 @@ a CSS attribute selector, so the final rendered control must be blue.
 This proves one hosted text-input flow and its rendered state. Default-action
 cancellation, form submission, other control types, and installed-browser
 event capture remain explicit fail-closed work.
+The canonical live-window wrapper executes this focused scenario with its
+admitted self-hosted runner before live-window capture.
+
+## Hosted rejected-navigation evidence
+
+The rejection scenario starts from a rendered red page. It submits a
+`javascript:` address through hosted address focus, text, and Enter dispatch
+and requires denial without a pending request or document replacement. It then
+starts a real BrowserSession HTTPS document request, proves a mismatched chrome
+press/release cannot activate Stop, performs a matching hosted Stop action,
+and requires the stopped request to reject a late successful response.
+
+The prior body and pixel buffer must remain unchanged and red. This proves
+BrowserSession pending-request and hosted Stop semantics; it does not fabricate
+a native HTTP handle or claim that an HTTP response completed successfully.
 The canonical live-window wrapper executes this focused scenario with its
 admitted self-hosted runner before live-window capture.

@@ -1019,3 +1019,16 @@ implementation in progress / target evidence blocked
   literal-loopback-only, use a bounded DER root with normal hostname/time
   verification, and add conditional ABI/security classification outside the
   current two-file lane. No TLS runtime changes or weaker verifier were added.
+- Static subprocess evidence now proves CSS cascade, positioned layout, Draw IR
+  text, no Engine2D fallback, deterministic blue pixels, and no animation timer.
+- Browser HTTP job imports now classify at the runtime security choke point as
+  `Network`; the focused Rust regression passed (1 test, 0 failures).
+- Hosted rejected-navigation evidence now covers invalid address submission,
+  stale chrome release, matching Stop, rejected late commit, and unchanged
+  prior pixels without a fabricated native job handle.
+- Renderer lifecycle evidence now repeats 32 admitted subprocess generations
+  and rechecks every PID dead. The wrapper records cycle count 32 and makes all
+  seven focused scenario statuses release-blocking.
+- Production HTTPS identity remains blocked, but a narrower private Rust unit
+  seam can test literal-loopback rustls identity with inline DER and no runtime
+  ABI. That test has not yet been implemented; production trust remains unchanged.

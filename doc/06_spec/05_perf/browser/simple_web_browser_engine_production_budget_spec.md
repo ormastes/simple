@@ -8,8 +8,9 @@
 
 This manual keeps unsupported production claims visible. The implemented
 current-host slice binds the executable to `HOSTED_WM_ARTIFACT` and
-`HOSTED_WM_ARTIFACT_SHA256`, starts its hidden renderer subprocess, obtains a
-real frame, and verifies bounded process teardown. It does not claim RSS, GC,
+`HOSTED_WM_ARTIFACT_SHA256`, runs 32 sequential hidden renderer subprocesses,
+obtains a real frame from each, and verifies bounded process teardown. It does
+not claim RSS, GC,
 10,000-cycle stability, unchanged-frame allocation avoidance, or Engine2D/font
 lifecycle counts because those metrics are not exposed by the production
 renderer today.
@@ -23,19 +24,24 @@ The scenario fails before launch when either input is missing or the digest
 does not match. The canonical live-window evidence wrapper runs this focused
 scenario after source-manifest and artifact admission; standalone environment
 assertions are not artifact-admission evidence.
+Its evidence receipt records
+`linux_hosted_wm_live_window_browser_lifecycle_cycle_count=32` only after the
+focused scenario succeeds.
 
 ## Implemented scenario
 
-### Close the admitted renderer subprocess within a bounded interval
+### Close 32 admitted renderer subprocesses within bounded intervals
 
-1. Launch the admitted executable as the sandboxed browser renderer with a
-   2,000 ms startup timeout.
-2. Render a 64x48 static page with a 2,000 ms protocol timeout.
-3. Record the renderer PID and confirm the subprocess is alive.
-4. Close the renderer, allowing at most 10 seconds for the platform process
-   teardown path.
-5. Confirm the broker reports PID `0`, state `closed`, and the recorded PID is
-   no longer alive.
+1. For generations 61 through 92, launch the admitted executable as a new
+   sandboxed browser renderer with a 2,000 ms startup timeout.
+2. Render a 64x48 static page with a 2,000 ms protocol timeout in each process.
+3. Record each renderer PID and confirm the subprocess is alive.
+4. Close each renderer before starting the next, allowing at most 10 seconds
+   for the platform process teardown path.
+5. After every close, confirm the broker reports PID `0`, state `closed`, and
+   the recorded PID is no longer alive.
+6. Recheck all 32 recorded PIDs after the loop and require a final completed
+   cycle count of exactly 32.
 
 Evidence captures: executed binary, subprocess log, and artifact identity.
 
@@ -64,5 +70,6 @@ and receipts exist:
 - Engine2D device/font/render-session/readback create-release counters;
 - recorded-baseline comparison and five-percent regression gating.
 
-Passing the bounded subprocess lifecycle scenario is not evidence for any of
+Passing the bounded repeated subprocess lifecycle scenario proves only process
+handle reclamation across 32 sequential cycles. It is not evidence for any of
 those blocked claims.

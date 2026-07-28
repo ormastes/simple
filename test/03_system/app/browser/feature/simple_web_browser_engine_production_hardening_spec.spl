@@ -12,11 +12,14 @@ use std.spec.*
 use std.env.variables.{env_get}
 use std.io_runtime.{file_hash_sha256}
 use app.io.mod.{thread_sleep_ms}
+use common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererProcess, HostedBrowserRendererResult
 }
 use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use std.gc_async_mut.web.browser_session.{BrowserResponse}
+use std.gc_async_mut.web.browser_session_loading.*
 
 val SUBPROCESS_ANIMATION_HTML = (
     "<style>@keyframes Pulse{from{background-color:#ef4444}" +
@@ -106,7 +109,51 @@ describe "Production Simple browser user flow":
         _production_browser_fixture()
         _open_conformance_page()
         _check_canonical_draw_ir()
-        _require_production_browser_evidence()
+        val artifact = env_get("HOSTED_WM_ARTIFACT")
+        val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+        if artifact == "":
+            fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+        if expected_artifact_sha.len() != 64 or
+            file_hash_sha256(artifact) != expected_artifact_sha:
+            fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+        var renderer = HostedBrowserRendererProcess.create(2, 64, 48)
+        val raster = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val started = renderer.start(artifact, 2000)
+        if not started.ok:
+            val closed = renderer.close()
+            raster.shutdown()
+            if not closed:
+                fail("browser renderer cleanup failed after launch failure")
+            fail("browser renderer launch failed: {started.reason}")
+        val frame = renderer.render(
+            "init",
+            "<style>.card{position:absolute;left:4px;top:6px;width:48px;height:30px;background-color:#ef4444;color:#ffffff;font-size:8px}#stage{background-color:#2563eb}</style><section><div id='stage' class='card'>Cascade text</div></section>",
+            2000
+        )
+        if not frame.ok:
+            _close_browser_animation_evidence(renderer, raster)
+            fail("browser renderer static frame failed: {frame.reason}")
+        val rendered = raster.render_draw_ir_composition(frame.composition, [])
+        var text_commands: i64 = 0
+        for batch in frame.composition.batches:
+            for command in batch.commands:
+                if command.kind == DRAW_IR_COMMAND_TEXT and
+                    command.text_value == "Cascade text":
+                    text_commands = text_commands + 1
+        val blue_pixels = _count_color(rendered.pixels, 0xFF2563EBu32)
+        val red_pixels = _count_color(rendered.pixels, 0xFFEF4444u32)
+        _close_browser_animation_evidence(renderer, raster)
+        expect(frame.composition.batches.len()).to_be_greater_than(0)
+        expect(frame.composition.batches[0].commands.len()).to_be_greater_than(0)
+        expect(text_commands).to_be_greater_than(0)
+        expect(rendered.fallback_required).to_equal(false)
+        expect(rendered.rendered_command_count).to_be_greater_than(0)
+        expect(rendered.pixels.len()).to_equal(64 * 48)
+        expect(blue_pixels).to_be_greater_than(1000)
+        expect(red_pixels).to_equal(0)
+        expect(frame.next_animation_ms).to_equal(-1)
 
     # @manual: show
     # @capture(html)
@@ -308,7 +355,73 @@ describe "Production Simple browser user flow":
     it "should reject stale targets invalid addresses and late stopped navigation commits":
         _production_browser_fixture()
         step("Stop an in-flight navigation before it commits")
-        _require_production_browser_evidence()
+        var session = HostedWebContentSession.create(
+            9,
+            "<style>#prior{width:32px;height:24px;" +
+            "background-color:#ef4444}</style>" +
+            "<div id='prior'>Prior</div>",
+            64, 48
+        )
+        val prior_body = session.current_body_html()
+        val prior_pixels = session.render_to_pixels()
+
+        val _ = session.dispatch_chrome_pointer(1, "address", true)
+        val address_up = session.dispatch_chrome_pointer(
+            2, "address", false
+        )
+        val address_edit = session.dispatch_text(
+            3, "javascript:alert(1)"
+        )
+        val invalid_submit = session.dispatch_key(4, 13, true)
+        expect(address_up.reason).to_equal("address-focused")
+        expect(address_edit.callback_count).to_equal(1)
+        expect(invalid_submit.callback_count).to_equal(0)
+        expect(session.browser.current_url).to_equal("simple-wm://window/9")
+        expect(session.browser.has_pending_requests()).to_equal(false)
+
+        expect(session.browser.begin_network_navigation(
+            "https://slow.example.test/page", "GET", "", "", ""
+        ).is_ok()).to_equal(true)
+        val pending = session.browser.take_pending_request()
+        if pending == nil:
+            fail("expected pending HTTPS document request")
+
+        val _ = session.dispatch_chrome_pointer(5, "reload", true)
+        val stale_release = session.dispatch_chrome_pointer(
+            6, "stop", false
+        )
+        expect(stale_release.reason).to_equal(
+            "chrome-release-target-mismatch"
+        )
+        expect(session.browser.can_stop_loading()).to_equal(true)
+
+        val stop_down = session.dispatch_chrome_pointer(7, "stop", true)
+        val stop_up = session.dispatch_chrome_pointer(8, "stop", false)
+        expect(stop_down.semantic_target_id).to_equal(
+            "browser:session#stop"
+        )
+        expect(stop_up.callback_count).to_equal(1)
+        expect(session.browser.can_stop_loading()).to_equal(false)
+
+        val request = pending.unwrap()
+        val late = session.browser.commit_network_response(
+            BrowserResponse.create(
+                request_id: request.id,
+                kind: request.kind,
+                url: request.url,
+                status: 200,
+                headers: "",
+                body: "<html><body>Late</body></html>",
+                error: ""
+            )
+        )
+        expect(late.is_err()).to_equal(true)
+        expect(session.current_body_html()).to_equal(prior_body)
+        val final_pixels = session.render_to_pixels()
+        expect(_pixels_equal(final_pixels, prior_pixels)).to_equal(true)
+        expect(_count_color(
+            final_pixels, 0xFFEF4444u32
+        )).to_be_greater_than(0)
 
     # @manual: folded
     it "should report unsupported content without fake success":
