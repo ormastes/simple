@@ -142,6 +142,25 @@ This result does not invalidate the focused 691-module HIR closure evidence,
 but it prevents the fresh deployed runner, focused HIR spec, full CLI checks,
 and Stage 4 admission from being claimed in this session.
 
+### Per-file timeout correction
+
+History and source-shape review found cumulative growth rather than a change
+from the facade fix: `lower_method_call` remained the declaration-level
+hotspot, while the literal-lowering tail had grown the physical source to
+3,389 lines. The existing methods from `lower_array_lit` through
+`lower_const_expr` were moved byte-for-byte into
+`_MirLoweringExpr/literals.spl` and re-exported by `mir_lowering_expr.spl`.
+This reduces `method_calls_literals.spl` to 2,723 lines without changing MIR
+behavior.
+
+The strict command above was not rerun. A separate 210-second diagnostic with
+an isolated cache and a 180-second per-file timeout discovered the 692-file
+closure but hit its outer bound before compilation began (peak RSS 280,620
+KiB). The admitted Stage-2 bootstrap binary has no `check` command, and the
+seed check could not delegate because this worktree has no deployed
+`bin/simple`. Therefore the split is a source correction, not new strict
+admission evidence; a fresh self-hosted run remains required.
+
 ## 2026-07-27 Final Bounded Attempt
 
 Small read-only classifier lanes separated the 6,144 diagnostics into facade
