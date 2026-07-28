@@ -71,15 +71,28 @@ pub fn handle_array_methods(
             Value::array(new_arr)
         }
         "pop" => {
-            // NOTE: returns the TRIMMED ARRAY, not the popped element. The
-            // identifier-lvalue path (interpreter_helpers/patterns.rs) special-
-            // cases pop to return the element + trim the binding; the field/Index
-            // self-update writeback paths still depend on this array return to
-            // mutate. Direct non-lvalue `arr.pop()` therefore yields the array
-            // (pre-existing; element-return for those paths is a separate fix).
-            let mut new_arr = arr.to_vec();
-            new_arr.pop();
-            Value::array(new_arr)
+            // `pop` REMOVES AND RETURNS THE LAST ELEMENT. That is the language's own
+            // definition of the method, in both places that define it:
+            //   * method_registry/builtins.rs — "removes and returns the last element",
+            //     is_mutating: true;
+            //   * hir/lower/expr/mod.rs — types `[T].pop()` as the ELEMENT type `T`
+            //     (explicitly contrasted there with `push`, typed as the array).
+            // The Cranelift/LLVM backends match it via `rt_array_pop`.
+            //
+            // Empty array yields Nil, consistent with `first`/`last`/`get` above and
+            // with the identifier-lvalue path in interpreter_helpers/patterns.rs
+            // (`vec.pop().unwrap_or(Value::Nil)`).
+            //
+            // This handler only ever sees a BORROWED slice, so it cannot write the
+            // trimmed receiver back; that is each owning caller's job, and neither
+            // caller reads the trimmed array off this return value:
+            //   * identifier receiver — interpreter_helpers/patterns.rs mutates the
+            //     binding in place via `apply_array_mutation_in_place`;
+            //   * field/index/deep place — `evaluate_method_call_with_self_update`
+            //     re-derives the trimmed array from the RECEIVER (it must, precisely
+            //     because this result is the element, not the array).
+            // A non-place receiver (`[10, 20, 30].pop()`) has nothing to write back to.
+            arr.last().cloned().unwrap_or(Value::Nil)
         }
         "concat" | "extend" | "merge" => {
             let other = eval_arg(
@@ -896,15 +909,22 @@ pub fn handle_dict_methods(
                 .map(|stored| Value::unwrap_dict_entry(&key_val, stored))
                 .unwrap_or(Value::Nil)
         }
+        // `keys`/`values`/`entries` all iterate in the canonical sorted-by-key
+        // order (`dict_entries_sorted`) so that `keys()[i]` and `values()[i]`
+        // describe the SAME entry. `values` must not use `map.values()`: that
+        // is raw HashMap order and would desync from the sorted `keys()`.
         "keys" => {
-            let keys: Vec<Value> = map
-                .iter()
+            let keys: Vec<Value> = crate::value::dict_entries_sorted(map)
+                .into_iter()
                 .map(|(k, v)| Value::dict_entry_key_for_iteration(v, k))
                 .collect();
             Value::array(keys)
         }
         "values" => {
-            let vals: Vec<Value> = map.values().map(Value::dict_entry_value_for_iteration).collect();
+            let vals: Vec<Value> = crate::value::dict_entries_sorted(map)
+                .into_iter()
+                .map(|(_, v)| Value::dict_entry_value_for_iteration(v))
+                .collect();
             Value::array(vals)
         }
         "set" | "insert" => {
@@ -961,8 +981,8 @@ pub fn handle_dict_methods(
                 .unwrap_or(default)
         }
         "entries" | "items" => {
-            let entries: Vec<Value> = map
-                .iter()
+            let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
+                .into_iter()
                 .map(|(k, v)| {
                     Value::Tuple(vec![
                         Value::dict_entry_key_for_iteration(v, k),

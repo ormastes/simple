@@ -10,6 +10,33 @@ fn is_dict_entry_marker(items: &[Value]) -> bool {
     items.len() == 3 && matches!(&items[0], Value::Symbol(s) if s == DICT_ENTRY_MARKER)
 }
 
+/// Canonical dict iteration order: **sorted by the internal key string**.
+///
+/// `Value::Dict` is backed by `std::collections::HashMap`, whose `RandomState`
+/// hasher is seeded per PROCESS. Iterating it directly therefore produced a
+/// DIFFERENT key order on every run of the same binary over the same input --
+/// `{"a":1,"b":2,"c":3,"d":4}.keys()` yielded 15 distinct orderings across 20
+/// runs. That made any spec asserting key order inherently flaky (green
+/// locally, red in CI, with no code change).
+///
+/// Every order-visible dict boundary -- `keys()`, `values()`, `entries()` /
+/// `items()`, `for (k, v) in dict`, and dict `to_display_string` /
+/// `to_debug_string` -- MUST route through this function so they agree with
+/// each other. Sorting one of them alone would desync `keys()[i]` from
+/// `values()[i]`.
+///
+/// Sorted (rather than insertion) order is the contract because it is a pure
+/// function of key content, so it can be reproduced identically by every
+/// backend without sharing a container: the interpreter's `HashMap`, the JIT,
+/// and the compiled runtime's open-addressing `RuntimeDict` (which is
+/// FNV-bucket ordered and cannot preserve insertion order without being
+/// rewritten). See `doc/07_guide/language/dict_iteration_order.md`.
+pub fn dict_entries_sorted(map: &HashMap<String, Value>) -> Vec<(&String, &Value)> {
+    let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+    entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    entries
+}
+
 /// Whether a rendered float came out looking like a plain integer (`1`, `-3`,
 /// `0`) and therefore needs a `.0` appended to stay recognisable as a float.
 ///
@@ -377,16 +404,18 @@ impl Value {
                     .collect();
                 format!("({})", parts.join(", "))
             }
+            // Sorted-by-key canonical order: printing a dict must be a stable
+            // function of its contents, not of the per-process hash seed.
             Value::Dict(map) => {
-                let parts: Vec<String> = map
-                    .iter()
+                let parts: Vec<String> = dict_entries_sorted(map)
+                    .into_iter()
                     .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
             Value::FrozenDict(map) => {
-                let parts: Vec<String> = map
-                    .iter()
+                let parts: Vec<String> = dict_entries_sorted(map)
+                    .into_iter()
                     .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
@@ -494,8 +523,8 @@ impl Value {
                 format!("[{}]", parts.join(", "))
             }
             Value::Dict(map) => {
-                let parts: Vec<String> = map
-                    .iter()
+                let parts: Vec<String> = dict_entries_sorted(map)
+                    .into_iter()
                     .map(|(k, v)| format!("{}: {}", k, v.to_debug_string()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))

@@ -990,6 +990,25 @@ impl Lowerer {
                         .types
                         .register(HirType::Array { element: TypeId::I64, size: None }),
                 ),
+                // `parse_int` and its `to_int`/`to_i64` aliases all lower to the
+                // runtime's `rt_string_to_int`, which returns a RAW (untagged)
+                // i64 — see the identical
+                // `"to_int" | "to_i64" | "parse_int" => "rt_string_to_int"`
+                // arms in codegen/instr/calls.rs, codegen/instr/closures_structs.rs,
+                // codegen/llvm/emitter.rs and codegen/llvm/functions{,/calls}.rs.
+                // This table forgetting them is the SAME class of gap as the
+                // `"length"` and `"bytes"` entries above: the call fell through
+                // to generic dynamic dispatch typed `TypeId::ANY`, so MIR
+                // emitted no int-boxing and the raw i64 was handed to
+                // `rt_println_value`, which then decoded it BY BIT PATTERN
+                // rather than by value. The parse itself was always correct —
+                // only the decode was wrong, which is why the symptom looked
+                // like a float: `"42"` printed as the f64 denormal of bit
+                // pattern 42 (`0.000…0002`) and `"-7"` printed as
+                // `<invalid-heap:0xfffffffffffffff9>` (raw -7 read as a
+                // pointer), while `"0"` happened to be right because bit
+                // pattern 0 decodes to 0.
+                "parse_int" | "parse_i32" | "parse_i64" | "to_int" | "to_i64" => Some(TypeId::I64),
                 _ => None,
             };
 

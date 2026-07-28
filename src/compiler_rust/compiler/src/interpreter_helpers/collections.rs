@@ -412,8 +412,10 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
         // (`Value::text(k)`); composite keys (struct/enum/tuple/array) yield
         // the real original key instead of the internal map string, fixing
         // the type corruption in dict_struct_key_iteration_single_entry_2026-06-13.
-        Value::Dict(map) => Ok(map
-            .iter()
+        // Sorted-by-key canonical order, matching `keys()`/`values()`/`entries()`
+        // -- `for (k, v) in dict` must visit entries in the same order those do.
+        Value::Dict(map) => Ok(crate::value::dict_entries_sorted(map)
+            .into_iter()
             .map(|(k, v)| {
                 Value::Tuple(vec![
                     Value::dict_entry_key_for_iteration(v, k),
@@ -421,8 +423,8 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
                 ])
             })
             .collect()),
-        Value::FrozenDict(map) => Ok(map
-            .iter()
+        Value::FrozenDict(map) => Ok(crate::value::dict_entries_sorted(map)
+            .into_iter()
             .map(|(k, v)| {
                 Value::Tuple(vec![
                     Value::dict_entry_key_for_iteration(v, k),
