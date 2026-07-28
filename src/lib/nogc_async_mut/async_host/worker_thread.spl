@@ -83,20 +83,22 @@ class WorkerThread:
         # Execute task if found
         match task_id:
             case Some(id):
-                match self.task_registry.get(id):
-                    case Some(poll_fn):
-                        val result = poll_fn()
-                        match result:
-                            case Poll.Ready(_):
-                                # Task complete, remove from registry
-                                self.task_registry.remove(id)
-                            case Poll.Pending:
-                                # Re-queue task for later
-                                self.local_queue.push(id)
-                        return true
-                    case nil:
-                        # Task not found in registry, skip
-                        return true
+                # Native codegen: Dict.get() on non-scalar values is unsafe.
+                # Use contains_key() + indexed read.
+                if self.task_registry.contains_key(id):
+                    val poll_fn = self.task_registry[id]
+                    val result = poll_fn()
+                    match result:
+                        case Poll.Ready(_):
+                            # Task complete, remove from registry
+                            self.task_registry.remove(id)
+                        case Poll.Pending:
+                            # Re-queue task for later
+                            self.local_queue.push(id)
+                    return true
+                else:
+                    # Task not found in registry, skip
+                    return true
             case nil:
                 return false
 
