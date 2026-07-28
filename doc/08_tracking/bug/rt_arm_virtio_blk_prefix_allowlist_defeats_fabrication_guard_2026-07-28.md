@@ -1,6 +1,6 @@
 # `rt_arm_virtio_` prefix allowlist defeats the fabricated-rt guard on a storage path
 
-**Status:** open
+**Status:** fixed (source hunk applied 2026-07-28; see "Fix applied" below)
 **Scope:** `src/compiler/70.backend/backend/llvm_native_link.spl` (pure-Simple
 SimpleOS freestanding link guard); affects any arch whose guest kernel links the
 VirtIO-BLK driver without a real `baremetal_stubs.c` implementation
@@ -127,6 +127,66 @@ path (`read_sector_direct`, `read_prefix`, `sector_bytes`, `read_hello_smf`)
 must not be optional. Expect this to require the arm64 guest to keep supplying
 real bodies — which it already does — and to make a riscv64/x86 guest that links
 the driver fail closed, which is the intent.
+
+## Fix applied (2026-07-28)
+
+`rt_arm_virtio_` is no longer a prefix in
+`simpleos_rt_symbol_is_optional_backend`. Six MMIO transport / capability
+probes are re-admitted **by exact name**; the eight sector-data-path symbols are
+not optional and a missing definition now fails the link.
+
+### Classification (all 14, from the `extern fn` signatures at
+`src/os/drivers/virtio/_VirtioBlk/driver_class.spl:118-132` and the arm64 bodies)
+
+| Symbol | Class | Why |
+|---|---|---|
+| `_set_mmio_base` | PROBE | stores the transport base; no-op when the device is absent |
+| `_mmio_read_u32` | PROBE | device-register read (magic/version/used-idx); nil ⇒ poll times out ⇒ fail-closed |
+| `_mmio_read_u64` | PROBE | device-register read |
+| `_mmio_write_u32` | PROBE | writes device *registers*, never sectors |
+| `_configure_queue` | PROBE | virtqueue register programming |
+| `_queue_base` | PROBE | address of the virtqueue storage |
+| `_dma_base` | **DATA PATH** | base of the buffer that *holds the sector payload*; nil ⇒ payload read from address 0 |
+| `_prepare_read` | **DATA PATH** | builds/submits the sector-read descriptor |
+| `_read_sector_direct` | **DATA PATH** | returns the status that decides success (0 ⇒ success) |
+| `_sector_bytes` | **DATA PATH** | returns the sector content itself |
+| `_status_u8` | **DATA PATH** | device status feeding a success decision |
+| `_wait_completion` | **DATA PATH** | completion status feeding a success decision |
+| `_read_prefix` | **DATA PATH** | multi-sector read |
+| `_read_hello_smf` | **DATA PATH** | reads LBA 0 |
+
+The six probes are exactly the six that appear as `W` in the built x86 guest and
+exactly the six already in `allow_arm_virtio()`
+(`test/03_system/check/simpleos_kernel_fabricated_rt_symbol_guard_spec.spl`), so
+the two lists agree without widening either. That spec now carries a comment
+pinning it to the link guard and forbidding a data-path addition.
+
+### Verification (both directions; system `clang`/`cc`/`nm`/`objdump` — `bin/simple` is the SEED, no pure-Simple binary is deployed)
+
+- **Still links.** `arch/{arm64,arm32}/boot/baremetal_stubs.c` compiled
+  (`clang -target aarch64-unknown-none-elf` / `armv7-unknown-none-eabi`, rc=0).
+  All 14 symbols are strong `T` with **non-trivial bodies** under a faithful
+  replica of `simpleos_trivial_insn_class` / `simpleos_trivial_body_rt_symbols`
+  (0/14 flagged on both arches). The guard cannot fire on the arm builds
+  regardless of the allowlist, so narrowing breaks nothing that links today.
+- **Now refuses.** The 14 fabricated `__attribute__((weak)) { return 0; }`
+  stubs from `arch/x86_64/boot/baremetal_stubs.c:17706-17719` compiled and
+  classified: **14/14** detected as constant-return fakes. Under the old prefix
+  **0** were refused; under the exact-name list **8** are refused — every
+  data-path symbol, none of the probes.
+- No new compiler diagnostics: `bin/simple compile` on the file before/after,
+  in place, yields an identical `error:`/`warning:` set (one pre-existing
+  `_bootstrap_fn_ret_types` error also present on the unmodified base version).
+
+### `status == 0` is correct — NOT a second defect
+
+`virtio_blk_arm_read_sector_bytes` reading 0 as success matches the real device
+ABI: `VIRTIO_BLK_S_OK == 0` (VirtIO 1.x §5.2.6). The arm64 implementation
+pre-seeds the status byte with `0xff` before submission
+(`baremetal_stubs.c:2941`) and returns the sentinel `0xFFFFFFFF` when the used
+ring never advances, so "device never wrote a status" cannot masquerade as 0.
+The semantics stay as they are; the hazard was only that a *fabricated* stub
+also returns 0, which is a link-time problem and is what this fix closes.
 
 ## Non-goals
 
