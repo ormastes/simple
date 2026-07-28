@@ -154,6 +154,21 @@ Cranelift hooks; the fresh core-C runtime owns `panic`; remaining legacy owners
 must be supplied through the existing validated external-provider link boundary
 without enabling stubs. The three-cycle cap stopped further build retries.
 
+## 2026-07-28 phase-profiler amplification
+
+An exact Stage4 full-CLI run with phase profiling produced 52,584 verbose HIR
+messages while lowering only 50 modules and reached 11,986,204 KiB max RSS in
+9m00s before it was stopped. The HIR diagnostic gates incorrectly treated
+`SIMPLE_COMPILER_PHASE_PROFILE=1` as a request for per-expression and
+per-function tracing. Those verbose allocations are now restricted to
+`SIMPLE_COMPILER_TRACE=1` or `SIMPLE_BOOTSTRAP_DIAG=1`; phase profiling keeps
+only bounded phase events.
+
+A comparison run with phase profiling absent produced no verbose output, but
+still reached 7,374,600 KiB RSS at 5m46s. The logging fix removes avoidable I/O
+and no-GC allocations, but does not change the primary whole-phase AST/HIR
+retention diagnosis below.
+
 ## Required structural fix
 
 Introduce a two-pass, streaming HIR pipeline using `ModuleSurface` as compact
