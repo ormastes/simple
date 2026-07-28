@@ -1,0 +1,666 @@
+"""Bounded secondary hosted-browser renderer ownership."""
+
+use common.ui.window_scene.{WmContentFrame}
+use common.ui.wm_chrome_theme.{active_wm_theme_id}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
+use std.gc_async_mut.web.browser_session_url.{
+    normalize_network_navigation_url
+}
+use std.common.encoding.utf8.{text_without_last_codepoint}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_revision_with_theme,
+    simple_web_external_content_frame
+}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess,
+    HostedBrowserRendererResult
+}
+use std.common.web.browser_renderer_protocol.{BROWSER_RENDERER_MAX_VIEWPORT}
+
+val HOSTED_BROWSER_RENDERER_REGISTRY_MAX_COUNT: i64 = 4
+
+pub struct HostedBrowserRendererDispatch:
+    event_id: i64
+    wm_target_id: i64
+    semantic_target_id: text
+    callback_count: i64
+    mutation_revision: i64
+    reason: text
+
+fn _dispatch(
+    event_id: i64, window_id: i64, target: text,
+    callback_count: i64, revision: i64, reason: text
+) -> HostedBrowserRendererDispatch:
+    HostedBrowserRendererDispatch(
+        event_id: event_id,
+        wm_target_id: window_id,
+        semantic_target_id: target,
+        callback_count: callback_count,
+        mutation_revision: revision,
+        reason: reason
+    )
+
+fn _empty_registry_frame() -> WmContentFrame:
+    WmContentFrame(
+        window_id: "",
+        scene_revision: 0,
+        content_revision: 0,
+        origin_kind: "",
+        width: 0,
+        height: 0,
+        pixels: [],
+        checksum: 0u64,
+        parent_window_id: "",
+        offset_x: 0,
+        offset_y: 0
+    )
+
+class HostedBrowserRendererEntry:
+    window_id: i64
+    renderer: HostedBrowserRendererProcess
+    raster: Engine2dCompositorBackend
+    renderer_closed: bool
+    raster_closed: bool
+    ready: bool
+    close_pending: bool
+    animation_origin_micros: i64
+    startup_html: text
+    address_draft: text
+    address_editing: bool
+    address_replace_on_text: bool
+    pressed_control: text
+    mutation_revision: i64
+    pending_frame: WmContentFrame
+    failure_reason: text
+    failure_published: bool
+
+    static fn create(
+        window_id: i64,
+        renderer: HostedBrowserRendererProcess,
+        raster: Engine2dCompositorBackend,
+        animation_origin_micros: i64,
+        startup_html: text
+    ) -> HostedBrowserRendererEntry:
+        HostedBrowserRendererEntry(
+            window_id: window_id,
+            renderer: renderer,
+            raster: raster,
+            renderer_closed: false,
+            raster_closed: false,
+            ready: false,
+            close_pending: false,
+            animation_origin_micros: animation_origin_micros,
+            startup_html: startup_html,
+            address_draft: startup_html,
+            address_editing: false,
+            address_replace_on_text: false,
+            pressed_control: "",
+            mutation_revision: 0,
+            pending_frame: _empty_registry_frame(),
+            failure_reason: "",
+            failure_published: false
+        )
+
+pub class HostedBrowserRendererRegistry:
+    entries: [HostedBrowserRendererEntry]
+    executable: text
+    home_url: text
+    next_generation: i64
+    pressed_window_id: i64
+    pending_cancel_window_id: i64
+    pending_cancel_event_id: i64
+
+    static fn create(
+        executable: text,
+        home_url: text
+    ) -> HostedBrowserRendererRegistry:
+        HostedBrowserRendererRegistry(
+            entries: [],
+            executable: executable,
+            home_url: home_url,
+            next_generation: 2,
+            pressed_window_id: 0,
+            pending_cancel_window_id: 0,
+            pending_cancel_event_id: 0
+        )
+
+    fn _index(window_id: i64) -> i32:
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].window_id == window_id:
+                return i
+            i = i + 1
+        -1
+
+    fn contains(window_id: i64) -> bool:
+        self._index(window_id) >= 0
+
+    fn document_url(window_id: i64) -> text:
+        val index = self._index(window_id)
+        if index < 0:
+            return ""
+        val entry = self.entries[index]
+        entry.renderer.document_url
+
+    fn address_text(window_id: i64) -> text:
+        val index = self._index(window_id)
+        if index < 0:
+            return ""
+        self.entries[index].address_draft
+
+    me _teardown(index: i32, reason: text) -> bool:
+        var entry = self.entries[index]
+        if self.pressed_window_id == entry.window_id:
+            self.pressed_window_id = 0
+        if self.pending_cancel_window_id == entry.window_id:
+            self.pending_cancel_window_id = 0
+            self.pending_cancel_event_id = 0
+        entry.ready = false
+        entry.pending_frame = _empty_registry_frame()
+        if reason != "":
+            entry.failure_reason = reason
+        if not entry.renderer_closed:
+            if entry.renderer.close():
+                entry.renderer_closed = true
+                entry.close_pending = false
+            else:
+                entry.close_pending = true
+                if entry.failure_reason == "":
+                    entry.failure_reason = "renderer-close-failed"
+                elif not entry.failure_reason.ends_with(
+                    ";renderer-close-failed"
+                ):
+                    entry.failure_reason = (
+                        entry.failure_reason + ";renderer-close-failed"
+                    )
+        if not entry.raster_closed:
+            entry.raster.shutdown()
+            entry.raster_closed = true
+        self.entries[index] = entry
+        entry.renderer_closed and entry.raster_closed
+
+    me _fail(index: i32, reason: text) -> text:
+        val _ = self._teardown(index, reason)
+        var entry = self.entries[index]
+        entry.failure_published = true
+        self.entries[index] = entry
+        "failed"
+
+    me _store_frame(
+        index: i32,
+        result: HostedBrowserRendererResult,
+        title: text,
+        body_html: text
+    ) -> text:
+        var entry = self.entries[index]
+        if entry.raster_closed:
+            return self._fail(index, "renderer-raster-unavailable")
+        var raster = entry.raster
+        if (raster.w != entry.renderer.width or
+            raster.h != entry.renderer.height):
+            raster.shutdown()
+            raster = Engine2dCompositorBackend.create_from_env(
+                entry.renderer.width, entry.renderer.height
+            )
+        val rendered = raster.render_draw_ir_composition(
+            result.composition, []
+        )
+        entry.raster = raster
+        val active_theme = active_wm_theme_id()
+        val theme = if active_theme != "": active_theme else: default_theme_id()
+        val revision = simple_web_content_revision_with_theme(
+            theme,
+            title,
+            body_html,
+            entry.renderer.width,
+            entry.renderer.height,
+            0
+        )
+        val frame = simple_web_external_content_frame(
+            entry.window_id.to_text(),
+            revision,
+            theme,
+            entry.renderer.width,
+            entry.renderer.height,
+            rendered,
+            result.cpu_composited_count,
+            result.cpu_composited_sha256,
+            result.solid_material_count,
+            result.solid_material_sha256
+        )
+        if frame.checksum == 0u64 or frame.pixels.len() == 0:
+            self.entries[index] = entry
+            return self._fail(index, "renderer-raster-rejected")
+        entry.mutation_revision = entry.mutation_revision + 1
+        if not entry.address_editing and entry.renderer.document_url != "":
+            entry.address_draft = entry.renderer.document_url
+        entry.pending_frame = frame
+        self.entries[index] = entry
+        "frame"
+
+    me ensure(
+        window_id: i64,
+        initial_html: text,
+        width: i32,
+        height: i32,
+        now_micros: i64
+    ) -> text:
+        val existing = self._index(window_id)
+        if existing >= 0:
+            if self.entries[existing].pending_frame.checksum > 0u64:
+                return "frame"
+            if (self.entries[existing].renderer_closed or
+                self.entries[existing].close_pending or
+                self.entries[existing].failure_reason != ""):
+                return "failed"
+            return "none"
+        if (window_id <= 0 or self.executable == "" or width <= 0 or
+            height <= 0 or width.to_i64() > BROWSER_RENDERER_MAX_VIEWPORT or
+            height.to_i64() > BROWSER_RENDERER_MAX_VIEWPORT or
+            self.entries.len() >= HOSTED_BROWSER_RENDERER_REGISTRY_MAX_COUNT):
+            return "failed"
+        val generation = self.next_generation
+        self.next_generation = self.next_generation + 1
+        var entry = HostedBrowserRendererEntry.create(
+            window_id,
+            HostedBrowserRendererProcess.create(generation, width, height),
+            Engine2dCompositorBackend.create_from_env(width, height),
+            now_micros,
+            initial_html
+        )
+        val _ = entry.renderer.set_home_url(self.home_url)
+        self.entries.push(entry)
+        val index = self.entries.len() - 1
+        val started = entry.renderer.begin_start(self.executable, 2000)
+        self.entries[index] = entry
+        match started:
+            Err(reason):
+                self._fail(index, reason)
+            Ok(_):
+                "none"
+
+    me advance_window(
+        window_id: i64,
+        title: text,
+        body_html: text,
+        width: i32,
+        height: i32,
+        now_micros: i64,
+        visible: bool
+    ) -> text:
+        val index = self._index(window_id)
+        if index < 0:
+            return "failed"
+        var entry = self.entries[index]
+        if (entry.renderer_closed or entry.close_pending or
+            entry.failure_reason != ""):
+            return if entry.failure_published: "none" else: "failed"
+        val was_ready = entry.ready
+        val polled = entry.renderer.poll()
+        self.entries[index] = entry
+        if val Some(result) = polled:
+            if not result.ok:
+                return self._fail(index, result.reason)
+            if entry.renderer.state == "await-init":
+                val initialized = entry.renderer.begin_init(
+                    entry.startup_html, 2000
+                )
+                entry.startup_html = ""
+                self.entries[index] = entry
+                match initialized:
+                    Err(reason):
+                        return self._fail(index, reason)
+                    Ok(_):
+                        return "none"
+            entry.ready = true
+            if not was_ready:
+                entry.animation_origin_micros = now_micros
+            self.entries[index] = entry
+            return self._store_frame(index, result, title, body_html)
+        if not entry.ready:
+            return "none"
+        if (self.pending_cancel_window_id == window_id and
+            self.pending_cancel_event_id > 0 and
+            entry.renderer.command_deadline_ms <= 0):
+            match entry.renderer.begin_pointer(
+                self.pending_cancel_event_id, -1, -1, false, 2000
+            ):
+                Ok(_):
+                    self.pending_cancel_window_id = 0
+                    self.pending_cancel_event_id = 0
+                Err(_):
+                    pass
+            self.entries[index] = entry
+        if not visible:
+            return "none"
+        if (width <= 0 or height <= 0 or
+            width.to_i64() > BROWSER_RENDERER_MAX_VIEWPORT or
+            height.to_i64() > BROWSER_RENDERER_MAX_VIEWPORT):
+            return self._fail(index, "invalid-renderer-viewport")
+        if (width != entry.renderer.width or height != entry.renderer.height):
+            match entry.renderer.begin_resize(width, height, 2000):
+                Err(reason):
+                    self.entries[index] = entry
+                    if reason != "renderer-busy":
+                        return self._fail(index, reason)
+                Ok(_):
+                    self.entries[index] = entry
+            return "none"
+        val animation_time_ms = (
+            now_micros - entry.animation_origin_micros
+        ) / 1000
+        if (entry.renderer.command_deadline_ms <= 0 and
+            entry.renderer.next_animation_ms >= 0 and
+            animation_time_ms >= entry.renderer.next_animation_ms):
+            match entry.renderer.begin_advance(animation_time_ms, 2000):
+                Err(reason):
+                    self.entries[index] = entry
+                    if reason != "renderer-busy":
+                        return self._fail(index, reason)
+                Ok(_):
+                    self.entries[index] = entry
+        "none"
+
+    me take_frame(window_id: i64) -> WmContentFrame:
+        val index = self._index(window_id)
+        if index < 0:
+            return _empty_registry_frame()
+        var entry = self.entries[index]
+        val frame = entry.pending_frame
+        entry.pending_frame = _empty_registry_frame()
+        self.entries[index] = entry
+        frame
+
+    me _begin_pointer(
+        window_id: i64, event_id: i64, x: i64, y: i64, pressed: bool
+    ) -> Result<bool, text>:
+        val index = self._index(window_id)
+        if index < 0 or not self.entries[index].ready:
+            return Err("renderer-unavailable")
+        var entry = self.entries[index]
+        val result = entry.renderer.begin_pointer(
+            event_id, x, y, pressed, 2000
+        )
+        self.entries[index] = entry
+        result
+
+    me _begin_control(window_id: i64, control: text) -> Result<bool, text>:
+        val index = self._index(window_id)
+        if index < 0 or not self.entries[index].ready:
+            return Err("renderer-unavailable")
+        var entry = self.entries[index]
+        val result = if control == "back":
+            entry.renderer.begin_go_back(2000)
+        elif control == "forward":
+            entry.renderer.begin_go_forward(2000)
+        elif control == "stop":
+            entry.renderer.begin_stop(2000)
+        elif control == "reload":
+            entry.renderer.begin_reload(2000)
+        elif control == "home":
+            entry.renderer.begin_go_home(2000)
+        else:
+            Err("unknown-browser-control")
+        self.entries[index] = entry
+        result
+
+    me dispatch_pointer(
+        event_id: i64, window_id: i64, x: i64, y: i64, pressed: bool
+    ) -> HostedBrowserRendererDispatch:
+        val index = self._index(window_id)
+        if index < 0:
+            return _dispatch(event_id, window_id, "", 0, 0,
+                "renderer-unavailable")
+        var entry = self.entries[index]
+        if pressed and self.pending_cancel_window_id > 0:
+            return _dispatch(event_id, window_id, "browser:page", 0,
+                entry.mutation_revision, "pointer-cancel-pending")
+        entry.address_editing = false
+        entry.address_replace_on_text = false
+        self.entries[index] = entry
+        match self._begin_pointer(window_id, event_id, x, y, pressed):
+            Err(reason):
+                _dispatch(event_id, window_id, "browser:page", 0,
+                    entry.mutation_revision, reason)
+            Ok(_):
+                if pressed:
+                    self.pressed_window_id = window_id
+                elif self.pressed_window_id == window_id:
+                    self.pressed_window_id = 0
+                _dispatch(event_id, window_id, "browser:page", 1,
+                    entry.mutation_revision, "")
+
+    me dispatch_chrome_pointer(
+        event_id: i64, window_id: i64, control: text, pressed: bool
+    ) -> HostedBrowserRendererDispatch:
+        val index = self._index(window_id)
+        if index < 0:
+            return _dispatch(event_id, window_id, "", 0, 0,
+                "renderer-unavailable")
+        var entry = self.entries[index]
+        val target = "browser:parent#{control}"
+        if pressed:
+            if self.pending_cancel_window_id > 0:
+                return _dispatch(event_id, window_id, target, 0,
+                    entry.mutation_revision, "pointer-cancel-pending")
+            entry.pressed_control = control
+            self.pressed_window_id = window_id
+            if control == "address":
+                entry.address_editing = true
+                entry.address_replace_on_text = true
+            self.entries[index] = entry
+            return _dispatch(event_id, window_id, target, 0,
+                entry.mutation_revision, "chrome-pressed")
+        val armed = entry.pressed_control
+        entry.pressed_control = ""
+        if self.pressed_window_id == window_id:
+            self.pressed_window_id = 0
+        if armed != control:
+            self.entries[index] = entry
+            return _dispatch(event_id, window_id, target, 0,
+                entry.mutation_revision, "chrome-release-target-mismatch")
+        if control == "address":
+            entry.address_editing = true
+            entry.address_replace_on_text = true
+            self.entries[index] = entry
+            return _dispatch(event_id, window_id, target, 0,
+                entry.mutation_revision, "address-focused")
+        self.entries[index] = entry
+        if control == "favorite":
+            return _dispatch(event_id, window_id, target, 0,
+                entry.mutation_revision, "favorite-parent")
+        match self._begin_control(window_id, control):
+            Err(reason):
+                _dispatch(event_id, window_id, target, 0,
+                    entry.mutation_revision, reason)
+            Ok(_):
+                _dispatch(event_id, window_id, target, 1,
+                    entry.mutation_revision, "")
+
+    me dispatch_key_with_shift(
+        event_id: i64, window_id: i64, key_code: i64,
+        pressed: bool, shift_key: bool
+    ) -> HostedBrowserRendererDispatch:
+        val index = self._index(window_id)
+        if index < 0:
+            return _dispatch(event_id, window_id, "", 0, 0,
+                "renderer-unavailable")
+        var entry = self.entries[index]
+        if entry.address_editing:
+            if not pressed:
+                return _dispatch(event_id, window_id,
+                    "browser:parent#address", 0,
+                    entry.mutation_revision, "key-up")
+            if key_code == 13:
+                match normalize_network_navigation_url(entry.address_draft):
+                    Err(reason):
+                        return _dispatch(event_id, window_id,
+                            "browser:parent#address", 0,
+                            entry.mutation_revision, reason)
+                    Ok(url):
+                        entry.address_editing = false
+                        entry.address_replace_on_text = false
+                        val result = entry.renderer.begin_navigate(
+                            url, "GET", "", "", "", 2000
+                        )
+                        self.entries[index] = entry
+                        match result:
+                            Err(reason):
+                                return _dispatch(event_id, window_id,
+                                    "browser:parent#address", 0,
+                                    entry.mutation_revision, reason)
+                            Ok(_):
+                                return _dispatch(event_id, window_id,
+                                    "browser:parent#address", 1,
+                                    entry.mutation_revision, "")
+            if key_code == 27:
+                entry.address_draft = entry.renderer.document_url
+                entry.address_editing = false
+                entry.address_replace_on_text = false
+            elif key_code == 8:
+                entry.address_draft = text_without_last_codepoint(
+                    entry.address_draft
+                )
+                entry.address_replace_on_text = false
+            self.entries[index] = entry
+            return _dispatch(event_id, window_id,
+                "browser:parent#address", 1,
+                entry.mutation_revision, "")
+        if not entry.ready:
+            return _dispatch(event_id, window_id, "browser:page", 0,
+                entry.mutation_revision, "renderer-unavailable")
+        val result = entry.renderer.begin_key_with_shift(
+            event_id, key_code, pressed, shift_key, 2000
+        )
+        self.entries[index] = entry
+        match result:
+            Err(reason):
+                _dispatch(event_id, window_id, "browser:page", 0,
+                    entry.mutation_revision, reason)
+            Ok(_):
+                _dispatch(event_id, window_id, "browser:page", 1,
+                    entry.mutation_revision, "")
+
+    me dispatch_text(
+        event_id: i64, window_id: i64, value: text
+    ) -> HostedBrowserRendererDispatch:
+        val index = self._index(window_id)
+        if index < 0:
+            return _dispatch(event_id, window_id, "", 0, 0,
+                "renderer-unavailable")
+        var entry = self.entries[index]
+        if entry.address_editing:
+            val updated = if entry.address_replace_on_text:
+                value
+            else:
+                entry.address_draft + value
+            if updated.len() > 2048:
+                return _dispatch(event_id, window_id,
+                    "browser:parent#address", 0,
+                    entry.mutation_revision, "address-too-long")
+            entry.address_draft = updated
+            entry.address_replace_on_text = false
+            self.entries[index] = entry
+            return _dispatch(event_id, window_id,
+                "browser:parent#address", 1,
+                entry.mutation_revision, "")
+        if not entry.ready:
+            return _dispatch(event_id, window_id, "browser:page", 0,
+                entry.mutation_revision, "renderer-unavailable")
+        val result = entry.renderer.begin_text_input(event_id, value, 2000)
+        self.entries[index] = entry
+        match result:
+            Err(reason):
+                _dispatch(event_id, window_id, "browser:page", 0,
+                    entry.mutation_revision, reason)
+            Ok(_):
+                _dispatch(event_id, window_id, "browser:page", 1,
+                    entry.mutation_revision, "")
+
+    me cancel_pointer_state(event_id: i64):
+        if self.pending_cancel_window_id > 0:
+            return
+        val armed_window_id = self.pressed_window_id
+        val index = self._index(armed_window_id)
+        self.pressed_window_id = 0
+        if index < 0:
+            self.pending_cancel_window_id = 0
+            self.pending_cancel_event_id = 0
+            return
+        var entry = self.entries[index]
+        entry.pressed_control = ""
+        self.pending_cancel_window_id = armed_window_id
+        self.pending_cancel_event_id = event_id
+        if entry.ready and entry.renderer.command_deadline_ms <= 0:
+            match entry.renderer.begin_pointer(
+                event_id, -1, -1, false, 2000
+            ):
+                Ok(_):
+                    self.pending_cancel_window_id = 0
+                    self.pending_cancel_event_id = 0
+                Err(_):
+                    pass
+        self.entries[index] = entry
+
+    me remove_window(window_id: i64) -> bool:
+        val index = self._index(window_id)
+        if index < 0:
+            return true
+        if not self._teardown(index, ""):
+            return false
+        var kept: [HostedBrowserRendererEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            if i != index:
+                kept.push(self.entries[i])
+            i = i + 1
+        self.entries = kept
+        true
+
+    me fail_window(window_id: i64, reason: text):
+        val index = self._index(window_id)
+        if index >= 0:
+            val _ = self._fail(index, reason)
+
+    me reconcile(live_window_ids: [i64]) -> bool:
+        var any_missing = false
+        var scan = 0
+        while scan < self.entries.len():
+            var live = false
+            for window_id in live_window_ids:
+                if window_id == self.entries[scan].window_id:
+                    live = true
+            if not live:
+                any_missing = true
+            scan = scan + 1
+        if not any_missing:
+            return true
+        var retained: [HostedBrowserRendererEntry] = []
+        var ok = true
+        var i = 0
+        while i < self.entries.len():
+            var live = false
+            for window_id in live_window_ids:
+                if window_id == self.entries[i].window_id:
+                    live = true
+            if live:
+                retained.push(self.entries[i])
+            elif not self._teardown(i, "window-destroyed"):
+                retained.push(self.entries[i])
+                ok = false
+            i = i + 1
+        self.entries = retained
+        ok
+
+    me close() -> bool:
+        var retained: [HostedBrowserRendererEntry] = []
+        var ok = true
+        var i = 0
+        while i < self.entries.len():
+            if not self._teardown(i, ""):
+                retained.push(self.entries[i])
+                ok = false
+            i = i + 1
+        self.entries = retained
+        ok

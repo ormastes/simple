@@ -160,9 +160,13 @@ present.
 Hosted browser frames are admitted by `HostCompositor` per window. Admission
 requires the current content-box dimensions, Simple Web provenance, and a valid
 pixel checksum; four slots share a 16,777,216-pixel retention budget. Resize
-empties the affected slot and window destruction removes only that slot. The
-primary hosted browser uses this path today; secondary browser process routing
-remains incomplete and must not be described as sandboxed production evidence.
+empties the affected slot and window destruction removes only that slot. Both
+primary and secondary hosted browser windows use it. Secondary windows own
+bounded, window-keyed renderer/raster entries; minimized entries still poll
+cleanup and deadlines without scheduling animation work. Missing, failed, or
+over-capacity renderer admission stays blank rather than falling back to parent
+HTML/JavaScript execution. Fresh pure-Simple live evidence is still required
+before describing the multi-window path as production-proven.
 
 ## Milestone History
 

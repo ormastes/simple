@@ -89,17 +89,24 @@ describe "hosted browser renderer entry isolation":
         expect(poll_body.contains("rt_sleep_ms")).to_be(false)
         expect(poll_body.contains("_write_before")).to_be(false)
         expect(pump_body).to_contain("process_write_stdin_some")
-        val start_body = broker.slice(
-            broker.find("me start("),
-            broker.find("me _finalize_network(")
+        val begin_start_body = broker.slice(
+            broker.find("me begin_start("),
+            broker.find("me start(")
         )
-        expect(start_body).to_contain("self.pid = 0")
-        expect(start_body).to_contain(
-            "self.fail(\"renderer-crashed\")"
+        expect(begin_start_body).to_contain(
+            "browser_renderer_spawn_sandboxed"
         )
-        expect(pump_body).to_contain("self.pid = 0")
+        expect(begin_start_body).to_contain(
+            "self.pending_operation = \"start\""
+        )
+        expect(begin_start_body.contains("rt_sleep_ms")).to_be(false)
+        expect(poll_body).to_contain("self.state == \"starting\"")
+        expect(poll_body).to_contain("decoded.message.kind != \"ready\"")
+        expect(poll_body).to_contain("self.fail(\"renderer-crashed\")")
+        expect(broker).to_contain("me begin_init(")
+        expect(pump_body.contains("self.pid = 0")).to_be(false)
         expect(pump_body).to_contain("\"renderer-crashed\"")
-        expect(poll_body).to_contain("self.pid = 0")
+        expect(poll_body.contains("self.pid = 0")).to_be(false)
         expect(poll_body).to_contain(
             "self.fail(\"renderer-crashed\")"
         )
@@ -271,7 +278,7 @@ describe "hosted browser renderer entry isolation":
         )
         val page_pointer_end = pointer_body.find(
             "                    else:\n" +
-            "                        val dispatch = web_sessions.dispatch_pointer("
+            "                        if comp.is_browser_window(target.window_id):"
         )
         expect(page_pointer_start).to_be_greater_than(-1)
         expect(page_pointer_end).to_be_greater_than(page_pointer_start)
@@ -442,7 +449,7 @@ describe "hosted browser renderer entry isolation":
         expect(advance_failure).to_be_greater_than(advance_call)
 
     # @req REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009
-    it "routes each secondary browser toolbar to its own hosted session":
+    it "routes each secondary browser window through its own sandbox renderer":
         val entry = executable_source_lines(
             rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
         )
@@ -454,7 +461,7 @@ describe "hosted browser renderer entry isolation":
             "target.window_id != browser_profile_window_id"
         )
         val routed = mouse.find(
-            "web_sessions.dispatch_chrome_pointer("
+            "browser_renderers.dispatch_chrome_pointer("
         )
         val primary = mouse.find(
             "browser_pressed_control = target.control"
@@ -462,12 +469,9 @@ describe "hosted browser renderer entry isolation":
         expect(secondary).to_be_greater_than(-1)
         expect(routed).to_be_greater_than(secondary)
         expect(primary).to_be_greater_than(routed)
-        expect(mouse).to_contain(
-            "web_sessions.body_html(target.window_id)"
-        )
-        expect(mouse).to_contain(
-            "web_sessions.address_text(target.window_id)"
-        )
+        expect(mouse).to_contain("comp.is_browser_window(target.window_id)")
+        expect(mouse).to_contain("browser_renderers.dispatch_pointer(")
+        expect(mouse).to_contain("browser_renderers.cancel_pointer_state(")
 
         val keyboard = entry.slice(
             entry.find("elif kind == EVT_KEY:"),
@@ -477,12 +481,136 @@ describe "hosted browser renderer entry isolation":
             entry.find("elif kind == EVT_TEXT:"),
             entry.find("val browser_animation_time_ms")
         )
+        expect(keyboard).to_contain("comp.is_browser_window(focused)")
         expect(keyboard).to_contain(
-            "web_sessions.address_text(focused)"
+            "browser_renderers.dispatch_key_with_shift("
         )
-        expect(text).to_contain(
-            "web_sessions.address_text(focused)"
+        expect(text).to_contain("comp.is_browser_window(focused)")
+        expect(text).to_contain("browser_renderers.dispatch_text(")
+        expect(entry).to_contain("browser_renderers.advance_window(")
+        expect(entry).to_contain("browser_renderers.take_frame(")
+        expect(entry).to_contain("browser_renderers.remove_window(")
+        expect(entry).to_contain("browser_renderers.reconcile(")
+        expect(entry).to_contain("val secondary_renderers_closed =")
+        val render_start = entry.find(
+            "                if web_window.app_id == \"browser\":"
         )
+        val render_end = entry.find(
+            "                elif not web_window.minimized:", render_start
+        )
+        expect(render_start).to_be_greater_than(-1)
+        expect(render_end).to_be_greater_than(render_start)
+        val render_route = entry.slice(render_start, render_end)
+        expect(render_route).to_contain(
+            "browser_renderers.ensure(\n                                web_window.id"
+        )
+        expect(render_route).to_contain(
+            "browser_renderers.advance_window(\n                            web_window.id"
+        )
+        expect(render_route).to_contain(
+            "browser_renderers.take_frame(\n                                web_window.id"
+        )
+        expect(render_route).to_contain(
+            "comp.set_external_web_frame(\n                                web_window.id"
+        )
+        expect(render_route.contains("web_sessions.")).to_be(false)
+
+        val browser_pointer_start = mouse.find(
+            "if comp.is_browser_window(target.window_id):"
+        )
+        val browser_pointer_end = mouse.find(
+            "                        else:", browser_pointer_start
+        )
+        expect(browser_pointer_start).to_be_greater_than(-1)
+        expect(browser_pointer_end).to_be_greater_than(browser_pointer_start)
+        val browser_pointer = mouse.slice(
+            browser_pointer_start, browser_pointer_end
+        )
+        expect(browser_pointer).to_contain(
+            "browser_renderers.dispatch_pointer(\n" +
+            "                                semantic_event_id, target.window_id"
+        )
+        expect(browser_pointer.contains("web_sessions.")).to_be(false)
+
+        val browser_key_start = keyboard.find(
+            "if comp.is_browser_window(focused):"
+        )
+        val browser_key_end = keyboard.find(
+            "                    else:", browser_key_start
+        )
+        expect(browser_key_start).to_be_greater_than(-1)
+        expect(browser_key_end).to_be_greater_than(browser_key_start)
+        val browser_key_route = keyboard.slice(
+            browser_key_start, browser_key_end
+        )
+        expect(browser_key_route).to_contain(
+            "browser_renderers.dispatch_key_with_shift(\n" +
+            "                            semantic_event_id, focused"
+        )
+        expect(browser_key_route.contains("web_sessions.")).to_be(false)
+
+        val browser_text_start = text.find(
+            "if comp.is_browser_window(focused):"
+        )
+        val browser_text_end = text.find(
+            "                        else:", browser_text_start
+        )
+        expect(browser_text_start).to_be_greater_than(-1)
+        expect(browser_text_end).to_be_greater_than(browser_text_start)
+        val browser_text_route = text.slice(
+            browser_text_start, browser_text_end
+        )
+        expect(browser_text_route).to_contain(
+            "browser_renderers.dispatch_text(\n" +
+            "                                semantic_event_id, focused"
+        )
+        expect(browser_text_route.contains("web_sessions.")).to_be(false)
+
+    it "fails closed and reaps hidden or destroyed browser renderers":
+        val compositor = rt_file_read_text(
+            "src/os/compositor/host_compositor_core.spl"
+        ) ?? ""
+        val registry = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_registry.spl"
+        ) ?? ""
+        expect(compositor).to_contain("elif win.app_id == \"browser\":")
+        expect(compositor).to_contain(
+            "content_frames.push(_host_empty_external_web_frame())"
+        )
+        expect(registry).to_contain("entry.renderer.poll()")
+        val poll_pos = registry.find("entry.renderer.poll()")
+        val hidden_pos = registry.find("if not visible:")
+        expect(poll_pos).to_be_greater_than(-1)
+        expect(hidden_pos).to_be_greater_than(poll_pos)
+        expect(registry).to_contain("me reconcile(live_window_ids: [i64])")
+        expect(registry).to_contain("entry.renderer.close()")
+        expect(registry).to_contain("entry.raster.shutdown()")
+        expect(registry).to_contain("pressed_window_id: i64")
+        expect(registry).to_contain("pending_cancel_window_id: i64")
+        val cancel_start = registry.find("me cancel_pointer_state(")
+        val cancel_end = registry.find("me remove_window(", cancel_start)
+        expect(cancel_start).to_be_greater_than(-1)
+        expect(cancel_end).to_be_greater_than(cancel_start)
+        val cancel = registry.slice(cancel_start, cancel_end)
+        expect(cancel).to_contain(
+            "if self.pending_cancel_window_id > 0:\n" +
+            "            return"
+        )
+        expect(cancel).to_contain(
+            "val armed_window_id = self.pressed_window_id"
+        )
+        expect(cancel).to_contain(
+            "self.pending_cancel_window_id = armed_window_id"
+        )
+        expect(cancel).to_contain("event_id, -1, -1, false, 2000")
+        expect(cancel.contains("while i < self.entries.len()")).to_be(false)
+        expect(registry).to_contain(
+            "self.pending_cancel_window_id == window_id"
+        )
+        expect(registry).to_contain("\"pointer-cancel-pending\"")
+        expect(registry.contains(
+            "raster: Engine2dCompositorBackend?"
+        )).to_be(false)
 
     # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017
     it "persists learned HSTS before processing the completed frame":

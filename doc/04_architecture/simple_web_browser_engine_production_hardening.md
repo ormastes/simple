@@ -357,9 +357,12 @@ or native TLS behavior.
   external-frame compositor seam exists. It owns up to four receiver-indexed
   window/frame pairs, rejects frames that do not match the live content box,
   caps retained external pixels at 16,777,216, invalidates pixels on resize,
-  and releases only the closed window's frame. This is the compositor
-  prerequisite for secondary per-window renderer brokers; the hosted entry
-  still isolates only its primary browser window. The broker now also exposes a
+  and releases only the closed window's frame. The hosted entry now owns one
+  bounded renderer/raster entry per secondary browser window, polls every live
+  child once per host tick (including minimized children for cleanup), and
+  reconciles destroyed windows through explicit process/network/raster teardown.
+  Browser windows without an admitted frame render blank and never fall back to
+  parent HTML/JavaScript execution. The broker now also exposes a
   per-tick transaction pump, owns at most one parent HTTP job, and writes each
   queued response with one bounded nonblocking pipe operation per poll. Stop
   clears trusted pending state before cancel/free and issuing its correlated
@@ -367,9 +370,8 @@ or native TLS behavior.
   request policy and FetchEngine to authorize CSS/script/module requests after
   the document response, while committed chrome URL/history still wait for a
   validated frame; legacy synchronous calls wrap that same pump.
-  The hosted entry is not switched to this path yet, so production chrome does
-  not exercise preemptive Stop; resize/scroll plus parent-owned bookmark/cookie
-  state remain incomplete. Windows AppContainer and the signed macOS helper
-  also remain open.
+  Production chrome now uses the broker for Stop and resize. Renderer wheel/
+  scroll forwarding plus parent-owned cookie state remain incomplete. Windows
+  AppContainer and the signed macOS helper also remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;
 - existing browser interaction evidence can pass when its artifact is absent.

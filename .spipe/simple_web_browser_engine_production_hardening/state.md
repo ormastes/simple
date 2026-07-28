@@ -1249,3 +1249,28 @@ implementation in progress / target evidence blocked
   feature-preserving and does not yet classify every browser window as
   external; enable that fail-closed rule only with the per-window renderer
   registry so multi-window behavior is preserved rather than disabled.
+- Security/lifecycle: secondary `app_id == "browser"` windows now own bounded,
+  window-keyed `HostedBrowserRendererProcess` and persistent Engine2D raster
+  entries. Startup/READY/init, network completion, resize, input, navigation,
+  animation, frame publication, destroy reconciliation, and shutdown route
+  through that owner; close explicitly cancels/frees broker HTTP state, reaps
+  the child, and shuts down the raster instead of relying on BrowserSession GC.
+- Performance: renderer startup no longer sleeps in the WM thread. `begin_start`
+  and `begin_init` queue work, while the registry performs at most one broker
+  poll per window per host tick. Minimized windows still poll cleanup/deadlines
+  but do not schedule resize or animation raster work.
+- Fail-closed boundary: the compositor renders a blank external frame for every
+  browser window lacking an admitted frame, including capacity/start/crash
+  failures. Browser input is classified by the compositor window owner, so an
+  unadmitted browser cannot fall back to the parent `HostedWebContentRegistry`.
+- Verification: focused source contracts were updated; SPipe wiring and both
+  direct env/runtime guards pass. Live Simple/JS/CSS/animation execution and
+  docgen remain unavailable for the already-recorded admitted-CLI failures; no
+  bootstrap or Rust seed fallback was used.
+- Leak/perf review fixes: dead renderer detection now retains the PID until the
+  canonical piped-process close frees its table row and file descriptors;
+  stable-window reconciliation returns without rebuilding entry arrays;
+  rejected compositor frames tear down their renderer/raster; repeated frame
+  admission is idempotent. Pointer cancellation tracks one armed window and
+  queues an empty-target release for that renderer only, never a cross-window
+  synthetic press broadcast.
