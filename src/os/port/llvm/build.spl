@@ -1,8 +1,17 @@
 ## LLVM cross-compilation build script for SimpleOS targets.
 ##
+## Triple vocabulary: the canonical SimpleOS toolchain triple is the three-field
+## `<arch>-unknown-simpleos` form (build.shs default, simpleos_cross_toolchain.cmake
+## default, `build/os/llvm/cross-<triple>/`, `bin/release/<triple>/`, and the
+## sysroot's `share/simpleos/target-triple.txt` all use it). The two-field
+## `<arch>-simpleos` selector form is also in wide use as a lane name; it is
+## ACCEPTED here and normalized to the canonical form at the boundary, matching
+## `rust_target_spec_name` in src/os/port/_BootstrapCross/cross_compile_stages.spl.
+##
 ## Usage:
-##   bin/simple run src/os/port/llvm/build.spl -- --target x86_64-simpleos
-##   bin/simple run src/os/port/llvm/build.spl -- --target aarch64-simpleos --jobs 8
+##   bin/simple run src/os/port/llvm/build.spl -- --target x86_64-unknown-simpleos
+##   bin/simple run src/os/port/llvm/build.spl -- --target aarch64-unknown-simpleos --jobs 8
+##   bin/simple run src/os/port/llvm/build.spl -- --target x86_64-simpleos   # alias, normalized
 ##   bin/simple run src/os/port/llvm/build.spl -- --all
 
 use std.fs
@@ -19,11 +28,13 @@ fn env_get(key: text) -> text:
 fn env_set(key: text, value: text) -> bool:
     rt_env_set(key, value)
 
+## Legacy standalone-build target list. Canonical `-unknown-simpleos` spelling,
+## kept in the same vocabulary as CROSS_SUPPORTED_TARGETS below.
 val SUPPORTED_TARGETS = [
-    "x86_64-simpleos",
-    "aarch64-simpleos",
-    "riscv64gc-simpleos",
-    "riscv32imac-simpleos",
+    "x86_64-unknown-simpleos",
+    "aarch64-unknown-simpleos",
+    "riscv64gc-unknown-simpleos",
+    "riscv32imac-unknown-simpleos",
 ]
 
 ## compiler-rt in this port is only ever configured freestanding/baremetal
@@ -31,12 +42,30 @@ val SUPPORTED_TARGETS = [
 ## into a SimpleOS sysroot / clang resource dir. Such an archive is wrong for a
 ## hosted target, so every compiler-rt entry point is gated on this predicate.
 ##
-## Both triple spellings used in this file (`x86_64-simpleos` and
+## Both triple spellings accepted by this file (`x86_64-simpleos` and
 ## `x86_64-unknown-simpleos`) carry the `-simpleos` suffix, so the suffix — not
 ## an allowlist — is the invariant. Gate is fail-closed: anything unrecognised
 ## is refused rather than silently granted compiler-rt.
+##
+## Suffix, not substring: `simpleos-x86_64` and `x86_64-simpleos-foo` are
+## refused, as are the empty string and every hosted triple.
 fn is_simpleos_triple(triple: text) -> bool:
     triple.ends_with("-simpleos")
+
+## Normalize the two-field selector form `<arch>-simpleos` onto the canonical
+## three-field toolchain triple `<arch>-unknown-simpleos`.
+##
+## This is a pure widening of the *accepted* input surface, never of the gate:
+## a triple is only rewritten when it already satisfies `is_simpleos_triple`,
+## so nothing that would have been refused can be normalized into acceptance.
+## Triples that already carry a vendor field are returned untouched.
+fn canonical_simpleos_triple(triple: text) -> text:
+    if not is_simpleos_triple(triple):
+        return triple
+    val parts = triple.split("-")
+    if parts.len() != 2:
+        return triple
+    "{parts[0]}-unknown-simpleos"
 
 val LLVM_REPO = "https://github.com/ormastes/llvm-project.git"
 val LLVM_REVISION = "3b33ba807a99855133981897fa8c9d91933f759d"
@@ -61,7 +90,7 @@ class BuildConfig:
             panic("Unknown architecture for target: {self.target}")
 
 fn parse_args(args: List<text>) -> BuildConfig:
-    var target = "x86_64-simpleos"
+    var target = "x86_64-unknown-simpleos"
     var source_dir = "llvm-project"
     var build_dir = "build-llvm"
     var install_prefix = DEFAULT_INSTALL_PREFIX
@@ -74,7 +103,10 @@ fn parse_args(args: List<text>) -> BuildConfig:
         val arg = args[i]
         if arg == "--target":
             i = i + 1
-            target = args[i]
+            # Accept the `<arch>-simpleos` selector alias; everything downstream
+            # (build dirs, LLVM_DEFAULT_TARGET_TRIPLE, --target= for compiler-rt)
+            # then speaks the one canonical vocabulary.
+            target = canonical_simpleos_triple(args[i])
         else if arg == "--source-dir":
             i = i + 1
             source_dir = args[i]
@@ -259,9 +291,11 @@ fn main():
 
 val CROSS_STAGES: [text] = ["host-tools", "cross", "compiler-rt"]
 
-## Full SimpleOS triple list (unknown-simpleos vendor/OS form) consumed by
-## the cross-build pipeline. Keep in sync with SUPPORTED_TARGETS above and
-## with patches/simpleos_toolchain_cpp/README.md.
+## Full SimpleOS triple list in the canonical `<arch>-unknown-simpleos` form
+## consumed by the cross-build pipeline. Keep in sync with SUPPORTED_TARGETS
+## above and with patches/simpleos_toolchain_cpp/README.md. User input in the
+## `<arch>-simpleos` selector form is normalized into this vocabulary by
+## canonical_simpleos_triple() before it is matched here.
 val CROSS_SUPPORTED_TARGETS: [text] = [
     "x86_64-unknown-simpleos",
     "aarch64-unknown-simpleos",
@@ -281,8 +315,12 @@ fn cross_target_supported(triple: text) -> bool:
     # which panics on an unrecognised arch).
     if not is_simpleos_triple(triple):
         return false
+    # Normalize the selector alias before the allowlist compare, otherwise a
+    # documented form (`x86_64-simpleos`) passes the shape gate and is then
+    # rejected by an allowlist written only in the canonical vocabulary.
+    val canonical = canonical_simpleos_triple(triple)
     for supported in CROSS_SUPPORTED_TARGETS:
-        if triple == supported:
+        if canonical == supported:
             return true
     false
 
@@ -320,6 +358,11 @@ fn cross_selected_targets() -> [text]:
     Honours the SIMPLE_TARGET env override: when set (non-empty) only that
     triple, or a comma-separated list of triples, is returned. Otherwise the
     full CROSS_SUPPORTED_TARGETS list is used.
+
+    Selected triples are normalized to the canonical `<arch>-unknown-simpleos`
+    vocabulary so per-target build dirs, SIMPLEOS_TARGET_TRIPLE, and the clang
+    resource-dir path agree regardless of which spelling the caller used.
+    Non-SimpleOS strings pass through unchanged and are refused downstream.
     """
     val override = env_get("SIMPLE_TARGET") ?? ""
     if override != "":
@@ -327,7 +370,7 @@ fn cross_selected_targets() -> [text]:
         for target in override.split(","):
             val trimmed = target.trim()
             if trimmed != "":
-                selected.push(trimmed)
+                selected.push(canonical_simpleos_triple(trimmed))
         return selected
     CROSS_SUPPORTED_TARGETS
 
@@ -433,12 +476,17 @@ fn build_compiler_rt_for_target(triple: text) -> bool:
         print "[compiler-rt] Refusing non-SimpleOS triple '{triple}' (must end in -simpleos)"
         return false
 
-    if not cross_build_stage_for_target(stage: "compiler-rt", triple: triple):
+    # Gate on the raw input, stage under the canonical name: the clang driver
+    # looks for builtins under the normalized triple, so a caller reaching this
+    # function directly with the selector alias must still land in the same slot.
+    val canon = canonical_simpleos_triple(triple)
+
+    if not cross_build_stage_for_target(stage: "compiler-rt", triple: canon):
         return false
 
     # Stage archives into clang resource dir.
-    val rt_dir = "build/os/llvm/compiler-rt-{triple}"
-    val res_lib = "build/os/sysroot/lib/clang/{CLANG_RESOURCE_VERSION}/lib/{triple}"
+    val rt_dir = "build/os/llvm/compiler-rt-{canon}"
+    val res_lib = "build/os/sysroot/lib/clang/{CLANG_RESOURCE_VERSION}/lib/{canon}"
     val archive_probe = process.run("sh", ["-c", "find '" + rt_dir + "' -type f -name 'libclang_rt.builtins*.a' -print -quit"])
     if archive_probe.exit_code != 0 or archive_probe.stdout.trim() == "":
         print "[compiler-rt] No builtins archive produced for {triple}"

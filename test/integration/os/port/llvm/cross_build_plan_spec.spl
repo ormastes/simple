@@ -13,6 +13,7 @@
 use std.fs
 use std.text
 use std.spec
+use os.port.llvm.build.{canonical_simpleos_triple, cross_target_supported, is_simpleos_triple}
 
 val BUILD_SPL = "src/os/port/llvm/build.spl"
 
@@ -80,3 +81,65 @@ describe "SimpleOS LLVM cross-build --print-plan scaffolding":
     it "per-target build dir is cross-<triple>":
         val src = build_source()
         expect(src.contains("cross-{{triple}}")).to_equal(true)
+
+describe "SimpleOS LLVM triple vocabulary":
+    """Behavioural checks (not source-text) that build.spl speaks ONE triple
+    vocabulary: canonical `<arch>-unknown-simpleos`, with the `<arch>-simpleos`
+    selector form accepted and normalized onto it — while the fail-closed
+    `-simpleos` compiler-rt gate still refuses everything it should."""
+
+    it "normalizes the selector form onto the canonical triple":
+        """`x86_64-simpleos` is a documented spelling; it must not be rejected."""
+        expect(canonical_simpleos_triple("x86_64-simpleos")).to_equal("x86_64-unknown-simpleos")
+        expect(canonical_simpleos_triple("aarch64-simpleos")).to_equal("aarch64-unknown-simpleos")
+        expect(canonical_simpleos_triple("riscv64gc-simpleos")).to_equal("riscv64gc-unknown-simpleos")
+        expect(canonical_simpleos_triple("riscv32imac-simpleos")).to_equal("riscv32imac-unknown-simpleos")
+
+    it "leaves an already-canonical triple untouched":
+        """Normalization must be idempotent — no double vendor field."""
+        expect(canonical_simpleos_triple("x86_64-unknown-simpleos")).to_equal("x86_64-unknown-simpleos")
+        expect(canonical_simpleos_triple("armv7-unknown-simpleos")).to_equal("armv7-unknown-simpleos")
+
+    it "accepts both spellings of every supported triple":
+        """The core reconciliation: one vocabulary, two accepted input forms."""
+        assert_true(cross_target_supported("x86_64-unknown-simpleos"))
+        assert_true(cross_target_supported("x86_64-simpleos"))
+        assert_true(cross_target_supported("aarch64-unknown-simpleos"))
+        assert_true(cross_target_supported("aarch64-simpleos"))
+        assert_true(cross_target_supported("riscv64gc-simpleos"))
+        assert_true(cross_target_supported("riscv32imac-simpleos"))
+        assert_true(cross_target_supported("armv7-unknown-simpleos"))
+
+    it "still refuses host triples":
+        """The gate exists to stop a baremetal compiler-rt overwriting a host
+        toolchain — hosted triples must never be granted compiler-rt."""
+        assert_false(is_simpleos_triple("x86_64-unknown-linux-gnu"))
+        assert_false(cross_target_supported("x86_64-unknown-linux-gnu"))
+        assert_false(cross_target_supported("aarch64-apple-darwin"))
+        assert_false(cross_target_supported("x86_64-pc-windows-msvc"))
+
+    it "still refuses the empty triple":
+        """Fail-closed: an unset/blank target is refused, not defaulted."""
+        assert_false(is_simpleos_triple(""))
+        assert_false(cross_target_supported(""))
+
+    it "treats -simpleos as a suffix, not a substring":
+        """`simpleos-x86_64` and `x86_64-simpleos-foo` contain the token but do
+        not end in it; both must be refused."""
+        assert_false(is_simpleos_triple("simpleos-x86_64"))
+        assert_false(cross_target_supported("simpleos-x86_64"))
+        assert_false(is_simpleos_triple("x86_64-simpleos-foo"))
+        assert_false(cross_target_supported("x86_64-simpleos-foo"))
+
+    it "refuses an unknown arch that merely ends in -simpleos":
+        """Shape gate passes, allowlist must still reject — normalization is a
+        widening of accepted spellings, never of accepted architectures."""
+        assert_true(is_simpleos_triple("wat-simpleos"))
+        assert_false(cross_target_supported("wat-simpleos"))
+        assert_false(cross_target_supported("mips64-unknown-simpleos"))
+
+    it "normalization cannot launder a refused triple into acceptance":
+        """Anything failing the shape gate passes through unrewritten."""
+        expect(canonical_simpleos_triple("x86_64-unknown-linux-gnu")).to_equal("x86_64-unknown-linux-gnu")
+        expect(canonical_simpleos_triple("simpleos-x86_64")).to_equal("simpleos-x86_64")
+        expect(canonical_simpleos_triple("")).to_equal("")
