@@ -1,0 +1,429 @@
+"""
+# Pure-Simple SSH Client — Transport, Auth and Channel Encoding
+
+**Feature IDs:** N/A
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Absolute-oracle specs for the client-side halves of SSH-2 that `os.apps.sshd`
+does not implement: the client version exchange, the client KEXINIT proposal
+and its negotiation against the real server proposal, publickey/password
+userauth request encoding, and session-channel + exec encoding.
+
+Every case is driven from byte vectors — there is no socket anywhere in this
+file. Where a server-side artefact is needed it is produced by the REAL sshd
+builder (`ssh_build_kexinit`, `ssh_packet_build`), so a mismatch between the
+two trees fails the spec rather than hiding.
+
+Covers:
+  1. Version exchange: client banner shape, informational preamble skipping,
+     and closed failure on every malformed banner.
+  2. KEXINIT: client proposal negotiates against the real server proposal to
+     the expected suite; no common algorithm fails closed.
+  3. Binary packet: encode/decode round-trip with padding; truncation fails.
+  4. Userauth: password + ed25519 publickey request encoding, session-id
+     binding in the signed blob, reply decoding.
+  5. Channel: session open + exec request encoding, message decoding.
+
+tag: unit, ssh, ssh_client, protocol
+"""
+
+use std.spipe.*
+use os.apps.ssh_client.ssh_client_version.{
+    ssh_client_version_bytes, ssh_client_version_wire,
+    ssh_client_parse_server_banner, ssh_client_banner_text
+}
+use os.apps.ssh_client.ssh_client_kexinit.{
+    ssh_client_build_kexinit, ssh_client_negotiate_from_payloads,
+    ssh_client_strict_kex_from_payloads
+}
+use os.apps.ssh_client.ssh_client_auth.{
+    ssh_client_build_service_request, ssh_client_parse_service_accept,
+    ssh_client_build_userauth_password, ssh_client_publickey_signed_data,
+    ssh_client_build_ed25519_signature_blob, ssh_client_parse_userauth_reply,
+    SSH_SERVICE_USERAUTH, SSH_SERVICE_CONNECTION,
+    SSH_AUTH_REPLY_SUCCESS, SSH_AUTH_REPLY_FAILURE, SSH_AUTH_REPLY_BANNER
+}
+use os.apps.ssh_client.ssh_client_channel.{
+    ssh_client_build_channel_open_session, ssh_client_build_exec_request,
+    ssh_client_parse_channel_message, ssh_client_channel_text,
+    SSH_CHAN_OPEN_OK, SSH_CHAN_OPEN_FAILED, SSH_CHAN_DATA, SSH_CHAN_STDERR,
+    SSH_CHAN_EXIT_STATUS, SSH_CHAN_REQ_SUCCESS
+}
+use os.apps.sshd.ssh_transport.{ssh_build_kexinit, ssh_parse_kexinit, SshKexInit}
+use os.apps.sshd.ssh_packet.{
+    ssh_packet_build, ssh_packet_read, ssh_put_u32, ssh_put_text, ssh_put_string,
+    ssh_ascii_text_to_bytes, ssh_ascii_bytes_to_text
+}
+
+# ============================================================================
+# Byte helpers — `[u8] + [u8]` does NOT concatenate in this language, so every
+# byte vector here is built by explicit push.
+# ============================================================================
+
+fn bstr(s: text) -> [u8]:
+    var src = ssh_ascii_text_to_bytes(s)
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn cat(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < a.len():
+        out.push(a[i])
+        i = i + 1
+    var j: u64 = 0
+    while j < b.len():
+        out.push(b[j])
+        j = j + 1
+    out
+
+fn line(s: text) -> [u8]:
+    var out = bstr(s)
+    out.push(0x0D)
+    out.push(0x0A)
+    out
+
+fn repeat_byte(value: u8, count: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < count:
+        out.push(value)
+        i = i + 1
+    out
+
+fn fixed_cookie() -> [u8]:
+    repeat_byte(0x5A, 16)
+
+fn seed32(base: u8) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push(base + i.to_u8())
+        i = i + 1
+    out
+
+fn kexinit_with_kex(kex: text) -> [u8]:
+    """A minimal well-formed server KEXINIT advertising a chosen kex list."""
+    var buf: [u8] = []
+    buf.push(20)
+    var i: u64 = 0
+    while i < 16:
+        buf.push(0)
+        i = i + 1
+    buf = ssh_put_text(buf, kex)
+    buf = ssh_put_text(buf, "ssh-ed25519")
+    buf = ssh_put_text(buf, "aes256-gcm@openssh.com")
+    buf = ssh_put_text(buf, "aes256-gcm@openssh.com")
+    buf = ssh_put_text(buf, "none")
+    buf = ssh_put_text(buf, "none")
+    buf = ssh_put_text(buf, "none")
+    buf = ssh_put_text(buf, "none")
+    buf = ssh_put_text(buf, "")
+    buf = ssh_put_text(buf, "")
+    buf.push(0)
+    buf = ssh_put_u32(buf, 0)
+    buf
+
+fn err_text(msg: text) -> text:
+    msg
+
+# ============================================================================
+
+describe "SSH client version exchange":
+
+    it "emits an SSH-2.0 client banner terminated by CR LF":
+        val wire = ssh_client_version_wire()
+        expect(wire.len()).to_equal(23)
+        expect(wire[0]).to_equal(0x53)
+        expect(wire[4]).to_equal(0x32)
+        expect(wire[wire.len() - 2]).to_equal(0x0D)
+        expect(wire[wire.len() - 1]).to_equal(0x0A)
+        # V_C for the exchange hash excludes the terminator.
+        expect(ssh_client_version_bytes().len()).to_equal(21)
+
+    it "accepts a well-formed server banner and reports it without CR LF":
+        val parsed = ssh_client_parse_server_banner(line("SSH-2.0-OpenSSH_9.6"))
+        expect(parsed.is_ok()).to_equal(true)
+        val banner = parsed.unwrap()
+        expect(banner.version).to_equal("SSH-2.0-OpenSSH_9.6")
+        expect(banner.raw.len()).to_equal(19)
+        expect(banner.consumed).to_equal(21)
+        expect(banner.preamble_lines).to_equal(0)
+
+    it "skips informational preamble lines before the identification string":
+        val data = cat(cat(line("*** legal notice ***"), line("second line")), line("SSH-2.0-OpenSSH_9.6"))
+        val parsed = ssh_client_parse_server_banner(data)
+        expect(parsed.is_ok()).to_equal(true)
+        val banner = parsed.unwrap()
+        expect(banner.version).to_equal("SSH-2.0-OpenSSH_9.6")
+        expect(banner.preamble_lines).to_equal(2)
+
+    it "rejects a banner with no CR LF terminator":
+        val parsed = ssh_client_parse_server_banner(bstr("SSH-2.0-OpenSSH_9.6"))
+        expect(parsed.is_ok()).to_equal(false)
+        expect(parsed.unwrap_err()).to_contain("no CRLF terminator")
+
+    it "rejects a protocol version that is not SSH-2.0":
+        val parsed = ssh_client_parse_server_banner(line("SSH-1.5-ancient"))
+        expect(parsed.is_ok()).to_equal(false)
+        expect(parsed.unwrap_err()).to_contain("unsupported SSH version")
+
+    it "rejects an identification string with an empty softwareversion":
+        val parsed = ssh_client_parse_server_banner(line("SSH-2.0-"))
+        expect(parsed.is_ok()).to_equal(false)
+        expect(parsed.unwrap_err()).to_contain("empty softwareversion")
+
+    it "rejects a banner longer than the RFC 4253 255-byte limit":
+        var long_name: text = "SSH-2.0-"
+        var i: u64 = 0
+        while i < 250:
+            long_name = long_name + "A"
+            i = i + 1
+        val parsed = ssh_client_parse_server_banner(line(long_name))
+        expect(parsed.is_ok()).to_equal(false)
+        expect(parsed.unwrap_err()).to_contain("exceeds 255 bytes")
+
+    it "rejects a banner carrying an embedded control byte":
+        var raw = bstr("SSH-2.0-Open")
+        raw.push(0x00)
+        raw.push(0x53)
+        raw.push(0x0D)
+        raw.push(0x0A)
+        val parsed = ssh_client_parse_server_banner(raw)
+        expect(parsed.is_ok()).to_equal(false)
+        expect(parsed.unwrap_err()).to_contain("control byte")
+
+describe "SSH client KEXINIT negotiation":
+
+    it "negotiates curve25519-sha256 / ssh-ed25519 / aes256-gcm against the real sshd proposal":
+        val client_payload = ssh_client_build_kexinit(fixed_cookie())
+        val server_payload = ssh_build_kexinit()
+        val negotiated = ssh_client_negotiate_from_payloads(client_payload, server_payload)
+        expect(negotiated.is_ok()).to_equal(true)
+        val algorithms = negotiated.unwrap()
+        expect(algorithms.kex).to_equal("curve25519-sha256")
+        expect(algorithms.host_key).to_equal("ssh-ed25519")
+        expect(algorithms.cipher_c2s).to_equal("aes256-gcm@openssh.com")
+        expect(algorithms.cipher_s2c).to_equal("aes256-gcm@openssh.com")
+        # AES-GCM carries its own tag, so the MAC slot is implicit.
+        expect(algorithms.mac_c2s).to_equal("none")
+        expect(algorithms.compress_c2s).to_equal("none")
+
+    it "puts the caller-supplied cookie in the first 16 bytes after the message type":
+        val payload = ssh_client_build_kexinit(fixed_cookie())
+        expect(payload[0]).to_equal(20)
+        expect(payload[1]).to_equal(0x5A)
+        expect(payload[16]).to_equal(0x5A)
+        val decoded = ssh_parse_kexinit(payload)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().first_kex_packet_follows).to_equal(false)
+
+    it "advertises ext-info-c and kex-strict-c so strict KEX is agreed with sshd":
+        val client_payload = ssh_client_build_kexinit(fixed_cookie())
+        val decoded = ssh_parse_kexinit(client_payload)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().kex_algorithms).to_contain("ext-info-c")
+        expect(decoded.unwrap().kex_algorithms).to_contain("kex-strict-c-v00@openssh.com")
+        val strict = ssh_client_strict_kex_from_payloads(client_payload, ssh_build_kexinit())
+        expect(strict.is_ok()).to_equal(true)
+        expect(strict.unwrap()).to_equal(true)
+
+    it "fails closed when the server offers no common key exchange algorithm":
+        val client_payload = ssh_client_build_kexinit(fixed_cookie())
+        val server_payload = kexinit_with_kex("diffie-hellman-group1-sha1")
+        val negotiated = ssh_client_negotiate_from_payloads(client_payload, server_payload)
+        expect(negotiated.is_ok()).to_equal(false)
+        expect(negotiated.unwrap_err()).to_contain("no matching kex algorithm")
+
+    it "fails closed on a truncated server KEXINIT":
+        val client_payload = ssh_client_build_kexinit(fixed_cookie())
+        val full = kexinit_with_kex("curve25519-sha256")
+        var truncated: [u8] = []
+        var i: u64 = 0
+        while i < 40:
+            truncated.push(full[i])
+            i = i + 1
+        val negotiated = ssh_client_negotiate_from_payloads(client_payload, truncated)
+        expect(negotiated.is_ok()).to_equal(false)
+
+describe "SSH binary packet round-trip":
+
+    it "round-trips a client payload through build and read with correct padding":
+        val payload = ssh_client_build_kexinit(fixed_cookie())
+        val framed = ssh_packet_build(payload, 0)
+        expect(framed.len() % 8).to_equal(0)
+        # padding_length byte must be at least the RFC minimum of 4
+        expect(framed[4] >= 4).to_equal(true)
+        val decoded = ssh_packet_read(framed, 0)
+        expect(decoded.is_ok()).to_equal(true)
+        val result = decoded.unwrap()
+        expect(result.consumed).to_equal(framed.len())
+        expect(result.packet.payload.len()).to_equal(payload.len())
+        expect(result.packet.payload).to_equal(payload)
+
+    it "fails closed on a truncated packet":
+        val payload = ssh_client_build_kexinit(fixed_cookie())
+        val framed = ssh_packet_build(payload, 0)
+        var truncated: [u8] = []
+        var i: u64 = 0
+        while i < framed.len() - 7:
+            truncated.push(framed[i])
+            i = i + 1
+        val decoded = ssh_packet_read(truncated, 0)
+        expect(decoded.is_ok()).to_equal(false)
+        expect(decoded.unwrap_err()).to_contain("incomplete packet")
+
+describe "SSH client user authentication encoding":
+
+    it "encodes a service request for ssh-userauth":
+        val payload = ssh_client_build_service_request(SSH_SERVICE_USERAUTH)
+        expect(payload[0]).to_equal(5)
+        expect(payload.len()).to_equal(17)
+        expect(payload[4]).to_equal(12)
+
+    it "accepts SERVICE_ACCEPT only for the service that was requested":
+        var accept: [u8] = []
+        accept.push(6)
+        accept = ssh_put_text(accept, "ssh-userauth")
+        expect(ssh_client_parse_service_accept(accept, SSH_SERVICE_USERAUTH).is_ok()).to_equal(true)
+        var wrong: [u8] = []
+        wrong.push(6)
+        wrong = ssh_put_text(wrong, "ssh-connection")
+        val bad = ssh_client_parse_service_accept(wrong, SSH_SERVICE_USERAUTH)
+        expect(bad.is_ok()).to_equal(false)
+        expect(bad.unwrap_err()).to_contain("expected ssh-userauth")
+
+    it "encodes a password userauth request in RFC 4252 field order":
+        val payload = ssh_client_build_userauth_password("root", SSH_SERVICE_CONNECTION, "hunter2")
+        expect(payload[0]).to_equal(50)
+        expect(payload[4]).to_equal(4)
+        expect(ssh_ascii_bytes_to_text(payload)).to_contain("root")
+        expect(ssh_ascii_bytes_to_text(payload)).to_contain("ssh-connection")
+        expect(ssh_ascii_bytes_to_text(payload)).to_contain("password")
+        expect(ssh_ascii_bytes_to_text(payload)).to_contain("hunter2")
+
+    it "binds the session id into the publickey signature input":
+        val blob = bstr("KEYBLOB")
+        val signed_a = ssh_client_publickey_signed_data(seed32(1), "root", SSH_SERVICE_CONNECTION, "ssh-ed25519", blob)
+        val signed_b = ssh_client_publickey_signed_data(seed32(9), "root", SSH_SERVICE_CONNECTION, "ssh-ed25519", blob)
+        # Same request, different session -> different bytes to sign.
+        expect(signed_a.len()).to_equal(signed_b.len())
+        expect(signed_a == signed_b).to_equal(false)
+        # The signed blob starts with string(session_id) and the TRUE flag is set.
+        expect(signed_a[3]).to_equal(32)
+        expect(signed_a[36]).to_equal(50)
+
+    it "refuses to wrap a signature that is not 64 bytes":
+        val bad = ssh_client_build_ed25519_signature_blob(repeat_byte(1, 63))
+        expect(bad.is_ok()).to_equal(false)
+        expect(bad.unwrap_err()).to_contain("64 bytes")
+        expect(ssh_client_build_ed25519_signature_blob(repeat_byte(1, 64)).is_ok()).to_equal(true)
+
+    it "decodes SUCCESS, FAILURE and BANNER replies and rejects anything else":
+        var success: [u8] = []
+        success.push(52)
+        val ok = ssh_client_parse_userauth_reply(success)
+        expect(ok.is_ok()).to_equal(true)
+        expect(ok.unwrap().kind).to_equal(SSH_AUTH_REPLY_SUCCESS)
+
+        var failure: [u8] = []
+        failure.push(51)
+        failure = ssh_put_text(failure, "publickey,password")
+        failure.push(0)
+        val fail = ssh_client_parse_userauth_reply(failure)
+        expect(fail.is_ok()).to_equal(true)
+        expect(fail.unwrap().kind).to_equal(SSH_AUTH_REPLY_FAILURE)
+        expect(fail.unwrap().methods).to_equal("publickey,password")
+        expect(fail.unwrap().partial_success).to_equal(false)
+
+        var banner: [u8] = []
+        banner.push(53)
+        banner = ssh_put_text(banner, "welcome")
+        val ban = ssh_client_parse_userauth_reply(banner)
+        expect(ban.is_ok()).to_equal(true)
+        expect(ban.unwrap().kind).to_equal(SSH_AUTH_REPLY_BANNER)
+
+        var junk: [u8] = []
+        junk.push(77)
+        val bad = ssh_client_parse_userauth_reply(junk)
+        expect(bad.is_ok()).to_equal(false)
+        expect(bad.unwrap_err()).to_contain("unexpected message type")
+
+describe "SSH client session channel and exec":
+
+    it "encodes a session channel open with our window and packet limits":
+        val payload = ssh_client_build_channel_open_session(0)
+        expect(payload[0]).to_equal(90)
+        expect(ssh_ascii_bytes_to_text(payload)).to_contain("session")
+        expect(payload.len()).to_equal(24)
+
+    it "encodes an exec request and refuses an empty command":
+        val request = ssh_client_build_exec_request(3, "uname -a", true)
+        expect(request.is_ok()).to_equal(true)
+        val payload = request.unwrap()
+        expect(payload[0]).to_equal(98)
+        expect(payload[4]).to_equal(3)
+        expect(ssh_ascii_bytes_to_text(payload)).to_contain("exec")
+        expect(ssh_ascii_bytes_to_text(payload)).to_contain("uname -a")
+        expect(ssh_client_build_exec_request(3, "", true).is_ok()).to_equal(false)
+
+    it "decodes channel open confirmation, data, stderr and exit-status":
+        var confirm: [u8] = []
+        confirm.push(91)
+        confirm = ssh_put_u32(confirm, 0)
+        confirm = ssh_put_u32(confirm, 7)
+        confirm = ssh_put_u32(confirm, 2097152)
+        confirm = ssh_put_u32(confirm, 32768)
+        val open_ok = ssh_client_parse_channel_message(confirm)
+        expect(open_ok.is_ok()).to_equal(true)
+        expect(open_ok.unwrap().kind).to_equal(SSH_CHAN_OPEN_OK)
+        expect(open_ok.unwrap().sender).to_equal(7)
+
+        var data_msg: [u8] = []
+        data_msg.push(94)
+        data_msg = ssh_put_u32(data_msg, 0)
+        data_msg = ssh_put_string(data_msg, bstr("hello"))
+        val got = ssh_client_parse_channel_message(data_msg)
+        expect(got.is_ok()).to_equal(true)
+        expect(got.unwrap().kind).to_equal(SSH_CHAN_DATA)
+        expect(ssh_client_channel_text(got.unwrap())).to_equal("hello")
+
+        var stderr_msg: [u8] = []
+        stderr_msg.push(95)
+        stderr_msg = ssh_put_u32(stderr_msg, 0)
+        stderr_msg = ssh_put_u32(stderr_msg, 1)
+        stderr_msg = ssh_put_string(stderr_msg, bstr("oops"))
+        val err_msg = ssh_client_parse_channel_message(stderr_msg)
+        expect(err_msg.is_ok()).to_equal(true)
+        expect(err_msg.unwrap().kind).to_equal(SSH_CHAN_STDERR)
+        expect(ssh_client_channel_text(err_msg.unwrap())).to_equal("oops")
+
+        var exit_msg: [u8] = []
+        exit_msg.push(98)
+        exit_msg = ssh_put_u32(exit_msg, 0)
+        exit_msg = ssh_put_text(exit_msg, "exit-status")
+        exit_msg.push(0)
+        exit_msg = ssh_put_u32(exit_msg, 42)
+        val status = ssh_client_parse_channel_message(exit_msg)
+        expect(status.is_ok()).to_equal(true)
+        expect(status.unwrap().kind).to_equal(SSH_CHAN_EXIT_STATUS)
+        expect(status.unwrap().exit_status).to_equal(42)
+
+    it "fails closed on a truncated channel data message":
+        var short_msg: [u8] = []
+        short_msg.push(94)
+        short_msg = ssh_put_u32(short_msg, 0)
+        short_msg.push(0)
+        short_msg.push(0)
+        short_msg.push(0)
+        short_msg.push(200)
+        val bad = ssh_client_parse_channel_message(short_msg)
+        expect(bad.is_ok()).to_equal(false)

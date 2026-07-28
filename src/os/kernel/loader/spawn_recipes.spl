@@ -1,0 +1,214 @@
+# Spawn recipes — the least-authority SpawnSpec per legitimate spawn caller.
+#
+# Master plan §5.4 ("Remove ambient spawn authority") has two halves:
+#   1. the guard  — `spawn_authority.spl`, already wired at every ambient site;
+#   2. the recipes — THIS module, the thing the guard tells callers to use.
+#
+# Every userland caller that spawns a process names a recipe here. A recipe is a
+# `SpawnSpec` whose grants are exactly the authority that caller needs and no
+# more, so arming the boot seal changes NOTHING for a legitimate caller: it was
+# already spawning through an attenuated pouch, not through `spawn_full()`.
+#
+# This is NOT a second spawn path. A recipe only decides WHICH CapabilitySet the
+# child receives; the image build, scheduler task creation, and arch handoff stay
+# on the one existing path (`fs_exec_prepare_spawn_from_bytes` /
+# `create_user_task_pid`).
+#
+# THE PRECONDITION EVERY CALLER MUST MEET (cspace_spawn.`_find_source`):
+#   An ambient `CapabilitySet.full()` parent is `caps: [], is_pledged: false` —
+#   ZERO concrete tokens — so it authorizes NOTHING under a SpawnSpec mint and a
+#   recipe minted from it comes back deny-all with every grant `rejected`. A
+#   migrated caller must therefore hold real, delegable tokens. That is what
+#   `spawn_recipe_seed_parent_caps()` builds: the root grant a service task is
+#   given at boot, from which its recipe pouches are then derived.
+#
+# FREESTANDING DISCIPLINE (same rules as spawn_authority.spl / fs_exec_resolve.spl):
+#   - No module-level array/[text]/struct initializers — they do NOT run under
+#     the freestanding native-build. Every table is built INSIDE a function.
+#   - No class construction, no trait-object dispatch on this path.
+#   - Recipe ids are plain `i64` scalars so they can be threaded through the
+#     shared cross-arch bridge signature without an ABI change.
+
+use os.kernel.types.capability_types.{
+    CapabilitySet, CapabilityToken, CapabilityKind,
+    CAP_RIGHT_READ, CAP_RIGHT_EXEC
+}
+use os.kernel.ipc.cspace_spawn.{SpawnSpec, CapGrant, AttenuationSpec}
+
+# ============================================================================
+# Recipe ids
+# ============================================================================
+#
+# 0 is reserved for "no recipe" so an un-set scalar (zeroed .bss under the
+# freestanding build) means "ambient path, unchanged" — the fail-safe default.
+
+pub val SPAWN_RECIPE_NONE: i64 = 0
+pub val SPAWN_RECIPE_SHELL: i64 = 1
+pub val SPAWN_RECIPE_CONSOLE_SHELL: i64 = 2
+pub val SPAWN_RECIPE_APP_LAUNCHER: i64 = 3
+
+pub val SPAWN_RECIPE_FIRST: i64 = 1
+pub val SPAWN_RECIPE_LAST: i64 = 3
+
+pub fn spawn_recipe_is_migrated(recipe: i64) -> bool:
+    """True when `recipe` names a migrated caller with a real recipe.
+
+    `SPAWN_RECIPE_NONE` (and anything out of range) is NOT migrated — those
+    callers stay on the ambient path and stay subject to the root-only seal."""
+    if recipe < SPAWN_RECIPE_FIRST:
+        return false
+    recipe <= SPAWN_RECIPE_LAST
+
+pub fn spawn_recipe_name(recipe: i64) -> text:
+    """Greppable label for audit lines."""
+    if recipe == SPAWN_RECIPE_SHELL:
+        return "shell"
+    if recipe == SPAWN_RECIPE_CONSOLE_SHELL:
+        return "console-shell"
+    if recipe == SPAWN_RECIPE_APP_LAUNCHER:
+        return "app-launcher"
+    "none"
+
+# ============================================================================
+# Per-recipe authority declaration
+# ============================================================================
+#
+# The path prefix a recipe's child may execute and read under. Deliberately the
+# NARROWEST prefix that still covers the caller's real workload — widening one
+# of these is the reviewable act that widens the caller's authority.
+
+pub fn spawn_recipe_exec_prefix(recipe: i64) -> text:
+    """Executable path prefix this recipe's child is allowed to run from."""
+    if recipe == SPAWN_RECIPE_SHELL:
+        return "/bin/"
+    if recipe == SPAWN_RECIPE_CONSOLE_SHELL:
+        return "/bin/"
+    if recipe == SPAWN_RECIPE_APP_LAUNCHER:
+        return "/sys/apps/"
+    ""
+
+pub fn spawn_recipe_read_prefix(recipe: i64) -> text:
+    """Read prefix this recipe's child is allowed. Narrower than exec where the
+    caller does not need to read outside its own tree."""
+    if recipe == SPAWN_RECIPE_SHELL:
+        return "/bin/"
+    if recipe == SPAWN_RECIPE_CONSOLE_SHELL:
+        return "/bin/"
+    if recipe == SPAWN_RECIPE_APP_LAUNCHER:
+        return "/sys/apps/"
+    ""
+
+pub fn spawn_recipe_rights_mask(recipe: i64) -> u32:
+    """The rights-bitmask half of the declaration, for the meet point in
+    `spawn_authority.spawn_effective_rights_with_profile`.
+
+    Masking is done with `|` over the CAP_RIGHT_* constants exactly the way
+    `capability_types` defines them (plain u32 bit flags). Written as an explicit
+    `a | b` expression — never `x |= b` — because the compound-assign form drops
+    the operator on the current backends."""
+    if not spawn_recipe_is_migrated(recipe):
+        return 0u32
+    # Every migrated caller spawns an executable it must first read: READ|EXEC.
+    # None of them needs WRITE, ADMIN, MOUNT, MAP, or queue rights.
+    CAP_RIGHT_READ | CAP_RIGHT_EXEC
+
+# ============================================================================
+# The recipes
+# ============================================================================
+
+fn _atten_rights(mask: u32) -> AttenuationSpec:
+    """Rights-narrowing attenuation; all four fields written explicitly
+    (omitted defaulted struct fields nil-fill to 3 on the JIT).
+
+    EVERY grant in a recipe carries a NON-ZERO mask, including the kinds that
+    carry no rights of their own (ProcessSpawn). That is deliberate: per
+    `AttenuationSpec`, `rights_mask == 0` means "keep the PARENT's rights", so a
+    zero mask makes `spawn_authority.spawn_spec_requested_rights` fold the whole
+    parent set back into the request. A non-zero mask keeps the request pinned at
+    the recipe's declared rights, which is the property the seal-readiness proof
+    asserts."""
+    AttenuationSpec(rights_mask: mask, path_prefix: "", depth_limit: -1, single_use: false)
+
+pub fn spawn_recipe_grants(recipe: i64) -> [CapGrant]:
+    """The grant list for `recipe` — exactly the authority the caller needs.
+
+    Built inside the function (no module-level array initializer) so the table
+    exists under the freestanding native-build."""
+    var grants: [CapGrant] = []
+    if not spawn_recipe_is_migrated(recipe):
+        return grants
+    val exec_prefix = spawn_recipe_exec_prefix(recipe)
+    val read_prefix = spawn_recipe_read_prefix(recipe)
+    val mask = spawn_recipe_rights_mask(recipe)
+    grants.push(CapGrant(
+        label: "fs.exec",
+        requested: CapabilityKind.FileExec(path_prefix: exec_prefix),
+        atten: _atten_rights(mask)
+    ))
+    grants.push(CapGrant(
+        label: "fs.read",
+        requested: CapabilityKind.FileRead(path_prefix: read_prefix),
+        atten: _atten_rights(mask)
+    ))
+    grants.push(CapGrant(
+        label: "proc.spawn",
+        requested: CapabilityKind.ProcessSpawn,
+        atten: _atten_rights(mask)
+    ))
+    grants
+
+pub fn spawn_recipe_grant_count(recipe: i64) -> i64:
+    """How many grants `recipe` declares (0 for an unmigrated recipe)."""
+    spawn_recipe_grants(recipe).len()
+
+pub fn spawn_recipe_spec(recipe: i64, image_hash: text) -> SpawnSpec:
+    """The SpawnSpec a migrated caller presents instead of ambient authority.
+
+    `image_hash` is the content address of the binary being spawned; two callers
+    presenting the same hash with different recipes is the intended
+    "same immutable binary, different privilege" property."""
+    SpawnSpec(
+        image_hash: image_hash,
+        grants: spawn_recipe_grants(recipe),
+        isolation: spawn_recipe_name(recipe),
+        budget: 0u64
+    )
+
+# ============================================================================
+# Root-grant seeding (the precondition — see the header note on `_find_source`)
+# ============================================================================
+
+fn _root_token(kind: CapabilityKind, owner: u64, token_id: u64) -> CapabilityToken:
+    """One concrete, delegable root token. Every field explicit.
+
+    `depth: 2` is the documented default delegation budget for a fresh root
+    grant (capability_types.CapabilityToken), and `> 0` is what makes the token
+    usable as a `_find_source` parent."""
+    CapabilityToken(
+        kind: kind,
+        generation: 1u64,
+        owner: owner,
+        token_id: token_id,
+        parent_token_id: 0u64,
+        depth: 2
+    )
+
+pub fn spawn_recipe_seed_parent_caps(recipe: i64, owner: u64) -> CapabilitySet:
+    """The root grant a service task must hold so its recipe can be minted.
+
+    An ambient `full()` parent authorizes nothing under a SpawnSpec mint (zero
+    concrete tokens), so a migrated caller has to be SEEDED with real tokens at
+    boot. This builds exactly the tokens `spawn_recipe_grants(recipe)` needs —
+    the parent is therefore the tightest set that still admits its own recipe,
+    never a god-mode stand-in.
+
+    Returns a PLEDGED set: it can only ever shrink from here."""
+    var tokens: [CapabilityToken] = []
+    if not spawn_recipe_is_migrated(recipe):
+        return CapabilitySet(caps: tokens, is_pledged: true)
+    val exec_prefix = spawn_recipe_exec_prefix(recipe)
+    val read_prefix = spawn_recipe_read_prefix(recipe)
+    tokens.push(_root_token(CapabilityKind.FileExec(path_prefix: exec_prefix), owner, 1u64))
+    tokens.push(_root_token(CapabilityKind.FileRead(path_prefix: read_prefix), owner, 2u64))
+    tokens.push(_root_token(CapabilityKind.ProcessSpawn, owner, 3u64))
+    CapabilitySet(caps: tokens, is_pledged: true)

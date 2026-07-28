@@ -1,0 +1,234 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SSH client user authentication — RFC 4252.
+#
+# Direction-asymmetric half: the client BUILDS SSH_MSG_SERVICE_REQUEST and
+# SSH_MSG_USERAUTH_REQUEST and PARSES SERVICE_ACCEPT / USERAUTH_SUCCESS /
+# FAILURE / BANNER / PK_OK. os.apps.sshd.ssh_auth is the exact mirror, so
+# nothing here is a second copy of the same direction.
+#
+# The SSH string codec is reused from os.apps.sshd.ssh_packet and ed25519
+# signing from os.crypto.ed25519.
+
+use os.apps.sshd.ssh_packet.{
+    ssh_put_u32, ssh_put_text, ssh_put_string, ssh_put_bool, ssh_put_byte,
+    ssh_get_string, ssh_get_text, SshStringResult, SshTextResult
+}
+use os.crypto.ed25519.{ed25519_sign}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+val SSH_MSG_SERVICE_REQUEST_C: u8 = 5
+val SSH_MSG_SERVICE_ACCEPT_C: u8 = 6
+val SSH_MSG_USERAUTH_REQUEST_C: u8 = 50
+val SSH_MSG_USERAUTH_FAILURE_C: u8 = 51
+val SSH_MSG_USERAUTH_SUCCESS_C: u8 = 52
+val SSH_MSG_USERAUTH_BANNER_C: u8 = 53
+val SSH_MSG_USERAUTH_PK_OK_C: u8 = 60
+
+val SSH_SERVICE_USERAUTH: text = "ssh-userauth"
+val SSH_SERVICE_CONNECTION: text = "ssh-connection"
+
+# Reply kinds returned by ssh_client_parse_userauth_reply.
+val SSH_AUTH_REPLY_SUCCESS: text = "success"
+val SSH_AUTH_REPLY_FAILURE: text = "failure"
+val SSH_AUTH_REPLY_BANNER: text = "banner"
+val SSH_AUTH_REPLY_PK_OK: text = "pk_ok"
+
+struct SshAuthReply:
+    """Decoded server response to a userauth request."""
+    kind: text
+    methods: text          # FAILURE: name-list of methods that may continue
+    partial_success: bool  # FAILURE only
+    message: text          # BANNER only
+    algorithm: text        # PK_OK only
+    key_blob: [u8]         # PK_OK only
+
+fn _sshcli_u8_at(data: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+
+fn _empty_reply(kind: text) -> SshAuthReply:
+    SshAuthReply(
+        kind: kind,
+        methods: "",
+        partial_success: false,
+        message: "",
+        algorithm: "",
+        key_blob: []
+    )
+
+# ============================================================================
+# Service request
+# ============================================================================
+
+fn ssh_client_build_service_request(service: text) -> [u8]:
+    """byte SSH_MSG_SERVICE_REQUEST, string service_name."""
+    var buf: [u8] = []
+    buf = ssh_put_byte(buf, SSH_MSG_SERVICE_REQUEST_C)
+    buf = ssh_put_text(buf, service)
+    buf
+
+fn ssh_client_parse_service_accept(data: [u8], expected: text) -> Result<text, text>:
+    """Accept only an exact SERVICE_ACCEPT for the service we asked for."""
+    if data.len() < 5:
+        return Err("SERVICE_ACCEPT: too short")
+    if _sshcli_u8_at(data, 0) != SSH_MSG_SERVICE_ACCEPT_C:
+        return Err("SERVICE_ACCEPT: wrong message type")
+    val name: SshTextResult = ssh_get_text(data, 1)?
+    if name.value != expected:
+        return Err("SERVICE_ACCEPT: server accepted " + name.value + ", expected " + expected)
+    Ok(name.value)
+
+# ============================================================================
+# Password authentication (RFC 4252 section 8)
+# ============================================================================
+
+fn ssh_client_build_userauth_password(user: text, service: text, password: text) -> [u8]:
+    var buf: [u8] = []
+    buf = ssh_put_byte(buf, SSH_MSG_USERAUTH_REQUEST_C)
+    buf = ssh_put_text(buf, user)
+    buf = ssh_put_text(buf, service)
+    buf = ssh_put_text(buf, "password")
+    buf = ssh_put_bool(buf, false)   # not a password change
+    buf = ssh_put_text(buf, password)
+    buf
+
+# ============================================================================
+# Publickey authentication (RFC 4252 section 7)
+# ============================================================================
+
+fn _userauth_publickey_core(buf_in: [u8], user: text, service: text, algorithm: text, key_blob: [u8], has_signature: bool) -> [u8]:
+    var buf: [u8] = buf_in
+    buf = ssh_put_text(buf, user)
+    buf = ssh_put_text(buf, service)
+    buf = ssh_put_text(buf, "publickey")
+    buf = ssh_put_bool(buf, has_signature)
+    buf = ssh_put_text(buf, algorithm)
+    buf = ssh_put_string(buf, key_blob)
+    buf
+
+fn ssh_client_build_userauth_publickey_query(user: text, service: text, algorithm: text, key_blob: [u8]) -> [u8]:
+    """Probe form (has_signature = FALSE): asks whether the key is acceptable."""
+    var buf: [u8] = []
+    buf = ssh_put_byte(buf, SSH_MSG_USERAUTH_REQUEST_C)
+    _userauth_publickey_core(buf, user, service, algorithm, key_blob, false)
+
+fn ssh_client_publickey_signed_data(session_id: [u8], user: text, service: text, algorithm: text, key_blob: [u8]) -> [u8]:
+    """The exact byte string a publickey signature must cover:
+
+        string  session identifier
+        byte    SSH_MSG_USERAUTH_REQUEST
+        string  user name
+        string  service name
+        string  "publickey"
+        boolean TRUE
+        string  public key algorithm name
+        string  public key blob
+
+    Binding the session id is what stops a captured signature being replayed
+    into a different session.
+    """
+    var buf: [u8] = []
+    buf = ssh_put_string(buf, session_id)
+    buf = ssh_put_byte(buf, SSH_MSG_USERAUTH_REQUEST_C)
+    _userauth_publickey_core(buf, user, service, algorithm, key_blob, true)
+
+fn ssh_client_build_ed25519_signature_blob(signature: [u8]) -> Result<[u8], text>:
+    if signature.len() != 64:
+        return Err("publickey: ed25519 signature must be 64 bytes")
+    var buf: [u8] = []
+    buf = ssh_put_text(buf, "ssh-ed25519")
+    buf = ssh_put_string(buf, signature)
+    Ok(buf)
+
+fn ssh_client_build_userauth_publickey_ed25519(
+    session_id: [u8],
+    user: text,
+    service: text,
+    key_blob: [u8],
+    private_seed: [u8],
+    public_key: [u8]
+) -> Result<[u8], text>:
+    """Signed publickey request using an ed25519 user key."""
+    if session_id.len() == 0:
+        return Err("publickey: empty session id")
+    if private_seed.len() != 32:
+        return Err("publickey: ed25519 private seed must be 32 bytes")
+    if public_key.len() != 32:
+        return Err("publickey: ed25519 public key must be 32 bytes")
+
+    val signed = ssh_client_publickey_signed_data(session_id, user, service, "ssh-ed25519", key_blob)
+    val raw_sig = ed25519_sign(private_seed, public_key, signed)
+    val sig_blob = ssh_client_build_ed25519_signature_blob(raw_sig)?
+
+    var buf: [u8] = []
+    buf = ssh_put_byte(buf, SSH_MSG_USERAUTH_REQUEST_C)
+    buf = _userauth_publickey_core(buf, user, service, "ssh-ed25519", key_blob, true)
+    buf = ssh_put_string(buf, sig_blob)
+    Ok(buf)
+
+# ============================================================================
+# Server replies
+# ============================================================================
+
+fn ssh_client_parse_userauth_reply(data: [u8]) -> Result<SshAuthReply, text>:
+    """Decode SUCCESS / FAILURE / BANNER / PK_OK. Anything else is an error —
+    an unrecognised reply must never be read as an authentication success."""
+    if data.len() < 1:
+        return Err("USERAUTH reply: empty")
+    val msg: u8 = _sshcli_u8_at(data, 0)
+
+    if msg == SSH_MSG_USERAUTH_SUCCESS_C:
+        if data.len() != 1:
+            return Err("USERAUTH_SUCCESS: trailing bytes")
+        return Ok(_empty_reply(SSH_AUTH_REPLY_SUCCESS))
+
+    if msg == SSH_MSG_USERAUTH_FAILURE_C:
+        val methods: SshTextResult = ssh_get_text(data, 1)?
+        if methods.next_offset >= data.len():
+            return Err("USERAUTH_FAILURE: missing partial_success flag")
+        val partial: bool = _sshcli_u8_at(data, methods.next_offset) != 0
+        return Ok(SshAuthReply(
+            kind: SSH_AUTH_REPLY_FAILURE,
+            methods: methods.value,
+            partial_success: partial,
+            message: "",
+            algorithm: "",
+            key_blob: []
+        ))
+
+    if msg == SSH_MSG_USERAUTH_BANNER_C:
+        val message: SshTextResult = ssh_get_text(data, 1)?
+        return Ok(SshAuthReply(
+            kind: SSH_AUTH_REPLY_BANNER,
+            methods: "",
+            partial_success: false,
+            message: message.value,
+            algorithm: "",
+            key_blob: []
+        ))
+
+    if msg == SSH_MSG_USERAUTH_PK_OK_C:
+        val algorithm: SshTextResult = ssh_get_text(data, 1)?
+        val blob: SshStringResult = ssh_get_string(data, algorithm.next_offset)?
+        return Ok(SshAuthReply(
+            kind: SSH_AUTH_REPLY_PK_OK,
+            methods: "",
+            partial_success: false,
+            message: "",
+            algorithm: algorithm.value,
+            key_blob: blob.data
+        ))
+
+    Err("USERAUTH reply: unexpected message type " + msg.to_i64().to_text())
+
+export SshAuthReply
+export SSH_MSG_SERVICE_REQUEST_C, SSH_MSG_SERVICE_ACCEPT_C
+export SSH_MSG_USERAUTH_REQUEST_C, SSH_MSG_USERAUTH_FAILURE_C
+export SSH_MSG_USERAUTH_SUCCESS_C, SSH_MSG_USERAUTH_BANNER_C, SSH_MSG_USERAUTH_PK_OK_C
+export SSH_SERVICE_USERAUTH, SSH_SERVICE_CONNECTION
+export SSH_AUTH_REPLY_SUCCESS, SSH_AUTH_REPLY_FAILURE, SSH_AUTH_REPLY_BANNER, SSH_AUTH_REPLY_PK_OK
+export ssh_client_build_service_request, ssh_client_parse_service_accept
+export ssh_client_build_userauth_password
+export ssh_client_build_userauth_publickey_query, ssh_client_publickey_signed_data
+export ssh_client_build_ed25519_signature_blob, ssh_client_build_userauth_publickey_ed25519
+export ssh_client_parse_userauth_reply

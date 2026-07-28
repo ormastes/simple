@@ -15,10 +15,17 @@ use os.kernel.scheduler.scheduler_types.{
 use os.kernel.scheduler.green_carrier.{green_carrier_execution_state_new}
 use os.kernel.scheduler.scheduler_arm_bootstrap.{scheduler_create_bootstrap_user_task_pid}
 use os.kernel.loader.spawn_authority.{
-    spawn_authority_ambient_caps, spawn_authority_note_caller,
-    spawn_authority_current_caller, spawn_authority_clear_caller
+    spawn_authority_note_caller,
+    spawn_authority_current_caller, spawn_authority_clear_caller,
+    spawn_authority_note_recipe, spawn_authority_current_recipe,
+    spawn_authority_clear_recipe, spawn_authority_check_spawn,
+    spawn_authority_spawn_caps
+}
+use os.kernel.loader.spawn_recipes.{
+    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps
 }
 use os.kernel.types.task_types.{TaskId, TaskPriority, scheduler_flat_topology, user_process_image_entry, user_process_image_segment_count}
+use os.kernel.types.capability_types.{CapabilitySet}
 
 @cfg(arm64)
 extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
@@ -259,7 +266,15 @@ pub fn fs_exec_prepare_spawn_from_bytes(path: text, bytes: [u8], arch: Architect
     # The caller id comes from the scalar recorded by `fs_exec_spawn_as` (the
     # cross-arch bridge signature is shared, so it is not threaded as a param —
     # see spawn_authority.spl "Caller propagation").
-    val spawn_caps = spawn_authority_ambient_caps(spawn_authority_current_caller())
+    # A MIGRATED caller declares a recipe (`spawn_authority_note_recipe`) before
+    # descending, and then never touches ambient authority at all: it presents a
+    # SpawnSpec and gets an attenuated pouch minted from its own parent tokens.
+    # With no recipe declared the scalar is SPAWN_RECIPE_NONE and this is
+    # bit-for-bit the previous ambient call.
+    val spawn_recipe = spawn_authority_current_recipe()
+    val spawn_caller = spawn_authority_current_caller()
+    val spawn_caps = spawn_authority_spawn_caps(
+        spawn_caller, spawn_recipe, _fs_exec_parent_caps(spawn_caller, spawn_recipe))
     val scheduler_result: SchedulerBootstrapUserTaskResult = scheduler_create_bootstrap_user_task_pid(
         scheduler, image, TaskPriority.Normal, spawn_caps
     )
@@ -307,3 +322,76 @@ pub fn fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [text]) -> 
         return prepared.pid
     serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
     prepared.pid
+
+# ============================================================================
+# Recipe-gated entry points (master plan §5.4 — migrated userland callers)
+# ============================================================================
+
+fn _fs_exec_parent_caps(caller: i64, recipe: i64) -> CapabilitySet:
+    """The parent capability set a recipe mint is bounded by.
+
+    The fs-exec bridge builds its own bootstrap scheduler and therefore has no
+    handle on the calling task's `TaskControlBlock.capabilities`. Until boot
+    installs per-task root grants (see `spawn_recipe_seed_parent_caps`), the
+    bound used here is that same seeded grant — i.e. exactly the recipe's own
+    declared authority, which is strictly narrower than the `spawn_full()`
+    god-mode set this path used before, but does NOT yet enforce a real
+    per-caller parent bound.
+
+    TODO(boot-seal): thread the calling task's real `TaskControlBlock.capabilities`
+    into `fs_exec_prepare_spawn_from_bytes` so the `parent ∩` term is a genuine
+    bound rather than the recipe's own declaration. Must land with the boot-side
+    seeder in the arming session; the seal is safe to arm either way (the child is
+    attenuated in both cases), but the parent bound is only real afterwards."""
+    if not spawn_recipe_is_migrated(recipe):
+        return CapabilitySet.full()
+    val owner = if caller < 0: 0u64 else: caller.to_u64()
+    spawn_recipe_seed_parent_caps(recipe, owner)
+
+pub fn fs_exec_spawn_with_recipe(caller: i64, recipe: i64, path: text, argv: [text], envp: [text]) -> i64:
+    """Capability-gated spawn under a named SpawnSpec recipe.
+
+    Same single spawn path as `fs_exec_spawn_as` — the recipe only changes WHICH
+    CapabilitySet the child receives. Admitted regardless of the boot seal,
+    because a recipe spawn never takes ambient authority."""
+    val allowed = spawn_authority_check_spawn(caller, recipe)
+    if allowed != 0:
+        serial_println("[fs-exec] spawn:seal-denied caller={caller} recipe={recipe} path={path}")
+        return allowed as i64
+    val gate = exec_cap_check(caller, path)
+    if gate != 0:
+        serial_println("[fs-exec] spawn:denied caller={caller} path={path} err={gate}")
+        return gate as i64
+    spawn_authority_note_caller(caller)
+    spawn_authority_note_recipe(recipe)
+    val prepared = fs_exec_prepare_spawn(path, argv, envp)
+    spawn_authority_clear_recipe()
+    spawn_authority_clear_caller()
+    if prepared.pid <= 0:
+        return prepared.pid
+    serial_println("[fs-exec] spawn:pid={prepared.pid} recipe={recipe} path={path}")
+    prepared.pid
+
+pub fn fs_exec_spawn_ring3_with_recipe(caller: i64, recipe: i64, path: text, argv: [text], envp: [text]) -> i64:
+    """Live user-mode handoff spawn under a named recipe.
+
+    Also fixes the audit hole in the plain `fs_exec_spawn_ring3`: that entry
+    never recorded its caller, so the shared bridge read a STALE
+    `g_spawn_current_caller` scalar and attributed the spawn to whoever spawned
+    last. This entry records caller AND recipe before descending, and clears both
+    after."""
+    val allowed = spawn_authority_check_spawn(caller, recipe)
+    if allowed != 0:
+        serial_println("[fs-exec] ring3:seal-denied caller={caller} recipe={recipe} path={path}")
+        return allowed as i64
+    val gate = exec_cap_check(caller, path)
+    if gate != 0:
+        serial_println("[fs-exec] ring3:denied caller={caller} path={path} err={gate}")
+        return gate as i64
+    spawn_authority_note_caller(caller)
+    spawn_authority_note_recipe(recipe)
+    val pid = _fs_exec_spawn_ring3_active(path, argv, envp)
+    spawn_authority_clear_recipe()
+    spawn_authority_clear_caller()
+    serial_println("[fs-exec] ring3:result caller={caller} recipe={recipe} pid={pid}")
+    pid

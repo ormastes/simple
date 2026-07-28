@@ -10,7 +10,9 @@ use os.kernel.types.task_types.{TaskId, TaskPriority, BlockReason}
 # NOTE: `spawn_full()` is no longer called directly here — every ambient grant
 # now goes through `spawn_authority_ambient_caps()`, which returns `spawn_full()`
 # for authorized callers and the pledged deny-all set for everyone else.
-use os.kernel.loader.spawn_authority.{spawn_authority_check_ambient, spawn_authority_ambient_caps, spawn_authority_bootstrap_sealed}
+use os.kernel.loader.spawn_authority.{spawn_authority_ambient_caps, spawn_authority_bootstrap_sealed, spawn_authority_check_spawn, spawn_authority_spawn_caps, spawn_authority_current_recipe}
+use os.kernel.loader.spawn_recipes.{spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps}
+use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.scheduler.scheduler.{Scheduler, wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -115,8 +117,13 @@ fn _ambient_spawn_denied(caller: i64) -> bool:
     Refusal is only possible after `spawn_authority_seal_bootstrap()`; while the
     bootstrap window is open every caller is allowed (fail-open boot, fail-closed
     afterwards). The redundant `bootstrap_sealed()` re-check keeps that invariant
-    explicit at the call site rather than implicit in the guard."""
-    if spawn_authority_check_ambient(caller) == 0:
+    explicit at the call site rather than implicit in the guard.
+
+    A caller that declared a MIGRATED recipe (master plan §5.4) is never refused
+    here: it is not asking for ambient authority at all, and
+    `_spawn_caps_for` mints it an attenuated pouch instead. That is what makes
+    arming the boot seal a no-op for legitimate userland spawns."""
+    if spawn_authority_check_spawn(caller, _declared_spawn_recipe()) == 0:
         return false
     if not spawn_authority_bootstrap_sealed():
         return false
@@ -124,6 +131,30 @@ fn _ambient_spawn_denied(caller: i64) -> bool:
     # take (and drop) the powerless set it hands back on the refusal path.
     val _refused_caps = spawn_authority_ambient_caps(caller)
     true
+
+fn _declared_spawn_recipe() -> i64:
+    """The SpawnSpec recipe declared by the caller for the spawn in flight.
+
+    Read from the same scalar the fs-exec bridge uses (`spawn_authority.spl`
+    "Caller propagation"), because syscall 13's ABI has no recipe argument.
+
+    TODO(boot-seal): carry the recipe id as an explicit syscall argument so a
+    genuine ring-3 caller can declare it across the privilege boundary. The
+    scalar only propagates for in-image callers (launcher, boot services), which
+    is every migrated caller today."""
+    spawn_authority_current_recipe()
+
+fn _spawn_caps_for(caller: i64) -> CapabilitySet:
+    """The capability set to install for the spawn in flight.
+
+    No declared recipe -> the unchanged ambient path, bit-for-bit as before.
+    Declared migrated recipe -> a `spawn_with_cspace` mint bounded by the
+    caller's seeded root grant (see `spawn_recipe_seed_parent_caps`)."""
+    val recipe = _declared_spawn_recipe()
+    if not spawn_recipe_is_migrated(recipe):
+        return spawn_authority_ambient_caps(caller)
+    val owner = if caller < 0: 0u64 else: caller.to_u64()
+    spawn_authority_spawn_caps(caller, recipe, spawn_recipe_seed_parent_caps(recipe, owner))
 
 fn _handle_exit(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Exit the current task with the given exit code.
@@ -181,7 +212,7 @@ fn _handle_spawn(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     val caller = _ambient_spawn_caller(scheduler)
     if _ambient_spawn_denied(caller):
         return SyscallResult(value: 0 - EACCES as i64)
-    val caps = spawn_authority_ambient_caps(caller)
+    val caps = _spawn_caps_for(caller)
 
     var sched = scheduler
     val task_id = sched.create_task(entry, priority, caps)
@@ -702,7 +733,7 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
         val caller = _ambient_spawn_caller(scheduler)
         if _ambient_spawn_denied(caller):
             return SyscallResult(value: 0 - EACCES as i64)
-        val caps = spawn_authority_ambient_caps(caller)
+        val caps = _spawn_caps_for(caller)
         var sched = scheduler
         val before_next_task_id = g_scheduler_next_task_id
         val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
@@ -775,7 +806,7 @@ fn _spawn_from_resolved_bytes_for_arch_state(path: text, path_bytes: [u8], bytes
     val caller = _ambient_spawn_caller(scheduler)
     if _ambient_spawn_denied(caller):
         return SpawnBinaryDirectState(pid: 0 - EACCES as i64, scheduler: scheduler)
-    val caps = spawn_authority_ambient_caps(caller)
+    val caps = _spawn_caps_for(caller)
     var sched = scheduler
     log_raw_println("[syscall13] staged create_user_task begin")
     val pid = sched.create_user_task_from_bytes_pid(path, bytes, arch, priority, caps)

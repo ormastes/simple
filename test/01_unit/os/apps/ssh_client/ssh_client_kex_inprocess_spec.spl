@@ -1,0 +1,304 @@
+"""
+# Pure-Simple SSH Client — Host Key Pinning and In-Process Key Exchange
+
+**Feature IDs:** N/A
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** Implemented
+
+## Overview
+
+The security core of the client. An SSH client that does not pin the server
+host key hands the whole session to a man in the middle, so every case here
+asserts a CLOSED failure, not a warning.
+
+The "server" in this file is not a mock: the KEX_ECDH_REPLY is produced by the
+REAL sshd builders (`ssh_build_kexinit`, `ssh_build_kex_ecdh_reply`), the
+shared secret and exchange hash come from the REAL sshd key-exchange core
+(`ssh_kex_compute_shared`, `ssh_kex_compute_exchange_hash`), and the host-key
+signature is a REAL ed25519 signature from `os.crypto.ed25519`. Client and
+server are therefore driven against each other in-process, byte for byte,
+without a socket.
+
+Covers:
+  1. known_hosts parsing, base64 round-trip, malformed-store rejection.
+  2. Unknown host key -> REFUSED. Changed host key -> REFUSED as a mismatch.
+  3. Exact match -> accepted.
+  4. Signature over the exchange hash verifies with the right host key and
+     FAILS with the wrong one.
+  5. Full in-process client<->server key exchange producing session keys, and
+     the same exchange refused when the host key is not pinned.
+
+tag: unit, ssh, ssh_client, security, crypto
+"""
+
+use std.spipe.*
+use os.apps.ssh_client.ssh_known_hosts.{
+    SshKnownHostsDb, SshKnownHostEntry,
+    ssh_known_hosts_parse, ssh_known_hosts_verify, ssh_known_hosts_status,
+    ssh_known_hosts_line, ssh_base64_encode_bytes, ssh_base64_decode_bytes,
+    SSH_HOSTKEY_OK, SSH_HOSTKEY_UNKNOWN, SSH_HOSTKEY_MISMATCH
+}
+use os.apps.ssh_client.ssh_client_kex.{
+    ssh_client_build_kex_ecdh_init, ssh_client_parse_kex_ecdh_reply,
+    ssh_client_ed25519_host_key, ssh_client_ed25519_signature,
+    ssh_client_verify_host_signature, ssh_client_complete_kex
+}
+use os.apps.ssh_client.ssh_client_kexinit.{ssh_client_build_kexinit}
+use os.apps.ssh_client.ssh_client_version.{ssh_client_version_bytes}
+use os.apps.sshd.ssh_transport.{ssh_build_kexinit}
+use os.apps.sshd.ssh_kex.{ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init}
+use os.apps.sshd.ssh_kex_core.{
+    ssh_kex_public_from_private, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash
+}
+use os.apps.sshd.ssh_kex_primitives.{ssh_build_ed25519_host_key_blob}
+use os.apps.sshd.ssh_packet.{ssh_put_text, ssh_put_string, ssh_ascii_text_to_bytes}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
+
+# ============================================================================
+# Deterministic fixtures — no randomness, so the whole handshake is reproducible
+# ============================================================================
+
+fn seed32(base: u8) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push(base + i.to_u8())
+        i = i + 1
+    out
+
+fn cookie16() -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 16:
+        out.push(0x11)
+        i = i + 1
+    out
+
+fn bstr(s: text) -> [u8]:
+    var src = ssh_ascii_text_to_bytes(s)
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn host_key_blob(seed_base: u8) -> [u8]:
+    """Real ssh-ed25519 host key blob for a deterministic seed."""
+    val pair = ed25519_keypair_from_seed(seed32(seed_base))
+    ssh_build_ed25519_host_key_blob(pair.1)
+
+fn host_private(seed_base: u8) -> [u8]:
+    val pair = ed25519_keypair_from_seed(seed32(seed_base))
+    pair.0
+
+fn host_public(seed_base: u8) -> [u8]:
+    val pair = ed25519_keypair_from_seed(seed32(seed_base))
+    pair.1
+
+fn server_version_bytes() -> [u8]:
+    bstr("SSH-2.0-SimpleOS_1.0")
+
+fn signature_blob(raw_signature: [u8]) -> [u8]:
+    var buf: [u8] = []
+    buf = ssh_put_text(buf, "ssh-ed25519")
+    buf = ssh_put_string(buf, raw_signature)
+    buf
+
+fn known_hosts_for(host: text, seed_base: u8) -> SshKnownHostsDb:
+    val content = ssh_known_hosts_line(host, "ssh-ed25519", host_key_blob(seed_base))
+    ssh_known_hosts_parse(content).unwrap()
+
+fn empty_known_hosts() -> SshKnownHostsDb:
+    ssh_known_hosts_parse("").unwrap()
+
+# ============================================================================
+# In-process server: every byte produced by the REAL sshd implementation.
+# ============================================================================
+
+fn server_kex_reply(host_seed: u8, server_private: [u8], client_kexinit: [u8], client_public: [u8]) -> [u8]:
+    """Play the sshd side of curve25519 KEX and return the wire reply payload."""
+    val blob = host_key_blob(host_seed)
+    val server_public = ssh_kex_public_from_private(server_private)
+    val shared = ssh_kex_compute_shared(server_private, client_public)
+    val exchange_hash = ssh_kex_compute_exchange_hash(
+        ssh_client_version_bytes(),
+        server_version_bytes(),
+        client_kexinit,
+        ssh_build_kexinit(),
+        blob,
+        client_public,
+        server_public,
+        shared
+    )
+    val raw_signature = ed25519_sign(host_private(host_seed), host_public(host_seed), exchange_hash)
+    ssh_build_kex_ecdh_reply(blob, server_public, signature_blob(raw_signature))
+
+fn server_exchange_hash(host_seed: u8, server_private: [u8], client_kexinit: [u8], client_public: [u8]) -> [u8]:
+    val server_public = ssh_kex_public_from_private(server_private)
+    val shared = ssh_kex_compute_shared(server_private, client_public)
+    ssh_kex_compute_exchange_hash(
+        ssh_client_version_bytes(),
+        server_version_bytes(),
+        client_kexinit,
+        ssh_build_kexinit(),
+        host_key_blob(host_seed),
+        client_public,
+        server_public,
+        shared
+    )
+
+# ============================================================================
+
+describe "host key signature over the exchange hash":
+
+    it "extracts the ed25519 public key and signature from their SSH blobs":
+        val blob = host_key_blob(1)
+        val key = ssh_client_ed25519_host_key(blob)
+        expect(key.is_ok()).to_equal(true)
+        expect(key.unwrap().len()).to_equal(32)
+        expect(key.unwrap()).to_equal(host_public(1))
+
+        var raw: [u8] = []
+        var i: u64 = 0
+        while i < 64:
+            raw.push(i.to_u8())
+            i = i + 1
+        val sig = ssh_client_ed25519_signature(signature_blob(raw))
+        expect(sig.is_ok()).to_equal(true)
+        expect(sig.unwrap()).to_equal(raw)
+
+    it "verifies a signature made by the matching host key":
+        val client_private = seed32(9)
+        val client_public = ssh_kex_public_from_private(client_private)
+        val client_kexinit = ssh_client_build_kexinit(cookie16())
+        val hash = server_exchange_hash(1, seed32(90), client_kexinit, client_public)
+        expect(hash.len()).to_equal(32)
+        val raw_signature = ed25519_sign(host_private(1), host_public(1), hash)
+        val verdict = ssh_client_verify_host_signature(host_key_blob(1), signature_blob(raw_signature), hash)
+        expect(verdict.is_ok()).to_equal(true)
+        expect(verdict.unwrap()).to_equal(true)
+
+    it "REFUSES a signature made by a different host key":
+        val client_private = seed32(9)
+        val client_public = ssh_kex_public_from_private(client_private)
+        val client_kexinit = ssh_client_build_kexinit(cookie16())
+        val hash = server_exchange_hash(1, seed32(90), client_kexinit, client_public)
+        # Signed by host key 200 but presented as host key 1.
+        val wrong_signature = ed25519_sign(host_private(200), host_public(200), hash)
+        val verdict = ssh_client_verify_host_signature(host_key_blob(1), signature_blob(wrong_signature), hash)
+        expect(verdict.is_ok()).to_equal(false)
+        expect(verdict.unwrap_err()).to_contain("verification FAILED")
+
+    it "REFUSES a signature over a different exchange hash":
+        val client_private = seed32(9)
+        val client_public = ssh_kex_public_from_private(client_private)
+        val client_kexinit = ssh_client_build_kexinit(cookie16())
+        val hash = server_exchange_hash(1, seed32(90), client_kexinit, client_public)
+        val other_hash = server_exchange_hash(1, seed32(91), client_kexinit, client_public)
+        val raw_signature = ed25519_sign(host_private(1), host_public(1), other_hash)
+        val verdict = ssh_client_verify_host_signature(host_key_blob(1), signature_blob(raw_signature), hash)
+        expect(verdict.is_ok()).to_equal(false)
+        expect(verdict.unwrap_err()).to_contain("verification FAILED")
+
+describe "in-process client to sshd key exchange":
+
+    it "completes a real curve25519 key exchange against the sshd builders":
+        val client_private = seed32(9)
+        val client_public = ssh_kex_public_from_private(client_private)
+        val client_kexinit = ssh_client_build_kexinit(cookie16())
+
+        # Client -> server.
+        val init_payload = ssh_client_build_kex_ecdh_init(client_public)
+        expect(init_payload.is_ok()).to_equal(true)
+        # The REAL sshd parser must accept what the client encoded.
+        val server_saw = ssh_parse_kex_ecdh_init(init_payload.unwrap())
+        expect(server_saw.is_ok()).to_equal(true)
+        expect(server_saw.unwrap()).to_equal(client_public)
+
+        # Server -> client, built by the real sshd reply builder.
+        val reply = server_kex_reply(1, seed32(90), client_kexinit, client_public)
+        val decoded = ssh_client_parse_kex_ecdh_reply(reply)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().server_public.len()).to_equal(32)
+
+        val result = ssh_client_complete_kex(
+            "simpleos",
+            known_hosts_for("simpleos", 1),
+            client_private,
+            ssh_client_version_bytes(),
+            server_version_bytes(),
+            client_kexinit,
+            ssh_build_kexinit(),
+            reply
+        )
+        expect(result.is_ok()).to_equal(true)
+        val completed = result.unwrap()
+        expect(completed.algorithm).to_equal("ssh-ed25519")
+        expect(completed.exchange_hash.len()).to_equal(32)
+        expect(completed.session_id).to_equal(completed.exchange_hash)
+        expect(completed.keys.enc_key_c2s.len()).to_equal(32)
+        expect(completed.keys.enc_key_s2c.len()).to_equal(32)
+        expect(completed.keys.iv_c2s.len()).to_equal(12)
+        # Directions must not share key material.
+        expect(completed.keys.enc_key_c2s == completed.keys.enc_key_s2c).to_equal(false)
+
+    it "REFUSES the same exchange when the host key is not in known_hosts":
+        val client_private = seed32(9)
+        val client_public = ssh_kex_public_from_private(client_private)
+        val client_kexinit = ssh_client_build_kexinit(cookie16())
+        val reply = server_kex_reply(1, seed32(90), client_kexinit, client_public)
+        val result = ssh_client_complete_kex(
+            "simpleos",
+            empty_known_hosts(),
+            client_private,
+            ssh_client_version_bytes(),
+            server_version_bytes(),
+            client_kexinit,
+            ssh_build_kexinit(),
+            reply
+        )
+        expect(result.is_ok()).to_equal(false)
+        expect(result.unwrap_err()).to_contain("unknown host key")
+
+    it "REFUSES a man-in-the-middle presenting a different host key":
+        val client_private = seed32(9)
+        val client_public = ssh_kex_public_from_private(client_private)
+        val client_kexinit = ssh_client_build_kexinit(cookie16())
+        # The MITM has its own valid ed25519 key and signs correctly with it.
+        val reply = server_kex_reply(200, seed32(90), client_kexinit, client_public)
+        val result = ssh_client_complete_kex(
+            "simpleos",
+            known_hosts_for("simpleos", 1),
+            client_private,
+            ssh_client_version_bytes(),
+            server_version_bytes(),
+            client_kexinit,
+            ssh_build_kexinit(),
+            reply
+        )
+        expect(result.is_ok()).to_equal(false)
+        expect(result.unwrap_err()).to_contain("HOST KEY MISMATCH")
+
+    it "fails closed on a truncated KEX_ECDH_REPLY":
+        val client_private = seed32(9)
+        val client_public = ssh_kex_public_from_private(client_private)
+        val client_kexinit = ssh_client_build_kexinit(cookie16())
+        val reply = server_kex_reply(1, seed32(90), client_kexinit, client_public)
+        var truncated: [u8] = []
+        var i: u64 = 0
+        while i < reply.len() - 20:
+            truncated.push(reply[i])
+            i = i + 1
+        val result = ssh_client_complete_kex(
+            "simpleos",
+            known_hosts_for("simpleos", 1),
+            client_private,
+            ssh_client_version_bytes(),
+            server_version_bytes(),
+            client_kexinit,
+            ssh_build_kexinit(),
+            truncated
+        )
+        expect(result.is_ok()).to_equal(false)
