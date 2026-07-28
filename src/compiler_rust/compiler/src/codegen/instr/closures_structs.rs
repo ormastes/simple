@@ -80,6 +80,30 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             | ("has" | "contains" | "contains_key" | "has_key", 1)
             | ("remove", 1)
             | ("find", 1)
+            // Text prefix/suffix tests. Same hazard as the collection idioms
+            // above, and the one that page-faulted the SimpleOS WM guest
+            // (2026-07-27): a bare `text.starts_with(prefix)` carries NO
+            // receiver type at this point — `SIMPLE_DUMP_MIR` shows the MIR
+            // for a text receiver and a ByteSpan receiver are byte-identical
+            // (`MethodCallStatic { func_name: "starts_with" }`) — so the
+            // cross-module `use_map`/`import_map` suffix scan in
+            // `compile_method_call_static` binds it to the FIRST linked
+            // `*.starts_with` it finds. Whenever `common.bytes.span` is
+            // anywhere in the entry closure that is
+            // `ByteSpan.starts_with`, which reads the text receiver as a
+            // ByteSpan struct and dereferences garbage.
+            // `rt_string_starts_with` / `rt_string_ends_with` tag-dispatch
+            // safely on any value, so route bare calls there first.
+            //
+            // Scope note: this only fires for an ERASED receiver. A genuine
+            // `span.starts_with(other_span)` on a typed ByteSpan (or
+            // `path.starts_with(p)` on `fs_driver::Path`, the only other
+            // in-tree instance method with this name/arity) lowers to the
+            // qualified name "ByteSpan.starts_with", and the caller gates
+            // this whole check on `!lookup_name.contains('.')`, so those
+            // still resolve to their real method. `Matcher.starts_with` is
+            // a `static fn` and is likewise always qualified.
+            | ("starts_with" | "ends_with", 1)
             // `is_empty` is handled below (compiled as `rt_len(receiver) == 0`)
             // but was missing from this gate, so a bare (erased-receiver)
             // `.is_empty()` fell all the way through to suffix-based symbol
@@ -887,6 +911,20 @@ mod tests {
         assert!(is_bare_builtin_collection_method("keys", 0));
         assert!(is_bare_builtin_collection_method("values", 0));
         assert!(!is_bare_builtin_collection_method("keys", 1));
+    }
+
+    /// A bare `text.starts_with(prefix)` must reach `rt_string_starts_with`
+    /// before any name/use_map resolution, or it binds to whatever
+    /// `Type.starts_with` (e.g. `ByteSpan.starts_with`) happens to be linked
+    /// into the entry closure and dereferences the text as that struct.
+    #[test]
+    fn erased_text_prefix_suffix_use_builtin_dispatch() {
+        assert!(is_bare_builtin_collection_method("starts_with", 1));
+        assert!(is_bare_builtin_collection_method("ends_with", 1));
+        // Arity-gated: a differently-shaped user method still resolves normally.
+        assert!(!is_bare_builtin_collection_method("starts_with", 0));
+        assert!(!is_bare_builtin_collection_method("starts_with", 2));
+        assert!(!is_bare_builtin_collection_method("ends_with", 2));
     }
 }
 
