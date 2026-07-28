@@ -122,9 +122,13 @@ fn _full_transcript_hash(client_version: text, server_public: [u8], shared_secre
     val seed = _ed25519_seed()
     val host_pub = ed25519_keypair_from_seed(seed).1
     val host_blob = ssh_build_ed25519_host_key_blob(host_pub)
+    # NOTE: client_version/server_version are `[u8]` parameters. Passing `text`
+    # here is silently accepted by the compiler and contributes NOTHING to the
+    # digest, so two different version strings produced an identical exchange
+    # hash and the version-binding assertion could never hold. Convert first.
     ssh_kex_compute_exchange_hash(
-        client_version,
-        "SSH-2.0-SimpleOS_1.0",
+        rt_text_to_bytes(client_version),
+        rt_text_to_bytes("SSH-2.0-SimpleOS_1.0"),
         _filled_bytes(32, 0x11),
         _filled_bytes(48, 0x44),
         host_blob,
@@ -347,23 +351,92 @@ describe "host-key aware KEXINIT builder":
             rsa_public_blob: nil,
             ecdsa_p256_pkcs8: nil
         ))
-        expect(payload[0]).to_equal(20)
+        # RFC 4253 section 7.1 layout:
+        #   byte      SSH_MSG_KEXINIT (20)
+        #   byte[16]  cookie
+        #   name-list x 10
+        #   boolean   first_kex_packet_follows
+        #   uint32    reserved (0)
+        val msg_type = payload[0]
+        expect(msg_type).to_equal(20)
+
+        # Cookie: 16 bytes at offsets 1..16, all zero for this builder.
+        var cookie_nonzero: u64 = 0
         var i: u64 = 1
         while i < 17:
-            expect(payload[i]).to_equal(0)
+            if payload[i] != 0:
+                cookie_nonzero = cookie_nonzero + 1
             i = i + 1
-        expect(ssh_get_u32(payload, 17)).to_equal(17)
+        expect(cookie_nonzero).to_equal(0)
 
-        var off: u64 = 17
-        var field: u64 = 0
-        while field < 10:
-            val field_len = ssh_get_u32(payload, off).to_u64()
-            off = off + 4 + field_len
-            field = field + 1
-        expect(payload[off]).to_equal(0)
-        off = off + 1
-        expect(ssh_get_u32(payload, off)).to_equal(0)
-        expect(off + 4).to_equal(payload.len())
+        # Each name-list length, asserted individually so a wire-format
+        # regression names the exact field that moved.
+        val len_kex = ssh_get_u32(payload, 17).to_u64()
+        # "curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com" = 57 bytes
+        expect(len_kex).to_equal(57)
+        val off_hostkey = 17 + 4 + len_kex
+        expect(off_hostkey).to_equal(78)
+
+        val len_hostkey = ssh_get_u32(payload, off_hostkey).to_u64()
+        # ed25519-only host key set advertises "ssh-ed25519" = 11 bytes
+        expect(len_hostkey).to_equal(11)
+        val off_enc_c2s = off_hostkey + 4 + len_hostkey
+        expect(off_enc_c2s).to_equal(93)
+
+        val len_enc_c2s = ssh_get_u32(payload, off_enc_c2s).to_u64()
+        # "aes256-gcm@openssh.com" = 22 bytes
+        expect(len_enc_c2s).to_equal(22)
+        val off_enc_s2c = off_enc_c2s + 4 + len_enc_c2s
+        expect(off_enc_s2c).to_equal(119)
+
+        val len_enc_s2c = ssh_get_u32(payload, off_enc_s2c).to_u64()
+        expect(len_enc_s2c).to_equal(22)
+        val off_mac_c2s = off_enc_s2c + 4 + len_enc_s2c
+        expect(off_mac_c2s).to_equal(145)
+
+        val len_mac_c2s = ssh_get_u32(payload, off_mac_c2s).to_u64()
+        # "none" = 4 bytes (AES-GCM carries its own tag)
+        expect(len_mac_c2s).to_equal(4)
+        val off_mac_s2c = off_mac_c2s + 4 + len_mac_c2s
+        expect(off_mac_s2c).to_equal(153)
+
+        val len_mac_s2c = ssh_get_u32(payload, off_mac_s2c).to_u64()
+        expect(len_mac_s2c).to_equal(4)
+        val off_comp_c2s = off_mac_s2c + 4 + len_mac_s2c
+        expect(off_comp_c2s).to_equal(161)
+
+        val len_comp_c2s = ssh_get_u32(payload, off_comp_c2s).to_u64()
+        expect(len_comp_c2s).to_equal(4)
+        val off_comp_s2c = off_comp_c2s + 4 + len_comp_c2s
+        expect(off_comp_s2c).to_equal(169)
+
+        val len_comp_s2c = ssh_get_u32(payload, off_comp_s2c).to_u64()
+        expect(len_comp_s2c).to_equal(4)
+        val off_lang_c2s = off_comp_s2c + 4 + len_comp_s2c
+        expect(off_lang_c2s).to_equal(177)
+
+        # Both language name-lists are empty per RFC 4253 section 7.1.
+        val len_lang_c2s = ssh_get_u32(payload, off_lang_c2s).to_u64()
+        expect(len_lang_c2s).to_equal(0)
+        val off_lang_s2c = off_lang_c2s + 4 + len_lang_c2s
+        expect(off_lang_s2c).to_equal(181)
+
+        val len_lang_s2c = ssh_get_u32(payload, off_lang_s2c).to_u64()
+        expect(len_lang_s2c).to_equal(0)
+        val off_bool = off_lang_s2c + 4 + len_lang_s2c
+        expect(off_bool).to_equal(185)
+
+        # boolean first_kex_packet_follows = false
+        val first_kex_follows = payload[off_bool]
+        expect(first_kex_follows).to_equal(0)
+
+        # uint32 reserved = 0, and nothing after it
+        val off_reserved = off_bool + 1
+        val reserved = ssh_get_u32(payload, off_reserved).to_u64()
+        expect(reserved).to_equal(0)
+        val payload_len = payload.len()
+        expect(off_reserved + 4).to_equal(payload_len)
+        expect(payload_len).to_equal(190)
 
 # ============================================================================
 # rsa-sha2-256 Tests
@@ -602,11 +675,11 @@ describe "host_key_set_advertised_algorithms":
         val expected = "ssh-ed25519,rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256"
         expect(host_key_set_advertised_algorithms(host_keys)).to_equal(expected)
 
-    it "empty set defaults to ssh-ed25519":
+    it "empty set advertises nothing (fail closed, never a default algorithm)":
         val host_keys = HostKeySet(
             ed25519_seed: nil,
             rsa_pkcs8: nil,
             rsa_public_blob: nil,
             ecdsa_p256_pkcs8: nil
         )
-        expect(host_key_set_advertised_algorithms(host_keys)).to_equal("ssh-ed25519")
+        expect(host_key_set_advertised_algorithms(host_keys)).to_equal("")
