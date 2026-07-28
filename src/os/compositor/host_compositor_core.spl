@@ -669,6 +669,27 @@ class HostCompositor:
         self.external_web_frames = kept_frames
         true
 
+    me _drop_window_render_state(window_id: i64):
+        self._drop_external_web_frame(window_id)
+        self.scroll_offsets.remove(window_id)
+        self.content_caches.remove(window_id)
+        if self.drag_window_id == window_id:
+            self.dragging = false
+            self.drag_window_id = 0
+        if self.resize_window_id == window_id:
+            self.resizing = false
+            self.resize_window_id = 0
+        if self.armed_chrome_window_id == window_id:
+            self.armed_chrome_target = ""
+            self.armed_chrome_window_id = 0
+        var native_index = 0
+        while native_index < self.native_cache_window_ids.len():
+            if self.native_cache_window_ids[native_index] == window_id:
+                self.native_cache_window_ids.remove(native_index)
+                self.native_content_caches.remove(native_index)
+                return
+            native_index = native_index + 1
+
     me require_external_web_frame(window_id: i64) -> bool:
         if window_id <= 0 or self._find_window_index(window_id) < 0:
             return false
@@ -1326,7 +1347,7 @@ class HostCompositor:
         while j < prior_windows.len():
             if _host_find_window_by_id(self.windows, prior_windows[j].id) < 0:
                 val gone = prior_windows[j]
-                self._drop_external_web_frame(gone.id)
+                self._drop_window_render_state(gone.id)
                 self.dirty.add_rect(gone.x, gone.y, gone.w, gone.h)
             j = j + 1
 
@@ -1412,6 +1433,10 @@ class HostCompositor:
             i = i + 1
         if hit_idx >= 0:
             val wid = self.windows[hit_idx].id
+            # Sandboxed browser frames own page scrolling. Retaining a parent
+            # offset only dirties and redraws the same external pixels.
+            if self.is_browser_window(wid):
+                return
             val current = self.scroll_offsets.get(wid) ?? 0.0
             self.scroll_offsets[wid] = current + dy
             # Scroll changes rendered content without touching self.windows,

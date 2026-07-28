@@ -1286,3 +1286,14 @@ implementation in progress / target evidence blocked
   the fail-closed tombstone while retaining learned HSTS for persistence.
   Liveness-observed dead children clear the handle already consumed by the
   process facade; only genuine close failures retain ownership for retry.
+- Compositor window destruction now releases every window-keyed render owner:
+  external frame pixels, wheel offsets, hosted pixel caches, and native pixel
+  caches. Previously, every destroyed rendered window could retain a full
+  cached frame for the compositor lifetime; the focused regression renders,
+  scrolls, closes, and asserts the native/hosted caches and offset are empty.
+  The same lifecycle owner clears matching drag, resize, and armed-chrome state
+  so programmatic close cannot leave a stuck interaction.
+- Wheel input over renderer-owned browser windows no longer records a parent
+  compositor offset or dirties an unchanged external frame. Actual browser
+  scrolling remains a separate sandbox protocol/worker lane; this change only
+  removes the proven no-op allocation and redraw.

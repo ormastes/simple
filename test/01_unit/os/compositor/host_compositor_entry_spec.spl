@@ -1104,6 +1104,49 @@ describe "hosted WM mouse wheel + non-left buttons (FIX 1)":
         comp.handle_mouse_wheel(0.0, 4.0)
         expect(comp.scroll_offset_for(comp.windows[0].id)).to_equal(0.0)
 
+    it "does not retain a useless parent scroll offset for sandboxed browsers":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Browser", 40, 60, 200, 140, "", 1, "browser")
+        val window_id = comp.windows[0].id
+        comp.handle_mouse_move(80, 100)
+        comp.handle_mouse_wheel(0.0, 5.0)
+        expect(comp.scroll_offset_for(window_id)).to_equal(0.0)
+
+    it "releases scroll and rendered pixel caches when a window closes":
+        val comp = HostCompositor.new_headless(Size.wh(160, 120))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "One", 8, 8, 120, 96, "cached", 1, "/sys/apps/one")
+        val window_id = comp.windows[0].id
+        comp.handle_mouse_move(40, 50)
+        comp.handle_mouse_wheel(0.0, 5.0)
+        comp.render_frame()
+        expect(comp.native_cache_window_ids).to_contain(window_id)
+        expect(comp.scroll_offset_for(window_id)).to_equal(5.0)
+        comp.dragging = true
+        comp.drag_window_id = window_id
+        comp.resizing = true
+        comp.resize_window_id = window_id
+        comp.armed_chrome_target = "close"
+        comp.armed_chrome_window_id = window_id
+
+        comp.destroy_window(window_id)
+        expect(comp.native_cache_window_ids.len()).to_equal(0)
+        expect(comp.native_content_caches.len()).to_equal(0)
+        expect(comp.scroll_offset_for(window_id)).to_equal(0.0)
+        expect(comp.dragging).to_be(false)
+        expect(comp.resizing).to_be(false)
+        expect(comp.armed_chrome_target).to_equal("")
+
+        val hosted = HostCompositor.new(
+            FakeCompositorBackend(w: 160, h: 120), Size.wh(160, 120)
+        )
+        hosted.apply_bridge_request(2, 88, COMP_CREATE_WINDOW.to_i64(), 0, "Two", 8, 8, 120, 96, "cached", 2, "/sys/apps/two")
+        val hosted_id = hosted.windows[0].id
+        hosted.render_frame()
+        expect(hosted.content_caches.contains_key(hosted_id)).to_be(true)
+        hosted.destroy_window(hosted_id)
+        expect(hosted.content_caches.contains_key(hosted_id)).to_be(false)
+
 describe "click-on-release chrome semantics (FIX 2)":
 
     it "does not close the window on mouse-down over the close button":
