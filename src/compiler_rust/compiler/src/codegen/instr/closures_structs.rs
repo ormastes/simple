@@ -987,21 +987,34 @@ fn try_compile_builtin_method_call<M: Module>(
 
     // Numeric type conversion methods must produce a real native cast so later
     // boxing preserves the intended width and signedness.
-    if method.starts_with("to_u") || method.starts_with("to_i") || method.starts_with("to_f") {
+    //
+    // The cast names are matched EXACTLY. This guard used to be a prefix test
+    // (`starts_with("to_u") || starts_with("to_i") || starts_with("to_f")`),
+    // which also captured every non-cast method sharing those three prefixes --
+    // `to_upper`, `to_uppercase`, `to_include`, `to_index`, `to_int_or`,
+    // `to_utf8`, `to_iterable`, `to_id`, `to_import`, `to_unix_timestamp`,
+    // `to_feature_string` -- and then dropped them on the match's wildcard arm,
+    // which returned the receiver UNCHANGED. Every such call was therefore a
+    // silent no-op under the JIT that still exited 0: `"hello".to_upper()`
+    // evaluated to `"hello"` where the interpreter correctly returned `"HELLO"`.
+    // Names that are not numeric casts must fall through to the normal
+    // builtin/user-method resolution below, where e.g. `to_upper` is already
+    // mapped to `rt_string_to_upper`.
+    let numeric_cast_target = match method {
+        "to_u8" => Some(TypeId::U8),
+        "to_u16" => Some(TypeId::U16),
+        "to_u32" => Some(TypeId::U32),
+        "to_u64" => Some(TypeId::U64),
+        "to_i8" => Some(TypeId::I8),
+        "to_i16" => Some(TypeId::I16),
+        "to_i32" => Some(TypeId::I32),
+        "to_i64" | "to_int" => Some(TypeId::I64),
+        "to_f32" => Some(TypeId::F32),
+        "to_f64" | "to_float" => Some(TypeId::F64),
+        _ => None,
+    };
+    if let Some(to_ty) = numeric_cast_target {
         let from_ty = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
-        let to_ty = match method {
-            "to_u8" => TypeId::U8,
-            "to_u16" => TypeId::U16,
-            "to_u32" => TypeId::U32,
-            "to_u64" => TypeId::U64,
-            "to_i8" => TypeId::I8,
-            "to_i16" => TypeId::I16,
-            "to_i32" => TypeId::I32,
-            "to_i64" | "to_int" => TypeId::I64,
-            "to_f32" => TypeId::F32,
-            "to_f64" | "to_float" => TypeId::F64,
-            _ => return Ok(Some(receiver_val)),
-        };
 
         let to_is_int = matches!(
             to_ty,
@@ -1248,8 +1261,15 @@ fn try_compile_builtin_method_call<M: Module>(
         "find" => "rt_string_find",
         "any" => "rt_array_any",
         "all" => "rt_array_all",
+        // `rt_array_enumerate` has always existed in the runtime but had no
+        // dispatch arm, so `arr.enumerate()` raised "Function 'Array.enumerate'
+        // not found" and still exited 0. It returns (index, item) tuples,
+        // matching the interpreter.
+        "enumerate" => "rt_array_enumerate",
         // String extra methods
-        "trim" => "rt_string_trim",
+        // `strip`/`trimmed` are interpreter-level aliases of `trim`
+        // (interpreter_method/string.rs: `"trim" | "trimmed" | "strip"`).
+        "trim" | "trimmed" | "strip" => "rt_string_trim",
         "trim_start" => "rt_string_trim_start",
         "trim_end" => "rt_string_trim_end",
         "split" => "rt_string_split",
@@ -1260,7 +1280,9 @@ fn try_compile_builtin_method_call<M: Module>(
         "to_lower" | "lower" => "rt_string_to_lower",
         "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",
         "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => "rt_string_to_float",
-        "index_of" | "find_str" => "rt_string_find",
+        // Receiver-polymorphic: see rt_index_of.
+        "index_of" => "rt_index_of",
+        "find_str" => "rt_string_find",
         "rfind" | "last_index_of" => "rt_string_rfind",
         "to_string" | "to_text" | "str" => "rt_to_string",
         // Dict/collection methods

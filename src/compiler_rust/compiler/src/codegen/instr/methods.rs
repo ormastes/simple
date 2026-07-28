@@ -98,21 +98,28 @@ pub(crate) fn compile_builtin_method<M: Module>(
     args: &[VReg],
 ) -> InstrResult<()> {
     let receiver_val = ctx.get_vreg(&receiver)?;
-    if method.starts_with("to_u") || method.starts_with("to_i") || method.starts_with("to_f") || method == "to_int" {
+    // Cast names are matched EXACTLY. A `starts_with("to_u"/"to_i"/"to_f")`
+    // prefix test also captures non-cast methods such as `to_upper`,
+    // `to_uppercase`, `to_include`, `to_index`, `to_int_or`, `to_utf8`,
+    // `to_iterable`, `to_id` and `to_import`; those landed on the wildcard arm
+    // (`_ => from_ty`), which made `to_ty == from_ty` and emitted the receiver
+    // UNCHANGED -- a silent no-op that still exited 0. Non-cast names must fall
+    // through to the regular builtin dispatch further down.
+    let numeric_cast_target = match method {
+        "to_u8" => Some(TypeId::U8),
+        "to_u16" => Some(TypeId::U16),
+        "to_u32" => Some(TypeId::U32),
+        "to_u64" => Some(TypeId::U64),
+        "to_i8" => Some(TypeId::I8),
+        "to_i16" => Some(TypeId::I16),
+        "to_i32" => Some(TypeId::I32),
+        "to_i64" | "to_int" => Some(TypeId::I64),
+        "to_f32" => Some(TypeId::F32),
+        "to_f64" | "to_float" => Some(TypeId::F64),
+        _ => None,
+    };
+    if let Some(to_ty) = numeric_cast_target {
         let from_ty = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
-        let to_ty = match method {
-            "to_u8" => TypeId::U8,
-            "to_u16" => TypeId::U16,
-            "to_u32" => TypeId::U32,
-            "to_u64" => TypeId::U64,
-            "to_i8" => TypeId::I8,
-            "to_i16" => TypeId::I16,
-            "to_i32" => TypeId::I32,
-            "to_i64" | "to_int" => TypeId::I64,
-            "to_f32" => TypeId::F32,
-            "to_f64" | "to_float" => TypeId::F64,
-            _ => from_ty,
-        };
         let src_ty = builder.func.dfg.value_type(receiver_val);
         let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
         let actual_is_float = src_ty == types::F32 || src_ty == types::F64;

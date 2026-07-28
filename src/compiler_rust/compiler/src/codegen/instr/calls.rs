@@ -3214,7 +3214,11 @@ pub fn compile_call<M: Module>(
                 "pop" => Some("rt_array_pop"),
                 "clear" => Some("rt_array_clear"),
                 "join" => Some("rt_string_join"),
-                "trim" => Some("rt_string_trim"),
+                // `strip`/`trimmed` are interpreter-level aliases of `trim`
+                // (interpreter_method/string.rs: `"trim" | "trimmed" | "strip"`).
+                // Without them here `text.strip()` raised "Function 'str.strip'
+                // not found" and still exited 0.
+                "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
                 "trim_start" => Some("rt_string_trim_start"),
                 "trim_end" => Some("rt_string_trim_end"),
                 "split" => Some("rt_string_split"),
@@ -3225,7 +3229,10 @@ pub fn compile_call<M: Module>(
                 "to_lower" | "lower" => Some("rt_string_to_lower"),
                 "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
                 "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
-                "index_of" | "find" | "find_str" => Some("rt_string_find"),
+                // `index_of` is receiver-polymorphic (array or text): routing it
+                // to rt_string_find made every `[T].index_of(v)` return -1.
+                "index_of" => Some("rt_index_of"),
+                "find" | "find_str" => Some("rt_string_find"),
                 "rfind" | "last_index_of" => Some("rt_string_rfind"),
                 "to_string" | "to_text" | "str" => Some("rt_to_string"),
                 "slice" | "substring" => Some("rt_slice"),
@@ -3240,6 +3247,12 @@ pub fn compile_call<M: Module>(
                 "find" => Some("rt_array_find"),
                 "any" => Some("rt_array_any"),
                 "all" => Some("rt_array_all"),
+                // `rt_array_enumerate` has always existed in the runtime
+                // (runtime/src/value/collections.rs) but had no dispatch arm, so
+                // `arr.enumerate()` raised "Function 'Array.enumerate' not
+                // found" and still exited 0. It returns an array of
+                // (index, item) tuples, matching the interpreter.
+                "enumerate" => Some("rt_array_enumerate"),
                 _ => None,
             };
             if let Some(rt_name) = runtime_func {
