@@ -17,8 +17,9 @@ produce the pure-Simple prerequisite.
 
 ### Current bootstrap blocker
 
-The current synced checkpoint is
-`616454901c666f87e2cb7d70719d8d076ec81a1d`. The earlier pushed checkpoint
+The implementation checkpoint under verification is
+`269f46387e174d6e8b31ad494c0d177dc15e69f4`; this evidence-only commit follows
+it and intentionally does not self-record its own hash. The earlier pushed checkpoint
 `2eb2bbf93f10` is historical. Completion still requires the final
 fetch/rebase/file-count gate against the then-current `origin/main`.
 At the earlier source checkpoint `deb90cd8a9c`, both direct-runtime guards,
@@ -27,26 +28,19 @@ zero-executable-specs-under-`doc/06_spec` layout gate passed. Those retained
 static results do not prove the current checkout, runtime behavior, or a
 native row.
 
-No Stage 4 CLI/core-C identity was published and no global runner calibration
-ran. The three-check cap is reached; no further retry is permitted this
-session. A fresh session must verify the integrated accumulator and typed-index
-collector before any downstream evidence can be accepted.
+Current source `269f46387e1` replaces the quadratic sibling resolver with one
+shared package-sibling index and makes Stage3 use the pure positional route,
+the native-all runtime bundle, and forwarded target/cache/thread/runtime
+environment. All three producer cycles are exhausted. The latest stopped after
+17m29s at maximum RSS 23,943,204 KiB with no output; there is no fourth retry.
+No admitted CLI/core-C identity or global runner calibration exists.
 
-A separate read-only monitor observed the external compiler workspace produce
-compiler-only Stage3 SHA-256
-`704f67af420bd8788dda809b46112d0a9a76cec64601ebfe2a6958a894aa380f`,
-then fail Stage4 at `src/std/nogc_sync_mut/env/variables.spl:364`. `src/std`
-is the tracked `src/lib` symlink, so the canonical source path is
-`src/lib/nogc_sync_mut/env/variables.spl`. A clean current checkout already
-uses the safe Option form following the non-nil guard; this identifies the
-external dirty checkout as stale rather than a new parser or font-source
-defect. One fresh full-CLI build from a clean current compiler checkout still
-must be admitted before focused runtime evidence can begin; no full CLI was
-produced. The retained Stage4 log is
-`/home/ormastes/dev/pub/simple-bootstrap/build/mini_builds/bootstrap-memory-lexer-fix-stage4-cycle2.log`
-(SHA-256 `1a6e74e630d3341898cecfe9e785f9802527b96ae2372583531c8f52d17f09a9`).
-That clean-current full-CLI admission is the exact prerequisite before focused
-font test/docgen/native verification can resume.
+The external compiler workspace at stale source `c167e2509f4` ended Stage4
+with `EXIT=143`/SIGTERM and produced no full output. Its retained log SHA-256 is
+`5a49ab01a7f7db6fc112c77c605c4760ff1a68f6929e5cf1e7037deef8d1c1d7`.
+The stale Stage3 artifact (`01ef253d...3c3c7`,
+`full_cli_status=separate-not-proven`) is historical only. No eligible parent
+or current admission route remains in this verification window.
 
 One isolated clean-current attempt was made only because this admission is
 essential. Rust seed
@@ -209,7 +203,7 @@ do not promote a requirement or NFR.
 Every non-pass row names its owner, dependency, exact acceptance surface, and
 final reviewer. `active` means the owning parallel lane can still change the
 row; `blocked` means the required runtime/device evidence is unavailable.
-Current count: `0 pass`, `14 active`, `9 blocked`.
+Current count: `0 pass`, `15 active`, `9 blocked`.
 
 | Row | Status | Owner / writable scope | Current executable and manual evidence | Dependency and exact completion command | Final reviewer |
 |---|---|---|---|---|---|
@@ -321,10 +315,14 @@ Twenty existing mirrors are stale because their executable sources changed in th
 all-items worktree and no current pure-Simple docgen result exists:
 
 - `install_font_assets_spec.md`
+- `release_archive_layout_spec.md`
 - `font_asset_manifest_spec.md`
+- `font_renderer_spec.md`
 - `gui_entry_desktop_production_render_contract_spec.md`
 - `simpleos_font_asset_staging_spec.md`
+- `simpleos_font_bundle_spec.md`
 - `legacy_web_gui_wm_font_route_spec.md`
+- `native_gpu_font_readback_spec.md`
 - `shared_font_manifest_spec.md`
 - `shared_font_shaping_acceptance_spec.md`
 - `shared_font_surfaces_spec.md`
@@ -333,6 +331,7 @@ all-items worktree and no current pure-Simple docgen result exists:
 - `linux_hosted_wm_live_window_spec.md`
 - `simpleos_wm_fullscreen_spec.md`
 - `rv64_simpleos_wm_font_input_spec.md`
+- `selected_devanagari_spec.md`
 - `simpleos_wm_qemu_evidence_contract_spec.md`
 - `shared_multilingual_gpu_fonts_perf_spec.md`
 
@@ -869,7 +868,11 @@ Lane C executes the aggregate and integrated shaping gates once each:
 run_focused_spec test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl
 run_focused_spec test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl
 run_focused_spec test/01_unit/lib/skia/ot_layout_apply_spec.spl
+run_focused_spec test/01_unit/lib/skia/ot_layout_gsub_full_spec.spl
 run_focused_spec test/01_unit/lib/skia/ot_layout_gpos_spec.spl
+run_focused_spec test/01_unit/lib/skia/ot_layout_gpos_full_spec.spl
+run_focused_spec test/01_unit/lib/skia/ot_layout_gpos_variation_spec.spl
+run_focused_spec test/01_unit/lib/skia/ot_layout_lookup_flags_spec.spl
 run_focused_spec test/01_unit/lib/skia/ot_layout_pinned_inventory_spec.spl
 run_focused_spec test/01_unit/lib/skia/ot_parser_layout_selector_spec.spl
 run_focused_spec test/01_unit/lib/skia/ot_parser_spec.spl

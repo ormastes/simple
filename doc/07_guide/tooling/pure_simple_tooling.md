@@ -52,14 +52,15 @@ want a clean dynload cache without rebuilding the Rust seed/runtime; use
 `--full-bootstrap` only when Rust seed/runtime inputs must be rebuilt.
 
 Use `--full-cli` when a new monolithic CLI is required, `--deploy` to build and
-install it, and `--full-bootstrap` only when Rust seed/runtime inputs changed.
+install it, and `--full-bootstrap` only when changed Rust seed/runtime inputs
+must actually be rebuilt.
 `--mode=one-binary` also implies a full CLI relink.
 
-Do not add a full-bootstrap “final check” to app, IDE, Office, ordinary tooling,
-documentation, or test-only changes. The final full-bootstrap gate applies only
-when the goal changes compiler/interpreter, bootstrap, or bootstrap/runtime
-implementation. Other goals use focused checks with the existing deployed
-pure-Simple runtime.
+Do not add a full-bootstrap “final check” merely because a goal is ready to
+finish. Pure-Simple compiler/interpreter, bootstrap, app, IDE, Office, ordinary
+tooling, documentation, and test-only changes use the cheapest adequate
+incremental or staged pure-Simple build. Use `--full-bootstrap` only when
+changed Rust seed/runtime implementation inputs must actually be rebuilt.
 
 Dependency tracing remains conservative around AOP/MDSOC weaving. The native
 cache fingerprints module sources, while the wrapper broadly invalidates on
@@ -463,11 +464,14 @@ evidence boundary for the important pure-Simple tooling lanes:
   [runtime-bundle report](../../08_tracking/bug/native_build_removed_runtime_bundle_false_green_2026-07-24.md).
   Compile/link failures preserve the prior requested output. In-process
   `--runtime-path` compatibility handling now restores both runtime-path
-  environment variables on every exit (`9e86b3a1c84`). **Remaining bug/gap:** the focused
-  staging source-contract scenario passes, but the synchronized cached bootstrap
-  closure remained CPU-bound for 900 seconds with no log or artifact and was
-  terminated once. **Next solution:** instrument or bound entry-closure discovery,
-  then resume the preserved cache and run the artifact once.
+  environment variables on every exit (`9e86b3a1c84`). The positional
+  bootstrap entry also forwards target, cache directory, and thread count into
+  its in-process driver and restores the caller environment afterward.
+  **Remaining evidence gap:** the focused staging source-contract scenario
+  passes and HIR package-sibling lookup is now indexed once per compile,
+  but no current-source CLI was produced within the capped verification window.
+  Admit an externally completed pure-Simple parent only after its own gates pass,
+  then rebuild current sources incrementally; do not start a fourth producer.
   A sole `--help`/`-h` succeeds; malformed invocations (including malformed
   `... --help`) fail with exit 2. `--emit-archive` remains active archive mode;
   `--runtime-path` remains an arity-checked compatibility override, while

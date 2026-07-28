@@ -3,7 +3,8 @@
 
 ## Goal and authority
 
-Requirements remain `doc/02_requirements/{feature,nfr}/shared_multilingual_gpu_fonts.md`.
+Requirements remain `doc/02_requirements/{feature,nfr}/shared_multilingual_gpu_fonts.md`
+and cover REQ-001–016 plus NFR-001–008.
 State and acceptance criteria live in
 `.spipe/shared_multilingual_gpu_fonts_all_items/state.md`. This plan supersedes
 the scheduling sections—not the historical evidence—of
@@ -21,13 +22,43 @@ atlas, cache, process/env facade, or device-success path.
 | Area | Current evidence | Required next state |
 |---|---|---|
 | GSUB/GPOS | reviewed completion is integrated on the isolated branch; superseded stage1 duplicates were not imported | execute the frozen shaping/parser specs on the deployed pure-Simple runtime |
-| Runtime | no admitted current full CLI exists. The final bounded retained-Stage3 cycle cleared the NUL environment panic, then trapped at RIP `0x88034b` while its obsolete iterable collector passed a `LoweringError` with nil `span` to `_format_hir_lowering_error`; current source already contains the typed indexed collector, but that fix is absent from the executing producer | in a fresh verification window, P0 uses the Rust seed once as bootstrap-only authority to build current `bootstrap_main.spl` with `SIMPLE_NATIVE_ARENA_DECLS=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and a fresh exclusive cache; that pure-Simple Stage2 rebuilds Stage3, which alone builds and admits the full CLI before A records its identity |
+| Runtime | no admitted current full CLI or eligible parent exists. Three bounded local producer cycles are exhausted, and external stale-source Stage4 `c167e250` ended `EXIT=143`/`SIGTERM` with no full output (log SHA-256 `5a49ab01a7f7db6fc112c77c605c4760ff1a68f6929e5cf1e7037deef8d1c1d7`) | P0 is unassigned and blocked; a future verification window may resume only after an independently completed pure-Simple parent is proven, then use it once to incrementally build current checkpoint sources. No Rust-seed or fourth producer attempt is allowed in this window |
 | Focused tests | implementation and static coverage exist; prior runner exited before examples | calibrated, nonzero, authoritative runtime results |
 | Native GPU | source/emission and partial backend evidence exist | one real 2D+3D promoted device route and current perf record |
 | Surfaces | source contracts and retained artifacts exist | live canonical Web/GUI/WM/SimpleOS evidence and honest blocked rows |
 | Docs/manuals | 34 changed/new sources since `origin/main`; 14 mirrors missing, 20 stale, zero current, and zero retained docgen logs | regenerate all 34 mirrors with the admitted pure-Simple runtime, require `0 stubs`, and update one requirement/evidence matrix |
 
-## Parallel lanes
+The implementation checkpoint under verification is `269f46387e1`; this
+evidence-only commit follows it without self-recording its own hash.
+Source-present but runtime-unverified work at that checkpoint includes the one-pass package sibling index, positional Stage 3
+build with target/cache/thread/runtime forwarding, reviewed GSUB/GPOS coverage,
+GPOS VariationIndex long-word handling, fail-closed degenerate Web results,
+HIP prepared-batch canonicalization, and nested-WM clipping/stale-frame checks.
+
+## Current owner overlay
+
+| Current sidecar | Exact scope | Status / writable authority |
+|---|---|---|
+| `bootstrap_docs_refresh` | bootstrap/compiler documentation refresh | source-complete; owned bootstrap docs only |
+| `runtime_admission_watch` | externally owned producer provenance/resource watch | complete: `c167e250` Stage4 ended `EXIT=143`/`SIGTERM` without output; N/A — read-only |
+| `manual_inventory_audit` | 34-source manual and matcher/step audit | complete; N/A — read-only |
+| `remaining_matrix_audit` | REQ/NFR and 39-command graph audit | complete; N/A — read-only |
+| `current_host_gpu_audit` | current-host native/GPU capability audit | complete; N/A — read-only |
+| `state_plan_consistency` | state/plan/report consistency audit | complete; N/A — read-only |
+| `canonical_matchers_fix` | nine non-canonical boolean matcher wrappers | source-complete, runtime-unverified; owned spec lines only |
+| `frozen_steps_fix` | four production-surface frozen-step vocabulary violations | source-complete, runtime-unverified; owned spec lines only |
+| `verification_report_fix` | current checkpoint, matrix, C17/39, and manual-inventory report truth | source-complete; verification report only |
+| `state_truth_fix` | current acceptance/matrix/checkpoint truth | source-complete; SPipe state only |
+| `agent_plan_fix` | current admission, ownership, graph, and inventory truth | source-complete; this plan only |
+| `spec_cleanup_review` | independent review of matcher/step cleanup | PASS; N/A — read-only |
+| `bootstrap_doc_review` | independent review of bootstrap/compiler doc refresh | PASS; N/A — read-only |
+| `/root` | merge owner and final high-capability reviewer | integration, final guards, sync/push |
+
+The former B–F implementation aliases below are decomposition history, not
+additional active writers in this checkpoint. Their product-code lanes are N/A
+unless `/root` assigns a concrete failed acceptance row after CLI admission.
+
+## Parallel lane decomposition
 
 | Lane | Owner | Exclusive writable scope | Deliverable and evidence |
 |---|---|---|---|
@@ -41,7 +72,7 @@ atlas, cache, process/env facade, or device-success path.
 
 | Task | Owner | Exclusive writable scope | Dependency | Deliverable and evidence |
 |---|---|---|---|---|
-| P0 fresh pure-CLI admission | external compiler/runtime owner | separate clean compiler worktree, incremental cache, admission logs; no font-branch files | none | current pure-Simple full CLI plus CLI/core-C paths and SHA-256 identities; essential-tools smoke PASS |
+| P0 current-source pure-CLI admission | unassigned / blocked | future detached current checkpoint, unique incremental cache/output, admission logs; no product-code edits | no eligible parent currently; successful immutable external pure-Simple parent required | future current-source pure-Simple full CLI plus CLI/core-C paths and SHA-256 identities; essential-tools smoke PASS |
 | A1 runtime identity | `bootstrap_runner` | retained runtime identity and focused runner artifacts only | P0 | immutable admitted CLI/core-C identity; reject Rust seed and stale binaries |
 | A2 command calibration | `bootstrap_runner` | `build/test-artifacts/shared_multilingual_gpu_fonts/{essential-tools,runner-calibration}/**`, focused runner contract/manual, and immutable preflight evidence | A1 | essential-tools (including its lint/duplicate probes), deliberate-red, zero-example evidence, then one focused `test_runner_result_wrapper_spec.spl` preflight before B–E use the helper |
 | B1 manifests/distribution | `manifest_distribution` | font registry/assets/notices, release/package/SimpleOS font-manifest code and specs | A2 | REQ-001–005 and NFR-001/003 executable byte/license/package evidence |
@@ -74,55 +105,33 @@ atlas, cache, process/env facade, or device-success path.
 6. H reviews every handoff. A failed criterion returns only to its owner for at
    most three fix/verify cycles.
 
-### Bounded Stage 4 continuation
+### Historical Stage 4 evidence and current admission rule
 
 | TODO | Status | Implementation owner | Acceptance evidence |
 |---|---|---|---|
-| `HIR-BOOTSTRAP-NIL-001` | FAIL — fixes implemented, bootstrap unverified, three-check cap reached | compiler/bootstrap owner in a fresh session | `e331a5700ab`/HEAD `7a161abfabb` retains impl methods in the bootstrap accumulator and adds `bootstrap_impl_function_accumulation_spec.spl`. The final cycle-3 check reached `bootstrap-functions:count ... count=15`, completed wrapper/store/function-field access, then failed after `driver:errors-read:done`. The current typed-index `_driver_collect_hir_errors` change plus `hir_lowering_error_collection_spec.spl` addresses that localized boundary but has not been exercised by a post-fix bootstrap. |
+| `HIR-BOOTSTRAP-NIL-001` | FAIL — source fixes present at `269f46387e1`, runtime unverified, three-check cap reached | N/A in this verification window | Historical `e331a5700ab`/`7a161abfabb` retained impl accumulation; cycle 3 reached `bootstrap-functions:count ... count=15`, completed wrapper/store/function-field access, then its obsolete iterable collector trapped at RIP `0x88034b` while formatting a nil-span `LoweringError`. Current source retains the typed indexed collector and adds one shared package sibling index; neither has authoritative current-runtime evidence. |
 
-P0 must use a fresh exclusive Stage2 cache because the retained cache was
-produced by the obsolete Stage3. Later pure-Simple stages may preserve their
-own isolated incremental caches. P0 must deliver a fresh current full CLI that
-passes this exact admission before A starts:
-
-The retained Stage3 SHA-256
+External stale-source Stage4 `c167e250` ended `EXIT=143`/`SIGTERM` with no full
+output; its log SHA-256 is
+`5a49ab01a7f7db6fc112c77c605c4760ff1a68f6929e5cf1e7037deef8d1c1d7`.
+Its stale Stage3 `01ef253d...3c3c7` records
+`full_cli_status=separate-not-proven` and is historical only, not an eligible
+parent. The earlier retained Stage3 SHA-256
 `704f67af420bd8788dda809b46112d0a9a76cec64601ebfe2a6958a894aa380f`
-must not be retried: it embeds the obsolete collector. In the next verification
-window, P0 first produces a repaired pure-Simple Stage2 from current
-`src/app/cli/bootstrap_main.spl` using the repo Rust seed only as bootstrap
-authority, `SIMPLE_NATIVE_ARENA_DECLS=1`,
-`SIMPLE_NO_STUB_FALLBACK=1`, runtime bundle `core-c-bootstrap`, and a new
-exclusive `SIMPLE_NATIVE_BUILD_CACHE_DIR`. Stage2 must then rebuild Stage3.
-Rust-seed output is never test, docgen, focused-run, or admission evidence.
+must not be retried: it embeds obsolete source. The final current-source
+producer attempt also produced no candidate, so **no fourth producer or full
+bootstrap is permitted in this verification window**.
 
-Run the canonical producer once from the final pushed checkpoint; do not reuse
-an output root:
-
-```bash
-set -euo pipefail
-CHECKPOINT_SHA=<final-pushed-feature-sha>
-ADMISSION_ROOT="/tmp/simple-font-cli-admission-$CHECKPOINT_SHA"
-ADMISSION_TREE="$ADMISSION_ROOT/worktree"
-test ! -e "$ADMISSION_ROOT"
-mkdir -p "$ADMISSION_ROOT"
-git worktree add --detach "$ADMISSION_TREE" "$CHECKPOINT_SHA"
-(
-  cd "$ADMISSION_TREE"
-  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_ARENA_DECLS=1 \
-    sh scripts/bootstrap/bootstrap-from-scratch.sh \
-      --backend=cranelift --output="$ADMISSION_ROOT/artifacts" \
-      --full-bootstrap --mode=dynload --full-cli --fresh-cache --jobs=1 --no-mcp
-)
-CLI="$ADMISSION_ROOT/artifacts/full/x86_64-unknown-linux-gnu/simple"
-test -x "$CLI"
-```
-
-The producer first creates the missing Rust bootstrap authority, then uses its
-seed only for the recorded Stage2 build. The immutable admitted pure-Simple
-Stage2 builds Stage3; the producer records both transcripts, source/runtime
-snapshots, and manifest verification. `SIMPLE_NATIVE_ARENA_DECLS=1` is
-hash-bound inside both the producer and its manifest replay; the outer binding
-is only fail-safe clarity.
+P0 may resume in a future verification window only when an independently owned
+pure-Simple parent completes successfully. `/root` first retains its exit
+record, transcript, source
+checkpoint, and SHA without signalling or adopting its worktree. If those
+prove a real pure-Simple binary, that immutable parent runs one incremental
+native build from detached checkpoint `269f46387e1`, with a new output root and
+exclusive cache, to compile current `src/app/cli/main.spl`. Only the resulting
+current-source binary may enter the admission, smoke, calibration, focused-test,
+or docgen gates below. A Rust seed, stale Stage 3, or the external parent's
+older-source binary is never acceptance evidence.
 
 ```bash
 set -euo pipefail
@@ -192,8 +201,11 @@ before B–E use the helper.
 Owners generate their own manuals with the immutable docgen helper in the
 verification report. A owns the focused runner contract, B owns six changed
 specs, C owns 15, D owns ten, and E owns two. Fourteen mirrors are missing and
-20 are stale. Hand edits do not count; every source requires current docgen
-with `0 stubs`. F audits only after owner generation.
+20 are stale; zero are current. Static cleanup of nine boolean matcher wrappers
+and four production-surface step-vocabulary violations is source-complete and
+independently reviewed PASS, but remains runtime-unverified. Hand edits do not
+count; every source requires current docgen with `0 stubs`. F audits only after
+owner generation.
 
 ## Dependency rules
 
@@ -212,9 +224,11 @@ with `0 stubs`. F audits only after owner generation.
 Compiler/bootstrap behavior is not a font requirement and cannot promote a font
 row. The current HirBlock, typed lowering-error collector, native-arena, and
 direct-entry fixes are retained only because they are necessary to produce the
-pure-Simple prerequisite. P0 remains a prerequisite artifact provider: Rust
-seed use stops after Stage2 generation, while Stage3/full-CLI admission and all
-font evidence use pure-Simple binaries.
+pure-Simple prerequisite. P0 is currently unassigned and blocked because no
+eligible parent exists. A future verification window may consume a proven
+external pure-Simple parent to build current sources incrementally, but this
+window must not invoke the Rust seed or another full bootstrap. All font
+evidence uses the admitted current-source pure-Simple binary.
 
 The working tree additionally implements HIP-to-ROCm prepared-batch
 canonicalization, fail-closed degenerate Simple Web results, ancestor-clipped
@@ -259,3 +273,29 @@ commands: one runner preflight, B6, C17, D11, and E4. The added rows are the
 focused runner contract and the SimpleOS producer/consumer artifact-root
 contract. Historical log entries remain evidence of what was known when
 recorded; they do not override this correction.
+
+C17 is exactly:
+
+1. `shared_font_shaping_acceptance_spec.spl`
+2. `shared_font_surfaces_spec.spl`
+3. `ot_layout_apply_spec.spl`
+4. `ot_layout_gsub_full_spec.spl`
+5. `ot_layout_gpos_spec.spl`
+6. `ot_layout_gpos_full_spec.spl`
+7. `ot_layout_gpos_variation_spec.spl`
+8. `ot_layout_lookup_flags_spec.spl`
+9. `ot_layout_pinned_inventory_spec.spl`
+10. `ot_parser_layout_selector_spec.spl`
+11. `ot_parser_spec.spl`
+12. `shaper_spec.spl`
+13. `selected_devanagari_spec.spl`
+14. `selected_arabic_spec.spl`
+15. `font_renderer_spec.spl`
+16. `font_render_config_spec.spl`
+17. `font_compat_spec.spl`
+
+The four rows omitted by the obsolete graph were `ot_layout_gsub_full`,
+`ot_layout_gpos_full`, `ot_layout_gpos_variation`, and
+`ot_layout_lookup_flags`. Overall verification remains **STATUS: FAIL** until
+an admitted CLI executes the immutable 39-command graph and regenerates all 34
+manuals, with unavailable device/host rows retained as explicit blockers.

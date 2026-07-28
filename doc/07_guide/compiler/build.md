@@ -173,7 +173,7 @@ Stage 2: Pure Simple (compiled by Rust seed)
   -> Backend: selected backend (LLVM default; Cranelift supported)
 
 Stage 3: Self-Hosted (compiled by Stage 2)
-  stage2 native-build --entry bootstrap_main.spl
+  SIMPLE_NATIVE_RUNTIME_BUNDLE=all stage2 native-build [forwarded options] bootstrap_main.spl
   -> build/bootstrap/stage3/<triple>/simple
   -> Backend: selected backend (LLVM default; Cranelift supported)
 
@@ -209,11 +209,13 @@ AArch64 and RISC-V exact-output execution, with target-specific SIMD/RVV
 instruction checks. This is the hosted Engine2D native-row architecture gate;
 it does not introduce a parallel WebIR, Draw IR, or rendering path.
 
-Current implementation note: Stage 2/Stage 3 are fail-closed while
-`bootstrap_main.spl` self-host lowering is still being repaired. When Stage 3
-is unavailable, the wrapper reports incomplete pure-Simple evidence and exits
-before producing a Stage 4 full CLI; it does not publish a seed fallback as a
-self-hosted result.
+Stage 3 uses the pure-Simple positional `bootstrap_main.spl` path, not the
+Rust-owned explicit `--entry` bridge. The wrapper pins
+`SIMPLE_NATIVE_RUNTIME_BUNDLE=all` and forwards the selected target, backend,
+runtime path, cache directory, thread count, and build mode. Stage 2/Stage 3
+remain fail-closed: when Stage 3 is unavailable, the wrapper reports incomplete
+pure-Simple evidence and exits before producing a Stage 4 full CLI; it does not
+publish a seed fallback as a self-hosted result.
 
 ### Quick Bootstrap
 
@@ -249,7 +251,10 @@ sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift
 ```
 
 **Notes:**
-- Cranelift stages 2–3 complete reliably; full-CLI (`--full-cli`) requires `--full-bootstrap` to avoid stale-backfill rejection (the driver rejects a stage-3 binary built by a pre-fix seed).
+- Cranelift stages 2–3 complete reliably. A full-CLI (`--full-cli`) rebuild can
+  reuse the admitted Stage 3; pair it with `--full-bootstrap` only when changed
+  Rust seed/runtime inputs must actually be rebuilt. Stale-backfill rejection
+  still applies to a Stage 3 produced by a pre-fix seed.
 - **LLVM path status:** Stage 2 link has 62 residual undefined symbols blocking LLVM bootstrap. See [doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md](../../08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md).
 - **Stage-4 caveat:** Hours-long spins observed when stage-3 was built by pre-fix seed. Root: InterpCall handicap in Cranelift (symbol lowering delay). See [doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md](../../08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md).
 

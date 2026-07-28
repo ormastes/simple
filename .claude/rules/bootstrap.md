@@ -133,9 +133,10 @@ right gate ships a stale binary. **A small change is NOT a full bootstrap.**
   layout changes, entry-closure set changes, linker-script or flag/target/opt-level
   changes. (Under T1 these auto-trigger a full rebuild anyway; run T2 directly when
   you know the change is structural.)
-- **T3 — full bootstrap.** ONLY when the compiler itself changed
-  (`src/compiler_rust` seed or `src/compiler` pure-Simple), or as the final
-  pre-goal-complete gate. A seed change invalidates T1's cache, so T3 subsumes it.
+- **T3 — full bootstrap.** ONLY when changed Rust seed/runtime implementation
+  inputs must actually be rebuilt. Pure-Simple compiler changes and final
+  completion gates use the cheapest adequate incremental or staged pure-Simple
+  build; completion by itself is never a reason to rebuild Rust.
 
 **Follow-up (not yet done):** `SIMPLE_NATIVE_INCREMENTAL` safe per-module reuse is
 implemented only in the Rust seed's native-build pipeline
@@ -183,9 +184,11 @@ tracer follows plain `use` imports but does NOT traverse `export use` shims.
 Only direct imports trigger cascading closure collection. Plan closure manually
 for re-exports if needed.
 
-**Runtime Path Requirement:** `SIMPLE_RUNTIME_PATH` env var MUST point at the
-seed target directory for hosted linking. The `--runtime-path` CLI flag alone
-does not set it. Ensure the wrapper sets both when invoking native-build in
-hosted mode (e.g., `SIMPLE_RUNTIME_PATH="$seed_target" bin/simple native-build`).
+**Runtime Path Requirement:** `SIMPLE_RUNTIME_PATH` must point at the selected
+runtime authority for hosted linking. The pure positional `bootstrap_main.spl`
+native-build path copies `--runtime-path` into that environment for its
+in-process driver and restores the caller's value afterward. Other hosted-link
+entrypoints must still set `SIMPLE_RUNTIME_PATH` themselves when they do not
+route through that path.
 
 See `.claude/memory/ref_architecture.md` for detailed architecture.

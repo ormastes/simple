@@ -21,11 +21,19 @@ relinking requires `--full-cli`, `--deploy`, or `--mode=one-binary`.
 after the dynload stages unless combined with a full-CLI option. The Rust seed
 is a bootstrap input, not the production toolchain.
 
-A full bootstrap is a completion gate only for changes to the compiler,
-interpreter, bootstrap machinery, or bootstrap/runtime implementation. App,
-IDE, Office, ordinary tooling, documentation, and test-only changes complete
-with focused checks against the existing deployed pure-Simple runtime; they do
-not require a bootstrap solely because they are ready to finish.
+A full bootstrap is required only when changed Rust seed/runtime implementation
+inputs must actually be rebuilt. Pure-Simple compiler, interpreter, bootstrap,
+app, IDE, Office, ordinary tooling, documentation, and test-only changes use
+the cheapest adequate incremental or staged pure-Simple build. Reaching a final
+completion gate is not by itself a reason to rebuild Rust.
+
+Stage 3 is a pure-Simple positional compile of
+`src/app/cli/bootstrap_main.spl`. The wrapper sets
+`SIMPLE_NATIVE_RUNTIME_BUNDLE=all`; the bootstrap entry forwards
+`--runtime-path`, `--target`, `--cache-dir`, and `--threads` into the in-process
+driver environment and restores the caller's values afterward. Explicit
+`--entry` remains the Rust-seed-owned Stage 2 bridge and is not the Stage 3
+self-host path.
 
 ## Dependency Tracing
 

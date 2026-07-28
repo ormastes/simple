@@ -10,9 +10,12 @@ inside pure-Simple tooling.
 - `one-binary` is the conservative monolithic native executable path.
 - Normal bootstrap never rebuilds Rust; `--full-bootstrap` is the only cargo
   rebuild path.
-- Treat full bootstrap as a final gate only for compiler, interpreter,
-  bootstrap, or bootstrap/runtime implementation changes—not app, IDE, Office,
-  ordinary tooling, documentation, or test-only work.
+- Stage 3 invokes positional `bootstrap_main.spl` through pure Simple with the
+  native-all bundle; it forwards and restores runtime path, target, cache, and
+  thread settings. Explicit `--entry` remains the Stage 2 Rust bridge.
+- Use full bootstrap only when changed Rust seed/runtime implementation inputs
+  must actually be rebuilt; final gates and pure-Simple changes use the cheapest
+  adequate incremental or staged pure-Simple build.
 - `--entry-closure` is a reducer, not authoritative dependency tracing.
 - AOP/MDSOC weaving, module resolver, interpreter cache, loader ABI, or compiler
   ABI changes invalidate broadly.

@@ -53,6 +53,10 @@ source files
   pure-Simple stages; Rust rebuilds are explicit `--full-bootstrap` work.
 - Entry-closure and native cache reuse are conservative around AOP/MDSOC,
   interpreter, loader, and compiler ABI changes.
+- The driver builds the package-to-direct-sibling index once per compilation
+  and shares it with HIR lowerers; bare-name lookup registers the requested
+  symbol from a direct sibling and never rescans the full module map for every
+  lowered module.
 - Runtime-family restrictions and no-allocation policies must be enforced at
   compiler entrypoints before target-specific native or SimpleOS execution.
 
