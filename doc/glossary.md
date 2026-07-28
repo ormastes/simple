@@ -486,10 +486,11 @@ The record/diff/equivalence and RDC-inspection cores exist. Completion still
 requires fresh admitted pure-Simple, QEMU/native-host, and live capture evidence
 for the target environment.
 
-- Architecture: `doc/04_architecture/simple_2d_renderdoc_backend_equivalence.md`
-- Core: `src/lib/common/renderdoc/backend_render_record.spl`
-- Guide: `doc/07_guide/tooling/renderdoc_capture_infra.md`
-- SPipe/LLM wiki: `doc/00_llm_process/feature_expert/simple_renderdoc/skill.md`
+- [Architecture](04_architecture/simple_2d_renderdoc_backend_equivalence.md)
+- [Core](../src/lib/common/renderdoc/backend_render_record.spl)
+- [Capture guide](07_guide/tooling/renderdoc_capture_infra.md)
+- [Test host aggregate](07_guide/app/ui/test_host_env.md)
+- [SPipe/LLM wiki](00_llm_process/feature_expert/simple_renderdoc/skill.md)
 
 ## Cooperative Workflow
 Multi-LLM pipeline integrated into SStack. Phases 2-3 can use Codex (`/research_codex`) and Gemini (`/gemini_ui_design`) for richer output.
