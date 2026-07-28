@@ -44,6 +44,26 @@ void rt_rv32_nand_ram_store(unsigned int word, unsigned int value) {
     }
 }
 
+/* RV32 NVMe mailbox aperture.  The endpoint owns the register/DMA behavior;
+ * this bridge deliberately exposes only aligned accesses inside its 0x00..0x64
+ * contract so a malformed firmware offset cannot touch unrelated MMIO. */
+static volatile unsigned int *const rt_rv32_nvme_mmio =
+    (volatile unsigned int *)(unsigned long)0x20000000U;
+
+unsigned int rt_rv32_nvme_mmio_load(unsigned int offset) {
+    if ((offset & 3U) != 0U || offset > 0x64U) {
+        return 0U;
+    }
+    return rt_rv32_nvme_mmio[offset >> 2];
+}
+
+void rt_rv32_nvme_mmio_store(unsigned int offset, unsigned int value) {
+    if ((offset & 3U) != 0U || offset > 0x64U) {
+        return;
+    }
+    rt_rv32_nvme_mmio[offset >> 2] = value;
+}
+
 long long rt_rv32_boot_optional_nvme_fw_selftest(void) __attribute__((weak));
 long long rt_rv32_boot_optional_nvme_fw_selftest(void) {
     return 0;

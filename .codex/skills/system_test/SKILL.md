@@ -96,6 +96,36 @@ describe "<Feature Name>":
   must report the affected spec as complete with `0 stubs`; if it reports an
   auto/manual spec as a stub, fix the spec or docgen validation before handoff.
   Use only the pure-Simple `simple-core` or `core-c-bootstrap` runtime lanes.
+
+### NVMe/RV32 Transport Profile Rules
+
+Use these profile names consistently in NVMe firmware specs and manuals:
+
+| Profile | What it proves | What it does not prove |
+|---|---|---|
+| `TARGET_SIMPLE_SIM` / `fw/` | Host-model controller, FTL/FIL and command semantics | RV32 ELF, AXI, IRQ, PCIe, OpenSSD silicon |
+| `emu/` | Host/device memcpy seam, RAM NAND and emulator data path | Hardware MMIO, host queue DMA, PCIe or physical NAND |
+| `fw_rv32` + QEMU | RV32 firmware execution and scalar RAM-NAND policy | Host-issued NVMe MMIO/DMA unless the host endpoint is exercised |
+| RV32 + GHDL AXI | Synthesizable H1 AXI model evidence | PCIe enumeration, MSI/PERST, OpenSSD silicon |
+| KV260 FPGA | H1 FPGA-model evidence when the host protocol and transcript are real | OpenSSD/physical-NAND or PCIe acceptance |
+| Cosmos+ OpenSSD | Vendor/H2 target contract only when the board gate runs | Any claim from QEMU, GHDL, or internal selftest |
+
+For `rv32_nvme_host_axi_mmio`, a passing transport spec must show actual
+external MMIO register traffic, host queue-memory SQE/CQE DMA, payload movement,
+IRQ assertion/acknowledgement, and host completion consumption. CPU-local
+submission, linker `.nandram` reads/writes, UART markers from an internal
+selftest, or `rv32_ctrl_obs_slave` debug traffic are not host-NVMe evidence.
+The first accepted PRP contract is one dword-aligned PRP1 contained in a 4 KiB
+page. Identify writes 256 bytes; current NAND Read/Write moves one 4-byte word.
+Unsupported PRP2/multi-page requests must fail
+closed. QEMU and synthesizable AXI must use the same host sequence. Missing
+target, runtime, trace, DMA, IRQ, or marker is FAIL/POSTPONED evidence, never a
+PASS or fallback to `TARGET_SIMPLE_SIM`.
+
+Source/evidence assertions document design obligations but never satisfy a
+`@req` by themselves. Once an endpoint exists, its SSpec must invoke the real
+runner and tag only requirements exercised by that runner. A mocked firmware
+mailbox completion is endpoint evidence, not firmware or recovery evidence.
   An unresolved runtime symbol, nonzero exit, signal exit, or missing output is
   a FAIL; do not substitute a hand-edited manual or the Rust seed.
 - Scenario-oriented specs must produce manual-quality generated docs:

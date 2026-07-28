@@ -7,8 +7,16 @@
 - **Filed-on:** 2026-07-28
 - **Target:** RV32 NVMe firmware, QEMU/OpenSSD/KV260 profiles
 - **Priority:** P0
-- **Status:** Open. Current AXI evidence transports firmware RAM loads/stores;
-  current KV260 evidence observes an internally driven self-test through USER4.
+- **Status:** Open. The standalone synthesizable endpoint H1 gate now passes
+  host register access, two posted SQE DMA fetches, testbench-modeled firmware
+  completions, CQE DMA, IRQ/ack, and invalid-CC handling. Firmware-in-the-loop,
+  CPU/top-level generator wiring, QEMU parity, and physical H2 remain open.
+- **Current evidence:**
+  `sh scripts/fpga/ghdl_rv32_nvme_host_axi_mmio.shs` reports
+  `STATUS: PASS rv32-nvme-host-axi-mmio H1-ENDPOINT firmware=mocked`.
+  The RV32 start/MMIO assembly compiles, but the firmware ELF build is blocked
+  because the deployed pure-Simple runtime crashes its bounded `test --help`
+  ABI probe.
 - **Requested-semantics:** Add an NVMe register/doorbell and DMA transport that
   lets an external host create admin and I/O queues and submit commands to the
   same firmware controller path. Keep QEMU, RAM-NAND, OpenSSD, and FPGA target

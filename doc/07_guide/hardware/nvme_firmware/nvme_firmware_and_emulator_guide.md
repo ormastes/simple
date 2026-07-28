@@ -36,6 +36,32 @@ register device.
 Host-issued NVMe-over-AXI/MMIO remains tracked in
 `doc/08_tracking/feature/rv32_nvme_host_axi_mmio_2026-07-28.md`.
 
+### Profile catalog and evidence boundary
+
+Use the profile that matches the transport actually exercised:
+
+| Profile | Available evidence | Do not claim |
+|---|---|---|
+| `TARGET_SIMPLE_SIM` / `fw/` | Host-model NVMe controller, FTL/FIL and command semantics | RV32, AXI, IRQ, PCIe, or OpenSSD hardware |
+| `emu/` | Host/device memcpy seam and RAM-backed NAND emulator | Hardware MMIO, queue DMA, PCIe, or physical NAND |
+| `fw_rv32` + QEMU | RV32 ELF execution and scalar RAM-NAND policy | Host-issued NVMe MMIO/DMA unless host traffic is captured |
+| RV32 + GHDL AXI | H1 synthesizable AXI model evidence | PCIe enumeration, MSI/PERST, physical NAND, OpenSSD silicon |
+| KV260 FPGA | H1 FPGA-model evidence with a real host trace | OpenSSD or physical-NAND acceptance |
+| Cosmos+ OpenSSD | H2/vendor profile only through its board gate | Any result inferred from QEMU/GHDL/internal selftest |
+
+The `rv32_nvme_host_axi_mmio` contract is the missing host transport. Its
+closure requires external MMIO register traffic, host SQE/CQE queue DMA,
+payload DMA, IRQ assertion/acknowledgement, and host completion consumption.
+The current `.nandram` AXI gate and USER4 transcript remain valid backend
+recovery evidence, but they are CPU-driven internal selftest evidence, not
+host-NVMe evidence. The first host contract is qid 0/qid 1, depth 2..16,
+`4 << CAP.DSTRD` doorbells and one dword-aligned PRP1 contained in a page.
+Identify writes 256 bytes; current NAND Read/Write moves one 4-byte word.
+Unsupported PRP2/multi-page requests fail closed. See the feature artifacts
+in `doc/{01_research/local,02_requirements,04_architecture,05_design}/` and the
+runner-backed endpoint SSpec at
+`test/03_system/app/nvme_firmware/rv32_nvme_host_axi_mmio_spec.spl`.
+
 `--fpga` rebuilds the same ELF used by GHDL, builds/programs the KV260
 bitstream, reads the captured UART through JTAG USER4, checks every lifecycle
 marker, and retains ELF/bitstream hashes. Never substitute QEMU/GHDL output for

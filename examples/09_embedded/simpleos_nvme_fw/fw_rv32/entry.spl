@@ -28,8 +28,235 @@
 extern fn rt_riscv_uart_put(byte: u64)
 extern fn rt_rv32_nand_ram_load(word: u32) -> u32
 extern fn rt_rv32_nand_ram_store(word: u32, value: u32)
+extern fn rt_rv32_nvme_mmio_load(offset: u32) -> u32
+extern fn rt_rv32_nvme_mmio_store(offset: u32, value: u32)
 use logic.{nvme_fw_rv32_logic_selftest}
 use logic_nand_read_level.*
+
+# Fixed RV32 mailbox ABI.  STATUS00 bit 0 is a host-published pending bit;
+# COMPLETE is a write-one acknowledgement.  DMA_CMD bit 31 is busy, bit 30 is
+# endpoint error, command 1 reads host memory and command 2 writes host memory.
+val NVME_MMIO_STATUS: u32 = 0x00
+val NVME_MMIO_SQID: u32 = 0x04
+val NVME_MMIO_SQE_BASE: u32 = 0x08
+val NVME_MMIO_RESULT: u32 = 0x48
+val NVME_MMIO_STATUS_FIELD: u32 = 0x4C
+val NVME_MMIO_COMPLETE: u32 = 0x50
+val NVME_MMIO_DMA_ADDR_LO: u32 = 0x54
+val NVME_MMIO_DMA_ADDR_HI: u32 = 0x58
+val NVME_MMIO_DMA_WDATA: u32 = 0x5C
+val NVME_MMIO_DMA_RDATA: u32 = 0x60
+val NVME_MMIO_DMA_CMD: u32 = 0x64
+val NVME_DMA_BUSY: u32 = 0x80000000
+val NVME_DMA_ERROR: u32 = 0x40000000
+val NVME_DMA_READ: u32 = 1
+val NVME_DMA_WRITE: u32 = 2
+val NVME_DMA_WAIT_LIMIT: u32 = 1024
+val NVME_FW_MAX_BYTES: u32 = 256
+val NVME_FW_NAND_BYTES: u32 = 4
+val NVME_SERVICE_COOKIE: u32 = 0x52563332
+val NVME_SC_SUCCESS: u32 = 0x0000
+val NVME_SC_INVALID_OPCODE: u32 = 0x0001
+val NVME_SC_INVALID_FIELD: u32 = 0x0002
+val NVME_SC_INVALID_NAMESPACE: u32 = 0x000B
+
+fn _nvme_sqe(dw: u32) -> u32:
+    rt_rv32_nvme_mmio_load(NVME_MMIO_SQE_BASE + (dw * 4))
+
+fn _nvme_finish(status: u32, result: u32):
+    rt_rv32_nvme_mmio_store(NVME_MMIO_RESULT, result)
+    rt_rv32_nvme_mmio_store(NVME_MMIO_STATUS_FIELD, status)
+    rt_rv32_nvme_mmio_store(NVME_MMIO_COMPLETE, 1)
+
+fn _nvme_dma_wait() -> i64:
+    var spins: u32 = 0
+    while spins < NVME_DMA_WAIT_LIMIT:
+        val command = rt_rv32_nvme_mmio_load(NVME_MMIO_DMA_CMD)
+        if (command & NVME_DMA_BUSY) == 0:
+            if (command & NVME_DMA_ERROR) != 0:
+                return 1
+            return 0
+        spins = spins + 1
+    1
+
+fn _nvme_dma_read_word(address_lo: u32, address_hi: u32) -> u32:
+    rt_rv32_nvme_mmio_store(NVME_MMIO_DMA_ADDR_LO, address_lo)
+    rt_rv32_nvme_mmio_store(NVME_MMIO_DMA_ADDR_HI, address_hi)
+    rt_rv32_nvme_mmio_store(NVME_MMIO_DMA_CMD, NVME_DMA_READ)
+    if _nvme_dma_wait() != 0:
+        return 0
+    rt_rv32_nvme_mmio_load(NVME_MMIO_DMA_RDATA)
+
+fn _nvme_dma_write_word(address_lo: u32, address_hi: u32, data: u32) -> i64:
+    rt_rv32_nvme_mmio_store(NVME_MMIO_DMA_ADDR_LO, address_lo)
+    rt_rv32_nvme_mmio_store(NVME_MMIO_DMA_ADDR_HI, address_hi)
+    rt_rv32_nvme_mmio_store(NVME_MMIO_DMA_WDATA, data)
+    rt_rv32_nvme_mmio_store(NVME_MMIO_DMA_CMD, NVME_DMA_WRITE)
+    _nvme_dma_wait()
+
+fn _nvme_identify_word(word: u32) -> u32:
+    if word == 0:
+        return 0x00010001
+    if word == 19:
+        return 0x00000400
+    0
+
+fn _nvme_identify(prp_lo: u32, prp_hi: u32) -> i64:
+    var word: u32 = 0
+    while word < (NVME_FW_MAX_BYTES / 4):
+        val offset = word * 4
+        val address_lo = prp_lo + offset
+        var address_hi = prp_hi
+        if address_lo < prp_lo:
+            address_hi = address_hi + 1
+        if _nvme_dma_write_word(address_lo, address_hi, _nvme_identify_word(word)) != 0:
+            return 1
+        word = word + 1
+    0
+
+fn _nvme_prp_one_page_valid(prp_lo: u32, prp_hi: u32, bytes: u32) -> i64:
+    if prp_lo == 0 or prp_hi != 0:
+        return 0
+    if bytes == 0 or bytes > NVME_FW_MAX_BYTES:
+        return 0
+    if (prp_lo & 3) != 0:
+        return 0
+    if (prp_lo & 0xFFF) + bytes > 4096:
+        return 0
+    1
+
+fn _nvme_admin_queue_ensure() -> i64:
+    if _nand_ram_load(14) == 1:
+        return 0
+    _nand_ram_create_admin_queue(0, 16)
+
+fn _nvme_io_complete() -> i64:
+    if _nand_ram_complete_io() != 0:
+        return 1
+    if _nand_ram_reap_completion() != 0:
+        return 1
+    0
+
+fn _nvme_process_pending() -> i64:
+    val sqid = rt_rv32_nvme_mmio_load(NVME_MMIO_SQID)
+    val dw0 = _nvme_sqe(0)
+    val dw1 = _nvme_sqe(1)
+    val dw2 = _nvme_sqe(2)
+    val dw3 = _nvme_sqe(3)
+    val dw4 = _nvme_sqe(4)
+    val dw5 = _nvme_sqe(5)
+    val dw6 = _nvme_sqe(6)
+    val dw7 = _nvme_sqe(7)
+    val dw8 = _nvme_sqe(8)
+    val dw9 = _nvme_sqe(9)
+    val dw10 = _nvme_sqe(10)
+    val dw11 = _nvme_sqe(11)
+    val dw12 = _nvme_sqe(12)
+    val dw13 = _nvme_sqe(13)
+    val dw14 = _nvme_sqe(14)
+    val dw15 = _nvme_sqe(15)
+    val opcode = dw0 & 0xFF
+    val cid = dw0 >> 16
+    val prp2_nonzero = dw8 != 0 or dw9 != 0
+    var status: u32 = NVME_SC_SUCCESS
+    var result: u32 = 0
+
+    # Reserved command words and the unsupported fused/PSDT flags are rejected
+    # before any DMA or NAND operation, so malformed input cannot partially write media.
+    if sqid > 1 or (dw0 & 0xFF00) != 0 or dw2 != 0 or dw3 != 0 or dw4 != 0 or dw5 != 0 or prp2_nonzero:
+        status = NVME_SC_INVALID_FIELD
+    elif opcode == 0x06:
+        if sqid != 0 or (dw1 != 0 and dw1 != 1) or dw10 != 1 or dw11 != 0 or dw12 != 0 or dw13 != 0 or dw14 != 0 or dw15 != 0:
+            if dw1 != 0 and dw1 != 1:
+                status = NVME_SC_INVALID_NAMESPACE
+            else:
+                status = NVME_SC_INVALID_FIELD
+        elif _nvme_prp_one_page_valid(dw6, dw7, NVME_FW_MAX_BYTES) == 0:
+            status = NVME_SC_INVALID_FIELD
+        elif _nvme_identify(dw6, dw7) != 0:
+            status = NVME_SC_INVALID_FIELD
+    elif (opcode == 0x05 or opcode == 0x01) and sqid == 0:
+        val qid = dw10 & 0xFFFF
+        val depth_minus_one = dw10 >> 16
+        val depth = depth_minus_one + 1
+        if dw1 != 0 or qid != 1 or depth < 2 or depth > 16 or dw12 != 0 or dw13 != 0 or dw14 != 0 or dw15 != 0:
+            if dw1 != 0:
+                status = NVME_SC_INVALID_NAMESPACE
+            else:
+                status = NVME_SC_INVALID_FIELD
+        elif _nvme_prp_one_page_valid(dw6, dw7, 4) == 0 or (dw6 & 0xFFF) != 0:
+            status = NVME_SC_INVALID_FIELD
+        elif opcode == 0x05 and (dw11 & 0xFFFFFFFC) != 0:
+            status = NVME_SC_INVALID_FIELD
+        elif opcode == 0x01 and ((dw11 >> 16) != 1 or (dw11 & 0x0000FFF8) != 0):
+            status = NVME_SC_INVALID_FIELD
+        elif opcode == 0x05:
+            if _nvme_admin_queue_ensure() != 0:
+                status = NVME_SC_INVALID_FIELD
+            else:
+                _nand_ram_store(48, 1)
+        elif _nvme_admin_queue_ensure() != 0 or _nand_ram_load(48) != 1:
+            status = NVME_SC_INVALID_FIELD
+        elif qid == 1 and _nand_ram_create_io_queue(1, depth as i64) != 0:
+            status = NVME_SC_INVALID_FIELD
+    elif opcode == 0x00 or opcode == 0x01 or opcode == 0x02:
+        if sqid != 1 or dw1 != 1:
+            status = NVME_SC_INVALID_NAMESPACE
+        elif dw10 != 0 or dw11 != 0 or dw12 != 0 or dw13 != 0 or dw14 != 0 or dw15 != 0:
+            status = NVME_SC_INVALID_FIELD
+        elif opcode == 0x00:
+            if dw6 != 0 or dw7 != 0 or _nand_ram_submit_io() != 0 or _nvme_io_complete() != 0:
+                status = NVME_SC_INVALID_FIELD
+        elif _nvme_prp_one_page_valid(dw6, dw7, NVME_FW_NAND_BYTES) == 0:
+            status = NVME_SC_INVALID_FIELD
+        elif _nand_ram_submit_io() != 0:
+            status = NVME_SC_INVALID_FIELD
+        elif opcode == 0x01:
+            val data = _nvme_dma_read_word(dw6, dw7)
+            if (rt_rv32_nvme_mmio_load(NVME_MMIO_DMA_CMD) & (NVME_DMA_BUSY | NVME_DMA_ERROR)) != 0:
+                status = NVME_SC_INVALID_FIELD
+            elif _nand_ram_erase() != 0 or _nand_ram_program(data) != 0:
+                status = NVME_SC_INVALID_FIELD
+            elif _nvme_io_complete() != 0:
+                status = NVME_SC_INVALID_FIELD
+        else:
+            val data = _nand_ram_read()
+            if _nand_ram_load(9) != 0 or _nvme_dma_write_word(dw6, dw7, data) != 0:
+                status = NVME_SC_INVALID_FIELD
+            elif _nvme_io_complete() != 0:
+                status = NVME_SC_INVALID_FIELD
+    else:
+        status = NVME_SC_INVALID_OPCODE
+
+    # CID is parsed from the real DW0 layout.  The mailbox exposes only RESULT,
+    # so keep the completion result zero and leave phase/CID decoration to the endpoint.
+    result = 0
+    _nvme_finish(status, result)
+    1
+
+@export("C", name: "nvme_fw_rv32_service_once")
+fn nvme_fw_rv32_service_once() -> i64:
+    if _nand_ram_load(47) != NVME_SERVICE_COOKIE:
+        if _nand_ram_startup() != 0:
+            if (rt_rv32_nvme_mmio_load(NVME_MMIO_STATUS) & 1) != 0:
+                _nvme_finish(NVME_SC_INVALID_FIELD, 0)
+            return 0
+        _nand_ram_store(47, NVME_SERVICE_COOKIE)
+    if (rt_rv32_nvme_mmio_load(NVME_MMIO_STATUS) & 1) == 0:
+        return 0
+    _nvme_process_pending()
+
+fn nvme_fw_rv32_service_poll() -> i64:
+    var count: i64 = 0
+    while count < 8:
+        if nvme_fw_rv32_service_once() == 0:
+            return count
+        count = count + 1
+    count
+
+@export("C", name: "rt_rv32_boot_optional_nvme_fw_service")
+fn rt_rv32_boot_optional_nvme_fw_service() -> i64:
+    nvme_fw_rv32_service_poll()
 
 fn _uart_put(byte: i64):
     rt_riscv_uart_put(byte as u64)
@@ -333,6 +560,7 @@ fn _nand_ram_startup() -> i64:
     _nand_ram_store(44, 0)
     _nand_ram_store(45, 0)
     _nand_ram_store(46, 0)
+    _nand_ram_store(48, 0)
     if _nand_ram_load(0) != 0x4E414E44:
         return 1
     if _nand_ram_load(1) != 1:
