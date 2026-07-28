@@ -31,6 +31,7 @@ struct ModuleResolverPort:
     resolve_fn: any
 
 type HirModulesByName = {text: Module}
+type HirPackageSiblingIndex = {text: [text]}
 type HirImplFunctions = {SymbolId: HirFunction}
 type HirTraitsByName = {text: HirTrait}
 type HirImportedEnumsByName = {text: Enum}
@@ -39,6 +40,20 @@ type HirFieldTypesByName = {text: {text: HirType}}
 type HirLocalStructTypes = {i64: text}
 type HirFieldOrderByName = {text: [text]}
 type HirLocalTupleTypes = {i64: [HirType]}
+
+fn hir_package_sibling_index(modules_by_name: HirModulesByName) -> HirPackageSiblingIndex:
+    var index: HirPackageSiblingIndex = {}
+    for module_name in modules_by_name.keys():
+        val last_dot = module_name.last_index_of(".") ?? -1
+        if last_dot < 0:
+            continue
+        val package_name = module_name[0:last_dot]
+        var siblings: [text] = []
+        if index.contains_key(package_name):
+            siblings = index[package_name]
+        siblings.push(module_name)
+        index[package_name] = siblings
+    index
 
 # HIR Lowering Context
 # ============================================================================
@@ -57,6 +72,8 @@ class HirLowering:
     module_resolver: ModuleResolverPort?   # Optional resolver for 2-pass import resolution (FR-COMPILER-003)
     loaded_modules: [text]         # Paths of modules already loaded (for cycle detection in A2 resolve pass)
     modules_by_name: HirModulesByName       # All parsed modules keyed by module name (for resolve_import_symbols)
+    package_sibling_index: HirPackageSiblingIndex
+    package_sibling_self_name: text
     package_sibling_modules: [text] # Direct sibling module keys, resolved lazily by bare-name lookup
     package_sibling_misses: {text: bool}
     current_method_self_type: HirType?
@@ -141,6 +158,7 @@ enum LoweringErrorKind:
 fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages: [text], diagnostic_recovered: [bool]) -> HirLowering:
     val empty_loaded_modules: [text] = []
     val empty_modules_by_name: HirModulesByName = {}
+    val empty_package_sibling_index: HirPackageSiblingIndex = {}
     val empty_package_sibling_modules: [text] = []
     val empty_package_sibling_misses: {text: bool} = {}
     val empty_impl_functions: HirImplFunctions = {}
@@ -165,6 +183,8 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         module_resolver: nil,
         loaded_modules: empty_loaded_modules,
         modules_by_name: empty_modules_by_name,
+        package_sibling_index: empty_package_sibling_index,
+        package_sibling_self_name: "",
         package_sibling_modules: empty_package_sibling_modules,
         package_sibling_misses: empty_package_sibling_misses,
         current_method_self_type: nil,

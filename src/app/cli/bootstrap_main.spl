@@ -11,7 +11,7 @@ extern fn rt_native_build(args: [text]) -> i64
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, driver_output_format_smf, compile_result_is_success, compile_result_errors)
 use app.cli.bootstrap_identity.{bootstrap_version}
-use app.cli.bootstrap_focused_native_build.{run_exact_stage4_focused_capsule}
+use app.cli.bootstrap_focused_native_build.{focused_native_build_arg_value, run_exact_stage4_focused_capsule}
 use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists}
 
 fn native_build_help() -> i64:
@@ -227,13 +227,29 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         return run_rt_native_build(args)
     val output = bootstrap_output_from_args(args, 0)
     val backend = native_build_backend_from_args(args, 0)
+    val runtime_path = focused_native_build_arg_value(args, "--runtime-path")
+    val target = focused_native_build_arg_value(args, "--target")
+    val cache_dir = focused_native_build_arg_value(args, "--cache-dir")
+    val threads = focused_native_build_arg_value(args, "--threads")
     # Seed both scalar and array input channels: compiled struct transport can
     # lose input_files. Leave closure discovery enabled so Driver can load the
     # entry's imports before it flips SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE to 1.
     val old_native_arena_decls = env_get("SIMPLE_NATIVE_ARENA_DECLS")
+    val old_runtime_path = env_get("SIMPLE_RUNTIME_PATH")
+    val old_target = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+    val old_cache_dir = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR")
+    val old_threads = env_get("SIMPLE_NATIVE_BUILD_THREADS")
     env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_path)
     env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
     env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
+    if runtime_path != "":
+        env_set("SIMPLE_RUNTIME_PATH", runtime_path)
+    if target != "":
+        env_set("SIMPLE_NATIVE_BUILD_TARGET", target)
+    if cache_dir != "":
+        env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", cache_dir)
+    if threads != "":
+        env_set("SIMPLE_NATIVE_BUILD_THREADS", threads)
     # Build directly through the pure-Simple CompilerDriver (unique symbol
     # names -- avoids the `aot_native_file_with_backend` duplicate-name
     # collision between driver_public_compile [subprocess facade] and
@@ -253,6 +269,10 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
     env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+    env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", old_target)
+    env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_cache_dir)
+    env_set("SIMPLE_NATIVE_BUILD_THREADS", old_threads)
     # Free-function accessors, NOT result.is_success()/.get_errors(): this
     # entry is MIR-lowered without HIR type inference, so method calls on the
     # lazy-import-returned result never resolve (Task #145 erased-receiver

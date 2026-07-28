@@ -398,7 +398,7 @@ class SharedWmPixelBufferBackend:
         if width >= slot_w:
             self._px_text_fit(width - slot_w + 4, taskbar_y + 14, clock_label, theme.text_primary, theme.taskbar, if slot_w > 8: (slot_w - 8) / 8 else: 0)
 
-    me _px_render_child_content_frames(frames: [WmContentFrame], scene_revision: i64, parent_id: text, parent_rect: SharedWmRect, depth: i32) -> i64:
+    me _px_render_child_content_frames(frames: [WmContentFrame], scene_revision: i64, parent_id: text, parent_origin_rect: SharedWmRect, parent_clip_rect: SharedWmRect, depth: i32) -> i64:
         if depth > WM_CONTENT_FRAME_MAX_NESTING_DEPTH:
             return 0
         var content_pixel_count: i64 = 0
@@ -406,19 +406,20 @@ class SharedWmPixelBufferBackend:
         while i < frames.len():
             val frame = frames[i]
             if frame.parent_window_id == parent_id:
-                val child_x = parent_rect.x + frame.offset_x
-                val child_y = parent_rect.y + frame.offset_y
+                val child_x = parent_origin_rect.x + frame.offset_x
+                val child_y = parent_origin_rect.y + frame.offset_y
                 val valid = shared_wm_nested_content_frame_valid(frame, scene_revision) and _wm_nested_content_frame_unique(frames, frame) and wm_content_frame_web_provenance_valid(frame)
                 if valid:
-                    val clipped = _wm_content_frame_clip_to_rect(frame.pixels, frame.width, frame.height, child_x, child_y, parent_rect)
+                    val clipped = _wm_content_frame_clip_to_rect(frame.pixels, frame.width, frame.height, child_x, child_y, parent_clip_rect)
                     if clipped.width > 0 and clipped.height > 0:
                         self._px_blit(clipped.dest_x, clipped.dest_y, clipped.width, clipped.height, clipped.pixels)
                         content_pixel_count = content_pixel_count + (clipped.width.to_i64() * clipped.height.to_i64())
-                    val child_rect = SharedWmRect(x: child_x, y: child_y, width: frame.width, height: frame.height)
-                    content_pixel_count = content_pixel_count + self._px_render_child_content_frames(frames, scene_revision, frame.window_id, child_rect, depth + 1)
+                    val child_origin_rect = SharedWmRect(x: child_x, y: child_y, width: frame.width, height: frame.height)
+                    val child_clip_rect = SharedWmRect(x: clipped.dest_x, y: clipped.dest_y, width: clipped.width, height: clipped.height)
+                    content_pixel_count = content_pixel_count + self._px_render_child_content_frames(frames, scene_revision, frame.window_id, child_origin_rect, child_clip_rect, depth + 1)
                 else:
                     print("shared_wm_scene_render_taskbar_context_to_pixel_buffer: rejecting missing, stale, or invalid nested content frame for window '{frame.window_id}' (parent '{parent_id}')")
-                    val fail_rect = _wm_rect_intersect(child_x, child_y, frame.width, frame.height, parent_rect)
+                    val fail_rect = _wm_rect_intersect(child_x, child_y, frame.width, frame.height, parent_clip_rect)
                     if fail_rect.width > 0 and fail_rect.height > 0:
                         self._px_fill_rect(fail_rect.x, fail_rect.y, fail_rect.width, fail_rect.height, 0xFFFF00FFu32)
             i = i + 1
@@ -442,7 +443,7 @@ class SharedWmPixelBufferBackend:
                     val frame = input.content_frames[frame_index]
                     self._px_blit(content.x, content.y, frame.width, frame.height, frame.pixels)
                     content_pixel_count = content_pixel_count + frame.pixels.len().to_i64()
-                    content_pixel_count = content_pixel_count + self._px_render_child_content_frames(input.content_frames, input.revision.scene_revision, window.window_id, content, 1)
+                    content_pixel_count = content_pixel_count + self._px_render_child_content_frames(input.content_frames, input.revision.scene_revision, window.window_id, content, content, 1)
                 else:
                     print("shared_wm_scene_render_taskbar_context_to_pixel_buffer: rejecting missing, stale, or invalid Simple Web frame for window '{window.window_id}'")
                     self._px_fill_rect(content.x, content.y, content.width, content.height, 0xFFFF00FFu32)
@@ -1553,34 +1554,35 @@ fn _wm_content_frame_clip_to_rect(pixels: [u32], src_w: i32, src_h: i32, dest_x:
     WmClippedPixelRect(dest_x: out_rect.x, dest_y: out_rect.y, width: out_rect.width, height: out_rect.height, pixels: cropped)
 
 # Recursively renders the content frames nested under `parent_id`
-# (parent_window_id == parent_id), clipped to `parent_rect` (the immediate
-# parent's own content rect), then recurses into each child's own children
+# (parent_window_id == parent_id), positioned from `parent_origin_rect` and
+# clipped to `parent_clip_rect`, then recurses into each child's own children
 # (grandchildren etc.) up to WM_CONTENT_FRAME_MAX_NESTING_DEPTH. A valid
-# child is blitted (cropped to the parent rect); an invalid child (bad
+# child is blitted (cropped to the active clip); an invalid child (bad
 # revision/checksum/size) is fail-closed magenta-filled over its own rect
-# (also cropped to the parent rect) instead of drawing stale/fabricated
+# (also cropped to the active clip) instead of drawing stale/fabricated
 # pixels — mirroring _shared_wm_content_frame_for_window's fail-closed
 # contract for top-level frames. Returns the pixel count actually blitted
 # (valid children only) so callers can fold it into SharedWmSceneRenderStats.
-fn _shared_wm_render_child_content_frames(backend: CompositorBackend, input: SharedWmRenderInput, parent_id: text, parent_rect: SharedWmRect, depth: i32) -> i64:
+fn _shared_wm_render_child_content_frames(backend: CompositorBackend, input: SharedWmRenderInput, parent_id: text, parent_origin_rect: SharedWmRect, parent_clip_rect: SharedWmRect, depth: i32) -> i64:
     if depth > WM_CONTENT_FRAME_MAX_NESTING_DEPTH:
         return 0
     var content_pixel_count: i64 = 0
     for frame in input.content_frames:
         if frame.parent_window_id == parent_id:
-            val child_x = parent_rect.x + frame.offset_x
-            val child_y = parent_rect.y + frame.offset_y
+            val child_x = parent_origin_rect.x + frame.offset_x
+            val child_y = parent_origin_rect.y + frame.offset_y
             val valid = shared_wm_nested_content_frame_valid(frame, input.revision.scene_revision) and _wm_nested_content_frame_unique(input.content_frames, frame) and wm_content_frame_web_provenance_valid(frame)
             if valid:
-                val clipped = _wm_content_frame_clip_to_rect(frame.pixels, frame.width, frame.height, child_x, child_y, parent_rect)
+                val clipped = _wm_content_frame_clip_to_rect(frame.pixels, frame.width, frame.height, child_x, child_y, parent_clip_rect)
                 if clipped.width > 0 and clipped.height > 0:
                     backend.blit_pixels(clipped.dest_x, clipped.dest_y, clipped.width, clipped.height, clipped.pixels)
                     content_pixel_count = content_pixel_count + (clipped.width.to_i64() * clipped.height.to_i64())
-                val child_rect = SharedWmRect(x: child_x, y: child_y, width: frame.width, height: frame.height)
-                content_pixel_count = content_pixel_count + _shared_wm_render_child_content_frames(backend, input, frame.window_id, child_rect, depth + 1)
+                val child_origin_rect = SharedWmRect(x: child_x, y: child_y, width: frame.width, height: frame.height)
+                val child_clip_rect = SharedWmRect(x: clipped.dest_x, y: clipped.dest_y, width: clipped.width, height: clipped.height)
+                content_pixel_count = content_pixel_count + _shared_wm_render_child_content_frames(backend, input, frame.window_id, child_origin_rect, child_clip_rect, depth + 1)
             else:
                 print("shared_wm_scene_render_context_to_backend: rejecting missing, stale, or invalid nested content frame for window '{frame.window_id}' (parent '{parent_id}')")
-                val fail_rect = _wm_rect_intersect(child_x, child_y, frame.width, frame.height, parent_rect)
+                val fail_rect = _wm_rect_intersect(child_x, child_y, frame.width, frame.height, parent_clip_rect)
                 if fail_rect.width > 0 and fail_rect.height > 0:
                     backend.fill_rect(fail_rect.x, fail_rect.y, fail_rect.width, fail_rect.height, 0xFFFF00FFu32)
     content_pixel_count
@@ -1608,7 +1610,7 @@ fn _shared_wm_scene_render_context_content_to_backend(backend: CompositorBackend
             if val frame = _shared_wm_content_frame_for_window(input, window):
                 backend.blit_pixels(content.x, content.y, frame.width, frame.height, frame.pixels)
                 content_pixel_count = content_pixel_count + frame.pixels.len().to_i64()
-                content_pixel_count = content_pixel_count + _shared_wm_render_child_content_frames(backend, input, window.window_id, content, 1)
+                content_pixel_count = content_pixel_count + _shared_wm_render_child_content_frames(backend, input, window.window_id, content, content, 1)
             else:
                 print("shared_wm_scene_render_context_to_backend: rejecting missing, stale, or invalid Simple Web frame for window '{window.window_id}'")
                 backend.fill_rect(content.x, content.y, content.width, content.height, 0xFFFF00FFu32)

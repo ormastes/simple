@@ -5,7 +5,7 @@ Verifies that explicit, glob, and aliased imports register symbols from the
 requested source module even when another loaded module exports the same name.
 """
 
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.types.{HirLowering, HirModulesByName, hir_package_sibling_index}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.{SymbolKind}
@@ -33,11 +33,16 @@ describe "resolve_import_symbols 2-pass import resolver":
         val provider = parse_full_frontend("pub struct Box:\n    value: i64\npub fn answer() -> i64:\n    42\npub fn unused() -> i64:\n    0", "pkg.types", "pkg.types", log)
         val nested = parse_full_frontend("pub fn nested_only() -> i64:\n    7", "pkg.nested.shadow", "pkg.nested.shadow", log)
         val consumer = parse_full_frontend("fn pass(box: Box) -> Box:\n    box\nfn main() -> i64:\n    answer()", "pkg.consumer", "pkg.consumer", log)
-        var modules: Dict<text, any> = {}
+        var modules: HirModulesByName = {}
         modules["pkg.types"] = provider
         modules["pkg.nested.shadow"] = nested
+        modules["pkg.consumer"] = consumer
+        val sibling_index = hir_package_sibling_index(modules)
+        expect(sibling_index["pkg"].len()).to_equal(2)
+        expect(sibling_index["pkg.nested"].len()).to_equal(1)
         var lowering = HirLowering.with_filename("pkg.consumer")
         lowering.modules_by_name = modules
+        lowering.package_sibling_index = sibling_index
         val hir = lowering.lower_module(consumer)
 
         expect(lowering.errors.len()).to_equal(0)

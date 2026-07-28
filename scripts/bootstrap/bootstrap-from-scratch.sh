@@ -1212,19 +1212,16 @@ else
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
       "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
       "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-      "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
+      "SIMPLE_NATIVE_RUNTIME_BUNDLE=all" \
       "SIMPLE_NATIVE_ARENA_DECLS=1" \
       "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
-      --runtime-bundle core-c-bootstrap \
-      --source src/compiler --source src/app --source src/lib \
-      --entry-closure --threads "${selfhost_jobs}" \
+      --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
-      --entry src/app/cli/bootstrap_main.spl \
       --runtime-path "${stage_runtime_absolute}" \
-      -o "${stage3_bin}"
+      -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
   )
   rm -f "${stage2_bin}" "${stage3_bin}"
   bootstrap_stage3_directory_snapshot \
@@ -1336,23 +1333,19 @@ else
     SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-    SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_NATIVE_RUNTIME_BUNDLE=all \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_BINARY="${stage2_admitted_absolute}" -- \
     "${stage2_admitted_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
-    --runtime-bundle core-c-bootstrap \
-    --source src/compiler --source src/app --source src/lib \
-    --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
-    --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "${stage_runtime_absolute}" \
-    -o "${stage3_bin}"
+    -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
   stage3_status=$?
   set -e
   if [ "${stage2_admitted_sha_before_stage3}" != absent ]; then

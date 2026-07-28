@@ -306,12 +306,15 @@ Fourteen changed/new specs currently lack mirrors:
 - `doc/06_spec/01_unit/lib/common/text_layout/font_render_config_spec.md`
 - `doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_apply_spec.md`
+- `doc/06_spec/01_unit/lib/skia/ot_layout_gsub_full_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_gpos_spec.md`
+- `doc/06_spec/01_unit/lib/skia/ot_layout_gpos_full_spec.md`
+- `doc/06_spec/01_unit/lib/skia/ot_layout_gpos_variation_spec.md`
+- `doc/06_spec/01_unit/lib/skia/ot_layout_lookup_flags_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_pinned_inventory_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_parser_layout_selector_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_parser_spec.md`
 - `doc/06_spec/01_unit/lib/skia/shaper_spec.md`
-- `doc/06_spec/02_integration/compiler/explicit_enum_discriminant_runtime_spec.md`
 - `doc/06_spec/02_integration/rendering/wm_nested_content_frame_spec.md`
 
 Twenty existing mirrors are stale because their executable sources changed in this
@@ -1010,5 +1013,26 @@ The linked producer contained 43 unresolved compatibility stubs and crashed on
 a second native-build invocation. Per the existing three-cycle cap, no new full
 Stage4 run was started. Resource, essential-tools, and font evidence therefore
 remain open and `STATUS: FAIL` is unchanged.
+
+The follow-up root-cause repair removes the remaining per-module full registry
+scan: the driver now builds one package-to-direct-module index per lowering
+invocation, and each lowerer selects its package slice directly while retaining
+lazy symbol registration. The Stage 3 positional pure-Simple route also now
+honors and restores `--runtime-path`, `--target`, `--cache-dir`, and `--threads`;
+its canonical wrapper no longer selects Rust native-build and binds the admitted
+native-all runtime explicitly. Independent review found no P0/P1 defect in
+these changes.
+
+The third and final producer attempt used the retained admitted pure-Simple
+compiler, `SIMPLE_NO_STUB_FALLBACK=1`, the isolated shared cache, a two-thread
+cap, the explicit host target, and the frozen Stage 2 runtime authority. The
+old executing compiler remained CPU-active but emitted no phase result and no
+candidate after 17m29s; it was stopped at the documented resource ceiling to
+avoid another runaway. `/usr/bin/time -v` recorded maximum RSS 23,943,204 KiB.
+Evidence is retained at
+`build/native_probe/lazy-sibling-stage3-cycle3-pure/build.log`; the output is
+absent. No fourth producer or full Stage4 build is permitted in this window.
+The new index is present only in the not-yet-produced candidate, so this old
+producer's memory profile is not performance evidence for or against it.
 
 `STATUS: FAIL`
