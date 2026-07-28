@@ -1912,6 +1912,15 @@ static bool browser_renderer_apply_seccomp(void) {
 #ifdef __NR_recvmsg
         BROWSER_RENDERER_DENY_SYSCALL(__NR_recvmsg),
 #endif
+#ifdef __NR_fcntl
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fcntl),
+#endif
+#ifdef __NR_fcntl64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fcntl64),
+#endif
+#ifdef __NR_ioctl
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_ioctl),
+#endif
 #ifdef __NR_statx
         BROWSER_RENDERER_DENY_SYSCALL(__NR_statx),
 #endif

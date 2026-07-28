@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/resource.h>
 #include <sys/ipc.h>
+#include <sys/ioctl.h>
 #include <sys/msg.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
@@ -132,6 +133,15 @@ static int sandbox_probe(int argc, char** argv) {
     if (syscall(SYS_execve, "/bin/true", exec_args, exec_env) >= 0 ||
         errno != EPERM) {
         return 19;
+    }
+    errno = 0;
+    if (fcntl(STDIN_FILENO, F_SETOWN, getppid()) >= 0 || errno != EPERM) {
+        return 34;
+    }
+    int async_owner = getppid();
+    errno = 0;
+    if (ioctl(STDIN_FILENO, FIOSETOWN, &async_owner) >= 0 || errno != EPERM) {
+        return 35;
     }
     errno = 0;
     if (setpriority(PRIO_PROCESS, getppid(), 1) >= 0 || errno != EPERM) {
