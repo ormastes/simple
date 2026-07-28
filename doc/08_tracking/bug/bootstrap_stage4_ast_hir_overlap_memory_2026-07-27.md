@@ -255,10 +255,10 @@ deployment, and production SSpec/docgen remain pending the final strict retry.
 The third and final strict retry rebuilt the Rust authority, completed and
 sanity-checked both pure-Simple Stage 2 and self-hosted Stage 3, and therefore
 confirmed the transient-promotion runtime repair through the prior link
-failure. Stage 4 stopped before compilation because the fail-closed source
-fingerprint found `src/app/spostgre` dangling to
-`../../examples/spostgre/src/tool` and reported
-`could not fingerprint Stage 4 source authority`.
+failure. Stage 4 stopped before compilation with
+`could not fingerprint Stage 4 source authority`. The initial source audit
+found and removed the dead `src/app/spostgre` alias, but a later instrumented
+authority walk showed that this was not the first failing record.
 
 The run took 37m35s, peaked at 2,558,236 KiB RSS, and performed zero swaps.
 Stage 2 SHA-256 was
@@ -266,5 +266,29 @@ Stage 2 SHA-256 was
 Stage 3 SHA-256 was
 `94d193374dd212f962bce4ef6b3c62516cd4bfee0d7b728c0d40754d76de8343`.
 No Stage-4 candidate was admitted or deployed, so the NVMe post-bootstrap
-SSpec/docgen gate was not run. The next bounded session must repair or remove
-the dangling source link before one new strict bootstrap attempt.
+SSpec/docgen gate was not run.
+
+## 2026-07-28 owned tooling-source repair
+
+The next bounded strict attempt again completed and sanity-checked Stage 2 and
+Stage 3, then stopped at the same Stage-4 fingerprint boundary. It took
+37m17s, peaked at 2,557,072 KiB RSS, and performed zero swaps. Stage 2 SHA-256
+was `9ff6785f03cb81c08633b0e8d93fee8f8ace5dc83bb7fa6959879f135693c9b8`;
+Stage 3 SHA-256 was
+`f10afef864fc8f62226b83ff192ecdbc37a1601029638f7002d2f3c2a62dd8bc`.
+
+An instrumented replay localized the first failure to `src/app/mcp_t32`, a
+supported alias resolving inside the repository at
+`examples/10_tooling/trace32_tools/t32_mcp`. The Stage-4 helper now treats
+`examples/10_tooling` as owned source, hashes its files directly, permits only
+canonical directory aliases into that tree or the existing `src/**` roots,
+and prints the failing alias for unresolved or escaping links. The shared
+Stage-3 snapshot also now emits the resolved-link records it validated; the
+missing insertion had made its own symlink integration test fail.
+
+The direct complete source-revision check now passes with SHA-256
+`6286d44f93289b75e3b42e273083fcf71f026b2c1f645703181998be5f86302e`.
+The Stage-3 source snapshot and jj-state portions of the portability gate pass;
+that broader gate later stops on the unrelated retired-Windows-workflow check.
+The one-attempt cap leaves Stage-4 compilation, deployment, and NVMe
+post-bootstrap SSpec/docgen for the next bounded run.

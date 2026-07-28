@@ -3,7 +3,7 @@
 These items are deliberately separate from completed host/ARM contract work.
 Postponed hardware rows remain open and must not be converted into host PASS.
 
-# TODO: [bootstrap][P0] Repair or remove the dangling `src/app/spostgre` source link rejected by the fail-closed Stage-4 fingerprint, then run one bounded strict bootstrap, admit/deploy Stage 4, and execute the NVMe SSpec/docgen gate. The final retry proved Stage 2/3 and the `rt_transient_heap_promote` repair, peaked at 2,558,236 KiB RSS with zero swaps, then stopped before Stage-4 compilation.
+# TODO: [bootstrap][P0] Run one bounded strict bootstrap after the owned `examples/10_tooling` source-authority repair, admit/deploy Stage 4, and execute the NVMe SSpec/docgen gate. The latest attempt proved Stage 2/3, peaked at 2,557,072 KiB RSS with zero swaps, then exposed the now-fixed alias policy before Stage-4 compilation; the direct complete source fingerprint now passes.
 # DONE: [nvme][P0] GHDL runs host-issued Create CQ/SQ, Identify, Write, Flush, and Read against `build/nvme_fw_rv32_service.elf`, retaining MMIO/DMA/IRQ/recovery/remap evidence.
 # DONE: [nvme][P1] QEMU runs the same firmware command/recovery sequence through a GDB-driven guest-RAM mailbox; GHDL remains the AXI/DMA/IRQ authority.
 # DONE: [cosmos][P1] Package manifest v3 binds a clean repository revision, compiler/linker/Bootgen identities, bound profile/contract, board serial/revision, boot mode, DMA bounds, and immutable artifact hashes; self-tests reject omissions and mismatches.
