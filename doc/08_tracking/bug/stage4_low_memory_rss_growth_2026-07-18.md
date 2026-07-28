@@ -253,3 +253,29 @@ Cycle receipts are under `build/native_probe/current-overlay-full-cli-next*`
 and `build/native_probe/current-source-stage3-cycle3/`. A future bounded window
 must first produce the current Stage 3 parent; direct Stage 4 from the retained
 old parent cannot validate or benefit from this repair.
+
+## Stage 3 break-glass window and second allocation fix (2026-07-28)
+
+A separately authorized Stage-3-only window retained the same parent, cache,
+runtime, source identity, and canonical positional route:
+
+- 48 GiB cycle 1 was manually stopped after 2,397 seconds at 43.00 GiB maximum
+  RSS when unrelated host load crossed the conservative residual floor;
+- 48 GiB cycle 2 was cgroup OOM-killed after 2,442 seconds, last observed at
+  47.95 GiB, with no output;
+- 64 GiB cycle 3 was paused rather than restarted during host contention, then
+  resumed with a calibrated 36 GiB residual floor. It was cgroup OOM-killed
+  after 3,222 seconds at a 63.73 GiB cgroup peak, again with no output.
+
+The old positional Stage 3 path legitimately consumes the flat HIR bridge, so
+these failures do not exercise or disprove the Stage 4 flat-store repair. They
+do prove that a current parent cannot yet be bootstrapped within 64 GiB.
+
+A subsequent allocation audit found another safe no-GC leak: MIR lowering
+replaced fourteen function-local scratch arrays/dictionaries for every
+function, abandoning each old container. Current source now calls `clear()` on
+twelve containers, preserving capacity while resetting their LocalId-indexed
+state. The two aggregate-valued dictionaries retain replacement initialization
+because seed construction can leave that field shape nil. The focused source
+regression passes 1/1 under bounded seed diagnostics; pure-Simple runtime and
+RSS evidence remain unavailable without a current parent.
