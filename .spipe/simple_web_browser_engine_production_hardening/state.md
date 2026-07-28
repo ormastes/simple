@@ -1157,3 +1157,13 @@ implementation in progress / target evidence blocked
   duplicate author ids still collided at the select-owner target seam. The
   unverified select patch was removed rather than shipping ambiguous control
   mutation; existing focus-only evidence remains the current boundary.
+- Navigation: Hosted secondary-window address Backspace now removes one
+  validated UTF-8 scalar through the shared encoding owner. The same helper
+  replaces duplicate worker, parent-entry, and BrowserSession deletion logic;
+  a pure-Simple stage-2 diagnostic probe printed
+  `BROWSER UTF8 BACKSPACE PROBE: PASS`. Stage 2 is not release evidence, so the
+  hosted scenario remains pending a genuine full CLI.
+- Events: Production text input still ignores HTML `maxlength` across worker,
+  hosted-session, and UI-access callers. The root fix belongs once in
+  `BrowserSession.set_dom_text_input`, counting Unicode scalars before the
+  cancelable `beforeinput` dispatch; this remains active and unclaimed.

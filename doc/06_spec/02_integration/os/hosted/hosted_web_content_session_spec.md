@@ -103,6 +103,12 @@ expect(unfocused.mutation_revision).to_equal(0)
 - Focus a checkbox and verify Space keydown reuses the canonical click/default
   path while Space keyup reaches its listener.
 
+#### deletes one UTF-8 scalar from the hosted address bar
+
+- Focus the trusted hosted address field and commit a URL ending in Hangul.
+- Backspace removes the complete trailing scalar, never one UTF-8 byte.
+- The resulting address remains exactly `https://example.test/`.
+
 #### keeps trusted browser chrome outside hostile page hit testing
 
 #### isolates address history and page state between browser windows
