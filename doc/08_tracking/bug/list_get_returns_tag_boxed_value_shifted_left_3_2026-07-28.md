@@ -41,14 +41,30 @@ trips W1006 `mutation without mut capability`, which demotes the whole program).
 **`SIMPLE_NO_JIT=1` does NOT reach the interpreter** — see the companion defect
 below; with that env var set the same file still prints 40.
 
-## Companion defect: `SIMPLE_NO_JIT=1` is not honored
+## Companion defect: engine selection was fail-open — RESOLVED `b7151d94114`
 
-`SIMPLE_NO_JIT=1 bin/simple run scope.spl` prints `40`, i.e. the JIT result. The
-only reliable way observed to reach the tree-walk interpreter is an unrelated
-W1006 demotion. This makes the documented engine-isolation knob fail-open, and
-invalidates any past "reproduced under both engines" claim that relied on it.
-File separately if not already tracked; it must be fixed before any engine-parity
-measurement is trusted.
+`SIMPLE_NO_JIT=1` never selected an engine; it only moved the interpreter's
+internal JIT threshold, and the Rust seed has no reader for it at all. So
+`SIMPLE_NO_JIT=1 bin/simple run` prints the JIT's `40`. Likewise `--interpret`
+/ `--no-jit` were discarded and `bin/simple-interp` set nothing.
+
+**The knob that works is `SIMPLE_EXECUTION_MODE=interpret`.** An unrecognized
+value silently falls through to JIT (`exec_core.rs:41 _ => ExecutionMode::Jit`),
+so a typo reads as a successful interpreter run. Verified truth table:
+
+| invocation | `a.get(0)` on `[5]` |
+|---|---|
+| default | 40 (JIT) |
+| `SIMPLE_EXECUTION_MODE=interpret` | 5 (interpreter) |
+| `SIMPLE_EXECUTION_MODE=interpreter` | 5 |
+| `SIMPLE_EXECUTION_MODE=typo_xyz` | 40 — fails open |
+| `SIMPLE_NO_JIT=1` | 40 — no-op on the seed |
+
+Fixed in `b7151d94114` (synonym accepted, `SIMPLE_NO_JIT`/`--no-jit` mapped to
+force-interpret, unrecognized values warn, wrapper exports the variable); the
+seed keeps ignoring `SIMPLE_NO_JIT` until the next bootstrap. Guide:
+`doc/07_guide/runtime/execution_engine_selection.md`. **Any past "reproduced
+under both engines" claim resting on `SIMPLE_NO_JIT` proved nothing.**
 
 ## Blast radius
 
