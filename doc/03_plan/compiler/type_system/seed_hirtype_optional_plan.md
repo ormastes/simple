@@ -175,14 +175,32 @@ counting them as `rt_index_of` sites conflates the method name with the target.
 
 Still open, and now the substance of Stage 0:
 
-1. **Backend divergence — likely a live wrong-answer bug.** The JIT/cranelift
-   path (`instr/*`) routes `index_of` to the receiver-polymorphic `rt_index_of`,
-   while both LLVM paths still route it to `rt_string_find`, which is
-   string-only. So `arr.index_of(x)` plausibly yields the receiver-mismatch
-   sentinel `-1` under LLVM and the correct index under the JIT — the *same
-   source* compiling to *different semantics per backend*. Confirm with an A/B
-   before anything else in this plan; if it reproduces it outranks the Optional
-   work entirely.
+1. **Backend divergence — HYPOTHESISED, then REFUTED. Deprioritised.** An earlier
+   revision of this plan predicted that `arr.index_of(x)` would silently yield
+   `-1` under LLVM and the correct index under the JIT, and ranked it above the
+   Optional work. **It does not reproduce.** A peer lane A/B'd it on a binary
+   built from `b410e53a7a2`: the JIT lane is fully correct
+   (`arr.index_of(30)`→`2`, `"hello world".index_of("world")`→`6`, miss→`-1`),
+   and the LLVM/native lane does not silently disagree — it fails loudly with
+   `MIR lowering error: unresolved method call: index_of`, rc=1, no binary
+   emitted. A control probe without `index_of` builds clean.
+
+   Two independent corroborations that this class is loud, not silent: the
+   diagnostic originates in the **pure-Simple** compiler
+   (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:1881` and siblings) —
+   *not* the Rust seed this plan concerns, so it is outside this workstream's
+   scope entirely; and the pre-existing bug doc
+   `doc/08_tracking/bug/native_string_methods_unresolved_in_mir_2026-07-17.md`
+   already characterises the whole family as *"Medium (loud build failure, not
+   silent-wrong; but a real functionality gap vs. the oracle)"*.
+
+   Residual risk worth keeping, unresolved: the
+   `unresolved method call ... lowered to const-0 placeholder (silent-null risk,
+   Task #145)` warning fires three times *alongside* the fatal error. So the
+   placeholder machinery is real and reachable, and only this configuration was
+   shown to pair it with a hard error. Whether any configuration emits the
+   const-0 **without** the error is Task #145's concern and remains untested.
+   That, not the backend split, is the silent-wrong-answer risk here.
 2. **`rt_string_index_of` is still unreachable.** At `origin/main` it appears
    only as a `RuntimeFuncSpec` registration (`runtime_sffi.rs:413`); no
    method-name dispatch selects it. It remains the only genuinely
