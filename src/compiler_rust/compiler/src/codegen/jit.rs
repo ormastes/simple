@@ -83,6 +83,40 @@ impl JitCompiler {
 
     /// Compile a MIR module and return function pointers.
     pub fn compile_module(&mut self, mir: &MirModule) -> JitResult<()> {
+        // Pre-compile guard against the broken JIT lambda/closure ABI.
+        //
+        // `compile_closure_create` builds a closure as a bare `rt_alloc` block
+        // with the raw code address at offset 0, and `compile_indirect_call`
+        // calls it as `fn(closure_ptr, raw_args...) -> raw_result`. Neither the
+        // arguments nor the result are tag-boxed, and the block carries no
+        // `HeapHeader`. Two consequences, both observed:
+        //
+        //  1. The result of a lambda call is consumed as a tagged
+        //     `RuntimeValue`. A raw `i64` body result is therefore misread
+        //     (`fn(x: i64) -> i64: x * 10` applied to 4 yields 40, printed as
+        //     40 >> 3 == 5), and a raw `bool` result of 1 aliases `TAG_HEAP`
+        //     with a NULL payload, so the first deref SIGSEGVs
+        //     (`fn(x: i64) -> bool: x > 1` crashes with exit 139).
+        //  2. Every runtime helper that accepts a closure
+        //     (`rt_array_filter`, `rt_array_find`, `rt_option_map`, ...) calls
+        //     `rt_closure_func_ptr`, which validates a `HeapObjectType::Closure`
+        //     header. A JIT closure has none, so the helper either silently
+        //     returns an empty/NIL result or walks unmapped memory.
+        //
+        // Repairing this needs a coordinated change to the JIT closure
+        // representation (a real `rt_closure_new` object) plus boxing of lambda
+        // parameters and results. Until then, fail the JIT compile so the
+        // driver's interpreter fallback runs and produces correct answers,
+        // matching the `first_unresolved_import` guard below.
+        if let Some(name) = Self::first_lambda_function_impl(mir) {
+            return Err(BackendError::ModuleError(format!(
+                "function '{name}' creates a lambda/closure; the JIT closure ABI does not \
+                 tag-box lambda arguments or results and is incompatible with the runtime's \
+                 RuntimeClosure layout, so JIT would return wrong values or crash; \
+                 deferring to interpreter"
+            )));
+        }
+
         // Compile all functions
         let functions = self.backend.compile_all_functions(mir)?;
 
@@ -151,6 +185,27 @@ impl JitCompiler {
         }
 
         Ok(())
+    }
+
+    /// Return the name of the first MIR function that builds a closure, if any.
+    ///
+    /// `MirInst::ClosureCreate` is emitted only for `HirExprKind::Lambda`
+    /// (see `MirLowerer::lower_lambda_expr`); generators, futures and actors
+    /// have their own instructions. See `compile_module` for why its presence
+    /// disqualifies a module from JIT execution.
+    fn first_lambda_function_impl(mir: &MirModule) -> Option<String> {
+        for func in &mir.functions {
+            for block in &func.blocks {
+                if block
+                    .instructions
+                    .iter()
+                    .any(|inst| matches!(inst, crate::mir::MirInst::ClosureCreate { .. }))
+                {
+                    return Some(func.name.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Return the name of a declared `Linkage::Import` function that will not
