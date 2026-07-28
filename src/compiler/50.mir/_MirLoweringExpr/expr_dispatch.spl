@@ -992,16 +992,44 @@ impl MirLowering:
         # `return expr`, nil for a bare `return`.
         if val rv = value:
             var br = self.builder
-            var result = self.lower_expr(rv)
             # current_function uses a boxed Option on this lane; only the
-            # explicit Some arm unboxes it safely.
-            var cur_builder = self.builder
+            # explicit Some arm unboxes it safely. Resolved BEFORE lowering
+            # the value: the declared return type decides whether `.?` is in
+            # value position or bool position (see below), and lowering has
+            # to happen the right way the first time.
+            var pre_builder = self.builder
             var declared_return: HirType? = nil
-            match cur_builder.current_function:
+            match pre_builder.current_function:
                 case Some(active_fn):
                     declared_return = self.resolved_call_hir_return_type(active_fn.symbol)
                 case None:
                     ()
+            # Bool-return position: `fn has() -> bool: opt.?`. `.?` evaluates
+            # to `T?`, so returning it raw hands the caller the NON-ZERO nil
+            # sentinel 3 instead of `false` -- and `if has_none():` then takes
+            # the TRUE branch, the exact condition-position bug laundered
+            # through a function return. 20 owned `-> bool` functions inside
+            # src/compiler/ alone return a bare `.?` (has_errors,
+            # has_violations, is_resolved, has_default, ...), so this arm is
+            # load-bearing, not defensive. Mirrors the seed's
+            # lower_bool_return_expr (ab773bb5d5e).
+            # current_fn_returns_bool is the primary source: it is recorded by
+            # lower_function straight from fn_.return_type. declared_return is
+            # kept as a second chance because resolved_call_hir_return_type
+            # only answers for symbols that made it into the symbol table and
+            # returns nil for locally lowered functions -- relying on it alone
+            # made this coercion silently never fire.
+            var returns_bool = self.current_fn_returns_bool
+            if val bool_return_check = declared_return:
+                match bool_return_check.kind:
+                    case HirTypeKind.Bool:
+                        returns_bool = true
+                    case _:
+                        ()
+            var result = if returns_bool:
+                self.lower_cond_expr(rv)
+            else:
+                self.lower_expr(rv)
             if val found_return = declared_return:
                 match found_return.kind:
                     case HirTypeKind.Optional(_):

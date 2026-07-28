@@ -319,7 +319,29 @@ impl MirLowering:
             print "[mir-lower] lower_function:body-start {fn_.name}"
         if bootstrap_trace:
             print "[mir-lower] real-lower:body {fn_.name}"
-        val result = self.lower_block(fn_.body)
+        # Thread the declared return type into the body ONLY for `-> bool`
+        # functions, so lower_block_expected can put a bare trailing `.?` in
+        # bool position (see its tail_bool_position block). Deliberately not
+        # threaded for other return types: lower_block_expected's Optional arm
+        # would then start calling ensure_option_handle on every implicit
+        # return, which is a much wider behaviour change than this fix wants.
+        var fn_returns_bool = false
+        match fn_.return_type.kind:
+            case HirTypeKind.Bool:
+                fn_returns_bool = true
+            case _:
+                ()
+        # Also published on self for lower_return_expr, which handles the
+        # EXPLICIT `return opt.?` form and cannot recover the declared type on
+        # its own (see current_fn_returns_bool). Saved/restored like
+        # current_has_vhdl_metadata above, so nested lowering cannot leak it.
+        val previous_fn_returns_bool = self.current_fn_returns_bool
+        self.current_fn_returns_bool = fn_returns_bool
+        val result = if fn_returns_bool:
+            self.lower_block_expected(fn_.body, fn_.return_type)
+        else:
+            self.lower_block(fn_.body)
+        self.current_fn_returns_bool = previous_fn_returns_bool
         if trace_enabled:
             print "[mir-lower] lower_function:body-done {fn_.name}"
         if bootstrap_trace:
@@ -621,11 +643,35 @@ impl MirLowering:
             if bootstrap_trace:
                 print "[mir-lower] block:value-unwrapped"
             var local = LocalId(id: 0)
+            # Bool-return position for the IMPLICIT trailing-expression form
+            # (`fn has() -> bool: opt.?` with no explicit `return`). This is
+            # the dominant shape: of the 44 owned `-> bool` functions that
+            # return a bare `.?`, 40 are trailing expressions and only 3 are
+            # explicit returns. Without this, `.?` lowers to its `T?` VALUE
+            # and the function hands back the non-zero nil sentinel 3 instead
+            # of `false` -- so `if has_none():` takes the TRUE branch, the
+            # condition-position bug laundered through a return.
+            # lower_function only threads a non-nil expected_type here for
+            # bool-returning functions, so nothing else changes shape.
+            var tail_bool_position = false
+            if val tail_expected = expected_type:
+                match tail_expected.kind:
+                    case HirTypeKind.Bool:
+                        tail_bool_position = true
+                    case _:
+                        ()
+            var tail_coerced_to_bool = false
             match value.kind:
                 case HirExprKind.If(cond, then_, else_):
                     local = self.lower_if(cond, then_, else_, expected_type)
                 case HirExprKind.MatchCase(scrutinee, arms):
                     local = self.lower_match_case(scrutinee, arms, expected_type)
+                case HirExprKind.ExistsCheck(_):
+                    if tail_bool_position:
+                        local = self.lower_cond_expr(value)
+                        tail_coerced_to_bool = true
+                    else:
+                        local = self.lower_expr(value)
                 case _:
                     local = self.lower_expr(value)
             if val found_expected = expected_type:
@@ -638,7 +684,11 @@ impl MirLowering:
             # implicit returns (function body without explicit 'return')
             # preserve type information through MIR lowering and inline_call.
             # Fixes bug: extern_return_type_mismatch_object_to_int
-            if value.has_type_:
+            # Skip when the tail was coerced to a bool above: `local` now holds
+            # the rt_is_some predicate, not the `T?` that value.type_ names, and
+            # recording the stale Option type would mislead every downstream
+            # consumer of local_hir_types (option handling, field resolution).
+            if value.has_type_ and not tail_coerced_to_bool:
                 self.remember_local_hir_type(local.id, value.type_)
             if trace_enabled:
                 print "[mir-lower] block:value-lowered"

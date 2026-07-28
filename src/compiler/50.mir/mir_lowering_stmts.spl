@@ -1330,11 +1330,53 @@ impl MirLowering:
 # Control Flow Lowering
 # ============================================================================
 
+    me lower_cond_expr(cond: HirExpr) -> LocalId:
+        """Lower an expression that sits in boolean/condition position.
+
+        `.?` is an existence check whose VALUE is `T?` -- the payload when
+        present, nil when absent (syntax_quick_reference.md "Existence Check
+        (.?) - Returns T?"), and `lower_expr`'s ExistsCheck arm
+        (_MirLoweringExpr/expr_dispatch.spl) correctly produces exactly that.
+        But the nil sentinel is the NON-ZERO integer 3 (RT_NIL =
+        (SPECIAL_NIL << 3) | TAG_SPECIAL, runtime_value.h), so branching on
+        that value directly is unconditionally TRUE -- a silent wrong-branch
+        bug, strictly worse than a loud crash.
+
+        So position decides the lowering, the same split the seed uses since
+        ab773bb5d5e (lower_condition in the Rust seed's
+        hir/lower/expr/control.rs) and the same split the tree-walk
+        interpreter has always used: value position keeps the payload,
+        condition position keeps the `rt_is_some` predicate.
+
+        Everything that is not a bare `.?` falls through to the normal
+        `lower_expr` dispatcher untouched. That fall-through is deliberate:
+        the seed's first cut hand-built the and/or/not nodes here instead of
+        routing through the dispatcher, which perturbed the JIT's extern set
+        and demoted a whole module to the interpreter (a ~1000x perf cliff).
+        `not`/`and`/`or` already funnel their operands back through the
+        condition path via their own lowering, so they need nothing here.
+        """
+        match cond.kind:
+            case HirExprKind.ExistsCheck(exists_base):
+                val exists_local = self.lower_expr(exists_base)
+                var b_cond = self.builder
+                val is_some_func = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_is_some"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                    )))
+                ))
+                val is_some_res = b_cond.emit_call(is_some_func, [mir_operand_copy(exists_local)], MirType.bool())
+                self.builder = b_cond
+                is_some_res ?? LocalId(id: 0)
+            case _:
+                self.lower_expr(cond)
+
     me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, expected_type: HirType?) -> LocalId:
         """Lower if expression."""
         val coverage_decision_id = self.coverage_register_decision(cond.span, "if", cond.coverage_excluded)
         self.coverage_push_decision(coverage_decision_id)
-        val cond_local = self.lower_expr(cond)
+        val cond_local = self.lower_cond_expr(cond)
         self.coverage_pop_decision(coverage_decision_id)
         match cond.kind:
             case HirExprKind.Binary(HirBinOp.And, _, _) | HirExprKind.Binary(HirBinOp.Or, _, _): ()
@@ -1533,7 +1575,9 @@ impl MirLowering:
 
         val coverage_decision_id = self.coverage_register_decision(cond.span, "while", cond.coverage_excluded)
         self.coverage_push_decision(coverage_decision_id)
-        val cond_local = self.lower_expr(cond)
+        # Condition position: see lower_cond_expr -- a bare `while opt.?:`
+        # would otherwise spin forever on the non-zero nil sentinel.
+        val cond_local = self.lower_cond_expr(cond)
         self.coverage_pop_decision(coverage_decision_id)
         match cond.kind:
             case HirExprKind.Binary(HirBinOp.And, _, _) | HirExprKind.Binary(HirBinOp.Or, _, _): ()
