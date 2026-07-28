@@ -153,6 +153,83 @@ fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<S
     })
 }
 
+/// The bare Simple function name of a mangled pure-Simple module symbol.
+///
+/// Pure-Simple symbols are mangled `<module_prefix>__<fn_name>` where the module
+/// prefix itself uses `__` as its path separator (`lib__common__text__trim`), so
+/// the function name is everything after the LAST `__`. Returns `None` for any
+/// symbol that is not a pure-Simple module symbol (notably every `rt_*` extern,
+/// which this check must not disturb).
+pub(crate) fn simple_module_symbol_tail(sym: &str) -> Option<&str> {
+    if !(sym.starts_with("lib__") || sym.starts_with("os__")) {
+        return None;
+    }
+    let tail = sym.rsplit("__").next()?;
+    if tail.is_empty() {
+        None
+    } else {
+        Some(tail)
+    }
+}
+
+/// Report undefined pure-Simple module symbols that are defined in the same link
+/// under a different module prefix — the stale-object-cache signature.
+///
+/// Low false positive by construction: a dangling `lib__A__f` reference is a
+/// defect in every case (it can only ever become a fabricated nil stub), and the
+/// presence of a live `lib__B__f` in the same link names the module it moved to.
+fn stale_module_move_report(
+    needs_stub: &[String],
+    defined: &std::collections::HashSet<String>,
+) -> Option<String> {
+    use std::collections::HashMap;
+
+    // tail -> defined mangled symbols sharing that bare function name.
+    let mut defined_by_tail: HashMap<&str, Vec<&str>> = HashMap::new();
+    for sym in defined {
+        if let Some(tail) = simple_module_symbol_tail(sym) {
+            defined_by_tail.entry(tail).or_default().push(sym.as_str());
+        }
+    }
+
+    let mut findings: Vec<String> = Vec::new();
+    for sym in needs_stub {
+        let Some(tail) = simple_module_symbol_tail(sym) else {
+            continue;
+        };
+        let Some(providers) = defined_by_tail.get(tail) else {
+            continue;
+        };
+        let mut elsewhere: Vec<&str> = providers
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != sym.as_str())
+            .collect();
+        if elsewhere.is_empty() {
+            continue;
+        }
+        elsewhere.sort_unstable();
+        findings.push(format!("  {sym}\n      moved to: {}", elsewhere.join(", ")));
+    }
+
+    if findings.is_empty() {
+        return None;
+    }
+    findings.sort();
+    Some(format!(
+        "stale object cache detected: {} undefined pure-Simple module symbol(s) are \
+defined in this same link under a different module prefix.\n{}\n\
+This means a cached object compiled against the OLD provider module was reused \
+after the function moved modules. Linking it would fabricate a weak nil stub for \
+the dead name and every call site would silently return 0/false.\n\
+Fix: rebuild with a clean object cache (--clean, or delete the native cache \
+objects directory). If this survives a clean build the reference is genuinely \
+dangling and the source must be repaired.",
+        findings.len(),
+        findings.join("\n")
+    ))
+}
+
 /// Generate a legacy stub object file for a FREESTANDING (cross) target.
 ///
 /// Unlike `generate_stub_object`, this does not emit asm using host instructions
@@ -252,6 +329,25 @@ pub(crate) fn generate_stub_object_freestanding(
         .filter(|s| !is_linker_provided_symbol(s, &defined))
         .filter(|s| s != "main" && s != "_main")
         .collect();
+
+    // Stale-object-cache consistency check (runs BEFORE the unresolved-mode
+    // match, so `DeferToLinker` / `EmitStubs` cannot swallow it).
+    //
+    // An undefined `lib__*` / `os__*` symbol whose bare function name IS defined
+    // in this very same link under a DIFFERENT module prefix is unambiguous
+    // evidence that a cached object compiled against the OLD provider module
+    // survived a cross-module symbol move. Left alone, the stub generator
+    // fabricates an 8-byte weak nil body for the dead name and every call site
+    // in the stale object silently receives 0/false with no link error — the
+    // same fail-open shape as a nil-returning `rt_*` stub.
+    //
+    // This is a cheap backstop for the dependency-aware object cache key
+    // (`cross_module_layout_fingerprint` in `native_project::mod`): it catches
+    // the class even if a future key change regresses. It deliberately does NOT
+    // touch the `rt_*` channels.
+    if let Some(report) = stale_module_move_report(&needs_stub, &defined) {
+        return Err(report);
+    }
 
     let mut compat_symbols = BTreeSet::new();
     let mut unresolved = Vec::new();
@@ -925,6 +1021,47 @@ pub(crate) fn generate_stub_object(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn stale_module_move_is_detected_and_rt_channels_are_untouched() {
+        // The live 2026-07-28 instance: `skip_wrap_spaces` moved from the
+        // `_layout` module to `_foundation`; a stale cached caller object kept
+        // the dead `_layout` reference while the real body sits in the same link.
+        let dead = "lib__gc_async_mut__gpu__browser_engine__renderer_layout__skip_wrap_spaces";
+        let live = "lib__gc_async_mut__gpu__browser_engine__renderer_foundation__skip_wrap_spaces";
+        let defined: HashSet<String> = [live, "os__kernel__mm__map_page"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+
+        let report = stale_module_move_report(&[dead.to_string()], &defined)
+            .expect("a dead module-prefixed reference with a live sibling must be reported");
+        assert!(report.contains(dead), "report names the dead symbol");
+        assert!(report.contains(live), "report names the module it moved to");
+        assert!(report.contains("stale object cache"), "report names the cause");
+
+        // No sibling under a different prefix -> not this class, stays quiet.
+        assert!(stale_module_move_report(
+            &["lib__common__text__genuinely_absent".to_string()],
+            &defined
+        )
+        .is_none());
+
+        // `rt_*` externs are a different channel and must not be disturbed.
+        assert!(simple_module_symbol_tail("rt_array_copy").is_none());
+        assert!(stale_module_move_report(&["rt_array_copy".to_string()], &defined).is_none());
+
+        // A symbol undefined in one object and defined in another under the SAME
+        // name is ordinary cross-object linkage, not a move.
+        assert!(stale_module_move_report(&[live.to_string()], &defined).is_none());
+
+        // Tail extraction takes everything after the LAST separator.
+        assert_eq!(simple_module_symbol_tail(live), Some("skip_wrap_spaces"));
+        assert_eq!(
+            simple_module_symbol_tail("os__kernel__mm__map_page"),
+            Some("map_page")
+        );
+    }
 
     #[test]
     fn compatibility_aliases_use_gc_boundaries_and_elf_discards_siblings() {

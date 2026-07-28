@@ -146,12 +146,41 @@ silently gets `false`/`0`.
 
 ### Two separate defects
 
-- **D1 (cache):** the per-module object cache key does not invalidate on a
-  cross-module function MOVE. `cross_module_layout_fingerprint`
-  (`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs`) folds the
-  import map, yet a pre-move object was still a cache hit on 07-28 — INFERRED
-  gap, not yet isolated to a specific field. Until it is, a module move must be
-  followed by a cache purge.
+- **D1 (cache): ISOLATED AND PROVEN 2026-07-28.** The gap is not a missing field
+  in `cross_module_layout_fingerprint` — the digest is correct and does change on
+  a module move. The gap is that the DEPLOYED binary still gates the entire
+  `GlobalBuildFingerprint` (layout digest, target, opt-level, linker script)
+  behind `incr_hardening`, which is OFF by default. `35dbbf8ce85` (07-28 00:12)
+  ungates it in source; the deployed
+  `bin/release/x86_64-unknown-linux-gnu/simple` (07-28 05:45) predates that
+  behaviour and therefore still uses the dependency-blind content-only key. So
+  the key fix is landed but INERT until a bootstrap redeploy — the same
+  deployment gap as the pure-Simple guard channels.
+
+  Minimal reproduction (4 modules, freestanding archive, ~10 s/build):
+  `caller.spl` bare-calls `helper_moved`, resolved through the closure import
+  map; move `helper_moved` from `prov_a.spl` to `prov_b.spl` leaving
+  `caller.spl` byte-identical (`md5sum -c` OK), then rebuild against the same
+  `--cache-dir`.
+
+  - default (deployed behaviour): caller's object is REUSED; the emitted archive
+    carries `UND prov_a__helper_moved` (dead) alongside `FUNC prov_b__helper_moved`
+    (real) — exactly the `skip_wrap_spaces` shape.
+  - `SIMPLE_NATIVE_INCREMENTAL=1` (source behaviour after `35dbbf8ce85`):
+    `[native-incremental] 0 reused / 4 rebuilt (full rebuild: cross-module type
+    layout / signatures changed)` and the archive references only
+    `prov_b__helper_moved`.
+
+  The same lever also proves a pure ARITY change in an unrelated function fails
+  to invalidate dependents under the deployed binary. Until the redeploy lands, a
+  module move or signature change must be followed by a cache purge, or the build
+  must set `SIMPLE_NATIVE_INCREMENTAL=1`.
+
+  Hit-rate impact of the unconditional key (measured on the reproduction):
+  warm no-op 3/4 reused; body-only edit 2/4 reused (only the edited module plus
+  the always-rebuilt entry); signature / module-membership change full rebuild.
+  Body edits — the common case — keep hitting; only structural changes pay the
+  full-closure cost.
 - **D2 (fail-open):** nothing failed the link. FIXED here by channel 3 of
   `simpleos_check_no_fabricated_rt_stubs`.
 
@@ -174,3 +203,19 @@ including the `rt_*` channels landed on 07-28 — therefore does NOT run in the
 SimpleOS WM gate today. It becomes effective only after a bootstrap redeploy of
 the self-hosted binary. Until then the equivalent refusal would have to live in
 `src/compiler_rust/compiler/src/pipeline/native_project/stubs.rs`.
+
+### Seed-side backstop landed (runs today, once the seed is rebuilt)
+
+`generate_stub_object_freestanding` in
+`src/compiler_rust/compiler/src/pipeline/native_project/stubs.rs` now runs
+`stale_module_move_report` on the about-to-be-stubbed set, BEFORE the
+`FreestandingUnresolvedMode` match so `DeferToLinker` / `EmitStubs` cannot
+swallow it. Any undefined `lib__*` / `os__*` symbol whose bare function name (the
+segment after the LAST `__`) is DEFINED in the same link under a different module
+prefix aborts the link and names both the dead symbol and the module it moved to.
+This is the seed complement to channel 3 — it lives in the binary the SimpleOS
+gate actually executes, and it is the backstop for D1 in case a future cache-key
+change regresses. `rt_*` symbols are excluded by construction
+(`simple_module_symbol_tail` returns `None` for them), so the `rt_*` channels are
+untouched. Unit test:
+`stubs::tests::stale_module_move_is_detected_and_rt_channels_are_untouched`.
