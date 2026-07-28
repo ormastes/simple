@@ -1,6 +1,8 @@
 # HIR lowering is quadratic in symbols-per-module (stage-4 blocker)
 
-- **Status:** open, root cause identified and measured; fix NOT landed (see "Why no fix landed")
+- **Status:** open. Root cause 1 **REFUTED** on the stage-4 (native) lane by a
+  second pass on 2026-07-28 — see "CORRECTION" below before doing anything.
+  Root causes 2 and 3 remain unproven and unfixed; no fix landed.
 - **Filed:** 2026-07-28
 - **Severity:** blocks the stage-4 bootstrap run (three-plus modules consume ~72% of total HIR phase time)
 - **Area:** `src/compiler/20.hir/hir_types.spl` (`SymbolTable.define`),
@@ -28,7 +30,66 @@ word boundary (59 modules completed, 1,535,618 ms total phase time):
 the prior run (2.5x allocation), consistent with copy-churn rather than extra
 hashing.
 
-## Root cause 1 (MEASURED): `SymbolTable.define` is O(scope size) per call
+## CORRECTION 2026-07-28 (second pass): root cause 1 is REFUTED on the stage-4 lane
+
+**Do not implement "recommended fix 1" (flattening `SymbolTable` scope
+storage). It was measured on the wrong execution engine and is a no-op at best,
+a regression at worst.**
+
+The probe below (`/tmp/perfprobe/define_quad.spl`) declares
+`extern fn rt_time_now_monotonic_ms()`. That symbol is **not resolvable by the
+JIT or the native backend**, so every run of it falls back to the tree-walking
+interpreter:
+
+```
+[INFO] JIT compilation failed, falling back to interpreter:
+  unresolved external symbol 'rt_time_now_monotonic_ms'
+```
+
+Stage-4 does not use the interpreter. `bootstrap.log` records
+`Stage 4: compiling full CLI (main.spl) with bootstrap compiler`, i.e. the
+**native** stage3 binary. Re-running the *exact* `define()` shape (both the
+`self.symbols[raw_id] = symbol` write and the four-line copy-modify-reassign
+tail) with a resolvable timer (`rt_time_now_unix_micros`), compiled with
+`bin/simple compile --native`, gives (`/tmp/perfprobe/define_shape.spl`):
+
+| N | current copy-modify-reassign | proposed flat `"{scope_id} {name}"` dict |
+|---|---|---|
+| 1000 | 2 ms | 2 ms |
+| 2000 | 5 ms | 5 ms |
+| 4000 | 10 ms | 15 ms |
+| 8000 | 22 ms | 29 ms |
+
+Both are **linear** (~2x per doubling). The proposed flat form is consistently
+*slower* because it builds an interpolated composite key per call. Lookups
+round-tripped correctly in both (`bad=0` at every N).
+
+### What the interpreter measurement actually found (a real, separate defect)
+
+The quadratic is real, but it is **interpreter-only**, and it is not the four
+lines the report blamed. Isolated with `/tmp/perfprobe/me_recv.spl` and
+`/tmp/perfprobe/me_read.spl` (2000 calls against a pre-filled dict):
+
+| dict size | `me` method writing **that** dict | `me` method mutating a scalar field | `me` method writing a **different, small** dict | read via method |
+|---|---|---|---|---|
+| 1000 | 387 ms | 14 ms | 237 ms | 19 ms |
+| 2000 | 572 ms | 14 ms | 228 ms | 20 ms |
+| 4000 | 929 ms | 14 ms | 228 ms | 18 ms |
+| 8000 | 1775 ms | 11 ms | 228 ms | 18 ms |
+
+So under the tree-walk interpreter, `self.<dict field>[k] = v` inside a `me`
+method copies the entire target dict (O(size) per write). Reads are O(1),
+scalar-field writes are O(1), and writes to a *different* field-held dict are
+O(1). Flattening does not dodge this — the flat dict is the one being written,
+so it grows and gets copied identically (measured: flat was quadratic too under
+the interpreter, 73/249/1002/5745 ms at N=1k/2k/4k/8k, matching the
+copy-modify-reassign shape 90/286/1061/5299 ms).
+
+This deserves its own bug against the interpreter's index-assign path; it makes
+every interpreter-hosted symbol-table build accidentally quadratic. It does not
+affect the native/JIT lane.
+
+## Root cause 1 (interpreter-only — see CORRECTION above): `SymbolTable.define` is O(scope size) per call
 
 `src/compiler/20.hir/hir_types.spl`. `Scope` is a **struct** (value type) whose
 `symbols` field is a `Dict<text, i64>`. `define()` ends with:
@@ -136,7 +197,42 @@ lowering order rather than any property of the module itself.
    constructs a **fresh `HirLowering` per source file**. (Root cause 3's global
    accumulator *is* order-dependent, but the `SymbolTable` is not.)
 
-## Still unexplained
+## Still unexplained (updated 2026-07-28, second pass)
+
+Two candidate explanations for `tokens` were checked and **eliminated**:
+
+1. **"The 512 s window is really a batch of several modules."** No. Each
+   `phase3:hir:file:start` window in `s4final.log` contains exactly one
+   `[hir-lower] lower_module:start`. Verified for the `tokens` window
+   (lines 52573-55084), `lexer_struct` (48605-52572), `database.bug`
+   (59371-61217) and `database.test` (61218-62761) — all `nested=1`.
+2. **"`tokens` does more lowering work."** No — it does *less*. The `tokens`
+   window has 2,512 log lines and 10 `lower_function:start`; `lexer_struct`
+   has 3,968 lines and 22, and is 1,096x faster. The 512 s is spent in an
+   **uninstrumented, allocation-heavy region**: `heap_registry` grows by
+   **26,035,397** entries across the `tokens` window versus **41,714** for
+   `lexer_struct` (624x).
+
+The strongest remaining structural difference between the two files:
+
+| file | ms | heap_registry delta | `use` lines | `export` lines |
+|---|---|---|---|---|
+| `tokens.spl` | 512,761 | 26,035,397 | 0 | 30 (~200 names) |
+| `lexer_struct.spl` | 468 | 41,714 | 3 | 2 |
+| `database/test.spl` | 183,198 | 10,882,448 | 5 | 0 |
+| `database/bug.spl` | 956 | 21,334 | 3 | 0 |
+
+`tokens.spl` has no imports but the **largest re-export surface in its
+package**, and its package (`src/compiler/10.frontend/core`) has 48 siblings,
+5 of which carry `export ....*` facade forms. `resolve_package_sibling_symbols`
+glob-sweeps all 48 siblings, and each sweep re-walks the `exports` list and
+recurses to depth 8 **with no visited set** (root cause 2). A re-walking sweep
+over a densely cross-exporting 48-module package is the only mechanism found
+that produces a 26M-allocation blowup from a file that lowers 10 functions.
+**Root cause 2 is therefore the leading hypothesis for `tokens`, not root
+cause 1.** It is unproven — see "Why no fix landed (second pass)".
+
+The original text follows for reference:
 
 `tokens` has no imports, so its N must come from
 `resolve_package_sibling_symbols` sweeping the 48 siblings of
@@ -169,9 +265,50 @@ loop:
 Landing an unmeasured change into `module_lowering.spl` while a stage-4 build is
 actively reading it was judged the worse risk.
 
+## Why no fix landed (second pass, 2026-07-28)
+
+Root cause 1 was refuted (above), so its fix was deliberately not implemented.
+Root causes 2 and 3 were **not** landed because no trustworthy in-lane feedback
+loop could be built:
+
+- **`bin/simple compile` measures the wrong compiler.** `bin/simple` is the
+  Rust bootstrap seed (it prints the seed banner). Its HIR lowering is the Rust
+  implementation, so it is completely insensitive to edits in
+  `src/compiler/20.hir/**`. The glob-import numbers in this report
+  (55 / 322 / 875 ms) were taken with it and therefore say nothing about
+  `register_glob_imported_symbols_depth` in `.spl`.
+- **The pure-Simple lane exists but the probe is swamped.** The stage3
+  pure-Simple compiler is on disk
+  (`build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple`, copied to
+  `/tmp/claude_s4_compiler`) and does accept
+  `compile <f> --format=smf` under `SIMPLE_BOOTSTRAP=1
+  SIMPLE_COMPILER_PHASE_PROFILE=1`. On it, the two-line probes give
+  `g_none` = 16 ms to end of HIR, but `g_io` (`use std.io`) never reaches HIR
+  at all: it spends **176 seconds in phase2 parse of a single file**,
+  `src/std/nogc_async_mut/io/driver.spl` (31,090 chars, +16,944 ms ->
+  +193,636 ms). That is the known lexer O(n^2) parse defect, and it dwarfs and
+  masks the HIR cost, so the glob probe cannot isolate root cause 2.
+- **Symbol-set equivalence could not be verified.** Adding a visited set can
+  change resolution: non-type symbols are **last-write-wins** in `define()`, so
+  in a diamond (A -> B -> D, A -> C -> D) the current sweep order is
+  A,B,D,C,D and a visited set makes it A,B,D,C. For any name defined in both
+  `C` and `D` the winner flips. Proving "identical symbol set" needs a stage2
+  rebuild plus a before/after symbol dump.
+
+**The loop that would work** (untested, but the pieces are verified to exist):
+`stage2-native-build` took ~3 minutes and `stage3-native-build` ~6 minutes in
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/`. Rebuilding stage2 from a
+modified tree yields a pure-Simple compiler containing the change, which can
+then be driven exactly as `~/.claude/jobs/4403a7d8/tmp/run_s4final.sh` does.
+Any future attempt at root cause 2 or 3 should establish that loop first and
+dump the registered symbol set before and after.
+
 ## Recommended fixes, in order of leverage
 
-1. **Root cause 1** — make `define()` O(1). The natural in-place forms are both
+**Item 1 below is superseded — see the CORRECTION section at the top. Start
+from item 2.**
+
+1. ~~**Root cause 1**~~ (REFUTED on the native lane; do not implement) — make `define()` O(1). The natural in-place forms are both
    rejected by the language today (see "Language limitation" below), so the
    viable shape is to flatten scope storage onto `SymbolTable` as a single-level
    `Dict<text, i64>` keyed by `"{scope_id} {name}"`, so the hot write is a
@@ -212,6 +349,32 @@ quadratic. Filed as part of this bug.
 ## Reproduction
 
 - Quadratic `define` probe: `/tmp/perfprobe/define_quad.spl` (replicates the
-  copy-modify-reassign block; run with `bin/simple run`).
-- Glob-import cost probe: 2-line files with and without `use std.io`, timed with
-  `bin/simple compile`.
+  copy-modify-reassign block; run with `bin/simple run`). **Interpreter-only —
+  its `rt_time_now_monotonic_ms` extern forces JIT fallback. Do not use it to
+  judge the stage-4 lane.**
+- Native-lane `define` probe: `/tmp/perfprobe/define_shape.spl`
+  (`bin/simple compile --native`, times with `rt_time_now_unix_micros`).
+  Compares the current shape against the proposed flat dict at N=1k/2k/4k/8k.
+- Engine-semantics probes: `/tmp/perfprobe/me_recv.spl`,
+  `/tmp/perfprobe/me_read.spl`, `/tmp/perfprobe/me_forms.spl`,
+  `/tmp/perfprobe/field_dict.spl`, `/tmp/perfprobe/dict_raw.spl`.
+  `dict_raw.spl` shows a bare `Dict<text,i64>` insert loop is linear on every
+  engine, so `Dict` itself is not the problem.
+- Glob-import cost probe: 2-line files with and without `use std.io`.
+  **Timing them with `bin/simple compile` measures the Rust seed, not the
+  `.spl` compiler.** Use `/tmp/claude_s4_compiler` (stage3) instead — but note
+  it stalls 176 s in phase2 parse before reaching HIR.
+
+## Language / runtime gaps recorded by this bug
+
+1. Nested index/field assignment is not expressible (original report, below):
+   `self.scopes[0].symbols[name] = v` and `self.scope_syms[0][name] = v` are
+   both rejected.
+2. **Interpreter copies a whole `Dict` on `self.<field>[k] = v` inside a `me`
+   method** (measured above). Reads, scalar-field writes, and writes to other
+   field-held dicts are all O(1); only the written dict is copied. This makes
+   any interpreter-hosted accumulation into a class-held dict quadratic.
+3. **Lexer/parser O(n^2)**: `src/std/nogc_async_mut/io/driver.spl` (31 KB)
+   takes 176 s to parse on the stage3 pure-Simple compiler. Pre-existing (see
+   `project_lexer_on2_perf_and_native_slice_2026-07-12`), but it is now the
+   blocking obstacle to building a cheap HIR feedback loop.
