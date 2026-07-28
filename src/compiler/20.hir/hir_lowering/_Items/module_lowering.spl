@@ -516,6 +516,8 @@ impl HirLowering:
             val fn_type = self.declared_callable_type(imported_mod.functions[imported_name], nil)
             val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod_name))
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod_name, imported_name)
+            if local_name == imported_name:
+                self.symbols.bind_qualified_function(imported_mod_name, imported_name, imported_fn_sym)
         elif has_const:
             self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
         else:
@@ -975,6 +977,17 @@ impl HirLowering:
             return nil
         val active_scope = self.symbols.current_scope
         self.symbols.current_scope = ScopeId(id: 0)
+        val package_separator = self.package_sibling_self_name.last_index_of(".") ?? -1
+        if package_separator >= 0:
+            val package_key = self.package_sibling_self_name[0:package_separator] + "::" + name
+            if self.package_sibling_symbol_index.contains_key(package_key):
+                val owner_name = self.package_sibling_symbol_index[package_key]
+                if owner_name != self.package_sibling_self_name and self.modules_by_name.contains_key(owner_name):
+                    self.register_imported_symbol(self.modules_by_name[owner_name], owner_name, name, name, span)
+                    val indexed = self.symbols.lookup(name)
+                    if indexed != nil:
+                        self.symbols.current_scope = active_scope
+                        return self.symbols.lookup(name)
         for sibling_name in self.package_sibling_modules:
             if sibling_name == self.package_sibling_self_name:
                 continue

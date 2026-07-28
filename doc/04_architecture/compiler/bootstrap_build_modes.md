@@ -35,6 +35,11 @@ driver environment and restores the caller's values afterward. Explicit
 `--entry` remains the Rust-seed-owned Stage 2 bridge and is not the Stage 3
 self-host path.
 
+The focused Stage 4 route in
+`src/app/cli/bootstrap_focused_native_build.spl` accepts only the canonical
+`--low-memory` flag, maps it to `SIMPLE_BOOTSTRAP_LOW_MEMORY` around the
+in-process driver call, and restores the caller's prior value afterward.
+
 ## Dependency Tracing
 
 `--entry-closure` is a reducer, not an authority. It scans imports from the

@@ -288,7 +288,10 @@ For this kernel specifically:
   a leaf edit can never ship a stale wrong kernel. Default OFF.
 - **Structural change** (new module, struct/enum/trait layout, entry-closure set,
   linker/flag/target/opt-level) → full rebuild (T1 auto-triggers this too).
-- **Compiler change** (`src/compiler_rust` or `src/compiler`) → full bootstrap.
+- **Rust seed/runtime implementation change** (`src/compiler_rust` or
+  `src/runtime`) → full bootstrap. A pure-Simple `src/compiler` change uses the
+  cheapest adequate incremental or staged rebuild; relink/deploy only when a
+  fresh CLI is needed.
 
 Boot with `qemu-system-x86_64 -machine q35 -cpu max -m 2G` plus an
 NVMe-backed FAT32 disk if the VFS/disk path is under test

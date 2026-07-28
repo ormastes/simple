@@ -1,6 +1,6 @@
 # Shared Multilingual GPU Fonts — All Remaining Items — TLDR
 
-Six non-overlapping lanes own every selected REQ-001–015 and NFR-001–008 row;
+Six non-overlapping lanes own every selected REQ-001–016 and NFR-001–008 row;
 `/root` alone integrates, reviews, rebases, and pushes.
 
 ## Core Shape
@@ -24,13 +24,20 @@ Six non-overlapping lanes own every selected REQ-001–015 and NFR-001–008 row
 - The current manual inventory is 34 changed/new specs: 14 mirrors missing,
   20 stale, zero current; all 34 require immutable owner docgen and F review
   with `0 stubs`.
+- Three prerequisite compiler perf-repair mirrors outside the font graph also
+  require docgen and `0 stubs`; all three canonical mirrors are missing.
 - The authoritative focused graph is 39 commands: one runner-contract
   preflight, B6, C17, D11, and E4.
 - Production rows are Engine2D, Web, GUI, hosted WM, x86 SimpleOS, and RV64
   SimpleOS; unavailable hardware remains blocked, never simulated PASS.
-- P0 is compiler-enablement only. The next fresh window uses the Rust seed once
-  to build repaired pure-Simple Stage2 from current source; Stage2 rebuilds
-  Stage3, and only Stage3/full CLI may supply admission or font evidence.
+- P0 is compiler-enablement only. This window has no eligible CLI, parent, or
+  provenance-valid cache and permits no fourth producer/full bootstrap. A
+  future fresh window must first prove an immutable pure-Simple parent/current
+  source receipt, then use the cheapest adequate incremental build.
+- Three shared compiler performance defects are source-fixed and independently
+  reviewed: Stage4 low-memory forwarding/restoration, one direct sibling-owner
+  index per lowering pass, and direct qualified-function lookup. Runtime and
+  measured-gain evidence remain open.
 
 ## Open Next
 

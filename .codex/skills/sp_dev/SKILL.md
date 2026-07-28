@@ -818,8 +818,11 @@ NOT a full bootstrap. Per `.claude/rules/bootstrap.md` § "Verification tiering"
 T0 hosted seed probe (seconds) for logic changes; T1 incremental kernel build via
 `SIMPLE_NATIVE_INCREMENTAL=1` with a stable `--cache-dir` for small lib changes
 (reuses per-module objects — link + entry-closure discovery still run each build);
-T2 full kernel rebuild for structural changes; T3 full bootstrap only when
-`src/compiler_rust`/`src/compiler` changed or as the final pre-goal gate.
+T2 full kernel rebuild for structural changes. Pure-Simple compiler changes and
+final completion gates use the cheapest adequate incremental or staged
+pure-Simple build. T3 full bootstrap is only for changed Rust seed/runtime
+implementation inputs that actually must be rebuilt; completion alone is not a
+reason to rebuild Rust.
 
 ## Log-retention convention (debug/perf instrumentation)
 

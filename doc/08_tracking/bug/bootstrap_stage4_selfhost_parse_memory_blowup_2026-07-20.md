@@ -1126,3 +1126,36 @@ Focused resolver tests pass. A source-matched generation-1 benchmark still
 requires rebuilding the Rust bootstrap seed with that fix; do not credit the
 multi-file performance gate or full Stage4 until that rebuild and benchmark
 complete.
+
+## UPDATE 2026-07-28: remove residual lookup scans and restore focused Stage4 low-memory forwarding (source-fixed, runtime-unverified)
+
+The latest bounded full-CLI producer remains the runtime baseline: it ran for
+17m29s, reached 23,943,204 KiB max RSS, and emitted no CLI. Source inspection
+after that run found three residual hot-path/control-path defects not present in
+that baseline binary:
+
+- the focused Stage4 route did not forward canonical `--low-memory` into the
+  in-process driver. `bootstrap_focused_native_build.spl` now saves
+  `SIMPLE_BOOTSTRAP_LOW_MEMORY`, sets it to `1` only for the exact flag (or `0`
+  otherwise), invokes the driver, and restores the prior value;
+- bare package-sibling lookup still had to walk sibling modules to discover the
+  direct declaration owner. The driver now builds one package/name-to-owner
+  index per lowering pass and shares it with every `HirLowering` instance;
+- module-qualified function access scanned every `SymbolTable.symbols.keys()`.
+  Imported functions now populate a qualified-function index, and qualified
+  access performs that direct lookup. Bare-name import registration still
+  chases facade re-exports; facade-qualified re-export access remains
+  unsupported as before.
+
+Focused regression coverage was added in
+`test/01_unit/app/cli/bootstrap_focused_native_build_spec.spl`,
+`test/01_unit/compiler/hir/resolve_import_symbols_spec.spl`, and
+`test/01_unit/compiler/hir/symbol_display_name_spec.spl`. These assert exact
+save/set/call/restore ordering, direct declaration-owner lookup without the
+legacy sibling walk, qualified lookup/miss behavior, and absence of the former
+per-access `keys()` loop.
+
+No new build or runtime test was started: the producer retry cap is exhausted.
+These are current-source fixes with focused tests present, not measured
+performance evidence. Do not claim an RSS or elapsed-time improvement until a
+later admitted current-source pure-Simple CLI runs the bounded gates once.

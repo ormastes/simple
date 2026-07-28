@@ -13,6 +13,8 @@ inside pure-Simple tooling.
 - Stage 3 invokes positional `bootstrap_main.spl` through pure Simple with the
   native-all bundle; it forwards and restores runtime path, target, cache, and
   thread settings. Explicit `--entry` remains the Stage 2 Rust bridge.
+- The focused Stage 4 route forwards canonical `--low-memory` through
+  `SIMPLE_BOOTSTRAP_LOW_MEMORY` and restores the prior environment value.
 - Use full bootstrap only when changed Rust seed/runtime implementation inputs
   must actually be rebuilt; final gates and pure-Simple changes use the cheapest
   adequate incremental or staged pure-Simple build.

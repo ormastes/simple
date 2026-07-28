@@ -32,25 +32,31 @@ All 24 requirement/NFR rows are mapped, but the umbrella result remains
   retains immutable identity/command/streams/exit/manual-hash evidence and
   requires an explicit complete/`0 stubs` marker; the aggregate checker
   revalidates and seals the complete graph;
-- pushed checkpoint `4a88fee61df3` matched the remote feature branch before
-  this pending source/evidence correction; final fetch/rebase/file-count sync
+- implementation checkpoint `269f46387e1` precedes the current evidence
+  working changes; final fetch/rebase/file-count sync
   remains open, while older static guard results are historical only;
 - the final bounded retained-Stage3 cycle cleared the NUL environment panic,
   then trapped at RIP `0x88034b` because its obsolete iterable collector passed
   a lowering error with nil `span` to `_format_hir_lowering_error`; no candidate
   ELF exists; current source now formats a nil-span diagnostic without
   dereferencing it, but that repair is execution-unverified;
-- the next fresh verification window uses the Rust seed once as bootstrap-only
-  authority to produce current pure-Simple Stage2 in a fresh exclusive cache;
-  the canonical producer and manifest replay now hash-bind the native-arena
-  mode, Stage2 rebuilds Stage3, and only pure-Simple Stage3/full CLI may supply
-  admission evidence;
+- this window has no eligible CLI, parent, or provenance-valid cache and permits
+  no fourth producer/full bootstrap; a future fresh window must first prove an
+  immutable pure-Simple parent/current source receipt and then use the cheapest
+  adequate incremental build;
+- Stage4 low-memory forwarding/restoration, one direct sibling-owner index per
+  lowering pass, and direct qualified-function lookup are source-fixed and
+  independently reviewed; Rust diagnostics are non-acceptance, no measured
+  gain exists, and all three canonical prerequisite mirrors are missing;
 - the three-cycle cap is reached; the compatibility bridge remains isolated
   and uncommitted, and no further build retry is permitted this session;
-- an external compiler-only Stage3 was produced, but its Stage4 full-CLI build
-  failed at `env/variables.spl:364`; no test/run/docgen runtime exists;
+- the latest external `c167e250` Stage4 ended `EXIT=143`/SIGTERM with no full
+  output; older `env/variables.spl` failures are historical only, and no
+  test/run/docgen runtime exists;
 - the essential-tools gate for test, lint, duplicate-check, and its aggregate
   marker must pass once against the exact admitted CLI before runner calibration;
+- compiler, lib, MCP, LSP, and MCP stdio integration pure-runtime gates remain
+  mandatory because compiler and CLI source changed;
 - all six production capability rows remain blocked: Engine2D/Vulkan,
   HTML/WebIR, GUI, hosted WM, x86_64 SimpleOS QEMU, and RV64 SimpleOS QEMU;
   their exact artifact paths and resume commands are recorded in the full

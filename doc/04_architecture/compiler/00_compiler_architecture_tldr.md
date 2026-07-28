@@ -25,8 +25,11 @@ Key rules:
   `--full-bootstrap`.
 - Treat entry-closure and native cache reuse as conservative around AOP/MDSOC,
   interpreter, loader, and compiler ABI changes.
-- Build one package-to-direct-sibling index per compilation; HIR lowerers reuse
-  it and register the requested symbol from a direct sibling only when needed.
+- Build package/direct-sibling and direct-declaration-owner indexes once per
+  compilation pass; HIR lowerers register only the requested sibling symbol,
+  retaining the old scan only for re-export fallback and misses.
+- Resolve module-qualified functions through the `SymbolTable` qualified index;
+  never use a per-access full `keys()` scan.
 - Keep strict runtime-family and no-allocation checks on target-sensitive paths.
 
 Open next:

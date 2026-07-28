@@ -1,4 +1,5 @@
 use std.spec.*
+use std.io_runtime.{file_read}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.{SymbolKind, SymbolTable}
@@ -19,3 +20,24 @@ describe "HIR symbol display names":
         expect(symbols.symbol_display_name(id, "fallback")).to_equal("answer")
         symbols.rename_symbol(id, "provider.answer")
         expect(symbols.symbol_display_name(id, "fallback")).to_equal("provider.answer")
+
+    it "indexes qualified functions without scanning the symbol table":
+        var symbols = SymbolTable.new()
+        val id = symbols.define(
+            "answer",
+            SymbolKind.Function,
+            nil,
+            Span.empty(),
+            Visibility.Public,
+            false,
+            Some("provider")
+        )
+        symbols.bind_qualified_function("provider", "answer", id)
+
+        val found = symbols.lookup_qualified_function("provider", "answer")
+        expect(found.unwrap().id).to_equal(id.id)
+        expect(symbols.lookup_qualified_function("provider", "missing")).to_be_nil()
+
+        val source = file_read("src/compiler/20.hir/hir_lowering/expressions.spl")
+        expect(source).to_contain("self.symbols.lookup_qualified_function(module_name, fld_name_t)")
+        expect(source.index_of("for candidate_key in self.symbols.symbols.keys():")).to_equal(-1)

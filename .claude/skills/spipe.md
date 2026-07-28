@@ -30,10 +30,11 @@ mirrored through SPipe.
 > last resort, not a default.** Before rebuilding anything, ask which tier of
 > `.claude/rules/bootstrap.md` § "Verification tiers" your change needs: T0
 > hosted seed probe (seconds), T1 incremental kernel build, T2 full kernel
-> rebuild, T3 full bootstrap. Most verification — including most compiler-source
-> edits whose effect is observable in a probe or a single spec — is decided at
-> T0/T1. Escalating a one-file change to T3 costs hours and blocks every other
-> lane on the machine.
+> rebuild, T3 full bootstrap. Pure-Simple compiler changes and final completion
+> gates use the cheapest adequate incremental or staged pure-Simple build. T3 is
+> only for changed Rust seed/runtime implementation inputs that actually must be
+> rebuilt; completion alone is not a reason to rebuild Rust. Most other
+> verification is decided at T0/T1.
 >
 > When you do build incrementally, you MUST confirm reuse actually happened:
 > set `SIMPLE_NATIVE_INCREMENTAL=1`, pass a **stable** `--cache-dir`, and read
@@ -1565,8 +1566,10 @@ tiering": T0 hosted seed probe (seconds) for logic changes; T1 incremental kerne
 build with `SIMPLE_NATIVE_INCREMENTAL=1` + a stable `--cache-dir` for small lib
 changes (reuses per-module objects; link + discovery still run); T2 full kernel
 rebuild for structural changes (new modules, type/trait layout, entry-closure set,
-linker/flag changes); T3 full bootstrap ONLY when the compiler itself
-(`src/compiler_rust` or `src/compiler`) changed or as the final pre-goal gate.
+linker/flag changes). Pure-Simple compiler changes and final completion gates use
+the cheapest adequate incremental or staged pure-Simple build. T3 full bootstrap
+is only for changed Rust seed/runtime implementation inputs that actually must be
+rebuilt; completion alone is not a reason to rebuild Rust.
 
 ## Log-retention convention (debug/perf instrumentation)
 

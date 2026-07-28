@@ -18,8 +18,8 @@ produce the pure-Simple prerequisite.
 ### Current bootstrap blocker
 
 The implementation checkpoint under verification is
-`269f46387e174d6e8b31ad494c0d177dc15e69f4`; this evidence-only commit follows
-it and intentionally does not self-record its own hash. The earlier pushed checkpoint
+`269f46387e174d6e8b31ad494c0d177dc15e69f4`; current evidence working changes
+follow it without inventing a commit hash. The earlier pushed checkpoint
 `2eb2bbf93f10` is historical. Completion still requires the final
 fetch/rebase/file-count gate against the then-current `origin/main`.
 At the earlier source checkpoint `deb90cd8a9c`, both direct-runtime guards,
@@ -411,7 +411,7 @@ themselves as manually synchronized/docgen-pending. Hand synchronization is not
 generated evidence. The 14 absent mirrors and all 20 stale mirrors therefore
 remain rejected until deterministic docgen succeeds with `0 stubs`.
 
-Nine additional changed compiler/bootstrap specs are prerequisite-enablement
+Twelve additional changed compiler/bootstrap specs are prerequisite-enablement
 regressions, not shared-font requirement evidence, and are explicitly excluded
 from the 34-manual and 39-command font graphs:
 `bootstrap_main_source_spec.spl`,
@@ -422,7 +422,17 @@ from the 34-manual and 39-command font graphs:
 `hir_block_tail_invariants_source_spec.spl`,
 `const_eval_spec.spl`,
 `effect_inference_spec.spl`, and
-`resolve_nil_guard_spec.spl`. During this audit, two apparent further diffs
+`resolve_nil_guard_spec.spl`,
+`bootstrap_focused_native_build_spec.spl`,
+`resolve_import_symbols_spec.spl`, and
+`symbol_display_name_spec.spl`. All three canonical prerequisite mirrors are
+missing:
+`doc/06_spec/01_unit/app/cli/bootstrap_focused_native_build_spec.md`,
+`doc/06_spec/01_unit/compiler/hir/resolve_import_symbols_spec.md`, and
+`doc/06_spec/01_unit/compiler/hir/symbol_display_name_spec.md`. The stale
+legacy-path copy at
+`doc/06_spec/test/01_unit/compiler/hir/resolve_import_symbols_spec.md` does not
+satisfy the canonical docgen path. During this audit, two apparent further diffs
 came only from newer upstream GPU-wire changes:
 `processing_cpu_fallback_daemon_wire_spec.spl` and
 `simpleos_qemu_host_gpu_2d_spec.spl`. Neither contains a font or glyph
@@ -570,12 +580,23 @@ test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl
 test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
 test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
 SPECS
+
+DOCGEN_ROOT="build/test-artifacts/shared_multilingual_gpu_fonts/compiler-perf-prerequisite-docgen/attempt-$DOCGEN_ATTEMPT"
+mkdir -p "$DOCGEN_ROOT"
+while IFS= read -r spec; do
+  run_docgen_spec "$spec"
+done <<'SPECS'
+test/01_unit/app/cli/bootstrap_focused_native_build_spec.spl
+test/01_unit/compiler/hir/resolve_import_symbols_spec.spl
+test/01_unit/compiler/hir/symbol_display_name_spec.spl
+SPECS
 ```
 
 Lane A records the deployed pure-Simple runtime and matching core-C identity
-used for focused checks. Rust-seed Stage2 generation is bootstrap-only
-enablement; a Rust binary or exit `2`, `124`, `132`, or `139` remains
-non-evidence.
+used for focused checks. Rust-seed Stage2 generation remains non-evidence and
+is not permitted in this exhausted producer window; bounded seed diagnostics
+remain non-acceptance only. A Rust binary or exit `2`, `124`, `132`, or `139`
+is never acceptance evidence.
 
 After lane A publishes those immutable values, set:
 
@@ -939,22 +960,60 @@ complete with `0 stubs`. The owner retains the immutable identity, command,
 both streams, exit, and manual hash; lane F reviews the generated operator
 flow.
 
+The separate prerequisite loop above must also exit zero and produce three
+current `0 stubs` manuals. This does not change the 39-command focused graph or
+the 34-font-manual count.
+
 ## Final gates owned by `/root`
 
 ```bash
+set -euo pipefail
 find doc/06_spec -name '*_spec.spl' -print
 sh scripts/audit/direct-env-runtime-guard.shs --working
 sh scripts/audit/direct-env-runtime-guard.shs --staged
 sh scripts/audit/numbered-artifact-guard.shs --working
 sh scripts/audit/numbered-artifact-guard.shs --staged
 git diff --check
+"$CLI" check src/compiler
+"$CLI" check src/lib
+"$CLI" check src/app/mcp
+"$CLI" check src/app/simple_lsp_mcp
+SIMPLE_LIB=src "$CLI" test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
 bash scripts/check/check-shared-multilingual-font-evidence.shs
+prereq_root="build/test-artifacts/shared_multilingual_gpu_fonts/compiler-perf-prerequisite-docgen/attempt-${DOCGEN_ATTEMPT:?}"
+[ "$(git rev-parse HEAD)" = "${CHECKPOINT_SHA:?}" ]
+[ "$(sha256sum "$CLI" | awk '{print $1}')" = "${CLI_SHA:?}" ]
+[ "$(sha256sum "$CORE_C_DIR/libsimple_runtime.a" | awk '{print $1}')" = "${CORE_C_SHA:?}" ]
+while IFS='|' read -r spec manual artifact; do
+  artifact="$prereq_root/$artifact"
+  spec_sha=$(sha256sum "$spec" | awk '{print $1}')
+  manual_sha=$(sha256sum "$manual" | awk '{print $1}')
+  test "$(tr -d '\r\n' < "$artifact.exit")" = 0
+  grep -Eq '^DONE Generated [0-9]+ docs \([0-9]+ complete, 0 stubs\)$' "$artifact.out"
+  grep -Fx "checkpoint_sha=$CHECKPOINT_SHA" "$artifact.command"
+  grep -Fx "attempt=$DOCGEN_ATTEMPT" "$artifact.command"
+  grep -Fx "cli_sha256=$CLI_SHA" "$artifact.command"
+  grep -Fx "core_c_sha256=$CORE_C_SHA" "$artifact.command"
+  grep -Fx "spec=$spec" "$artifact.command"
+  grep -Fx "spec_sha256=$spec_sha" "$artifact.command"
+  grep -Fx "manual=$manual" "$artifact.command"
+  grep -Fx "manual_sha256=$manual_sha" "$artifact.manual.sha256"
+done <<'PREREQUISITES'
+test/01_unit/app/cli/bootstrap_focused_native_build_spec.spl|doc/06_spec/01_unit/app/cli/bootstrap_focused_native_build_spec.md|01_unit_app_cli_bootstrap_focused_native_build_spec.spl
+test/01_unit/compiler/hir/resolve_import_symbols_spec.spl|doc/06_spec/01_unit/compiler/hir/resolve_import_symbols_spec.md|01_unit_compiler_hir_resolve_import_symbols_spec.spl
+test/01_unit/compiler/hir/symbol_display_name_spec.spl|doc/06_spec/01_unit/compiler/hir/symbol_display_name_spec.md|01_unit_compiler_hir_symbol_display_name_spec.spl
+PREREQUISITES
 ```
 
-The first command must print nothing. The final command revalidates and
+The first command must print nothing. The five pure-runtime compiler/lib/MCP/LSP
+commands are mandatory because compiler and CLI source changed; Rust diagnostics
+cannot replace them. The shared-font checker revalidates and
 hash-seals exactly 39 focused artifact sets, 34 docgen/manual records, the
 essential-tools admission, and the runner calibration, then verifies the new
-seal before reporting PASS. Existing-seal mode is reserved for a later
+seal before reporting PASS. The following loop independently gates the three
+prerequisite manuals against current checkpoint, CLI, core-C, source, canonical
+manual, and recorded manual identities without changing those counts.
+Existing-seal mode is reserved for a later
 independent audit and must not be invoked immediately as a redundant rerun.
 Final verification remains `STATUS: FAIL`
 until every blocked row has authoritative evidence; unavailable hardware stays
@@ -977,10 +1036,10 @@ candidate ELF was created. Evidence is retained at
 `5cd89facfb881ee5a5f5003941e9bdf486f87b90dc0fe36573ec6e7482b5e034`).
 The hard three-cycle cap prevents another build in this verification window;
 the 39 focused runs, 34 docgens, and essential-tools smoke remain blocked.
-The only authoritative resume contract is the fresh Rust-seed Stage2 →
-pure-Simple Stage3 plan in
-`doc/03_plan/agent_tasks/shared_multilingual_gpu_fonts_all_items_2026-07-26.md`;
-the older bridge/cache imperatives above are retained as history only.
+The only authoritative resume contract is a future fresh window that first
+proves an immutable pure-Simple parent/current source receipt, then uses the
+cheapest adequate incremental build. The older Rust-seed, bridge, and cache
+imperatives above are retained as history only.
 
 ## 2026-07-28 latest incremental profile
 
@@ -1037,5 +1096,28 @@ Evidence is retained at
 absent. No fourth producer or full Stage4 build is permitted in this window.
 The new index is present only in the not-yet-produced candidate, so this old
 producer's memory profile is not performance evidence for or against it.
+
+`STATUS: FAIL`
+
+## 2026-07-28 compiler performance repair
+
+Focused/incremental builds are now the default; a full bootstrap is required
+only when changed seed/runtime inputs make it essential. Bounded inventory
+found no eligible current CLI, parent, or provenance-valid reusable cache, and
+the producer cap forbids a fourth attempt in this window.
+
+Three shared hot-path defects are source-fixed: focused Stage4 now forwards and
+exactly restores low-memory state; lowering builds one direct package-sibling
+owner index per pass while retaining the legacy re-export fallback; and
+module-qualified function access uses a direct index instead of materializing
+all symbol keys per access. Independent focused, combined, and static reviews
+passed.
+
+Rust-seed diagnostics are not acceptance evidence. The qualified-function
+spec passed; the low-memory and sibling-index specs stopped before examples on
+the retained seed parser error in `module_lowering.spl` (`expected Comma, found
+FString([Literal("}")])`). No new full CLI, essential-tools admission,
+pure-Simple acceptance result, measured performance gain, focused font result,
+or docgen exists. No fourth producer is permitted.
 
 `STATUS: FAIL`

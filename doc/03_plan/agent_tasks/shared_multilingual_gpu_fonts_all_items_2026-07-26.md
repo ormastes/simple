@@ -22,14 +22,14 @@ atlas, cache, process/env facade, or device-success path.
 | Area | Current evidence | Required next state |
 |---|---|---|
 | GSUB/GPOS | reviewed completion is integrated on the isolated branch; superseded stage1 duplicates were not imported | execute the frozen shaping/parser specs on the deployed pure-Simple runtime |
-| Runtime | no admitted current full CLI or eligible parent exists. Three bounded local producer cycles are exhausted, and external stale-source Stage4 `c167e250` ended `EXIT=143`/`SIGTERM` with no full output (log SHA-256 `5a49ab01a7f7db6fc112c77c605c4760ff1a68f6929e5cf1e7037deef8d1c1d7`) | P0 is unassigned and blocked; a future verification window may resume only after an independently completed pure-Simple parent is proven, then use it once to incrementally build current checkpoint sources. No Rust-seed or fourth producer attempt is allowed in this window |
+| Runtime | no admitted current full CLI, eligible parent, or provenance-valid reusable cache exists. Three bounded local producer cycles are exhausted, and external stale-source Stage4 `c167e250` ended `EXIT=143`/`SIGTERM` with no full output (log SHA-256 `5a49ab01a7f7db6fc112c77c605c4760ff1a68f6929e5cf1e7037deef8d1c1d7`) | P0 is blocked in this window; a future fresh producer window must first prove an immutable pure-Simple parent/current source receipt, then use the cheapest adequate incremental build. No fourth producer or full bootstrap is allowed in this window |
 | Focused tests | implementation and static coverage exist; prior runner exited before examples | calibrated, nonzero, authoritative runtime results |
 | Native GPU | source/emission and partial backend evidence exist | one real 2D+3D promoted device route and current perf record |
 | Surfaces | source contracts and retained artifacts exist | live canonical Web/GUI/WM/SimpleOS evidence and honest blocked rows |
-| Docs/manuals | 34 changed/new sources since `origin/main`; 14 mirrors missing, 20 stale, zero current, and zero retained docgen logs | regenerate all 34 mirrors with the admitted pure-Simple runtime, require `0 stubs`, and update one requirement/evidence matrix |
+| Docs/manuals | 34 font sources: 14 mirrors missing, 20 stale, zero current, and zero retained docgen logs. All three canonical prerequisite compiler perf-repair mirrors outside the font graph are missing; a stale legacy-path resolve-import copy does not satisfy the canonical path | regenerate the 34 font mirrors and three prerequisite mirrors with the admitted pure-Simple runtime, require `0 stubs`, and update one requirement/evidence matrix |
 
-The implementation checkpoint under verification is `269f46387e1`; this
-evidence-only commit follows it without self-recording its own hash.
+The implementation checkpoint under verification is `269f46387e1`; current
+evidence working changes follow it without inventing a commit hash.
 Source-present but runtime-unverified work at that checkpoint includes the one-pass package sibling index, positional Stage 3
 build with target/cache/thread/runtime forwarding, reviewed GSUB/GPOS coverage,
 GPOS VariationIndex long-word handling, fail-closed degenerate Web results,
@@ -39,19 +39,16 @@ HIP prepared-batch canonicalization, and nested-WM clipping/stale-frame checks.
 
 | Current sidecar | Exact scope | Status / writable authority |
 |---|---|---|
-| `bootstrap_docs_refresh` | bootstrap/compiler documentation refresh | source-complete; owned bootstrap docs only |
-| `runtime_admission_watch` | externally owned producer provenance/resource watch | complete: `c167e250` Stage4 ended `EXIT=143`/`SIGTERM` without output; N/A — read-only |
-| `manual_inventory_audit` | 34-source manual and matcher/step audit | complete; N/A — read-only |
-| `remaining_matrix_audit` | REQ/NFR and 39-command graph audit | complete; N/A — read-only |
-| `current_host_gpu_audit` | current-host native/GPU capability audit | complete; N/A — read-only |
-| `state_plan_consistency` | state/plan/report consistency audit | complete; N/A — read-only |
-| `canonical_matchers_fix` | nine non-canonical boolean matcher wrappers | source-complete, runtime-unverified; owned spec lines only |
-| `frozen_steps_fix` | four production-surface frozen-step vocabulary violations | source-complete, runtime-unverified; owned spec lines only |
-| `verification_report_fix` | current checkpoint, matrix, C17/39, and manual-inventory report truth | source-complete; verification report only |
-| `state_truth_fix` | current acceptance/matrix/checkpoint truth | source-complete; SPipe state only |
-| `agent_plan_fix` | current admission, ownership, graph, and inventory truth | source-complete; this plan only |
-| `spec_cleanup_review` | independent review of matcher/step cleanup | PASS; N/A — read-only |
-| `bootstrap_doc_review` | independent review of bootstrap/compiler doc refresh | PASS; N/A — read-only |
+| `process_rule_fix` / `bootstrap_rule_crosscheck` | incremental/full-bootstrap policy correction and crosscheck | source-complete / PASS; policy files only |
+| `pure_cli_inventory` / `incremental_cache_audit` | eligible current CLI, parent, and cache provenance | complete: none eligible; N/A — read-only |
+| `remaining_source_gaps` | REQ/NFR implementation/source coverage | PASS; N/A — read-only |
+| `compiler_perf_source_audit` | Stage4 hot-path profiling audit | complete: three shared root causes identified |
+| `low_memory_forward_fix` | focused Stage4 low-memory forwarding/restoration | source-complete, runtime-unverified |
+| `sibling_symbol_index_fix` | one direct package-sibling owner index per lowering pass | source-complete, runtime-unverified |
+| `qualified_function_index_fix` | direct qualified-function lookup index | source-complete, runtime-unverified |
+| `low_memory_review` / `sibling_index_review` / `qualified_index_review` | independent focused review | PASS; N/A — read-only |
+| `perf_fix_docs` / `perf_manual_inventory` | architecture, blocker truth, and three-spec mirror audit | complete; three canonical prerequisite mirrors missing |
+| `final_perf_review` / `static_guard_review` | combined correctness and policy review | PASS; N/A — read-only |
 | `/root` | merge owner and final high-capability reviewer | integration, final guards, sync/push |
 
 The former B–F implementation aliases below are decomposition history, not
@@ -72,7 +69,7 @@ unless `/root` assigns a concrete failed acceptance row after CLI admission.
 
 | Task | Owner | Exclusive writable scope | Dependency | Deliverable and evidence |
 |---|---|---|---|---|
-| P0 current-source pure-CLI admission | unassigned / blocked | future detached current checkpoint, unique incremental cache/output, admission logs; no product-code edits | no eligible parent currently; successful immutable external pure-Simple parent required | future current-source pure-Simple full CLI plus CLI/core-C paths and SHA-256 identities; essential-tools smoke PASS |
+| P0 current-source pure-CLI admission | unassigned / blocked | future detached current checkpoint, unique incremental cache/output, admission logs; no product-code edits | blocked in this window; future fresh producer window must first prove an immutable pure-Simple parent/current source receipt | future current-source pure-Simple full CLI plus CLI/core-C paths and SHA-256 identities; essential-tools smoke PASS |
 | A1 runtime identity | `bootstrap_runner` | retained runtime identity and focused runner artifacts only | P0 | immutable admitted CLI/core-C identity; reject Rust seed and stale binaries |
 | A2 command calibration | `bootstrap_runner` | `build/test-artifacts/shared_multilingual_gpu_fonts/{essential-tools,runner-calibration}/**`, focused runner contract/manual, and immutable preflight evidence | A1 | essential-tools (including its lint/duplicate probes), deliberate-red, zero-example evidence, then one focused `test_runner_result_wrapper_spec.spl` preflight before B–E use the helper |
 | B1 manifests/distribution | `manifest_distribution` | font registry/assets/notices, release/package/SimpleOS font-manifest code and specs | A2 | REQ-001–005 and NFR-001/003 executable byte/license/package evidence |
@@ -227,7 +224,8 @@ direct-entry fixes are retained only because they are necessary to produce the
 pure-Simple prerequisite. P0 is currently unassigned and blocked because no
 eligible parent exists. A future verification window may consume a proven
 external pure-Simple parent to build current sources incrementally, but this
-window must not invoke the Rust seed or another full bootstrap. All font
+window must not invoke the Rust seed as a producer or another full bootstrap;
+bounded seed diagnostics remain non-acceptance only. All font
 evidence uses the admitted current-source pure-Simple binary.
 
 The working tree additionally implements HIP-to-ROCm prepared-batch
@@ -258,7 +256,13 @@ Each lane reports:
 - Focused deployed-runtime docgen covers all 34 changed/new specs; lane F
   reviews all 34 immutable command/output/error/exit/manual-hash sets but does
   not replace owner generation.
+- Separate prerequisite docgen covers the three changed compiler perf-repair
+  specs outside the font graph; all three mirrors must be current with
+  `0 stubs` (all three canonical mirrors are currently missing).
 - `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`.
+- The admitted pure-Simple runtime checks `src/compiler`, `src/lib`,
+  `src/app/mcp`, and `src/app/simple_lsp_mcp`, then runs
+  `test/02_integration/app/mcp_stdio_integration_spec.spl` in interpreter mode.
 - Every REQ-001–016 and NFR-001–008 has current evidence or remains an explicit
   completion blocker; a blocked required row prevents overall `STATUS: PASS`.
 - Independent final review runs once and owns all done marks.
@@ -297,5 +301,6 @@ C17 is exactly:
 The four rows omitted by the obsolete graph were `ot_layout_gsub_full`,
 `ot_layout_gpos_full`, `ot_layout_gpos_variation`, and
 `ot_layout_lookup_flags`. Overall verification remains **STATUS: FAIL** until
-an admitted CLI executes the immutable 39-command graph and regenerates all 34
-manuals, with unavailable device/host rows retained as explicit blockers.
+an admitted CLI executes the immutable 39-command graph, regenerates all 34
+font manuals, and regenerates the three prerequisite perf-repair manuals, with
+unavailable device/host rows retained as explicit blockers.

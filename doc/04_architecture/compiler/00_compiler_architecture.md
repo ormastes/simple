@@ -53,10 +53,14 @@ source files
   pure-Simple stages; Rust rebuilds are explicit `--full-bootstrap` work.
 - Entry-closure and native cache reuse are conservative around AOP/MDSOC,
   interpreter, loader, and compiler ABI changes.
-- The driver builds the package-to-direct-sibling index once per compilation
-  and shares it with HIR lowerers; bare-name lookup registers the requested
-  symbol from a direct sibling and never rescans the full module map for every
-  lowered module.
+- The driver builds package-to-direct-sibling and direct-declaration-owner
+  indexes once per compilation pass and shares them with HIR lowerers;
+  bare-name lookup registers the requested declaration from its indexed direct
+  sibling instead of scanning every sibling or the full module map per access;
+  the existing sibling scan remains only for re-export fallback and misses.
+- Module-qualified function access uses the `SymbolTable` qualified-function
+  index populated during import registration and never scans the full
+  symbol-table `keys()` per access.
 - Runtime-family restrictions and no-allocation policies must be enforced at
   compiler entrypoints before target-specific native or SimpleOS execution.
 

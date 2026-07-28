@@ -5,7 +5,7 @@ Verifies that explicit, glob, and aliased imports register symbols from the
 requested source module even when another loaded module exports the same name.
 """
 
-use compiler.hir.hir_lowering.types.{HirLowering, HirModulesByName, hir_package_sibling_index}
+use compiler.hir.hir_lowering.types.{HirLowering, HirModulesByName, hir_package_sibling_index, hir_package_sibling_symbol_index}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.{SymbolKind}
@@ -31,23 +31,33 @@ describe "resolve_import_symbols 2-pass import resolver":
     it "resolves package sibling names without eagerly registering unused declarations":
         val log = make_logger()
         val provider = parse_full_frontend("pub struct Box:\n    value: i64\npub fn answer() -> i64:\n    42\npub fn unused() -> i64:\n    0", "pkg.types", "pkg.types", log)
+        val duplicate = parse_full_frontend("pub fn answer() -> i64:\n    99", "pkg.other", "pkg.other", log)
         val nested = parse_full_frontend("pub fn nested_only() -> i64:\n    7", "pkg.nested.shadow", "pkg.nested.shadow", log)
         val consumer = parse_full_frontend("fn pass(box: Box) -> Box:\n    box\nfn main() -> i64:\n    answer()", "pkg.consumer", "pkg.consumer", log)
         var modules: HirModulesByName = {}
         modules["pkg.types"] = provider
+        modules["pkg.other"] = duplicate
         modules["pkg.nested.shadow"] = nested
         modules["pkg.consumer"] = consumer
         val sibling_index = hir_package_sibling_index(modules)
-        expect(sibling_index["pkg"].len()).to_equal(2)
+        val symbol_index = hir_package_sibling_symbol_index(modules)
+        expect(sibling_index["pkg"].len()).to_equal(3)
         expect(sibling_index["pkg.nested"].len()).to_equal(1)
+        expect(symbol_index["pkg::Box"]).to_equal("pkg.types")
+        expect(symbol_index["pkg::answer"]).to_equal("pkg.types")
+        expect(symbol_index["pkg.nested::nested_only"]).to_equal("pkg.nested.shadow")
+        expect(symbol_index.contains_key("pkg::nested_only")).to_equal(false)
         var lowering = HirLowering.with_filename("pkg.consumer")
         lowering.modules_by_name = modules
-        lowering.package_sibling_index = sibling_index
+        # Leave the legacy sibling list empty so these lookups prove the direct index path.
+        lowering.package_sibling_symbol_index = symbol_index
         val hir = lowering.lower_module(consumer)
 
         expect(lowering.errors.len()).to_equal(0)
         expect(hir.symbols.lookup("Box").?).to_equal(true)
         expect(hir.symbols.lookup("answer").?).to_equal(true)
+        val answer = hir.symbols.get_symbol(hir.symbols.lookup("answer"))
+        expect(answer.unwrap().defining_module.unwrap()).to_equal("pkg.types")
         expect(hir.symbols.lookup("unused").?).to_equal(false)
         expect(hir.symbols.lookup("nested_only").?).to_equal(false)
 
@@ -376,3 +386,16 @@ describe "resolve_import_symbols 2-pass import resolver":
                     case _:
                         expect(false).to_equal(true)
         expect(found_main).to_equal(true)
+
+    it "reports a missing qualified function without dereferencing a nil index result":
+        val log = make_logger()
+        val provider = parse_full_frontend("pub fn answer() -> i64:\n    42", "provider", "provider", log)
+        val consumer = parse_full_frontend("import provider\nfn main() -> i64:\n    provider.missing()", "consumer_missing_qualified", "consumer_missing_qualified", log)
+        var modules: Dict<text, any> = {}
+        modules["provider"] = provider
+        var lowering = HirLowering.with_filename("consumer_missing_qualified")
+        lowering.modules_by_name = modules
+        lowering.lower_module(consumer)
+
+        expect(lowering.errors.len()).to_be_greater_than(0)
+        expect(lowering.errors[0].message).to_contain("unresolved module member: missing")
