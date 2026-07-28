@@ -127,6 +127,21 @@ SIMPLE_EXECUTION_MODE=interpreter bin/simple run <same>   — same 4 lines
   spec is unobserved under `run`. The two properties most exposed by the
   `sys_commit` rewrite (optimistic conflict, peer isolation) are re-covered in
   this lane's spec instead.
+
+  **UPDATE 2026-07-28 (lane DBHANG closed this).** The hang is fixed and
+  `db_server_tier_spec.spl` runs 30/30, so the compensation motive is gone.
+  Lane DBHANG §6 offered to revert the two re-covered examples. **Reviewed and
+  DECLINED — they stay.** They are not duplicates: the tier spec builds its
+  server with `DbServerCapsule.new(...)` (no durability port) and asserts only
+  against the in-memory `server.store` and its own GET path — it never re-reads
+  the file. §3's "the transaction guarantees are unchanged" pair is the only
+  place either property is checked against `on_disk()` (a fresh
+  `SdnDatabase.load`): that a conflict-rejected COMMIT leaves the loser's write
+  off disk, and that an uncommitted peer write is absent from disk. The tier
+  spec is at least as strong on the in-memory half (it adds an unconditional
+  control and a deliberate-red calibration) and strictly weaker on the disk
+  half. Deleting them would drop real coverage. Rationale recorded in the
+  `@manual_section` header above the describe block so it is not re-proposed.
 - `make_store()` in the increment-1 spec uses the SHARED path
   `/tmp/dbtier_spec.sdn`. Now that COMMIT really writes, two concurrent runs
   of that spec contend on `FileLock` (5-minute acquire timeout). DBTIER should
