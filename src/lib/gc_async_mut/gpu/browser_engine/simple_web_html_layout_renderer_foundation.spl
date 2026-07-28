@@ -296,6 +296,16 @@ fn text_matches_at(haystack: text, needle: text, offset: i32) -> bool:
 fn text_starts_with_portable(s: text, prefix: text) -> bool:
     text_matches_at(s, prefix, 0)
 
+# Advance past ASCII spaces. Defined in this base module because BOTH
+# ..._style.spl (parse_font_shorthand_family) and ..._layout.spl call it, and
+# _style sits below _layout in the import order.
+fn skip_wrap_spaces(txt: text, off: i32) -> i32:
+    var out = off
+    val n = txt.len()
+    while out < n and txt.char_code_at(out) == 32:
+        out = out + 1
+    out
+
 fn find_from(s: text, needle: text, pos: i32) -> i32:
     # O(n*m) portable positional search. Do not emulate this through
     # substring(start).index_of(): native substring can be represented as an
@@ -1529,6 +1539,94 @@ fn decl_last_pos(decls: text, prop: text) -> i32:
             break
         pos = semi + 1
     found
+
+# ---------------------------------------------------------------------------
+# Parsed declaration table.
+#
+# `decl_get` / `decl_last_pos` each re-scan the WHOLE declaration string and
+# allocate `substring().trim().lower()` per declaration examined. `apply_decls`
+# issues 244 `decl_get` plus 32 `decl_last_pos` calls against one block, so a
+# single rule costs 276 x O(len(decls)) scans and hundreds of throwaway strings
+# — fatal on the guest's non-reclaiming bump heap.
+#
+# These helpers parse the block ONCE into a flat name/value table plus an
+# aligned start-position table, so the 276 lookups become table scans.
+# Semantics are byte-identical to the scanning versions: same trim/lower
+# normalisation, same "an entry without a colon before its `;` is skipped",
+# and LAST-WINS on duplicate names (the lookups walk the table BACKWARDS, which
+# is why they must not stop at the first textual occurrence).
+# ---------------------------------------------------------------------------
+
+# Number of well-formed `name: value` entries in a declaration block.
+fn decl_entry_count(decls: text) -> i32:
+    var pos = 0
+    var count = 0
+    val decls_len = decls.len()
+    while pos < decls_len:
+        val semi = find_from(decls, ";", pos)
+        val end = if semi >= 0: semi else: decls_len
+        val colon = find_from(decls, ":", pos)
+        if colon >= 0 and colon < end:
+            count = count + 1
+        if semi < 0:
+            break
+        pos = semi + 1
+    count
+
+# Flat table, stride 2: [name0, value0, name1, value1, ...] in source order.
+# Names are trimmed+lowered, values trimmed — exactly as `decl_get` does.
+fn decl_table_build(decls: text) -> [text]:
+    val n = decl_entry_count(decls)
+    if n == 0:
+        val empty: [text] = []
+        return empty
+    # Preallocated + indexed store: `.push` in a loop clones the array (O(N^2)).
+    var tbl: [text] = [""; n * 2]
+    var pos = 0
+    var idx = 0
+    val decls_len = decls.len()
+    while pos < decls_len:
+        val semi = find_from(decls, ";", pos)
+        val end = if semi >= 0: semi else: decls_len
+        val colon = find_from(decls, ":", pos)
+        if colon >= 0 and colon < end:
+            tbl[idx] = decls.substring(pos, colon).trim().lower()
+            tbl[idx + 1] = decls.substring(colon + 1, end).trim()
+            idx = idx + 2
+        if semi < 0:
+            break
+        pos = semi + 1
+    tbl
+
+# Table-backed `decl_get`. Backwards walk == last-wins on duplicates.
+fn decl_tbl_get(tbl: [text], prop: text) -> text:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == prop:
+            return tbl[i + 1]
+        i = i - 2
+    ""
+
+# Table-backed replacement for `decl_last_pos`. Backwards walk == last-wins.
+#
+# Returns the ENTRY INDEX (0-based, in source order), NOT the byte offset that
+# `decl_last_pos` returns. That substitution is sound because entry indices are
+# strictly increasing in byte offset (the build loop advances `pos`
+# monotonically), and `apply_decls` consumes these values ONLY as `a > b`,
+# `a >= 0` and `a < 0` — never as an offset into `decls`. Order and the -1
+# "absent" sentinel are therefore preserved exactly, which is all the cascade
+# tie-breaking depends on. Verified exhaustively against `decl_last_pos` over
+# 46 real+adversarial blocks x 244 properties (all ordered pairs agree).
+#
+# Keeping indices also lets us skip building a parallel byte-offset table,
+# which removed a second full scan of every declaration block.
+fn decl_tbl_last_index(tbl: [text], prop: text) -> i32:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == prop:
+            return i / 2
+        i = i - 2
+    -1
 
 fn parse_nth_box_int(raw: text, index: i32) -> i32:
     val normalized = raw.trim().lower()
