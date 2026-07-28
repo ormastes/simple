@@ -292,3 +292,22 @@ The Stage-3 source snapshot and jj-state portions of the portability gate pass;
 that broader gate later stops on the unrelated retired-Windows-workflow check.
 The one-attempt cap leaves Stage-4 compilation, deployment, and NVMe
 post-bootstrap SSpec/docgen for the next bounded run.
+
+## 2026-07-28 production Stage-4 gate wiring
+
+The next strict attempt used the current Rust authority, completed and
+sanity-checked Stage 2 and Stage 3, passed the repaired source fingerprint, and
+entered Stage-4 compilation for the first time in this sequence. It took
+31m42s, peaked at 2,923,264 KiB RSS, and performed zero swaps. Stage 2 SHA-256
+was `d42064a6286128c0690bbafa4d0bcc6d04adc50f4935080db6b8851416becd4f`;
+Stage 3 SHA-256 was
+`17914479afe700d95fe37bc155861cf6ee7b19beb8aecc88844e1a59fb7b15d4`.
+
+Stage 4 parsed 1,819 physical modules, then the legacy Phase-3 surface matcher
+failed on alias `compiler.core.ast_stmt`. The production launcher set
+`SIMPLE_BOOTSTRAP_STAGE4=1` but omitted the independent
+`SIMPLE_STAGE4_STREAMING_SURFACES=1` admission flag, so the streaming ownership
+implementation described above was never selected. The shared Stage-4 launch
+function now sets that flag, and unit/system contracts plus the portability
+gate require it. The one-attempt cap leaves compilation, deployment, and NVMe
+post-bootstrap SSpec/docgen for the next bounded run.

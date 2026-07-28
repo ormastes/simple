@@ -3,7 +3,7 @@
 These items are deliberately separate from completed host/ARM contract work.
 Postponed hardware rows remain open and must not be converted into host PASS.
 
-# TODO: [bootstrap][P0] Run one bounded strict bootstrap after the owned `examples/10_tooling` source-authority repair, admit/deploy Stage 4, and execute the NVMe SSpec/docgen gate. The latest attempt proved Stage 2/3, peaked at 2,557,072 KiB RSS with zero swaps, then exposed the now-fixed alias policy before Stage-4 compilation; the direct complete source fingerprint now passes.
+# TODO: [bootstrap][P0] Run one bounded strict bootstrap after wiring `SIMPLE_STAGE4_STREAMING_SURFACES=1` into the production Stage-4 launcher, admit/deploy Stage 4, and execute the NVMe SSpec/docgen gate. The latest attempt proved Stage 2/3 and source attestation, entered Stage 4, peaked at 2,923,264 KiB RSS with zero swaps, then exposed the now-fixed missing admission flag.
 # DONE: [nvme][P0] GHDL runs host-issued Create CQ/SQ, Identify, Write, Flush, and Read against `build/nvme_fw_rv32_service.elf`, retaining MMIO/DMA/IRQ/recovery/remap evidence.
 # DONE: [nvme][P1] QEMU runs the same firmware command/recovery sequence through a GDB-driven guest-RAM mailbox; GHDL remains the AXI/DMA/IRQ authority.
 # DONE: [cosmos][P1] Package manifest v3 binds a clean repository revision, compiler/linker/Bootgen identities, bound profile/contract, board serial/revision, boot mode, DMA bounds, and immutable artifact hashes; self-tests reject omissions and mismatches.
