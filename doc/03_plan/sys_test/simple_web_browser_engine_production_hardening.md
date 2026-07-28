@@ -123,6 +123,10 @@ structured interaction are not production browser evidence.
   scheme-denial, oversized-protocol denial, crash/timeout containment, and
   lifecycle scenarios before live-window capture, then release-gates the
   admitted input-to-present sample.
+  When the full CLI cannot be admitted, provide the source-matched focused
+  executables with `SIMPLE_NATIVE_BUILDER` and `SIMPLE_TEST_RUNNER`; the wrapper
+  requires their matching `*_SHA256` pins, then records and rechecks both hashes.
+  `SIMPLE_BIN` remains the single-CLI fallback.
   Standalone runs are not artifact admission evidence.
 - text/HTML/protocol/exec/log/artifact:
   `build/test-artifacts/<spec-relative-path>/`

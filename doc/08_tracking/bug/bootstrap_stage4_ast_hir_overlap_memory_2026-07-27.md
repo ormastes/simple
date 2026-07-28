@@ -141,6 +141,19 @@ pins both the `src/std -> src/lib` and `src/compiler/frontend -> 10.frontend`
 aliases. This removes proven duplicate lowering; it does not claim to solve the
 necessary whole-phase AST/HIR lifetime.
 
+## 2026-07-28 focused compiler admission
+
+Building `src/app/cli/native_build_worker.spl` instead of the full CLI bounded
+the same compiler capability at 446 MiB peak RSS and 5m56s. The first artifact
+was rejected because permissive bootstrap linking generated a `panic` stub.
+With `SIMPLE_NO_STUB_FALLBACK=1`, a 300-second per-file limit completed all
+source objects at 899 MiB peak, then failed closed at the provider boundary:
+the core-C bootstrap archive lacks hosted compiler hooks and several legacy
+runtime helpers. The source-matched `libsimple_compiler_backfill.a` owns the
+Cranelift hooks; the fresh core-C runtime owns `panic`; remaining legacy owners
+must be supplied through the existing validated external-provider link boundary
+without enabling stubs. The three-cycle cap stopped further build retries.
+
 ## Required structural fix
 
 Introduce a two-pass, streaming HIR pipeline using `ModuleSurface` as compact

@@ -19,6 +19,15 @@ window command. The Vulkan command deliberately produces browser backing and
 the current direct run; running only `--run` does not populate every retained
 path admitted by `test_host_env`.
 
+The live-window wrapper accepts either one full CLI through `SIMPLE_BIN`, or
+separate focused pure-Simple roles through `SIMPLE_NATIVE_BUILDER` and
+`SIMPLE_TEST_RUNNER`. Explicit focused roles also require their pinned
+`SIMPLE_NATIVE_BUILDER_SHA256` and `SIMPLE_TEST_RUNNER_SHA256`. Seed markers are
+rejected, and both hashes are retained and checked for mutation. A focused
+builder is the standalone `native_build_worker.spl` executable and receives
+native-build arguments directly; a focused runner is the standalone
+`app.test_runner_new.main` executable.
+
 ## Three distinct RenderDoc lanes
 
 [Simple RenderDoc](../../../glossary.md#simple-renderdoc) means the repo-native

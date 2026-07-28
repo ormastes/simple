@@ -8,6 +8,14 @@ BUILD_DIR="${BUILD_DIR:-build/linux-hosted-wm-live-window-evidence}"
 REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
 ENTRY=src/os/hosted/hosted_entry.spl
 SIMPLE_BIN="${SIMPLE_BIN:-}"
+SIMPLE_NATIVE_BUILDER_FOCUSED=0
+[ "${SIMPLE_NATIVE_BUILDER:-}" != "" ] && SIMPLE_NATIVE_BUILDER_FOCUSED=1
+SIMPLE_TEST_RUNNER_FOCUSED=0
+[ "${SIMPLE_TEST_RUNNER:-}" != "" ] && SIMPLE_TEST_RUNNER_FOCUSED=1
+SIMPLE_NATIVE_BUILDER="${SIMPLE_NATIVE_BUILDER:-$SIMPLE_BIN}"
+SIMPLE_TEST_RUNNER="${SIMPLE_TEST_RUNNER:-$SIMPLE_BIN}"
+SIMPLE_NATIVE_BUILDER_SHA256="${SIMPLE_NATIVE_BUILDER_SHA256:-}"
+SIMPLE_TEST_RUNNER_SHA256="${SIMPLE_TEST_RUNNER_SHA256:-}"
 HOSTED_BIN="${HOSTED_WM_ARTIFACT:-$BUILD_DIR/hosted-wm}"
 WINT_LIB="${SIMPLE_WM_WINIT_LIB:-src/runtime/spl_winit/target/release/libspl_winit.so}"
 RUNTIME_LIB="${SIMPLE_WM_RUNTIME_LIB:-src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so}"
@@ -184,6 +192,10 @@ emit() {
         echo "linux_hosted_wm_live_window_reason=$reason"
         echo "linux_hosted_wm_live_window_simple_bin=$SIMPLE_BIN"
         echo "linux_hosted_wm_live_window_simple_bin_sha256=$simple_bin_sha"
+        echo "linux_hosted_wm_live_window_native_builder=$SIMPLE_NATIVE_BUILDER"
+        echo "linux_hosted_wm_live_window_native_builder_sha256=$native_builder_sha"
+        echo "linux_hosted_wm_live_window_test_runner=$SIMPLE_TEST_RUNNER"
+        echo "linux_hosted_wm_live_window_test_runner_sha256=$test_runner_sha"
         echo "linux_hosted_wm_live_window_native_artifact=$HOSTED_BIN"
         echo "linux_hosted_wm_live_window_source_revision=$source_revision"
         echo "linux_hosted_wm_live_window_source_diff_sha256=$source_diff_sha"
@@ -336,6 +348,8 @@ emit() {
         echo "- source revision/diff: $source_revision / $source_diff_sha"
         echo "- native source manifest: $SOURCE_MANIFEST_ID (${source_manifest_admitted_sha:--}, status=$source_manifest_status)"
         echo "- pure-Simple compiler SHA-256: ${simple_bin_sha:--}"
+        echo "- native builder SHA-256: ${native_builder_sha:--}"
+        echo "- test runner SHA-256: ${test_runner_sha:--}"
         echo "- native artifact SHA-256: ${hosted_bin_sha:--}"
         echo "- wrapper SHA-256: ${wrapper_sha:--}"
         echo "- font identity: ${font_identity:--}"
@@ -453,6 +467,8 @@ source_manifest_status=fail
 entry_sha="$(sha256_file "$ENTRY")"
 engine_sha="$(sha256_file src/os/compositor/compositor_engine2d.spl)"
 simple_bin_sha=""
+native_builder_sha=""
+test_runner_sha=""
 wrapper_sha="$(sha256_file "$0")"
 hosted_bin_sha=""
 html_css_spec_status=not-run
@@ -480,7 +496,8 @@ resolve_source_provenance || {
 }
 
 if [ "$SELF_TEST" -eq 1 ]; then
-    [ "$SIMPLE_BIN" = "" ] || {
+    [ "$SIMPLE_BIN" = "" ] && [ "$SIMPLE_NATIVE_BUILDER" = "" ] && [ "$SIMPLE_TEST_RUNNER" = "" ] \
+        && [ "$SIMPLE_NATIVE_BUILDER_FOCUSED" -eq 0 ] && [ "$SIMPLE_TEST_RUNNER_FOCUSED" -eq 0 ] || {
         echo "linux_hosted_wm_live_window_self_test_status=fail"
         exit 1
     }
@@ -514,6 +531,7 @@ if [ "$SELF_TEST" -eq 1 ]; then
     echo "linux_hosted_wm_live_window_self_test_source_vcs=$source_vcs"
     echo "linux_hosted_wm_live_window_self_test_source_provenance_status=$source_provenance_status"
     echo "linux_hosted_wm_live_window_self_test_simple_bin_default=explicit-required"
+    echo "linux_hosted_wm_live_window_self_test_role_binaries=explicit-required"
     echo "linux_hosted_wm_live_window_self_test_pending_glyph=calibration-required"
     echo "linux_hosted_wm_live_window_self_test_calibration_glyph=calibration-only"
     echo "linux_hosted_wm_live_window_self_test_native_source_manifest=stable"
@@ -525,29 +543,61 @@ if [ "$SELF_TEST" -eq 1 ]; then
     exit 0
 fi
 
-if [ "$SIMPLE_BIN" = "" ]; then
-    emit unavailable explicit-simple-bin-required
+if [ "$SIMPLE_NATIVE_BUILDER" = "" ] || [ "$SIMPLE_TEST_RUNNER" = "" ]; then
+    emit unavailable explicit-native-builder-and-test-runner-required
     exit 1
 fi
 
-for command in jq xdotool import convert sha256sum cargo Xvfb; do
+for command in jq xdotool import convert sha256sum strings cargo Xvfb; do
     command -v "$command" >/dev/null 2>&1 || {
         emit unavailable "missing-command-$command"
         exit 1
     }
 done
 
-if [ ! -x "$SIMPLE_BIN" ] || [ ! -s "$RUNTIME_LIB" ]; then
-    emit unavailable missing-pure-simple-or-runtime
+if [ ! -x "$SIMPLE_NATIVE_BUILDER" ] || [ ! -x "$SIMPLE_TEST_RUNNER" ] || [ ! -s "$RUNTIME_LIB" ]; then
+    emit unavailable missing-pure-simple-role-binary-or-runtime
     exit 1
 fi
-simple_bin_sha="$(sha256_file "$SIMPLE_BIN")"
-case "$("$SIMPLE_BIN" --version 2>&1 | tr '[:upper:]' '[:lower:]')" in
-    *rust-built*|*rust*seed*|*bootstrap*seed*)
+native_builder_sha="$(sha256_file "$SIMPLE_NATIVE_BUILDER")"
+test_runner_sha="$(sha256_file "$SIMPLE_TEST_RUNNER")"
+if [ "$SIMPLE_NATIVE_BUILDER_FOCUSED" -eq 0 ]; then
+    simple_bin_sha="$native_builder_sha"
+fi
+for role_binary in "$SIMPLE_NATIVE_BUILDER" "$SIMPLE_TEST_RUNNER"; do
+    if strings "$role_binary" | tr '[:upper:]' '[:lower:]' | grep -E 'rust-built simple binary|bootstrap seed only' >/dev/null; then
         emit fail rust-seed-forbidden
         exit 1
-        ;;
-esac
+    fi
+done
+if [ "$SIMPLE_NATIVE_BUILDER_FOCUSED" -eq 1 ]; then
+    if [ "$SIMPLE_NATIVE_BUILDER_SHA256" = "" ] || [ "$native_builder_sha" != "$SIMPLE_NATIVE_BUILDER_SHA256" ]; then
+        emit fail focused-native-builder-sha256-invalid
+        exit 1
+    fi
+    if ! strings "$SIMPLE_NATIVE_BUILDER" | grep -F 'Simple Native Build' >/dev/null; then
+        emit fail focused-native-builder-identity-invalid
+        exit 1
+    fi
+fi
+if [ "$SIMPLE_TEST_RUNNER_FOCUSED" -eq 1 ]; then
+    if [ "$SIMPLE_TEST_RUNNER_SHA256" = "" ] || [ "$test_runner_sha" != "$SIMPLE_TEST_RUNNER_SHA256" ]; then
+        emit fail focused-test-runner-sha256-invalid
+        exit 1
+    fi
+    if ! strings "$SIMPLE_TEST_RUNNER" | grep -F 'Simple Test Runner v0.8.1' >/dev/null; then
+        emit fail focused-test-runner-identity-invalid
+        exit 1
+    fi
+fi
+if [ "$SIMPLE_NATIVE_BUILDER_FOCUSED" -eq 0 ] || [ "$SIMPLE_TEST_RUNNER_FOCUSED" -eq 0 ]; then
+    case "$("$SIMPLE_BIN" --version 2>&1 | tr '[:upper:]' '[:lower:]')" in
+        *rust-built*|*rust*seed*|*bootstrap*seed*)
+            emit fail rust-seed-forbidden
+            exit 1
+            ;;
+    esac
+fi
 
 font_sha="$(sha256_file "$FONT_ASSET" 2>/dev/null || true)"
 if [ "$font_sha" != "$FONT_ASSET_SHA256" ]; then
@@ -568,10 +618,19 @@ write_native_source_manifest "$SOURCE_MANIFEST" || {
 }
 source_manifest_candidate_sha="$(sha256_file "$SOURCE_MANIFEST")"
 
-SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src timeout -k 10 "$BUILD_TIMEOUT_SECS" "$SIMPLE_BIN" native-build \
-    --source "$ENTRY" --entry "$ENTRY" --entry-closure --strip \
-    --backend cranelift --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
-    --output "$HOSTED_BIN" >"$BUILD_LOG" 2>&1 || {
+run_native_builder() {
+    if [ "$SIMPLE_NATIVE_BUILDER_FOCUSED" -eq 0 ]; then
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src \
+            timeout -k 10 "$BUILD_TIMEOUT_SECS" "$SIMPLE_NATIVE_BUILDER" native-build "$@"
+    else
+        SIMPLE_NATIVE_BUILD_WORKER=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src \
+            timeout -k 10 "$BUILD_TIMEOUT_SECS" "$SIMPLE_NATIVE_BUILDER" "$@"
+    fi
+}
+run_native_builder \
+        --source "$ENTRY" --entry "$ENTRY" --entry-closure --strip \
+        --backend cranelift --cache-dir "$BUILD_DIR/native-cache" --mode dynload \
+        --output "$HOSTED_BIN" >"$BUILD_LOG" 2>&1 || {
         emit fail production-native-build-failed
         exit 1
     }
@@ -586,7 +645,7 @@ if [ "$source_manifest_candidate_sha" != "$source_manifest_after_sha" ]; then
     emit fail native-source-manifest-changed-during-build
     exit 1
 fi
-if [ "$(sha256_file "$SIMPLE_BIN")" != "$simple_bin_sha" ]; then
+if [ "$(sha256_file "$SIMPLE_NATIVE_BUILDER")" != "$native_builder_sha" ]; then
     rm -f "$HOSTED_BIN"
     emit fail simple-bin-changed-during-build
     exit 1
@@ -603,12 +662,16 @@ export HOSTED_WM_ARTIFACT_SHA256="$hosted_bin_sha"
 
 run_browser_spec() {
     spec_path=$1 filter=$2 log_path=$3 failure_reason=$4
-    SIMPLE_LIB=src timeout -k 5 "$TIMEOUT_SECS" "$SIMPLE_BIN" test \
+    SIMPLE_LIB=src timeout -k 5 "$TIMEOUT_SECS" "$SIMPLE_TEST_RUNNER" test \
         "$spec_path" --mode=interpreter --filter "$filter" \
         >"$log_path" 2>&1 || {
             emit fail "$failure_reason"
             exit 1
         }
+    if [ "$(sha256_file "$SIMPLE_TEST_RUNNER")" != "$test_runner_sha" ]; then
+        emit fail test-runner-changed-during-specs
+        exit 1
+    fi
 }
 
 html_css_spec_status=fail
