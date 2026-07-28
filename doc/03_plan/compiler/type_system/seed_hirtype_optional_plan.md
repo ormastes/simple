@@ -44,7 +44,11 @@ realistic cost of a fully-wired single-inner variant in this codebase.
 from a genuine shared pointer. There are 18 `PointerKind::Shared` sites and 53
 `HirType::Pointer` sites to audit for which ones *mean* optional.
 
-### P4. `rt_index_of` is unresolvable — TWO stacked defects, corrected 2026-07-28
+### P4. `rt_index_of` was unresolvable — RESOLVED 2026-07-28, see Stage 0
+
+**This section is retained as the historical record; the two defects it describes
+were both fixed at `origin/main` by `5c75a1bbce0` after it was written.** Read
+Stage 0 for current state. The method note at the end still applies.
 
 Two codegen paths emit a call to `rt_index_of`:
 
@@ -153,27 +157,42 @@ operands.
 
 ## Staged sequence (each stage builds and lands alone)
 
-**Stage 0 — repair `rt_index_of` (do this first, independent of Optional).**
-Revised 2026-07-28 per P4. **Do NOT write a new `rt_index_of`, and do NOT delete
-the four call sites** — the function already exists and is the only
-receiver-polymorphic `index_of`; removing it would force every caller to choose
-array-vs-text statically, the opposite of what the P5 divergence needs. Instead,
-in order:
+**Stage 0 — repair `rt_index_of`.** Steps 1-2 **LANDED 2026-07-28** by a third
+lane, `5c75a1bbce0` *"fix(jit,runtime): register rt_index_of so index_of stops
+de-JITting the module"*, which added the definition to `collections.rs` **and**
+the registrations (`common/src/runtime_symbols.rs`, `codegen/runtime_sffi.rs`,
+`codegen/jit.rs`) in one commit. Verified at `origin/main`: the definition is now
+at `collections.rs:3051` and `rt_index_of` appears in both symbol tables. The
+unpushed `0d864c55fe7` is no longer load-bearing for this symbol (though it may
+still carry unrelated borrow-checker work worth landing).
 
-1. **Get the existing definition onto `origin/main`.** It is currently unpushed,
-   carried by the unrelated borrow-checker commit `0d864c55fe7`. Its owner should
-   land it on its own merits. Until then `origin/main` is internally inconsistent
-   and no fix downstream of it can be verified from a clean clone.
-2. **Get the symbol into `RUNTIME_SYMBOL_ENTRIES.`** Fix the `build.rs` generator
-   miss so `rt_index_of` is emitted alongside `rt_array_index_of`. Verify with
-   `grep -c '"rt_index_of"'` over the generated tables (expect ≥1, currently 0)
-   and `nm bin/simple` (expect ≥1, currently 0).
-3. **Then** reconcile the still-unreachable `rt_string_index_of` — the only
-   genuinely Option-returning implementation, which no method-name dispatch
-   selects. That one is a separate live defect and does not block steps 1-2.
+**Correction to an earlier draft and to a peer's report: only TWO codegen sites
+emit `rt_index_of`**, not four — `codegen/instr/calls.rs:3234` and
+`codegen/instr/closures_structs.rs:1284`. Verified at `origin/main` by grepping
+the emitted *symbol* rather than the method name. `llvm/emitter.rs:191` and
+`llvm/functions.rs:2274` match on `"index_of"` but emit **`rt_string_find`**;
+counting them as `rt_index_of` sites conflates the method name with the target.
 
-Steps 1-2 alone fix the reported `index_of` bug and the JIT bailout. No type
-change involved.
+Still open, and now the substance of Stage 0:
+
+1. **Backend divergence — likely a live wrong-answer bug.** The JIT/cranelift
+   path (`instr/*`) routes `index_of` to the receiver-polymorphic `rt_index_of`,
+   while both LLVM paths still route it to `rt_string_find`, which is
+   string-only. So `arr.index_of(x)` plausibly yields the receiver-mismatch
+   sentinel `-1` under LLVM and the correct index under the JIT — the *same
+   source* compiling to *different semantics per backend*. Confirm with an A/B
+   before anything else in this plan; if it reproduces it outranks the Optional
+   work entirely.
+2. **`rt_string_index_of` is still unreachable.** At `origin/main` it appears
+   only as a `RuntimeFuncSpec` registration (`runtime_sffi.rs:413`); no
+   method-name dispatch selects it. It remains the only genuinely
+   Option-returning implementation, so it is the natural target once `index_of`
+   is retyped `Optional` in Stage 4 — but today it is dead code.
+
+No type change is involved in either. Do NOT author a second `rt_index_of` and do
+NOT delete the two call sites — it is the only receiver-polymorphic `index_of`,
+and removing it forces every caller to choose array-vs-text statically, the
+opposite of what the P5 divergence needs.
 
 **Stage 1 — add the variant, unused.** Add `HirType::Optional{inner}`, fix the 3
 `E0004` sites, register nothing to it. Oracle: `--emit-archive --target
