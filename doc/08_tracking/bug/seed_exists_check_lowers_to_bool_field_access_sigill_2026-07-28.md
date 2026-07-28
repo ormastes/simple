@@ -301,29 +301,51 @@ fallbacks. The lesson is recorded here because the symptom (a perf cliff, not a
 wrong answer) is easy to ship unnoticed.
 
 **That bailout was NOT an artifact of the first cut — it is a real standing
-defect this change merely stopped triggering.** Corrected after the fact, and
-worth stating precisely because a first pass over it concluded "`rt_index_of`
-does not exist / is dead code", which would send a fixer down the wrong path:
+defect this change merely stopped triggering.** There are **two stacked
+defects**, and which one you see depends on which tree you measure. An earlier
+revision of this section claimed `rt_index_of` "is defined"; that was measured
+against this shared working copy and is **retracted for `origin/main`**.
 
-- `rt_index_of` **is** defined, and deliberately: `#[no_mangle] pub extern "C"
-  fn rt_index_of` at `src/compiler_rust/runtime/src/value/collections.rs:3051`,
-  a documented receiver-polymorphic dispatcher that tries `rt_array_index_of`
-  then falls back to `rt_string_find`. It is not dead code.
-- It is missing from the build-script-generated `RUNTIME_SYMBOL_ENTRIES` table
-  (`runtime/build.rs`) that the JIT resolves `rt_*` through — verified absent
-  from **all five** generated tables under `target/release/build/simple-runtime-*/`,
-  including one regenerated during this work, so this is a generator miss, not
-  staleness. Its own sibling `rt_array_index_of`, declared identically twenty
-  lines earlier in the same file, **is** in the table.
-- Because nothing registers or references it, the linker drops it:
-  `nm bin/release/x86_64-unknown-linux-gnu/simple | grep rt_index_of` → 0,
-  while `rt_string_find` → 1. So any codegen path that emits a call to it
-  (`codegen/instr/closures_structs.rs:1284`, `codegen/instr/calls.rs:3234`,
-  plus the two LLVM paths) produces an unresolvable symbol at JIT time.
+**Defect 1 — at `origin/main`, `rt_index_of` has no definition at all.**
+A tree-wide `git grep "fn rt_index_of" origin/main` returns only doc files —
+no `.rs` definition anywhere. Yet four codegen paths emit calls to it:
+`codegen/instr/calls.rs:3234`, `codegen/instr/closures_structs.rs:1284`, and
+two LLVM paths (`codegen/llvm/emitter.rs:192`, `codegen/llvm/functions.rs:2275`).
+So **a fresh clone builds a compiler that emits calls to a function absent from
+its own source tree.** This is invisible to anyone working in this working
+copy.
 
-The fix is to get the existing symbol into the generated table, not to write a
-new function or delete the call sites. Filed as adjacent work; it is a
-link/registration defect, out of scope for this `.?` change.
+The definition exists **only locally**: `#[no_mangle] pub extern "C" fn
+rt_index_of` at `src/compiler_rust/runtime/src/value/collections.rs:3051`, a
+documented receiver-polymorphic dispatcher that tries `rt_array_index_of` then
+falls back to `rt_string_find`. It arrived in local commit `0d864c55fe7`
+("fix(borrow): forward-propagate move state…"), which is **not an ancestor of
+`origin/main`** — unpushed work riding in an unrelated borrow-checker commit.
+At `origin/main` that region of `collections.rs` is `rt_array_concat`. Line
+3051 will not resolve from a clean clone until that definition lands.
+
+**Defect 2 — even with the definition present, it is never registered.**
+The JIT resolves `rt_*` through the build-script-generated
+`RUNTIME_SYMBOL_ENTRIES` table (`runtime/build.rs`). `rt_index_of` is absent
+from **all five** generated tables under
+`target/release/build/simple-runtime-*/out/`, including one regenerated during
+this work — a generator miss, not staleness. Its sibling `rt_array_index_of`,
+declared identically twenty lines earlier in the same file, **is** present (as
+is `rt_string_find`), so the file is scanned and this one symbol is
+specifically dropped. Consequently the linker drops it:
+`nm bin/release/x86_64-unknown-linux-gnu/simple | grep rt_index_of` → 0, while
+`rt_string_find` → 1.
+
+Fix order, both out of scope for this `.?` change: (1) land the existing
+definition on its own merits, (2) fix the `build.rs` generator miss. Do **not**
+author a second `rt_index_of` and do **not** delete the four call sites — it is
+the only receiver-polymorphic `index_of`, and removing it forces every caller
+to choose array-vs-text statically.
+
+**Method note.** The retracted claim came from verifying against the shared
+working copy while knowing it was contested and mid-flight. When a finding will
+be published, measure it against `origin/main` — a working-copy-only symbol
+reads exactly like a present one.
 
 Measurement caveat for anyone re-running these: this host was concurrently
 running another session's `stage2_*` jobs holding ~95 GB RSS at load average
