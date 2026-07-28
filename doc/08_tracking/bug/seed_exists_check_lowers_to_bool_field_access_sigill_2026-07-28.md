@@ -331,12 +331,45 @@ an otherwise-identical probe without `index_of` native-builds and runs fine.
 So the failure is loud, not silent — the hypothesis that the two backends
 silently disagree (JIT via polymorphic `rt_index_of`, LLVM via string-only
 `rt_string_find` returning the `-1` mismatch sentinel) does **not** reproduce:
-MIR lowering rejects the method before either LLVM mapping is reached. Note
-the `unresolved method call 'index_of' lowered to const-0 placeholder
-(silent-null risk, Task #145)` warning is still emitted three times alongside
-the fatal error, so the placeholder machinery is real; whether any other
-configuration lets it through *without* the accompanying hard error was not
-determined here.
+MIR lowering rejects the method before either LLVM mapping is reached. This
+diagnostic is not the Rust seed's at all — `"unresolved method call"` has zero
+hits in `src/compiler_rust/**/*.rs` at `origin/main`; it comes from the
+**pure-Simple** compiler. The class is already tracked in
+`doc/08_tracking/bug/native_string_methods_unresolved_in_mir_2026-07-17.md`.
+
+### Task #145 const-0 placeholder — the guard is a warning, not a hard fail
+
+The 2026-07-17 doc above describes the Task #145 guard as "converting
+unresolved calls into hard errors rather than silently emitting a placeholder".
+**That is not what the code does**, and the difference matters because a
+const-0 where a value was expected is the same failure shape as the nil
+sentinel reading as a real integer — this report's own defect class.
+
+At `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:2485-2500`
+the unresolved path calls `self.error(...)` and then *continues*, emitting the
+const-0 placeholder. Its own comment states the problem plainly: `self.error`
+**only collects**, and both the bootstrap lane (`driver_bootstrap.spl` reads
+`ctx.errors`, never `MirLowering.errors`) and the native-build worker drop that
+list, after which the placeholder "ships as SILENT data loss (exit 0, no
+stderr) — exactly how the `.join()` no-op survived undetected". The `print`
+warning exists precisely because the error alone is not reliably fatal. So
+fatality depends on the consumer, not on the guard.
+
+Measured on `b410e53a7a2`, same probe, two lanes:
+
+| lane | const-0 warnings | hard error surfaced | result |
+|---|---|---|---|
+| `native-build` (default) | 3 | yes (3) | rc=1, no binary — loud |
+| `native-build`, `SIMPLE_BOOTSTRAP=1` | 3 | **no (0)** | rc=1, no binary |
+
+The bootstrap lane demonstrably **drops the hard error**, corroborating the
+source comment. It is *not* proof that a const-0 ships silently, because that
+run died for an unrelated reason before codegen (`error: semantic: function
+expects argument for parameter 'span', but none was provided`). So: the
+mechanism for silent const-0 is confirmed to exist and one lane is confirmed to
+swallow the error; an end-to-end "exit 0 with a wrong value" reproduction is
+still **not** demonstrated. That is the open measurement, and it belongs to the
+`index_of`/Task #145 lane, not to this `.?` report.
 
 Measurement caveat for anyone re-running these: this host was concurrently
 running another session's `stage2_*` jobs holding ~95 GB RSS at load average
