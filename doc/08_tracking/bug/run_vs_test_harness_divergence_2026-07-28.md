@@ -62,6 +62,10 @@ a clean sentinel.
 Correctness note: **the `test`/interpreter column is correct in every DISAGREE
 row below**; the JIT column is the wrong one in all of them.
 
+Both drivers ran all 60 cases to completion and agree 60/60 (see §7), so the
+table below is the real `bin/simple run` vs real `bin/simple test` result, not
+an extrapolation.
+
 | Probe | receiver | `run` (JIT) | `test` (interp) | verdict |
 |---|---|---|---|---|
 | `arr_len` | array | `3` | `3` | AGREE |
@@ -262,7 +266,79 @@ sh build/probe_divergence/probe_driver.shs  # ~90 min, real `run` vs real `test`
 ```
 
 `fast_driver` substitutes `SIMPLE_EXECUTION_MODE=interpreter` for the spec
-harness; `probe_driver` uses the real `bin/simple test`. The first 7 rows of
-`probe_driver` were compared against `fast_driver` and match exactly, confirming
-the substitution is sound. `probe_driver` treats a spec with no `N examples`
-line, or with `0 examples`, as `<UNMEASURED>` — never as agreement.
+harness; `probe_driver` uses the real `bin/simple run` and `bin/simple test`.
+
+**Both drivers completed all 60 cases and agree on every value, 60/60.** The
+real-harness tallies are identical to the table above: **31 AGREE, 18 DISAGREE,
+11 UNMEASURED-on-JIT**. (A naive string diff of the two TSVs reports 15
+differences; all 15 are annotation-only — `fast_driver` appends `exit=139` and
+`<via-jit-bailout>` markers that `probe_driver` records in its separate engine
+column instead. No semantic value differs.) `probe_driver` independently tagged
+all 11 dict rows `interp-fallback`, confirming from the real `run` path that the
+JIT cannot compile any dict operation.
+
+### Measurement integrity checks
+
+- **Zero-example false green:** `probe_driver` treats a spec with no
+  `N examples` line, or with `0 examples`, as `<UNMEASURED>` — never as
+  agreement. **0 of 60 specs hit either condition**; every one reported
+  `1 example, 0 failures` and emitted its `VALUE=` line.
+- **Assertion calibration:** a deliberately-wrong spec
+  (`expect(a.index_of(10)).to_equal(999)`) was run through `bin/simple test` and
+  **did fail** — `expected 0 to equal 999`, `1 example, 1 failure`, exit 1. The
+  spec harness genuinely evaluates `it` bodies and assertions; it is not
+  file-load-only. (`.claude/rules/testing.md` still carries an "interpreter mode
+  only verifies file loading, NOT `it` block execution" caveat — that caveat did
+  not hold for this binary and should be re-checked.) The calibration spec is
+  not committed; a permanently-red example trains people to ignore the suite.
+- All `run`-side output was captured to files and read from the tail — the lint
+  and seed-banner preamble is thousands of lines and `| head` would show none of
+  the results.
+
+---
+
+## Post-rebuild verification (2026-07-28 10:35)
+
+The dispatch fixes in `173ad044494` landed **unverified** — they are seed
+codegen changes and the deployed `bin/simple` predated them. Rebuilt
+`src/compiler_rust/target/debug/simple` (mtime 10:35, `cargo build -p
+simple-driver`, exit 0) and re-ran the probes against that binary. One probe
+per file, to avoid the whole-program interpreter demotion.
+
+| probe | JIT (before) | JIT (after rebuild) | interpreter | verdict |
+|---|---|---|---|---|
+| `"hello".to_upper()` | `hello` — silent no-op | **`HELLO`** | `HELLO` | **FIXED** |
+| `"  pad  ".strip()` | `Function 'str.strip' not found`, exit 0 | **`[pad]`** | `[pad]` | **FIXED** |
+| `[10,20,30].enumerate().len()` | `-1` + not-found, exit 0 | **`3`** | `3` | **FIXED** |
+| `[10,20,30].first()` | `80` (`10 << 3`) | **`10`** | `10` | **FIXED** |
+| `"hello".index_of("l")` | `2` | `2` | `2` | agrees |
+| `[10,20,30].index_of(20)` | `<value:0xff..ff>` | `<value:0xff..ff>` | `1` | **STILL BROKEN** |
+| `[text].index_of("y")` | — | **`nil`** | `1` | **STILL BROKEN** |
+
+Positive controls unchanged and correct on both engines after the rebuild:
+`.len()` → 3, `.join("-")` → `b-a`, `text.replace` → `yo there`,
+`text.to_lower` → `hello`, `[i64].contains(20)` → `true`.
+
+### `index_of` on arrays is NOT fixed, and the dispatch arm was not the cause
+
+All four dispatch tables now map bare `index_of` to `rt_index_of`
+(`instr/calls.rs:3234`, `instr/closures_structs.rs:1284`,
+`llvm/emitter.rs:192`, `llvm/functions.rs:2275`); `rt_index_of` exists
+(`runtime/src/value/collections.rs:3051`) and is declared to codegen
+(`runtime_sffi.rs:416`). The only type-qualified `rt_string_find` mapping left
+(`llvm/functions.rs:2613`) is correctly gated on a text receiver.
+
+Evidence that the symbol is reached: `text.index_of` returns `2`, and text now
+routes through `rt_index_of`.
+
+Evidence that the array path inside it fails: `[i64]` yields a raw `-1`
+(`<value:0xffffffffffffffff>`) while `[text]` yields `nil` — two different
+wrong answers from one call site, which a simple "not found" cannot explain.
+
+Note for whoever picks this up: **`contains` works on the same array and value**
+(`true`), so the array receiver does reach the runtime intact. That is not the
+counter-example it first appears to be — there is no `rt_array_contains` at all,
+so `contains` takes an entirely different path and proves nothing about
+`rt_array_index_of`'s calling convention. The open question is whether
+`rt_array_index_of` is entered at all for a typed array receiver, and if so why
+`rt_value_eq` fails on JIT-boxed elements.
