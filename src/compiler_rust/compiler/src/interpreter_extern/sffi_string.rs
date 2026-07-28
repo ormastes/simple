@@ -9,7 +9,7 @@ use std::cell::RefCell;
 
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{rt_string_new, rt_string_concat, rt_string_len, rt_string_eq, rt_string_free};
-use simple_runtime::value::{rt_string_data};
+use simple_runtime::value::{rt_string_data, rt_string_to_int};
 
 fn resolve_runtime_string(val: &Value) -> Result<RuntimeValue, CompileError> {
     match val {
@@ -86,6 +86,49 @@ pub fn rt_string_len_fn(args: &[Value]) -> Result<Value, CompileError> {
         }
         None => Err(CompileError::semantic_with_context(
             "rt_string_len expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )),
+    }
+}
+
+/// Parse a `text` receiver to `i64`, mirroring `simple_runtime`'s
+/// `rt_string_to_int` (trim, whole-string parse, 0 on failure).
+///
+/// This hand-written `EXTERN_DISPATCH` entry exists for the same reason as
+/// `rt_string_bytes_fn` below: `extern fn rt_string_to_int(value: text) -> i64`
+/// is a legal declaration (see `src/lib/common/ui/wm_app_process_contract.spl`),
+/// and the JIT/native lanes resolve it through `codegen/runtime_sffi.rs`. The
+/// interpreter lane had no entry at all, so whenever the enclosing function ran
+/// interpreted instead of compiled the call fell through to
+/// `interpreter_extern::mod`'s final arm and died with
+/// `semantic: unknown extern function: rt_string_to_int` — which is how the
+/// host-WM showcase wrappers failed at `wm_fs_bridge_decode()`.
+pub fn rt_string_to_int_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match args.first() {
+        Some(Value::Str(text)) => Ok(Value::Int(text.as_str().trim().parse::<i64>().unwrap_or(0))),
+        Some(value) => {
+            let string = resolve_runtime_string(value)?;
+            Ok(Value::Int(rt_string_to_int(string)))
+        }
+        None => Err(CompileError::semantic_with_context(
+            "rt_string_to_int expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )),
+    }
+}
+
+/// Render a raw `i64` as decimal `text`.
+///
+/// Same missing-interpreter-entry story as `rt_string_to_int_fn` above:
+/// `extern fn rt_raw_i64_to_string(value: i64) -> text` is declared and called
+/// in `src/lib/common/ui/wm_app_process_contract.spl` (WM event encoding).
+/// Returns a real `Value::Str` rather than a runtime string handle so
+/// interpreted callers keep normal `text` semantics.
+pub fn rt_raw_i64_to_string_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match args.first() {
+        Some(value) => Ok(Value::text(value.as_int()?.to_string())),
+        None => Err(CompileError::semantic_with_context(
+            "rt_raw_i64_to_string expects 1 argument".to_string(),
             ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
         )),
     }

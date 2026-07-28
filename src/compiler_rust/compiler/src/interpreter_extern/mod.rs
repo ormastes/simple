@@ -1695,6 +1695,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_string_eq", sffi_string::rt_string_eq_fn);
     insert_simple!("rt_string_len", sffi_string::rt_string_len_fn);
     insert_simple!("rt_string_new", sffi_string::rt_string_new_fn);
+    // host_wm_showcase_unknown_extern_rt_string_to_int_2026-07-28: the JIT/native
+    // lanes resolve these two through codegen/runtime_sffi.rs, but the interpreter
+    // lane had no entry, so an interpreted call to a legally declared
+    // `extern fn rt_string_to_int` / `rt_raw_i64_to_string` died with
+    // "semantic: unknown extern function".
+    insert_simple!("rt_string_to_int", sffi_string::rt_string_to_int_fn);
+    insert_simple!("rt_raw_i64_to_string", sffi_string::rt_raw_i64_to_string_fn);
     insert_simple!("rt_swi_build", simd::rt_swi_build);
     insert_simple!("rt_swi_byte_to_char", simd::rt_swi_byte_to_char);
     insert_simple!("rt_swi_char_to_byte", simd::rt_swi_char_to_byte);
