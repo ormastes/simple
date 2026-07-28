@@ -104,6 +104,22 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             // still resolve to their real method. `Matcher.starts_with` is
             // a `static fn` and is likewise always qualified.
             | ("starts_with" | "ends_with", 1)
+            // Text/array slicing. Identical hazard to `starts_with` above and
+            // found by the same reloc census (2026-07-28): a bare
+            // `text.slice(a, b)` on an erased receiver was binding to
+            // `ByteSpan.slice` whenever `common.bytes.span` was anywhere in
+            // the entry closure, reading a text as a ByteSpan struct.
+            // `rt_slice` tag-dispatches safely on any value and is already the
+            // target reached for clean receivers, so route bare calls there
+            // first.
+            //
+            // Arities are the ones `try_compile_builtin_method_call` actually
+            // implements below: `start` is required, `end` and `step` are
+            // optional (1..=3). Census of owned `.spl` sources: 178 one-arg,
+            // 1922 two-arg, 1 three-arg call sites. Zero-arg is deliberately
+            // excluded — a bare `.slice()` with no start is not a builtin
+            // idiom and should keep falling through to normal resolution.
+            | ("slice", 1 | 2 | 3)
             // `is_empty` is handled below (compiled as `rt_len(receiver) == 0`)
             // but was missing from this gate, so a bare (erased-receiver)
             // `.is_empty()` fell all the way through to suffix-based symbol
@@ -926,6 +942,22 @@ mod tests {
         assert!(!is_bare_builtin_collection_method("starts_with", 2));
         assert!(!is_bare_builtin_collection_method("ends_with", 2));
     }
+
+    /// Same defect class as `starts_with`: a bare `text.slice(a, b)` was
+    /// binding to `ByteSpan.slice` (reloc census on `mod_0.o`, 2026-07-28)
+    /// instead of the tag-dispatching `rt_slice`. Arities are the ones
+    /// `try_compile_builtin_method_call` implements: start required, end and
+    /// step optional.
+    #[test]
+    fn erased_slice_uses_builtin_dispatch() {
+        assert!(is_bare_builtin_collection_method("slice", 1));
+        assert!(is_bare_builtin_collection_method("slice", 2));
+        assert!(is_bare_builtin_collection_method("slice", 3));
+        // Arity-gated at both ends: no-start and over-long forms still resolve
+        // through normal name resolution.
+        assert!(!is_bare_builtin_collection_method("slice", 0));
+        assert!(!is_bare_builtin_collection_method("slice", 4));
+    }
 }
 
 /// Try to compile a builtin method call (String, Array methods)
@@ -1275,6 +1307,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "split" => "rt_string_split",
         "bytes" => "rt_string_bytes",
         "chars" => "rt_string_chars",
+        "lines" | "split_lines" => "rt_string_lines",
         "replace" => "rt_string_replace",
         "to_upper" | "upper" => "rt_string_to_upper",
         "to_lower" | "lower" => "rt_string_to_lower",
