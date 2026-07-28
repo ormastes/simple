@@ -9,7 +9,7 @@ Use an LLVM-enabled pure-Simple self-hosted release driver. The Rust driver is
 bootstrap-only and is not a verification fallback. On Apple Silicon, set:
 
 ```bash
-SIMPLE=bin/release/aarch64-apple-darwin/simple
+SIMPLE=bin/release/aarch64-apple-darwin-macho/simple
 test -x "$SIMPLE"
 ```
 
@@ -64,12 +64,18 @@ supports the documented `virt` plus `ramfb` lane:
 sh scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs
 ```
 
+The probe uses `timeout`, then Homebrew `gtimeout`, with a bounded POSIX
+watchdog fallback when neither command is installed. Test that fallback without
+starting QEMU with
+`sh scripts/check/check-simpleos-arm64-wm-qemu-readiness.shs --self-test-timeout`.
+
 The probe verifies that `qemu-system-aarch64` is on `PATH`, that the `virt`
 machine and `ramfb` device are available, and that QEMU accepts the documented
 headless `virt`/`ramfb` dry-run command for the current host accelerator:
-`hvf` on Darwin, `kvm` on Linux ARM64 with `/dev/kvm`, otherwise `tcg` with
-`cortex-a57`. It is not a live boot proof; the serial markers below remain the
-acceptance signal for a completed ARM64 WM run.
+`hvf` on Apple Silicon, `kvm` on Linux ARM64 with `/dev/kvm`, otherwise `tcg`
+with `cortex-a57`. In particular, Intel macOS cannot use HVF for an AArch64
+guest and therefore stays on TCG. It is not a live boot proof; the serial
+markers below remain the acceptance signal for a completed ARM64 WM run.
 
 ## Runner Scenario Contract
 

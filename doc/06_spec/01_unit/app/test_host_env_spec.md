@@ -37,7 +37,7 @@ fn create_file_symlink(target: text, link: text) -> i64:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -55,6 +55,7 @@ expect(source).to_contain(
     "host_x86_simd_evidence_passes(cpu_simd) and host_simd_artifacts_are_current(cpu_simd),")
 expect(source).to_contain("host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_artifacts_are_current(renderdoc)")
 expect(source).to_contain("host_simd_capability_row_current(")
+expect(source).to_contain("CPU_SIMD_ARCH_MATRIX_TARGET_BUILD=1 sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs")
 expect(source).to_contain(
     "host_simd_evidence_passes(evidence, arch, feature) and host_simd_artifacts_are_current(evidence),")
 expect(source).to_contain("\"arm_simd\", arm_simd, \"aarch64\", \"neon\", ARM_SIMD_PATH")

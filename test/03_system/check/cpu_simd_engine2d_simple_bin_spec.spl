@@ -82,6 +82,11 @@ describe "CPU SIMD Engine2D Simple binary contract":
         expect(script).to_contain("\"build/bootstrap/stage3/simple\"")
         expect(script).to_contain("repo-self-hosted-engine2d-simd")
         expect(script).to_contain("is_rust_seed_simple")
+        expect(script).to_contain("resolve_simple_path")
+        expect(script).to_contain("is_rust_seed_simple \"$SIMPLE_BIN_RESOLVED\"")
+        expect(script).to_contain("[ ! -L \"$path\" ] || return 1")
+        expect(script).to_contain("SIMPLE_BIN_STATUS=unresolved")
+        expect(script).to_contain("REASON=\"simple-bin-unresolved\"")
         expect(script).to_contain("binary_runs_engine2d_simd_smoke")
         expect(script).to_contain("engine2d_simd_candidate_smoke.spl")
         expect(script).to_contain("engine2d_simd_fill_row_u32(4, 0xFF010203u32)")
@@ -144,6 +149,41 @@ describe "CPU SIMD Engine2D Simple binary contract":
         val (_src_out, _src_err, src_code) = process_run("/bin/sh", ["-c", "test ! -f " + root + "/out/cpu_simd_engine2d_evidence.spl"])
         expect(src_code).to_equal(0)
 
+        val link_root = root + "-symlink"
+        val link_command = "rm -rf " + link_root + " && mkdir -p " + link_root + " && ln -s \"$(pwd)/src/compiler_rust/target/release/simple\" " + link_root + "/simple && SIMPLE_BIN=" + link_root + "/simple BUILD_DIR=" + link_root + "/out REPORT_PATH=" + link_root + "/report.md sh scripts/check/check-cpu-simd-engine2d-evidence.shs > " + link_root + "/stdout.txt 2> " + link_root + "/stderr.txt || true"
+        val (_link_out, _link_err, link_code) = process_run("/bin/sh", ["-c", link_command])
+        expect(link_code).to_equal(0)
+        val link_evidence = file_read(link_root + "/out/evidence.env")
+        expect(link_evidence).to_contain("cpu_simd_evidence_reason=simple-bin-forbidden")
+        expect(link_evidence).to_contain("cpu_simd_evidence_simple_bin_status=forbidden")
+        val (_link_src_out, _link_src_err, link_src_code) = process_run("/bin/sh", ["-c", "test ! -f " + link_root + "/out/cpu_simd_engine2d_evidence.spl"])
+        expect(link_src_code).to_equal(0)
+
+    it "rejects overlong and cyclic Simple binary symlinks before smoke execution":
+        val long_root = "build/test-cpu-simd-engine2d-seed-long-link"
+        val long_command = "rm -rf " + long_root + " && mkdir -p " + long_root + " && i=0; while [ \"$i\" -lt 22 ]; do next=$((i + 1)); ln -s link$next " + long_root + "/link$i; i=$next; done; ln -s \"$(pwd)/src/compiler_rust/target/release/simple\" " + long_root + "/link22; SIMPLE_BIN=" + long_root + "/link0 BUILD_DIR=" + long_root + "/out REPORT_PATH=" + long_root + "/report.md sh scripts/check/check-cpu-simd-engine2d-evidence.shs > " + long_root + "/stdout.txt 2> " + long_root + "/stderr.txt || true"
+        val (_long_out, _long_err, long_code) = process_run("/bin/sh", ["-c", long_command])
+        expect(long_code).to_equal(0)
+        val long_evidence = file_read(long_root + "/out/evidence.env")
+        expect(long_evidence).to_contain("cpu_simd_evidence_reason=simple-bin-unresolved")
+        expect(long_evidence).to_contain("cpu_simd_evidence_simple_bin_status=unresolved")
+        val (_, _, long_source_code) = process_run("/bin/sh", ["-c", "test ! -f " + long_root + "/out/cpu_simd_engine2d_evidence.spl"])
+        expect(long_source_code).to_equal(0)
+        val (_, _, long_smoke_code) = process_run("/bin/sh", ["-c", "test ! -f " + long_root + "/out/candidate-smoke/engine2d_simd_candidate_smoke.spl"])
+        expect(long_smoke_code).to_equal(0)
+
+        val cycle_root = "build/test-cpu-simd-engine2d-seed-link-cycle"
+        val cycle_command = "rm -rf " + cycle_root + " && mkdir -p " + cycle_root + " && ln -s cycle-b " + cycle_root + "/cycle-a && ln -s cycle-a " + cycle_root + "/cycle-b && SIMPLE_BIN=" + cycle_root + "/cycle-a BUILD_DIR=" + cycle_root + "/out REPORT_PATH=" + cycle_root + "/report.md sh scripts/check/check-cpu-simd-engine2d-evidence.shs > " + cycle_root + "/stdout.txt 2> " + cycle_root + "/stderr.txt || true"
+        val (_cycle_out, _cycle_err, cycle_code) = process_run("/bin/sh", ["-c", cycle_command])
+        expect(cycle_code).to_equal(0)
+        val cycle_evidence = file_read(cycle_root + "/out/evidence.env")
+        expect(cycle_evidence).to_contain("cpu_simd_evidence_reason=simple-bin-unresolved")
+        expect(cycle_evidence).to_contain("cpu_simd_evidence_simple_bin_status=unresolved")
+        val (_, _, cycle_source_code) = process_run("/bin/sh", ["-c", "test ! -f " + cycle_root + "/out/cpu_simd_engine2d_evidence.spl"])
+        expect(cycle_source_code).to_equal(0)
+        val (_, _, cycle_smoke_code) = process_run("/bin/sh", ["-c", "test ! -f " + cycle_root + "/out/candidate-smoke/engine2d_simd_candidate_smoke.spl"])
+        expect(cycle_smoke_code).to_equal(0)
+
     it "records independent x86 arm and riscv matrix rows":
         val script = file_read("scripts/check/check-cpu-simd-engine2d-arch-matrix.shs")
         expect(script).to_contain("x86_64 aarch64 riscv64")
@@ -176,6 +216,7 @@ describe "CPU SIMD Engine2D Simple binary contract":
         expect(script).to_contain("CPU_SIMD_ARCH_MATRIX_RUNTIME_SOURCE")
         expect(script).to_contain("missing-riscv-fill-dispatch")
         expect(script).to_contain("missing-riscv-copy-dispatch")
+        expect(script.contains("src/compiler_rust/target/debug/simple")).to_be(false)
 
         val runtime = file_read("src/runtime/runtime_simd_dispatch.c")
         expect(runtime).to_contain("__riscv_vector")

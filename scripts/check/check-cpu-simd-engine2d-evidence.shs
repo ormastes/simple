@@ -20,6 +20,29 @@ is_rust_seed_simple() {
     esac
 }
 
+resolve_simple_path() {
+    path="$1"
+    depth=0
+    while [ -L "$path" ] && [ "$depth" -lt 20 ]; do
+        target="$(readlink "$path" 2>/dev/null || true)"
+        [ "$target" != "" ] || return 1
+        case "$target" in
+            /*) path="$target" ;;
+            *) path="$(dirname -- "$path")/$target" ;;
+        esac
+        depth=$((depth + 1))
+    done
+    [ ! -L "$path" ] || return 1
+    dir="$(dirname -- "$path")"
+    base="$(basename -- "$path")"
+    if [ -d "$dir" ]; then
+        dir="$(CDPATH= cd -- "$dir" && pwd -P)"
+        printf '%s/%s\n' "$dir" "$base"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
 # The genuine Engine2D SIMD evidence needs an interpreter binary that carries the
 # rt_engine2d_simd_fill_row_u32 / copy / blend externs (the names the evidence
 # .spl actually calls). Guarding on the NEW symbol means a binary that only has
@@ -83,7 +106,10 @@ if [ "$SIMPLE_BIN_PINNED" = "0" ]; then
         "release"/*/simple \
         "bin/release"/*/simple \
         "build/bootstrap/stage3/simple"; do
-        if binary_has_runnable_engine2d_simd_externs "$_cand"; then
+        _cand_resolved=""
+        if _cand_resolved="$(resolve_simple_path "$_cand")" \
+            && ! is_rust_seed_simple "$_cand" && ! is_rust_seed_simple "$_cand_resolved" \
+            && binary_has_runnable_engine2d_simd_externs "$_cand"; then
             SIMPLE_BIN="$_cand"
             SIMPLE_BIN_SOURCE="repo-self-hosted-engine2d-simd"
             break
@@ -91,7 +117,10 @@ if [ "$SIMPLE_BIN_PINNED" = "0" ]; then
     done
     if [ "$SIMPLE_BIN_SOURCE" = "missing-self-hosted-engine2d-simd" ] && [ "${ALLOW_PATH_SIMPLE_BIN:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
         _path_simple="$(command -v simple)"
-        if binary_has_runnable_engine2d_simd_externs "$_path_simple"; then
+        _path_simple_resolved=""
+        if _path_simple_resolved="$(resolve_simple_path "$_path_simple")" \
+            && ! is_rust_seed_simple "$_path_simple" && ! is_rust_seed_simple "$_path_simple_resolved" \
+            && binary_has_runnable_engine2d_simd_externs "$_path_simple"; then
             SIMPLE_BIN="$_path_simple"
             SIMPLE_BIN_SOURCE="path-opt-in-engine2d-simd"
         fi
@@ -99,16 +128,28 @@ if [ "$SIMPLE_BIN_PINNED" = "0" ]; then
 else
     SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 fi
+SIMPLE_BIN_RESOLVED=""
+SIMPLE_BIN_RESOLUTION_STATUS=missing
+if [ "$SIMPLE_BIN" != "" ]; then
+    if SIMPLE_BIN_RESOLVED="$(resolve_simple_path "$SIMPLE_BIN")"; then
+        SIMPLE_BIN_RESOLUTION_STATUS=pass
+    else
+        SIMPLE_BIN_RESOLUTION_STATUS=unresolved
+    fi
+fi
 if [ "$SIMPLE_BIN" = "" ]; then
     SIMPLE_BIN_STATUS=missing
-elif is_rust_seed_simple "$SIMPLE_BIN"; then
+elif [ "$SIMPLE_BIN_RESOLUTION_STATUS" = "unresolved" ]; then
+    SIMPLE_BIN_STATUS=unresolved
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-unresolved"
+elif is_rust_seed_simple "$SIMPLE_BIN" || is_rust_seed_simple "$SIMPLE_BIN_RESOLVED"; then
     SIMPLE_BIN_STATUS=forbidden
     SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
 elif [ ! -x "$SIMPLE_BIN" ]; then
     SIMPLE_BIN_STATUS=missing
     SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
 fi
-export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS SIMPLE_BIN_RESOLVED SIMPLE_BIN_RESOLUTION_STATUS
 
 TIMEOUT_SECS="${SIMPLE_CPU_SIMD_EVIDENCE_TIMEOUT_SECS:-120}"
 WORK_DIR="${BUILD_DIR:-build/cpu-simd-engine2d-evidence}"
@@ -339,6 +380,24 @@ echo "timeout_secs=$TIMEOUT_SECS"
 if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
     STATUS=fail
     REASON="simple-bin-forbidden"
+    ARCH=unknown
+    FEATURE=unknown
+    LEVEL=unknown
+    CHECKSUM=0
+    REPORT_HITS=0
+    X86_STATUS=unknown
+    ARM_STATUS=unknown
+    RISCV_STATUS=unknown
+    emit_report
+    echo "cpu_simd_evidence_status=$STATUS"
+    echo "cpu_simd_evidence_reason=$REASON"
+    echo "report_path=$REPORT_PATH"
+    exit 1
+fi
+
+if [ "$SIMPLE_BIN_STATUS" = "unresolved" ]; then
+    STATUS=fail
+    REASON="simple-bin-unresolved"
     ARCH=unknown
     FEATURE=unknown
     LEVEL=unknown
