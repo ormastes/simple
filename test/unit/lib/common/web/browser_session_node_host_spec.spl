@@ -2,7 +2,6 @@ use std.spec.*
 
 use std.js.engine.js_error.{Logger, LogLevel}
 use std.gc_async_mut.web.browser_session.{BrowserRuntimeState}
-use std.js.engine.runtime.{NATIVE_NODE_PROCESS_EXIT}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_native.*
 use std.nogc_sync_mut.js.engine.interpreter_object.*
@@ -27,24 +26,29 @@ fn _display_js(v: JsValue) -> text:
         JsValue.Symbol(id): "Symbol()"
 
 fn _new_interpreter() -> JsInterpreter:
-    JsInterpreter.new(Logger.new(LogLevel.Error))
+    JsInterpreter.new(Logger.new("browser-node-host-spec", LogLevel.Error))
+
+fn _browser_eval_is_error(source: text) -> bool:
+    var state = BrowserRuntimeState.create("https://example.test/", "T", "", [], [], "")
+    match state.runtime.eval(source):
+        Ok(value): false
+        Err(err): true
 
 fn _object_property_text(interp: JsInterpreter, value: JsValue, key: text) -> text:
     match value:
         JsValue.Object(id): _display_js(interp.get_object_property(id, key))
         _: ""
 
-fn _object_child_property_text(interp: JsInterpreter, value: JsValue, child_key: text, key: text) -> text:
-    match value:
-        JsValue.Object(id):
-            val child = interp.get_object_property(id, child_key)
-            match child:
-                JsValue.Object(child_id): _display_js(interp.get_object_property(child_id, key))
-                JsValue.Array(child_id): _display_js(interp.get_object_property(child_id, key))
-                _: ""
-        _: ""
-
 describe "BrowserSession deterministic Node host surface":
+    it "denies direct Node host syntax in browser mode":
+        expect(_browser_eval_is_error("process.cwd()")).to_equal(true)
+        expect(_browser_eval_is_error("process.env.PATH")).to_equal(true)
+        expect(_browser_eval_is_error("process.argv[0]")).to_equal(true)
+        expect(_browser_eval_is_error("process.versions.node")).to_equal(true)
+        expect(_browser_eval_is_error("globalThis.Buffer.byteLength('secret')")).to_equal(true)
+        expect(_browser_eval_is_error("require('fs').readFileSync('/etc/passwd')")).to_equal(true)
+        expect(_browser_eval_is_error("process.send('secret')")).to_equal(true)
+
     it "builds deterministic process and Buffer globals without host state":
         var interp = _new_interpreter()
 
@@ -100,25 +104,3 @@ describe "BrowserSession deterministic Node host surface":
                 expect(_object_property_text(interp, denied, "error")).to_equal("file-denied")
             _:
                 expect("missing fs module").to_equal("object")
-
-    it "installs deterministic process argv on BrowserSession runtime globals":
-        val state = BrowserRuntimeState.create("https://example.test/", "T", "", [], [], "")
-        val process = state.runtime.get_host_property(state.window_id, "process")
-        expect(_object_child_property_text(state.runtime.interpreter, process, "argv", "length")).to_equal("2")
-        expect(_object_child_property_text(state.runtime.interpreter, process, "argv", "0")).to_equal("simple")
-        expect(_object_property_text(state.runtime.interpreter, process, "exit")).to_equal("[Function]")
-        expect(_display_js(state.runtime.interpreter._dispatch_native_with_receiver(NATIVE_NODE_PROCESS_EXIT, JsValue.Undefined, [JsValue.Number(v: 7.0)], 0))).to_equal("7")
-
-    it "executes embedded process exit intent in BrowserSession runtime scripts":
-        var state = BrowserRuntimeState.create("about:node-process", "Node", "", [], [], "")
-
-        match state.runtime.eval("process.exit(7)"):
-            Ok(value):
-                expect(_display_js(value)).to_equal("7")
-            Err(err):
-                expect(err.message).to_equal("ok")
-        match state.runtime.eval("require('process').exit(7)"):
-            Ok(value):
-                expect(_display_js(value)).to_equal("7")
-            Err(err):
-                expect(err.message).to_equal("ok")

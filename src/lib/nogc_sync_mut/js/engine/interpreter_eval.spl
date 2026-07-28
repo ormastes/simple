@@ -95,6 +95,8 @@ impl JsInterpreter:
                 val global_lookup = self.lookup_global_value(name)
                 if val Some(v) = global_lookup:
                     return Ok(v)
+                if not self.node_compat_enabled and (name == "require" or name == "process" or name == "Buffer"):
+                    return Err(script_error("ReferenceError: {name} is not defined"))
                 self.logger.warn("ReferenceError: {name} is not defined")
                 return Ok(JsValue.Undefined)
             JsExpression.Binary(op, left, right):
@@ -523,7 +525,7 @@ impl JsInterpreter:
         if is_member and member_method == "cwd":
             match member_obj_expr:
                 JsExpression.Identifier(obj_name):
-                    if obj_name == "process":
+                    if obj_name == "process" and self.node_compat_enabled:
                         return Ok(JsValue.String(v: "/"))
                 _: pass_dn
 
@@ -535,7 +537,13 @@ impl JsInterpreter:
                         match root_expr:
                             JsExpression.Identifier(root_name):
                                 if root_name == "globalThis":
-                                    byte_length_global = true
+                                    if self.node_compat_enabled:
+                                        byte_length_global = true
+                                    else:
+                                        val root_value = self.eval_expression(root_expr, env)?
+                                        val root_id = _get_obj_id(root_value)
+                                        if root_id < 0 or strict_equals(self.get_object_property(root_id, "Buffer"), JsValue.Undefined):
+                                            return Err(script_error("ReferenceError: Buffer is not defined"))
                             _: pass_dn
                 _: pass_dn
             if byte_length_global:
