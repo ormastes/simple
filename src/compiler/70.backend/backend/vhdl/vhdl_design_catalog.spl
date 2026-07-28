@@ -408,7 +408,7 @@ fn vhdl_catalog_resolve_target(target: text,
                                hardware_only: bool,
                                target_kind: text) -> Result<SymbolId?, text>:
     val qualified = target.contains("::")
-    var found: SymbolId? = nil
+    var found_id = -1
     var matches = 0
     for candidate_symbol in vhdl_catalog_sorted_symbols(all_functions.keys()):
         val candidate = all_functions[candidate_symbol]
@@ -420,7 +420,7 @@ fn vhdl_catalog_resolve_target(target: text,
         else:
             candidate.name == target
         if matches_target:
-            found = Some(candidate_symbol)
+            found_id = candidate_symbol.id
             matches = matches + 1
     if matches > 1:
         return Err("Ambiguous VHDL {target_kind} `{target}`; use a module-qualified identity")
@@ -428,9 +428,9 @@ fn vhdl_catalog_resolve_target(target: text,
         if qualified:
             return Err("Unresolved VHDL {target_kind} `{target}`")
         return Ok(nil)
-    Ok(found)
+    Ok(Some(SymbolId(id: found_id)))
 
-fn vhdl_catalog_mark_type(ty: MirType, needed: Dict<i64, bool>):
+fn vhdl_catalog_mark_type(ty: MirType, mut needed: Dict<i64, bool>):
     match ty.kind:
         case Struct(symbol) | Enum(symbol): needed[symbol.id] = true
         case Array(element, _) | Slice(element) | Ptr(element, _) | Ref(element, _) | Promise(element) | ScalableVec(element, _):
@@ -447,23 +447,23 @@ fn vhdl_catalog_mark_type(ty: MirType, needed: Dict<i64, bool>):
             vhdl_catalog_mark_type(signature.return_type, needed)
         case _: ()
 
-fn vhdl_catalog_mark_function_types(func: MirFunction, needed: Dict<i64, bool>):
+fn vhdl_catalog_mark_function_types(func: MirFunction, mut needed: Dict<i64, bool>):
     for param in func.signature.params:
         vhdl_catalog_mark_type(param, needed)
     vhdl_catalog_mark_type(func.signature.return_type, needed)
     for local in func.locals:
         vhdl_catalog_mark_type(local.type_, needed)
 
-fn vhdl_catalog_mark_operand_type(operand: MirOperand, needed: Dict<i64, bool>):
+fn vhdl_catalog_mark_operand_type(operand: MirOperand, mut needed: Dict<i64, bool>):
     match operand.kind:
         case Const(_, type_): vhdl_catalog_mark_type(type_, needed)
         case _: ()
 
-fn vhdl_catalog_mark_operand_types(operands: [MirOperand], needed: Dict<i64, bool>):
+fn vhdl_catalog_mark_operand_types(operands: [MirOperand], mut needed: Dict<i64, bool>):
     for operand in operands:
         vhdl_catalog_mark_operand_type(operand, needed)
 
-fn vhdl_catalog_mark_inst_types(inst: MirInst, needed: Dict<i64, bool>):
+fn vhdl_catalog_mark_inst_types(inst: MirInst, mut needed: Dict<i64, bool>):
     match inst.kind:
         case Const(_, _, type_) | Alloc(_, type_):
             vhdl_catalog_mark_type(type_, needed)
@@ -521,7 +521,7 @@ fn vhdl_catalog_mark_inst_types(inst: MirInst, needed: Dict<i64, bool>):
         case _: ()
 
 fn vhdl_catalog_mark_terminator_types(terminator: MirTerminator,
-                                      needed: Dict<i64, bool>):
+                                      mut needed: Dict<i64, bool>):
     match terminator:
         case Ret(value):
             if val operand = value:
@@ -533,7 +533,7 @@ fn vhdl_catalog_mark_terminator_types(terminator: MirTerminator,
             vhdl_catalog_mark_operand_types(args, needed)
         case _: ()
 
-fn vhdl_catalog_type_def_mark_dependencies(type_def: MirTypeDef, needed: Dict<i64, bool>):
+fn vhdl_catalog_type_def_mark_dependencies(type_def: MirTypeDef, mut needed: Dict<i64, bool>):
     match type_def.kind:
         case Struct(fields):
             for field in fields:

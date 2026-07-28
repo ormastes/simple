@@ -915,9 +915,7 @@ fn process_exists_os(pid: i64) -> bool {
                     let _ = CloseHandle(handle);
                     true
                 }
-                Err(error) => {
-                    error.code() == windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0)
-                }
+                Err(error) => error.code() == windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0),
             }
         };
     }

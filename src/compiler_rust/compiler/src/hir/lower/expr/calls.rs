@@ -509,6 +509,7 @@ impl Lowerer {
             }
             "to_string" => Ok(Some(self.lower_builtin_call(name, args, TypeId::STRING, ctx)?)),
             "to_int" => Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?)),
+            "panic" => Ok(Some(self.lower_builtin_call("rt_panic", args, TypeId::NIL, ctx)?)),
             // Option/Result constructors (needed for stdlib)
             "Some" | "Ok" => {
                 // Wrap value in Some/Ok variant - return ANY since it's a generic wrapper

@@ -68,6 +68,28 @@ fn stepped_range_lowers_to_array_range() {
 }
 
 #[test]
+fn panic_lowers_to_canonical_runtime_symbol() {
+    let module = parse_and_lower("fn fail():\n    panic(\"boom\")\n").unwrap();
+    let expression = module.functions[0]
+        .body
+        .iter()
+        .find_map(|statement| match statement {
+            HirStmt::Expr(expression) => Some(expression),
+            _ => None,
+        })
+        .expect("panic expression");
+
+    match &expression.kind {
+        HirExprKind::BuiltinCall { name, args } => {
+            assert_eq!(name, "rt_panic");
+            assert_eq!(args.len(), 1);
+            assert_eq!(expression.ty, TypeId::NIL);
+        }
+        other => panic!("expected canonical panic builtin, got {other:?}"),
+    }
+}
+
+#[test]
 fn shared_keyword_local_read_does_not_become_global_variant() {
     let module = parse_and_lower("fn value() -> i64:\n    val shared = 1\n    return shared\n").unwrap();
     let function = &module.functions[0];

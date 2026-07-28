@@ -322,7 +322,7 @@ impl VhdlBackend:
                 return Ok(true)
         Ok(false)
 
-    fn plan_hardware_call_instance_name(func: MirFunction, callee: MirFunction, ordinal: i32) -> Result<text, CompileError>:
+    me plan_hardware_call_instance_name(func: MirFunction, callee: MirFunction, ordinal: i32) -> Result<text, CompileError>:
         val stem = "simple_hwcall_{vhdl_sanitize_identifier(callee.name)}_{ordinal}"
         val abi = match self.vhdl_return_abi(callee):
             case Ok(value): value
@@ -483,6 +483,19 @@ impl VhdlBackend:
                     count = count + 1
         count
 
+    fn local_definition(func: MirFunction, local: LocalId) -> MirInst?:
+        var block_index = func.blocks.len() - 1
+        while block_index >= 0:
+            val block = func.blocks[block_index]
+            var inst_index = block.instructions.len() - 1
+            while inst_index >= 0:
+                val inst = block.instructions[inst_index]
+                if self.inst_def_id(inst) == local.id:
+                    return Some(inst)
+                inst_index = inst_index - 1
+            block_index = block_index - 1
+        nil
+
     fn hardware_call_local_is_mutated(func: MirFunction, local: LocalId) -> bool:
         for block in func.blocks:
             for inst in block.instructions:
@@ -512,15 +525,14 @@ impl VhdlBackend:
             return false
         var definition_block = BlockId(id: -1)
         var definition_index: i64 = -1
-        var definition: MirInst? = nil
         for block in func.blocks:
             var idx: i64 = 0
             for inst in block.instructions:
                 if self.inst_def_id(inst) == local.id:
                     definition_block = block.id
                     definition_index = idx
-                    definition = Some(inst)
                 idx = idx + 1
+        val definition = self.local_definition(func, local)
         if not definition.?:
             return false
         val before_call = definition_block.id == call_block.id and definition_index < call_index
@@ -592,11 +604,7 @@ impl VhdlBackend:
                 match kind:
                     case Arg(_): return self.local_to_vhdl(local)
                     case _: ()
-                var definition: MirInst? = nil
-                for block in func.blocks:
-                    for inst in block.instructions:
-                        if self.inst_def_id(inst) == local.id:
-                            definition = Some(inst)
+                val definition = self.local_definition(func, local)
                 if not definition.?:
                     return Err(self.backend_error("VHDL hardware call input local {local.id} in `{func.name}` has no unique definition"))
                 match definition.unwrap().kind:
@@ -676,7 +684,7 @@ impl VhdlBackend:
                     case _:
                         Err(self.backend_error("VHDL hardware call input local {local.id} in `{func.name}` is not a recursively pure SSA expression"))
 
-    fn prepare_hardware_call_wiring(func: MirFunction) -> Result<(), CompileError>:
+    me prepare_hardware_call_wiring(func: MirFunction) -> Result<(), CompileError>:
         var hardware_args: Dict<i64, bool> = {}
         for block in func.blocks:
             for inst in block.instructions:

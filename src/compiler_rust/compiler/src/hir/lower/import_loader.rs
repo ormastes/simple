@@ -1090,6 +1090,44 @@ fn read_hardware(addr: u64) -> u64:
     }
 
     #[test]
+    fn direct_symbol_import_call_lowers_to_global_symbol() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let owner = src.join("owner");
+        fs::create_dir_all(&owner).unwrap();
+
+        fs::write(
+            owner.join("pipeline.spl"),
+            "fn compile_specialized_template_default() -> i64:\n    73\n",
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            "use owner.pipeline.compile_specialized_template_default\n\nfn run() -> i64:\n    compile_specialized_template_default()\n",
+        )
+        .unwrap();
+
+        let source = fs::read_to_string(&main_path).unwrap();
+        let ast = Parser::new(&source).parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let lowered = Lowerer::with_module_resolver(resolver, main_path)
+            .lower_module(&ast)
+            .expect("direct symbol import should lower");
+        let function = lowered
+            .functions
+            .iter()
+            .find(|function| function.name == "run")
+            .expect("run function");
+        let body = format!("{:?}", function.body);
+
+        assert!(
+            body.contains("Global(\"compile_specialized_template_default\")"),
+            "body: {body}"
+        );
+    }
+
+    #[test]
     fn aliased_import_static_method_call_resolves_to_alias_target() {
         // C8-DEEP regression: `use {Real as Alias}` then a static-method /
         // constructor call `Alias.make(...)` must bind the callee to the

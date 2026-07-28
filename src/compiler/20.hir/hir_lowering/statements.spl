@@ -281,20 +281,18 @@ impl HirLowering:
     me lower_tuple_destructure(name: text, hir_init: HirExpr, is_mut: bool, span: Span) -> HirStmt:
         val inner = name.slice(1, name.len() - 1)
         val parts = inner.split(",")
-        var stmts: [HirStmt] = []
+        val stmts: [HirStmt] = []
         val tmp_sym = self.symbols.define("__tuple_destr", SymbolKind.Variable, nil, span, false, false, nil)
-        stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_init), span: span))
-        var td_elem_types: [HirType] = []
-        var td_base_sym: SymbolId? = nil
-        match hir_init.kind:
-            case HirExprKind.Var(td_sym):
-                td_base_sym = td_sym
-            case HirExprKind.NamedVar(td_sym2, _):
-                td_base_sym = td_sym2
-            case _: ()
+        stmts.push(HirStmt(kind: HirStmtKind.Let(tmp_sym, nil, hir_init), span: span))
+        val td_elem_types: [HirType] = []
+        val td_base_sym: SymbolId? = match hir_init.kind:
+            case HirExprKind.Var(td_sym): td_sym
+            case HirExprKind.NamedVar(td_sym2, _): td_sym2
+            case _: nil
         if val td_bs = td_base_sym:
             if self.local_tuple_types.has(td_bs.id):
-                td_elem_types = self.local_tuple_types[td_bs.id]
+                for td_elem_type in self.local_tuple_types[td_bs.id]:
+                    td_elem_types.push(td_elem_type)
         # Call init: `val (a, b, c) = f(...)` where f's declared return type
         # is a tuple. Without this, every destructured element's Let has a
         # nil type, so downstream consumers default the locals to i64 --
@@ -313,20 +311,19 @@ impl HirLowering:
         if td_elem_types.len() == 0:
             val td_callee_name: text = self.td_init_callee_name(hir_init)
             if td_callee_name != "" and self.fn_tuple_returns.has(td_callee_name):
-                td_elem_types = self.fn_tuple_returns[td_callee_name]
+                for td_return_type in self.fn_tuple_returns[td_callee_name]:
+                    td_elem_types.push(td_return_type)
         var i = 0
         while i < parts.len():
             val pname = parts[i]
             if pname != "_":
-                var td_idx_type: HirType? = nil
-                if i < td_elem_types.len():
-                    td_idx_type = td_elem_types[i]
+                val td_idx_type: HirType? = if i < td_elem_types.len(): td_elem_types[i] else: nil
                 val idx_expr = HirExpr(kind: HirExprKind.Index(
                     HirExpr(kind: HirExprKind.Var(tmp_sym), type_: nil, span: span),
                     HirExpr(kind: HirExprKind.IntLit(i, nil), type_: nil, span: span)
                 ), type_: td_idx_type, span: span)
                 val psym = self.symbols.define(pname, SymbolKind.Variable, nil, span, false, is_mut, nil)
-                stmts = stmts.push(HirStmt(kind: HirStmtKind.Let(psym, nil, idx_expr), span: span))
+                stmts.push(HirStmt(kind: HirStmtKind.Let(psym, nil, idx_expr), span: span))
             i = i + 1
         HirStmt(kind: HirStmtKind.Block(HirBlock(stmts: stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: span), span: span)), span: span)
 
@@ -409,9 +406,9 @@ impl HirLowering:
             # Bare-lift + if-val: explicit Some(...) here built the heap box
             # MIR lower_expr saw as <value:0x100000004>. This fast path
             # SHADOWS the StmtKind.Return arm below (bug doc 2026-07-23).
-            var rt_hir: HirExpr? = nil
-            if val rt_val_e = rt_val:
-                rt_hir = self.lower_hir_expr(rt_val_e)
+            val rt_hir: HirExpr? = match rt_val:
+                case Some(rt_val_e): self.lower_hir_expr(rt_val_e)
+                case _: nil
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), type_: nil, span: s.span)), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, nil, sk_dummy)):
             val as_target: Expr = match stmt_kind_value:
@@ -571,8 +568,7 @@ impl HirLowering:
                 # Bare-lift: explicit Some(...) builds a heap Option box on the
                 # stage4 native lane; MIR lower_expr then sees the box header
                 # (<value:0x100000004>) instead of the expr (bug doc 2026-07-23).
-                var return_value: HirExpr? = nil
-                return_value = self.lower_hir_expr(value)
+                val return_value: HirExpr? = self.lower_hir_expr(value)
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Return(return_value),
                     type_: nil,

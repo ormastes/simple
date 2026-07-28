@@ -59,6 +59,11 @@ class MappedRecord:
     owner_id: text
     address: i64
 
+struct JitCacheRecord:
+    code: [u8]
+    address: i64
+    owner: text
+
 var _g_symbols: [text] = []
 var _g_owners: [text] = []
 var _g_addresses: [i64] = []
@@ -100,6 +105,13 @@ fn _jit_key_list_contains(keys: [text], key: text) -> bool:
         if item == key:
             return true
     false
+
+fn _jit_remove_text(values: [text], target: text) -> [text]:
+    var kept: [text] = []
+    for value in values:
+        if value != target:
+            kept.push(value)
+    kept
 
 class JitExecMapper:
     records: Dict
@@ -144,13 +156,13 @@ class JitMapper:
 
 class JitInstantiator:
     config: JitInstantiatorConfig
-    jit_cache: Dict
+    jit_cache: Dict<text, JitCacheRecord>
     jit_semantic_keys: Dict<text, [text]>
     smf_semantic_keys: Dict<text, [text]>
     exec_mapper: JitExecMapper
     jit_mapper: JitMapper
     loaded_metadata: Dict<text, LoadedMetadata>
-    in_progress: Set<text>
+    in_progress: [text]
     depth: i64
     compile_count: i64
 
@@ -163,7 +175,7 @@ class JitInstantiator:
             exec_mapper: JitExecMapper(records: {}, symbols: [], owners: [], addresses: []),
             jit_mapper: JitMapper(),
             loaded_metadata: {},
-            in_progress: {},
+            in_progress: [],
             depth: 0,
             compile_count: 0
         )
@@ -211,7 +223,7 @@ class JitInstantiator:
         if val mapped_record = rec:
             if mapped_record != nil:
                 owner = mapped_record.owner_id
-        self.jit_cache[name] = {"code": code, "address": addr, "owner": owner}
+        self.jit_cache[name] = JitCacheRecord(code: code, address: addr, owner: owner)
 
     me set_smf_semantic_keys(path: text, keys: [text]):
         self.smf_semantic_keys[path] = keys
@@ -255,8 +267,8 @@ class JitInstantiator:
             return JitInstantiationResult.CompilationError(message: "Maximum JIT depth exceeded: {self.config.max_depth}")
         if self.jit_cache.has(name):
             val rec = self.jit_cache[name]
-            val code = rec["code"]
-            val addr = rec["address"]
+            val code = rec.code
+            val addr = rec.address
             return JitInstantiationResult.Success(code: code, symbol: name, address: Some(addr))
         if self.in_progress.contains(name):
             return JitInstantiationResult.CircularDependency(cycle: [name])
@@ -270,7 +282,7 @@ class JitInstantiator:
             case nil: return JitInstantiationResult.NotFound(symbol: name)
 
         self.depth = self.depth + 1
-        self.in_progress = self.in_progress.insert(name)
+        self.in_progress = self.in_progress.push(name)
 
         val compiled = _fake_compile_bytes(entry)
         val address = _next_fake_address(self.exec_mapper, compiled.len() as i64)
@@ -280,11 +292,7 @@ class JitInstantiator:
             path
         _global_set(name, owner_id, address)
         self.exec_mapper.set_record(name, owner_id, address)
-        self.jit_cache[name] = {
-            "code": compiled,
-            "address": address,
-            "owner": owner_id
-        }
+        self.jit_cache[name] = JitCacheRecord(code: compiled, address: address, owner: owner_id)
         if self.smf_semantic_keys.has(path):
             self.jit_semantic_keys[name] = self.smf_semantic_keys[path]
         self.compile_count = self.compile_count + 1
@@ -294,11 +302,11 @@ class JitInstantiator:
             match update_result:
                 case Ok(_): ()
                 case Err(update_error):
-                    self.in_progress = self.in_progress.remove(name)
+                    self.in_progress = _jit_remove_text(self.in_progress, name)
                     self.depth = self.depth - 1
                     return JitInstantiationResult.UpdateFailed(symbol: name, error: update_error)
 
-        self.in_progress = self.in_progress.remove(name)
+        self.in_progress = _jit_remove_text(self.in_progress, name)
         self.depth = self.depth - 1
         JitInstantiationResult.Success(code: compiled, symbol: name, address: Some(address))
 
@@ -350,7 +358,7 @@ class JitSymbolResolver:
             return Some(self.symbols[symbol])
         if self.jit.jit_cache.has(symbol):
             val rec = self.jit.jit_cache[symbol]
-            val addr = rec["address"]
+            val addr = rec.address
             self.symbols[symbol] = addr
             return Some(addr)
 

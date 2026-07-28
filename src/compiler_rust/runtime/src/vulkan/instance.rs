@@ -63,9 +63,9 @@ impl VulkanInstance {
                 entry
                     .enumerate_instance_layer_properties()
                     .map(|layers| {
-                        layers.iter().any(|layer| {
-                            CStr::from_ptr(layer.layer_name.as_ptr()) == validation_layer.as_c_str()
-                        })
+                        layers
+                            .iter()
+                            .any(|layer| CStr::from_ptr(layer.layer_name.as_ptr()) == validation_layer.as_c_str())
                     })
                     .unwrap_or(false)
             };

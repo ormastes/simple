@@ -1469,6 +1469,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_contract_violation_kind",
     "rt_contract_violation_message",
     "rt_contract_violation_new",
+    "rt_panic",
     "rt_coverage_clear",
     "rt_coverage_condition_probe",
     "rt_coverage_decision_probe",

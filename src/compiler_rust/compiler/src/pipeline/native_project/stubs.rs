@@ -1000,7 +1000,11 @@ pub(crate) fn generate_stub_object(
     if let Ok(dump_path) = std::env::var("SIMPLE_DUMP_STUBS") {
         let mut all: Vec<String> = needs_stub.to_vec();
         all.sort();
-        let contents = if all.is_empty() { String::new() } else { all.join("\n") + "\n" };
+        let contents = if all.is_empty() {
+            String::new()
+        } else {
+            all.join("\n") + "\n"
+        };
         std::fs::write(&dump_path, contents).map_err(|e| format!("write stub dump {dump_path}: {e}"))?;
         eprintln!("Wrote {} unresolved symbols to {}", all.len(), dump_path);
     }
@@ -1344,10 +1348,7 @@ mod tests {
             resolve_defined_suffix_alias("_io__env_ops__env_get", &defined),
             Some("nogc_sync_mut__io__env_ops__env_get".to_string())
         );
-        assert_eq!(
-            resolve_defined_suffix_alias("other__env_get", &defined),
-            None
-        );
+        assert_eq!(resolve_defined_suffix_alias("other__env_get", &defined), None);
     }
 
     #[test]

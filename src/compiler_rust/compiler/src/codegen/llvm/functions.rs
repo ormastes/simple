@@ -395,13 +395,15 @@ impl LlvmBackend {
             .as_ref()
             .ok_or_else(crate::error::factory::llvm_builder_not_created)?;
 
-        // Resolve through import_map/use_map to get the mangled name
-        let resolved_name = self
-            .use_map
-            .get(&func.name)
-            .or_else(|| self.import_map.get(&func.name))
-            .map(|s| s.as_str())
-            .unwrap_or(&func.name);
+        let resolved_name = if func.blocks.is_empty() {
+            self.use_map
+                .get(&func.name)
+                .or_else(|| self.import_map.get(&func.name))
+                .map(|s| s.as_str())
+                .unwrap_or(&func.name)
+        } else {
+            func.name.as_str()
+        };
 
         // Get the function that was forward-declared in the compile() pass
         // If it doesn't exist, create it (for backwards compatibility)

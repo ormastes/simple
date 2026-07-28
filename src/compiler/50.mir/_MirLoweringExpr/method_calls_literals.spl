@@ -889,12 +889,14 @@ impl MirLowering:
         val resolution_is_free_function = resolution_disc == rt_enum_discriminant(MethodResolution.FreeFunction(SymbolId(id: -1)))
         val resolution_is_instance_method = resolution_disc == rt_enum_discriminant(MethodResolution.InstanceMethod(SymbolId(id: -1), SymbolId(id: -1)))
         val resolution_is_static_method = resolution_disc == rt_enum_discriminant(MethodResolution.StaticMethod(SymbolId(id: -1), SymbolId(id: -1)))
-        var result_ok_type: HirType? = nil
-        var result_err_type: HirType? = nil
-        if method == "unwrap" or method == "unwrap_or":
-            result_ok_type = self.result_ok_hir_type(receiver)
-        if method == "unwrap_err":
-            result_err_type = self.result_err_hir_type(receiver)
+        val result_ok_type: HirType? = if method == "unwrap" or method == "unwrap_or":
+            self.result_ok_hir_type(receiver)
+        else:
+            nil
+        val result_err_type: HirType? = if method == "unwrap_err":
+            self.result_err_hir_type(receiver)
+        else:
+            nil
 
         # Resolve a type-valued receiver once. The Unresolved arm below uses
         # this for static custom methods; predicate fallbacks also need it
@@ -2225,30 +2227,27 @@ impl MirLowering:
                 # previously re-lowered it) to avoid double-evaluating a
                 # side-effecting receiver expression.
                 val static_method_key = "static::{static_receiver_name}::{method}"
-                var static_method_id: SymbolId? = nil
-                if static_receiver_name != "" and self.struct_method_syms.contains(static_method_key):
-                    static_method_id = Some(self.struct_method_syms[static_method_key])
+                val static_receiver_symbol: SymbolId? = match receiver.kind:
+                    case NamedVar(static_symbol, _): Some(static_symbol)
+                    case Var(static_symbol): Some(static_symbol)
+                    case _: nil
+                val static_method_id: SymbolId? = if static_receiver_name != "" and self.struct_method_syms.contains(static_method_key):
+                    Some(self.struct_method_syms[static_method_key])
                 elif static_receiver_name != "":
-                    match receiver.kind:
-                        case NamedVar(static_symbol, _):
-                            val static_candidate = self.symbols.lookup_method_in_type(static_symbol, method)
-                            if static_candidate != nil:
-                                val static_candidate_id = static_candidate ?? SymbolId(id: -1)
-                                val static_candidate_symbol = self.symbols.get_symbol_raw(static_candidate_id.id)
-                                if static_candidate_symbol != nil:
-                                    match static_candidate_symbol.kind:
-                                        case Function: static_method_id = Some(static_candidate_id)
-                                        case _: ()
-                        case Var(static_symbol):
-                            val static_candidate = self.symbols.lookup_method_in_type(static_symbol, method)
-                            if static_candidate != nil:
-                                val static_candidate_id = static_candidate ?? SymbolId(id: -1)
-                                val static_candidate_symbol = self.symbols.get_symbol_raw(static_candidate_id.id)
-                                if static_candidate_symbol != nil:
-                                    match static_candidate_symbol.kind:
-                                        case Function: static_method_id = Some(static_candidate_id)
-                                        case _: ()
-                        case _: ()
+                    match static_receiver_symbol:
+                        case Some(static_symbol):
+                            match self.symbols.lookup_method_in_type(static_symbol, method):
+                                case Some(static_candidate_id):
+                                    match self.symbols.get_symbol_raw(static_candidate_id.id):
+                                        case Some(static_candidate_symbol):
+                                            match static_candidate_symbol.kind:
+                                                case Function: Some(static_candidate_id)
+                                                case _: nil
+                                        case _: nil
+                                case _: nil
+                        case _: nil
+                else:
+                    nil
                 if static_method_id != nil:
                     val resolved_static_method_id = static_method_id ?? SymbolId(id: -1)
                     var static_args: [MirOperand] = []
@@ -2283,24 +2282,24 @@ impl MirLowering:
                     val unresolved_method_key = "{unresolved_struct_name}::{method}"
                     # Method symbols are owner-qualified during HIR lowering,
                     # so unrelated types may safely expose the same method name.
-                    var unresolved_method_id: SymbolId? = nil
-                    if self.struct_method_syms.contains(unresolved_method_key):
-                        unresolved_method_id = Some(self.struct_method_syms[unresolved_method_key])
+                    val unresolved_method_id: SymbolId? = if self.struct_method_syms.contains(unresolved_method_key):
+                        Some(self.struct_method_syms[unresolved_method_key])
                     else:
-                        val declared_receiver_type = self.receiver_declared_type(receiver)
-                        if declared_receiver_type != nil:
-                            val found_receiver_type = declared_receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
-                            match found_receiver_type.kind:
-                                case Named(receiver_type_symbol, _):
-                                    val instance_candidate = self.symbols.lookup_method_in_type(receiver_type_symbol, method)
-                                    if instance_candidate != nil:
-                                        val instance_candidate_id = instance_candidate ?? SymbolId(id: -1)
-                                        val instance_candidate_symbol = self.symbols.get_symbol_raw(instance_candidate_id.id)
-                                        if instance_candidate_symbol != nil:
-                                            match instance_candidate_symbol.kind:
-                                                case Method: unresolved_method_id = Some(instance_candidate_id)
-                                                case _: ()
-                                case _: ()
+                        match self.receiver_declared_type(receiver):
+                            case Some(found_receiver_type):
+                                match found_receiver_type.kind:
+                                    case Named(receiver_type_symbol, _):
+                                        match self.symbols.lookup_method_in_type(receiver_type_symbol, method):
+                                            case Some(instance_candidate_id):
+                                                match self.symbols.get_symbol_raw(instance_candidate_id.id):
+                                                    case Some(instance_candidate_symbol):
+                                                        match instance_candidate_symbol.kind:
+                                                            case Method: Some(instance_candidate_id)
+                                                            case _: nil
+                                                    case _: nil
+                                            case _: nil
+                                    case _: nil
+                            case _: nil
                     if unresolved_method_id != nil:
                         val resolved_method_id = unresolved_method_id ?? SymbolId(id: -1)
                         # Cross-module flat HIR reaches this unresolved-owner

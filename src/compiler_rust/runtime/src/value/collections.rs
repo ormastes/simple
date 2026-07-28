@@ -2872,9 +2872,7 @@ pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue)
         let haystack = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
         let needle_str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(needle_data, needle_len as usize));
         match haystack.find(needle_str) {
-            Some(idx) => {
-                super::objects::rt_option_some(RuntimeValue::from_int(idx as i64))
-            }
+            Some(idx) => super::objects::rt_option_some(RuntimeValue::from_int(idx as i64)),
             None => super::objects::rt_option_none(),
         }
     }

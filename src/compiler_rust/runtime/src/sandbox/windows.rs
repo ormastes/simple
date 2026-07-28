@@ -121,16 +121,12 @@ fn apply_network_isolation(mode: &NetworkMode) -> SandboxResult<()> {
             tracing::debug!("Network: Full access");
             Ok(())
         }
-        NetworkMode::None => {
-            Err(SandboxError::NetworkIsolation(
-                "Windows network isolation requires an AppContainer child".to_string(),
-            ))
-        }
-        NetworkMode::AllowList | NetworkMode::BlockList => {
-            Err(SandboxError::NetworkIsolation(
-                "Windows domain filtering requires an AppContainer child".to_string(),
-            ))
-        }
+        NetworkMode::None => Err(SandboxError::NetworkIsolation(
+            "Windows network isolation requires an AppContainer child".to_string(),
+        )),
+        NetworkMode::AllowList | NetworkMode::BlockList => Err(SandboxError::NetworkIsolation(
+            "Windows domain filtering requires an AppContainer child".to_string(),
+        )),
     }
 }
 
@@ -163,11 +159,9 @@ fn apply_filesystem_isolation(
                 "Windows filesystem isolation requires an AppContainer child".to_string(),
             ))
         }
-        FilesystemMode::Overlay => {
-            Err(SandboxError::FilesystemIsolation(
-                "overlay filesystem isolation is unsupported on Windows".to_string(),
-            ))
-        }
+        FilesystemMode::Overlay => Err(SandboxError::FilesystemIsolation(
+            "overlay filesystem isolation is unsupported on Windows".to_string(),
+        )),
     }
 }
 

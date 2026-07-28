@@ -15,7 +15,11 @@ use std.nogc_sync_mut.shell.file (rename)
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
-use compiler.driver.driver_source_loading.{_driver_entry_import_module_paths, _driver_entry_sibling_module_paths, _driver_resolve_entry_import}
+use compiler.driver.driver_source_loading.{
+    _driver_entry_import_module_paths, _driver_entry_sibling_module_paths,
+    _driver_resolve_entry_import, _driver_text_bucket_set_new,
+    _driver_text_bucket_set_has, _driver_text_bucket_set_add
+}
 # Dict.entries currently lowers to this implementation; keep its object in the
 # entry closure even though this walker no longer constructs a custom HashMap.
 use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
@@ -507,19 +511,21 @@ fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
         return p3
     ""
 
-fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
+fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> text:
     # Resolve a module segment list to an .spl file under a --source root.
     # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
     # the root's dir name. Returns "" if unresolved.
-    if segs.len() > 1 and segs[0] == "compiler":
-        val numbered = _driver_resolve_entry_import(_nb_join_segments(segs), "")
-        if numbered != "":
-            val numbered_abs = rt_path_absolute(numbered).replace("\\", "/")
+    val module_path = _nb_join_segments(segs)
+    val entry_dir = _driver_entry_import_dirname(importer_path)
+    if segs.len() > 0:
+        val resolved = _driver_resolve_entry_import(module_path, entry_dir)
+        if resolved != "":
+            val resolved_abs = rt_path_absolute(resolved).replace("\\", "/")
             for root in source_dirs:
                 val root_abs = _nb_trim_trailing_slashes(rt_path_absolute(root).replace("\\", "/"))
                 val root_prefix = if root_abs.ends_with("/"): root_abs else: root_abs + "/"
-                if numbered_abs.starts_with(root_prefix):
-                    return numbered
+                if resolved_abs.starts_with(root_prefix):
+                    return resolved
     for root in source_dirs:
         val dir_name = _nb_basename(root)
         val public_lib_alias = dir_name == "lib" and segs.len() > 0 and segs[0] == "std"
@@ -539,15 +545,6 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
         val src_path = _nb_resolve_under_root("src", segs)
         if src_path != "":
             return src_path
-        # Working-directory root. The driver-side resolver
-        # (_driver_resolve_entry_import) has always probed cwd, but that walk is
-        # skipped under --entry-closure, where this function is the only
-        # resolver. Without it a positional entry (no --source) could not reach
-        # any sibling module of its own repo-relative import path -- the closure
-        # shipped the entry file alone and the callee died as "unresolved name".
-        val cwd_path = _nb_resolve_under_root(".", segs)
-        if cwd_path != "":
-            return cwd_path
     # Unprefixed tier-qualified paths (`nogc_sync_mut.io_runtime` from the
     # std.io_runtime shim's `export use`; `common.ui.access_types`) live
     # under src/lib but carry no std./lib. prefix — no root above matches.
@@ -586,10 +583,8 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # errors in the compile phase.
     val trace_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
     var queue: [text] = [entry]
-    # The Rust seed drops receivers for custom read-only instance methods.
-    # Built-in Dict keeps hashed lookup while the self-hosted ABI catches up.
-    var discovered: Dict<text, bool> = {}
-    discovered[entry] = true
+    var discovered = _driver_text_bucket_set_new(512)
+    discovered = _driver_text_bucket_set_add(discovered, entry)
     var result: [text] = []
     var resolve_cache: Dict<text, text> = {}
     val closure_source_dirs = _nb_normalize_source_dirs(source_dirs)
@@ -617,9 +612,9 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
         for mp in module_paths:
             if mp.starts_with("."):
                 val rel_rp = _nb_resolve_relative(mp, f)
-                if rel_rp != "" and not discovered.has(rel_rp):
+                if rel_rp != "" and not _driver_text_bucket_set_has(discovered, rel_rp):
                     queue = queue.push(rel_rp)
-                    discovered[rel_rp] = true
+                    discovered = _driver_text_bucket_set_add(discovered, rel_rp)
                 continue
             val segs = mp.split(".")
             val seg_key = _nb_join_segments(segs)
@@ -627,13 +622,13 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             if resolve_cache.has(seg_key):
                 rp = resolve_cache[seg_key]
             else:
-                rp = _nb_resolve_segs(segs, closure_source_dirs)
+                rp = _nb_resolve_segs(segs, closure_source_dirs, f)
                 resolve_cache[seg_key] = rp
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
-            if rp != "" and not discovered.has(rp):
+            if rp != "" and not _driver_text_bucket_set_has(discovered, rp):
                 queue = queue.push(rp)
-                discovered[rp] = true
+                discovered = _driver_text_bucket_set_add(discovered, rp)
             if rp == "" and segs.len() > 1:
                 var drop: [text] = []
                 var di = 0
@@ -645,11 +640,11 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                 if resolve_cache.has(drop_key):
                     drop_rp = resolve_cache[drop_key]
                 else:
-                    drop_rp = _nb_resolve_segs(drop, closure_source_dirs)
+                    drop_rp = _nb_resolve_segs(drop, closure_source_dirs, f)
                     resolve_cache[drop_key] = drop_rp
-                if drop_rp != "" and not discovered.has(drop_rp):
+                if drop_rp != "" and not _driver_text_bucket_set_has(discovered, drop_rp):
                     queue = queue.push(drop_rp)
-                    discovered[drop_rp] = true
+                    discovered = _driver_text_bucket_set_add(discovered, drop_rp)
     result
 
 fn cli_native_build(args: [text]) -> i64:
@@ -796,12 +791,13 @@ fn cli_native_build(args: [text]) -> i64:
                 entry_closure = true
             elif cli_native_build_is_entry_arg(a):
                 if a.contains("="):
-                    val idx = a.index_of("=")
-                    if idx >= 0:
-                        entry_point = a.substring(idx + 1)
-                    else:
-                        _cli_eprint("Error: --entry requires an argument")
-                        return 1
+                    val eq_idx = a.index_of("=")
+                    match eq_idx:
+                        Some(idx):
+                            entry_point = a.substring(idx + 1)
+                        nil:
+                            _cli_eprint("Error: --entry requires an argument")
+                            return 1
                 elif j + 1 < args.len():
                     j = j + 1
                     entry_point = args[j]
@@ -1000,7 +996,7 @@ fn cli_native_build(args: [text]) -> i64:
 
         # A missing --output parent dir previously made the worker fail with a
         # silent exit 1 after the full compile (bug: native_build_missing_output_dir_silent_fail_2026-07-23).
-        val out_slash = output.rfind("/")
+        val out_slash = output.rfind("/") ?? 0
         if out_slash > 0:
             val out_parent = output.substring(0, out_slash)
             if not _cli_dir_create_impl(out_parent, true):
@@ -1074,11 +1070,8 @@ fn cli_native_build(args: [text]) -> i64:
             env_set("SIMPLE_NATIVE_BUILD_TARGET", native_target)
         if set_native_cpu:
             env_set("SIMPLE_NATIVE_CPU", native_cpu)
-        # The driver owns the entry-closure transition: it must first walk every
-        # import and register its exact dotted alias (`std.*` may resolve to a
-        # physical `lib.*` module), then it flips this flag before bulk loading.
-        # Pre-enabling closure mode here skips that alias walk and leaves valid
-        # cross-module names unresolved during HIR lowering.
+        # Keep the pre-closure flag clear. The driver must register logical
+        # aliases for the physical closure inputs before it marks the walk done.
         val effective_entry_closure = entry_closure or emit_object or emit_archive
         env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
         if runtime_bundle_explicit:
@@ -1112,6 +1105,7 @@ fn cli_native_build(args: [text]) -> i64:
             if verbose and effective_entry_closure:
                 _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
             options.mode = CompileMode.Aot
+            options.cli_mode_text = "aot"
             options.output_file = Some(staged_output)
             options.output_format = driver_output_format_both()
             options.backend = backend
@@ -1144,6 +1138,7 @@ fn cli_native_build(args: [text]) -> i64:
             if verbose and effective_entry_closure:
                 _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
             options.mode = CompileMode.Aot
+            options.cli_mode_text = "aot"
             options.output_file = Some(staged_output)
             if build_mode == "dynload" and not emit_object and not emit_archive:
                 options.output_format = driver_output_format_both()

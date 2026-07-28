@@ -114,14 +114,10 @@ pub fn install_seccomp_profile(profile: LinuxSeccompProfile) -> SandboxResult<()
         return Ok(());
     }
 
-    let audit_arch = current_linux_audit_arch().ok_or_else(|| {
-        SandboxError::Config("seccomp audit architecture is unsupported".to_string())
-    })?;
+    let audit_arch = current_linux_audit_arch()
+        .ok_or_else(|| SandboxError::Config("seccomp audit architecture is unsupported".to_string()))?;
     let mut filter = Vec::new();
-    filter.push(bpf_stmt(
-        (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-        4,
-    ));
+    filter.push(bpf_stmt((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 4));
     filter.push(bpf_jump(
         (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
         audit_arch,
@@ -281,10 +277,7 @@ pub fn install_landlock_filesystem_rules(config: &SandboxConfig) -> SandboxResul
             added_rules += 1;
         }
     }
-    if added_rules == 0
-        && (!config.filesystem.read_paths.is_empty()
-            || !config.filesystem.write_paths.is_empty())
-    {
+    if added_rules == 0 && (!config.filesystem.read_paths.is_empty() || !config.filesystem.write_paths.is_empty()) {
         return Err(SandboxError::FilesystemIsolation(
             "Landlock filesystem isolation requires at least one existing allowed path".to_string(),
         ));
@@ -492,12 +485,9 @@ fn apply_network_isolation(mode: &NetworkMode) -> SandboxResult<()> {
             tracing::debug!("Network: blocking socket operations with seccomp");
             Ok(())
         }
-        NetworkMode::AllowList | NetworkMode::BlockList => Err(
-            SandboxError::NetworkIsolation(
-                "process-local domain filtering is unavailable; refusing an unenforced policy"
-                    .to_string(),
-            ),
-        ),
+        NetworkMode::AllowList | NetworkMode::BlockList => Err(SandboxError::NetworkIsolation(
+            "process-local domain filtering is unavailable; refusing an unenforced policy".to_string(),
+        )),
     }
 }
 
@@ -1448,19 +1438,13 @@ mod tests {
 
     #[test]
     fn configured_sandbox_denies_network_socket_in_child() {
-        run_irreversible_sandbox_child(|| unsafe {
-            configured_sandbox_denies_network_in_child()
-        });
+        run_irreversible_sandbox_child(|| unsafe { configured_sandbox_denies_network_in_child() });
     }
 
     #[test]
     fn configured_domain_filter_fails_before_applying_partial_sandbox() {
-        let config =
-            SandboxConfig::new().with_network_allowlist(vec!["example.com".to_string()]);
-        assert!(matches!(
-            apply_sandbox(&config),
-            Err(SandboxError::NetworkIsolation(_))
-        ));
+        let config = SandboxConfig::new().with_network_allowlist(vec!["example.com".to_string()]);
+        assert!(matches!(apply_sandbox(&config), Err(SandboxError::NetworkIsolation(_))));
     }
 
     #[test]

@@ -97,3 +97,44 @@ failed at the admitted `core-c-bootstrap` link. Missing providers include
 `str.to_lowercase`, `rt_string_free`, and `rt_cranelift_*`; the historical
 runtime-path attempt added unresolved `spl_*` dependencies. No stub fallback,
 full bootstrap, `84` oracle, or Vulkan run was accepted.
+
+## Optimized Runtime Revalidation
+
+Later current-source evidence supersedes the blocked Linux status above for the
+ProcessingIR Vulkan probe. Commit `b658e408064a` replaces exported per-element
+RuntimeArray conversion calls with checked direct slice loops. CUDA/Vulkan
+runtime archive
+`3d24c72e59735791941983517cc222ff5fc9a4112b668ef098dbfa4ceab244c0`
+links strict no-stub probe
+`fd9fa68a06ac4eb32182eab5bcc19095aaed89ceb8220078c89e229e045bdd4d`.
+
+The canonical hardware gate passes:
+
+- exact 64-value Vulkan result with handle/identity `666008366`;
+- unavailable, init, submit, readback, and mismatch failures with exact reasons,
+  empty output, and zero provenance;
+- same-process submit failure followed by exact recovery with unchanged
+  identity.
+
+The retained gate log is
+`build/simpleos_gpu_host/vulkan_fault_native/optimized-runtime-gate.log`.
+This closes Linux revalidation of the shared conversion optimization. It does
+not claim prepared-host Metal or macOS Vulkan execution.
+
+## Canonical Probe Refresh
+
+On 2026-07-28 the canonical probe paths still named older binaries. The CUDA
+binary returned a checksum eight times the expected value even though the
+newer recovery-capable artifact passed exact device readback. The verified
+artifacts were promoted byte-for-byte to the canonical paths:
+
+- CUDA: `10323c8438ed987a2610793aa6af680933ae20e933ce0f3c11fcdbc281259519`
+- Vulkan: `106e0c5e35acf33810dde296099fa3010ed4f1d0a16f6e064efe9259a25c2a19`
+
+The combined gate then passed exact CUDA output with no CPU fallback, exact
+Vulkan output, all five typed failure phases, and same-process recovery. The
+receipt is `build/gpu-goal/evidence/processing-cuda-vulkan-native-parity-2026-07-28.log`.
+The durable receipt values are CUDA count 64, checksum 1082179840, handle 1,
+identity 1002905313239842438, `cpu_fallback=false`; and Vulkan count 64,
+handle/identity 666008366, all five injected failures classified correctly,
+followed by exact recovery with stable identity.

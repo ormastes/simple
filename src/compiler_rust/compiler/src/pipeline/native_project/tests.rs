@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use crate::codegen::common_backend::{
-    enum_runtime_module_name_from_path, module_init_symbol, module_prefix_from_path,
-};
+use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_init_symbol, module_prefix_from_path};
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
 use super::linker::{add_extra_link_objects, split_extra_link_objects, validate_extra_link_objects};
@@ -197,11 +195,7 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
     let consumer_c = temp.path().join("consumer.c");
     let consumer_o = temp.path().join("consumer.o");
     let output = temp.path().join("provider-probe");
-    std::fs::write(
-        &provider_c,
-        "long external_provider_value(void) { return 42; }\n",
-    )
-    .unwrap();
+    std::fs::write(&provider_c, "long external_provider_value(void) { return 42; }\n").unwrap();
     std::fs::write(
         &consumer_c,
         "extern long external_provider_value(void);\nint main(void) { return external_provider_value() == 42 ? 0 : 1; }\n",
@@ -258,14 +252,8 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
-    let stub = super::stubs::generate_stub_object(
-        temp.path(),
-        &[consumer_o],
-        &output,
-        &[provider.as_path()],
-        &imports,
-    )
-    .unwrap();
+    let stub = super::stubs::generate_stub_object(temp.path(), &[consumer_o], &output, &[provider.as_path()], &imports)
+        .unwrap();
     let symbols = std::process::Command::new("nm").arg("-g").arg(stub).output().unwrap();
     assert!(symbols.status.success());
     assert!(!String::from_utf8_lossy(&symbols.stdout).contains("external_provider_value"));
@@ -437,13 +425,7 @@ __attribute__((constructor(101))) static void non_llvm_ctor(void) {}
 #[test]
 fn canonical_bootstrap_does_not_force_diagnostic_whole_archive_mode() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
+    let repo_root = manifest_dir.parent().unwrap().parent().unwrap().parent().unwrap();
     let script = std::fs::read_to_string(repo_root.join("scripts/bootstrap/bootstrap-from-scratch.sh")).unwrap();
 
     assert!(!script.contains("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1"));
@@ -774,7 +756,10 @@ fn enum_runtime_names_keep_explicit_source_dir_namespace() {
     ];
 
     let result = super::imports::build_import_map(&file_sources, &source_dirs, &source_root);
-    let names = result.enum_runtime_names.values().collect::<std::collections::HashSet<_>>();
+    let names = result
+        .enum_runtime_names
+        .values()
+        .collect::<std::collections::HashSet<_>>();
     for expected in [
         "compiler.10.frontend.probe.CompilerProbe",
         "app.tool.probe.AppProbe",
@@ -814,10 +799,7 @@ fn test_native_build_rejects_module_prefix_collision_before_codegen() {
     assert!(error.contains("my_tool.spl"));
     assert!(error.contains("my_tool"));
     assert!(!project_root.join("out").exists());
-    assert!(
-        cache_marker.exists(),
-        "collision rejection must precede cache cleanup"
-    );
+    assert!(cache_marker.exists(), "collision rejection must precede cache cleanup");
 }
 
 /// Regression test: two sibling `--source` roots (e.g. `src/app` and
@@ -1277,11 +1259,7 @@ fn test_native_hir_loads_common_imported_struct_fields_from_lib_root() {
     let consumer = lib_root.join("gc_async_mut/gpu/engine2d/draw_ir_adv.spl");
     std::fs::create_dir_all(owner.parent().unwrap()).unwrap();
     std::fs::create_dir_all(consumer.parent().unwrap()).unwrap();
-    std::fs::write(
-        &owner,
-        "pub struct Simple2dDrawIrPlan:\n    batch_id: text\n",
-    )
-    .unwrap();
+    std::fs::write(&owner, "pub struct Simple2dDrawIrPlan:\n    batch_id: text\n").unwrap();
     std::fs::write(
         &consumer,
         "use common.ui.draw_ir.{Simple2dDrawIrPlan}\n\nfn batch_id(plan: Simple2dDrawIrPlan) -> text:\n    plan.batch_id\n",
@@ -4144,18 +4122,16 @@ fn test_build_import_map_anchors_split_trait_impl_vtable_to_type_definition() {
         (impl_path.clone(), std::fs::read_to_string(&impl_path).unwrap()),
     ];
     let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
-    let owner = format!(
-        "{}__Translator",
-        module_prefix_from_path(&class_path, &src_root)
-    );
+    let owner = format!("{}__Translator", module_prefix_from_path(&class_path, &src_root));
     assert!(result.vtable_type_owners.contains(&owner));
     assert_eq!(
         result.vtable_symbols.get(&owner),
         Some(&format!("__vtable__{owner}__for__TextCodegen"))
     );
-    assert!(!result
-        .vtable_type_owners
-        .contains(&format!("{}__Translator", module_prefix_from_path(&impl_path, &src_root))));
+    assert!(!result.vtable_type_owners.contains(&format!(
+        "{}__Translator",
+        module_prefix_from_path(&impl_path, &src_root)
+    )));
 }
 
 #[test]
@@ -4548,6 +4524,74 @@ fn test_llvm_mangle_renames_imported_global_declarations_with_uses() {
 }
 
 #[test]
+fn test_llvm_mangle_keeps_local_bodies_owned_despite_runtime_or_import_names() {
+    let mut mir = crate::mir::MirModule::new();
+    for name in ["rt_file_rename", "eprint", "join"] {
+        let mut function = crate::mir::MirFunction::new(
+            name.to_string(),
+            crate::hir::TypeId::VOID,
+            simple_parser::Visibility::Private,
+        );
+        function.blocks[0].terminator = crate::mir::Terminator::Return(None);
+        mir.functions.push(function);
+    }
+    let mut exported = crate::mir::MirFunction::new(
+        "rt_exported_probe".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Public,
+    );
+    exported.attributes.push("export".to_string());
+    exported.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(exported);
+
+    let mut caller = crate::mir::MirFunction::new(
+        "caller".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Private,
+    );
+    for name in ["rt_file_rename", "eprint", "join"] {
+        caller.blocks[0].instructions.push(crate::mir::MirInst::Call {
+            dest: None,
+            target: crate::mir::CallTarget::Pure(name.to_string()),
+            args: vec![],
+        });
+    }
+    caller.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(caller);
+
+    let import_map = std::collections::HashMap::from([
+        ("rt_file_rename".to_string(), "other__rt_file_rename".to_string()),
+        ("eprint".to_string(), "other__eprint".to_string()),
+        ("join".to_string(), "other__join".to_string()),
+    ]);
+    let unresolved = super::mangle::mangle_mir(
+        &mut mir,
+        "owner",
+        false,
+        &import_map,
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    );
+
+    assert_eq!(unresolved, 0);
+    assert_eq!(mir.functions[0].name, "owner__rt_file_rename");
+    assert_eq!(mir.functions[1].name, "owner__eprint");
+    assert_eq!(mir.functions[2].name, "owner__join");
+    assert_eq!(mir.functions[3].name, "rt_exported_probe");
+    let caller = &mir.functions[4];
+    let targets = caller.blocks[0]
+        .instructions
+        .iter()
+        .map(|inst| match inst {
+            crate::mir::MirInst::Call { target, .. } => target.name().to_string(),
+            other => panic!("expected call, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(targets, ["owner__rt_file_rename", "owner__eprint", "owner__join"]);
+}
+
+#[test]
 fn test_llvm_mangle_resolves_ambiguous_private_call_to_nearest_module() {
     let mut mir = crate::mir::MirModule::new();
     let mut func = crate::mir::MirFunction::new(
@@ -4707,10 +4751,9 @@ fn test_llvm_mangle_resolves_desugared_cross_module_method() {
     );
 
     match &mir.functions[0].blocks[0].instructions[0] {
-        crate::mir::MirInst::MethodCallStatic { func_name, .. } => assert_eq!(
-            func_name,
-            "frontend__treesitter__outline_lexer__treesitter_match_token"
-        ),
+        crate::mir::MirInst::MethodCallStatic { func_name, .. } => {
+            assert_eq!(func_name, "frontend__treesitter__outline_lexer__treesitter_match_token")
+        }
         other => panic!("expected static method call, got {other:?}"),
     }
 }
@@ -6878,6 +6921,7 @@ fn test_cross_module_layout_fingerprint_sensitivity_and_stability() {
 #[test]
 fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
     let base = GlobalBuildFingerprint {
+        producer: 0xAAAA_AAAA_AAAA_AAAA,
         opt_level: 0x1111_1111_1111_1111,
         entry_closure: 0x2222_2222_2222_2222,
         target: 0x3333_3333_3333_3333,
@@ -6886,8 +6930,19 @@ fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
     };
     let line = base.to_manifest_line();
     let parsed = GlobalBuildFingerprint::from_manifest_line(&line).expect("manifest line must parse");
-    assert_eq!(parsed, base, "manifest round-trip must preserve all five components");
-    assert_eq!(base.changed_reason(&parsed), None, "identical fingerprints report no change");
+    assert_eq!(parsed, base, "manifest round-trip must preserve all components");
+    assert_eq!(
+        base.changed_reason(&parsed),
+        None,
+        "identical fingerprints report no change"
+    );
+
+    let mut producer_changed = base;
+    producer_changed.producer = 0xBBBB_BBBB_BBBB_BBBB;
+    assert_eq!(
+        producer_changed.changed_reason(&base),
+        Some("compiler producer changed")
+    );
 
     let mut layout_changed = base;
     layout_changed.layout = 0x9999_9999_9999_9999;
@@ -6963,7 +7018,11 @@ fn test_incremental_hardening_invalidates_on_cross_module_struct_change() {
     // Build 1: cold cache -> both modules compile fresh.
     let r1 = build();
     assert_eq!(r1.cached, 0, "cold build must not report cache hits");
-    assert!(r1.compiled >= 2, "cold build must compile both modules, got {}", r1.compiled);
+    assert!(
+        r1.compiled >= 2,
+        "cold build must compile both modules, got {}",
+        r1.compiled
+    );
 
     // Build 2: leaf body-only change in A (constant), B untouched. B stays cached
     // -> incrementality is real (not a full rebuild on every edit).

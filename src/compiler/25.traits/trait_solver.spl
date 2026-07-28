@@ -131,9 +131,9 @@ class TraitSolver:
     # Associated type resolver
     assoc_resolver: AssocTypeResolver
 
-    # Map from trait name to all method names (required + default)
+    # Map from method name to all declaring traits (required + default)
     # Used by resolve_strategies for method dispatch
-    trait_methods: Dict<Symbol, [text]>
+    trait_methods: Dict<text, [Symbol]>
 
 impl TraitSolver:
     static fn create() -> TraitSolver:
@@ -155,16 +155,24 @@ impl TraitSolver:
         Collects all method names (both required and default) into
         trait_methods for efficient lookup during method resolution.
         """
-        self.traits[trait_def.name] = trait_def
-        self.assoc_resolver.add_trait(trait_def)
+        var traits = self.traits
+        traits = traits.set(trait_def.name, trait_def)
+        self.traits = traits
 
-        # Build method name list: required methods + default methods
-        var method_names: [text] = []
+        var assoc_resolver = self.assoc_resolver
+        assoc_resolver.add_trait(trait_def)
+        self.assoc_resolver = assoc_resolver
+
+        var trait_methods = self.trait_methods
         for method in trait_def.methods:
-            method_names = method_names.push(method.name)
+            var owners: [Symbol] = if trait_methods.has(method.name): trait_methods[method.name] else: []
+            owners = owners.push(trait_def.name)
+            trait_methods = trait_methods.set(method.name, owners)
         for default in trait_def.defaults:
-            method_names = method_names.push(default.name)
-        self.trait_methods[trait_def.name] = method_names
+            var owners: [Symbol] = if trait_methods.has(default.name): trait_methods[default.name] else: []
+            owners = owners.push(trait_def.name)
+            trait_methods = trait_methods.set(default.name, owners)
+        self.trait_methods = trait_methods
 
     me add_impl(impl_block: ImplBlock):
         """Register an impl block.
@@ -369,6 +377,14 @@ impl TraitSolver:
     fn get_trait(name: Symbol) -> TraitDef?:
         """Get trait definition by name."""
         self.traits[name]
+
+    fn find_trait_for_method(method_name: text) -> Symbol?:
+        """Find the first registered trait that declares method_name."""
+        if self.trait_methods.has(method_name):
+            val owners: [Symbol] = self.trait_methods[method_name]
+            if owners.len() > 0:
+                return Some(owners[0])
+        nil
 
     fn get_impls_for_type(type_symbol: Symbol) -> [ImplBlock]:
         """Get all impl blocks for a given type."""

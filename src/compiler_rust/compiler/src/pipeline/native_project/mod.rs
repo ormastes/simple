@@ -130,7 +130,9 @@ fn init_rayon_pool(config: &NativeBuildConfig) {
     static POOL_INIT: Once = Once::new();
 
     let available_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let bootstrap_threads_env = std::env::var("SIMPLE_BOOTSTRAP_THREADS").ok().and_then(|s| s.parse::<usize>().ok());
+    let bootstrap_threads_env = std::env::var("SIMPLE_BOOTSTRAP_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
     let num_threads = resolve_num_threads(config, available_cores, bootstrap_threads_env);
 
     if config.verbose || std::env::var("SIMPLE_NATIVE_BUILD_TRACE").is_ok() {
@@ -664,8 +666,7 @@ impl NativeProjectBuilder {
         } else {
             Self::deduplicate_for_compilation(&files).into_iter().collect()
         };
-        let mut module_paths: std::collections::HashMap<String, PathBuf> =
-            std::collections::HashMap::new();
+        let mut module_paths: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
         for (i, (path, _)) in file_sources.iter().enumerate() {
             if !compile_indices.contains(&i) {
                 continue;
@@ -826,6 +827,11 @@ impl NativeProjectBuilder {
                 .unwrap_or(0);
             let triple = effective_target().triple_str().to_string();
             Some(GlobalBuildFingerprint {
+                producer: std::env::current_exe()
+                    .ok()
+                    .and_then(|path| std::fs::read(path).ok())
+                    .map(|bytes| hash_one(&bytes))
+                    .unwrap_or(0),
                 opt_level: hash_one(&self.config.opt_level.as_str()),
                 entry_closure: hash_one(&self.config.entry_closure),
                 target: hash_one(&triple),
@@ -1490,10 +1496,11 @@ pub(crate) fn cross_module_layout_fingerprint(result: &imports::ImportMapResult)
     fp
 }
 
-/// The five component hashes of the global build fingerprint. Stored in the
+/// The component hashes of the global build fingerprint. Stored in the
 /// per-build manifest so a full-rebuild reason can name WHICH input changed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct GlobalBuildFingerprint {
+    pub producer: u64,
     pub opt_level: u64,
     pub entry_closure: u64,
     pub target: u64,
@@ -1506,6 +1513,7 @@ impl GlobalBuildFingerprint {
     pub(crate) fn combined(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.producer.hash(&mut hasher);
         self.opt_level.hash(&mut hasher);
         self.entry_closure.hash(&mut hasher);
         self.target.hash(&mut hasher);
@@ -1517,7 +1525,9 @@ impl GlobalBuildFingerprint {
     /// Human-readable name of the first component that differs from `prev`
     /// (used to explain a full rebuild). Returns None when unchanged.
     pub(crate) fn changed_reason(&self, prev: &GlobalBuildFingerprint) -> Option<&'static str> {
-        if self.opt_level != prev.opt_level {
+        if self.producer != prev.producer {
+            Some("compiler producer changed")
+        } else if self.opt_level != prev.opt_level {
             Some("opt-level changed")
         } else if self.entry_closure != prev.entry_closure {
             Some("entry-closure flag changed")
@@ -1532,17 +1542,18 @@ impl GlobalBuildFingerprint {
         }
     }
 
-    /// Serialize to the manifest line format `opt=..;ec=..;t=..;ls=..;layout=..`.
+    /// Serialize to the manifest line format used beside cached objects.
     pub(crate) fn to_manifest_line(&self) -> String {
         format!(
-            "opt={:016x};ec={:016x};t={:016x};ls={:016x};layout={:016x}",
-            self.opt_level, self.entry_closure, self.target, self.linker_script, self.layout
+            "producer={:016x};opt={:016x};ec={:016x};t={:016x};ls={:016x};layout={:016x}",
+            self.producer, self.opt_level, self.entry_closure, self.target, self.linker_script, self.layout
         )
     }
 
     /// Parse a manifest line produced by `to_manifest_line`.
     pub(crate) fn from_manifest_line(line: &str) -> Option<GlobalBuildFingerprint> {
         let mut fp = GlobalBuildFingerprint {
+            producer: 0,
             opt_level: 0,
             entry_closure: 0,
             target: 0,
@@ -1554,6 +1565,7 @@ impl GlobalBuildFingerprint {
             let (key, val) = part.split_once('=')?;
             let n = u64::from_str_radix(val.trim(), 16).ok()?;
             match key.trim() {
+                "producer" => fp.producer = n,
                 "opt" => fp.opt_level = n,
                 "ec" => fp.entry_closure = n,
                 "t" => fp.target = n,
@@ -1563,7 +1575,7 @@ impl GlobalBuildFingerprint {
             }
             seen += 1;
         }
-        if seen == 5 {
+        if seen == 5 || seen == 6 {
             Some(fp)
         } else {
             None

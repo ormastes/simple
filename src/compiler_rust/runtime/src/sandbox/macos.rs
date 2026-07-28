@@ -38,16 +38,12 @@ fn apply_network_isolation(mode: &NetworkMode) -> SandboxResult<()> {
             tracing::debug!("Network: Full access");
             Ok(())
         }
-        NetworkMode::None => {
-            Err(SandboxError::NetworkIsolation(
-                "macOS network isolation requires a sandboxed child re-exec".to_string(),
-            ))
-        }
-        NetworkMode::AllowList | NetworkMode::BlockList => {
-            Err(SandboxError::NetworkIsolation(
-                "macOS domain filtering requires a sandboxed child re-exec".to_string(),
-            ))
-        }
+        NetworkMode::None => Err(SandboxError::NetworkIsolation(
+            "macOS network isolation requires a sandboxed child re-exec".to_string(),
+        )),
+        NetworkMode::AllowList | NetworkMode::BlockList => Err(SandboxError::NetworkIsolation(
+            "macOS domain filtering requires a sandboxed child re-exec".to_string(),
+        )),
     }
 }
 
@@ -78,11 +74,9 @@ fn apply_filesystem_isolation(
                 "macOS filesystem isolation requires a sandboxed child re-exec".to_string(),
             ))
         }
-        FilesystemMode::Overlay => {
-            Err(SandboxError::FilesystemIsolation(
-                "overlay filesystem isolation is unsupported on macOS".to_string(),
-            ))
-        }
+        FilesystemMode::Overlay => Err(SandboxError::FilesystemIsolation(
+            "overlay filesystem isolation is unsupported on macOS".to_string(),
+        )),
     }
 }
 

@@ -116,10 +116,77 @@ fn bootstrap_builtin_return_type(name: text, span: Span) -> HirType:
 fn bootstrap_builtin_signature(name: text, span: Span) -> HirType:
     HirType(kind: HirTypeKind.Function([], bootstrap_builtin_return_type(name, span), []), span: span)
 
+fn _hir_expr_symbol(kind: HirExprKind) -> SymbolId?:
+    match kind:
+        case HirExprKind.Var(symbol): symbol
+        case HirExprKind.NamedVar(symbol, _): symbol
+        case _: nil
+
+fn _hir_named_type_symbol(type_: HirType) -> SymbolId?:
+    match type_.kind:
+        case HirTypeKind.Named(symbol, _): symbol
+        case _: nil
+
 # Expression Lowering
 # ============================================================================
 
 impl HirLowering:
+    me field_module_callable(module_name: text, field_name: text) -> SymbolId?:
+        val candidate_keys = self.symbols.symbols.keys()
+        var index = candidate_keys.len()
+        while index > 0:
+            index = index - 1
+            val candidate = self.symbols.symbols[candidate_keys[index]]
+            if val candidate_module = candidate.defining_module:
+                if candidate_module == module_name:
+                    match candidate.kind:
+                        case SymbolKind.Function:
+                            if candidate.name == field_name or candidate.name.ends_with("." + field_name):
+                                return candidate.id
+                        case _: ()
+        nil
+
+    me field_tuple_element_type(base_kind: HirExprKind, index: i64) -> HirType?:
+        if val base_symbol = _hir_expr_symbol(base_kind):
+            if rt_dict_contains(self.local_tuple_types, base_symbol.id):
+                val element_types = self.local_tuple_types[base_symbol.id]
+                if index >= 0 and index < element_types.len():
+                    return element_types[index]
+        nil
+
+    me field_type_for_owner(owner_symbol_id: SymbolId, field_name: text) -> HirType?:
+        if val owner_symbol = self.symbols.get_symbol_raw(owner_symbol_id.id):
+            if rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
+                val owner_fields = self.struct_field_types_by_name[owner_symbol.name]
+                if rt_dict_contains(owner_fields, field_name):
+                    return owner_fields[field_name]
+        nil
+
+    me field_type_for_base(base_symbol: SymbolId, field_name: text) -> HirType?:
+        if rt_dict_contains(self.local_struct_types, base_symbol.id):
+            val struct_name = self.local_struct_types[base_symbol.id]
+            if rt_dict_contains(self.struct_field_types_by_name, struct_name):
+                val struct_fields = self.struct_field_types_by_name[struct_name]
+                if rt_dict_contains(struct_fields, field_name):
+                    return struct_fields[field_name]
+
+        if val base_type = self.symbols.get_symbol_type_raw(base_symbol.id):
+            if val owner_symbol = _hir_named_type_symbol(base_type):
+                return self.field_type_for_owner(owner_symbol, field_name)
+
+        if val self_type = self.current_method_self_type:
+            if val base_definition = self.symbols.get_symbol_raw(base_symbol.id):
+                if base_definition.name == "self" or base_definition.name == "me":
+                    if val owner_symbol = _hir_named_type_symbol(self_type):
+                        return self.field_type_for_owner(owner_symbol, field_name)
+        nil
+
+    me combine_pattern_conditions(conditions: [HirExpr], count: i64, op: HirBinOp, span: Span) -> HirExpr:
+        if count == 1:
+            return conditions[0]
+        val left = self.combine_pattern_conditions(conditions, count - 1, op, span)
+        HirExpr(kind: HirExprKind.Binary(op, left, conditions[count - 1]), type_: nil, span: span)
+
     me lower_host_gpu_lane_payload(marker: Expr) -> i64:
         match marker.kind:
             case ExprKind.MethodCall(_receiver, method, args):
@@ -203,32 +270,6 @@ impl HirLowering:
         them on first use and emit NamedVar so the HIR interpreter can
         dispatch by name (process_module registers every table symbol as a
         global Function value). Everything else stays an error."""
-        # Receiver aliasing (`me` <-> `self`). The class-body parser
-        # (parser_decls_use.spl parse_class_body_method) synthesizes the
-        # receiver parameter as "self" for a `me`-prefixed method that declares
-        # no explicit receiver (`me build_ui():`), so a body that writes
-        # `me.field` / `me.method()` looked up a name that was never defined and
-        # died here with "unresolved name: me" — 543 times in the stage-4
-        # full-CLI build, all in `class X:` bodies (src/app/office/*). Both
-        # spellings denote the same receiver, so try the counterpart before
-        # failing. Only visible under SIMPLE_BOOTSTRAP_STAGE4=1: the non-stage4
-        # bootstrap lane builds MIR from the flat-AST accumulator and never
-        # surfaces these HIR errors, which is why isolated probes of the same
-        # class shape all reported success. See
-        # doc/08_tracking/bug/stage4_me_receiver_unresolved_in_class_methods_2026-07-27.md
-        if name == "me" or name == "self":
-            val recv_alias = if name == "me": "self" else: "me"
-            val recv_sym = self.symbols.lookup_or_invalid(recv_alias)
-            if recv_sym.is_valid():
-                return HirExprKind.NamedVar(recv_sym, recv_alias)
-        # `me method()` historically synthesizes one receiver named `self`,
-        # while both `self.field` and `me.field` are accepted source spellings.
-        # Resolve `me` to that existing symbol instead of creating a second
-        # positional receiver or reporting it unresolved.
-        if name == "me":
-            val self_symbol = self.symbols.lookup("self")
-            if self_symbol != nil:
-                return HirExprKind.NamedVar(self_symbol.unwrap(), "self")
         val is_bootstrap_builtin = (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and is_bootstrap_builtin_fn(name)
         # Bare Result variants: `Ok(v)` / `Err(e)` are not in the symbol table
         # (Result is a built-in, not a module enum). Emit NamedVar so MIR
@@ -271,6 +312,15 @@ impl HirLowering:
             HirExprKind.Error
 
     me lower_hir_expr(e: Expr) -> HirExpr:
+        if e == nil:
+            val missing_span = Span.empty()
+            self.error("missing AST expression during HIR lowering", missing_span)
+            return HirExpr(
+                kind: HirExprKind.Error,
+                has_type_: false,
+                type_: HirType(kind: HirTypeKind.Unit, span: missing_span),
+                span: missing_span
+            )
         # Probes UNGATED: Trap D (iteration 17) — env-gated probes are mute in
         # hir_lowering modules. Remove before deploy.
         # DIRECT typed field read, NOT `match e: case Expr(k, _): k`: the struct
@@ -316,7 +366,7 @@ impl HirLowering:
                 return HirExpr(kind: HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, []), type_: nil, span: e.span)
             case _:
                 pass
-        if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_expr_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
+        if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_expr:kind")
         # SEED PATTERN HAZARD (bug doc iteration 18): when a variant pattern's
         # name is ALSO a struct name in scope (`struct Field` in
@@ -330,6 +380,44 @@ impl HirLowering:
         # (rt_enum_discriminant = DefaultHasher(variant name) truncated to u32)
         # and keep them OUT of the big match.
         val kind_disc_v: i64 = hir_expr_kind_disc(expr_kind_value)
+        val kind_disc_dummy = Expr(kind: ExprKind.NilLit, span: e.span)
+        if kind_disc_v == hir_expr_kind_disc(ExprKind.MethodCall(kind_disc_dummy, "", [])):
+            match expr_kind_value:
+                case ExprKind.MethodCall(receiver, method, args):
+                    var hir_args: [HirCallArg] = []
+                    for arg in args:
+                        val marg_t: CallArg = arg
+                        hir_args = hir_args.push(HirCallArg(
+                            has_name: marg_t.has_name,
+                            name: marg_t.name,
+                            value: self.lower_hir_expr(marg_t.value),
+                            span: marg_t.span
+                        ))
+                    return HirExpr(
+                        kind: HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, hir_args, MethodResolution.Unresolved),
+                        type_: nil,
+                        span: e.span
+                    )
+                case _:
+                    pass
+        if kind_disc_v == hir_expr_kind_disc(ExprKind.If(kind_disc_dummy, Block(stmts: [], span: e.span), nil)):
+            match expr_kind_value:
+                case ExprKind.If(cond, then_, else_):
+                    val hir_cond = self.lower_hir_expr(cond)
+                    val hir_then = self.lower_hir_block(then_)
+                    if val else_block_src = else_:
+                        return HirExpr(
+                            kind: HirExprKind.If(hir_cond, hir_then, self.lower_hir_block(else_block_src)),
+                            type_: nil,
+                            span: e.span
+                        )
+                    return HirExpr(
+                        kind: HirExprKind.If(hir_cond, hir_then, nil),
+                        type_: nil,
+                        span: e.span
+                    )
+                case _:
+                    pass
         if kind_disc_v == 21232742:  # hash("Field")
             match expr_kind_value:
                 case ExprKind.Field(base, field):
@@ -339,34 +427,16 @@ impl HirLowering:
                     # Module imports are namespaces, not runtime values. A
                     # qualified imported function must lower to its defining
                     # function symbol before MIR call lowering.
-                    var fld_module_base_sym: SymbolId? = nil
-                    match fld_lowered_base.kind:
-                        case HirExprKind.Var(fld_base_sym):
-                            fld_module_base_sym = fld_base_sym
-                        case HirExprKind.NamedVar(fld_base_sym, _):
-                            fld_module_base_sym = fld_base_sym
-                        case _: ()
+                    val fld_module_base_sym = _hir_expr_symbol(fld_lowered_base.kind)
                     if val fld_base_sym = fld_module_base_sym:
-                        val fld_base_symbol = self.symbols.get_symbol_raw(fld_base_sym.id)
-                        if fld_base_symbol != nil:
+                        if val fld_base_symbol = self.symbols.get_symbol_raw(fld_base_sym.id):
                             match fld_base_symbol.kind:
                                 case SymbolKind.Module:
                                     if val module_name = fld_base_symbol.defining_module:
-                                        # Dict.values() corrupts struct values
-                                        # on the native Stage-4 lane. Reuse the
-                                        # proven keys()+index access pattern.
-                                        for candidate_key in self.symbols.symbols.keys():
-                                            val candidate = self.symbols.symbols[candidate_key]
-                                            if val candidate_module = candidate.defining_module:
-                                                if candidate_module == module_name:
-                                                    match candidate.kind:
-                                                        case SymbolKind.Function:
-                                                            if candidate.name == fld_name_t or candidate.name.ends_with("." + fld_name_t):
-                                                                val callable_name = self.symbols.symbol_display_name(candidate.id, fld_name_t)
-                                                                return HirExpr(kind: HirExprKind.NamedVar(candidate.id, callable_name), type_: nil, span: e.span)
-                                                        case _: ()
-                                    self.error("unresolved module member: {fld_name_t}", e.span)
-                                    return HirExpr(kind: HirExprKind.Error, type_: nil, span: e.span)
+                                        val module_callable = self.field_module_callable(module_name, fld_name_t)
+                                        if val resolved_callable = module_callable:
+                                            val callable_name = self.symbols.symbol_display_name(resolved_callable, fld_name_t)
+                                            return HirExpr(kind: HirExprKind.NamedVar(resolved_callable, callable_name), type_: nil, span: e.span)
                                 case _: ()
                     # Numeric tuple positional access (`t.0`, `t.1`, ...):
                     # route through HirExprKind.Index (rt_array_get at
@@ -395,19 +465,7 @@ impl HirLowering:
                         # (e.g. text) reads back as raw i64 bits downstream
                         # (MIR's Index case has no per-index element-type table
                         # for MirTypeKind.Tuple and defaults to i64).
-                        var fld_tuple_elem_type: HirType? = nil
-                        var fld_tuple_base_sym: SymbolId? = nil
-                        match fld_lowered_base.kind:
-                            case HirExprKind.Var(fld_tb_sym):
-                                fld_tuple_base_sym = fld_tb_sym
-                            case HirExprKind.NamedVar(fld_tb_sym2, _):
-                                fld_tuple_base_sym = fld_tb_sym2
-                            case _: ()
-                        if val fld_tb_sym3 = fld_tuple_base_sym:
-                            if rt_dict_contains(self.local_tuple_types, fld_tb_sym3.id):
-                                val fld_tuple_elem_types = self.local_tuple_types[fld_tb_sym3.id]
-                                if fld_tuple_idx >= 0 and fld_tuple_idx < fld_tuple_elem_types.len():
-                                    fld_tuple_elem_type = fld_tuple_elem_types[fld_tuple_idx]
+                        val fld_tuple_elem_type = self.field_tuple_element_type(fld_lowered_base.kind, fld_tuple_idx)
                         return HirExpr(
                             kind: HirExprKind.Index(fld_lowered_base, HirExpr(kind: HirExprKind.IntLit(fld_tuple_idx, nil), type_: nil, span: e.span)),
                             type_: fld_tuple_elem_type,
@@ -424,63 +482,11 @@ impl HirLowering:
                     # `val/var x = StructName(...)` local shape; anything else
                     # falls through to the pre-existing nil/i64-default
                     # behavior unchanged.
-                    var fld_field_type: HirType? = nil
-                    var fld_base_sym_opt: SymbolId? = nil
-                    match fld_lowered_base.kind:
-                        case HirExprKind.Var(fld_base_sym):
-                            fld_base_sym_opt = fld_base_sym
-                        case HirExprKind.NamedVar(fld_base_sym2, _):
-                            fld_base_sym_opt = fld_base_sym2
-                        case _: ()
-                    if val fld_base_sym = fld_base_sym_opt:
-                        if rt_dict_contains(self.local_struct_types, fld_base_sym.id):
-                            val fld_struct_name = self.local_struct_types[fld_base_sym.id]
-                            if rt_dict_contains(self.struct_field_types_by_name, fld_struct_name):
-                                val fld_struct_fields = self.struct_field_types_by_name[fld_struct_name]
-                                if rt_dict_contains(fld_struct_fields, fld_name_t):
-                                    fld_field_type = fld_struct_fields[fld_name_t]
-                        if not fld_field_type.?:
-                            # Receiver/param field typing (native --entry path,
-                            # bug native_method_text_return_prints_handle):
-                            # local_struct_types only covers `val x =
-                            # StructName(...)` bindings, so `self.name` inside
-                            # a method (and `w.name` for a typed param `w:
-                            # Widget`) stayed type_-nil here and MIR defaulted
-                            # the field local to i64 -- a text field's tagged
-                            # handle then rendered as a raw decimal through
-                            # coerce_concat_operand / print's numeric branch.
-                            # Recover the owning struct from the base symbol's
-                            # own declared type (typed params), falling back to
-                            # the enclosing method's receiver type for a
-                            # `self`/`me` base whose param symbol carries no
-                            # explicit annotation.
-                            var fld_owner_sym_opt: SymbolId? = nil
-                            # Pass the plain i64 id: a SymbolId struct arg is
-                            # miscompiled on the stage4 native lane (get_symbol_type_raw).
-                            val fld_base_sym_type = self.symbols.get_symbol_type_raw(fld_base_sym.id)
-                            if val fld_base_sym_type_v = fld_base_sym_type:
-                                if fld_base_sym_type_v != nil:
-                                    match fld_base_sym_type_v.kind:
-                                        case HirTypeKind.Named(fld_owner_sym0, _):
-                                            fld_owner_sym_opt = fld_owner_sym0
-                                        case _: ()
-                            if not fld_owner_sym_opt.? and self.current_method_self_type.?:
-                                val fld_base_symbol = self.symbols.get_symbol_raw(fld_base_sym.id)
-                                if fld_base_symbol != nil:
-                                    if fld_base_symbol.name == "self" or fld_base_symbol.name == "me":
-                                        val fld_self_type_v = self.current_method_self_type.unwrap()
-                                        if fld_self_type_v != nil:
-                                            match fld_self_type_v.kind:
-                                                case HirTypeKind.Named(fld_owner_sym1, _):
-                                                    fld_owner_sym_opt = fld_owner_sym1
-                                                case _: ()
-                            if val fld_owner_sym = fld_owner_sym_opt:
-                                val fld_owner_symbol = self.symbols.get_symbol_raw(fld_owner_sym.id)
-                                if fld_owner_symbol != nil:
-                                    if rt_dict_contains(self.struct_field_types_by_name, fld_owner_symbol.name):
-                                        val fld_owner_fields = self.struct_field_types_by_name[fld_owner_symbol.name]
-                                        if rt_dict_contains(fld_owner_fields, fld_name_t):
-                                            fld_field_type = fld_owner_fields[fld_name_t]
+                    val fld_base_sym_opt = _hir_expr_symbol(fld_lowered_base.kind)
+                    val fld_field_type: HirType? = if val fld_base_sym = fld_base_sym_opt:
+                        self.field_type_for_base(fld_base_sym, fld_name_t)
+                    else:
+                        nil
                     return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, nil), type_: fld_field_type, span: e.span)
                 case _:
                     pass
@@ -492,7 +498,7 @@ impl HirLowering:
                     pass
         val kind = match expr_kind_value:
             case ExprKind.IntLit(value):
-                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_expr_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
+                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_expr:int")
                 HirExprKind.IntLit(value, nil)
 
@@ -500,7 +506,7 @@ impl HirLowering:
                 HirExprKind.FloatLit(value, nil)
 
             case ExprKind.StringLit(value, interps):
-                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_expr_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
+                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_expr:string")
                 # Bug bootstrap_mir_interpolation_literal_braces: same #130
                 # fix as the Call/MethodCall arms above -- the former
@@ -518,7 +524,7 @@ impl HirLowering:
                 HirExprKind.StringLit(value, hir_interps)
 
             case ExprKind.BoolLit(value):
-                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_expr_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
+                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     eprint("[hir-lower] lower_expr:bool")
                 HirExprKind.BoolLit(value)
 
@@ -555,13 +561,7 @@ impl HirLowering:
                 # Typed rebind: extracted ANY-ish payload misreads on stage4
                 # when consumed directly (bug doc iteration 18).
                 val ident_name_t: text = name
-                var symbol = self.symbols.lookup(ident_name_t)
-                # `me method()` uses a mutable receiver keyword, but the flat
-                # bridge synthesizes the receiver slot as `self`. Explicit
-                # `fn method(me)` still defines `me`, so fall back only after
-                # the direct lookup misses.
-                if symbol == nil and ident_name_t == "me":
-                    symbol = self.symbols.lookup("self")
+                val symbol = self.symbols.lookup(ident_name_t)
                 if val found_symbol = symbol:
                     # NOTE: `if val found_symbol = symbol:` is not sufficient
                     # here -- same class of bug fixed in 413d121a011 for MIR
@@ -675,18 +675,6 @@ impl HirLowering:
                     ))
                 HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, hir_args, MethodResolution.Unresolved)
 
-            case ExprKind.If(cond, then_, else_):
-                # if-val + bare-lift: value-if-nil and optional-in-arg are
-                # miscompiled on the stage4 native lane (bug doc 2026-07-23).
-                var else_block: HirBlock? = nil
-                if val else_block_src = else_:
-                    else_block = self.lower_hir_block(else_block_src)
-                HirExprKind.If(
-                    self.lower_hir_expr(cond),
-                    self.lower_hir_block(then_),
-                    else_block
-                )
-
             case ExprKind.MatchCase(scrutinee, arms):
                 var hir_arms: [HirMatchArm] = []
                 for arm in arms:
@@ -737,9 +725,9 @@ impl HirLowering:
             case ExprKind.Yield(value):
                 # if-val + bare-lift: value-if-nil and optional-in-arg are
                 # miscompiled on the stage4 native lane (bug doc 2026-07-23).
-                var yv: HirExpr? = nil
-                if val yv_src = value:
-                    yv = self.lower_hir_expr(yv_src)
+                val yv: HirExpr? = match value:
+                    case Some(yv_src): self.lower_hir_expr(yv_src)
+                    case _: nil
                 HirExprKind.Yield(yv)
 
             case ExprKind.Throw(value):
@@ -754,19 +742,19 @@ impl HirLowering:
             case ExprKind.Range(start, end, inclusive, step):
                 # if-val + bare-lift: value-if-nil and optional-in-arg are
                 # miscompiled on the stage4 native lane (bug doc 2026-07-23).
-                var rstart: HirExpr? = nil
-                if val rstart_src = start:
-                    rstart = self.lower_hir_expr(rstart_src)
+                val rstart: HirExpr? = match start:
+                    case Some(rstart_src): self.lower_hir_expr(rstart_src)
+                    case _: nil
                 # if-val + bare-lift: value-if-nil and optional-in-arg are
                 # miscompiled on the stage4 native lane (bug doc 2026-07-23).
-                var rend: HirExpr? = nil
-                if val rend_src = end:
-                    rend = self.lower_hir_expr(rend_src)
+                val rend: HirExpr? = match end:
+                    case Some(rend_src): self.lower_hir_expr(rend_src)
+                    case _: nil
                 # if-val + bare-lift: value-if-nil and optional-in-arg are
                 # miscompiled on the stage4 native lane (bug doc 2026-07-23).
-                var rstep: HirExpr? = nil
-                if val rstep_src = step:
-                    rstep = self.lower_hir_expr(rstep_src)
+                val rstep: HirExpr? = match step:
+                    case Some(rstep_src): self.lower_hir_expr(rstep_src)
+                    case _: nil
                 HirExprKind.Range(rstart, rend, inclusive, rstep)
 
             case ExprKind.ListComprehension(expr, clauses):
@@ -969,9 +957,9 @@ impl HirLowering:
                 var hir_elements: [HirPattern] = []
                 for elem in elements:
                     hir_elements = hir_elements.push(self.lower_pattern(elem))
-                var rest_symbol: SymbolId? = nil
-                if val rest_name = rest:
-                    rest_symbol = self.symbols.define(rest_name, SymbolKind.Variable, nil, p.span, false, false, nil)
+                val rest_symbol: SymbolId? = match rest:
+                    case Some(rest_name): self.symbols.define(rest_name, SymbolKind.Variable, nil, p.span, false, false, nil)
+                    case _: nil
                 HirPatternKind.Array(hir_elements, rest_symbol)
 
             case Struct(type_, fields):
@@ -1039,19 +1027,20 @@ impl HirLowering:
                     # No `.map(\pl: ...)` lambda here: the seed interpreter does not
                     # bind `self` inside a lambda body, so `self.lower_pattern` in a
                     # closure fails native-build with "variable `self` not found".
-                    var hir_payload: HirPatternPayload? = nil
-                    if val pl = payload:
-                        match pl:
-                            case Tuple(patterns):
-                                var hir_patterns: [HirPattern] = []
-                                for pat in patterns:
-                                    hir_patterns = hir_patterns.push(self.lower_pattern(pat))
-                                hir_payload = Some(HirPatternPayload.Tuple(hir_patterns))
-                            case Struct(fields):
-                                var hir_fields: [(text, HirPattern)] = []
-                                for (fname, fpat) in fields:
-                                    hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
-                                hir_payload = Some(HirPatternPayload.Struct(hir_fields))
+                    val hir_payload: HirPatternPayload? = match payload:
+                        case Some(pl):
+                            match pl:
+                                case Tuple(patterns):
+                                    val hir_patterns: [HirPattern] = []
+                                    for pat in patterns:
+                                        hir_patterns.push(self.lower_pattern(pat))
+                                    HirPatternPayload.Tuple(hir_patterns)
+                                case Struct(fields):
+                                    val hir_fields: [(text, HirPattern)] = []
+                                    for (fname, fpat) in fields:
+                                        hir_fields.push((fname, self.lower_pattern(fpat)))
+                                    HirPatternPayload.Struct(hir_fields)
+                        case _: nil
                     HirPatternKind.Enum(hir_type, variant, hir_payload)
 
             case Or(patterns):
@@ -1063,14 +1052,14 @@ impl HirLowering:
             case Range(start, end, inclusive):
                 # if-val + bare-lift: value-if-nil and optional-in-arg are
                 # miscompiled on the stage4 native lane (bug doc 2026-07-23).
-                var pstart: HirExpr? = nil
-                if val pstart_src = start:
-                    pstart = self.lower_hir_expr(pstart_src)
+                val pstart: HirExpr? = match start:
+                    case Some(pstart_src): self.lower_hir_expr(pstart_src)
+                    case _: nil
                 # if-val + bare-lift: value-if-nil and optional-in-arg are
                 # miscompiled on the stage4 native lane (bug doc 2026-07-23).
-                var pend: HirExpr? = nil
-                if val pend_src = end:
-                    pend = self.lower_hir_expr(pend_src)
+                val pend: HirExpr? = match end:
+                    case Some(pend_src): self.lower_hir_expr(pend_src)
+                    case _: nil
                 HirPatternKind.Range(pstart, pend, inclusive)
 
             case Error:
@@ -1267,19 +1256,16 @@ impl HirLowering:
                     else:
                         nil
             case Or(patterns):
-                var combined: HirExpr? = nil
+                val conditions: [HirExpr] = []
                 for p in patterns:
                     val sub_cond = self.pattern_test_condition(value_expr, p, span)
                     if val sc = sub_cond:
-                        if val c = combined:
-                            combined = HirExpr(kind: HirExprKind.Binary(HirBinOp.Or, c, sc), type_: nil, span: span)
-                        else:
-                            combined = sc
+                        conditions.push(sc)
                     else:
-                        combined = nil
-                combined
+                        conditions.clear()
+                if conditions.len() == 0: nil else: self.combine_pattern_conditions(conditions, conditions.len(), HirBinOp.Or, span)
             case Tuple(elements):
-                var combined2: HirExpr? = nil
+                val conditions: [HirExpr] = []
                 var i = 0
                 while i < elements.len():
                     # Index(base, IntLit(i)), NOT TupleIndex: tuples lower to
@@ -1291,25 +1277,19 @@ impl HirLowering:
                     val elem_expr = HirExpr(kind: HirExprKind.Index(value_expr, HirExpr(kind: HirExprKind.IntLit(i, nil), type_: nil, span: span)), type_: nil, span: span)
                     val sub_cond2 = self.pattern_test_condition(elem_expr, elements[i], span)
                     if val sc2 = sub_cond2:
-                        if val c2 = combined2:
-                            combined2 = HirExpr(kind: HirExprKind.Binary(HirBinOp.And, c2, sc2), type_: nil, span: span)
-                        else:
-                            combined2 = sc2
+                        conditions.push(sc2)
                     i = i + 1
-                combined2
+                if conditions.len() == 0: nil else: self.combine_pattern_conditions(conditions, conditions.len(), HirBinOp.And, span)
             case Struct(_, fields):
-                var combined3: HirExpr? = nil
+                val conditions: [HirExpr] = []
                 for fpair in fields:
                     val fname: text = fpair.0
                     val fpat: HirPattern = fpair.1
                     val felem_expr = HirExpr(kind: HirExprKind.Field(value_expr, fname, nil), type_: nil, span: span)
                     val sub_cond3 = self.pattern_test_condition(felem_expr, fpat, span)
                     if val sc3 = sub_cond3:
-                        if val c3 = combined3:
-                            combined3 = HirExpr(kind: HirExprKind.Binary(HirBinOp.And, c3, sc3), type_: nil, span: span)
-                        else:
-                            combined3 = sc3
-                combined3
+                        conditions.push(sc3)
+                if conditions.len() == 0: nil else: self.combine_pattern_conditions(conditions, conditions.len(), HirBinOp.And, span)
             case _:
                 nil
 
@@ -1330,14 +1310,12 @@ impl HirLowering:
         val is_last = idx == hir_arms.len() - 1
         if is_last:
             return HirExpr(kind: HirExprKind.Block(arm_block), type_: nil, span: span)
-        var chain_result = HirExpr(kind: HirExprKind.Block(arm_block), type_: nil, span: span)
         if val c = cond:
             val rest = self.build_if_chain(scrut_var, hir_arms, idx + 1, span)
             val else_block = HirBlock(stmts: [], has: true, value: rest, span: span)
-            var else_opt: HirBlock? = nil
-            else_opt = else_block
-            chain_result = HirExpr(kind: HirExprKind.If(c, arm_block, else_opt), type_: nil, span: span)
-        return chain_result
+            val else_opt: HirBlock? = else_block
+            return HirExpr(kind: HirExprKind.If(c, arm_block, else_opt), type_: nil, span: span)
+        HirExpr(kind: HirExprKind.Block(arm_block), type_: nil, span: span)
 
     me desugar_match_to_if_chain(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
         val fresh = self.symbols.define("__mp_scrutinee", SymbolKind.Variable, nil, span, false, false, nil)
@@ -1606,7 +1584,7 @@ impl HirLowering:
     # non-Unit returns, where a value is genuinely required (that path keeps the
     # known ANY-extraction limitation, documented in the bug tracker).
     me lower_hir_block_unit(b: Block) -> HirBlock:
-        if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_expr_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
+        if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             eprint("[hir-lower] lower_block_unit:start")
             self.symbols.push_scope(ScopeKind.Block)
             var boot_stmts: [HirStmt] = []

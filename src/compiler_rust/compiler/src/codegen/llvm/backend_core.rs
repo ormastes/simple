@@ -1411,14 +1411,17 @@ impl NativeBackend for LlvmBackend {
             };
             let mut param_types = vec![crate::hir::TypeId::I64; implicit_slots];
             param_types.extend(func.params.iter().map(|p| p.ty));
-            // Resolve through import_map/use_map to get the mangled name
-            // (e.g., "exit" -> "app__io__cli_ops__exit") to avoid symbol collisions
-            let resolved_name = self
-                .use_map
-                .get(&func.name)
-                .or_else(|| self.import_map.get(&func.name))
-                .map(|s| s.as_str())
-                .unwrap_or(&func.name);
+            // A body already owns its mangled name. Only declarations resolve
+            // through project imports; rebinding a body creates duplicate owners.
+            let resolved_name = if has_body {
+                func.name.as_str()
+            } else {
+                self.use_map
+                    .get(&func.name)
+                    .or_else(|| self.import_map.get(&func.name))
+                    .map(|s| s.as_str())
+                    .unwrap_or(&func.name)
+            };
             self.function_return_types
                 .borrow_mut()
                 .insert(resolved_name.to_string(), func.return_type);

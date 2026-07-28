@@ -110,6 +110,38 @@ fn codegen_method_call_static() {
 }
 
 #[test]
+fn codegen_qualified_recursive_method_call_resolves_to_self() {
+    let mut func = MirFunction::new(
+        "HirLowering.lower_hir_expr".to_string(),
+        TypeId::I64,
+        simple_parser::ast::Visibility::Public,
+    );
+    let receiver = func.new_vreg();
+    let dest = func.new_vreg();
+    func.params.push(MirLocal {
+        name: "self".to_string(),
+        ty: TypeId::I64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
+    });
+    let block = func.block_mut(BlockId(0)).unwrap();
+    block.instructions.push(MirInst::MethodCallStatic {
+        dest: Some(dest),
+        receiver,
+        func_name: "HirLowering.lower_hir_expr".to_string(),
+        args: vec![],
+    });
+    block.terminator = Terminator::Return(Some(dest));
+
+    let mut module = MirModule::new();
+    module.functions.push(func);
+    let codegen = crate::codegen::Codegen::new().expect("failed to create codegen");
+    let object = codegen.compile_module(&module).expect("AOT compilation failed");
+
+    assert!(!object_relocates_to_symbol(&object, "rt_function_not_found"));
+}
+
+#[test]
 fn codegen_method_call_virtual() {
     assert!(aot_compiles("method_virt", |f| {
         let recv = f.new_vreg();

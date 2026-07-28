@@ -1022,14 +1022,12 @@ impl MirLowering:
         # Bare-lift accumulator + explicit tail: explicit Some(...) on return
         # and mixed return/implicit-tail are both miscompiled on the stage4
         # native lane (bug doc 2026-07-23).
-        var ret_out: HirType? = nil
         # Primary source: declared return types recorded in the lower_module
         # pre-pass (fn_return_types, mir_lowering_types.spl) — the symbol
         # table's fn type_ is NOT reliably Function(...)-kind on this lane
         # (unresolved infer var observed). Bare-lift assign, no Some().
         if self.fn_return_types.contains(symbol.id):
-            ret_out = self.fn_return_types[symbol.id]
-            return ret_out
+            return self.fn_return_types[symbol.id]
         val sym = self.symbols.get_symbol_raw(symbol.id)
         if val found_sym = sym:
             # Name-keyed cross-module source: symbol IDs are per-module-table,
@@ -1037,15 +1035,24 @@ impl MirLowering:
             # id-keyed map. The flat pre-pass registered every free fn's
             # declared return type globally (ambiguous names never answered).
             if val reg_ret = bootstrap_fn_ret_hir_type_lookup(found_sym.name):
-                ret_out = reg_ret
-                return ret_out
+                return reg_ret
             if val sym_type = found_sym.type_:
                 match sym_type.kind:
                     case HirTypeKind.Function(_, ret, _):
-                        ret_out = ret
+                        return ret
                     case _:
                         ()
-        return ret_out
+        nil
+
+    me field_array_element_override(struct_name: text, field_idx: i64) -> HirType?:
+        if self.struct_field_array_elem_type.contains(struct_name):
+            val element_types = self.struct_field_array_elem_type[struct_name]
+            if field_idx >= 0 and field_idx < element_types.len():
+                val element_type = element_types[field_idx]
+                match element_type.kind:
+                    case HirTypeKind.Error: return nil
+                    case _: return element_type
+        nil
 
     me resolved_call_hir_param_types(symbol: SymbolId) -> [HirType]:
         val sym = self.symbols.get_symbol_raw(symbol.id)
@@ -1137,12 +1144,9 @@ impl MirLowering:
             # current_function uses a boxed Option on this lane; only the
             # explicit Some arm unboxes it safely.
             var cur_builder = self.builder
-            var declared_return: HirType? = nil
-            match cur_builder.current_function:
-                case Some(active_fn):
-                    declared_return = self.resolved_call_hir_return_type(active_fn.symbol)
-                case None:
-                    ()
+            val declared_return: HirType? = match cur_builder.current_function:
+                case Some(active_fn): self.resolved_call_hir_return_type(active_fn.symbol)
+                case None: nil
             if val found_return = declared_return:
                 match found_return.kind:
                     case HirTypeKind.Optional(_):
@@ -1562,15 +1566,9 @@ impl MirLowering:
                     # `<special:N>` garbage or a raw heap-handle number
                     # instead of true/false or the string).
                     val base_struct_name_pre = self.resolve_base_struct_name(base, base_local)
-                    var field_elem_type_override: HirType? = nil
-                    if val bsn_pre = base_struct_name_pre:
-                        if self.struct_field_array_elem_type.contains(bsn_pre):
-                            val field_elem_types_pre = self.struct_field_array_elem_type[bsn_pre]
-                            if field_idx >= 0 and field_idx < field_elem_types_pre.len():
-                                val field_elem_type_pre = field_elem_types_pre[field_idx]
-                                match field_elem_type_pre.kind:
-                                    case HirTypeKind.Error: ()
-                                    case _: field_elem_type_override = Some(field_elem_type_pre)
+                    val field_elem_type_override: HirType? = match base_struct_name_pre:
+                        case Some(bsn_pre): self.field_array_element_override(bsn_pre, field_idx)
+                        case _: nil
                     var field_type = MirType.i64()
                     if val field_elem_type = field_elem_type_override:
                         field_type = MirType(kind: MirTypeKind.Array(self.lower_type(field_elem_type), 0))
@@ -1992,14 +1990,13 @@ impl MirLowering:
                             val enum_eq_res = b_enum_eq.emit_call(enum_eq_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
                             self.builder = b_enum_eq
                             if val enum_eq_local = enum_eq_res:
-                                var enum_raw_bool = enum_eq_local
-                                match op:
+                                val enum_raw_bool = match op:
                                     case NotEq:
                                         var b_enum_neq = self.builder
-                                        enum_raw_bool = b_enum_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(enum_eq_local), mir_operand_const_int(1), MirType.i64())
+                                        val inverted = b_enum_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(enum_eq_local), mir_operand_const_int(1), MirType.i64())
                                         self.builder = b_enum_neq
-                                    case _:
-                                        ()
+                                        inverted
+                                    case _: enum_eq_local
                                 var b_enum_narrow = self.builder
                                 val enum_bool = b_enum_narrow.emit_binop(MirBinOp.Eq, mir_operand_copy(enum_raw_bool), mir_operand_const_int(1), MirType.bool())
                                 self.builder = b_enum_narrow
@@ -2318,15 +2315,13 @@ impl MirLowering:
                             val eq_res = b_eq.emit_call(eq_func, [mir_operand_copy(left_local), mir_operand_copy(right_local)], MirType.i64())
                             self.builder = b_eq
                             if val eq_local = eq_res:
-                                var raw_bool_val = eq_local
-                                match op:
+                                val raw_bool_val = match op:
                                     case NotEq:
                                         var b_neq = self.builder
                                         val neq_local = b_neq.emit_binop(MirBinOp.BitXor, mir_operand_copy(eq_local), mir_operand_const_int(1), MirType.i64())
                                         self.builder = b_neq
-                                        raw_bool_val = neq_local
-                                    case _:
-                                        ()
+                                        neq_local
+                                    case _: eq_local
                                 # rt_text_eq_any returns a raw i64 0/1 (its real
                                 # C ABI return, matching `declare i64
                                 # @rt_text_eq_any(...)`), not a native i1 --
@@ -2513,9 +2508,7 @@ impl MirLowering:
                 unary_result
 
             case If(cond, then_, else_):
-                var expected_if_type: HirType? = nil
-                if expr.has_type_:
-                    expected_if_type = Some(expr.type_)
+                val expected_if_type: HirType? = if expr.has_type_: expr.type_ else: nil
                 self.lower_if(cond, then_, else_, expected_if_type)
 
             case MethodCall(receiver, method, args, resolution):
@@ -2943,15 +2936,9 @@ impl MirLowering:
                 # that arm's comment for why field_type must be overridden
                 # BEFORE emit_get_field rather than patched up afterward.
                 val base_struct_name_pre2 = self.resolve_base_struct_name(base, base_local)
-                var field_elem_type_override2: HirType? = nil
-                if val bsn_pre2 = base_struct_name_pre2:
-                    if self.struct_field_array_elem_type.contains(bsn_pre2):
-                        val field_elem_types_pre2 = self.struct_field_array_elem_type[bsn_pre2]
-                        if field_idx >= 0 and field_idx < field_elem_types_pre2.len():
-                            val field_elem_type_pre2 = field_elem_types_pre2[field_idx]
-                            match field_elem_type_pre2.kind:
-                                case HirTypeKind.Error: ()
-                                case _: field_elem_type_override2 = Some(field_elem_type_pre2)
+                val field_elem_type_override2: HirType? = match base_struct_name_pre2:
+                    case Some(bsn_pre2): self.field_array_element_override(bsn_pre2, field_idx)
+                    case _: nil
                 var field_type = MirType.i64()
                 if val field_elem_type3 = field_elem_type_override2:
                     field_type = MirType(kind: MirTypeKind.Array(self.lower_type(field_elem_type3), 0))
@@ -2985,9 +2972,7 @@ impl MirLowering:
                 self.lower_enum_lit(type_, variant, payload)
 
             case MatchCase(scrutinee, arms):
-                var expected_match_type: HirType? = nil
-                if expr.has_type_:
-                    expected_match_type = Some(expr.type_)
+                val expected_match_type: HirType? = if expr.has_type_: expr.type_ else: nil
                 self.lower_match_case(scrutinee, arms, expected_match_type)
 
             case _:

@@ -46,9 +46,7 @@ fn parse(source: &str) -> simple_parser::ast::Module {
 
 fn pattern_name(pattern: &Pattern) -> Option<String> {
     match pattern {
-        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
-            Some(name.clone())
-        }
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => Some(name.clone()),
         Pattern::Typed { pattern, .. } => pattern_name(pattern),
         _ => None,
     }
@@ -160,8 +158,7 @@ fn main():
     val x = 1
 ";
     let module = parse(source);
-    let wrapped_freestanding =
-        super::compiler::wrap_entry_script_as_main(module.clone(), true);
+    let wrapped_freestanding = super::compiler::wrap_entry_script_as_main(module.clone(), true);
     let wrapped_hosted = super::compiler::wrap_entry_script_as_main(module, false);
     assert_eq!(wrapped_freestanding.items.len(), wrapped_hosted.items.len());
     assert!(has_top_level_function(&wrapped_freestanding, "main"));

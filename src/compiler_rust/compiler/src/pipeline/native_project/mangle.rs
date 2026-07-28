@@ -15,9 +15,7 @@ fn qualify_enum_pattern(
 ) -> Result<(), String> {
     use crate::mir::MirPattern;
     match pattern {
-        MirPattern::Variant {
-            enum_name, payload, ..
-        } => {
+        MirPattern::Variant { enum_name, payload, .. } => {
             *enum_name = qualify(enum_name)?;
             if let Some(payload) = payload {
                 qualify_enum_pattern(payload, qualify)?;
@@ -172,21 +170,6 @@ pub(crate) fn mangle_mir(
         .map(|f| f.name.clone())
         .collect();
 
-    // Build set of all known fully-qualified imported names.
-    let imported_qualified: std::collections::HashSet<String> = {
-        let mut set = std::collections::HashSet::new();
-        for v in import_map.values().chain(use_map.values()) {
-            set.insert(v.clone());
-            if v.contains('.') {
-                set.insert(v.replace('.', "_dot_"));
-            }
-            if v.contains("_dot_") {
-                set.insert(v.replace("_dot_", "."));
-            }
-        }
-        set
-    };
-
     // Build a mapping from raw name -> mangled name for local functions.
     let mut local_mangled: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for func in &mir.functions {
@@ -194,10 +177,14 @@ pub(crate) fn mangle_mir(
         if !has_body {
             continue;
         }
-        if is_runtime_or_builtin(&func.name) {
-            continue;
-        }
-        if imported_qualified.contains(&func.name) {
+        let keeps_abi_name = func.attributes.iter().any(|attr| attr == "export")
+            || extern_fns.contains(&func.name)
+            || func.name.starts_with("__simple_")
+            || func.name.starts_with("__module_init_")
+            || func.name.starts_with("spl_")
+            || func.name.starts_with("__get_global_")
+            || func.name.starts_with("__set_global_");
+        if keeps_abi_name {
             continue;
         }
         let mangled = if func.name == "main" {
@@ -369,9 +356,6 @@ pub(crate) fn mangle_mir(
                             *target = target.with_name(canonical_name);
                         }
                         let name = target.name().to_string();
-                        if is_runtime_or_builtin(&name) {
-                            continue;
-                        }
                         if known_mangled.contains(name.as_str()) {
                             continue;
                         }
@@ -384,6 +368,8 @@ pub(crate) fn mangle_mir(
                         }
                         if let Some(mangled) = local_mangled.get(&name) {
                             *target = target.with_name(mangled.clone());
+                        } else if is_runtime_or_builtin(&name) {
+                            continue;
                         } else if let Some(resolved) = use_map.get(&name) {
                             *target = target.with_name(resolved.clone());
                         } else {
@@ -429,6 +415,10 @@ pub(crate) fn mangle_mir(
                         }
                     }
                     MirInst::InterpCall { func_name, .. } => {
+                        if let Some(mangled) = local_mangled.get(func_name.as_str()) {
+                            *func_name = mangled.clone();
+                            continue;
+                        }
                         if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
                             continue;
                         }
@@ -460,6 +450,10 @@ pub(crate) fn mangle_mir(
                     }
                     MirInst::MethodCallStatic { func_name, .. } => {
                         canonicalize_equivalent_dot_name(func_name, &known_mangled);
+                        if let Some(mangled) = local_mangled.get(func_name.as_str()) {
+                            *func_name = mangled.clone();
+                            continue;
+                        }
                         if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
                             continue;
                         }

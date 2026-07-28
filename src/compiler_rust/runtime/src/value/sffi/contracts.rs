@@ -1,5 +1,18 @@
 //! Contract checking implemented directly in Rust.
 
+use std::ffi::CStr;
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_panic(message: *const std::ffi::c_char) {
+    let message = if message.is_null() {
+        "panic".into()
+    } else {
+        CStr::from_ptr(message).to_string_lossy()
+    };
+    eprintln!("{message}");
+    std::process::abort();
+}
+
 fn contract_kind_name(kind: i64) -> &'static str {
     match kind {
         0 => "Precondition",

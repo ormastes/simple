@@ -333,6 +333,30 @@ fn runtime_symbol_table_contains_processing_wire_helpers() {
     }
 }
 
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
+fn runtime_symbol_table_contains_monotonic_time() {
+    let entry = RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .find(|entry| entry.name == "rt_time_now_monotonic_ms")
+        .expect("monotonic-time provider must be registered");
+    assert!(!entry.ptr.is_null());
+
+    let now: extern "C" fn() -> i64 = unsafe { std::mem::transmute(entry.ptr) };
+    let first = now();
+    let second = now();
+    assert!(first >= 0);
+    assert!(second >= first);
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
+fn runtime_symbol_table_contains_panic() {
+    assert!(RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .any(|entry| entry.name == "rt_panic" && !entry.ptr.is_null()));
+}
+
 #[no_mangle]
 pub extern "C" fn rt_memory_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);

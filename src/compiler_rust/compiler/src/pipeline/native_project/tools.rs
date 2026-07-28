@@ -1201,11 +1201,7 @@ fn validate_stage4_system_library_ownership(
 }
 
 #[cfg(target_os = "macos")]
-fn validate_stage4_macos_system_ownership(
-    archives: &[PathBuf],
-    cc: &str,
-    build_dir: &Path,
-) -> Result<(), String> {
+fn validate_stage4_macos_system_ownership(archives: &[PathBuf], cc: &str, build_dir: &Path) -> Result<(), String> {
     for (archive, spec) in archives.iter().zip(STAGE4_C_PROVIDER_SPECS) {
         let probe = build_dir.join(format!("{}.system-owner.dylib", spec.source));
         let mut command = std::process::Command::new(cc);
@@ -1223,7 +1219,10 @@ fn validate_stage4_macos_system_ownership(
                 .arg("-lsqlite3");
         }
         let output = command.arg("-o").arg(&probe).output().map_err(|err| {
-            format!("failed to execute macOS Stage4 system-owner probe for {}: {err}", spec.source)
+            format!(
+                "failed to execute macOS Stage4 system-owner probe for {}: {err}",
+                spec.source
+            )
         })?;
         let _ = std::fs::remove_file(&probe);
         if !output.status.success() {
@@ -1290,9 +1289,8 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
     let native_linux = cfg!(all(target_os = "linux", target_env = "gnu"))
         && target.os == simple_common::target::TargetOS::Linux
         && target.is_host();
-    let native_macos = cfg!(target_os = "macos")
-        && target.os == simple_common::target::TargetOS::MacOS
-        && target.is_host();
+    let native_macos =
+        cfg!(target_os = "macos") && target.os == simple_common::target::TargetOS::MacOS && target.is_host();
     if !native_linux && !native_macos {
         return Err("Stage4 C provider archives currently require a native GNU/Linux or macOS host target".to_string());
     }
@@ -1393,7 +1391,12 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
         let (sqlite, sqlite_definitions) =
             resolve_stage4_system_library(&cc, &[("libsqlite3.so", true), ("libsqlite3.a", false)])?;
         validate_stage4_system_library_ownership(&archives[0], &STAGE4_C_PROVIDER_SPECS[0], &libc, &libc_definitions)?;
-        validate_stage4_system_library_ownership(&archives[1], &STAGE4_C_PROVIDER_SPECS[1], &sqlite, &sqlite_definitions)?;
+        validate_stage4_system_library_ownership(
+            &archives[1],
+            &STAGE4_C_PROVIDER_SPECS[1],
+            &sqlite,
+            &sqlite_definitions,
+        )?;
     }
     #[cfg(target_os = "macos")]
     if native_macos {
@@ -1467,7 +1470,9 @@ fn project_stage4_archive_closure(
     stem: &str,
 ) -> Result<PathBuf, String> {
     if !cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")) {
-        return Err("Stage4 archive projection currently requires native GNU/Linux or macOS linker semantics".to_string());
+        return Err(
+            "Stage4 archive projection currently requires native GNU/Linux or macOS linker semantics".to_string(),
+        );
     }
     let output = temp_dir.join(format!("libsimple_{stem}.a"));
     let closure_object = temp_dir.join(format!("{stem}_closure.o"));
@@ -1581,7 +1586,10 @@ fn project_stage4_archive_closure(
         }
         #[cfg(target_os = "linux")]
         closure_cmd.arg("-Wl,--end-group");
-        let closure = closure_cmd.arg("-o").arg(&closure_object).output()
+        let closure = closure_cmd
+            .arg("-o")
+            .arg(&closure_object)
+            .output()
             .map_err(|err| format!("failed to execute Stage4 runtime capsule closure link with {cc}: {err}"))?;
         if !closure.status.success() {
             return Err(format!(

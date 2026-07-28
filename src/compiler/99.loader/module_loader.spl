@@ -5,11 +5,12 @@
 # the `compiler.loader.runtime` package and its explicit surface.
 
 extern fn rt_file_exists(path: text) -> bool
-use compiler.loader.jit_instantiator.{JitInstantiator}
+use compiler.loader.jit_instantiator.{JitCacheRecord, JitInstantiator}
 use compiler.loader.compiler_sffi.{TypeInfo, type_to_string}
 use compiler.loader.metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
 use compiler.loader.unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.backend.linker.obj_taker.{SymbolType}
 use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
 use std.io_runtime.{file_read_bytes}
 
@@ -48,19 +49,17 @@ fn _any_name_in(left: [text], right: [text]) -> bool:
 fn _metadata_instantiation_symbols(self: ModuleLoader, path: text) -> [text]:
     loaded_metadata_instantiation_symbol_names(self.jit.loaded_metadata, path)
 
-fn _jit_cache_owner(self: ModuleLoader, sym_name: text, rec_cache) -> text:
-    if rec_cache.has("owner"):
-        return rec_cache["owner"]
-    "__jit__"
+fn _jit_cache_owner(self: ModuleLoader, sym_name: text, rec_cache: JitCacheRecord) -> text:
+    rec_cache.owner
 
-fn _jit_cached_loaded_symbol(sym_name: text, rec_cache) -> LoadedSymbol:
-    val code = rec_cache["code"]
-    val addr = rec_cache["address"]
+fn _jit_cached_loaded_symbol(sym_name: text, rec_cache: JitCacheRecord) -> LoadedSymbol:
+    val code = rec_cache.code
+    val addr = rec_cache.address
     LoadedSymbol(
         name: sym_name,
         address: addr,
         size: code.len() as i64,
-        ty: SymbolType.Function,
+        ty: LoaderSymbolType.Function,
         is_jit: true,
         file_offset: 0
     )
@@ -125,15 +124,20 @@ fn _moduleloader_semantic_fingerprint_dependents(self: ModuleLoader, changed_pat
                 progressed = true
     affected
 
-enum SymbolType:
+enum LoaderSymbolType:
     Function
     Data
+
+fn _loader_symbol_type_from_smf(ty: SymbolType) -> LoaderSymbolType:
+    match ty:
+        case Function: LoaderSymbolType.Function
+        case _: LoaderSymbolType.Data
 
 struct LoadedSymbol:
     name: text
     address: i64
     size: i64
-    ty: SymbolType
+    ty: LoaderSymbolType
     is_jit: bool
     file_offset: i64
 
@@ -270,7 +274,7 @@ impl ModuleLoader:
                         return LoadResult.Error(message: "Failed to mark executable memory for {smf_sym.name}")
                     native_flush_icache(addr, code.len() as i64)
                     val symbol_size: i64 = smf_sym.size as i64
-                    val symbol_ty: SymbolType = smf_sym.ty
+                    val symbol_ty = _loader_symbol_type_from_smf(smf_sym.ty)
                     val symbol_file_offset: i64 = smf_sym.offset as i64
                     val loaded_sym = LoadedSymbol(
                         name: smf_sym.name,
@@ -447,7 +451,7 @@ impl ModuleLoader:
 
         if self.jit.jit_cache.has(name):
             val rec_cache = self.jit.jit_cache[name]
-            val code = rec_cache["code"]
+            val code = rec_cache.code
             val owner = _jit_cache_owner(self, name, rec_cache)
             val sym = _jit_cached_loaded_symbol(name, rec_cache)
             self.global_symbols[name] = (owner, sym)
@@ -472,7 +476,7 @@ impl ModuleLoader:
                     name: sym_name,
                     address: addr,
                     size: code.len() as i64,
-                    ty: SymbolType.Function,
+                    ty: LoaderSymbolType.Function,
                     is_jit: true,
                     file_offset: 0
                 )
@@ -526,16 +530,16 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
 fn moduleloader_with_defaults() -> ModuleLoader:
     moduleloader_new(moduleloaderconfig_default())
 
-fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
+me moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
     self.load(path)
 
-fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
+me moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
     self.reload(path)
 
-fn moduleloader_unload(self: ModuleLoader, path: text):
+me moduleloader_unload(self: ModuleLoader, path: text):
     self.unload(path)
 
-fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
+me moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
     self.resolve_symbol(name)
 
 fn moduleloader_execute_smf(path: text) -> Result<i64, text>:
@@ -559,19 +563,19 @@ fn moduleloader_execute_loaded_main(loader: ModuleLoader, path: text) -> Result<
         case Error(message):
             Err("SMF entry point 'main' resolution failed: {message}")
 
-fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
+me moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
     self.resolve_symbol(mangle_name(name, type_args))
 
-fn moduleloader_record_semantic_export(self: ModuleLoader, path: text, key: text):
+me moduleloader_record_semantic_export(self: ModuleLoader, path: text, key: text):
     self.record_semantic_export(path, key)
 
-fn moduleloader_record_semantic_dependency(self: ModuleLoader, path: text, key: text):
+me moduleloader_record_semantic_dependency(self: ModuleLoader, path: text, key: text):
     self.record_semantic_dependency(path, key)
 
-fn moduleloader_record_semantic_fingerprint(self: ModuleLoader, path: text, fingerprint: text):
+me moduleloader_record_semantic_fingerprint(self: ModuleLoader, path: text, fingerprint: text):
     self.semantic_fingerprints[path] = fingerprint
 
-fn moduleloader_record_dependency_semantic_fingerprint(self: ModuleLoader, dependent_path: text, dependency_path: text, fingerprint: text):
+me moduleloader_record_dependency_semantic_fingerprint(self: ModuleLoader, dependent_path: text, dependency_path: text, fingerprint: text):
     var deps: Dict<text, text> = {}
     if self.dependency_semantic_fingerprints.has(dependent_path):
         deps = self.dependency_semantic_fingerprints[dependent_path]
@@ -601,7 +605,7 @@ fn moduleloader_semantic_dependents_of(self: ModuleLoader, changed_path: text) -
 fn moduleloader_semantic_dependents(self: ModuleLoader, changed_key: text) -> [text]:
     self.semantic_dependents(changed_key)
 
-fn moduleloader_invalidate_semantic_change(self: ModuleLoader, changed_key: text) -> [text]:
+me moduleloader_invalidate_semantic_change(self: ModuleLoader, changed_key: text) -> [text]:
     self.invalidate_semantic_change(changed_key)
 
 fn mangle_name(base: text, type_args: [TypeInfo]) -> text:

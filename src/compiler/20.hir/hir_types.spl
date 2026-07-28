@@ -160,14 +160,12 @@ impl MethodResolution:
         Bare-lift accumulator: explicit Some(...) builds a heap Option box on
         the stage4 native lane and if-val at the caller binds the BOX
         un-unwrapped (bug doc 2026-07-23 family)."""
-        var out: SymbolId? = nil
         match self:
-            case InstanceMethod(_, method_id): out = method_id
-            case TraitMethod(_, method_id): out = method_id
-            case FreeFunction(func_id): out = func_id
-            case StaticMethod(_, method_id): out = method_id
-            case Unresolved: ()
-        return out
+            case InstanceMethod(_, method_id): method_id
+            case TraitMethod(_, method_id): method_id
+            case FreeFunction(func_id): func_id
+            case StaticMethod(_, method_id): method_id
+            case Unresolved: nil
 
 struct ScopeId:
     """Unique identifier for a scope."""
@@ -197,6 +195,13 @@ class SymbolTable:
     current_scope: ScopeId
     next_symbol_id: i64
     next_scope_id: i64
+
+fn _hir_symbol_owner_module(path: text) -> text:
+    if path.starts_with("../"):
+        return _hir_symbol_owner_module(path.substring(3))
+    val relative = if path.starts_with("./"): path.substring(2) else: path
+    val source_relative = if relative.starts_with("src/"): relative.substring(4) else: relative
+    source_relative.replace(".spl", "").replace(".sdn", "").replace("/", ".")
 
 impl SymbolTable:
     static fn new() -> SymbolTable:
@@ -347,10 +352,9 @@ impl SymbolTable:
         callers extract `.id` at the call site and pass the plain i64."""
         # has()+bracket: Dict.get returns a TAGGED value on the stage4 native
         # lane; bracket-index takes the untag path (bug doc 2026-07-23 family).
-        var found: Symbol? = nil
         if self.symbols.has(raw):
-            found = self.symbols[raw]
-        return found
+            return self.symbols[raw]
+        nil
 
     me symbol_display_name(id: SymbolId, fallback: text) -> text:
         """Return the CURRENT stored `.name` for `id` (reflecting any
@@ -369,7 +373,7 @@ impl SymbolTable:
         bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
         match id:
             case SymbolId(raw):
-                val found: Symbol? = self.symbols[raw]
+                val found: HirSymbol? = self.symbols[raw]
                 if val sym = found:
                     return sym.name
                 fallback
@@ -386,10 +390,20 @@ impl SymbolTable:
         bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
         match id:
             case SymbolId(raw):
-                val found: Symbol? = self.symbols[raw]
+                val found: HirSymbol? = self.symbols[raw]
                 if val sym = found:
-                    var renamed = sym
-                    renamed.name = new_name
+                    val renamed = HirSymbol(
+                        id: sym.id,
+                        name: new_name,
+                        kind: sym.kind,
+                        type_: sym.type_,
+                        scope: sym.scope,
+                        span: sym.span,
+                        visibility: sym.visibility,
+                        is_public: sym.is_public,
+                        is_mutable: sym.is_mutable,
+                        defining_module: sym.defining_module
+                    )
                     self.symbols[raw] = renamed
             case _:
                 pass
@@ -438,16 +452,7 @@ impl SymbolTable:
         val type_symbol = self.get_symbol(type_id)
         if type_symbol == nil:
             return method_name
-        var owner_module = type_symbol.defining_module ?? ""
-        while owner_module.starts_with("../"):
-            owner_module = owner_module.substring(3)
-        if owner_module.starts_with("./"):
-            owner_module = owner_module.substring(2)
-        if owner_module.starts_with("src/"):
-            owner_module = owner_module.substring(4)
-        owner_module = owner_module.replace(".spl", "")
-        owner_module = owner_module.replace(".sdn", "")
-        owner_module = owner_module.replace("/", ".")
+        val owner_module = _hir_symbol_owner_module(type_symbol.defining_module ?? "")
         val owner = if owner_module != "": "{owner_module}.{type_symbol.name}" else: type_symbol.name
         "{owner}::{method_name}"
 

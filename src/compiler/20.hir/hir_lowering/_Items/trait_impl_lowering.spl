@@ -25,6 +25,26 @@ use compiler.core.types.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
+    me concrete_default_method_type(default_fn: HirFunction, impl_type: HirType) -> HirType?:
+        if val default_symbol = self.symbols.get_symbol(default_fn.symbol):
+            if val symbol_type = default_symbol.type_:
+                if not default_fn.is_static:
+                    match symbol_type.kind:
+                        case Function(default_params, default_return, default_effects):
+                            if default_params.len() > 0:
+                                var concrete_params: [HirType] = [impl_type]
+                                var index = 1
+                                while index < default_params.len():
+                                    concrete_params.push(default_params[index])
+                                    index = index + 1
+                                return HirType(
+                                    kind: HirTypeKind.Function(concrete_params, default_return, default_effects),
+                                    span: default_fn.span
+                                )
+                        case _: ()
+                return symbol_type
+        nil
+
     me lower_bitfield_field(f: BitfieldField, offset: i64) -> HirBitfieldField:
         val symbol = self.symbols.define(f.name, SymbolKind.Field, nil, f.span, Visibility.Private, false, nil)
 
@@ -210,28 +230,10 @@ impl HirLowering:
                         for default_fn in trait_hir.defaults:
                             if not methods.contains_key(default_fn.name):
                                 var concrete_default = default_fn
-                                var concrete_symbol_type: HirType? = nil
-                                val default_symbol = self.symbols.get_symbol(default_fn.symbol)
-                                if default_symbol != nil:
-                                    concrete_symbol_type = default_symbol.type_
+                                val concrete_symbol_type = self.concrete_default_method_type(default_fn, type_)
                                 val concrete_symbol_name = match type_.kind:
                                     case Named(owner_symbol, _): self.symbols.method_symbol_name(owner_symbol, default_fn.name)
                                     case _: default_fn.name
-                                if not default_fn.is_static and concrete_symbol_type != nil:
-                                    match concrete_symbol_type.unwrap().kind:
-                                        case Function(default_params, default_return, default_effects):
-                                            if default_params.len() > 0:
-                                                var concrete_params: [HirType] = [type_]
-                                                var concrete_param_i = 1
-                                                while concrete_param_i < default_params.len():
-                                                    concrete_params.push(default_params[concrete_param_i])
-                                                    concrete_param_i = concrete_param_i + 1
-                                                concrete_symbol_type = Some(HirType(
-                                                    kind: HirTypeKind.Function(concrete_params, default_return, default_effects),
-                                                    span: default_fn.span
-                                                ))
-                                        case _:
-                                            ()
                                 val concrete_symbol = self.symbols.define(
                                     concrete_symbol_name,
                                     if default_fn.is_static: SymbolKind.Function else: SymbolKind.Method,

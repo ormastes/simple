@@ -710,11 +710,9 @@ fn should_flatten_nested_import(use_stmt: &UseStmt, source: &str) -> bool {
     }
 }
 
-/// True when a `Single`/`Aliased` import names a standalone module *file*
-/// directly (e.g. `use std.common.string_builder` resolving to
-/// `common/string_builder.spl`), as opposed to importing one symbol out of a
-/// package aggregator (`__init__.spl`, where the imported name is a symbol
-/// *inside* the package).
+/// True when a `Single`/`Aliased` import resolves to a standalone module file,
+/// either by naming the file or one of its symbols. Package aggregators stay
+/// lazy because their requested symbol may belong to a sibling provider.
 ///
 /// `should_flatten_nested_import` only flattens `Group`/`Glob` forms, so a
 /// whole-module `use a.b.c` brings the module's *type* into scope (via the
@@ -724,15 +722,8 @@ fn should_flatten_nested_import(use_stmt: &UseStmt, source: &str) -> bool {
 /// flattening that one file's definitions is the same operation `Group`/`Glob`
 /// already perform, just keyed on the resolved path instead of the syntax.
 fn single_import_targets_module_file(target: &ImportTarget, resolved: &Path) -> bool {
-    let name = match target {
-        ImportTarget::Single(name) => name.as_str(),
-        ImportTarget::Aliased { name, .. } => name.as_str(),
-        _ => return false,
-    };
-    if resolved.file_name().is_some_and(|n| n == "__init__.spl") {
-        return false;
-    }
-    resolved.file_stem().and_then(|s| s.to_str()) == Some(name)
+    matches!(target, ImportTarget::Single(_) | ImportTarget::Aliased { .. })
+        && resolved.file_name().is_none_or(|name| name != "__init__.spl")
 }
 
 fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -> bool {
@@ -1909,42 +1900,52 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         }
     }
 
-    if let Some(resolved) = resolve_parts_with_search_roots(base, &parts, use_stmt) {
+    let resolve_parts = |parts: &[String]| {
+        if let Some(resolved) = resolve_parts_with_search_roots(base, parts, use_stmt) {
+            return Some(resolved);
+        }
+
+        if let Some(type_parts) = normalize_type_parts(parts) {
+            if let Some(resolved) = resolve_parts_with_search_roots(base, &type_parts, use_stmt) {
+                return Some(resolved);
+            }
+        }
+
+        let mut current = base.to_path_buf();
+        for _ in 0..10 {
+            if let Some(resolved) = resolve_from_stdlib_root(&current, parts, use_stmt) {
+                return Some(resolved);
+            }
+            let Some(parent) = current.parent() else {
+                break;
+            };
+            current = parent.to_path_buf();
+        }
+
+        let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_root.join("..").join("..").join("..");
+        for fallback_root in [
+            repo_root,
+            manifest_root.join("..").join(".."),
+            manifest_root.join(".."),
+            manifest_root.to_path_buf(),
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ] {
+            if let Some(resolved) = resolve_from_stdlib_root(&fallback_root, parts, use_stmt) {
+                return Some(resolved);
+            }
+        }
+
+        None
+    };
+
+    if let Some(resolved) = resolve_parts(&parts) {
         return Some(resolved);
     }
 
-    if let Some(type_parts) = normalize_type_parts(&parts) {
-        if let Some(resolved) = resolve_parts_with_search_roots(base, &type_parts, use_stmt) {
-            return Some(resolved);
-        }
-    }
-
-    // If not found, try stdlib location
-    // Walk up the directory tree to find stdlib
-    let mut current = base.to_path_buf();
-    for _ in 0..10 {
-        if let Some(resolved) = resolve_from_stdlib_root(&current, &parts, use_stmt) {
-            return Some(resolved);
-        }
-        if let Some(parent) = current.parent() {
-            current = parent.to_path_buf();
-        } else {
-            break;
-        }
-    }
-
-    let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_root.join("..").join("..").join("..");
-    for fallback_root in [
-        repo_root,
-        manifest_root.join("..").join(".."),
-        manifest_root.join(".."),
-        manifest_root.to_path_buf(),
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    ] {
-        if let Some(resolved) = resolve_from_stdlib_root(&fallback_root, &parts, use_stmt) {
-            return Some(resolved);
-        }
+    if matches!(use_stmt.target, ImportTarget::Single(_) | ImportTarget::Aliased { .. }) {
+        parts.pop();
+        return resolve_parts(&parts);
     }
 
     None
@@ -2487,6 +2488,29 @@ mod tests {
 
         assert!(has_run);
         assert!(has_helper);
+    }
+
+    #[test]
+    fn nested_direct_symbol_imports_flatten_transitively() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("main.spl");
+        let wrapper = temp.path().join("wrapper.spl");
+        let pipeline = temp.path().join("pipeline.spl");
+
+        fs::write(&entry, "use wrapper.{run}\nfn main() -> int:\n    run()\n").unwrap();
+        fs::write(
+            &wrapper,
+            "use pipeline.compile_default\nfn run() -> int:\n    compile_default()\n",
+        )
+        .unwrap();
+        fs::write(&pipeline, "fn compile_default() -> int:\n    73\n").unwrap();
+
+        let loaded = load_module_with_imports(&entry, &mut HashSet::new()).unwrap();
+
+        assert!(loaded
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(func) if func.name == "compile_default")));
     }
 
     #[test]

@@ -508,6 +508,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
     let current_fn_name_ex: &str = ctx.func.name.as_str();
     let current_fn_sanitized_ex = current_fn_name_ex.replace('.', "_dot_");
     let is_self = |name: &str| -> bool {
+        if lookup_name.contains('.') {
+            return false;
+        }
         let tail_dot = format!("__{}", current_fn_name_ex);
         let tail_san = format!("__{}", current_fn_sanitized_ex);
         name == current_fn_name_ex

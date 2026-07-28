@@ -121,6 +121,24 @@ fn lookup_builtin_tag(name: text) -> BuiltinTag:
     BuiltinTag.Unknown
 
 impl InterpreterBackendImpl:
+    fn resolve_function_by_name(name: text, ctx: EvalContext) -> HirFunction?:
+        if ctx.fn_by_name.has(name):
+            return Some(ctx.fn_by_name[name])
+        if ctx.has_fn_index:
+            return nil
+        val candidates = ctx.module.functions.values()
+        var found_index = -1
+        var i = 0
+        while i < candidates.len():
+            val candidate: HirFunction = candidates[i]
+            if candidate.name == name:
+                found_index = i
+            i = i + 1
+        if found_index >= 0:
+            Some(candidates[found_index])
+        else:
+            nil
+
     fn call_function(fn_value: Value, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
         itrace("[CF] call_function enter")
         match fn_value:
@@ -146,21 +164,7 @@ impl InterpreterBackendImpl:
                 # O(1) resolve via the prebuilt name index (perf); fall back to
                 # the linear scan only when the index is absent (non-process_module
                 # entry points). Last-writer-wins matches the old no-break loop.
-                var cf_target_hit: HirFunction? = nil
-                if ctx.fn_by_name.has(f_t.name):
-                    val cf_hit2: HirFunction = ctx.fn_by_name[f_t.name]
-                    cf_target_hit = Some(cf_hit2)
-                elif not ctx.has_fn_index:
-                    val cf_candidates = ctx.module.functions.values()
-                    var cf_target_index = -1
-                    var cf_i = 0
-                    while cf_i < cf_candidates.len():
-                        val cf_f: HirFunction = cf_candidates[cf_i]
-                        if cf_f.name == f_t.name:
-                            cf_target_index = cf_i
-                        cf_i = cf_i + 1
-                    if cf_target_index >= 0:
-                        cf_target_hit = Some(cf_candidates[cf_target_index])
+                val cf_target_hit = self.resolve_function_by_name(f_t.name, ctx)
                 if cf_target_hit.?:
                     self.call_hir_function(cf_target_hit.unwrap(), args, ctx)
                 else:
@@ -186,8 +190,8 @@ impl InterpreterBackendImpl:
             val param = fn_.params[i]
             val value = if i < args.len():
                 args[i]
-            elif param.default.?:
-                self.eval_expr(param.default.unwrap(), ctx)?
+            elif param.has_default:
+                self.eval_expr(param.default, ctx)?
             else:
                 return Err(BackendError.runtime_error("missing argument for parameter {param.name}", Some(fn_.span)))
 

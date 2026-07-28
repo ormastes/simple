@@ -90,21 +90,24 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("val unique_entry_sources = _driver_unique_physical_sources(entry_sources)")
         expect(driver).to_contain("parsed_entry_paths = parsed_entry_paths.push(physical_key)")
         expect(driver).to_contain("parsed_entry_modules = parsed_entry_modules.push(entry_module)")
-        expect(driver).to_contain("entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]")
+        expect(driver).to_contain("entry_modules = entry_modules.set(source.module_name, parsed_entry_modules[parsed_idx])")
+        expect(driver).to_not_contain("entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]")
         expect(driver).to_contain("entry_ctx.sources = unique_entry_sources")
         expect(driver).to_contain(r"phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
 
     it "uses bucket sets for every phase-one closure membership role":
         val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
+        val native_build = rt_file_read_text("src/app/io/_CliCompile/compile_targets.spl") ?? ""
 
-        expect(driver).to_contain("var seen_sources = _driver_text_bucket_set_new(8192)")
-        expect(driver).to_contain("var closure_loaded_mods = _driver_text_bucket_set_new(8192)")
-        expect(driver).to_contain("var closure_seen_mods = _driver_text_bucket_set_new(8192)")
-        expect(driver).to_contain("var closure_scanned_paths = _driver_text_bucket_set_new(8192)")
+        expect(native_build).to_contain("var discovered = _driver_text_bucket_set_new(512)")
+        expect(driver).to_contain("var seen_sources = _driver_text_bucket_set_new(512)")
+        expect(driver).to_contain("var closure_loaded_mods = _driver_text_bucket_set_new(512)")
+        expect(driver).to_contain("var closure_seen_mods = _driver_text_bucket_set_new(512)")
+        expect(driver).to_contain("var closure_scanned_paths = _driver_text_bucket_set_new(512)")
         expect(driver).to_not_contain("var closure_seen_mods: [text]")
 
     it "scans imports through native text operations":
-        val imports = _driver_entry_import_module_paths("use std.real\n\"\"\"\nuse fake.block\n\"\"\"\n\"\"\"use fake.inline\"\"\"\nexport use app.live.*\nimport third.party\nuse app.module.Func\n")
+        val imports = _driver_entry_import_module_paths("use std.real\n\"\"\"\nuse fake.block\n\"\"\"\n\"\"\"use fake.inline\"\"\"\npub use public.owner.{Thing}\nexport use app.live.*\nimport third.party\nuse app.module.Func\n")
         val long_imports = _driver_entry_import_module_paths(("# filler\n").repeat(8192) + "use std.tail." + "{" + "Thing}\n")
         val ordinary_imports = _driver_entry_import_module_paths("val x = 1\n".repeat(4096) + "\timport app.final\n")
         val unicode_imports = _driver_entry_import_module_paths("é\n# 文\n\tuse std.unicode\n")
@@ -113,7 +116,7 @@ describe "entry-closure physical source deduplication":
         val siblings = _driver_entry_sibling_module_paths("mod pkg.real\n\"\"\"\nmod pkg.fake\nexport fake.deep.*\n\"\"\"\n# mod pkg.comment\nexport sibling.deep.*\nexport A, B\nexport use app.live.*\n")
         val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
 
-        expect(imports).to_equal(["std.real", "app.live", "third.party", "app.module.Func"])
+        expect(imports).to_equal(["std.real", "public.owner", "app.live", "third.party", "app.module.Func"])
         expect(long_imports).to_equal(["std.tail"])
         expect(ordinary_imports).to_equal(["app.final"])
         expect(unicode_imports).to_equal(["std.unicode"])
@@ -123,6 +126,13 @@ describe "entry-closure physical source deduplication":
         expect(loading).to_contain('for raw_line in content.split("\n"):')
         expect(loading).to_contain("_driver_import_path_is_valid(module_path)")
         expect(loading).to_contain("_driver_entry_import_module_paths_text_fallback")
+        expect(loading).to_contain('var tail: text = ""')
+        expect(loading).to_contain("var cut: i64 = rt_string_len(tail)")
+        expect(loading).to_contain('val comment_at = _driver_text_index_of(scan_line, "#")')
+        expect(loading).to_contain("val delimiter_at = _driver_text_index_of(tail, delimiter)")
+        expect(loading).to_contain("val byte = path_text.char_code_at(i)")
+        expect(loading.contains("path_text.bytes()")).to_equal(false)
+        expect(loading.contains(".find(")).to_equal(false)
 
     it "keeps command-only tools out of the ordinary CLI entry closure":
         val cli_entry = rt_file_read_text("src/app/cli/_CliMain/main_and_help.spl") ?? ""
@@ -147,12 +157,14 @@ describe "entry-closure physical source deduplication":
         expect(inference).to_contain("self.generate_obligations_for_function_call(func_symbol, type_args, span)")
         expect(inference).to_not_contain("call_type_args")
 
-    it "keeps a zero-import explicit entry out of whole-workspace loading":
+    it "keeps every explicit entry walk out of whole-workspace loading":
         val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
 
-        expect(driver).to_contain("val closure_error_count_before = self.ctx.errors.len()")
-        expect(driver).to_contain("if self.ctx.errors.len() == closure_error_count_before:\n                # A successful explicit-entry walk is a closure")
+        expect(driver).to_contain("# An explicit-entry walk is a closure even when import resolution")
         expect(driver).to_contain("rt_env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"1\")")
+        expect(driver).to_contain("if nb_entry_env != \"\" and not nb_entry_closure_pre:")
+        expect(driver).to_not_contain("not nb_entry_closure_pre and self.ctx.options.mode == CompileMode.Aot")
+        expect(driver).to_not_contain("if self.ctx.errors.len() == 0:\n                # A successful explicit-entry walk is a closure")
         expect(driver).to_contain("if has_project_source and self.ctx.options.mode != CompileMode.Check and not nb_entry_closure:")
         expect(driver).to_not_contain("closure_added")
 

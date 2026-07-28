@@ -513,11 +513,7 @@ pub(crate) fn build_import_map(
                                 if !implementations.iter().any(|candidate| candidate == type_name) {
                                     implementations.push(type_name.to_string());
                                 }
-                                pending_vtable_impls.push((
-                                    prefix.clone(),
-                                    type_name.to_string(),
-                                    trait_name.clone(),
-                                ));
+                                pending_vtable_impls.push((prefix.clone(), type_name.to_string(), trait_name.clone()));
                             }
                             for m in &imp.methods {
                                 if !m.body.statements.is_empty() {

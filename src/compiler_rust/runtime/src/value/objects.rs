@@ -259,11 +259,7 @@ pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
 pub(crate) const OPTION_ENUM_ID: u32 = 1;
 
 pub(crate) fn rt_option_none() -> RuntimeValue {
-    rt_enum_new(
-        OPTION_ENUM_ID,
-        hash_variant_discriminant("None"),
-        RuntimeValue::NIL,
-    )
+    rt_enum_new(OPTION_ENUM_ID, hash_variant_discriminant("None"), RuntimeValue::NIL)
 }
 
 pub(crate) fn rt_option_some(payload: RuntimeValue) -> RuntimeValue {

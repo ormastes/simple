@@ -81,3 +81,8 @@ int64_t rt_time_now_nanos(void) {
 int64_t rt_time_now_micros(void) {
     return rt_time_now_nanos() / 1000;
 }
+
+/* ---- Monotonic clock: milliseconds (= nanos / 1000000) ---- */
+int64_t rt_time_now_monotonic_ms(void) {
+    return rt_time_now_nanos() / 1000000;
+}

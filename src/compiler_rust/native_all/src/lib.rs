@@ -1185,15 +1185,6 @@ pub extern "C" fn rt_current_time_ms() -> i64 {
         .unwrap_or(0)
 }
 
-#[no_mangle]
-pub extern "C" fn rt_time_now_monotonic_ms() -> i64 {
-    // Use Instant isn't available for extern "C", use SystemTime
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 // -- Builtins --
 //
 // `sys_get_args` and `sys_exit` are provided by the bundled `simple-runtime`

@@ -464,7 +464,7 @@ pub class CompilerDriver:
         # Build sources list locally to avoid chained method call issue
         # (self.ctx.sources.push() doesn't persist — interpreter limitation)
         var all_sources: [SourceFile] = []
-        var seen_sources = _driver_text_bucket_set_new(8192)
+        var seen_sources = _driver_text_bucket_set_new(512)
 
         # Start with user-provided roots
         var i = 0
@@ -531,8 +531,7 @@ pub class CompilerDriver:
         # tree before entry-closure pruning can happen.
         val nb_entry_env = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         val nb_entry_closure_pre = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        if nb_entry_env != "" and not nb_entry_closure_pre and self.ctx.options.mode == CompileMode.Aot:
-            val closure_error_count_before = self.ctx.errors.len()
+        if nb_entry_env != "" and not nb_entry_closure_pre:
             # BUG FIX (CLI --source loss): explicit --source roots are already
             # scanned into all_sources by the loop above (driver_inputs), but
             # under their own path-derived module names -- which do not
@@ -547,14 +546,14 @@ pub class CompilerDriver:
             # entry-only filter, which otherwise requires this block to flip
             # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE before anything but the exact
             # entry file is parsed.
-            var closure_loaded_mods = _driver_text_bucket_set_new(8192)
+            var closure_loaded_mods = _driver_text_bucket_set_new(512)
             var closure_preidx = 0
             while closure_preidx < all_sources.len():
                 val loaded_module_name = all_sources[closure_preidx].module_name
                 closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, loaded_module_name)
                 closure_preidx = closure_preidx + 1
-            var closure_seen_mods = _driver_text_bucket_set_new(8192)
-            var closure_scanned_paths = _driver_text_bucket_set_new(8192)
+            var closure_seen_mods = _driver_text_bucket_set_new(512)
+            var closure_scanned_paths = _driver_text_bucket_set_new(512)
             var closure_idx = 0
             while closure_idx < all_sources.len():
                 val closure_src = all_sources[closure_idx]
@@ -613,11 +612,10 @@ pub class CompilerDriver:
                             all_sources = all_sources.push(SourceFile(path: closure_file, content: closure_content, module_name: closure_mp))
                             closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, closure_mp)
                 closure_idx = closure_idx + 1
-            if self.ctx.errors.len() == closure_error_count_before:
-                # A successful explicit-entry walk is a closure even when the
-                # entry has no imports. Otherwise the single-file case falls
-                # through to the implicit whole-workspace source load.
-                rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+            # An explicit-entry walk is a closure even when import resolution
+            # reports an error. Keep that error bounded to the requested graph
+            # instead of hiding it behind an unrelated whole-workspace failure.
+            rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
 
         # Add core source roots only when compiling project sources (self-hosted build).
         # native-build --entry-closure suppresses this implicit whole-src bulk-load
@@ -769,7 +767,7 @@ pub class CompilerDriver:
                 if parsed_idx < 0:
                     self.ctx.errors.push("internal entry-closure parse cache miss for {source.path}")
                     return (self.ctx, false)
-                entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]
+                entry_modules = entry_modules.set(source.module_name, parsed_entry_modules[parsed_idx])
             var entry_ctx: CompileContext = self.ctx
             entry_ctx.modules = entry_modules
             # Alias module keys remain in entry_modules for import lookup, but
@@ -1009,7 +1007,7 @@ pub class CompilerDriver:
             _driver_validate_value_struct_layouts(bootstrap_ctx)
             return (bootstrap_ctx, bootstrap_ctx.errors.len() == 0)
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
-        var phase_entry_hir: HirModule? = self.ctx.bootstrap_entry_hir
+        var phase_entry_source_index = -1
         var source_idx = 0
         while source_idx < self.ctx.sources.len():
             val src = self.ctx.sources[source_idx]
@@ -1121,7 +1119,7 @@ pub class CompilerDriver:
             if focused_future_driver_diag:
                 eprint("[driver-hir] stored")
             if is_requested_bootstrap_entry:
-                phase_entry_hir = Some(hir_module)
+                phase_entry_source_index = source_idx
             val hir_function_count: i64 = hir_module.functions.len()
             if focused_future_driver_diag:
                 eprint("[driver-hir] functions={hir_function_count}")
@@ -1141,6 +1139,11 @@ pub class CompilerDriver:
 
         log_debug("HIR lowering complete")
 
+        val phase_entry_hir: HirModule? = if phase_entry_source_index >= 0:
+            val entry_source = self.ctx.sources[phase_entry_source_index]
+            phase_hir_modules[entry_source.module_name]
+        else:
+            self.ctx.bootstrap_entry_hir
         var phase_ctx: CompileContext = self.ctx
         phase_ctx.hir_modules = phase_hir_modules
         phase_ctx.bootstrap_entry_hir = phase_entry_hir
