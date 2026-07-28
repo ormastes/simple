@@ -1184,3 +1184,11 @@ implementation in progress / target evidence blocked
   writes, selector matching, or control processing. A focused token-level
   regression locks both uniqueness and first-wins semantics; execution remains
   blocked by the recorded compiler defect, and no bootstrap retry was made.
+- Parsing/performance: the HTML tree builder now owns one preallocated private
+  open-node stack and mutates it through indexed leaf operations. Append and
+  close clear the stored parent before growing its child array, removing both
+  repeated stack rebuilds and the sibling COW alias while preserving DOM order
+  and public APIs. Fixed 512-slot storage flattens excess nesting without
+  dropping nodes, repairing the existing depth scenario without token-count
+  preallocation. The separate 65,536-node quota remains missing, and runtime
+  timing is still compiler-blocked.

@@ -1,8 +1,8 @@
 # HTML Tree Builder — WHATWG insertion-mode tree construction
 #
 # Builds a BeDomNode tree from tokenized HTML.
-# Key constraint: BeDomNode values are COPIED when pushed to arrays in interpreter mode.
-# Pattern: use stack[n-1] = node after mutation; children added to parent when CLOSED.
+# Key constraint: BeDomNode values are copied when stored in arrays.
+# The private stack owns preallocated storage and clears slots before child growth.
 
 use std.gc_async_mut.gpu.browser_engine.html_tokenizer.{
     HtmlTokenizer, HtmlToken, HtmlTokenKind, HtmlAttr,
@@ -16,58 +16,94 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
 }
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style}
 
-# Append child to node at top of stack, write it back
-fn _stk_append(stack: [BeDomNode], child: BeDomNode) -> [BeDomNode]:
-    """Append child to top of stack; return modified stack."""
-    val n = stack.len()
-    if n == 0: return stack
-    var parent = stack[n - 1]
-    var kids = parent.children
-    kids.push(child)
-    parent.children = kids
-    stack[n - 1] = parent
-    stack
+val HTML_MAX_TREE_DEPTH: i32 = 512
 
-# Pop top from stack, return it (caller writes back result stack)
-fn _stk_pop_and_append(stack: [BeDomNode]) -> [BeDomNode]:
-    """Pop top node, append it as child of new top. Return new stack."""
-    val n = stack.len()
-    if n <= 1: return stack
-    val completed = stack[n - 1]
-    var rest: [BeDomNode] = []
-    var i = 0
-    while i < n - 1:
-        rest.push(stack[i])
-        i = i + 1
-    # Append completed to rest's top
-    val rn = rest.len()
-    var parent = rest[rn - 1]
-    var kids = parent.children
-    kids.push(completed)
-    parent.children = kids
-    rest[rn - 1] = parent
-    rest
+# Preallocated owner keeps stack mutation O(1) without aliased array parameters.
+class _TreeStack:
+    nodes: [BeDomNode]
+    length: i32
+    empty: BeDomNode
 
-# Find top index of tag in stack (-1 if not found)
-fn _stk_find_tag(stack: [BeDomNode], tag: text) -> i32:
-    var i = stack.len() - 1
-    while i >= 0:
-        if be_dom_get_tag(stack[i]) == tag:
-            return i
-        i = i - 1
-    -1
+    fn len() -> i32:
+        self.length
 
-# Pop until and including tag
-fn _stk_pop_until_incl(stack: [BeDomNode], tag: text) -> [BeDomNode]:
-    var s = stack
-    var limit = 200
-    while limit > 0 and s.len() > 1:
-        limit = limit - 1
-        val top_tag = be_dom_get_tag(s[s.len() - 1])
-        s = _stk_pop_and_append(s)
-        if top_tag == tag:
-            limit = 0  # done
-    s
+    fn top() -> BeDomNode:
+        self.nodes[self.length - 1]
+
+    fn root_or(fallback: BeDomNode) -> BeDomNode:
+        if self.length > 0: self.nodes[0] else: fallback
+
+    fn find_tag(tag: text) -> i32:
+        var i = self.length - 1
+        while i >= 0:
+            if be_dom_get_tag(self.nodes[i]) == tag:
+                return i
+            i = i - 1
+        -1
+
+    me push_open(node: BeDomNode):
+        if self.length >= self.nodes.len():
+            val completed_idx = self.length - 1
+            val parent_idx = completed_idx - 1
+            val completed = self.nodes[completed_idx]
+            var parent = self.nodes[parent_idx]
+            self.nodes[completed_idx] = self.empty
+            self.nodes[parent_idx] = self.empty
+            parent.children.push(completed)
+            self.nodes[parent_idx] = parent
+            self.length = completed_idx
+        self.nodes[self.length] = node
+        self.length = self.length + 1
+
+    me replace_top(node: BeDomNode):
+        self.nodes[self.length - 1] = node
+
+    me append_child(child: BeDomNode):
+        if self.length == 0: return
+        val idx = self.length - 1
+        var parent = self.nodes[idx]
+        self.nodes[idx] = self.empty
+        parent.children.push(child)
+        self.nodes[idx] = parent
+
+    me close_top():
+        if self.length <= 1: return
+        val completed_idx = self.length - 1
+        val parent_idx = completed_idx - 1
+        val completed = self.nodes[completed_idx]
+        var parent = self.nodes[parent_idx]
+        self.nodes[completed_idx] = self.empty
+        self.nodes[parent_idx] = self.empty
+        parent.children.push(completed)
+        self.nodes[parent_idx] = parent
+        self.length = completed_idx
+
+    me close_through(tag: text):
+        var limit = 200
+        while limit > 0 and self.length > 1:
+            limit = limit - 1
+            val completed_idx = self.length - 1
+            val parent_idx = completed_idx - 1
+            val top_tag = be_dom_get_tag(self.nodes[completed_idx])
+            val completed = self.nodes[completed_idx]
+            var parent = self.nodes[parent_idx]
+            self.nodes[completed_idx] = self.empty
+            self.nodes[parent_idx] = self.empty
+            parent.children.push(completed)
+            self.nodes[parent_idx] = parent
+            self.length = completed_idx
+            if top_tag == tag:
+                limit = 0
+
+    me foster_append(child: BeDomNode):
+        var table_idx = self.length - 1
+        while table_idx >= 0 and be_dom_get_tag(self.nodes[table_idx]) != "table":
+            table_idx = table_idx - 1
+        val parent_idx = if table_idx > 0: table_idx - 1 else: self.length - 1
+        var parent = self.nodes[parent_idx]
+        self.nodes[parent_idx] = self.empty
+        parent.children.push(child)
+        self.nodes[parent_idx] = parent
 
 fn _is_void(tag: text) -> bool:
     if tag == "area": return true
@@ -99,36 +135,6 @@ fn _is_table_content(tag: text) -> bool:
     if tag == "colgroup": return true
     if tag == "caption": return true
     false
-
-fn _stk_in_table(stack: [BeDomNode]) -> bool:
-    """True if current insertion context is inside a table structural element."""
-    val top = be_dom_get_tag(stack[stack.len() - 1])
-    _is_table_context(top)
-
-fn _stk_find_table_ancestor(stack: [BeDomNode]) -> i32:
-    """Find index of nearest table ancestor in stack, or -1."""
-    var i = stack.len() - 1
-    while i >= 0:
-        if be_dom_get_tag(stack[i]) == "table":
-            return i
-        i = i - 1
-    -1
-
-fn _stk_foster_append(stack: [BeDomNode], child: BeDomNode) -> [BeDomNode]:
-    """Append child before the table — to the table's parent. Returns modified stack."""
-    val table_idx = _stk_find_table_ancestor(stack)
-    if table_idx <= 0:
-        # No table or table is root — append to bottom
-        return _stk_append(stack, child)
-    else:
-        # Append to the table's parent (table_idx - 1)
-        var s = stack
-        var parent = s[table_idx - 1]
-        var kids = parent.children
-        kids.push(child)
-        parent.children = kids
-        s[table_idx - 1] = parent
-        return s
 
 fn _closes_p_elem(tag: text) -> bool:
     if tag == "address": return true
@@ -193,6 +199,7 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
     """
     val tokenizer = html_tokenizer_new(html_text)
     val tokens = html_tokenizer_tokenize(tokenizer)
+    val ntok = tokens.len()
 
     # Collected script content
     var script_bodies: [text] = []
@@ -210,10 +217,11 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
     val body_el = BeDomNode.element(next_node_id, "body")
     next_node_id = next_node_id + 1
 
-    var stack: [BeDomNode] = []
-    stack.push(doc_node)
-    stack.push(html_el)
-    stack.push(head_el)
+    val empty_node = BeDomNode.element(0, "")
+    val stack = _TreeStack(nodes: [empty_node; HTML_MAX_TREE_DEPTH], length: 0, empty: empty_node)
+    stack.push_open(doc_node)
+    stack.push_open(html_el)
+    stack.push_open(head_el)
 
     var in_body = false
     var in_script = false
@@ -221,7 +229,6 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
     var script_src = ""
     var skipped_raw_text_tag = ""
 
-    val ntok = tokens.len()
     var ti = 0
     while ti < ntok:
         val tok = tokens[ti]
@@ -245,8 +252,8 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
             elif t == "body":
                 if not in_body:
                     # Pop head, push body
-                    stack = _stk_pop_and_append(stack)
-                    stack.push(body_el)
+                    stack.close_top()
+                    stack.push_open(body_el)
                     in_body = true
 
             elif t == "title" or t == "meta" or t == "link" or t == "base":
@@ -254,13 +261,13 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
                 val he_raw = BeDomNode.element(next_node_id, t)
                 next_node_id = next_node_id + 1
                 val he = _apply_attrs(he_raw, tok.attrs)
-                stack = _stk_append(stack, he)
+                stack.append_child(he)
 
             elif t == "script":
                 # M15: Collect script content for execution
                 if not in_body:
-                    stack = _stk_pop_and_append(stack)
-                    stack.push(body_el)
+                    stack.close_top()
+                    stack.push_open(body_el)
                     in_body = true
                 in_script = true
                 script_content = ""
@@ -276,7 +283,7 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
                 val script_el = BeDomNode.element(next_node_id, "script")
                 next_node_id = next_node_id + 1
                 val script_node = _apply_attrs(script_el, tok.attrs)
-                stack.push(script_node)
+                stack.push_open(script_node)
 
             elif t == "style" or t == "noscript":
                 skipped_raw_text_tag = t
@@ -284,26 +291,26 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
             else:
                 # Switch to body if not yet
                 if not in_body:
-                    stack = _stk_pop_and_append(stack)  # close head
-                    stack.push(body_el)
+                    stack.close_top()  # close head
+                    stack.push_open(body_el)
                     in_body = true
 
                 # Implicit close of <p> before block elements
-                if _closes_p_elem(t) and _stk_find_tag(stack, "p") >= 0:
-                    stack = _stk_pop_until_incl(stack, "p")
+                if _closes_p_elem(t) and stack.find_tag("p") >= 0:
+                    stack.close_through("p")
 
                 # Implicit close of <li> before new <li>
-                if t == "li" and _stk_find_tag(stack, "li") >= 0:
-                    stack = _stk_pop_until_incl(stack, "li")
+                if t == "li" and stack.find_tag("li") >= 0:
+                    stack.close_through("li")
 
                 # Implicit close of <dt>/<dd>
-                if t == "dt" and _stk_find_tag(stack, "dt") >= 0:
-                    stack = _stk_pop_until_incl(stack, "dt")
-                if t == "dd" and _stk_find_tag(stack, "dd") >= 0:
-                    stack = _stk_pop_until_incl(stack, "dd")
+                if t == "dt" and stack.find_tag("dt") >= 0:
+                    stack.close_through("dt")
+                if t == "dd" and stack.find_tag("dd") >= 0:
+                    stack.close_through("dd")
 
                 # Check if we're in a table context with non-table content
-                val top_tag = be_dom_get_tag(stack[stack.len() - 1])
+                val top_tag = be_dom_get_tag(stack.top())
                 val in_table_ctx = _is_table_context(top_tag)
                 val is_table_content = _is_table_content(t)
 
@@ -312,29 +319,20 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
                     next_node_id = next_node_id + 1
                     val vnode = _apply_attrs(vn_raw, tok.attrs)
                     if in_table_ctx and not is_table_content:
-                        stack = _stk_foster_append(stack, vnode)
+                        stack.foster_append(vnode)
                     else:
-                        stack = _stk_append(stack, vnode)
+                        stack.append_child(vnode)
                 elif in_table_ctx and not is_table_content:
                     # Foster-parent non-table elements that appear inside table context
                     val fp_raw = BeDomNode.element(next_node_id, t)
                     next_node_id = next_node_id + 1
                     val fp_el = _apply_attrs(fp_raw, tok.attrs)
-                    # Insert before table: find table ancestor, insert in its parent
-                    val tbl_idx = _stk_find_table_ancestor(stack)
-                    if tbl_idx > 0:
-                        var tbl_parent = stack[tbl_idx - 1]
-                        var fp_kids = tbl_parent.children
-                        fp_kids.push(fp_el)
-                        tbl_parent.children = fp_kids
-                        stack[tbl_idx - 1] = tbl_parent
-                    else:
-                        stack = _stk_append(stack, fp_el)
+                    stack.foster_append(fp_el)
                 else:
                     val el_raw = BeDomNode.element(next_node_id, t)
                     next_node_id = next_node_id + 1
                     val new_el = _apply_attrs(el_raw, tok.attrs)
-                    stack.push(new_el)
+                    stack.push_open(new_el)
 
         elif tok.token_kind == HtmlTokenKind.EndTag:
             val et = tok.tag_name
@@ -346,21 +344,21 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
                 elif script_content.trim().len() > 0:
                     script_bodies.push(script_content)
                 # Store content as a real DOM text child.
-                var top = stack[stack.len() - 1]
+                var top = stack.top()
                 top.children = [BeDomNode.text_node(next_node_id, script_content)]
                 next_node_id = next_node_id + 1
-                stack[stack.len() - 1] = top
+                stack.replace_top(top)
                 # Pop script node and append to parent
-                if _stk_find_tag(stack, "script") >= 0:
-                    stack = _stk_pop_and_append(stack)
+                if stack.find_tag("script") >= 0:
+                    stack.close_top()
                 script_content = ""
                 script_src = ""
             elif et == skipped_raw_text_tag:
                 skipped_raw_text_tag = ""
             elif et == "html" or et == "body" or et == "head":
                 pass_dn  # handled in drain
-            elif _stk_find_tag(stack, et) >= 0:
-                stack = _stk_pop_until_incl(stack, et)
+            elif stack.find_tag(et) >= 0:
+                stack.close_through(et)
 
         elif tok.token_kind == HtmlTokenKind.Character:
             val data = tok.data
@@ -372,22 +370,20 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
             elif not in_body:
                 if data.trim().len() > 0:
                     # Non-whitespace before body — switch to body
-                    stack = _stk_pop_and_append(stack)  # close head
-                    stack.push(body_el)
+                    stack.close_top()  # close head
+                    stack.push_open(body_el)
                     in_body = true
                     val tn = BeDomNode.text_node(next_node_id, data)
                     next_node_id = next_node_id + 1
-                    stack = _stk_append(stack, tn)
+                    stack.append_child(tn)
             else:
                 val tn2 = BeDomNode.text_node(next_node_id, data)
                 next_node_id = next_node_id + 1
-                stack = _stk_append(stack, tn2)
+                stack.append_child(tn2)
 
     # Drain remaining open elements
     while stack.len() > 1:
-        stack = _stk_pop_and_append(stack)
+        stack.close_top()
 
-    # stack[0] is now doc_node with html as only child (after drain)
-    # But since we modified stack[0] in place, we need to return it
-    val final_doc = if stack.len() > 0: stack[0] else: doc_node
+    val final_doc = stack.root_or(doc_node)
     TreeBuilderResult(doc: final_doc, scripts: script_bodies, src_paths: script_src_paths)
