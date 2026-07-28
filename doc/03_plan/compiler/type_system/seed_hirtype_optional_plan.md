@@ -7,9 +7,11 @@ small; the semantics migration is not, and it is blocked on a prior repair.**
 
 Adding `HirType::Optional { inner }` to the seed is **structurally contained** —
 measured, not estimated. But it must NOT land first. The `index_of` family is
-currently routed to a **runtime symbol that does not exist**, and four codegen
-paths disagree about what `index_of` even returns. Typing it `Optional` on top of
-that would paper over a link-level defect with a type-level one.
+currently routed to a **runtime symbol that is unresolvable** (its definition is
+unpushed, and the symbol-table generator drops it even where it exists — P4), and
+four codegen paths disagree about what `index_of` even returns. Typing it
+`Optional` on top of that would paper over two link-level defects with a
+type-level one.
 
 Stage 0 below is the real root fix for the reported `index_of` bug. The Optional
 type is Stage 2+.
@@ -42,26 +44,56 @@ realistic cost of a fully-wired single-inner variant in this codebase.
 from a genuine shared pointer. There are 18 `PointerKind::Shared` sites and 53
 `HirType::Pointer` sites to audit for which ones *mean* optional.
 
-### P4. `rt_index_of` IS A DANGLING SYMBOL — this is the `index_of` root cause
+### P4. `rt_index_of` is unresolvable — TWO stacked defects, corrected 2026-07-28
 
 Two codegen paths emit a call to `rt_index_of`:
 
 - `codegen/instr/closures_structs.rs:1284` — `"index_of" => "rt_index_of"`
 - `codegen/instr/calls.rs:3234` — `"index_of" => Some("rt_index_of")`
 
-`rt_index_of` is **defined nowhere in the repository** (`grep "fn rt_index_of"`
-over all `.rs`/`.c`/`.spl` returns nothing) and is **absent from the deployed
-seed binary** (`nm bin/simple | grep rt_index_of` → 0 matches).
+An earlier revision of this plan said `rt_index_of` was "defined nowhere in the
+repository". **That was measured against `origin/main` and is true there, but it
+is misleading**, and a peer lane correctly challenged it. The reconciled facts,
+each verified:
 
-This independently corroborates the JIT bailout another lane observed
-(`unresolved external symbol 'rt_index_of'` demoting a whole module to the
-interpreter). It is a link-level defect, not a typing defect.
+**Defect 1 — the definition is UNPUSHED.**
+`rt_index_of` *does* exist as a receiver-polymorphic dispatcher at
+`src/compiler_rust/runtime/src/value/collections.rs:3051` — it tries
+`rt_array_index_of` first and falls back to `rt_string_find`, dispatching by
+trial because both callees are total and return `-1` on receiver mismatch. But it
+exists **only in the local working copy's HEAD** (`533d96801dd`), introduced by
+`0d864c55fe7` *"fix(borrow): forward-propagate move state"* — an unrelated
+borrow-checker commit that is **NOT an ancestor of `origin/main`**. On
+`origin/main`, `collections.rs:3051` is a blank line and `git grep "fn
+rt_index_of"` over the whole tree returns nothing.
+
+So a fresh clone gets a compiler that emits calls to a function that is not in
+its own source tree. **This is unpushed work riding in an unrelated commit** —
+exactly the profile this repo has repeatedly lost to stale-working-copy clobbers.
+It should be committed on its own merits, urgently, by its owner.
+
+**Defect 2 — even where it exists, the symbol-table generator drops it.**
+The JIT resolves `rt_*` through the build-script-generated
+`RUNTIME_SYMBOL_ENTRIES` (`src/compiler_rust/runtime/build.rs`). Measured across
+all five generated tables under
+`target/release/build/simple-runtime-*/out/runtime_symbol_entries.rs`:
+`rt_index_of` = **0 in every table**, while siblings `rt_array_index_of` = 2 and
+`rt_string_find` = 2 in four of them. `rt_array_index_of` is declared identically
+(`#[no_mangle]`, same `pub extern "C" fn` form) twenty lines earlier **in the same
+file**, so the file is scanned and this one symbol is specifically dropped.
+Suspect `collect_rust_file_exports` in `build.rs` (~lines 276-293); root cause not
+yet chased.
+
+Nothing registers it → the linker drops it → `nm bin/simple | grep rt_index_of` =
+**0** (`rt_string_find` = 1, for contrast) → unresolvable at JIT time. This is
+what produced the `unresolved external symbol 'rt_index_of'` bailout another lane
+observed. Both defects are link-level, not typing-level.
 
 ### P5. `index_of` has FOUR divergent behaviours
 
 | Path | Target | Runtime representation |
 |---|---|---|
-| `closures_structs.rs:1284`, `calls.rs:3234` | `rt_index_of` | **does not exist** → bailout/link failure |
+| `closures_structs.rs:1284`, `calls.rs:3234` | `rt_index_of` | the **intended unifier** (array-then-string trial dispatch), but unpushed *and* missing from the symbol table → bailout/link failure. See P4. |
 | `llvm/emitter.rs:191`, `llvm/functions.rs:2274,2611` | `rt_string_find` | raw `i64`, `-1` sentinel |
 | `runtime_sffi.rs:413` registers it, no method-name path selects it | `rt_string_index_of` | **real `Option`** (`rt_option_some`/`rt_option_none`) |
 | `mir/lower/lowering_expr_method.rs:554` (array receiver) | `rt_array_index_of` | raw `i64`, `-1` sentinel |
@@ -122,11 +154,26 @@ operands.
 ## Staged sequence (each stage builds and lands alone)
 
 **Stage 0 — repair `rt_index_of` (do this first, independent of Optional).**
-Either define `rt_index_of` or repoint `closures_structs.rs:1284` and
-`calls.rs:3234` at an existing symbol, and reconcile against the dead
-`rt_string_index_of`. Decide *one* representation per receiver type and make all
-four paths in P5 agree. This alone fixes the reported `index_of` bug and the JIT
-bailout. No type change involved.
+Revised 2026-07-28 per P4. **Do NOT write a new `rt_index_of`, and do NOT delete
+the four call sites** — the function already exists and is the only
+receiver-polymorphic `index_of`; removing it would force every caller to choose
+array-vs-text statically, the opposite of what the P5 divergence needs. Instead,
+in order:
+
+1. **Get the existing definition onto `origin/main`.** It is currently unpushed,
+   carried by the unrelated borrow-checker commit `0d864c55fe7`. Its owner should
+   land it on its own merits. Until then `origin/main` is internally inconsistent
+   and no fix downstream of it can be verified from a clean clone.
+2. **Get the symbol into `RUNTIME_SYMBOL_ENTRIES.`** Fix the `build.rs` generator
+   miss so `rt_index_of` is emitted alongside `rt_array_index_of`. Verify with
+   `grep -c '"rt_index_of"'` over the generated tables (expect ≥1, currently 0)
+   and `nm bin/simple` (expect ≥1, currently 0).
+3. **Then** reconcile the still-unreachable `rt_string_index_of` — the only
+   genuinely Option-returning implementation, which no method-name dispatch
+   selects. That one is a separate live defect and does not block steps 1-2.
+
+Steps 1-2 alone fix the reported `index_of` bug and the JIT bailout. No type
+change involved.
 
 **Stage 1 — add the variant, unused.** Add `HirType::Optional{inner}`, fix the 3
 `E0004` sites, register nothing to it. Oracle: `--emit-archive --target
