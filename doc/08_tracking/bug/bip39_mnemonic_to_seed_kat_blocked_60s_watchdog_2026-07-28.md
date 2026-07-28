@@ -1,7 +1,36 @@
 # BIP-39 mnemonic_to_seed KAT block cannot complete — 60 s run watchdog vs interpreted PBKDF2
 
 - **Date:** 2026-07-28
-- **Status:** OPEN — end-to-end path for `bip39_mnemonic_to_seed` is UNPROVEN
+- **Status:** RESOLVED 2026-07-28 (same day) — see "Resolution" below; full KAT now green
+
+## Resolution (2026-07-28, later the same day)
+
+Three stacked defects, all fixed:
+
+1. **The ~60 s killer was a detached daemon**, not the runner or CLI:
+   `scripts/resource/kill_simple_monitor.shs` SIGKILLed any `simple run|test` at
+   ≥95% CPU past 60 s and never saw the run's env. Fixed in `a6819dcc788`
+   (reads `SIMPLE_TIMEOUT_SECONDS` live from `/proc/<pid>/environ`, writes an
+   explicit `error: TIMEOUT: killed by kill_simple_monitor` into the victim).
+   Details: `reference` in the fail-open ledger; the daemon's own log names
+   every kill.
+2. **TV2's expected seed was FABRICATED** — 35-byte shared prefix, then
+   divergence. The implementation was correct and the test was failing it.
+   Verified against independent PBKDF2-HMAC-SHA512 and the official BIP-39
+   vectors. Also: TV4/TV5/TV6 asserted only `len()==64` and the empty-passphrase
+   example asserted only inequality. All made real KATs in `ea4ae7e4062`.
+3. With (1) raised via `SIMPLE_TIMEOUT_SECONDS` and (2) corrected, the full spec
+   is green: **24 examples, 0 failures**, including all six TREZOR seed vectors
+   and the no-passphrase KAT (blocks 1+7+6+3+7). Evidence:
+   `~/.claude/jobs/4403a7d8/tmp/bip39_kat2.log`.
+
+Still true and still open elsewhere: the seed-number caveat below (all timings
+are SEED + debug-build numbers), the unrouted `rt_pbkdf2_hmac_sha512` fast-path
+(header claim corrected in `3a19e6640ef`), and the `_set_bit` W1006 demotion —
+which must NOT be "fixed" with `mut` until the list-`.get()` unbox fix
+(`ca2d18fac83` line) is in the deployed binary.
+
+---
 - **Spec:** `test/01_unit/os/crypto/bip39_kat_spec.spl`
 - **Module:** `src/os/crypto/bip39.spl`, `src/os/crypto/bip39_wordlist.spl`
 - **Binary that produced all evidence below:** the **Rust bootstrap seed**
