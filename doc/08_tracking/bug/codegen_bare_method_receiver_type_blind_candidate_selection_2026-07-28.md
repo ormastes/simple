@@ -70,6 +70,11 @@ distinct (method, arity, receiver-type, target) tuples.** 45 had
 | `as_text` / `as_int` / `as_real` / `as_bool` | 4 | `DbValue.*` | legit erased-field dispatch |
 | `diagnostic_text`, `ftruncate`, `has_swapped_mapping`, `init_bounce_buffer` | 4 | assorted | legit erased-field dispatch |
 
+Widening to three SimpleOS closures (`gui_entry_desktop` 97, `desktop_e2e_entry`
+68, `os_entry` 45) gives **210 binds over 22 distinct method names and 36
+distinct tuples**, i.e. each additional closure keeps adding new tuples rather
+than converging.
+
 `equals` did not appear in this closure, but the fixture confirms it is
 stealable: an erased `text` receiver bound `equals` and `index_of` to
 `Foo.equals` / `Foo.index_of` (matching `Foo_dot_equals` / `Foo_dot_index_of`
