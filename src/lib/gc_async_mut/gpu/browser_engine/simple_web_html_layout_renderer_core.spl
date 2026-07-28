@@ -2,6 +2,7 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_d
 
 class Rules:
     group_parts: [[[text]]]
+    group_specificities: [[i32]]
     decls: [text]
 
 # Named transport for the three parallel rule-scan arrays. Returning these as
@@ -404,7 +405,7 @@ fn _extract_css_vw_with_rule_limit(
     if (rule_limit == 0 or not _simple_web_html_source_admitted(
         html, SIMPLE_WEB_MAX_HTML_BYTES
     )):
-        return Rules(group_parts: [], decls: [])
+        return Rules(group_parts: [], group_specificities: [], decls: [])
     # First pass: collect CSS custom properties from all :root blocks
     var html_tag = find_from(html, "<html", 0)
     var html_tag_guard = 0
@@ -443,6 +444,7 @@ fn _extract_css_vw_with_rule_limit(
         pre_pos = pre_close + 1
     val custom_props = if custom_prop_count == 0: "" else: custom_prop_parts.join("")
     var group_parts: [[[text]]] = []
+    var group_specificities: [[i32]] = []
     var decls: [text] = []
     var pos = 0
     var guard = 0
@@ -485,6 +487,7 @@ fn _extract_css_vw_with_rule_limit(
         else:
             remaining_rules
         var block_group_parts: [[[text]]] = [[[]]; block_cap]
+        var block_group_specificities: [[i32]] = [[]; block_cap]
         var block_decls: [text] = [""; block_cap]
         var out_i = 0
         var bi = 0
@@ -510,11 +513,14 @@ fn _extract_css_vw_with_rule_limit(
                 # in-place keeps the handoff inside one call frame.
                 val rule_group_count = rule_groups.len()
                 var rule_parts: [[text]] = [[]; rule_group_count]
+                var rule_specificities: [i32] = [0; rule_group_count]
                 var rgi = 0
                 while rgi < rule_group_count:
                     rule_parts[rgi] = selector_group_parts(rule_groups[rgi])
+                    rule_specificities[rgi] = _group_specificity(rule_parts[rgi])
                     rgi = rgi + 1
                 block_group_parts[out_i] = rule_parts
+                block_group_specificities[out_i] = rule_specificities
                 block_decls[out_i] = decl
                 out_i = out_i + 1
             bi = bi + 1
@@ -524,10 +530,14 @@ fn _extract_css_vw_with_rule_limit(
         var gi = 0
         while gi < out_i:
             group_parts = group_parts + [block_group_parts[gi]]
+            group_specificities = group_specificities + [block_group_specificities[gi]]
             gi = gi + 1
         decls = decls + text_list_prefix(block_decls, out_i)
         pos = close + 1
-    val result = Rules(group_parts: group_parts, decls: decls)
+    val result = Rules(
+        group_parts: group_parts,
+        group_specificities: group_specificities,
+        decls: decls)
     if trace_stages:
         print "[layout-trace] css_result rules={result.group_parts.len()} decls={result.decls.len()}"
     # Silent-on-healthy attribution receipt: scanned at least one candidate
@@ -1538,15 +1548,6 @@ fn selector_group_matches_node_parts(nodes: [HNode], ctx: SelectorContext, idx: 
             want = want - 1
     not require_direct
 
-fn selector_matches_node_group_parts(nodes: [HNode], ctx: SelectorContext, idx: i32, group_parts: [[text]]) -> bool:
-    var g = 0
-    val group_count = group_parts.len()
-    while g < group_count:
-        if selector_group_matches_node_parts(nodes, ctx, idx, group_parts[g]):
-            return true
-        g = g + 1
-    false
-
 # ---------------------------------------------------------------------------
 # CSS specificity helpers
 # ---------------------------------------------------------------------------
@@ -1603,27 +1604,6 @@ fn _group_specificity(parts: [text]) -> i32:
             total = total + _part_specificity(p)
         i = i + 1
     total
-
-fn _rule_specificity(rules: Rules, r: i32) -> i32:
-    val groups = rules.group_parts[r]
-    var best = 0
-    var g = 0
-    val group_count = groups.len()
-    while g < group_count:
-        val s = _group_specificity(groups[g])
-        if s > best:
-            best = s
-        g = g + 1
-    best
-
-fn build_rule_specificities(rules: Rules) -> [i32]:
-    val rule_count = rules.group_parts.len()
-    var specificities: [i32] = [0; rule_count]
-    var r = 0
-    while r < rule_count:
-        specificities[r] = _rule_specificity(rules, r)
-        r = r + 1
-    specificities
 
 fn _candidate_sort_before(left: i32, right: i32, rule_specificities: [i32]) -> bool:
     val left_spec = rule_specificities[left]
@@ -1859,7 +1839,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
     val selector_ctx = build_selector_context(nodes, child_index)
     if trace_stages:
         print "[layout-trace] style_stage=selector-context-ready"
-    val rule_specificities = build_rule_specificities(rules)
+    var rule_specificities: [i32] = [-1; rules.group_parts.len()]
     if trace_stages:
         print "[layout-trace] style_stage=rule-specificities-ready"
     val node_count = nodes.len()
@@ -1906,6 +1886,34 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         val candidates_raw = style_rule_candidates(nd, rule_buckets)
         if trace_stages:
             print "[layout-trace] style_stage=candidates-ready index={i} count={candidates_raw.len()}"
+        var specificity_i = 0
+        var selector_group_budget_count = 0
+        while specificity_i < candidates_raw.len():
+            val specificity_rule = candidates_raw[specificity_i]
+            val specificity_groups = rules.group_parts[specificity_rule]
+            val precomputed_specificities = rules.group_specificities[specificity_rule]
+            var matched_specificity = -1
+            var group_i = 0
+            var specificity_expired = false
+            while group_i < specificity_groups.len():
+                if (selector_group_budget_count & 255) == 0 and _web_budget_expired():
+                    specificity_expired = true
+                    break
+                if selector_group_matches_node_parts(
+                    nodes, selector_ctx, i, specificity_groups[group_i]
+                ):
+                    val group_specificity = precomputed_specificities[group_i]
+                    if group_specificity > matched_specificity:
+                        matched_specificity = group_specificity
+                selector_group_budget_count = selector_group_budget_count + 1
+                group_i = group_i + 1
+            if specificity_expired:
+                while specificity_i < candidates_raw.len():
+                    rule_specificities[candidates_raw[specificity_i]] = -1
+                    specificity_i = specificity_i + 1
+                break
+            rule_specificities[specificity_rule] = matched_specificity
+            specificity_i = specificity_i + 1
         val candidates = _sort_candidates_by_specificity(candidates_raw, rule_specificities)
         if trace_stages:
             print "[layout-trace] style_stage=candidates-sorted index={i} count={candidates.len()}"
@@ -1923,7 +1931,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             if r >= WEB_STYLE_RULE_QUOTA:
                 candidate_i = candidate_i + 1
                 continue
-            if selector_matches_node_group_parts(nodes, selector_ctx, i, rules.group_parts[r]):
+            if rule_specificities[r] >= 0:
                 val empty_cells_decl = decl_get(rules.decls[r], "empty-cells")
                 if empty_cells_decl.trim().lower() == "hide":
                     empty_cells_hide = true

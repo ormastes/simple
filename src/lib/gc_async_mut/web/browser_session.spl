@@ -30,6 +30,8 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_set_children
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
+use std.gc_async_mut.gpu.browser_engine.style_block.{CssDecl}
+use std.gc_async_mut.gpu.browser_engine.style_block_parse.{parse_declarations}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     browser_resource_size_allowed, BROWSER_MAX_DOCUMENT_SUBRESOURCES,
     BROWSER_MAX_RESOURCE_BYTES
@@ -384,6 +386,7 @@ class BrowserRuntimeState:
     dom_value_snapshots: [text]
     dom_style_snapshots: [text]
     dom_bridge_generation: i64
+    dom_mutation_generation: i64
 
     static fn create(
         url: text,
@@ -643,7 +646,8 @@ class BrowserRuntimeState:
             dom_class_snapshots: [],
             dom_value_snapshots: [],
             dom_style_snapshots: [],
-            dom_bridge_generation: 0
+            dom_bridge_generation: 0,
+            dom_mutation_generation: 0
         )
         state
 
@@ -813,31 +817,69 @@ fn _browser_host_body_mutation_plan(
         elements: elements
     )
 
+fn _browser_dom_css_property_matches(left: text, right: text) -> bool:
+    if left.starts_with("--") or right.starts_with("--"):
+        return left == right
+    left.lower() == right.lower()
+
+fn _browser_dom_style_replace_declaration(
+    declarations: [CssDecl], property: text, value: text
+) -> [CssDecl]:
+    var next: [CssDecl] = []
+    for declaration in declarations:
+        if not _browser_dom_css_property_matches(
+            declaration.property, property
+        ):
+            next.push(declaration)
+    if value != "":
+        for declaration in parse_declarations(property + ":" + value):
+            next = _browser_dom_style_replace_declaration(
+                next, declaration.property, ""
+            )
+            next.push(declaration)
+    next
+
 fn _browser_dom_style_snapshot(runtime: JsRuntime, object_id: i64) -> text:
     val object = runtime.get_host_object(object_id)
-    var out = ""
-    match runtime.get_host_property(object_id, "cssText"):
-        JsValue.String(v):
-            if not browser_resource_size_allowed(v.len()):
+    var css_text_index = -1
+    var css_text = ""
+    var property_index = 0
+    while property_index < object.properties.len():
+        val prop = object.properties[property_index]
+        if prop.key == "cssText":
+            css_text = _browser_dom_js_text(prop.value).trim()
+            if not browser_resource_size_allowed(css_text.len()):
                 return BROWSER_DOM_BRIDGE_OVERSIZE
-            out = v.trim()
-        _:
-            pass_dn
-    for prop in object.properties:
+            css_text_index = property_index
+        property_index = property_index + 1
+    var declarations = parse_declarations(css_text)
+    property_index = css_text_index + 1
+    while property_index < object.properties.len():
+        val prop = object.properties[property_index]
         if (
             prop.key != "cssText" and prop.key != "setProperty" and
             prop.key != "getPropertyValue" and prop.key != "removeProperty" and
             not prop.key.starts_with("__")
         ):
             val value = _browser_dom_js_text(prop.value)
-            if value != "":
-                if not browser_resource_size_allowed(
-                    out.len() + prop.key.len() + value.len() + 3
-                ):
-                    return BROWSER_DOM_BRIDGE_OVERSIZE
-                if out != "" and not out.ends_with(";"):
-                    out = out + ";"
-                out = out + _browser_dom_css_name(prop.key) + ":" + value + ";"
+            if not browser_resource_size_allowed(
+                prop.key.len() + value.len() + 1
+            ):
+                return BROWSER_DOM_BRIDGE_OVERSIZE
+            declarations = _browser_dom_style_replace_declaration(
+                declarations, _browser_dom_css_name(prop.key), value
+            )
+        property_index = property_index + 1
+    var out = ""
+    for declaration in declarations:
+        if not browser_resource_size_allowed(
+            out.len() + declaration.property.len() +
+            declaration.value.len() + 2
+        ):
+            return BROWSER_DOM_BRIDGE_OVERSIZE
+        out = (
+            out + declaration.property + ":" + declaration.value + ";"
+        )
     out
 
 class BrowserDomSyncResult:
@@ -935,14 +977,26 @@ impl BrowserRuntimeState:
         val _ = runtime.eval(
             "function __simple_dom_matches(el, selector) { if (el === null || el === undefined || selector === '') { return false; } var first = selector.slice(0, 1); if (first === '#') { return el.id === selector.slice(1); } if (first === '.') { return (' ' + el.className + ' ').indexOf(' ' + selector.slice(1) + ' ') >= 0; } return el.tagName.toLowerCase() === selector.toLowerCase(); } function __simple_css_key(name) { name = String(name); if (name.slice(0, 2) === '--') { return name; } var out = ''; var upper = false; for (var i = 0; i < name.length; i = i + 1) { var ch = name.slice(i, i + 1); if (ch === '-') { upper = true; } else { out = out + (upper ? ch.toUpperCase() : ch); upper = false; } } return out; } document.getElementById = function(id) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (all[i].id === String(id)) { return all[i]; } } return null; }; document.querySelector = function(selector) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { return all[i]; } } return null; }; document.querySelectorAll = function(selector) { var all = document.__simple_elements; var out = []; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { out.push(all[i]); } } return out; }; function __simple_dom_install(el) { el.style.setProperty = function(name, value) { this[__simple_css_key(name)] = String(value); }; el.style.getPropertyValue = function(name) { var value = this[__simple_css_key(name)]; return value === undefined || value === null ? '' : String(value); }; el.style.removeProperty = function(name) { var key = __simple_css_key(name); var old = this.getPropertyValue(name); this[key] = ''; return old; }; } for (var __simple_i = 0; __simple_i < document.__simple_elements.length; __simple_i = __simple_i + 1) { __simple_dom_install(document.__simple_elements[__simple_i]); }"
         )
+        var interpreter = runtime.interpreter
+        interpreter.host_dom_element_list_id = self.dom_element_list_id
+        interpreter.host_dom_element_ids = self.dom_element_ids
+        interpreter.host_dom_style_ids = self.dom_style_ids
+        interpreter.host_dom_id_snapshots = self.dom_id_snapshots
+        interpreter.host_dom_class_snapshots = self.dom_class_snapshots
+        interpreter.host_dom_value_snapshots = self.dom_value_snapshots
+        interpreter.host_dom_style_snapshots = self.dom_style_snapshots
+        runtime.interpreter = interpreter
         self.runtime = runtime
         self.dom_bridge_generation = (
             runtime.interpreter.host_dom_bridge_generation
         )
+        self.dom_mutation_generation = (
+            runtime.interpreter.host_dom_mutation_generation
+        )
 
     me adopt_dom_bridge(root: BeDomNode) -> bool:
         val interpreter = self.runtime.interpreter
-        if interpreter.host_dom_bridge_generation <= self.dom_bridge_generation:
+        if interpreter.host_dom_bridge_generation == self.dom_bridge_generation:
             return false
         var stack: [BeDomNode] = [root]
         var node_ids: [i64] = []

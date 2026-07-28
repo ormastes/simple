@@ -23,6 +23,129 @@ fn _pixels_equal(left: [u32], right: [u32]) -> bool:
 
 describe "BrowserSession script CSS animation rendering":
 
+    it "tracks only DOM-observable animation frame mutations":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/dom-mutation-generation",
+            "<html><body><div id='stage'></div><script>var stage = document.getElementById('stage'); requestAnimationFrame(function(){ document.title = 'title-only'; requestAnimationFrame(function(){ Object.assign(stage.style, { backgroundColor: '#ef4444' }, { backgroundColor: '#2563eb' }); requestAnimationFrame(function(){ delete stage.style.backgroundColor; }); }); });</script></body></html>"
+        ).is_ok()).to_equal(true)
+
+        var initial_generation: i64 = -1
+        if val Some(state) = session.runtime_state:
+            initial_generation = (
+                state.runtime.interpreter.host_dom_mutation_generation
+            )
+        expect(initial_generation).to_be_greater_than(-1)
+
+        expect(session.advance_time(16)).to_equal(1)
+        expect(session.current_title).to_equal("title-only")
+        if val Some(state) = session.runtime_state:
+            expect(
+                state.runtime.interpreter.host_dom_mutation_generation
+            ).to_equal(initial_generation)
+
+        expect(session.advance_time(32)).to_equal(1)
+        var assigned_generation = initial_generation
+        if val Some(state) = session.runtime_state:
+            assigned_generation = (
+                state.runtime.interpreter.host_dom_mutation_generation
+            )
+            expect(
+                state.runtime.interpreter.host_dom_mutation_generation
+            ).to_be_greater_than(initial_generation)
+        expect(session.render_html_document()).to_contain(
+            "background-color:#2563eb;"
+        )
+
+        expect(session.advance_time(48)).to_equal(1)
+        if val Some(state) = session.runtime_state:
+            expect(
+                state.runtime.interpreter.host_dom_mutation_generation
+            ).to_be_greater_than(assigned_generation)
+        expect(session.render_html_document().contains(
+            "background-color:#2563eb;"
+        )).to_equal(false)
+
+    it "observes DOM mutation generation wraparound":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/dom-mutation-wrap",
+            "<html><body><div id='stage'></div><script>var stage = document.getElementById('stage'); requestAnimationFrame(function(){ stage.style.cssText = 'color:#2563eb'; });</script></body></html>"
+        ).is_ok()).to_equal(true)
+        if val Some(state) = session.runtime_state:
+            var wrapped_state = state
+            wrapped_state.runtime.interpreter.host_dom_mutation_generation = (
+                9223372036854775807
+            )
+            wrapped_state.dom_mutation_generation = 9223372036854775807
+            session.runtime_state = Some(wrapped_state)
+
+        expect(session.advance_time(16)).to_equal(1)
+        if val Some(state) = session.runtime_state:
+            expect(
+                state.runtime.interpreter.host_dom_mutation_generation
+            ).to_equal(0)
+        expect(session.render_html_document()).to_contain(
+            "style=\"color:#2563eb;\""
+        )
+
+    it "treats cssText as the latest declaration reset boundary":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/css-text-reset",
+            "<html><body><div id='stage' style='background-color:#ef4444'></div><script>var stage = document.getElementById('stage'); requestAnimationFrame(function(){ stage.style.cssText = 'color:#2563eb'; requestAnimationFrame(function(){ stage.style.cssText = ''; }); });</script></body></html>"
+        ).is_ok()).to_equal(true)
+
+        expect(session.advance_time(16)).to_equal(1)
+        val replaced = session.render_html_document()
+        expect(replaced).to_contain("style=\"color:#2563eb;\"")
+        expect(replaced.contains("background-color:#ef4444")).to_equal(false)
+
+        expect(session.advance_time(32)).to_equal(1)
+        val cleared = session.render_html_document()
+        expect(cleared.contains("color:#2563eb")).to_equal(false)
+        expect(cleared.contains("background-color:#ef4444")).to_equal(false)
+
+    it "removes a declaration inherited from cssText":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/css-text-remove-property",
+            "<html><body><div id='stage'></div><script>var stage = document.getElementById('stage'); requestAnimationFrame(function(){ stage.style.cssText = 'color:#2563eb'; requestAnimationFrame(function(){ stage.style.removeProperty('color'); }); });</script></body></html>"
+        ).is_ok()).to_equal(true)
+
+        expect(session.advance_time(16)).to_equal(1)
+        expect(session.render_html_document()).to_contain(
+            "style=\"color:#2563eb;\""
+        )
+        expect(session.advance_time(32)).to_equal(1)
+        expect(session.render_html_document().contains(
+            "color:#2563eb"
+        )).to_equal(false)
+
+    it "observes DOM bridge generation wraparound":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/dom-bridge-wrap",
+            "<html><body><div id='before'></div></body></html>"
+        ).is_ok()).to_equal(true)
+        expect(session.eval_script("document.title = 'runtime-ready'").is_ok()).to_equal(true)
+        if val Some(state) = session.runtime_state:
+            var wrapped_state = state
+            wrapped_state.runtime.interpreter.host_dom_bridge_generation = (
+                9223372036854775807
+            )
+            wrapped_state.dom_bridge_generation = 9223372036854775807
+            session.runtime_state = Some(wrapped_state)
+
+        expect(session.eval_script(
+            "document.body.innerHTML = '<div id=\"after\"></div>'"
+        ).is_ok()).to_equal(true)
+        if val Some(state) = session.runtime_state:
+            expect(
+                state.runtime.interpreter.host_dom_bridge_generation
+            ).to_equal(0)
+        expect(session.render_html_document()).to_contain("id=\"after\"")
+
     it "passes the actual delayed frame time to requestAnimationFrame":
         var session = BrowserSession.new()
         expect(session.open_html(

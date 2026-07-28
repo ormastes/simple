@@ -1380,3 +1380,17 @@ implementation in progress / target evidence blocked
   compiler, bootstrap, or Rust seed was used for this evidence. A trickle-
   handshake regression was added and compiles cleanly but was not executed
   after the mandatory three-cycle verification cap.
+- CSS selector-list specificity is now computed from matching branches only,
+  with group specificity precomputed once and hostile comma lists sampled by
+  the shared render budget. Computed-style and pixel regressions cover an
+  unmatched high-specificity branch and multiple matching branches.
+- Browser rAF/timer flushes now reconcile the DOM only after an observed DOM
+  mutation generation changes. Title-only animation callbacks avoid the prior
+  full DOM/property scan; direct style writes, `Object.assign`, repeated
+  writes/deletes, `cssText` replacement/removal, body bridge changes, and both
+  generation wrap paths retain repaint behavior in focused regressions.
+- Real HTML/CSS/JS animation execution remains blocked: the third and final
+  bounded bootstrap cycle passed Stage 2/3 and the former ModuleSurface
+  promotion failure, then Stage 4 crashed with SIGSEGV immediately after
+  releasing the first `src/app/cli/main.spl` surface. No executable browser
+  PASS is claimed and the build was not retried.

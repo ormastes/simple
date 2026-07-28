@@ -12,6 +12,11 @@ use std.js.engine.vm_object_store.{ObjectStore}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 
+fn _next_host_generation(generation: i64) -> i64:
+    if generation >= 9223372036854775807:
+        return 0
+    generation + 1
+
 fn _js_location_find_text(haystack: text, needle: text, start: i64) -> i64:
     if start < 0 or start > haystack.len() or needle.len() == 0:
         return -1
@@ -360,8 +365,8 @@ impl JsInterpreter:
             self.host_dom_class_snapshots = class_snapshots
             self.host_dom_value_snapshots = value_snapshots
             self.host_dom_style_snapshots = style_snapshots
-            self.host_dom_bridge_generation = (
-                self.host_dom_bridge_generation + 1
+            self.host_dom_bridge_generation = _next_host_generation(
+                self.host_dom_bridge_generation
             )
             self.host_body_inner_html_value = JsValue.String(
                 v: plan.canonical_body_html
@@ -379,6 +384,70 @@ impl JsInterpreter:
         else:
             self.host_body_text_content_dirty = true
             self.host_body_inner_html_dirty = false
+
+    fn _host_dom_observes_property(obj_id: i64, property: text) -> bool:
+        var dom_index = 0
+        while dom_index < self.host_dom_element_ids.len():
+            if (
+                self.host_dom_element_ids[dom_index] == obj_id and
+                (property == "id" or property == "className" or
+                 property == "value")
+            ):
+                return true
+            if (
+                dom_index < self.host_dom_style_ids.len() and
+                self.host_dom_style_ids[dom_index] == obj_id and
+                property != "setProperty" and
+                property != "getPropertyValue" and
+                property != "removeProperty" and
+                not property.starts_with("__")
+            ):
+                return true
+            dom_index = dom_index + 1
+        false
+
+    fn _host_dom_style_object(obj_id: i64) -> bool:
+        for style_id in self.host_dom_style_ids:
+            if style_id == obj_id:
+                return true
+        false
+
+    fn _host_dom_style_assignment_changes(
+        obj_id: i64, property: text, rhs: JsValue
+    ) -> bool:
+        val store = self.object_store
+        var css_text_index = -1
+        var property_index = -1
+        var index = 0
+        while index < store.prop_obj_ids.len():
+            if store.prop_obj_ids[index] == obj_id:
+                if store.prop_keys[index] == "cssText":
+                    css_text_index = index
+                if store.prop_keys[index] == property:
+                    property_index = index
+            index = index + 1
+        if not strict_equals(self.get_object_property(obj_id, property), rhs):
+            return true
+        if property != "cssText":
+            return property_index <= css_text_index
+        index = css_text_index + 1
+        while index < store.prop_obj_ids.len():
+            if (
+                store.prop_obj_ids[index] == obj_id and
+                store.prop_keys[index] != "cssText" and
+                store.prop_keys[index] != "setProperty" and
+                store.prop_keys[index] != "getPropertyValue" and
+                store.prop_keys[index] != "removeProperty" and
+                not store.prop_keys[index].starts_with("__")
+            ):
+                return true
+            index = index + 1
+        false
+
+    me _mark_host_dom_mutation():
+        self.host_dom_mutation_generation = _next_host_generation(
+            self.host_dom_mutation_generation
+        )
 
     me _assign_object_property(obj_id: i64, property: text, rhs: JsValue):
         if obj_id == self.host_document_id:
@@ -444,7 +513,30 @@ impl JsInterpreter:
             else:
                 self.logger.warn("Web Storage quota reached")
             return
+        val observed_dom_property = self._host_dom_observes_property(
+            obj_id, property
+        )
+        val before = self.get_object_property(obj_id, property)
+        val is_style_property = (
+            observed_dom_property and self._host_dom_style_object(obj_id)
+        )
+        val style_changes = (
+            is_style_property and
+            self._host_dom_style_assignment_changes(obj_id, property, rhs) and
+            not self._is_object_frozen(obj_id)
+        )
+        if style_changes:
+            # CSS declarations are ordered writes. Re-appending preserves the
+            # reset boundary established by a later cssText assignment.
+            self.object_store.remove_property(obj_id, property)
         self.set_object_property_direct(obj_id, property, rhs)
+        val stored = self.get_object_property(obj_id, property)
+        if (
+            (style_changes and strict_equals(stored, rhs)) or
+            (observed_dom_property and not is_style_property and
+             not strict_equals(before, stored))
+        ):
+            self._mark_host_dom_mutation()
 
     # Assignment: target = value
     me eval_assignment(target: JsExpression, value: JsExpression, env: i64) -> BrowserResult<JsValue>:
@@ -539,7 +631,15 @@ impl JsInterpreter:
                 val obj_val = self.eval_expression(object, env)?
                 match obj_val:
                     JsValue.Object(id):
+                        val observed = self._host_dom_observes_property(
+                            id, property
+                        )
+                        val before = self.get_object_property(id, property)
                         self.object_store.remove_property(id, property)
+                        if observed and not strict_equals(
+                            before, self.get_object_property(id, property)
+                        ):
+                            self._mark_host_dom_mutation()
                         return Ok(JsValue.Boolean(v: true))
                     _:
                         return Ok(JsValue.Boolean(v: true))

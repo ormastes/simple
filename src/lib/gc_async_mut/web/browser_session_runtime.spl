@@ -1317,35 +1317,43 @@ impl BrowserSession:
         if body_changed:
             self._replace_current_body_children(next_body_html)
         val bridge_changed = (
-            state.runtime.interpreter.host_dom_bridge_generation >
+            state.runtime.interpreter.host_dom_bridge_generation !=
             state.dom_bridge_generation
+        )
+        val dom_mutation_changed = (
+            state.runtime.interpreter.host_dom_mutation_generation !=
+            state.dom_mutation_generation
         )
         if body_changed or bridge_changed:
             if not state.adopt_dom_bridge(self.current_dom):
                 state.bind_dom(self.current_dom)
-        val dom_sync = state.sync_dom(self.current_dom)
-        if dom_sync.changed:
-            self.current_dom = dom_sync.root
-            self._sync_body_html_from_dom()
-            val synced_body_text = html_to_text(self.current_body_html)
-            state.runtime.set_host_property(
-                state.body_id, "innerHTML",
-                JsValue.String(v: self.current_body_html)
+        if body_changed or bridge_changed or dom_mutation_changed:
+            val dom_sync = state.sync_dom(self.current_dom)
+            if dom_sync.changed:
+                self.current_dom = dom_sync.root
+                self._sync_body_html_from_dom()
+                val synced_body_text = html_to_text(self.current_body_html)
+                state.runtime.set_host_property(
+                    state.body_id, "innerHTML",
+                    JsValue.String(v: self.current_body_html)
+                )
+                state.runtime.set_host_property(
+                    state.body_id, "textContent",
+                    JsValue.String(v: synced_body_text)
+                )
+                var synced_interpreter = state.runtime.interpreter
+                synced_interpreter.host_body_inner_html_value = JsValue.String(
+                    v: self.current_body_html
+                )
+                synced_interpreter.host_body_text_content_value = JsValue.String(
+                    v: synced_body_text
+                )
+                synced_interpreter.host_body_inner_html_dirty = false
+                synced_interpreter.host_body_text_content_dirty = false
+                state.runtime.interpreter = synced_interpreter
+            state.dom_mutation_generation = (
+                state.runtime.interpreter.host_dom_mutation_generation
             )
-            state.runtime.set_host_property(
-                state.body_id, "textContent",
-                JsValue.String(v: synced_body_text)
-            )
-            var synced_interpreter = state.runtime.interpreter
-            synced_interpreter.host_body_inner_html_value = JsValue.String(
-                v: self.current_body_html
-            )
-            synced_interpreter.host_body_text_content_value = JsValue.String(
-                v: synced_body_text
-            )
-            synced_interpreter.host_body_inner_html_dirty = false
-            synced_interpreter.host_body_text_content_dirty = false
-            state.runtime.interpreter = synced_interpreter
         self.session_storage = storage_pairs_from_object(state, state.session_storage_id)
         self.local_storage = storage_pairs_from_object(state, state.local_storage_id)
         self._persist_storage_for_url(active_document_url)
