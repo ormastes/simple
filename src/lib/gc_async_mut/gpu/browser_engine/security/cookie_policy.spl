@@ -24,8 +24,11 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin}
 use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{
     is_opaque,
     is_tuple_origin,
-    is_potentially_trustworthy
+    is_potentially_trustworthy,
+    same_site
 }
+use std.gc_async_mut.http.types.{is_safe_method}
+use common.web.host_policy.{is_ip_host_literal}
 use common.web.public_suffix.{is_public_suffix}
 
 pub class CookieVerdict:
@@ -56,6 +59,8 @@ pub fn domain_matches(cookie_domain: text, request_host: text) -> bool:
         return false
     if domain == host:
         return true
+    if is_ip_host_literal(host):
+        return false
     if not host.ends_with("." + domain):
         return false
     # An IP-literal host never domain-matches a shorter suffix.
@@ -91,16 +96,6 @@ fn _same_site_is_none(cookie: Cookie) -> bool:
         SameSite.Strict:
             return false
         SameSite.Lax:
-            return false
-    return false
-
-fn _same_site_is_strict(cookie: Cookie) -> bool:
-    match cookie.same_site:
-        SameSite.Strict:
-            return true
-        SameSite.Lax:
-            return false
-        SameSite.None:
             return false
     return false
 
@@ -166,11 +161,30 @@ pub fn script_visible(cookie: Cookie) -> bool:
     """`HttpOnly` cookies are never handed to script (`document.cookie`)."""
     return not cookie.http_only
 
+fn same_site_allows(
+    same_site: SameSite,
+    is_same_site_request: bool,
+    is_top_level_navigation: bool,
+    is_safe_method: bool
+) -> bool:
+    """Apply SameSite delivery rules to one request."""
+    if is_same_site_request:
+        return true
+    match same_site:
+        SameSite.None:
+            return true
+        SameSite.Strict:
+            return false
+        SameSite.Lax:
+            return is_top_level_navigation and is_safe_method
+    return false
+
 pub fn cookie_applies(
     cookie: Cookie,
     origin: Origin,
     request_path: text,
-    is_same_site_request: bool,
+    site_for_cookies: Origin?,
+    method: text,
     is_top_level_navigation: bool,
     now: i64
 ) -> bool:
@@ -178,9 +192,10 @@ pub fn cookie_applies(
 
     Deny-wins. A `Secure` cookie never leaves a non-secure channel, an expired
     cookie is never sent, and `SameSite` gates cross-site delivery:
-    `Strict` same-site only, `Lax` same-site plus top-level navigations,
+    `Strict` same-site only, `Lax` same-site plus safe top-level navigations,
     `None` anywhere — but `None` is only reachable at all because
-    `validate_set_cookie` already forced `Secure` on it.
+    `validate_set_cookie` already forced `Secure` on it. A missing client site
+    follows RFC6265bis: requests with no client are same-site.
     """
     if is_opaque(origin) or not is_tuple_origin(origin):
         return false
@@ -192,19 +207,23 @@ pub fn cookie_applies(
         return false
     if not path_matches(cookie.path, request_path):
         return false
-    if is_same_site_request:
-        return true
-    if _same_site_is_none(cookie):
-        return cookie.secure
-    if _same_site_is_strict(cookie):
+    if _same_site_is_none(cookie) and not cookie.secure:
         return false
-    return is_top_level_navigation
+    var is_same_site_request = true
+    if val Some(site) = site_for_cookies:
+        is_same_site_request = same_site(site, origin)
+    return same_site_allows(
+        cookie.same_site,
+        is_same_site_request,
+        is_top_level_navigation,
+        is_safe_method(method)
+    )
 
-fn _digits_to_i64(raw: text) -> i64:
-    """Parse an optionally-signed decimal. Returns 0 on anything malformed."""
+fn _digits_to_i64(raw: text) -> i64?:
+    """Parse an optionally-signed decimal, rejecting malformed input."""
     val body = raw.trim()
     if body.len() == 0:
-        return 0
+        return nil
     var negative = false
     var start = 0
     if body.starts_with("-"):
@@ -213,18 +232,18 @@ fn _digits_to_i64(raw: text) -> i64:
     elif body.starts_with("+"):
         start = 1
     if start >= body.len() or body.len() - start > 18:
-        return 0
+        return nil
     var acc = 0
     var i = start
     while i < body.len():
         val code = body.char_code_at(i)
         if code < 48 or code > 57:
-            return 0
+            return nil
         acc = acc * 10 + (code - 48)
         i = i + 1
     if negative:
-        return 0 - acc
-    return acc
+        return Some(0 - acc)
+    return Some(acc)
 
 pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
     """Resolve a `Max-Age=` attribute in `header` into an absolute `expires_at`.
@@ -233,6 +252,7 @@ pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
     so `is_expired` and `validate_set_cookie` both see it. Absent or malformed
     `Max-Age` leaves the cookie a session cookie.
     """
+    var max_age: i64? = nil
     val parts = header.split(";")
     var i = 0
     while i < parts.len():
@@ -240,18 +260,20 @@ pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
         i = i + 1
         val lowered = part.to_lower()
         if lowered.starts_with("max-age="):
-            val seconds = _digits_to_i64(part.slice(8, part.len()))
-            var expiry = now + seconds
-            if seconds <= 0:
-                expiry = now - 1
-            return Cookie {
-                name: cookie.name,
-                value: cookie.value,
-                domain: cookie.domain,
-                path: cookie.path,
-                secure: cookie.secure,
-                http_only: cookie.http_only,
-                same_site: cookie.same_site,
-                expires_at: expiry
-            }
+            if val Some(seconds) = _digits_to_i64(part.slice(8, part.len())):
+                max_age = Some(seconds)
+    if val Some(seconds) = max_age:
+        var expiry = now + seconds
+        if seconds <= 0:
+            expiry = now - 1
+        return Cookie {
+            name: cookie.name,
+            value: cookie.value,
+            domain: cookie.domain,
+            path: cookie.path,
+            secure: cookie.secure,
+            http_only: cookie.http_only,
+            same_site: cookie.same_site,
+            expires_at: expiry
+        }
     return cookie

@@ -37,6 +37,7 @@ use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{
     is_tuple_origin,
     origin_from_url_text,
     same_origin,
+    same_site,
     serialize_origin,
     is_potentially_trustworthy,
     can_access_document,
@@ -105,6 +106,9 @@ fn site_a() -> Origin:
 
 fn site_b() -> Origin:
     return origin_of("https://b.test/")
+
+fn attacker_origin() -> Origin:
+    return origin_of("https://attacker.example.net/")
 
 
 # ============================================================================
@@ -231,6 +235,28 @@ describe "same-origin equality is a strict tuple comparison":
         it "denies an origin whose port was never populated":
             val no_port = Origin(scheme: "https", host: "example.com", port: 0)
             assert_false(same_origin(no_port, no_port))
+
+
+describe "same-site equality uses scheme and registrable domain":
+    it "allows sibling hosts only on the same schemeful site":
+        assert_true(same_site(origin_of("https://shop.example.com/"), origin_of("https://account.example.com/")))
+        assert_false(same_site(origin_of("http://shop.example.com/"), origin_of("https://account.example.com/")))
+
+    it "respects public suffix boundaries":
+        assert_false(same_site(origin_of("https://alice.github.io/"), origin_of("https://bob.github.io/")))
+
+    it "compares IP literals by exact host and denies opaque origins":
+        assert_true(same_site(origin_of("https://127.0.0.1/"), origin_of("https://127.0.0.1:8443/")))
+        assert_false(same_site(origin_of("https://127.0.0.1/"), origin_of("https://127.0.0.2/")))
+        assert_true(same_site(origin_of("http://localhost/"), origin_of("http://localhost:8080/")))
+        assert_false(same_site(origin_of("https://999.999.999.999/"), origin_of("https://999.999.999.999/")))
+        assert_false(same_site(origin_of("https://[:::]/"), origin_of("https://[:::]/")))
+        assert_false(same_site(origin_of("https://[1:2:3:4:5:6:7:8:]/"), origin_of("https://[1:2:3:4:5:6:7:8:]/")))
+        assert_true(same_site(origin_of("https://[::ffff:192.0.2.1]/"), origin_of("https://[::ffff:192.0.2.1]:8443/")))
+        assert_false(same_site(origin_of("https://-bad/"), origin_of("https://-bad/")))
+        assert_false(same_site(origin_of("https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"), origin_of("https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/")))
+        assert_false(same_site(opaque_origin("a"), opaque_origin("a")))
+        assert_false(same_site(Origin(scheme: "https", host: "", port: 443), shop_https()))
 
 
 # ============================================================================
@@ -495,6 +521,10 @@ describe "cookie delivery honours domain, path, Secure and SameSite":
         it "denies a suffix-confusable host":
             assert_false(domain_matches("ample.com", "example.com"))
 
+        it "requires exact matching for IP hosts":
+            assert_true(domain_matches("127.0.0.1", "127.0.0.1"))
+            assert_false(domain_matches("0.0.1", "127.0.0.1"))
+
         it "denies a parent host against a deeper cookie domain":
             assert_false(domain_matches("shop.example.com", "example.com"))
 
@@ -518,38 +548,46 @@ describe "cookie delivery honours domain, path, Secure and SameSite":
     context "when the channel is insecure":
         it "withholds a Secure cookie from an http request":
             val cookie = make_cookie("sid", "example.com", "/", true, false, SameSite.Lax, 0)
-            assert_false(cookie_applies(cookie, shop_http(), "/cart/items", true, false, 1000))
+            assert_false(cookie_applies(cookie, shop_http(), "/cart/items", Some(shop_http()), "GET", false, 1000))
 
         it "sends the same cookie over https":
             val cookie = make_cookie("sid", "example.com", "/", true, false, SameSite.Lax, 0)
-            assert_true(cookie_applies(cookie, shop_https(), "/cart/items", true, false, 1000))
+            assert_true(cookie_applies(cookie, shop_https(), "/cart/items", Some(shop_https()), "GET", false, 1000))
 
     context "when the request is cross-site":
         it "withholds a SameSite=Strict cookie":
             val cookie = make_cookie("sid", "example.com", "/", true, false, SameSite.Strict, 0)
-            assert_false(cookie_applies(cookie, shop_https(), "/cart/items", false, true, 1000))
+            assert_false(cookie_applies(cookie, shop_https(), "/cart/items", Some(attacker_origin()), "GET", true, 1000))
+
+        it "treats a request with no client as same-site":
+            val cookie = make_cookie("sid", "example.com", "/", true, false, SameSite.Strict, 0)
+            assert_true(cookie_applies(cookie, shop_https(), "/cart/items", nil, "POST", false, 1000))
 
         it "withholds a SameSite=Lax cookie from a subresource request":
             val cookie = make_cookie("sid", "example.com", "/", true, false, SameSite.Lax, 0)
-            assert_false(cookie_applies(cookie, shop_https(), "/cart/items", false, false, 1000))
+            assert_false(cookie_applies(cookie, shop_https(), "/cart/items", Some(attacker_origin()), "GET", false, 1000))
 
         it "sends a SameSite=Lax cookie on a top-level navigation":
             val cookie = make_cookie("sid", "example.com", "/", true, false, SameSite.Lax, 0)
-            assert_true(cookie_applies(cookie, shop_https(), "/cart/items", false, true, 1000))
+            assert_true(cookie_applies(cookie, shop_https(), "/cart/items", Some(attacker_origin()), "GET", true, 1000))
+
+        it "withholds a SameSite=Lax cookie on an unsafe top-level navigation":
+            val cookie = make_cookie("sid", "example.com", "/", true, false, SameSite.Lax, 0)
+            assert_false(cookie_applies(cookie, shop_https(), "/cart/items", Some(attacker_origin()), "POST", true, 1000))
 
         it "sends a SameSite=None; Secure cookie on a subresource request":
             val cookie = make_cookie("sid", "example.com", "/", true, false, SameSite.None, 0)
-            assert_true(cookie_applies(cookie, shop_https(), "/cart/items", false, false, 1000))
+            assert_true(cookie_applies(cookie, shop_https(), "/cart/items", Some(attacker_origin()), "GET", false, 1000))
 
         it "withholds a SameSite=None cookie that lost its Secure flag":
             step("defence in depth: admission already refuses this shape")
             val cookie = make_cookie("sid", "example.com", "/", false, false, SameSite.None, 0)
-            assert_false(cookie_applies(cookie, shop_https(), "/cart/items", false, false, 1000))
+            assert_false(cookie_applies(cookie, shop_https(), "/cart/items", Some(attacker_origin()), "GET", false, 1000))
 
     context "when the cookie has expired":
         it "withholds an expired cookie even from a same-site request":
             val cookie = make_cookie("sid", "example.com", "/", true, false, SameSite.Strict, 900)
-            assert_false(cookie_applies(cookie, shop_https(), "/cart/items", true, false, 1000))
+            assert_false(cookie_applies(cookie, shop_https(), "/cart/items", Some(shop_https()), "GET", false, 1000))
 
         it "treats expires_at of zero as a session cookie":
             assert_false(is_expired(plain_cookie("sid", "example.com"), 999999))
@@ -567,6 +605,12 @@ describe "cookie delivery honours domain, path, Secure and SameSite":
             val resolved = apply_max_age(plain_cookie("sid", "example.com"), "sid=v; Path=/", 1000)
             expect(resolved.expires_at).to_equal(0)
 
+        it "ignores malformed Max-Age and uses the last valid attribute":
+            val malformed = apply_max_age(plain_cookie("sid", "example.com"), "sid=v; Max-Age=garbage", 1000)
+            val duplicate = apply_max_age(plain_cookie("sid", "example.com"), "sid=v; Max-Age=60; Max-Age=5", 1000)
+            expect(malformed.expires_at).to_equal(0)
+            expect(duplicate.expires_at).to_equal(1005)
+
     context "when a cookie is HttpOnly":
         it "hides it from script":
             assert_false(script_visible(make_cookie("sid", "example.com", "/", true, true, SameSite.Lax, 0)))
@@ -576,7 +620,7 @@ describe "cookie delivery honours domain, path, Secure and SameSite":
 
         it "still sends the HttpOnly cookie on the network":
             val cookie = make_cookie("sid", "example.com", "/", true, true, SameSite.Lax, 0)
-            assert_true(cookie_applies(cookie, shop_https(), "/cart/items", true, false, 1000))
+            assert_true(cookie_applies(cookie, shop_https(), "/cart/items", Some(shop_https()), "GET", false, 1000))
 
     context "when the cookie is host-only":
         it "keys a host-only cookie to the request host":

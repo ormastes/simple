@@ -29,8 +29,12 @@ use std.gc_async_mut.gpu.browser_engine.security.cookie_policy.{
     canonical_domain,
     script_visible,
     validate_set_cookie,
-    effective_domain
+    effective_domain,
+    is_expired,
+    path_matches as policy_path_matches
 }
+use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{is_potentially_trustworthy}
+use common.web.host_policy.{is_ip_host_literal}
 
 fn _jar_allows_cookie(jar_key: text, cookie: Cookie, origin: Origin) -> bool:
     if canonical_domain(cookie.domain) == "":
@@ -64,25 +68,27 @@ pub fn parse_set_cookie(header: text) -> Cookie:
                 value = part.slice(eq + 1, part.len()).trim()
             else:
                 name = part
-        elif part.starts_with("Domain=") or part.starts_with("domain="):
-            val eq = part.index_of("=")
-            domain = part.slice(eq + 1, part.len()).trim()
-        elif part.starts_with("Path=") or part.starts_with("path="):
-            val eq = part.index_of("=")
-            path = part.slice(eq + 1, part.len()).trim()
-        elif part == "Secure" or part == "secure":
-            secure = true
-        elif part == "HttpOnly" or part == "httponly" or part == "HttpOnly":
-            http_only = true
-        elif part.starts_with("SameSite=") or part.starts_with("samesite="):
-            val eq = part.index_of("=")
-            val ss_val = part.slice(eq + 1, part.len()).trim()
-            if ss_val == "Strict":
-                same_site = SameSite.Strict
-            elif ss_val == "None":
-                same_site = SameSite.None
-            else:
-                same_site = SameSite.Lax
+        else:
+            val lowered = part.lower()
+            if lowered.starts_with("domain="):
+                val eq = part.index_of("=")
+                domain = part.slice(eq + 1, part.len()).trim()
+            elif lowered.starts_with("path="):
+                val eq = part.index_of("=")
+                path = part.slice(eq + 1, part.len()).trim()
+            elif lowered == "secure":
+                secure = true
+            elif lowered == "httponly":
+                http_only = true
+            elif lowered.starts_with("samesite="):
+                val eq = part.index_of("=")
+                val ss_val = part.slice(eq + 1, part.len()).trim().lower()
+                if ss_val == "strict":
+                    same_site = SameSite.Strict
+                elif ss_val == "none":
+                    same_site = SameSite.None
+                else:
+                    same_site = SameSite.Lax
 
     return Cookie {
         name: name,
@@ -219,6 +225,38 @@ pub class CookieStore:
         jar.cookies = kept
         self._jars[idx] = jar
 
+    me fn _remove_under(jar_key: text, c: Cookie):
+        var index = 0
+        while index < self._domains.len():
+            if self._domains[index] == jar_key:
+                var jar = self._jars[index]
+                var kept: [Cookie] = []
+                for existing in jar.cookies:
+                    if existing.name != c.name or existing.path != c.path:
+                        kept.push(existing)
+                jar.cookies = kept
+                self._jars[index] = jar
+                return
+            index = index + 1
+
+    static fn _domains_overlap(left: text, right: text) -> bool:
+        if left == right:
+            return true
+        if is_ip_host_literal(left) or is_ip_host_literal(right):
+            return false
+        return left.ends_with("." + right) or right.ends_with("." + left)
+
+    me fn _secure_cookie_collision(jar_key: text, c: Cookie) -> bool:
+        var index = 0
+        while index < self._domains.len():
+            if CookieStore._domains_overlap(self._domains[index], jar_key):
+                for existing in self._jars[index].cookies:
+                    if (existing.secure and existing.name == c.name and
+                        policy_path_matches(existing.path, c.path)):
+                        return true
+            index = index + 1
+        return false
+
     me fn store(c: Cookie):
         """Store a cookie under its own Domain attribute as the jar key.
 
@@ -235,16 +273,31 @@ pub class CookieStore:
         host-only cookie is keyed by the setting origin's host rather than the
         empty string.
         """
-        val verdict = validate_set_cookie(c, origin, now)
+        var admitted = c
+        if is_expired(c, now):
+            admitted = Cookie(
+                name: c.name, value: c.value, domain: c.domain, path: c.path,
+                secure: c.secure, http_only: c.http_only,
+                same_site: c.same_site, expires_at: 0
+            )
+        val verdict = validate_set_cookie(admitted, origin, now)
         if not verdict.accepted:
             return verdict
-        self._store_under(effective_domain(c, origin), c)
+        val jar_key = effective_domain(admitted, origin)
+        if (not is_potentially_trustworthy(origin) and
+            self._secure_cookie_collision(jar_key, c)):
+            return CookieVerdict.reject("insecure-origin-cannot-replace-secure-cookie")
+        if is_expired(c, now):
+            self._remove_under(jar_key, c)
+            return verdict
+        self._store_under(jar_key, c)
         return verdict
 
     me fn get_header_for_origin(
         origin: Origin,
         request_path: text,
-        is_same_site_request: bool,
+        site_for_cookies: Origin?,
+        method: text,
         is_top_level_navigation: bool,
         now: i64
     ) -> text:
@@ -263,7 +316,7 @@ pub class CookieStore:
                 val c = jar.cookies[j]
                 j = j + 1
                 if (_jar_allows_cookie(self._domains[i - 1], c, origin) and
-                    cookie_applies(c, origin, request_path, is_same_site_request, is_top_level_navigation, now)):
+                    cookie_applies(c, origin, request_path, site_for_cookies, method, is_top_level_navigation, now)):
                     if result != "":
                         result = result + "; "
                     result = result + c.name + "=" + c.value
@@ -287,7 +340,7 @@ pub class CookieStore:
                 j = j + 1
                 if (script_visible(c) and
                     _jar_allows_cookie(self._domains[i - 1], c, origin)):
-                    if cookie_applies(c, origin, request_path, true, true, now):
+                    if cookie_applies(c, origin, request_path, Some(origin), "GET", true, now):
                         if result != "":
                             result = result + "; "
                         result = result + c.name + "=" + c.value

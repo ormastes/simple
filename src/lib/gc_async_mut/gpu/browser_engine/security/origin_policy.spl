@@ -30,6 +30,8 @@ partially-populated origins lose.
 """
 
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin}
+use common.web.host_policy.{is_ip_host_literal}
+use common.web.public_suffix.{registrable_domain}
 
 # ---------------------------------------------------------------------------
 # low-level scanners (no `parse_int` — it does not resolve at runtime here)
@@ -291,6 +293,99 @@ pub fn same_origin(left: Origin, right: Origin) -> bool:
     if not _well_formed(right):
         return false
     return left.scheme == right.scheme and left.host == right.host and left.port == right.port
+
+fn _valid_ipv4_site_host(host: text) -> bool:
+    val parts = host.split(".")
+    if parts.len() != 4:
+        return false
+    for part in parts:
+        if part == "":
+            return false
+        var index = 0
+        while index < part.len():
+            val code = part.char_code_at(index)
+            if code < 48 or code > 57:
+                return false
+            index = index + 1
+        val octet = part.to_i64() ?? -1
+        if octet < 0 or octet > 255:
+            return false
+    true
+
+fn _valid_ip_site_host(host: text) -> bool:
+    if host.contains(":"):
+        if not host.starts_with("[") or not host.ends_with("]"):
+            return false
+        var inner = host.slice(1, host.len() - 1)
+        if not inner.contains(":") or inner.contains(":::"):
+            return false
+        if inner.contains("."):
+            val last_colon = inner.last_index_of(":") ?? -1
+            if last_colon < 0 or not _valid_ipv4_site_host(inner.slice(last_colon + 1, inner.len())):
+                return false
+            inner = inner.slice(0, last_colon + 1) + "0:0"
+        if (inner.starts_with(":") and not inner.starts_with("::")) or
+            (inner.ends_with(":") and not inner.ends_with("::")):
+            return false
+        var double_count = 0
+        var index = 0
+        while index + 1 < inner.len():
+            if inner.slice(index, index + 2) == "::":
+                double_count = double_count + 1
+                index = index + 2
+            else:
+                index = index + 1
+        if double_count > 1:
+            return false
+        var group_count = 0
+        for group in inner.split(":"):
+            if group != "":
+                if group.len() > 4:
+                    return false
+                var group_index = 0
+                while group_index < group.len():
+                    if not _is_ipv6_char(group.char_code_at(group_index)):
+                        return false
+                    group_index = group_index + 1
+                group_count = group_count + 1
+        if double_count == 0:
+            return group_count == 8
+        return group_count < 8
+    _valid_ipv4_site_host(host)
+
+fn _valid_single_label_site_host(host: text) -> bool:
+    if host == "" or host.len() > 63 or host.starts_with("-") or host.ends_with("-"):
+        return false
+    var index = 0
+    while index < host.len():
+        val code = host.char_code_at(index)
+        if not (_is_lower_alpha(code) or _is_digit(code) or code == 45):
+            return false
+        index = index + 1
+    true
+
+pub fn same_site(left: Origin, right: Origin) -> bool:
+    """Schemeful-site comparison. Opaque and malformed origins never match."""
+    if not _well_formed(left) or not _well_formed(right):
+        return false
+    if left.scheme != right.scheme:
+        return false
+    val left_ip = is_ip_host_literal(left.host)
+    val right_ip = is_ip_host_literal(right.host)
+    val left_single_label = not left.host.contains(".")
+    val right_single_label = not right.host.contains(".")
+    if left_ip or right_ip:
+        if not (left_ip and right_ip and _valid_ip_site_host(left.host) and _valid_ip_site_host(right.host)):
+            return false
+        return left.host == right.host
+    if left_single_label or right_single_label:
+        if not (_valid_single_label_site_host(left.host) and _valid_single_label_site_host(right.host)):
+            return false
+        return left.host == right.host
+    val left_domain = registrable_domain(left.host)
+    if left_domain == "":
+        return false
+    return left_domain == registrable_domain(right.host)
 
 pub fn serialize_origin(origin: Origin) -> text:
     """Serialize per HTML: `"null"` for opaque or unusable, else the ASCII form."""

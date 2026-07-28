@@ -18,6 +18,8 @@ use std.spipe.*
 
 use std.gc_async_mut.gpu.browser_engine.net.cookie_store.{CookieStore, CookieJar, parse_set_cookie}
 use std.gc_async_mut.gpu.browser_engine.net.entity.cookie_types.{Cookie, SameSite}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin}
+use std.gc_async_mut.gpu.browser_engine.security.cookie_policy.{apply_max_age}
 
 
 # ============================================================================
@@ -72,6 +74,12 @@ describe "parse_set_cookie":
         val c = parse_simple_cookie()
         val is_lax = (c.same_site == SameSite.Lax)
         expect(is_lax).to_equal(true)
+
+    it "AC-6: attribute names and values are case-insensitive":
+        val c = parse_set_cookie("token=x; dOmAiN=example.com; sAmEsItE=sTrIcT; SeCuRe")
+        expect(c.domain).to_equal("example.com")
+        expect(c.secure).to_equal(true)
+        expect(c.same_site == SameSite.Strict).to_equal(true)
 
 
 # ============================================================================
@@ -182,6 +190,26 @@ describe "CookieStore storage":
         val stored = count_cookies_for_domain(store, "example.com")
         expect(stored).to_be_less_than(52)
 
+    it "AC-6: Max-Age zero removes the matching cookie":
+        val store = make_empty_store()
+        val origin = Origin(scheme: "https", host: "example.com", port: 443)
+        val live = parse_set_cookie("session=live; Path=/")
+        store.store_from_origin(live, origin, 100)
+        val expired = apply_max_age(parse_set_cookie("session=gone; Path=/; Max-Age=0"), "session=gone; Path=/; Max-Age=0", 101)
+        store.store_from_origin(expired, origin, 101)
+        expect(store.get_header_for_origin(origin, "/", Some(origin), "GET", false, 101)).to_equal("")
+
+    it "AC-6: insecure origin cannot shadow a Secure cookie":
+        val store = make_empty_store()
+        val secure_origin = Origin(scheme: "https", host: "example.com", port: 443)
+        val insecure_origin = Origin(scheme: "http", host: "sub.example.com", port: 80)
+        store.store_from_origin(parse_set_cookie("session=live; Domain=example.com; Path=/login/; Secure"), secure_origin, 100)
+        val shadow = parse_set_cookie("session=shadow; Domain=sub.example.com; Path=/login/admin")
+        val verdict = store.store_from_origin(shadow, insecure_origin, 101)
+        expect(verdict.accepted).to_equal(false)
+        val target = Origin(scheme: "https", host: "sub.example.com", port: 443)
+        expect(store.get_header_for_origin(target, "/login/admin", Some(target), "GET", false, 101)).to_contain("session=live")
+
 
 # ============================================================================
 # Helpers
@@ -266,7 +294,10 @@ fn store_cookie(store: CookieStore, c: Cookie):
     store.store(c)
 
 fn get_cookies_for(store: CookieStore, host: text, request_path: text) -> text:
-    return store.get_header(host, request_path)
+    val origin = Origin(scheme: "https", host: host, port: 443)
+    return store.get_header_for_origin(
+        origin, request_path, Some(origin), "GET", false, 0
+    )
 
 fn cookies_contain(header: text, name: text) -> bool:
     return header.contains(name)
