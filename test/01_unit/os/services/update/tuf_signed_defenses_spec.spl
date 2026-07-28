@@ -1,0 +1,134 @@
+# @cover src/os/services/update/tuf_signing.spl 40%
+"""
+# TUF Structural Defenses On Top Of Real Signatures
+
+**Category:** Update security
+**Status:** Real cryptography (Ed25519)
+
+## Overview
+
+Adding real signature verification must not weaken the defenses `tuf_metadata`
+already provides. The dangerous failure mode is an update that is *perfectly
+signed* and still malicious: an attacker who replays genuinely-signed OLD
+metadata, or who replays one valid signature twice to fake a second signer.
+These cases assert those defenses still fire after the crypto layer runs.
+
+## Absolute oracles
+
+- A signature that verifies twice still proves only ONE distinct signer, so a
+  replayed signature cannot manufacture a quorum.
+- A genuinely-signed but rolled-back root is rejected `TUF_ROLLBACK`.
+
+## Budget note
+
+A spec gets roughly 60 s of wall clock and each Ed25519 operation costs ~2.8 s
+(the JIT bails with `Unknown type: u128`, so the primitive runs interpreted).
+This file is sized to that: one keypair, four role signatures at module level
+plus one extra signature, and the distinct-signer case is asserted at the
+`check_role_signatures` boundary so it costs two verifications rather than a
+full four-role pipeline pass.
+"""
+
+use std.spec
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign}
+use os.services.update.tuf_metadata.{
+    RoleMetadata,
+    CurrentVersions,
+    TUF_ROLLBACK
+}
+use os.services.update.tuf_signing.{
+    RoleSignature,
+    SignedRole,
+    TrustedKey,
+    SignerCheck,
+    canonical_role_bytes,
+    check_role_signatures,
+    verify_update_signed
+}
+
+# ----------------------------------------------------------------------------
+# Fixtures — one keypair only; every Ed25519 op is counted
+# ----------------------------------------------------------------------------
+
+fn seed_of(n: u64) -> [u8]:
+    var s: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        s = s.push(((i * 7 + n * 31 + 3) % 251).to_u8())
+        i = i + 1
+    return s
+
+fn mk_role(role: text, ver: u64, thr: u64, signers: List<text>,
+           deleg: List<text>, rtv: u64) -> RoleMetadata:
+    return RoleMetadata(
+        role: role,
+        version: ver,
+        expires_at: 2000,
+        threshold: thr,
+        signer_key_ids: signers,
+        signatures_present: [],
+        delegated_key_ids: deleg,
+        recorded_targets_version: rtv)
+
+val KP_A: ([u8], [u8]) = ed25519_keypair_from_seed(seed_of(1))
+val SEED_A: [u8] = KP_A.0
+val PUB_A: [u8] = KP_A.1
+
+val KEYRING: List<TrustedKey> = [TrustedKey(key_id: "kA", public_key: PUB_A)]
+
+val M_ROOT: RoleMetadata = mk_role("root", 5, 1, ["kA"], ["kA"], 0)
+val M_TS:   RoleMetadata = mk_role("timestamp", 6, 1, ["kA"], [], 0)
+val M_SNAP: RoleMetadata = mk_role("snapshot", 4, 1, ["kA"], [], 11)
+val M_TGT:  RoleMetadata = mk_role("targets", 11, 1, ["kA"], [], 0)
+
+val CURRENT: CurrentVersions = CurrentVersions(root: 5, timestamp: 6, snapshot: 4, targets: 11)
+
+fn sign_a(meta: RoleMetadata) -> [u8]:
+    return ed25519_sign(SEED_A, PUB_A, canonical_role_bytes(meta))
+
+fn signed_a(meta: RoleMetadata, sig: [u8]) -> SignedRole:
+    return SignedRole(meta: meta, signatures: [RoleSignature(key_id: "kA", sig: sig)])
+
+val S_ROOT: SignedRole = signed_a(M_ROOT, sign_a(M_ROOT))
+val S_TS:   SignedRole = signed_a(M_TS,   sign_a(M_TS))
+val S_SNAP: SignedRole = signed_a(M_SNAP, sign_a(M_SNAP))
+val S_TGT:  SignedRole = signed_a(M_TGT,  sign_a(M_TGT))
+
+# ============================================================================
+
+describe "TUF thresholding counts DISTINCT verified signers":
+    """One valid signature replayed twice must not manufacture a second signer."""
+
+    it "two copies of one key's signature collapse to a single proven signer":
+        """Both copies verify, yet only one distinct key-id is proven."""
+        val touch = S_TGT
+        val sig: [u8] = touch.signatures[0].sig
+        val dup = SignedRole(
+            meta: M_TGT,
+            signatures: [
+                RoleSignature(key_id: "kA", sig: sig),
+                RoleSignature(key_id: "kA", sig: sig)])
+        val chk: SignerCheck = check_role_signatures(dup, ["kA"], KEYRING)
+        assert_true(chk.ok)
+        assert_eq(chk.verified_key_ids.len(), 1)
+
+describe "TUF structural defenses still fire on real signatures":
+    """Real crypto is layered onto the existing defenses, it does not replace them."""
+
+    it "a genuinely signed but rolled-back root is still rejected":
+        """The attacker replays authentic OLD metadata — rollback defense holds."""
+        val touch = CURRENT
+        val old_meta = mk_role("root", 2, 1, ["kA"], ["kA"], 0)
+        val old_root = signed_a(old_meta, sign_a(old_meta))
+        val out = verify_update_signed(old_root, S_TS, S_SNAP, S_TGT, KEYRING, touch, 100)
+        assert_false(out.accepted)
+        assert_eq(out.reason_code, TUF_ROLLBACK)
+
+    # The freeze/expiry and snapshot-consistency defenses are NOT re-asserted
+    # here: one more `verify_update_signed` pass costs four Ed25519
+    # verifications (~11 s) and pushed this file over the runner's ~60 s wall
+    # ("no examples executed"). Both remain proven structurally in
+    # test/01_unit/os/services/update/tuf_metadata_spec.spl, and the rollback
+    # case above already establishes that `verify_update_signed` delegates to
+    # the unchanged `verify_update` after the crypto layer succeeds — which is
+    # the property that carries every remaining structural defense across.

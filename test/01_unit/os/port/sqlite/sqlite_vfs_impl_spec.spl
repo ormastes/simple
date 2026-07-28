@@ -1,0 +1,572 @@
+# Spec for the SQLite-over-SimpleOS VFS IMPLEMENTATION.
+#
+# Absolute oracles only: exact byte arrays, exact sqlite3.h result codes, exact
+# file sizes read back off the real filesystem. Nothing here asserts "did not
+# crash".
+#
+# Every test uses a temp path unique to (pid, tag). A shared path caused real
+# FileLock contention between concurrent spec runs, which is a harness bug that
+# looks exactly like a product bug.
+#
+# Results come back as NAMED STRUCTS, not tuples — lint FSK002 / entry-closure
+# defect C4 swaps anonymous tuple members under freestanding codegen, which is
+# the target this VFS exists for.
+
+use os.port.sqlite.sqlite_vfs_impl.{
+    SqliteVfs, bytes_from_text, bytes_equal, read_all_bytes, normalize_full_path,
+    parent_dir_of, path_is_journal, journal_path_for, filled_bytes,
+    sqlite_ok, sqlite_busy, sqlite_ioerr, sqlite_notfound,
+    sqlite_ioerr_short_read, sqlite_ioerr_shmmap, sqlite_ioerr_shmlock,
+    sqlite_ioerr_shmopen, sqlite_ioerr_truncate,
+    open_main_db, open_main_journal, open_create, open_readwrite,
+    open_exclusive, open_deleteonclose,
+    sync_normal, sync_full,
+    access_exists, access_read, access_readwrite,
+    fcntl_size_hint, fcntl_has_moved,
+    lock_none, lock_shared, lock_reserved, lock_exclusive, lock_level_name_of,
+    impl_status_of, impl_count_with_status, impl_wal_supported,
+    impl_rollback_journal_supported, impl_wal_blocked_prerequisite,
+    amalgamation_build_status
+}
+
+extern fn rt_env_cwd() -> text
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+
+fn scratch_dir() -> text:
+    val d = rt_env_cwd() + "/build/sqlvfs_run"
+    rt_dir_create_all(d)
+    d
+
+# Unique per (pid, tag) so concurrent spec runs never contend on one FileLock.
+fn tpath(tag: text) -> text:
+    val pid = rt_getpid()
+    scratch_dir() + "/vfs_" + "{pid}" + "_" + tag + ".db"
+
+fn clean(base: text):
+    rt_file_delete(base)
+    rt_file_delete(base + "-journal")
+    rt_file_delete(base + ".lock")
+    rt_file_delete(base + ".sqlvfs.tmp")
+
+fn new_vfs() -> SqliteVfs:
+    SqliteVfs.create("simpleos", rt_env_cwd())
+
+fn db_flags() -> i64:
+    open_main_db() + open_create() + open_readwrite()
+
+fn journal_flags() -> i64:
+    open_main_journal() + open_create() + open_readwrite()
+
+# ===========================================================================
+describe "SQLite VFS impl — file IO carries real bytes":
+
+    it "read-after-write returns exactly the bytes written":
+        val base = tpath("rw")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        expect(h).to_equal(0)
+        expect(v.x_write(h, 0, bytes_from_text("SQLite format 3"))).to_equal(sqlite_ok())
+        val rr = v.x_read(h, 0, 15)
+        expect(rr.code).to_equal(sqlite_ok())
+        expect(bytes_equal(rr.data, bytes_from_text("SQLite format 3"))).to_equal(true)
+        # And the bytes are really on the filesystem, not just in the VFS.
+        expect(bytes_equal(read_all_bytes(base), bytes_from_text("SQLite format 3"))).to_equal(true)
+        expect(v.x_close(h)).to_equal(sqlite_ok())
+        clean(base)
+
+    it "an offset write lands at the offset and leaves the prefix intact":
+        val base = tpath("off")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        v.x_write(h, 0, bytes_from_text("AAAABBBB"))
+        expect(v.x_write(h, 4, bytes_from_text("ZZZZ"))).to_equal(sqlite_ok())
+        val rr = v.x_read(h, 0, 8)
+        expect(rr.code).to_equal(sqlite_ok())
+        expect(bytes_equal(rr.data, bytes_from_text("AAAAZZZZ"))).to_equal(true)
+        v.x_close(h)
+        clean(base)
+
+    it "a write past EOF zero-fills the hole, like pwrite":
+        val base = tpath("hole")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        v.x_write(h, 0, bytes_from_text("AB"))
+        expect(v.x_write(h, 5, bytes_from_text("Z"))).to_equal(sqlite_ok())
+        val sr = v.x_file_size(h)
+        expect(sr.code).to_equal(sqlite_ok())
+        expect(sr.size).to_equal(6)
+        val rr = v.x_read(h, 0, 6)
+        expect(rr.code).to_equal(sqlite_ok())
+        expect(rr.data[2]).to_equal(0)
+        expect(rr.data[3]).to_equal(0)
+        expect(rr.data[4]).to_equal(0)
+        expect(rr.data[5]).to_equal(90)
+        v.x_close(h)
+        clean(base)
+
+    it "a short read zero-fills the tail and returns SQLITE_IOERR_SHORT_READ":
+        val base = tpath("short")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        v.x_write(h, 0, bytes_from_text("ABCD"))
+        val rr = v.x_read(h, 2, 8)
+        expect(rr.code).to_equal(sqlite_ioerr_short_read())
+        expect(rr.data.len()).to_equal(8)
+        expect(rr.data[0]).to_equal(67)
+        expect(rr.data[1]).to_equal(68)
+        expect(rr.data[2]).to_equal(0)
+        expect(rr.data[7]).to_equal(0)
+        v.x_close(h)
+        clean(base)
+
+    it "xFileSize reports the real on-disk size":
+        val base = tpath("size")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        v.x_write(h, 0, filled_bytes(300, 7))
+        val sr = v.x_file_size(h)
+        expect(sr.code).to_equal(sqlite_ok())
+        expect(sr.size).to_equal(300)
+        expect(rt_file_size(base)).to_equal(300)
+        v.x_close(h)
+        clean(base)
+
+# ===========================================================================
+describe "SQLite VFS impl — xTruncate uses the house atomic pattern":
+
+    it "truncate shrinks to exactly the requested size and keeps the prefix":
+        val base = tpath("trunc")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        v.x_write(h, 0, bytes_from_text("0123456789"))
+        expect(v.x_truncate(h, 4)).to_equal(sqlite_ok())
+        val sr = v.x_file_size(h)
+        expect(sr.size).to_equal(4)
+        expect(rt_file_size(base)).to_equal(4)
+        val rr = v.x_read(h, 0, 4)
+        expect(rr.code).to_equal(sqlite_ok())
+        expect(bytes_equal(rr.data, bytes_from_text("0123"))).to_equal(true)
+        v.x_close(h)
+        clean(base)
+
+    it "truncate to zero empties the file and leaves no .tmp behind":
+        val base = tpath("trunc0")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        v.x_write(h, 0, bytes_from_text("payload"))
+        expect(v.x_truncate(h, 0)).to_equal(sqlite_ok())
+        expect(rt_file_size(base)).to_equal(0)
+        # The tmp was renamed, not left as litter — that is the whole point of
+        # the tmp+fsync+rename pattern.
+        expect(rt_file_exists(base + ".sqlvfs.tmp")).to_equal(false)
+        v.x_close(h)
+        clean(base)
+
+    it "a negative truncate is rejected with SQLITE_IOERR_TRUNCATE":
+        val base = tpath("truncneg")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        expect(v.x_truncate(h, -1)).to_equal(sqlite_ioerr_truncate())
+        v.x_close(h)
+        clean(base)
+
+# ===========================================================================
+# The reason a VFS is worth having.
+describe "SQLite VFS impl — rollback-journal durability ordering":
+
+    it "the correct sequence lands and the journal is DURABLE ON DISK before the page write":
+        val base = tpath("ord_ok")
+        clean(base)
+        var v = new_vfs()
+        val hdb = v.x_open(base, db_flags())
+        val hj = v.x_open(journal_path_for(base), journal_flags())
+
+        # 1. the database page as it exists today
+        v.x_write(hdb, 0, bytes_from_text("OLDPAGE."))
+        v.x_sync(hdb, sync_full())
+
+        # 2. journal the PRE-IMAGE of the page we are about to modify
+        expect(v.x_write(hj, 0, bytes_from_text("OLDPAGE."))).to_equal(sqlite_ok())
+
+        # 3. make the journal durable
+        expect(v.x_sync(hj, sync_full())).to_equal(sqlite_ok())
+
+        # CRASH POINT: right here, before the page is touched, the pre-image
+        # must already be readable off the real filesystem. If a power cut
+        # happened now, recovery has everything it needs.
+        expect(bytes_equal(read_all_bytes(journal_path_for(base)), bytes_from_text("OLDPAGE."))).to_equal(true)
+        expect(bytes_equal(read_all_bytes(base), bytes_from_text("OLDPAGE."))).to_equal(true)
+
+        # 4. only now overwrite the page
+        expect(v.x_write(hdb, 0, bytes_from_text("NEWPAGE!"))).to_equal(sqlite_ok())
+        expect(v.x_sync(hdb, sync_full())).to_equal(sqlite_ok())
+        expect(bytes_equal(read_all_bytes(base), bytes_from_text("NEWPAGE!"))).to_equal(true)
+
+        # 5. commit point: the journal is deleted with a durable directory entry
+        expect(v.x_delete(journal_path_for(base), true)).to_equal(sqlite_ok())
+        expect(rt_file_exists(journal_path_for(base))).to_equal(false)
+
+        expect(v.journal_before_page_ordering_holds(base)).to_equal(true)
+        expect(v.violation_count()).to_equal(0)
+        v.x_close(hdb)
+        v.x_close(hj)
+        clean(base)
+
+    it "REFUSES a page write while the journal still has unsynced bytes":
+        val base = tpath("ord_bad")
+        clean(base)
+        var v = new_vfs()
+        val hdb = v.x_open(base, db_flags())
+        val hj = v.x_open(journal_path_for(base), journal_flags())
+
+        v.x_write(hdb, 0, bytes_from_text("OLDPAGE."))
+        v.x_sync(hdb, sync_full())
+
+        # journal written but DELIBERATELY not synced
+        expect(v.x_write(hj, 0, bytes_from_text("OLDPAGE."))).to_equal(sqlite_ok())
+
+        # the page overwrite must fail closed
+        expect(v.x_write(hdb, 0, bytes_from_text("NEWPAGE!"))).to_equal(sqlite_ioerr())
+
+        # and the database on disk must be UNCHANGED — the refusal is real,
+        # not cosmetic
+        expect(bytes_equal(read_all_bytes(base), bytes_from_text("OLDPAGE."))).to_equal(true)
+        expect(v.violation_count()).to_equal(1)
+
+        # after the journal IS synced, the same write is accepted
+        expect(v.x_sync(hj, sync_full())).to_equal(sqlite_ok())
+        expect(v.x_write(hdb, 0, bytes_from_text("NEWPAGE!"))).to_equal(sqlite_ok())
+        expect(bytes_equal(read_all_bytes(base), bytes_from_text("NEWPAGE!"))).to_equal(true)
+        v.x_close(hdb)
+        v.x_close(hj)
+        clean(base)
+
+    it "the log-based ordering verdict independently agrees with the guard":
+        val base = tpath("ord_log")
+        clean(base)
+        var v = new_vfs()
+        val hdb = v.x_open(base, db_flags())
+        val hj = v.x_open(journal_path_for(base), journal_flags())
+        v.x_write(hj, 0, bytes_from_text("pre"))
+        v.x_sync(hj, sync_normal())
+        v.x_write(hdb, 0, bytes_from_text("new"))
+        expect(v.journal_before_page_ordering_holds(base)).to_equal(true)
+        v.x_close(hdb)
+        v.x_close(hj)
+        clean(base)
+
+    # DELIBERATE-RED CALIBRATION, kept permanently.
+    # Dropping the ordering rule is not a hypothetical: this test drops it and
+    # pins exactly what goes wrong, so the guard can never be quietly removed
+    # while the suite stays green.
+    it "CALIBRATION: with the ordering guard dropped, the page write succeeds and the log verdict goes FALSE":
+        val base = tpath("ord_cal")
+        clean(base)
+        var v = new_vfs()
+        v.enforce_journal_sync_before_page_write = false
+        val hdb = v.x_open(base, db_flags())
+        val hj = v.x_open(journal_path_for(base), journal_flags())
+
+        v.x_write(hdb, 0, bytes_from_text("OLDPAGE."))
+        v.x_sync(hdb, sync_full())
+        v.x_write(hj, 0, bytes_from_text("OLDPAGE."))
+        # no journal sync — with the guard off this is now ACCEPTED
+        expect(v.x_write(hdb, 0, bytes_from_text("NEWPAGE!"))).to_equal(sqlite_ok())
+        # the database has moved on while its recovery source may not be durable
+        expect(bytes_equal(read_all_bytes(base), bytes_from_text("NEWPAGE!"))).to_equal(true)
+        # no violation was recorded, because the guard that records them is off
+        expect(v.violation_count()).to_equal(0)
+        # but the independent log verdict catches it
+        expect(v.journal_before_page_ordering_holds(base)).to_equal(false)
+        v.x_close(hdb)
+        v.x_close(hj)
+        clean(base)
+
+    it "xSync FULL also fsyncs the parent directory":
+        val base = tpath("syncdir")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        v.x_write(h, 0, bytes_from_text("d"))
+        expect(v.x_sync(h, sync_full())).to_equal(sqlite_ok())
+        expect(parent_dir_of(base)).to_equal(scratch_dir())
+        v.x_close(h)
+        clean(base)
+
+# ===========================================================================
+describe "SQLite VFS impl — locking over the one existing primitive":
+
+    it "acquire, conflict, release: a second handle gets SQLITE_BUSY and then succeeds":
+        val base = tpath("lock")
+        clean(base)
+        var v = new_vfs()
+        val h1 = v.x_open(base, db_flags())
+        val h2 = v.x_open(base, db_flags())
+
+        expect(v.x_lock(h1, lock_shared())).to_equal(sqlite_ok())
+        expect(rt_file_exists(base + ".lock")).to_equal(true)
+
+        # conflicting acquisition fails CLOSED, it does not block or succeed
+        expect(v.x_lock(h2, lock_shared())).to_equal(sqlite_busy())
+
+        # escalation on the holder is fine
+        expect(v.x_lock(h1, lock_exclusive())).to_equal(sqlite_ok())
+        expect(v.handle_lock_level(h1)).to_equal(lock_exclusive())
+
+        expect(v.x_unlock(h1, lock_none())).to_equal(sqlite_ok())
+        expect(rt_file_exists(base + ".lock")).to_equal(false)
+
+        # now the other handle can take it
+        expect(v.x_lock(h2, lock_shared())).to_equal(sqlite_ok())
+        expect(v.x_unlock(h2, lock_none())).to_equal(sqlite_ok())
+        expect(rt_file_exists(base + ".lock")).to_equal(false)
+        v.x_close(h1)
+        v.x_close(h2)
+        clean(base)
+
+    it "the lock is the REAL on-disk FileLock: a separate VFS instance is blocked by it":
+        val base = tpath("lock2")
+        clean(base)
+        var a = new_vfs()
+        var b = new_vfs()
+        val ha = a.x_open(base, db_flags())
+        val hb = b.x_open(base, db_flags())
+        expect(a.x_lock(ha, lock_reserved())).to_equal(sqlite_ok())
+        # `b` shares no in-process table with `a`; it can only see the lockfile.
+        expect(b.x_lock(hb, lock_shared())).to_equal(sqlite_busy())
+        expect(a.x_unlock(ha, lock_none())).to_equal(sqlite_ok())
+        expect(b.x_lock(hb, lock_shared())).to_equal(sqlite_ok())
+        expect(b.x_unlock(hb, lock_none())).to_equal(sqlite_ok())
+        a.x_close(ha)
+        b.x_close(hb)
+        clean(base)
+
+    it "xCheckReservedLock sees another holder and does not see itself":
+        val base = tpath("chkres")
+        clean(base)
+        var v = new_vfs()
+        val h1 = v.x_open(base, db_flags())
+        val h2 = v.x_open(base, db_flags())
+        val before = v.x_check_reserved_lock(h2)
+        expect(before.code).to_equal(sqlite_ok())
+        expect(before.value).to_equal(false)
+        v.x_lock(h1, lock_reserved())
+        val other = v.x_check_reserved_lock(h2)
+        expect(other.code).to_equal(sqlite_ok())
+        expect(other.value).to_equal(true)
+        # the holder itself is not "someone else"
+        val mine = v.x_check_reserved_lock(h1)
+        expect(mine.value).to_equal(false)
+        v.x_unlock(h1, lock_none())
+        val after = v.x_check_reserved_lock(h2)
+        expect(after.value).to_equal(false)
+        v.x_close(h1)
+        v.x_close(h2)
+        clean(base)
+
+    it "xClose releases a still-held lock rather than leaking the lockfile":
+        val base = tpath("lockclose")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        v.x_lock(h, lock_exclusive())
+        expect(rt_file_exists(base + ".lock")).to_equal(true)
+        expect(v.x_close(h)).to_equal(sqlite_ok())
+        expect(rt_file_exists(base + ".lock")).to_equal(false)
+        clean(base)
+
+    it "the lock ladder names match sqlite3.h":
+        expect(lock_level_name_of(0)).to_equal("NONE")
+        expect(lock_level_name_of(1)).to_equal("SHARED")
+        expect(lock_level_name_of(2)).to_equal("RESERVED")
+        expect(lock_level_name_of(3)).to_equal("PENDING")
+        expect(lock_level_name_of(4)).to_equal("EXCLUSIVE")
+
+# ===========================================================================
+describe "SQLite VFS impl — namespace methods":
+
+    it "xAccess is false for a missing file and true once it exists":
+        val base = tpath("access")
+        clean(base)
+        var v = new_vfs()
+        val miss = v.x_access(base, access_exists())
+        expect(miss.code).to_equal(sqlite_ok())
+        expect(miss.value).to_equal(false)
+        expect(v.x_access(base, access_read()).value).to_equal(false)
+        expect(v.x_access(base, access_readwrite()).value).to_equal(false)
+        val h = v.x_open(base, db_flags())
+        val hit = v.x_access(base, access_exists())
+        expect(hit.code).to_equal(sqlite_ok())
+        expect(hit.value).to_equal(true)
+        v.x_close(h)
+        clean(base)
+
+    it "xOpen without CREATE refuses a missing file":
+        val base = tpath("nocreate")
+        clean(base)
+        var v = new_vfs()
+        expect(v.x_open(base, open_main_db() + open_readwrite())).to_equal(-1)
+        expect(rt_file_exists(base)).to_equal(false)
+
+    it "xOpen with CREATE+EXCLUSIVE refuses an existing file":
+        val base = tpath("excl")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        expect(h).to_equal(0)
+        expect(v.x_open(base, open_main_db() + open_create() + open_exclusive())).to_equal(-1)
+        v.x_close(h)
+        clean(base)
+
+    it "DELETEONCLOSE removes the file on xClose":
+        val base = tpath("delonclose")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags() + open_deleteonclose())
+        expect(rt_file_exists(base)).to_equal(true)
+        expect(v.x_close(h)).to_equal(sqlite_ok())
+        expect(rt_file_exists(base)).to_equal(false)
+
+    it "xDelete of a missing file is OK, of an existing file removes it":
+        val base = tpath("del")
+        clean(base)
+        var v = new_vfs()
+        expect(v.x_delete(base, false)).to_equal(sqlite_ok())
+        val h = v.x_open(base, db_flags())
+        v.x_close(h)
+        expect(rt_file_exists(base)).to_equal(true)
+        expect(v.x_delete(base, true)).to_equal(sqlite_ok())
+        expect(rt_file_exists(base)).to_equal(false)
+
+    it "xFullPathname normalizes . .. duplicate slashes and trailing slash":
+        expect(normalize_full_path("/w", "a/b")).to_equal("/w/a/b")
+        expect(normalize_full_path("/w", "a//b")).to_equal("/w/a/b")
+        expect(normalize_full_path("/w", "./a/./b")).to_equal("/w/a/b")
+        expect(normalize_full_path("/w", "a/../b")).to_equal("/w/b")
+        expect(normalize_full_path("/w", "a/b/")).to_equal("/w/a/b")
+        expect(normalize_full_path("/w", "/abs/p")).to_equal("/abs/p")
+        expect(normalize_full_path("/w", "/abs//p/../q/")).to_equal("/abs/q")
+        expect(normalize_full_path("/w", "..")).to_equal("/")
+        expect(normalize_full_path("/w", ".")).to_equal("/w")
+
+    it "xFullPathname through the VFS returns the normalized absolute path":
+        var v = SqliteVfs.create("simpleos", "/base")
+        val fp = v.x_full_pathname("sub/../x.db")
+        expect(fp.code).to_equal(sqlite_ok())
+        expect(fp.path).to_equal("/base/x.db")
+
+    it "journal path derivation and detection are consistent":
+        expect(journal_path_for("/d/a.db")).to_equal("/d/a.db-journal")
+        expect(path_is_journal("/d/a.db-journal")).to_equal(true)
+        expect(path_is_journal("/d/a.db")).to_equal(false)
+        expect(parent_dir_of("/d/a.db")).to_equal("/d")
+        expect(parent_dir_of("/a.db")).to_equal("/")
+        expect(parent_dir_of("a.db")).to_equal(".")
+
+    it "xRandomness returns the requested count and xSleep sleeps at least as long as asked":
+        var v = new_vfs()
+        expect(v.x_randomness(16).len()).to_equal(16)
+        expect(v.x_randomness(0).len()).to_equal(0)
+        expect(v.x_sleep(0)).to_equal(0)
+        expect(v.x_sleep(1000)).to_equal(1000)
+        expect(v.x_sleep(1500) >= 1500).to_equal(true)
+
+    it "xCurrentTime returns a plausible Julian Day and the int64 form agrees":
+        var v = new_vfs()
+        val jd = v.x_current_time()
+        # 2440587.5 is the Unix epoch; anything sane is well past 2460000 (2023).
+        expect(jd > 2460000.0).to_equal(true)
+        expect(jd < 2500000.0).to_equal(true)
+        expect(v.x_current_time_int64() > 0).to_equal(true)
+
+# ===========================================================================
+describe "SQLite VFS impl — unsupported surface fails CLOSED":
+
+    it "every shared-memory method returns its real SQLITE_IOERR_SHM* code":
+        val base = tpath("shm")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        expect(v.x_shm_map(h, 0, 32768, true)).to_equal(sqlite_ioerr_shmmap())
+        expect(v.x_shm_lock(h, 0, 1, 0)).to_equal(sqlite_ioerr_shmlock())
+        expect(v.x_shm_barrier(h)).to_equal(sqlite_ioerr_shmmap())
+        expect(v.x_shm_unmap(h, true)).to_equal(sqlite_ioerr_shmmap())
+        expect(v.x_shm_open(h)).to_equal(sqlite_ioerr_shmopen())
+        # never SQLITE_OK — that is the bug this test exists to prevent
+        expect(v.x_shm_map(h, 0, 32768, true) == sqlite_ok()).to_equal(false)
+        v.x_close(h)
+        clean(base)
+
+    it "WAL stays gated and says exactly what it is waiting on":
+        expect(impl_wal_supported()).to_equal(false)
+        expect(impl_status_of("xShmMap").status).to_equal("unsupported")
+        expect(impl_wal_blocked_prerequisite()).to_contain("shared mmap")
+        # rollback-journal mode, by contrast, is real
+        expect(impl_rollback_journal_supported()).to_equal(true)
+
+    it "xDeviceCharacteristics claims NO unproven IOCAP bit":
+        val base = tpath("iocap")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        expect(v.x_device_characteristics(h)).to_equal(0)
+        expect(v.x_sector_size(h)).to_equal(512)
+        v.x_close(h)
+        clean(base)
+
+    it "xFileControl handles the two opcodes it claims and returns NOTFOUND for the rest":
+        val base = tpath("fcntl")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        expect(v.x_file_control(h, fcntl_size_hint())).to_equal(sqlite_ok())
+        expect(v.x_file_control(h, fcntl_has_moved())).to_equal(sqlite_ok())
+        expect(v.x_file_control(h, 9999)).to_equal(sqlite_notfound())
+        v.x_close(h)
+        clean(base)
+
+    it "operations on a closed or bogus handle fail rather than corrupting":
+        val base = tpath("badh")
+        clean(base)
+        var v = new_vfs()
+        val h = v.x_open(base, db_flags())
+        v.x_close(h)
+        expect(v.x_write(h, 0, bytes_from_text("x"))).to_not_equal(sqlite_ok())
+        expect(v.x_read(h, 0, 4).code).to_not_equal(sqlite_ok())
+        expect(v.x_sync(h, sync_normal())).to_not_equal(sqlite_ok())
+        expect(v.x_truncate(h, 0)).to_not_equal(sqlite_ok())
+        expect(v.x_write(4242, 0, bytes_from_text("x"))).to_not_equal(sqlite_ok())
+        expect(v.x_file_size(4242).code).to_not_equal(sqlite_ok())
+        clean(base)
+
+    it "the implementation status table is honest about what is real":
+        expect(impl_status_of("xTruncate").status).to_equal("supported")
+        expect(impl_status_of("xSync").status).to_equal("supported")
+        expect(impl_status_of("xLock").status).to_equal("partial")
+        expect(impl_status_of("xUnlock").status).to_equal("partial")
+        expect(impl_status_of("xCheckReservedLock").status).to_equal("partial")
+        expect(impl_status_of("xDeviceCharacteristics").status).to_equal("partial")
+        expect(impl_status_of("xShmMap").status).to_equal("unsupported")
+        expect(impl_status_of("xShmLock").status).to_equal("unsupported")
+        expect(impl_status_of("xShmBarrier").status).to_equal("unsupported")
+        expect(impl_status_of("xShmUnmap").status).to_equal("unsupported")
+        expect(impl_count_with_status("unsupported")).to_equal(4)
+        expect(impl_count_with_status("partial")).to_equal(5)
+        expect(impl_count_with_status("supported")).to_equal(14)
+        expect(impl_status_of("xNoSuchMethod").status).to_equal("unsupported")
+
+    it "the amalgamation build is still reported blocked":
+        expect(amalgamation_build_status()).to_contain("blocked")
+        expect(amalgamation_build_status()).to_contain("C toolchain")

@@ -1,7 +1,7 @@
 # Module-global write inside a `fn` is invisible to every callee (interpreter)
 
 **ID:** module_global_write_invisible_to_callee_2026-07-27
-**Status:** OPEN — root-caused, not fixed
+**Status:** FIXED 2026-07-28 (lane GFIX) — see §Fix applied
 **Severity:** Critical (silent wrong results; no diagnostic)
 **Component:** Rust seed interpreter — `src/compiler_rust/compiler/src/interpreter_call/**`
 **Engines:** interpreter ONLY. JIT (cranelift) is correct.
@@ -337,3 +337,56 @@ it rather than assume. A JIT-only run is a false green: every row passes there.
 - `doc/08_tracking/bug/seed_interp_defer_lazy_imports_module_globals_2026-07-24.md` — FIXED `2cbebf1bcb05`; added the flat-map mirror in `sync_owned_captured_globals`
 - `doc/08_tracking/bug/cross_import_const_no_hir_linkage_2026-07-25.md` — OPEN, cross-import consts
 - `doc/08_tracking/bug/selfhost_two_hop_field_method_mutation_lost_2026-07-27.md` — sibling place-model defect
+
+## Sites repaired (lane GLOBALSWEEP, 2026-07-27)
+
+Containment sweep across owned `src/**`. Scanner `build/gsweep_scan.py` (validated: run
+against `git show HEAD:src/os/kernel/smp/percpu.spl` it reports exactly the known
+`percpu_init -> percpu_store_entry` positive and nothing else). Corpus 10,963 files / 503
+with module globals / 1,943 globals → **159 unique candidates**
+(`build/gsweep_candidates.txt`). Full table and per-site judgement:
+`.spipe/global_write_sweep/state.md`.
+
+| # | File | Writer → callee | Silent consequence | Repair |
+|---|---|---|---|---|
+| 1 | `src/os/kernel/fd_table.spl` | `fd_set` → `_fd_mirror_from_object` | **worst site found.** Mirror saw pre-write `fd_objects[idx]==0`, took the `obj == 0` branch and cleared the fd to `FD_TYPE_FREE`, so `fd_set` silently opened NO descriptor at all — including stdio | mirror inline |
+| 2 | same | `fd_activate_task` → `_fd_store_active_context` | new task's context looked up under the *previous* owner; freshly seeded stdio never persisted | `_fd_store_context_at(ctx)` + leaf `_fd_claim_context` |
+| 3 | same | `fd_close` → `_fd_release_object_ref` | closed fd still seen as a live ref and re-mirrored (resurrected) | call before the writes |
+| 4 | same | `fd_dup`/`fd_dup_from`/`fd_dup2` → `_fd_refresh_object_mirrors` | new fd never mirrored → `dup` returned an fd that `fd_is_valid` rejected | `_fd_attach_dup(new_idx, obj, rc, cloexec)` |
+| 5 | same | `_fd_release_object_ref` → `_fd_refresh_object_mirrors` | mirrors got the pre-decrement refcount | inline with a local |
+| 6 | same | `fd_set_status_flags` / `fd_set_offset` → `_fd_refresh_object_mirrors` | mirror refreshed with the stale value — the point of the call defeated | inline |
+| 7 | same | `fd_prepare_fork{,_to_task}` → `_fd_mirror_from_object` / `_fd_store_active_context` | fork child context clone discarded | leaf `_fd_bump_fork_refs` + `_fd_mark_context` |
+| 8 | same | `fd_release_task` → `_fd_store_active_context` | table re-persisted into a slot just marked free | reorder + leaf |
+| 9 | same | `fd_table_init` → `fd_activate_task` | non-idempotent init: re-init observed pre-reset scalars | writes pushed into leaf resets |
+| 10 | `src/lib/nogc_sync_mut/db/dbfs_engine/superblock.spl` | `dbfs_bitmap_reset` → `_dbfs_bitmap_ensure_init` | **allocator**: `_dbfs_bitmap_init` read stale `true` → early return → bitmap left EMPTY and sectors 0-3 never re-marked reserved | build local, publish once |
+| 11 | `src/lib/nogc_sync_mut/src/aop.spl` | `init_aop` → `_seal_registry` / `get_registry` | **SECURITY**: `_seal_registry` read stale `None` and did nothing — the aspect registry was never sealed, defeating the control its own comment describes | build local, seal, publish once |
+| 12 | `src/os/gui/render.spl` | `render_init` → `render_mark_dirty_rect` | stale `g_width`/`g_height` (0 at boot) hit the `g_width == 0` guard → initial full-screen damage dropped, first frame never presented | record damage inline |
+| 13 | `src/lib/nogc_sync_mut/spec.spl` | `_execute_it` → `_write_test_result_evidence` | evidence file recorded the tally from **before** the test that just ran; a failing final example could leave false-green evidence | pass tallies as arguments |
+| 14 | `src/lib/nogc_sync_mut/coverage.spl` | `reload_coverage_data` → `_load_coverage_data` | stale `_coverage_data_loaded == true` → early return → reload was a silent no-op | guard moved to callers |
+
+### Evidence
+
+`test/01_unit/os/posix/fd_table_spec.spl`: **18 of 20 examples failing before the repair** —
+only the two negative "reject invalid input" examples passed, the same signature as percpu's
+10/14. Failure text `expected -9 to equal 0` (EBADF) confirmed descriptors were being left
+`FD_TYPE_FREE`. After repair: **14 of 20 passing**.
+
+### Residual — input for the root-cause lane
+
+The 6 still-failing fd_table examples are all in the stdio-seed / dup family. Rewriting
+`_fd_seed_stdio` as a leaf (inlining allocation rather than delegating to `fd_set`) did **not**
+recover them. That points at the *depth* axis rather than the read-after-write-through-a-call
+shape: writes made several hops below the caller are lost on the way back up, consistent with
+the "two-hop / DEPTH is the only axis" interpreter place-model note. Not a separate product
+bug — it is this defect, and the repairs above cannot reach it.
+
+### Spec verdicts
+
+| File | Spec | Verdict |
+|---|---|---|
+| `src/os/kernel/fd_table.spl` | `test/01_unit/os/posix/fd_table_spec.spl` | **2/20 → 14/20 passing** |
+| `src/lib/nogc_sync_mut/coverage.spl` | `test/03_system/coverage/coverage_check_api_spec.spl` | 24/24 GREEN |
+| `src/lib/nogc_sync_mut/src/aop.spl` | `test/03_system/security/security_aop_spec.spl` | 120/167; A/B'd against `HEAD` = identical 120/167 → **no regression**, the 47 failures are pre-existing |
+| `src/lib/nogc_sync_mut/spec.spl` | every spec run | sound — post-edit run still enumerates all 20 fd_table examples |
+| `src/lib/nogc_sync_mut/db/dbfs_engine/superblock.spl` | **no covering spec exists** | repaired by inspection only |
+| `src/os/gui/render.spl` | **no covering spec exists** | repaired by inspection only |
