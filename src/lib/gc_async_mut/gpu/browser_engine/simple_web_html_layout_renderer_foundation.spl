@@ -2,6 +2,9 @@
 
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+}
 
 # Render budget + CSS quotas (hostile-page hardening)
 # ---------------------------------------------------------------------------
@@ -73,6 +76,21 @@ fn simple_web_backdrop_admission(backdrop: text) -> SimpleWebBackdropAdmission:
 # default.
 val WEB_RENDER_BUDGET_MS: i64 = 10000
 val SIMPLE_WEB_MAX_HTML_NODES: i32 = 65536
+val SIMPLE_WEB_MAX_HTML_BYTES: i64 = BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+val SIMPLE_WEB_MAX_HTML_PARTS: i32 = 262144
+
+fn _simple_web_html_source_admitted(html: text, byte_limit: i64) -> bool:
+    if html.len() > byte_limit:
+        return false
+    var part_count = 1
+    var i = 0
+    while i < html.len():
+        if html.char_code_at(i) == 60:
+            part_count = part_count + 1
+            if part_count > SIMPLE_WEB_MAX_HTML_PARTS:
+                return false
+        i = i + 1
+    true
 
 # Optional override for WEB_RENDER_BUDGET_MS, read from the environment at the
 # start of every render so long/headless probes can raise the budget without
@@ -726,15 +744,32 @@ fn text_list_prefix(values: [text], count: i32) -> [text]:
     out
 
 fn parse_html(html: text) -> [HNode]:
-    _parse_html_with_node_limit(html, SIMPLE_WEB_MAX_HTML_NODES)
+    _parse_html_with_limits(
+        html, SIMPLE_WEB_MAX_HTML_NODES, SIMPLE_WEB_MAX_HTML_BYTES
+    )
 
 fn _parse_html_with_node_limit(html: text, requested_node_limit: i32) -> [HNode]:
+    _parse_html_with_limits(
+        html, requested_node_limit, SIMPLE_WEB_MAX_HTML_BYTES
+    )
+
+fn _parse_html_with_limits(
+    html: text, requested_node_limit: i32, requested_byte_limit: i64
+) -> [HNode]:
     val node_limit = if requested_node_limit < 1:
         1
     elif requested_node_limit > SIMPLE_WEB_MAX_HTML_NODES:
         SIMPLE_WEB_MAX_HTML_NODES
     else:
         requested_node_limit
+    val byte_limit = if requested_byte_limit < 0:
+        0
+    elif requested_byte_limit > SIMPLE_WEB_MAX_HTML_BYTES:
+        SIMPLE_WEB_MAX_HTML_BYTES
+    else:
+        requested_byte_limit
+    if not _simple_web_html_source_admitted(html, byte_limit):
+        return [mk_node("#root", -1)]
     # Scan the document into a flat event list, two parallel LOCAL arrays:
     #   kind "g" -- tag: payload is the tag's inner text
     #   kind "x" -- text run between tags (raw, entities still encoded)
@@ -967,6 +1002,13 @@ pub fn simple_web_layout_debug_capped_node_count(
     html: text, requested_node_limit: i32
 ) -> i32:
     _parse_html_with_node_limit(html, requested_node_limit).len() as i32
+
+pub fn simple_web_layout_debug_capped_input_node_count(
+    html: text, requested_byte_limit: i64
+) -> i32:
+    _parse_html_with_limits(
+        html, SIMPLE_WEB_MAX_HTML_NODES, requested_byte_limit
+    ).len() as i32
 
 pub fn simple_web_layout_debug_attr_by_id(html: text, id: text, attr: text) -> text:
     val nodes = parse_html(html)

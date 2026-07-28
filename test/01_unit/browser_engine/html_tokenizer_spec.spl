@@ -1,7 +1,9 @@
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.html_tokenizer.{
     HtmlTokenizer, HtmlToken, HtmlTokenKind, HtmlAttr,
-    html_tokenizer_new, html_tokenizer_tokenize
+    html_tokenizer_new, html_tokenizer_tokenize,
+    html_tokenizer_tokenize_with_limit,
+    html_tokenizer_tokenize_with_limits
 }
 
 fn _tokenize(html: text) -> [HtmlToken]:
@@ -73,6 +75,54 @@ fn _first_char_token_data(html: text) -> text:
 # ============================================================================
 
 describe "HtmlTokenizer basic tags":
+    it "AC-1: accepts the exact token limit and truncates the next token":
+        val tokenizer = html_tokenizer_new("<p>x</p>")
+        val exact = html_tokenizer_tokenize_with_limit(tokenizer, 3)
+        val overflow = html_tokenizer_tokenize_with_limit(tokenizer, 2)
+
+        expect(exact.truncated).to_equal(false)
+        expect(exact.tokens.len()).to_equal(4)
+        expect(overflow.truncated).to_equal(true)
+        expect(overflow.tokens.len()).to_equal(3)
+        expect(
+            overflow.tokens[2].token_kind == HtmlTokenKind.Eof
+        ).to_equal(true)
+
+    it "AC-1: bounds retained attributes before emitting their tag":
+        val tokenizer = html_tokenizer_new("<p a='1' b='2'>x</p>")
+        val exact = html_tokenizer_tokenize_with_limits(tokenizer, 10, 2)
+        val overflow = html_tokenizer_tokenize_with_limits(tokenizer, 10, 1)
+
+        expect(exact.truncated).to_equal(false)
+        expect(exact.tokens[0].attrs.len()).to_equal(2)
+        expect(overflow.truncated).to_equal(true)
+        expect(overflow.tokens.len()).to_equal(1)
+        expect(
+            overflow.tokens[0].token_kind == HtmlTokenKind.Eof
+        ).to_equal(true)
+
+    it "AC-1: preserves exact limits across raw text and ignored syntax":
+        val raw = html_tokenizer_tokenize_with_limit(
+            html_tokenizer_new("<script>x</script>"), 2
+        )
+        val ignored = html_tokenizer_tokenize_with_limit(
+            html_tokenizer_new("<p><?ignored>"), 1
+        )
+        val duplicate = html_tokenizer_tokenize_with_limits(
+            html_tokenizer_new("<p a='1' A='2'>"), 10, 1
+        )
+
+        expect(raw.truncated).to_equal(true)
+        expect(raw.tokens.len()).to_equal(3)
+        expect(
+            raw.tokens[1].token_kind == HtmlTokenKind.Character
+        ).to_equal(true)
+        expect(ignored.truncated).to_equal(false)
+        expect(ignored.tokens.len()).to_equal(2)
+        expect(duplicate.truncated).to_equal(false)
+        expect(duplicate.tokens[0].attrs.len()).to_equal(1)
+        expect(duplicate.tokens[0].attrs[0].value).to_equal("1")
+
     it "AC-1: emits StartTag token for simple open tag":
         val tok = _first_start_tag("<p>hello</p>")
         expect(tok.tag_name).to_equal("p")

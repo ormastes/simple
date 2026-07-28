@@ -264,6 +264,8 @@ All defaults are compile-time constants with bounded production overrides:
 - URL/header/body/decoded resource;
 - redirects/connections;
 - DOM nodes: 65,536 per parsed document; depth/attributes/text are also bounded;
+- HTML parse work: 262,144 tokens, 65,536 retained attributes, and a 1 MiB
+  direct-render source / 262,144 structural-part ceiling;
 - script source/jobs/microtasks/timers;
 - frame callbacks and work time;
 - Draw IR commands/strings/images/pixels;

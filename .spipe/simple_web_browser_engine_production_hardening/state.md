@@ -1335,3 +1335,8 @@ implementation in progress / target evidence blocked
   evaluation. Duplicate `Access-Control-Allow-Origin` values therefore fail
   closed in both response-body and preflight paths regardless of line order,
   while repeated list-valued method/header fields retain comma-list behavior.
+- HTML tokenizer retention is now independently bounded at 262,144 content
+  tokens and 65,536 unique attributes, with exact-limit/overflow signals folded
+  into atomic BrowserSession admission. Direct render parsing reuses the 1 MiB
+  renderer envelope and a 262,144-part structural cap before `split`/event
+  allocation; rejected root-only results cannot enter split-heavy diagnostics.

@@ -7,6 +7,9 @@
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 
+pub val HTML_MAX_TOKENS: i32 = 262144
+pub val HTML_MAX_ATTRIBUTES: i32 = 65536
+
 # =========================================================================
 # Token types
 # =========================================================================
@@ -60,19 +63,61 @@ pub class HtmlTokenizer:
     pos: i32
     length: i32
 
+pub class HtmlTokenizeResult:
+    tokens: [HtmlToken]
+    truncated: bool
+
+class _TokenSink:
+    tokens: [HtmlToken]
+    limit: i32
+    truncated: bool
+
+    me push(token: HtmlToken) -> bool:
+        if self.tokens.len() >= self.limit:
+            self.truncated = true
+            return false
+        self.tokens.push(token)
+        true
+
 pub fn html_tokenizer_new(html: text) -> HtmlTokenizer:
     """Create a new tokenizer for the given HTML string."""
     HtmlTokenizer(html: html, pos: 0, length: html.len())
 
 pub fn html_tokenizer_tokenize(t: HtmlTokenizer) -> [HtmlToken]:
     """Tokenize the entire input, returning all tokens including final EOF."""
-    var tokens: [HtmlToken] = []
+    html_tokenizer_tokenize_with_limit(t, HTML_MAX_TOKENS).tokens
+
+pub fn html_tokenizer_tokenize_with_limit(
+    t: HtmlTokenizer, requested_token_limit: i32
+) -> HtmlTokenizeResult:
+    html_tokenizer_tokenize_with_limits(
+        t, requested_token_limit, HTML_MAX_ATTRIBUTES
+    )
+
+pub fn html_tokenizer_tokenize_with_limits(
+    t: HtmlTokenizer, requested_token_limit: i32,
+    requested_attr_limit: i32
+) -> HtmlTokenizeResult:
+    val token_limit = if requested_token_limit < 1:
+        1
+    elif requested_token_limit > HTML_MAX_TOKENS:
+        HTML_MAX_TOKENS
+    else:
+        requested_token_limit
+    val attr_limit = if requested_attr_limit < 0:
+        0
+    elif requested_attr_limit > HTML_MAX_ATTRIBUTES:
+        HTML_MAX_ATTRIBUTES
+    else:
+        requested_attr_limit
+    val sink = _TokenSink(tokens: [], limit: token_limit, truncated: false)
     var pos = 0
     val html = t.html
     val n = html.len()
+    var retained_attrs = 0
     # raw-text mode for script/style (tag name stored here)
     var raw_text_tag = ""
-    while pos < n:
+    while pos < n and not sink.truncated:
         val ch = html.char_at(pos)
         if raw_text_tag != "":
             # In raw-text mode: scan for </tag>
@@ -84,26 +129,26 @@ pub fn html_tokenizer_tokenize(t: HtmlTokenizer) -> [HtmlToken]:
                 raw_data = html.slice(pos, n)
                 pos = n
                 if raw_data.len() > 0:
-                    tokens.push(_tok_char(raw_data))
+                    val _ = sink.push(_tok_char(raw_data))
                 raw_text_tag = ""
             else:
                 raw_data = html.slice(pos, found_end)
                 pos = found_end
                 if raw_data.len() > 0:
-                    tokens.push(_tok_char(raw_data))
+                    val _ = sink.push(_tok_char(raw_data))
                 # Emit the end tag
                 val close_end = _find_char(html, ">", pos)
                 if close_end < 0:
                     pos = n
                 else:
                     pos = close_end + 1
-                tokens.push(_tok_end(raw_text_tag))
+                val _ = sink.push(_tok_end(raw_text_tag))
                 raw_text_tag = ""
         elif ch == "<":
             # Peek at next char
             if pos + 1 >= n:
                 # Lone < at end — emit as character
-                tokens.push(_tok_char("<"))
+                val _ = sink.push(_tok_char("<"))
                 pos = pos + 1
             else:
                 val next = html.char_at(pos + 1)
@@ -114,11 +159,11 @@ pub fn html_tokenizer_tokenize(t: HtmlTokenizer) -> [HtmlToken]:
                         val comment_end = _find_substr(html, "-->", pos + 4)
                         if comment_end < 0:
                             val comment_data = html.slice(pos + 4, n)
-                            tokens.push(_tok_comment(comment_data))
+                            val _ = sink.push(_tok_comment(comment_data))
                             pos = n
                         else:
                             val comment_data2 = html.slice(pos + 4, comment_end)
-                            tokens.push(_tok_comment(comment_data2))
+                            val _ = sink.push(_tok_comment(comment_data2))
                             pos = comment_end + 3
                     elif pos + 8 < n and html.slice(pos + 2, pos + 9).lower() == "doctype":
                         # Doctype
@@ -128,7 +173,7 @@ pub fn html_tokenizer_tokenize(t: HtmlTokenizer) -> [HtmlToken]:
                         else:
                             val dt_inner = html.slice(pos + 9, gt).trim()
                             val dt_parts = _split_first_word(dt_inner)
-                            tokens.push(_tok_doctype(dt_parts))
+                            val _ = sink.push(_tok_doctype(dt_parts))
                             pos = gt + 1
                     else:
                         # Unknown <! sequence — skip to >
@@ -141,12 +186,12 @@ pub fn html_tokenizer_tokenize(t: HtmlTokenizer) -> [HtmlToken]:
                     # End tag
                     val gt = _find_char(html, ">", pos + 2)
                     if gt < 0:
-                        tokens.push(_tok_char("<"))
+                        val _ = sink.push(_tok_char("<"))
                         pos = pos + 1
                     else:
                         val tag_raw = html.slice(pos + 2, gt).trim().lower()
                         val tag_name = _strip_tag_name(tag_raw)
-                        tokens.push(_tok_end(tag_name))
+                        val _ = sink.push(_tok_end(tag_name))
                         pos = gt + 1
                 elif next == "?":
                     # Processing instruction — skip to >
@@ -159,37 +204,43 @@ pub fn html_tokenizer_tokenize(t: HtmlTokenizer) -> [HtmlToken]:
                     # Start tag
                     val gt4 = _find_tag_close(html, pos + 1)
                     if gt4 < 0:
-                        tokens.push(_tok_char("<"))
+                        val _ = sink.push(_tok_char("<"))
                         pos = pos + 1
                     else:
                         val self_closing = gt4 > 0 and html.char_at(gt4 - 1) == "/"
                         val inner = html.slice(pos + 1, if self_closing: gt4 - 1 else: gt4).trim()
-                        val parsed = _parse_start_tag(inner)
+                        val parsed = _parse_start_tag(
+                            inner, attr_limit - retained_attrs
+                        )
                         val tag_name2 = parsed.tag_name
                         val attrs2 = parsed.attrs
-                        tokens.push(_tok_start(tag_name2, attrs2, self_closing))
+                        if parsed.truncated:
+                            sink.truncated = true
+                        else:
+                            retained_attrs = retained_attrs + attrs2.len()
+                            val _ = sink.push(_tok_start(tag_name2, attrs2, self_closing))
                         pos = gt4 + 1
                         # Enter raw-text mode for script and style
                         if tag_name2 == "script" or tag_name2 == "style":
                             raw_text_tag = tag_name2
                 else:
                     # Stray < — emit as character
-                    tokens.push(_tok_char("<"))
+                    val _ = sink.push(_tok_char("<"))
                     pos = pos + 1
         elif ch == "&":
             # Named entity reference
             val entity_result = _parse_entity(html, pos)
-            tokens.push(_tok_char(entity_result.decoded))
+            val _ = sink.push(_tok_char(entity_result.decoded))
             pos = entity_result.end_pos
         else:
             # Regular character data — accumulate until < or &
             val end_pos = _scan_char_data(html, pos)
             val char_data = html.slice(pos, end_pos)
             if char_data.len() > 0:
-                tokens.push(_tok_char(char_data))
+                val _ = sink.push(_tok_char(char_data))
             pos = end_pos
-    tokens.push(_tok_eof())
-    tokens
+    sink.tokens.push(_tok_eof())
+    HtmlTokenizeResult(tokens: sink.tokens, truncated: sink.truncated)
 
 # =========================================================================
 # Tag parsing helpers
@@ -198,12 +249,13 @@ pub fn html_tokenizer_tokenize(t: HtmlTokenizer) -> [HtmlToken]:
 class _ParsedTag:
     tag_name: text
     attrs: [HtmlAttr]
+    truncated: bool
 
-fn _parse_start_tag(inner: text) -> _ParsedTag:
+fn _parse_start_tag(inner: text, attr_limit: i32) -> _ParsedTag:
     """Parse tag name and attributes from the inner content of a start tag."""
     val n = inner.len()
     if n == 0:
-        return _ParsedTag(tag_name: "", attrs: [])
+        return _ParsedTag(tag_name: "", attrs: [], truncated: false)
     # Extract tag name: up to first whitespace
     var name_end = 0
     while name_end < n:
@@ -232,8 +284,11 @@ fn _parse_start_tag(inner: text) -> _ParsedTag:
     val tag_name = inner.slice(0, tag_end).lower()
     # Parse attributes from the remainder
     val attrs_str = if tag_end < n: inner.slice(tag_end, n).trim() else: ""
-    val attrs = _parse_attrs(attrs_str)
-    _ParsedTag(tag_name: tag_name, attrs: attrs)
+    val parsed_attrs = _parse_attrs(attrs_str, attr_limit)
+    _ParsedTag(
+        tag_name: tag_name, attrs: parsed_attrs.attrs,
+        truncated: parsed_attrs.truncated
+    )
 
 fn _is_ws(c: text) -> bool:
     c == " " or c == "\t" or c == "\n" or c == "\r"
@@ -250,12 +305,16 @@ fn _skip_ws(s: text, start: i32) -> i32:
             done = true
     i
 
-fn _parse_attrs(s: text) -> [HtmlAttr]:
+class _ParsedAttrs:
+    attrs: [HtmlAttr]
+    truncated: bool
+
+fn _parse_attrs(s: text, attr_limit: i32) -> _ParsedAttrs:
     """Parse attribute string into list of HtmlAttr."""
     var attrs: [HtmlAttr] = []
     val n = s.len()
     if n == 0:
-        return attrs
+        return _ParsedAttrs(attrs: attrs, truncated: false)
     var seen: Dict<text, bool> = {}
     var pos = _skip_ws(s, 0)
     while pos < n:
@@ -271,6 +330,8 @@ fn _parse_attrs(s: text) -> [HtmlAttr]:
         val attr_name = s.slice(pos, name_end).lower()
         val keep_attr = attr_name.len() > 0 and not seen.has(attr_name)
         if keep_attr:
+            if attrs.len() >= attr_limit:
+                return _ParsedAttrs(attrs: attrs, truncated: true)
             seen[attr_name] = true
         pos = _skip_ws(s, name_end)
         # Check for =
@@ -307,7 +368,7 @@ fn _parse_attrs(s: text) -> [HtmlAttr]:
             if keep_attr:
                 attrs.push(HtmlAttr(name: attr_name, value: ""))
         pos = _skip_ws(s, pos)
-    attrs
+    _ParsedAttrs(attrs: attrs, truncated: false)
 
 # =========================================================================
 # Entity parsing

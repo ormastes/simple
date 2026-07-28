@@ -160,6 +160,12 @@ document nodes. BrowserSession detects truncation before replacing the active
 document and returns `resource_limit`; direct rendering bounds its arena and
 returns the safe parsed prefix.
 
+Canonical tokenization independently admits 262,144 content tokens and 65,536
+retained attributes, propagating either truncation through the same atomic
+load failure. Direct render parsing rejects payloads above the existing 1 MiB
+renderer envelope or 262,144 structural parts before split/event allocation or
+degenerate diagnostics.
+
 `common.web.event_types.DomEvent` is the event type. BrowserSession adds:
 
 ```text
