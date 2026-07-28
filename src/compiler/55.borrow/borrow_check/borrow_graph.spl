@@ -108,6 +108,57 @@ pub fn place_conflicts_with(a: Place, b: Place) -> bool:
         i = i + 1
     true
 
+pub fn borrow_kind_to_text(k: BorrowKind) -> text:
+    """Render a borrow kind for diagnostics (BorrowKind has no to_text
+    method; same latent format-time crash class as place_to_text)."""
+    match k:
+        case Shared: "shared"
+        case Mutable: "mutable"
+        case Unique: "unique"
+
+pub fn place_to_text(p: Place) -> text:
+    """Render a place for diagnostics.
+
+    SF1 (2026-07-28): the error constructors below used `place.to_text()`,
+    but Place never had a to_text method — every move/borrow-of-moved error
+    CRASHED at format time. Latent until now because the checker was
+    starved of Move input and the paths never fired.
+    """
+    var s = ""
+    match p.base:
+        case Local(id):
+            s = "local({id})"
+        case Static(name):
+            s = "static({name})"
+        case Promoted(id):
+            s = "promoted({id})"
+    for proj in p.projections:
+        match proj:
+            case Deref:
+                s = "*{s}"
+            case Field(idx):
+                s = "{s}.f{idx}"
+            case Index(local):
+                s = "{s}[local {local}]"
+            case ConstantIndex(idx):
+                s = "{s}[{idx}]"
+            case Downcast(v):
+                s = "({s} as variant {v})"
+    s
+
+pub fn place_equals(a: Place, b: Place) -> bool:
+    """Check if two places are exactly equal (same base, same projection path)."""
+    if not place_base_equals(a.base, b.base):
+        return false
+    if a.projections.len() != b.projections.len():
+        return false
+    var i = 0
+    while i < a.projections.len():
+        if not place_elem_equals(a.projections[i], b.projections[i]):
+            return false
+        i = i + 1
+    true
+
 pub fn kind_conflicts_with(a: BorrowKind, b: BorrowKind) -> bool:
     """Check if two borrow kinds conflict.
 
@@ -363,7 +414,7 @@ pub fn borrowerror_conflict(borrow: Borrow, conflicting: Borrow, point: i64) -> 
 
 pub fn borrowerror_use_after_move(place: Place, point: i64) -> BorrowError:
         BorrowError(
-            message: "Use of moved value: {place.to_text()}",
+            message: "Use of moved value: {place_to_text(place)}",
             #  # DESUGARED: borrow: nil
             #  # DESUGARED: conflicting: nil
             point: point
@@ -372,7 +423,7 @@ pub fn borrowerror_use_after_move(place: Place, point: i64) -> BorrowError:
 
 pub fn borrowerror_borrow_of_moved(place: Place, point: i64) -> BorrowError:
         BorrowError(
-            message: "Borrow of moved value: {place.to_text()}",
+            message: "Borrow of moved value: {place_to_text(place)}",
             #  # DESUGARED: borrow: nil
             #  # DESUGARED: conflicting: nil
             point: point
@@ -387,8 +438,25 @@ pub class BorrowGraph:
     # Borrows active at each program point
     point_borrows: Dict<i64, BorrowSet>
 
-    # Places that have been moved
+    # Places that have been moved AT a given point (per-point gen record)
     moved_places: Dict<i64, [Place]>
+
+    # Forward-propagated moved state (SF1 fix, 2026-07-28): the running
+    # union of all moves recorded so far on the analysis walk, minus places
+    # revived by a later reassignment (kill-on-reassign). The old design
+    # only consulted moved_places[point] at the SAME point, so a move at
+    # pt3 + use at pt7 was undetectable by construction.
+    #
+    # CFG note: mod.spl's analyze_mir_borrows records instructions in
+    # program order with monotonically increasing points, so this linear
+    # forward union is a conservative superset of the CFG may-move union
+    # (a move inside one branch is also considered moved while walking the
+    # sibling branch, not just after the join). That over-approximation is
+    # acceptable: Move instructions only enter MIR from explicit move
+    # sites, which Simple's surface language does not produce today
+    # (assignment is copy for value types, reference-share for classes;
+    # `iso` move-only transfer is planned but erased at HIR type lowering).
+    moved_now: [Place]
 
     # Accumulated errors
     errors: [BorrowError]
@@ -400,6 +468,7 @@ pub class BorrowGraph:
         BorrowGraph(
             point_borrows: {},
             moved_places: {},
+            moved_now: [],
             errors: [],
             lifetimes: LifetimeEnv.create()
         )
@@ -435,9 +504,9 @@ pub class BorrowGraph:
             self.errors = self.errors.push(borrowerror_conflict(new_borrow, conflict.unwrap(), point))
             return nil
 
-        # Check if place was moved
-        val moved = self.moved_places[point] ?? []
-        for moved_place in moved:
+        # Check if place was moved (forward-propagated state, not just
+        # moves recorded at this same point)
+        for moved_place in self.moved_now:
             if place_conflicts_with(place, moved_place):
                 self.errors = self.errors.push(borrowerror_borrow_of_moved(place, point))
                 return nil
@@ -452,25 +521,45 @@ pub class BorrowGraph:
     me record_use(point: i64, place: Place):
         """Record a use of a place.
 
-        Checks that place hasn't been moved.
+        Checks the place against the forward-propagated moved state
+        (a move at ANY earlier point on the walk that has not been killed
+        by a reassignment), not only moves recorded at this same point.
         """
-        val moved = self.moved_places[point] ?? []
-        for moved_place in moved:
+        for moved_place in self.moved_now:
             if place_conflicts_with(place, moved_place):
                 self.errors = self.errors.push(borrowerror_use_after_move(place, point))
                 return
 
     me record_move(point: i64, place: Place):
-        """Record a move of a place."""
+        """Record a move of a place.
+
+        Keeps the per-point gen record (moved_places) and adds the place
+        to the forward moved state so later program points observe it.
+        """
         var moved: [Place] = self.moved_places[point] ?? []
         moved = moved.push(place)
         self.moved_places[point] = moved
+        self.moved_now = self.moved_now.push(place)
 
     me record_assign(point: i64, place: Place):
         """Record an assignment to a place.
 
-        This may invalidate borrows of the place.
+        This may invalidate borrows of the place. It also KILLS moved
+        state the write fully covers (re-initialization revives the
+        place): a whole-local write revives the local and everything
+        under it; a projected write revives only the exact place.
         """
+        if self.moved_now.len() > 0:
+            var kept: [Place] = []
+            for mp in self.moved_now:
+                var killed = false
+                if place.projections.len() == 0:
+                    killed = place_base_equals(mp.base, place.base)
+                else:
+                    killed = place_equals(mp, place)
+                if not killed:
+                    kept = kept.push(mp)
+            self.moved_now = kept
         var borrow_set = self.get_or_create_borrows(point)
 
         # Find conflicting borrows
@@ -478,7 +567,7 @@ pub class BorrowGraph:
         for borrow in conflicts:
             if kind_is_mutable(borrow.kind):
                 self.errors = self.errors.push(BorrowError(
-                    message: "Assignment while mutably borrowed: {place.to_text()}",
+                    message: "Assignment while mutably borrowed: {place_to_text(place)}",
                     # # DESUGARED: borrow: Some(borrow)
             borrow: borrow,
                     conflicting: nil,

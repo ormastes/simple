@@ -26,6 +26,7 @@ use compiler.frontend.core._AstExpr.accessors.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
+use compiler.core.types.{span_start, span_end, span_line, span_col, span_is_valid}
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
@@ -151,6 +152,22 @@ fn flat_bootstrap_body_at(index: i64) -> Block:
 
 fn make_span() -> Span:
     Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+
+# Bug hir_lowering_never_populates_function_spans: the flat AST DOES record a
+# real (start, end, line, col) for every declaration (parse_fn_decl captures
+# decl_line/decl_col before parsing the body and stores them via
+# flat_span_new -> decl_span[idx], see fn_struct_decls.spl:387-388,476-477).
+# `make_span()` above discards that and hands every converted node a
+# Span(0,0,0,0) -- this is the actual data available for a declaration's own
+# span. Falls back to make_span() only if the span id is out of range (should
+# not happen for a real decl, but a wrong line is worse than a missing one).
+fn decl_span_for(idx: i64) -> Span:
+    val span_id = decl_get_span(idx)
+    if not span_is_valid(span_id):
+        return make_span()
+    val s = span_start(span_id)
+    val e = span_end(span_id)
+    Span(start: s, end: e, line: span_line(span_id), col: span_col(span_id), file: "", length: e - s)
 
 fn flat_empty_module(path: text) -> Module:
     parser_module_new(
@@ -957,6 +974,17 @@ fn convert_flat_expr(idx: i64) -> Expr:
             arms.push(flat_asm_match_arm(arm_indices[ai], span))
             ai = ai + 1
         return Expr(kind: ExprKind.AsmMatch(arms), span: span)
+    elif tag == EXPR_UNSAFE_BLOCK:
+        # unsafe: / danger: block — same AST node the seed parser produces
+        # (ExprKind.UnsafeBlock, parser_types_expr.spl), so HIR lowering and
+        # the safety checker see one shape regardless of the parsing lane.
+        val u_stmts = expr_get_stmts(idx)
+        var u_body: [Stmt] = []
+        var ui = 0
+        while ui < u_stmts.len():
+            u_body.push(convert_flat_stmt(u_stmts[ui]))
+            ui = ui + 1
+        return Expr(kind: ExprKind.UnsafeBlock(Block(stmts: u_body, span: span)), span: span)
     elif tag == EXPR_ASSIGN:
         # `target = value` -- the flat parser emits assignment as an
         # EXPRESSION statement (stmt_expr_stmt(expr_assign(...))), never
@@ -1485,7 +1513,7 @@ fn convert_decl_fn(idx: i64) -> Function:
     # here so it reaches HirParam (declaration_lowering.spl's lower_param)
     # and, from there, MIR function_lowering.spl's by-reference bind.
     val p_muts = decl_get_param_muts(idx)
-    val span = make_span()
+    val span = decl_span_for(idx)
     var params: [Param] = []
     var pi = 0
     while pi < p_names.len():
@@ -1718,7 +1746,7 @@ fn convert_decl_extern_fn(idx: i64) -> Function:
     val name = decl_get_name(idx)
     val p_names = decl_get_param_names(idx)
     val p_types = decl_get_param_types(idx)
-    val span = make_span()
+    val span = decl_span_for(idx)
     var params: [Param] = []
     var pi = 0
     while pi < p_names.len():

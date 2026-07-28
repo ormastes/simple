@@ -3013,6 +3013,30 @@ impl MirLowering:
                                     self.builder = b_narrow
                     case _:
                         ()
+                # SF1 (c), 2026-07-28 — flag-gated, DEFAULT OFF: under
+                # SIMPLE_BORROW_REF_CALL_ARGS=1 record the by-reference
+                # nature of a class-typed argument as a Mutable MIR Ref so
+                # the NLL borrow checker receives borrow input from
+                # ordinary calls (today only explicit unary `&`/`&mut`
+                # produce Ref). Default-off because s19 semantics make
+                # EVERY class param mutable-by-design (write-through — see
+                # _MirLowering/function_lowering.spl class-param binding):
+                # emitting honest Mutable refs unconditionally would flag
+                # existing valid aliasing (the same object passed twice) as
+                # a borrow conflict. Opt-in until the checker models
+                # shared-mutation semantics.
+                if (rt_env_get("SIMPLE_BORROW_REF_CALL_ARGS") ?? "") == "1":
+                    match declared_param_type.kind:
+                        case HirTypeKind.Named(cls_sym, _):
+                            val cls_rec = self.symbols.get_symbol_raw(cls_sym.id)
+                            val cls_name = if cls_rec.?: cls_rec.name else: ""
+                            if cls_name != "" and self.class_type_names.has(cls_name):
+                                var b_ref = self.builder
+                                val ref_ty = self.local_mir_type_of(arg_local) ?? MirType.i64()
+                                b_ref.emit_ref(MirPlace.local_place(arg_local), MirBorrowKind.Mutable, ref_ty)
+                                self.builder = b_ref
+                        case _:
+                            ()
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
 
         if is_direct:

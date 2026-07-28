@@ -165,19 +165,32 @@ class BorrowChecker:
                 nll.record_borrow(point, mir_place, kind)
 
             case Copy(dest, src):
-                # Copy uses the source
+                # Copy uses the source and (re)initializes the destination
                 val src_local: LocalId = src
                 nll.record_use(point, Place.local(src_local.id))
+                val dest_local: LocalId = dest
+                nll.record_assign(point, Place.local(dest_local.id))
 
             case Move(dest, src):
-                # Move consumes the source
+                # Move consumes the source and (re)initializes the destination
                 val src_local: LocalId = src
                 nll.record_move(point, Place.local(src_local.id))
+                val dest_local: LocalId = dest
+                nll.record_assign(point, Place.local(dest_local.id))
+
+            case Const(dest, _, _):
+                # Constant write re-initializes the destination: this KILLS
+                # any moved-out state (re-init revives the local) — it is
+                # NOT a use, so it must never trigger use-after-move.
+                val dest_local: LocalId = dest
+                nll.record_assign(point, Place.local(dest_local.id))
 
             case Assign(dest, _):
-                # Assignment to destination
+                # Assignment (re)initializes the destination. Recording a
+                # USE here (old behavior) would flag legitimate
+                # re-initialization of a moved-out local as use-after-move.
                 val dest_local: LocalId = dest
-                nll.record_use(point, Place.local(dest_local.id))
+                nll.record_assign(point, Place.local(dest_local.id))
 
             case _:
                 pass_do_nothing

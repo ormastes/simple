@@ -145,12 +145,16 @@ class LlvmIRBuilder:
         val param_str = params.join(", ")
         self.emit("define {return_type} @{name}({param_str}) nounwind {{")
 
-    me start_function_opt(name: text, params: [text], return_type: text, is_readonly: bool, is_small: bool):
+    me start_function_opt(name: text, params: [text], return_type: text, is_readonly: bool, is_small: bool, dbg_id: i64?):
         """Start a function definition with optimization attributes.
 
         - nounwind: always (Simple has no exceptions)
         - readonly: function has no side effects (no stores, no non-pure calls)
         - alwaysinline: function is small (< 10 instructions)
+        - dbg_id: when Some(id), attaches `!dbg !id` linking this definition
+          to the !DISubprogram emitted for it (see emit_di_subprogram). The
+          verifier requires this attachment for any DISubprogram marked
+          isDefinition: true.
         """
         self.current_function = Some(name)
         val param_str = params.join(", ")
@@ -159,7 +163,13 @@ class LlvmIRBuilder:
             attrs = attrs + " readonly"
         if is_small:
             attrs = attrs + " alwaysinline"
-        self.emit("define {return_type} @{name}({param_str}){attrs} {{")
+        var dbg_suffix = ""
+        match dbg_id:
+            Some(id):
+                dbg_suffix = " !dbg !{id}"
+            nil:
+                ()
+        self.emit("define {return_type} @{name}({param_str}){attrs}{dbg_suffix} {{")
 
     me start_function_with_attrs(name: text, params: [text], return_type: text, func_attr: FunctionAttr):
         """Start a function definition with attributes."""
@@ -466,22 +476,55 @@ class LlvmIRBuilder:
     # === Debug Info (DWARF) ===
 
     me emit_debug_info_header(filename: text, directory: text):
-        """Emit DWARF debug info metadata."""
+        """Emit DWARF debug info metadata (compile unit + shared subroutine type).
+
+        Verified against LLVM 18 (`opt -passes=verify` + `llc -filetype=obj` +
+        `llvm-dwarfdump --debug-info`): this shape produces a real
+        DW_TAG_compile_unit and, once a function's `define` is annotated with
+        `!dbg !N` (see emit_di_subprogram + start_function_opt's dbg_id),
+        a DW_TAG_subprogram naming the source file.
+
+        emissionKind is deliberately FullDebug, not LineTablesOnly: LLVM's
+        LineTablesOnly mode intentionally omits DW_TAG_subprogram DIEs
+        entirely (confirmed against `clang -gline-tables-only`), which would
+        leave nothing for tools to find. Until per-instruction MIR spans
+        exist (DS5), "line-tables" support here means function-level
+        file+line scope inside an otherwise-minimal FullDebug unit, not
+        true `-gline-tables-only` DWARF trimming.
+
+        !4/!5 are a single shared `void()`-shaped DISubroutineType reused by
+        every function's DISubprogram (see emit_di_subprogram) -- callers
+        only draw ONE fresh id per function from next_debug_id(), so
+        reserving distinct ids per subprogram here would collide with the
+        next function's id.
+        """
         self.emit("")
         self.emit("; Debug information")
-        self.emit("!llvm.dbg.cu = !{!0}")
+        # NOTE: braces doubled (`!{{!0}}`) same as emit_baremetal_attributes --
+        # a single-element `!{!0}` is not just literal text here: Simple's
+        # string-interpolation parser tries to parse the `{...}` body as an
+        # expression, and `!0` parses as a valid unary-not-of-int expression
+        # (0 is falsy, so `!0` -> true), silently rewriting this to the
+        # invalid `!llvm.dbg.cu = !true` (confirmed empirically: this line
+        # was broken exactly this way before the fix). The multi-element
+        # `!{!1, !2}` below is NOT affected -- `!1, !2` doesn't parse as a
+        # single expression, so it falls through unparsed as literal text.
+        self.emit("!llvm.dbg.cu = !{{!0}}")
         self.emit("!llvm.module.flags = !{!1, !2}")
         self.emit("")
         self.emit("!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !3, producer: \"simple-compiler\", isOptimized: false, emissionKind: FullDebug)")
         self.emit("!1 = !{i32 2, !\"Dwarf Version\", i32 4}")
         self.emit("!2 = !{i32 2, !\"Debug Info Version\", i32 3}")
         self.emit("!3 = !DIFile(filename: \"{filename}\", directory: \"{directory}\")")
+        self.emit("!4 = !DISubroutineType(types: !5)")
+        self.emit("!5 = !{{null}}")
 
     me emit_di_subprogram(id: i64, name: text, line: i64):
-        """Emit DISubprogram metadata for a function."""
-        self.emit("!{id} = distinct !DISubprogram(name: \"{name}\", scope: !3, file: !3, line: {line}, type: !{id + 1}, unit: !0)")
-        self.emit("!{id + 1} = !DISubroutineType(types: !{id + 2})")
-        self.emit("!{id + 2} = !{{null}}")
+        """Emit DISubprogram metadata for a function at `id` (a fresh id from
+        next_debug_id()). References the shared !4 DISubroutineType emitted by
+        emit_debug_info_header -- do NOT allocate extra ids here, or the next
+        function's next_debug_id() call collides with them."""
+        self.emit("!{id} = distinct !DISubprogram(name: \"{name}\", scope: !3, file: !3, line: {line}, type: !4, unit: !0, isDefinition: true)")
 
     me next_debug_id() -> i64:
         """Get next debug metadata ID."""

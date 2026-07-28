@@ -782,6 +782,41 @@ fn lex_mark_current_token_as_generic_close():
         lex_generic_close_pending = [false]
     lex_generic_close_pending[0] = true
 
+# ===== Live position accessors (bypass the dead legacy `lex_state` slot) =====
+#
+# `lex_pos_get`/`lex_pos_set`/`lex_line_get`/`lex_line_set`/`lex_col_get`/
+# `lex_col_set` (above) read/write `lex_state_get/set("pos"|"line"|"col", ...)`
+# -- a store that CoreLexer.next_token() (lexer_struct.spl) never writes to.
+# Callers of those accessors (e.g. the raw-brace asm scanner,
+# _ParserPrimary/asm_raw_parsing.spl) were silently reading a permanently
+# stale position (observed stuck at its "0"/"1" fallback), producing
+# "unterminated asm { ... } block" on real input. `lex_token_end_get()`
+# already exposes the live struct's `pos` (set from `loaded.pos` in
+# `lex_next()` above); these two getters expose the matching live
+# `line`/`col`, and `lex_force_set_pos` lets a caller that hand-scanned raw
+# source (skipping normal tokenization) hand the live position back so the
+# next `lex_next()` resumes from the right place.
+fn lex_live_line_get() -> i64:
+    if lexer_array_len(current_core_lexer_slot) == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    current_core_lexer_slot[0].line
+
+fn lex_live_col_get() -> i64:
+    if lexer_array_len(current_core_lexer_slot) == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    current_core_lexer_slot[0].col
+
+fn lex_force_set_pos(new_pos: i64, new_line: i64, new_col: i64):
+    if lexer_array_len(current_core_lexer_slot) == 0:
+        current_core_lexer_slot = [current_core_lexer_load()]
+    var lx = current_core_lexer_slot[0]
+    lx.pos = new_pos
+    lx.line = new_line
+    lx.col = new_col
+    current_core_lexer_slot[0] = lx
+    current_core_lexer_save(lx)
+    lex_token_end_direct[0] = new_pos
+
 # ===== Forced Indentation (block bodies inside call parens) =====
 # See CoreLexer.enable_forced_indentation in lexer_struct.spl. The parser
 # calls these around a block-bodied `\param:` lambda so its multi-statement

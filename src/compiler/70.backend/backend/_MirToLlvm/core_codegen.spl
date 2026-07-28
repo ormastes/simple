@@ -8,6 +8,7 @@ use compiler.backend.backend.mir_to_llvm.*
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst}
 use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
 use compiler.mir_opt.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
 use compiler.backend.backend_api.*
@@ -17,6 +18,29 @@ use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integ
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+
+# DS3 debug-info path split: NOT std.nogc_sync_mut.path.{basename, dirname} --
+# empirically, that dirname()'s rfind()-based fast path throws ("match
+# expression exhausted ... for i64 value -1") under this engine when the
+# path has no "/": rfind() returns a raw sentinel i64 here instead of the
+# Option<i64> its own `match ... case Some(idx) / nil` expects. Split
+# manually with .split("/") instead (the same pattern compile_opt_and_driver.spl
+# already uses safely for source_file).
+fn debug_info_split_path(path: text) -> (text, text):
+    if not path.contains("/"):
+        return (path, ".")
+    val parts = path.split("/")
+    val filename = parts[parts.len() - 1]
+    var directory = ""
+    var i = 0
+    while i < parts.len() - 1:
+        if i > 0:
+            directory = directory + "/"
+        directory = directory + parts[i]
+        i = i + 1
+    if directory == "":
+        directory = "/"
+    (filename, directory)
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
@@ -77,11 +101,11 @@ fn llvm_module_name_from_entry_path(path: text) -> text:
         mod_path = mod_path.substring(3)
     if mod_path.starts_with("./"):
         mod_path = mod_path.substring(2)
-    val absolute_src = mod_path.find("/src/")
+    val absolute_src = mod_path.find("/src/") ?? -1
     if absolute_src >= 0:
         mod_path = mod_path.substring(absolute_src + 5)
     else:
-        val absolute_examples = mod_path.find("/examples/")
+        val absolute_examples = mod_path.find("/examples/") ?? -1
         if absolute_examples >= 0:
             mod_path = mod_path.substring(absolute_examples + 1)
     if mod_path.starts_with("src/"):
@@ -139,6 +163,28 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[llvm-translate] runtime"
         self.emit_runtime_declarations()
+
+        # DS3: line-table debug info. Emit the DWARF compile-unit header once,
+        # up front, keyed off the first function whose MIR span carries a
+        # real source file (begin_function's caller passes fn_.span for
+        # ordinary functions -- see mir_data.spl:62 / function_lowering.spl:123).
+        # Falls back to a synthetic "<module>.spl" name for the rare synthetic
+        # functions (module init, generic specializations) built with a nil/
+        # empty span. Per-function DISubprogram + !dbg attachment happens in
+        # translate_function.
+        if self.debug_info:
+            var dbg_source_file = ""
+            for fn_dbg in module.functions.values():
+                match fn_dbg.span:
+                    nil: ()
+                    _:
+                        if fn_dbg.span.file != "":
+                            dbg_source_file = fn_dbg.span.file
+                            break
+            if dbg_source_file == "":
+                dbg_source_file = "{module.name}.spl"
+            val (dbg_filename, dbg_directory) = debug_info_split_path(dbg_source_file)
+            self.builder.emit_debug_info_header(dbg_filename, dbg_directory)
 
         # Origin discriminator (see mir_call_ownership.spl): record which
         # runtime-owned names this module ALSO defines a local function
@@ -220,7 +266,7 @@ impl MirTextCodegen for MirToLlvm:
                 if real_bootstrap:
                     val bootstrap_fn = bootstrap_mir_function_at(bootstrap_fni)
                     val body = MirBody.from_function(bootstrap_fn)
-                    self.translate_function(self.llvm_function_symbol_name(name), body)
+                    self.translate_function(self.llvm_function_symbol_name(name), body, bootstrap_fn.span)
                 else:
                     val fn_name = self.llvm_function_symbol_name(name)
                     self.builder.emit("define i64 @{fn_name}() {")
@@ -244,7 +290,7 @@ impl MirTextCodegen for MirToLlvm:
             for fn_ in module.functions.values():
                 val body = MirBody.from_function(llvm_bootstrap_ssa_function(fn_))
                 val fn_name = self.llvm_function_symbol_name(fn_.name)
-                self.translate_function(fn_name, body)
+                self.translate_function(fn_name, body, fn_.span)
 
         if self.unknown_func_decls.keys().len() > 0:
             self.builder.emit("")
@@ -280,11 +326,21 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit_tbaa_hierarchy()
         return llvm_ir_builder_build(self.builder)
 
-    me translate_function(name: text, body: MirBody):
+    me translate_function(name: text, body: MirBody, span: Span):
         """Translate a MIR function with optimization attributes.
 
         Renames 'main' to '__simple_main' so the entry point wrapper
         (entry_point.spl) can call it with proper runtime init/shutdown.
+
+        `span` is the function-level MIR span (begin_function's caller
+        passes the real HIR function span for ordinary functions; synthetic
+        functions may pass an empty/nil-derived span -- see the DS3 debug-
+        info note on `debug_info` in class_def.spl). Used only when
+        self.debug_info is true, to attach a per-function !DISubprogram
+        (file+line scope) via !dbg. Per-instruction line locations are NOT
+        emitted here -- most MIR instruction spans are still nil pending a
+        separate MIR-span-propagation fix (DS5); this is line-table-level
+        (function granularity) debug info, not full DWARF.
         """
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
@@ -416,7 +472,20 @@ impl MirTextCodegen for MirToLlvm:
         self.remember_function_param_types(name, param_types)
         self.remember_function_param_types(fn_name, param_types)
 
-        self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small)
+        var dbg_id: i64? = nil
+        if self.debug_info:
+            val sub_id = self.builder.next_debug_id()
+            # Synthetic functions (module init, generic specialization
+            # templates -- see module_lowering.spl's `begin_function(..., nil)`
+            # call sites) build their MirFunction with a nil span; matching
+            # against nil first avoids crashing on `.line` for those.
+            val dbg_line = match span:
+                nil: 1
+                _: if span.line > 0: span.line else: 1
+            self.builder.emit_di_subprogram(sub_id, name, dbg_line)
+            dbg_id = Some(sub_id)
+
+        self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small, dbg_id)
         if bootstrap_debug:
             print "[mir-to-llvm] function:started {name}"
 

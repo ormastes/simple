@@ -33,6 +33,22 @@ extern fn rt_env_get(key: text) -> text
 fn backend_helper_trace_enabled() -> bool:
     (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
+# DS3: `--debug-info=none|line-tables|full` (see compile_opt_and_driver.spl)
+# is threaded down to here via SIMPLE_DEBUG_INFO_LEVEL rather than a new
+# CompileOptions field, matching this file's existing env-var-knob pattern
+# (SIMPLE_COMPILER_TRACE above, SIMPLE_NATIVE_BUILD_NO_MANGLE elsewhere).
+# "full" currently maps to the same emission as "line-tables" -- true
+# per-instruction DWARF locations need MIR spans that DS5 hasn't landed yet
+# (see MirToLlvm.translate_function's debug_info doc). Explicit
+# none/line-tables/full always wins over the release-mode default.
+fn backend_helper_debug_info(is_release: bool) -> bool:
+    val level = rt_env_get("SIMPLE_DEBUG_INFO_LEVEL") ?? ""
+    if level == "none":
+        return false
+    if level == "line-tables" or level == "full":
+        return true
+    not is_release
+
 fn backend_helper_native_target_for(target: text) -> CodegenTarget:
     if target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos":
         return CodegenTarget.SimpleOS_X86_64
@@ -344,7 +360,7 @@ fn compile_module_with_backend(
     val options = CompileOptions(
         target: backend_helper_native_target(),
         opt_level: opt,
-        debug_info: not is_release,
+        debug_info: backend_helper_debug_info(is_release),
         emit_assembly: false,
         emit_llvm_ir: false,
         emit_mir: false,
@@ -439,7 +455,7 @@ fn compile_bootstrap_module_with_backend(
     val options = CompileOptions(
         target: CodegenTarget.Host,
         opt_level: opt,
-        debug_info: not is_release,
+        debug_info: backend_helper_debug_info(is_release),
         emit_assembly: false,
         emit_llvm_ir: false,
         emit_mir: false,

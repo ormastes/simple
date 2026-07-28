@@ -263,7 +263,10 @@ pub fn nllerror_format_related(err: NLLError) -> text:
 
 fn nllerror_borrow_conflict(borrow1: Borrow, borrow2: Borrow) -> NLLError:
         NLLError(
-            message: "cannot borrow `{borrow1.place.to_text()}` as {borrow1.kind.to_text()} because it is also borrowed as {borrow2.kind.to_text()}",
+            # place_to_text / borrow_kind_to_text free fns: Place and
+            # BorrowKind have no to_text METHOD — the method calls here
+            # crashed at format time (latent while the checker was starved).
+            message: "cannot borrow `{place_to_text(borrow1.place)}` as {borrow_kind_to_text(borrow1.kind)} because it is also borrowed as {borrow_kind_to_text(borrow2.kind)}",
             has_primary_span: true,
             primary_span: borrow1.borrow_point,
             secondary_spans: [SpanLabel(span: borrow2.borrow_point, label: "first borrow here")],
@@ -274,7 +277,7 @@ fn nllerror_borrow_conflict(borrow1: Borrow, borrow2: Borrow) -> NLLError:
 
 fn nllerror_use_while_borrowed(place: Place, borrow: Borrow, point: i64) -> NLLError:
         NLLError(
-            message: "cannot use `{place.to_text()}` because it was mutably borrowed",
+            message: "cannot use `{place_to_text(place)}` because it was mutably borrowed",
             has_primary_span: true,
             primary_span: point,
             secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "mutable borrow occurs here")],
@@ -285,10 +288,10 @@ fn nllerror_use_while_borrowed(place: Place, borrow: Borrow, point: i64) -> NLLE
 
 fn nllerror_move_while_borrowed(place: Place, borrow: Borrow, point: i64) -> NLLError:
         NLLError(
-            message: "cannot move out of `{place.to_text()}` because it is borrowed",
+            message: "cannot move out of `{place_to_text(place)}` because it is borrowed",
             has_primary_span: true,
             primary_span: point,
-            secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "borrow of `{place.to_text()}` occurs here")],
+            secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "borrow of `{place_to_text(place)}` occurs here")],
             has_help: false,
             help: ""
         )
@@ -404,7 +407,7 @@ class NLLChecker:
                 val active = borrowset_active_list(borrow_set.borrows)
                 for borrow in active:
                     self.errors = self.errors.push(NLLError(
-                        message: "borrow of `{borrow.place.to_text()}` may still be active at return",
+                        message: "borrow of `{place_to_text(borrow.place)}` may still be active at return",
                         has_primary_span: true,
                         primary_span: point,
                         secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "borrow created here")],
@@ -446,6 +449,14 @@ class NLLChecker:
     me record_move(point: i64, place: Place):
         """Record move of a place."""
         self.borrow_graph.record_move(point, place)
+
+    me record_assign(point: i64, place: Place):
+        """Record (re)initialization of a place.
+
+        Kills forward-propagated moved-out state for the place so a
+        re-initialized local is usable again (see BorrowGraph.record_assign).
+        """
+        self.borrow_graph.record_assign(point, place)
 
     fn get_errors() -> [NLLError]:
         """Get all NLL errors."""

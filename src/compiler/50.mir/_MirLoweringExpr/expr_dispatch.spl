@@ -30,6 +30,17 @@ extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 fn mir_expr_env_get(key: text) -> text:
     rt_env_get(key)
 
+# SF1 (d), 2026-07-28: bounds-check lowering used to bail out SILENTLY when
+# the indexed base type exposes no len symbol — the access then ran with no
+# check at all and nothing recorded the gap. Count every bailout so the gap
+# is measurable, and surface it under SIMPLE_MIR_BOUNDS_DEBUG=1.
+var mir_bounds_check_bailout_count: i64 = 0
+
+pub fn mir_bounds_check_bailouts() -> i64:
+    """Number of indexed accesses lowered WITHOUT a bounds check because the
+    base type had no len symbol (see emit_bounds_check_for_index)."""
+    mir_bounds_check_bailout_count
+
 fn mir_expr_symbol_id_value(symbol: SymbolId) -> i64:
     symbol.id
 
@@ -860,6 +871,15 @@ impl MirLowering:
             if self.local_is_runtime_array(base_local):
                 len_symbol = "rt_array_len"
             else:
+                # LOUD bailout (SF1 (d), 2026-07-28): no len symbol exists
+                # for this base type, so no conservative check can be
+                # emitted (there is no length source to compare against).
+                # The indexed access proceeds UNCHECKED. Counted via
+                # mir_bounds_check_bailouts(); per-site detail under
+                # SIMPLE_MIR_BOUNDS_DEBUG=1.
+                mir_bounds_check_bailout_count = mir_bounds_check_bailout_count + 1
+                if (mir_expr_env_get("SIMPLE_MIR_BOUNDS_DEBUG") ?? "") == "1":
+                    print("[mir] bounds-check bailout #{mir_bounds_check_bailout_count}: no len symbol for indexed base local {base_local.id} (access is UNCHECKED)")
                 return
         val func_operand = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(len_symbol),
@@ -992,44 +1012,16 @@ impl MirLowering:
         # `return expr`, nil for a bare `return`.
         if val rv = value:
             var br = self.builder
+            var result = self.lower_expr(rv)
             # current_function uses a boxed Option on this lane; only the
-            # explicit Some arm unboxes it safely. Resolved BEFORE lowering
-            # the value: the declared return type decides whether `.?` is in
-            # value position or bool position (see below), and lowering has
-            # to happen the right way the first time.
-            var pre_builder = self.builder
+            # explicit Some arm unboxes it safely.
+            var cur_builder = self.builder
             var declared_return: HirType? = nil
-            match pre_builder.current_function:
+            match cur_builder.current_function:
                 case Some(active_fn):
                     declared_return = self.resolved_call_hir_return_type(active_fn.symbol)
                 case None:
                     ()
-            # Bool-return position: `fn has() -> bool: opt.?`. `.?` evaluates
-            # to `T?`, so returning it raw hands the caller the NON-ZERO nil
-            # sentinel 3 instead of `false` -- and `if has_none():` then takes
-            # the TRUE branch, the exact condition-position bug laundered
-            # through a function return. 20 owned `-> bool` functions inside
-            # src/compiler/ alone return a bare `.?` (has_errors,
-            # has_violations, is_resolved, has_default, ...), so this arm is
-            # load-bearing, not defensive. Mirrors the seed's
-            # lower_bool_return_expr (ab773bb5d5e).
-            # current_fn_returns_bool is the primary source: it is recorded by
-            # lower_function straight from fn_.return_type. declared_return is
-            # kept as a second chance because resolved_call_hir_return_type
-            # only answers for symbols that made it into the symbol table and
-            # returns nil for locally lowered functions -- relying on it alone
-            # made this coercion silently never fire.
-            var returns_bool = self.current_fn_returns_bool
-            if val bool_return_check = declared_return:
-                match bool_return_check.kind:
-                    case HirTypeKind.Bool:
-                        returns_bool = true
-                    case _:
-                        ()
-            var result = if returns_bool:
-                self.lower_cond_expr(rv)
-            else:
-                self.lower_expr(rv)
             if val found_return = declared_return:
                 match found_return.kind:
                     case HirTypeKind.Optional(_):
@@ -1230,7 +1222,41 @@ impl MirLowering:
 
 
     me lower_expr(expr: HirExpr) -> LocalId:
-        """Lower HIR expression to MIR, return result local."""
+        """Lower HIR expression to MIR, return result local.
+
+        DS5 (mir-span-thread, 2026-07-28): thin save/set/restore wrapper
+        around lower_expr_impl. Pushes this node's own span onto
+        self.builder.current_span before dispatch and pops it back on the
+        way out, so:
+          - a leaf node (Const/Var/...) emits with ITS OWN span (set here,
+            never overwritten before its emit_* call runs), and
+          - a compound node (BinOp/Call/...) that recurses into lower_expr
+            for its operands FIRST and emits its own instruction AFTER gets
+            its own span back for that final emit, not its last operand's
+            span -- because every recursive self.lower_expr(child) call
+            saves/restores around itself via this same wrapper.
+        All recursive descent must go through this name (not
+        lower_expr_impl directly) for the stack discipline to hold.
+        """
+        var b_span_save = self.builder
+        val saved_span = b_span_save.current_span
+        # `expr` is defensively nilable here (lower_expr_impl substitutes a
+        # synthetic nil_expr when it is) -- guard the same way before the
+        # first field deref so a nil expr doesn't crash the span push.
+        if expr != nil:
+            b_span_save.current_span = Some(expr.span)
+        self.builder = b_span_save
+        val span_result = self.lower_expr_impl(expr)
+        var b_span_restore = self.builder
+        b_span_restore.current_span = saved_span
+        self.builder = b_span_restore
+        span_result
+
+    me lower_expr_impl(expr: HirExpr) -> LocalId:
+        """Lower HIR expression to MIR, return result local. Body of
+        lower_expr; only reached through the lower_expr wrapper above so
+        span save/restore stays consistent. Do not call this directly from
+        outside lower_expr's recursive dispatch."""
         val nil_span = Span.empty()
         val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: nil_span), span: nil_span)
         var expr_value = nil_expr
@@ -1673,17 +1699,7 @@ impl MirLowering:
                             self.builder = b_special
                             temp
                     case And | Or:
-                        var coverage_decision_id = self.coverage_current_decision()
-                        val coverage_owns_decision = coverage_decision_id == -1
-                        if coverage_owns_decision:
-                            coverage_decision_id = self.coverage_register_decision(expr_value.span, "logical", expr_value.coverage_excluded)
-                            self.coverage_push_decision(coverage_decision_id)
                         val left_local = self.lower_expr(left)
-                        match left.kind:
-                            case HirExprKind.Binary(HirBinOp.And, _, _) | HirExprKind.Binary(HirBinOp.Or, _, _): ()
-                            case _:
-                                val left_condition_id = self.coverage_register_condition(coverage_decision_id, left.span, 0)
-                                self.coverage_emit_condition_probe(coverage_decision_id, left_condition_id, left_local, left.span)
                         var b_logic = self.builder
                         val rhs_block = b_logic.new_block(Some("logic_rhs"))
                         val short_block = b_logic.new_block(Some("logic_short"))
@@ -1711,11 +1727,6 @@ impl MirLowering:
                         b_rhs.switch_to_block(rhs_block)
                         self.builder = b_rhs
                         val right_local = self.lower_expr(right)
-                        match right.kind:
-                            case HirExprKind.Binary(HirBinOp.And, _, _) | HirExprKind.Binary(HirBinOp.Or, _, _): ()
-                            case _:
-                                val right_condition_id = self.coverage_register_condition(coverage_decision_id, right.span, 1)
-                                self.coverage_emit_condition_probe(coverage_decision_id, right_condition_id, right_local, right.span)
                         var right_value = right_local
                         var b_rhs_done = self.builder
                         if val right_type = self.local_mir_type_of(right_local):
@@ -1744,9 +1755,6 @@ impl MirLowering:
                         val logic_zero = b_rhs_done.emit_const_int(0)
                         val logic_result = b_rhs_done.emit_binop(MirBinOp.Ne, mir_operand_copy(merged_int), mir_operand_copy(logic_zero), MirType.bool())
                         self.builder = b_rhs_done
-                        if coverage_owns_decision:
-                            self.coverage_emit_decision_probe(coverage_decision_id, logic_result, expr_value.span)
-                            self.coverage_pop_decision(coverage_decision_id)
                         logic_result
                     case _:
                         val left_local = self.lower_expr(left)
@@ -2588,7 +2596,7 @@ impl MirLowering:
                 self.lower_while(cond, body)
 
             case For(var_, iter, body, _):
-                self.lower_for(var_, iter, body, expr_value.span)
+                self.lower_for(var_, iter, body)
 
             case Return(value):
                 self.lower_return_expr(value)

@@ -546,6 +546,69 @@ fn alloc_probe_count() -> i64:
     _g_alloc_probe
 
 # ---------------------------------------------------------------------------
+# Text intern table - fixed-capacity handle table for log_dispatch_text().
+#
+# log_dispatch_text() (used by log_trace/debug/info/warn/error/fatal) has no
+# numeric p0/p1 payload of its own - callers pass a `text` directly. Before
+# this fix it called `_dispatch_to_backends(level, subsys, 0)` with a dummy
+# p0=0, so backend consumers (e.g. RingBackend) could never recover the
+# actual message. Fix: store the text in a fixed-size slot table and carry the
+# resulting handle as p0 instead - the same trick `log_ring_push` already uses
+# for `fmt_handle`. No heap growth after warm-up (index writes, not appends).
+#
+# The table WRAPS rather than dropping when full, matching the ring backend it
+# feeds: a record's text stays resolvable exactly as long as the record itself
+# is plausibly alive. A non-wrapping table would go permanently text-blind
+# after LOG_TEXT_INTERN_CAP messages, which any real program passes in
+# seconds. Handles are monotonic (never reused), so a handle whose slot has
+# since been overwritten resolves to "" instead of silently returning some
+# unrelated later message.
+# ---------------------------------------------------------------------------
+val LOG_TEXT_INTERN_CAP: i64 = 4096
+
+var _g_text_intern: [text] = []
+var _g_text_intern_ready: bool = false
+var _g_text_intern_next: i64 = 0
+
+fn _ensure_text_intern():
+    if _g_text_intern_ready:
+        return
+    var slots: [text] = []
+    var i = 0
+    while i < LOG_TEXT_INTERN_CAP:
+        slots.push("")
+        i = i + 1
+    _g_text_intern = slots
+    _g_text_intern_ready = true
+
+# Stores `msg` and returns a 1-based monotonic handle. Writes wrap around the
+# fixed-capacity table, so the hot logging path never allocates and never goes
+# text-blind; the oldest entry is overwritten instead.
+fn _text_intern(msg: text) -> i64:
+    _ensure_text_intern()
+    val slot = _g_text_intern_next % LOG_TEXT_INTERN_CAP
+    _g_text_intern[slot] = msg
+    _g_text_intern_next = _g_text_intern_next + 1
+    _g_text_intern_next
+
+# Resolves a handle from _text_intern() back to its text. Returns "" for an
+# invalid handle (0 or not-yet-issued) or one whose slot has since been
+# overwritten by wrap-around - never a stale unrelated message.
+fn log_text_from_handle(handle: i64) -> text:
+    if handle <= 0 or handle > _g_text_intern_next:
+        return ""
+    if _g_text_intern_next - handle >= LOG_TEXT_INTERN_CAP:
+        return ""
+    _g_text_intern[(handle - 1) % LOG_TEXT_INTERN_CAP]
+
+# Number of stored messages already overwritten by wrap-around, i.e. handles
+# below this watermark no longer resolve.
+fn log_text_intern_overwritten() -> i64:
+    if _g_text_intern_next <= LOG_TEXT_INTERN_CAP:
+        return 0
+    _g_text_intern_next - LOG_TEXT_INTERN_CAP
+
+# ---------------------------------------------------------------------------
 # Dispatch - the heart of the facade
 # ---------------------------------------------------------------------------
 fn _dispatch_to_backends(level: i64, subsys: i64, p0: i64):
@@ -577,7 +640,13 @@ fn log_dispatch_text(level: i64, subsys: i64, msg: text):
         return
     if not _level_passes(level, subsys):
         return
-    _dispatch_to_backends(level, subsys, 0)
+    val handle = _text_intern(msg)
+    _dispatch_to_backends(level, subsys, handle)
+    # Non-panic stderr decision: backend kind=2 ("console", see
+    # LogBackendOps.kind) has no implementation anywhere in this facade -
+    # _dispatch_to_backends only ever handles kind==1 (ring). Until a real
+    # console backend exists, stderr intentionally stays panic-only; this is
+    # a documented decision, not a silent gap.
     if _g_panic_mode:
         rt_stderr_write(msg)
         rt_stderr_write("\n")
@@ -778,6 +847,7 @@ fn syslog_parse(line: text) -> SyslogRecord:
     )
 
 export log, log_dispatch_text, subsys_from_scope
+export log_text_from_handle, log_text_intern_overwritten, LOG_TEXT_INTERN_CAP
 export debug, error, info, warn, verbose, fatal, log_info, log_get_level, is_enabled
 export parse_level, level_name, set_level, get_global_level
 export LOG_TRACE, LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_FATAL, LOG_OFF, LOG_VERBOSE, LOG_ALL

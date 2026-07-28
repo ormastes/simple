@@ -43,7 +43,13 @@ use compiler.core.ast.{expr_asm, expr_asm_match, expr_asm_assert}
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
 use compiler.core.ast.{module_get_path}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
-use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set}
+# NOTE: intentionally NOT importing lex_pos_get/lex_pos_set/lex_line_get/
+# lex_line_set/lex_col_get/lex_col_set here -- those wrap a dead legacy
+# `lex_state` slot that CoreLexer.next_token() never writes back to, so they
+# read a permanently-stale position (root cause of "unterminated asm { ... }
+# block" on real bare-brace asm text, e.g. `asm { nop }`). Use the live
+# equivalents below instead. See lexer.spl's "Live position accessors" note.
+use compiler.frontend.core.lexer.{lex_token_end_get, lex_live_line_get, lex_live_col_get, lex_force_set_pos}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_skip_newlines}
@@ -89,8 +95,8 @@ fn parse_raw_asm_normalize(payload: text) -> text:
     parts.join("\n")
 
 fn parse_raw_asm_advance_lexer(start_pos: i64, end_pos: i64):
-    var line = lex_line_get()
-    var col = lex_col_get()
+    var line = lex_live_line_get()
+    var col = lex_live_col_get()
     var pos = start_pos
     while pos < end_pos:
         val ch = lex_source_char_at(pos)
@@ -100,12 +106,10 @@ fn parse_raw_asm_advance_lexer(start_pos: i64, end_pos: i64):
         else:
             col = col + 1
         pos = pos + 1
-    lex_pos_set(end_pos)
-    lex_line_set(line)
-    lex_col_set(col)
+    lex_force_set_pos(end_pos, line, col)
 
 fn parse_raw_asm_braced_payload() -> text:
-    val content_start = lex_pos_get()
+    val content_start = lex_token_end_get()
     val source_len = lex_source_len()
     var pos = content_start
     var depth = 1

@@ -35,6 +35,14 @@ struct MirBuilder:
     locals: [MirLocal]
     blocks: [MirBlock]
     instructions: [MirInst]
+    # DS5 (mir-span-thread, 2026-07-28): source span attributed to whatever
+    # HIR node is *currently* being lowered. Seeded per-function from
+    # begin_function's span, then stacked (save/set/restore) around each
+    # lower_stmt / lower_expr entry so nested emit_* calls stamp the
+    # innermost node's real span instead of a hardcoded `nil`. See
+    # expr_dispatch.spl::lower_expr and mir_lowering_stmts.spl::lower_stmt
+    # for the save/restore wrappers that maintain this stack discipline.
+    current_span: Span?
 
 impl MirBuilder:
     static fn new() -> MirBuilder:
@@ -52,7 +60,8 @@ impl MirBuilder:
             next_block_id: 1,
             locals: [],
             blocks: [],
-            instructions: []
+            instructions: [],
+            current_span: nil
         )
 
     # ========================================================================
@@ -94,6 +103,13 @@ impl MirBuilder:
         self.blocks = []
         self.instructions = []
         self.current_block = BlockId.entry()
+        # DS5: seed the per-function default span from the function's own
+        # declaration span. lower_stmt/lower_expr push a more specific span
+        # while lowering a given node and restore this on the way back out,
+        # so anything emitted with no narrower node in scope (e.g. synthetic
+        # prologue instructions) still carries a real, in-function location
+        # instead of nil.
+        self.current_span = Some(span)
         if (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1":
             print "MIRB begin {name} post-reset blocks={self.blocks.len()} locals={self.locals.len()}"
 
@@ -306,7 +322,7 @@ impl MirBuilder:
         """Emit a constant load."""
         self.emit(MirInst(
             kind: MirInstKind.Const(dest, value, type_),
-            span: nil
+            span: self.current_span
         ))
 
     me emit_const_int(value: i64) -> LocalId:
@@ -331,14 +347,29 @@ impl MirBuilder:
         """Emit a copy instruction."""
         self.emit(MirInst(
             kind: MirInstKind.Copy(dest, src),
-            span: nil
+            span: self.current_span
         ))
 
     me emit_move(dest: LocalId, src: LocalId):
-        """Emit a move instruction."""
+        """Emit a move instruction.
+
+        SF1 audit (2026-07-28): Simple's surface language currently has NO
+        semantically-true move sites — assignment is copy for value types
+        (structs/arrays) and reference-share for classes (s19
+        mutation-by-design, see _MirLowering/function_lowering.spl class
+        param binding); there is no `move` keyword in the frontend; and the
+        `iso` (Isolated) move-only capability parses as a type
+        (parser_types_expr.spl) but is erased to Infer at HIR type lowering
+        (hir_lowering/types.spl "Infer / Atomic / Isolated" arm). So this
+        builder has no surface-lowering caller yet by DESIGN, not by
+        omission. When iso-capability lowering lands, iso-typed
+        variable-to-variable assignment is the genuine move site to wire
+        here. The NLL checker's Move handling is real and spec-proven via
+        hand-built MIR (test/01_unit/compiler/borrow/borrow_check_spec.spl).
+        """
         self.emit(MirInst(
             kind: MirInstKind.Move(dest, src),
-            span: nil
+            span: self.current_span
         ))
 
     me emit_binop(op: MirBinOp, left: MirOperand, right: MirOperand, type_: MirType) -> LocalId:
@@ -346,7 +377,7 @@ impl MirBuilder:
         val dest = self.new_temp(type_)
         self.emit(MirInst(
             kind: MirInstKind.BinOp(dest, op, left, right),
-            span: nil
+            span: self.current_span
         ))
         dest
 
@@ -355,7 +386,7 @@ impl MirBuilder:
         val dest = self.new_temp(type_)
         self.emit(MirInst(
             kind: MirInstKind.UnaryOp(dest, op, operand),
-            span: nil
+            span: self.current_span
         ))
         dest
 
@@ -364,7 +395,7 @@ impl MirBuilder:
         val dest = self.new_temp(type_)
         self.emit(MirInst(
             kind: MirInstKind.Ref(dest, borrow_kind, place),
-            span: nil
+            span: self.current_span
         ))
         dest
 
@@ -373,7 +404,7 @@ impl MirBuilder:
         val dest = self.new_temp(type_)
         self.emit(MirInst(
             kind: MirInstKind.Load(dest, ptr),
-            span: nil
+            span: self.current_span
         ))
         dest
 
@@ -381,7 +412,7 @@ impl MirBuilder:
         """Emit a store instruction."""
         self.emit(MirInst(
             kind: MirInstKind.Store(ptr, value),
-            span: nil
+            span: self.current_span
         ))
 
     me emit_alloc(type_: MirType) -> LocalId:
@@ -389,14 +420,14 @@ impl MirBuilder:
         val dest = self.new_temp(MirType.ptr(type_, true))
         self.emit(MirInst(
             kind: MirInstKind.Alloc(dest, type_),
-            span: nil
+            span: self.current_span
         ))
         dest
 
     me emit_entry_alloc(type_: MirType) -> LocalId:
         """Emit a fixed-lifetime allocation in the function entry block."""
         val dest = self.new_temp(MirType.ptr(type_, true))
-        val alloc = MirInst(kind: MirInstKind.Alloc(dest, type_), span: nil)
+        val alloc = MirInst(kind: MirInstKind.Alloc(dest, type_), span: self.current_span)
         if self.current_block.id == BlockId.entry().id:
             self.emit(alloc)
         else:
@@ -427,7 +458,7 @@ impl MirBuilder:
 
         self.emit(MirInst(
             kind: MirInstKind.Call(dest, func, args),
-            span: nil
+            span: self.current_span
         ))
 
         dest
@@ -443,7 +474,7 @@ impl MirBuilder:
 
         self.emit(MirInst(
             kind: MirInstKind.CallIndirect(dest, ptr, args, sig),
-            span: nil
+            span: self.current_span
         ))
 
         dest
@@ -453,7 +484,7 @@ impl MirBuilder:
         val dest = self.new_temp(target)
         self.emit(MirInst(
             kind: MirInstKind.Cast(dest, operand, target),
-            span: nil
+            span: self.current_span
         ))
         dest
 
@@ -461,7 +492,7 @@ impl MirBuilder:
         val dest = self.new_temp(target)
         self.emit(MirInst(
             kind: MirInstKind.Bitcast(dest, operand, target),
-            span: nil
+            span: self.current_span
         ))
         dest
 
@@ -470,7 +501,7 @@ impl MirBuilder:
         val dest = self.new_temp(type_)
         self.emit(MirInst(
             kind: MirInstKind.Aggregate(dest, kind, operands),
-            span: nil
+            span: self.current_span
         ))
         dest
 
@@ -479,7 +510,7 @@ impl MirBuilder:
         val dest = self.new_temp(type_)
         self.emit(MirInst(
             kind: MirInstKind.GetField(dest, base, field),
-            span: nil
+            span: self.current_span
         ))
         dest
 
@@ -487,7 +518,7 @@ impl MirBuilder:
         """Emit field assignment."""
         self.emit(MirInst(
             kind: MirInstKind.SetField(base, field, value),
-            span: nil
+            span: self.current_span
         ))
 
     me emit_gep(base: MirOperand, indices: [MirOperand], type_: MirType) -> LocalId:
@@ -495,7 +526,7 @@ impl MirBuilder:
         val dest = self.new_temp(type_)
         self.emit(MirInst(
             kind: MirInstKind.GetElementPtr(dest, base, indices),
-            span: nil
+            span: self.current_span
         ))
         dest
 
@@ -595,7 +626,7 @@ impl MirBuilder:
 
         self.emit(MirInst(
             kind: MirInstKind.Call(nil, func_op, operands),
-            span: nil
+            span: self.current_span
         ))
 
     me terminate_return_copy(local: LocalId):
