@@ -300,52 +300,43 @@ final binary runs the showcase with `codegen_fallback_hits=0` and zero JIT
 fallbacks. The lesson is recorded here because the symptom (a perf cliff, not a
 wrong answer) is easy to ship unnoticed.
 
-**That bailout was NOT an artifact of the first cut — it is a real standing
-defect this change merely stopped triggering.** There are **two stacked
-defects**, and which one you see depends on which tree you measure. An earlier
-revision of this section claimed `rt_index_of` "is defined"; that was measured
-against this shared working copy and is **retracted for `origin/main`**.
+**That bailout was NOT an artifact of the first cut — it was a real standing
+defect this change merely stopped triggering.** It has since been **fixed
+independently** by `5c75a1bbce0` ("fix(jit,runtime): register rt_index_of so
+index_of stops de-JITting the module"), which landed both the definition and
+the registrations. Verified on a binary built from `origin/main` at
+`b410e53a7a2`: `nm … | grep rt_index_of` → 1, and `arr.index_of(30)` → `2`,
+`"hello world".index_of("world")` → `6`, `arr.index_of(99)` → `-1`, all
+correct. Nothing is outstanding on the JIT lane.
 
-**Defect 1 — at `origin/main`, `rt_index_of` has no definition at all.**
-A tree-wide `git grep "fn rt_index_of" origin/main` returns only doc files —
-no `.rs` definition anywhere. Yet four codegen paths emit calls to it:
-`codegen/instr/calls.rs:3234`, `codegen/instr/closures_structs.rs:1284`, and
-two LLVM paths (`codegen/llvm/emitter.rs:192`, `codegen/llvm/functions.rs:2275`).
-So **a fresh clone builds a compiler that emits calls to a function absent from
-its own source tree.** This is invisible to anyone working in this working
-copy.
+This section went through two wrong revisions before that. Both errors are
+recorded because each has a reusable lesson:
 
-The definition exists **only locally**: `#[no_mangle] pub extern "C" fn
-rt_index_of` at `src/compiler_rust/runtime/src/value/collections.rs:3051`, a
-documented receiver-polymorphic dispatcher that tries `rt_array_index_of` then
-falls back to `rt_string_find`. It arrived in local commit `0d864c55fe7`
-("fix(borrow): forward-propagate move state…"), which is **not an ancestor of
-`origin/main`** — unpushed work riding in an unrelated borrow-checker commit.
-At `origin/main` that region of `collections.rs` is `rt_array_concat`. Line
-3051 will not resolve from a clean clone until that definition lands.
+1. **"`rt_index_of` is defined" — wrong tree.** Verified against this shared
+   working copy, which carried another lane's unpushed definition, while
+   `origin/main` had none. A working-copy-only symbol reads exactly like a
+   present one. *Verify publishable findings against `origin/main`, and say
+   which tree you measured.*
+2. **"four codegen paths emit it" — wrong grep.** Only **two** emit the symbol
+   (`codegen/instr/calls.rs:3234`, `codegen/instr/closures_structs.rs:1284`).
+   The two LLVM sites match the *method name* `"index_of"` but emit
+   `rt_string_find` (`llvm/emitter.rs:191`, `llvm/functions.rs:2274`).
+   *Grep the emitted symbol (`'"rt_index_of"'`), not the method name.*
 
-**Defect 2 — even with the definition present, it is never registered.**
-The JIT resolves `rt_*` through the build-script-generated
-`RUNTIME_SYMBOL_ENTRIES` table (`runtime/build.rs`). `rt_index_of` is absent
-from **all five** generated tables under
-`target/release/build/simple-runtime-*/out/`, including one regenerated during
-this work — a generator miss, not staleness. Its sibling `rt_array_index_of`,
-declared identically twenty lines earlier in the same file, **is** present (as
-is `rt_string_find`), so the file is scanned and this one symbol is
-specifically dropped. Consequently the linker drops it:
-`nm bin/release/x86_64-unknown-linux-gnu/simple | grep rt_index_of` → 0, while
-`rt_string_find` → 1.
-
-Fix order, both out of scope for this `.?` change: (1) land the existing
-definition on its own merits, (2) fix the `build.rs` generator miss. Do **not**
-author a second `rt_index_of` and do **not** delete the four call sites — it is
-the only receiver-polymorphic `index_of`, and removing it forces every caller
-to choose array-vs-text statically.
-
-**Method note.** The retracted claim came from verifying against the shared
-working copy while knowing it was contested and mid-flight. When a finding will
-be published, measure it against `origin/main` — a working-copy-only symbol
-reads exactly like a present one.
+**Still open, and measured here (NOT a `.?` issue — handed to the `index_of`
+lane):** `index_of` is unsupported on the LLVM/native-build lane. On the same
+`b410e53a7a2` binary that is correct under the JIT, `native-build` fails with
+`MIR lowering error: unresolved method call: index_of` (rc=1, no binary), while
+an otherwise-identical probe without `index_of` native-builds and runs fine.
+So the failure is loud, not silent — the hypothesis that the two backends
+silently disagree (JIT via polymorphic `rt_index_of`, LLVM via string-only
+`rt_string_find` returning the `-1` mismatch sentinel) does **not** reproduce:
+MIR lowering rejects the method before either LLVM mapping is reached. Note
+the `unresolved method call 'index_of' lowered to const-0 placeholder
+(silent-null risk, Task #145)` warning is still emitted three times alongside
+the fatal error, so the placeholder machinery is real; whether any other
+configuration lets it through *without* the accompanying hard error was not
+determined here.
 
 Measurement caveat for anyone re-running these: this host was concurrently
 running another session's `stage2_*` jobs holding ~95 GB RSS at load average
