@@ -117,6 +117,202 @@ fn freestanding_unresolved_mode() -> FreestandingUnresolvedMode {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fabricated-stub ratchet
+//
+// This is the guard at the site where fabrication ACTUALLY happens. The weak
+// nil-returning bodies emitted below (`__attribute__((weak)) __stub_i64
+// {wrap}(void) { return 0; }`) are the mechanism that once shipped a
+// nil-returning `rt_array_copy` into a guest and silently shredded every array
+// copy nine steps downstream.
+//
+// Unlike a post-link disassembly guard, this channel needs no classifier and
+// can produce no false positives: it does not decide whether a body looks
+// fabricated, it reports exactly the set of symbols this function is itself
+// about to fabricate.
+//
+// The ratchet is per-entry and NEW-ONLY: existing debt is recorded in
+// `config/freestanding_fabricated_stub_baseline.sdn` and does not fail the
+// build, because the production freestanding link currently cannot link
+// without these stubs. A symbol that is NOT in the entry's baseline fails the
+// link.
+// ---------------------------------------------------------------------------
+
+/// Default location of the fabricated-stub baseline, overridable for tests.
+fn fabricated_stub_baseline_path(project_root: &Path) -> PathBuf {
+    if let Ok(p) = std::env::var("SIMPLE_FABRICATED_STUB_BASELINE") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    project_root.join("config/freestanding_fabricated_stub_baseline.sdn")
+}
+
+/// Per-entry baseline key: the output binary's basename.
+///
+/// Deliberately identical to `simpleos_entry_key` in
+/// `src/compiler/70.backend/backend/llvm_native_link.spl`, so the two baseline
+/// files key their rows the same way.
+fn fabricated_stub_entry_key(output: &Path) -> String {
+    output
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| output.to_string_lossy().to_string())
+}
+
+/// Parse `<entry-key> <symbol>` rows. `#` starts a comment; blank lines are
+/// skipped. A malformed row is a hard error -- silently degrading to an empty
+/// baseline would be a fail-open on the exact channel this file gates.
+fn parse_fabricated_stub_baseline(text: &str) -> Result<std::collections::BTreeSet<(String, String)>, String> {
+    let mut rows = std::collections::BTreeSet::new();
+    for (lineno, raw) in text.lines().enumerate() {
+        let line = match raw.find('#') {
+            Some(i) => &raw[..i],
+            None => raw,
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "fabricated-stub baseline line {}: expected `<entry-key> <symbol>`, got {:?}",
+                lineno + 1,
+                line
+            ));
+        }
+        rows.insert((parts[0].to_string(), parts[1].to_string()));
+    }
+    Ok(rows)
+}
+
+/// Rewrite the rows for one entry, preserving comments and every other entry.
+///
+/// This IS the documented regeneration procedure
+/// (`SIMPLE_FABRICATED_STUB_BASELINE_WRITE=1`), so the procedure recorded in
+/// the baseline file cannot drift from what the code does.
+fn rewrite_fabricated_stub_baseline(existing: &str, entry_key: &str, symbols: &[String]) -> String {
+    let mut out = String::new();
+    for raw in existing.lines() {
+        let code = match raw.find('#') {
+            Some(i) => &raw[..i],
+            None => raw,
+        };
+        let first = code.split_whitespace().next();
+        if first == Some(entry_key) {
+            continue; // replaced below
+        }
+        out.push_str(raw);
+        out.push('\n');
+    }
+    if !out.ends_with("\n\n") && !out.is_empty() {
+        out.push('\n');
+    }
+    for sym in symbols {
+        out.push_str(entry_key);
+        out.push(' ');
+        out.push_str(sym);
+        out.push('\n');
+    }
+    out
+}
+
+/// Split the fabricated set into (already-baselined, NEW) for one entry.
+fn partition_fabricated_against_baseline(
+    rows: &std::collections::BTreeSet<(String, String)>,
+    entry_key: &str,
+    fabricated: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut known = Vec::new();
+    let mut new_syms = Vec::new();
+    for sym in fabricated {
+        if rows.contains(&(entry_key.to_string(), sym.clone())) {
+            known.push(sym.clone());
+        } else {
+            new_syms.push(sym.clone());
+        }
+    }
+    (known, new_syms)
+}
+
+/// Report every symbol about to be weak-stubbed, and fail on NEW ones.
+///
+/// Reporting is unconditional and names every symbol: silence is the defect
+/// this guard exists to remove.
+fn check_fabricated_stub_ratchet(project_root: &Path, output: &Path, fabricated: &[String]) -> Result<(), String> {
+    let entry_key = fabricated_stub_entry_key(output);
+    let baseline_path = fabricated_stub_baseline_path(project_root);
+    let existing = std::fs::read_to_string(&baseline_path).unwrap_or_default();
+    let rows = parse_fabricated_stub_baseline(&existing)
+        .map_err(|e| format!("{} ({})", e, baseline_path.display()))?;
+    let entry_baselined = rows.iter().any(|(k, _)| k == &entry_key);
+    let (known, new_syms) = partition_fabricated_against_baseline(&rows, &entry_key, fabricated);
+
+    eprintln!(
+        "Fabricated freestanding stubs: {} symbol(s) for entry '{}' -- weak bodies that RETURN 0 \
+         (baseline {}: {} known, {} new)",
+        fabricated.len(),
+        entry_key,
+        baseline_path.display(),
+        known.len(),
+        new_syms.len()
+    );
+    for sym in &known {
+        eprintln!("  FABRICATED     {} {}", entry_key, sym);
+    }
+    for sym in &new_syms {
+        eprintln!("  FABRICATED-NEW {} {}", entry_key, sym);
+    }
+
+    if std::env::var("SIMPLE_FABRICATED_STUB_BASELINE_WRITE").as_deref() == Ok("1") {
+        let updated = rewrite_fabricated_stub_baseline(&existing, &entry_key, fabricated);
+        if let Some(parent) = baseline_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&baseline_path, updated)
+            .map_err(|e| format!("write fabricated-stub baseline {}: {e}", baseline_path.display()))?;
+        eprintln!(
+            "Fabricated-stub baseline REWRITTEN for entry '{}': {} row(s) -> {}",
+            entry_key,
+            fabricated.len(),
+            baseline_path.display()
+        );
+        return Ok(());
+    }
+
+    if !entry_baselined {
+        // A never-measured entry has no debt record. Failing here would break
+        // every freestanding entry that has not been baselined yet, so this
+        // reports loudly instead -- escalate with the strict env var.
+        let msg = format!(
+            "fabricated-stub baseline has NO rows for entry '{}'; {} symbol(s) fabricated unmeasured. \
+             Baseline it with SIMPLE_FABRICATED_STUB_BASELINE_WRITE=1 on this exact build.",
+            entry_key,
+            fabricated.len()
+        );
+        if std::env::var("SIMPLE_STRICT_FABRICATED_STUB_RATCHET").as_deref() == Ok("1") {
+            return Err(msg);
+        }
+        eprintln!("WARNING: {}", msg);
+        return Ok(());
+    }
+
+    if !new_syms.is_empty() {
+        return Err(format!(
+            "freestanding link would FABRICATE {} symbol(s) not in the baseline for entry '{}': {}. \
+             These get weak bodies that return 0, which silently corrupts every caller. \
+             Implement them, or -- only if nil is genuinely the correct answer -- re-baseline with \
+             SIMPLE_FABRICATED_STUB_BASELINE_WRITE=1 and justify it in {}.",
+            new_syms.len(),
+            entry_key,
+            new_syms.join(", "),
+            baseline_path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
     if is_runtime_owned_symbol(sym) {
         return None;
@@ -247,6 +443,8 @@ pub(crate) fn generate_stub_object_freestanding(
     triple: &str,
     march: &str,
     mabi: &str,
+    project_root: &Path,
+    output: &Path,
 ) -> Result<Option<PathBuf>, String> {
     use std::collections::{BTreeSet, HashSet};
 
@@ -549,6 +747,9 @@ pub(crate) fn generate_stub_object_freestanding(
         );
     }
     if matches!(unresolved_mode, FreestandingUnresolvedMode::EmitStubs) {
+        // Guard at the fabrication site: report every symbol about to get a
+        // weak nil-returning body, and fail on any that is not baselined debt.
+        check_fabricated_stub_ratchet(project_root, output, &unresolved)?;
         for (i, sym) in unresolved.iter().enumerate() {
             // Sanitize C identifier for the wrapper name; keep the external symbol
             // name exact via an __asm__ label so the linker sees the mangled form.
@@ -1157,5 +1358,83 @@ mod tests {
         ]);
 
         assert_eq!(resolve_defined_suffix_alias("run_check", &defined), None);
+    }
+
+    #[test]
+    fn fabricated_stub_baseline_parses_rows_and_comments() {
+        let rows = parse_fabricated_stub_baseline(
+            "# header\n\nkernel.elf rt_array_copy  # debt\n kernel.elf rt_dma_alloc\nother.elf rt_x\n",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.contains(&("kernel.elf".to_string(), "rt_array_copy".to_string())));
+        assert!(rows.contains(&("other.elf".to_string(), "rt_x".to_string())));
+    }
+
+    #[test]
+    fn malformed_baseline_row_is_an_error_not_an_empty_baseline() {
+        assert!(parse_fabricated_stub_baseline("kernel.elf\n").is_err());
+        assert!(parse_fabricated_stub_baseline("a b c\n").is_err());
+    }
+
+    #[test]
+    fn new_fabricated_symbols_are_partitioned_out() {
+        let rows = parse_fabricated_stub_baseline("kernel.elf rt_known\n").unwrap();
+        let (known, new_syms) = partition_fabricated_against_baseline(
+            &rows,
+            "kernel.elf",
+            &["rt_known".to_string(), "rt_brand_new".to_string()],
+        );
+        assert_eq!(known, vec!["rt_known".to_string()]);
+        assert_eq!(new_syms, vec!["rt_brand_new".to_string()]);
+    }
+
+    #[test]
+    fn baseline_rows_are_scoped_per_entry() {
+        let rows = parse_fabricated_stub_baseline("other.elf rt_known\n").unwrap();
+        let (known, new_syms) =
+            partition_fabricated_against_baseline(&rows, "kernel.elf", &["rt_known".to_string()]);
+        assert!(known.is_empty());
+        assert_eq!(new_syms, vec!["rt_known".to_string()]);
+    }
+
+    #[test]
+    fn rewrite_replaces_only_the_target_entry_and_keeps_comments() {
+        let existing = "# doc line\nkernel.elf rt_old\nother.elf rt_keep\n";
+        let updated =
+            rewrite_fabricated_stub_baseline(existing, "kernel.elf", &["rt_a".to_string(), "rt_b".to_string()]);
+        assert!(updated.contains("# doc line"));
+        assert!(updated.contains("other.elf rt_keep"));
+        assert!(!updated.contains("kernel.elf rt_old"));
+        assert!(updated.contains("kernel.elf rt_a"));
+        assert!(updated.contains("kernel.elf rt_b"));
+        // The rewrite output must round-trip through the parser.
+        let rows = parse_fabricated_stub_baseline(&updated).unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn entry_key_is_the_output_basename() {
+        assert_eq!(
+            fabricated_stub_entry_key(Path::new("/a/b/simple_wm_kernel.elf")),
+            "simple_wm_kernel.elf"
+        );
+    }
+
+    #[test]
+    fn shipped_baseline_file_parses() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(std::path::Path::to_path_buf)
+            .unwrap();
+        let path = repo_root.join("config/freestanding_fabricated_stub_baseline.sdn");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        parse_fabricated_stub_baseline(&text).unwrap();
+        assert!(
+            text.contains("SIMPLE_FABRICATED_STUB_BASELINE_WRITE"),
+            "baseline file must document the regeneration procedure the code implements"
+        );
     }
 }

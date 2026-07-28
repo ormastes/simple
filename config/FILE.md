@@ -11,6 +11,7 @@ Configuration files for build, test, packaging, and tooling.
 | `di.sdn` | Dependency injection configuration |
 | `dl.config.sdn` | Deep learning configuration |
 | `doc_coverage.sdn` | Documentation coverage configuration |
+| `freestanding_fabricated_stub_baseline.sdn` | Per-entry NEW-only ratchet for weak nil-returning freestanding stubs |
 | `docker-compose.test.yml` | Docker test compose |
 | `docker-compose.yml` | Docker compose |
 | `mcp` | MCP server configurations |

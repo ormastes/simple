@@ -1933,7 +1933,16 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         };
 
         let freestanding_stub_obj =
-            generate_stub_object_freestanding(temp_dir, object_paths, &boot_objects, triple, march, mabi)?;
+            generate_stub_object_freestanding(
+                temp_dir,
+                object_paths,
+                &boot_objects,
+                triple,
+                march,
+                mabi,
+                &self.project_root,
+                &self.output,
+            )?;
         let weak_boot_defsyms = Self::freestanding_weak_boot_defsyms(object_paths, &boot_objects, imports)?;
         if !weak_boot_defsyms.is_empty() {
             eprintln!(
