@@ -69,11 +69,40 @@ static int remove_sysv_objects(int shmid, int msgid, int semid) {
     return removed;
 }
 
+static int sandbox_pre_main_denials;
+
+#ifdef __linux__
+extern bool rt_browser_renderer_preinit_active_for_test(void);
+
+__attribute__((constructor))
+static void sandbox_pre_main_probe(void) {
+    if (!rt_browser_renderer_preinit_active_for_test()) return;
+    errno = 0;
+    int file_denied = open("/etc/passwd", O_RDONLY) < 0 && errno == EACCES;
+    errno = 0;
+    int socket_denied = socket(AF_INET, SOCK_STREAM, 0) < 0 && errno == EPERM;
+    errno = 0;
+    pid_t child = fork();
+    if (child == 0) _exit(125);
+    if (child > 0) {
+        int status;
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    }
+    int fork_denied = child < 0 && errno == EPERM;
+    sandbox_pre_main_denials = file_denied && socket_denied && fork_denied;
+}
+#else
+static bool rt_browser_renderer_preinit_active_for_test(void) {
+    return false;
+}
+#endif
+
 static int sandbox_probe(int argc, char** argv) {
     if (argc != 7 || strcmp(argv[0], "simple-browser-renderer") != 0 ||
         getenv("SIMPLE_BROWSER_RENDERER_SECRET") != NULL) {
         return 10;
     }
+    if (!sandbox_pre_main_denials) return 29;
     char cwd[8];
     if (!getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/") != 0) return 11;
     int inherited_fd = atoi(argv[2]);
@@ -562,6 +591,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && strcmp(argv[1], "--sandbox-probe") == 0) {
         return sandbox_probe(argc, argv);
     }
+    if (rt_browser_renderer_preinit_active_for_test()) return 10;
     if (!closed_child_write_is_nonfatal()) return 1;
     if (!interrupted_large_write_completes()) return 2;
     if (!bounded_write_reports_backpressure()) return 3;

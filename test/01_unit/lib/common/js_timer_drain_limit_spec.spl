@@ -6,6 +6,24 @@ use std.js.types.js_types.{JsValue}
 
 describe "JavaScript timer drain limit":
 
+    it "does not allocate Node timer handles in browser mode":
+        var runtime = JsRuntime.new_browser(
+            Logger.new("browser-timer-heap", LogLevel.Error)
+        )
+        expect(runtime.eval("function noop() {}").is_ok()).to_equal(true)
+        val baseline = runtime.interpreter.object_store.next_id
+        var now = 0
+        while now < 128:
+            match runtime.eval("setTimeout(noop, 0)"):
+                Ok(JsValue.Number(_)): pass_dn
+                _:
+                    fail("Expected browser setTimeout to return a numeric id")
+            expect(runtime.drain_due_timers(now)).to_equal(1)
+            now = now + 1
+        expect(runtime.interpreter.object_store.next_id).to_equal(baseline)
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
+
     it "coalesces an overdue interval to one callback per clock advance":
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(

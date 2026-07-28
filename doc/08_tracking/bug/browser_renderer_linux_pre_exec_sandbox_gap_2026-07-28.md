@@ -1,6 +1,6 @@
 # Browser renderer Linux pre-exec sandbox gap
 
-Status: open, release-blocking
+Status: implemented; production admission pending, release-blocking
 
 `rt_browser_renderer_spawn_sandboxed` scrubs descriptors/environment and then
 executes the full hosted renderer. The worker installs rlimits, `no_new_privs`,
@@ -28,3 +28,18 @@ A full-policy preinit prototype failed the bounded
 three distinct fix/check cycles and was reverted. Resume by splitting the
 startup-safe stage-one filter from the post-main policy; do not install the
 current full worker policy unchanged at preinit.
+
+## Implemented stage one
+
+`runtime_process.c` now installs an executable-only ELF preinit callback. It
+activates only for the broker-fixed `simple-browser-renderer` argv with an
+empty environment, then applies `no_new_privs`, deny-all Landlock, and a
+startup-safe seccomp filter denying socket, fork/clone, and further exec. The
+existing worker entry layers the stricter stage-two limits and filter.
+
+The production-spawn C probe observes file, socket, and fork denial from a
+constructor and then completes the normal stage-two child handshake. It passed
+on verification cycle 2. Keep this issue release-blocking until the admitted
+pure-Simple renderer completes ready/frame protocol evidence with the same
+artifact; current target construction is blocked by the compiler/runtime link
+failure recorded in the SPipe state.

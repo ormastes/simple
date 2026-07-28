@@ -1755,6 +1755,90 @@ static bool browser_renderer_apply_landlock(void) {
 #endif
 }
 
+static bool s_browser_renderer_preinit_active;
+
+static bool browser_renderer_apply_startup_seccomp(void) {
+#if !defined(BROWSER_RENDERER_AUDIT_ARCH) || !defined(SYS_seccomp)
+    return false;
+#else
+    struct sock_filter filter[] = {
+        BPF_STMT(
+            BPF_LD | BPF_W | BPF_ABS,
+            (uint32_t)offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(
+            BPF_JMP | BPF_JEQ | BPF_K,
+            BROWSER_RENDERER_AUDIT_ARCH, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+        BPF_STMT(
+            BPF_LD | BPF_W | BPF_ABS,
+            (uint32_t)offsetof(struct seccomp_data, nr)),
+#if defined(__x86_64__)
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000U, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+#endif
+#ifdef __NR_socket
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_socket),
+#endif
+#ifdef __NR_socketpair
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_socketpair),
+#endif
+#ifdef __NR_socketcall
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_socketcall),
+#endif
+#ifdef __NR_fork
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fork),
+#endif
+#ifdef __NR_vfork
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_vfork),
+#endif
+#ifdef __NR_clone
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_clone),
+#endif
+#ifdef __NR_clone3
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_clone3),
+#endif
+#ifdef __NR_execve
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_execve),
+#endif
+#ifdef __NR_execveat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_execveat),
+#endif
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program = {
+        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+        .filter = filter
+    };
+    return syscall(
+        SYS_seccomp, SECCOMP_SET_MODE_FILTER,
+        SECCOMP_FILTER_FLAG_TSYNC, &program) == 0;
+#endif
+}
+
+typedef void (*BrowserRendererPreinitFn)(int, char**, char**);
+
+static void browser_renderer_preinit(int argc, char** argv, char** envp) {
+    static const char marker[] = "simple-browser-renderer";
+    if (argc <= 0 || !argv || !argv[0] || strcmp(argv[0], marker) != 0) {
+        return;
+    }
+    if (!envp || envp[0] != NULL ||
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+        !browser_renderer_apply_landlock() ||
+        !browser_renderer_apply_startup_seccomp()) {
+        _exit(126);
+    }
+    s_browser_renderer_preinit_active = true;
+}
+
+__attribute__((section(".preinit_array"), used))
+static BrowserRendererPreinitFn const browser_renderer_preinit_entry =
+    browser_renderer_preinit;
+
+bool rt_browser_renderer_preinit_active_for_test(void) {
+    return s_browser_renderer_preinit_active;
+}
+
 static bool browser_renderer_apply_seccomp(void) {
 #if !defined(BROWSER_RENDERER_AUDIT_ARCH) || !defined(SYS_seccomp)
     return false;

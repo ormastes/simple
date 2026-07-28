@@ -1140,3 +1140,20 @@ implementation in progress / target evidence blocked
   condition parser fix. It failed once at Stage 2 linking on missing
   `rt_index_of` and `rt_file_is_regular_no_follow`; no retry or broader
   bootstrap was attempted. Fresh HTML/CSS/animation pixels remain blocked.
+- Body DOM publication now preserves the canonical body node, author id,
+  classes, inline style, and JS body/style objects across `innerHTML` changes.
+  Focused rAF coverage requires same-callback selectors, canonical HTML, CSS
+  color pixels, and a changed frame; execution remains compiler-blocked.
+- Browser-mode timers now return scalar web timer IDs before Node handle
+  allocation, so discarded animation frames add no handle objects. Node mode
+  keeps its refresh/ref/unref handle semantics. Runtime creation also removed
+  one redundant synthetic DOM publication before the authoritative bind.
+- Linux renderer stage one now enters from ELF preinit for the broker-fixed
+  argv and empty environment, before constructors. It applies no-new-privs,
+  deny-all Landlock, and startup-safe socket/fork/clone/exec seccomp; the
+  focused production-spawn constructor probe passed on verification cycle 2.
+  Full admitted renderer execution is still required before closing the bug.
+- Native select UI access remains open after three bounded fix/review cycles:
+  duplicate author ids still collided at the select-owner target seam. The
+  unverified select patch was removed rather than shipping ambiguous control
+  mutation; existing focus-only evidence remains the current boundary.

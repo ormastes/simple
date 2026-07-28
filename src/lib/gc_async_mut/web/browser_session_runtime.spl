@@ -17,7 +17,9 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_dispatch_event_to_id, be_dom_find_by_tag, be_dom_find_path_to_id,
-    be_dom_focused_id, be_dom_get_attr, be_dom_has_attr, be_dom_serialize_children,
+    be_dom_focused_id, be_dom_get_attr, be_dom_has_attr,
+    be_dom_serialize_children,
+    be_dom_serialize_html, be_dom_set_children,
     be_dom_submit_form_owner_id, be_dom_keyboard_activation_event_for_target,
     be_dom_checked_radio_id_for_target, be_dom_form_owner_id,
     be_dom_default_submitter_id, be_dom_form_allows_direct_implicit_submit,
@@ -148,6 +150,18 @@ fn _browser_session_dom_node_count(node: BeDomNode) -> i32:
         count = count + _browser_session_dom_node_count(child)
     count
 
+fn _browser_session_replace_body_children(
+    node: BeDomNode, children: [BeDomNode]
+) -> BeDomNode:
+    if node.tag_name == "body":
+        return be_dom_set_children(node, children)
+    var next_children: [BeDomNode] = []
+    for child in node.children:
+        next_children.push(_browser_session_replace_body_children(
+            child, children
+        ))
+    be_dom_set_children(node, next_children)
+
 fn _browser_session_dom_action(action: text) -> bool:
     action.starts_with("set-text:") or action.starts_with("set-attr:") or
         action.starts_with("remove-attr:") or action.starts_with("add-class:") or
@@ -194,6 +208,19 @@ fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pai
     out
 
 impl BrowserSession:
+
+    me _replace_current_body_children(body_html: text):
+        val replacement = html_tree_builder_build(
+            "<html><body>" + body_html + "</body></html>"
+        )
+        val replacement_bodies = be_dom_find_by_tag(replacement, "body")
+        val current_bodies = be_dom_find_by_tag(self.current_dom, "body")
+        if replacement_bodies.len() == 0 or current_bodies.len() == 0:
+            self.current_dom = replacement
+            return
+        self.current_dom = _browser_session_replace_body_children(
+            self.current_dom, replacement_bodies[0].children
+        )
 
     me _submit_dom_form(
         form_id: text, submitter_id: text
@@ -804,9 +831,13 @@ impl BrowserSession:
 
     me render_html_document() -> text:
         val title = if self.current_title != "": self.current_title else: self.current_url
-        val body_html = if self.current_body_html.len() > 0: self.current_body_html else: ""
+        val bodies = be_dom_find_by_tag(self.current_dom, "body")
+        val body_html = if bodies.len() > 0:
+            be_dom_serialize_html(bodies[0])
+        else:
+            "<body>" + self.current_body_html + "</body>"
         val style_html = self.current_style_html
-        "<!DOCTYPE html><html><head><title>{escape_html_text(title)}</title>{style_html}</head><body>{body_html}</body></html>"
+        "<!DOCTYPE html><html><head><title>{escape_html_text(title)}</title>{style_html}</head>{body_html}</html>"
 
     me current_entry() -> BrowserHistoryEntry?:
         if self.current_index >= 0 and self.current_index < self.history.len():
@@ -904,9 +935,19 @@ impl BrowserSession:
         self.current_body_html = body_html
         self.current_style_html = ""
         self.source_html = own_text(html)
-        self.current_dom = html_tree_builder_build(
-            "<html><body>" + body_html + "</body></html>"
-        )
+        val visible_dom = html_tree_builder_build(visible_html)
+        val visible_bodies = be_dom_find_by_tag(visible_dom, "body")
+        self.current_dom = if visible_bodies.len() > 0:
+            html_tree_builder_build(
+                "<html>" + be_dom_serialize_html(visible_bodies[0]) + "</html>"
+            )
+        else:
+            html_tree_builder_build(
+                "<html><body>" + body_html + "</body></html>"
+            )
+        if val Some(state) = self.runtime_state:
+            state.bind_dom(self.current_dom)
+            self.runtime_state = Some(state)
 
         var load = BrowserLoadState.create(
             document_url: url,
@@ -965,7 +1006,7 @@ impl BrowserSession:
         if val Some(state) = self.runtime_state:
             return Some(state)
         val cookie_text = self._script_cookie_for_url(self.document_url)
-        val state = BrowserRuntimeState.create(
+        var state = BrowserRuntimeState.create(
             self.document_url,
             self.current_title,
             self.current_body_html,
@@ -974,6 +1015,7 @@ impl BrowserSession:
             cookie_text
         )
         state.runtime.interpreter.timer_current_time_ms = self.monotonic_time_ms
+        state.bind_dom(self.current_dom)
         self.runtime_state = Some(state)
         Some(state)
 
@@ -1141,9 +1183,7 @@ impl BrowserSession:
         val body_changed = next_body_html != self.current_body_html
         self.current_body_html = next_body_html
         if body_changed:
-            self.current_dom = html_tree_builder_build(
-                "<html><body>" + next_body_html + "</body></html>"
-            )
+            self._replace_current_body_children(next_body_html)
         val bridge_changed = (
             state.runtime.interpreter.host_dom_bridge_generation >
             state.dom_bridge_generation
