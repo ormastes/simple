@@ -1257,6 +1257,8 @@ class BrowserSession:
     cookies: CookieStore
     runtime_state: BrowserRuntimeState?
     pending_requests: [BrowserRequest]
+    pending_request_head: i64
+    pending_request_tombstone: BrowserRequest
     inflight_requests: [BrowserRequest]
     next_request_seq: i32
     subresource_request_count: i32
@@ -1313,6 +1315,10 @@ class BrowserSession:
             cookies: CookieStore.new(),
             runtime_state: nil,
             pending_requests: [],
+            pending_request_head: 0,
+            pending_request_tombstone: BrowserRequest.create(
+                "", "", "", "", "", "", ""
+            ),
             inflight_requests: [],
             next_request_seq: 1,
             subresource_request_count: 0,
@@ -1489,6 +1495,7 @@ impl BrowserSession:
         # Stop or a failed response must preserve.
         self.active_load = nil
         self.pending_requests = []
+        self.pending_request_head = 0
         self.inflight_requests = []
         self.subresource_request_count = 0
         self.pending_content_security_policy = ""
@@ -1501,7 +1508,7 @@ impl BrowserSession:
 
     me can_stop_loading() -> bool:
         self.is_loading or self.active_load != nil or
-            self.pending_requests.len() > 0 or self.inflight_requests.len() > 0
+            self.pending_request_count() > 0 or self.inflight_requests.len() > 0
 
     me stop_loading():
         if not self.can_stop_loading():
@@ -1514,6 +1521,7 @@ impl BrowserSession:
         self.pending_navigation_target_index = -1
         self.pending_navigation_push_history = true
         self.pending_requests = []
+        self.pending_request_head = 0
         self.inflight_requests = []
         self.active_load = nil
         self.pending_content_security_policy = ""
@@ -1551,21 +1559,29 @@ impl BrowserSession:
         Ok(true)
 
     me take_pending_request() -> BrowserRequest?:
-        while self.pending_requests.len() > 0:
-            val pending_count = self.pending_requests.len()
-            val req = self.pending_requests[0]
-            val rest_count = pending_count - 1
-            if rest_count == 0:
+        while self.pending_request_head < self.pending_requests.len():
+            val req = self.pending_requests[self.pending_request_head]
+            self.pending_requests[self.pending_request_head] = (
+                self.pending_request_tombstone
+            )
+            self.pending_request_head = self.pending_request_head + 1
+            if self.pending_request_head >= self.pending_requests.len():
                 self.pending_requests = []
-            else:
-                var rest: [BrowserRequest] = [self.pending_requests[1]; rest_count]
-                var idx = 1
+                self.pending_request_head = 0
+            elif (self.pending_request_head >= 256 and
+                self.pending_request_head * 2 >= self.pending_requests.len()):
+                val remaining = self.pending_requests.len() - self.pending_request_head
+                var compacted: [BrowserRequest] = [
+                    self.pending_requests[self.pending_request_head]; remaining
+                ]
+                var idx = self.pending_request_head
                 var out_idx = 0
-                while idx < pending_count:
-                    rest[out_idx] = self.pending_requests[idx]
+                while idx < self.pending_requests.len():
+                    compacted[out_idx] = self.pending_requests[idx]
                     out_idx = out_idx + 1
                     idx = idx + 1
-                self.pending_requests = rest
+                self.pending_requests = compacted
+                self.pending_request_head = 0
 
             val is_network_url = req.url.starts_with("http://") or req.url.starts_with("https://")
             val invalid_network_url = (
@@ -1685,7 +1701,10 @@ impl BrowserSession:
             self._flush_runtime_side_effects()
 
     me has_pending_requests() -> bool:
-        self.pending_requests.len() > 0
+        self.pending_request_count() > 0
+
+    fn pending_request_count() -> i64:
+        self.pending_requests.len() - self.pending_request_head
 
     me _drain_runtime_async_requests() -> bool:
         if val Some(state) = self.runtime_state:
@@ -1743,13 +1762,16 @@ impl BrowserSession:
                         )
                         val request_capacity_reached = (
                             self.subresource_request_count +
-                            self.pending_requests.len() >=
+                            self.pending_request_count() >=
                             BROWSER_MAX_DOCUMENT_SUBRESOURCES
                         )
                         var already_emitted = false
-                        for existing in self.pending_requests:
+                        var pending_index = self.pending_request_head
+                        while pending_index < self.pending_requests.len():
+                            val existing = self.pending_requests[pending_index]
                             if existing.id == request_id:
                                 already_emitted = true
+                            pending_index = pending_index + 1
                         for seen_id in seen_request_ids:
                             if seen_id == request_id:
                                 already_emitted = true
@@ -2313,8 +2335,8 @@ impl BrowserSession:
         if self.current_index < 0 or self.current_index >= self.history.len():
             return Err("no page to reload")
         val entry = self.history[self.current_index]
-        if entry.url.starts_with("http://") or
-            entry.url.starts_with("https://"):
+        if (entry.url.starts_with("http://") or
+            entry.url.starts_with("https://")):
             return self.begin_network_reload()
         self.begin_navigation(entry.url)
         self.pending_content_security_policy = entry.content_security_policy

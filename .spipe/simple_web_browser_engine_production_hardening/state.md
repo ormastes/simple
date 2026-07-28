@@ -1431,3 +1431,23 @@ implementation in progress / target evidence blocked
   the isolated workspace has no admitted pure-Simple CLI, and invoking the
   deployed artifact reached the prohibited seed/wrapper admission path, so it
   was stopped without bootstrap or seed fallback.
+- BrowserSession's request FIFO now advances a queue head instead of copying
+  every remaining request on each pop. A shared tombstone releases consumed
+  URL/body references immediately, geometric compaction bounds dead slots,
+  active-count and duplicate scans ignore consumed entries, and all navigation/
+  stop/document-replacement paths reset the cursor. The 1024-request unit and
+  runnable native probe assert FIFO order, no first-pop array copy, tombstone
+  reclamation, the 512-entry compaction boundary, exhaustion, and storage reset.
+- execution clarification: `release/x86_64-unknown-linux-gnu/simple`
+  (`04a38e21...`) identifies as pure Simple, but `run`, `test`, and
+  `native-build` currently SIGSEGV (139); `bin/release/.../simple` is a separate
+  Rust seed and is not admissible. A no-bootstrap focused build with the pure
+  Stage-3 compiler (`build/bootstrap/stage3/.../simple`, `a4d84871...`) first
+  exposed and fixed the inherited parenthesized-multiline-`or` requirement in
+  `BrowserSession.reload`, then stopped at the existing self-hosted parser
+  Dedent bug in `security/origin_policy.spl:354` after the third/final bounded
+  build cycle. No Rust seed or bootstrap was used. Resume after a current
+  pure-Simple compiler is deployed with the recorded focused native-build
+  command targeting
+  `test/02_integration/app/browser/probe_pending_request_queue.spl`; owner:
+  browser hardening merge owner; final reviewer: highest-capability Codex.
