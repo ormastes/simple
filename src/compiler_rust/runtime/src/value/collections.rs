@@ -3031,6 +3031,31 @@ pub extern "C" fn rt_array_index_of(array: RuntimeValue, value: RuntimeValue) ->
     }
 }
 
+/// Receiver-polymorphic `index_of`: works on both arrays and text.
+///
+/// ROOT FIX (array_index_of_always_minus_one_2026-07-28): codegen mapped the
+/// `index_of` method name unconditionally to `rt_string_find`, so
+/// `[T].index_of(v)` called a *string* search on an array receiver.
+/// `rt_string_find` bails with -1 when `rt_string_len` reports a non-string, so
+/// EVERY array `index_of` returned -1 — including when the element was present
+/// at index 0. `rt_array_index_of` already existed and was correct, but was
+/// never wired into codegen. (The `"find" => rt_array_find` arm sitting below
+/// `"index_of" | "find" | "find_str" => rt_string_find` in those same match
+/// tables was likewise unreachable.)
+///
+/// Dispatch is by trial rather than a kind test because both callees are total
+/// and return -1 on receiver-type mismatch: an array receiver makes
+/// `rt_string_find` return -1, and a text receiver makes `rt_array_index_of`
+/// return -1. Array is tried first so a text receiver never hits the array path.
+#[no_mangle]
+pub extern "C" fn rt_index_of(haystack: RuntimeValue, needle: RuntimeValue) -> i64 {
+    let as_array = rt_array_index_of(haystack, needle);
+    if as_array >= 0 {
+        return as_array;
+    }
+    rt_string_find(haystack, needle)
+}
+
 /// Find the last index of a value in an array
 /// Returns -1 if not found
 #[no_mangle]

@@ -1286,6 +1286,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_header_ptr",
     "rt_string_free",
     "rt_array_index_of",
+    // Receiver-polymorphic index_of (array or text). Codegen emits this name
+    // for the `index_of` method; without a manifest entry it resolves to
+    // nothing at JIT time and silently de-JITs the whole module.
+    "rt_index_of",
     "rt_array_join",
     "rt_array_last",
     "rt_array_last_index_of",

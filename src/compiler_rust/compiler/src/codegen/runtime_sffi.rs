@@ -412,6 +412,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_to_int_lenient", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_index_of", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_find", &[I64, I64], &[I64]),
+    // Receiver-polymorphic index_of (array or text). See rt_index_of.
+    RuntimeFuncSpec::new("rt_index_of", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_index_of", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_rfind", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_utf8_count_codepoints", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_utf8_validate", &[I64], &[I8]),

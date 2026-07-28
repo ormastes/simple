@@ -99,6 +99,27 @@ impl JitCompiler {
         // JIT would crash. Detect them here and fail the JIT compile so the
         // driver's interpreter fallback runs instead (matching AOT behaviour).
         if let Some(name) = self.first_unresolved_import() {
+            // Make the de-JIT LOUD. A silent whole-module drop to the
+            // interpreter is a proven catastrophic-cost defect class here: one
+            // unresolvable name cost ~1000x (parse_html 3.56s -> 19.4ms,
+            // compute_styles >10min -> 369ms once fixed, 365a643236b). Worse,
+            // de-JITted code is *correct but slow*, so it silently hides real
+            // miscompiles until someone makes it fast. Always emit a greppable
+            // marker naming the symbol.
+            eprintln!(
+                "[jit-fallback] unresolved external symbol '{name}': \
+                 whole module dropped to the interpreter (expect ~100-1000x slowdown). \
+                 Set SIMPLE_JIT_STRICT=1 to turn this into a hard error."
+            );
+            // Opt-in hard failure for lanes that must never silently de-JIT.
+            // Off by default so legitimate fallbacks (cross-module Simple
+            // method symbols) keep working.
+            if std::env::var_os("SIMPLE_JIT_STRICT").is_some_and(|v| v != "0") {
+                return Err(BackendError::ModuleError(format!(
+                    "SIMPLE_JIT_STRICT: unresolved external symbol '{name}' would NULL-jump in JIT; \
+                     refusing to fall back to the interpreter"
+                )));
+            }
             return Err(BackendError::ModuleError(format!(
                 "unresolved external symbol '{name}' would NULL-jump in JIT; deferring to interpreter"
             )));
