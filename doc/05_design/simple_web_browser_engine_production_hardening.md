@@ -99,7 +99,8 @@ ID. Duplicate, unknown, or late replies are rejected.
 5. Apply CSP destination policy.
 6. Fetch with bounded redirects, body, decompression, and timeout.
 7. Validate TLS and HSTS before exposing bytes.
-8. Apply CORS/response filtering and MIME policy.
+8. Combine repeated CORS fields, reject duplicate allow-origin grants, then
+   apply response filtering and MIME policy.
 9. Update broker cookie jar.
 10. Send only permitted response fields to renderer.
 

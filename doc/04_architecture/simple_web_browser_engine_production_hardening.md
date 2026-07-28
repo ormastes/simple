@@ -122,6 +122,8 @@ Reuse `src/lib/gc_async_mut/gpu/browser_engine/net/`:
 - `Url` and `Origin` become the only policy identity;
 - the broker derives initiator origin from committed state, never renderer IPC;
 - Fetch owns redirect/CORS/credentials/abort;
+- repeated CORS response fields are combined before policy evaluation, so
+  singleton `Access-Control-Allow-Origin` duplicates fail closed;
 - CSP is enforced before queuing or executing script/style/connect/image work;
 - cookies use the existing network cookie owner extended with host-only,
   expiry, `Secure`, `HttpOnly`, and `SameSite`;

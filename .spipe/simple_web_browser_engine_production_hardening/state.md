@@ -1331,3 +1331,7 @@ implementation in progress / target evidence blocked
   direct-render HNode arena at 65,536 nodes. BrowserSession parses before
   clearing the active document and returns a stable `resource_limit` error on
   truncation; direct rendering safely paints only the admitted prefix.
+- CORS response parsing now combines every matching header line before policy
+  evaluation. Duplicate `Access-Control-Allow-Origin` values therefore fail
+  closed in both response-body and preflight paths regardless of line order,
+  while repeated list-valued method/header fields retain comma-list behavior.
