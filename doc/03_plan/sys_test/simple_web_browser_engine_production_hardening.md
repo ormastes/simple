@@ -96,6 +96,8 @@ Each row has a normal (`N`), edge (`E`), and denial/error (`D`) case.
 - BrowserSession script/history/control specs;
 - Draw IR and Engine2D specs;
 - generic platform TLS and sandbox unit tests.
+- private runtime-TLS identity tests for trusted localhost, hostname mismatch,
+  and an untrusted test CA; these support but do not replace live broker proof.
 
 Supporting evidence is linked from the three production specs but does not
 replace their live assertions.
@@ -114,8 +116,9 @@ structured interaction are not production browser evidence.
   `scripts/check/check-linux-hosted-wm-live-window-evidence.shs`. The spec
   hashes the exact native `src/os/hosted/hosted_entry.spl` artifact before
   launch, and that wrapper runs the focused static HTML/CSS, animation,
-  controls, Reload/Home, page-link, Favorite, stopped-navigation, sandbox,
-  scheme-denial, and lifecycle scenarios before live-window capture.
+  controls, default-cancellation, Reload/Home, page-link, Favorite,
+  stopped-navigation, sandbox, scheme-denial, and lifecycle scenarios before
+  live-window capture.
   Standalone runs are not artifact admission evidence.
 - text/HTML/protocol/exec/log/artifact:
   `build/test-artifacts/<spec-relative-path>/`

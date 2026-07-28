@@ -110,6 +110,19 @@ SQLite `BrowserBookmarkStore`, enables the profile for one hosted window, and
 activates Favorite through registry chrome dispatch. It requires the session
 favorite state and profile snapshot to contain the saved URL before cleanly
 closing the registry. It does not claim filesystem persistence.
+
+## Hosted default-action cancellation evidence
+
+The cancellation scenario renders a red submit button inside a POST form. It
+registers capture and bubble listeners on the live form around the button's
+target listener, then requires the production DOM dispatch to report capture,
+target, and bubble phases against `profile`, `save`, and `profile` in order.
+Each listener calls `prevent-default` without mutating the document.
+
+The same live control is then activated by hosted layout hit-testing and a
+matching pointer press/release. The canceled button activation must not submit
+the form or enqueue navigation, and the body and pixel buffer must remain
+unchanged and red. This uses no alternate controller or network fixture.
 The canonical live-window wrapper executes the focused Reload/Home, page-link,
-Favorite, and rejected-navigation scenarios with its admitted self-hosted
-runner before live-window capture.
+Favorite, default-cancellation, and rejected-navigation scenarios with its
+admitted self-hosted runner before live-window capture.

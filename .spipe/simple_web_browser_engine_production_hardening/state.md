@@ -1047,3 +1047,19 @@ implementation in progress / target evidence blocked
 - Node/native denial remains unobservable in the admitted worker protocol:
   script parse/load warnings are not returned with frame evidence, so no
   ambiguous unchanged-frame assertion was added.
+- Hosted default-action cancellation now proves capture, target, and bubble
+  order, `prevent-default`, no pending POST navigation, and unchanged body and
+  pixels after a real pointer activation. The wrapper release-gates all eleven
+  focused browser scenarios.
+- Private runtime-TLS unit evidence now uses literal-loopback rustls fixtures:
+  trusted `localhost` succeeds, the same CA with a wrong-host certificate is
+  rejected, and an empty root store rejects the localhost certificate. The
+  focused Rust run passed 3 tests; production platform trust is unchanged and
+  live broker HTTPS evidence remains open.
+- Linux pre-exec sandboxing remains open: applying the existing deny-all
+  Landlock/seccomp worker policy before `exec` would also block the renderer,
+  ELF loader, and shared libraries. No unsafe partial fix was added.
+- The hosted target uses explicit allocation and reclamation rather than an
+  active collector, so GC pause/count claims remain unsupported. Future honest
+  telemetry must report allocated, reclaimed, and current registered objects
+  and bytes through the existing heap/runtime ownership paths.

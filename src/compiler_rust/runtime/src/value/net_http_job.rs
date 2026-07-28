@@ -174,17 +174,17 @@ fn browser_http_read_plain(
 }
 
 #[cfg(feature = "runtime-tls")]
-fn browser_http_tls(
-    host: &str,
+fn browser_http_tls_with_config(
+    server_name: &str,
     stream: TcpStream,
     request: &[u8],
     deadline: std::time::Instant,
     job: &BrowserHttpJob,
     max_response_bytes: usize,
+    config: std::sync::Arc<rustls::ClientConfig>,
 ) -> std::io::Result<Vec<u8>> {
-    let server_name = rustls::pki_types::ServerName::try_from(host.to_owned())
+    let server_name = rustls::pki_types::ServerName::try_from(server_name.to_owned())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid TLS server name"))?;
-    let config = platform_tls_client_config().map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
     let connection = rustls::ClientConnection::new(config, server_name)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
     let mut tls = rustls::StreamOwned::new(connection, stream);
@@ -206,6 +206,20 @@ fn browser_http_tls(
             Err(error) => return Err(error),
         }
     }
+}
+
+#[cfg(feature = "runtime-tls")]
+fn browser_http_tls(
+    host: &str,
+    stream: TcpStream,
+    request: &[u8],
+    deadline: std::time::Instant,
+    job: &BrowserHttpJob,
+    max_response_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+    let config = platform_tls_client_config()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+    browser_http_tls_with_config(host, stream, request, deadline, job, max_response_bytes, config)
 }
 
 #[cfg(not(feature = "runtime-tls"))]
@@ -418,6 +432,111 @@ pub extern "C" fn rt_browser_http_job_free(handle: i64) -> bool {
 mod browser_http_job_tests {
     use super::*;
 
+    #[cfg(feature = "runtime-tls")]
+    const TEST_CA_PEM: &[u8] = include_bytes!("../../tests/fixtures/browser_tls_identity/ca.pem");
+    #[cfg(feature = "runtime-tls")]
+    const TEST_LOCALHOST_CERT_PEM: &[u8] =
+        include_bytes!("../../tests/fixtures/browser_tls_identity/localhost.pem");
+    #[cfg(feature = "runtime-tls")]
+    const TEST_LOCALHOST_KEY_PEM: &[u8] =
+        include_bytes!("../../tests/fixtures/browser_tls_identity/localhost-key.pem");
+    #[cfg(feature = "runtime-tls")]
+    const TEST_WRONG_HOST_CERT_PEM: &[u8] =
+        include_bytes!("../../tests/fixtures/browser_tls_identity/wrong-host.pem");
+    #[cfg(feature = "runtime-tls")]
+    const TEST_WRONG_HOST_KEY_PEM: &[u8] =
+        include_bytes!("../../tests/fixtures/browser_tls_identity/wrong-host-key.pem");
+
+    #[cfg(feature = "runtime-tls")]
+    fn test_pem_certs(pem: &[u8]) -> Vec<rustls::pki_types::CertificateDer<'static>> {
+        rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[cfg(feature = "runtime-tls")]
+    fn test_pem_key(pem: &[u8]) -> rustls::pki_types::PrivateKeyDer<'static> {
+        rustls_pemfile::private_key(&mut std::io::Cursor::new(pem))
+            .unwrap()
+            .unwrap()
+    }
+
+    #[cfg(feature = "runtime-tls")]
+    fn test_client_config(trust_fixture_ca: bool) -> std::sync::Arc<rustls::ClientConfig> {
+        let mut roots = rustls::RootCertStore::empty();
+        if trust_fixture_ca {
+            roots.add(test_pem_certs(TEST_CA_PEM).remove(0)).unwrap();
+        }
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        std::sync::Arc::new(
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }
+
+    #[cfg(feature = "runtime-tls")]
+    fn spawn_test_tls_server(
+        cert_pem: &'static [u8],
+        key_pem: &'static [u8],
+    ) -> (
+        std::net::SocketAddr,
+        std::thread::JoinHandle<Result<(), String>>,
+    ) {
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(test_pem_certs(cert_pem), test_pem_key(key_pem))
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        assert_eq!(address.ip(), std::net::IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            let connection = rustls::ServerConnection::new(std::sync::Arc::new(config))
+                .map_err(|error| error.to_string())?;
+            let mut tls = rustls::StreamOwned::new(connection, stream);
+            let mut request = [0u8; 256];
+            let read = tls.read(&mut request).map_err(|error| error.to_string())?;
+            if !request[..read].starts_with(b"GET /identity HTTP/1.1\r\n") {
+                return Err("unexpected fixture request".to_owned());
+            }
+            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .map_err(|error| error.to_string())?;
+            tls.flush().map_err(|error| error.to_string())?;
+            tls.conn.send_close_notify();
+            tls.flush().map_err(|error| error.to_string())?;
+            Ok(())
+        });
+        (address, server)
+    }
+
+    #[cfg(feature = "runtime-tls")]
+    fn request_test_tls_server(
+        address: std::net::SocketAddr,
+        config: std::sync::Arc<rustls::ClientConfig>,
+    ) -> std::io::Result<Vec<u8>> {
+        let stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+        let job = BrowserHttpJob {
+            canceled: std::sync::atomic::AtomicBool::new(false),
+            socket: std::sync::Mutex::new(None),
+            outcome: std::sync::Mutex::new(None),
+        };
+        browser_http_tls_with_config(
+            "localhost",
+            stream,
+            b"GET /identity HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            std::time::Instant::now() + Duration::from_secs(2),
+            &job,
+            4096,
+            config,
+        )
+    }
+
     #[test]
     fn public_address_policy_rejects_non_public_ipv4_and_ipv6() {
         for address in [
@@ -465,5 +584,30 @@ mod browser_http_job_tests {
         let error = browser_http_extend_response(&mut response, b"6", 5, "HTTP").unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
         assert_eq!(response, b"12345");
+    }
+
+    #[cfg(feature = "runtime-tls")]
+    #[test]
+    fn loopback_tls_accepts_trusted_localhost_identity() {
+        let (address, server) = spawn_test_tls_server(TEST_LOCALHOST_CERT_PEM, TEST_LOCALHOST_KEY_PEM);
+        let response = request_test_tls_server(address, test_client_config(true)).unwrap();
+        assert!(response.ends_with(b"\r\n\r\nok"));
+        assert!(server.join().unwrap().is_ok());
+    }
+
+    #[cfg(feature = "runtime-tls")]
+    #[test]
+    fn loopback_tls_rejects_same_ca_wrong_host_identity() {
+        let (address, server) = spawn_test_tls_server(TEST_WRONG_HOST_CERT_PEM, TEST_WRONG_HOST_KEY_PEM);
+        assert!(request_test_tls_server(address, test_client_config(true)).is_err());
+        let _ = server.join().unwrap();
+    }
+
+    #[cfg(feature = "runtime-tls")]
+    #[test]
+    fn loopback_tls_rejects_untrusted_localhost_identity() {
+        let (address, server) = spawn_test_tls_server(TEST_LOCALHOST_CERT_PEM, TEST_LOCALHOST_KEY_PEM);
+        assert!(request_test_tls_server(address, test_client_config(false)).is_err());
+        let _ = server.join().unwrap();
     }
 }

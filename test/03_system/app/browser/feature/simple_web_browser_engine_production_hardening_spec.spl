@@ -24,6 +24,9 @@ use os.hosted.browser_profile_store.{BrowserBookmarkStore}
 use std.gc_async_mut.web.browser_session.{BrowserResponse}
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_path_to_id
+}
 
 val SUBPROCESS_ANIMATION_HTML = (
     "<style>@keyframes Pulse{from{background-color:#ef4444}" +
@@ -279,7 +282,54 @@ describe "Production Simple browser user flow":
     it "should cancel a default action after capture target and bubble dispatch":
         _production_browser_fixture()
         step("Cancel a default action after capture target and bubble dispatch")
-        _require_production_browser_evidence()
+        var session = HostedWebContentSession.create(
+            13,
+            "<style>#save{display:block;width:32px;height:24px;" +
+            "background-color:#ef4444}</style>" +
+            "<form id='profile' action='https://example.test/save' " +
+            "method='post'><button id='save' type='submit' " +
+            "onclick='prevent-default'>Save</button></form>",
+            64, 48
+        )
+        val path = be_dom_find_path_to_id(
+            session.browser.dom_root(), "save"
+        )
+        if path.len() < 2:
+            fail("expected form-to-button DOM path")
+        var form = path[path.len() - 2]
+        form.add_event_listener_with_capture(
+            "click", "prevent-default", true
+        )
+        form.add_event_listener("click", "prevent-default")
+
+        val prior_body = session.current_body_html()
+        val prior_pixels = session.render_to_pixels()
+        val dispatch = session.browser.dispatch_dom_event(
+            "save", "click", true, true
+        )
+        expect(dispatch.actions.len()).to_equal(3)
+        expect(dispatch.phases[0]).to_equal("capture")
+        expect(dispatch.current_target_ids[0]).to_equal("profile")
+        expect(dispatch.phases[1]).to_equal("target")
+        expect(dispatch.current_target_ids[1]).to_equal("save")
+        expect(dispatch.phases[2]).to_equal("bubble")
+        expect(dispatch.current_target_ids[2]).to_equal("profile")
+        expect(dispatch.event.default_prevented).to_equal(true)
+        expect(dispatch.default_action_allowed).to_equal(false)
+        expect(session.browser.has_pending_requests()).to_equal(false)
+
+        val press = session.dispatch_pointer_at(1, 5, 5, true)
+        val release = session.dispatch_pointer_at(2, 5, 5, false)
+        expect(press.semantic_target_id).to_equal("save")
+        expect(release.semantic_target_id).to_equal("save")
+        expect(release.callback_count).to_equal(3)
+        expect(session.browser.has_pending_requests()).to_equal(false)
+        expect(session.current_body_html()).to_equal(prior_body)
+        val final_pixels = session.render_to_pixels()
+        expect(_pixels_equal(final_pixels, prior_pixels)).to_equal(true)
+        expect(_count_color(
+            final_pixels, 0xFFEF4444u32
+        )).to_be_greater_than(0)
 
     # @manual: show
     # @capture(text)
