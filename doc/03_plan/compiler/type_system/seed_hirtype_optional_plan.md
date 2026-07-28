@@ -1,0 +1,176 @@
+# Seed `HirType::Optional` — Scoping Result and Staged Plan
+
+Date: 2026-07-28. Status: SCOPED, not implemented. Verdict: **the type change is
+small; the semantics migration is not, and it is blocked on a prior repair.**
+
+## Verdict
+
+Adding `HirType::Optional { inner }` to the seed is **structurally contained** —
+measured, not estimated. But it must NOT land first. The `index_of` family is
+currently routed to a **runtime symbol that does not exist**, and four codegen
+paths disagree about what `index_of` even returns. Typing it `Optional` on top of
+that would paper over a link-level defect with a type-level one.
+
+Stage 0 below is the real root fix for the reported `index_of` bug. The Optional
+type is Stage 2+.
+
+## PROVEN (measured this session)
+
+### P1. The enum change breaks exactly 3 matches
+
+Added `Optional { inner: TypeId }` to `HirType` in a clean worktree off
+`origin/main` and ran `cargo check -p simple-compiler`. Result: **3 errors, all
+`E0004` non-exhaustive**, zero others:
+
+- `compiler/src/codegen/lean/types.rs:216`
+- `compiler/src/hir/lower/type_resolver.rs:514`
+- `compiler/src/hir/type_registry.rs:243`
+
+Every other `match` on `HirType` already has a wildcard arm. Total surface:
+550 `HirType::` references across 53 files, but only these 3 are exhaustive.
+
+### P2. There is a working precedent to copy
+
+`HirType::Promise { inner: TypeId }` is already a single-inner wrapper variant
+with the exact shape needed. It has **6 references across 4 files** — that is the
+realistic cost of a fully-wired single-inner variant in this codebase.
+
+### P3. `T?` currently resolves to a shared pointer
+
+`type_resolver.rs:314`: `Type::Optional(inner)` registers
+`HirType::Pointer { kind: Shared, capability: Shared, inner }`. Indistinguishable
+from a genuine shared pointer. There are 18 `PointerKind::Shared` sites and 53
+`HirType::Pointer` sites to audit for which ones *mean* optional.
+
+### P4. `rt_index_of` IS A DANGLING SYMBOL — this is the `index_of` root cause
+
+Two codegen paths emit a call to `rt_index_of`:
+
+- `codegen/instr/closures_structs.rs:1284` — `"index_of" => "rt_index_of"`
+- `codegen/instr/calls.rs:3234` — `"index_of" => Some("rt_index_of")`
+
+`rt_index_of` is **defined nowhere in the repository** (`grep "fn rt_index_of"`
+over all `.rs`/`.c`/`.spl` returns nothing) and is **absent from the deployed
+seed binary** (`nm bin/simple | grep rt_index_of` → 0 matches).
+
+This independently corroborates the JIT bailout another lane observed
+(`unresolved external symbol 'rt_index_of'` demoting a whole module to the
+interpreter). It is a link-level defect, not a typing defect.
+
+### P5. `index_of` has FOUR divergent behaviours
+
+| Path | Target | Runtime representation |
+|---|---|---|
+| `closures_structs.rs:1284`, `calls.rs:3234` | `rt_index_of` | **does not exist** → bailout/link failure |
+| `llvm/emitter.rs:191`, `llvm/functions.rs:2274,2611` | `rt_string_find` | raw `i64`, `-1` sentinel |
+| `runtime_sffi.rs:413` registers it, no method-name path selects it | `rt_string_index_of` | **real `Option`** (`rt_option_some`/`rt_option_none`) |
+| `mir/lower/lowering_expr_method.rs:554` (array receiver) | `rt_array_index_of` | raw `i64`, `-1` sentinel |
+
+So `rt_string_index_of` — the only genuinely Option-returning implementation —
+appears to be **dead code no method-name dispatch reaches**.
+
+### P6. The HIR type table already contradicts the runtime
+
+`hir/lower/expr/mod.rs:970` types the whole string family `TypeId::I64` with the
+comment *"find/rfind return -1 if not found ... raw i64 from rt_string_find"*.
+`mod.rs:1036` types array `index_of` `I64` via a comment documenting a
+*deliberate* workaround: typing it `I64` "restores the BoxInt and picks static
+dispatch". **Retyping these to `Optional` risks reintroducing the exact misdecode
+that workaround suppresses.** That is the single largest hazard in this plan.
+
+`mod.rs:1039`: `first | last | get` return the bare element type, with the
+comment "(or Option<element>)" — the gap acknowledged in-place.
+
+### P7. The pure-Simple design is portable
+
+`src/compiler/30.types/type_system/expr_infer.spl` uses `Optional(inner)` /
+`type_Optional(inner:)` at lines 354, 366, 369, 387, 396, 415, 424, and
+`40.mono/monomorphize/util.spl` (62, 212, 353) already threads it through
+monomorphization including a `concretetype_Optional` bridge. The shape maps 1:1
+onto `HirType::Optional { inner }`. **Port, do not reinvent.**
+
+## INFERRED (not executed)
+
+- That the 899 `index_of`-family `??` sites split by receiver rather than
+  migrating uniformly. Follows from P5 but was not measured per-site.
+- That making `??` a no-op on statically-non-Optional operands fixes the
+  `-1`-sentinel sites for free (`arr.index_of(x) ?? -1` → raw `-1` when absent,
+  raw index when present — both correct). Reasoned from P5, not run.
+- Whether the 7,288 unclassifiable sites are dominated by genuine `T?` receivers.
+  Not sampled.
+
+## Design: why the non-zero nil sentinel forces a type-level rule
+
+`TAG_SPECIAL = 0b011 = 3` and `rt_is_none` tests `value.0 == TAG_SPECIAL`. So
+raw-`3`-is-nil holds **by construction** — swapping `??` to `rt_is_some` does not
+fix it. The discriminator must be **static**, not dynamic:
+
+- `lower_coalesce` dispatches on the operand's `HirType`. `Optional{..}` → nil
+  test + unwrap. Anything else → **the operand itself**, unchanged, plus a lint.
+- No new runtime representation is required. `Optional{inner}` is a type-level
+  discriminator over the existing tag scheme.
+- Never branch on a raw `.?` value. `if nil_opt.?:` must funnel through
+  `rt_is_some`, or nil (=3) reads truthy — a silent wrong-branch bug, strictly
+  worse than a loud crash.
+
+**A naive blanket no-op rule is wrong** and would regress `.first()`, which is
+genuinely optional and is separately mis-lowered (returns the boxed `v<<3` — 24
+for element 3 — never unwrapped). `.first()` must be *typed* `Optional` so it
+takes the unwrap path; the no-op arm must apply only to provably non-Optional
+operands.
+
+## Staged sequence (each stage builds and lands alone)
+
+**Stage 0 — repair `rt_index_of` (do this first, independent of Optional).**
+Either define `rt_index_of` or repoint `closures_structs.rs:1284` and
+`calls.rs:3234` at an existing symbol, and reconcile against the dead
+`rt_string_index_of`. Decide *one* representation per receiver type and make all
+four paths in P5 agree. This alone fixes the reported `index_of` bug and the JIT
+bailout. No type change involved.
+
+**Stage 1 — add the variant, unused.** Add `HirType::Optional{inner}`, fix the 3
+`E0004` sites, register nothing to it. Oracle: `--emit-archive --target
+x86_64-unknown-none` must produce **byte-identical archives**, proving a no-op.
+
+**Stage 2 — type-level `??` rule.** `lower_coalesce` dispatches on static type as
+above. Still no method retyped, so `Optional` is never produced — archives should
+again be byte-identical. This is the stage that requires `control.rs` ownership.
+
+**Stage 3 — retype `first`/`last`/`get`** (`mod.rs:1039`) to `Optional(element)`,
+and fix their lowering to unwrap rather than return the boxed form. Smallest
+genuinely-optional family; validates the whole mechanism.
+
+**Stage 4 — migrate the `index_of` family** on top of Stage 0's now-consistent
+runtime, receiver class at a time (string, then array), re-running the archive
+oracle per class. Guard against the P6 BoxInt/static-dispatch regression at every
+step.
+
+**Stage 5 — audit the 18 `PointerKind::Shared` sites** for pointer-means-optional
+and convert. Only then is the defect class dead.
+
+Stages 0 and 1 are independently landable today. Do not claim the class is fixed
+before Stage 5.
+
+## Coordination
+
+`control.rs` is owned by another lane landing the `.?`-to-BOOL/SIGILL stopgap
+(value → `T?`, condition → `rt_is_some`, **bool-return → `rt_is_some`**; that
+lane measured 42 owned `-> bool` functions returning a bare `.?`, ~10 inside
+`src/compiler/`). Agreed sequencing: **stopgap first, this plan subsumes the
+value-position half later.** The bool-return coercion should remain permanently —
+it honours a declared return type and is not a `.?` workaround.
+
+Mirror gap, read from source, not executed: the pure-Simple compiler has the same
+hole at `src/compiler/50.mir/mir_lowering_stmts.spl:1333` (`lower_if` calls
+`lower_expr(cond)` with no `ExistsCheck` case, so a bare `if opt.?:` branches on
+the sentinel). `if val v = opt.?:` is safe — the parser desugars it.
+
+Perf landmine for Stage 2: rewriting lowering paths can perturb the JIT extern
+set and silently demote a module to the interpreter. Watch
+`codegen_fallback_hits` and the JIT-fallback log line, not just correctness.
+
+## Testing note
+
+Do **not** write tests using `.?` inside `expect(...)`. On the spec/matcher path
+`.?` yields the payload, not a bool, so `expect(x.?).to_equal(true)` always lies.
+Use `match` or `.is_some()`.
