@@ -3,6 +3,10 @@ use std.spec.*
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.js.engine.interpreter.{
+    JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS,
+    JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
+}
 
 fn _count_color(pixels: [u32], color: u32) -> i64:
     var count: i64 = 0
@@ -255,7 +259,7 @@ describe "BrowserSession script CSS animation rendering":
         var session = BrowserSession.new()
         expect(session.open_html(
             "https://example.test/same-callback-dom",
-            "<!DOCTYPE html><html><body><div style='width:32px;height:24px;background-color:#ef4444'></div><script>var saved = null; requestAnimationFrame(function(){ document.body.innerHTML = '<div id=\"next\" style=\"width:32px;height:24px;background-color:#ef4444\"></div>'; saved = document.getElementById('next'); saved.style.backgroundColor = '#16a34a'; document.title = document.querySelector('#next') === saved ? 'same-turn' : 'stale'; requestAnimationFrame(function(){ var same = document.getElementById('next') === saved; document.body['innerHTML'] = '<div id=\"last\" style=\"width:32px;height:24px;background-color:#ef4444\"></div>'; var last = document.querySelector('#last'); last.style.setProperty('background-color', '#2563eb'); document.title = (same && document.getElementById('last') === last) ? 'same-next:computed' : 'lost'; }); });</script></body></html>"
+            "<!DOCTYPE html><html><body><div style='width:32px;height:24px;background-color:#ef4444'></div><script>var saved = null; requestAnimationFrame(function(){ document.body.innerHTML = '<div id=\"next\" style=\"width:32px;height:24px;background-color:#ef4444\"></div>'; saved = document.getElementById('next'); saved.style.backgroundColor = '#16a34a'; document.title = document.querySelector('#next') === saved ? 'same-turn' : 'stale'; requestAnimationFrame(function(){ var same = document.getElementById('next') === saved; document.body['innerHTML'] = '<div id=\"last\" style=\"width:32px;height:24px;background-color:#ef4444\"></div>'; var last = document.querySelector('#last'); last.style.setProperty('background-color', '#2563eb'); document.title = (same && saved !== last && document.getElementById('last') === last) ? 'same-next:computed' : 'lost'; }); });</script></body></html>"
         ).is_ok()).to_equal(true)
 
         val first = session.render_to_pixels(64, 48)
@@ -282,6 +286,72 @@ describe "BrowserSession script CSS animation rendering":
         expect(_pixels_equal(
             third.pixel_data, second.pixel_data
         )).to_equal(false)
+
+    it "bounds retained DOM bridge allocations without aliasing detached nodes":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/dom-retention-budget",
+            "<html><body><div id='kept'></div></body></html>"
+        ).is_ok()).to_equal(true)
+        expect(session.eval_script(
+            "document.title = 'runtime-ready'"
+        ).is_ok()).to_equal(true)
+        var exercised = false
+        var admitted_checked = false
+        var object_limit_checked = false
+        var byte_limit_checked = false
+        if val Some(state) = session.runtime_state:
+            exercised = true
+            var bounded_state = state
+            # list + fresh element/style pairs for implicit html, head, and div
+            val replacement_object_count: i64 = 7
+            bounded_state.runtime.interpreter.host_dom_mutation_retained_objects = (
+                JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS -
+                replacement_object_count
+            )
+            session.runtime_state = Some(bounded_state)
+            expect(session.eval_script(
+                "var old = document.getElementById('kept'); document.body.innerHTML = '<div id=\"last\"></div>'; var next = document.getElementById('last'); document.title = (old !== null && next !== null && old !== next) ? 'distinct' : 'aliased';"
+            ).is_ok()).to_equal(true)
+            expect(session.current_title).to_equal("distinct")
+            expect(session.current_body_html).to_contain("id=\"last\"")
+            if val Some(after_first) = session.runtime_state:
+                admitted_checked = true
+                val allocated = after_first.runtime.interpreter.object_store.next_id
+                expect(session.eval_script(
+                    "document.body.innerHTML = '<div id=\"rejected\"></div>'"
+                ).is_ok()).to_equal(true)
+                if val Some(after_limit) = session.runtime_state:
+                    object_limit_checked = true
+                    expect(
+                        after_limit.runtime.interpreter.object_store.next_id
+                    ).to_equal(allocated)
+                expect(session.current_body_html).to_contain("id=\"last\"")
+                expect(session.current_body_html.contains(
+                    "id=\"rejected\""
+                )).to_equal(false)
+                if val Some(after_object_limit) = session.runtime_state:
+                    var byte_bounded_state = after_object_limit
+                    byte_bounded_state.runtime.interpreter.host_dom_mutation_retained_objects = 0
+                    byte_bounded_state.runtime.interpreter.host_dom_mutation_retained_bytes = (
+                        JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
+                    )
+                    session.runtime_state = Some(byte_bounded_state)
+                    expect(session.eval_script(
+                        "document.body.innerHTML = '<div id=\"byte-rejected\"></div>'"
+                    ).is_ok()).to_equal(true)
+                    if val Some(after_byte_limit) = session.runtime_state:
+                        byte_limit_checked = true
+                        expect(
+                            after_byte_limit.runtime.interpreter.object_store.next_id
+                        ).to_equal(allocated)
+                    expect(session.current_body_html.contains(
+                        "id=\"byte-rejected\""
+                    )).to_equal(false)
+        expect(exercised).to_equal(true)
+        expect(admitted_checked).to_equal(true)
+        expect(object_limit_checked).to_equal(true)
+        expect(byte_limit_checked).to_equal(true)
 
     it "keeps the prior body when a synchronous mutation plan exceeds its element bound":
         var session = BrowserSession.new()

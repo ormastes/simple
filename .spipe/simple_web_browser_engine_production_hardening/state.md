@@ -1533,3 +1533,16 @@ implementation in progress / target evidence blocked
   The optimizer/perf runner remains unexecuted because the admitted pure-Simple
   CLI crash and three-cycle build cap are unchanged; no bootstrap/seed fallback
   was used.
+- Repeated JavaScript body replacement previously retained one list plus two
+  host objects per non-body element forever in the append-only JS object store,
+  making memory and reverse property scans grow without a ceiling. The shared
+  mutation publisher now rejects before allocation after 32,768 retained bridge
+  objects or 64 MiB of retained bridge payload per document. Detached-node
+  identity remains correct; focused animation coverage now proves an old node
+  cannot alias its replacement and exact object/byte boundaries preserve the
+  last admitted rendered DOM. Before: `1 + 2 * descendants` objects per
+  replacement without a bound. After: the same browser-correct fresh identities
+  up to the fixed cumulative ceiling, then zero additional allocations.
+- The optimizer/perf runner and executable rendering spec remain unexecuted
+  because the admitted pure-Simple CLI crash and exhausted three-cycle compiler
+  cap are unchanged. No bootstrap, Rust seed, or compiler workaround was used.

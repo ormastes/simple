@@ -9,7 +9,10 @@ use std.js.types.ast_types.{DestructProp, JsExpression}
 use std.js.types.ast_types.JsStatement
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
-use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter.{
+    JsInterpreter, JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS,
+    JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
+}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 
 fn _next_host_generation(generation: i64) -> i64:
@@ -223,9 +226,33 @@ impl JsInterpreter:
         if plan.handled and not plan.ok:
             return
         if plan.ok:
+            var retained_objects: i64 = 1
+            var retained_bytes = (
+                plan.canonical_body_html.len() +
+                plan.canonical_body_text.len()
+            )
             for element in plan.elements:
                 if element.style_names.len() != element.style_values.len():
                     return
+                if not element.is_body:
+                    retained_objects = retained_objects + 2
+                retained_bytes = (
+                    retained_bytes + element.tag_name.len() +
+                    element.author_id.len() + element.class_name.len() +
+                    element.value.len() + element.text_content.len() +
+                    element.inner_html.len() + element.style_snapshot.len()
+                )
+                for style_name in element.style_names:
+                    retained_bytes = retained_bytes + style_name.len()
+                for style_value in element.style_values:
+                    retained_bytes = retained_bytes + style_value.len()
+            if (
+                retained_objects > JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS -
+                    self.host_dom_mutation_retained_objects or
+                retained_bytes > JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES -
+                    self.host_dom_mutation_retained_bytes
+            ):
+                return
             val old_style_id = _get_obj_id(
                 self.get_object_property(self.host_body_id, "style")
             )
@@ -367,6 +394,12 @@ impl JsInterpreter:
             self.host_dom_style_snapshots = style_snapshots
             self.host_dom_bridge_generation = _next_host_generation(
                 self.host_dom_bridge_generation
+            )
+            self.host_dom_mutation_retained_objects = (
+                self.host_dom_mutation_retained_objects + retained_objects
+            )
+            self.host_dom_mutation_retained_bytes = (
+                self.host_dom_mutation_retained_bytes + retained_bytes
             )
             self.host_body_inner_html_value = JsValue.String(
                 v: plan.canonical_body_html
