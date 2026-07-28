@@ -1285,6 +1285,28 @@ implementation in progress / target evidence blocked
   system spec remains source-reviewed but unexecuted because the admitted
   pure-Simple CLI still crashes and the three-cycle compiler/build cap is
   exhausted; no bootstrap or Rust seed fallback was used.
+- Navigation start/active-load Stop now disarm a pending Space-key activation,
+  preventing keyup from clicking the preserved old document after a canceled
+  navigation. No-op Stop retains valid input state. A focused unit regression
+  covers both navigation boundaries and preserved-document behavior.
+- HTTP cache freshness now distinguishes an absent `max-age` directive from
+  explicit `max-age=0`; zero is immediately stale instead of falling through
+  to the one-hour default, so reload/navigation cannot silently reuse stale
+  HTML or CSS. A focused cache regression covers immediate lookup.
+- remaining concrete perf/security follow-ups: fallback DOM-bridge rebinding
+  allocates fresh JS host/list/style objects that the flat ObjectStore cannot
+  reclaim within a document; repeated animated `innerHTML` replacement grows
+  scans and retained rows. Navigation cancellation also drops queued/inflight
+  fetch requests without rejecting the old document's promise registry, which
+  can retain pending handlers until the bounded fetch limit. Stylesheet
+  accumulation is capped per resource/count but not cumulatively, permitting
+  excessive retained `current_style_html`. Owners: BrowserRuntimeState.bind_dom,
+  BrowserSession navigation cancellation, and BrowserLoadState style append.
+- verify: working/staged direct-env guards, rendering-source coupling,
+  conflict-marker scan, and executable-spec layout gate pass; independent
+  cache and input-event reviews pass. Focused Simple unit execution remains
+  unavailable under the existing admitted-compiler crash/build-cycle cap; no
+  bootstrap or Rust seed fallback was used.
 - Leak/perf review fixes: dead renderer detection now retains the PID until the
   canonical piped-process close frees its table row and file descriptors;
   stable-window reconciliation returns without rebuilding entry arrays;
