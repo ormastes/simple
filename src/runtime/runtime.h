@@ -292,6 +292,7 @@ int64_t  rt_heap_registry_count(void);
 int8_t rt_transient_array_scope_begin(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
+int8_t rt_transient_heap_promote(int64_t value);
 int64_t  rt_time_now_unix(void);
 int64_t  rt_entropy_hardware_ready(void);
 void     rt_sleep_ms(int64_t ms);

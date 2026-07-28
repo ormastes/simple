@@ -14,8 +14,9 @@
   generated output. The resident service ELF now passes host-issued Create
   CQ/SQ, Identify, Write, Flush, and Read with AXI RAM recovery/prevention/remap.
   QEMU now passes the same firmware command and recovery sequence through a
-  GDB-driven guest-RAM mailbox. A full K26 boot rehearsal is waiting for its
-  RV32 kernel fixture; Vivado/board evidence and physical H2 remain open.
+  GDB-driven guest-RAM mailbox. The current endpoint-wired K26 top passes full
+  RV32 SimpleOS GHDL boot with zeroed and garbage-filled DDR. Vivado/board
+  evidence and physical H2 remain open.
 - **Current evidence:**
   `sh scripts/fpga/ghdl_rv32_nvme_host_axi_mmio.shs` reports
   `STATUS: PASS rv32-nvme-host-axi-mmio H1-ENDPOINT firmware=mocked`.
@@ -28,6 +29,8 @@
   `NVME_RV32_SERVICE=1` builds `build/nvme_fw_rv32_service.elf` with the
   verified Stage 3 pure-Simple compiler. Full CLI deployment remains blocked
   by Stage-4 memory growth, not by the former stale-ABI crash.
+  `doc/09_report/rv32_k26_endpoint_wired_boot_rehearsal_2026-07-28.md`
+  retains the current-top boot result and source/fixture hashes.
 - **Requested-semantics:** Add an NVMe register/doorbell and DMA transport that
   lets an external host create admin and I/O queues and submit commands to the
   same firmware controller path. Keep QEMU, RAM-NAND, OpenSSD, and FPGA target
@@ -40,8 +43,9 @@
   - [x] Host-driven erase/program/read reaches the RAM NAND backend and proves
         prevention, retry, FCR, and alternate-slot recovery.
   - [x] The same firmware command/recovery sequence runs against QEMU and the
-        synthesizable AXI target; a
-        physical OpenSSD/KV260 lane retains MMIO/JTAG/log artifacts.
+        synthesizable AXI target.
+  - [ ] A physical OpenSSD/KV260 lane retains source-bound MMIO/JTAG/log
+        artifacts for the host-issued command sequence.
   - [x] Missing AXI transactions, DMA, interrupts, or host completions fail the
         gate instead of falling back to the internal self-test.
 - **Related:** `doc/06_spec/03_system/app/nvme_firmware/rv32_nvme_nand_read_level_spec.md`

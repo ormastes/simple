@@ -197,3 +197,30 @@ impl signatures, deterministic closure order, and entry-closure output parity.
 - Peak RSS remains below the host limit with `SIMPLE_NO_STUB_FALLBACK=1`.
 - The deployed `bin/simple` builds and runs a representative program.
 - No generic/diagnostic errors are suppressed to obtain the binary.
+
+## 2026-07-28 experimental ownership implementation
+
+The structural path now exists behind the additional
+`SIMPLE_STAGE4_STREAMING_SURFACES=1` admission gate. Phase 2 parses one physical
+source in a transient heap scope, pauses allocation, builds and promotes only
+its compact `ModuleSurface`, then clears parser roots and reclaims the rich
+module. Phase 3 reparses one source at a time, lowers HIR while allocation is
+paused, promotes parser-owned values reachable from the HIR root and lowering
+diagnostic/cache state, and then reclaims that source's AST. Type aliases, enum
+variants, trait defaults, impl signatures, and source aliases remain in the
+cross-module surface.
+
+The core-C runtime now scopes arrays, dicts, enums, closures, and boxed floats;
+strings remain persistent. All tracked heap kinds share the existing
+open-addressing pointer registry, so membership and scope-end reclamation do
+not scan cumulative arrays or persistent strings. Recursive promotion is
+cycle-safe and serialized against unregister/free. The ASan+UBSan ownership
+selfcheck passes cyclic reclamation/promotion and bounded scope-end checks
+after 100,000 persistent strings and 20,000 persistent arrays.
+
+This is implemented but not admitted. The available pure-Simple binary parsed
+the changed driver successfully, then its repository-wide hygiene subprocess
+failed on unrelated concurrent work. Its stale test runner could not resolve
+`std.spec`. A fresh Stage 4 compiler and the required live registry/RSS slope
+remain the next evidence; none of the acceptance items above is marked complete
+from static contracts or the C selfcheck alone.

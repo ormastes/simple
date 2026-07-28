@@ -23,7 +23,11 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 RTL_DIR="$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl"
-WORK_DIR="$ROOT_DIR/build/ghdl/rv32_k26_ddr_boot"
+DEFAULT_WORK_DIR="$ROOT_DIR/build/ghdl/rv32_k26_ddr_boot"
+if [ "${GARBAGE_FILL:-0}" = "1" ]; then
+  DEFAULT_WORK_DIR="$ROOT_DIR/build/ghdl/rv32_k26_ddr_boot_garbage"
+fi
+EVIDENCE_DIR="${WORK_DIR:-$DEFAULT_WORK_DIR}"
 KERNEL_ELF="${KERNEL_ELF:-$ROOT_DIR/build/os/simpleos_riscv32_smf_fs.elf}"
 FAT32_IMG="${FAT32_IMG:-$ROOT_DIR/build/os/fat32-riscv32.img}"
 RAMDISK_BYTES="${RAMDISK_BYTES:-1048576}"
@@ -36,7 +40,8 @@ command -v ghdl >/dev/null 2>&1 || { echo "ERROR: ghdl not found in PATH"; exit 
 [ -f "$KERNEL_ELF" ] || { echo "ERROR: kernel ELF missing: $KERNEL_ELF"; exit 1; }
 [ -f "$FAT32_IMG" ] || { echo "ERROR: FAT32 image missing: $FAT32_IMG"; exit 1; }
 
-mkdir -p "$WORK_DIR"
+mkdir -p "$EVIDENCE_DIR"
+WORK_DIR="$(mktemp -d "$EVIDENCE_DIR/run.XXXXXX")"
 echo "=== GHDL rv32 SimpleOS boot through the K26 DDR PL top (AXI4 + AXI-Lite) ==="
 echo "  Kernel ELF:  $KERNEL_ELF"
 echo "  Ramdisk img: $FAT32_IMG (first $RAMDISK_BYTES bytes -> core 0x88000000)"
@@ -52,21 +57,19 @@ od -An -v -tx4 -w4 "$WORK_DIR/rv32_ramdisk.img" | awk 'NF{print $1}' > "$WORK_DI
 echo "  Ramdisk image: $(wc -l < "$WORK_DIR/rv32_ramdisk.mem") words"
 
 printf "  Analysing PL top + adapter + control slave + testbench ... "
-out="$(ghdl -a --std=08 --workdir="$WORK_DIR" \
+if ! out="$(ghdl -a --std=08 --workdir="$WORK_DIR" \
   "$RTL_DIR/rv32_exec_core_axi.vhd" \
   "$RTL_DIR/rv32_axi4_mem_adapter.vhd" \
   "$RTL_DIR/rv32_nvme_axi.vhd" \
   "$RTL_DIR/rv32_ctrl_obs_slave.vhd" \
   "$RTL_DIR/soc_top_rv32_k26_ddr.vhd" \
-  "$RTL_DIR/tb_rv32_k26_ddr_boot.vhd" 2>&1)" || true
-if echo "$out" | grep -q ":error:"; then
+  "$RTL_DIR/tb_rv32_k26_ddr_boot.vhd" 2>&1)"; then
   echo "FAIL"; echo "$out" | tail -40; exit 1
 fi
 echo "OK"
 
 printf "  Elaborating ... "
-out="$(cd "$WORK_DIR" && ghdl -e --std=08 --workdir="$WORK_DIR" tb_rv32_k26_ddr_boot 2>&1)" || true
-if echo "$out" | grep -qi "error"; then
+if ! out="$(cd "$WORK_DIR" && ghdl -e --std=08 --workdir="$WORK_DIR" tb_rv32_k26_ddr_boot 2>&1)"; then
   echo "FAIL"; echo "$out" | tail -40; exit 1
 fi
 echo "OK"
@@ -86,11 +89,22 @@ if [ "${GARBAGE_FILL:-0}" = "1" ]; then
   echo "  DDR model: GARBAGE FILL (un-zeroed power-up DDR rehearsal)"
 fi
 echo "  Running simulation (stop-time=$STOP_TIME) ..."
-(cd "$WORK_DIR" && ghdl -r --std=08 --workdir="$WORK_DIR" \
+printf 'K26_GARBAGE_FILL=%s\n' "${GARBAGE_FILL:-0}" > "$WORK_DIR/sim.log"
+if (cd "$WORK_DIR" && ghdl -r --std=08 --workdir="$WORK_DIR" \
   tb_rv32_k26_ddr_boot $GEN_ARGS \
   -gG_MARKER="$EXPECTED_MARKER" -gG_TRACE_BASE="$TRACE_BASE" \
   -gG_TRACE_BYTES="$TRACE_BYTES" --stop-time="$STOP_TIME" \
-  > "$WORK_DIR/sim.log" 2>&1) || true
+  >> "$WORK_DIR/sim.log" 2>&1); then
+  sim_status=0
+else
+  sim_status=$?
+fi
+cp "$WORK_DIR/sim.log" "$EVIDENCE_DIR/sim.log"
+if [ "$sim_status" -ne 0 ]; then
+  echo "RESULT: FAIL - simulation exited with status $sim_status"
+  tail -40 "$WORK_DIR/sim.log"
+  exit 1
+fi
 
 echo "----- transcript recovered over AXI-Lite -----"
 grep -v -E "^K26_" "$WORK_DIR/sim.log" || true
@@ -107,5 +121,5 @@ if grep -q "K26_MARKER_SEEN" "$WORK_DIR/sim.log"; then
   echo "RESULT: PASS - ${RESULT_LABEL:-rv32 SimpleOS booted through the AXI4/DDR path}"
   exit 0
 fi
-echo "RESULT: FAIL - terminal marker not seen (full log: $WORK_DIR/sim.log)"
+echo "RESULT: FAIL - terminal marker not seen (full log: $EVIDENCE_DIR/sim.log)"
 exit 1

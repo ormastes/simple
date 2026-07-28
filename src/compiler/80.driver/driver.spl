@@ -23,6 +23,7 @@ use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTypeDef, MirBody}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.core.parser.{par_had_error_get}
+use compiler.core.ast.{ast_reset}
 use compiler.frontend.parser_types.*
 use compiler.backend.backend.backend_api.{Backend}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
@@ -45,6 +46,7 @@ use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
 use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module}
 use driver_types.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics, LoweringError}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName, module_surface_promote, module_surface_source_matches, module_surfaces_from_modules}
 use compiler.hir.hir_lowering.module_registry.{hir_registry_reset, hir_registry_put}
 use compiler.hir.hir_types.{SymbolTable, SymbolId}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module}
@@ -62,7 +64,7 @@ use compiler.driver.driver_pipeline.*
 use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
 use compiler.common.driver_core_types.{CompileResult, driver_core_compile_options_default, driver_output_format_is_smf, driver_output_format_is_both, driver_output_format_is_self_contained}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_info, log_warn, log_error, log_phase}
+use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_info, log_warn, log_error, log_phase, log_module_surface_released}
 use compiler.driver.driver_bootstrap.{
     bootstrap_native_opt_level, bootstrap_llvm_opt_level,
     bootstrap_compile_to_native_local, bootstrap_compile_context_to_native_local,
@@ -89,6 +91,10 @@ extern fn rt_hash_text(s: text) -> i64
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
 
 fn native_build_cache_dir() -> text:
     val dir = rt_env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
@@ -162,6 +168,20 @@ class CheckBackendImpl(Backend):
 # ------------------------------------------------------------------------------
 # Compiler Driver
 # ------------------------------------------------------------------------------
+
+fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:
+    ctx.options.mode == CompileMode.Aot and
+        ctx.options.low_memory and
+        (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+        (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1" and
+        (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
+        (rt_env_get("SIMPLE_STAGE4_STREAMING_SURFACES") ?? "") == "1" and
+        ctx.options.backend != "vhdl"
+
+fn driver_end_transient_parse_scope() -> bool:
+    lexer_release_parse_source_globals()
+    ast_reset()
+    rt_transient_array_scope_end()
 
 pub class CompilerDriver:
     ctx: CompileContext
@@ -265,7 +285,7 @@ pub class CompilerDriver:
         log_phase("phase2:parse:done n_modules={self.ctx.modules.keys().len()}")
 
         # Evict raw source text (no longer needed after parsing)
-        if self.ctx.source_contents_reclaimable():
+        if self.ctx.source_contents_reclaimable() and not driver_streaming_surface_enabled(self.ctx):
             log_phase("phase2:source_reclaim:start low_memory=true")
             log_debug("low-memory: evicting source text")
             # The frontend keeps the most recent source in lexer globals. Clear
@@ -411,6 +431,7 @@ pub class CompilerDriver:
         val module_name = _driver_module_name_from_path(path)
         print "[bootstrap_parse] {path} as {module_name}"
         self.ctx.modules[module_name] = parse_full_frontend(content, path, module_name, self.ctx.logger)
+        self.ctx.sources = self.ctx.sources.push(SourceFile(path: path, content: content, module_name: module_name))
         if module_name.starts_with("compiler.10.frontend.core."):
             val core_alias = "compiler.core." + module_name.substring("compiler.10.frontend.core.".len())
             print "[bootstrap_parse] alias {core_alias}"
@@ -631,7 +652,59 @@ pub class CompilerDriver:
     # Phase 2: Parse
     # --------------------------------------------------------------------------
 
+    me add_streaming_module_surface(builder: ModuleSurfaceBuilder, source: SourceFile, source_index: i64) -> Result<ModuleSurfaceBuilder, text>:
+        if not rt_transient_array_scope_begin():
+            return Err("transient parser scope unavailable for {source.path}")
+        val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+        if par_had_error_get():
+            val _ended = driver_end_transient_parse_scope()
+            return Err("parse error in {source.path} (see [parser_error] output above)")
+        if not rt_transient_array_scope_pause():
+            val _ended = driver_end_transient_parse_scope()
+            return Err("transient parser scope pause failed for {source.path}")
+        val add_result = builder.add_parsed(module, source, source_index)
+        if add_result.is_err():
+            val _ended = driver_end_transient_parse_scope()
+            return Err(add_result.unwrap_err())
+        val surface_index = builder.surfaces.len() - 1
+        if surface_index < 0 or not module_surface_promote(builder.surfaces[surface_index]):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("module surface promotion failed for {source.path}")
+        if not driver_end_transient_parse_scope():
+            return Err("transient parser scope end failed for {source.path}")
+        Ok(builder)
+
+    me parse_all_streaming_surfaces_impl() -> (CompileContext, bool):
+        self.ctx.modules = {}
+        self.ctx.module_surfaces = nil
+        var builder = ModuleSurfaceBuilder.new()
+        var source_index = 0
+        var release_seq: i64 = 0
+        while source_index < self.ctx.sources.len():
+            val source = self.ctx.sources[source_index]
+            if builder.has_path(source.path):
+                val alias_result = builder.add_alias(source)
+                if alias_result.is_err():
+                    self.ctx.add_error("Module surface extraction error: {alias_result.unwrap_err()}")
+                    return (self.ctx, false)
+            else:
+                val parsed_result = self.add_streaming_module_surface(builder, source, source_index)
+                if parsed_result.is_err():
+                    self.ctx.add_error("Module surface extraction error: {parsed_result.unwrap_err()}")
+                    return (self.ctx, false)
+                builder = parsed_result.unwrap()
+                release_seq = release_seq + 1
+                log_module_surface_released(source.path, release_seq)
+            source_index = source_index + 1
+
+        var streaming_ctx = self.ctx
+        streaming_ctx.module_surfaces = Some(builder.finish())
+        streaming_ctx.modules = {}
+        (streaming_ctx, streaming_ctx.errors.len() == 0)
+
     me parse_all_impl() -> (CompileContext, bool):
+        if driver_streaming_surface_enabled(self.ctx):
+            return self.parse_all_streaming_surfaces_impl()
         val log = self.ctx.logger
         val sources = self.ctx.sources
         log_debug("parsing sources")
@@ -770,7 +843,96 @@ pub class CompilerDriver:
     # phases in a single loop, avoiding redundant iterations and improving
     # performance on large codebases.
 
+    me lower_streaming_surface_source(lowering: HirLowering, source: SourceFile) -> Result<HirModule, text>:
+        if not rt_transient_array_scope_begin():
+            return Err("transient parser scope unavailable for {source.path}")
+        val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+        if par_had_error_get():
+            val _ended = driver_end_transient_parse_scope()
+            return Err("parse error in {source.path} (see [parser_error] output above)")
+        if not rt_transient_array_scope_pause():
+            val _ended = driver_end_transient_parse_scope()
+            return Err("transient parser scope pause failed for {source.path}")
+        val hir_module = lowering.lower_parser_module_unstub(module)
+        if not rt_transient_heap_promote(hir_module):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("HIR ownership promotion failed for {source.path}")
+        if not rt_transient_heap_promote(lowering):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("HIR lowering-state promotion failed for {source.path}")
+        if not driver_end_transient_parse_scope():
+            return Err("transient parser scope end failed for {source.path}")
+        Ok(hir_module)
+
+    me lower_and_check_streaming_surfaces_impl() -> (CompileContext, bool):
+        if not self.ctx.module_surfaces.?:
+            self.ctx.add_error("Streaming module surfaces missing after phase 2")
+            return (self.ctx, false)
+        val surfaces = self.ctx.module_surfaces.unwrap()
+        var lowering: HirLowering = hirlowering_for_module("", surfaces)
+        var lowered_by_surface: Dict<i64, HirModule> = {}
+        var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
+        var phase_entry_hir: HirModule? = self.ctx.bootstrap_entry_hir
+        var source_index = 0
+
+        while source_index < self.ctx.sources.len():
+            val source = self.ctx.sources[source_index]
+            if not surfaces.index_by_name.contains_key(source.module_name):
+                self.ctx.add_error("Missing module surface alias for {source.module_name}")
+                return (self.ctx, false)
+            val surface_index = surfaces.index_by_name[source.module_name]
+            val is_requested_bootstrap_entry = _driver_is_bootstrap_entry_source(source.path, source.module_name) or source.module_name == bootstrap_entry_module_name(self.ctx)
+
+            if lowered_by_surface.contains_key(surface_index):
+                val alias_hir = lowered_by_surface[surface_index]
+                phase_hir_modules[source.module_name] = alias_hir
+                if is_requested_bootstrap_entry:
+                    phase_entry_hir = Some(alias_hir)
+                source_index = source_index + 1
+                continue
+            if surface_index < 0 or surface_index >= surfaces.surfaces.len():
+                self.ctx.add_error("Invalid module surface index for {source.module_name}: {surface_index}")
+                return (self.ctx, false)
+            val surface: ModuleSurface = surfaces.surfaces[surface_index]
+            if not module_surface_source_matches(surface, source, source_index):
+                self.ctx.add_error("Module surface/source fingerprint mismatch for {source.path}")
+                return (self.ctx, false)
+
+            lowering.begin_module(source.path)
+            log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
+            val lower_result = self.lower_streaming_surface_source(lowering, source)
+            if lower_result.is_err():
+                self.ctx.add_error("Streaming HIR lowering error: {lower_result.unwrap_err()}")
+                return (self.ctx, false)
+            val hir_module = lower_result.unwrap()
+            _driver_collect_hir_errors(self.ctx, source.module_name, lowering.errors)
+            if self.ctx.errors.len() > 0:
+                return (self.ctx, false)
+            lowered_by_surface[surface_index] = hir_module
+            phase_hir_modules[source.module_name] = hir_module
+            if is_requested_bootstrap_entry:
+                phase_entry_hir = Some(hir_module)
+            log_phase("phase3:hir:file:done {source.path} module={source.module_name} funcs={hir_module.functions.len()}")
+            source_index = source_index + 1
+
+        var phase_ctx: CompileContext = self.ctx
+        phase_ctx.hir_modules = phase_hir_modules
+        phase_ctx.bootstrap_entry_hir = phase_entry_hir
+        _driver_validate_value_struct_layouts(phase_ctx)
+        if phase_ctx.errors.len() > 0:
+            return (phase_ctx, false)
+        ast_reset()
+        phase_ctx.modules = {}
+        lexer_release_parse_source_globals()
+        val reclaimed_sources = phase_ctx.reclaim_source_contents()
+        log_phase("phase3:streaming_source_reclaim:done reclaimed={reclaimed_sources}")
+        phase_ctx.evict_sources()
+        phase_ctx.module_surfaces = nil
+        (phase_ctx, true)
+
     me lower_and_check_impl() -> (CompileContext, bool):
+        if driver_streaming_surface_enabled(self.ctx):
+            return self.lower_and_check_streaming_surfaces_impl()
         val log = self.ctx.logger
 
         # Build module_name -> source_path map so each module gets the right
@@ -798,6 +960,14 @@ pub class CompilerDriver:
         var shared_lowering_errors: [LoweringError] = []
         var shared_lowering_diagnostic_messages: [text] = []
         var shared_lowering_diagnostic_recovered: [bool] = []
+        val retained_module_surfaces: ModuleSurfacesByName = if self.ctx.sources.len() > 0:
+            match module_surfaces_from_modules(self.ctx.modules, self.ctx.sources):
+                case Ok(value): value
+                case Err(error):
+                    self.ctx.add_error("Module surface extraction error: {error}")
+                    return (self.ctx, false)
+        else:
+            ModuleSurfacesByName(surfaces: [], index_by_name: {})
         if self.ctx.sources.len() <= 0:
             dtrace("[DRV] lac-branch=modules-loop (sources<=0)")
             var bootstrap_hir_modules: Dict<text, HirModule> = {}
@@ -808,7 +978,7 @@ pub class CompilerDriver:
                 if module == nil:
                     log_error("module is nil")
                     continue
-                var lowering: HirLowering = hirlowering_for_module("", self.ctx.modules)
+                var lowering: HirLowering = hirlowering_for_module("", retained_module_surfaces)
                 lowering.lowered_traits = shared_lowered_traits
                 val hir_module: HirModule = lowering.lower_module(module)
                 shared_lowered_traits = lowering.lowered_traits
@@ -849,7 +1019,7 @@ pub class CompilerDriver:
             # lower_parser_module_unstub) mis-dispatch and the HIR lowering body
             # never runs (iteration 17; same family as the iteration 9 Dict-ANY
             # field hazard).
-            var lowering: HirLowering = hirlowering_for_module_with_diagnostics(src_path ?? "", self.ctx.modules, shared_lowering_errors, shared_lowering_diagnostic_messages, shared_lowering_diagnostic_recovered)
+            var lowering: HirLowering = hirlowering_for_module_with_diagnostics(src_path ?? "", retained_module_surfaces, shared_lowering_errors, shared_lowering_diagnostic_messages, shared_lowering_diagnostic_recovered)
             if src_path != nil:
                 lowering.module_filename = src_path
             lowering.lowered_traits = shared_lowered_traits
@@ -1019,6 +1189,11 @@ pub class CompilerDriver:
 
     fn lower_to_hir_impl() -> (CompileContext, bool):
         var ctx = self.ctx
+        val retained_module_surfaces: ModuleSurfacesByName = match module_surfaces_from_modules(ctx.modules, ctx.sources):
+            case Ok(value): value
+            case Err(error):
+                ctx.add_error("Module surface extraction error: {error}")
+                return (ctx, false)
 
         # Build module_name -> source_path map for per-module filename tracking.
         var source_path_map2: Dict<text, text> = {}
@@ -1029,7 +1204,7 @@ pub class CompilerDriver:
             val name = src2.module_name
             val module = ctx.modules[name]
             val src_path2 = source_path_map2[name]
-            var lowering: HirLowering = hirlowering_for_module(src_path2 ?? "", ctx.modules)
+            var lowering: HirLowering = hirlowering_for_module(src_path2 ?? "", retained_module_surfaces)
             if src_path2 != nil:
                 lowering.module_filename = src_path2
             val hir_module: HirModule = lowering.lower_module(module)

@@ -12,7 +12,7 @@ operation and recovery behavior lives in
 | `1` | `TARGET_OPENSSD_2CH8WAY` | Cosmos+ PCIe/NFC + physical NAND | Profile present; H2 board gate postponed |
 | `2` | `TARGET_OPENSSD_8CH8WAY` | Cosmos+ PCIe/NFC + physical NAND | Profile present; H2 board gate postponed |
 | `3` | `TARGET_RV32_QEMU_RAM_NAND` | RV32 ELF + GDB host mailbox + guest PRP RAM + 256-byte `.nandram` | H1 firmware-command parity PASS; no AXI/IRQ |
-| `4` | `TARGET_RV32_KV260_AXI_RAM_NAND` | AXI host endpoint + queue DMA + firmware mailbox + RAM NAND | H1 real firmware-in-loop PASS; board evidence open |
+| `4` | `TARGET_RV32_KV260_AXI_RAM_NAND` | AXI host endpoint + queue DMA + firmware mailbox + RAM NAND | H1 firmware-in-loop and current-top GHDL boot PASS; board evidence open |
 
 Unknown IDs return `TARGET_INVALID`; they never fall back to the simulator.
 The canonical profile source is
@@ -72,6 +72,10 @@ physical NAND, or OpenSSD silicon from that result. The source-matched Stage 3 p
 compiler builds the resident service ELF and VHDL generator; SSpec/docgen still
 requires an admitted full CLI. The stale deployed binary is not acceptable
 evidence.
+
+The current endpoint-wired K26 top also passes full SimpleOS boot with both
+zeroed and garbage-filled DDR. That rehearsal uses a tied-off endpoint and does
+not replace the firmware-in-loop DMA/IRQ gate or physical board evidence.
 
 ## Primary Files
 

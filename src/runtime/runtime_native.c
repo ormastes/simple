@@ -808,6 +808,7 @@ typedef struct RtCoreMutex {
 typedef struct RtCoreEnum {
     uint8_t kind;
     uint8_t reserved[3];
+    uint32_t transient_scope_id;
     uint32_t enum_id;
     uint32_t discriminant;
     uint32_t reserved2;
@@ -816,7 +817,8 @@ typedef struct RtCoreEnum {
 
 typedef struct RtCoreClosure {
     uint8_t kind;
-    uint8_t reserved[7];
+    uint8_t reserved[3];
+    uint32_t transient_scope_id;
     int64_t func_ptr;
     int64_t capture_count;
     int64_t captures[];
@@ -837,7 +839,8 @@ typedef struct RtCoreDictEntry {
 typedef struct RtCoreDict {
     uint8_t kind;      /* RT_VALUE_HEAP_DICT */
     uint8_t flags;
-    uint8_t reserved[6];
+    uint16_t reserved;
+    uint32_t transient_scope_id;
     int64_t cap;       /* power of two */
     int64_t len;       /* live entries */
     int64_t tombstones;
@@ -851,7 +854,7 @@ typedef struct RtCoreDict {
  * i64 that merely aliases TAG_HEAP is never dereferenced. */
 typedef struct RtCoreFloat {
     uint32_t kind;      /* RT_VALUE_HEAP_FLOAT */
-    uint32_t reserved;
+    uint32_t transient_scope_id;
     double value;
 } RtCoreFloat;
 
@@ -864,14 +867,13 @@ static int rt_core_dict_del(RtCoreDict* d, int64_t key);
 static _Atomic size_t rt_core_heap_registry_count = 0;
 static RtCoreString* rt_core_short_string_cache[257] = {0};
 static atomic_flag rt_core_short_string_cache_lock = ATOMIC_FLAG_INIT;
-static RtCoreArray** rt_core_array_registry = NULL;
-static size_t rt_core_array_registry_len = 0;
-static size_t rt_core_array_registry_cap = 0;
-static atomic_flag rt_core_array_registry_lock = ATOMIC_FLAG_INIT;
 static _Atomic uint32_t rt_core_transient_array_scope_next_id = 1;
 static _Thread_local uint32_t rt_core_transient_array_scope_id = 0;
 static _Thread_local int rt_core_transient_array_scope_active = 0;
 static _Thread_local int rt_core_transient_array_scope_paused = 0;
+static _Thread_local void** rt_core_transient_heap_scope_objects = NULL;
+static _Thread_local size_t rt_core_transient_heap_scope_object_len = 0;
+static _Thread_local size_t rt_core_transient_heap_scope_object_cap = 0;
 static RtCoreMutex** rt_core_mutex_registry = NULL;
 static size_t rt_core_mutex_registry_len = 0;
 static size_t rt_core_mutex_registry_cap = 0;
@@ -879,6 +881,65 @@ static atomic_flag rt_core_mutex_registry_lock = ATOMIC_FLAG_INIT;
 
 static int rt_core_register_immortal_ptr(void* ptr);
 static int rt_core_is_registered_immortal_ptr(void* ptr);
+static int rt_core_unregister_immortal_ptr(void* ptr);
+static void rt_core_reclaim_transient_immortal(uint32_t scope_id);
+static atomic_flag rt_core_heap_lifecycle_lock = ATOMIC_FLAG_INIT;
+
+static void rt_core_heap_lifecycle_acquire(void) {
+    while (atomic_flag_test_and_set_explicit(
+        &rt_core_heap_lifecycle_lock, memory_order_acquire)) {}
+}
+
+static void rt_core_heap_lifecycle_release(void) {
+    atomic_flag_clear_explicit(&rt_core_heap_lifecycle_lock, memory_order_release);
+}
+
+static uint32_t rt_core_registered_object_kind(void* ptr) {
+    uint32_t wide_kind = *(uint32_t*)ptr;
+    if (wide_kind == RT_VALUE_HEAP_STRING || wide_kind == RT_VALUE_HEAP_FLOAT) {
+        return wide_kind;
+    }
+    return *(uint8_t*)ptr;
+}
+
+static uint32_t rt_core_transient_scope_for_new_object(void) {
+    return rt_core_transient_array_scope_active && !rt_core_transient_array_scope_paused
+        ? rt_core_transient_array_scope_id
+        : 0;
+}
+
+#define RT_CORE_TRANSIENT_SCOPE_MAX_OBJECTS ((size_t)1 << 24)
+
+static int rt_core_track_transient_immortal(void* ptr) {
+    if (rt_core_transient_heap_scope_object_len == rt_core_transient_heap_scope_object_cap) {
+        size_t next_cap = rt_core_transient_heap_scope_object_cap == 0
+            ? 64
+            : rt_core_transient_heap_scope_object_cap * 2;
+        if (next_cap > RT_CORE_TRANSIENT_SCOPE_MAX_OBJECTS ||
+            next_cap > SIZE_MAX / sizeof(void*)) {
+            return 0;
+        }
+        void** next = (void**)realloc(
+            rt_core_transient_heap_scope_objects, next_cap * sizeof(void*));
+        if (!next) return 0;
+        rt_core_transient_heap_scope_objects = next;
+        rt_core_transient_heap_scope_object_cap = next_cap;
+    }
+    rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len++] = ptr;
+    return 1;
+}
+
+static int rt_core_register_scoped_immortal(void* ptr, uint32_t* object_scope_id) {
+    *object_scope_id = rt_core_transient_scope_for_new_object();
+    if (*object_scope_id && !rt_core_track_transient_immortal(ptr)) return 0;
+    if (rt_core_register_immortal_ptr(ptr)) return 1;
+    if (*object_scope_id && rt_core_transient_heap_scope_object_len > 0 &&
+        rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len - 1] == ptr) {
+        rt_core_transient_heap_scope_object_len--;
+    }
+    *object_scope_id = 0;
+    return 0;
+}
 
 static int rt_core_register_string(RtCoreString* s) {
     return rt_core_register_immortal_ptr(s);
@@ -897,83 +958,39 @@ static int rt_core_is_registered_string(RtCoreString* s) {
  * a heap object at all, so the dereference lands on a wild address. Every dict
  * is created at exactly one choke point (rt_dict_new) and registered there, so
  * rt_core_as_dict can now perform a PURE POINTER COMPARISON before touching
- * ->kind. Dicts have no free primitive yet, so the immortal registry (which
- * strings and heap floats already use) is the right backing store. */
+ * ->kind. The shared pointer registry is the right backing store; scoped dicts
+ * are removed from it when their transient scope ends. */
 static int rt_core_register_dict(RtCoreDict* d) {
-    return rt_core_register_immortal_ptr(d);
+    return rt_core_register_scoped_immortal(d, &d->transient_scope_id);
 }
 
 static int rt_core_is_registered_dict(RtCoreDict* d) {
     return rt_core_is_registered_immortal_ptr(d);
 }
 
-static void rt_core_array_registry_acquire(void) {
-    while (atomic_flag_test_and_set_explicit(&rt_core_array_registry_lock, memory_order_acquire)) {}
-}
-
-static void rt_core_array_registry_release(void) {
-    atomic_flag_clear_explicit(&rt_core_array_registry_lock, memory_order_release);
-}
-
-static void rt_core_register_array(RtCoreArray* array) {
-    if (!array) return;
-    array->transient_scope_id =
-        rt_core_transient_array_scope_active && !rt_core_transient_array_scope_paused
-            ? rt_core_transient_array_scope_id
-            : 0;
-    rt_core_array_registry_acquire();
-    if (rt_core_array_registry_len == rt_core_array_registry_cap) {
-        size_t next_cap = rt_core_array_registry_cap == 0 ? 64 : rt_core_array_registry_cap * 2;
-        RtCoreArray** next =
-            (RtCoreArray**)realloc(rt_core_array_registry, next_cap * sizeof(RtCoreArray*));
-        if (!next) {
-            rt_core_array_registry_release();
-            return;
-        }
-        rt_core_array_registry = next;
-        rt_core_array_registry_cap = next_cap;
-    }
-    rt_core_array_registry[rt_core_array_registry_len++] = array;
-    atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
-    rt_core_array_registry_release();
+static int rt_core_register_array(RtCoreArray* array) {
+    if (!array) return 0;
+    return rt_core_register_scoped_immortal(array, &array->transient_scope_id);
 }
 
 static int rt_core_is_registered_array(RtCoreArray* array) {
-    int found = 0;
-    rt_core_array_registry_acquire();
-    for (size_t i = 0; i < rt_core_array_registry_len; i++) {
-        if (rt_core_array_registry[i] == array) {
-            found = 1;
-            break;
-        }
-    }
-    rt_core_array_registry_release();
-    return found;
+    return array && rt_core_is_registered_immortal_ptr(array) &&
+        array->kind == RT_VALUE_HEAP_ARRAY;
 }
 
 static int rt_core_unregister_array(RtCoreArray* array) {
-    int found = 0;
-    rt_core_array_registry_acquire();
-    for (size_t i = 0; i < rt_core_array_registry_len; i++) {
-        if (rt_core_array_registry[i] != array) continue;
-        rt_core_array_registry[i] = rt_core_array_registry[--rt_core_array_registry_len];
-        atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
-        found = 1;
-        break;
-    }
-    rt_core_array_registry_release();
-    return found;
+    return rt_core_unregister_immortal_ptr(array);
 }
 
-static void rt_core_register_mutex(RtCoreMutex* mutex) {
-    if (!mutex) return;
+static int rt_core_register_mutex(RtCoreMutex* mutex) {
+    if (!mutex) return 0;
     while (atomic_flag_test_and_set_explicit(&rt_core_mutex_registry_lock, memory_order_acquire)) { }
     if (rt_core_mutex_registry_len == rt_core_mutex_registry_cap) {
         size_t next_cap = rt_core_mutex_registry_cap == 0 ? 16 : rt_core_mutex_registry_cap * 2;
         RtCoreMutex** next = (RtCoreMutex**)realloc(rt_core_mutex_registry, next_cap * sizeof(RtCoreMutex*));
         if (!next) {
             atomic_flag_clear_explicit(&rt_core_mutex_registry_lock, memory_order_release);
-            return;
+            return 0;
         }
         rt_core_mutex_registry = next;
         rt_core_mutex_registry_cap = next_cap;
@@ -981,6 +998,7 @@ static void rt_core_register_mutex(RtCoreMutex* mutex) {
     rt_core_mutex_registry[rt_core_mutex_registry_len++] = mutex;
     atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
     atomic_flag_clear_explicit(&rt_core_mutex_registry_lock, memory_order_release);
+    return 1;
 }
 
 static int rt_core_is_registered_mutex(RtCoreMutex* mutex) {
@@ -1035,9 +1053,9 @@ static int rt_core_is_registered_mutex(RtCoreMutex* mutex) {
  * through the shared immortal hash table instead, exactly like
  * rt_core_register_dict/rt_core_register_float above, restoring amortized
  * O(1) membership tests. */
-static void rt_core_register_enum(RtCoreEnum* e) {
-    if (!e) return;
-    rt_core_register_immortal_ptr(e);
+static int rt_core_register_enum(RtCoreEnum* e) {
+    if (!e) return 0;
+    return rt_core_register_scoped_immortal(e, &e->transient_scope_id);
 }
 
 static int rt_core_is_registered_enum(RtCoreEnum* e) {
@@ -1049,7 +1067,7 @@ int64_t rt_heap_registry_count(void) {
 }
 
 int8_t rt_transient_array_scope_begin(void) {
-    if (rt_core_transient_array_scope_active) return 0;
+    if (rt_core_transient_array_scope_active || rt_core_transient_heap_scope_object_len != 0) return 0;
     uint32_t next_id =
         atomic_load_explicit(&rt_core_transient_array_scope_next_id, memory_order_relaxed);
     while (next_id != 0) {
@@ -1079,24 +1097,7 @@ int8_t rt_transient_array_scope_end(void) {
     rt_core_transient_array_scope_active = 0;
     rt_core_transient_array_scope_paused = 0;
 
-    size_t write_idx = 0;
-    size_t freed = 0;
-    rt_core_array_registry_acquire();
-    for (size_t read_idx = 0; read_idx < rt_core_array_registry_len; read_idx++) {
-        RtCoreArray* array = rt_core_array_registry[read_idx];
-        if (array && array->transient_scope_id == scope_id) {
-            free(array->data);
-            free(array);
-            freed++;
-        } else {
-            rt_core_array_registry[write_idx++] = array;
-        }
-    }
-    rt_core_array_registry_len = write_idx;
-    if (freed > 0) {
-        atomic_fetch_sub_explicit(&rt_core_heap_registry_count, freed, memory_order_relaxed);
-    }
-    rt_core_array_registry_release();
+    rt_core_reclaim_transient_immortal(scope_id);
     return 1;
 }
 
@@ -1111,7 +1112,7 @@ int8_t rt_transient_array_scope_end(void) {
  * enums instead of a bespoke array+lock. */
 static int rt_core_register_closure(RtCoreClosure* closure) {
     if (!closure) return 0;
-    return rt_core_register_immortal_ptr(closure);
+    return rt_core_register_scoped_immortal(closure, &closure->transient_scope_id);
 }
 
 static RtCoreClosure* rt_core_as_closure(int64_t value) {
@@ -1133,9 +1134,8 @@ static RtCoreClosure* rt_core_as_closure(int64_t value) {
  * amortized membership. The pointer-only lookup happens before any dereference,
  * so a flat i64 that merely aliases RT_VALUE_TAG_HEAP is rejected safely.
  *
- * Only objects with a leading `kind` field and process-lifetime allocation may
- * enter this table. Strings and boxed floats are never removed, so their
- * addresses cannot be reused into stale-membership false positives.
+ * Only objects with a leading `kind` field enter this table. Strings remain
+ * process-persistent; scoped parser objects are erased before being freed.
  * -------------------------------------------------------------------------- */
 /* Open-addressing table. 0 = never used, TOMBSTONE = erased.
  *
@@ -1275,13 +1275,62 @@ static int rt_core_is_registered_immortal_ptr(void* ptr) {
 
 static int rt_core_unregister_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
+    rt_core_heap_lifecycle_acquire();
     rt_core_immortal_registry_acquire();
     int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
     rt_core_immortal_registry_release();
     if (erased) {
         atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
     }
+    rt_core_heap_lifecycle_release();
     return erased;
+}
+
+static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
+    rt_core_heap_lifecycle_acquire();
+    for (size_t i = 0; i < rt_core_transient_heap_scope_object_len; i++) {
+        void* ptr = rt_core_transient_heap_scope_objects[i];
+        if (!rt_core_is_registered_immortal_ptr(ptr)) continue;
+        uint32_t* object_scope = NULL;
+        switch (rt_core_registered_object_kind(ptr)) {
+            case RT_VALUE_HEAP_ARRAY:
+                object_scope = &((RtCoreArray*)ptr)->transient_scope_id;
+                break;
+            case RT_VALUE_HEAP_DICT:
+                object_scope = &((RtCoreDict*)ptr)->transient_scope_id;
+                break;
+            case RT_VALUE_HEAP_ENUM:
+                object_scope = &((RtCoreEnum*)ptr)->transient_scope_id;
+                break;
+            case RT_VALUE_HEAP_CLOSURE:
+                object_scope = &((RtCoreClosure*)ptr)->transient_scope_id;
+                break;
+            case RT_VALUE_HEAP_FLOAT:
+                object_scope = &((RtCoreFloat*)ptr)->transient_scope_id;
+                break;
+            default:
+                break; /* strings remain process-persistent */
+        }
+        if (!object_scope || *object_scope != scope_id) continue;
+        rt_core_immortal_registry_acquire();
+        int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
+        rt_core_immortal_registry_release();
+        if (!erased) continue;
+        atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        switch (rt_core_registered_object_kind(ptr)) {
+            case RT_VALUE_HEAP_ARRAY:
+                free(((RtCoreArray*)ptr)->data);
+                break;
+            case RT_VALUE_HEAP_DICT:
+                free(((RtCoreDict*)ptr)->entries);
+                break;
+            default:
+                break;
+        }
+        free(ptr);
+    }
+    rt_core_transient_heap_scope_object_len = 0;
+    rt_core_heap_lifecycle_release();
 }
 
 static int rt_core_unregister_string(RtCoreString* s) {
@@ -1289,7 +1338,7 @@ static int rt_core_unregister_string(RtCoreString* s) {
 }
 
 static int rt_core_register_float(RtCoreFloat* f) {
-    return rt_core_register_immortal_ptr(f);
+    return rt_core_register_scoped_immortal(f, &f->transient_scope_id);
 }
 
 static int rt_core_is_registered_float(RtCoreFloat* f) {
@@ -1429,6 +1478,169 @@ static inline RtCoreEnum* rt_core_as_registered_enum(int64_t value) {
 
 static inline RtCoreArray* rt_core_array_ptr(SplArray* value) {
     return rt_core_as_array((int64_t)(uintptr_t)value);
+}
+
+enum {
+    RT_CORE_TRANSIENT_ARRAY,
+    RT_CORE_TRANSIENT_DICT,
+    RT_CORE_TRANSIENT_ENUM,
+    RT_CORE_TRANSIENT_FLOAT,
+    RT_CORE_TRANSIENT_CLOSURE
+};
+
+typedef struct RtCoreTransientNode {
+    void* ptr;
+    uint8_t kind;
+} RtCoreTransientNode;
+
+typedef struct RtCoreTransientPlan {
+    RtCoreTransientNode* nodes;
+    size_t len;
+    size_t cap;
+    uintptr_t* seen;
+    size_t seen_cap;
+    size_t seen_len;
+} RtCoreTransientPlan;
+
+#define RT_CORE_TRANSIENT_MAX_NODES ((size_t)1 << 22)
+
+static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t ptr) {
+    if ((plan->seen_len + 1) * 10 >= plan->seen_cap * 7) {
+        size_t next_cap = plan->seen_cap == 0 ? 256 : plan->seen_cap * 2;
+        if (next_cap > SIZE_MAX / sizeof(uintptr_t)) return -1;
+        uintptr_t* fresh = (uintptr_t*)calloc(next_cap, sizeof(uintptr_t));
+        if (!fresh) return -1;
+        size_t mask = next_cap - 1;
+        for (size_t i = 0; i < plan->seen_cap; i++) {
+            uintptr_t entry = plan->seen[i];
+            if (!entry) continue;
+            size_t j = rt_core_immortal_hash_ptr(entry) & mask;
+            while (fresh[j]) j = (j + 1) & mask;
+            fresh[j] = entry;
+        }
+        free(plan->seen);
+        plan->seen = fresh;
+        plan->seen_cap = next_cap;
+    }
+    size_t mask = plan->seen_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
+    for (;;) {
+        if (!plan->seen[i]) {
+            plan->seen[i] = ptr;
+            plan->seen_len++;
+            return 1;
+        }
+        if (plan->seen[i] == ptr) return 0;
+        i = (i + 1) & mask;
+    }
+}
+
+static int rt_core_transient_plan_push(RtCoreTransientPlan* plan, void* ptr, uint8_t kind) {
+    if (plan->len == plan->cap) {
+        size_t next_cap = plan->cap == 0 ? 32 : plan->cap * 2;
+        if (next_cap > RT_CORE_TRANSIENT_MAX_NODES) return 0;
+        RtCoreTransientNode* fresh = (RtCoreTransientNode*)realloc(
+            plan->nodes, next_cap * sizeof(RtCoreTransientNode));
+        if (!fresh) return 0;
+        plan->nodes = fresh;
+        plan->cap = next_cap;
+    }
+    plan->nodes[plan->len++] = (RtCoreTransientNode){ptr, kind};
+    return 1;
+}
+
+/* 1 = tracked node, 0 = immediate or persistent string, -1 = invalid node. */
+static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) {
+    if (!rt_core_is_heap(value)) return 0;
+    void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (rt_core_is_registered_immortal_ptr(ptr)) {
+        switch (rt_core_registered_object_kind(ptr)) { /* membership checked first */
+            case RT_VALUE_HEAP_ARRAY:
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_ARRAY};
+                return 1;
+            case RT_VALUE_HEAP_DICT:
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_DICT};
+                return 1;
+            case RT_VALUE_HEAP_ENUM:
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_ENUM};
+                return 1;
+            case RT_VALUE_HEAP_FLOAT:
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_FLOAT};
+                return 1;
+            case RT_VALUE_HEAP_CLOSURE:
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_CLOSURE};
+                return 1;
+            case RT_VALUE_HEAP_STRING:
+                return 0;
+            default:
+                return -1;
+        }
+    }
+    return 0;
+}
+
+static int rt_core_transient_add(RtCoreTransientPlan* plan, int64_t value) {
+    RtCoreTransientNode node;
+    int classified = rt_core_transient_classify(value, &node);
+    if (classified < 0) return -1;
+    if (classified == 0) return 1;
+    int seen = rt_core_transient_seen_insert(plan, (uintptr_t)node.ptr);
+    if (seen < 0) return -1;
+    if (!seen) return 1;
+    return rt_core_transient_plan_push(plan, node.ptr, node.kind) ? 1 : -1;
+}
+
+int8_t rt_transient_heap_promote(int64_t value) {
+    if (!rt_core_transient_array_scope_active || !rt_core_transient_array_scope_paused) return 0;
+    rt_core_heap_lifecycle_acquire();
+    RtCoreTransientPlan plan = {0};
+    RtCoreTransientNode root;
+    int ok = rt_core_transient_classify(value, &root) == 1 &&
+        rt_core_transient_add(&plan, value) == 1;
+    for (size_t i = 0; ok && i < plan.len; i++) {
+        RtCoreTransientNode node = plan.nodes[i];
+        if (node.kind == RT_CORE_TRANSIENT_ARRAY) {
+            RtCoreArray* array = (RtCoreArray*)node.ptr;
+            if (array->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) continue;
+            for (int64_t j = 0; j < array->len && ok; j++) {
+                ok = rt_core_transient_add(&plan, ((int64_t*)array->data)[j]) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_DICT) {
+            RtCoreDict* dict = (RtCoreDict*)node.ptr;
+            for (int64_t j = 0; j < dict->cap && ok; j++) {
+                RtCoreDictEntry* entry = &dict->entries[j];
+                if (entry->occupied != 1) continue;
+                ok = rt_core_transient_add(&plan, entry->key) == 1 &&
+                    rt_core_transient_add(&plan, entry->value) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_ENUM) {
+            ok = rt_core_transient_add(&plan, ((RtCoreEnum*)node.ptr)->payload) == 1;
+        } else if (node.kind == RT_CORE_TRANSIENT_CLOSURE) {
+            RtCoreClosure* closure = (RtCoreClosure*)node.ptr;
+            for (int64_t j = 0; j < closure->capture_count && ok; j++) {
+                ok = rt_core_transient_add(&plan, closure->captures[j]) == 1;
+            }
+        }
+    }
+    if (ok) {
+        const uint32_t scope_id = rt_core_transient_array_scope_id;
+        for (size_t i = 0; i < plan.len; i++) {
+            RtCoreTransientNode node = plan.nodes[i];
+            uint32_t* object_scope = NULL;
+            switch (node.kind) {
+                case RT_CORE_TRANSIENT_ARRAY: object_scope = &((RtCoreArray*)node.ptr)->transient_scope_id; break;
+                case RT_CORE_TRANSIENT_DICT: object_scope = &((RtCoreDict*)node.ptr)->transient_scope_id; break;
+                case RT_CORE_TRANSIENT_ENUM: object_scope = &((RtCoreEnum*)node.ptr)->transient_scope_id; break;
+                case RT_CORE_TRANSIENT_FLOAT: object_scope = &((RtCoreFloat*)node.ptr)->transient_scope_id; break;
+                case RT_CORE_TRANSIENT_CLOSURE: object_scope = &((RtCoreClosure*)node.ptr)->transient_scope_id; break;
+            }
+            if (object_scope && *object_scope == scope_id) *object_scope = 0;
+        }
+    }
+    free(plan.nodes);
+    free(plan.seen);
+    rt_core_heap_lifecycle_release();
+    return ok ? 1 : 0;
 }
 
 static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap);
@@ -1595,7 +1807,6 @@ int64_t rt_value_float(int64_t raw_bits) {
         return (int64_t)(((uint64_t)raw_bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
     }
     f->kind = RT_VALUE_HEAP_FLOAT;
-    f->reserved = 0;
     memcpy(&f->value, &raw_bits, sizeof(f->value));
     if (!rt_core_register_float(f)) {
         free(f);
@@ -2554,7 +2765,10 @@ int64_t rt_mutex_new(int64_t initial) {
     mutex->kind = RT_VALUE_HEAP_MUTEX;
     atomic_flag_clear(&mutex->lock);
     mutex->value = initial;
-    rt_core_register_mutex(mutex);
+    if (!rt_core_register_mutex(mutex)) {
+        free(mutex);
+        return rt_core_nil();
+    }
     return (int64_t)(((uintptr_t)mutex) | RT_VALUE_TAG_HEAP);
 }
 
@@ -3444,7 +3658,11 @@ static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_ite
         free(a);
         return NULL;
     }
-    rt_core_register_array(a);
+    if (!rt_core_register_array(a)) {
+        free(a->data);
+        free(a);
+        return NULL;
+    }
     return (SplArray*)(((uintptr_t)a) | RT_VALUE_TAG_HEAP);
 }
 
@@ -3631,19 +3849,19 @@ static int rt_core_deep_free_classify(int64_t value, void** out_ptr) {
     if ((raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return RT_CORE_DEEP_FREE_LEAF;
     void* p = (void*)(raw & ~RT_VALUE_TAG_MASK);
     if (rt_core_is_registered_immortal_ptr(p)) {
-        /* strings and heap-boxed f64 share this registry; disambiguate by kind,
-         * which is safe to read now that membership is established */
-        RtCoreString* s = (RtCoreString*)p;
-        if (s->kind != RT_VALUE_HEAP_STRING) return RT_CORE_DEEP_FREE_REFUSE;
-        if (s->reserved & RT_CORE_STRING_FLAG_SHARED) return RT_CORE_DEEP_FREE_REFUSE;
-        *out_ptr = s;
-        return RT_CORE_DEEP_FREE_STRING;
-    }
-    if (rt_core_is_registered_array((RtCoreArray*)p)) {
-        RtCoreArray* a = rt_core_as_array((int64_t)raw);
-        if (!a) return RT_CORE_DEEP_FREE_REFUSE; /* header failed sanity checks */
-        *out_ptr = a;
-        return RT_CORE_DEEP_FREE_ARRAY;
+        uint32_t kind = rt_core_registered_object_kind(p);
+        if (kind == RT_VALUE_HEAP_ARRAY) {
+            RtCoreArray* a = rt_core_as_array((int64_t)raw);
+            if (!a) return RT_CORE_DEEP_FREE_REFUSE;
+            *out_ptr = a;
+            return RT_CORE_DEEP_FREE_ARRAY;
+        }
+        if (kind == RT_VALUE_HEAP_STRING) {
+            RtCoreString* s = (RtCoreString*)p;
+            if (s->reserved & RT_CORE_STRING_FLAG_SHARED) return RT_CORE_DEEP_FREE_REFUSE;
+            *out_ptr = s;
+            return RT_CORE_DEEP_FREE_STRING;
+        }
     }
     return RT_CORE_DEEP_FREE_REFUSE;
 }
@@ -4373,11 +4591,14 @@ static RtEnumInternEntry rt_enum_intern_table[RT_ENUM_INTERN_MAX];
 static int rt_enum_intern_count = 0;
 
 int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
-    for (int i = 0; i < rt_enum_intern_count; i++) {
-        if (rt_enum_intern_table[i].enum_id == enum_id &&
-            rt_enum_intern_table[i].discriminant == discriminant &&
-            rt_enum_intern_table[i].payload == payload) {
-            return rt_enum_intern_table[i].value;
+    const int transient = rt_core_transient_scope_for_new_object() != 0;
+    if (!transient) {
+        for (int i = 0; i < rt_enum_intern_count; i++) {
+            if (rt_enum_intern_table[i].enum_id == enum_id &&
+                rt_enum_intern_table[i].discriminant == discriminant &&
+                rt_enum_intern_table[i].payload == payload) {
+                return rt_enum_intern_table[i].value;
+            }
         }
     }
     RtCoreEnum* value = (RtCoreEnum*)calloc(1, sizeof(RtCoreEnum));
@@ -4386,9 +4607,12 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     value->enum_id = (uint32_t)enum_id;
     value->discriminant = (uint32_t)discriminant;
     value->payload = payload;
-    rt_core_register_enum(value);
+    if (!rt_core_register_enum(value)) {
+        free(value);
+        return rt_core_nil();
+    }
     int64_t tagged = (int64_t)(((uint64_t)(uintptr_t)value) | RT_VALUE_TAG_HEAP);
-    if (rt_enum_intern_count < RT_ENUM_INTERN_MAX) {
+    if (!transient && rt_enum_intern_count < RT_ENUM_INTERN_MAX) {
         rt_enum_intern_table[rt_enum_intern_count].enum_id = enum_id;
         rt_enum_intern_table[rt_enum_intern_count].discriminant = discriminant;
         rt_enum_intern_table[rt_enum_intern_count].payload = payload;

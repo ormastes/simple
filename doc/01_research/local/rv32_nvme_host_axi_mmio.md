@@ -8,6 +8,18 @@ firmware. It must let an external AXI host configure the controller, place
 memory, and observe an interrupt. It must reuse the existing NAND-RAM policy;
 it must not add a second command implementation.
 
+## Implementation update — 2026-07-28
+
+The missing-transport statements below describe the pre-implementation
+baseline. The synthesizable AXI-Lite register/doorbell endpoint, bounded AXI4
+queue DMA, firmware mailbox, and interrupt path are now implemented. The
+firmware-in-loop GHDL and QEMU parity gates cover Create CQ/SQ, Identify,
+Write, Flush, Read, erase/program/read, prevention, retry, refresh, and remap.
+KV260 JTAG/MMIO capture tooling also exists. The generated K26 top now has
+GHDL boot evidence; Vivado/physical K26 and Cosmos+ NFC/PCIe/NAND acceptance
+remain open; see
+`doc/08_tracking/feature/rv32_nvme_host_axi_mmio_2026-07-28.md`.
+
 ## Existing surfaces
 
 | Surface | Current role | Reusable part | Boundary |
