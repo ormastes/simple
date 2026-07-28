@@ -11,10 +11,12 @@
 # where the seed oracle is known-broken, that native alone matches ground
 # truth) so none of these fixes silently regress.
 #
-# Both backends use the SAME tracked self-hosted release wrapper:
-#   SEED ORACLE:         env -u SIMPLE_BOOTSTRAP bin/release/simple run prog.spl
+# The two backends are TWO DISTINCT, IDENTITY-VERIFIED binaries (see the
+# fail-closed resolution block below; before 2026-07-28 both sides used the
+# same binary and the comparison could not fail):
+#   SEED ORACLE:         env -u SIMPLE_BOOTSTRAP "$SEED_BINARY" run prog.spl
 #   PURE-SIMPLE NATIVE:   env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH \
-#                         bin/release/simple native-build \
+#                         "$SIMPLE_BINARY" native-build \
 #                         --entry prog.spl -o out --clean && ./out
 # SIMPLE_BOOTSTRAP is unset so both operations use the selected deployed
 # compiler without an explicit bootstrap override.
@@ -93,11 +95,56 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED TWO-BINARY RESOLUTION (2026-07-28)
+#
+# Until today this harness ran BOTH sides of every "parity" case through the
+# SAME $SIMPLE_BINARY: `run_seed` called `$SIMPLE_BINARY run` and `build_native`
+# called `$SIMPLE_BINARY native-build`. The header above has always described
+# the left side as a "SEED ORACLE", and the case reclassification notes above
+# reason explicitly about "the seed is Rust — not fixable from pure-Simple
+# source". That intent was never implemented: with one binary on both sides the
+# seed-vs-native comparison structurally cannot detect a seed/native divergence
+# at all, so a green run proved nothing.
+#   Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
+#
+# The oracle is now a GENUINELY DISTINCT Rust seed binary, and each side's
+# identity is verified before any case runs:
+#   SIMPLE_BINARY  must be self-hosted   (seed banner => exit 2, untestable)
+#   SEED_BINARY    must actually be a seed (no banner => exit 2, untestable)
+#   the two must be different real files  (same file => exit 2, untestable)
+# Any of those failing exits 2 (UNTESTABLE) — never 0. There is no configuration
+# in which this script prints PASS without having compared two real compilers.
+# ---------------------------------------------------------------------------
+. "$ROOT_DIR/scripts/check/lib/require-self-hosted.shs"
+
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/release/simple}"
-if [ ! -x "$SIMPLE_BINARY" ]; then
-    echo "error: executable Simple compiler not found: $SIMPLE_BINARY (set SIMPLE_BINARY to a deployed pure-Simple compiler)" >&2
-    exit 2
+require_self_hosted "$SIMPLE_BINARY" "native side (self-hosted)"
+SIMPLE_BINARY="$SELF_HOSTED_BIN"
+
+# Seed oracle. Default candidates are the Rust bootstrap outputs; override with
+# SEED_BINARY. It must self-identify AS a seed — if it does not, it is not an
+# independent Rust oracle and the comparison is not the one this script claims.
+if [ -n "${SEED_BINARY:-}" ]; then
+    SEED_CANDIDATES="$SEED_BINARY"
+else
+    SEED_CANDIDATES="src/compiler_rust/target/bootstrap/simple src/compiler_rust/target/release/simple"
 fi
+SEED_RESOLVED=""
+for seed_candidate in $SEED_CANDIDATES; do
+    if seed_path="$(resolve_binary "$seed_candidate")"; then
+        binary_is_seed "$seed_path" && { SEED_RESOLVED="$seed_path"; break; }
+    fi
+done
+[ -n "$SEED_RESOLVED" ] || check_untestable "no Rust seed oracle found (tried: $SEED_CANDIDATES).
+  This harness compares the self-hosted native backend against an independent
+  Rust seed. Without a second, genuinely distinct compiler there is nothing to
+  compare against — set SEED_BINARY=/path/to/rust/seed and re-run."
+SEED_BINARY="$SEED_RESOLVED"
+echo "seed side:  $SEED_BINARY  ->  $(real_path "$SEED_BINARY")"
+echo "identity:  Rust bootstrap seed (banner present)  OK"
+
+require_distinct_binaries "$SIMPLE_BINARY" "$SEED_BINARY"
 WORK_DIR="${PARITY_WORK_DIR:-/tmp/check-native-seed-parity.$$}"
 SEED_TIMEOUT_S="${SEED_TIMEOUT_S:-20}"
 NATIVE_RUN_TIMEOUT_S="${NATIVE_RUN_TIMEOUT_S:-20}"
@@ -1807,8 +1854,11 @@ run_seed() {
     # is known to hang on some constructs (see `range_for`) — never let an
     # oracle run block the gate. rc is ignored; callers treat the seed as
     # a best-effort oracle only.
+    # The oracle is $SEED_BINARY — an independent Rust seed, NOT $SIMPLE_BINARY.
+    # Using $SIMPLE_BINARY here (as this did until 2026-07-28) makes every
+    # parity case compare one binary against itself.
     src="$1"; out="$2"
-    "$TIMEOUT_BIN" "$SEED_TIMEOUT_S" env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" run "$src" \
+    "$TIMEOUT_BIN" "$SEED_TIMEOUT_S" env -u SIMPLE_BOOTSTRAP "$SEED_BINARY" run "$src" \
         >"$out" 2>"$out.stderr" || true
 }
 

@@ -118,3 +118,117 @@ name, in what they claim, and in where they exit 0 — so each needs review.
   `bin/simple lint` reports "all files clean" on files that do not parse.
 - `doc/08_tracking/todo/workspace_root_guard_is_vacuous_in_ci_2026-07-28.md` —
   workspace root guard is vacuous in CI.
+
+---
+
+# Progress update — 2026-07-28 (second pass)
+
+## Shared guard extracted
+
+`scripts/check/lib/require-self-hosted.shs` (source it; do not exec it).
+Semantics copied from `check-f64-call-abi.shs` so the two cannot drift.
+
+| Function | Contract |
+|---|---|
+| `require_self_hosted TARGET [LABEL]` | resolves TARGET, prints `readlink -f` real path, captures `--version 2>&1`, rejects the seed banner; sets `SELF_HOSTED_BIN` / `SELF_HOSTED_REAL` / `SELF_HOSTED_VERSION`; exits 2 on anything unverified |
+| `binary_is_seed PATH` | `0` = is the seed, `1` = is not, `2` = identity unverifiable |
+| `require_distinct_binaries A B` | exit 2 if both sides are the same real file |
+| `resolve_binary` / `real_path` / `require_tool` | small primitives |
+| `check_untestable MSG` / `check_fail MSG` | exit 2 / exit 1 |
+
+Exit contract everywhere: **0** = property actually measured on a verified
+target, **1** = measured and wrong, **2** = UNTESTABLE (never 0).
+
+## Fixed this pass
+
+- **`check-native-seed-parity.shs` — the check that could not fail.** Both
+  sides ran through one `$SIMPLE_BINARY` (`run` vs `native-build`), so a
+  seed/native divergence was undetectable by construction, even though the
+  header and the per-case reclassification notes all reason about a genuine
+  Rust oracle. It now resolves **two** binaries: `$SIMPLE_BINARY` must be
+  self-hosted (seed banner ⇒ exit 2) and `$SEED_BINARY` must actually *be* a
+  seed (no banner ⇒ exit 2), and `require_distinct_binaries` backstops both.
+  `run_seed()` now invokes `$SEED_BINARY`. The two identity requirements are
+  mutually exclusive, so "same binary on both sides" is now unreachable.
+  With no self-hosted binary deployed today it exits **2 (untestable)** rather
+  than printing PASS.
+- **`check-widget-showcase-4k-200fps.shs`** — `SIMPLE_BIN_SOURCE` was assigned
+  `self-hosted-release` purely from the path pattern `bin/release/*`, which is
+  exactly where the deployed **seed** lives, and the `rust-seed-forbidden` gate
+  only matched `src/compiler_rust/*`. Added a real `--version` probe; reuses the
+  script's existing `exit 1` + `rust-seed-simple-binary-forbidden` vocabulary,
+  plus a new `simple-binary-identity-unverifiable` reason. Skipped under
+  `PLAN_ONLY=1` (which measures nothing by design).
+- **`check-rocm-engine2d-font-readback.shs`** — **the audit entry for this file
+  was wrong.** It does *not* fail open: `simple_binary_is_valid` (from
+  `cert/redeploy_gate/candidate_frontend_admission.shs`, sourced at L59) already
+  rejects the seed banner. The real defect was diagnostic: the seed surfaced as
+  the catch-all `pure-simple-admission-failed`. Now reports
+  `rust-bootstrap-seed-not-self-hosted`.
+
+## The `is_rust_seed_simple()` family — 42 scripts converted
+
+43 scripts in `scripts/check/` define a local `is_rust_seed_simple()`. All 8
+textual variants tested **only** the path pattern `src/compiler_rust/*`. The
+deployed seed at `bin/release/<triple>/simple` matches none of them, so the
+predicate answered "not a seed" for the seed and every self-hosted claim in
+those scripts was asserted against it.
+
+The function body was replaced in the 42 unguarded ones with a real identity
+probe (path pattern **or** `--version` banner, `timeout`-guarded). Callers were
+not touched — they already branch on this predicate and already fail on it.
+Fail-closed details:
+
+- executable but `--version` fails / is empty ⇒ **treated as seed** (forbidden);
+- not executable / empty path ⇒ returns "not seed" so the caller's own
+  pre-existing `missing` branch reports it (that branch also fails);
+- `check-hosted-wm-capture-evidence.shs` (the 43rd) was left alone — it already
+  checks the banner separately.
+
+## Remaining: 29 scripts, NOT mechanical
+
+Left deliberately unconverted; each needs individual review.
+
+| Script | What makes it non-mechanical |
+|---|---|
+| `cert/cert-gate.shs`, `cert/fuzz-diff.shs`, `cert/soundness-diff.shs`, `cert/stress-suite.shs`, `cert/redeploy_gate/redeploy_gate.shs` | certification drivers with their own multi-binary admission pipeline; adding a second guard risks double-gating an already-gated flow |
+| `check-freebsd-bootstrap-qemu.shs` | resolves binaries *inside a QEMU guest over SSH*; the guard runs on the host and cannot probe the guest binary |
+| `native-smoke-matrix.shs`, `check-web-baremetal-size-audit.shs` | an XFAIL/skip bucket absorbs failures; needs a decision on which buckets become exit 2 |
+| `check-sspec-count-truthful.shs`, `check-cross-app-glyph-consistency.shs`, `check-browser-interaction.shs` | swallow status with `\|\| true` at the measurement site, not the resolution site — two separate fixes |
+| `check-gui-vulkan-window.shs`, `check-wm-daemon-health-recovery-evidence.shs`, `check-engine2d-nomirror-fast-render-evidence.shs`, `check-simple-2d-renderdoc-backend-equivalence.shs` | explicit `exit 0` on the missing-executable path; changing it flips the meaning of the whole script for callers |
+| `check-stage4-selfhost-parse-memory{,-multifile}.shs`, `check-nvme-rv32-minimal-live.shs`, `check-tauri-android-webview-proof.shs` | bespoke env var names and no standard `ROOT_DIR` idiom |
+| `check-native-consecutive-zero-arg-receiver.shs`, `check-native-immutable-fn-receiver.shs`, `check-cpu-hotloop-idiom.shs`, `check-seed-extern-registry.shs`, `check-test-runner-rss-batch.shs`, `check-hda-qemu.shs`, `check-gtk-gui-size-speed-baseline.shs`, `check-linux-hosted-wm-live-window-evidence.shs`, `check-simpleos-wm-fullscreen-evidence.shs`, `check-wm-production-fullscreen-evidence.shs`, `produce-aetheric-host-web-gui-evidence.shs` | require `SIMPLE_BIN` to be set with no default; the fail-open is subtler (what the *caller* passes), so the guard belongs at the call sites too |
+
+Note `check-seed-extern-registry.shs` legitimately targets the seed — it must
+**not** get a self-hosted guard.
+
+## CI — confirmed running a self-hosted check against the seed
+
+`.github/workflows/rust-bootstrap-multiplatform.yml:310-320`, step
+**"Run Rust-seed custom enum identity parity"**:
+
+```yaml
+seed="src/compiler_rust/target/bootstrap/simple"
+SIMPLE_BINARY="$seed" ... sh scripts/check/check-native-seed-parity.shs
+```
+
+CI explicitly pointed the seed-vs-native parity harness at **the seed**, so both
+sides were the same binary and the step was green by construction. This is the
+CI instance of exactly the defect above.
+
+**This step will now exit 2 and turn that job red.** That is the correct
+fail-closed outcome, but the resolution is a judgement call and was NOT made
+here:
+
+1. delete the step (it never compared two compilers), or
+2. keep the seed's own interpret-vs-native-build coverage under an honest name
+   (e.g. `check-native-backend-selfconsistency.shs`) taking a single binary and
+   claiming only self-consistency.
+
+The `SIMPLE_BINARY="$stage3"` invocations (L392, L406, L418, L431) are fine and
+become genuinely meaningful — stage3 is self-hosted and the seed oracle is
+present in that job.
+
+Still open: `.github/workflows/` has no `SIMPLE_BIN` gating for the ~50 GUI
+evidence scripts; whether CI ever runs them with a seed was not established
+(only `check-gui-hardening-open-gates.shs` is invoked from a workflow).

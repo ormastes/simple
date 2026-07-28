@@ -708,6 +708,51 @@ case "$SIMPLE_BIN" in
         ;;
 esac
 
+# ---------------------------------------------------------------------------
+# IDENTITY VERIFICATION (2026-07-28) — the rust-seed `case` above and the
+# SIMPLE_BIN_SOURCE label below are both PATH-PATTERN heuristics: any binary
+# under bin/release/ is labelled "self-hosted-release" without ever being
+# asked what it is, and the seed-forbidden case only matches src/compiler_rust/.
+# bin/release/x86_64-unknown-linux-gnu/simple is currently the Rust bootstrap
+# SEED, so it sailed through both gates and this script retained perf evidence
+# attributed to the self-hosted compiler that was measured on the seed.
+#   Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
+# Ask the binary directly. Same reason code and exit status as the existing
+# rust-seed-forbidden path above, so callers see no new exit vocabulary.
+# ---------------------------------------------------------------------------
+if [ "$PLAN_ONLY" != "1" ]; then
+    . "$ROOT_DIR/scripts/check/lib/require-self-hosted.shs"
+    if [ -n "$SIMPLE_BIN" ] && [ -x "$SIMPLE_BIN" ]; then
+        # `|| widget_seed_rc=$?` keeps `set -e` from aborting on the non-seed
+        # (rc=1) and unverifiable (rc=2) returns, which are both meaningful here.
+        widget_seed_rc=0
+        binary_is_seed "$SIMPLE_BIN" || widget_seed_rc=$?
+    else
+        widget_seed_rc=2
+    fi
+    if [ "$widget_seed_rc" = "0" ] || [ "$widget_seed_rc" = "2" ]; then
+        SIMPLE_BIN_STATUS=forbidden
+        if [ "$widget_seed_rc" = "0" ]; then
+            widget_seed_reason=rust-seed-simple-binary-forbidden
+            widget_seed_msg="FAIL: Rust seed Simple binary is forbidden for perf evidence (identified by --version banner): $SIMPLE_BIN"
+        else
+            widget_seed_reason=simple-binary-identity-unverifiable
+            widget_seed_msg="FAIL: could not establish the identity of the Simple binary (no usable --version): ${SIMPLE_BIN:-<unset>}"
+        fi
+        {
+            echo "${STATUS_PREFIX}_status=fail"
+            echo "${STATUS_PREFIX}_reason=$widget_seed_reason"
+            emit_common_fields
+            emit_unmeasured_perf_fields
+            echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
+            emit_log_fields
+        } >"$STATUS_ENV"
+        echo "$widget_seed_msg"
+        exit 1
+    fi
+    echo "${STATUS_PREFIX}_simple_bin_identity=self-hosted-verified"
+fi
+
 if [ "$PLAN_ONLY" != "1" ] && [ "$SIMPLE_BIN_SOURCE" != "self-hosted-release" ]; then
     SIMPLE_BIN_STATUS=forbidden
     {
