@@ -21,6 +21,25 @@ fn driver_identity_hash(identity: &str) -> i64 {
     }
 }
 
+fn physical_device_identity(device_uuid: &[u8; 16], device_luid: &[u8; 8], luid_valid: bool) -> String {
+    if device_uuid.iter().any(|&byte| byte != 0) {
+        return format!("uuid-{}", hex_bytes(device_uuid));
+    }
+    if luid_valid && device_luid.iter().any(|&byte| byte != 0) {
+        return format!("luid-{}", hex_bytes(device_luid));
+    }
+    String::new()
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(result, "{byte:02x}");
+    }
+    result
+}
+
 // ============================================================================
 // Device Enumeration & Selection
 // ============================================================================
@@ -225,9 +244,43 @@ pub extern "C" fn rt_vulkan_selected_device_driver_identity_hash() -> i64 {
     0
 }
 
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_selected_device_physical_identity() -> *const c_char {
+    let mut state = STATE.lock();
+    let identity = match (&state.instance, &state.device) {
+        (Some(instance), Some(device)) => {
+            let mut id_properties = vk::PhysicalDeviceIDProperties::default();
+            let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut id_properties);
+            unsafe {
+                instance
+                    .instance()
+                    .get_physical_device_properties2(device.physical_device().handle, &mut properties);
+            }
+            physical_device_identity(
+                &id_properties.device_uuid,
+                &id_properties.device_luid,
+                id_properties.device_luid_valid == vk::TRUE,
+            )
+        }
+        _ => String::new(),
+    };
+    if identity.is_empty() {
+        empty_cstr()
+    } else {
+        state.cached_cstr(identity)
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_selected_device_physical_identity() -> *const c_char {
+    empty_cstr()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{driver_identity, driver_identity_hash};
+    use super::{driver_identity, driver_identity_hash, physical_device_identity};
 
     #[test]
     fn driver_identity_is_stable_and_unambiguous() {
@@ -237,6 +290,19 @@ mod tests {
         );
         assert_eq!(driver_identity_hash("abc"), 96_354);
         assert_eq!(driver_identity_hash("😀"), 1_772_899);
+    }
+
+    #[test]
+    fn physical_identity_prefers_uuid_and_falls_back_to_valid_luid() {
+        let uuid = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let luid = [0xf0, 0xe1, 0xd2, 0xc3, 0xb4, 0xa5, 0x96, 0x87];
+        assert_eq!(
+            physical_device_identity(&uuid, &luid, true),
+            "uuid-000102030405060708090a0b0c0d0e0f"
+        );
+        assert_eq!(physical_device_identity(&[0; 16], &luid, true), "luid-f0e1d2c3b4a59687");
+        assert_eq!(physical_device_identity(&[0; 16], &luid, false), "");
+        assert_eq!(physical_device_identity(&[0; 16], &[0; 8], true), "");
     }
 }
 

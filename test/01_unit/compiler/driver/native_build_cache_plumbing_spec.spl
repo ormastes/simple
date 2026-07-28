@@ -2,8 +2,9 @@ use std.spec
 use std.io_runtime.{file_read}
 use std.common.validation.{is_hex_string}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_compiler_identity}
-use compiler.driver.driver_aot_output.{driver_native_module_is_export_facade, driver_native_sources_fingerprint}
-use compiler.common.driver_core_types.{SourceFile}
+use compiler.driver.driver_aot_output.{driver_native_module_is_export_facade, driver_native_module_is_retained_export_facade, driver_native_sources_fingerprint}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{CompileOptions, SourceFile}
 use compiler.frontend.parser_types.{Module, Export, DomainBlock}
 use compiler.mir.mir_data.{MirModule}
 use compiler.mir.mir_types.{MirConstant, MirConstValue, MirType}
@@ -39,6 +40,26 @@ describe "native-build cache plumbing policy":
         expect(src).to_contain("val direct_interpret_entry = self.ctx.options.mode == CompileMode.Interpret and input_len == 1")
         expect(src).to_contain("if (nb_entry_env != \"\" or direct_interpret_entry) and not has_project_source")
         expect(src.contains("and not nb_entry_closure_pre")).to_equal(false)
+
+    it "hoists Stage3 diagnostic and environment gates out of hot loops":
+        val driver_source = file_read("src/compiler/80.driver/driver.spl")
+        val source_loading = file_read("src/compiler/80.driver/driver_source_loading.spl")
+        val log_source = file_read("src/compiler/80.driver/driver_log_helpers.spl")
+
+        expect(driver_source).to_contain("val stage3_driver_trace = (rt_env_get(\"SIMPLE_INTERP_TRACE\") ?? \"\") == \"1\"")
+        expect(driver_source).to_contain("val stage3_phase_trace = driver_phase_trace_enabled()")
+        expect(driver_source).to_contain("val unstub_hir = (rt_env_get(\"SIMPLE_STUB_HIR\") ?? \"\") != \"1\"")
+        expect(driver_source).to_contain("val native_entry_closure_hir = (rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\") ?? \"\") == \"1\"")
+        expect(driver_source).to_contain("val stage3_entry_name = bootstrap_entry_module_name(self.ctx)")
+        expect(driver_source).to_contain("val is_requested_bootstrap_entry = name == stage3_entry_name")
+        expect(driver_source).to_contain("if stage3_driver_trace:\n                eprint(\"[DRV] lac-loop")
+        expect(driver_source).to_contain("if stage3_phase_trace:\n                log_phase_enabled(\"phase3:hir:file:start")
+        expect(driver_source).to_contain("val focused_future_driver_diag = lowering.focused_hir_diag and")
+        expect(source_loading).to_contain("val native_entry = rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY\") ?? \"\"")
+        expect(source_loading.contains("_driver_cached_native_entry")).to_equal(false)
+        expect(log_source).to_contain("pub fn log_phase_enabled(msg: text):")
+        expect(log_source).to_contain("SIMPLE_COMPILER_MEMORY_PROFILE")
+        expect(log_source.contains("_g_phase_trace_enabled_set")).to_equal(false)
 
     it "routes AOT cache metadata and objects through SIMPLE_NATIVE_BUILD_CACHE_DIR":
         val src = file_read("src/compiler/80.driver/driver_aot_output.spl")
@@ -100,11 +121,29 @@ describe "native-build cache plumbing policy":
         val data_mir = MirModule(name: "facade", functions: {}, statics: {}, constants: constants, types: {})
         expect(driver_native_module_is_export_facade(data_mir, facade)).to_equal(false)
 
+    it "retains compact facade classification after low-memory AST eviction":
+        var ctx = CompileContext.create(CompileOptions.default())
+        val facade = native_build_test_module([Export(items: ["impl.*"], span: Span.empty())], [])
+        ctx.modules["facade"] = facade
+        ctx.retain_native_export_facade_candidates()
+        ctx.evict_ast()
+
+        val empty_mir = MirModule(name: "facade", functions: {}, statics: {}, constants: {}, types: {})
+        expect(ctx.modules.keys().len()).to_equal(0)
+        expect(ctx.native_export_facade_candidates.contains_key("facade")).to_equal(true)
+        expect(driver_native_module_is_retained_export_facade(
+            empty_mir, ctx.native_export_facade_candidates.contains_key("facade"))).to_equal(true)
+
+        val non_facade_mir = MirModule(name: "facade", functions: {}, statics: {}, constants: {}, types: {})
+        expect(driver_native_module_is_retained_export_facade(
+            non_facade_mir, ctx.native_export_facade_candidates.contains_key("missing"))).to_equal(false)
+
     it "skips parser-confirmed facades but rejects an all-empty native build":
         val src = file_read("src/compiler/80.driver/driver_aot_output.spl")
         expect(src).to_contain("pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Module?) -> bool:")
-        expect(src).to_contain("if mir.functions.len() > 0 or mir.statics.len() > 0 or mir.constants.len() > 0 or mir.types.len() > 0:")
-        expect(src).to_contain("if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):")
+        expect(src).to_contain("if mir.functions.keys().len() > 0 or mir.statics.keys().len() > 0 or mir.constants.keys().len() > 0 or mir.types.keys().len() > 0:")
+        expect(src).to_contain("driver_native_module_is_retained_export_facade(")
+        expect(src).to_contain("ctx.mir_modules[name], ctx.native_export_facade_candidates.contains_key(name))")
         expect(src).to_contain("if object_files.len() == 0 and uncached_names.len() == 0:")
         expect(src).to_contain("native-build produced no code-bearing MIR modules")
 

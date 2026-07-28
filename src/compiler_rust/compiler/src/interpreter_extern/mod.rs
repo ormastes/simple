@@ -1961,6 +1961,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_vulkan_selected_device_driver_identity_hash",
         gpu::rt_vulkan_selected_device_driver_identity_hash_fn
     );
+    insert_simple!(
+        "rt_vulkan_selected_device_physical_identity",
+        gpu::rt_vulkan_selected_device_physical_identity_fn
+    );
     insert_simple!("rt_vulkan_selected_device_name", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_device_type", gpu::rt_vulkan_device_type_fn);
     insert_simple!("rt_vulkan_selected_device_type", gpu::rt_vulkan_selected_device_type_fn);

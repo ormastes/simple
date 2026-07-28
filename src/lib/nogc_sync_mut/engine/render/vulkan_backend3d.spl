@@ -40,6 +40,7 @@ use std.nogc_sync_mut.io.vulkan_sffi.{
     rt_vulkan_device_count, rt_vulkan_select_device, rt_vulkan_get_device,
     rt_vulkan_selected_device_name, rt_vulkan_selected_device_type,
     rt_vulkan_selected_device_driver_identity,
+    rt_vulkan_selected_device_physical_identity,
     rt_vulkan_alloc_buffer, rt_vulkan_free_buffer, rt_vulkan_copy_to_buffer,
     rt_vulkan_compile_spirv, rt_vulkan_destroy_shader,
     rt_vulkan_create_offscreen_render_pass, rt_vulkan_destroy_render_pass,
@@ -58,7 +59,11 @@ use std.nogc_sync_mut.io.vulkan_sffi.{
     rt_vulkan_bind_font_texture, rt_vulkan_draw, rt_vulkan_draw_indexed,
     rt_vulkan_fence_submission_supported,
     rt_vulkan_submit_graphics_and_wait_fence, rt_vulkan_wait_fence, rt_vulkan_destroy_fence,
-    rt_vulkan_wait_idle
+    rt_vulkan_wait_idle, vulkan_last_error
+}
+use std.common.gpu.font_owner_fault_receipt.{
+    FONT_OWNER_FAULT_NONE, FONT_OWNER_FAULT_DEVICE_LOSS,
+    font_owner_fault_code_from_reason, font_owner_fault_code_observed
 }
 
 # ============================================================================
@@ -84,6 +89,7 @@ class VulkanBackend3DDeviceEvidence:
     device_name: text
     device_type: text
     driver_identity: text
+    physical_device_identity: text
     command_handle: i64
     submitted_command_handle: i64
     fence_handle: i64
@@ -133,6 +139,7 @@ class VulkanRenderBackend3D:
     device_name: text
     device_type: text
     driver_identity: text
+    physical_device_identity: text
     initialized: bool
     owns_session: bool
     base_submit_ok: bool
@@ -141,6 +148,12 @@ class VulkanRenderBackend3D:
     font_binding_submitted: bool
     font_draw_count: i64
     blocker_reason: text
+    font_fault_mask: i64
+    font_last_fault: i64
+    font_fault_sequence: i64
+    font_device_loss_sequence: i64
+    font_fault_identity_unchanged: bool
+    font_fault_fallback_count: i64
     # Auto-incrementing logical id counter
     next_id: i64
     width: i64
@@ -175,6 +188,7 @@ class VulkanRenderBackend3D:
             device_name: "",
             device_type: "",
             driver_identity: "",
+            physical_device_identity: "",
             initialized: false,
             owns_session: false,
             base_submit_ok: false,
@@ -183,6 +197,12 @@ class VulkanRenderBackend3D:
             font_binding_submitted: false,
             font_draw_count: 0,
             blocker_reason: "texture-descriptor-layout-unavailable",
+            font_fault_mask: 0,
+            font_last_fault: FONT_OWNER_FAULT_NONE,
+            font_fault_sequence: 0,
+            font_device_loss_sequence: 0,
+            font_fault_identity_unchanged: true,
+            font_fault_fallback_count: 0,
             next_id: 1,
             width: 0,
             height: 0
@@ -274,6 +294,7 @@ impl RenderBackend3D for VulkanRenderBackend3D:
         self.device_name = rt_vulkan_selected_device_name()
         self.device_type = rt_vulkan_selected_device_type()
         self.driver_identity = rt_vulkan_selected_device_driver_identity()
+        self.physical_device_identity = rt_vulkan_selected_device_physical_identity()
         self.initialized = true
         true
 
@@ -349,6 +370,8 @@ impl RenderBackend3D for VulkanRenderBackend3D:
             if self.command_handle > 0:
                 rt_vulkan_discard_graphics_command(self.command_handle)
             self.command_handle = if self.initialized: rt_vulkan_begin_graphics() else: 0
+            if self.initialized and self.command_handle <= 0:
+                self.record_font_fault_from_runtime("submit-failed", true)
         self.base_submit_ok = false
         self.recording_blocked = false
         self.last_fence_handle = 0
@@ -477,23 +500,35 @@ impl RenderBackend3D for VulkanRenderBackend3D:
         if not commands_ok or not rt_vulkan_fence_submission_supported():
             if not self.recording_blocked:
                 self.blocker_reason = if commands_ok: "fenced-submit-unavailable" else: "graphics-command-recording-failed"
+            self.record_font_fault_from_runtime(self.blocker_reason, true)
             rt_vulkan_discard_graphics_command(self.command_handle)
             self.command_handle = 0
             return
         self.last_submitted_command_handle = self.command_handle
         val fence = rt_vulkan_submit_graphics_and_wait_fence(self.command_handle)
         self.last_fence_handle = fence
+        if fence <= 0:
+            self.record_font_fault_from_runtime("submit-failed", true)
         if fence < 0:
             self.completion_unknown = true
-            self.blocker_reason = "graphics-submission-completion-unknown"
+            if self.blocker_reason != "device-lost":
+                self.blocker_reason = "graphics-submission-completion-unknown"
         self.last_fence_waited = fence > 0 and rt_vulkan_wait_fence(fence, 1000000000)
-        self.last_fence_destroyed = fence > 0 and rt_vulkan_destroy_fence(fence)
+        if fence > 0 and not self.last_fence_waited:
+            self.completion_unknown = true
+            self.record_font_fault_from_runtime("submit-failed", true)
+        if fence > 0 and self.last_fence_waited:
+            self.last_fence_destroyed = rt_vulkan_destroy_fence(fence)
+            if not self.last_fence_destroyed:
+                self.record_font_fault_from_runtime("submit-failed", true)
         self.base_submit_ok = fence > 0 and self.last_fence_waited and self.last_fence_destroyed
         if self.base_submit_ok:
             self.last_readback_pixels = self._capture_last_color_rgba8()
             self.last_readback_bytes = self.last_readback_pixels.len()
             if self.last_readback_bytes == self.width * self.height * 4:
                 self.last_readback_image = self.last_color_image
+            else:
+                self.record_font_fault_from_runtime("vulkan-font-readback-failed", true)
         self.command_handle = 0
 
     fn present(self):
@@ -502,7 +537,7 @@ impl RenderBackend3D for VulkanRenderBackend3D:
     fn shutdown(self):
         if self.completion_unknown:
             if not rt_vulkan_wait_idle():
-                self.blocker_reason = "graphics-submission-still-in-flight"
+                self.record_font_fault_from_runtime("graphics-submission-still-in-flight", true)
                 return
             self.completion_unknown = false
         if self.command_handle > 0:
@@ -549,6 +584,7 @@ impl RenderBackend3D for VulkanRenderBackend3D:
         self.device_handle = 0
         self.render_pass_handle = 0
         self.sampler_handle = 0
+        self.physical_device_identity = ""
         self.last_submitted_command_handle = 0
         self.last_color_image = 0
         self.last_readback_image = 0
@@ -559,6 +595,39 @@ impl RenderBackend3D for VulkanRenderBackend3D:
         self.owns_session = false
 
 impl VulkanRenderBackend3D:
+    me retain_font_identity_unchanged(identity_unchanged: bool):
+        self.font_fault_identity_unchanged = self.font_fault_identity_unchanged and identity_unchanged
+
+    me record_font_fault(reason: text, identity_unchanged: bool):
+        val fault_code = font_owner_fault_code_from_reason(reason)
+        self.blocker_reason = reason
+        self.font_fault_identity_unchanged = self.font_fault_identity_unchanged and identity_unchanged
+        if font_owner_fault_code_observed(fault_code):
+            self.font_fault_sequence = self.font_fault_sequence + 1
+            self.font_fault_mask = self.font_fault_mask | fault_code
+            self.font_last_fault = fault_code
+            if fault_code == FONT_OWNER_FAULT_DEVICE_LOSS:
+                self.font_device_loss_sequence = self.font_fault_sequence
+
+    me record_font_fault_from_runtime(fallback_reason: text, identity_unchanged: bool):
+        val runtime_reason = vulkan_last_error()
+        val reason = if runtime_reason.contains("device lost") or runtime_reason.contains("DEVICE_LOST"):
+            "device-lost"
+        else:
+            fallback_reason
+        self.record_font_fault(reason, identity_unchanged)
+
+    me record_font_fallback():
+        self.font_fault_fallback_count = self.font_fault_fallback_count + 1
+
+    fn font_owner_fault_receipt() -> i64: self.font_last_fault
+    fn font_owner_fault_mask() -> i64: self.font_fault_mask
+    fn font_owner_fault_sequence() -> i64: self.font_fault_sequence
+    fn font_device_loss_sequence() -> i64: self.font_device_loss_sequence
+    fn font_device_loss_observed() -> bool: self.font_device_loss_sequence > 0
+    fn font_owner_fault_identity_unchanged() -> bool: self.font_fault_identity_unchanged
+    fn font_owner_fault_fallback_count() -> i64: self.font_fault_fallback_count
+
     fn pipeline_native_handle(pipeline: PipelineHandle) -> i64:
         _find_pipeline_native(self.pipeline_ids, self.pipeline_native, pipeline.id)
 
@@ -567,18 +636,40 @@ impl VulkanRenderBackend3D:
 
     me upload_buffer_checked(buf: BufferHandle, data: [u8], offset: i64) -> bool:
         val native = _find_buffer_native(self.buffer_ids, self.buffer_native, buf.id)
-        native > 0 and rt_vulkan_copy_to_buffer(native, data, offset)
+        val uploaded = native > 0 and rt_vulkan_copy_to_buffer(native, data, offset)
+        if not uploaded:
+            self.record_font_fault_from_runtime("vulkan-font-vertex-upload-failed", true)
+        uploaded
 
     me upload_texture_checked(tex: TextureHandle, data: [u8]) -> bool:
         val native = _find_texture_native(self.texture_ids, self.texture_native, tex.id)
-        native > 0 and rt_vulkan_copy_to_image(native, data)
+        val uploaded = native > 0 and rt_vulkan_copy_to_image(native, data)
+        if not uploaded:
+            self.record_font_fault_from_runtime("vulkan-font-atlas-upload-failed", true)
+        uploaded
+
+    me destroy_texture(tex: TextureHandle) -> bool:
+        var i: i64 = 0
+        while i < self.texture_ids.len():
+            if self.texture_ids[i] == tex.id:
+                val native = self.texture_native[i]
+                if native > 0 and not rt_vulkan_destroy_image(native):
+                    self.record_font_fault_from_runtime("vulkan-font-atlas-retire-failed", true)
+                    return false
+                self.texture_ids.remove(i)
+                self.texture_native.remove(i)
+                return true
+            i = i + 1
+        false
 
     me destroy_buffer(buf: BufferHandle):
         var i: i64 = 0
         while i < self.buffer_ids.len():
-            if self.buffer_ids[i] == buf.id and self.buffer_native[i] > 0:
-                rt_vulkan_free_buffer(self.buffer_native[i])
-                self.buffer_native[i] = 0
+            if self.buffer_ids[i] == buf.id:
+                if self.buffer_native[i] > 0:
+                    rt_vulkan_free_buffer(self.buffer_native[i])
+                self.buffer_ids.remove(i)
+                self.buffer_native.remove(i)
                 return
             i = i + 1
 
@@ -660,6 +751,7 @@ impl VulkanRenderBackend3D:
             device_name: self.device_name,
             device_type: self.device_type,
             driver_identity: self.driver_identity,
+            physical_device_identity: self.physical_device_identity,
             command_handle: self.command_handle,
             submitted_command_handle: self.last_submitted_command_handle,
             fence_handle: self.last_fence_handle,

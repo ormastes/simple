@@ -1220,6 +1220,7 @@ else
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
+      --low-memory \
       --runtime-path "${stage_runtime_absolute}" \
       -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
   )
@@ -1344,6 +1345,7 @@ else
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
+    --low-memory \
     --runtime-path "${stage_runtime_absolute}" \
     -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
   stage3_status=$?

@@ -241,6 +241,13 @@ scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --full-cli
 scripts/bootstrap/bootstrap-from-scratch.sh --release
 ```
 
+### Bounded Stage 4 memory diagnostics
+
+Set `SIMPLE_COMPILER_MEMORY_PROFILE=1` on a bounded Stage 4 or `native-build`
+run to emit low-noise `[BOOTSTRAP-PHASE]` elapsed-time and `heap_registry`
+live-object receipts. Escalate to `SIMPLE_COMPILER_PHASE_PROFILE=1` only when
+the coarse receipts leave the growing sub-phase unclear; both are off by default.
+
 ### Cranelift Bootstrap Path (2026-07-18)
 
 The Cranelift backend now completes stages 2–3 successfully as an alternative to LLVM:

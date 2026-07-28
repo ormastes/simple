@@ -30,6 +30,7 @@ use common.ui.window_scene_draw_ir.{
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrAdvResult,
     Engine2dResolvedDrawIrImage,
     engine2d_draw_ir_adv_composition_present_with_images,
     engine2d_resolved_draw_ir_image
@@ -54,6 +55,9 @@ extern fn serial_println(msg: text)
 # engine2d-draw-ir-rejected — those are evidence and fail-closed receipts that
 # must always print.
 val _WM_TRACE: bool = false
+
+fn simpleos_wm_draw_ir_skipped_selected_font(result: Engine2dDrawIrAdvResult) -> bool:
+    result.skipped_command_count > 0 and result.selected_font_command_skipped
 
 class Engine2dWmFrameExecutor:
     engine: Engine2D
@@ -276,6 +280,12 @@ class Engine2dWmFrameExecutor:
         if _WM_TRACE: serial_println("[wm-exec] at=present-begin")
         val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, composition, false, images)
         if _WM_TRACE: serial_println("[wm-exec] at=present-end rendered={result.rendered_command_count} skipped={result.skipped_command_count}")
+        # Image resources may degrade independently, but selected-font text is
+        # part of the production frame identity. A rendered rect must not hide
+        # a skipped text-font-* command behind partial-frame success.
+        if simpleos_wm_draw_ir_skipped_selected_font(result):
+            serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} fallback_required={result.fallback_required} reason=selected-font-command-skipped detail={result.fallback_reason}")
+            return 0
         # A partially-unsupported composition (e.g. one taskbar icon whose
         # image never resolved because the backing disk lease is degraded)
         # must still show the commands that DID render -- rejecting the

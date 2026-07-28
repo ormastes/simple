@@ -11,6 +11,7 @@ use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.{SymbolKind}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.common.config.{Logger}
+use std.nogc_sync_mut.io_runtime.{file_read}
 
 fn make_logger() -> Logger:
     Logger(level: 0)
@@ -27,6 +28,7 @@ describe "resolve_import_symbols 2-pass import resolver":
         lowering.modules_by_name = modules
         val hir = lowering.lower_module(consumer)
         expect(hir.symbols.lookup("answer").?).to_equal(true)
+        expect(hir.symbols.qualified_functions.keys().len()).to_equal(0)
 
     it "resolves package sibling names without eagerly registering unused declarations":
         val log = make_logger()
@@ -181,6 +183,30 @@ describe "resolve_import_symbols 2-pass import resolver":
 
         expect(hir.symbols.lookup("FacadeType").?).to_equal(true)
         expect(hir.symbols.lookup("facade_answer").?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "glob import bounds a cyclic diamond facade traversal":
+        val log = make_logger()
+        val leaf = parse_full_frontend("pub fn shared_answer() -> i64:\n    42", "graph.leaf", "graph.leaf", log)
+        val left = parse_full_frontend("use graph.root.*\nuse graph.leaf.*", "graph.left", "graph.left", log)
+        val right = parse_full_frontend("use graph.leaf.*", "graph.right", "graph.right", log)
+        val root = parse_full_frontend("use graph.left.*\nuse graph.right.*", "graph.root", "graph.root", log)
+        val consumer = parse_full_frontend("use graph.root.*\nfn main() -> i64:\n    shared_answer()", "graph.consumer", "graph.consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["graph.leaf"] = leaf
+        modules["graph.left"] = left
+        modules["graph.right"] = right
+        modules["graph.root"] = root
+        var lowering = HirLowering.with_filename("graph.consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("shared_answer").?).to_equal(true)
+        var imported_count = 0
+        for symbol in hir.symbols.symbols.values():
+            if symbol.name == "shared_answer" and symbol.defining_module.unwrap() == "graph.leaf":
+                imported_count = imported_count + 1
+        expect(imported_count).to_equal(1)
         expect(lowering.errors.len()).to_equal(0)
 
     it "named import resolves through a dotted bare child glob export":
@@ -365,6 +391,8 @@ describe "resolve_import_symbols 2-pass import resolver":
         val hir = lowering.lower_module(consumer)
 
         expect(hir.symbols.lookup("provider").?).to_equal(true)
+        expect(hir.symbols.qualified_functions.keys().len()).to_equal(1)
+        expect(hir.symbols.qualified_functions.contains_key("provider.answer")).to_be(true)
         expect(lowering.errors.len()).to_equal(0)
         var found_main = false
         for fn_ in hir.functions.values():
@@ -387,6 +415,26 @@ describe "resolve_import_symbols 2-pass import resolver":
                         expect(false).to_equal(true)
         expect(found_main).to_equal(true)
 
+    it "keeps same-named qualified functions distinct across namespaces":
+        val log = make_logger()
+        val alpha = parse_full_frontend("pub fn answer() -> i64:\n    1", "alpha", "alpha", log)
+        val beta = parse_full_frontend("pub fn answer() -> i64:\n    2", "beta", "beta", log)
+        val consumer = parse_full_frontend("import alpha\nimport beta\nfn main() -> i64:\n    alpha.answer() + beta.answer()", "qualified_collision", "qualified_collision", log)
+        var modules: Dict<text, any> = {}
+        modules["alpha"] = alpha
+        modules["beta"] = beta
+        var lowering = HirLowering.with_filename("qualified_collision")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        val alpha_answer = hir.symbols.lookup_qualified_function("alpha", "answer")
+        val beta_answer = hir.symbols.lookup_qualified_function("beta", "answer")
+        expect(alpha_answer.?).to_equal(true)
+        expect(beta_answer.?).to_equal(true)
+        expect(alpha_answer.unwrap().id == beta_answer.unwrap().id).to_equal(false)
+        expect(hir.symbols.qualified_functions.keys().len()).to_equal(2)
+        expect(lowering.errors.len()).to_equal(0)
+
     it "reports a missing qualified function without dereferencing a nil index result":
         val log = make_logger()
         val provider = parse_full_frontend("pub fn answer() -> i64:\n    42", "provider", "provider", log)
@@ -399,3 +447,11 @@ describe "resolve_import_symbols 2-pass import resolver":
 
         expect(lowering.errors.len()).to_be_greater_than(0)
         expect(lowering.errors[0].message).to_contain("unresolved module member: missing")
+
+    it "bounds glob facade traversal and keeps native-safe emptiness checks":
+        val source = file_read("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+        expect(source).to_contain("var visited: Dict<text, bool> = {}")
+        expect(source).to_contain("visited.contains_key(imported_mod_name)")
+        expect(source).to_contain("visited[imported_mod_name] = true")
+        expect(source).to_contain("depth + 1, visited")
+        expect(source).to_contain("imported_mod.classes.keys().len()")

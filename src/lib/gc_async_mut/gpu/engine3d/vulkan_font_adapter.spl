@@ -8,7 +8,7 @@ use std.nogc_sync_mut.engine.render.vulkan_backend3d.{
     VulkanRenderBackend3D, VulkanBackend3DDeviceEvidence
 }
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, font_render_batch_atlas_owner_identity}
-use std.gpu.engine3d.font_hud_material.{font_hud_vertices, font_world_vertices}
+use std.gpu.engine3d.font_hud_material.{font_hud_vertices_into, font_world_vertices_into}
 use std.gpu.engine3d.font_vulkan_spirv.{
     font_hud_vulkan_vertex_spirv, font_world_vulkan_vertex_spirv,
     font_vulkan_fragment_spirv
@@ -51,12 +51,27 @@ class VulkanFontAdapter3D:
     color: TextureHandle
     depth: TextureHandle
     atlas: TextureHandle
+    pending_atlas: TextureHandle
+    frame_atlas: TextureHandle
+    retired_atlases: [TextureHandle]
     transient_vertices: [BufferHandle]
+    transient_vertex_capacities: [i64]
+    reusable_vertices: [BufferHandle]
+    reusable_vertex_capacities: [i64]
+    acquired_vertex_capacity: i64
     atlas_width: i32
     atlas_height: i32
     atlas_generation: i64
     atlas_owner_identity: text
     atlas_payload_sha256: text
+    pending_atlas_width: i32
+    pending_atlas_height: i32
+    pending_atlas_generation: i64
+    pending_atlas_owner_identity: text
+    pending_atlas_payload_sha256: text
+    pending_atlas_draw_recorded: bool
+    atlas_alpha_scratch: [u8]
+    vertex_bytes_scratch: [u8]
     font_artifact_sha256: text
     frame_sequence: i64
     atlas_upload_count: i64
@@ -74,6 +89,12 @@ class VulkanFontAdapter3D:
     hud_draws: i64
     world_draws: i64
     last_pixels: [u8]
+    font_fault_mask: i64
+    font_last_fault: i64
+    font_fault_sequence: i64
+    font_device_loss_sequence: i64
+    font_fault_identity_unchanged: bool
+    font_fault_fallback_count: i64
 
     static fn create(width: i32, height: i32) -> VulkanFontAdapter3D:
         var backend = VulkanRenderBackend3D.create()
@@ -94,7 +115,13 @@ class VulkanFontAdapter3D:
                 backend.texture_native_handle(color) > 0 and
                 backend.texture_native_handle(depth) > 0)
             if not ready:
-                reason = "vulkan-font-pipeline-or-target-install-failed"
+                if (backend.pipeline_native_handle(hud_pipeline) <= 0 or
+                    backend.pipeline_native_handle(world_pipeline) <= 0):
+                    reason = "vulkan-font-program-compile-failed"
+                else:
+                    reason = "vulkan-font-target-create-failed"
+        if not ready:
+            backend.record_font_fault_from_runtime(reason, true)
         VulkanFontAdapter3D(
             backend: backend,
             hud_pipeline: hud_pipeline,
@@ -102,12 +129,27 @@ class VulkanFontAdapter3D:
             color: color,
             depth: depth,
             atlas: TextureHandle.invalid(),
+            pending_atlas: TextureHandle.invalid(),
+            frame_atlas: TextureHandle.invalid(),
+            retired_atlases: [],
             transient_vertices: [],
+            transient_vertex_capacities: [],
+            reusable_vertices: [],
+            reusable_vertex_capacities: [],
+            acquired_vertex_capacity: 0,
             atlas_width: 0,
             atlas_height: 0,
             atlas_generation: -1,
             atlas_owner_identity: "",
             atlas_payload_sha256: "",
+            pending_atlas_width: 0,
+            pending_atlas_height: 0,
+            pending_atlas_generation: -1,
+            pending_atlas_owner_identity: "",
+            pending_atlas_payload_sha256: "",
+            pending_atlas_draw_recorded: false,
+            atlas_alpha_scratch: [],
+            vertex_bytes_scratch: [],
             font_artifact_sha256: "",
             frame_sequence: 0,
             atlas_upload_count: 0,
@@ -124,12 +166,97 @@ class VulkanFontAdapter3D:
             reason: reason,
             hud_draws: 0,
             world_draws: 0,
-            last_pixels: []
+            last_pixels: [],
+            font_fault_mask: backend.font_fault_mask,
+            font_last_fault: backend.font_last_fault,
+            font_fault_sequence: backend.font_fault_sequence,
+            font_device_loss_sequence: backend.font_device_loss_sequence,
+            font_fault_identity_unchanged: backend.font_fault_identity_unchanged,
+            font_fault_fallback_count: backend.font_fault_fallback_count
         )
 
+    me _sync_backend_fault_state():
+        self.font_fault_mask = self.backend.font_fault_mask
+        self.font_last_fault = self.backend.font_last_fault
+        self.font_fault_sequence = self.backend.font_fault_sequence
+        self.font_device_loss_sequence = self.backend.font_device_loss_sequence
+        self.font_fault_identity_unchanged = self.backend.font_fault_identity_unchanged
+        self.font_fault_fallback_count = self.backend.font_fault_fallback_count
+        if self.backend.font_device_loss_sequence > 0:
+            self.ready = false
+
+    me record_font_fault(reason: text, identity_unchanged: bool):
+        self.reason = reason
+        self.backend.record_font_fault(reason, identity_unchanged)
+        self._sync_backend_fault_state()
+
+    me _stage_atlas_alpha(batch: FontRenderBatch):
+        self.atlas_alpha_scratch.clear()
+        for pixel in batch.atlas_pixels:
+            self.atlas_alpha_scratch.push(((pixel >> 24u32) & 255u32).to_u8())
+
+    me record_font_fallback():
+        # Keep nested aggregate transport scalar for native self-hosting.
+        self.backend.font_fault_fallback_count = self.backend.font_fault_fallback_count + 1
+        self._sync_backend_fault_state()
+
+    me _take_vertex_buffer(byte_count: i64) -> BufferHandle:
+        var i: i64 = 0
+        while i < self.reusable_vertices.len():
+            if self.reusable_vertex_capacities[i] >= byte_count:
+                val vertices = self.reusable_vertices[i]
+                self.acquired_vertex_capacity = self.reusable_vertex_capacities[i]
+                self.reusable_vertices.remove(i)
+                self.reusable_vertex_capacities.remove(i)
+                return vertices
+            i = i + 1
+        if self.reusable_vertices.len() > 0:
+            self.backend.destroy_buffer(self.reusable_vertices[0])
+            self.reusable_vertices.remove(0)
+            self.reusable_vertex_capacities.remove(0)
+        self.acquired_vertex_capacity = byte_count
+        self.backend.create_vertex_buffer(byte_count)
+
+    fn font_owner_fault_receipt() -> i64: self.font_last_fault
+    fn font_owner_fault_mask() -> i64: self.font_fault_mask
+    fn font_owner_fault_sequence() -> i64: self.font_fault_sequence
+    fn font_device_loss_sequence() -> i64: self.font_device_loss_sequence
+    fn font_device_loss_observed() -> bool: self.font_device_loss_sequence > 0
+    fn font_owner_fault_identity_unchanged() -> bool: self.font_fault_identity_unchanged
+    fn font_owner_fault_fallback_count() -> i64: self.font_fault_fallback_count
+    fn shutdown_complete() -> bool: not self.backend.initialized
+
+    me _retain_active_identity_after_fault(handle_before: i64, owner_before: text,
+                                           generation_before: i64, payload_before: text,
+                                           fault_sequence_before: i64):
+        if self.backend.font_fault_sequence > fault_sequence_before:
+            val identity_unchanged = (self.atlas.id == handle_before and
+                self.atlas_owner_identity == owner_before and
+                self.atlas_generation == generation_before and
+                self.atlas_payload_sha256 == payload_before)
+            self.backend.retain_font_identity_unchanged(identity_unchanged)
+            self._sync_backend_fault_state()
+
     me begin_frame() -> bool:
-        if not self.ready or self.frame_active:
+        val handle_before = self.atlas.id
+        val owner_before = self.atlas_owner_identity
+        val generation_before = self.atlas_generation
+        val payload_before = self.atlas_payload_sha256
+        val fault_sequence_before = self.backend.font_fault_sequence
+        val begun = self._begin_frame_impl()
+        self._retain_active_identity_after_fault(
+            handle_before, owner_before, generation_before, payload_before, fault_sequence_before)
+        begun
+
+    me _begin_frame_impl() -> bool:
+        if not self.ready:
+            self.record_font_fault("vulkan-font-adapter-not-ready", true)
             return false
+        if self.frame_active:
+            self.record_font_fault("vulkan-font-frame-already-active", true)
+            return false
+        self.reason = ""
+        self.frame_atlas = TextureHandle.invalid()
         self.atlas_upload_count = 0
         self.atlas_uploaded_bytes = 0
         self.hud_vertex_upload_count = 0
@@ -138,11 +265,17 @@ class VulkanFontAdapter3D:
         self.world_vertex_uploaded_bytes = 0
         self.backend.begin_frame()
         if self.backend.command_handle <= 0:
-            self.reason = "vulkan-graphics-command-begin-failed"
+            self._sync_backend_fault_state()
+            if self.backend.blocker_reason == "device-lost":
+                self.reason = "device-lost"
+            else:
+                self.reason = "vulkan-graphics-command-begin-failed"
             return false
         self.pass_handle = self.backend.begin_render_pass(self.color, self.depth)
         if self.backend.recording_blocked:
-            self.reason = "vulkan-font-framebuffer-unavailable"
+            self.backend.record_font_fault_from_runtime("vulkan-font-framebuffer-unavailable", true)
+            self._sync_backend_fault_state()
+            self.reason = self.backend.blocker_reason
             self.backend.end_frame()
             return false
         self.frame_sequence = self.frame_sequence + 1
@@ -153,8 +286,24 @@ class VulkanFontAdapter3D:
         true
 
     me _upload_atlas(batch: FontRenderBatch) -> bool:
-        if (not batch.material_supported() or batch.atlas_width <= 0 or batch.atlas_height <= 0 or
+        val handle_before = self.atlas.id
+        val owner_before = self.atlas_owner_identity
+        val generation_before = self.atlas_generation
+        val payload_before = self.atlas_payload_sha256
+        val fault_sequence_before = self.backend.font_fault_sequence
+        val uploaded = self._upload_atlas_impl(batch)
+        self._retain_active_identity_after_fault(
+            handle_before, owner_before, generation_before, payload_before, fault_sequence_before)
+        uploaded
+
+    me _upload_atlas_impl(batch: FontRenderBatch) -> bool:
+        if not batch.material_supported():
+            val reason = if batch.valid: "unsupported-font-program-version" else: "invalid-font-atlas"
+            self.record_font_fault(reason, true)
+            return false
+        if (batch.atlas_width <= 0 or batch.atlas_height <= 0 or
             batch.atlas_pixels.len() != batch.atlas_width.to_i64() * batch.atlas_height.to_i64()):
+            self.record_font_fault("invalid-font-atlas", true)
             return false
         val device_features = if self.backend.device_name != "" and self.backend.device_type != "" and self.backend.driver_identity != "":
             "name=" + self.backend.device_name + ";type=" + self.backend.device_type + ";driver=" + self.backend.driver_identity
@@ -179,89 +328,217 @@ class VulkanFontAdapter3D:
             font_render_batch_atlas_owner_identity(batch), "vulkan3d", device_features,
             artifact_identity, dependency_identity)
         if owner_identity == "":
+            self.record_font_fault("invalid-font-atlas", true)
             return false
-        if (self.atlas.id < 0 or self.atlas_width != batch.atlas_width or
-            self.atlas_height != batch.atlas_height):
-            self.atlas = self.backend.create_texture(
-                batch.atlas_width.to_i64(), batch.atlas_height.to_i64(), TextureFormat3D.R8Unorm
-            )
-            self.atlas_width = batch.atlas_width
-            self.atlas_height = batch.atlas_height
-            self.atlas_generation = -1
-            self.atlas_owner_identity = ""
-            self.atlas_payload_sha256 = ""
-        if vulkan_font_atlas_upload_required(self.atlas_owner_identity, self.atlas_generation, owner_identity, batch):
-            var alpha: [u8] = []
-            for pixel in batch.atlas_pixels:
-                alpha.push(((pixel >> 24u32) & 255u32).to_u8())
-            if not self.backend.upload_texture_checked(self.atlas, alpha):
-                self.atlas_generation = -1
-                self.atlas_owner_identity = ""
-                self.atlas_payload_sha256 = ""
-                return false
-            self.atlas_upload_count = self.atlas_upload_count + 1
-            self.atlas_uploaded_bytes = self.atlas_uploaded_bytes + alpha.len()
-            self.atlas_generation = batch.atlas_generation
-            self.atlas_owner_identity = owner_identity
-            self.atlas_payload_sha256 = sha256_u8_hex(alpha)
-        self.atlas.id >= 0
+        if not vulkan_font_atlas_upload_required(
+            self.atlas_owner_identity, self.atlas_generation, owner_identity, batch
+        ):
+            self.frame_atlas = self.atlas
+            return self.frame_atlas.id >= 0
+        if self.pending_atlas.id >= 0:
+            val same_pending_owner = (self.pending_atlas_owner_identity == owner_identity and
+                self.pending_atlas_width == batch.atlas_width and
+                self.pending_atlas_height == batch.atlas_height)
+            if same_pending_owner and self.pending_atlas_generation == batch.atlas_generation:
+                self.frame_atlas = self.pending_atlas
+                return true
+            if same_pending_owner and batch.atlas_generation > self.pending_atlas_generation:
+                self._stage_atlas_alpha(batch)
+                if not self.backend.upload_texture_checked(self.pending_atlas, self.atlas_alpha_scratch):
+                    self.backend.recording_blocked = true
+                    self._sync_backend_fault_state()
+                    self.reason = if self.backend.blocker_reason == "device-lost":
+                        "device-lost"
+                    else:
+                        "vulkan-font-atlas-upload-failed"
+                    return false
+                self.pending_atlas_generation = batch.atlas_generation
+                self.pending_atlas_payload_sha256 = sha256_u8_hex(self.atlas_alpha_scratch)
+                self.frame_atlas = self.pending_atlas
+                self.atlas_upload_count = self.atlas_upload_count + 1
+                self.atlas_uploaded_bytes = self.atlas_uploaded_bytes + self.atlas_alpha_scratch.len()
+                return true
+            self.record_font_fault("vulkan-font-atlas-pending-conflict", true)
+            return false
+        if self.retired_atlases.len() > 0:
+            self.record_font_fault("vulkan-font-atlas-retire-failed", true)
+            return false
+        val fresh = self.backend.create_texture(
+            batch.atlas_width.to_i64(), batch.atlas_height.to_i64(), TextureFormat3D.R8Unorm
+        )
+        if self.backend.texture_native_handle(fresh) <= 0:
+            self.backend.record_font_fault_from_runtime("vulkan-font-atlas-allocation-failed", true)
+            val allocation_reason = self.backend.blocker_reason
+            self.backend.destroy_texture(fresh)
+            self._sync_backend_fault_state()
+            self.reason = if self.backend.blocker_reason == "device-lost": "device-lost" else: allocation_reason
+            return false
+        self._stage_atlas_alpha(batch)
+        if not self.backend.upload_texture_checked(fresh, self.atlas_alpha_scratch):
+            if not self.backend.destroy_texture(fresh):
+                self.retired_atlases.push(fresh)
+            self._sync_backend_fault_state()
+            self.reason = if self.backend.blocker_reason == "device-lost":
+                "device-lost"
+            else:
+                "vulkan-font-atlas-upload-failed"
+            return false
+        self.pending_atlas = fresh
+        self.pending_atlas_width = batch.atlas_width
+        self.pending_atlas_height = batch.atlas_height
+        self.pending_atlas_generation = batch.atlas_generation
+        self.pending_atlas_owner_identity = owner_identity
+        self.pending_atlas_payload_sha256 = sha256_u8_hex(self.atlas_alpha_scratch)
+        self.pending_atlas_draw_recorded = false
+        self.frame_atlas = fresh
+        self.atlas_upload_count = self.atlas_upload_count + 1
+        self.atlas_uploaded_bytes = self.atlas_uploaded_bytes + self.atlas_alpha_scratch.len()
+        true
 
     me draw_hud(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> bool:
-        if not self.frame_active or not self._upload_atlas(batch):
+        val handle_before = self.atlas.id
+        val owner_before = self.atlas_owner_identity
+        val generation_before = self.atlas_generation
+        val payload_before = self.atlas_payload_sha256
+        val fault_sequence_before = self.backend.font_fault_sequence
+        val drawn = self._draw_hud_impl(origin_x, origin_y, batch)
+        self._retain_active_identity_after_fault(
+            handle_before, owner_before, generation_before, payload_before, fault_sequence_before)
+        drawn
+
+    me _draw_hud_impl(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> bool:
+        if not self.frame_active:
+            self.record_font_fault("vulkan-font-frame-inactive", true)
             return false
-        val bytes = font_hud_vertices(batch, origin_x, origin_y, self.width, self.height)
-        if bytes.len() == 0:
+        if not self._upload_atlas(batch):
             return false
-        val vertices = self.backend.create_vertex_buffer(bytes.len())
-        if not self.backend.upload_buffer_checked(vertices, bytes, 0):
+        font_hud_vertices_into(batch, origin_x, origin_y, self.width, self.height, self.vertex_bytes_scratch)
+        if self.vertex_bytes_scratch.len() == 0:
+            self.record_font_fault("invalid-font-quad", true)
+            return false
+        val vertices = self._take_vertex_buffer(self.vertex_bytes_scratch.len())
+        if not self.backend.upload_buffer_checked(vertices, self.vertex_bytes_scratch, 0):
             self.backend.destroy_buffer(vertices)
+            self._sync_backend_fault_state()
+            self.reason = if self.backend.blocker_reason == "device-lost": "device-lost" else: "vulkan-font-vertex-upload-failed"
             return false
         self.hud_vertex_upload_count = self.hud_vertex_upload_count + 1
-        self.hud_vertex_uploaded_bytes = self.hud_vertex_uploaded_bytes + bytes.len()
+        self.hud_vertex_uploaded_bytes = self.hud_vertex_uploaded_bytes + self.vertex_bytes_scratch.len()
         self.transient_vertices.push(vertices)
+        self.transient_vertex_capacities.push(self.acquired_vertex_capacity)
         self.backend.set_pipeline(self.pass_handle, self.hud_pipeline)
         self.backend.bind_vertex_buffer(self.pass_handle, vertices, 0)
-        self.backend.bind_font_texture(self.pass_handle, self.hud_pipeline, self.atlas)
-        val draws = bytes.len() / 20
+        self.backend.bind_font_texture(self.pass_handle, self.hud_pipeline, self.frame_atlas)
+        val draws = self.vertex_bytes_scratch.len() / 20
         self.backend.draw_font_vertices(self.pass_handle, draws)
+        if self.frame_atlas.id == self.pending_atlas.id:
+            self.pending_atlas_draw_recorded = true
         self.hud_draws = self.hud_draws + draws
         true
 
     me draw_world(origin_x: i32, origin_y: i32, clip_z: f32, batch: FontRenderBatch) -> bool:
-        if not self.frame_active or not self._upload_atlas(batch):
+        val handle_before = self.atlas.id
+        val owner_before = self.atlas_owner_identity
+        val generation_before = self.atlas_generation
+        val payload_before = self.atlas_payload_sha256
+        val fault_sequence_before = self.backend.font_fault_sequence
+        val drawn = self._draw_world_impl(origin_x, origin_y, clip_z, batch)
+        self._retain_active_identity_after_fault(
+            handle_before, owner_before, generation_before, payload_before, fault_sequence_before)
+        drawn
+
+    me _draw_world_impl(origin_x: i32, origin_y: i32, clip_z: f32, batch: FontRenderBatch) -> bool:
+        if not self.frame_active:
+            self.record_font_fault("vulkan-font-frame-inactive", true)
             return false
-        val bytes = font_world_vertices(batch, origin_x, origin_y, self.width, self.height, clip_z)
-        if bytes.len() == 0:
+        if not self._upload_atlas(batch):
             return false
-        val vertices = self.backend.create_vertex_buffer(bytes.len())
-        if not self.backend.upload_buffer_checked(vertices, bytes, 0):
+        font_world_vertices_into(batch, origin_x, origin_y, self.width, self.height, clip_z, self.vertex_bytes_scratch)
+        if self.vertex_bytes_scratch.len() == 0:
+            self.record_font_fault("invalid-font-quad", true)
+            return false
+        val vertices = self._take_vertex_buffer(self.vertex_bytes_scratch.len())
+        if not self.backend.upload_buffer_checked(vertices, self.vertex_bytes_scratch, 0):
             self.backend.destroy_buffer(vertices)
+            self._sync_backend_fault_state()
+            self.reason = if self.backend.blocker_reason == "device-lost": "device-lost" else: "vulkan-font-vertex-upload-failed"
             return false
         self.world_vertex_upload_count = self.world_vertex_upload_count + 1
-        self.world_vertex_uploaded_bytes = self.world_vertex_uploaded_bytes + bytes.len()
+        self.world_vertex_uploaded_bytes = self.world_vertex_uploaded_bytes + self.vertex_bytes_scratch.len()
         self.transient_vertices.push(vertices)
+        self.transient_vertex_capacities.push(self.acquired_vertex_capacity)
         self.backend.set_pipeline(self.pass_handle, self.world_pipeline)
         self.backend.bind_vertex_buffer(self.pass_handle, vertices, 0)
-        self.backend.bind_font_texture(self.pass_handle, self.world_pipeline, self.atlas)
-        val draws = bytes.len() / 24
+        self.backend.bind_font_texture(self.pass_handle, self.world_pipeline, self.frame_atlas)
+        val draws = self.vertex_bytes_scratch.len() / 24
         self.backend.draw_font_vertices(self.pass_handle, draws)
+        if self.frame_atlas.id == self.pending_atlas.id:
+            self.pending_atlas_draw_recorded = true
         self.world_draws = self.world_draws + draws
         true
 
     me end_frame() -> VulkanFontAdapter3DEvidence:
+        val handle_before = self.atlas.id
+        val owner_before = self.atlas_owner_identity
+        val generation_before = self.atlas_generation
+        val payload_before = self.atlas_payload_sha256
+        val fault_sequence_before = self.backend.font_fault_sequence
         if self.frame_active:
             self.backend.end_render_pass(self.pass_handle)
             self.backend.end_frame()
             self.frame_active = false
-        if not self.backend.completion_unknown:
-            for vertices in self.transient_vertices:
-                self.backend.destroy_buffer(vertices)
-            self.transient_vertices = []
-        val device = self.backend.device_evidence()
+        self._sync_backend_fault_state()
+        val submission_device = self.backend.device_evidence()
         self.last_pixels = self.backend.readback_last_color_rgba8()
+        if not self.backend.completion_unknown:
+            var vertex_index: i64 = 0
+            while vertex_index < self.transient_vertices.len():
+                self.reusable_vertices.push(self.transient_vertices[vertex_index])
+                self.reusable_vertex_capacities.push(self.transient_vertex_capacities[vertex_index])
+                vertex_index = vertex_index + 1
+            self.transient_vertices.clear()
+            self.transient_vertex_capacities.clear()
+            if self.pending_atlas.id >= 0:
+                val completed_atlas = self.pending_atlas
+                if submission_device.status == "font-ready" and self.pending_atlas_draw_recorded:
+                    val old_atlas = self.atlas
+                    self.atlas = completed_atlas
+                    self.atlas_width = self.pending_atlas_width
+                    self.atlas_height = self.pending_atlas_height
+                    self.atlas_generation = self.pending_atlas_generation
+                    self.atlas_owner_identity = self.pending_atlas_owner_identity
+                    self.atlas_payload_sha256 = self.pending_atlas_payload_sha256
+                    if old_atlas.id >= 0:
+                        self.retired_atlases.push(old_atlas)
+                else:
+                    self.retired_atlases.push(completed_atlas)
+                self.pending_atlas = TextureHandle.invalid()
+                self.pending_atlas_width = 0
+                self.pending_atlas_height = 0
+                self.pending_atlas_generation = -1
+                self.pending_atlas_owner_identity = ""
+                self.pending_atlas_payload_sha256 = ""
+                self.pending_atlas_draw_recorded = false
+            if self.retired_atlases.len() > 0:
+                var retired_index = self.retired_atlases.len() - 1
+                while retired_index >= 0:
+                    if self.backend.destroy_texture(self.retired_atlases[retired_index]):
+                        self.retired_atlases.remove(retired_index)
+                    retired_index = retired_index - 1
+            self._sync_backend_fault_state()
+        self._retain_active_identity_after_fault(
+            handle_before, owner_before, generation_before, payload_before, fault_sequence_before)
+        var device = self.backend.device_evidence()
+        if self.backend.font_device_loss_sequence > 0:
+            device.status = "unavailable"
+            device.reason = "device-lost"
+            device.texture_binding_ready = false
+        if device.reason != "" and device.status != "font-ready":
+            if self.reason == "" or device.reason == "device-lost":
+                self.reason = device.reason
         VulkanFontAdapter3DEvidence(
             ready: device.status == "font-ready" and self.last_pixels.len() > 0,
-            reason: device.reason,
+            reason: self.reason,
             device: device,
             hud_pipeline_handle: self.backend.pipeline_native_handle(self.hud_pipeline),
             world_pipeline_handle: self.backend.pipeline_native_handle(self.world_pipeline),
@@ -286,12 +563,31 @@ class VulkanFontAdapter3D:
 
     me shutdown():
         self.backend.shutdown()
+        self._sync_backend_fault_state()
+        if self.backend.initialized:
+            self.reason = self.backend.blocker_reason
+            return
         self.atlas = TextureHandle.invalid()
+        self.pending_atlas = TextureHandle.invalid()
+        self.frame_atlas = TextureHandle.invalid()
+        self.retired_atlases = []
         self.atlas_width = 0
         self.atlas_height = 0
         self.atlas_generation = -1
         self.atlas_owner_identity = ""
         self.atlas_payload_sha256 = ""
+        self.pending_atlas_width = 0
+        self.pending_atlas_height = 0
+        self.pending_atlas_generation = -1
+        self.pending_atlas_owner_identity = ""
+        self.pending_atlas_payload_sha256 = ""
+        self.pending_atlas_draw_recorded = false
+        self.transient_vertices.clear()
+        self.transient_vertex_capacities.clear()
+        self.reusable_vertices.clear()
+        self.reusable_vertex_capacities.clear()
+        self.acquired_vertex_capacity = 0
+        self.vertex_bytes_scratch.clear()
         self.font_artifact_sha256 = ""
         self.ready = false
         self.frame_active = false

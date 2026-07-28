@@ -19,7 +19,7 @@ use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptio
 use compiler.driver.smf_writer.{generate_smf_with_templates, generate_smf_with_options, generate_smf_with_raw_code_options, Target, build_smf_with_relocations, SmfBuildOptions, SmfDependencyEntry}
 use compiler.driver.smf_binary_helpers.{u32_to_bytes, u64_to_bytes}
 use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
-use driver_types.{CompileResult, CompileOptions, compileoptions_effective_mir_opt_level, CompileContext}
+use driver_types.{CompileResult, CompileOptions, compileoptions_effective_mir_opt_level, CompileContext, driver_native_parsed_module_is_export_facade}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.driver_core_types.{driver_output_format_is_smf, driver_output_format_is_both, driver_output_format_is_self_contained}
 use compiler.driver.driver.{CompilerDriver}
@@ -164,8 +164,16 @@ pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
     val manifest = rows.join("\n")
     "{rt_hash_text(manifest)}n{sources.len()}"
 
+fn driver_native_mir_has_no_code(mir: MirModule) -> bool:
+    if mir.functions.keys().len() > 0 or mir.statics.keys().len() > 0 or mir.constants.keys().len() > 0 or mir.types.keys().len() > 0:
+        return false
+    true
+
+pub fn driver_native_module_is_retained_export_facade(mir: MirModule, retained_candidate: bool) -> bool:
+    driver_native_mir_has_no_code(mir) and retained_candidate
+
 pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Module?) -> bool:
-    if mir.functions.len() > 0 or mir.statics.len() > 0 or mir.constants.len() > 0 or mir.types.len() > 0:
+    if not driver_native_mir_has_no_code(mir):
         return false
     if parsed_module == nil:
         return false
@@ -177,22 +185,11 @@ pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: Modu
     # A module with any NON-extern parsed function still hard-fails there:
     # HIR had bodies, so an empty MIR is a real lowering bug and must stay
     # loud (bug bootstrap_stage2_empty_mir_bodies_2026-07-05).
-    var only_extern_functions = true
-    for fn_name in parsed.functions.keys():
-        val parsed_fn = parsed.functions[fn_name]
-        if not parsed_fn.is_extern:
-            only_extern_functions = false
     # `export use backend.{...}` facades produce an Import record but NO
     # Export record in the flat bridge (only bare `export a, b` emits one),
     # e.g. std.nogc_async_mut.env.types — accept import-only and trait-only
     # modules too; neither has standalone code by the decl checks below.
-    ((parsed.exports.len() > 0 or parsed.imports.len() > 0 or parsed.traits.len() > 0) and parsed.domain_blocks.len() == 0 and
-        only_extern_functions and parsed.classes.len() == 0 and parsed.actors.len() == 0 and
-        parsed.structs.len() == 0 and parsed.enums.len() == 0 and parsed.bitfields.len() == 0 and
-        parsed.impls.len() == 0 and parsed.type_aliases.len() == 0 and
-        parsed.constants.len() == 0 and parsed.static_asserts.len() == 0 and
-        parsed.aop_advices.len() == 0 and parsed.di_bindings.len() == 0 and
-        parsed.arch_rules.len() == 0 and parsed.mock_decls.len() == 0)
+    driver_native_parsed_module_is_export_facade(parsed)
 
 fn driver_native_build_filter_scoped_outputs(cached_outputs: [text], cache_scope_root: text) -> ([text], bool):
     var scoped_outputs: [text] = []
@@ -374,7 +371,11 @@ impl CompilerDriver:
         for name in module_names:
             # Import/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
-            if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):
+            var skip_facade = driver_native_module_is_retained_export_facade(
+                ctx.mir_modules[name], ctx.native_export_facade_candidates.contains_key(name))
+            if not skip_facade and ctx.modules.has(name):
+                skip_facade = driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name])
+            if skip_facade:
                 continue
             val cache_source = driver_native_module_cache_source(ctx, name)
             var used_cache = false

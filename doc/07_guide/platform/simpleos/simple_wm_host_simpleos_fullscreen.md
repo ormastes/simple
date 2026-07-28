@@ -54,7 +54,10 @@ Registered-only source paths now shape the pinned Hindi and Arabic/Urdu
 witnesses from validated VFS bytes without the host font ABI, then materialize
 them through the existing selected-byte `FontRenderer`. This is executable
 regression coverage, not retained guest/QEMU framebuffer evidence; the Browser
-frame and pixel-oracle gates still fail until that evidence is captured.
+frame and pixel-oracle gates still fail until that evidence is captured. The
+frame executor rejects a skipped command only when the Engine2D receipt marks
+it as a selected-font text command. Image degradation remains allowed; general,
+embedding, and empty-command failures are not reclassified as font failures.
 VFAT writing and lookup currently support ASCII long names; nested directories
 chain across clusters, while invalid names and fixed-root overflow fail closed.
 

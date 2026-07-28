@@ -45,20 +45,6 @@ fn hir_tuple_return_elem_list(t: HirType) -> [HirType]:
         case _:
             return []
 
-fn hir_module_phase_probe(msg: text):
-    if hir_module_diag_enabled():
-        eprint("[BOOTSTRAP-PHASE] " + msg)
-
-fn hir_module_diag_enabled() -> bool:
-    val phase = hir_module_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
-    val trace = hir_module_env_get("SIMPLE_COMPILER_TRACE") ?? ""
-    val diag = hir_module_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
-    if phase == "1":
-        return true
-    if trace == "1":
-        return true
-    diag == "1"
-
 struct HirReexportSource:
     """Result of chasing a re-export facade chain (find_reexport_source).
     A struct (not an anonymous tuple) on purpose: multi-value tuple returns
@@ -159,6 +145,10 @@ fn hir_module_is_bootstrap_entry(module_name: text) -> bool:
     hir_module_logical_name_from_path(entry_path) == hir_module_logical_name_from_path(module_name)
 
 impl HirLowering:
+    me hir_module_phase_probe(msg: text):
+        if self.bootstrap_phase_profile or self.bootstrap_trace or self.bootstrap_diag:
+            eprint("[BOOTSTRAP-PHASE] " + msg)
+
     me prescan_composite_field_types(name: text, fields: [Field]):
         """Register parser struct/class fields before function lowering."""
         var field_types: Dict<text, HirType> = {}
@@ -516,8 +506,6 @@ impl HirLowering:
             val fn_type = self.declared_callable_type(imported_mod.functions[imported_name], nil)
             val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod_name))
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod_name, imported_name)
-            if local_name == imported_name:
-                self.symbols.bind_qualified_function(imported_mod_name, imported_name, imported_fn_sym)
         elif has_const:
             self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
         else:
@@ -529,7 +517,7 @@ impl HirLowering:
             # later with "unresolved name: rt_env_get" (native-build
             # entry-closure path; parity case dynload_tagged_text).
             val hop = self.find_reexport_source(imported_mod, imported_mod_name, imported_name, 0)
-            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+            if self.bootstrap_trace or self.bootstrap_diag:
                 eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={hop.found} mname={imported_mod.name} fns={imported_mod.functions.len()}")
             if hop.found:
                 if self.modules_by_name.contains_key(hop.module_name):
@@ -754,17 +742,17 @@ impl HirLowering:
         A plain (non-closure) bootstrap_main.spl build has no cross-module
         imports to qualify, and a normal (non-bootstrap) compile keeps the
         local alias name -- both are unaffected by this rename."""
-        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-        val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        if bootstrap_closure:
+        if self.bootstrap_closure:
             self.symbols.rename_symbol(sym_id, "{imported_mod_name}.{imported_name}")
 
     me register_glob_imported_symbols(imported_mod: any, imported_mod_name: text, import_span: Span):
-        self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0)
+        var visited: Dict<text, bool> = {}
+        self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, visited)
 
-    me register_glob_imported_symbols_depth(imported_mod: any, imported_mod_name: text, import_span: Span, depth: i64):
-        if depth > 8:
+    me register_glob_imported_symbols_depth(imported_mod: any, imported_mod_name: text, import_span: Span, depth: i64, visited: Dict<text, bool>):
+        if depth > 8 or visited.contains_key(imported_mod_name):
             return
+        visited[imported_mod_name] = true
         var keys = imported_mod.classes.keys()
         var idx = 0
         while idx < keys.len():
@@ -798,7 +786,11 @@ impl HirLowering:
         keys = imported_mod.functions.keys()
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            val function_name = keys[idx]
+            self.register_imported_symbol(imported_mod, imported_mod_name, function_name, function_name, import_span)
+            if depth == 0:
+                if val qualified_symbol = self.symbols.lookup(function_name):
+                    self.symbols.bind_qualified_function(imported_mod_name, function_name, qualified_symbol)
             idx = idx + 1
 
         keys = imported_mod.constants.keys()
@@ -827,7 +819,7 @@ impl HirLowering:
                         if export_key == "":
                             export_key = self.resolve_module_key(export_base)
                     if export_key != "" and export_key != imported_mod_name and self.modules_by_name.contains_key(export_key):
-                        self.register_glob_imported_symbols_depth(self.modules_by_name[export_key], export_key, import_span, depth + 1)
+                        self.register_glob_imported_symbols_depth(self.modules_by_name[export_key], export_key, import_span, depth + 1, visited)
                 else:
                     val export_parts = export_item.split(":")
                     val export_source = export_parts[0]
@@ -853,7 +845,7 @@ impl HirLowering:
             if glob_imp.items.len() == 0:
                 val nested_key = self.resolve_module_key_relative(glob_imp.module, imported_mod_name)
                 if nested_key != "" and nested_key != imported_mod_name and self.modules_by_name.contains_key(nested_key):
-                    self.register_glob_imported_symbols_depth(self.modules_by_name[nested_key], nested_key, import_span, depth + 1)
+                    self.register_glob_imported_symbols_depth(self.modules_by_name[nested_key], nested_key, import_span, depth + 1, visited)
             var glob_it = 0
             while glob_it < glob_imp.items.len():
                 val glob_item = glob_imp.items[glob_it]
@@ -869,7 +861,7 @@ impl HirLowering:
             # Struct-valued Dict.get() corrupts native hit payloads. Track the
             # winning key and read the value only with bracket indexing.
             var imported_key = if self.modules_by_name.contains_key(imp.module): imp.module else: ""
-            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+            if self.bootstrap_trace or self.bootstrap_diag:
                 eprint("[imp] importer={module.name} module={imp.module} items={imp.items.len()} found={imported_key != ""}")
             # Symbols must register under the DEFINING module's canonical name:
             # a relative alias like ".helper" would otherwise be baked into the
@@ -917,7 +909,7 @@ impl HirLowering:
                 if fb_key != "" and self.modules_by_name.contains_key(fb_key):
                     imported_key = fb_key
                     resolved_module_name = fb_key
-            if imported_key == "" and (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+            if imported_key == "" and (self.bootstrap_trace or self.bootstrap_diag):
                 eprint("[import-miss] importer={module.name} module={imp.module}")
             if imported_key != "":
                 val imported_mod = self.modules_by_name[imported_key]
@@ -1017,16 +1009,17 @@ impl HirLowering:
         # hir_lowering modules — `(hir_*_env_get("X") ?? "") == "1"` evaluates
         # false on stage4 even when X=1 — while UNGATED eprint works fine.
         # Probe builds must use ungated eprint here.
-        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-        val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        if bootstrap_mode and (not bootstrap_closure or hir_module_is_bootstrap_entry(module.name)):
+        val bootstrap_mode = self.bootstrap_mode
+        val bootstrap_closure = self.bootstrap_closure
+        val bootstrap_flat_store = self.bootstrap_flat_store
+        if bootstrap_flat_store and (not bootstrap_closure or hir_module_is_bootstrap_entry(module.name)):
             bootstrap_hir_modules_reset()
         val parser_constants = module.constants.values()
         # Keep the aggregate out of the stage4 Any-erasure path. HirModule
         # contains several dictionaries, and the first field access below can
         # otherwise dispatch through a nil Any receiver in bootstrap builds.
         var lowered_module: HirModule = self.lower_module(module)
-        val focused_future_diag = bootstrap_mode and module.name == "src/lib/nogc_async_mut/async/future.spl"
+        val focused_future_diag = bootstrap_mode and (self.bootstrap_trace or self.bootstrap_diag) and module.name == "src/lib/nogc_async_mut/async/future.spl"
         if focused_future_diag:
             eprint("[hir-finalize] returned future")
         var flat_constants: [HirConst] = []
@@ -1036,7 +1029,8 @@ impl HirLowering:
             while const_idx < parser_constants.len():
                 val hir_const = self.lower_hir_const_decl(parser_constants[const_idx])
                 recovered_constants[SymbolId(id: const_idx)] = hir_const
-                flat_constants = flat_constants.push(hir_const)
+                if bootstrap_flat_store:
+                    flat_constants = flat_constants.push(hir_const)
                 const_idx = const_idx + 1
             lowered_module.constants = recovered_constants
         elif lowered_module.constants.keys().len() == 0 and parser_constants.len() > 0:
@@ -1049,7 +1043,7 @@ impl HirLowering:
             lowered_module.constants = recovered_constants
         if focused_future_diag:
             eprint("[hir-finalize] constants done")
-        if bootstrap_mode:
+        if bootstrap_flat_store:
             var flat_functions: [HirFunction] = []
             var flat_fn_idx = 0
             while flat_fn_idx < bootstrap_hir_function_count():
@@ -1100,9 +1094,11 @@ impl HirLowering:
         lowered
 
     me lower_module(module: Module) -> HirModule:
-        # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
-        val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-        val bootstrap_diag = bootstrap_mode and hir_module_diag_enabled()
+        # Keep verbose probes on eprint, but only for explicit trace/diagnostic
+        # mode. The phase-profile flag owns coarse phase markers only.
+        val bootstrap_mode = self.bootstrap_mode
+        val bootstrap_diag = bootstrap_mode and (self.bootstrap_trace or self.bootstrap_diag)
+        val phase_probe = self.bootstrap_phase_profile or self.bootstrap_trace or self.bootstrap_diag
         # A multi-module --entry-closure build under SIMPLE_BOOTSTRAP=1 parses
         # EVERY module in the closure for real (see flat_is_bootstrap_entry_path
         # in the flat-AST bridge), not just the single bootstrap_main.spl entry.
@@ -1115,7 +1111,7 @@ impl HirLowering:
         # gap). Single-entry bootstrap_main.spl builds (no closure flag) never
         # had real cross-module imports to resolve, so this only widens
         # behavior for the closure path.
-        val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val bootstrap_closure = self.bootstrap_closure
         if bootstrap_diag:
             # NOTE: parser Module has no `path` field (parser_types.spl) — a
             # `{module.path}` interpolation here aborted the whole worker under
@@ -1153,7 +1149,8 @@ impl HirLowering:
         # Pass 0: pre-register imported type names so explicit `use` paths win
         # over module load order when two modules export the same short name.
         if not bootstrap_mode or bootstrap_closure:
-            hir_module_phase_probe("phase3:hir:imports:start {module.name}")
+            if phase_probe:
+                self.hir_module_phase_probe("phase3:hir:imports:start {module.name}")
             if bootstrap_diag:
                 eprint("[hir-lower] resolve_import_symbols:start module={module.name}")
             self.registering_import_symbols = true
@@ -1162,13 +1159,15 @@ impl HirLowering:
             self.registering_import_symbols = false
             if bootstrap_diag:
                 eprint("[hir-lower] resolve_import_symbols:done module={module.name}")
-            hir_module_phase_probe("phase3:hir:imports:done {module.name}")
+            if phase_probe:
+                self.hir_module_phase_probe("phase3:hir:imports:done {module.name}")
 
         # First pass: declare all top-level symbols
         if bootstrap_diag:
             eprint("[hir-lower] declare:start module={module.name}")
         if not bootstrap_mode or bootstrap_closure:
-            hir_module_phase_probe("phase3:hir:declare:start {module.name}")
+            if phase_probe:
+                self.hir_module_phase_probe("phase3:hir:declare:start {module.name}")
             # Under a closure build, a module's own struct/enum/class/trait
             # names must be pre-declared before its functions are lowered --
             # a constructor referencing its own module's struct (e.g.
@@ -1179,7 +1178,8 @@ impl HirLowering:
             # bootstrap_decl_idx loop below, so this only widens declaration
             # coverage to types/consts for the closure path.
             self.declare_module_symbols(module)
-            hir_module_phase_probe("phase3:hir:declare:done {module.name}")
+            if phase_probe:
+                self.hir_module_phase_probe("phase3:hir:declare:done {module.name}")
         if bootstrap_diag:
             eprint("[hir-lower] declare:done module={module.name}")
 
@@ -1252,7 +1252,8 @@ impl HirLowering:
 
         var lower_idx = 0
         if bootstrap_mode:
-            bootstrap_hir_functions_reset()
+            if self.bootstrap_flat_store:
+                bootstrap_hir_functions_reset()
             # Lower the REAL parsed functions of the entry module. They are held
             # in `module.functions` (populated by the flat-AST bridge at parse
             # time — see parse_and_build_module). The prior implementation re-read
@@ -1307,7 +1308,8 @@ impl HirLowering:
                 val hir_fn = self.lower_function(bootstrap_fn)
                 val fn_key: SymbolId = SymbolId(id: lower_idx)
                 functions[fn_key] = hir_fn
-                bootstrap_hir_functions_add(hir_fn)
+                if self.bootstrap_flat_store:
+                    bootstrap_hir_functions_add(hir_fn)
                 if bootstrap_diag:
                     eprint("[hir-lower] function:done module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
                 lower_idx = lower_idx + 1
@@ -1316,7 +1318,8 @@ impl HirLowering:
             val lower_function_keys = lower_module_functions.keys()
             while lower_idx < lower_function_keys.len():
                 val name = lower_function_keys[lower_idx]
-                hir_module_phase_probe("phase3:hir:function:start {module.name}.{name}")
+                if phase_probe:
+                    self.hir_module_phase_probe("phase3:hir:function:start {module.name}.{name}")
                 val fn_: Function = lower_module_functions[name]
                 val hir_fn = self.lower_function(fn_)
                 # Key the HIR functions Dict by a distinct per-function SymbolId
@@ -1339,7 +1342,8 @@ impl HirLowering:
                 # distinct synthetic key preserves all entries and all consumers.
                 val fn_key: SymbolId = SymbolId(id: lower_idx)
                 functions[fn_key] = hir_fn
-                hir_module_phase_probe("phase3:hir:function:done {module.name}.{name}")
+                if phase_probe:
+                    self.hir_module_phase_probe("phase3:hir:function:done {module.name}.{name}")
                 lower_idx = lower_idx + 1
 
         if bootstrap_mode:
@@ -1404,7 +1408,8 @@ impl HirLowering:
                 for bootstrap_impl_sym in self.lowered_impl_functions.keys():
                     val bootstrap_impl_fn: HirFunction = self.lowered_impl_functions[bootstrap_impl_sym]
                     functions[SymbolId(id: bootstrap_impl_fn_key)] = bootstrap_impl_fn
-                    bootstrap_hir_functions_add(bootstrap_impl_fn)
+                    if self.bootstrap_flat_store:
+                        bootstrap_hir_functions_add(bootstrap_impl_fn)
                     bootstrap_impl_fn_key = bootstrap_impl_fn_key + 1
             # Module-level `val` constants: this bootstrap early-return used to
             # hard-code `constants: {}`, so module globals never reached HIR ->
@@ -1423,7 +1428,7 @@ impl HirLowering:
                 bootstrap_constants[bootstrap_hir_const.symbol] = bootstrap_hir_const
                 bootstrap_const_idx = bootstrap_const_idx + 1
             if bootstrap_diag:
-                eprint("[hir-lower] bootstrap-functions:count module={module.name} count={_bootstrap_hir_functions.len()}")
+                eprint("[hir-lower] bootstrap-functions:count module={module.name} count={functions.len()}")
             # Avoid passing untyped empty aggregate literals through the
             # stage4 constructor ABI. The normal path below materializes these
             # collections with their concrete element types before building
@@ -1591,8 +1596,8 @@ impl HirLowering:
         # Closure builds need this pass even under SIMPLE_BOOTSTRAP=1 (see the
         # call site in lower_module) so a module's own struct/enum/class/
         # trait names resolve inside its own function bodies.
-        val declare_bootstrap_closure = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not declare_bootstrap_closure:
+        val declare_bootstrap_closure = self.bootstrap_closure
+        if self.bootstrap_mode and not declare_bootstrap_closure:
             return
         # Pass module filename for visibility tracking
         val mod_name = if self.module_filename != "": Some(self.module_filename) else: nil
@@ -1648,7 +1653,7 @@ impl HirLowering:
         while idx < fn_keys.len():
             val name = fn_keys[idx]
             val fn_decl: Function = module_functions[name]
-            if (hir_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") ?? "") == "1":
+            if self.focused_hir_diag:
                 val return_name: text = parser_type_kind_named_name(fn_decl.return_type.kind)
                 eprint("[flat-function-roundtrip] phase=hir name={fn_decl.name} return={return_name}")
             val fn_type = self.declared_callable_type(fn_decl, nil)
@@ -1895,9 +1900,12 @@ impl HirLowering:
 
     me lower_bootstrap_flat_stmt(stmt_idx: i64) -> HirStmt:
         val span = Span.empty()
-        eprint("[hir-lower] flat_stmt:start {stmt_idx}")
+        val verbose_diag = self.bootstrap_trace or self.bootstrap_diag
+        if verbose_diag:
+            eprint("[hir-lower] flat_stmt:start {stmt_idx}")
         val tag = stmt_get_tag(stmt_idx)
-        eprint("[hir-lower] flat_stmt:tag {stmt_idx} {tag}")
+        if verbose_diag:
+            eprint("[hir-lower] flat_stmt:tag {stmt_idx} {tag}")
         if tag == STMT_EXPR:
             return HirStmt(kind: HirStmtKind.Expr(self.lower_bootstrap_flat_expr(stmt_get_expr(stmt_idx))), span: span)
         if tag == STMT_RETURN:
@@ -1920,11 +1928,14 @@ impl HirLowering:
         var value_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
         val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(value_expr))
         val return_expr_disc = rt_enum_discriminant(HirExprKind.Return(nil))
+        val verbose_diag = self.bootstrap_trace or self.bootstrap_diag
         var i = 0
         while i < stmt_ids.len():
-            eprint("[hir-lower] flat_block:stmt {i}")
+            if verbose_diag:
+                eprint("[hir-lower] flat_block:stmt {i}")
             val stmt = self.lower_bootstrap_flat_stmt(stmt_ids[i])
-            eprint("[hir-lower] flat_block:stmt:done {i}")
+            if verbose_diag:
+                eprint("[hir-lower] flat_block:stmt:done {i}")
             if i == stmt_ids.len() - 1:
                 if rt_enum_discriminant(stmt.kind) == expr_stmt_disc:
                     match stmt.kind:

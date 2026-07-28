@@ -59,7 +59,7 @@ use compiler.driver.driver_pipeline.*
 use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
 use compiler.common.driver_core_types.{CompileResult, driver_core_compile_options_default, driver_output_format_is_smf, driver_output_format_is_both, driver_output_format_is_self_contained}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_info, log_warn, log_error, log_phase}
+use compiler.driver.driver_log_helpers.{driver_phase_trace_enabled, log_debug, log_trace, log_info, log_warn, log_error, log_phase, log_phase_enabled}
 use compiler.driver.driver_bootstrap.{
     bootstrap_native_opt_level, bootstrap_llvm_opt_level,
     bootstrap_compile_to_native_local, bootstrap_compile_context_to_native_local,
@@ -75,7 +75,7 @@ use compiler.driver.driver_source_loading.{
     _driver_resolve_entry_import, _driver_collect_entry_import_source,
     _driver_canonical_source_path, _driver_unique_physical_sources,
     _driver_module_name_collision,
-    _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add,
+    DriverTextBucketSet, _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add,
     _format_type_infer_error, _format_nll_error, _format_coherence_error, _format_trait_error
 }
 
@@ -101,14 +101,6 @@ fn _driver_text_list_contains(items: [text], item: text) -> bool:
             return true
         i = i + 1
     false
-
-fn _driver_text_list_index(items: [text], item: text) -> i64:
-    var i = 0
-    while i < items.len():
-        if items[i] == item:
-            return i
-        i = i + 1
-    -1
 
 # Env-gated driver trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
 # [DRV]/[BOOTSTRAP-PHASE] loading/lowering probe trail.
@@ -299,6 +291,11 @@ pub class CompilerDriver:
         # Evict AST modules (no longer needed after HIR lowering)
         if self.ctx.options.low_memory:
             log_debug("low-memory: evicting AST modules")
+            # Native AOT still needs to distinguish legitimate bodyless
+            # import/export/trait/extern facades from failed MIR lowering.
+            # Retain one bit only for candidates instead of the full AST.
+            if compile_mode_text == "aot":
+                self.ctx.retain_native_export_facade_candidates()
             self.ctx.evict_ast()
 
         # Check is analysis-only. Monomorphization mutates HIR but contributes
@@ -440,7 +437,7 @@ pub class CompilerDriver:
         # Build sources list locally to avoid chained method call issue
         # (self.ctx.sources.push() doesn't persist — interpreter limitation)
         var all_sources: [SourceFile] = []
-        var seen_sources = _driver_text_bucket_set_new(8192)
+        var seen_sources: DriverTextBucketSet = _driver_text_bucket_set_new(8192)
 
         # Start with user-provided roots
         var i = 0
@@ -522,14 +519,14 @@ pub class CompilerDriver:
             # entry-only filter, which otherwise requires this block to flip
             # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE before anything but the exact
             # entry file is parsed.
-            var closure_loaded_mods = _driver_text_bucket_set_new(8192)
+            var closure_loaded_mods: DriverTextBucketSet = _driver_text_bucket_set_new(8192)
             var closure_preidx = 0
             while closure_preidx < all_sources.len():
                 val loaded_module_name = all_sources[closure_preidx].module_name
                 closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, loaded_module_name)
                 closure_preidx = closure_preidx + 1
-            var closure_seen_mods = _driver_text_bucket_set_new(8192)
-            var closure_scanned_paths = _driver_text_bucket_set_new(8192)
+            var closure_seen_mods: DriverTextBucketSet = _driver_text_bucket_set_new(8192)
+            var closure_scanned_paths: DriverTextBucketSet = _driver_text_bucket_set_new(8192)
             var closure_idx = 0
             while closure_idx < all_sources.len():
                 val closure_src = all_sources[closure_idx]
@@ -661,7 +658,7 @@ pub class CompilerDriver:
                 entry_idx = entry_idx + 1
             val unique_entry_sources = _driver_unique_physical_sources(entry_sources)
             log_phase("phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
-            var parsed_entry_paths: [text] = []
+            var parsed_entry_index: Dict<text, i64> = {}
             var parsed_entry_modules: [Module] = []
             for source in unique_entry_sources:
                 val physical_key = _driver_canonical_source_path(source.path)
@@ -684,14 +681,14 @@ pub class CompilerDriver:
                     return (self.ctx, false)
                 if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
                     dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
-                parsed_entry_paths = parsed_entry_paths.push(physical_key)
+                parsed_entry_index[physical_key] = parsed_entry_modules.len()
                 parsed_entry_modules = parsed_entry_modules.push(entry_module)
             for source in entry_sources:
                 val physical_key = _driver_canonical_source_path(source.path)
-                val parsed_idx = _driver_text_list_index(parsed_entry_paths, physical_key)
-                if parsed_idx < 0:
+                if not parsed_entry_index.contains_key(physical_key):
                     self.ctx.errors.push("internal entry-closure parse cache miss for {source.path}")
                     return (self.ctx, false)
+                val parsed_idx = parsed_entry_index[physical_key]
                 entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]
             var entry_ctx: CompileContext = self.ctx
             entry_ctx.modules = entry_modules
@@ -774,6 +771,11 @@ pub class CompilerDriver:
 
     me lower_and_check_impl() -> (CompileContext, bool):
         val log = self.ctx.logger
+        val stage3_driver_trace = (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"
+        val stage3_phase_trace = driver_phase_trace_enabled()
+        val unstub_hir = (rt_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
+        val native_entry_closure_hir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val stage3_entry_name = bootstrap_entry_module_name(self.ctx)
 
         # Build module_name -> source_path map so each module gets the right
         # filename in module_filename (required for defining_module + visibility).
@@ -787,7 +789,8 @@ pub class CompilerDriver:
         val package_sibling_symbol_index = hir_package_sibling_symbol_index(self.ctx.modules)
 
         log_debug("lowering modules to HIR")
-        dtrace("[DRV] lac-entry sources.len={self.ctx.sources.len()} modules.len={self.ctx.modules.len()}")
+        if stage3_driver_trace:
+            eprint("[DRV] lac-entry sources.len={self.ctx.sources.len()} modules.len={self.ctx.modules.len()}")
         # HirTrait bodies contain SymbolIds owned by one HirLowering. Imported
         # traits are lowered on demand in each consumer; never carry them into
         # a fresh lowerer's symbol table.
@@ -799,9 +802,9 @@ pub class CompilerDriver:
         var shared_lowering_diagnostic_messages: [text] = []
         var shared_lowering_diagnostic_recovered: [bool] = []
         if self.ctx.sources.len() <= 0:
-            dtrace("[DRV] lac-branch=modules-loop (sources<=0)")
+            if stage3_driver_trace:
+                eprint("[DRV] lac-branch=modules-loop (sources<=0)")
             var bootstrap_hir_modules: Dict<text, HirModule> = {}
-            val bootstrap_entry_name = bootstrap_entry_module_name(self.ctx)
             for module in self.ctx.modules.values():
                 val name = module.name
                 log_trace("processing module")
@@ -825,7 +828,7 @@ pub class CompilerDriver:
             val (updated_hir_boot, effect_warnings_boot) = run_effect_pass(bootstrap_hir_modules)
             var bootstrap_ctx: CompileContext = self.ctx
             bootstrap_ctx.hir_modules = updated_hir_boot
-            val bootstrap_entry_module = updated_hir_boot[bootstrap_entry_name]
+            val bootstrap_entry_module = updated_hir_boot[stage3_entry_name]
             if bootstrap_entry_module != nil:
                 bootstrap_ctx.bootstrap_entry_hir = Some(bootstrap_entry_module)
             log_debug("effect inference done")
@@ -838,7 +841,8 @@ pub class CompilerDriver:
         while source_idx < self.ctx.sources.len():
             val src = self.ctx.sources[source_idx]
             val name = src.module_name
-            log_phase("phase3:hir:file:start {src.path} module={name}")
+            if stage3_phase_trace:
+                log_phase_enabled("phase3:hir:file:start {src.path} module={name}")
             log_trace("processing module")
 
             # Set per-module filename so Symbol.defining_module is populated
@@ -859,13 +863,13 @@ pub class CompilerDriver:
             # Real single-file HIR lowering is the default; SIMPLE_STUB_HIR=1 is the
             # escape hatch forcing the empty-HIR stub (pre-2026-07-03 behavior) if a
             # stage4 lowering regression ever needs to be bypassed in the field.
-            val unstub_hir = (rt_env_get("SIMPLE_STUB_HIR") ?? "") != "1"
-            val native_entry_closure_hir = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-            val is_requested_bootstrap_entry = _driver_is_bootstrap_entry_source(src.path, name) or name == bootstrap_entry_module_name(self.ctx)
+            val is_requested_bootstrap_entry = name == stage3_entry_name
             val is_bootstrap_entry = native_entry_closure_hir or is_requested_bootstrap_entry
-            dtrace("[DRV] lac-loop name={name} content_len={src.content.len()}")
+            if stage3_driver_trace:
+                eprint("[DRV] lac-loop name={name} content_len={src.content.len()}")
             val hir_module: HirModule = if is_bootstrap_entry:
-                dtrace("[DRV] branch=bootstrap_entry")
+                if stage3_driver_trace:
+                    eprint("[DRV] branch=bootstrap_entry")
                 val entry_module_for_hir = self.ctx.modules[name]
                 if entry_module_for_hir != nil:
                     lowering.lower_parser_module_unstub(entry_module_for_hir)
@@ -878,10 +882,12 @@ pub class CompilerDriver:
                 # `lowering.lower_module(...)` mis-dispatches on the stage4 binary
                 # (same-name sibling on MirLowering; iteration 17) and the real
                 # HIR lowering body never runs.
-                dtrace("[DRV] branch=unstub_reparse")
+                if stage3_driver_trace:
+                    eprint("[DRV] branch=unstub_reparse")
                 val entry_module_for_hir = parse_full_frontend(src.content, source_file_authored_path(src), name, self.ctx.logger)
                 val lowered_hm: HirModule = lowering.lower_parser_module_unstub(entry_module_for_hir)
-                dtrace("[DRV] lowered funcs={lowered_hm.functions.len()} name={lowered_hm.name}")
+                if stage3_driver_trace:
+                    eprint("[DRV] lowered funcs={lowered_hm.functions.len()} name={lowered_hm.name}")
                 lowered_hm
             elif unstub_hir and (self.ctx.modules[name] != nil):
                 # Opt-in real lowering, low_memory fallback (source evicted).
@@ -889,7 +895,8 @@ pub class CompilerDriver:
             else:
                 # Empty-HIR stub: forced via SIMPLE_STUB_HIR=1, or fallback when the
                 # phase-2 module was evicted/unavailable (re-parse would be unsafe).
-                dtrace("[DRV] branch=STUB (empty HIR)")
+                if stage3_driver_trace:
+                    eprint("[DRV] branch=STUB (empty HIR)")
                 HirModule(
                     name: name,
                     path: src.path,
@@ -912,7 +919,7 @@ pub class CompilerDriver:
                     mock_decls: [],
                     types: []
                 )
-            val focused_future_driver_diag = src.path == "src/lib/nogc_async_mut/async/future.spl"
+            val focused_future_driver_diag = lowering.focused_hir_diag and src.path == "src/lib/nogc_async_mut/async/future.spl"
             if focused_future_driver_diag:
                 eprint("[driver-hir] returned future")
             log_trace("HIR lowered")
@@ -945,7 +952,8 @@ pub class CompilerDriver:
             val hir_function_count: i64 = hir_module.functions.len()
             if focused_future_driver_diag:
                 eprint("[driver-hir] functions={hir_function_count}")
-            log_phase("phase3:hir:file:done {src.path} module={name} funcs={hir_function_count}")
+            if stage3_phase_trace:
+                log_phase_enabled("phase3:hir:file:done {src.path} module={name} funcs={hir_function_count}")
             log_trace("stored HIR module")
             source_idx = source_idx + 1
 

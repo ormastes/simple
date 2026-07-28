@@ -586,10 +586,13 @@ pub extern "C" fn rt_vulkan_submit_graphics_and_wait_fence(_cmd: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_wait_idle() -> i64 {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
-        Err(_) => return 0,
+        Err(error) => {
+            state.set_error(error);
+            return 0;
+        }
     };
     match device.wait_idle() {
         Ok(()) => {
@@ -599,8 +602,8 @@ pub extern "C" fn rt_vulkan_wait_idle() -> i64 {
             STATE.lock().clean_quarantined_graphics();
             1
         }
-        Err(e) => {
-            tracing::error!("wait_idle: {e}");
+        Err(error) => {
+            state.set_error(format!("wait_idle: {error}"));
             0
         }
     }

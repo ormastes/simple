@@ -1998,6 +1998,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_reset_fence",
     "rt_vulkan_selected_device_driver_identity",
     "rt_vulkan_selected_device_driver_identity_hash",
+    "rt_vulkan_selected_device_physical_identity",
     "rt_vulkan_selected_device_type",
     "rt_vulkan_select_device",
     "rt_vulkan_set_scissor",

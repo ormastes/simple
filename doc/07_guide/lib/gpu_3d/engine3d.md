@@ -409,7 +409,11 @@ quads over one bounded persistent white-alpha atlas. Engine3D now exposes
 `load_font`, `unload_font`, `draw_text_hud`, and `draw_text_world`. The default
 path consumes the shared batch through the CPU image target; the optional
 Engine3D Vulkan font adapter consumes that same batch through separate HUD and
-world pipelines. Neither source path alone is native GPU evidence.
+world pipelines. Engine3D retains one `Engine2DFontOwner` slot; each operation
+stages plan/batch fields into caller-owned storage and writes the renderer back
+to that slot. It does not expose a `fonts()` renderer accessor or return an
+aggregate batch across the ownership boundary. Neither source path alone is
+native GPU evidence.
 
 The native blocker is a retained end-to-end execution record: atlas texture
 creation and upload, texture/sampler/pipeline binding, HUD and world transform

@@ -21,22 +21,22 @@ fn _font_hud_push_vertex(bytes: [u8], x: f32, y: f32, z: f32, u: f32, v: f32,
     _font_hud_push_u32_le(bytes, f32_to_bits(v))
     _font_hud_push_u32_le(bytes, color)
 
-fn _font_vertices(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
-                  target_width: i32, target_height: i32, clip_z: f32,
-                  include_depth: bool) -> [u8]:
+fn _font_vertices_into(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
+                       target_width: i32, target_height: i32, clip_z: f32,
+                       include_depth: bool, bytes: [u8]) -> bool:
+    bytes.clear()
     if (not batch.valid or target_width <= 0 or target_height <= 0 or
         batch.atlas_width <= 0 or batch.atlas_height <= 0):
-        return []
+        return false
     val atlas_count = batch.atlas_width.to_i64() * batch.atlas_height.to_i64()
     val stride = if include_depth: 24 else: FONT_HUD_METAL_VERTEX_BYTES
     if batch.quads.len().to_i64() > 2147483647 / (6 * stride):
-        return []
+        return false
     val vertex_bytes = batch.quads.len().to_i64() * 6 * stride
     if (atlas_count <= 0 or atlas_count > 2147483647 or
         batch.atlas_pixels.len().to_i64() < atlas_count or
         vertex_bytes < 0 or vertex_bytes > 2147483647):
-        return []
-    var bytes: [u8] = []
+        return false
     for quad in batch.quads:
         val x0 = font_destination_origin(origin_x, quad.dst_x, quad.width)
         val y0 = font_destination_origin(origin_y, quad.dst_y, quad.height)
@@ -44,7 +44,8 @@ fn _font_vertices(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
             quad.width <= 0 or quad.height <= 0 or
             quad.atlas_x > batch.atlas_width - quad.width or
             quad.atlas_y > batch.atlas_height - quad.height):
-            return []
+            bytes.clear()
+            return false
         val x1 = x0.?.to_i64() + quad.width.to_i64()
         val y1 = y0.?.to_i64() + quad.height.to_i64()
         val left = 2.0f32 * x0.?.to_f32() / target_width.to_f32() - 1.0f32
@@ -61,17 +62,31 @@ fn _font_vertices(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
         _font_hud_push_vertex(bytes, right, top, clip_z, u1, v0, quad.color, include_depth)
         _font_hud_push_vertex(bytes, left, bottom, clip_z, u0, v1, quad.color, include_depth)
         _font_hud_push_vertex(bytes, right, bottom, clip_z, u1, v1, quad.color, include_depth)
-    bytes
+    true
+
+fn font_hud_vertices_into(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
+                          target_width: i32, target_height: i32, bytes: [u8]) -> bool:
+    _font_vertices_into(batch, origin_x, origin_y, target_width, target_height, 0.0f32, false, bytes)
+
+fn font_world_vertices_into(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
+                            target_width: i32, target_height: i32, clip_z: f32,
+                            bytes: [u8]) -> bool:
+    if clip_z < -1.0f32 or clip_z > 1.0f32:
+        bytes.clear()
+        return false
+    _font_vertices_into(batch, origin_x, origin_y, target_width, target_height, clip_z, true, bytes)
 
 fn font_hud_vertices(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
                      target_width: i32, target_height: i32) -> [u8]:
-    _font_vertices(batch, origin_x, origin_y, target_width, target_height, 0.0f32, false)
+    var bytes: [u8] = []
+    font_hud_vertices_into(batch, origin_x, origin_y, target_width, target_height, bytes)
+    bytes
 
 fn font_world_vertices(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
                        target_width: i32, target_height: i32, clip_z: f32) -> [u8]:
-    if clip_z < -1.0f32 or clip_z > 1.0f32:
-        return []
-    _font_vertices(batch, origin_x, origin_y, target_width, target_height, clip_z, true)
+    var bytes: [u8] = []
+    font_world_vertices_into(batch, origin_x, origin_y, target_width, target_height, clip_z, bytes)
+    bytes
 
 fn font_world_vulkan_depth(clip_z: f32) -> f32:
     clip_z * 0.5f32 + 0.5f32
@@ -80,4 +95,4 @@ fn font_hud_metal_vertices(batch: FontRenderBatch, origin_x: i32, origin_y: i32,
                            target_width: i32, target_height: i32) -> [u8]:
     font_hud_vertices(batch, origin_x, origin_y, target_width, target_height)
 
-export font_hud_vertices, font_world_vertices, font_world_vulkan_depth, font_hud_metal_vertices
+export font_hud_vertices_into, font_world_vertices_into, font_hud_vertices, font_world_vertices, font_world_vulkan_depth, font_hud_metal_vertices

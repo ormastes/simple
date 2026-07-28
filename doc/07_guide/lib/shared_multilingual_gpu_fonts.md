@@ -316,7 +316,11 @@ concrete `cpu` is valid. Unknown targets and unsupported
 rendering modes or nonuniform/rotated/skewed/subpixel transforms must reject
 before changing cache generations or backend state. The canonical renderer and
 Engine2D/Engine3D owners now implement those configured entrypoints and retain
-an observable attempt/selected-target trace. A non-default
+an observable attempt/selected-target trace. Hot callers use the existing
+caller-owned `font_execution_plan_into` form; Engine3D retains one
+`Engine2DFontOwner` slot and stages `FontRenderBatch` fields into caller-owned
+storage before writing the renderer back. No public renderer accessor or
+aggregate batch return crosses that ownership boundary. A non-default
 family/category/language/script tuple resolves through the pinned sparse matrix,
 requires the exact resolved family (or `auto`), validates the CLDR script, and
 loads the unchanged bundled face; unavailable tuples reject before cache
@@ -717,7 +721,10 @@ bitmap text but are compatibility-only, not production-route evidence. Hosted
 it to `HostCompositor.render_frame_engine2d`, which executes `SharedWmScene ->
 DrawIrComposition -> Engine2D`. This source route is not executable/device proof; the programmatic
 direct-compatibility gate, image/motion backgrounds, nested content, and
-rejected-readback retries remain non-completion paths. Do not add a paint-local
+rejected-readback retries remain non-completion paths. A hosted compatibility
+frame reports `renderer=compatibility-direct-framebuffer`,
+`content=compatibility-font`, `route=direct-compatibility`, and `fallback=true`;
+it never reports Engine2D provenance and evidence mode rejects it. Do not add a paint-local
 loader, atlas, cache, or private font draw path.
 
 SimpleOS image construction now iterates the closed 53-entry OS projection
@@ -731,9 +738,12 @@ the identity. The pure-Simple image writer emits LFN slots and the shared reader
 resolves them before its raw 8.3 fallback. Pure-Simple path readers retain a
 bounded 32 MiB ceiling, above the largest pinned 25,125,512-byte face; the live
 x86_64 and ARM64 C bridges use the same cap. This adds 28 MiB of static `.bss`
-to the selected architecture's kernel image. The Simple Browser
-accepts only validated registered TTF bytes and rejects any skipped Draw IR
-command. Missing or changed assets cannot become a selected vector face.
+to the selected architecture's kernel image. The Simple Browser accepts only
+validated registered TTF bytes. SimpleOS rejects a skipped command when the
+Engine2D receipt classifies it as a selected-font text command; image
+degradation remains allowed, while general, embedding, and empty-command
+failures do not masquerade as font rejection. Missing or changed assets cannot
+become a selected vector face.
 Registered-only source paths bind the exact validated Arabic/Devanagari blobs
 to the existing pure-Simple shaper with handle/generation `0`, emit only
 handle-free glyph payloads, and materialize them through the existing
@@ -778,10 +788,18 @@ Keep the remaining work on the frozen public seams:
    upload behavior, RSS delta, and GPU resource high-water. Durable schema v5
    also pins viewport, byte-domain packed-ARGB/straight-alpha and rounding
    semantics, per-route warmup, percentile policy, exact packed-ARGB CPU-oracle
-   comparison, same-host OS/architecture, and device/driver; FNV64 remains a
+   comparison, same-host OS/architecture, and stable physical-device identity;
+   FNV64 remains a
    runtime diagnostic and any field drift fails closed. The same record requires
-   controlled Vulkan-poison CPU fallback, unchanged prepared-batch identity, and
-   eleven post-loss CPU samples whose p95 does not exceed the baseline CPU row.
+   a real font-owner fault producer for corrupt asset/program, unsupported
+   format, compile failure, submit failure, and device loss. Until Engine2D's
+   Vulkan font owner and Engine3D's Vulkan font adapter execute their shared
+   scalar `FontOwnerFaultReceipt` contract under an admitted runtime, the
+   aggregate remains blocked before focused-result admission. The owners retain
+   monotonic masks/sequences and expose scalar receipt/device-loss facades;
+   classifier calls, synthetic poisoning, and raw-handle identity are not
+   evidence. Vulkan3D fence-wait/wait-idle device loss remains a tracked runtime
+   observability gap.
    It also retains one emission/compile-install scalar and seven 11-sample
    stage arrays for shaping, material, unchanged dirty upload, fused
    submit-through-device-completion `queue_device`, later fence observation,

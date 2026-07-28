@@ -67,6 +67,16 @@ the applicable full lint and duplication gates. If duplicate caching changed,
 the same gate must prove token/cosine create/reuse parity, changed/deleted-file
 invalidation, `--no-cache`, exit parity, and JSON stdout purity.
 
+Build that Stage 4 full CLI incrementally by default from a proven pure-Simple
+parent and a stable, exclusively locked cache, with
+`SIMPLE_NATIVE_INCREMENTAL=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and the full
+`src/app/cli/main.spl` entry. A successful artifact is Stage 4 evidence when its
+source overlay, parent, runtime, exact command, cache receipt, and output hash
+are retained and the exact artifact passes every existing Stage 4 admission and
+smoke gate. Do not rerun it cleanly merely to call it "actual Stage 4". Normal
+cache-key rejection may rebuild affected or all modules in that same invocation;
+start a clean retry only for cache-integrity failure or a failed acceptance gate.
+
 Use `bin/simple lint <changed .spl files>` and
 `bin/simple duplicate-check <owned-dir> --mode token --min-lines 5` for those
 pure-Simple gates. `bin/simple build lint` and `build check` are Rust workspace

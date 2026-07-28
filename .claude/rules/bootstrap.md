@@ -88,6 +88,13 @@ right gate ships a stale binary. **A small change is NOT a full bootstrap.**
 > the `[native-incremental] N reused / M rebuilt` receipt. No receipt, or `N=0`,
 > means it was a cold full build regardless of intent.
 >
+> For bounded memory localization, prefer
+> `SIMPLE_COMPILER_MEMORY_PROFILE=1`. It emits the existing per-phase/per-module
+> `[BOOTSTRAP-PHASE]` elapsed and `heap_registry` receipts without enabling
+> expression/function trace traffic. Escalate to
+> `SIMPLE_COMPILER_PHASE_PROFILE=1` only when the coarse owner boundary is
+> insufficient.
+>
 > **The worktree trap (2026-07-27: four consecutive full rebuilds, ~4h, no
 > binary).** A fresh `git worktree` gets its own EMPTY `build/`. A compiler
 > rebuild driven from that worktree recompiles everything every time, while a
@@ -137,6 +144,18 @@ right gate ships a stale binary. **A small change is NOT a full bootstrap.**
   inputs must actually be rebuilt. Pure-Simple compiler changes and final
   completion gates use the cheapest adequate incremental or staged pure-Simple
   build; completion by itself is never a reason to rebuild Rust.
+
+### Stage 4 is incremental too
+
+Produce the Stage 4 full CLI from a proven pure-Simple parent with
+`SIMPLE_NATIVE_INCREMENTAL=1`, `SIMPLE_NO_STUB_FALLBACK=1`, the full
+`src/app/cli/main.spl` entry, and a stable, exclusively locked cache. Retain the
+source-overlay, parent, runtime, exact-command, cache, and output-hash receipts.
+If that exact CLI passes every existing Stage 4 admission and essential-tools
+smoke gate, it is the accepted Stage 4 artifact; do not repeat the same build
+with a clean cache only to relabel it as an "actual" Stage 4 build. Normal
+cache-key rejection may rebuild affected or all modules in the same invocation;
+use a clean retry only for cache-integrity failure or a failed acceptance gate.
 
 **Follow-up (not yet done):** `SIMPLE_NATIVE_INCREMENTAL` safe per-module reuse is
 implemented only in the Rust seed's native-build pipeline

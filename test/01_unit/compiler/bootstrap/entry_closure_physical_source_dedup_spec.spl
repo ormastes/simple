@@ -2,10 +2,14 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_absolute(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
 
-use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
+use compiler.driver.driver.{compiler_driver_create}
 use compiler.driver.driver_source_loading.{
+    DriverTextBucketSet,
     _driver_canonical_source_path, _driver_module_name_from_path, _driver_unique_physical_sources,
     _driver_module_name_collision,
     _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add,
@@ -35,6 +39,26 @@ describe "entry-closure physical source deduplication":
         expect(_driver_canonical_source_path(sources[0].path)).to_equal("src/lib/common/shared.spl")
         expect(_driver_unique_physical_sources(sources).len()).to_equal(1)
 
+    it "registers two logical aliases after one physical parse":
+        val old_closure = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")).to_equal(true)
+        val content = "fn shared() -> i64: 1\n"
+        var driver = compiler_driver_create(driver_core_compile_options_default())
+        var ctx = driver.ctx
+        ctx.sources = [
+            SourceFile(path: "./src/lib/common/../common/shared.spl", content: content, module_name: "std.shared"),
+            SourceFile(path: "src/lib/common/shared.spl", content: content, module_name: "lib.common.shared")
+        ]
+        driver.ctx = ctx
+
+        val (parsed, ok) = driver.parse_all_impl()
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)).to_equal(true)
+
+        expect(ok).to_be(true)
+        expect(parsed.modules.contains_key("std.shared")).to_be(true)
+        expect(parsed.modules.contains_key("lib.common.shared")).to_be(true)
+        expect(parsed.sources.len()).to_equal(1)
+
     it "keeps absolute workspace punctuation out of native module symbols":
         val driver = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
         val bootstrap_mir = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstrap_globals.spl") ?? ""
@@ -61,7 +85,7 @@ describe "entry-closure physical source deduplication":
         expect(_driver_module_name_collision([dashed, absolute_same_file])).to_equal("")
 
     it "keeps colliding bucket keys exact and persistent":
-        var buckets = _driver_text_bucket_set_new(1)
+        var buckets: DriverTextBucketSet = _driver_text_bucket_set_new(1)
         buckets = _driver_text_bucket_set_add(buckets, "std.alpha")
         buckets = _driver_text_bucket_set_add(buckets, "std.alphabet")
         buckets = _driver_text_bucket_set_add(buckets, "std.alpha")
@@ -72,9 +96,16 @@ describe "entry-closure physical source deduplication":
         expect(_driver_text_bucket_set_has(buckets, "std.alph")).to_be(false)
         expect(loading).to_contain("use compiler.core.interpreter.hashmap.{hm_hash_text}")
         expect(loading).to_contain("val raw = hm_hash_text(key) % bucket_count")
-        expect(loading).to_not_contain("extern fn rt_hash_text")
+        expect(loading.contains("extern fn rt_hash_text")).to_be(false)
         expect(loading).to_contain("bucket.starts_with(marker) or bucket.contains(\"\\n\" + marker)")
-        expect(loading).to_not_contain("for existing in bucket.split(\"\\n\")")
+        expect(loading.contains("for existing in bucket.split(\"\\n\")")).to_be(false)
+        expect(loading).to_contain("class DriverTextBucketSet:")
+        expect(loading).to_contain("var buckets: [text] = []")
+        expect(loading.contains("rt_array_new_with_cap")).to_be(false)
+        expect(loading).to_contain("pub class DriverTextBucketSet:")
+        expect(loading).to_contain("var seen: DriverTextBucketSet")
+        expect(loading).to_contain("self.buckets[index] = self.buckets[index] + key + \"\\n\"")
+        expect(loading.contains("var updated = buckets")).to_be(false)
 
     it "hashes every UTF-8 byte without indexed text ord lowering":
         val hashmap = rt_file_read_text("src/compiler/10.frontend/core/interpreter/hashmap.spl") ?? ""
@@ -82,15 +113,18 @@ describe "entry-closure physical source deduplication":
         expect(hm_hash_text("a") == hm_hash_text("g")).to_be(false)
         expect(hashmap).to_contain("val bytes = s.bytes()")
         expect(hashmap).to_contain("h = h xor (bytes[i] as i64)")
-        expect(hashmap).to_not_contain("s[i].ord()")
+        expect(hashmap.contains("s[i].ord()")).to_be(false)
 
     it "registers every logical alias from one cached module result":
         val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
 
         expect(driver).to_contain("val unique_entry_sources = _driver_unique_physical_sources(entry_sources)")
-        expect(driver).to_contain("parsed_entry_paths = parsed_entry_paths.push(physical_key)")
+        expect(driver).to_contain("var parsed_entry_index: Dict<text, i64> = {}")
+        expect(driver).to_contain("parsed_entry_index[physical_key] = parsed_entry_modules.len()")
+        expect(driver).to_contain("if not parsed_entry_index.contains_key(physical_key):")
         expect(driver).to_contain("parsed_entry_modules = parsed_entry_modules.push(entry_module)")
         expect(driver).to_contain("entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]")
+        expect(driver.contains("_driver_text_list_index(parsed_entry_paths, physical_key)")).to_be(false)
         expect(driver).to_contain("entry_ctx.sources = unique_entry_sources")
         expect(driver).to_contain(r"phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
 
@@ -101,7 +135,7 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("var closure_loaded_mods = _driver_text_bucket_set_new(8192)")
         expect(driver).to_contain("var closure_seen_mods = _driver_text_bucket_set_new(8192)")
         expect(driver).to_contain("var closure_scanned_paths = _driver_text_bucket_set_new(8192)")
-        expect(driver).to_not_contain("var closure_seen_mods: [text]")
+        expect(driver.contains("var closure_seen_mods: [text]")).to_be(false)
 
     it "scans imports through native text operations":
         val imports = _driver_entry_import_module_paths("use std.real\n\"\"\"\nuse fake.block\n\"\"\"\n\"\"\"use fake.inline\"\"\"\nexport use app.live.*\nimport third.party\nuse app.module.Func\n")
@@ -121,6 +155,7 @@ describe "entry-closure physical source deduplication":
         expect(doc_comment_close).to_equal(["std.after_doc"])
         expect(siblings).to_equal([".real", ".sibling.deep"])
         expect(loading).to_contain('for raw_line in content.split("\n"):')
+        expect(loading).to_contain('if scan_line.contains("\\\"\\\"\\\""):')
         expect(loading).to_contain("_driver_import_path_is_valid(module_path)")
         expect(loading).to_contain("_driver_entry_import_module_paths_text_fallback")
 
@@ -129,23 +164,23 @@ describe "entry-closure physical source deduplication":
         val json_wrapper = rt_file_read_text("src/app/test_runner_new/json_wrapper.spl") ?? ""
         val imports = _driver_entry_import_module_paths(cli_entry)
 
-        expect(imports).to_not_contain("app.test_runner_new.test_runner_main")
-        expect(imports).to_not_contain("app.test_runner_new.json_wrapper")
-        expect(imports).to_not_contain("compiler.tools.leak_check.main")
+        expect(imports.contains("app.test_runner_new.test_runner_main")).to_be(false)
+        expect(imports.contains("app.test_runner_new.json_wrapper")).to_be(false)
+        expect(imports.contains("compiler.tools.leak_check.main")).to_be(false)
         expect(cli_entry).to_contain("use lazy app.test_runner_new.test_runner_main.{run_test_cli}")
         expect(cli_entry).to_contain("use lazy app.test_runner_new.json_wrapper.{run_test_json_wrapper, test_json_requested, test_json_worker_requested}")
         expect(cli_entry).to_contain("use lazy compiler.tools.leak_check.main.{run_leak_check}")
         expect(cli_entry).to_contain("return run_test_cli()")
         expect(cli_entry).to_contain("elif str_eq(first, \"leak-check\"):\n        return run_leak_check()")
         expect(json_wrapper).to_contain("return [\"run\", \"src/app/test_runner_new/main.spl\", TEST_JSON_WORKER_ARG] + test_args")
-        expect(json_wrapper).to_not_contain("return [\"run\", arg, \"test\", TEST_JSON_WORKER_ARG]")
+        expect(json_wrapper.contains("return [\"run\", arg, \"test\", TEST_JSON_WORKER_ARG]")).to_be(false)
 
     it "uses the HIR call type arguments already bound by inference":
         val inference = rt_file_read_text("src/compiler/30.types/type_infer/inference_expr.spl") ?? ""
 
         expect(inference).to_contain("case Call(callee, args, type_args):")
         expect(inference).to_contain("self.generate_obligations_for_function_call(func_symbol, type_args, span)")
-        expect(inference).to_not_contain("call_type_args")
+        expect(inference.contains("call_type_args")).to_be(false)
 
     it "keeps a zero-import explicit entry out of whole-workspace loading":
         val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
@@ -153,14 +188,14 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("if self.ctx.errors.len() == 0:\n                # A successful explicit-entry walk is a closure")
         expect(driver).to_contain("rt_env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"1\")")
         expect(driver).to_contain("if has_project_source and self.ctx.options.mode != CompileMode.Check and not nb_entry_closure:")
-        expect(driver).to_not_contain("closure_added")
+        expect(driver.contains("closure_added")).to_be(false)
 
     it "fails required closure load parse and HIR errors before later phases":
         val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
         val compile_start = driver.find("    me compile() -> CompileResult:") ?? -1
-        val load_start = driver.find("    me load_sources_impl() -> bool:") ?? -1
-        val parse_start = driver.find("    me parse_all_impl() -> bool:") ?? -1
-        val hir_start = driver.find("    me lower_and_check_impl() -> bool:") ?? -1
+        val load_start = driver.find("    me load_sources_impl() -> (CompileContext, bool):") ?? -1
+        val parse_start = driver.find("    me parse_all_impl() -> (CompileContext, bool):") ?? -1
+        val hir_start = driver.find("    me lower_and_check_impl() -> (CompileContext, bool):") ?? -1
         val hir_end = driver.find("    fn lower_to_hir_impl() -> (CompileContext, bool):") ?? -1
         expect(compile_start).to_be_greater_than(-1)
         expect(load_start).to_be_greater_than(compile_start)
@@ -172,8 +207,8 @@ describe "entry-closure physical source deduplication":
         val load_body = driver.substring(load_start, parse_start)
         val parse_body = driver.substring(parse_start, hir_start)
         val hir_body = driver.substring(hir_start, hir_end)
-        expect(compile_body).to_contain("if not self.load_sources_impl():\n            log_error(\"phase 1 FAILED\")\n            return CompileResult.ParseError(self.ctx.errors)")
-        expect(compile_body).to_contain("if not self.parse_all_impl():\n            log_error(\"phase 2 FAILED\")\n            return CompileResult.ParseError(self.ctx.errors)")
+        expect(compile_body).to_contain("val (loaded_ctx, load_ok) = self.load_sources_impl()\n        self.ctx = loaded_ctx\n        if not load_ok:")
+        expect(compile_body).to_contain("val (parsed_ctx, parse_ok) = self.parse_all_impl()\n        self.ctx = parsed_ctx\n        if not parse_ok:")
         expect(compile_body).to_contain("if not analyze_ok:\n            log_error(\"phase 3 FAILED\")")
         val type_error_return = compile_body.index_of("return CompileResult.TypeError(self.ctx.errors)") ?? -1
         val phase4_start = compile_body.index_of("phase4:monomorphize:start") ?? -1
@@ -201,8 +236,8 @@ describe "entry-closure physical source deduplication":
 
         expect(loading).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
         expect(helpers).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
-        expect(loading).to_not_contain("find src/app src/lib src/compiler src/runtime")
-        expect(helpers).to_not_contain("find src/app src/lib src/compiler src/runtime")
+        expect(loading.contains("find src/app src/lib src/compiler src/runtime")).to_be(false)
+        expect(helpers.contains("find src/app src/lib src/compiler src/runtime")).to_be(false)
 
     it "uses the canonical numbered-layer MIR module in legacy optimization passes":
         val engine = rt_file_read_text("src/compiler/60.mir_opt/_OptimizationPasses/engine.spl") ?? ""
@@ -211,9 +246,9 @@ describe "entry-closure physical source deduplication":
         expect(engine).to_contain("use compiler.mir.mir_data.*")
         expect(io_passes).to_contain("use compiler.mir.mir_data.*")
         expect(legacy_spec).to_contain("use compiler.mir.mir_data.*")
-        expect(engine).to_not_contain("use mir_data.*")
-        expect(io_passes).to_not_contain("use mir_data.*")
-        expect(legacy_spec).to_not_contain("use mir_data.*")
+        expect(engine.contains("use mir_data.*")).to_be(false)
+        expect(io_passes.contains("use mir_data.*")).to_be(false)
+        expect(legacy_spec.contains("use mir_data.*")).to_be(false)
 
     it "does not scan a sibling root omitted by its caller":
         val fixture = "/tmp/simple-entry-closure-source-roots"

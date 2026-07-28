@@ -164,6 +164,22 @@ fn vulkan_font_runtime_classification(runtime_available: bool, evidence: VulkanF
     else:
         "failed"
 
+fn vulkan_font_fence_failure_reason(fence_result: i64, last_error: text) -> text:
+    if fence_result <= 0 and vulkan_classify_error(last_error) == VulkanErrorKind.DeviceLost:
+        "device-lost"
+    elif fence_result == 0:
+        "submit-failed"
+    elif fence_result < 0:
+        "fence-completion-unknown"
+    else:
+        ""
+
+fn vulkan_font_sffi_failure_reason(default_reason: text, last_error: text) -> text:
+    if vulkan_classify_error(last_error) == VulkanErrorKind.DeviceLost:
+        "device-lost"
+    else:
+        default_reason
+
 fn vulkan_font_promotion_ready(artifact_mode: text, dispatch_count: i64, quad_count: i64,
                                submitted: bool, waited: bool, readback_bytes: i64,
                                parity: bool, fence_handle: i64,
@@ -216,6 +232,7 @@ fn _vulkan_font_evidence(pipeline: VulkanFontPipelineEvidence, status: text, rea
         fence_evidence_available: false, fence_destroyed: false,
         device_name: pipeline.device_name, device_type: pipeline.device_type,
         driver_identity: pipeline.driver_identity,
+        physical_device_identity: pipeline.physical_device_identity,
         readback_source: if readback_bytes > 0: "device_readback" else: "unavailable",
         readback_buffer_handle: if readback_bytes > 0: framebuffer else: 0,
         readback_byte_count: readback_bytes, device_checksum: device_checksum,
@@ -254,6 +271,14 @@ fn _vulkan_font_with_fallback(evidence: VulkanFontCompositeEvidence,
 impl VulkanBackend:
     me composite_font_batch(origin_x: i32, origin_y: i32,
                             batch: FontRenderBatch) -> VulkanFontCompositeEvidence:
+        # Snapshot the live backend owner, not the inbound immutable batch.
+        # Failed work must report whether any retained atlas identity changed.
+        val atlas_handle_before = self.d_font_atlas
+        val atlas_width_before = self.font_atlas_width
+        val atlas_height_before = self.font_atlas_height
+        val atlas_generation_before = self.font_atlas_generation
+        val atlas_owner_before = self.font_atlas_owner_identity
+        val atlas_payload_before = self.font_atlas_payload_sha256
         val started_ns = time_now_nanos()
         var evidence = self._composite_font_batch_impl(origin_x, origin_y, batch)
         val total_ns = vulkan_font_elapsed_ns(started_ns, time_now_nanos())
@@ -261,6 +286,19 @@ impl VulkanBackend:
         evidence.atlas_upload_count = self.font_atlas_upload_count
         evidence.atlas_upload_bytes = self.font_atlas_upload_bytes
         evidence.gpu_resource_high_water_bytes = self.font_gpu_resource_high_water_bytes
+        if evidence.status == "failed":
+            evidence.reason = vulkan_font_sffi_failure_reason(
+                evidence.reason, vulkan_sffi_last_error())
+        if evidence.status == "failed" or evidence.status == "rejected":
+            val identity_unchanged = (self.d_font_atlas == atlas_handle_before and
+                self.font_atlas_width == atlas_width_before and
+                self.font_atlas_height == atlas_height_before and
+                self.font_atlas_generation == atlas_generation_before and
+                self.font_atlas_owner_identity == atlas_owner_before and
+                self.font_atlas_payload_sha256 == atlas_payload_before)
+            self.session._retain_font_owner_fault(
+                evidence.reason, identity_unchanged)
+            self._mirror_font_owner_fault_state()
         evidence
 
     me _composite_font_batch_impl(origin_x: i32, origin_y: i32,
@@ -289,14 +327,14 @@ impl VulkanBackend:
             val total = q.width.to_i64() * q.height.to_i64()
             val dst_x = font_destination_origin(origin_x, q.dst_x, q.width)
             val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
+            val subrect_in_bounds = (q.width > 0 and q.height > 0 and
+                q.atlas_x >= 0 and q.atlas_y >= 0 and
+                q.atlas_x <= batch.atlas_width and q.atlas_y <= batch.atlas_height and
+                q.width <= batch.atlas_width - q.atlas_x and
+                q.height <= batch.atlas_height - q.atlas_y)
             if (vulkan_font_dispatch_groups(total) == 0 or dst_x == nil or dst_y == nil or
-                font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
-                    q.atlas_x, q.atlas_y, q.width, q.height, q.color).len() != total):
+                not subrect_in_bounds):
                 return _vulkan_font_evidence(pipeline, "rejected", "invalid-font-quad", self.d_font_atlas, self.d_font_params, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
-            val packed = vulkan_font_atlas_composite_params(batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),
-                q.atlas_x, q.atlas_y, q.width, q.height, width, height, dst_count, dst_x.?, dst_y.?, q.color)
-            if packed.len() != VULKAN_FONT_PARAMS_BYTES:
-                return _vulkan_font_evidence(pipeline, "rejected", "invalid-font-params", self.d_font_atlas, self.d_font_params, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
             checked = checked + 1
 
         if (pipeline.device_type != "discrete" and pipeline.device_type != "integrated" and
@@ -318,42 +356,59 @@ impl VulkanBackend:
             return _vulkan_font_evidence(pipeline, "rejected", "incomplete-font-cache-identity", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
         val atlas_bytes = atlas_count * 4
         val dimensions_changed = self.font_atlas_width != batch.atlas_width or self.font_atlas_height != batch.atlas_height
-        if self.d_font_atlas == 0 or dimensions_changed:
+        val atlas_changed = (self.d_font_atlas == 0 or dimensions_changed or
+            self.font_atlas_generation != batch.atlas_generation or
+            self.font_atlas_owner_identity != owner_identity)
+        if atlas_changed:
+            # Replacement is transactional. The live atlas remains the owner
+            # until a fresh allocation has received the complete payload and
+            # the old allocation has been retired successfully.
             val fresh = vulkan_sffi_alloc_buffer(atlas_bytes, _VULKAN_STORAGE_BUFFER)
             if fresh == 0:
-                return _vulkan_font_evidence(pipeline, "failed", "atlas-allocation-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
-            if self.d_font_atlas != 0:
-                val old_freed = vulkan_sffi_free_buffer(self.d_font_atlas)
+                val reason = vulkan_font_sffi_failure_reason(
+                    "atlas-allocation-failed", vulkan_sffi_last_error())
+                return _vulkan_font_evidence(pipeline, "failed", reason, self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            val dirty_upload_started = time_now_nanos()
+            val atlas_payload = _vulkan_font_pixels_to_bytes(batch.atlas_pixels)
+            val atlas_uploaded = vulkan_sffi_copy_to_buffer(fresh, atlas_payload, 0)
+            dirty_upload_ns = vulkan_font_elapsed_ns(dirty_upload_started, time_now_nanos())
+            if not atlas_uploaded:
+                var reason = vulkan_font_sffi_failure_reason(
+                    "vulkan-font-atlas-upload-failed", vulkan_sffi_last_error())
+                val fresh_freed = vulkan_sffi_free_buffer(fresh)
+                if not fresh_freed:
+                    val cleanup_reason = vulkan_font_sffi_failure_reason(
+                        "vulkan-font-atlas-retire-failed", vulkan_sffi_last_error())
+                    if cleanup_reason == "device-lost": reason = cleanup_reason
+                    vulkan_sffi_quarantine_dependencies(0, fresh, 0, 0)
+                return _vulkan_font_evidence(pipeline, "failed", reason, self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            val old_atlas = self.d_font_atlas
+            if old_atlas != 0:
+                val old_freed = vulkan_sffi_free_buffer(old_atlas)
                 if not old_freed:
+                    var reason = vulkan_font_sffi_failure_reason(
+                        "vulkan-font-atlas-retire-failed", vulkan_sffi_last_error())
                     val fresh_freed = vulkan_sffi_free_buffer(fresh)
-                    val reason = vulkan_font_atlas_replacement_status(true, false, fresh_freed)
+                    if not fresh_freed:
+                        val cleanup_reason = vulkan_font_sffi_failure_reason(
+                            "vulkan-font-atlas-retire-failed", vulkan_sffi_last_error())
+                        if cleanup_reason == "device-lost": reason = cleanup_reason
+                        vulkan_sffi_quarantine_dependencies(0, fresh, 0, 0)
                     return _vulkan_font_evidence(pipeline, "failed", reason, self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            val payload_hash_started = time_now_nanos()
+            val payload_sha256 = sha256_u8_hex(atlas_payload)
+            evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(payload_hash_started, time_now_nanos())
             self.d_font_atlas = fresh
             self.font_atlas_width = batch.atlas_width
             self.font_atlas_height = batch.atlas_height
-            self.font_atlas_generation = -1
-            self.font_atlas_owner_identity = ""
-            self.font_atlas_payload_sha256 = ""
+            self.font_atlas_generation = batch.atlas_generation
+            self.font_atlas_owner_identity = owner_identity
+            self.font_atlas_payload_sha256 = payload_sha256
+            self.font_atlas_upload_count = self.font_atlas_upload_count + 1
+            self.font_atlas_upload_bytes = self.font_atlas_upload_bytes + atlas_bytes
             val allocated_bytes = vulkan_font_gpu_resource_bytes(atlas_bytes, dst_count * 4, self.d_font_params != 0)
             if allocated_bytes > self.font_gpu_resource_high_water_bytes:
                 self.font_gpu_resource_high_water_bytes = allocated_bytes
-        if self.font_atlas_generation != batch.atlas_generation or self.font_atlas_owner_identity != owner_identity:
-            val dirty_upload_started = time_now_nanos()
-            val atlas_payload = _vulkan_font_pixels_to_bytes(batch.atlas_pixels)
-            val atlas_uploaded = vulkan_sffi_copy_to_buffer(self.d_font_atlas, atlas_payload, 0)
-            dirty_upload_ns = vulkan_font_elapsed_ns(dirty_upload_started, time_now_nanos())
-            if not atlas_uploaded:
-                self.font_atlas_generation = -1
-                self.font_atlas_owner_identity = ""
-                self.font_atlas_payload_sha256 = ""
-                return _vulkan_font_evidence(pipeline, "failed", "atlas-upload-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
-            val payload_hash_started = time_now_nanos()
-            self.font_atlas_payload_sha256 = sha256_u8_hex(atlas_payload)
-            evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(payload_hash_started, time_now_nanos())
-            self.font_atlas_generation = batch.atlas_generation
-            self.font_atlas_owner_identity = owner_identity
-            self.font_atlas_upload_count = self.font_atlas_upload_count + 1
-            self.font_atlas_upload_bytes = self.font_atlas_upload_bytes + atlas_bytes
         if self.d_font_params == 0:
             self.d_font_params = vulkan_sffi_alloc_buffer(VULKAN_FONT_PARAMS_BYTES, _VULKAN_STORAGE_BUFFER)
             if self.d_font_params == 0:
@@ -417,6 +472,7 @@ impl VulkanBackend:
                 vulkan_sffi_end_compute(command))
             var submitted = false
             var completion_waited = false
+            var submit_failed = false
             var fence_completion_unknown = false
             var fence_failure_reason = "fence-completion-unknown"
             if prepared:
@@ -430,12 +486,45 @@ impl VulkanBackend:
                     val sync_wait_started = time_now_nanos()
                     completion_waited = vulkan_sffi_wait_fence(fence_result, 0)
                     sync_wait_ns = sync_wait_ns + vulkan_font_elapsed_ns(sync_wait_started, time_now_nanos())
-                    last_fence_destroyed = vulkan_sffi_destroy_fence(fence_result)
+                    if not completion_waited:
+                        fence_failure_reason = vulkan_font_sffi_failure_reason(
+                            "fence-wait-evidence-failed", vulkan_sffi_last_error())
+                        fence_completion_unknown = true
+                    else:
+                        last_fence_destroyed = vulkan_sffi_destroy_fence(fence_result)
+                        if not last_fence_destroyed:
+                            fence_failure_reason = vulkan_font_sffi_failure_reason(
+                                "fence-cleanup-failed", vulkan_sffi_last_error())
+                elif fence_result == 0:
+                    fence_failure_reason = vulkan_font_fence_failure_reason(
+                        fence_result, vulkan_sffi_last_error())
+                    if fence_failure_reason == "device-lost":
+                        fence_completion_unknown = true
+                    else:
+                        submit_failed = true
                 elif fence_result < 0:
                     fence_completion_unknown = true
-                    if vulkan_classify_error(vulkan_sffi_last_error()) == VulkanErrorKind.DeviceLost:
-                        fence_failure_reason = "device-lost"
+                    fence_failure_reason = vulkan_font_fence_failure_reason(
+                        fence_result, vulkan_sffi_last_error())
+            if submit_failed:
+                # A zero fence result means the runtime retained and freed the
+                # submitted compute command. Only the descriptor remains ours.
+                var submit_descriptor = descriptor
+                if descriptor > 0 and vulkan_sffi_destroy_descriptor_set(descriptor):
+                    submit_descriptor = -descriptor
+                elif descriptor > 0:
+                    vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+                val failed = _vulkan_font_with_fallback(
+                    _vulkan_font_evidence(pipeline, "failed", fence_failure_reason,
+                        self.d_font_atlas, last_params, submit_descriptor, last_command,
+                        batch.quads.len(), done, false, false, framebuffer,
+                        0, 0, 0, false), before)
+                return _vulkan_font_completion(failed, 0, false, false)
             if fence_completion_unknown:
+                # The command may still reference the framebuffer, atlas, and
+                # params. Poison the backend here so direct callers cannot
+                # mutate or release them before quarantine recovery.
+                self.completion_unknown = true
                 vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
                 val unknown = _vulkan_font_with_fallback(
                     _vulkan_font_evidence(pipeline, "failed", fence_failure_reason, self.d_font_atlas, last_params, descriptor, last_command, batch.quads.len(), done, false, false, framebuffer, 0, 0, 0, false), before)
@@ -463,7 +552,7 @@ impl VulkanBackend:
             if last_fence_available and not last_fence_destroyed:
                 val restored = vulkan_sffi_copy_to_buffer(framebuffer, before_bytes, 0)
                 val failed = _vulkan_font_with_fallback(
-                    _vulkan_font_evidence(pipeline, "failed", if restored: "fence-cleanup-failed" else: "partial-framebuffer-restore-failed", self.d_font_atlas, last_params, last_descriptor, last_command, batch.quads.len(), done, submitted, completion_waited, framebuffer, 0, 0, 0, false), before)
+                    _vulkan_font_evidence(pipeline, "failed", if restored: fence_failure_reason else: "partial-framebuffer-restore-failed", self.d_font_atlas, last_params, last_descriptor, last_command, batch.quads.len(), done, submitted, completion_waited, framebuffer, 0, 0, 0, false), before)
                 return _vulkan_font_completion(failed, last_fence, true, false)
             if not submitted:
                 val reason = if command > 0: "missing-command-cleanup-capability" else: "font-dispatch-failed"
@@ -520,6 +609,7 @@ export VULKAN_FONT_PARAMS_BYTES
 export vulkan_font_atlas_composite_params
 export vulkan_font_dispatch_groups, vulkan_font_atlas_replacement_status
 export vulkan_font_pixels_checksum, vulkan_font_pixels_equal, vulkan_font_runtime_classification
+export vulkan_font_fence_failure_reason
 export vulkan_font_promotion_ready
 export vulkan_font_changed_pixel_count, vulkan_font_stage_evidence_ready
 export vulkan_font_timed_ns

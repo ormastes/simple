@@ -56,6 +56,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
+use std.common.gpu.font_owner_fault_receipt.{FONT_OWNER_FAULT_NONE}
 
 # ============================================================================
 # Vulkan Availability Check
@@ -216,6 +217,12 @@ class VulkanBackend:
     session: VulkanSession       # Shared session (null-like when not session-owned)
     owns_session: bool           # True when this backend must release the session
     last_error: text             # Most recent init/runtime failure for strict probes
+    font_fault_mask: i64
+    font_last_fault: i64
+    font_fault_sequence: i64
+    font_device_loss_sequence: i64
+    font_fault_identity_unchanged: bool
+    font_fault_fallback_count: i64
 
     static fn create() -> VulkanBackend:
         """Create an uninitialized Vulkan backend. Call init() before drawing."""
@@ -269,8 +276,28 @@ class VulkanBackend:
             completion_unknown: false,
             session: VulkanSession.create(),
             owns_session: false,
-            last_error: ""
+            last_error: "",
+            font_fault_mask: 0,
+            font_last_fault: FONT_OWNER_FAULT_NONE,
+            font_fault_sequence: 0,
+            font_device_loss_sequence: 0,
+            font_fault_identity_unchanged: true,
+            font_fault_fallback_count: 0
         )
+
+    me _mirror_font_owner_fault_state():
+        self.font_fault_mask = self.session.font_owner_fault_mask_value
+        self.font_last_fault = self.session.font_owner_last_fault
+        self.font_fault_sequence = self.session.font_owner_fault_sequence_value
+        self.font_device_loss_sequence = self.session.font_device_loss_sequence_value
+        self.font_fault_identity_unchanged = self.session.font_owner_fault_identity_unchanged_value
+        self.font_fault_fallback_count = self.session.font_owner_fault_fallback_count_value
+
+    me _record_font_owner_fallback():
+        # Keep nested aggregate transport scalar for native self-hosting.
+        self.session.font_owner_fault_fallback_count_value =
+            self.session.font_owner_fault_fallback_count_value + 1
+        self._mirror_font_owner_fault_state()
 
 fn vulkan_backend_retain_session(mut backend: VulkanBackend, session: VulkanSession):
     """Retain and store the original session without trusting a native method return."""
@@ -324,6 +351,7 @@ impl RenderBackend for VulkanBackend:
         # Keep the original session value. Hosted native compilation can corrupt
         # a class-valued return from a mutating no-argument method.
         vulkan_backend_retain_session(self, session)
+        self._mirror_font_owner_fault_state()
 
         # Borrow shared pipeline handles from the session
         self.shader_clear         = session.shader_clear
@@ -950,7 +978,9 @@ impl Engine2DExtended for VulkanBackend:
     me install_font_atlas_pipeline(spirv_bytes: [u8]) -> VulkanFontPipelineEvidence:
         """Install through the retained shared session; standalone mode fails closed."""
         if self.owns_session:
-            return self.session.install_font_atlas_pipeline(spirv_bytes)
+            val evidence = self.session.install_font_atlas_pipeline(spirv_bytes)
+            self._mirror_font_owner_fault_state()
+            return evidence
         VulkanFontPipelineEvidence(
             status: "unavailable", reason: "font-pipeline-requires-session",
             artifact_mode: "none", shader_handle: 0, pipeline_handle: 0,
@@ -966,6 +996,16 @@ impl Engine2DExtended for VulkanBackend:
             artifact_mode: "none", shader_handle: 0, pipeline_handle: 0,
             device_name: "", device_type: "", driver_identity: ""
         )
+
+    fn font_owner_fault_receipt() -> i64: self.font_last_fault
+
+    fn font_device_loss_observed() -> bool: self.font_device_loss_sequence > 0
+
+    fn font_owner_fault_mask() -> i64: self.font_fault_mask
+    fn font_owner_fault_sequence() -> i64: self.font_fault_sequence
+    fn font_device_loss_sequence() -> i64: self.font_device_loss_sequence
+    fn font_owner_fault_identity_unchanged() -> bool: self.font_fault_identity_unchanged
+    fn font_owner_fault_fallback_count() -> i64: self.font_fault_fallback_count
 
     # Rasterize glyph coverage on the CPU, then perform the framebuffer write
     # through the fenced Vulkan image-composite path. CPU glyph generation is

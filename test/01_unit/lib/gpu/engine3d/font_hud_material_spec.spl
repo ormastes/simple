@@ -1,12 +1,14 @@
 use std.spipe.*
 use std.common.binary_io.{f32_to_bits}
-use std.gpu.engine3d.font_hud_material.{font_hud_vertices, font_world_vertices, font_world_vulkan_depth, font_hud_metal_vertices}
+use std.gpu.engine3d.font_hud_material.{font_hud_vertices_into, font_world_vertices_into, font_hud_vertices, font_world_vertices, font_world_vulkan_depth, font_hud_metal_vertices}
 use std.gpu.engine3d.vulkan_font_adapter.{vulkan_font_atlas_upload_required}
+use std.gpu.engine3d.engine.{Engine3D}
 use std.gpu.engine3d.font_vulkan_spirv.{font_vulkan_fragment_spirv}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_cache_identity}
 use std.io_runtime.{file_read}
+use std.common.gpu.font_owner_fault_receipt.{FONT_OWNER_FAULT_NONE}
 
 fn _u32_le(bytes: [u8], offset: i64) -> u32:
     bytes[offset].to_u32() | (bytes[offset + 1].to_u32() << 8u32) |
@@ -17,6 +19,221 @@ fn _hud_batch(quad: FontRenderQuad) -> FontRenderBatch:
         atlas_pixels: [0u32; 8], quads: [quad], atlas_generation: 1, dirty_rects: [])
 
 describe "Engine3D Vulkan font atlas identity":
+    it "exposes lifetime scalar owner-fault state without a synthetic injector":
+        var engine = Engine3D.create_with_backend(8, 8, "cpu")
+        expect engine.font_owner_fault_receipt() to_equal FONT_OWNER_FAULT_NONE
+        expect engine.font_owner_fault_mask() to_equal 0
+        expect engine.font_owner_fault_sequence() to_equal 0
+        expect engine.font_device_loss_sequence() to_equal 0
+        expect engine.font_device_loss_observed() to_equal false
+        expect engine.font_owner_fault_identity_unchanged() to_equal true
+        expect engine.font_owner_fault_fallback_count() to_equal 0
+        engine.shutdown()
+
+        val source = file_read("src/lib/gc_async_mut/gpu/engine3d/engine.spl")
+        expect source to_contain "fn font_owner_fault_receipt() -> i64"
+        expect source to_contain "fn font_device_loss_observed() -> bool"
+        expect source to_contain "me _capture_vulkan_font_fault_state(adapter: VulkanFontAdapter3D)"
+        expect source to_contain "_font_owner_fault_mask: 0,"
+        expect source to_contain "_font_owner_last_fault: FONT_OWNER_FAULT_NONE,"
+        expect source to_contain "_font_owner_fault_fallback_count: 0,"
+        expect source to_contain "_font_install_failure_pending: false,"
+        expect source to_contain "val adapter_sequence = adapter.font_fault_sequence"
+        expect(source.contains("adapter.font_owner_fault_sequence()")).to_be(false)
+        expect source to_contain "if self._font_install_failure_pending:"
+        expect(source.index_of("self._font_install_failure_pending = true") <
+            source.index_of("self._font_owner_fault_fallback_count = self._font_owner_fault_fallback_count + 1")).to_be(true)
+        expect(source.contains("inject_font")) to_be(false)
+
+    it "commits atlas identity only after a fresh upload and retires superseded textures after completion":
+        val adapter = file_read("src/lib/gc_async_mut/gpu/engine3d/vulkan_font_adapter.spl")
+        val retire_guard = adapter.index_of("if self.retired_atlases.len() > 0:")
+        val fresh_create = adapter.index_of("val fresh = self.backend.create_texture(")
+        val fresh_upload = adapter.index_of("self.backend.upload_texture_checked(fresh, self.atlas_alpha_scratch)")
+        val pending_install = adapter.index_of("self.pending_atlas = fresh")
+        val completion_gate = adapter.index_of("if device.status == \"font-ready\" and self.pending_atlas_draw_recorded:")
+        val atlas_commit = adapter.index_of("self.atlas = completed_atlas")
+        val identity_commit = adapter.index_of("self.atlas_owner_identity = self.pending_atlas_owner_identity")
+        val retirement = adapter.index_of("self.backend.destroy_texture(self.retired_atlases[retired_index])")
+        expect retire_guard to_be_greater_than -1
+        expect fresh_create to_be_greater_than retire_guard
+        expect fresh_upload to_be_greater_than fresh_create
+        expect pending_install to_be_greater_than fresh_upload
+        expect completion_gate to_be_greater_than pending_install
+        expect atlas_commit to_be_greater_than completion_gate
+        expect identity_commit to_be_greater_than atlas_commit
+        expect retirement to_be_greater_than identity_commit
+        expect adapter to_contain "if not self.backend.completion_unknown:"
+        expect adapter to_contain "vulkan-font-atlas-pending-conflict"
+        expect adapter to_contain "same_pending_owner and batch.atlas_generation > self.pending_atlas_generation"
+        expect adapter to_contain "self.backend.recording_blocked = true"
+        expect adapter to_contain "atlas_alpha_scratch: [u8]"
+        expect adapter to_contain "atlas_alpha_scratch: [],"
+        expect adapter to_contain "me _stage_atlas_alpha(batch: FontRenderBatch):"
+        expect adapter to_contain "self.atlas_alpha_scratch.clear()"
+        expect(adapter.split("self._stage_atlas_alpha(batch)").len()).to_equal(3)
+        expect adapter to_contain "self.backend.upload_texture_checked(self.pending_atlas, self.atlas_alpha_scratch)"
+        expect adapter to_contain "self.backend.upload_texture_checked(fresh, self.atlas_alpha_scratch)"
+        expect adapter to_contain "sha256_u8_hex(self.atlas_alpha_scratch)"
+        expect(adapter.contains("var refreshed_alpha: [u8] = []")).to_be(false)
+        expect(adapter.contains("var alpha: [u8] = []")).to_be(false)
+        expect adapter to_contain "retired_atlases: [TextureHandle]"
+        expect adapter to_contain "self.retired_atlases.remove(retired_index)"
+        expect adapter to_contain "me _retain_active_identity_after_fault("
+        expect adapter to_contain "var device = self.backend.device_evidence()"
+        expect adapter to_contain "device.reason = \"device-lost\""
+        expect(adapter.contains("self.atlas = fresh")).to_be(false)
+        expect adapter to_contain "self.font_fault_mask = self.backend.font_fault_mask"
+        expect(adapter.contains("self.backend.font_owner_fault_mask()")).to_be(false)
+
+        val backend = file_read("src/lib/nogc_sync_mut/engine/render/vulkan_backend3d.spl")
+        expect backend to_contain "rt_vulkan_wait_idle, vulkan_last_error"
+        expect backend to_contain "me destroy_texture(tex: TextureHandle) -> bool:"
+        expect backend to_contain "self.texture_ids.remove(i)"
+        expect backend to_contain "self.texture_native.remove(i)"
+        expect backend to_contain "me destroy_buffer(buf: BufferHandle):"
+        expect backend to_contain "self.buffer_ids.remove(i)"
+        expect backend to_contain "self.buffer_native.remove(i)"
+        expect(backend.contains("self.buffer_native[i] = 0")).to_be(false)
+        expect backend to_contain "record_font_fault_from_runtime(\"submit-failed\", true)"
+        expect backend to_contain "self.completion_unknown = true"
+        expect backend to_contain "me retain_font_identity_unchanged(identity_unchanged: bool):"
+        expect backend to_contain "\"device-lost\""
+
+        val runtime_sync = file_read(
+            "src/compiler_rust/runtime/src/vulkan_graphics_runtime_sync.rs")
+        val wait_fence_start = runtime_sync.index_of(
+            "pub extern \"C\" fn rt_vulkan_wait_fence(fence")
+        val wait_fence_error = runtime_sync.index_of("state.set_error(error);")
+        val wait_fence_stub = runtime_sync.index_of(
+            "pub extern \"C\" fn rt_vulkan_wait_fence(_fence")
+        expect wait_fence_start to_be_greater_than -1
+        expect wait_fence_error to_be_greater_than wait_fence_start
+        expect wait_fence_error to_be_less_than wait_fence_stub
+
+        val runtime_compute = file_read(
+            "src/compiler_rust/runtime/src/vulkan_graphics_runtime_compute.rs")
+        val wait_idle_start = runtime_compute.index_of(
+            "pub extern \"C\" fn rt_vulkan_wait_idle() -> i64")
+        val wait_idle_error = runtime_compute.index_of(
+            "state.set_error(format!(\"wait_idle: ")
+        val wait_idle_stub = runtime_compute.index_of(
+            "#[cfg(not(feature = \"vulkan\"))]\npub extern \"C\" fn rt_vulkan_wait_idle()")
+        expect wait_idle_start to_be_greater_than -1
+        expect wait_idle_error to_be_greater_than wait_idle_start
+        expect wait_idle_error to_be_less_than wait_idle_stub
+
+    it "reuses only completed Vulkan font vertex buffers":
+        val adapter = file_read("src/lib/gc_async_mut/gpu/engine3d/vulkan_font_adapter.spl")
+        val completion_gate = adapter.index_of("if not self.backend.completion_unknown:")
+        val recycle = adapter.index_of("self.reusable_vertices.push(self.transient_vertices[vertex_index])")
+        expect adapter to_contain "reusable_vertices: [BufferHandle]"
+        expect adapter to_contain "reusable_vertex_capacities: [i64]"
+        expect adapter to_contain "acquired_vertex_capacity: i64"
+        expect adapter to_contain "vertex_bytes_scratch: [u8]"
+        expect adapter to_contain "vertex_bytes_scratch: [],"
+        expect adapter to_contain "me _take_vertex_buffer(byte_count: i64) -> BufferHandle:"
+        expect adapter to_contain "if self.reusable_vertex_capacities[i] >= byte_count:"
+        expect adapter to_contain "self.acquired_vertex_capacity = self.reusable_vertex_capacities[i]"
+        val evict = adapter.index_of("self.backend.destroy_buffer(self.reusable_vertices[0])")
+        val allocate = adapter.index_of("self.backend.create_vertex_buffer(byte_count)")
+        expect adapter to_contain "if self.reusable_vertices.len() > 0:"
+        expect adapter to_contain "self.reusable_vertices.remove(0)"
+        expect adapter to_contain "self.reusable_vertex_capacities.remove(0)"
+        expect evict to_be_greater_than -1
+        expect allocate to_be_greater_than evict
+        expect(adapter.split("self.transient_vertex_capacities.push(self.acquired_vertex_capacity)").len()).to_equal(3)
+        expect(adapter.split("self._take_vertex_buffer(self.vertex_bytes_scratch.len())").len()).to_equal(3)
+        expect(adapter.split("self.backend.create_vertex_buffer(byte_count)").len()).to_equal(2)
+        expect adapter to_contain "font_hud_vertices_into(batch, origin_x, origin_y, self.width, self.height, self.vertex_bytes_scratch)"
+        expect adapter to_contain "font_world_vertices_into(batch, origin_x, origin_y, self.width, self.height, clip_z, self.vertex_bytes_scratch)"
+        expect(adapter.contains("val bytes = font_hud_vertices(")).to_be(false)
+        expect(adapter.contains("val bytes = font_world_vertices(")).to_be(false)
+        expect completion_gate to_be_greater_than -1
+        expect recycle to_be_greater_than completion_gate
+        expect adapter to_contain "self.transient_vertices.clear()"
+        expect adapter to_contain "self.transient_vertex_capacities.clear()"
+
+    it "keeps HUD and world text and glyph runs off aggregate return channels":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine3d/engine.spl")
+        expect source to_contain "val ENGINE3D_FONT_EXECUTION_TARGETS: [text] = [\"vulkan\", \"cpu\"]"
+        expect source to_contain "val plan_count = font_execution_plan_into(config, ENGINE3D_FONT_EXECUTION_TARGETS, plan)"
+        expect(source.split("val plan_count = font_execution_plan_into(config, ENGINE3D_FONT_EXECUTION_TARGETS, plan)").len()).to_equal(3)
+        expect source to_contain "_font_plan_scratch: [text]"
+        expect source to_contain "var plan = self._font_plan_scratch"
+        expect source to_contain "_font_attempt_scratch: [text]"
+        expect source to_contain "_font_attempt_scratch: [],"
+        expect source to_contain "var attempts = self._font_attempt_scratch"
+        expect source to_contain "self._font_attempt_scratch = attempts"
+        expect source to_contain "self.last_font_execution_attempts = attempts"
+        expect(source.contains("var attempt_snapshot: [text] = []")).to_be(false)
+        expect source to_contain "fn font_execution_attempts() -> [text]:\n        var snapshot: [text] = []"
+        expect source to_contain "for attempt in self.last_font_execution_attempts:"
+        expect source to_contain "snapshot.push(attempt)"
+        expect(source.contains("var attempts = self.last_font_execution_attempts")).to_be(false)
+        expect(source.contains("self.last_font_execution_attempts.clear()")).to_be(false)
+        expect source to_contain "var completion_attempts: [text] = []"
+        expect source to_contain "var fallback_attempts: [text] = []"
+        expect(source.contains("var plan: [text] = []")).to_be(false)
+        expect source to_contain "_font_owner: Engine2DFontOwner"
+        expect source to_contain "_font_owner: Engine2DFontOwner.new()"
+        expect source to_contain "var fonts: FontRenderer = self._font_owner.active[0]"
+        expect source to_contain "self._font_owner.active[0] = fonts"
+        expect(source.contains("_font_renderer: FontRenderer?")).to_be(false)
+        expect(source.contains("self._font_renderer")).to_be(false)
+        expect(source.contains("me fonts() -> FontRenderer:")).to_be(false)
+        expect source to_contain "me _draw_staged_font_batch_policy("
+        expect source to_contain "atlas_pixels: self._font_owner.active[0].atlas_pixels"
+        expect(source.contains("var atlas: [u32] = []")).to_be(false)
+        expect source to_contain "fonts.stage_text_configured(content, color, config)"
+        expect(source.split("fonts.stage_text_configured(content, color, config)").len()).to_equal(3)
+        expect source to_contain "val staged_count = fonts.stage_glyph_run(run, color, font_size)"
+        expect(source.split("val staged_count = fonts.stage_glyph_run(run, color, font_size)").len()).to_equal(3)
+        expect source to_contain "me _font_world_screen_into(x: f32, y: f32, z: f32) -> bool:"
+        val projection_start = source.index_of("    me _font_world_screen_into(")
+        val projection_end = source.index_of("    me draw_text_world(")
+        val projection = source.substring(projection_start, projection_end)
+        expect projection_start to_be_greater_than -1
+        expect projection_end to_be_greater_than projection_start
+        expect(projection.contains("mat4_mul(")).to_be(false)
+        expect projection to_contain "val view_w = self._view[3] * x"
+        expect projection to_contain "self._proj[15] * view_w"
+        expect source to_contain "self._font_screen_x = screen_x"
+        expect source to_contain "self._font_screen_depth = ndc_z"
+        expect(source.contains("var screen: [i32] = []")).to_be(false)
+        expect(source.contains("var depth: [f32] = []")).to_be(false)
+        expect source to_contain "self._pending_font_cpu_fallbacks.clear()"
+        expect source to_contain "self.last_font_execution_attempts = []"
+        expect(source.contains("fn _font_world_screen(")).to_be(false)
+        expect(source.contains("val plan = font_execution_plan(config,")).to_be(false)
+        expect(source.contains("fonts.prepare_text_configured(content, color, config)")).to_be(false)
+        expect(source.contains("fonts.prepare_glyph_run(run, color, font_size)")).to_be(false)
+
+    it "retains full fallback batches only when deferred CPU replay is required":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine3d/engine.spl")
+        val predrawn_branch = source.index_of("if cpu_ready:")
+        val deferred_enqueue = source.index_of("_PendingFontCpuFallback(x: x, y: y, batch: batch)")
+        val replay_start = source.index_of("            elif completion_target == \"cpu\":")
+        val replay_end = source.index_of("            elif self._font_frame_target == \"vulkan\":")
+        val replay = source.substring(replay_start, replay_end)
+        expect source to_contain "_predrawn_font_cpu_fallback_count: i64"
+        expect source to_contain "_predrawn_font_cpu_fallback_count: 0,"
+        expect source to_contain "completed, self._pending_font_cpu_fallbacks.len() + self._predrawn_font_cpu_fallback_count"
+        expect source to_contain "self._predrawn_font_cpu_fallback_count = self._predrawn_font_cpu_fallback_count + 1"
+        expect source to_contain "me _draw_font_batch_hud_into("
+        expect replay to_contain "if self._pending_font_cpu_fallbacks.len() > 0:"
+        expect replay to_contain "for pending in self._pending_font_cpu_fallbacks:"
+        expect replay to_contain "self._draw_font_batch_hud_into("
+        expect(replay.split("self._cpu.read_pixels()").len()).to_equal(2)
+        expect(replay.split("self._cpu.draw_image(0, 0, target_w, target_h, target)").len()).to_equal(2)
+        expect replay to_contain "else:\n                            replayed = false"
+        expect replay.index_of("if replayed:") to_be_greater_than replay.index_of("if drawn:")
+        expect replay.index_of("vulkan.record_font_fallback()") to_be_greater_than replay.index_of("if replayed:")
+        expect(source.split("self._predrawn_font_cpu_fallback_count = 0").len()).to_equal(4)
+        expect(source.contains("already_drawn")).to_be(false)
+        expect predrawn_branch to_be_greater_than -1
+        expect deferred_enqueue to_be_greater_than predrawn_branch
+
     it "fences the atlas cache with Vulkan graphics target and session identity":
         val source = file_read("src/lib/gc_async_mut/gpu/engine3d/vulkan_font_adapter.spl")
         expect source to_contain "font_atlas_composite_cache_identity("
@@ -76,6 +293,17 @@ describe "Engine3D Metal font HUD material":
         expect _u32_le(bytes, 104) to_equal f32_to_bits(0.0f32)
         expect _u32_le(bytes, 108) to_equal f32_to_bits(0.75f32)
         expect _u32_le(bytes, 112) to_equal f32_to_bits(0.5f32)
+
+    it "fills reusable HUD and world byte storage and clears it on invalid input":
+        val quad = FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 2, height: 1, atlas_x: 1, atlas_y: 0, color: 0x80402010u32)
+        var bytes = [99u8]
+        expect font_hud_vertices_into(_hud_batch(quad), 0, 0, 4, 2, bytes) to_equal true
+        expect bytes to_equal font_hud_vertices(_hud_batch(quad), 0, 0, 4, 2)
+        expect font_world_vertices_into(_hud_batch(quad), 0, 0, 4, 2, 0.25f32, bytes) to_equal true
+        expect bytes to_equal font_world_vertices(_hud_batch(quad), 0, 0, 4, 2, 0.25f32)
+        expect font_world_vertices_into(_hud_batch(quad), 0, 0, 4, 2, 2.0f32, bytes) to_equal false
+        expect bytes.len() to_equal 0
 
     it "carries clip depth in the separate 24-byte world vertex contract":
         val quad = FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,

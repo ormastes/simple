@@ -15,6 +15,16 @@ independent review and exact reproduction may mark tracked pins verified.
 order; a named target moves first, then remaining GPUs and CPU. `Preferred`
 tries the named target then CPU; `Required` tries the named target only.
 Compatibility entrypoints construct the documented default config and delegate.
+Native-sensitive Engine2D/Engine3D paths fill plans through
+`font_execution_plan_into`, retain renderers in the shared one-slot owner, and
+stage batch/projection data through caller-owned storage.
+
+Vulkan font faults use one neutral scalar `FontOwnerFaultReceipt` contract.
+Each 2D/3D owner retains monotonic masks and sequences and exposes only scalar
+facades; calling the shared reason classifier does not prove an owner event.
+Engine3D replaces atlas textures transactionally and retires the old native
+texture only after the fresh upload succeeds, avoiding failed-replacement
+identity corruption and resource growth.
 
 WM/GUI/Web/2D resolution also stays under `FontRenderer`: Web layout consumes
 `ResolvedFontMetrics` (stable candidate identity plus exact advances), Draw IR
@@ -39,8 +49,10 @@ On x86_64 and ARM64 registration of the selected catalog is attempted before
 that frame and the existing `taskbar-clock` DrawIR slot is the witness; its
 56x48 QEMU hash remains unset until retained capture evidence exists.
 Hosted color-background frames now lower through the same Draw IR/Engine2D
-route with one persistent raster session. Image/motion backgrounds and nested
-content retain an immediate compatibility retry; source routing is not runtime proof.
+route with one persistent raster session. Compatibility frames are labeled as
+direct-framebuffer fallback and cannot satisfy live Engine2D evidence; source
+routing is not runtime proof. SimpleOS rejects a frame when any typed selected-
+font command was skipped, while explicit image degradation remains separate.
 
 The pinned 10-language × 10-category source policy contains 67 native cells,
 4 explicit script-sans mono fallbacks, 26 not-designed cells, and 3 unavailable

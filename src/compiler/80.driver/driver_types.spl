@@ -26,6 +26,22 @@ use compiler.common.compiler_services.{CompilerServices, create_default_services
 
 extern fn rt_string_free(value: text) -> i64
 
+pub fn driver_native_parsed_module_is_export_facade(parsed: Module) -> bool:
+    """Whether a parsed module can legitimately produce no object code."""
+    var only_extern_functions = true
+    val parsed_function_names = parsed.functions.keys()
+    for fn_name in parsed_function_names:
+        val parsed_fn = parsed.functions[fn_name]
+        if not parsed_fn.is_extern:
+            only_extern_functions = false
+    ((parsed.exports.len() > 0 or parsed.imports.len() > 0 or parsed.traits.keys().len() > 0) and parsed.domain_blocks.len() == 0 and
+        only_extern_functions and parsed.classes.keys().len() == 0 and parsed.actors.keys().len() == 0 and
+        parsed.structs.keys().len() == 0 and parsed.enums.keys().len() == 0 and parsed.bitfields.keys().len() == 0 and
+        parsed.impls.len() == 0 and parsed.type_aliases.keys().len() == 0 and
+        parsed.constants.keys().len() == 0 and parsed.static_asserts.len() == 0 and
+        parsed.aop_advices.len() == 0 and parsed.di_bindings.len() == 0 and
+        parsed.arch_rules.len() == 0 and parsed.mock_decls.len() == 0)
+
 # ------------------------------------------------------------------------------
 # Compilation Context
 # ------------------------------------------------------------------------------
@@ -40,6 +56,7 @@ class CompileContext:
     sources: [SourceFile]
     native_sources_fingerprint: text
     modules: Dict<text, Module>
+    native_export_facade_candidates: Dict<text, bool>
     hir_modules: Dict<text, HirModule>
     bootstrap_entry_hir: HirModule?
     mir_modules: Dict<text, MirModule>
@@ -132,6 +149,7 @@ class CompileContext:
             sources: [],
             native_sources_fingerprint: "",
             modules: {},
+            native_export_facade_candidates: {},
             hir_modules: {},
             bootstrap_entry_hir: nil,
             mir_modules: {},
@@ -193,6 +211,12 @@ class CompileContext:
         self.sources = metadata
 
     # After HIR lowering, AST modules are no longer needed.
+    me retain_native_export_facade_candidates():
+        self.native_export_facade_candidates = {}
+        for name in self.modules.keys():
+            if driver_native_parsed_module_is_export_facade(self.modules[name]):
+                self.native_export_facade_candidates[name] = true
+
     me evict_ast():
         self.modules = {}
 

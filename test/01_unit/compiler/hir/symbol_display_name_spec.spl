@@ -3,6 +3,7 @@ use std.io_runtime.{file_read}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.{SymbolKind, SymbolTable}
+use compiler.hir.hir_lowering.types.{hir_bootstrap_flat_store_enabled}
 
 describe "HIR symbol display names":
     it "reads back a renamed qualified symbol name":
@@ -41,3 +42,54 @@ describe "HIR symbol display names":
         val source = file_read("src/compiler/20.hir/hir_lowering/expressions.spl")
         expect(source).to_contain("self.symbols.lookup_qualified_function(module_name, fld_name_t)")
         expect(source.index_of("for candidate_key in self.symbols.symbols.keys():")).to_equal(-1)
+
+    it "caches bootstrap flags once per lowering instance":
+        val types = file_read("src/compiler/20.hir/hir_lowering/types.spl")
+        val modules = file_read("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+        val declarations = file_read("src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl")
+        val expressions = file_read("src/compiler/20.hir/hir_lowering/expressions.spl")
+
+        expect(types).to_contain("bootstrap_closure: bool")
+        expect(types).to_contain("bootstrap_phase_profile: bool")
+        expect(types).to_contain("bootstrap_trace: bool")
+        expect(types).to_contain("bootstrap_diag: bool")
+        expect(types).to_contain("focused_hir_diag: bool")
+        expect(types).to_contain("if self.bootstrap_mode:")
+        expect(modules).to_contain("if self.bootstrap_closure:")
+        expect(modules).to_contain("self.bootstrap_trace or self.bootstrap_diag")
+        expect(types).to_contain("SIMPLE_COMPILER_PHASE_PROFILE")
+        expect(modules.contains("SIMPLE_COMPILER_PHASE_PROFILE")).to_be(false)
+        expect(modules).to_contain("eprint(\"[BOOTSTRAP-PHASE] \" + msg)")
+        expect(modules).to_contain("self.bootstrap_phase_profile or self.bootstrap_trace or self.bootstrap_diag")
+        expect(modules).to_contain("val phase_probe = self.bootstrap_phase_profile or self.bootstrap_trace or self.bootstrap_diag")
+        expect(modules).to_contain("if phase_probe:\n                    self.hir_module_phase_probe(\"phase3:hir:function:start")
+        expect(modules).to_contain("if phase_probe:\n                    self.hir_module_phase_probe(\"phase3:hir:function:done")
+        expect(modules.contains("hir_module_diag_enabled")).to_be(false)
+        expect(modules.contains("SIMPLEOS_FOCUSED_HIR_DIAG")).to_be(false)
+        expect(types).to_contain("if self.focused_hir_diag:")
+        expect(types).to_contain("val focused_future_errors = self.focused_hir_diag and")
+        expect(types.split("SIMPLEOS_FOCUSED_HIR_DIAG").len()).to_equal(2)
+        expect(modules.contains("rt_env_get(\"SIMPLE_BOOTSTRAP_DIAG\")")).to_be(false)
+        expect(declarations).to_contain("self.bootstrap_mode and (self.bootstrap_trace or self.bootstrap_diag)")
+        expect(declarations.contains("hir_lower_env_get")).to_be(false)
+        expect(declarations.contains("SIMPLE_COMPILER_PHASE_PROFILE")).to_be(false)
+        expect(expressions).to_contain("self.bootstrap_mode and is_bootstrap_builtin_fn(name)")
+        expect(expressions.contains("hir_expr_env_get")).to_be(false)
+        expect(expressions.contains("SIMPLE_COMPILER_PHASE_PROFILE")).to_be(false)
+        expect(expressions.contains("[hir-lower] lower_expr:")).to_be(false)
+        expect(expressions.contains("[hir-lower] lower_block_unit:")).to_be(false)
+
+    it "does not build legacy flat HIR copies for Stage 4":
+        expect(hir_bootstrap_flat_store_enabled(false, false)).to_be(false)
+        expect(hir_bootstrap_flat_store_enabled(true, false)).to_be(true)
+        expect(hir_bootstrap_flat_store_enabled(true, true)).to_be(false)
+
+        val types = file_read("src/compiler/20.hir/hir_lowering/types.spl")
+        val hir_modules = file_read("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+        val mir_modules = file_read("src/compiler/50.mir/_MirLowering/module_lowering.spl")
+
+        expect(types).to_contain("bootstrap_flat_store: bool")
+        expect(hir_modules).to_contain("if bootstrap_flat_store:")
+        expect(hir_modules).to_contain("if self.bootstrap_flat_store:\n                    bootstrap_hir_functions_add(hir_fn)")
+        expect(mir_modules).to_contain("val bootstrap_flat_store = bootstrap_mode and")
+        expect(mir_modules).to_contain("if bootstrap_flat_store:\n                        bootstrap_mir_functions_add(fn_.name, mir_fn, 0)")

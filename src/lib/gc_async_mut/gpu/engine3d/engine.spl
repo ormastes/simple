@@ -19,18 +19,20 @@
 
 use std.gpu.engine3d.backend.{RenderBackend3D}
 use std.gpu.engine3d.backend_cpu.{CpuBackend3D}
-use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, LightParams3D, mat4_identity, mat4_mul}
+use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, LightParams3D, mat4_identity}
 use std.gpu.engine3d.resource_pool.{ResourcePool3D, TextureHandle3D, BufferHandle3D, ShaderHandle3D, PipelineHandle3D}
 use std.gpu.engine3d.texture3d.{TextureDescriptor3D, SamplerDescriptor3D, TextureView3D}
 use std.gpu.engine3d.texture3d.{TEX_DIM_2D, TEX_DIM_3D, TEX_DIM_CUBE, TEX_FMT_RGBA8_UNORM, TEX_FMT_DEPTH32_FLOAT}
 use std.gpu.engine3d.texture3d.{TEX_USAGE_TEXTURE_BINDING, TEX_USAGE_COPY_DST}
 use std.gc_async_mut.text_layout.font_renderer.{
     FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderer,
-    font_execution_plan, font_render_config_selection_supported
+    font_execution_plan_into, font_render_config_selection_supported
 }
+use std.gc_async_mut.gpu.engine2d.font_owner.{Engine2DFontOwner}
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
 use std.gpu.engine3d.color3d.{blend3d}
 use std.gpu.engine3d.vulkan_font_adapter.{VulkanFontAdapter3D, VulkanFontAdapter3DEvidence}
+use std.common.gpu.font_owner_fault_receipt.{FONT_OWNER_FAULT_NONE}
 
 fn engine3d_font_frame_target_allows(current: text, requested: text) -> bool:
     current == "" or current == requested
@@ -40,11 +42,12 @@ fn engine3d_font_completion_target(completed: bool, cpu_fallback_count: i64) -> 
     if cpu_fallback_count > 0: return "cpu"
     "unavailable"
 
+val ENGINE3D_FONT_EXECUTION_TARGETS: [text] = ["vulkan", "cpu"]
+
 class _PendingFontCpuFallback:
     x: i32
     y: i32
     batch: FontRenderBatch
-    already_drawn: bool
 
 # ============================================================================
 # Engine3D
@@ -74,7 +77,10 @@ class Engine3D:
     _w: i32
     _h: i32
     _resources: ResourcePool3D
-    _font_renderer: FontRenderer? = nil
+    # One-slot ownership avoids returning or unwrapping FontRenderer across a
+    # native aggregate boundary. Direct array-element access is the same
+    # proven channel used by Engine2D.
+    _font_owner: Engine2DFontOwner
     _vulkan_font: VulkanFontAdapter3D? = nil
     _vulkan_font_evidence: VulkanFontAdapter3DEvidence? = nil
     _font_receipt_frame_sequence: i64 = 0
@@ -96,16 +102,52 @@ class Engine3D:
     last_font_execution_attempts: [text] = []
     last_font_execution_target: text = ""
     _pending_font_cpu_fallbacks: [_PendingFontCpuFallback] = []
+    _predrawn_font_cpu_fallback_count: i64
+    _font_plan_scratch: [text]
+    _font_attempt_scratch: [text]
+    _font_screen_x: i32
+    _font_screen_y: i32
+    _font_screen_depth: f32
+    _font_owner_fault_mask: i64
+    _font_owner_last_fault: i64
+    _font_owner_fault_sequence: i64
+    _font_device_loss_sequence: i64
+    _font_owner_fault_identity_unchanged: bool
+    _font_owner_fault_fallback_count: i64
+    _font_adapter_observed_sequence: i64
+    _font_adapter_observed_fallback_count: i64
+    _font_install_failure_pending: bool
     _view: [f32]
     _proj: [f32]
 
-    me fonts() -> FontRenderer:
-        val active = self._font_renderer
-        if active != nil:
-            return active
-        val created = FontRenderer.new()
-        self._font_renderer = created
-        created
+    me _ensure_font_renderer():
+        if self._font_owner.active.len() == 0:
+            self._font_owner.active = [FontRenderer.new()]
+
+    me _capture_vulkan_font_fault_state(adapter: VulkanFontAdapter3D):
+        val adapter_sequence = adapter.font_fault_sequence
+        if adapter_sequence < self._font_adapter_observed_sequence:
+            self._font_adapter_observed_sequence = 0
+        val previous_sequence = self._font_owner_fault_sequence
+        val sequence_delta = adapter_sequence - self._font_adapter_observed_sequence
+        if sequence_delta > 0:
+            self._font_owner_fault_sequence = self._font_owner_fault_sequence + sequence_delta
+            self._font_owner_fault_mask = self._font_owner_fault_mask | adapter.font_fault_mask
+            self._font_owner_last_fault = adapter.font_last_fault
+            if adapter.font_device_loss_sequence > self._font_adapter_observed_sequence:
+                self._font_device_loss_sequence = previous_sequence + (
+                    adapter.font_device_loss_sequence - self._font_adapter_observed_sequence
+                )
+        self._font_owner_fault_identity_unchanged = (self._font_owner_fault_identity_unchanged and
+            adapter.font_fault_identity_unchanged)
+        self._font_adapter_observed_sequence = adapter_sequence
+        val adapter_fallbacks = adapter.font_fault_fallback_count
+        if adapter_fallbacks < self._font_adapter_observed_fallback_count:
+            self._font_adapter_observed_fallback_count = 0
+        val fallback_delta = adapter_fallbacks - self._font_adapter_observed_fallback_count
+        if fallback_delta > 0:
+            self._font_owner_fault_fallback_count = self._font_owner_fault_fallback_count + fallback_delta
+        self._font_adapter_observed_fallback_count = adapter_fallbacks
 
     # ========================================================================
     # Constructors
@@ -147,6 +189,24 @@ class Engine3D:
             _w: width,
             _h: height,
             _resources: ResourcePool3D.create(),
+            _font_owner: Engine2DFontOwner.new(),
+            last_font_execution_attempts: [],
+            _pending_font_cpu_fallbacks: [],
+            _predrawn_font_cpu_fallback_count: 0,
+            _font_plan_scratch: [],
+            _font_attempt_scratch: [],
+            _font_screen_x: 0,
+            _font_screen_y: 0,
+            _font_screen_depth: 0.0f32,
+            _font_owner_fault_mask: 0,
+            _font_owner_last_fault: FONT_OWNER_FAULT_NONE,
+            _font_owner_fault_sequence: 0,
+            _font_device_loss_sequence: 0,
+            _font_owner_fault_identity_unchanged: true,
+            _font_owner_fault_fallback_count: 0,
+            _font_adapter_observed_sequence: 0,
+            _font_adapter_observed_fallback_count: 0,
+            _font_install_failure_pending: false,
             _view: mat4_identity(),
             _proj: mat4_identity()
         )
@@ -167,10 +227,16 @@ class Engine3D:
         if installed != nil:
             return installed.?.ready
         var adapter = VulkanFontAdapter3D.create(self._w, self._h)
+        self._font_adapter_observed_sequence = 0
+        self._font_adapter_observed_fallback_count = 0
+        self._capture_vulkan_font_fault_state(adapter)
         if not adapter.ready:
             adapter.shutdown()
+            self._capture_vulkan_font_fault_state(adapter)
+            self._font_install_failure_pending = true
             return false
         self._vulkan_font = adapter
+        self._font_install_failure_pending = false
         self._backend_name = "vulkan-font"
         true
 
@@ -193,6 +259,14 @@ class Engine3D:
     fn vulkan_font_receipt_world_vertex_upload_count() -> i64: self._font_receipt_world_vertex_upload_count
     fn vulkan_font_receipt_world_vertex_uploaded_bytes() -> i64: self._font_receipt_world_vertex_uploaded_bytes
 
+    fn font_owner_fault_receipt() -> i64: self._font_owner_last_fault
+    fn font_owner_fault_mask() -> i64: self._font_owner_fault_mask
+    fn font_owner_fault_sequence() -> i64: self._font_owner_fault_sequence
+    fn font_device_loss_sequence() -> i64: self._font_device_loss_sequence
+    fn font_device_loss_observed() -> bool: self._font_device_loss_sequence > 0
+    fn font_owner_fault_identity_unchanged() -> bool: self._font_owner_fault_identity_unchanged
+    fn font_owner_fault_fallback_count() -> i64: self._font_owner_fault_fallback_count
+
     me _clear_vulkan_font_receipts():
         self._font_receipt_frame_sequence = 0
         self._font_receipt_ready = false
@@ -207,7 +281,11 @@ class Engine3D:
         self._font_receipt_world_vertex_upload_count = 0
         self._font_receipt_world_vertex_uploaded_bytes = 0
 
-    fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
+    fn font_execution_attempts() -> [text]:
+        var snapshot: [text] = []
+        for attempt in self.last_font_execution_attempts:
+            snapshot.push(attempt)
+        snapshot
     fn font_execution_target() -> text: self.last_font_execution_target
 
     # ========================================================================
@@ -230,9 +308,20 @@ class Engine3D:
         if active != nil:
             var vulkan = active.?
             vulkan.shutdown()
-        self._vulkan_font = nil
+            self._capture_vulkan_font_fault_state(vulkan)
+            if vulkan.shutdown_complete():
+                self._vulkan_font = nil
+            else:
+                self._vulkan_font = vulkan
+        else:
+            self._vulkan_font = nil
         self._clear_vulkan_font_receipts()
-        self._pending_font_cpu_fallbacks = []
+        self._font_install_failure_pending = false
+        self._pending_font_cpu_fallbacks.clear()
+        self._predrawn_font_cpu_fallback_count = 0
+        self.last_font_execution_attempts = []
+        self._font_attempt_scratch.clear()
+        self._font_plan_scratch.clear()
         self._cpu.shutdown()
 
     me begin_frame():
@@ -242,14 +331,18 @@ class Engine3D:
         self._clear_vulkan_font_receipts()
         self._font_frame_target = ""
         self._font_readback_target = ""
-        self._pending_font_cpu_fallbacks = []
+        self._pending_font_cpu_fallbacks.clear()
+        self._predrawn_font_cpu_fallback_count = 0
         self.last_font_execution_attempts = []
+        self._font_attempt_scratch.clear()
+        self._font_plan_scratch.clear()
         self.last_font_execution_target = ""
         val active = self._vulkan_font
         if active != nil:
             var vulkan = active.?
-            if not vulkan.begin_frame():
-                vulkan.reason = "vulkan-font-frame-begin-failed"
+            if vulkan.font_device_loss_sequence == 0:
+                vulkan.begin_frame()
+            self._capture_vulkan_font_fault_state(vulkan)
             self._vulkan_font = vulkan
 
     me end_frame():
@@ -257,6 +350,7 @@ class Engine3D:
         if active != nil:
             var vulkan = active.?
             val evidence = vulkan.end_frame()
+            self._capture_vulkan_font_fault_state(vulkan)
             self._vulkan_font_evidence = evidence
             self._font_receipt_frame_sequence = evidence.frame_sequence
             self._font_receipt_ready = evidence.ready
@@ -276,10 +370,12 @@ class Engine3D:
                 evidence.hud_draws + evidence.world_draws > 0 and
                 evidence.pixels_rgba8.len() == expected_bytes)
             val completion_target = engine3d_font_completion_target(
-                completed, self._pending_font_cpu_fallbacks.len()
+                completed, self._pending_font_cpu_fallbacks.len() + self._predrawn_font_cpu_fallback_count
             )
             if self._font_frame_target == "vulkan":
-                var completion_attempts = self.last_font_execution_attempts
+                var completion_attempts: [text] = []
+                for attempt in self.last_font_execution_attempts:
+                    completion_attempts.push(attempt)
                 val completion_reason = if evidence.reason == "": "completion-failed" else: evidence.reason
                 completion_attempts.push(if completed: "vulkan:success" else: "vulkan:" + completion_reason)
                 self.last_font_execution_attempts = completion_attempts
@@ -296,14 +392,29 @@ class Engine3D:
                 self.last_font_execution_target = "vulkan"
             elif completion_target == "cpu":
                 var replayed = true
-                for pending in self._pending_font_cpu_fallbacks:
-                    if not pending.already_drawn and not self._draw_font_batch_hud(pending.x, pending.y, pending.batch):
-                        replayed = false
+                if self._pending_font_cpu_fallbacks.len() > 0:
+                    val target_w = self._cpu.width()
+                    val target_h = self._cpu.height()
+                    var target = self._cpu.read_pixels()
+                    var drawn = false
+                    for pending in self._pending_font_cpu_fallbacks:
+                        if self._draw_font_batch_hud_into(
+                            pending.x, pending.y, pending.batch, target_w, target_h, target
+                        ):
+                            drawn = true
+                        else:
+                            replayed = false
+                    if drawn:
+                        self._cpu.draw_image(0, 0, target_w, target_h, target)
                 if replayed:
+                    vulkan.record_font_fallback()
+                    self._capture_vulkan_font_fault_state(vulkan)
                     self._font_frame_target = "cpu"
                     self._font_readback_target = "cpu"
                     self.last_font_execution_target = "cpu"
-                    var fallback_attempts = self.last_font_execution_attempts
+                    var fallback_attempts: [text] = []
+                    for attempt in self.last_font_execution_attempts:
+                        fallback_attempts.push(attempt)
                     fallback_attempts.push("cpu:deferred-success")
                     self.last_font_execution_attempts = fallback_attempts
                 else:
@@ -312,7 +423,8 @@ class Engine3D:
             elif self._font_frame_target == "vulkan":
                 self._font_readback_target = "unavailable"
                 self.last_font_execution_target = ""
-            self._pending_font_cpu_fallbacks = []
+            self._pending_font_cpu_fallbacks.clear()
+            self._predrawn_font_cpu_fallback_count = 0
             self._vulkan_font = vulkan
         self._cpu.end_frame()
 
@@ -399,30 +511,30 @@ class Engine3D:
         self._cpu.draw_image(x, y, w, h, pixels)
 
     me load_font(path: text) -> bool:
-        val fonts = self.fonts()
+        self._ensure_font_renderer()
+        var fonts: FontRenderer = self._font_owner.active[0]
         val loaded = fonts.try_load_runtime_ttf(path)
-        self._font_renderer = fonts
+        self._font_owner.active[0] = fonts
         loaded
 
     me unload_font():
-        val active = self._font_renderer
-        if active != nil:
-            val fonts = active
+        if self._font_owner.active.len() > 0:
+            var fonts: FontRenderer = self._font_owner.active[0]
             fonts.clear_ttf()
-        self._font_renderer = nil
+            self._font_owner.active[0] = fonts
+        self._font_owner.active = []
 
     me font_cache_stats() -> FontCacheStats:
-        val fonts = self.fonts()
+        self._ensure_font_renderer()
+        var fonts: FontRenderer = self._font_owner.active[0]
         val stats = fonts.cache_stats()
-        self._font_renderer = fonts
+        self._font_owner.active[0] = fonts
         stats
 
-    me _draw_font_batch_hud(x: i32, y: i32, batch: FontRenderBatch) -> bool:
+    me _draw_font_batch_hud_into(x: i32, y: i32, batch: FontRenderBatch,
+                                 target_w: i32, target_h: i32, target: [u32]) -> bool:
         if not batch.material_supported() or batch.is_empty():
             return false
-        val target_w = self._cpu.width()
-        val target_h = self._cpu.height()
-        var target = self._cpu.read_pixels()
         var drawn = false
         var i = 0
         while i < batch.quads.len():
@@ -450,6 +562,13 @@ class Engine3D:
                             col = col + 1
                         row = row + 1
             i = i + 1
+        drawn
+
+    me _draw_font_batch_hud(x: i32, y: i32, batch: FontRenderBatch) -> bool:
+        val target_w = self._cpu.width()
+        val target_h = self._cpu.height()
+        var target = self._cpu.read_pixels()
+        val drawn = self._draw_font_batch_hud_into(x, y, batch, target_w, target_h, target)
         if drawn:
             self._cpu.draw_image(0, 0, target_w, target_h, target)
         drawn
@@ -458,8 +577,10 @@ class Engine3D:
                                batch: FontRenderBatch, plan: [text]) -> bool:
         if not batch.material_supported() or plan.len() == 0:
             return false
-        var attempts: [text] = []
+        var attempts = self._font_attempt_scratch
+        attempts.clear()
         var winner = ""
+        var vulkan_failed = false
         for target in plan:
             if not engine3d_font_frame_target_allows(self._font_frame_target, target):
                 attempts.push(target + ":frame-target=" + self._font_frame_target)
@@ -467,32 +588,57 @@ class Engine3D:
                 val active = self._vulkan_font
                 if active == nil:
                     attempts.push("vulkan:unavailable")
+                    if self._font_install_failure_pending:
+                        vulkan_failed = true
                 else:
                     var vulkan = active.?
-                    val drawn = if world:
-                        vulkan.draw_world(x, y, depth, batch)
+                    if vulkan.font_device_loss_sequence > 0:
+                        attempts.push("vulkan:device-lost")
+                        vulkan_failed = true
+                        self._vulkan_font = vulkan
                     else:
-                        vulkan.draw_hud(x, y, batch)
-                    self._vulkan_font = vulkan
-                    attempts.push(if drawn: "vulkan:pending" else: "vulkan:failed")
-                    if drawn:
-                        winner = "vulkan-pending"
-                        self._font_frame_target = "vulkan"
-                        var cpu_ready = false
-                        if self._font_cpu_comparator and plan.contains("cpu"):
-                            cpu_ready = self._draw_font_batch_hud(x, y, batch)
-                        if plan.contains("cpu"):
-                            self._pending_font_cpu_fallbacks.push(
-                                _PendingFontCpuFallback(x: x, y: y, batch: batch, already_drawn: cpu_ready)
-                            )
+                        val drawn = if world:
+                            vulkan.draw_world(x, y, depth, batch)
+                        else:
+                            vulkan.draw_hud(x, y, batch)
+                        self._capture_vulkan_font_fault_state(vulkan)
+                        self._vulkan_font = vulkan
+                        val failure_reason = if vulkan.reason == "": "failed" else: vulkan.reason
+                        attempts.push(if drawn: "vulkan:pending" else: "vulkan:" + failure_reason)
+                        if drawn:
+                            winner = "vulkan-pending"
+                            self._font_frame_target = "vulkan"
+                            var cpu_ready = false
+                            if self._font_cpu_comparator and plan.contains("cpu"):
+                                cpu_ready = self._draw_font_batch_hud(x, y, batch)
+                            if plan.contains("cpu"):
+                                if cpu_ready:
+                                    self._predrawn_font_cpu_fallback_count = self._predrawn_font_cpu_fallback_count + 1
+                                else:
+                                    self._pending_font_cpu_fallbacks.push(
+                                        _PendingFontCpuFallback(x: x, y: y, batch: batch)
+                                    )
+                        else:
+                            vulkan_failed = true
             elif target == "cpu":
                 val drawn = self._draw_font_batch_hud(x, y, batch)
                 attempts.push(if drawn: "cpu:success" else: "cpu:failed")
                 if drawn:
+                    if vulkan_failed:
+                        val failed_active = self._vulkan_font
+                        if failed_active != nil:
+                            var failed_vulkan = failed_active.?
+                            failed_vulkan.record_font_fallback()
+                            self._capture_vulkan_font_fault_state(failed_vulkan)
+                            self._vulkan_font = failed_vulkan
+                        else:
+                            self._font_owner_fault_fallback_count = self._font_owner_fault_fallback_count + 1
+                        self._font_install_failure_pending = false
                     winner = "cpu"
                     self._font_frame_target = "cpu"
             if winner != "":
                 break
+        self._font_attempt_scratch = attempts
         self.last_font_execution_attempts = attempts
         self.last_font_execution_target = winner
         if winner == "vulkan-pending":
@@ -501,11 +647,43 @@ class Engine3D:
             self._font_readback_target = "cpu"
         winner != ""
 
+    # Materialize the renderer's staged payload locally and pass the batch only
+    # inbound. Returning FontRenderBatch across a native call can lose its
+    # array fields, while live receiver fields and inbound aggregates are the
+    # established safe transfer used by Engine2D.
+    me _draw_staged_font_batch_policy(x: i32, y: i32, depth: f32, world: bool,
+                                      plan: [text]) -> bool:
+        if self._font_owner.active.len() == 0:
+            return false
+        val batch = FontRenderBatch(
+            program_version: self._font_owner.active[0].staged_program_version,
+            transform_identity: self._font_owner.active[0].staged_transform_identity,
+            font_identity: self._font_owner.active[0].staged_font_identity,
+            face_generation: self._font_owner.active[0].staged_face_generation,
+            valid: self._font_owner.active[0].staged_valid,
+            atlas_width: self._font_owner.active[0].staged_atlas_width,
+            atlas_height: self._font_owner.active[0].staged_atlas_height,
+            atlas_pixels: self._font_owner.active[0].atlas_pixels,
+            quads: self._font_owner.active[0].staged_quads,
+            atlas_generation: self._font_owner.active[0].staged_atlas_generation,
+            dirty_rects: self._font_owner.active[0].staged_dirty_rects,
+            atlas_owner_generation: self._font_owner.active[0].staged_atlas_owner_generation,
+            render_config_identity: self._font_owner.active[0].staged_render_config_identity,
+            execution_target: self._font_owner.active[0].staged_execution_target,
+            execution_policy: self._font_owner.active[0].staged_execution_policy
+        )
+        self._draw_font_batch_policy(x, y, depth, world, batch, plan)
+
     me draw_glyph_run_hud(x: i32, y: i32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
-        val fonts = self.fonts()
-        val batch = fonts.prepare_glyph_run(run, color, font_size)
-        self._font_renderer = fonts
-        self._draw_font_batch_policy(x, y, 0.0f32, false, batch, ["vulkan", "cpu"])
+        self._ensure_font_renderer()
+        var fonts: FontRenderer = self._font_owner.active[0]
+        val staged_count = fonts.stage_glyph_run(run, color, font_size)
+        self._font_owner.active[0] = fonts
+        if staged_count <= 0:
+            return false
+        val drawn = self._draw_staged_font_batch_policy(
+            x, y, 0.0f32, false, ENGINE3D_FONT_EXECUTION_TARGETS)
+        drawn
 
     me draw_text_hud(x: i32, y: i32, content: text, color: u32, font_size: i32) -> bool:
         self.draw_text_hud_configured(
@@ -513,34 +691,48 @@ class Engine3D:
         )
 
     me draw_text_hud_configured(x: i32, y: i32, content: text, color: u32, config: FontRenderConfig) -> bool:
-        val plan = font_execution_plan(config, ["vulkan", "cpu"])
-        if plan.len() == 0 or not font_render_config_selection_supported(config):
+        var plan = self._font_plan_scratch
+        val plan_count = font_execution_plan_into(config, ENGINE3D_FONT_EXECUTION_TARGETS, plan)
+        self._font_plan_scratch = plan
+        if plan_count <= 0:
             return false
-        val fonts = self.fonts()
-        val batch = fonts.prepare_text_configured(content, color, config)
-        self._font_renderer = fonts
-        self._draw_font_batch_policy(x, y, 0.0f32, false, batch, plan)
+        if plan.len() == 0:
+            return false
+        if not font_render_config_selection_supported(config):
+            return false
+        self._ensure_font_renderer()
+        var fonts: FontRenderer = self._font_owner.active[0]
+        fonts.stage_text_configured(content, color, config)
+        self._font_owner.active[0] = fonts
+        val drawn = self._draw_staged_font_batch_policy(x, y, 0.0f32, false, plan)
+        drawn
 
-    fn _font_world_screen(x: f32, y: f32, z: f32) -> (bool, i32, i32, f32):
+    me _font_world_screen_into(x: f32, y: f32, z: f32) -> bool:
         val target_w = self._cpu.width()
         val target_h = self._cpu.height()
         if self._view.len() != 16 or self._proj.len() != 16 or target_w <= 0 or target_h <= 0:
-            return (false, 0, 0, 0.0f32)
-        val vp = mat4_mul(self._proj, self._view)
-        val clip_x = vp[0] * x + vp[4] * y + vp[8] * z + vp[12]
-        val clip_y = vp[1] * x + vp[5] * y + vp[9] * z + vp[13]
-        val clip_z = vp[2] * x + vp[6] * y + vp[10] * z + vp[14]
-        val clip_w = vp[3] * x + vp[7] * y + vp[11] * z + vp[15]
+            return false
+        val view_x = self._view[0] * x + self._view[4] * y + self._view[8] * z + self._view[12]
+        val view_y = self._view[1] * x + self._view[5] * y + self._view[9] * z + self._view[13]
+        val view_z = self._view[2] * x + self._view[6] * y + self._view[10] * z + self._view[14]
+        val view_w = self._view[3] * x + self._view[7] * y + self._view[11] * z + self._view[15]
+        val clip_x = self._proj[0] * view_x + self._proj[4] * view_y + self._proj[8] * view_z + self._proj[12] * view_w
+        val clip_y = self._proj[1] * view_x + self._proj[5] * view_y + self._proj[9] * view_z + self._proj[13] * view_w
+        val clip_z = self._proj[2] * view_x + self._proj[6] * view_y + self._proj[10] * view_z + self._proj[14] * view_w
+        val clip_w = self._proj[3] * view_x + self._proj[7] * view_y + self._proj[11] * view_z + self._proj[15] * view_w
         if clip_w <= 0.0:
-            return (false, 0, 0, 0.0f32)
+            return false
         val ndc_x = clip_x / clip_w
         val ndc_y = clip_y / clip_w
         val ndc_z = clip_z / clip_w
         if ndc_x < -1.0 or ndc_x > 1.0 or ndc_y < -1.0 or ndc_y > 1.0 or ndc_z < -1.0 or ndc_z > 1.0:
-            return (false, 0, 0, 0.0f32)
+            return false
         val screen_x = ((ndc_x + 1.0) * (target_w as f32) / 2.0) as i32
         val screen_y = ((1.0 - ndc_y) * (target_h as f32) / 2.0) as i32
-        (true, screen_x, screen_y, ndc_z)
+        self._font_screen_x = screen_x
+        self._font_screen_y = screen_y
+        self._font_screen_depth = ndc_z
+        true
 
     me draw_text_world(x: f32, y: f32, z: f32, content: text, color: u32, font_size: i32) -> bool:
         self.draw_text_world_configured(
@@ -548,25 +740,38 @@ class Engine3D:
         )
 
     me draw_text_world_configured(x: f32, y: f32, z: f32, content: text, color: u32, config: FontRenderConfig) -> bool:
-        val plan = font_execution_plan(config, ["vulkan", "cpu"])
-        if plan.len() == 0 or not font_render_config_selection_supported(config):
+        var plan = self._font_plan_scratch
+        val plan_count = font_execution_plan_into(config, ENGINE3D_FONT_EXECUTION_TARGETS, plan)
+        self._font_plan_scratch = plan
+        if plan_count <= 0:
             return false
-        val projected = self._font_world_screen(x, y, z)
-        if not projected.0:
+        if plan.len() == 0:
             return false
-        val fonts = self.fonts()
-        val batch = fonts.prepare_text_configured(content, color, config)
-        self._font_renderer = fonts
-        self._draw_font_batch_policy(projected.1, projected.2, projected.3, true, batch, plan)
+        if not font_render_config_selection_supported(config):
+            return false
+        if not self._font_world_screen_into(x, y, z):
+            return false
+        self._ensure_font_renderer()
+        var fonts: FontRenderer = self._font_owner.active[0]
+        fonts.stage_text_configured(content, color, config)
+        self._font_owner.active[0] = fonts
+        val drawn = self._draw_staged_font_batch_policy(
+            self._font_screen_x, self._font_screen_y, self._font_screen_depth, true, plan)
+        drawn
 
     me draw_glyph_run_world(x: f32, y: f32, z: f32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
-        val projected = self._font_world_screen(x, y, z)
-        if not projected.0:
+        if not self._font_world_screen_into(x, y, z):
             return false
-        val fonts = self.fonts()
-        val batch = fonts.prepare_glyph_run(run, color, font_size)
-        self._font_renderer = fonts
-        self._draw_font_batch_policy(projected.1, projected.2, projected.3, true, batch, ["vulkan", "cpu"])
+        self._ensure_font_renderer()
+        var fonts: FontRenderer = self._font_owner.active[0]
+        val staged_count = fonts.stage_glyph_run(run, color, font_size)
+        self._font_owner.active[0] = fonts
+        if staged_count <= 0:
+            return false
+        val drawn = self._draw_staged_font_batch_policy(
+            self._font_screen_x, self._font_screen_y, self._font_screen_depth,
+            true, ENGINE3D_FONT_EXECUTION_TARGETS)
+        drawn
 
     fn read_pixels() -> [u32]:
         if self._font_readback_target == "vulkan-pending" or self._font_readback_target == "unavailable":

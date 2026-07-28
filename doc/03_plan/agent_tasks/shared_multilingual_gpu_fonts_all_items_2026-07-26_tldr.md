@@ -1,43 +1,38 @@
 # Shared Multilingual GPU Fonts — All Remaining Items — TLDR
 
-Six non-overlapping lanes own every selected REQ-001–016 and NFR-001–008 row;
-`/root` alone integrates, reviews, rebases, and pushes.
+Six non-overlapping lanes own REQ-001–016 and NFR-001–008; `/root` integrates,
+reviews, syncs, and pushes.
 
 ## Core Shape
 
-1. P0 builds/adopts the CLI while font lanes perform read-only source and host
-   preparation.
-2. A records CLI/core-C hashes and runs essential-tools, lint, duplicate-check,
-   deliberate-red, and zero-example calibration once.
-3. B distribution, C shaping/material/config, D host preparation, and E
-   deterministic emission proceed in parallel.
-4. D1 proves Engine2D, then Web, GUI, hosted-WM, x86 SimpleOS, and RV64
-   capability rows run independently; native 2D/3D and performance run when a
-   real device is available.
-5. Owners generate manuals, F audits, and H performs final review/sync serially.
+- P0 admits the pure-Simple CLI/core-C identity; A runs shared calibration.
+- B distribution, C shaping/material/config, D host rows, and E deterministic
+  native/performance evidence proceed independently.
+- Owners generate manuals, F audits them, and H performs the final review/sync.
+- `FontRenderer`/`FontRenderBatch`, SSpec steps, and checker names are frozen.
 
-## Frozen Facts
+## Current Truth
 
-- `FontRenderer`/`FontRenderBatch`, SSpec steps, and checker names remain frozen.
-- Old-plan lane letters are historical: old A/B/C/D/E/F/G map to current
-  B/C/E/E/F/D/D; the obsolete eleven-manual count must not be dispatched.
-- The current manual inventory is 34 changed/new specs: 14 mirrors missing,
-  20 stale, zero current; all 34 require immutable owner docgen and F review
-  with `0 stubs`.
-- Three prerequisite compiler perf-repair mirrors outside the font graph also
-  require docgen and `0 stubs`; all three canonical mirrors are missing.
-- The authoritative focused graph is 39 commands: one runner-contract
-  preflight, B6, C17, D11, and E4.
-- Production rows are Engine2D, Web, GUI, hosted WM, x86 SimpleOS, and RV64
-  SimpleOS; unavailable hardware remains blocked, never simulated PASS.
-- P0 is compiler-enablement only. This window has no eligible CLI, parent, or
-  provenance-valid cache and permits no fourth producer/full bootstrap. A
-  future fresh window must first prove an immutable pure-Simple parent/current
-  source receipt, then use the cheapest adequate incremental build.
-- Three shared compiler performance defects are source-fixed and independently
-  reviewed: Stage4 low-memory forwarding/restoration, one direct sibling-owner
-  index per lowering pass, and direct qualified-function lookup. Runtime and
-  measured-gain evidence remain open.
+- Focused graph: 46 commands (preflight, B6, C18, D12, E9).
+- Manuals: 42 font mirrors (19 missing, 23 stale) plus four missing compiler
+  prerequisite mirrors; every mirror needs immutable docgen and `0 stubs`.
+- Evidence: REQ/NFR `0 pass / 0 active / 24 blocked`; AC
+  `1 pass / 4 active / 7 blocked`.
+- Checkout: 75 changed/new paths at `24a77be3c89a`; origin comparison is 87
+  behind / 70 ahead. No completion sync has run.
+- Source fixes cover per-invocation Stage3/HIR env/profile hoisting, GPOS
+  owner-relative lookup, scalar owner-fault receipts, transactional atlas/fence
+  safety, reusable vertex bytes, a bounded completed vertex pool, one deferred
+  fallback snapshot, cleared Engine2D fallback pixels, stable Vulkan UUID/LUID
+  identity, and wait/device-loss error retention.
+- Host-independent exact Rust diagnostics pass: runtime UUID/LUID identity
+  (0.00s, 5,632 KiB max RSS) and compiler device-loss classification (17.84s,
+  2,169,768 KiB max RSS). They are not pure-Simple acceptance evidence.
+- No admitted current-source CLI exists. Runtime, docgen, native, QEMU, and
+  performance acceptance rows have not run; unavailable hardware is never PASS.
+- Three producer/profile cycles are exhausted. This window permits no fourth
+  producer or full bootstrap; a fresh window may resume the retained cache once.
+- Exact NFR-007 blocker remains `font-owner-fault-runtime-proof-unavailable`.
 
 ## Open Next
 

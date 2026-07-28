@@ -143,3 +143,113 @@ remain open.
 Acceptance requires a produced full CLI, bounded warm elapsed time/RSS evidence,
 and green test-runner, lint, and duplication probes. A CPU-active process with
 unbounded RSS is not a passing “slow build.”
+
+### 2026-07-28 current-overlay incremental producer
+
+The fresh window bound the exact overlay at HEAD `24a77be3c89a`, tracked
+`src scripts test` diff SHA-256
+`c5233e73b817e1ca915aa768f62856200b7fc43b542b2715d03ed7c5eab218b1`,
+pure-Simple parent SHA-256
+`a920123d919c4a4c384161e16fe35a1853d6e3da6bfd3a4a4e7291a2c072f04d`,
+and core-C runtime SHA-256
+`822f4ef4f1f6cad0d3e3a8a0a51c0f68de8bf23452059ec5d3c292a9a9750605`.
+All runs used the retained exclusive cache, two threads, `--low-memory`, the
+full `src/app/cli/main.spl` entry closure, and a 32 GiB cgroup cap.
+
+Cycle 1 intentionally retained phase profiling and reproduced the old parent's
+per-expression log/RSS cost; it was stopped after 1,300.86 seconds at
+24,951,108 KiB max RSS. Cycle 2 disabled profiling and enabled
+`SIMPLE_NATIVE_INCREMENTAL=1`; unrelated host jobs drove available RAM below
+10%, so `earlyoom` terminated it after 594.71 seconds at 10,623,772 KiB rather
+than a compiler failure. Cycle 3 ran after resource admission, completed HIR
+finalization with no HIR error, then its cgroup OOM-killed `simple` at
+33,483,972 KiB anonymous RSS before codegen/link. No executable was produced.
+Retained log SHA-256 values are respectively
+`a2bc96cbec9a304a94bb8d8b926996f598c2cb1f185a2ef50566b061d7156760`,
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,
+and `5cc177b2746cf4a117df4917cb9dde2ec3f0a30740e7a7157befb59e23967cc5`.
+
+The remaining root cause is retained HIR/module state exceeding the low-memory
+ceiling before codegen. The next implementation cycle must release completed
+module state or otherwise bound its owner lifetime; raising the cap is not the
+fix. The three-cycle guard forbids another producer in this window.
+
+### 2026-07-28 dead Stage 4 flat-store repair
+
+The retained owner is now narrower. Every Stage 4 module populated canonical
+`CompileContext.hir_modules` and also materialized legacy
+`_bootstrap_hir_functions` plus `_bootstrap_hir_module_*` copies. Stage 4 never
+consumes those globals: both flat-HIR-to-MIR dispatches require
+`SIMPLE_BOOTSTRAP_STAGE4 != 1`; the Stage 4 path reads only canonical HIR.
+Normal MIR lowering likewise stored each function in its returned `MirModule`
+and in the unused `_bootstrap_mir_functions` accumulator.
+
+Current source adds a constructor-hoisted `bootstrap_flat_store` predicate and
+suppresses all legacy flat HIR reset/add/materialization when Stage 4 is active.
+It also suppresses the analogous duplicate MIR function accumulator while
+preserving canonical HIR/MIR and cross-module return-type registration. This
+avoids allocation rather than attempting unsafe post-hoc deep frees: runtime
+values are pointer-aliased, and the portable deep-free surface cannot prove
+external ownership.
+
+`SIMPLE_COMPILER_MEMORY_PROFILE=1` now enables coarse per-phase/per-module
+elapsed plus `heap_registry` receipts without enabling expression/function
+trace traffic. The focused HIR spec passed 4/4 under bounded seed diagnostics;
+working and staged direct-runtime guards pass. Pure-Simple runtime measurement
+remains pending because the three-cycle producer window is exhausted, so no
+RSS improvement or completion claim is made yet.
+
+The next authorized producer window should run exactly once with the retained
+incremental cache and the coarse profiler (the canonical CLI entry is
+`src/app/cli/main.spl`):
+
+```bash
+RUNTIME_ROOT=/home/ormastes/dev/pub/simple/src/compiler_rust/target/bootstrap
+mkdir -p build/native_probe/current-overlay-full-cli-next
+flock -n build/bootstrap/native_cache/.stage4-producer.lock \
+  sh scripts/resource/run_capped.shs timeout -k 30s 3600s \
+  env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_STAGE4=1 \
+  SIMPLE_BOOTSTRAP_LOW_MEMORY=1 SIMPLE_NATIVE_INCREMENTAL=1 \
+  SIMPLE_COMPILER_MEMORY_PROFILE=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_THREADS=2 \
+  SIMPLE_NATIVE_BUILD_CACHE_DIR=build/bootstrap/native_cache \
+  SIMPLE_RUNTIME_PATH="$RUNTIME_ROOT" \
+  SIMPLE_BINARY="$PWD/build/native_probe/rebased-latest-stage3-cycle1/simple" \
+  build/native_probe/rebased-latest-stage3-cycle1/simple native-build \
+  --target x86_64-unknown-linux-gnu --backend cranelift \
+  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
+  --source src/lib --source examples/10_tooling --entry-closure --low-memory \
+  --threads 2 --cache-dir build/bootstrap/native_cache --mode one-binary \
+  --entry src/app/cli/main.spl \
+  --runtime-path "$RUNTIME_ROOT" \
+  -o build/native_probe/current-overlay-full-cli-next/simple \
+  >build/native_probe/current-overlay-full-cli-next/producer.log 2>&1
+```
+
+Before launch, bind the source, parent, runtime, literal command, cache, and lock
+identities in the output directory. Afterward record exit status and capped
+resource receipt; admit a successful output only with its SHA-256 and the
+incremental reused/rebuilt counts from the producer log.
+
+## Current-parent prerequisite result (2026-07-28)
+
+The command above cannot exercise a compiler-source memory fix when its parent
+predates that fix: the parent performs HIR/MIR lowering while compiling the new
+source. A current Stage 3 parent must therefore be produced first with the
+canonical positional `src/app/cli/bootstrap_main.spl` route (no `--entry`,
+`--entry-closure`, or `--source`), then used for Stage 4.
+
+The authorized three-cycle window produced no executable:
+
+- cycle 1 was stopped at 12.92 GiB after unrelated builds crossed the declared
+  host-headroom floor; the cache was preserved;
+- cycle 2 proved the old parent still followed the prior slope and was stopped
+  after 1,197 seconds at 26.98 GiB maximum RSS;
+- cycle 3 used the corrected positional Stage 3 route and was cgroup OOM-killed
+  after 1,409 seconds. The last observed cgroup peak was 31.16 GiB under the
+  32 GiB cap; the systemd journal records `Failed with result 'oom-kill'`.
+
+Cycle receipts are under `build/native_probe/current-overlay-full-cli-next*`
+and `build/native_probe/current-source-stage3-cycle3/`. A future bounded window
+must first produce the current Stage 3 parent; direct Stage 4 from the retained
+old parent cannot validate or benefit from this repair.

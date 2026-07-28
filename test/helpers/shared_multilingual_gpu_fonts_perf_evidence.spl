@@ -2,6 +2,8 @@ use std.io_runtime.{file_read, file_write, file_exists, file_delete, file_hash_s
 use std.common.crypto.sha256.{sha256_text}
 
 val FONT_PERF_EVIDENCE_PATH = "build/shared_multilingual_gpu_fonts_perf/evidence.env"
+val FONT_NATIVE_AA_EDGE_CHANNEL_ABS_MAX: i64 = 2
+val FONT_NATIVE_AA_COVERAGE_ABS_MAX: i64 = 1
 val FONT_PERF_COLLECTOR_PATH = "test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl"
 val FONT_PERF_HELPER_PATH = "test/helpers/shared_multilingual_gpu_fonts_perf_evidence.spl"
 val FONT_PERF_RSS_PROBE_PATH = "src/app/test/shared_multilingual_gpu_fonts_rss_probe.spl"
@@ -96,6 +98,14 @@ class FontPerfBudgetEvidence:
     promotion_device_executed: bool = false
     promotion_ready: bool = false
     promotion_present_mode: text = ""
+    gpu_device_type: text = ""
+
+fn font_native_aa_within_limits(edge_channel_abs_delta: i64,
+                                coverage_abs_delta: i64) -> bool:
+    (edge_channel_abs_delta >= 0 and
+        edge_channel_abs_delta <= FONT_NATIVE_AA_EDGE_CHANNEL_ABS_MAX and
+        coverage_abs_delta >= 0 and
+        coverage_abs_delta <= FONT_NATIVE_AA_COVERAGE_ABS_MAX)
 
 fn unavailable_font_perf_evidence(reason: text) -> FontPerfBudgetEvidence:
     FontPerfBudgetEvidence(
@@ -225,7 +235,8 @@ fn _valid_shape(evidence: FontPerfBudgetEvidence) -> bool:
         not _safe_record_text(evidence.promotion_batch_identity) or
         not _safe_record_text(evidence.promotion_atlas_payload_sha256) or
         not _safe_record_text(evidence.promotion_readback_source) or
-        not _safe_record_text(evidence.promotion_present_mode)):
+        not _safe_record_text(evidence.promotion_present_mode) or
+        not _safe_record_text(evidence.gpu_device_type)):
         return false
     if evidence.warm_1080_p95_ns < 0 or evidence.warm_1080_p95_ns > 1000000000000 or evidence.warm_4k_p95_ns < 0 or evidence.warm_4k_p95_ns > 1000000000000: return false
     if evidence.cpu_4096_p95_ns < 0 or evidence.cpu_4096_p95_ns > 1000000000000 or evidence.gpu_4096_p95_ns < 0 or evidence.gpu_4096_p95_ns > 1000000000000: return false
@@ -296,7 +307,8 @@ fn expect_font_perf_budget(evidence: FontPerfBudgetEvidence) -> bool:
         evidence.unchanged_upload and evidence.rss_available and
         evidence.rss_growth_percent == _paired_rss_growth_percent(evidence) and evidence.rss_growth_percent <= 10 and
         evidence.gpu_device_name != "" and evidence.gpu_driver_identity != "" and
-        evidence.device_loss_status == "controlled-poison-cpu-fallback" and
+        (evidence.gpu_device_type == "discrete" or evidence.gpu_device_type == "integrated") and
+        evidence.device_loss_status == "owner-device-loss-observed-cpu-fallback" and
         evidence.device_loss_batch_identity_before != "" and
         evidence.device_loss_batch_identity_after == evidence.device_loss_batch_identity_before and
         evidence.cpu_after_device_loss_p95_ns > 0 and
@@ -378,7 +390,8 @@ fn font_perf_evidence_record(evidence: FontPerfBudgetEvidence) -> text:
     val recovery = "\ndevice_loss_status={evidence.device_loss_status}\ndevice_loss_batch_identity_before={evidence.device_loss_batch_identity_before}\ndevice_loss_batch_identity_after={evidence.device_loss_batch_identity_after}\ncpu_after_device_loss_p95_ns={evidence.cpu_after_device_loss_p95_ns}\ncpu_after_device_loss_samples_ns={_samples_text(evidence.cpu_after_device_loss_samples_ns)}"
     val stages = "\nstage_shaping_p95_ns={evidence.stage_shaping_p95_ns}\nstage_material_p95_ns={evidence.stage_material_p95_ns}\nstage_emission_compile_ns={evidence.stage_emission_compile_ns}\nstage_dirty_upload_p95_ns={evidence.stage_dirty_upload_p95_ns}\nstage_queue_device_p95_ns={evidence.stage_queue_device_p95_ns}\nstage_sync_p95_ns={evidence.stage_sync_p95_ns}\nstage_present_readback_p95_ns={evidence.stage_present_readback_p95_ns}\nstage_cpu_oracle_p95_ns={evidence.stage_cpu_oracle_p95_ns}\nstage_shaping_samples_ns={_samples_text(evidence.stage_shaping_samples_ns)}\nstage_material_samples_ns={_samples_text(evidence.stage_material_samples_ns)}\nstage_dirty_upload_samples_ns={_samples_text(evidence.stage_dirty_upload_samples_ns)}\nstage_queue_device_samples_ns={_samples_text(evidence.stage_queue_device_samples_ns)}\nstage_sync_samples_ns={_samples_text(evidence.stage_sync_samples_ns)}\nstage_present_readback_samples_ns={_samples_text(evidence.stage_present_readback_samples_ns)}\nstage_cpu_oracle_samples_ns={_samples_text(evidence.stage_cpu_oracle_samples_ns)}"
     val promotion = "\npromotion_artifact_identity={evidence.promotion_artifact_identity}\npromotion_entry_name={evidence.promotion_entry_name}\npromotion_program_version={evidence.promotion_program_version}\npromotion_batch_identity={evidence.promotion_batch_identity}\npromotion_atlas_payload_sha256={evidence.promotion_atlas_payload_sha256}\npromotion_shader_handle={evidence.promotion_shader_handle}\npromotion_pipeline_handle={evidence.promotion_pipeline_handle}\npromotion_atlas_buffer_handle={evidence.promotion_atlas_buffer_handle}\npromotion_params_buffer_handle={evidence.promotion_params_buffer_handle}\npromotion_command_handle={evidence.promotion_command_handle}\npromotion_fence_handle={evidence.promotion_fence_handle}\npromotion_readback_buffer_handle={evidence.promotion_readback_buffer_handle}\npromotion_quad_count={evidence.promotion_quad_count}\npromotion_dispatch_count={evidence.promotion_dispatch_count}\npromotion_submitted={evidence.promotion_submitted}\npromotion_completion_waited={evidence.promotion_completion_waited}\npromotion_fence_evidence_available={evidence.promotion_fence_evidence_available}\npromotion_fence_destroyed={evidence.promotion_fence_destroyed}\npromotion_readback_source={evidence.promotion_readback_source}\npromotion_readback_byte_count={evidence.promotion_readback_byte_count}\npromotion_readback_nonblank_pixels={evidence.promotion_readback_nonblank_pixels}\npromotion_device_checksum={evidence.promotion_device_checksum}\npromotion_oracle_checksum={evidence.promotion_oracle_checksum}\npromotion_parity={evidence.promotion_parity}\npromotion_device_executed={evidence.promotion_device_executed}\npromotion_ready={evidence.promotion_ready}\npromotion_present_mode={evidence.promotion_present_mode}"
-    base + recovery + stages + promotion
+    val integrity = "\ngpu_device_type={evidence.gpu_device_type}\naa_edge_channel_abs_limit={FONT_NATIVE_AA_EDGE_CHANNEL_ABS_MAX}\naa_coverage_abs_limit={FONT_NATIVE_AA_COVERAGE_ABS_MAX}"
+    base + recovery + stages + promotion + integrity
 
 fn _line_value(lines: [text], index: i64, key: text) -> text:
     val prefix = key + "="
@@ -387,7 +400,7 @@ fn _line_value(lines: [text], index: i64, key: text) -> text:
 
 fn parse_font_perf_evidence(record: text) -> FontPerfBudgetEvidence:
     val lines = record.split("\n")
-    if lines.len() != 104: return unavailable_font_perf_evidence("durable performance record is malformed")
+    if lines.len() != 107: return unavailable_font_perf_evidence("durable performance record is malformed")
     if _line_value(lines, 0, "schema") != "shared-multilingual-gpu-font-perf/v5" or _line_value(lines, 1, "fixture") != "top-10-language-witnesses": return unavailable_font_perf_evidence("durable performance schema or fixture mismatch")
     if _line_value(lines, 2, "witness_mapping") != FONT_PERF_WITNESS_MAPPING or _line_value(lines, 3, "face_mapping") != FONT_PERF_FACE_MAPPING or _line_value(lines, 4, "representative_codepoints") != FONT_PERF_CODEPOINTS: return unavailable_font_perf_evidence("durable performance witness mapping mismatch")
     if _line_value(lines, 5, "glyphs_1080") != "1024" or _line_value(lines, 6, "glyphs_4k") != "1024" or _line_value(lines, 7, "glyphs_compare") != "4096" or _line_value(lines, 8, "sample_count") != "11" or _line_value(lines, 9, "warm_backend") != "vulkan": return unavailable_font_perf_evidence("durable performance dimensions or backend mismatch")
@@ -448,6 +461,11 @@ fn parse_font_perf_evidence(record: text) -> FontPerfBudgetEvidence:
     if _line_value(lines, 98, "promotion_device_checksum").to_i64() == nil or
         _line_value(lines, 99, "promotion_oracle_checksum").to_i64() == nil:
         return unavailable_font_perf_evidence("durable performance promotion checksum is malformed")
+    if ((_line_value(lines, 104, "gpu_device_type") != "discrete" and
+         _line_value(lines, 104, "gpu_device_type") != "integrated") or
+        _line_value(lines, 105, "aa_edge_channel_abs_limit") != FONT_NATIVE_AA_EDGE_CHANNEL_ABS_MAX.to_text() or
+        _line_value(lines, 106, "aa_coverage_abs_limit") != FONT_NATIVE_AA_COVERAGE_ABS_MAX.to_text()):
+        return unavailable_font_perf_evidence("durable performance hardware or AA contract mismatch")
     val evidence = FontPerfBudgetEvidence(
         status: _line_value(lines, 34, "status"), reason: _line_value(lines, 35, "reason"),
         warm_1080_p95_ns: _line_value(lines, 36, "warm_1080_p95_ns").to_i64() ?? -1,
@@ -516,7 +534,8 @@ fn parse_font_perf_evidence(record: text) -> FontPerfBudgetEvidence:
         promotion_parity: promotion_parity_text == "true",
         promotion_device_executed: promotion_device_executed_text == "true",
         promotion_ready: promotion_ready_text == "true",
-        promotion_present_mode: _line_value(lines, 103, "promotion_present_mode"))
+        promotion_present_mode: _line_value(lines, 103, "promotion_present_mode"),
+        gpu_device_type: _line_value(lines, 104, "gpu_device_type"))
     if not _valid_shape(evidence): return unavailable_font_perf_evidence("durable performance fields are incomplete")
     evidence
 
@@ -525,7 +544,17 @@ fn write_font_perf_evidence(evidence: FontPerfBudgetEvidence) -> bool:
     val record = font_perf_evidence_record(evidence)
     record != "" and file_write(FONT_PERF_EVIDENCE_PATH, record)
 
+fn write_font_perf_evidence_at(path: text, evidence: FontPerfBudgetEvidence) -> bool:
+    if path == "" or file_exists(path): return false
+    val record = font_perf_evidence_record(evidence)
+    record != "" and file_write(path, record)
+
 fn read_font_perf_evidence() -> FontPerfBudgetEvidence:
     if not file_exists(FONT_PERF_EVIDENCE_PATH):
         return unavailable_font_perf_evidence("durable performance evidence is missing")
     parse_font_perf_evidence(file_read(FONT_PERF_EVIDENCE_PATH))
+
+fn read_font_perf_evidence_at(path: text) -> FontPerfBudgetEvidence:
+    if path == "" or not file_exists(path):
+        return unavailable_font_perf_evidence("durable performance evidence is missing")
+    parse_font_perf_evidence(file_read(path))

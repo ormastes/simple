@@ -1549,6 +1549,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vulkan_device_type", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_driver_identity", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_driver_identity_hash", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_selected_device_physical_identity", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_type", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_fence_submission_supported", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_submit_and_wait_fence", &[I64], &[I64]),

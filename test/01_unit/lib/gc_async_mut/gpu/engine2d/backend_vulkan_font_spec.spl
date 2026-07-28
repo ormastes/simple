@@ -6,7 +6,8 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{
     VULKAN_FONT_PARAMS_BYTES,
     vulkan_font_atlas_composite_params, vulkan_font_dispatch_groups, vulkan_font_atlas_replacement_status,
     vulkan_font_pixels_checksum, vulkan_font_pixels_equal, vulkan_font_promotion_ready,
-    vulkan_font_changed_pixel_count, vulkan_font_stage_evidence_ready
+    vulkan_font_changed_pixel_count, vulkan_font_stage_evidence_ready,
+    vulkan_font_fence_failure_reason
 }
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
@@ -20,6 +21,11 @@ use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_vulkan_glsl_source}
+use std.common.gpu.font_owner_fault_receipt.{
+    FontOwnerFaultReceipt, font_owner_fault_receipt_from_reason,
+    font_owner_fault_receipt_observed, FONT_OWNER_FAULT_UNSUPPORTED_FORMAT,
+    FONT_OWNER_FAULT_CORRUPT_PROGRAM, FONT_OWNER_FAULT_CORRUPT_ASSET
+}
 
 fn _font_quad_batch(version: i64) -> FontRenderBatch:
     FontRenderBatch(program_version: version, font_identity: "unit-font", face_generation: 1,
@@ -47,6 +53,79 @@ fn _complete_stage_evidence() -> VulkanFontCompositeEvidence:
         present_mode: "not-applicable-offscreen", readback_nonblank_pixels: 1)
 
 describe "Vulkan font atlas composite companion":
+    it "classifies only exact font owner fault reasons":
+        expect(font_owner_fault_receipt_from_reason("invalid-font-atlas")).to_equal(FontOwnerFaultReceipt.CorruptAsset)
+        expect(font_owner_fault_receipt_from_reason("font-pipeline-artifact-hash-mismatch")).to_equal(FontOwnerFaultReceipt.CorruptProgram)
+        expect(font_owner_fault_receipt_from_reason("invalid-spirv")).to_equal(FontOwnerFaultReceipt.UnsupportedFormat)
+        expect(font_owner_fault_receipt_from_reason("compile-artifact-unavailable")).to_equal(FontOwnerFaultReceipt.CompileFailure)
+        expect(font_owner_fault_receipt_from_reason("submit-failed")).to_equal(FontOwnerFaultReceipt.SubmitFailure)
+        expect(font_owner_fault_receipt_from_reason("vulkan-font-adapter-init-failed")).to_equal(FontOwnerFaultReceipt.SubmitFailure)
+        expect(font_owner_fault_receipt_from_reason("vulkan-font-target-create-failed")).to_equal(FontOwnerFaultReceipt.SubmitFailure)
+        expect(font_owner_fault_receipt_from_reason("device-lost")).to_equal(FontOwnerFaultReceipt.DeviceLoss)
+        val near_match = font_owner_fault_receipt_from_reason("device-lost ")
+        expect(near_match).to_equal(FontOwnerFaultReceipt.Unknown)
+        expect(font_owner_fault_receipt_observed(near_match)).to_be(false)
+
+    it "distinguishes rejected submit from unknown completion and device loss":
+        expect(vulkan_font_fence_failure_reason(0, "")).to_equal("submit-failed")
+        expect(vulkan_font_fence_failure_reason(-1, "VK_ERROR_DEVICE_LOST")).to_equal("device-lost")
+        expect(vulkan_font_fence_failure_reason(-1, "device-lost")).to_equal("fence-completion-unknown")
+        expect(vulkan_font_fence_failure_reason(1, "VK_ERROR_DEVICE_LOST")).to_equal("")
+
+    it "retains pipeline faults monotonically without mutating on cached success":
+        var session = VulkanSession.create()
+        val unsupported = session.install_pinned_font_atlas_pipeline([0u8; 20])
+        expect(unsupported.reason).to_equal("invalid-spirv")
+        expect(session.font_owner_fault_receipt()).to_equal(FONT_OWNER_FAULT_UNSUPPORTED_FORMAT)
+        expect(session.font_owner_fault_mask()).to_equal(4)
+        expect(session.font_owner_fault_sequence()).to_equal(1)
+        var changed = spirv_font_atlas_composite()
+        changed[4] = changed[4] + 1u8
+        session.shader_font_atlas = 11
+        session.pipe_font_atlas = 22
+        session.font_atlas_status = "ready"
+        session.font_atlas_artifact_mode = "precompiled-spirv"
+        session.font_atlas_artifact_identity = "precompiled-spirv:" + FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256
+        val corrupt = session.install_font_atlas_pipeline(changed)
+        expect(corrupt.reason).to_equal("font-pipeline-artifact-hash-mismatch")
+        expect(session.font_owner_fault_receipt()).to_equal(FONT_OWNER_FAULT_CORRUPT_PROGRAM)
+        expect(session.font_owner_fault_mask()).to_equal(6)
+        expect(session.font_owner_fault_sequence()).to_equal(2)
+        val cached = session.install_font_atlas_pipeline(spirv_font_atlas_composite())
+        expect(cached.reason).to_equal("cached")
+        expect(session.font_owner_fault_mask()).to_equal(6)
+        expect(session.font_owner_fault_sequence()).to_equal(2)
+        expect(session.font_device_loss_observed()).to_be(false)
+        expect(session.font_device_loss_sequence()).to_equal(0)
+        expect(session.font_owner_fault_identity_unchanged()).to_be(true)
+        expect(session.font_owner_fault_fallback_count()).to_equal(0)
+
+    it "retains a real rejected atlas through the Vulkan owner boundary":
+        var state = VulkanBackend.create()
+        state.owns_session = true
+        state.session.is_initialized = true
+        state.session.device = 1
+        state.session.device_name = "device"
+        state.session.device_type = "discrete"
+        state.session.driver_identity = "driver"
+        state.session.shader_font_atlas = 11
+        state.session.pipe_font_atlas = 22
+        state.session.font_atlas_status = "ready"
+        state.session.font_atlas_artifact_mode = "precompiled-spirv"
+        state.session.font_atlas_artifact_identity = "precompiled-spirv:" + FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256
+        state.d_framebuffer = 1
+        state.w = 1
+        state.h = 1
+        var malformed = _font_quad_batch(1)
+        malformed.atlas_width = 2
+        val rejected = state.composite_font_batch(0, 0, malformed)
+        expect(rejected.reason).to_equal("invalid-font-atlas")
+        expect(state.font_owner_fault_receipt()).to_equal(FONT_OWNER_FAULT_CORRUPT_ASSET)
+        expect(state.font_owner_fault_mask()).to_equal(1)
+        expect(state.font_owner_fault_sequence()).to_equal(1)
+        expect(state.font_owner_fault_identity_unchanged()).to_be(true)
+        expect(state.font_owner_fault_fallback_count()).to_equal(0)
+
     it "packs the frozen 13-word ABI into 52 little-endian bytes":
         val p = vulkan_font_atlas_composite_params(2, 2, 4, 0, 0, 2, 2, 8, 9, 72, -11, -12, 0xAABBCCDDu32)
         expect(VULKAN_FONT_PARAMS_BYTES).to_equal(52)
@@ -78,7 +157,7 @@ describe "Vulkan font atlas composite companion":
     it "uses a deterministic nonzero pixel checksum":
         expect(vulkan_font_pixels_checksum([])).to_equal(0)
         val first = vulkan_font_pixels_checksum([0u32, 1u32])
-        expect(first).to_not_equal(0)
+        expect(first == 0).to_be(false)
         expect(vulkan_font_pixels_checksum([0u32, 1u32])).to_equal(first)
         assert_not_equal(vulkan_font_pixels_checksum([1u32, 0u32]), first)
 
@@ -120,7 +199,7 @@ describe "Vulkan font atlas composite companion":
     it "wraps deterministically for a large pixel input":
         val pixels: [u32] = [0xfeedbeefu32; 65536]
         val first = vulkan_font_pixels_checksum(pixels)
-        expect(first).to_not_equal(0)
+        expect(first == 0).to_be(false)
         expect(vulkan_font_pixels_checksum(pixels)).to_equal(first)
 
     it "promotes only complete fenced device identity evidence":
@@ -240,10 +319,19 @@ describe "Vulkan font atlas composite companion":
         expect(source).to_contain("device_type == \"discrete\"")
         expect(source.contains("vulkan_sffi_submit_and_wait(command)")).to_equal(false)
 
+    it "validates Vulkan font quads without materializing glyph pixels or params":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
+        expect(source).to_contain("val subrect_in_bounds =")
+        expect(source.count("font_atlas_subrect_pixels(batch.atlas_pixels")).to_equal(1)
+        expect(source.count("val packed = vulkan_font_atlas_composite_params(")).to_equal(1)
+        expect(source.index_of("val subrect_in_bounds =") < source.index_of("val atlas_bytes = atlas_count * 4")).to_equal(true)
+        expect(source.index_of("val atlas_bytes = atlas_count * 4") < source.index_of("val pixels = font_atlas_subrect_pixels(batch.atlas_pixels")).to_equal(true)
+
     it "keeps Vulkan atlas synchronization full-upload only":
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
         val session = file_read("src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl")
         val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val engine = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
         expect(source).to_contain("font_atlas_composite_cache_identity(")
         expect(source).to_contain("font_render_batch_atlas_owner_identity(batch), \"vulkan2d\", device_features")
         expect(source).to_contain("completed.batch_identity = font_render_batch_atlas_cache_identity(batch)")
@@ -268,9 +356,22 @@ describe "Vulkan font atlas composite companion":
         expect(source).to_contain("vulkan_sffi_submit_and_wait_fence(command)")
         expect(source).to_contain("fence-completion-unknown")
         expect(source).to_contain("fence-cleanup-failed")
-        expect(source.index_of("val old_freed = vulkan_sffi_free_buffer(self.d_font_atlas)") < source.index_of("self.d_font_atlas = fresh")).to_equal(true)
+        expect(source.index_of("vulkan_sffi_copy_to_buffer(fresh, atlas_payload, 0)") < source.index_of("val old_freed = vulkan_sffi_free_buffer(old_atlas)")).to_equal(true)
+        expect(source.index_of("val old_freed = vulkan_sffi_free_buffer(old_atlas)") < source.index_of("self.d_font_atlas = fresh")).to_equal(true)
         expect(source).to_contain("val fresh_freed = vulkan_sffi_free_buffer(fresh)")
         expect(source).to_contain("return _vulkan_font_evidence(pipeline, \"failed\", reason, self.d_font_atlas")
+        expect(source).to_contain("val atlas_handle_before = self.d_font_atlas")
+        expect(source).to_contain("self.font_atlas_payload_sha256 == atlas_payload_before")
+        expect(source).to_contain("evidence.reason = vulkan_font_sffi_failure_reason(")
+        expect(source.contains("batch.font_identity == font_identity_before")).to_equal(false)
+        expect(source).to_contain("Only the descriptor remains ours")
+        expect(backend).to_contain("self.session.font_owner_fault_mask_value")
+        expect(backend.contains("self.session.font_owner_fault_mask()")).to_equal(false)
+        expect(session).to_contain("font_owner_last_fault: i64")
+        expect(session.contains("_font_owner_last_fault: i64")).to_equal(false)
+        expect(engine).to_contain("var vulkan_fallback_pending = false")
+        expect(engine).to_contain("if vulkan_fallback_pending:")
+        expect(engine).to_contain("_font_owner_last_fault: FONT_OWNER_FAULT_NONE")
         expect(source.index_of("var checked: i64 = 0") < source.index_of("val atlas_bytes = atlas_count * 4")).to_equal(true)
         expect(source.index_of("var checked: i64 = 0") < source.index_of("vulkan_sffi_alloc_buffer(atlas_bytes")).to_equal(true)
         expect(source.index_of("var checked: i64 = 0") < source.index_of("self.font_atlas_generation = batch.atlas_generation")).to_equal(true)

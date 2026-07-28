@@ -86,48 +86,42 @@ fn imported_enum_discriminant_value(expr: Expr, enum_name: text, constants: Dict
         case _:
             return nil
 
-extern fn rt_env_get(key: text) -> text
-
-fn hir_lower_env_get(key: text) -> text:
-    rt_env_get(key)
-
-fn hir_lower_diag_enabled() -> bool:
-    val phase = hir_lower_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
-    val trace = hir_lower_env_get("SIMPLE_COMPILER_TRACE") ?? ""
-    val diag = hir_lower_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
-    if phase == "1":
-        return true
-    if trace == "1":
-        return true
-    diag == "1"
-
 impl HirLowering:
     me lower_bootstrap_flat_function(decl_idx: i64) -> HirFunction:
         val span = Span.empty()
         val name = decl_get_name(decl_idx)
-        eprint("[hir-lower] flat_function:start {name}")
+        val verbose_diag = self.bootstrap_trace or self.bootstrap_diag
+        if verbose_diag:
+            eprint("[hir-lower] flat_function:start {name}")
         val symbol = bootstrap_hir_symbol_for_name(name)
         self.current_function = Some(symbol)
         self.symbols.push_scope(ScopeKind.Function)
-        eprint("[hir-lower] flat_function:params:start {name}")
+        if verbose_diag:
+            eprint("[hir-lower] flat_function:params:start {name}")
         val param_count = 0
-        eprint("[hir-lower] flat_function:params:count {name} {param_count}")
+        if verbose_diag:
+            eprint("[hir-lower] flat_function:params:count {name} {param_count}")
         var params: [HirParam] = []
         var pi = 0
         while pi < param_count:
-            eprint("[hir-lower] flat_function:param {name} {pi}")
+            if verbose_diag:
+                eprint("[hir-lower] flat_function:param {name} {pi}")
             val p_type = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
             val p_sym = self.symbols.define("", SymbolKind.Parameter, Some(p_type), span, Visibility.Private, false, nil)
             params.push(HirParam(symbol: p_sym, name: "", type_: p_type, has_default: false, default: HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span, is_mutable: false))
             pi = pi + 1
-        eprint("[hir-lower] flat_function:body:start {name}")
+        if verbose_diag:
+            eprint("[hir-lower] flat_function:body:start {name}")
         val body_ids = decl_get_body(decl_idx)
-        eprint("[hir-lower] flat_function:body:count {name} {body_ids.len()}")
+        if verbose_diag:
+            eprint("[hir-lower] flat_function:body:count {name} {body_ids.len()}")
         val body = self.lower_bootstrap_flat_block(body_ids)
-        eprint("[hir-lower] flat_function:body:done {name}")
+        if verbose_diag:
+            eprint("[hir-lower] flat_function:body:done {name}")
         self.symbols.pop_scope()
         self.current_function = nil
-        eprint("[hir-lower] flat_function:done {name}")
+        if verbose_diag:
+            eprint("[hir-lower] flat_function:done {name}")
         val func_attr_opt: FunctionAttr? = if decl_is_gpu_kernel[decl_idx] != 0:
             var fa = FunctionAttr.default()
             fa.is_gpu_kernel = true
@@ -170,7 +164,7 @@ impl HirLowering:
             val owns_alias = self.module_filename.replace("\\", "/") == "src/runtime/simple_core/core_string.spl"
             if not owns_alias:
                 self.error("function name '__simple_rt_string_char_code_at' is reserved for compiler-generated text calls", fn_.span)
-        val bootstrap_diag = (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and hir_lower_diag_enabled()
+        val bootstrap_diag = self.bootstrap_mode and (self.bootstrap_trace or self.bootstrap_diag)
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:start {fn_.name}")
         var fn_symbol_id = SymbolId(id: -1)
@@ -209,7 +203,7 @@ impl HirLowering:
             self.declared_callable_type(fn_, nil)
         else:
             nil
-        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not fn_.is_method:
+        if self.bootstrap_mode and not fn_.is_method:
             fn_symbol_id = bootstrap_hir_symbol_for_name(fn_.name)
         else:
             val fn_symbol_lookup = self.symbols.lookup(fn_symbol_name)
@@ -342,7 +336,7 @@ impl HirLowering:
         # fallback for bootstrap functions with no declaration.
         if fn_.has_return_type:
             val declared_ret = self.lower_type(fn_.return_type)
-            if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            if self.bootstrap_mode:
                 # NARROW (deliberate): in bootstrap mode only Str declared
                 # returns take priority for now. Widening every declared type
                 # (arrays/structs/dicts) immediately broke consumers tuned to
@@ -357,7 +351,7 @@ impl HirLowering:
                         return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
             else:
                 return_type = declared_ret
-        elif (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        elif self.bootstrap_mode:
             return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:return_type {fn_.name}")
@@ -402,7 +396,7 @@ impl HirLowering:
         # nil and traps "field access on nil receiver", dropping the in-guest
         # interpreter's main. main's untyped body returns Unit (defaulted above),
         # so it needs none of this user-function return inference.
-        if (not fn_.has_return_type) and (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1" and fn_.name != "main":
+        if (not fn_.has_return_type) and not self.bootstrap_mode and fn_.name != "main":
             val fn_sym_type = self.symbols.get_symbol_type(fn_symbol_id)
             if fn_sym_type.?:
                 match fn_sym_type.unwrap().kind:

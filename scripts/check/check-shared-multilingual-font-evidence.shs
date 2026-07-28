@@ -25,6 +25,10 @@ case "$docgen_attempt" in
   *) fail "docgen attempt must be 1, 2, or 3" ;;
 esac
 
+# Scalar owner facades exist, but source shape is not runtime evidence. Keep the
+# authoritative NFR-007 blocker ahead of focused-result admission.
+fail "font-owner-fault-runtime-proof-unavailable: NFR-007 requires admitted native execution of the real Engine2D/Engine3D owner fault paths; a Vulkan3D fence-wait/wait-idle runtime receipt remains unavailable"
+
 focused_root="$evidence_root/focused/attempt-$focused_attempt"
 docgen_root="$evidence_root/docgen/attempt-$docgen_attempt"
 calibration_root="$evidence_root/runner-calibration"
@@ -77,7 +81,13 @@ focused_specs=(
   test/01_unit/lib/skia/selected_arabic_spec.spl
   test/01_unit/lib/common/text_layout/font_renderer_spec.spl
   test/01_unit/lib/common/text_layout/font_render_config_spec.spl
+  test/01_unit/lib/gpu/engine2d/font_runtime_config_spec.spl
   test/01_unit/lib/gpu/engine3d/font_compat_spec.spl
+  test/01_unit/helpers/shared_multilingual_gpu_fonts_perf_evidence_spec.spl
+  test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spec.spl
+  test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_font_scalar_receipt_spec.spl
+  test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_device_metadata_spec.spl
+  test/01_unit/lib/gpu/engine3d/font_hud_material_spec.spl
   test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl
   test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.spl
   test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
@@ -85,6 +95,7 @@ focused_specs=(
   test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl
   test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl
   test/03_system/gui/feature/gui_font_event_surface_spec.spl
+  test/01_unit/os/hosted/hosted_entry_live_proof_focus_contract_spec.spl
   test/03_system/gui/linux_hosted_wm_live_window_spec.spl
   test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl
   test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
@@ -102,6 +113,13 @@ docgen_specs=(
   test/01_unit/lib/common/text_layout/font_render_config_spec.spl
   test/01_unit/lib/common/text_layout/font_renderer_spec.spl
   test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.spl
+  test/01_unit/helpers/shared_multilingual_gpu_fonts_perf_evidence_spec.spl
+  test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spec.spl
+  test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_font_scalar_receipt_spec.spl
+  test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_device_metadata_spec.spl
+  test/01_unit/lib/gpu/engine2d/font_runtime_config_spec.spl
+  test/01_unit/lib/gpu/engine3d/font_compat_spec.spl
+  test/01_unit/lib/gpu/engine3d/font_hud_material_spec.spl
   test/01_unit/lib/test_runner_result_wrapper_spec.spl
   test/01_unit/lib/skia/ot_layout_apply_spec.spl
   test/01_unit/lib/skia/ot_layout_gsub_full_spec.spl
@@ -115,6 +133,7 @@ docgen_specs=(
   test/01_unit/lib/skia/selected_devanagari_spec.spl
   test/01_unit/lib/skia/shaper_spec.spl
   test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
+  test/01_unit/os/hosted/hosted_entry_live_proof_focus_contract_spec.spl
   test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl
   test/01_unit/os/port/simpleos_font_bundle_spec.spl
   test/02_integration/os/port/simpleos_font_asset_staging_spec.spl
@@ -132,8 +151,8 @@ docgen_specs=(
   test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
 )
 
-[ "${#focused_specs[@]}" -eq 39 ] || fail "focused inventory is not 39"
-[ "${#docgen_specs[@]}" -eq 34 ] || fail "docgen inventory is not 34"
+[ "${#focused_specs[@]}" -eq 46 ] || fail "focused inventory is not 46"
+[ "${#docgen_specs[@]}" -eq 42 ] || fail "docgen inventory is not 42"
 [ -d "$focused_root" ] || fail "missing $focused_root"
 [ -d "$docgen_root" ] || fail "missing $docgen_root"
 [ -f "$essential_root/evidence.sha256" ] || fail "missing essential-tools hash record"
@@ -259,6 +278,40 @@ for spec in "${focused_specs[@]}"; do
     fail "$spec uses a different CLI/core-C identity"
 done
 
+native_record="$focused_root/native_gpu_font_readback.evidence.env"
+perf_started="$focused_root/shared_multilingual_gpu_fonts_perf.measurement-started.env"
+perf_record="$focused_root/shared_multilingual_gpu_fonts_perf.evidence.env"
+for artifact in "$native_record" "$perf_started" "$perf_record"; do
+  [ -f "$artifact" ] || fail "missing immutable Lane-E artifact $artifact"
+  hash_files+=("$artifact")
+done
+[ "$(field "$native_record" schema)" = shared-multilingual-native-font-readback/v2 ] ||
+  fail "native font record schema mismatch"
+[ "$(field "$native_record" promotion_status)" = pass ] ||
+  fail "native font promotion did not pass"
+case "$(field "$native_record" device_type)" in
+  discrete|integrated) ;;
+  *) fail "native font promotion used a virtual or software device" ;;
+esac
+[ -n "$(field "$native_record" engine2d_physical_device_identity)" ] &&
+  [ "$(field "$native_record" engine2d_physical_device_identity)" = \
+    "$(field "$native_record" engine3d_physical_device_identity)" ] ||
+  fail "Engine2D/Engine3D stable physical-device identity is unavailable or differs"
+[ "$(field "$native_record" aa_edge_channel_abs_limit)" = 2 ] &&
+  [ "$(field "$native_record" aa_coverage_abs_limit)" = 1 ] ||
+  fail "native font AA bounds differ from the selected contract"
+[ "$(field "$perf_started" schema)" = shared-multilingual-gpu-font-perf/v5 ] ||
+  fail "Lane-E measurement-started record schema mismatch"
+[ "$(field "$perf_started" status)" = unavailable ] ||
+  fail "Lane-E measurement-started sentinel is invalid"
+[ "$(field "$perf_record" schema)" = shared-multilingual-gpu-font-perf/v5 ] ||
+  fail "Lane-E performance record schema mismatch"
+[ "$(field "$perf_record" status)" = pass ] ||
+  fail "Lane-E performance record did not pass"
+case "$(field "$perf_record" gpu_device_type)" in
+  discrete|integrated) ;;
+  *) fail "Lane-E performance record used a virtual or software device" ;;
+esac
 hash_files+=("$common_cli" "$common_core_dir/libsimple_runtime.a")
 
 essential_identity="$essential_root/identity.env"
@@ -299,7 +352,7 @@ calibration_identity="$calibration_root/identity.env"
 
 for suffix in command out err exit; do
   count=$(find "$focused_root" -maxdepth 1 -type f -name "*.$suffix" | wc -l)
-  [ "$count" -eq 39 ] || fail "focused $suffix count is $count, expected 39"
+  [ "$count" -eq 46 ] || fail "focused $suffix count is $count, expected 46"
 done
 
 for spec in "${docgen_specs[@]}"; do
@@ -349,10 +402,10 @@ done
 
 for suffix in command out err exit; do
   count=$(find "$docgen_root" -maxdepth 1 -type f -name "*.$suffix" | wc -l)
-  [ "$count" -eq 34 ] || fail "docgen $suffix count is $count, expected 34"
+  [ "$count" -eq 42 ] || fail "docgen $suffix count is $count, expected 42"
 done
 count=$(find "$docgen_root" -maxdepth 1 -type f -name "*.manual.sha256" | wc -l)
-[ "$count" -eq 34 ] || fail "docgen manual-hash count is $count, expected 34"
+[ "$count" -eq 42 ] || fail "docgen manual-hash count is $count, expected 42"
 [ "$(sha256sum "$common_cli" | awk '{print $1}')" = "$common_cli_sha" ] ||
   fail "CLI changed during aggregate verification"
 [ "$(sha256sum "$common_core_dir/libsimple_runtime.a" | awk '{print $1}')" = "$common_core_sha" ] ||
@@ -392,10 +445,10 @@ if [ -e "$summary" ] || [ -e "$manifest" ]; then
     fail "existing aggregate is not PASS"
   [ "$(field "$summary" checkpoint_sha)" = "$head_sha" ] ||
     fail "existing aggregate checkpoint differs from selected evidence"
-  [ "$(field "$summary" focused_count)" = 39 ] ||
-    fail "existing aggregate focused count is not 39"
-  [ "$(field "$summary" docgen_count)" = 34 ] ||
-    fail "existing aggregate docgen count is not 34"
+  [ "$(field "$summary" focused_count)" = 46 ] ||
+    fail "existing aggregate focused count is not 46"
+  [ "$(field "$summary" docgen_count)" = 42 ] ||
+    fail "existing aggregate docgen count is not 42"
   [ "$(field "$summary" focused_attempt)" = "$focused_attempt" ] ||
     fail "existing aggregate focused attempt differs from this audit"
   [ "$(field "$summary" docgen_attempt)" = "$docgen_attempt" ] ||
@@ -418,8 +471,8 @@ trap cleanup EXIT
 {
   printf 'status=pass\n'
   printf 'checkpoint_sha=%s\n' "$head_sha"
-  printf 'focused_count=39\n'
-  printf 'docgen_count=34\n'
+  printf 'focused_count=46\n'
+  printf 'docgen_count=42\n'
   printf 'focused_attempt=%s\n' "$focused_attempt"
   printf 'docgen_attempt=%s\n' "$docgen_attempt"
   printf 'cli_sha256=%s\ncore_c_sha256=%s\n' "$common_cli_sha" "$common_core_sha"

@@ -212,6 +212,7 @@ pub fn font_execution_plan_into(config: FontRenderConfig, executable_targets: [t
     plan-empty, 2026-07-26). Logic mirrors font_execution_plan exactly.
     Per-gate receipts are silent on healthy configs and attribute WHICH
     gate rejected when the plan comes back empty."""
+    plan_out.clear()
     if not font_render_config_valid(config):
         print("[font-plan] config-invalid size={config.size} target={config.execution_target}")
         # Field dump (locals, no chains): names WHICH field arrives corrupted
@@ -238,42 +239,41 @@ pub fn font_execution_plan_into(config: FontRenderConfig, executable_targets: [t
             FontExecutionPolicy.Required: d_policy_match = "required"
         print("[font-plan] config-dump size={d_size} family='{d_family}' category='{d_category}' language='{d_language}' script='{d_script}' weight='{d_weight}' style='{d_style}' hinting='{d_hinting}' aa='{d_aa}' atlas='{d_atlas}' policy_suggested={d_policy_suggested} policy_eq_pr={d_eq_p}{d_eq_r} policy_match='{d_policy_match}'")
         return 0
-    var order: [text] = []
+    val requested = font_execution_target_name(config.execution_target)
     for raw in executable_targets:
         val target = font_execution_target_name(raw)
         if target == "auto" or not font_execution_target_supported(target):
             print("[font-plan] target-unsupported target={target}")
+            plan_out.clear()
             return 0
-        if not order.contains(target):
-            order.push(target)
-    val requested = font_execution_target_name(config.execution_target)
-    if order.len() == 0 or (requested != "auto" and not order.contains(requested)):
-        print("[font-plan] requested-not-executable requested={requested} order_len={order.len()}")
+        if not plan_out.contains(target):
+            plan_out.push(target)
+    if plan_out.len() == 0 or (requested != "auto" and not plan_out.contains(requested)):
+        print("[font-plan] requested-not-executable requested={requested} order_len={plan_out.len()}")
+        plan_out.clear()
         return 0
     if config.execution_policy == FontExecutionPolicy.Required:
+        plan_out.clear()
         plan_out.push(requested)
         return 1
     if config.execution_policy == FontExecutionPolicy.Preferred:
+        val cpu_executable = plan_out.contains("cpu")
+        plan_out.clear()
         plan_out.push(requested)
         var preferred_count: i64 = 1
-        if requested != "cpu":
-            if order.contains("cpu"):
-                plan_out.push("cpu")
-                preferred_count = 2
+        if requested != "cpu" and cpu_executable:
+            plan_out.push("cpu")
+            preferred_count = 2
         return preferred_count
-    var plan_count: i64 = 0
     if requested == "auto":
-        for target in order:
-            plan_out.push(target)
-            plan_count = plan_count + 1
-        return plan_count
+        return plan_out.len()
+    plan_out.clear()
     plan_out.push(requested)
-    plan_count = 1
-    for target in order:
-        if target != requested:
+    for raw in executable_targets:
+        val target = font_execution_target_name(raw)
+        if target != requested and not plan_out.contains(target):
             plan_out.push(target)
-            plan_count = plan_count + 1
-    plan_count
+    plan_out.len()
 
 # Free-function form of FontRenderConfig.default_for_size: the seed compiler's
 # semantic analyzer rejects the static path call `FontRenderConfig.default_for_size(...)`

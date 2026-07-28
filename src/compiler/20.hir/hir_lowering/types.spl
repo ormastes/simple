@@ -103,6 +103,16 @@ class HirLowering:
     package_sibling_self_name: text
     package_sibling_modules: [text] # Direct sibling module keys, resolved lazily by bare-name lookup
     package_sibling_misses: {text: bool}
+    bootstrap_mode: bool
+    bootstrap_closure: bool
+    # Legacy flat HIR feeds only the pre-Stage4 bootstrap MIR bridge. Stage4
+    # retains canonical HirModules in CompileContext and must not allocate a
+    # second process-lifetime copy on the no-GC runtime.
+    bootstrap_flat_store: bool
+    bootstrap_phase_profile: bool
+    bootstrap_trace: bool
+    bootstrap_diag: bool
+    focused_hir_diag: bool
     current_method_self_type: HirType?
     lowered_impl_functions: HirImplFunctions
     lowered_traits: HirTraitsByName   # Traits lowered in this module (by name), for injecting defaults into impls
@@ -182,6 +192,9 @@ enum LoweringErrorKind:
     Other
     Recovered
 
+fn hir_bootstrap_flat_store_enabled(bootstrap_mode: bool, bootstrap_stage4: bool) -> bool:
+    bootstrap_mode and not bootstrap_stage4
+
 fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages: [text], diagnostic_recovered: [bool]) -> HirLowering:
     val empty_loaded_modules: [text] = []
     val empty_modules_by_name: HirModulesByName = {}
@@ -199,6 +212,14 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_local_tuple_types: HirLocalTupleTypes = {}
     val empty_enum_variant_names: {text: bool} = {}
     val empty_fn_tuple_returns: {text: [HirType]} = {}
+    val bootstrap_mode = (hir_type_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    val bootstrap_closure = bootstrap_mode and (hir_type_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+    val bootstrap_stage4 = bootstrap_mode and (hir_type_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
+    val bootstrap_flat_store = hir_bootstrap_flat_store_enabled(bootstrap_mode, bootstrap_stage4)
+    val bootstrap_phase_profile = (hir_type_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1"
+    val bootstrap_trace = (hir_type_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    val bootstrap_diag = (hir_type_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1"
+    val focused_hir_diag = (hir_type_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") ?? "") == "1"
     HirLowering(
         symbols: SymbolTable.new(),
         errors: errors,
@@ -216,6 +237,13 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         package_sibling_self_name: "",
         package_sibling_modules: empty_package_sibling_modules,
         package_sibling_misses: empty_package_sibling_misses,
+        bootstrap_mode: bootstrap_mode,
+        bootstrap_closure: bootstrap_closure,
+        bootstrap_flat_store: bootstrap_flat_store,
+        bootstrap_phase_profile: bootstrap_phase_profile,
+        bootstrap_trace: bootstrap_trace,
+        bootstrap_diag: bootstrap_diag,
+        focused_hir_diag: focused_hir_diag,
         current_method_self_type: nil,
         lowered_impl_functions: empty_impl_functions,
         lowered_traits: empty_traits,
@@ -304,7 +332,7 @@ impl HirLowering:
             false
 
     me error(message: text, span: Span):
-        if hir_type_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+        if self.focused_hir_diag:
             eprint("[simpleos-hir-push] {message}")
         self.errors = self.errors.push(LoweringError(
             message: message,
@@ -333,7 +361,7 @@ impl HirLowering:
     # in another module under full-closure allocation pressure. Expose only
     # scalar/text projections across that boundary.
     me lowering_error_count() -> i64:
-        val focused_future_errors = self.module_filename == "src/lib/nogc_async_mut/async/future.spl"
+        val focused_future_errors = self.focused_hir_diag and self.module_filename == "src/lib/nogc_async_mut/async/future.spl"
         if focused_future_errors:
             eprint("[hir-errors] receiver valid")
         val count: i64 = self.diagnostic_messages.len()
@@ -348,7 +376,7 @@ impl HirLowering:
         self.diagnostic_messages[index]
 
     me compute_visibility(type_name: text, declared_visibility: Visibility) -> Visibility:
-        if (hir_type_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if self.bootstrap_mode:
             return Visibility.Public
         if declared_visibility != Visibility.Private:
             return declared_visibility
@@ -397,7 +425,7 @@ impl HirLowering:
         if kind_disc_v == d_named:
             val nm: text = parser_type_kind_named_name(lt_kind)
             val nargs: [Type] = parser_type_kind_named_args(lt_kind)
-            if hir_type_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
+            if self.focused_hir_diag:
                 eprint("[hir-type-named] {nm}")
             if nm == "":
                 self.error("internal: failed to extract named type", lt.span)

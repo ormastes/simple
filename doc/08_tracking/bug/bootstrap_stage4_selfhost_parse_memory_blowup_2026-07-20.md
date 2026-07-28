@@ -1159,3 +1159,41 @@ No new build or runtime test was started: the producer retry cap is exhausted.
 These are current-source fixes with focused tests present, not measured
 performance evidence. Do not claim an RSS or elapsed-time improvement until a
 later admitted current-source pure-Simple CLI runs the bounded gates once.
+
+## UPDATE 2026-07-28: bounded Stage 3 parent profile and source fixes
+
+Two cold-cache, 30-minute, 40-GiB-capped Stage 3 producer runs used the same
+proven pure-Simple parent
+`build/native_probe/rebased-latest-stage3-cycle1/simple` (SHA-256
+`a920123d919c4a4c384161e16fe35a1853d6e3da6bfd3a4a4e7291a2c072f04d`).
+The pre-fix-source run exited 124 after 30:04.76 with a 21,850,164-KiB peak
+RSS. Phase 3 dominated: `parser.spl`, `tokens.spl`, and `lexer_chars.spl`
+accounted for 895.699 seconds and 76.38 million heap registrations; the run
+then spent 370.461 seconds and 34.43 million registrations in
+`module_lowering.spl`.
+
+The current-source producer also exited 124 in Phase 3 and produced no child.
+Its last sampled RSS was 19,841,980 KiB at 27:16. Representative HIR times
+were 189.216 seconds (`parser.spl`), 286.072 seconds (`tokens.spl`), 230.464
+seconds (`lexer_chars.spl`), and 552.387 seconds (`module_lowering.spl`). The
+three frontend files still registered about 25.45 million objects each, and
+`module_lowering.spl` still registered 34.43 million. These timings are not a
+patched-runtime comparison: the old parent executes the compiler while it
+produces Stage 3, so only a successfully produced child can exercise and
+profile the fixes on a subsequent incremental self-build.
+
+Current source now forwards `--low-memory` through the positional Stage 3
+route and its ordered provenance hash, removes value-copying bucket-set
+updates, replaces the phase-2 alias linear scan with a direct index, bounds
+glob/re-export traversal with a visited set, limits qualified-function indexing
+to namespace imports, caches hot bootstrap environment flags per HIR lowering,
+and retains one-bit facade metadata before low-memory AST eviction. Static
+parallel review found no remaining P0/P1 issue. Both direct-env runtime guards
+passed. The pure-Simple parent is a bootstrap-only CLI and rejected the focused
+test command as unknown, so no runtime test result is claimed.
+
+Per the three-cycle guard, do not rerun the producer in this session. The next
+bounded session should resume from the preserved cycle-3 cache, produce one
+current-source child, then use that child for exactly one incremental profiled
+self-build; that is the first valid performance and memory comparison for these
+fixes.

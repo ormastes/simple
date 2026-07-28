@@ -59,12 +59,13 @@ use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_defau
 use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_counters, tick_once}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION, font_atlas_composite_program_version_valid, font_atlas_subrect_pixels}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.gpu.font_owner_fault_receipt.{FONT_OWNER_FAULT_NONE}
 use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_default}
 use std.gc_async_mut.io.mod_stub.{env_get}
 use std.gc_async_mut.text_layout.font_renderer.{
     FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderer,
     FontExecutionPolicy,
-    font_execution_plan, font_execution_plan_into, font_render_config_selection_supported,
+    font_execution_plan_into, font_render_config_selection_supported,
     font_renderer_registered_selected_bytes_only
 }
 use std.gc_async_mut.gpu.engine2d.font_owner.{
@@ -174,6 +175,7 @@ var _vec_text_probe_count: i32 = 0
 var _vec_blit_probe_count: i32 = 0
 var _vec_entry_probe_count: i32 = 0
 var _font_batch_receipt_count: i32 = 0
+val ENGINE2D_FONT_EXECUTION_TARGETS: [text] = ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"]
 # ============================================================================
 # Engine2D
 # ============================================================================
@@ -218,6 +220,12 @@ class Engine2D with DrawIrRenderTarget:
     vulkan_backend: VulkanBackend? = nil
     vulkan_font_state_unknown: bool = false
     last_vulkan_font_evidence: VulkanFontCompositeEvidence? = nil
+    _font_owner_fault_mask: i64 = 0
+    _font_owner_last_fault: i64 = FONT_OWNER_FAULT_NONE
+    _font_owner_fault_sequence: i64 = 0
+    _font_device_loss_sequence: i64 = 0
+    _font_owner_fault_identity_unchanged: bool = true
+    _font_owner_fault_fallback_count: i64 = 0
     metal_backend: MetalBackend? = nil
     opencl_backend: OpenClBackend? = nil
     rocm_backend: RocmBackend? = nil
@@ -234,6 +242,8 @@ class Engine2D with DrawIrRenderTarget:
     font_owner: Engine2DFontOwner
     last_font_execution_attempts: [text] = []
     last_font_execution_target: text = ""
+    _font_plan_scratch: [text] = []
+    _font_attempt_scratch: [text] = []
     last_font_plan_admitted: bool = false
     last_font_size_is_100: bool = false
 
@@ -259,8 +269,20 @@ class Engine2D with DrawIrRenderTarget:
         self.font_owner = engine2d_font_owner_store(owner, fonts)
         identity
 
-    fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
+    fn font_execution_attempts() -> [text]:
+        var snapshot: [text] = []
+        for attempt in self.last_font_execution_attempts:
+            snapshot.push(attempt)
+        snapshot
     fn font_execution_target() -> text: self.last_font_execution_target
+
+    me _mirror_vulkan_font_fault_state(vulkan: VulkanBackend):
+        self._font_owner_fault_mask = vulkan.font_fault_mask
+        self._font_owner_last_fault = vulkan.font_last_fault
+        self._font_owner_fault_sequence = vulkan.font_fault_sequence
+        self._font_device_loss_sequence = vulkan.font_device_loss_sequence
+        self._font_owner_fault_identity_unchanged = vulkan.font_fault_identity_unchanged
+        self._font_owner_fault_fallback_count = vulkan.font_fault_fallback_count
 
     me install_vulkan_font_spirv(spirv_bytes: [u8]) -> bool:
         """Install one bounded precompiled font compositor on a real Vulkan engine."""
@@ -271,6 +293,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         val vulkan = active
         val evidence = vulkan.install_font_atlas_pipeline(spirv_bytes)
+        self._mirror_vulkan_font_fault_state(vulkan)
         self.vulkan_backend = Some(vulkan)
         evidence.status == "ready"
 
@@ -309,6 +332,7 @@ class Engine2D with DrawIrRenderTarget:
     me _poison_vulkan_font_surface(fallback_pixels: [u32]):
         if val Some(vulkan) = self.vulkan_backend:
             vulkan.mark_completion_unknown()
+            self._mirror_vulkan_font_fault_state(vulkan)
             self.vulkan_backend = Some(vulkan)
         var software = SoftwareBackend.create()
         software.init(self.w, self.h)
@@ -319,6 +343,11 @@ class Engine2D with DrawIrRenderTarget:
         self.software_backend = Some(software)
         self.selected_backend_name = "vulkan-poisoned-software"
         self.vulkan_font_state_unknown = true
+        # Count fallback only after the Engine has committed the CPU owner.
+        if val Some(vulkan) = self.vulkan_backend:
+            vulkan._record_font_owner_fallback()
+            self._mirror_vulkan_font_fault_state(vulkan)
+            self.vulkan_backend = Some(vulkan)
 
     # ========================================================================
     # Constructors
@@ -369,7 +398,7 @@ class Engine2D with DrawIrRenderTarget:
                 var sw = SoftwareBackend.create()
                 sw.init(width, height)
                 val capability = sw.capability()
-                Engine2D(backend: sw, capability: capability, software_backend: Some(sw), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+                Engine2D(backend: sw, capability: capability, software_backend: Some(sw), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     static fn create_with_backend_fast(width: i32, height: i32, backend_name: text) -> Engine2D:
         """Create an engine in native-only ("no mirror") fast mode.
@@ -406,6 +435,12 @@ class Engine2D with DrawIrRenderTarget:
                     rocm_backend: nil, software_backend: nil,
                     font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [],
                     last_font_execution_target: "",
+                    _font_owner_fault_mask: 0,
+                    _font_owner_last_fault: FONT_OWNER_FAULT_NONE,
+                    _font_owner_fault_sequence: 0,
+                    _font_device_loss_sequence: 0,
+                    _font_owner_fault_identity_unchanged: true,
+                    _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [],
                     w: width, h: height, pacing: make_frame_pacing_counters(),
                     selected_backend_name: "metal")
         Engine2D.create_with_backend(width, height, backend_name)
@@ -448,7 +483,7 @@ class Engine2D with DrawIrRenderTarget:
         # offscreen's software rasterizer and skip the two full-surface scratch
         # buffers draw_engine_opacity() would otherwise allocate per translucent
         # window (the residual first-frame heap pressure).
-        Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: sw, font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [], last_font_execution_target: "", w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+        Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: sw, font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [], last_font_execution_target: "", _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     me create_shared_vulkan_offscreen(width: i32, height: i32) -> Result<Engine2D, text>:
         """Create one transparent child framebuffer on this engine's Vulkan session."""
@@ -470,6 +505,12 @@ class Engine2D with DrawIrRenderTarget:
             cuda_backend: nil, vulkan_backend: Some(vulkan),
             vulkan_font_state_unknown: false,
             last_vulkan_font_evidence: nil, metal_backend: nil,
+            _font_owner_fault_mask: vulkan.font_fault_mask,
+            _font_owner_last_fault: vulkan.font_last_fault,
+            _font_owner_fault_sequence: vulkan.font_fault_sequence,
+            _font_device_loss_sequence: vulkan.font_device_loss_sequence,
+            _font_owner_fault_identity_unchanged: vulkan.font_fault_identity_unchanged,
+            _font_owner_fault_fallback_count: vulkan.font_fault_fallback_count, _font_plan_scratch: [], _font_attempt_scratch: [],
             opencl_backend: nil, rocm_backend: nil, software_backend: nil,
             font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [],
             last_font_execution_target: "",
@@ -501,6 +542,12 @@ class Engine2D with DrawIrRenderTarget:
             metal_backend: Some(metal), opencl_backend: nil,
             rocm_backend: nil, software_backend: nil, font_owner: Engine2DFontOwner.new(),
             last_font_execution_attempts: [], last_font_execution_target: "",
+            _font_owner_fault_mask: 0,
+            _font_owner_last_fault: FONT_OWNER_FAULT_NONE,
+            _font_owner_fault_sequence: 0,
+            _font_device_loss_sequence: 0,
+            _font_owner_fault_identity_unchanged: true,
+            _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [],
             w: width, h: height, pacing: make_frame_pacing_counters(),
             selected_backend_name: "metal"))
 
@@ -510,7 +557,7 @@ class Engine2D with DrawIrRenderTarget:
         if requested_backend == "cuda":
             var cuda = CudaBackend.create()
             if cuda.init(width, height):
-                var engine = Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
+                var engine = Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
                 engine.install_pinned_cuda_font_artifact()
                 return Ok(engine)
 
@@ -523,6 +570,12 @@ class Engine2D with DrawIrRenderTarget:
                     cuda_backend: nil, vulkan_backend: Some(vulkan),
                     vulkan_font_state_unknown: false,
                     last_vulkan_font_evidence: nil, metal_backend: nil,
+                    _font_owner_fault_mask: vulkan.font_fault_mask,
+                    _font_owner_last_fault: vulkan.font_last_fault,
+                    _font_owner_fault_sequence: vulkan.font_fault_sequence,
+                    _font_device_loss_sequence: vulkan.font_device_loss_sequence,
+                    _font_owner_fault_identity_unchanged: vulkan.font_fault_identity_unchanged,
+                    _font_owner_fault_fallback_count: vulkan.font_fault_fallback_count, _font_plan_scratch: [], _font_attempt_scratch: [],
                     opencl_backend: nil, rocm_backend: nil,
                     software_backend: nil, font_owner: Engine2DFontOwner.new(),
                     last_font_execution_attempts: [],
@@ -539,7 +592,7 @@ class Engine2D with DrawIrRenderTarget:
                 # its internal SoftwareBackend even when the D3D11/DXVK device
                 # chain initializes. "directx" stays valid as the REQUESTED key.
                 val selected_name = directx.name()
-                return Ok(Engine2D(backend: directx, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: selected_name))
+                return Ok(Engine2D(backend: directx, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: selected_name))
 
         if requested_backend == "directx-on-vulkan":
             # DirectX-on-Vulkan emulation: serve a DirectX API request through the
@@ -552,17 +605,17 @@ class Engine2D with DrawIrRenderTarget:
             # as "directx-software-emulation".
             var dx_vk = VulkanBackend.create()
             if dx_vk.init(width, height):
-                return Ok(Engine2D(backend: dx_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
+                return Ok(Engine2D(backend: dx_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
 
         if requested_backend == "opencl":
             var opencl = OpenClBackend.create()
             if opencl.init(width, height):
-                return Ok(Engine2D(backend: opencl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, opencl_backend: opencl, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
+                return Ok(Engine2D(backend: opencl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, opencl_backend: opencl, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
 
         if requested_backend == "opengl":
             var opengl = OpenGLBackend.create()
             if opengl.init(width, height):
-                return Ok(Engine2D(backend: opengl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl"))
+                return Ok(Engine2D(backend: opengl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl"))
 
         if requested_backend == "metal":
             var metal = MetalBackend.create()
@@ -578,6 +631,12 @@ class Engine2D with DrawIrRenderTarget:
                     rocm_backend: nil, software_backend: nil,
                     font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [],
                     last_font_execution_target: "",
+                    _font_owner_fault_mask: 0,
+                    _font_owner_last_fault: FONT_OWNER_FAULT_NONE,
+                    _font_owner_fault_sequence: 0,
+                    _font_device_loss_sequence: 0,
+                    _font_owner_fault_identity_unchanged: true,
+                    _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [],
                     w: width, h: height, pacing: make_frame_pacing_counters(),
                     selected_backend_name: "metal"))
 
@@ -585,33 +644,33 @@ class Engine2D with DrawIrRenderTarget:
             # Compatibility stays explicit: strict "metal" never claims this lane.
             var metal_vk = VulkanBackend.create()
             if metal_vk.init(width, height):
-                return Ok(Engine2D(backend: metal_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
+                return Ok(Engine2D(backend: metal_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
 
         if requested_backend == "rocm":
             var rocm = RocmBackend.create()
             if rocm.init(width, height):
-                return Ok(Engine2D(backend: rocm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, rocm_backend: rocm, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
+                return Ok(Engine2D(backend: rocm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, rocm_backend: rocm, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
 
         if requested_backend == "intel":
             var intel = IntelBackend.create()
             if intel.init(width, height):
-                return Ok(Engine2D(backend: intel, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel"))
+                return Ok(Engine2D(backend: intel, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel"))
 
         if requested_backend == "qualcomm":
             var qualcomm = QualcommBackend.create()
             if qualcomm.init(width, height):
-                return Ok(Engine2D(backend: qualcomm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm"))
+                return Ok(Engine2D(backend: qualcomm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm"))
 
         if requested_backend == "webgpu":
             var webgpu = WebGpuBackend.create()
             if webgpu.init(width, height):
-                return Ok(Engine2D(backend: webgpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu"))
+                return Ok(Engine2D(backend: webgpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu"))
 
         if requested_backend == "software":
             var sw = SoftwareBackend.create()
             if sw.init(width, height):
                 val capability = sw.capability()
-                return Ok(Engine2D(backend: sw, capability: capability, software_backend: Some(sw), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
+                return Ok(Engine2D(backend: sw, capability: capability, software_backend: Some(sw), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
 
         # Note: "baremetal" is NOT auto-detected. It requires a pre-initialized
         # FramebufferDriver and must be created via create_with_baremetal_backend().
@@ -623,13 +682,13 @@ class Engine2D with DrawIrRenderTarget:
             var cpu_simd = CpuBackend.create_simd()
             if not cpu_simd.init(width, height):
                 return Err("backend unavailable: cpu_simd init failed")
-            return Ok(Engine2D(backend: cpu_simd, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
+            return Ok(Engine2D(backend: cpu_simd, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
 
         if requested_backend == "cpu":
             var cpu = CpuBackend.create()
             if not cpu.init(width, height):
                 return Err("backend unavailable: cpu init failed")
-            return Ok(Engine2D(backend: cpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu"))
+            return Ok(Engine2D(backend: cpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu"))
 
         Err("backend unavailable: " + requested_backend)
 
@@ -643,6 +702,12 @@ class Engine2D with DrawIrRenderTarget:
                 cuda_backend: nil, vulkan_backend: Some(vulkan),
                 vulkan_font_state_unknown: false,
                 last_vulkan_font_evidence: nil, metal_backend: nil,
+                _font_owner_fault_mask: vulkan.font_fault_mask,
+                _font_owner_last_fault: vulkan.font_last_fault,
+                _font_owner_fault_sequence: vulkan.font_fault_sequence,
+                _font_device_loss_sequence: vulkan.font_device_loss_sequence,
+                _font_owner_fault_identity_unchanged: vulkan.font_fault_identity_unchanged,
+                _font_owner_fault_fallback_count: vulkan.font_fault_fallback_count, _font_plan_scratch: [], _font_attempt_scratch: [],
                 opencl_backend: nil, rocm_backend: nil,
                 software_backend: nil, font_owner: Engine2DFontOwner.new(),
                 last_font_execution_attempts: [],
@@ -696,11 +761,11 @@ class Engine2D with DrawIrRenderTarget:
         same category) explicitly rather than adding more fields to the
         growing exception list.
         """
-        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
 
     static fn create_with_virtio_gpu_backend(backend: VirtioGpuBackend) -> Engine2D:
         """Create engine with a pre-initialized VirtioGpuBackend."""
-        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: Some(backend), cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_owner: Engine2DFontOwner.new(), w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: Some(backend), cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_owner: Engine2DFontOwner.new(), _font_owner_fault_mask: 0, _font_owner_last_fault: FONT_OWNER_FAULT_NONE, _font_owner_fault_sequence: 0, _font_device_loss_sequence: 0, _font_owner_fault_identity_unchanged: true, _font_owner_fault_fallback_count: 0, _font_plan_scratch: [], _font_attempt_scratch: [], w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
 
     static fn create_with_backend_strict(width: i32, height: i32, backend_name: text) -> Result<Engine2D, BackendProbeResult>:
         """Create engine with a specific backend, returning diagnostics on failure.
@@ -971,6 +1036,7 @@ class Engine2D with DrawIrRenderTarget:
             bm.clear(color)
         elif val Some(vulkan) = self.vulkan_backend:
             vulkan.clear(color)
+            self._mirror_vulkan_font_fault_state(vulkan)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
         else:
@@ -993,6 +1059,7 @@ class Engine2D with DrawIrRenderTarget:
             bm.draw_rect_filled(x, y, w, h, color)
         elif val Some(vulkan) = self.vulkan_backend:
             vulkan.draw_rect_filled(x, y, w, h, color)
+            self._mirror_vulkan_font_fault_state(vulkan)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
         else:
@@ -1053,7 +1120,7 @@ class Engine2D with DrawIrRenderTarget:
             self.backend.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
 
     me _draw_font_batch(x: i32, y: i32, batch: FontRenderBatch) -> bool:
-        self._draw_font_batch_plan(x, y, batch, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
+        self._draw_font_batch_plan(x, y, batch, ENGINE2D_FONT_EXECUTION_TARGETS)
 
     me _draw_font_batch_cpu_suffix(x: i32, y: i32, batch: FontRenderBatch, submitted: i64) -> i64:
         var quad_index = if submitted < 0 or submitted > batch.quads.len(): 0 else: submitted
@@ -1122,9 +1189,6 @@ class Engine2D with DrawIrRenderTarget:
     me _draw_font_batch_staged(x: i32, y: i32, plan: [text]) -> bool:
         if self.font_owner.active.len() == 0:
             return false
-        var atlas: [u32] = []
-        if not self.font_owner.active[0].staged_atlas_empty:
-            atlas = self.font_owner.active[0].atlas_pixels
         val batch = FontRenderBatch(
             program_version: self.font_owner.active[0].staged_program_version,
             transform_identity: self.font_owner.active[0].staged_transform_identity,
@@ -1133,7 +1197,8 @@ class Engine2D with DrawIrRenderTarget:
             valid: self.font_owner.active[0].staged_valid,
             atlas_width: self.font_owner.active[0].staged_atlas_width,
             atlas_height: self.font_owner.active[0].staged_atlas_height,
-            atlas_pixels: atlas, quads: self.font_owner.active[0].staged_quads,
+            atlas_pixels: self.font_owner.active[0].atlas_pixels,
+            quads: self.font_owner.active[0].staged_quads,
             atlas_generation: self.font_owner.active[0].staged_atlas_generation,
             dirty_rects: self.font_owner.active[0].staged_dirty_rects,
             atlas_owner_generation: self.font_owner.active[0].staged_atlas_owner_generation,
@@ -1195,8 +1260,10 @@ class Engine2D with DrawIrRenderTarget:
         if not material_ok or plan.len() == 0:
             return false
         var quad_index: i64 = 0
-        var attempts: [text] = []
+        var attempts = self._font_attempt_scratch
+        attempts.clear()
         var winner = ""
+        var vulkan_fallback_pending = false
         for target in plan:
             if self.vulkan_font_state_unknown and target != "cpu":
                 attempts.push(target + ":poisoned-skip")
@@ -1246,6 +1313,7 @@ class Engine2D with DrawIrRenderTarget:
                     # whole-program JIT (2026-07-18).
                     var evidence = vulkan.composite_font_batch(x, y, batch)
                     self.last_vulkan_font_evidence = evidence
+                    self._mirror_vulkan_font_fault_state(vulkan)
                     self.vulkan_backend = Some(vulkan)
                     attempts.push("vulkan:" + evidence.reason)
                     if (evidence.reason == "partial-framebuffer-restore-failed" or
@@ -1257,16 +1325,19 @@ class Engine2D with DrawIrRenderTarget:
                         evidence.reason == "fence-cleanup-failed" or
                         evidence.reason == "fence-wait-evidence-failed" or
                         evidence.reason == "cleanup-failed"):
-                        self.last_font_execution_attempts = attempts
                         self.last_font_execution_target = ""
                         self._poison_vulkan_font_surface(evidence.fallback_pixels)
-                        evidence.fallback_pixels = []
+                        evidence.clear_fallback_pixels()
                         self.last_vulkan_font_evidence = evidence
                         quad_index = 0
                         continue
                     if evidence.promotion_ready and evidence.dispatch_count == batch.quads.len():
                         quad_index = batch.quads.len()
                         winner = "vulkan"
+                    else:
+                        evidence.clear_fallback_pixels()
+                        self.last_vulkan_font_evidence = evidence
+                        vulkan_fallback_pending = true
             elif target == "rocm":
                 val active = self.rocm_backend
                 if active == nil:
@@ -1291,8 +1362,15 @@ class Engine2D with DrawIrRenderTarget:
                 else:
                     attempts.push(if cpu_simd_requested: "cpu_simd:no-native-alpha-hit" else: "cpu:success")
                     winner = "cpu"
+                if vulkan_fallback_pending:
+                    if val Some(vulkan) = self.vulkan_backend:
+                        vulkan._record_font_owner_fallback()
+                        self._mirror_vulkan_font_fault_state(vulkan)
+                        self.vulkan_backend = Some(vulkan)
+                    vulkan_fallback_pending = false
             if winner != "":
                 break
+        self._font_attempt_scratch = attempts
         self.last_font_execution_attempts = attempts
         self.last_font_execution_target = winner
         winner != ""
@@ -1302,7 +1380,7 @@ class Engine2D with DrawIrRenderTarget:
         self.font_owner.active[0].stage_glyph_run(run, color, font_size)
         self._font_batch_receipt("glyph-run", run.glyph_ids.len())
         self._draw_font_batch_staged(
-            x, y, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
+            x, y, ENGINE2D_FONT_EXECUTION_TARGETS)
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         """Draw a selected vector face fail-closed, or use the bitmap default."""
@@ -1353,9 +1431,10 @@ class Engine2D with DrawIrRenderTarget:
         # Use the caller-owned plan channel proven by the advances path below.
         # The returned [text] from font_execution_plan can arrive empty on the
         # native aggregate-return lane before staging begins.
-        var plan: [text] = []
+        var plan = self._font_plan_scratch
         val plan_count = font_execution_plan_into(
-            config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"], plan)
+            config, ENGINE2D_FONT_EXECUTION_TARGETS, plan)
+        self._font_plan_scratch = plan
         if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
             _vec_entry_probe_count = _vec_entry_probe_count + 1
             val policy_is_suggested = config.execution_policy == FontExecutionPolicy.Suggested
@@ -1410,8 +1489,9 @@ class Engine2D with DrawIrRenderTarget:
         # (rerun31 [e2d-batch] plan-empty for text='X' size=12). The variant
         # fills a caller-local list and returns a scalar count, both proven
         # channels, and its per-gate receipts attribute any honest rejection.
-        var plan: [text] = []
-        val plan_count = font_execution_plan_into(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"], plan)
+        var plan = self._font_plan_scratch
+        val plan_count = font_execution_plan_into(config, ENGINE2D_FONT_EXECUTION_TARGETS, plan)
+        self._font_plan_scratch = plan
         # Explicit branches (no mixed boolean or) + per-exit receipts: rerun30
         # proved the caller sees false while the batch-path receipt below stays
         # silent — the failure is in one of these two early exits.
@@ -1438,8 +1518,15 @@ class Engine2D with DrawIrRenderTarget:
         )
 
     me draw_shaped_text_configured(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> bool:
-        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
-        if plan.len() == 0 or not font_render_config_selection_supported(config):
+        var plan = self._font_plan_scratch
+        val plan_count = font_execution_plan_into(
+            config, ENGINE2D_FONT_EXECUTION_TARGETS, plan)
+        self._font_plan_scratch = plan
+        if plan_count <= 0:
+            return false
+        if plan.len() == 0:
+            return false
+        if not font_render_config_selection_supported(config):
             return false
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
@@ -1768,6 +1855,27 @@ class Engine2D with DrawIrRenderTarget:
     fn vulkan_font_performance_evidence() -> VulkanFontCompositeEvidence?:
         self.last_vulkan_font_evidence
 
+    fn font_owner_fault_receipt() -> i64:
+        self._font_owner_last_fault
+
+    fn font_device_loss_observed() -> bool:
+        self._font_device_loss_sequence > 0
+
+    fn font_owner_fault_mask() -> i64:
+        self._font_owner_fault_mask
+
+    fn font_owner_fault_sequence() -> i64:
+        self._font_owner_fault_sequence
+
+    fn font_device_loss_sequence() -> i64:
+        self._font_device_loss_sequence
+
+    fn font_owner_fault_identity_unchanged() -> bool:
+        self._font_owner_fault_identity_unchanged
+
+    fn font_owner_fault_fallback_count() -> i64:
+        self._font_owner_fault_fallback_count
+
     fn draw_ir_font_evidence() -> DrawIrTargetFontEvidence?:
         val vulkan = self.last_vulkan_font_evidence
         if vulkan == nil:
@@ -1834,6 +1942,7 @@ class Engine2D with DrawIrRenderTarget:
             bm.draw_image(x, y, w, h, pixels)
         elif val Some(vulkan) = self.vulkan_backend:
             vulkan.draw_image(x, y, w, h, pixels)
+            self._mirror_vulkan_font_fault_state(vulkan)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
         else:
@@ -2025,6 +2134,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         val vulkan = active
         val completed = vulkan.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
+        self._mirror_vulkan_font_fault_state(vulkan)
         self.vulkan_backend = Some(vulkan)
         completed
 
@@ -2230,6 +2340,7 @@ class Engine2D with DrawIrRenderTarget:
             bm.present()
         elif val Some(vulkan) = self.vulkan_backend:
             vulkan.present()
+            self._mirror_vulkan_font_fault_state(vulkan)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
         else:
@@ -2247,6 +2358,7 @@ class Engine2D with DrawIrRenderTarget:
             return bm.read_pixels()
         elif val Some(vulkan) = self.vulkan_backend:
             val pixels = vulkan.read_pixels()
+            self._mirror_vulkan_font_fault_state(vulkan)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
             return pixels
@@ -2261,6 +2373,7 @@ class Engine2D with DrawIrRenderTarget:
             bm.read_pixels_with_source()
         elif val Some(vulkan) = self.vulkan_backend:
             val readback = vulkan.read_pixels_with_source()
+            self._mirror_vulkan_font_fault_state(vulkan)
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
             readback
@@ -2277,6 +2390,7 @@ class Engine2D with DrawIrRenderTarget:
         if self.selected_backend_name == "vulkan-poisoned-software":
             if val Some(vulkan) = self.vulkan_backend:
                 vulkan.shutdown()
+                self._mirror_vulkan_font_fault_state(vulkan)
                 if vulkan.completion_unknown:
                     self.vulkan_backend = Some(vulkan)
                 else:
@@ -2287,6 +2401,7 @@ class Engine2D with DrawIrRenderTarget:
         if self.selected_backend_name == "vulkan":
             if val Some(vulkan) = self.vulkan_backend:
                 vulkan.shutdown()
+                self._mirror_vulkan_font_fault_state(vulkan)
                 if vulkan.completion_unknown:
                     self.vulkan_backend = Some(vulkan)
                 else:

@@ -420,6 +420,11 @@ unsupported axes, and unsupported rendering modes reject before cache mutation.
 
 Policy is observable. Engine2D supplies its executable font-adapter order
 `cuda, metal, opencl, vulkan, rocm, cpu`; Engine3D supplies `vulkan, cpu`.
+Both engines fill a caller-owned target list through
+`font_execution_plan_into`; native production paths do not consume the
+aggregate-return compatibility helper. Engine3D keeps the renderer in the
+shared one-slot owner, stages text/glyph material there, and copies batch fields
+into the existing inbound material path before drawing HUD or world text.
 `Suggested(auto)` uses the supplied order, while `Suggested(named)` moves its
 named target first and retains each remaining target once. `Preferred(named)`
 tries the named target then CPU; `Required(named)` tries only the named target.
@@ -449,9 +454,14 @@ emission/compile, dirty upload, queue, device, synchronization, present/readback
 and CPU. Benchmark records include fixture hashes, viewport, color space,
 premultiplication/rounding, warmups, samples, percentile method, host,
 device/driver, RSS, and GPU resource high-water.
-Schema v5 also records controlled Vulkan-poison CPU fallback, the prepared batch
-identity before/after poison, and eleven post-loss CPU samples with recomputed
-p95 bounded by the unchanged baseline fixture. It adds one retained
+Schema v5 reserves owner-produced fault and device-loss evidence. The current
+source contract uses `FontOwnerFaultReceipt` plus lifetime-monotonic owner masks,
+sequences, identity-preservation, and fallback counters; public engine facades
+return only scalar projections. Classifier calls, literal labels, and synthetic
+poison are not acceptance evidence. The aggregate remains blocked before
+focused admission until the admitted runtime executes those real owner paths;
+Vulkan3D fence-wait/wait-idle device loss additionally remains unobservable at
+the runtime facade. It adds one retained
 emission/compile-install scalar; shaping, material, dirty-upload, fused
 submit-through-device-completion `queue_device`, later fence-observation
 `sync`, offscreen readback, and CPU-oracle p95s plus seven 11-sample arrays.
@@ -459,13 +469,23 @@ submit-through-device-completion `queue_device`, later fence-observation
 device-origin readback remains mandatory, and fused `queue_device` is never
 summed with `sync` as if the intervals were disjoint.
 
+Engine3D atlas replacement is transactional: create and upload a fresh texture
+without clearing the live atlas identity, retire the previous texture only
+after successful upload, and keep the old atlas untouched on failure. This
+prevents failed size changes from orphaning textures or corrupting the active
+cache identity.
+
 Promotion gates are the selected NFRs: at least 95% warm cache hits; 1,024 glyph
 p95 no more than 4 ms at 1080p and 8 ms at 4K; equal-semantics 4,096 glyph p95 at
 least 1.25x CPU; no unchanged full-atlas upload; at most 10% RSS growth, 128 MiB
 GPU resources, and 80 MiB bundled core fonts/notices.
 
-The performance SSpec is the sole collector. It overwrites
-`build/shared_multilingual_gpu_fonts_perf/evidence.env`; the shared helper pins
+The performance SSpec is the sole collector. Canonical schema-v5 attempts are
+immutable: it writes the measurement-started sentinel and final record once at
+`$FOCUSED_ROOT/attempt-$FOCUSED_ATTEMPT/shared_multilingual_gpu_fonts_perf.measurement-started.env`
+and
+`$FOCUSED_ROOT/attempt-$FOCUSED_ATTEMPT/shared_multilingual_gpu_fonts_perf.evidence.env`,
+and refuses an existing path. The shared helper pins
 the schema, fixture, font bytes, collector/helper and renderer/backend source
 bundle hashes, exact viewport/packed-ARGB/straight-alpha/rounding/per-route
 warmup/percentile/exact packed-ARGB comparator metadata, same-host OS/architecture,
@@ -474,6 +494,28 @@ arrays, and the observed promotion identities, handles, fence, changed pixels,
 checksums, and parity. The system promotion spec only
 loads this record. Missing, stale, partial, malformed, or percentile-mismatched
 records fail closed and never trigger a second measurement.
+
+Current source ownership is split at the native boundary. `stage3_hir_lifetime`
+owns the runtime selected-device identity and fence-wait/wait-idle last-error
+facades, including runtime symbol/codegen/interpreter and canonical Vulkan SFFI
+wiring. `font_native_perf_audit` owns Simple-side stable physical-device
+identity propagation into Engine2D/Engine3D and immutable native/performance
+evidence. The focused source contracts are
+`test/01_unit/lib/gpu/engine3d/font_hud_material_spec.spl`,
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_device_metadata_spec.spl`,
+and `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl`;
+their exact queued commands are:
+
+```bash
+run_focused_spec test/01_unit/lib/gpu/engine3d/font_hud_material_spec.spl
+run_focused_spec test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_device_metadata_spec.spl
+run_focused_spec test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl
+```
+
+The frozen helper retains receipts under
+`build/test-artifacts/shared_multilingual_gpu_fonts/focused/attempt-$FOCUSED_ATTEMPT/`.
+They remain blocked on an admitted CLI/core-C identity (and real hardware for
+native readback). `/root` is merge owner and final reviewer.
 
 ## Documentation impacts
 

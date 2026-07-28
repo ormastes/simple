@@ -14,8 +14,8 @@ All 24 requirement/NFR rows are mapped, but the umbrella result remains
   buffers plus Draw IR/Engine2D and require full-buffer no-nesting parity;
 - shared nested collection has source coverage for a valid collection and
   stale, duplicate, and orphan rejection, but remains runtime-unverified;
-- the inventory is 34 changed/new specs: 14 mirrors missing, 20 stale, zero
-  current, and all 34 require focused deployed-runtime docgen;
+- the inventory is 42 changed/new specs: 19 mirrors missing, 23 stale, zero
+  current, and all 42 require focused deployed-runtime docgen;
 - Lane C resolved all 19 matcher findings; two short-expression parse repairs
   and selected-registry path/SHA/axis binder hardening are source-present but
   runtime-unverified;
@@ -26,15 +26,16 @@ All 24 requirement/NFR rows are mapped, but the umbrella result remains
   complex-script preprocessing remains fail-closed outside its pinned oracles;
 - the historical Lane F scan found 346 scenarios with real direct/helper
   assertions and all eight frozen steps; the corrected deterministic 34-path
-  docgen manifest is recorded but has not run;
-- the corrected focused graph has 39 commands: one runner-contract preflight,
-  B6, C17, D11, and E4. Focused failures return their real exit, while docgen
+  docgen manifest is superseded by the current deterministic 42-path manifest,
+  which is recorded but has not run;
+- the corrected focused graph has 46 commands: one runner-contract preflight,
+  B6, C18, D12, and E9. Focused failures return their real exit, while docgen
   retains immutable identity/command/streams/exit/manual-hash evidence and
   requires an explicit complete/`0 stubs` marker; the aggregate checker
   revalidates and seals the complete graph;
-- implementation checkpoint `269f46387e1` precedes the current evidence
-  working changes; final fetch/rebase/file-count sync
-  remains open, while older static guard results are historical only;
+- implementation checkpoint `24a77be3c89a` has 75 current dirty paths; the
+  origin comparison is 87 behind / 70 ahead. Final fetch/rebase/file-count sync
+  remains open; the final 75-path/18-spec settled-overlay static gate passes;
 - the final bounded retained-Stage3 cycle cleared the NUL environment panic,
   then trapped at RIP `0x88034b` because its obsolete iterable collector passed
   a lowering error with nil `span` to `_format_hir_lowering_error`; no candidate
@@ -44,10 +45,16 @@ All 24 requirement/NFR rows are mapped, but the umbrella result remains
   no fourth producer/full bootstrap; a future fresh window must first prove an
   immutable pure-Simple parent/current source receipt and then use the cheapest
   adequate incremental build;
-- Stage4 low-memory forwarding/restoration, one direct sibling-owner index per
-  lowering pass, and direct qualified-function lookup are source-fixed and
-  independently reviewed; Rust diagnostics are non-acceptance, no measured
-  gain exists, and all three canonical prerequisite mirrors are missing;
+- Stage4 low-memory forwarding/restoration, per-invocation Stage3/HIR
+  environment/profile hoisting, one direct sibling-owner index per lowering
+  pass, and direct qualified-function lookup are source-fixed and independently
+  reviewed; all four canonical prerequisite mirrors are missing;
+- exact host-independent Rust diagnostics pass: runtime UUID/LUID identity
+  (0.00s, 5,632 KiB max RSS) and compiler device-loss classification (17.84s,
+  2,169,768 KiB max RSS); these are non-acceptance evidence;
+- completed memory/performance source fixes reuse vertex-byte scratch, bound the
+  completed vertex pool, retain one deferred-fallback snapshot, and clear
+  Engine2D fallback pixels; runtime/profile acceptance remains blocked;
 - the three-cycle cap is reached; the compatibility bridge remains isolated
   and uncommitted, and no further build retry is permitted this session;
 - the latest external `c167e250` Stage4 ended `EXIT=143`/SIGTERM with no full

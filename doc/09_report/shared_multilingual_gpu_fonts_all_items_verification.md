@@ -1,11 +1,97 @@
 # Shared Multilingual GPU Fonts — All-Items Verification
 
-Date: 2026-07-26
+Date: 2026-07-28
 Authority: selected requirements and NFRs in
 `doc/02_requirements/{feature,nfr}/shared_multilingual_gpu_fonts.md`
 Final done-mark owner: highest-capability `/root`
 
 ## Result
+
+`STATUS: FAIL`
+
+## 2026-07-28 current-overlay incremental Stage 4 result
+
+The SPipe skill and bootstrap rule now require Stage 4 to prefer a provenance-
+bound incremental full-CLI build and accept a successful artifact directly;
+there is no ceremonial clean replay. The exact current overlay, pure-Simple
+parent, stable runtime, exclusive cache, two-thread command, and 32 GiB cap were
+bound for three bounded cycles.
+
+No Stage 4 CLI was produced. The profiled first cycle was stopped after proving
+the old parent's per-expression instrumentation cost. The second cycle had no
+compiler error but was selected by host `earlyoom` when unrelated jobs exhausted
+RAM and swap. The resource-admitted third cycle completed HIR finalization, then
+the cgroup OOM-killed `simple` at 33,483,972 KiB anonymous RSS before
+codegen/link. Exact receipts are under
+`build/native_probe/current-overlay-full-cli-fresh{1,2,3}/`; the tracked blocker
+is `doc/08_tracking/bug/stage4_low_memory_rss_growth_2026-07-18.md`.
+
+The three-cycle cap is exhausted. Essential-tools admission, calibration, the
+46 focused commands, 42 font docgens, four compiler-prerequisite docgens,
+native/QEMU/performance evidence, completion sync, and push remain blocked.
+
+Source follow-up identifies and removes one high-confidence Stage 4-only
+retention owner: unused legacy flat HIR and MIR accumulators duplicated the
+canonical module graphs on the no-GC runtime. The gated path is unreachable to
+Stage 4 consumers, and an independent ownership review found no P0/P1 defect.
+The existing memory profiler now has a coarse
+`SIMPLE_COMPILER_MEMORY_PROFILE=1` mode. Focused HIR diagnostics pass 4/4 and
+both direct-runtime guards pass, but no new producer is permitted in this
+window; the change remains runtime-unverified and does not promote any matrix
+row.
+
+`STATUS: FAIL`
+
+## 2026-07-28 host-independent completion audit
+
+Parallel source audits fixed the remaining host-independent defects: GPOS
+PairPos Device offsets now resolve from the owning subtable; the selected-font
+SimpleOS skip is typed at the Engine2D rejection point; hosted compatibility
+frames cannot claim Engine2D provenance; Engine3D retains one font-owner slot
+and uses caller-owned plan/batch storage; and the four public font-renderer
+surfaces export the out-parameter API. Independent code reviews found no
+remaining P0/P1 in those paths. Exact host-independent Rust diagnostics also
+pass: runtime UUID/LUID physical identity completed in 0.00s at 5,632 KiB max
+RSS, and compiler wait/device-loss classification completed in 17.84s at
+2,169,768 KiB max RSS. These diagnostics do not replace pure-Simple evidence.
+
+Lane E now accepts only discrete/integrated devices with stable physical-device
+identity, treats AA bounds as limits rather than observations, and writes each
+attempt under its immutable attempt root. NFR-007 remains deliberately blocked:
+the perf spec reports unavailable, and a direct aggregate check fails before
+focused admission with `font-owner-fault-runtime-proof-unavailable`. Engine2D
+and Engine3D now expose tracked scalar owner-fault/device-loss state, but no
+admitted current pure-Simple run has produced the required hardware receipts;
+current source now retains Vulkan3D fence-wait/wait-idle errors through the
+canonical runtime facade, but that repair remains runtime-unverified.
+
+The source-only reliability repair uses `i64` fault codes rather than aggregate
+or enum transport on native hot paths. Atlas replacement is transactional;
+unknown fence completion poisons the backend and retains potentially in-flight
+resources; shutdown keeps an incomplete Engine3D owner; fallback counters move
+only after a successful CPU commit. Reused plan/projection and vertex-byte
+buffers remove the new per-draw scratch churn; the completed vertex pool is
+bounded, deferred fallback retains one snapshot, and Engine2D clears fallback
+pixels after use. Full-frame proof readbacks remain bounded P1 profiling work,
+not an observed leak.
+
+The final settled-overlay static gate passes for all 75 paths and 18 changed
+specs: diff/whitespace, canonical matcher and placeholder, Stage3 cache-shape,
+font allocation/lifetime, current-count, and working direct-runtime ownership
+checks are green. The aggregate itself still exits 1 with the expected exact
+runtime-proof blocker above.
+
+The executable-manual inventory is 42 font specs (19 missing mirrors, 23
+stale, zero current) plus four missing compiler-prerequisite mirrors. The
+focused graph has 46 commands: preflight, B6, C18, D12, and E9. With no
+admitted full CLI, no runtime, docgen, native, QEMU, or performance acceptance
+row can run. The mechanical matrix remains `0 pass / 0 active / 24 blocked`.
+The separate twelve-criterion control matrix is `1 pass / 4 active / 7 blocked`:
+AC-2 passes; AC-1, AC-7, AC-11, and AC-12 are active; AC-3–6 and
+AC-8–10 remain blocked. Source-lane activity does not promote a REQ/NFR row.
+The checkout has 75 changed/new paths at tracked checkpoint `24a77be3c89a` and
+is 87 commits behind / 70 ahead of `origin/main`; completion-time sync and push
+remain open.
 
 `STATUS: FAIL`
 
@@ -15,10 +101,41 @@ promote a font row. The branch nevertheless retains the minimal HirBlock,
 lowering-error collector, native-arena, and direct-entry repairs needed to
 produce the pure-Simple prerequisite.
 
+### Current identity and synchronization source ownership
+
+| Owner | Writable scope | Exact queued focused command | Retained root | Final reviewer |
+|---|---|---|---|---|
+| `font_native_perf_audit` | Simple-side stable physical-device identity propagation through existing Engine2D/Engine3D Vulkan owners and immutable native/perf evidence; performance-helper, backend-fault, metadata, and native source-contract specs; no Rust runtime identity/sync implementation | `run_focused_spec test/01_unit/helpers/shared_multilingual_gpu_fonts_perf_evidence_spec.spl`; `run_focused_spec test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spec.spl`; `run_focused_spec test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_device_metadata_spec.spl`; after runtime admission and real hardware, `run_focused_spec test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` | `build/test-artifacts/shared_multilingual_gpu_fonts/focused/attempt-$FOCUSED_ATTEMPT/` | `/root` |
+| `font_surface_audit` | Engine2D scalar owner-fault receipt and scratch-reuse source contract | `run_focused_spec test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_font_scalar_receipt_spec.spl` | `build/test-artifacts/shared_multilingual_gpu_fonts/focused/attempt-$FOCUSED_ATTEMPT/` | `/root` |
+| `font_matrix_audit` | hosted-WM live-proof focus/provenance source contract | `run_focused_spec test/01_unit/os/hosted/hosted_entry_live_proof_focus_contract_spec.spl` | `build/test-artifacts/shared_multilingual_gpu_fonts/focused/attempt-$FOCUSED_ATTEMPT/` | `/root` |
+| `stage3_hir_lifetime` | runtime selected-device identity, fence-wait/wait-idle last-error retention, runtime symbol/codegen/interpreter and canonical Vulkan SFFI facades; no Engine2D/Engine3D evidence-record ownership | `run_focused_spec test/01_unit/lib/gpu/engine3d/font_hud_material_spec.spl` | `build/test-artifacts/shared_multilingual_gpu_fonts/focused/attempt-$FOCUSED_ATTEMPT/` | `/root` |
+
+These commands remain queued until a future admitted pure-Simple CLI/core-C
+identity exists; the native readback command also requires one
+discrete/integrated Vulkan device. No command is executable merely because its
+source lane is active.
+
 ### Current bootstrap blocker
 
-The implementation checkpoint under verification is
-`269f46387e174d6e8b31ad494c0d177dc15e69f4`; current evidence working changes
+P0 is owned by `/root` for a future fresh producer window only, with `/root` as
+final reviewer. This exhausted window cannot execute another producer or full
+bootstrap. Retained cache/profile inputs remain under `build/native_probe/`,
+notably `stage3-importfix-cache/`, `rebased-stage4-cycle3-final.log`, and
+`lazy-sibling-stage3-cycle3-pure/build.log`. They are blocker/resume artifacts,
+not runtime admission. The conditional resume and hash-bound admission command
+below remains authoritative only after a future window first proves an
+immutable pure-Simple parent/current-source receipt.
+
+The producer input is the current isolated overlay rooted at
+`24a77be3c89a`, not the historical detached checkpoint. Its tracked
+`src scripts test` binary-diff SHA-256 is
+`c5233e73b817e1ca915aa768f62856200b7fc43b542b2715d03ed7c5eab218b1`;
+the additional untracked source owner
+`src/lib/common/gpu/font_owner_fault_receipt.spl` has SHA-256
+`032978d4654af8011f0d0bd084119dc7ed035bf8710d03c6928318c56a33817b`.
+
+The tracked implementation checkpoint under verification is
+`24a77be3c89adb1f46a53cbcb53602a904305345`; current evidence working changes
 follow it without inventing a commit hash. The earlier pushed checkpoint
 `2eb2bbf93f10` is historical. Completion still requires the final
 fetch/rebase/file-count gate against the then-current `origin/main`.
@@ -28,11 +145,18 @@ zero-executable-specs-under-`doc/06_spec` layout gate passed. Those retained
 static results do not prove the current checkout, runtime behavior, or a
 native row.
 
-Current source `269f46387e1` replaces the quadratic sibling resolver with one
+Current source replaces the quadratic sibling resolver with one
 shared package-sibling index and makes Stage3 use the pure positional route,
 the native-all runtime bundle, and forwarded target/cache/thread/runtime
-environment. All three producer cycles are exhausted. The latest stopped after
-17m29s at maximum RSS 23,943,204 KiB with no output; there is no fourth retry.
+environment. Environment/profile decisions and their diagnostic construction
+are hoisted once per compiler invocation rather than repeated per expression or
+source. All three producer cycles are exhausted. The retained pre-fix
+profile exited 124 after 30:04.76 with maximum RSS 21,850,164 KiB (log SHA-256
+`090e9775f618052004b1f451b3709fc49add60823a12cec4318117827dfeead5`).
+The later current-source producer also exited 124 after 30 minutes in HIR,
+produced no child, and has log SHA-256
+`b5b2aaa6d8b5eae73e863c7ae6c5fd3af29f675a6f3562d08c14e9a663c69bfe`;
+its last sampled RSS was 19,841,980 KiB at 27:16. There is no fourth retry.
 No admitted CLI/core-C identity or global runner calibration exists.
 
 The external compiler workspace at stale source `c167e2509f4` ended Stage4
@@ -202,35 +326,37 @@ do not promote a requirement or NFR.
 
 Every non-pass row names its owner, dependency, exact acceptance surface, and
 final reviewer. `active` means the owning parallel lane can still change the
-row; `blocked` means the required runtime/device evidence is unavailable.
-Current count: `0 pass`, `15 active`, `9 blocked`.
+row; `blocked` means required runtime/device/manual evidence is unavailable.
+The host-independent repair lanes are source-complete but runtime-unverified,
+so no row currently has an active writer. Current count: `0 pass`, `0 active`,
+`24 blocked`.
 
 | Row | Status | Owner / writable scope | Current executable and manual evidence | Dependency and exact completion command | Final reviewer |
 |---|---|---|---|---|---|
-| REQ-001 | active | B manifest/distribution | `shared_font_manifest_spec.spl` and mirror cover pins, order, totals, boundary | deployed pure-Simple runtime; run B command set below | `/root` |
-| REQ-002 | active | B manifest/distribution | same pair covers decimal contribution, alias policy, deterministic regeneration | deployed pure-Simple runtime; run B command set | `/root` |
-| REQ-003 | active | B+C manifest/shaping | manifest and shaping acceptance pairs cover sparse states and fail-closed cells | deployed pure-Simple runtime; run B and C command sets | `/root` |
-| REQ-004 | active | B manifest/distribution | manifest, asset-manifest, installer, archive, SimpleOS bundle/staging specs exist; mirrors exist for the acceptance pairs | deployed pure-Simple runtime; run B command set and zero-stub docgen | `/root` |
-| REQ-005 | active | B manifest/distribution | manifest and SimpleOS bundle specs cover the pinned candidate catalog and unchanged bytes | deployed pure-Simple runtime; run B command set | `/root` |
-| REQ-006 | active | C+D shaping/surfaces | `shared_font_surfaces_spec.spl` and legacy Web/GUI/WM route pair cover the shared owner/material seam | deployed pure-Simple runtime; run aggregate and D command sets | `/root` |
-| REQ-007 | active | C shaping/material | shaping acceptance plus selected Arabic/Devanagari and six integrated GSUB/GPOS unit specs exist; selected-memory binding rejects unregistered paths and path/hash mismatches, and GPOS catalog lookup now rejects duplicate indices without publishing partial adjustments | source is present but runtime-unverified; run the C command set on the deployed pure-Simple runtime and generate six missing unit mirrors | `/root` |
-| REQ-008 | active | B+C manifest/shaping | manifest and parser/loader specs cover `glyf`, default instance, bitmap, and rejection policy | deployed pure-Simple runtime; run B/C command sets | `/root` |
-| REQ-009 | active | C+E material/native | renderer, aggregate surface, emission, backend and perf specs contain cache identity/lifecycle oracles | deployed pure-Simple runtime and native record; run C/E sets | `/root` |
-| REQ-010 | active | E native/emission | GPU emission and CUDA handoff executable/manual pairs cover source/artifact contracts; emission is not execution | deployed pure-Simple runtime; run E source commands; retained native artifact required for promotion | `/root` |
-| REQ-011 | active | D+E surfaces/native | aggregate surfaces/route plus the six production capability rows below exist; working changes add fail-closed degenerate Web status, ancestor-clipped nested IMAGE projection, trait/concrete-pixel-buffer and Draw IR/Engine2D clip parity, full-buffer no-nesting parity, and shared nested-collector cases for valid collection plus stale/duplicate/orphan rejection | changes are source-present but runtime-unverified; deployed pure-Simple runtime, hosted frame and QEMU pixels required; complete all six rows below | `/root` |
-| REQ-012 | blocked | E native 2D/3D/perf | native readback source contains HUD/world, handles, submit, fence, depth/transform and readback gates; working source also records durable successful atlas/vertex upload counts and byte totals and requires all four receipts for 3D promotion | source changes are runtime-unverified; deployed pure-Simple runtime plus real graphics device required; run E native command | `/root` |
-| REQ-013 | blocked | E native 2D/3D/perf | native readback source rejects unavailable and forged promotion and now fails promotion closed when durable 3D upload receipts are missing | one real backend must pass both 2D and 3D through E native command | `/root` |
-| REQ-014 | blocked | B–E generation / F audit | among 34 changed/new specs, 14 mirrors are missing, 20 are stale, zero are current, and no retained log proves `0 stubs` | deployed pure-Simple runtime; run all 34 docgen commands below; review manuals | `/root` |
-| REQ-015 | active | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection; working changes canonicalize HIP to ROCm on the prepared batch | batch change is unverified; deployed pure-Simple runtime required; run aggregate/C commands | `/root` |
-| REQ-016 | active | C shaping/material | source integration covers GSUB 1–8, GPOS 1–9, LookupFlag/GDEF filtering, FeatureVariations, Device/VariationIndex and anchors, named context/data facades, nested contextual remaps, ppem/coordinates/LangSys, pixel/design-unit separation, and fail-closed selected preprocessing; focused regressions cover the reviewed P1s | execute all focused specs on an admitted pure-Simple CLI and regenerate/review all affected manuals | `/root` |
-| NFR-001 | active | B manifest/distribution | manifest and SimpleOS bundle source gates cover immutable hashes, deterministic generation and corruption rejection | deployed pure-Simple runtime; run B command set | `/root` |
-| NFR-002 | blocked | E native/perf | native readback and perf specs define exact packed-ARGB comparator and provenance fields | deployed pure-Simple runtime plus real device; run E native/perf commands | `/root` |
-| NFR-003 | active | B manifest/distribution | manifest/bundle gates encode the 80 MiB and SimpleOS projection limits | deployed pure-Simple runtime; run B command set | `/root` |
-| NFR-004 | blocked | E native/perf | performance spec and manual define warm hit and 1080p/4K p95 thresholds | real device must create a valid `build/shared_multilingual_gpu_fonts_perf/evidence.env` | `/root` |
+| REQ-001 | blocked | B manifest/distribution | `shared_font_manifest_spec.spl` and mirror cover pins, order, totals, boundary | deployed pure-Simple runtime; run B command set below | `/root` |
+| REQ-002 | blocked | B manifest/distribution | same pair covers decimal contribution, alias policy, deterministic regeneration | deployed pure-Simple runtime; run B command set | `/root` |
+| REQ-003 | blocked | B+C manifest/shaping | manifest and shaping acceptance pairs cover sparse states and fail-closed cells | deployed pure-Simple runtime; run B and C command sets | `/root` |
+| REQ-004 | blocked | B manifest/distribution | manifest, asset-manifest, installer, archive, SimpleOS bundle/staging specs exist; mirrors exist for the acceptance pairs | deployed pure-Simple runtime; run B command set and zero-stub docgen | `/root` |
+| REQ-005 | blocked | B manifest/distribution | manifest and SimpleOS bundle specs cover the pinned candidate catalog and unchanged bytes | deployed pure-Simple runtime; run B command set | `/root` |
+| REQ-006 | blocked | C+D shaping/surfaces | `shared_font_surfaces_spec.spl` and legacy Web/GUI/WM route pair cover the shared owner/material seam | deployed pure-Simple runtime; run aggregate and D command sets | `/root` |
+| REQ-007 | blocked | C shaping/material | shaping acceptance plus selected Arabic/Devanagari and six integrated GSUB/GPOS unit specs exist; selected-memory binding rejects unregistered paths and path/hash mismatches, and GPOS catalog lookup now rejects duplicate indices without publishing partial adjustments | source is present but runtime-unverified; run the C command set on the deployed pure-Simple runtime and generate six missing unit mirrors | `/root` |
+| REQ-008 | blocked | B+C manifest/shaping | manifest and parser/loader specs cover `glyf`, default instance, bitmap, and rejection policy | deployed pure-Simple runtime; run B/C command sets | `/root` |
+| REQ-009 | blocked | C+E material/native | renderer, aggregate surface, emission, backend and perf specs contain cache identity/lifecycle oracles | deployed pure-Simple runtime and native record; run C/E sets | `/root` |
+| REQ-010 | blocked | E native/emission | GPU emission and CUDA handoff executable/manual pairs cover source/artifact contracts; emission is not execution | deployed pure-Simple runtime; run E source commands; retained native artifact required for promotion | `/root` |
+| REQ-011 | blocked | D+E surfaces/native | aggregate surfaces/route plus the six production capability rows below exist; working changes add fail-closed degenerate Web status, ancestor-clipped nested IMAGE projection, trait/concrete-pixel-buffer and Draw IR/Engine2D clip parity, full-buffer no-nesting parity, and shared nested-collector cases for valid collection plus stale/duplicate/orphan rejection | changes are source-present but runtime-unverified; deployed pure-Simple runtime, hosted frame and QEMU pixels required; complete all six rows below | `/root` |
+| REQ-012 | blocked | `font_native_perf_audit` — Simple-side stable physical identity propagation through Engine2D/Engine3D Vulkan owners and immutable native/perf evidence; no Rust runtime/SFFI writes | native readback source contains HUD/world, handles, submit, fence, depth/transform and readback gates; promotion requires durable successful atlas/vertex upload receipts and one discrete/integrated stable UUID/PCI/LUID identity shared by Engine2D and Engine3D | the runtime identity facade is source-present; run `run_focused_spec test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_device_metadata_spec.spl`, then on real hardware run `run_focused_spec test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl`; both remain blocked on admitted CLI/core-C | `/root` |
+| REQ-013 | blocked | E native 2D/3D/perf | native readback source rejects unavailable, forged, CPU, virtual, and cross-device promotion and fails closed when durable 3D upload receipts are missing | one hardware backend must pass both 2D and 3D through E native command | `/root` |
+| REQ-014 | blocked | B–E generation / F audit | among 42 changed/new specs, 19 mirrors are missing, 23 are stale, zero are current, and no retained log proves `0 stubs` | deployed pure-Simple runtime; run all 42 docgen commands below; review manuals | `/root` |
+| REQ-015 | blocked | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection; working changes canonicalize HIP to ROCm on the prepared batch | batch change is unverified; deployed pure-Simple runtime required; run aggregate/C commands | `/root` |
+| REQ-016 | blocked | C shaping/material | source integration covers GSUB 1–8, GPOS 1–9, LookupFlag/GDEF filtering, FeatureVariations, Device/VariationIndex and anchors, named context/data facades, nested contextual remaps, ppem/coordinates/LangSys, pixel/design-unit separation, and fail-closed selected preprocessing; focused regressions cover the reviewed P1s | execute all focused specs on an admitted pure-Simple CLI and regenerate/review all affected manuals | `/root` |
+| NFR-001 | blocked | B manifest/distribution | manifest and SimpleOS bundle source gates cover immutable hashes, deterministic generation and corruption rejection | deployed pure-Simple runtime; run B command set | `/root` |
+| NFR-002 | blocked | E native/perf | native readback and perf specs define exact packed-ARGB comparison plus broader-AA limits of at most 2 channel levels at edges and 1 coverage level | deployed pure-Simple runtime plus real hardware device; run E perf/native commands | `/root` |
+| NFR-003 | blocked | B manifest/distribution | manifest/bundle gates encode the 80 MiB and SimpleOS projection limits | deployed pure-Simple runtime; run B command set | `/root` |
+| NFR-004 | blocked | E native/perf | performance spec and manual define warm hit and 1080p/4K p95 thresholds | real device must create a valid immutable `$FOCUSED_ROOT/attempt-$FOCUSED_ATTEMPT/shared_multilingual_gpu_fonts_perf.evidence.env` | `/root` |
 | NFR-005 | blocked | E native/perf | performance spec defines equal-semantics 4,096-glyph CPU/GPU comparison | real promoted backend must prove at least 1.25x using E perf command | `/root` |
-| NFR-006 | blocked | E native/perf | performance spec defines unchanged upload, RSS delta and GPU high-water checks | real device plus isolated RSS probe; run E perf command | `/root` |
-| NFR-007 | blocked | E native/perf | native/perf specs define corrupt/device-loss fallback and unchanged identity/p95 checks | retained native fault-injection execution required | `/root` |
-| NFR-008 | blocked | E native/perf | native/perf records require shaping through readback/resource stages; working 3D source adds successful atlas/vertex upload count and byte receipts | retained nonzero upload receipts, handles, fence and device-origin readback required | `/root` |
+| NFR-006 | blocked | E native/perf | performance spec defines unchanged upload, RSS delta and GPU high-water checks in the immutable attempt record | real device plus isolated RSS probe; run E perf command | `/root` |
+| NFR-007 | blocked | `stage3_hir_lifetime` — runtime fence-wait/wait-idle last-error retention plus symbol/codegen/interpreter/SFFI facade; `font_native_perf_audit` owns only downstream Simple owner/evidence propagation | Engine2D and Engine3D expose retained scalar fault code/mask/sequence, device-loss sequence, identity preservation, and committed CPU-fallback count for real owner paths | exact blocker: `font-owner-fault-runtime-proof-unavailable`; queue `run_focused_spec test/01_unit/lib/gpu/engine3d/font_hud_material_spec.spl`, then the stable-identity native command after admission and real hardware; runtime execution remains blocked | `/root` |
+| NFR-008 | blocked | E native/perf | native/perf records require shaping through readback/resource stages, successful atlas/vertex upload counts and bytes, exact device identity, and immutable attempt-root retention | retained nonzero upload receipts, handles, fence and device-origin readback required | `/root` |
 
 ### REQ-011 production capability rows
 
@@ -262,7 +388,7 @@ reviewed crop pins, so all six rows retain their existing status.
 | GUI widget-tree font and events | blocked | `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/gui_font_event.txt` is absent; source assertions and a CPU mirror are not production evidence | `run_focused_spec test/03_system/gui/feature/gui_font_event_surface_spec.spl` after Lane A admission | D surfaces / `/root` |
 | Linux hosted WM live window | blocked | `build/linux-hosted-wm-font-event-current/evidence.env` and `report.md` are absent; a current X11/winit frame and reviewed glyph pin are required | `BUILD_DIR=build/linux-hosted-wm-font-event-current REPORT_PATH=build/linux-hosted-wm-font-event-current/report.md SIMPLE_BIN="$CLI" sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs`, then `run_focused_spec test/03_system/gui/linux_hosted_wm_live_window_spec.spl` | D surfaces / `/root` |
 | x86_64 SimpleOS QEMU WM | blocked | `build/test-simpleos-wm-fullscreen-live/evidence.env`, report, framebuffer captures, and font crop are absent. `/home/ormastes/dev/pub/simple/build/simpleos_wm_fullscreen_evidence/evidence.env` is explicitly rejected because its dirty-root source snapshot differs from this feature checkout in 65/108 scoped files | `export SIMPLE_BIN="$CLI"; run_focused_spec test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl`; the spec runs the live wrapper exactly once | D SimpleOS / `/root` |
-| RV64 SimpleOS QEMU WM | blocked | the 128 MiB font disk exists, but the retained report is `status: fail`, `reason: missing-elf`; RV64 ELF, QMP scanout, input transcript, and reviewed RV64-only crop pin are absent | export the exact `BUILD_DIR`, `REPORT_PATH`, `RV64_DISPLAY_SMOKE_ELF`, `RV64_WM_FONT_DISK`, and reviewed `RV64_WM_FONT_REGION_EXPECTED_SHA256`, then `run_focused_spec test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl`; the spec runs the live wrapper exactly once | D SimpleOS / `/root` |
+| RV64 SimpleOS QEMU WM | blocked | no current 128 MiB font disk exists in this worktree; RV64 ELF, retained report, QMP scanout, input transcript, and reviewed RV64-only crop pin are also absent | export the exact `BUILD_DIR`, `REPORT_PATH`, `RV64_DISPLAY_SMOKE_ELF`, `RV64_WM_FONT_DISK`, and reviewed `RV64_WM_FONT_REGION_EXPECTED_SHA256`, then `run_focused_spec test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl`; the spec runs the live wrapper exactly once | D SimpleOS / `/root` |
 
 No row is classified `pass`: static source, an existing Markdown file, emitted
 source, CPU mirror, simulation, or a crashed command cannot prove the selected
@@ -270,13 +396,14 @@ runtime/native requirement.
 
 ## Canonical executable/manual audit
 
-The authoritative inventory contains 34 executable specs changed or added since
+The authoritative inventory contains 42 executable specs changed or added since
 `origin/main`, after excluding the compiler-only specs and adding the focused
 runner contract, SimpleOS producer/consumer artifact-root contract, four
-REQ-016 full-layout specs, and changed selected-Devanagari policy spec.
-Fourteen mirrored manuals are missing, 20 are
+REQ-016 full-layout specs, changed selected-Devanagari policy spec, and seven
+retained font source-contract specs from the current owner overlay, plus the
+Engine2D runtime-config contract. Nineteen mirrored manuals are missing, 23 are
 present but stale, zero are current, and zero retained owner docgen `{out,err}`
-files exist. Therefore all 34 require focused deployed-runtime docgen
+files exist. Therefore all 42 require focused deployed-runtime docgen
 and zero manuals have accepted current `0 stubs` evidence.
 
 The eleven original acceptance specs are accounted for, but their mirrors are
@@ -294,11 +421,16 @@ production-surface acceptance mirrors exist for:
 evidence, not an independent REQ-011 producer acceptance row; its absent manual
 does not replace any canonical pair.
 
-Fourteen changed/new specs currently lack mirrors:
+Nineteen changed/new specs currently lack mirrors:
 
 - `doc/06_spec/01_unit/lib/test_runner_result_wrapper_spec.md`
 - `doc/06_spec/01_unit/lib/common/text_layout/font_render_config_spec.md`
 - `doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.md`
+- `doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_font_scalar_receipt_spec.md`
+- `doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_device_metadata_spec.md`
+- `doc/06_spec/01_unit/lib/gpu/engine2d/font_runtime_config_spec.md`
+- `doc/06_spec/01_unit/lib/gpu/engine3d/font_compat_spec.md`
+- `doc/06_spec/01_unit/lib/gpu/engine3d/font_hud_material_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_apply_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_gsub_full_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_gpos_spec.md`
@@ -311,14 +443,17 @@ Fourteen changed/new specs currently lack mirrors:
 - `doc/06_spec/01_unit/lib/skia/shaper_spec.md`
 - `doc/06_spec/02_integration/rendering/wm_nested_content_frame_spec.md`
 
-Twenty existing mirrors are stale because their executable sources changed in this
+Twenty-three existing mirrors are stale because their executable sources changed in this
 all-items worktree and no current pure-Simple docgen result exists:
 
 - `install_font_assets_spec.md`
 - `release_archive_layout_spec.md`
 - `font_asset_manifest_spec.md`
 - `font_renderer_spec.md`
+- `shared_multilingual_gpu_fonts_perf_evidence_spec.md`
+- `backend_vulkan_font_spec.md`
 - `gui_entry_desktop_production_render_contract_spec.md`
+- `hosted_entry_live_proof_focus_contract_spec.md`
 - `simpleos_font_asset_staging_spec.md`
 - `simpleos_font_bundle_spec.md`
 - `legacy_web_gui_wm_font_route_spec.md`
@@ -358,7 +493,7 @@ The retained pre-REQ-016 audit found no `pass_todo`, tautological
 `expect(true).to_equal(true)`, `to_raise`, or empty scenario body. Its
 scenario/expect counts predate the four REQ-016 specs and the changed
 selected-Devanagari policy spec and omitted the two evidence-contract specs, so
-they are not current 34-source evidence; lane F must audit all 34 sources after
+they are not current 42-source evidence; lane F must audit all 42 sources after
 an admitted runtime is available.
 The four `pass_do_nothing` calls in
 `wm_nested_content_frame_spec.spl` are explicitly justified no-op methods on
@@ -402,18 +537,19 @@ compose old-to-new position maps. Focused source regressions exist, but no
 full-layout claim is valid until they execute on the admitted runtime.
 
 The four new full-layout specs, changed selected-Devanagari policy spec, focused
-runner contract, and SimpleOS artifact-root contract raise the changed/new
-manual scope to 34: 14 mirrors are absent and 20 are
+runner contract, and SimpleOS artifact-root contract established the prior
+scope; the retained current-overlay contracts raise it to 42 manuals:
+19 mirrors are absent and 23 are
 stale. The previous title-coverage split is invalidated by the newly changed
 specs. `font_asset_manifest_spec.md` and
 `gui_entry_desktop_production_render_contract_spec.md` explicitly identify
 themselves as manually synchronized/docgen-pending. Hand synchronization is not
-generated evidence. The 14 absent mirrors and all 20 stale mirrors therefore
+generated evidence. The 19 absent mirrors and all 23 stale mirrors therefore
 remain rejected until deterministic docgen succeeds with `0 stubs`.
 
-Twelve additional changed compiler/bootstrap specs are prerequisite-enablement
+Thirteen additional changed compiler/bootstrap specs are prerequisite-enablement
 regressions, not shared-font requirement evidence, and are explicitly excluded
-from the 34-manual and 39-command font graphs:
+from the 42-manual and 46-command font graphs:
 `bootstrap_main_source_spec.spl`,
 `cli_native_build_main_contract_spec.spl`,
 `interpreter_backend_spec.spl`,
@@ -424,10 +560,12 @@ from the 34-manual and 39-command font graphs:
 `effect_inference_spec.spl`, and
 `resolve_nil_guard_spec.spl`,
 `bootstrap_focused_native_build_spec.spl`,
+`bootstrap_context_mir_source_spec.spl`,
 `resolve_import_symbols_spec.spl`, and
-`symbol_display_name_spec.spl`. All three canonical prerequisite mirrors are
+`symbol_display_name_spec.spl`. All four canonical prerequisite mirrors are
 missing:
 `doc/06_spec/01_unit/app/cli/bootstrap_focused_native_build_spec.md`,
+`doc/06_spec/01_unit/compiler/driver/bootstrap_context_mir_source_spec.md`,
 `doc/06_spec/01_unit/compiler/hir/resolve_import_symbols_spec.md`, and
 `doc/06_spec/01_unit/compiler/hir/symbol_display_name_spec.md`. The stale
 legacy-path copy at
@@ -438,13 +576,14 @@ came only from newer upstream GPU-wire changes:
 `simpleos_qemu_host_gpu_2d_spec.spl`. Neither contains a font or glyph
 acceptance row, neither is branch-authored shared-font evidence, and both are
 excluded from this scope; the completion-time rebase absorbs that upstream
-drift. Thus the authoritative feature scope remains 34, not 36.
+drift. Thus those two upstream-only specs remain excluded; the seven retained
+current-overlay contracts set the authoritative feature scope to 42.
 
 ## Exact owner commands
 
-The authoritative docgen scope is the 34 changed/new specs classified above.
+The authoritative docgen scope is the 42 changed/new specs classified above.
 Each source owner retains the command, stdout, stderr, exit, and output-manual
-hash under an immutable attempt directory; lane F audits all 34.
+hash under an immutable attempt directory; lane F audits all 42.
 
 All retained paths are below
 `build/test-artifacts/shared_multilingual_gpu_fonts/`. The exact deterministic
@@ -551,6 +690,13 @@ test/01_unit/lib/common/encoding/font_asset_manifest_spec.spl
 test/01_unit/lib/common/text_layout/font_render_config_spec.spl
 test/01_unit/lib/common/text_layout/font_renderer_spec.spl
 test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.spl
+test/01_unit/helpers/shared_multilingual_gpu_fonts_perf_evidence_spec.spl
+test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spec.spl
+test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_font_scalar_receipt_spec.spl
+test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_device_metadata_spec.spl
+test/01_unit/lib/gpu/engine2d/font_runtime_config_spec.spl
+test/01_unit/lib/gpu/engine3d/font_compat_spec.spl
+test/01_unit/lib/gpu/engine3d/font_hud_material_spec.spl
 test/01_unit/lib/test_runner_result_wrapper_spec.spl
 test/01_unit/lib/skia/ot_layout_apply_spec.spl
 test/01_unit/lib/skia/ot_layout_gsub_full_spec.spl
@@ -564,6 +710,7 @@ test/01_unit/lib/skia/ot_parser_spec.spl
 test/01_unit/lib/skia/selected_devanagari_spec.spl
 test/01_unit/lib/skia/shaper_spec.spl
 test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
+test/01_unit/os/hosted/hosted_entry_live_proof_focus_contract_spec.spl
 test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl
 test/01_unit/os/port/simpleos_font_bundle_spec.spl
 test/02_integration/os/port/simpleos_font_asset_staging_spec.spl
@@ -587,6 +734,7 @@ while IFS= read -r spec; do
   run_docgen_spec "$spec"
 done <<'SPECS'
 test/01_unit/app/cli/bootstrap_focused_native_build_spec.spl
+test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl
 test/01_unit/compiler/hir/resolve_import_symbols_spec.spl
 test/01_unit/compiler/hir/symbol_display_name_spec.spl
 SPECS
@@ -902,6 +1050,7 @@ run_focused_spec test/01_unit/lib/skia/selected_devanagari_spec.spl
 run_focused_spec test/01_unit/lib/skia/selected_arabic_spec.spl
 run_focused_spec test/01_unit/lib/common/text_layout/font_renderer_spec.spl
 run_focused_spec test/01_unit/lib/common/text_layout/font_render_config_spec.spl
+run_focused_spec test/01_unit/lib/gpu/engine2d/font_runtime_config_spec.spl
 run_focused_spec test/01_unit/lib/gpu/engine3d/font_compat_spec.spl
 ```
 
@@ -927,6 +1076,7 @@ export AETHERIC_HOST_WEB_GUI_SIMPLE_BIN="$CLI"
 export AETHERIC_HOST_WEB_GUI_PROOF=/absolute/path/to/retained/aetheric-host-web-gui.env
 run_focused_spec test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl
 run_focused_spec test/03_system/gui/feature/gui_font_event_surface_spec.spl
+run_focused_spec test/01_unit/os/hosted/hosted_entry_live_proof_focus_contract_spec.spl
 # Generate the hosted live bundle once with the capability-row command above;
 # this focused spec consumes and validates that retained bundle.
 run_focused_spec test/03_system/gui/linux_hosted_wm_live_window_spec.spl
@@ -941,28 +1091,54 @@ export RV64_WM_FONT_REGION_EXPECTED_SHA256="<reviewed-rv64-crop-sha256>"
 run_focused_spec test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl
 ```
 
-Lane E executes once each on a real graphics device:
+Lane E executes its five source contracts after runtime admission, then its
+four hardware rows on a real graphics device:
 
 ```bash
+export SIMPLE_BIN="$CLI"
+export BUILD_DIR="$FOCUSED_ROOT/attempt-$FOCUSED_ATTEMPT"
+run_focused_spec test/01_unit/helpers/shared_multilingual_gpu_fonts_perf_evidence_spec.spl
+run_focused_spec test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spec.spl
+run_focused_spec test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_font_scalar_receipt_spec.spl
+run_focused_spec test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_device_metadata_spec.spl
+run_focused_spec test/01_unit/lib/gpu/engine3d/font_hud_material_spec.spl
 run_focused_spec test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl
 run_focused_spec test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl
-run_focused_spec test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl
 run_focused_spec test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
+run_focused_spec test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl
 ```
 
-The authoritative command graph contains 39 unique focused executions: one
-runner preflight, 6 in B, 17 in C, 11 in D including its Engine2D prerequisite
-and SimpleOS artifact-root contract, and 4 in E. No path appears in more than
+The perf run precedes native readback because native promotion consumes the
+same attempt's sealed perf record. Both specs refuse to overwrite their typed
+records. The aggregate path requires and hashes the perf measurement-started
+record, passing perf record, and native readback record from this attempt root.
+NFR-007 cannot currently be promoted: the
+perf spec reports unavailable and the `set -e` runbook stops before native
+readback. If invoked directly, the aggregate exits before focused admission
+with `font-owner-fault-runtime-proof-unavailable`; self-authored receipts and
+summary labels cannot bypass it. Source owners now retain scalar codes for
+corrupt asset/program, unsupported format, compile/submit failure, and device
+loss, plus identity and committed CPU-fallback state. Promotion still needs an
+admitted current pure-Simple execution on one stable-identity hardware Vulkan
+device; the source-fixed Vulkan3D fence-wait/wait-idle propagation still needs
+that runtime receipt.
+CPU, virtual, and software Vulkan devices are not promotion candidates. The AA
+fields are named `*_limit`; they state the selected contract and are not
+measured deltas.
+
+The authoritative command graph contains 46 unique focused executions: one
+runner preflight, 6 in B, 18 in C, 12 in D including its Engine2D prerequisite,
+hosted focus contract, and SimpleOS artifact-root contract, and 9 in E. No path appears in more than
 one group.
 
-Each of the 34 docgen commands must exit zero and report the affected spec
+Each of the 42 docgen commands must exit zero and report the affected spec
 complete with `0 stubs`. The owner retains the immutable identity, command,
 both streams, exit, and manual hash; lane F reviews the generated operator
 flow.
 
-The separate prerequisite loop above must also exit zero and produce three
-current `0 stubs` manuals. This does not change the 39-command focused graph or
-the 34-font-manual count.
+The separate prerequisite loop above must also exit zero and produce four
+current `0 stubs` manuals. This does not change the 46-command focused graph or
+the 42-font-manual count.
 
 ## Final gates owned by `/root`
 
@@ -1000,6 +1176,7 @@ while IFS='|' read -r spec manual artifact; do
   grep -Fx "manual_sha256=$manual_sha" "$artifact.manual.sha256"
 done <<'PREREQUISITES'
 test/01_unit/app/cli/bootstrap_focused_native_build_spec.spl|doc/06_spec/01_unit/app/cli/bootstrap_focused_native_build_spec.md|01_unit_app_cli_bootstrap_focused_native_build_spec.spl
+test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl|doc/06_spec/01_unit/compiler/driver/bootstrap_context_mir_source_spec.md|01_unit_compiler_driver_bootstrap_context_mir_source_spec.spl
 test/01_unit/compiler/hir/resolve_import_symbols_spec.spl|doc/06_spec/01_unit/compiler/hir/resolve_import_symbols_spec.md|01_unit_compiler_hir_resolve_import_symbols_spec.spl
 test/01_unit/compiler/hir/symbol_display_name_spec.spl|doc/06_spec/01_unit/compiler/hir/symbol_display_name_spec.md|01_unit_compiler_hir_symbol_display_name_spec.spl
 PREREQUISITES
@@ -1007,10 +1184,11 @@ PREREQUISITES
 
 The first command must print nothing. The five pure-runtime compiler/lib/MCP/LSP
 commands are mandatory because compiler and CLI source changed; Rust diagnostics
-cannot replace them. The shared-font checker revalidates and
-hash-seals exactly 39 focused artifact sets, 34 docgen/manual records, the
-essential-tools admission, and the runner calibration, then verifies the new
-seal before reporting PASS. The following loop independently gates the three
+cannot replace them. After the canonical owner-fault producer blocker is
+removed, the remaining shared-font checker path revalidates and hash-seals
+exactly 46 focused artifact sets, 42 docgen/manual records, the essential-tools
+admission, and the runner calibration, then verifies the new seal before
+reporting PASS. The following loop independently gates the four
 prerequisite manuals against current checkpoint, CLI, core-C, source, canonical
 manual, and recorded manual identities without changing those counts.
 Existing-seal mode is reserved for a later

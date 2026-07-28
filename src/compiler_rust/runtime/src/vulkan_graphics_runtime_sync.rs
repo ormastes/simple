@@ -59,16 +59,16 @@ pub extern "C" fn rt_vulkan_destroy_fence(_fence: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_wait_fence(fence: i64, timeout_ns: i64) -> i64 {
-    let state = STATE.lock();
-    let f = match state.fences.get(&fence) {
-        Some(f) => f,
-        None => return 0,
-    };
+    let mut state = STATE.lock();
     let timeout = if timeout_ns < 0 { u64::MAX } else { timeout_ns as u64 };
-    match f.wait(timeout) {
+    let result = match state.fences.get(&fence) {
+        Some(f) => f.wait(timeout).map_err(|error| format!("wait_fence: {error}")),
+        None => Err(format!("wait_fence: unknown fence handle {fence}")),
+    };
+    match result {
         Ok(()) => 1,
-        Err(e) => {
-            tracing::error!("wait_fence: {e}");
+        Err(error) => {
+            state.set_error(error);
             0
         }
     }
