@@ -30,6 +30,7 @@ use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicol
 use compiler.frontend.core.parser_stmts.{parse_block}
 use compiler.core.ast.{expr_int_lit}
 use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
+use compiler.core.ast.{decl_get_imports, module_add_decl}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait, decl_set_type_params}
 use compiler.core.ast.{decl_set_param_defaults, decl_set_param_muts}
@@ -175,11 +176,44 @@ fn parse_use_decl() -> i64:
         decl_set_lazy(use_result)
     use_result
 
+fn _export_record_reexport_surface(reexport_decl: i64) -> i64:
+    """Record the EXPORT half of a re-export declaration.
+
+    DEFECT (fixed here): every `export`-form that names a source module —
+    `export use M.{A as B}`, `export M.{a, b}`, `export A from M` — is parsed
+    as a plain use-import (`decl_use_import`) so the names land in
+    Module.imports, and the export half was then SILENTLY DROPPED: the facade's
+    Module.exports stayed EMPTY. Verified by parsing
+    `export use common.ui.access_cli_grammar.{AccessResult as T32BridgeResult}`
+    (examples/10_tooling/trace32_tools/t32_cli/types.spl:4) through
+    flat_ast_to_module: imports=1 (name=AccessResult has_alias=true
+    alias=T32BridgeResult), exports=0.
+
+    Module.exports is the surface `register_glob_imported_symbols_depth` and
+    `find_reexport_source` (20.hir/hir_lowering/_Items/module_lowering.spl)
+    read to re-export a facade's names to glob importers and to the
+    directory-package sibling registration that rescues every other name in a
+    package. With it empty, an ALIASED re-export is reachable ONLY through the
+    facade's explicit-import chase — a name declared nowhere else then has a
+    single point of failure, and the stage-4 full-CLI build reported 38
+    "unresolved name: T32BridgeResult" (exactly the 25 + 13 expression uses in
+    t32_cli/bridge.spl and bridge_access.spl; the type-annotation-only files
+    stayed quiet because annotations do not go through lower_unresolved_ident).
+
+    The item list is passed through in its existing "name[:alias]" encoding —
+    module_lowering already splits on ':' for export items. A wildcard
+    (`export use M.*`) carries NO item list, so exports stays empty and the
+    glob-facade branch of register_glob_imported_symbols_depth is unchanged."""
+    val reexported_items = decl_get_imports(reexport_decl)
+    if reexported_items.len() > 0:
+        module_add_decl(decl_export_names(reexported_items, 0))
+    reexport_decl
+
 fn parse_export_decl() -> i64:
     parser_advance()
     # G13: export use path.{names} or export use path.*  — delegate to use-decl parser
     if par_kind_get() == 27:
-        return parse_use_decl()
+        return _export_record_reexport_surface(parse_use_decl())
     var names: [text] = []
     val first_name = par_text_get()
     parser_expect(6)
@@ -210,7 +244,7 @@ fn parse_export_decl() -> i64:
                     parser_advance()
             if par_kind_get() == 143:
                 parser_advance()  # consume '}'
-            return decl_use_import(export_name, brace_names, 0)
+            return _export_record_reexport_surface(decl_use_import(export_name, brace_names, 0))
         val kw_seg: text = use_kw_segment_text(par_kind_get())
         if kw_seg != "":
             export_name = export_name + "." + kw_seg
@@ -299,7 +333,7 @@ fn parse_export_decl() -> i64:
             saw_dot = true
         if not saw_dot:
             from_module = "." + from_module
-        return decl_use_import(from_module, names, 0)
+        return _export_record_reexport_surface(decl_use_import(from_module, names, 0))
     decl_export_names(names, 0)
 
 fn parse_val_decl() -> i64:
