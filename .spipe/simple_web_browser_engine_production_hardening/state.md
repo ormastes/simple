@@ -1178,3 +1178,9 @@ implementation in progress / target evidence blocked
   text edit; focused coverage locks first-match, untouched-sibling, and
   missing-target behavior. Executable production timing remains
   blocked by the recorded `JsValue.Symbol` compiler defect.
+- Parsing/performance: the tokenizer now discards later case-insensitive
+  duplicate attributes and preserves the first value, matching the HTML
+  tokenizer contract before tree building, script metadata scans, DOM Dict
+  writes, selector matching, or control processing. A focused token-level
+  regression locks both uniqueness and first-wins semantics; execution remains
+  blocked by the recorded compiler defect, and no bootstrap retry was made.
