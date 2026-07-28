@@ -160,7 +160,7 @@ impl MirLowering:
             if arm.is_wildcard:
                 # Wildcard matches everything
                 if arm.is_compile_error:
-                    self.error(arm.error_message, Some(arm.span))
+                    self.error_fatal(arm.error_message, Some(arm.span))
                     return nil
                 if arm.has_asm_body:
                     return self.lower_inline_asm(arm.asm_body)
@@ -183,21 +183,21 @@ impl MirLowering:
                 )
 
                 if result == "unknown_version":
-                    self.error("cannot evaluate asm target backend version: {target_backend} version is unavailable", Some(arm.span))
+                    self.error_fatal("cannot evaluate asm target backend version: {target_backend} version is unavailable", Some(arm.span))
                     return nil
 
                 if result == "matched" or result == "note":
                     if result == "note":
                         self.error("note: target backend differs from recommended version", Some(arm.span))
                     if arm.is_compile_error:
-                        self.error(arm.error_message, Some(arm.span))
+                        self.error_fatal(arm.error_message, Some(arm.span))
                         return nil
                     if arm.has_asm_body:
                         return self.lower_inline_asm(arm.asm_body)
                     return nil
 
         # No arm matched
-        self.error("no asm match case for target {target_arch}-{target_os}", nil)
+        self.error_fatal("no asm match case for target {target_arch}-{target_os}", nil)
         nil
 
     me lower_asm_assert(spec: AsmTargetSpec, span: Span?):
@@ -262,8 +262,30 @@ impl MirLowering:
 # ============================================================================
 
     me error(message: text, span: Span?):
-        """Record a lowering error."""
-        self.errors = self.errors.push(MirError(message: message, span: span))
+        """Record a non-fatal lowering diagnostic.
+
+        Fatality for these is still decided downstream by the legacy
+        message-text allowlist in 80.driver (`_mir_error_is_fatal`). That
+        allowlist is DEPRECATED -- prefer `error_fatal` at any site that must
+        abort the build, so the decision lives with the site instead of with
+        its wording.
+        """
+        self.errors = self.errors.push(MirError(message: message, span: span, fatal: false))
+
+    me error_fatal(message: text, span: Span?):
+        """Record a lowering error that MUST abort the build before codegen.
+
+        Use this at every site that continues past the error and emits a
+        placeholder operand (a const 0/3, a default `MirType.I64`, a dropped
+        store, a nil asm body, a -1 enum id). Those placeholders are fail-open:
+        without an explicit fatal flag the driver downgrades the error to a
+        warning, the build succeeds, and the bogus value reaches codegen.
+
+        Collection semantics are unchanged -- this still only pushes onto
+        `self.errors`, so batch diagnostics are preserved and lowering keeps
+        going in order to report every error in a single pass.
+        """
+        self.errors = self.errors.push(MirError(message: message, span: span, fatal: true))
 # ============================================================================
 # Exports
 # ============================================================================

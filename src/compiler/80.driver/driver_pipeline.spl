@@ -119,6 +119,31 @@ fn _format_mir_error(err: MirError) -> text:
 # message. Verified empirically against the full native-smoke-matrix (all 15
 # cases still PASS): no passing case iterates a non-array/non-range
 # collection, so this cannot regress currently-working native-build output.
+#
+# DEPRECATED (2026-07-28) — do not add new prefixes to this list.
+# ---------------------------------------------------------------------------
+# Fatality is now a property the *call site* declares: `MirError.fatal`, set by
+# `MirLowering.error_fatal(...)` (50.mir/_MirLowering/asm_and_targets.spl).
+# This list survives only as a fallback for the 50.mir sites not yet migrated
+# and for any out-of-tree producer of MirError.
+#
+# Why it is deprecated: it makes control flow depend on diagnostic *wording*
+# maintained in a different layer, so a reworded message silently changes build
+# semantics — with no test, type, or compiler error to catch it. Two live
+# casualties found on 2026-07-28, both silent:
+#   * "unsupported Result {operation} payload type" — the entry below spells
+#     "…unwrap payload type", so `.unwrap()` was fatal but `.unwrap_err()` was
+#     NOT (`_err` breaks `starts_with`) and its payload lowered to const 0.
+#   * "enum construction: missing runtime identity for '…'" — the entry below
+#     spells "enum construction: unregistered enum", so a missing runtime enum
+#     identity fell through and lowered to the sentinel enum id -1.
+# Both are now fatal via `error_fatal` at the site, independent of wording.
+#
+# The mechanism is also structurally unable to cover asm `compile_error("…")`
+# arms: those carry *user-authored* text (`arm.error_message`), which no
+# allowlist in this layer can ever enumerate.
+#
+# New fatal sites: call `self.error_fatal(...)` in 50.mir. Nothing here.
 fn _mir_error_is_fatal(message: text) -> bool:
     message.starts_with("undefined variable") or
         message.starts_with("unresolved method call:") or
@@ -134,8 +159,11 @@ fn _mir_error_is_fatal(message: text) -> bool:
         message.starts_with("for-in over non-array iterables")
 
 fn _driver_collect_mir_errors(ctx: CompileContext, errors: [MirError]):
+    # `err.fatal` is the site's own explicit declaration and takes precedence.
+    # `_mir_error_is_fatal(err.message)` is the deprecated message-text fallback
+    # kept so the 99 already-fatal sites behave exactly as before.
     for err in errors:
-        if _mir_error_is_fatal(err.message):
+        if err.fatal or _mir_error_is_fatal(err.message):
             ctx.add_error(_format_mir_error(err))
         else:
             ctx.add_warning(_format_mir_error(err))
