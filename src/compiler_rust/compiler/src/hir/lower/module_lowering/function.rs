@@ -632,10 +632,13 @@ impl Lowerer {
         // 'rt_index_of'" bailout demoting the whole browser-engine module to
         // the interpreter). This transform allocates nothing and touches no
         // lowering state.
+        //
+        // The tail is not always a single trailing `HirStmt::Expr`: a `match`
+        // lowers to a chain of `HirStmt::If`, leaving the `.?` as the last
+        // statement of a nested `then_block`. `coerce_exists_tail_in_place`
+        // walks into those arms; see its doc comment for the measurement.
         if ctx.return_type == TypeId::BOOL {
-            if let Some(HirStmt::Expr(tail)) = body.last_mut() {
-                Lowerer::coerce_exists_value_to_bool_in_place(tail);
-            }
+            Lowerer::coerce_exists_tail_in_place(&mut body);
         }
 
         // Detect suspension operators in function body for async/sync validation.

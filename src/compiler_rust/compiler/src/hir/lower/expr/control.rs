@@ -1050,6 +1050,23 @@ impl Lowerer {
                 Self::coerce_exists_value_to_bool_in_place(operand);
                 expr.ty = TypeId::BOOL;
             }
+            // An `if`/`match` in tail position is itself the returned value, so
+            // each of its arms is in bool-return position too.
+            HirExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::coerce_exists_value_to_bool_in_place(then_branch);
+                if let Some(else_branch) = else_branch {
+                    Self::coerce_exists_value_to_bool_in_place(else_branch);
+                }
+                expr.ty = TypeId::BOOL;
+            }
+            HirExprKind::Block(stmts) => {
+                Self::coerce_exists_tail_in_place(stmts);
+                expr.ty = TypeId::BOOL;
+            }
             HirExprKind::LetIn { local_idx, value, body } => {
                 let is_exists_shape = match &body.kind {
                     HirExprKind::If { condition, .. } => matches!(
@@ -1076,6 +1093,47 @@ impl Lowerer {
                         args: vec![subject],
                     };
                     expr.ty = TypeId::BOOL;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Walk the **tail position** of a statement list and coerce every `.?`
+    /// that ends up being the implicitly returned value.
+    ///
+    /// The tail of a `-> bool` body is not always a single trailing
+    /// `HirStmt::Expr`. A `match` lowers to a chain of `HirStmt::If`, so
+    ///
+    /// ```text
+    /// fn has_suggestion() -> bool:
+    ///     match self:
+    ///         case UnknownKey(_, _, suggestion): suggestion.?
+    ///         case _: false
+    /// ```
+    ///
+    /// leaves the `.?` as the last statement of a nested `then_block`, not of
+    /// the function body. Handling only the outermost statement left that form
+    /// returning the non-zero nil sentinel — measured on the pristine seed as
+    /// `nested nil = true` where a plain-`bool` arm in the same position
+    /// correctly returned `false`, so the nested implicit return is a real,
+    /// working feature and the `.?` behaviour there was a genuine wrong-branch
+    /// bug. Four owned sites use exactly this shape, all inside
+    /// `src/compiler/` (`dim_constraints.spl`, `const_keys.spl`,
+    /// `backend_types.spl`, `interpreter/pattern.spl`).
+    ///
+    /// Only `If` recurses. Loop bodies are deliberately excluded: the last
+    /// expression of a `while`/`for`/`loop` body is not the function's return
+    /// value.
+    pub(crate) fn coerce_exists_tail_in_place(stmts: &mut [HirStmt]) {
+        match stmts.last_mut() {
+            Some(HirStmt::Expr(tail)) => Self::coerce_exists_value_to_bool_in_place(tail),
+            Some(HirStmt::If {
+                then_block, else_block, ..
+            }) => {
+                Self::coerce_exists_tail_in_place(then_block);
+                if let Some(else_block) = else_block {
+                    Self::coerce_exists_tail_in_place(else_block);
                 }
             }
             _ => {}

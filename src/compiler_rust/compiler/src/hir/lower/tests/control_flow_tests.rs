@@ -645,3 +645,71 @@ fn test_value_position_match_arm_return_actually_returns() {
         "match-arm return did not reach MIR as a Return terminator: {mir_repr}"
     );
 }
+
+/// A `-> bool` body's tail is not always a single trailing `HirStmt::Expr`.
+/// `match` lowers to a chain of `HirStmt::If`, so the `.?` ends up as the last
+/// statement of a nested `then_block`. Coercing only the outermost statement
+/// left that form returning the non-zero nil sentinel: measured on a pristine
+/// seed built from `origin/main`, `match c: case 1: v.?` in a `-> bool`
+/// function returned `true` for a nil `v`, while a plain-`bool` arm in the same
+/// position correctly returned `false` — so the nested implicit return is a
+/// real, working feature and this was a genuine wrong-branch bug. Four owned
+/// sites use exactly this shape, all inside `src/compiler/`.
+#[test]
+fn test_exists_check_in_nested_match_tail_of_bool_fn_stays_bool() {
+    let module =
+        parse_and_lower("fn f(v: i64?, c: i64) -> bool:\n    match c:\n        case 1:\n            v.?\n        case _:\n            false\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        !repr.contains("rt_unwrap_or_self"),
+        "`.?` in a nested match arm of a `-> bool` fn kept the T? value form, \
+         so the caller branches on the non-zero nil sentinel: {repr}"
+    );
+    assert!(
+        repr.contains("rt_is_some"),
+        "`.?` in a nested match arm lost its presence predicate: {repr}"
+    );
+}
+
+/// The same tail walk must reach an `if`/`else` arm.
+#[test]
+fn test_exists_check_in_nested_if_tail_of_bool_fn_stays_bool() {
+    let module =
+        parse_and_lower("fn f(v: i64?, c: bool) -> bool:\n    if c:\n        v.?\n    else:\n        false\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        !repr.contains("rt_unwrap_or_self"),
+        "`.?` in a nested if arm of a `-> bool` fn kept the T? value form: {repr}"
+    );
+}
+
+/// Guard for the other direction: the tail walk must NOT fire when the declared
+/// return type is not `bool`. `fn f() -> T?: <if>` still yields `T?` per spec.
+#[test]
+fn test_exists_check_in_nested_tail_of_non_bool_fn_keeps_value_form() {
+    let module =
+        parse_and_lower("fn f(v: i64?, c: bool) -> i64?:\n    if c:\n        v.?\n    else:\n        nil\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "`.?` in a non-bool function was wrongly collapsed to a bool: {repr}"
+    );
+}
+
+/// Loop bodies are deliberately excluded from the tail walk: the last
+/// expression of a `while` body is not the function's return value, so a `.?`
+/// there must keep the value lowering.
+#[test]
+fn test_exists_check_in_while_body_tail_is_not_coerced() {
+    let module =
+        parse_and_lower("fn f(v: i64?, c: bool) -> bool:\n    while c:\n        v.?\n    return false\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "a `.?` in a while body was treated as the function's return value: {repr}"
+    );
+}
