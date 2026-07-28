@@ -58,7 +58,7 @@ narrowed the first one, and the audit in
    **newline guard** (`c == '\n' && !is_triple` → `expr_failed`). That guard fixes
    the multi-line runaway case, but **cannot see this bug**, which is entirely on one
    line — so this defect regressed and stayed open.
-3. **`<THIS_COMMIT>`** (2026-07-28) — forward fix reconciling both. In a
+3. **`055c64cfb30`** (2026-07-28) — forward fix reconciling both. In a
    non-triple f-string, an unescaped `"` may only **open** a nested string where
    an operand is genuinely expected; otherwise it closes the OUTER string →
    `expr_failed` backtrack, exactly as (1) intended. "Operand expected" is
