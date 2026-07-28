@@ -75,6 +75,8 @@ val BROWSER_DOM_BRIDGE_MAX_ELEMENTS: i32 = 4096
 val BROWSER_DOM_BRIDGE_MAX_PLAN_BYTES: i64 = 64 * 1024 * 1024
 val BROWSER_DOM_BRIDGE_OVERSIZE = "\u0000simple-dom-oversize"
 val BROWSER_HISTORY_MAX_ENTRIES: i32 = 64
+val BROWSER_WARNING_MAX_ENTRIES: i64 = 128
+val BROWSER_WARNING_MAX_BYTES: i64 = 4096
 
 class BrowserHistoryEntry:
     url: text
@@ -1271,6 +1273,23 @@ class BrowserSession:
 
 impl BrowserSession:
 
+    me _append_warning(warning: text):
+        if self.warnings.len() >= BROWSER_WARNING_MAX_ENTRIES:
+            return
+        val bounded = if warning.len() > BROWSER_WARNING_MAX_BYTES:
+            warning.slice(0, BROWSER_WARNING_MAX_BYTES)
+        else:
+            warning
+        for existing in self.warnings:
+            if existing == bounded:
+                return
+        self.warnings.push(bounded)
+
+    me _replace_warnings(warnings: [text]):
+        self.warnings = []
+        for warning in warnings:
+            self._append_warning(warning)
+
     fn _cookie_now_seconds() -> i64:
         time_now_unix_micros() / 1000000
 
@@ -1507,7 +1526,7 @@ impl BrowserSession:
                 self.subresource_request_count = self.subresource_request_count + 1
             if resource_limit_reached:
                 val reason = "resource-limit:too-many-subresource-requests"
-                self.warnings.push("blocked {req.kind} browser request: {reason}")
+                self._append_warning("blocked {req.kind} browser request: {reason}")
                 if req.kind == "fetch":
                     self._reject_runtime_fetch(req.id, req.url, reason)
                 elif is_active_subresource:
@@ -1522,7 +1541,7 @@ impl BrowserSession:
                         error: reason
                     ))
             elif is_network_url == false:
-                self.warnings.push("blocked non-network browser request: {req.url}")
+                self._append_warning("blocked non-network browser request: {req.url}")
                 if req.kind == "fetch":
                     self._reject_runtime_fetch(req.id, req.url, "unsupported-scheme:{req.url}")
                 elif is_active_subresource:
@@ -1538,7 +1557,7 @@ impl BrowserSession:
                     ))
             elif invalid_network_url:
                 val reason = "invalid-url"
-                self.warnings.push("blocked invalid browser request")
+                self._append_warning("blocked invalid browser request")
                 if req.kind == "fetch":
                     self._reject_runtime_fetch(req.id, req.url, reason)
                 elif is_active_subresource:
@@ -1562,7 +1581,7 @@ impl BrowserSession:
                     "mixed-content:{req.url}"
                 else:
                     "cross-origin:{req.url}"
-                self.warnings.push("blocked {req.kind} browser request: {reason}")
+                self._append_warning("blocked {req.kind} browser request: {reason}")
                 self.inflight_requests.push(req)
                 val _ = self.commit_network_response(BrowserResponse.create(
                     request_id: req.id,
@@ -1578,7 +1597,7 @@ impl BrowserSession:
                 not self.broker_network_policy):
                 # ponytail: same-origin fetch only until BrowserRequest carries
                 # request mode and response CORS metadata.
-                self.warnings.push("cross-origin fetch blocked: {req.url}")
+                self._append_warning("cross-origin fetch blocked: {req.url}")
                 self._reject_runtime_fetch(req.id, req.url, "cross-origin:{req.url}")
             else:
                 self.inflight_requests.push(req)
@@ -1679,7 +1698,7 @@ impl BrowserSession:
                             not self._broker_hsts_candidate(url) and
                             not already_emitted):
                             seen_request_ids = seen_request_ids + [request_id]
-                            self.warnings.push("CSP blocked fetch: {url}")
+                            self._append_warning("CSP blocked fetch: {url}")
                             val _ = interpreter.resolve_async_fetch_response(
                                 request_id, url, 0, "", "", "csp-blocked:{url}"
                             )
@@ -1691,7 +1710,7 @@ impl BrowserSession:
                             # ponytail: same-origin fetch only until BrowserRequest
                             # carries request mode and validated CORS response metadata.
                             seen_request_ids = seen_request_ids + [request_id]
-                            self.warnings.push("cross-origin fetch blocked: {url}")
+                            self._append_warning("cross-origin fetch blocked: {url}")
                             val _ = interpreter.resolve_async_fetch_response(
                                 request_id, url, 0, "", "", "cross-origin:{url}"
                             )

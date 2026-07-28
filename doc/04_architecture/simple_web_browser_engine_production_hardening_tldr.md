@@ -24,8 +24,8 @@ DrawIrComposition -> persistent Engine2dCompositorBackend
 - Engine2D owns device/font/cache state; no per-frame recreation.
 - The compositor/hosted registry own four keyed external renderer/frame slots;
   missing frames stay blank, hidden windows poll cleanup without animation.
-- Navigation/close clears document references; profile and engine lifetimes
-  remain separate.
+- Navigation/close clears document references; warnings are deduplicated and
+  bounded; diagnostics are prefix-only and failed child cleanup is retried.
 - Broker owns URLs/origins, Fetch/CORS/CSP, cookies, TLS/HSTS, and host access.
 - Linux/macOS/Windows sandbox failure blocks production startup.
 

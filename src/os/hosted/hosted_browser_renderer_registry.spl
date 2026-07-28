@@ -64,6 +64,7 @@ class HostedBrowserRendererEntry:
     raster_closed: bool
     ready: bool
     close_pending: bool
+    close_retry_at_micros: i64
     animation_origin_micros: i64
     startup_html: text
     address_draft: text
@@ -90,6 +91,7 @@ class HostedBrowserRendererEntry:
             raster_closed: false,
             ready: false,
             close_pending: false,
+            close_retry_at_micros: 0,
             animation_origin_micros: animation_origin_micros,
             startup_html: startup_html,
             address_draft: startup_html,
@@ -164,6 +166,7 @@ pub class HostedBrowserRendererRegistry:
             if entry.renderer.close():
                 entry.renderer_closed = true
                 entry.close_pending = false
+                entry.close_retry_at_micros = 0
             else:
                 entry.close_pending = true
                 if entry.failure_reason == "":
@@ -293,8 +296,19 @@ pub class HostedBrowserRendererRegistry:
         if index < 0:
             return "failed"
         var entry = self.entries[index]
-        if (entry.renderer_closed or entry.close_pending or
-            entry.failure_reason != ""):
+        if entry.close_pending:
+            if entry.close_retry_at_micros <= 0:
+                entry.close_retry_at_micros = now_micros + 1000000
+            elif now_micros >= entry.close_retry_at_micros:
+                if entry.renderer.close():
+                    entry.renderer_closed = true
+                    entry.close_pending = false
+                    entry.close_retry_at_micros = 0
+                else:
+                    entry.close_retry_at_micros = now_micros + 1000000
+            self.entries[index] = entry
+            return if entry.failure_published: "none" else: "failed"
+        if entry.renderer_closed or entry.failure_reason != "":
             return if entry.failure_published: "none" else: "failed"
         val was_ready = entry.ready
         val polled = entry.renderer.poll()

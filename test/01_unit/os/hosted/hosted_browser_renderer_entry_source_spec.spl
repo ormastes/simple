@@ -83,9 +83,12 @@ describe "hosted browser renderer entry isolation":
         expect(broker.contains("rt_time_now_unix_micros")).to_be(false)
         val poll_start = broker.find("me poll()")
         val flush_start = broker.find("me _flush_pending_wire_once()")
+        val flush_end = broker.find("me _poll_network_job()", flush_start)
         val wait_start = broker.find("me _await_frame(")
+        expect(flush_start).to_be_greater_than(-1)
+        expect(flush_end).to_be_greater_than(flush_start)
         val poll_body = broker.slice(poll_start, wait_start)
-        val pump_body = broker.slice(flush_start, wait_start)
+        val pump_body = broker.slice(flush_start, flush_end)
         expect(poll_body.contains("rt_sleep_ms")).to_be(false)
         expect(poll_body.contains("_write_before")).to_be(false)
         expect(pump_body).to_contain("process_write_stdin_some")
@@ -104,11 +107,34 @@ describe "hosted browser renderer entry isolation":
         expect(poll_body).to_contain("decoded.message.kind != \"ready\"")
         expect(poll_body).to_contain("self.fail(\"renderer-crashed\")")
         expect(broker).to_contain("me begin_init(")
-        expect(pump_body.contains("self.pid = 0")).to_be(false)
-        expect(pump_body).to_contain("\"renderer-crashed\"")
-        expect(poll_body.contains("self.pid = 0")).to_be(false)
-        expect(poll_body).to_contain(
-            "self.fail(\"renderer-crashed\")"
+        val write_failed = pump_body.find("if written < 0:")
+        val write_empty = pump_body.find("if written == 0:")
+        val pipe_dead = pump_body.find(
+            "if not process_is_piped_alive(self.pid):", write_empty
+        )
+        val pipe_dead_return = pump_body.find(
+            "return \"renderer-crashed\"", pipe_dead
+        )
+        expect(write_failed).to_be_greater_than(-1)
+        expect(write_empty).to_be_greater_than(write_failed)
+        expect(pump_body.slice(write_failed, write_empty).contains(
+            "self.pid = 0"
+        )).to_be(false)
+        expect(pipe_dead).to_be_greater_than(write_empty)
+        expect(pipe_dead_return).to_be_greater_than(pipe_dead)
+        expect(pump_body.slice(pipe_dead, pipe_dead_return)).to_contain(
+            "self.pid = 0"
+        )
+        val dead_start = poll_body.find(
+            "if chunk == \"\" and not process_is_piped_alive(self.pid):"
+        )
+        val dead_end = poll_body.find(
+            "return Some(self.fail(\"renderer-crashed\"))", dead_start
+        )
+        expect(dead_start).to_be_greater_than(-1)
+        expect(dead_end).to_be_greater_than(dead_start)
+        expect(poll_body.slice(dead_start, dead_end)).to_contain(
+            "self.pid = 0"
         )
         val cancel_start = broker.find("me _cancel_network_job()")
         val replace_start = broker.find("me _replace_pending_navigation()")
@@ -139,6 +165,12 @@ describe "hosted browser renderer entry isolation":
         expect(broker).to_contain(
             "\"renderer-close-failed\""
         )
+        expect(close_body).to_contain(
+            "self.decoder = browser_renderer_decoder_new(self.generation)"
+        )
+        expect(close_body).to_contain("self.history_urls = []")
+        expect(close_body.contains("self.hsts =")).to_be(false)
+        expect(close_body.contains("self.hsts_dirty =")).to_be(false)
         expect(broker.contains(
             "hosted_browser_renderer_render_once"
         )).to_be(false)
@@ -146,6 +178,22 @@ describe "hosted browser renderer entry isolation":
             "\"unauthorized-document-request\""
         )
         expect(broker.contains("fn _renderer_fetch_mode")).to_be(false)
+
+    it "builds bounded diagnostics without joining retained warnings":
+        val worker = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_worker.spl"
+        ) ?? ""
+        val start = worker.find("fn _worker_diagnostics(")
+        val finish = worker.find("fn _worker_frame(")
+        expect(start).to_be_greater_than(-1)
+        expect(finish).to_be_greater_than(start)
+        val body = worker.slice(start, finish)
+        expect(body.contains("session.warnings.join")).to_be(false)
+        expect(body.contains("diagnostics = diagnostics +")).to_be(false)
+        expect(body).to_contain("StringBuilder.new()")
+        expect(body).to_contain("for warning in session.warnings:")
+        expect(body).to_contain("BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES")
+        expect(body).to_contain("warning.slice(0, remaining)")
 
     it "routes the production browser through the external worker frame gate":
         val entry = executable_source_lines(
@@ -585,6 +633,27 @@ describe "hosted browser renderer entry isolation":
         expect(registry).to_contain("me reconcile(live_window_ids: [i64])")
         expect(registry).to_contain("entry.renderer.close()")
         expect(registry).to_contain("entry.raster.shutdown()")
+        expect(registry).to_contain("close_retry_at_micros: i64")
+        val advance_start = registry.find("me advance_window(")
+        val advance_end = registry.find("me take_frame(", advance_start)
+        expect(advance_start).to_be_greater_than(-1)
+        expect(advance_end).to_be_greater_than(advance_start)
+        val advance = registry.slice(advance_start, advance_end)
+        expect(advance).to_contain("if entry.close_pending:")
+        val retry_text = (
+            "entry.close_retry_at_micros = now_micros + 1000000"
+        )
+        val first_retry = advance.find(retry_text)
+        val retry_due = advance.find(
+            "now_micros >= entry.close_retry_at_micros"
+        )
+        val failed_retry = advance.find(retry_text, first_retry + 1)
+        expect(first_retry).to_be_greater_than(-1)
+        expect(retry_due).to_be_greater_than(first_retry)
+        expect(failed_retry).to_be_greater_than(retry_due)
+        expect(advance).to_contain("if entry.renderer.close():")
+        expect(advance).to_contain("entry.renderer_closed = true")
+        expect(advance).to_contain("entry.close_pending = false")
         expect(registry).to_contain("pressed_window_id: i64")
         expect(registry).to_contain("pending_cancel_window_id: i64")
         val cancel_start = registry.find("me cancel_pointer_state(")

@@ -222,6 +222,13 @@ describe "BrowserSession production security boundary":
 
         expect(session.take_pending_request().is_none()).to_equal(true)
         expect(session.warnings).to_contain("cross-origin fetch blocked: https://evil.test/private")
+        var repeat = 0
+        while repeat < 32:
+            val _ = session.eval_script(
+                "fetch('https://evil.test/private')"
+            )
+            repeat = repeat + 1
+        expect(session.warnings.len()).to_equal(1)
         match session.eval_script("outcome"):
             Ok(value):
                 match value:
@@ -231,6 +238,27 @@ describe "BrowserSession production security boundary":
                         fail("Expected blocked fetch rejection text")
             Err(e):
                 fail("Expected blocked cross-origin fetch to reject: {e}")
+
+    it "bounds and deduplicates retained browser warnings":
+        var session = BrowserSession.new()
+        session._append_warning("duplicate")
+        session._append_warning("duplicate")
+        expect(session.warnings.len()).to_equal(1)
+        var index = 0
+        while index < 256:
+            session._append_warning("blocked warning {index}")
+            index = index + 1
+        expect(session.warnings.len()).to_equal(128)
+
+        var oversized_text = ""
+        index = 0
+        while index < 129:
+            oversized_text = oversized_text +
+                "abcdefghijklmnopqrstuvwxyz012345"
+            index = index + 1
+        var oversized = BrowserSession.new()
+        oversized._append_warning(oversized_text)
+        expect(oversized.warnings[0].len()).to_equal(4096)
 
     it "still exports same-origin page fetches":
         var session = BrowserSession.new()

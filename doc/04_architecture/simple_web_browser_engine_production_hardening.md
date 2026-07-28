@@ -231,6 +231,17 @@ next document. Detached-node animations and completed/canceled timers are
 compacted. Engine/device/font state survives same-size navigation and is
 released exactly once on app close.
 
+Document warnings are duplicate-suppressed, capped at 128 entries and 4096
+bytes per entry. Renderer diagnostics consume only the first 4096 characters
+without joining the retained warning set, so timer/animation traffic cannot
+turn repeated policy denials into growing retained memory or per-frame work.
+Failed child cleanup retries once per second while its window remains live;
+successful close drops decoder, network-cache, and history state even when the
+lightweight failure tombstone must remain fail closed. Learned HSTS remains
+available for the broker's persistence handoff. A child already reaped by the
+liveness facade clears its consumed handle before terminal state cleanup;
+genuine close failures retain the handle for retry.
+
 Evidence uses real `mem_tracker` live counts/bytes, heap-registry count when
 available, RSS, node/listener/timer/layout/command counts, and lifecycle
 create/shutdown counters. No synthetic collection or pause counter is added.

@@ -153,6 +153,29 @@ describe "hosted browser renderer worker":
         expect(first.wire == animated.wire).to_be(false)
         expect(animated.animation_time_ms).to_equal(16)
 
+    it "caps warning diagnostics before encoding animation frames":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<p>bounded diagnostics</p>"
+        )).ok).to_be(true)
+        var index = 0
+        while index < 256:
+            worker.browser._append_warning(
+                "warning-{index}-abcdefghijklmnopqrstuvwxyz0123456789"
+            )
+            index = index + 1
+        val advanced = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        ))
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), advanced.wire
+        )
+        val frame = browser_renderer_frame_decode(decoded.message, 64, 48)
+        expect(frame.ok).to_be(true)
+        expect(frame.diagnostics.len()).to_equal(4096)
+        expect(frame.diagnostics).to_start_with("warning-0-")
+
     it "resizes the existing session and emits matching frame bounds":
         var worker = HostedBrowserRendererWorkerSession.create(64, 48)
         val initialized = worker.handle(BrowserRendererMessage(

@@ -168,6 +168,13 @@ over-capacity renderer admission stays blank rather than falling back to parent
 HTML/JavaScript execution. Fresh pure-Simple live evidence is still required
 before describing the multi-window path as production-proven.
 
+BrowserSession retains at most 128 distinct warnings (4096 characters each).
+The sandbox worker builds its 4096-character frame diagnostic incrementally;
+it never joins the full warning history on animation frames.
+Failed child close retries once per second, and successful close releases the
+broker decoder/cache/history state retained by its failure tombstone while
+preserving learned HSTS for persistence.
+
 ## Milestone History
 
 | Milestone | Gate | Status |

@@ -1274,3 +1274,15 @@ implementation in progress / target evidence blocked
   admission is idempotent. Pointer cancellation tracks one armed window and
   queues an empty-target release for that renderer only, never a cross-window
   synthetic press broadcast.
+- Memory/performance: repeated CSP, cross-origin, navigation, and form denials
+  now share one duplicate-suppressing warning owner capped at 128 entries and
+  4096 characters per entry. Sandboxed animation frames build only the bounded
+  4096-character diagnostic prefix instead of joining the entire warning
+  history before truncation, removing unbounded retention and reducing
+  per-frame scan/allocation work.
+- Renderer failure lifecycle: a failed live child close now retries at a
+  one-second cadence instead of leaving its PID/pipes indefinitely retained.
+  Successful close resets decoder, Fetch/DNS/cache, and history state held by
+  the fail-closed tombstone while retaining learned HSTS for persistence.
+  Liveness-observed dead children clear the handle already consumed by the
+  process facade; only genuine close failures retain ownership for retry.

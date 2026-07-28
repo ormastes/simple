@@ -1,5 +1,6 @@
 """Hidden, fail-closed browser renderer worker entry."""
 
+use common.string_builder.{StringBuilder}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES, BROWSER_RENDERER_MAX_VIEWPORT,
     BROWSER_RENDERER_WORKER_ARG,
@@ -97,10 +98,23 @@ fn _worker_document_animation_time_ms(
     if elapsed > 0: elapsed else: 0
 
 fn _worker_diagnostics(session: BrowserSession) -> text:
-    val diagnostics = session.warnings.join("\n")
-    if diagnostics.len() <= BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES:
-        return diagnostics
-    diagnostics.slice(0, BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES)
+    var diagnostics = StringBuilder.new()
+    var used: i64 = 0
+    for warning in session.warnings:
+        if used >= BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES:
+            return diagnostics.build()
+        if used > 0:
+            diagnostics.push("\n")
+            used = used + 1
+        val remaining = (
+            BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES - used
+        )
+        if warning.len() > remaining:
+            diagnostics.push(warning.slice(0, remaining))
+            return diagnostics.build()
+        diagnostics.push(warning)
+        used = used + warning.len()
+    diagnostics.build()
 
 fn _worker_frame(
     session: BrowserSession,
