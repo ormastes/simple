@@ -16,17 +16,44 @@ exposure — always also search for `: {`-style dict declarations.
 | Operation | Native codegen result | Safe to use? |
 |---|---|---|
 | `d.len()` / `d.length()` | **-1**, always — local or struct field, empty or populated | **NO** |
-| `d.get(k)` — miss | correct, `nil` | yes |
-| `d.get(k)` — hit, `V` = struct/class/enum | non-nil `Option`, **corrupt payload** — `.unwrap()` or a field read **segfaults** | **NO** |
-| `d.get(k)` — hit, `V` = `i64` | still-boxed value (e.g. `7` reads back as `56` = `7<<3`) | **NO** |
+| `d.get(k)` — **miss** | **zero VALUE of `V`, not `nil`** — `0` / `false` / non-nil text. `== nil` is **false**, `?? default` **never fires** | **NO** |
+| `d.get(k)` — hit, `V` = `bool`, value `true` | reads `true` but `== nil` is **true** — a present key looks missing | **NO** |
+| `d.get(k)` — hit, `V` = `i64` / `text` | correct since `7e83e92ce314` (was `7`→`56`) | yes |
+| `d.get(k)` — hit, `V` = struct/class/enum | correct since `7e83e92ce314` (was a segfaulting corrupt `Option`) | yes |
+| `d.get(k).?` | **conflates a present `0` with empty** — reports empty for a stored zero | **NO** |
+| `d[k]` indexed read — **miss** | **`0`**, silently — no miss signal at all | **NO** |
 | `d.contains_key(k)` | correct | yes |
 | `d.keys()` | correct | yes |
-| `d[k]` indexed read | correct | yes |
+| `d[k]` indexed read — hit | correct | yes |
 | `Some(d[k])` manual wrap | correct — round-trips through `.unwrap()` and `Option`-typed params | yes |
+
+> **CHANGED 2026-07-28 — the MISS row was previously WRONG.** This table used to say
+> `d.get(k)` on a miss was "correct, `nil`". It is not: a miss returns the **zero value**
+> of the dict's value type, so a missing key is indistinguishable from a present zero.
+> **Measured natively for `i64`, `bool`, and `text`** (standalone native ELF, no
+> interpreter). Several 2026-07-27 sweeps reviewed call sites against the old
+> "miss path is safe" assumption and **need revisiting**. Struct/class/enum value types
+> were **not** measurable (any module-level `struct` makes native-build fail with
+> `MIR module has no functions`); static reading says they preserve nil, but that is
+> unverified. Details:
+> `doc/08_tracking/bug/native_dict_get_miss_returns_zero_not_nil_2026-07-28.md`.
+>
+> Cause: `rt_dict_get` returns the nil sentinel `3` on a miss, and the MIR lowering
+> decodes it as data with no nil guard — `3 >> 3` → `0` for integers, `3 == 11` → `false`
+> for bools, `rt_interp_cstr(3)` → `NULL` for text. Only the struct/default decode arm
+> passes the sentinel through untouched. This is **pre-existing**, not caused by
+> `7e83e92ce314` — it was first sighted as `scratchpad/dict_native_report.md` item 15
+> and never filed until now.
 
 ## Replacements
 
 - **Membership check** — use `contains_key(k)`, never infer it from `.get(k) != nil`.
+  A miss returns the zero value, so `.get(k) != nil` is **true for every key**,
+  present or not.
+- **Miss / default handling** — `.get(k) ?? default` and `val Some(x) = .get(k) else:`
+  both take the present-value branch on a miss. Test `contains_key(k)` first and
+  supply the default yourself. `.get(k).?` is also unsafe — it reports empty for a
+  stored `0`.
 - **Count** — never `d.len()`. For cold paths use `d.keys().len()`. For hot
   loops, maintain your own counter alongside the dict instead of recomputing
   a length.
@@ -71,6 +98,9 @@ val maybe: Tr? = if d.contains_key(key): Some(d[key]) else: nil
 
 ## Background
 
+- `doc/08_tracking/bug/native_dict_get_miss_returns_zero_not_nil_2026-07-28.md` —
+  `.get()` on a MISS returns the zero value of `V` instead of `nil`; `== nil`,
+  `??`, and `.?` all take the wrong branch. Silent wrong answer, no crash.
 - `doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md` —
   `.len()` always returns -1 under native codegen.
 - `doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md`
