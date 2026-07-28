@@ -40,6 +40,53 @@ Reloc census via `objdump -r` on `mod_0.o`, cranelift backend,
 Only ONE of those five `Foo_dot_slice` relocs is a genuinely typed
 `f.slice(1, 3)`. The other four were erased-receiver text calls, stolen.
 
+## Enumeration of the class (2026-07-28, `SIMPLE_DEBUG_ERASED_RECEIVER_BIND`)
+
+Step 1 below is now implemented. `SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1` reports
+every erased-receiver name-suffix bind (calling function, bare method + arity,
+receiver `TypeId`, bound symbol). It is report-only — proven by byte-identical
+archives from patched and unpatched seeds built in one isolated
+`CARGO_TARGET_DIR` (`mod_0.o` sha256 `ddeeda0818b74440…`, archive
+`f020994b7d37c2f7…`, identical for control / patched-off / patched-ON).
+
+Census over the `gui_entry_desktop` SimpleOS closure (39 imports, whole
+`src/os` + `src/lib` transitive graph, cranelift, `x86_64-unknown-none`,
+`--entry-closure`): **97 erased-receiver binds, 22 distinct method names, 30
+distinct (method, arity, receiver-type, target) tuples.** 45 had
+`receiver_ty=ANY`, 34 had no receiver type at all.
+
+| bare method | binds | bound to | reading |
+|---|---|---|---|
+| `to_i64` | 33 | `failsafe.core.LogLevel.to_i64` | THEFT — scalar/text builtin |
+| `unwrap` | 21 | `failsafe.core.FailSafeResult.unwrap` | THEFT — Option/Result builtin |
+| `to_i32` | 8 | `window_protocol.geometry.Px.to_i32` | THEFT — scalar builtin |
+| `index_of` | 8 | `dbfs_engine.txn.TxnStepSequence.index_of` | THEFT — text/array builtin |
+| `to_u32` | 2 | `fb_driver.Color.to_u32` | THEFT — scalar builtin |
+| `to_text` | 2 | `PackageVersion.to_text`, `ReadbackSource.to_text` | THEFT — universal builtin |
+| `push` | 1 | `bytes.window.RingWindow.push` | THEFT — array builtin |
+| `rollback` | 3 | `database.sql.transaction.Transaction.rollback` | probably legit erased-field dispatch |
+| `get_pixel_buffer` / `set_pixel_buffer_override` | 5 | `Engine2dCompositorBackend.*` | legit erased-field dispatch |
+| `clear` / `draw_image` / `read_pixels_with_source` / `shutdown` | 6 | `gpu.engine2d.Engine2D.*` | legit erased-field dispatch |
+| `as_text` / `as_int` / `as_real` / `as_bool` | 4 | `DbValue.*` | legit erased-field dispatch |
+| `diagnostic_text`, `ftruncate`, `has_swapped_mapping`, `init_bounce_buffer` | 4 | assorted | legit erased-field dispatch |
+
+`equals` did not appear in this closure, but the fixture confirms it is
+stealable: an erased `text` receiver bound `equals` and `index_of` to
+`Foo.equals` / `Foo.index_of` (matching `Foo_dot_equals` / `Foo_dot_index_of`
+relocs of 1 each).
+
+**Conclusion: the set is neither small nor closed.** One closure alone adds
+seven previously-unknown builtin-idiom victims (`to_i64`, `to_i32`, `to_u32`,
+`to_text`, `index_of`, `unwrap`, `push`) on top of the four already patched, and
+roughly a fifth of the binds are *legitimate* erased-field dispatch that an
+allowlist must not break. Completing `is_bare_builtin_collection_method` is
+therefore not a route to closing the class — it would keep growing per closure,
+and each entry risks the legitimate dispatches. **Step 3 (plumb a
+TypeId-to-name map into `InstrContext` and check the receiver type) is the fix.**
+Step 2 (arity filter) remains the useful interim narrowing: many of the thefts
+above are 0-arg calls landing on 0-arg methods, so arity alone would not have
+caught them either.
+
 ## Root cause, and a correction to the earlier reading
 
 The earlier write-up blamed the "pick shortest name" fallback. That is **not**
@@ -92,11 +139,9 @@ definitions exist in owned source.
 
 ## Suggested next steps, cheapest first
 
-1. **Make the single-candidate erased-receiver bind observable.** Emit a
-   level-gated (default-off) diagnostic naming the receiver vreg, method, and
-   bound symbol. Zero behavior change, zero regression risk, and it converts
-   discovery from "guest page fault" to "compile-time message". Run it over the
-   bootstrap closure to size the class before attempting 2 or 3.
+1. ~~**Make the single-candidate erased-receiver bind observable.**~~ DONE
+   2026-07-28 — `SIMPLE_DEBUG_ERASED_RECEIVER_BIND`, see the enumeration section
+   above. Discovery is now a compile-time message, not a guest page fault.
 2. Add the arity filter behind that measurement, once the placeholder-signature
    question in (2) above is settled.
 3. Plumb a TypeId-to-name map into `InstrContext` and check the receiver type.
