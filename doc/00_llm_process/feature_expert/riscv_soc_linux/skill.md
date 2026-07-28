@@ -38,7 +38,7 @@ placeholder stub today)**.
 | Configuration | Memory path | Evidence | Command |
 |---|---|---|---|
 | RV32 flat | local behavioral RAM | QEMU/GHDL core | `scripts/fpga/ghdl_rv32_nvme_fw.shs` |
-| RV32 BRAM SoC | core `mem_*` to synthesized BRAM banks | exact GHDL; KV260 USER4 JTAG (229/229-byte NVMe PASS) | `scripts/fpga/ghdl_rv32_nvme_bram_soc.shs` |
+| RV32 BRAM SoC | core `mem_*` to synthesized BRAM banks | exact GHDL; current source-matched KV260 NVMe bundle pending | `scripts/fpga/ghdl_rv32_nvme_bram_soc.shs` |
 | RV32 full AXI4 | `rv32_axi4_mem_adapter` to wait-state RAM/PS DDR | GHDL AXI4 + AXI4-Lite observation | `scripts/fpga/ghdl_rv32_nvme_axi_ram.shs` for NVMe; `scripts/fpga/ghdl_rv32_k26_ddr_boot.shs` for SimpleOS |
 | RV64 full AXI4 | `rv64_axi4_mem_adapter` to wait-state RAM/PS DDR | GHDL; silicon in progress | `scripts/fpga/ghdl_rv64_k26_ddr_boot.shs` |
 
@@ -133,7 +133,8 @@ through AXI MMIO.
   synthesis entry is no longer the product path.
 - **Either on FPGA:** the handwritten-RTL lane IS board-qualified for rv32 as
   of 2026-07-28 (SimpleOS `TEST PASSED` on KV260 silicon, DDR + BRAM-only; NVMe
-  recovery/prevention PASS in AXI/BRAM GHDL and KV260 USER4 JTAG) — but the *Simple-emitted*
+  recovery/prevention PASS in AXI/BRAM GHDL; current source-matched KV260 USER4
+  evidence is pending) — but the *Simple-emitted*
   (`_SocVhdlGen`) core path remains pending Stage 4 for both XLENs. The PL UART
   is still not host-routed; markers are read via JTAG obs regs / BSCANE2 tunnel,
   or wire a 3.3 V PMOD UART.

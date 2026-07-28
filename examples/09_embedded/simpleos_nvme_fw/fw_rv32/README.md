@@ -124,9 +124,12 @@ line, the live evidence marker
 `NAND EVIDENCE D1 U1 F5 C3 T1 M1 Q3 X2 S1 PASS`, and the final firmware marker from
 the USER4 JTAG transcript. The prior 226-byte KV260 capture predates the
 independent-SECDED and alternate-slot remap fix and is not evidence for the
-current image. The corrected image passes AXI RAM with 847 `.nandram` reads and
-460 writes, exact-BRAM GHDL with clean/garbage fill, and KV260 USER4 with all
-229 bytes recovered and no loss. This bounded model verifies controller policy;
+current image. A recorded corrected revision passed AXI RAM with 847 `.nandram`
+reads and 460 writes plus exact-BRAM GHDL with clean/garbage fill; those counts
+are historical after later `entry.spl` changes. The prior 229-byte KV260 USER4
+capture is likewise not a source-matched current bundle; rebuild and retain fresh
+ELF/bitstream/transcript hashes before claiming board evidence. This bounded
+model verifies controller policy;
 it does not model analog threshold distributions or host-driven NVMe MMIO.
 `hardware.nand_emu` owns analog concerns.
 
@@ -144,7 +147,7 @@ doorbells. Each core's loop state is explicit and legality-checked.
 
 ```sh
 NVME_RV32_SMP=1 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
-sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --smp build/nvme_fw_rv32.elf
+sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs --smp build/nvme_fw_rv32_smp.elf
 ```
 
 Expected final marker: `ALL RV32 4CORE IPC CHECKS PASS` (replaces the single-hart

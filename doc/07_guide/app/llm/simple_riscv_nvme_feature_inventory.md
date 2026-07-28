@@ -15,8 +15,46 @@ operation and recovery behavior lives in
 | `4` | `TARGET_RV32_KV260_AXI_RAM_NAND` | AXI host endpoint + queue DMA + firmware mailbox + RAM NAND | H1 firmware-in-loop and current-top GHDL boot PASS; board evidence open |
 
 Unknown IDs return `TARGET_INVALID`; they never fall back to the simulator.
-The canonical profile source is
+The canonical profile catalog is
 `examples/09_embedded/simpleos_nvme_fw/fw/openssd_config.spl`.
+
+Target IDs describe hardware/media contracts. The current RV32 build does not
+consume IDs `3`/`4`; `NVME_RV32_*` selectors below choose the executable image,
+and its runner supplies the transport. Do not claim runtime profile dispatch
+from the catalog alone.
+
+## Firmware Build Modes
+
+| Mode | Selector | Artifact / boundary |
+|---|---|---|
+| Single-hart self-test | default | `build/nvme_fw_rv32.elf`; internal startup, queues, NAND prevention/recovery |
+| Resident endpoint service | `NVME_RV32_SERVICE=1` | `build/nvme_fw_rv32_service.elf`; serves the AXI firmware mailbox |
+| QEMU host parity | `NVME_RV32_QEMU_HOST=1` | `build/nvme_fw_rv32_qemu_host.elf`; implies service mode and uses guest-RAM mailbox/PRPs |
+| Full RV32 OS boot | `NVME_RV32_BUILD_OS_BOOT=1` | Slower diagnostic build through the SimpleOS boot graph |
+| Four-hart firmware | `NVME_RV32_SMP=1` | `build/nvme_fw_rv32_smp.elf`; host logic checks exist, RV32 ELF/QEMU admission remains blocked by compiler emission throughput |
+
+`NVME_RV32_SIMPLE_BIN`, `NVME_RV32_OUT`, and
+`NVME_RV32_BUILD_TIMEOUT_SECS` override the compiler, output, and timeout.
+`build.shs --background` starts a detached build and `build.shs --status`
+reports its artifact and last phase. A background receipt is not a PASS until
+the expected ELF and its target runner pass.
+
+## Platform Capability Boundary
+
+| Capability | RV32 QEMU | RV32 GHDL/KV260 | Cosmos+ ARMv7 |
+|---|---|---|---|
+| CPU | QEMU RV32IMAC, one hart | Simple RV32 soft core, current admitted path is one hart | Zynq-7000 dual Cortex-A9 |
+| Queue transport | Guest-RAM mailbox and PRPs | AXI MMIO, SQE/CQE/PRP DMA, IRQ in GHDL | PCIe command FIFO/SRAM and host DMA contract |
+| Media | 256-byte linker RAM NAND | Same `.nandram` over AXI or BRAM | 8-channel/8-way physical NAND through NFC |
+| SMP/GIC | Not claimed | Four-hart source/host checks only; no admitted RV32 SMP ELF | CPU1/GIC/cache host contracts pass; physical SMP gate open |
+| MMU/cache | Not used by direct firmware | Direct M-mode firmware; no MMU claim | MMU W^X, L1, SCU and PL310 host/QEMU contracts pass |
+| FSBL/boot | `-bios none`; not FSBL evidence | KV260 PS init/JTAG flow; tiny BRAM needs no FSBL | Pinned FSBL/Bootgen package exists; physical handoff gate open |
+| Physical acceptance | None | No retained source-matched current bundle; host-issued physical NVMe sequence open | NFC/PCIe/persistence BT-001..BT-006 open |
+
+The Cosmos+ ARM, NFC, PCIe, SMP/GIC, cache/MMU, and FSBL implementation and
+acceptance commands are documented in
+`doc/07_guide/hardware/cosmos_openssd_production_firmware.md`. Do not infer
+those capabilities from the RV32 soft-core profile.
 
 ## RV32/K26 Interfaces
 
@@ -85,3 +123,4 @@ not replace the firmware-in-loop DMA/IRQ gate or physical board evidence.
 - Host SSpec: `test/03_system/app/nvme_firmware/rv32_nvme_host_axi_mmio_spec.spl`
 - QEMU runner: `scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs`
 - Remaining gates: `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`
+- LLM feature expert: `doc/00_llm_process/feature_expert/nvme_firmware/skill.md`

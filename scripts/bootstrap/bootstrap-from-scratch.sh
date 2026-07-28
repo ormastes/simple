@@ -180,6 +180,13 @@ bootstrap_provenance_helper_sha256_before=$(
 bootstrap_provenance_bundle_fingerprint_before=$(
   bootstrap_stage3_helper_bundle_fingerprint
 )
+STAGE4_PROVENANCE_HELPER_PATH=\
+"${repo_root}/scripts/check/lib/stage4-candidate-provenance.shs"
+export STAGE4_PROVENANCE_HELPER_PATH
+. "${STAGE4_PROVENANCE_HELPER_PATH}"
+stage4_provenance_helper_sha256_before=$(
+  bootstrap_stage3_hash_file "${STAGE4_PROVENANCE_HELPER_PATH}"
+)
 
 # Concurrency guard: two bootstraps sharing one ${output_dir} interleave logs
 # and race binary writes (observed 2026-07-24: twin stage2 builds truncated
@@ -1552,14 +1559,9 @@ if [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3}" ]; then
   fi
   stage_for_build="${stage3}"
 else
-  if [ "${stage2_capability_ok:-0}" -eq 1 ] && [ -x "${stage2}" ]; then
-    echo "Stage 3 unavailable — using capability-verified Stage 2 for stage 4"
-    stage_for_build="${stage2}"
-  else
-    echo "Stage 3 unavailable — no verified compiler for Stage 4"
-    stage_for_build=""
-    stage4_is_seed=1
-  fi
+  echo "Stage 3 unavailable — no provenance-verified compiler for Stage 4"
+  stage_for_build=""
+  stage4_is_seed=1
 fi
 
 # Fast iteration stops after the pure-Simple dynload stages. Relinking the
@@ -1586,12 +1588,23 @@ fi
 echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
+stage4_source_revision_before="$(stage4_source_revision "${repo_root}")" || {
+  echo "error: could not fingerprint Stage 4 source authority" >&2
+  exit 1
+}
 prepare_native_cache stage4
-rm -f "${full_dir}/simple${exe_suffix}"
+stage4_parent="$(bootstrap_stage3_canonical_file "$(absolute_path "${stage_for_build}")")" || {
+  echo "error: Stage 4 parent compiler path is not canonical" >&2
+  exit 1
+}
+full_bin="$(bootstrap_stage3_canonical_path "$(absolute_path "${full_dir}/simple${exe_suffix}")")" || {
+  echo "error: Stage 4 output path is not canonical" >&2
+  exit 1
+}
+rm -f "${full_bin}" "${full_bin}.provenance.env"
 run_logged stage4-native-build bootstrap_native_build_main \
-  "${stage_for_build}" "${full_dir}/simple${exe_suffix}"
+  "${stage4_parent}" "${full_bin}"
 
-full_bin="${full_dir}/simple${exe_suffix}"
 if [ ! -x "${full_bin}" ]; then
   echo "error: failed to compile full CLI binary from main.spl" >&2
   exit 1
@@ -1625,6 +1638,26 @@ run_logged stage4-redeploy-gate run_timeout_kill 180 sh \
 run_logged stage4-essential-tools-smoke run_timeout_kill 180 env \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   sh scripts/check/check-bootstrap-essential-tools-smoke.shs
+
+stage4_provenance="${full_bin}.provenance.env"
+stage4_write_candidate_provenance \
+  "${full_bin}" "${stage4_provenance}" "${repo_root}" \
+  "${bootstrap_script_path}" "${stage4_parent}" \
+  "$(absolute_path "${stage3_provenance_manifest}")" \
+  "${stage4_source_revision_before}" "${bootstrap_script_sha256_before}" \
+  "${stage4_provenance_helper_sha256_before}" \
+  "$(absolute_path "${bootstrap_lock}")" \
+  "$(absolute_path "${log_dir}/stage4-native-build.log")" \
+  "$(absolute_path "${log_dir}/stage4-essential-tools-smoke.log")" || {
+    echo "error: refusing Stage 4 without canonical candidate provenance" >&2
+    exit 1
+  }
+stage4_verify_candidate_provenance \
+  "${stage4_provenance}" "${full_bin}" "${repo_root}" || {
+    echo "error: Stage 4 candidate provenance did not re-verify" >&2
+    exit 1
+  }
+echo "  Stage 4 provenance: ${stage4_provenance}"
 
 echo "Stage 4b: compiling cached UI backend..."
 ui_backend_bin="${full_dir}/simple_ui_backend${exe_suffix}"

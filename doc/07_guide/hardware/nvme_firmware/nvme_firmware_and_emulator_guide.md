@@ -337,10 +337,11 @@ for full-width counter stress.
 
 The corrected full-word SECDED and alternate-slot remap ELF passes QEMU,
 behavioral GHDL, exact-BRAM GHDL with clean and garbage-filled RAM, and the full
-AXI4 RAM gate. The measured behavioral completion is 10.897245 ms. The AXI run
-observed 847 reads and 460 writes inside `.nandram`. The rebuilt KV260 image
-also passed with all 229 UART bytes recovered through USER4 JTAG, no loss, and
-no firmware failure marker.
+AXI4 RAM gate. A recorded revision completed behavioral simulation at 10.897245
+ms and observed 847 AXI reads plus 460 writes inside `.nandram`; those metrics
+are historical after later `entry.spl` changes. A prior KV260 run captured 229
+UART bytes through USER4 JTAG, but physical PASS requires a fresh retained
+source-matched ELF/bitstream/transcript bundle.
 Run the complete gate with:
 
 ```sh

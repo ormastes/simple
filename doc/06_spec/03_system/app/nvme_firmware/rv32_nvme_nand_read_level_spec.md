@@ -43,13 +43,14 @@ That remaining transport is tracked by
 
 ## Current gate status
 
-The revised SECDED/remap ELF passes QEMU, behavioral GHDL at 10.897245 ms,
-exact-BRAM GHDL with clean and garbage-filled RAM, and full AXI4 RAM GHDL. The
-AXI gate observed 847 `.nandram` reads and 460 writes and recovered the complete
-228-byte marker transcript (the trailing newline is not part of the match).
-The rebuilt KV260 image then produced all 229 bytes through USER4 JTAG with no
-loss, `pass_seen=1`, `fail_seen=0`, and every ordered marker. Hashes are retained
-in `build/fpga/rv32_nvme_nand_jtag/sha256.txt`.
+At the recorded revision, the SECDED/remap ELF passed QEMU, behavioral GHDL at
+10.897245 ms, exact-BRAM GHDL with clean and garbage-filled RAM, and full AXI4
+RAM GHDL. The AXI gate observed 847 `.nandram` reads and 460 writes and recovered
+the complete 228-byte marker transcript (the trailing newline is not part of the
+match). The rebuilt KV260 image produced all 229 bytes through
+USER4 JTAG with no loss, `pass_seen=1`, `fail_seen=0`, and every ordered marker.
+The hashes below are historical; current physical PASS requires a fresh retained
+source-matched ELF/bitstream/transcript bundle.
 
 - BRAM-linked ELF: `a3c1bd2fe25fb4034797a9aad66ebc72b6daac5bda15e28a60a443f9e69e1823`
 - KV260 bitstream: `afbe6d1b19e756430e6863fa36c27920cb09340e25106e3c3721155dba74cfea`

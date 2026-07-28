@@ -4,7 +4,8 @@
 - **Date:** 2026-07-28
 - **Severity:** High — green output from these checks is cited as evidence in plans and reports
 - **Found by:** follow-up to `doc/08_tracking/todo/blocked_p1_audit_2026-07-28.md` §3 item C1
-- **Fixed so far:** `scripts/check/check-f64-call-abi.shs` only
+- **Fixed so far:** `scripts/check/check-f64-call-abi.shs` and
+  `scripts/check/check-stage4-selfhost-parse-memory-multifile.shs`
 
 ## The pattern
 
@@ -54,7 +55,6 @@ All paths relative to `scripts/check/`:
 | `check-web-baremetal-size-audit.shs` | `SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"` | `[ ! -x ] \|\| SKIP_NATIVE_BUILDS=1` silently skips all native builds |
 | `native-smoke-matrix.shs` | `SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"` | error text says "set to a deployed pure-Simple compiler" but never checks; XFAIL bucket absorbs failures |
 | `check-stage4-selfhost-parse-memory.shs` | `${STAGE4_PARSE_MEM_BINARY:-bin/simple}` | name claims "selfhost"; only `-x` test |
-| `check-stage4-selfhost-parse-memory-multifile.shs` | `${STAGE4_PARSE_MEM_MULTI_BINARY:-bin/simple}` | same |
 | `check-rocm-engine2d-font-readback.shs` | `${PURE_SIMPLE_BIN:-bin/simple}` | var named PURE; sha256-hashes the binary but never checks identity |
 | `check-cross-app-glyph-consistency.shs` | `${SIMPLE_BIN:-bin/simple}` | `grep ... \|\| true` |
 | `check-browser-interaction.shs` | `${SIMPLE_BIN:-bin/simple}` | `grep ... \|\| true` |

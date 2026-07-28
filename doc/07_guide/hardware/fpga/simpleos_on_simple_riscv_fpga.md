@@ -226,9 +226,10 @@ sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
 ```
 
 It derives `.nandram` from the ELF and proves nonzero AXI reads/writes plus
-prevention and recovery. The corrected physical image also passes on KV260
-with all 229 emitted UART bytes recovered through the tiny-BRAM SoC's USER4
-JTAG observation path. This is not host-driven NVMe MMIO.
+prevention and recovery. A prior KV260 run recovered all 229 UART bytes through
+the tiny-BRAM SoC's USER4 JTAG path, but that is historical evidence until a
+fresh source-matched ELF/bitstream/transcript bundle is retained. USER4 is not
+host-driven NVMe MMIO.
 
 ## 7. rv64
 

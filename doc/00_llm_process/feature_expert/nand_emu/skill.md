@@ -33,8 +33,10 @@ NVMe firmware's FIL seam.
   Its 256-byte `.nandram` stores active, neighbor, SECDED, and alternate-remap
   state. `scripts/fpga/ghdl_rv32_nvme_axi_ram.shs` proves those ordinary
   loads/stores cross full AXI4 into RAM and observes prevention/recovery over
-  AXI4-Lite before the physical BRAM/JTAG gate. Current evidence: 847 reads,
-  460 writes in `.nandram`; KV260 USER4 captured all 229 emitted bytes.
+  AXI4-Lite before the physical BRAM/JTAG gate. A recorded GHDL run observed 847
+  reads and 460 writes in `.nandram`; it is historical after later `entry.spl`
+  changes. The 229-byte KV260 USER4 capture is also historical until a fresh
+  retained source-matched ELF/bitstream/transcript bundle passes the gates.
 
 ## Design Invariants (do not regress)
 

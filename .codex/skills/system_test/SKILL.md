@@ -104,6 +104,13 @@ The agent-facing configuration inventory, exact runners, MMIO apertures, and
 open evidence gates are in
 `doc/07_guide/app/llm/simple_riscv_nvme_feature_inventory.md`; update that page
 whenever a target profile or acceptance command changes.
+The reusable feature wiki is
+`doc/00_llm_process/feature_expert/nvme_firmware/skill.md`. Specs must name the
+target profile, independent `NVME_RV32_*` build mode, transport, media, and
+evidence class; a target ID alone is not a complete test configuration.
+For RV32 IDs `3`/`4`, catalog presence is not runtime dispatch: require evidence
+from the selected build mode and transport runner before naming the profile as
+exercised.
 
 | Profile | What it proves | What it does not prove |
 |---|---|---|

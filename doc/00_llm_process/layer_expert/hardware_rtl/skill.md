@@ -44,7 +44,8 @@ byte-identity — always run the probe gate, not just your own family's probe.
 - Specs: `test/01_unit/lib/hardware/vhdl_gen/`,
   `test/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.spl`.
 - Feature expert: [vhdl_exec_core_gen](../../feature_expert/vhdl_exec_core_gen/skill.md);
-  neighbours: [riscv_soc_linux](../../feature_expert/riscv_soc_linux/skill.md).
+  neighbours: [riscv_soc_linux](../../feature_expert/riscv_soc_linux/skill.md)
+  and [nvme_firmware](../../feature_expert/nvme_firmware/skill.md).
 
 ## Structuring rules (why the code looks like this)
 
