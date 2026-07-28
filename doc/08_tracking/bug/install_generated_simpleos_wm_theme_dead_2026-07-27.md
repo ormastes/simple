@@ -1,7 +1,7 @@
 # Bug: `install_generated_simpleos_wm_theme` has zero production callers — its own comment contradicts that
 
 **Date:** 2026-07-27
-**Status:** open
+**Status:** closed — invalid (finding contradicted by working copy, 2026-07-28)
 **Found:** side-finding while agents worked on other tasks, 2026-07-27
 **Area:** OS compositor (`src/os/compositor/simpleos_wm_theme_bootstrap.spl`) — freestanding SimpleOS WM theme boot path
 **Severity:** Medium — a feature believed present (the guest boot theme install) that cannot execute
@@ -98,3 +98,42 @@ follow-up locates them.
 - `doc/08_tracking/bug/theme_web_frame_acceptance_unguarded_2026-07-27.md` —
   a separate theme-identity gap found the same day in the same theme/WM
   subsystem.
+
+## Resolution (2026-07-28)
+
+Re-verified against the current working copy: **the "zero production
+callers" finding does not hold.** `install_generated_simpleos_wm_theme` is
+called from four real freestanding boot entry points, all wired into actual
+build/QEMU-preflight scripts:
+
+- `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl:296`
+  (used by `scripts/check/check-simpleos-x86-64-wm-qemu-preflight.shs` and
+  `check-simpleos-x86-64-wm-qemu-readiness.shs`)
+- `examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl:339`
+- `examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl:130`
+  (used by `scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs`
+  and `check-simpleos-arm64-wm-qemu-readiness.shs`)
+- `examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl:73`
+
+`git log -S` confirms these call sites are long-standing, not something
+added after the bug was filed. The likely explanation is that the original
+"repo-wide grep" was run against a torn/stale working copy — this same repo
+has independent, contemporaneous history of a pushed jj-conflict-tree /
+mass-file-deletion incident touching these exact files (see
+`src/os/compositor/simpleos_wm_theme_bootstrap.spl` git log:
+`37cda4befdc fix(vcs): restore main from pushed jj conflict tree`; and
+`examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl` git log:
+`369a3725bbe revert: restore 13,174 files mass-deleted by e3e22d19da
+torn-working-copy commit`) — so the `examples/` callers were transiently
+absent from disk when the original grep ran.
+
+**Action taken:** no code deletion, no rewiring — the function is live and
+correctly used. Tightened the module comment at
+`src/os/compositor/simpleos_wm_theme_bootstrap.spl:3-5` only: it previously
+said "Both canonical desktop entries," which undercounts the four real
+callers (x86_64 desktop + engine2d, arm64 desktop, riscv64 desktop); it now
+names all four call sites by path so the comment can't drift out of sync
+with the caller count again. The unit test
+(`test/01_unit/os/compositor/simpleos_wm_theme_bootstrap_spec.spl`) is kept —
+it is a normal unit test for a function that also has real callers, not the
+dead-code test this bug alleged.
