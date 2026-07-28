@@ -283,6 +283,51 @@ describe "hosted Web content session":
             "data-callback=\"yes\""
         )
 
+    # @req REQ-WEB-BROWSER-008
+    it "enforces authored maxlength after cancelable beforeinput":
+        step("Clamp text input to the authored maxlength")
+        var limited = HostedWebContentSession.create(
+            14,
+            "<input id='limited' maxlength='3' value='' " +
+            "onbeforeinput='set-attr:data-before=yes' " +
+            "oninput='set-attr:data-input=yes'>",
+            80, 40
+        )
+        val limited_press = limited.dispatch_pointer_at(10, 5, 5, true)
+        val limited_release = limited.dispatch_pointer_at(11, 5, 5, false)
+        expect(limited_press.semantic_target_id).to_equal("limited")
+        expect(limited_release.semantic_target_id).to_equal("limited")
+        val accepted = limited.dispatch_text(12, "a😀Z")
+        expect(accepted.semantic_target_id).to_equal("limited")
+        expect(accepted.callback_count).to_equal(2)
+        expect(accepted.reason).to_equal("")
+        expect(limited.current_body_html()).to_contain("value=\"a😀\"")
+        expect(limited.current_body_html()).to_contain("data-before=\"yes\"")
+        expect(limited.current_body_html()).to_contain("data-input=\"yes\"")
+        expect(
+            limited.current_body_html().contains("value=\"a😀Z\"")
+        ).to_be(false)
+
+        var canceled = HostedWebContentSession.create(
+            15,
+            "<input id='blocked' maxlength='3' value='kept' " +
+            "onbeforeinput='prevent-default' " +
+            "oninput='set-attr:data-input=yes'>",
+            80, 40
+        )
+        val canceled_press = canceled.dispatch_pointer_at(13, 5, 5, true)
+        val canceled_release = canceled.dispatch_pointer_at(14, 5, 5, false)
+        expect(canceled_press.semantic_target_id).to_equal("blocked")
+        expect(canceled_release.semantic_target_id).to_equal("blocked")
+        val blocked = canceled.dispatch_text(15, "a😀Z")
+        expect(blocked.semantic_target_id).to_equal("blocked")
+        expect(blocked.callback_count).to_equal(1)
+        expect(blocked.reason).to_equal("no-application-mutation")
+        expect(canceled.current_body_html()).to_contain("value=\"kept\"")
+        expect(
+            canceled.current_body_html().contains("data-input=\"yes\"")
+        ).to_be(false)
+
     # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
     it "clicks only after a matching hosted pointer press and release":
         var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))

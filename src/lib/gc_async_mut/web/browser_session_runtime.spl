@@ -46,7 +46,10 @@ use std.gc_async_mut.web.browser_session_context.{
     browser_csp_allows, browser_session_is_loopback_http,
     browser_session_is_secure_context
 }
-use std.common.encoding.utf8.{text_is_valid_utf8, text_without_last_codepoint}
+use std.common.encoding.utf8.{
+    text_is_valid_utf8, text_without_last_codepoint, utf8_decode_one
+}
+use std.common.convert.{digit_value}
 
 extern fn rt_text_to_bytes(value: text) -> [u8]
 
@@ -86,13 +89,94 @@ fn _browser_session_text_control_value(target: BeDomNode) -> text:
         return html_to_text(be_dom_serialize_children(target))
     ""
 
+fn _browser_session_parse_maxlength(raw: text) -> i64?:
+    val value = raw.trim()
+    if value == "":
+        return nil
+    var index: i64 = 0
+    if value[0] == "+":
+        index = 1
+    elif value[0] == "-":
+        return nil
+    var parsed: i64 = 0
+    var digits: i64 = 0
+    while index < value.len():
+        val digit = digit_value(value[index])
+        if digit < 0:
+            break
+        if parsed > 115292150460684697:
+            return nil
+        parsed = parsed * 10
+        if parsed > 1152921504606846975 - digit:
+            return nil
+        parsed = parsed + digit
+        digits = digits + 1
+        index = index + 1
+    if digits == 0:
+        return nil
+    parsed
+
+fn _browser_session_utf16_units(value: text) -> i64:
+    val bytes = value.bytes()
+    var offset: i64 = 0
+    var units: i64 = 0
+    while offset < bytes.len():
+        val decoded = utf8_decode_one(bytes, offset)
+        val consumed = decoded[1]
+        if consumed <= 0:
+            return units
+        units = units + (if decoded[0] > 0xFFFF: 2 else: 1)
+        offset = offset + consumed
+    units
+
+fn _browser_session_utf16_prefix(value: text, limit: i64) -> text:
+    if limit <= 0:
+        return ""
+    val bytes = value.bytes()
+    var offset: i64 = 0
+    var units: i64 = 0
+    while offset < bytes.len():
+        val decoded = utf8_decode_one(bytes, offset)
+        val consumed = decoded[1]
+        if consumed <= 0:
+            break
+        val next_units = units + (if decoded[0] > 0xFFFF: 2 else: 1)
+        if next_units > limit:
+            break
+        units = next_units
+        offset = offset + consumed
+    if offset >= bytes.len():
+        return value
+    value.slice(0, offset)
+
+fn _browser_session_text_maxlength(target: BeDomNode) -> i64?:
+    if not be_dom_has_attr(target, "maxlength"):
+        return nil
+    if target.tag_name == "textarea":
+        return _browser_session_parse_maxlength(
+            be_dom_get_attr(target, "maxlength")
+        )
+    if target.tag_name != "input":
+        return nil
+    val input_type = be_dom_get_attr(target, "type").lower()
+    if not (
+        input_type == "" or input_type == "text" or
+        input_type == "search" or input_type == "url" or
+        input_type == "tel" or input_type == "email" or
+        input_type == "password"
+    ):
+        return nil
+    _browser_session_parse_maxlength(be_dom_get_attr(target, "maxlength"))
+
 pub fn dom_text_control_selectable(target: BeDomNode) -> bool:
     if be_dom_has_attr(target, "disabled"):
         return false
-    if target.tag_name != "input":
+    if target.tag_name != "input" and target.tag_name != "textarea":
         return false
     if not text_is_valid_utf8(_browser_session_text_control_value(target)):
         return false
+    if target.tag_name == "textarea":
+        return true
     val input_type = be_dom_get_attr(target, "type").lower()
     input_type == "" or input_type == "text" or input_type == "search" or
         input_type == "url" or input_type == "tel" or
@@ -698,14 +782,21 @@ impl BrowserSession:
             return Err("DOM has no focusable target")
         Ok(self.dispatch_dom_event(next_id, "focus", false, false))
 
-    me set_dom_text_input(target_id: text, value: text) -> Result<BeDomEventDispatch, text>:
+    me _apply_dom_text_edit(
+        target_id: text, prefix: text, insertion: text, suffix: text,
+        replace_all: bool
+    ) -> Result<BeDomEventDispatch, text>:
         val path = be_dom_find_path_to_id(self.current_dom, target_id)
         if path.len() == 0:
             return Err("DOM input target not found")
         val target = path[path.len() - 1]
         if not dom_text_control_mutable(target):
             return Err("DOM input target is not editable")
-        if not text_is_valid_utf8(value):
+        if (
+            not text_is_valid_utf8(prefix) or
+            not text_is_valid_utf8(insertion) or
+            not text_is_valid_utf8(suffix)
+        ):
             return Err("DOM input value is not valid UTF-8")
         val _ = self.dispatch_dom_event(target_id, "focus", false, false)
         val before_input = self.dispatch_dom_event(
@@ -713,13 +804,51 @@ impl BrowserSession:
         )
         if before_input.event.default_prevented:
             return Ok(before_input)
-        if target.tag_name == "input":
+
+        val current_path = be_dom_find_path_to_id(self.current_dom, target_id)
+        if current_path.len() == 0:
+            return Err("DOM input target was removed")
+        val current_target = current_path[current_path.len() - 1]
+        if not dom_text_control_mutable(current_target):
+            return Err("DOM input target is not editable")
+        val current_value = _browser_session_text_control_value(current_target)
+        var accepted_insertion = insertion
+        var next_value = prefix + insertion + suffix
+        val maxlength = _browser_session_text_maxlength(current_target)
+        if maxlength != nil:
+            val limit = maxlength ?? 0
+            if replace_all:
+                val current_units = _browser_session_utf16_units(current_value)
+                val next_units = _browser_session_utf16_units(next_value)
+                if not (current_units > limit and next_units < current_units):
+                    accepted_insertion = _browser_session_utf16_prefix(
+                        insertion, limit
+                    )
+                    next_value = accepted_insertion
+            else:
+                val fixed_units = (
+                    _browser_session_utf16_units(prefix) +
+                    _browser_session_utf16_units(suffix)
+                )
+                val available = if fixed_units >= limit:
+                    0
+                else:
+                    limit - fixed_units
+                accepted_insertion = _browser_session_utf16_prefix(
+                    insertion, available
+                )
+                next_value = prefix + accepted_insertion + suffix
+        if next_value == current_value:
+            return Ok(before_input)
+
+        if current_target.tag_name == "input":
             self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, target_id, "set-attr:value=" + value, false
+                self.current_dom, target_id,
+                "set-attr:value=" + next_value, false
             )
         else:
             self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, target_id, "set-text:" + value, false
+                self.current_dom, target_id, "set-text:" + next_value, false
             )
         self.current_dom = script_host_apply_action_to_id(
             self.current_dom, target_id,
@@ -728,10 +857,19 @@ impl BrowserSession:
         val input_dispatch = self.dispatch_dom_event(
             target_id, "input", true, false
         )
+        val caret = if replace_all:
+            next_value.len()
+        else:
+            prefix.len() + accepted_insertion.len()
         self.text_selection_target_id = target_id
-        self.text_selection_anchor_byte = value.len()
-        self.text_selection_focus_byte = value.len()
+        self.text_selection_anchor_byte = caret
+        self.text_selection_focus_byte = caret
         Ok(input_dispatch)
+
+    me set_dom_text_input(
+        target_id: text, value: text
+    ) -> Result<BeDomEventDispatch, text>:
+        self._apply_dom_text_edit(target_id, "", value, "", true)
 
     me append_dom_text_input(
         target_id: text, value: text
@@ -751,17 +889,13 @@ impl BrowserSession:
             val swap = start
             start = end
             end = swap
-        val updated = self.set_dom_text_input(
+        self._apply_dom_text_edit(
             target_id,
-            current_value.slice(0, start) + value +
-                current_value.slice(end, current_value.len())
+            current_value.slice(0, start),
+            value,
+            current_value.slice(end, current_value.len()),
+            false
         )
-        if updated.is_ok():
-            val caret = start + value.len()
-            self.text_selection_target_id = target_id
-            self.text_selection_anchor_byte = caret
-            self.text_selection_focus_byte = caret
-        updated
 
     me _blur_dom_focus(target_id: text) -> Result<BeDomEventDispatch, text>:
         val path = be_dom_find_path_to_id(self.current_dom, target_id)

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -83,6 +83,14 @@ expect(unfocused.mutation_revision).to_equal(0)
 - Nested focus, before-input, and input listeners are all counted; default
   editing itself adds no callback.
 
+#### enforces authored maxlength after cancelable beforeinput
+
+- Clamp text input to the authored maxlength after the cancelable
+  `beforeinput` listener runs.
+- Count the astral emoji as two UTF-16 units, retaining `a😀` under
+  `maxlength="3"` and rejecting the trailing `Z` without splitting UTF-8.
+- A canceled edit preserves the old value and never emits `input`.
+
 #### clicks only after a matching hosted pointer press and release
 
 - A release without a preceding press must not check the checkbox.
@@ -147,7 +155,7 @@ expect(unfocused.mutation_revision).to_equal(0)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/02_integration/os/hosted/hosted_web_content_session_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-07-28 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -159,8 +167,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

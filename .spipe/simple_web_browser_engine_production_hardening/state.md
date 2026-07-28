@@ -1163,7 +1163,15 @@ implementation in progress / target evidence blocked
   a pure-Simple stage-2 diagnostic probe printed
   `BROWSER UTF8 BACKSPACE PROBE: PASS`. Stage 2 is not release evidence, so the
   hosted scenario remains pending a genuine full CLI.
-- Events: Production text input still ignores HTML `maxlength` across worker,
-  hosted-session, and UI-access callers. The root fix belongs once in
-  `BrowserSession.set_dom_text_input`, counting Unicode scalars before the
-  cancelable `beforeinput` dispatch; this remains active and unclaimed.
+- Events: The shared BrowserSession user-edit owner now enforces HTML
+  `maxlength` after cancelable `beforeinput`, measures UTF-16 units without
+  splitting UTF-8, preserves middle-edit suffixes and the accepted caret, and
+  enables the already-supported textarea mutation branch. Hosted evidence
+  covers an astral character plus canceled input. A bounded pure-Simple
+  Stage-2 diagnostic accepted the changed sources, then stopped at the known
+  `JsValue.Symbol` MIR blocker before execution; no production PASS is claimed.
+- Performance: `script_host_apply_action_to_id` still clones every descendant
+  and scans untouched siblings after finding its target. Accepted text edits
+  call it twice, causing two O(N) whole-DOM allocation passes per keystroke.
+  This is confirmed allocation churn, not proof of an unbounded leak, and
+  remains the next shared-owner fix.
