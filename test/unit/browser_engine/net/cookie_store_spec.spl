@@ -16,7 +16,7 @@ and CookieStore storage/retrieval. No network calls — pure logic.
 
 use std.spipe.*
 
-use std.gc_async_mut.gpu.browser_engine.net.cookie_store.{CookieStore, CookieJar, parse_set_cookie}
+use std.gc_async_mut.gpu.browser_engine.net.cookie_store.{CookieStore, CookieJar, apply_default_path, parse_set_cookie}
 use std.gc_async_mut.gpu.browser_engine.net.entity.cookie_types.{Cookie, SameSite}
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin}
 use std.gc_async_mut.gpu.browser_engine.security.cookie_policy.{apply_max_age}
@@ -80,6 +80,22 @@ describe "parse_set_cookie":
         expect(c.domain).to_equal("example.com")
         expect(c.secure).to_equal(true)
         expect(c.same_site == SameSite.Strict).to_equal(true)
+
+    it "AC-6: derives default path and preserves an explicit absolute Path":
+        val absent = apply_default_path(parse_set_cookie("a=1"), "a=1", "/account/login")
+        val explicit = apply_default_path(parse_set_cookie("a=1; Path=/chosen"), "a=1; Path=/chosen", "/account/login")
+        expect(absent.path).to_equal("/account")
+        expect(explicit.path).to_equal("/chosen")
+
+    it "AC-6: parses RFC1123 Expires and gives valid Max-Age precedence":
+        val expires = apply_max_age(parse_set_cookie("a=1"), "a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT", 100)
+        val malformed = apply_max_age(parse_set_cookie("a=1"), "a=1; Expires=not-a-date", 100)
+        val override = apply_max_age(parse_set_cookie("a=1"), "a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Max-Age=10", 100)
+        val epoch = apply_max_age(parse_set_cookie("a=1"), "a=1; Expires=Thu, 01 Jan 1970 00:00:00 GMT", 100)
+        expect(expires.expires_at).to_equal(1445412480)
+        expect(malformed.expires_at).to_equal(0)
+        expect(override.expires_at).to_equal(110)
+        expect(epoch.expires_at).to_equal(-1)
 
 
 # ============================================================================
@@ -190,6 +206,14 @@ describe "CookieStore storage":
         val stored = count_cookies_for_domain(store, "example.com")
         expect(stored).to_be_less_than(52)
 
+    it "AC-6: total cookie count is bounded":
+        val store = make_empty_store()
+        var i = 0
+        while i < 3001:
+            store.store(make_named_cookie("cookie", "v", "d{i}.example", "/"))
+            i = i + 1
+        expect(store.count()).to_equal(3000)
+
     it "AC-6: Max-Age zero removes the matching cookie":
         val store = make_empty_store()
         val origin = Origin(scheme: "https", host: "example.com", port: 443)
@@ -198,6 +222,17 @@ describe "CookieStore storage":
         val expired = apply_max_age(parse_set_cookie("session=gone; Path=/; Max-Age=0"), "session=gone; Path=/; Max-Age=0", 101)
         store.store_from_origin(expired, origin, 101)
         expect(store.get_header_for_origin(origin, "/", Some(origin), "GET", false, 101)).to_equal("")
+        expect(store.count()).to_equal(0)
+
+    it "AC-6: script cannot set or replace HttpOnly cookies":
+        val store = make_empty_store()
+        val origin = Origin(scheme: "https", host: "example.com", port: 443)
+        store.store_from_origin(parse_set_cookie("session=secret; Path=/; HttpOnly"), origin, 100)
+        val set_result = store.store_from_script(parse_set_cookie("other=x; Path=/; HttpOnly"), origin, 101)
+        val replace_result = store.store_from_script(parse_set_cookie("session=visible; Path=/"), origin, 101)
+        expect(set_result.accepted).to_equal(false)
+        expect(replace_result.accepted).to_equal(false)
+        expect(store.get_header_for_origin(origin, "/", Some(origin), "GET", false, 101)).to_contain("session=secret")
 
     it "AC-6: insecure origin cannot shadow a Secure cookie":
         val store = make_empty_store()

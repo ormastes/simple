@@ -32,7 +32,6 @@ use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, B
 use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
 use std.js.types.pair.{Pair}
 use std.gc_async_mut.web.browser_session_url.{resolve_relative_url, url_protocol, url_pathname, url_origin, url_host, url_search, url_hash}
-use std.gc_async_mut.web.browser_session_cookies.{document_cookie_text_for_url, merge_cookie_text_for_url, parse_cookie_line_for_url, upsert_cookie}
 use std.gc_async_mut.web.browser_session_html.{
     extract_title_text, extract_body_inner_html, own_text,
     html_to_text, escape_html_text,
@@ -872,7 +871,7 @@ impl BrowserSession:
         self._activate_storage_for_url(url)
         var native_globals_diagnostic = ""
         if self.runtime_enabled and script_blocks.len() > 0:
-            val cookie_text = document_cookie_text_for_url(self.cookies, url)
+            val cookie_text = self._script_cookie_for_url(url)
             var state = BrowserRuntimeState.create(
                 own_text(url),
                 initial_title,
@@ -946,7 +945,16 @@ impl BrowserSession:
                     val inline_method_raw = _browser_session_inline_fetch_option(html, "method")
                     val inline_method = if inline_method_raw != "": inline_method_raw.upper() else: "GET"
                     val inline_body = _browser_session_inline_fetch_option(html, "body")
-                    self.pending_requests.push(self._build_request("fetch", resolved_fetch_url, inline_method, "", inline_body, ""))
+                    val inline_credentials_raw = _browser_session_inline_fetch_option(html, "credentials").trim().lower()
+                    val inline_credentials = if (inline_credentials_raw == "omit" or
+                        inline_credentials_raw == "include"):
+                        inline_credentials_raw
+                    else:
+                        "same-origin"
+                    self.pending_requests.push(self._build_request(
+                        "fetch", resolved_fetch_url, inline_method, "",
+                        inline_body, "", inline_credentials
+                    ))
         if url.starts_with("https://guest.runtime/"):
             print "[BRS] active load created"
         self._advance_stylesheet_loading()
@@ -956,7 +964,7 @@ impl BrowserSession:
             return nil
         if val Some(state) = self.runtime_state:
             return Some(state)
-        val cookie_text = document_cookie_text_for_url(self.cookies, self.document_url)
+        val cookie_text = self._script_cookie_for_url(self.document_url)
         val state = BrowserRuntimeState.create(
             self.document_url,
             self.current_title,
@@ -1180,13 +1188,13 @@ impl BrowserSession:
             )
         match cookie_val:
             JsValue.String(cookie_text):
-                val visible_cookie_before_sync = document_cookie_text_for_url(self.cookies, active_document_url)
+                val visible_cookie_before_sync = self._script_cookie_for_url(active_document_url)
                 if cookie_text != visible_cookie_before_sync:
-                    self.cookies = merge_cookie_text_for_url(self.cookies, cookie_text, active_document_url, false)
+                    self._store_cookie_text(cookie_text, active_document_url, false)
             _:
                 pass_dn
 
-        val visible_cookie_text = document_cookie_text_for_url(self.cookies, active_document_url)
+        val visible_cookie_text = self._script_cookie_for_url(active_document_url)
         var runtime = state.runtime
         var interpreter = runtime.interpreter
         interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
@@ -1223,7 +1231,7 @@ impl BrowserSession:
 
     me _sync_runtime_cookie_string():
         if val Some(state) = self.runtime_state:
-            val visible_cookie_text = document_cookie_text_for_url(self.cookies, self.document_url)
+            val visible_cookie_text = self._script_cookie_for_url(self.document_url)
             var runtime = state.runtime
             var interpreter = runtime.interpreter
             interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
@@ -1236,18 +1244,21 @@ impl BrowserSession:
             state.runtime = runtime
             self.runtime_state = Some(state)
 
-    me _build_request(kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
+    me _build_request(
+        kind: text, url: text, method: text, headers: text, body: text,
+        content_type: text, credentials: text = "include"
+    ) -> BrowserRequest:
         val request_url = self._hsts_upgrade_url(url)
         val normalized_method = if method.trim() != "": method.upper() else: "GET"
-        var request_headers = headers
-        val cookie_header = self.cookie_header_for_request(request_url)
-        if cookie_header != "":
-            if request_headers != "":
-                request_headers = request_headers + "\n"
-            request_headers = request_headers + "Cookie: " + cookie_header
+        val site_for_cookies_url = self.document_url
+        val is_top_level_navigation = kind == "document"
+        val request_headers = self._headers_with_session_cookie(
+            headers, request_url, normalized_method, site_for_cookies_url,
+            is_top_level_navigation, credentials
+        )
         val request_id = "{kind}-{self.next_request_seq}"
         self.next_request_seq = self.next_request_seq + 1
-        BrowserRequest.create(
+        val request = BrowserRequest.create(
             id: request_id,
             kind: kind,
             url: request_url,
@@ -1256,6 +1267,10 @@ impl BrowserSession:
             body: body,
             content_type: content_type
         )
+        request.site_for_cookies_url = site_for_cookies_url
+        request.credentials = credentials
+        request.is_top_level_navigation = is_top_level_navigation
+        request
 
 fn browser_session_sync_location_object(state: BrowserRuntimeState, href: text):
     state.runtime.set_host_property(state.location_id, "href", JsValue.String(v: href))

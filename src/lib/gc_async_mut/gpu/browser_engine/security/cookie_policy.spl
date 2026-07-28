@@ -30,6 +30,7 @@ use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{
 use std.gc_async_mut.http.types.{is_safe_method}
 use common.web.host_policy.{is_ip_host_literal}
 use common.web.public_suffix.{is_public_suffix}
+use common.time_utils.{days_in_month, timestamp_from_components}
 
 pub class CookieVerdict:
     """Outcome of a Set-Cookie admission check."""
@@ -246,13 +247,14 @@ fn _digits_to_i64(raw: text) -> i64?:
     return Some(acc)
 
 pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
-    """Resolve a `Max-Age=` attribute in `header` into an absolute `expires_at`.
+    """Resolve `Expires`/`Max-Age` into `expires_at`, with Max-Age precedence.
 
     `Max-Age<=0` means delete-now, encoded as an expiry one second in the past
-    so `is_expired` and `validate_set_cookie` both see it. Absent or malformed
-    `Max-Age` leaves the cookie a session cookie.
+    so `is_expired` and `validate_set_cookie` both see it. Malformed attributes
+    are ignored.
     """
     var max_age: i64? = nil
+    var expires_at = cookie.expires_at
     val parts = header.split(";")
     var i = 0
     while i < parts.len():
@@ -262,6 +264,11 @@ pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
         if lowered.starts_with("max-age="):
             if val Some(seconds) = _digits_to_i64(part.slice(8, part.len())):
                 max_age = Some(seconds)
+        elif lowered.starts_with("expires="):
+            if val Some(expiry) = _parse_rfc1123(part.slice(8, part.len())):
+                # Zero is reserved for session cookies; epoch-or-earlier dates
+                # must remain an explicit expired value.
+                expires_at = if expiry <= 0: -1 else: expiry
     if val Some(seconds) = max_age:
         var expiry = now + seconds
         if seconds <= 0:
@@ -276,4 +283,54 @@ pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
             same_site: cookie.same_site,
             expires_at: expiry
         }
-    return cookie
+    if expires_at == cookie.expires_at:
+        return cookie
+    return Cookie {
+        name: cookie.name, value: cookie.value, domain: cookie.domain,
+        path: cookie.path, secure: cookie.secure, http_only: cookie.http_only,
+        same_site: cookie.same_site, expires_at: expires_at
+    }
+
+fn _month_number(raw: text) -> i64:
+    val month = raw.to_lower()
+    if month == "jan": return 1
+    if month == "feb": return 2
+    if month == "mar": return 3
+    if month == "apr": return 4
+    if month == "may": return 5
+    if month == "jun": return 6
+    if month == "jul": return 7
+    if month == "aug": return 8
+    if month == "sep": return 9
+    if month == "oct": return 10
+    if month == "nov": return 11
+    if month == "dec": return 12
+    return 0
+
+fn _valid_weekday(raw: text) -> bool:
+    val day = raw.to_lower()
+    return (day == "sun," or day == "mon," or day == "tue," or
+        day == "wed," or day == "thu," or day == "fri," or day == "sat,")
+
+fn _parse_rfc1123(raw: text) -> i64?:
+    val fields = raw.trim().split(" ")
+    if fields.len() != 6 or not _valid_weekday(fields[0]) or fields[5].to_lower() != "gmt":
+        return nil
+    val month = _month_number(fields[2])
+    val clock = fields[4].split(":")
+    if month == 0 or clock.len() != 3:
+        return nil
+    val day = _digits_to_i64(fields[1])
+    val year = _digits_to_i64(fields[3])
+    val hour = _digits_to_i64(clock[0])
+    val minute = _digits_to_i64(clock[1])
+    val second = _digits_to_i64(clock[2])
+    if not day.? or not year.? or not hour.? or not minute.? or not second.?:
+        return nil
+    if (year! < 1601 or year! > 9999 or day! < 1 or
+        day! > days_in_month(year!, month) or hour! < 0 or hour! > 23 or
+        minute! < 0 or minute! > 59 or second! < 0 or second! > 59):
+        return nil
+    return Some(timestamp_from_components(
+        year!, month, day!, hour!, minute!, second!, 0
+    ) / 1000000)

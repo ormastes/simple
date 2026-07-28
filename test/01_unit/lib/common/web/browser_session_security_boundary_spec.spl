@@ -209,7 +209,7 @@ describe "BrowserSession production security boundary":
                     Ok(_): fail("Expected mismatched response URL to be rejected")
                     Err(e): expect(e).to_contain("response URL mismatch")
                 expect(session.current_url).to_equal("about:blank")
-                expect(session.cookies.len()).to_equal(0)
+                expect(session.cookies.count()).to_equal(0)
             nil:
                 fail("Expected pending HTTPS document request")
 
@@ -732,10 +732,10 @@ describe "BrowserSession production security boundary":
             nil:
                 fail("Expected account document request")
 
-        expect(session.cookie_header_for_url(
+        expect(session.cookie_header_for_request(
             "https://safe.test/account/next"
         )).to_equal("account=private")
-        expect(session.cookie_header_for_url(
+        expect(session.cookie_header_for_request(
             "https://safe.test/public"
         )).to_equal("")
 
@@ -784,3 +784,49 @@ describe "BrowserSession production security boundary":
 
         expect(result.is_ok()).to_equal(true)
         expect(session.current_title).to_equal("8000")
+
+    it "strips forbidden and CR-injected request headers":
+        var session = BrowserSession.new()
+        val started = session.begin_network_navigation(
+            "https://safe.test/", "GET",
+            "Host: evil.test\nOrigin: https://evil.test\nContent-Length: 999\nX-Bad: ok\rInjected: yes\nX-Trace: kept",
+            "", ""
+        )
+        expect(started.is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(request.headers).to_equal("X-Trace: kept")
+            nil:
+                fail("Expected sanitized navigation request")
+
+    it "honours fetch credentials for cookie attachment and storage":
+        var session = BrowserSession.new()
+        session.broker_network_policy = true
+        session.open_html("https://safe.test/app", "<html><body>safe</body></html>")
+        session.apply_set_cookie_header("sid=secret; Secure; Path=/", "https://safe.test/app")
+
+        val _ = session.eval_script("fetch('https://safe.test:8443/omit', { credentials: 'omit' })")
+        match session.take_pending_request():
+            Some(request):
+                expect(request.headers.contains("Cookie:")).to_be(false)
+                val committed = session.commit_network_response(BrowserResponse.create(
+                    request.id, request.kind, request.url, 200,
+                    "Set-Cookie: omitted=bad; Secure; Path=/", "ok", ""
+                ))
+                expect(committed.is_ok()).to_be(true)
+            nil:
+                fail("Expected omit request")
+        expect(session.cookie_header_for_request("https://safe.test/").contains("omitted=bad")).to_be(false)
+
+        val _ = session.eval_script("fetch('https://safe.test:8443/include', { credentials: 'include' })")
+        match session.take_pending_request():
+            Some(request): expect(request.headers).to_contain("Cookie: sid=secret")
+            nil: fail("Expected include request")
+
+    it "prevents script from replacing an HttpOnly cookie":
+        var session = BrowserSession.new()
+        session.open_html("https://safe.test/", "<html><body>safe</body></html>")
+        session.apply_set_cookie_header("sid=secret; Secure; HttpOnly; Path=/")
+        val _ = session.eval_script("document.cookie = 'sid=visible; Path=/'")
+        expect(session.document_cookie()).to_equal("")
+        expect(session.cookie_header_for_request("https://safe.test/")).to_equal("sid=secret")

@@ -36,6 +36,8 @@ use std.gc_async_mut.gpu.browser_engine.security.cookie_policy.{
 use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{is_potentially_trustworthy}
 use common.web.host_policy.{is_ip_host_literal}
 
+val MAX_TOTAL_COOKIES: i64 = 3000
+
 fn _jar_allows_cookie(jar_key: text, cookie: Cookie, origin: Origin) -> bool:
     if canonical_domain(cookie.domain) == "":
         return jar_key == origin.host.trim().to_lower()
@@ -99,6 +101,29 @@ pub fn parse_set_cookie(header: text) -> Cookie:
         http_only: http_only,
         same_site: same_site,
         expires_at: 0
+    }
+
+pub fn apply_default_path(cookie: Cookie, header: text, request_path: text) -> Cookie:
+    """Apply RFC 6265 default-path when Path is absent or not absolute."""
+    var path_attribute = ""
+    for raw_part in header.split(";"):
+        val part = raw_part.trim()
+        if part.to_lower().starts_with("path="):
+            val eq = part.index_of("=")
+            if eq >= 0:
+                path_attribute = part.slice(eq + 1, part.len()).trim()
+    if path_attribute.starts_with("/"):
+        return cookie
+
+    var path = "/"
+    if request_path.starts_with("/"):
+        val last_slash = request_path.last_index_of("/") ?? 0
+        if last_slash > 0:
+            path = request_path.slice(0, last_slash)
+    return Cookie {
+        name: cookie.name, value: cookie.value, domain: cookie.domain, path: path,
+        secure: cookie.secure, http_only: cookie.http_only,
+        same_site: cookie.same_site, expires_at: cookie.expires_at
     }
 
 pub class CookieJar:
@@ -181,6 +206,50 @@ pub class CookieStore:
         self._jars.push(CookieJar.new())
         return self._domains.len() - 1
 
+    me fn _prune(now: i64):
+        var kept_domains: [text] = []
+        var kept_jars: [CookieJar] = []
+        var i = 0
+        while i < self._domains.len():
+            var live: [Cookie] = []
+            for cookie in self._jars[i].cookies:
+                if not is_expired(cookie, now):
+                    live.push(cookie)
+            if live.len() > 0:
+                kept_domains.push(self._domains[i])
+                kept_jars.push(CookieJar(cookies: live))
+            i = i + 1
+        self._domains = kept_domains
+        self._jars = kept_jars
+
+    fn _total_count() -> i64:
+        var total = 0
+        for jar in self._jars:
+            total = total + jar.cookies.len()
+        return total
+
+    me fn _evict_one():
+        var kept_domains: [text] = []
+        var kept_jars: [CookieJar] = []
+        var evicted = false
+        var i = 0
+        while i < self._domains.len():
+            var cookies = self._jars[i].cookies
+            if not evicted and cookies.len() > 0:
+                var tail: [Cookie] = []
+                var j = 1
+                while j < cookies.len():
+                    tail.push(cookies[j])
+                    j = j + 1
+                cookies = tail
+                evicted = true
+            if cookies.len() > 0:
+                kept_domains.push(self._domains[i])
+                kept_jars.push(CookieJar(cookies: cookies))
+            i = i + 1
+        self._domains = kept_domains
+        self._jars = kept_jars
+
     me fn _store_under(jar_key: text, c: Cookie):
         """Place `c` in the jar for `jar_key`, enforcing the per-domain cap.
 
@@ -189,7 +258,7 @@ pub class CookieStore:
         dropped on the interpreter (2+ field hops), which is why the store
         previously read back empty.
         """
-        val idx = self._ensure_jar(jar_key)
+        var idx = self._ensure_jar(jar_key)
         var jar = self._jars[idx]
 
         var is_replace = false
@@ -208,6 +277,12 @@ pub class CookieStore:
                 new_cookies.push(old_cookies[k])
                 k = k + 1
             jar.cookies = new_cookies
+
+        self._jars[idx] = jar
+        if not is_replace and self._total_count() >= MAX_TOTAL_COOKIES:
+            self._evict_one()
+            idx = self._ensure_jar(jar_key)
+            jar = self._jars[idx]
 
         var kept: [Cookie] = []
         var replaced = false
@@ -236,6 +311,7 @@ pub class CookieStore:
                         kept.push(existing)
                 jar.cookies = kept
                 self._jars[index] = jar
+                self._prune(0)
                 return
             index = index + 1
 
@@ -273,6 +349,7 @@ pub class CookieStore:
         host-only cookie is keyed by the setting origin's host rather than the
         empty string.
         """
+        self._prune(now)
         var admitted = c
         if is_expired(c, now):
             admitted = Cookie(
@@ -292,6 +369,25 @@ pub class CookieStore:
             return verdict
         self._store_under(jar_key, c)
         return verdict
+
+    me fn store_from_script(c: Cookie, origin: Origin, now: i64) -> CookieVerdict:
+        """Admit `document.cookie` without exposing or replacing HttpOnly rows."""
+        self._prune(now)
+        if c.http_only:
+            return CookieVerdict.reject("script-cannot-set-httponly")
+        val jar_key = effective_domain(c, origin)
+        var i = 0
+        while i < self._domains.len():
+            if self._domains[i] == jar_key:
+                for existing in self._jars[i].cookies:
+                    if (existing.http_only and existing.name == c.name and
+                        existing.path == c.path):
+                        return CookieVerdict.reject("script-cannot-overwrite-httponly")
+            i = i + 1
+        return self.store_from_origin(c, origin, now)
+
+    fn count() -> i64:
+        return self._total_count()
 
     me fn get_header_for_origin(
         origin: Origin,
