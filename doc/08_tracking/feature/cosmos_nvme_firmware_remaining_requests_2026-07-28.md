@@ -35,7 +35,10 @@
   reservation, power fixture, PCIe host, UART/JTAG, and thermal setup exist.
 - **Priority:** P0 production gate.
 - **Acceptance:** BT-001..BT-006 all PASS with raw evidence and independent
-  review. QEMU, UNO Q, and host mocks cannot satisfy this request.
+  review. The retained campaign must pass
+  `check-nvme-firmware-remaining-gates.shs --board-evidence DIR`, which binds
+  each raw log and the verified package manifest by SHA-256. QEMU, UNO Q, and
+  host mocks cannot satisfy this request.
 
 ## FR-COSMOS-004 - Run supplementary UNO Q portability checks
 

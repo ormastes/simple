@@ -115,6 +115,12 @@ acceptance-criterion IDs: a postponed row stays out of exclusions, keeps its
 TODO open, and blocks any phase, verify report, or goal whose acceptance depends
 on it until resumed and proved.
 
+For Cosmos+ NVMe physical evidence, accept BT-001..BT-006 only after
+`scripts/check/check-nvme-firmware-remaining-gates.shs --board-evidence DIR`
+passes. A result summary alone is invalid: each BT row binds a retained raw log
+by SHA-256, names the independent campaign reviewer, and matches the verified
+v3 package source, board, boot mode, and artifact identities.
+
 For cross-host or native-only matrices, keep every unavailable row visible in
 executable and generated-manual evidence as `unsupported` or `blocked`; never
 omit it, convert it to `skip()`, or count it as PASS. A run may report

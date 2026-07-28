@@ -17,12 +17,20 @@ manifest v3 provenance checks. The package gate requires complete compiled
 source closure, a clean source revision, board serial/revision, boot mode,
 compiler/linker/Bootgen identities, profile/contract/DMA values, and hashes for
 FSBL, bitstream, firmware receipt/ELF, metadata, and `boot.bin`. Missing keys or
-mismatched artifact hashes fail.
+mismatched artifact hashes fail. The campaign gate additionally binds the six
+BT result rows to retained raw logs, rejects path traversal and duplicate
+metadata, and requires a reviewer different from the operator.
 
 Expected software markers include:
 
 ```text
 COSMOS_PACKAGE_PROVENANCE_PASS source=clean board=bound tools=clang,lld,bootgen
+REJECTION missing-bt PASS
+REJECTION tampered-log PASS
+REJECTION path-traversal PASS
+REJECTION duplicate-field PASS
+REJECTION same-reviewer PASS
+REJECTION package-source-mismatch PASS
 STATUS: PASS nvme-firmware-remaining-gates self-test
 STATUS: POSTPONED uno-q-supplementary environment-unavailable
 STATUS: POSTPONED cosmos-board BT-001..BT-006

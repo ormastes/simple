@@ -408,6 +408,46 @@ all artifact hashes and package manifest
 Write every command and exit code to `commands.log`. Keep raw logs; a summary is
 not a substitute.
 
+Before review, retain nonempty regular files `inventory.txt`, `commands.log`,
+`tools.txt`, `artifacts.sha256`, `boot.bin.manifest`, `result.md`, and
+`manifest.txt`. `manifest.txt` uses `schema=cosmos-board-campaign-v1`,
+`status=pass`, clean source revision, board identity, boot mode, distinct
+operator/reviewer, UTC start/end, power fixture, PCIe host/BDF, destructive
+block range, package artifact hashes, and SHA-256 values for every top-level
+evidence file. The package manifest must be the original v3 manifest with its
+referenced artifacts still available; the checker runs `--verify-manifest`
+against the current clean source.
+
+Use these exact campaign keys; every `*.sha256` value is lowercase hex:
+
+```text
+schema=cosmos-board-campaign-v1
+status=pass
+board.serial=<serial>
+board.revision=<revision>
+source.commit=<40-or-64-hex-clean-revision>
+source.dirty=false
+boot.mode=sd
+operator=<operator-id>
+reviewer=<different-reviewer-id>
+started_utc=YYYY-MM-DDTHH:MM:SSZ
+completed_utc=YYYY-MM-DDTHH:MM:SSZ
+power.fixture=<fixture-id>
+pcie.host=<host-id>
+pcie.bdf=0000:01:00.0
+destructive.blocks=<predeclared-range>
+package.fsbl.sha256=<sha256>
+package.bitstream.sha256=<sha256>
+package.firmware.sha256=<sha256>
+package.boot.sha256=<sha256>
+package.manifest.sha256=<sha256-of-boot.bin.manifest>
+evidence.inventory.sha256=<sha256-of-inventory.txt>
+evidence.commands.sha256=<sha256-of-commands.log>
+evidence.tools.sha256=<sha256-of-tools.txt>
+evidence.artifacts.sha256=<sha256-of-artifacts.sha256>
+evidence.result.sha256=<sha256-of-result.md>
+```
+
 ## BootROM and FSBL Acceptance
 
 1. Set the documented board boot mode and connect UART/JTAG/power measurement.
@@ -600,8 +640,13 @@ limits and report FAIL/PENDING rather than discarding the interval.
 Create `result.md` with one row for every ST/BT scenario and REQ/NFR:
 
 ```text
-ID | PASS/FAIL/PENDING | command/procedure | raw evidence path | reviewer
+ID | PASS/FAIL/PENDING | command/procedure | raw evidence path | SHA-256 | reviewer
 ```
+
+For BT-001..BT-006, use exactly one `PASS` row per ID. Raw paths must be
+relative, remain inside the campaign, and name nonempty regular files. Hashes
+are tamper evidence, not protection from a malicious local owner; production
+acceptance still requires the independent reviewer.
 
 Production PASS requires, after the current software blockers are resolved:
 

@@ -75,6 +75,13 @@ gate with `--post-bootstrap`. Physical Cosmos+ evidence is accepted only by
 `--board-evidence DIR`; missing board/runtime/trace data is POSTPONED or FAIL,
 never a simulator fallback.
 
+The board campaign uses `cosmos-board-campaign-v1`. It retains inventory,
+commands, tools, artifact hashes, the original v3 package manifest, six BT raw
+logs, `result.md`, and `manifest.txt`. Each BT-001..BT-006 PASS row includes a
+relative raw-log path, its SHA-256, and the independent reviewer. The gate
+rejects missing/duplicate rows, changed logs, escaping paths, duplicate fields,
+same operator/reviewer, and package/source/board/artifact mismatches.
+
 ## Code Map
 
 - Shared firmware: `examples/09_embedded/simpleos_nvme_fw/fw/`

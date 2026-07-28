@@ -82,6 +82,11 @@ software binding only; physical NVMe IO and board acceptance remain pending.
 
 Detailed execution and evidence retention are in
 `doc/07_guide/hardware/cosmos_openssd_production_firmware.md`.
+The retained campaign is accepted only by
+`scripts/check/check-nvme-firmware-remaining-gates.shs --board-evidence DIR`.
+Each BT row must bind one nonempty in-campaign raw log by SHA-256 and name the
+independent reviewer recorded in `manifest.txt`; the gate also verifies the
+source/board/boot-mode/artifact binding through `boot.bin.manifest`.
 
 ## Traceability
 

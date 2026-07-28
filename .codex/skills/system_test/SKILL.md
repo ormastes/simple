@@ -133,6 +133,13 @@ closed. QEMU and synthesizable AXI must use the same host sequence. Missing
 target, runtime, trace, DMA, IRQ, or marker is FAIL/POSTPONED evidence, never a
 PASS or fallback to `TARGET_SIMPLE_SIM`.
 
+Cosmos+ physical BT-001..BT-006 evidence is accepted only through
+`sh scripts/check/check-nvme-firmware-remaining-gates.shs --board-evidence DIR`.
+Do not hand-accept a summary table: every BT row must bind an in-campaign raw
+log by SHA-256, use the independent reviewer in `manifest.txt`, and match the
+source, board, boot mode, and artifact hashes in the verified v3 package
+manifest.
+
 Source/evidence assertions document design obligations but never satisfy a
 `@req` by themselves. Once an endpoint exists, its SSpec must invoke the real
 runner and tag only requirements exercised by that runner. A mocked firmware
