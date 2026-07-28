@@ -2904,6 +2904,26 @@ int main(void) {
     );
 }
 
+#[test]
+fn test_stage4_runtime_projection_rejects_malformed_symbols_before_platform_tools() {
+    let invalid_root = build_stage4_rust_runtime_projection_archive(
+        Path::new("unused-runtime.a"),
+        &["rt_projected_root;exit(1)".to_string()],
+        &[],
+        Path::new("unused-output"),
+    )
+    .unwrap_err();
+    assert!(invalid_root.contains("not a C identifier"));
+    let invalid_external = build_stage4_rust_runtime_projection_archive(
+        Path::new("unused-runtime.a"),
+        &["rt_projected_root".to_string()],
+        &["rt_adjacent_capsule;exit(1)".to_string()],
+        Path::new("unused-output"),
+    )
+    .unwrap_err();
+    assert!(invalid_external.contains("not a C identifier"));
+}
+
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 fn test_stage4_rust_runtime_projection_keeps_roots_and_allowed_runtime_externals_only() {
@@ -2941,6 +2961,7 @@ __attribute__((constructor)) static void discarded_ctor(void) { rt_unrequested_e
         ["rt_adjacent_capsule"]
     );
     assert_eq!(archive_members(&output).unwrap(), ["stage4_rust_runtime_local.o"]);
+
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
