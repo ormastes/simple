@@ -95,7 +95,7 @@ describe "production host event and render evidence":
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 74 lines folded for reproduction.
+Runnable source: 132 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -112,6 +112,8 @@ expect(host_stdout).to_contain("\"name\":\"arm_simd\"")
 expect(host_stdout).to_contain("\"name\":\"riscv_simd\"")
 expect(host_stdout).to_contain("\"name\":\"vulkan\",\"status\":\"pass\"")
 expect(host_stdout).to_contain("\"name\":\"renderdoc\",\"status\":\"pass\"")
+expect(host_stdout).to_contain("\"name\":\"display_input\",\"status\":\"pass\"")
+expect(host_stdout).to_contain("\"name\":\"framebuffer_readback\",\"status\":\"pass\"")
 
 step("Inject one screen-originated event")
 expect(file_exists(LIVE_ENV)).to_be(true)
@@ -123,6 +125,12 @@ expect(live).to_contain("linux_hosted_wm_live_window_focus_status=pass")
 expect(live).to_contain("linux_hosted_wm_live_window_pointer_status=pass")
 expect(live).to_contain("linux_hosted_wm_live_window_keyboard_status=pass")
 expect(live).to_contain("linux_hosted_wm_live_window_text_status=pass")
+expect(required_unique_env_value(live, "linux_hosted_wm_live_window_key_down_count") == "").to_be(false)
+expect(required_unique_env_value(live, "linux_hosted_wm_live_window_key_up_count") == "").to_be(false)
+expect(required_unique_env_value(live, "linux_hosted_wm_live_window_pointer_move_count") == "").to_be(false)
+expect(required_unique_env_value(live, "linux_hosted_wm_live_window_pointer_button_down_count") == "").to_be(false)
+expect(required_unique_env_value(live, "linux_hosted_wm_live_window_pointer_button_up_count") == "").to_be(false)
+expect(required_unique_env_value(live, "linux_hosted_wm_live_window_text_commit_count") == "").to_be(false)
 expect(live).to_contain("linux_hosted_wm_live_window_event_origin=screen")
 expect(live).to_contain("linux_hosted_wm_live_window_wm_target_id=")
 expect(live).to_contain("linux_hosted_wm_live_window_input_compositor_wm_target_id=")
@@ -239,7 +247,7 @@ production owners. Live event and device proof belongs to the primary scenario.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 68 lines folded for reproduction.
+Runnable source: 75 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -255,6 +263,10 @@ expect(wrapper).to_contain("linux_hosted_wm_live_window")
 expect(app).to_contain("host_simd_capability_row")
 expect(app).to_contain("build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env")
 expect(app).to_contain("build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env")
+expect(app).to_contain("native-aarch64-host-with-neon-and-admitted-pure-simple-cli")
+expect(app).to_contain("native-riscv64-host-with-rvv-and-admitted-pure-simple-cli")
+expect(app).to_contain("CPU_SIMD_ARCH_MATRIX_AARCH64_SIMPLE_BIN=bin/simple")
+expect(app).to_contain("CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN=bin/simple")
 expect(app.contains("native_simd_pixel_evidence")).to_be(false)
 expect(app).to_contain("build/gui-web-2d-vulkan-env-run-current/simple-vulkan-readback/evidence.env")
 expect(app).to_contain("build/gui-web-2d-vulkan-env-run-current/evidence.env")

@@ -213,6 +213,12 @@ emit() {
         echo "linux_hosted_wm_live_window_keyboard_status=$keyboard_status"
         echo "linux_hosted_wm_live_window_text_status=$text_status"
         echo "linux_hosted_wm_live_window_input_receipt_status=$input_receipt_status"
+        echo "linux_hosted_wm_live_window_key_down_count=$key_down_count"
+        echo "linux_hosted_wm_live_window_key_up_count=$key_up_count"
+        echo "linux_hosted_wm_live_window_pointer_move_count=$pointer_move_count"
+        echo "linux_hosted_wm_live_window_pointer_button_down_count=$pointer_button_down_count"
+        echo "linux_hosted_wm_live_window_pointer_button_up_count=$pointer_button_up_count"
+        echo "linux_hosted_wm_live_window_text_commit_count=$text_commit_count"
         echo "linux_hosted_wm_live_window_semantic_status=$semantic_status"
         echo "linux_hosted_wm_live_window_event_origin=$event_origin"
         echo "linux_hosted_wm_live_window_event_id=$event_id"
@@ -334,6 +340,12 @@ pointer_status=fail
 keyboard_status=fail
 text_status=fail
 input_receipt_status=fail
+key_down_count=""
+key_up_count=""
+pointer_move_count=""
+pointer_button_down_count=""
+pointer_button_up_count=""
+text_commit_count=""
 semantic_status=fail
 event_origin=""
 event_id=""
@@ -666,6 +678,10 @@ now_ms() {
     date +%s%3N
 }
 
+run_live_tool() {
+    DISPLAY="$x_display" timeout -k 5 "$TIMEOUT_SECS" "$@"
+}
+
 wait_until() {
     predicate=$1
     started="$(now_ms)"
@@ -881,13 +897,13 @@ if [ "$font_identity" = "" ] || [ "$font_identity" = bitmap-default ]; then
     exit 1
 fi
 
-window_id="$(DISPLAY="$x_display" xdotool search --sync --name 'SimpleOS Shared Hosted WM' 2>/dev/null | tail -n 1)"
+window_id="$(run_live_tool xdotool search --sync --name 'SimpleOS Shared Hosted WM' 2>/dev/null | tail -n 1)"
 [ "$window_id" != "" ] || {
     emit fail live-x11-window-missing
     exit 1
 }
-DISPLAY="$x_display" xdotool getwindowgeometry --shell "$window_id" >"$WINDOW_ENV"
-DISPLAY="$x_display" import -window "$window_id" "$WINDOW_PNG"
+run_live_tool xdotool getwindowgeometry --shell "$window_id" >"$WINDOW_ENV"
+run_live_tool import -window "$window_id" "$WINDOW_PNG"
 if [ -s "$WINDOW_PNG" ] && grep -Fq WIDTH=1024 "$WINDOW_ENV" && grep -Fq HEIGHT=720 "$WINDOW_ENV"; then
     window_status=pass
 fi
@@ -944,11 +960,11 @@ window_move_before="${window_move_before:-0}"
 abs_x="$(sed -n 's/^X=//p' "$WINDOW_ENV")"
 abs_y="$(sed -n 's/^Y=//p' "$WINDOW_ENV")"
 
-DISPLAY="$x_display" xdotool windowfocus --sync "$window_id"
-DISPLAY="$x_display" xdotool mousemove $((abs_x + 150)) $((abs_y + 120))
-DISPLAY="$x_display" xdotool click 1
-DISPLAY="$x_display" xdotool type --delay 0 z
-DISPLAY="$x_display" xdotool key --clearmodifiers Tab
+run_live_tool xdotool windowfocus --sync "$window_id"
+run_live_tool xdotool mousemove $((abs_x + 150)) $((abs_y + 120))
+run_live_tool xdotool click 1
+run_live_tool xdotool type --delay 0 z
+run_live_tool xdotool key --clearmodifiers Tab
 wait_until native_events_advanced || {
     emit fail native-input-event-timeout
     exit 1
@@ -960,6 +976,12 @@ issue 2 snapshot && retain_phase input 2 snapshot-only "$INPUT_SNAPSHOT" "$INPUT
 input_focus="$(jq -r '.compositor.windows[] | select(.focused == true) | .id' "$SNAPSHOT_LIVE")"
 pointer_x="$(jq -r '.compositor.pointer_x' "$SNAPSHOT_LIVE")"
 pointer_y="$(jq -r '.compositor.pointer_y' "$SNAPSHOT_LIVE")"
+key_down_count="$(jq -r '.input.receipt.key_down_count' "$SNAPSHOT_LIVE")"
+key_up_count="$(jq -r '.input.receipt.key_up_count' "$SNAPSHOT_LIVE")"
+pointer_move_count="$(jq -r '.input.receipt.pointer_move_count' "$SNAPSHOT_LIVE")"
+pointer_button_down_count="$(jq -r '.input.receipt.pointer_button_down_count' "$SNAPSHOT_LIVE")"
+pointer_button_up_count="$(jq -r '.input.receipt.pointer_button_up_count' "$SNAPSHOT_LIVE")"
+text_commit_count="$(jq -r '.input.receipt.text_commit_count' "$SNAPSHOT_LIVE")"
 if jq -e '.input.receipt.key_down_count > 0 and
           .input.receipt.key_up_count > 0 and
           .input.receipt.pointer_move_count > 0 and
@@ -989,7 +1011,7 @@ fi
 [ "$pointer_x" -gt 0 ] && [ "$pointer_y" -gt 0 ] && [ "$input_receipt_status" = pass ] && pointer_status=pass
 focus_status=pass
 
-DISPLAY="$x_display" xdotool windowmove "$window_id" 80 60
+run_live_tool xdotool windowmove "$window_id" 80 60
 wait_until native_window_move_advanced || {
     emit fail native-window-move-timeout
     exit 1

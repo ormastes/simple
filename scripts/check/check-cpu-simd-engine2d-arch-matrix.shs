@@ -11,8 +11,7 @@ SKIP_RUN="${CPU_SIMD_ARCH_MATRIX_SKIP_RUN:-0}"
 TARGET_BUILD="${CPU_SIMD_ARCH_MATRIX_TARGET_BUILD:-0}"
 ALLOW_PARTIAL="${CPU_SIMD_ARCH_MATRIX_ALLOW_PARTIAL:-0}"
 RUNTIME_SOURCE="${CPU_SIMD_ARCH_MATRIX_RUNTIME_SOURCE:-src/runtime/runtime_simd_dispatch.c}"
-
-mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+CANONICAL_EVIDENCE_SOURCE="${CPU_SIMD_ARCH_MATRIX_CANONICAL_SOURCE:-scripts/build/cpu-simd-engine2d-evidence/cpu_simd_engine2d_evidence.spl}"
 
 host_arch() {
     case "$(uname -m 2>/dev/null || echo unknown)" in
@@ -35,7 +34,23 @@ arch_bin() {
 env_value() {
     file="$1"
     key="$2"
-    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+    values="$(sed -n "s/^${key}=//p" "$file" 2>/dev/null)"
+    count="$(sed -n "/^${key}=/p" "$file" 2>/dev/null | awk 'END { print NR + 0 }')"
+    [ "$count" -eq 1 ] && [ -n "$values" ] || {
+        printf ''
+        return 0
+    }
+    printf '%s' "$values"
+}
+
+file_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        printf ''
+    fi
 }
 
 text_sha256() {
@@ -164,6 +179,130 @@ target_file_pattern() {
     esac
 }
 
+arch_prerequisite() {
+    case "$1" in
+        x86_64) printf '%s' "native-x86_64-host-with-admitted-pure-simple-cli" ;;
+        aarch64) printf '%s' "native-aarch64-host-with-neon-and-admitted-pure-simple-cli" ;;
+        riscv64) printf '%s' "native-riscv64-host-with-rvv-and-admitted-pure-simple-cli" ;;
+    esac
+}
+
+arch_resume_command() {
+    case "$1" in
+        x86_64) printf '%s' "CPU_SIMD_ARCH_MATRIX_X86_64_SIMPLE_BIN=bin/simple sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs" ;;
+        aarch64) printf '%s' "CPU_SIMD_ARCH_MATRIX_AARCH64_SIMPLE_BIN=bin/simple sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs" ;;
+        riscv64) printf '%s' "CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN=bin/simple sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs" ;;
+    esac
+}
+
+frame_receipt_for_evidence() {
+    env_file="$1"
+    printf 'arch=%s\nfeature=%s\nexecution_environment=%s\nnative_simd_executed=%s\nnative_simd_bit_exact=%s\nnative_simd_hits=%s\nfill_expected_checksum=%s\nfill_actual_checksum=%s\nfill_mismatch_count=%s\ncopy_expected_checksum=%s\ncopy_actual_checksum=%s\ncopy_mismatch_count=%s\nalpha_expected_checksum=%s\nalpha_actual_checksum=%s\nalpha_mismatch_count=%s\nalpha_edge_expected_checksum=%s\nalpha_edge_actual_checksum=%s\nalpha_edge_mismatch_count=%s\nscroll_expected_checksum=%s\nscroll_actual_checksum=%s\nscroll_mismatch_count=%s\ndiagram_expected_checksum=%s\ndiagram_actual_checksum=%s\ndiagram_mismatch_count=%s\ncanonical_source_sha256=%s\ncompiler_sha256=%s\n' \
+        "$(env_value "$env_file" cpu_simd_evidence_arch)" \
+        "$(env_value "$env_file" cpu_simd_evidence_feature)" \
+        "$(env_value "$env_file" cpu_simd_evidence_execution_environment)" \
+        "$(env_value "$env_file" cpu_simd_evidence_native_simd_executed)" \
+        "$(env_value "$env_file" cpu_simd_evidence_native_simd_bit_exact)" \
+        "$(env_value "$env_file" cpu_simd_evidence_native_simd_hits)" \
+        "$(env_value "$env_file" cpu_simd_evidence_fill_expected_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_fill_actual_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_fill_mismatch_count)" \
+        "$(env_value "$env_file" cpu_simd_evidence_copy_expected_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_copy_actual_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_copy_mismatch_count)" \
+        "$(env_value "$env_file" cpu_simd_evidence_alpha_expected_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_alpha_actual_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_alpha_mismatch_count)" \
+        "$(env_value "$env_file" cpu_simd_evidence_alpha_edge_expected_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_alpha_edge_actual_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_alpha_edge_mismatch_count)" \
+        "$(env_value "$env_file" cpu_simd_evidence_scroll_expected_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_scroll_actual_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_scroll_mismatch_count)" \
+        "$(env_value "$env_file" cpu_simd_evidence_diagram_expected_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_diagram_actual_checksum)" \
+        "$(env_value "$env_file" cpu_simd_evidence_diagram_mismatch_count)" \
+        "$(env_value "$env_file" cpu_simd_evidence_canonical_source_sha256)" \
+        "$(env_value "$env_file" cpu_simd_evidence_compiler_sha256)" | text_sha256
+}
+
+validate_retained_evidence() {
+    arch="$1"
+    bin="$2"
+    env_file="$3"
+    wrapper_code="$4"
+    status="$(env_value "$env_file" cpu_simd_evidence_status)"
+    reason="$(env_value "$env_file" cpu_simd_evidence_reason)"
+    evidence_arch="$(env_value "$env_file" cpu_simd_evidence_arch)"
+    execution_environment="$(env_value "$env_file" cpu_simd_evidence_execution_environment)"
+    frame_checksum="$(env_value "$env_file" cpu_simd_evidence_diagram_actual_checksum)"
+    source_sha256="$(env_value "$env_file" cpu_simd_evidence_canonical_source_sha256)"
+    simple_bin_sha256="$(env_value "$env_file" cpu_simd_evidence_compiler_sha256)"
+    frame_receipt_sha256="$(env_value "$env_file" cpu_simd_evidence_frame_receipt_sha256)"
+    feature="$(env_value "$env_file" cpu_simd_evidence_feature)"
+    native_simd_executed="$(env_value "$env_file" cpu_simd_evidence_native_simd_executed)"
+    native_simd_bit_exact="$(env_value "$env_file" cpu_simd_evidence_native_simd_bit_exact)"
+    native_simd_hits="$(env_value "$env_file" cpu_simd_evidence_native_simd_hits)"
+    fill_expected="$(env_value "$env_file" cpu_simd_evidence_fill_expected_checksum)"
+    fill_actual="$(env_value "$env_file" cpu_simd_evidence_fill_actual_checksum)"
+    fill_mismatch="$(env_value "$env_file" cpu_simd_evidence_fill_mismatch_count)"
+    copy_expected="$(env_value "$env_file" cpu_simd_evidence_copy_expected_checksum)"
+    copy_actual="$(env_value "$env_file" cpu_simd_evidence_copy_actual_checksum)"
+    copy_mismatch="$(env_value "$env_file" cpu_simd_evidence_copy_mismatch_count)"
+    alpha_expected="$(env_value "$env_file" cpu_simd_evidence_alpha_expected_checksum)"
+    alpha_actual="$(env_value "$env_file" cpu_simd_evidence_alpha_actual_checksum)"
+    alpha_mismatch="$(env_value "$env_file" cpu_simd_evidence_alpha_mismatch_count)"
+    alpha_edge_expected="$(env_value "$env_file" cpu_simd_evidence_alpha_edge_expected_checksum)"
+    alpha_edge_actual="$(env_value "$env_file" cpu_simd_evidence_alpha_edge_actual_checksum)"
+    alpha_edge_mismatch="$(env_value "$env_file" cpu_simd_evidence_alpha_edge_mismatch_count)"
+    scroll_expected="$(env_value "$env_file" cpu_simd_evidence_scroll_expected_checksum)"
+    scroll_actual="$(env_value "$env_file" cpu_simd_evidence_scroll_actual_checksum)"
+    scroll_mismatch="$(env_value "$env_file" cpu_simd_evidence_scroll_mismatch_count)"
+    diagram_expected="$(env_value "$env_file" cpu_simd_evidence_diagram_expected_checksum)"
+    diagram_mismatch="$(env_value "$env_file" cpu_simd_evidence_diagram_mismatch_count)"
+    nested_bin="$(env_value "$env_file" cpu_simd_evidence_simple_bin)"
+    expected_receipt="$(frame_receipt_for_evidence "$env_file")"
+
+    if [ "$status" = "" ]; then
+        status=fail
+        reason="missing-evidence-env-exit-$wrapper_code"
+    elif [ "$wrapper_code" -ne 0 ] && [ "$status" != "fail" ]; then
+        status=fail
+        reason="wrapper-exit-$wrapper_code"
+    elif [ "$status" = "pass" ] && [ "$evidence_arch" != "$arch" ]; then
+        status=fail
+        reason=runtime-arch-mismatch
+    elif [ "$status" = "pass" ] && [ "$nested_bin" != "$bin" ]; then
+        status=fail
+        reason=simple-bin-path-mismatch
+    elif [ "$status" = "pass" ] && { [ ! -f "$bin" ] || [ -L "$bin" ] || [ ! -x "$bin" ] || [ ! -f "$CANONICAL_EVIDENCE_SOURCE" ] || [ -L "$CANONICAL_EVIDENCE_SOURCE" ] || [ "$(file_sha256 "$bin")" != "$simple_bin_sha256" ] || [ "$(file_sha256 "$CANONICAL_EVIDENCE_SOURCE")" != "$source_sha256" ]; }; then
+        status=fail
+        reason=current-artifact-provenance-mismatch
+    elif [ "$status" = "pass" ] && [ "$execution_environment" != "native_host" ]; then
+        status=fail
+        reason=native-execution-required
+    elif [ "$status" = "pass" ] && { [ "$native_simd_executed" != "true" ] || [ "$native_simd_bit_exact" != "true" ] || ! is_positive_decimal "$native_simd_hits"; }; then
+        status=fail
+        reason=executed-path-or-scalar-parity-unproven
+    elif [ "$status" = "pass" ] && { [ "$fill_expected" != "$fill_actual" ] || [ "$fill_mismatch" != "0" ] || [ "$copy_expected" != "$copy_actual" ] || [ "$copy_mismatch" != "0" ] || [ "$alpha_expected" != "$alpha_actual" ] || [ "$alpha_mismatch" != "0" ] || [ "$alpha_edge_expected" != "$alpha_edge_actual" ] || [ "$alpha_edge_mismatch" != "0" ] || [ "$scroll_expected" != "$scroll_actual" ] || [ "$scroll_mismatch" != "0" ] || [ "$diagram_expected" != "$frame_checksum" ] || [ "$diagram_mismatch" != "0" ]; }; then
+        status=fail
+        reason=scalar-oracle-parity-mismatch
+    elif [ "$status" = "pass" ] && [ "$arch" = "x86_64" ] && [ "$feature" != "avx2" ] && [ "$feature" != "sse42" ]; then
+        status=fail
+        reason=x86-executed-feature-invalid
+    elif [ "$status" = "pass" ] && [ "$arch" = "aarch64" ] && [ "$feature" != "neon" ]; then
+        status=fail
+        reason=arm-executed-feature-invalid
+    elif [ "$status" = "pass" ] && [ "$arch" = "riscv64" ] && [ "$feature" != "rvv" ]; then
+        status=fail
+        reason=riscv-executed-feature-invalid
+    elif [ "$status" = "pass" ] && { ! is_positive_decimal "$frame_checksum" || ! is_sha256 "$source_sha256" || ! is_sha256 "$simple_bin_sha256" || ! is_sha256 "$frame_receipt_sha256" || [ "$frame_receipt_sha256" != "$expected_receipt" ]; }; then
+        status=fail
+        reason=frame-receipt-invalid
+    fi
+    return 0
+}
+
 run_target_binary_build() {
     arch="$1"
     arch_dir="$BUILD_DIR/$arch"
@@ -226,6 +365,10 @@ run_arch() {
     source_sha256=""
     simple_bin_sha256=""
     frame_receipt_sha256=""
+    feature=""
+    native_simd_executed=""
+    native_simd_bit_exact=""
+    native_simd_hits=""
     if [ "$bin" = "" ] && [ "$arch" = "$current_host" ]; then
         bin="${SIMPLE_BIN:-bin/simple}"
     fi
@@ -247,33 +390,7 @@ run_arch() {
         code=$?
         set -e
         env_file="$arch_out/evidence.env"
-        status="$(env_value "$env_file" cpu_simd_evidence_status)"
-        reason="$(env_value "$env_file" cpu_simd_evidence_reason)"
-        evidence_arch="$(env_value "$env_file" cpu_simd_evidence_arch)"
-        execution_environment="$(env_value "$env_file" cpu_simd_evidence_execution_environment)"
-        frame_checksum="$(env_value "$env_file" cpu_simd_evidence_diagram_actual_checksum)"
-        source_sha256="$(env_value "$env_file" cpu_simd_evidence_canonical_source_sha256)"
-        simple_bin_sha256="$(env_value "$env_file" cpu_simd_evidence_compiler_sha256)"
-        frame_receipt_sha256="$(env_value "$env_file" cpu_simd_evidence_frame_receipt_sha256)"
-        nested_bin="$(env_value "$env_file" cpu_simd_evidence_simple_bin)"
-        expected_receipt="$(printf 'arch=%s\nfeature=%s\nexecution_environment=%s\ndiagram_actual_checksum=%s\ncanonical_source_sha256=%s\ncompiler_sha256=%s\n' \
-            "$evidence_arch" "$(env_value "$env_file" cpu_simd_evidence_feature)" "$execution_environment" "$frame_checksum" "$source_sha256" "$simple_bin_sha256" | text_sha256)"
-        if [ "$status" = "" ]; then
-            status=fail
-            reason="missing-evidence-env-exit-$code"
-        elif [ "$code" -ne 0 ] && [ "$status" != "fail" ]; then
-            status=fail
-            reason="wrapper-exit-$code"
-        elif [ "$status" = "pass" ] && [ "$evidence_arch" != "$arch" ]; then
-            status=fail
-            reason=runtime-arch-mismatch
-        elif [ "$status" = "pass" ] && [ "$nested_bin" != "$bin" ]; then
-            status=fail
-            reason=simple-bin-path-mismatch
-        elif [ "$status" = "pass" ] && { ! is_positive_decimal "$frame_checksum" || ! is_sha256 "$source_sha256" || ! is_sha256 "$simple_bin_sha256" || ! is_sha256 "$frame_receipt_sha256" || [ "$frame_receipt_sha256" != "$expected_receipt" ]; }; then
-            status=fail
-            reason=frame-receipt-invalid
-        fi
+        validate_retained_evidence "$arch" "$bin" "$env_file" "$code"
     fi
 
     write_kv "cpu_simd_engine2d_arch_matrix_${arch}_status" "$status"
@@ -286,9 +403,136 @@ run_arch() {
     write_kv "cpu_simd_engine2d_arch_matrix_${arch}_simple_bin_sha256" "$simple_bin_sha256"
     write_kv "cpu_simd_engine2d_arch_matrix_${arch}_frame_receipt_sha256" "$frame_receipt_sha256"
     write_kv "cpu_simd_engine2d_arch_matrix_${arch}_report" "$arch_dir/report.md"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_owner" "scripts/check/check-cpu-simd-engine2d-arch-matrix.shs"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_prerequisite" "$(arch_prerequisite "$arch")"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_retained_artifact" "$arch_out/evidence.env"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_resume_command" "$(arch_resume_command "$arch")"
 }
 
+self_test_replace() {
+    input="$1"
+    output="$2"
+    key="$3"
+    value="$4"
+    awk -v key="$key" -v value="$value" '
+        index($0, key "=") == 1 { print key "=" value; next }
+        { print }
+    ' "$input" >"$output"
+}
+
+self_test_expect() {
+    name="$1"
+    evidence="$2"
+    expected_status="$3"
+    expected_reason="$4"
+    validate_retained_evidence x86_64 "$SELF_TEST_BIN" "$evidence" 0
+    if [ "$status" != "$expected_status" ] || [ "$reason" != "$expected_reason" ]; then
+        printf 'cpu_simd_arch_matrix_self_test_%s=fail status=%s reason=%s\n' "$name" "$status" "$reason"
+        exit 1
+    fi
+    printf 'cpu_simd_arch_matrix_self_test_%s=pass\n' "$name"
+}
+
+run_self_test() {
+    SELF_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/simple-cpu-simd-matrix.XXXXXX")"
+    trap 'rm -rf "$SELF_TEST_DIR"' EXIT HUP INT TERM
+    SELF_TEST_BIN="$SELF_TEST_DIR/simple"
+    CANONICAL_EVIDENCE_SOURCE="$SELF_TEST_DIR/canonical.spl"
+    base="$SELF_TEST_DIR/evidence.env"
+    printf '%s\n' 'synthetic canonical SIMD evidence source' >"$CANONICAL_EVIDENCE_SOURCE"
+    printf '%s\n' 'synthetic admitted native executable bytes' >"$SELF_TEST_BIN"
+    chmod 700 "$SELF_TEST_BIN"
+    source_hash="$(file_sha256 "$CANONICAL_EVIDENCE_SOURCE")"
+    compiler_hash="$(file_sha256 "$SELF_TEST_BIN")"
+    cat >"$base" <<EOF
+cpu_simd_evidence_status=pass
+cpu_simd_evidence_reason=runtime-evidence-verified
+cpu_simd_evidence_simple_bin=$SELF_TEST_BIN
+cpu_simd_evidence_arch=x86_64
+cpu_simd_evidence_feature=avx2
+cpu_simd_evidence_execution_environment=native_host
+cpu_simd_evidence_native_simd_executed=true
+cpu_simd_evidence_native_simd_bit_exact=true
+cpu_simd_evidence_native_simd_hits=2
+cpu_simd_evidence_fill_expected_checksum=101
+cpu_simd_evidence_fill_actual_checksum=101
+cpu_simd_evidence_fill_mismatch_count=0
+cpu_simd_evidence_copy_expected_checksum=202
+cpu_simd_evidence_copy_actual_checksum=202
+cpu_simd_evidence_copy_mismatch_count=0
+cpu_simd_evidence_alpha_expected_checksum=303
+cpu_simd_evidence_alpha_actual_checksum=303
+cpu_simd_evidence_alpha_mismatch_count=0
+cpu_simd_evidence_alpha_edge_expected_checksum=404
+cpu_simd_evidence_alpha_edge_actual_checksum=404
+cpu_simd_evidence_alpha_edge_mismatch_count=0
+cpu_simd_evidence_scroll_expected_checksum=505
+cpu_simd_evidence_scroll_actual_checksum=505
+cpu_simd_evidence_scroll_mismatch_count=0
+cpu_simd_evidence_diagram_expected_checksum=606
+cpu_simd_evidence_diagram_actual_checksum=606
+cpu_simd_evidence_diagram_mismatch_count=0
+cpu_simd_evidence_canonical_source_sha256=$source_hash
+cpu_simd_evidence_compiler_sha256=$compiler_hash
+EOF
+    printf 'cpu_simd_evidence_frame_receipt_sha256=%s\n' "$(frame_receipt_for_evidence "$base")" >>"$base"
+
+    self_test_expect valid "$base" pass runtime-evidence-verified
+
+    duplicate="$SELF_TEST_DIR/duplicate.env"
+    cp "$base" "$duplicate"
+    printf '%s\n' 'cpu_simd_evidence_status=pass' >>"$duplicate"
+    self_test_expect duplicate_key "$duplicate" fail missing-evidence-env-exit-0
+
+    printf '%s\n' 'changed source bytes' >"$CANONICAL_EVIDENCE_SOURCE"
+    self_test_expect changed_source "$base" fail current-artifact-provenance-mismatch
+    printf '%s\n' 'synthetic canonical SIMD evidence source' >"$CANONICAL_EVIDENCE_SOURCE"
+    printf '%s\n' 'changed compiler bytes' >"$SELF_TEST_BIN"
+    self_test_expect changed_compiler "$base" fail current-artifact-provenance-mismatch
+    printf '%s\n' 'synthetic admitted native executable bytes' >"$SELF_TEST_BIN"
+
+    self_test_replace "$base" "$SELF_TEST_DIR/wrong-feature.env" cpu_simd_evidence_feature scalar
+    self_test_expect wrong_feature "$SELF_TEST_DIR/wrong-feature.env" fail x86-executed-feature-invalid
+    self_test_replace "$base" "$SELF_TEST_DIR/wrong-arch.env" cpu_simd_evidence_arch aarch64
+    self_test_expect runtime_arch_mismatch "$SELF_TEST_DIR/wrong-arch.env" fail runtime-arch-mismatch
+    self_test_replace "$base" "$SELF_TEST_DIR/wrong-bin.env" cpu_simd_evidence_simple_bin "$SELF_TEST_DIR/other-simple"
+    self_test_expect simple_bin_path_mismatch "$SELF_TEST_DIR/wrong-bin.env" fail simple-bin-path-mismatch
+    self_test_replace "$base" "$SELF_TEST_DIR/emulated.env" cpu_simd_evidence_execution_environment emulated
+    self_test_expect emulated_environment "$SELF_TEST_DIR/emulated.env" fail native-execution-required
+    self_test_replace "$base" "$SELF_TEST_DIR/not-executed.env" cpu_simd_evidence_native_simd_executed false
+    self_test_expect native_executed_false "$SELF_TEST_DIR/not-executed.env" fail executed-path-or-scalar-parity-unproven
+    self_test_replace "$base" "$SELF_TEST_DIR/not-exact.env" cpu_simd_evidence_native_simd_bit_exact false
+    self_test_expect bit_exact_false "$SELF_TEST_DIR/not-exact.env" fail executed-path-or-scalar-parity-unproven
+    self_test_replace "$base" "$SELF_TEST_DIR/zero-hits.env" cpu_simd_evidence_native_simd_hits 0
+    self_test_expect zero_hits "$SELF_TEST_DIR/zero-hits.env" fail executed-path-or-scalar-parity-unproven
+    self_test_replace "$base" "$SELF_TEST_DIR/scalar-mismatch.env" cpu_simd_evidence_fill_actual_checksum 102
+    self_test_expect scalar_mismatch "$SELF_TEST_DIR/scalar-mismatch.env" fail scalar-oracle-parity-mismatch
+    self_test_replace "$base" "$SELF_TEST_DIR/forged-receipt.env" cpu_simd_evidence_frame_receipt_sha256 0000000000000000000000000000000000000000000000000000000000000000
+    self_test_expect forged_receipt "$SELF_TEST_DIR/forged-receipt.env" fail frame-receipt-invalid
+
+    source_target="$SELF_TEST_DIR/canonical-target.spl"
+    mv "$CANONICAL_EVIDENCE_SOURCE" "$source_target"
+    ln -s "$source_target" "$CANONICAL_EVIDENCE_SOURCE"
+    self_test_expect source_symlink "$base" fail current-artifact-provenance-mismatch
+    rm "$CANONICAL_EVIDENCE_SOURCE"
+    mv "$source_target" "$CANONICAL_EVIDENCE_SOURCE"
+
+    compiler_target="$SELF_TEST_DIR/simple-target"
+    mv "$SELF_TEST_BIN" "$compiler_target"
+    ln -s "$compiler_target" "$SELF_TEST_BIN"
+    self_test_expect compiler_symlink "$base" fail current-artifact-provenance-mismatch
+    rm "$SELF_TEST_BIN"
+    mv "$compiler_target" "$SELF_TEST_BIN"
+    printf '%s\n' 'cpu_simd_arch_matrix_self_test_status=pass'
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    run_self_test
+    exit 0
+fi
+
 ENV_PATH="$BUILD_DIR/evidence.env"
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$ENV_PATH" "$REPORT_PATH"
 
 HOST_ARCH="$(host_arch)"

@@ -241,7 +241,8 @@ expect(file_write(log_path, "capture-log-original")).to_be(true)
 expect(file_write(xml_path, "replay-original")).to_be(true)
 val log_sha = file_hash_sha256(log_path)
 val xml_sha = file_hash_sha256(xml_path)
-val evidence = "rdoc_simple_gate_capture_file=" + capture_path + "\n" +
+val evidence = "rdoc_simple_gate_capture_command_exit=0\n" +
+    "rdoc_simple_gate_capture_file=" + capture_path + "\n" +
     "rdoc_simple_gate_capture_file_sha256=" + file_hash_sha256(capture_path) + "\n" +
     "rdoc_simple_gate_capture_log_path=" + log_path + "\n" +
     "rdoc_simple_gate_capture_log_file_sha256=" + log_sha + "\n" +

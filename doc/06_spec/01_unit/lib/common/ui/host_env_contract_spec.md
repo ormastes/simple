@@ -561,6 +561,8 @@ val (duplicate_xml_path, duplicate_xml_sha256) = host_renderdoc_replay_xml_bindi
 expect(duplicate_xml_path).to_equal("")
 expect(duplicate_xml_sha256).to_equal("")
 expect(host_renderdoc_evidence_passes(complete)).to_be(true)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_command_exit=0", "rdoc_simple_gate_capture_command_exit=7"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete + "\nrdoc_simple_gate_capture_command_exit=0")).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("\n", "\r\n"))).to_be(true)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_status=pass", "rdoc_simple_gate_status=fail"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_file_magic=RDOC", "rdoc_simple_gate_capture_file_magic=bad"))).to_be(false)
@@ -608,7 +610,7 @@ move, maximize, and restore status must each be exactly `pass`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -626,6 +628,15 @@ expect(host_display_input_evidence_passes(complete.replace("text_status=pass", "
 expect(host_display_input_evidence_passes(complete.replace("focus_status=pass", "focus_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("pointer_status=pass", "pointer_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("keyboard_status=pass", "keyboard_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("key_down_count=1", "key_down_count=0"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("key_up_count=1", "key_up_count=0"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("pointer_move_count=1", "pointer_move_count=0"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("pointer_button_down_count=1", "pointer_button_down_count=0"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("pointer_button_up_count=1", "pointer_button_up_count=0"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("text_commit_count=1", "text_commit_count=0"))).to_be(false)
+expect(host_display_input_evidence_passes(
+    complete + "\nlinux_hosted_wm_live_window_pointer_button_down_count=1"
+)).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("move_status=pass", "move_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("maximize_status=pass", "maximize_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("restore_status=pass", "restore_status=fail"))).to_be(false)

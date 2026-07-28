@@ -4,7 +4,8 @@
 
 - Interfaces: `TestHostEnv`, `HostCapabilityRow`,
   `HostedWebContentSessionRegistry`, existing `HostWmInputReceipt`.
-- Manual steps: the seven exact phrases in the system test plan.
+- Manual steps: the nine primary phrases plus the supporting structural phrase
+  in the system test plan.
 - Helpers: existing Vulkan setup, Linux hosted WM live wrapper, RenderDoc
   capture helper, event-routing checker, coverage engine.
 - Temporary helpers must call `fail(...)` or `assert(false)`.

@@ -12,6 +12,7 @@ use common.ui.host_env_contract.{
     host_readback_evidence_passes,
     host_readback_capture_bindings,
     host_renderdoc_capture_binding,
+    host_renderdoc_capture_command_exit_binding,
     host_renderdoc_capture_log_binding,
     host_renderdoc_replay_xml_binding,
     host_renderdoc_evidence_passes,
@@ -43,7 +44,8 @@ fn host_renderdoc_artifacts_are_current(evidence: text) -> bool:
     val (capture_path, capture_sha) = host_renderdoc_capture_binding(evidence)
     val (log_path, log_sha) = host_renderdoc_capture_log_binding(evidence)
     val (xml_path, xml_sha) = host_renderdoc_replay_xml_binding(evidence)
-    (capture_path != "" and log_path != "" and xml_path != "" and
+    val capture_command_exit = host_renderdoc_capture_command_exit_binding(evidence)
+    (capture_command_exit == "0" and capture_path != "" and log_path != "" and xml_path != "" and
         file_is_regular_no_follow(capture_path) and file_is_regular_no_follow(log_path) and
         file_is_regular_no_follow(xml_path) and
         file_hash_sha256(capture_path) == capture_sha and
@@ -82,13 +84,22 @@ fn host_simd_artifacts_are_current(evidence: text, source_path: text = SIMD_SOUR
 fn host_simd_capability_row_current(
     name: text, evidence: text, arch: text, feature: text, evidence_path: text
 ) -> HostCapabilityRow:
+    val prerequisite = if arch == "aarch64":
+        "native-aarch64-host-with-neon-and-admitted-pure-simple-cli"
+    else:
+        "native-riscv64-host-with-rvv-and-admitted-pure-simple-cli"
+    val bin_env = if arch == "aarch64":
+        "CPU_SIMD_ARCH_MATRIX_AARCH64_SIMPLE_BIN=bin/simple"
+    else:
+        "CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN=bin/simple"
+    val owner = "scripts/check/check-cpu-simd-engine2d-arch-matrix.shs"
     host_capability_row_from_evidence(
         name,
         host_simd_evidence_passes(evidence, arch, feature) and host_simd_artifacts_are_current(evidence),
         file_exists(evidence_path),
-        "complete-retained-native-" + arch + "-simd-frame-evidence-required",
+        "owner=" + owner + ";prerequisite=" + prerequisite + ";artifact=" + evidence_path,
         evidence_path,
-        "CPU_SIMD_ARCH_MATRIX_TARGET_BUILD=1 sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs"
+        bin_env + " sh " + owner
     )
 
 fn main() -> i64:

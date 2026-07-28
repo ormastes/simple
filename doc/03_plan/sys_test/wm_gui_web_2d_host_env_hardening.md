@@ -43,7 +43,12 @@ LinuxLiveSystem -> RenderDocArtifact
 4. `Render the resulting canonical composition`
 5. `Read back and compare the backend buffer`
 6. `Capture the Vulkan frame with RenderDoc`
-7. `Measure the retained rendering workload`
+7. `Reject missing or duplicate retained 4K and 8K producer fields`
+8. `Audit both retained workloads with the canonical aggregate validator`
+9. `Admit current 4K and 8K timing RSS baseline and native-binary evidence`
+
+The supporting structural scenario uses `Verify the retained contract binds a
+forward Vulkan revision`; it cannot promote a host row.
 
 ## Requirement Coverage
 
@@ -70,9 +75,9 @@ matching runtime counts through the Stage4 LLVM/core-C route.
 
 ## External Host Rows
 
-| Row | Resume command | Status rule |
-|---|---|---|
-| ARM NEON | `bin/simple test test/03_system/gui/feature/wm_gui_web_2d_host_env_hardening_spec.spl --mode=native` on prepared aarch64 | blocked until native |
-| RISC-V RVV | same command on prepared riscv64 RVV | blocked until native |
-| Vulkan/RenderDoc | `sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple` | valid `RDOC` required |
-| Chrome/Electron | `sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc` | browser Vulkan backing and ARGB parity required |
+| Row | Owner | Native prerequisite | Retained artifact | Resume command | Status rule |
+|---|---|---|---|---|---|
+| ARM NEON | `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` | Prepared aarch64 host with NEON and an admitted pure-Simple CLI | `build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env` | `CPU_SIMD_ARCH_MATRIX_AARCH64_SIMPLE_BIN=bin/simple sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` | blocked until native |
+| RISC-V RVV | `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` | Prepared riscv64 host with RVV and an admitted pure-Simple CLI | `build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env` | `CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN=bin/simple sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` | blocked until native |
+| Vulkan/RenderDoc | Existing Vulkan/RenderDoc setup owners | Linux Vulkan host with `renderdoccmd` | `build/renderdoc/simple-gate/evidence.env` | `sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple` | valid `RDOC` required |
+| Chrome/Electron | Existing browser-backing setup owner | Browser Vulkan backing | `build/gui-web-2d-vulkan-env-browser-backing/evidence.env` | `sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc` | browser Vulkan backing and ARGB parity required |
