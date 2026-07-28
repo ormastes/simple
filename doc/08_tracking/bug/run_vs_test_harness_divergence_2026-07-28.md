@@ -567,3 +567,56 @@ The blanket dict-bailout finding in the original section is superseded.
 | Corpus | `build/probe_divergence/cases.txt` (unchanged, 60 cases) |
 
 The original `fast_results.tsv` and `fast/` from the first run are left in place.
+
+### Root cause of the three dict "regressions" — unmasked, not newly broken
+
+A follow-up lane isolated the mechanism. The three dict rows above are
+**pre-existing JIT bugs that were previously hidden**, not breakage introduced
+today. The distinction matters for how they are triaged.
+
+The bail-out message, identical in all 11 dict probes:
+
+```
+JIT compilation failed, falling back to interpreter: Cranelift JIT compile:
+Module error: unresolved external symbol 'rt_dict_insert' would NULL-jump in JIT;
+deferring to interpreter
+```
+
+`rt_dict_insert` was declared to codegen (`codegen/runtime_sffi.rs:279`) but
+**never existed** in the runtime and was absent from
+`common/src/runtime_symbols.rs` — a phantom spec entry, not a feature gap.
+Dicts were fully implemented all along.
+
+The demotion is total because the guard at `codegen/jit.rs:101-105`
+(`first_unresolved_import`) scans **every declared `Linkage::Import`**, not just
+the call sites actually reached. One phantom import therefore demotes the whole
+module.
+
+A parallel session fixed it in `0d864c55fe7` by mapping
+`"rt_dict_insert" => Some("rt_dict_set")` at `codegen/instr/calls.rs:2787`
+(confirmed absent at `0d864c55fe7^`, present at `0d864c55fe7`). Dict code now
+genuinely reaches the JIT — 0 of 11 probes bail out, and
+`SIMPLE_JIT_TRACE_ADDR=1` shows native compilation.
+
+**That fix is correct, and it unmasks five real JIT correctness bugs:**
+
+| probe | JIT | interpreter |
+|---|---|---|
+| `{i64:i64}` `contains_key(1)` | `false` | `true` |
+| `{i64:i64}` `d[2]` | `3` | `20` |
+| `{i64:text}` `d[2]` | *no output* | `y` |
+| `{text:i64}` `get_or` hit / miss | `Function 'Dict.get_or' not found` | `1` / `-7` |
+
+All **text**-keyed operations and all i64-key **writes** are correct; only
+i64-key **reads** are broken. Cause: the inline-shift list at
+`codegen/instr/closures_structs.rs:1361` is
+`matches!(runtime_func, "rt_index_get" | "rt_dict_remove" | "rt_contains")`,
+omitting `rt_dict_contains` and `rt_dict_get` — so integer keys are hashed
+**unboxed on read but boxed on write**.
+
+`get_or` is a different category and must not be fixed the same way: it is
+missing from the dict method table at `hir/lower/expr/mod.rs:1085`, but unlike
+the `index_of` sibling there is **no `rt_dict_get_or` runtime function**. Adding
+the result type alone would emit a call to a nonexistent symbol and re-trigger
+the exact demotion just fixed. It needs either a runtime implementation or a
+lowering that expands to `contains_key` + `get` + select.
