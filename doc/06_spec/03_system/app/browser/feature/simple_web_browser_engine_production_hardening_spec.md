@@ -55,9 +55,9 @@ Forward through the same structured browser-session controls and requires the
 corresponding red and blue pages after each transition.
 
 This proves hosted HTML/CSS rendering and address, Back, and Forward routing
-through `BrowserSession` structured UI access. It does not claim real HTTP,
-the installed browser executable, Reload/Home, bookmarks, or link-click
-coverage. Those scenarios retain explicit fail-closed placeholders.
+through `BrowserSession` structured UI access. It does not claim real HTTP or
+the installed browser executable; the other controls are proved separately
+below.
 
 ## Hosted form-control event evidence
 
@@ -86,5 +86,30 @@ and requires the stopped request to reject a late successful response.
 The prior body and pixel buffer must remain unchanged and red. This proves
 BrowserSession pending-request and hosted Stop semantics; it does not fabricate
 a native HTTP handle or claim that an HTTP response completed successfully.
-The canonical live-window wrapper executes this focused scenario with its
-admitted self-hosted runner before live-window capture.
+
+## Hosted Reload and Home evidence
+
+The Reload/Home scenario mutates a local hosted document, activates Reload
+through hosted chrome, and requires the saved source and red raster to return.
+It then configures a registered Home document, activates Home through the same
+route, and requires its URL, body, and green raster. No network response is
+claimed: both transitions are deliberately synchronous production paths.
+
+## Hosted page-link evidence
+
+The link scenario renders a red page anchor, hits its painted coordinates with
+a matching pointer press/release, and requires the semantic `next` target to
+navigate to a registered document with a distinct blue raster. This exercises
+layout hit-testing, DOM click default action, session navigation, and rendering
+without a network mock.
+
+## Hosted Favorite evidence
+
+The Favorite scenario creates `HostedWebContentRegistry` with a real in-memory
+SQLite `BrowserBookmarkStore`, enables the profile for one hosted window, and
+activates Favorite through registry chrome dispatch. It requires the session
+favorite state and profile snapshot to contain the saved URL before cleanly
+closing the registry. It does not claim filesystem persistence.
+The canonical live-window wrapper executes the focused Reload/Home, page-link,
+Favorite, and rejected-navigation scenarios with its admitted self-hosted
+runner before live-window capture.

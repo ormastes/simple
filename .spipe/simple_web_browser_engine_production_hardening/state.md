@@ -1032,3 +1032,18 @@ implementation in progress / target evidence blocked
 - Production HTTPS identity remains blocked, but a narrower private Rust unit
   seam can test literal-loopback rustls identity with inline DER and no runtime
   ABI. That test has not yet been implemented; production trust remains unchanged.
+- Hosted navigation evidence now separately proves synchronous Reload, a
+  registered Home target, pointer-hit page-link navigation, and profile-backed
+  Favorite through the real in-memory SQLite bookmark store. The wrapper runs
+  and release-gates all ten focused scenarios.
+- The 32-cycle renderer lifecycle gate now samples host and renderer `VmRSS`
+  and `VmHWM` directly from `/proc`, records sampled combined RSS and a
+  conservative summed-HWM upper bound, and requires both below 384 MiB. The
+  required 60-minute RSS plateau and production GC-pause evidence remain open.
+- Security audit found a Linux pre-exec isolation window before the worker
+  installs Landlock/seccomp. The release blocker and trampoline acceptance
+  probe are recorded in
+  `doc/08_tracking/bug/browser_renderer_linux_pre_exec_sandbox_gap_2026-07-28.md`.
+- Node/native denial remains unobservable in the admitted worker protocol:
+  script parse/load warnings are not returned with frame evidence, so no
+  ambiguous unchanged-frame assertion was added.

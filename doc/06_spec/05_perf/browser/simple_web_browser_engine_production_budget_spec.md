@@ -10,10 +10,9 @@ This manual keeps unsupported production claims visible. The implemented
 current-host slice binds the executable to `HOSTED_WM_ARTIFACT` and
 `HOSTED_WM_ARTIFACT_SHA256`, runs 32 sequential hidden renderer subprocesses,
 obtains a real frame from each, and verifies bounded process teardown. It does
-not claim RSS, GC,
-10,000-cycle stability, unchanged-frame allocation avoidance, or Engine2D/font
-lifecycle counts because those metrics are not exposed by the production
-renderer today.
+not claim 60-minute RSS, GC, 10,000-cycle stability, unchanged-frame allocation
+avoidance, or Engine2D/font lifecycle counts because those metrics are not
+exposed by the production renderer today.
 
 ## Required admission inputs
 
@@ -36,12 +35,21 @@ focused scenario succeeds.
    sandboxed browser renderer with a 2,000 ms startup timeout.
 2. Render a 64x48 static page with a 2,000 ms protocol timeout in each process.
 3. Record each renderer PID and confirm the subprocess is alive.
-4. Close each renderer before starting the next, allowing at most 10 seconds
+4. Before close, read `VmRSS` and `VmHWM` directly from `/proc` for the current
+   test/browser host PID and renderer PID. Require positive values, distinct
+   PIDs, and each high-water mark to be at least its current RSS.
+5. Track the largest sampled combined RSS and the largest sum of the two
+   per-process high-water marks. The latter is named
+   `combined_peak_upper_bound_max_kib`: the peaks may occur at different times,
+   so it is a conservative upper bound rather than a measured simultaneous
+   peak. Require both values to remain at or below 393,216 KiB.
+6. Close each renderer before starting the next, allowing at most 10 seconds
    for the platform process teardown path.
-5. After every close, confirm the broker reports PID `0`, state `closed`, and
+7. After every close, confirm the broker reports PID `0`, state `closed`, and
    the recorded PID is no longer alive.
-6. Recheck all 32 recorded PIDs after the loop and require a final completed
+8. Recheck all 32 recorded PIDs after the loop and require a final completed
    cycle count of exactly 32.
+9. Record both RSS values in the focused spec log.
 
 Evidence captures: executed binary, subprocess log, and artifact identity.
 
@@ -65,11 +73,13 @@ and receipts exist:
 
 - warm/cold startup, first-render, and navigation percentiles;
 - changed/unchanged frame and input-to-present percentiles;
-- heap, RSS, browser-resource, and 10,000-cycle stability;
+- 60-minute heap/RSS, browser-resource, and 10,000-cycle stability;
 - GC pause, callback-queue, and post-cancel activity;
 - Engine2D device/font/render-session/readback create-release counters;
 - recorded-baseline comparison and five-percent regression gating.
 
 Passing the bounded repeated subprocess lifecycle scenario proves only process
-handle reclamation across 32 sequential cycles. It is not evidence for any of
-those blocked claims.
+handle reclamation and a short-cycle Linux RSS ceiling across 32 sequential
+cycles. NFR-WEB-BROWSER-005 remains blocked because it requires browser plus
+renderer RSS after 60 minutes; this scenario is not that duration. It is not
+evidence for any other blocked claim, including GC behavior.

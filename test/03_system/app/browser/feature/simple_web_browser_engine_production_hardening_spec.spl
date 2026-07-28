@@ -17,9 +17,13 @@ use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererProcess, HostedBrowserRendererResult
 }
-use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use os.hosted.hosted_web_content_session.{
+    HostedWebContentRegistry, HostedWebContentSession
+}
+use os.hosted.browser_profile_store.{BrowserBookmarkStore}
 use std.gc_async_mut.web.browser_session.{BrowserResponse}
 use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
 
 val SUBPROCESS_ANIMATION_HTML = (
     "<style>@keyframes Pulse{from{background-color:#ef4444}" +
@@ -350,6 +354,126 @@ describe "Production Simple browser user flow":
         expect(_count_color(
             session.render_to_pixels(), 0xFF2563EBu32
         )).to_be_greater_than(0)
+
+    # @manual: show
+    # @capture(text)
+    # @capture(gui)
+    it "should reload saved source and open registered Home through hosted chrome":
+        var session = HostedWebContentSession.create(
+            10,
+            "<style>#page{width:32px;height:24px;" +
+            "background-color:#ef4444}</style>" +
+            "<div id='page'>Original</div>",
+            64, 48
+        )
+        expect(session.browser.eval_script(
+            "document.body.innerHTML='<div id=\"mutated\">Mutated</div>'"
+        ).is_ok()).to_equal(true)
+        expect(session.current_body_html()).to_contain("Mutated")
+
+        val reload_down = session.dispatch_chrome_pointer(
+            1, "reload", true
+        )
+        val reload_up = session.dispatch_chrome_pointer(
+            2, "reload", false
+        )
+        expect(reload_down.semantic_target_id).to_equal(
+            "browser:session#reload"
+        )
+        expect(reload_up.callback_count).to_equal(1)
+        expect(session.current_body_html()).to_contain("Original")
+        expect(_count_color(
+            session.render_to_pixels(), 0xFFEF4444u32
+        )).to_be_greater_than(0)
+
+        session.browser.register_resource(
+            "https://example.test/home",
+            "<html><head><style>#home{width:32px;height:24px;" +
+            "background-color:#16a34a}</style></head>" +
+            "<body><div id='home'>Home</div></body></html>"
+        )
+        session.browser.set_home_url("https://example.test/home")
+        val home_down = session.dispatch_chrome_pointer(3, "home", true)
+        val home_up = session.dispatch_chrome_pointer(4, "home", false)
+        expect(home_down.semantic_target_id).to_equal(
+            "browser:session#home"
+        )
+        expect(home_up.callback_count).to_equal(1)
+        expect(session.browser.current_url).to_equal(
+            "https://example.test/home"
+        )
+        expect(session.current_body_html()).to_contain("Home")
+        expect(_count_color(
+            session.render_to_pixels(), 0xFF16A34Au32
+        )).to_be_greater_than(0)
+
+    # @manual: show
+    # @capture(text)
+    # @capture(gui)
+    it "should hit a page link and render its registered target":
+        var session = HostedWebContentSession.create(
+            11,
+            "<style>#next{display:block;width:32px;height:24px;" +
+            "background-color:#ef4444}</style>" +
+            "<a id='next' href='https://example.test/linked'>Open</a>",
+            64, 48
+        )
+        session.browser.register_resource(
+            "https://example.test/linked",
+            "<html><head><style>#linked{width:32px;height:24px;" +
+            "background-color:#2563eb}</style></head>" +
+            "<body><div id='linked'>Linked</div></body></html>"
+        )
+        val before = session.render_to_pixels()
+        expect(_count_color(before, 0xFFEF4444u32)).to_be_greater_than(0)
+
+        val press = session.dispatch_pointer_at(1, 5, 5, true)
+        val release = session.dispatch_pointer_at(2, 5, 5, false)
+        expect(press.semantic_target_id).to_equal("next")
+        expect(release.semantic_target_id).to_equal("next")
+        expect(session.browser.current_url).to_equal(
+            "https://example.test/linked"
+        )
+        expect(session.current_body_html()).to_contain("Linked")
+        val after = session.render_to_pixels()
+        expect(_pixels_equal(after, before)).to_equal(false)
+        expect(_count_color(after, 0xFF2563EBu32)).to_be_greater_than(0)
+
+    # @manual: show
+    # @capture(text)
+    it "should persist Favorite through the hosted profile registry":
+        var registry = HostedWebContentRegistry.create_with_bookmark_store(
+            BrowserBookmarkStore.memory()?
+        )
+        val _ = registry.advance_window(
+            12, "<div>Browser</div>", 64, 48, 1000, true
+        )
+        var session = registry.sessions[0]
+        val opened = session.browser.open_html(
+            "https://example.test/saved",
+            "<html><body><div>Saved</div></body></html>"
+        ).is_ok()
+        registry.sessions[0] = session
+
+        val favorite_down = registry.dispatch_chrome_pointer(
+            1, 12, "favorite", true
+        )
+        val favorite_up = registry.dispatch_chrome_pointer(
+            2, 12, "favorite", false
+        )
+        val favorite_target = favorite_down.semantic_target_id
+        val favorite_callbacks = favorite_up.callback_count
+        val saved = registry.sessions[0].browser.is_favorite(
+            "https://example.test/saved"
+        )
+        val bookmark_count = registry.profile_bookmarks.entries.len()
+        val closed = registry.close()
+        expect(opened).to_equal(true)
+        expect(favorite_target).to_equal("browser:session#favorite")
+        expect(favorite_callbacks).to_equal(1)
+        expect(saved).to_equal(true)
+        expect(bookmark_count).to_equal(1)
+        expect(closed).to_equal(true)
 
     # @manual: folded
     it "should reject stale targets invalid addresses and late stopped navigation commits":

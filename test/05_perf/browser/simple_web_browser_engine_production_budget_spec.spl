@@ -9,7 +9,7 @@ Engine2D/font recreation or unconditional readback.
 """
 use std.spec.*
 use std.env.variables.{env_get}
-use std.io_runtime.{file_hash_sha256}
+use std.io_runtime.{file_exists, file_hash_sha256, file_read, getpid}
 use std.nogc_sync_mut.io.process_ops.{process_is_piped_alive}
 use std.nogc_sync_mut.io.time_ops.{time_now_micros}
 use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
@@ -17,6 +17,19 @@ use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
 val PRODUCTION_BUDGET_HTML = (
     "<div style='width:16px;height:16px;background:#224466'>budget</div>"
 )
+val SHORT_CYCLE_RSS_LIMIT_KIB: i64 = 393_216
+
+fn _proc_status_kib(pid: i64, label: text) -> i64:
+    val path = "/proc/{pid}/status"
+    if pid <= 0 or not file_exists(path):
+        return 0
+    for line in file_read(path).split("\n"):
+        if line.starts_with(label):
+            for part in line.split(" "):
+                val parsed = part.trim().to_i64() ?? 0
+                if parsed > 0:
+                    return parsed
+    0
 
 # @inline
 fn _browser_budget_fixture():
@@ -45,6 +58,9 @@ fn _require_bounded_renderer_lifecycle_evidence():
 
     var completed_cycles: i64 = 0
     var closed_pids: [i64] = []
+    val host_pid = getpid()
+    var sampled_combined_rss_max_kib: i64 = 0
+    var combined_peak_upper_bound_max_kib: i64 = 0
     while completed_cycles < 32:
         val generation = 61 + completed_cycles
         var renderer = HostedBrowserRendererProcess.create(
@@ -70,6 +86,14 @@ fn _require_bounded_renderer_lifecycle_evidence():
 
         val renderer_pid = renderer.pid
         val alive_before_close = process_is_piped_alive(renderer_pid)
+        val host_rss_kib = _proc_status_kib(host_pid, "VmRSS:")
+        val renderer_rss_kib = _proc_status_kib(renderer_pid, "VmRSS:")
+        val host_hwm_kib = _proc_status_kib(host_pid, "VmHWM:")
+        val renderer_hwm_kib = _proc_status_kib(renderer_pid, "VmHWM:")
+        val sampled_combined_rss_kib = host_rss_kib + renderer_rss_kib
+        # This sum is a conservative upper bound because the two per-process
+        # high-water marks need not occur simultaneously.
+        val combined_peak_upper_bound_kib = host_hwm_kib + renderer_hwm_kib
         val close_started_us = time_now_micros()
         val closed = renderer.close()
         val close_elapsed_us = time_now_micros() - close_started_us
@@ -78,20 +102,52 @@ fn _require_bounded_renderer_lifecycle_evidence():
             fail("production renderer generation {generation} close failed")
 
         expect(renderer_pid).to_be_greater_than(0)
+        expect(host_pid).to_be_greater_than(0)
+        expect(host_pid == renderer_pid).to_be(false)
         expect(alive_before_close).to_be(true)
         expect(frame.composition.batches.len()).to_be_greater_than(0)
+        expect(host_rss_kib).to_be_greater_than(0)
+        expect(renderer_rss_kib).to_be_greater_than(0)
+        expect(host_hwm_kib).to_be_greater_than(0)
+        expect(renderer_hwm_kib).to_be_greater_than(0)
+        expect(host_hwm_kib >= host_rss_kib).to_be(true)
+        expect(renderer_hwm_kib >= renderer_rss_kib).to_be(true)
         expect(close_elapsed_us).to_be_greater_than(-1)
         expect(close_elapsed_us).to_be_less_than(10_000_000)
         expect(renderer.pid).to_equal(0)
         expect(renderer.state).to_equal("closed")
         expect(process_is_piped_alive(renderer_pid)).to_be(false)
+        if sampled_combined_rss_kib > sampled_combined_rss_max_kib:
+            sampled_combined_rss_max_kib = sampled_combined_rss_kib
+        if (combined_peak_upper_bound_kib >
+            combined_peak_upper_bound_max_kib):
+            combined_peak_upper_bound_max_kib = (
+                combined_peak_upper_bound_kib
+            )
         closed_pids = closed_pids + [renderer_pid]
         completed_cycles = completed_cycles + 1
 
     for closed_pid in closed_pids:
         expect(process_is_piped_alive(closed_pid)).to_be(false)
+    step(
+        "Record short-cycle RSS sampled_max_kib=" +
+        sampled_combined_rss_max_kib.to_text() +
+        " combined_peak_upper_bound_kib=" +
+        combined_peak_upper_bound_max_kib.to_text()
+    )
     expect(closed_pids.len()).to_equal(32)
     expect(completed_cycles).to_equal(32)
+    expect(sampled_combined_rss_max_kib).to_be_greater_than(0)
+    expect(combined_peak_upper_bound_max_kib).to_be_greater_than(0)
+    expect(
+        combined_peak_upper_bound_max_kib >= sampled_combined_rss_max_kib
+    ).to_be(true)
+    expect(sampled_combined_rss_max_kib).to_be_less_than(
+        SHORT_CYCLE_RSS_LIMIT_KIB + 1
+    )
+    expect(combined_peak_upper_bound_max_kib).to_be_less_than(
+        SHORT_CYCLE_RSS_LIMIT_KIB + 1
+    )
 
 fn _require_production_budget_evidence():
     fail("NFR-WEB-BROWSER-001..017: production budget evidence not implemented")
