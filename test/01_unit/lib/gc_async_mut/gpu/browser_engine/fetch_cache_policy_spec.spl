@@ -1,9 +1,12 @@
 use std.spec.*
 
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, RequestMode}
-use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
-use std.gc_async_mut.gpu.browser_engine.net.fetch.{credentials_allow_request_cookies, request_cache_eligible}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin, Url}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{
+    FetchEngine, credentials_allow_request_cookies, request_cache_eligible
+}
 use std.gc_async_mut.gpu.browser_engine.net.cache.{HttpCache}
+use std.gc_async_mut.gpu.browser_engine.net.cookie_store.{parse_set_cookie}
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
 
 fn cache_request(method: text, headers: text, credentials: text) -> FetchRequest:
@@ -31,6 +34,90 @@ describe "Browser fetch cache isolation":
         expect(credentials_allow_request_cookies("same-origin", true)).to_equal(true)
         expect(credentials_allow_request_cookies("same-origin", false)).to_equal(false)
         expect(credentials_allow_request_cookies("include", false)).to_equal(true)
+
+    it "admits script cookies only from an exact network URL":
+        var fetch = FetchEngine.new_for_origin(
+            Logger.new("cookie-test", BrowserLogLevel.Error),
+            "https://example.test"
+        )
+        expect(fetch.store_script_cookies(
+            ["theme=dark; Path=/app"], "https://example.test/app/page"
+        )).to_equal(true)
+        expect(fetch.store_script_cookies(
+            ["secret=x; HttpOnly"], "https://example.test/app/page"
+        )).to_equal(false)
+        expect(fetch.store_script_cookies(
+            ["prefix=yes; Path=/", "secret=x; HttpOnly"],
+            "https://example.test/app/page"
+        )).to_equal(false)
+        expect(fetch.store_script_cookies(
+            ["bad=x"], "https://example.test"
+        )).to_equal(false)
+        val origin = Origin(
+            scheme: "https", host: "example.test", port: 443
+        )
+        expect(fetch.cookie_store.get_header_for_origin(
+            origin, "/app/next", Some(origin), "GET", false, 0
+        )).to_equal("theme=dark")
+        expect(fetch.cookie_store.get_header_for_origin(
+            origin, "/", Some(origin), "GET", false, 0
+        ).contains("prefix=yes")).to_equal(false)
+
+    it "rejects a whole script batch that would shadow a Secure cookie":
+        var fetch = FetchEngine.new_for_origin(
+            Logger.new("cookie-atomic-test", BrowserLogLevel.Error),
+            "http://example.test"
+        )
+        val secure_origin = Origin(
+            scheme: "https", host: "example.test", port: 443
+        )
+        val _ = fetch.cookie_store.store_from_origin(
+            parse_set_cookie("session=live; Path=/; Secure"),
+            secure_origin,
+            100
+        )
+        expect(fetch.store_script_cookies(
+            ["prefix=yes; Path=/", "session=shadow; Path=/"],
+            "http://example.test/"
+        )).to_equal(false)
+        val insecure_origin = Origin(
+            scheme: "http", host: "example.test", port: 80
+        )
+        expect(fetch.cookie_store.get_header_for_origin(
+            insecure_origin, "/", Some(insecure_origin), "GET", false, 100
+        ).contains("prefix=yes")).to_equal(false)
+
+    it "preserves Lax cookies for cross-site top-level navigation only":
+        var fetch = FetchEngine.new_for_origin(
+            Logger.new("same-site-test", BrowserLogLevel.Error),
+            "https://other.test"
+        )
+        expect(fetch.store_script_cookies(
+            ["lax=yes; SameSite=Lax; Path=/"],
+            "https://example.test/start"
+        )).to_equal(true)
+        val request = FetchRequest(
+            method: "GET",
+            url: Url.parse_or_opaque("https://example.test/next"),
+            headers: "",
+            body: [],
+            mode: RequestMode.Navigate,
+            credentials: "include"
+        )
+        match fetch.prepare_single_hop(
+            request, "https://other.test/", false
+        ):
+            Err(error): fail(error.message)
+            Ok(prepared):
+                expect(prepared.request.headers.contains("Cookie:")).to_equal(
+                    false
+                )
+        match fetch.prepare_single_hop(
+            request, "https://other.test/", true
+        ):
+            Err(error): fail(error.message)
+            Ok(prepared):
+                expect(prepared.request.headers).to_contain("Cookie: lax=yes")
 
     it "treats max-age zero as immediately stale":
         var cache = HttpCache.new(

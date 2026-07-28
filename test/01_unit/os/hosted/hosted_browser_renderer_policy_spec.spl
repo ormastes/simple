@@ -24,6 +24,7 @@ use os.hosted.hosted_browser_renderer_policy.{
     HostedBrowserNavigationPermit,
     hosted_browser_cors_response_headers,
     hosted_browser_hsts_upgrade_valid,
+    hosted_browser_remove_http_only_set_cookie,
     hosted_browser_remove_response_header,
     hosted_browser_renderer_request_policy,
     hosted_browser_replace_response_header
@@ -59,7 +60,9 @@ fn request(
     method: text = "GET",
     headers: text = "",
     body: text = "",
-    content_type: text = ""
+    content_type: text = "",
+    credentials: text = "include",
+    script_cookie_writes: [text] = []
 ) -> BrowserRendererNetworkDecodeResult:
     BrowserRendererNetworkDecodeResult(
         ok: true,
@@ -72,6 +75,8 @@ fn request(
         headers: headers,
         body: body,
         content_type: content_type,
+        credentials: credentials,
+        script_cookie_writes: script_cookie_writes,
         status: 0,
         error: ""
     )
@@ -549,22 +554,59 @@ describe "hosted browser renderer broker policy":
         )
 
     it "derives same-origin mode from broker committed state":
-        val policy = hosted_browser_renderer_request_policy(
-            "https://example.test",
-            permit(false, ""),
-            request("script", "https://example.test/app.js")
-        )
-        expect(policy.ok).to_be(true)
-        expect(policy.mode == RequestMode.SameOrigin).to_be(true)
+        for credentials in ["omit", "same-origin", "include"]:
+            val policy = hosted_browser_renderer_request_policy(
+                "https://example.test",
+                permit(false, ""),
+                request(
+                    "script", "https://example.test/app.js", "GET",
+                    "", "", "", credentials
+                )
+            )
+            expect(policy.ok).to_be(true)
+            expect(policy.mode == RequestMode.SameOrigin).to_be(true)
+            expect(policy.credentials).to_equal(credentials)
+
+    it "requires exact supported renderer credentials":
+        for credentials in ["Include", "same_origin", "", " include"]:
+            val policy = hosted_browser_renderer_request_policy(
+                "https://example.test",
+                permit(false, ""),
+                request(
+                    "script", "https://example.test/app.js", "GET",
+                    "", "", "", credentials
+                )
+            )
+            expect(policy.ok).to_be(false)
+            expect(policy.reason).to_equal("invalid-request-credentials")
+
+    it "requires include credentials for parent-authorized documents":
+        for credentials in ["omit", "same-origin"]:
+            val policy = hosted_browser_renderer_request_policy(
+                "",
+                permit(true, "https://example.test/"),
+                request(
+                    "document", "https://example.test/", "GET",
+                    "", "", "", credentials
+                )
+            )
+            expect(policy.ok).to_be(false)
+            expect(policy.reason).to_equal(
+                "unauthorized-document-request"
+            )
 
     it "requires cors for simple cross-origin resources":
         val policy = hosted_browser_renderer_request_policy(
             "https://example.test",
             permit(false, ""),
-            request("style", "https://cdn.test/app.css")
+            request(
+                "style", "https://cdn.test/app.css", "GET",
+                "", "", "", "omit"
+            )
         )
         expect(policy.ok).to_be(true)
         expect(policy.mode == RequestMode.Cors).to_be(true)
+        expect(policy.credentials).to_equal("omit")
         expect(policy.sanitized_headers).to_equal(
             "Origin: https://example.test"
         )
@@ -591,6 +633,149 @@ describe "hosted browser renderer broker policy":
         expect(forged.ok).to_be(false)
         expect(forged.reason).to_equal("forbidden-request-header")
         expect(wire.contains("evil.test")).to_be(false)
+
+        val same_origin_credentials = hosted_browser_renderer_request_policy(
+            "https://example.test",
+            permit(false, ""),
+            request(
+                "style", "https://cdn.test/app.css", "GET",
+                "", "", "", "same-origin"
+            )
+        )
+        expect(same_origin_credentials.ok).to_be(true)
+        expect(same_origin_credentials.credentials).to_equal("same-origin")
+
+        val credentialed = hosted_browser_renderer_request_policy(
+            "https://example.test",
+            permit(false, ""),
+            request(
+                "style", "https://cdn.test/app.css", "GET",
+                "", "", "", "include"
+            )
+        )
+        expect(credentialed.ok).to_be(true)
+        expect(credentialed.credentials).to_equal("include")
+
+    it "rejects renderer-authored cookie request headers":
+        for header in [
+            "Cookie: sid=secret", "cOoKiE2: sid=secret",
+            "Sec-Fetch-Site: same-origin", "Proxy-Authorization: secret",
+            "Accept-Encoding: gzip", "Access-Control-Request-Method: PUT",
+            "Referer: https://forged.test/", "Via: forged"
+        ]:
+            val policy = hosted_browser_renderer_request_policy(
+                "https://example.test",
+                permit(false, ""),
+                request(
+                    "fetch", "https://example.test/data", "GET", header
+                )
+            )
+            expect(policy.ok).to_be(false)
+            expect(policy.reason).to_equal("forbidden-request-header")
+
+    it "binds ordered script cookie writes to the active document origin":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.document_url = "https://old.test/app"
+        broker.document_origin = "https://old.test"
+        expect(broker._apply_script_cookie_writes([
+            "first=one; Path=/", "second=two; Path=/"
+        ])).to_be(true)
+        val old_origin = Origin(
+            scheme: "https", host: "old.test", port: 443
+        )
+        expect(broker.network.cookie_store.get_header_for_origin(
+            old_origin, "/next", Some(old_origin), "GET", false,
+            rt_time_now_unix_micros() / 1000000
+        )).to_equal("first=one; second=two")
+
+        broker.pending_document_commit_url = "https://new.test/page"
+        broker.provisional_document_origin = "https://new.test"
+        expect(broker._apply_script_cookie_writes([
+            "fresh=yes; Path=/"
+        ])).to_be(true)
+        val new_origin = Origin(
+            scheme: "https", host: "new.test", port: 443
+        )
+        expect(broker.network.cookie_store.get_header_for_origin(
+            new_origin, "/next", Some(new_origin), "GET", false,
+            rt_time_now_unix_micros() / 1000000
+        )).to_equal("fresh=yes")
+        expect(broker.network.cookie_store.get_header_for_origin(
+            old_origin, "/next", Some(old_origin), "GET", false,
+            rt_time_now_unix_micros() / 1000000
+        ).contains("fresh=yes")).to_be(false)
+
+    it "removes only HttpOnly cookie response lines":
+        val filtered = hosted_browser_remove_http_only_set_cookie(
+            "X-First: 1\r\n" +
+            "Set-Cookie: public=yes; Path=/; SameSite=Lax\r\n" +
+            "set-cookie: secret=token; Secure;  HTTPONLY  ; Path=/\r\n" +
+            "Set-Cookie: named=yes; HttpOnly=not-an-attribute\r\n" +
+            "Set-Cookie2: legacy=secret\r\n" +
+            "X-Last: 2"
+        )
+        expect(filtered).to_equal(
+            "X-First: 1\r\n" +
+            "Set-Cookie: public=yes; Path=/; SameSite=Lax\r\n" +
+            "Set-Cookie: named=yes; HttpOnly=not-an-attribute\r\n" +
+            "X-Last: 2"
+        )
+
+    it "keeps HttpOnly cookies in the broker transport only":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.document_url = "https://secure.test/app"
+        broker.document_origin = "https://secure.test"
+        broker.network.set_requester_origin(broker.document_origin)
+        val fetch = request(
+            "fetch", "https://secure.test/data", "GET",
+            "", "", "", "include"
+        )
+        val policy = hosted_browser_renderer_request_policy(
+            broker.document_origin, permit(false, ""), fetch
+        )
+        expect(policy.ok).to_be(true)
+        val transport = FetchRequest(
+            method: "GET",
+            url: Url.parse_or_opaque("https://secure.test/data"),
+            headers: "",
+            body: [],
+            mode: RequestMode.SameOrigin,
+            credentials: "include"
+        )
+        val finalized = broker._finalize_network(
+            "fetch",
+            transport,
+            FetchResponse(
+                status: 200,
+                headers: "Set-Cookie: public=yes; Secure; Path=/\r\n" +
+                    "Set-Cookie: secret=token; Secure; HttpOnly; Path=/",
+                body: [111u8, 107u8]
+            ),
+            true
+        )
+        expect(finalized.error).to_equal("")
+        expect(broker._write_network_response(
+            fetch, policy, finalized, 0
+        )).to_equal("")
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), broker.pending_wire
+        )
+        val response = browser_renderer_network_response_decode(
+            decoded.message
+        )
+        expect(response.ok).to_be(true)
+        expect(response.headers).to_contain("Set-Cookie: public=yes")
+        expect(response.headers.contains("secret=token")).to_be(false)
+        expect(response.headers.lower().contains("httponly")).to_be(false)
+
+        match broker.network.prepare_single_hop(
+            transport, broker.document_url, false
+        ):
+            Err(error): fail(error.message)
+            Ok(prepared):
+                expect(prepared.request.headers).to_contain(
+                    "Cookie: public=yes; secret=token"
+                )
 
     it "blocks active and passive mixed content at the trusted broker":
         for kind in ["script", "style", "image", "fetch"]:
@@ -667,6 +852,11 @@ describe "hosted browser renderer broker policy":
             "Location: https://secure.test/next",
             true
         )).to_equal("Location: https://secure.test/next")
+        expect(hosted_browser_cors_response_headers(
+            "X-Secret: no\r\nAccess-Control-Expose-Headers: *",
+            false,
+            "include"
+        )).to_equal("")
         var credential_free = FetchEngine.new_for_origin(
             Logger.new("cors-cookie-test", BrowserLogLevel.Error),
             "https://secure.test"
@@ -790,11 +980,63 @@ describe "hosted browser renderer broker policy":
                     expect(next.body).to_equal(body)
                     if kind == "fetch":
                         expect(next.headers).to_contain("X-Test: retained")
-                        expect(next.headers).to_contain(
-                            "Cookie: secure_token=secret"
+                        expect(next.headers.contains("Cookie:")).to_equal(
+                            false
                         )
                     else:
                         expect(next.headers).to_equal("")
+
+        var redirect_broker = HostedBrowserRendererProcess.create(
+            1, 640, 480
+        )
+        redirect_broker.document_url = "https://source.test/page"
+        redirect_broker.document_origin = "https://source.test"
+        expect(redirect_broker.network.store_script_cookies(
+            ["source=one; SameSite=None; Secure; Path=/"],
+            "https://source.test/page"
+        )).to_equal(true)
+        expect(redirect_broker.network.store_script_cookies(
+            ["destination=two; SameSite=None; Secure; Path=/"],
+            "https://destination.test/page"
+        )).to_equal(true)
+        redirect_broker.network.set_requester_origin(
+            redirect_broker.document_origin
+        )
+        val redirect_request = FetchRequest(
+            method: "GET",
+            url: Url.parse_or_opaque("https://destination.test/resource"),
+            headers: "",
+            body: [],
+            mode: RequestMode.Cors,
+            credentials: "include"
+        )
+        match redirect_broker.network.prepare_single_hop(
+            redirect_request, redirect_broker.document_url, false
+        ):
+            Err(error): fail(error.message)
+            Ok(prepared):
+                expect(prepared.request.headers).to_contain(
+                    "Cookie: destination=two"
+                )
+                expect(prepared.request.headers.contains("source=one")).to_equal(
+                    false
+                )
+        val same_origin_redirect = FetchRequest(
+            method: "GET",
+            url: redirect_request.url,
+            headers: "",
+            body: [],
+            mode: RequestMode.Cors,
+            credentials: "same-origin"
+        )
+        match redirect_broker.network.prepare_single_hop(
+            same_origin_redirect, redirect_broker.document_url, false
+        ):
+            Err(error): fail(error.message)
+            Ok(prepared):
+                expect(prepared.request.headers.contains("Cookie:")).to_equal(
+                    false
+                )
 
         var blocked = BrowserSession.new()
         blocked.broker_network_policy = true

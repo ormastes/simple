@@ -62,7 +62,8 @@ describe "isolated browser renderer protocol":
     it "round-trips bounded network messages without delimiter ambiguity":
         val request_wire = browser_renderer_fetch_request_encode(
             7, 1, 41, "fetch-1", "fetch", "https://example.test/a",
-            "POST", "X-Test: a\tb", "h\u00e9llo\nbody", "text/plain"
+            "POST", "X-Test: a\tb", "h\u00e9llo\nbody", "text/plain",
+            "include", ["theme=dark", "lang=\u754c"]
         )
         expect(request_wire.ok).to_be(true)
         val request_message = browser_renderer_decoder_feed(
@@ -77,6 +78,20 @@ describe "isolated browser renderer protocol":
         expect(request.method).to_equal("POST")
         expect(request.headers).to_equal("X-Test: a\tb")
         expect(request.body).to_equal("h\u00e9llo\nbody")
+        expect(request.credentials).to_equal("include")
+        expect(request.script_cookie_writes.len()).to_equal(2)
+        expect(request.script_cookie_writes[0]).to_equal("theme=dark")
+        expect(request.script_cookie_writes[1]).to_equal("lang=\u754c")
+        val empty_cookie_writes = browser_renderer_fetch_request_encode(
+            7, 2, 42, "fetch-2", "fetch", "https://example.test/b",
+            "GET", "", "", "", "omit", []
+        )
+        expect(empty_cookie_writes.ok).to_be(true)
+        expect(browser_renderer_fetch_request_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), empty_cookie_writes.wire
+            ).message
+        ).script_cookie_writes.len()).to_equal(0)
 
         val response_wire = browser_renderer_network_response_encode(
             7, 1, "fetch-1", "fetch", "https://example.test/a",
@@ -92,21 +107,84 @@ describe "isolated browser renderer protocol":
         expect(response.ok).to_be(true)
         expect(response.status).to_equal(200)
         expect(response.body).to_equal("ok\n\u754c")
+        expect(response.credentials).to_equal("")
+        expect(response.script_cookie_writes.len()).to_equal(0)
 
+        # SBRQ2 is intentionally not accepted: both endpoints ship together,
+        # and guessing legacy credential semantics would cross the boundary.
         expect(browser_renderer_fetch_request_decode(
             BrowserRendererMessage(
                 kind: "fetch_request", generation: 7, request_id: 1,
                 payload: "SBRQ2\t1\t1\t5\t1\t3\t0\t0\t0\nxfetchuGETextra"
             )
         ).ok).to_be(false)
+        expect(browser_renderer_fetch_request_decode(
+            BrowserRendererMessage(
+                kind: "fetch_request", generation: 7, request_id: 1,
+                payload: "SBRQ3\t1\t1\t5\t1\t3\t0\t0\t0\t7\t2\n" +
+                    "xfetchuGETINCLUDE0\n"
+            )
+        ).ok).to_be(false)
+        for malformed_cookie_batch in [
+            "02\t3\t3\nonetwo",
+            "2\t3\none",
+            "1\t03\none",
+            "1\t3\nonetwo",
+            "1\t3\na\nb",
+            "1\t4097\n"
+        ]:
+            expect(browser_renderer_fetch_request_decode(
+                BrowserRendererMessage(
+                    kind: "fetch_request", generation: 7, request_id: 1,
+                    payload: (
+                        "SBRQ3\t1\t1\t5\t1\t3\t0\t0\t0\t11\t" +
+                        str(malformed_cookie_batch.len()) + "\n" +
+                        "xfetchuGETsame-origin" + malformed_cookie_batch
+                    )
+                )
+            ).ok).to_be(false)
         expect(browser_renderer_fetch_request_encode(
             7, 1, 1, "fetch-1", "fetch", "https://example.test/",
-            "TRACE", "", "", ""
+            "TRACE", "", "", "", "omit", []
         ).ok).to_be(false)
         expect(browser_renderer_fetch_request_encode(
             7, 1, 0, "fetch-1", "fetch", "https://example.test/",
-            "GET", "", "", ""
+            "GET", "", "", "", "same-origin", []
         ).ok).to_be(false)
+        for invalid_credentials in ["", "INCLUDE", "same_origin", "credential\nforged"]:
+            expect(browser_renderer_fetch_request_encode(
+                7, 1, 1, "fetch-1", "fetch",
+                "https://example.test/", "GET", "", "", "",
+                invalid_credentials, []
+            ).ok).to_be(false)
+        for invalid_cookie_write in ["nul\0write", "line\rreturn", "line\nfeed"]:
+            expect(browser_renderer_fetch_request_encode(
+                7, 1, 1, "fetch-1", "fetch",
+                "https://example.test/", "GET", "", "", "",
+                "same-origin", [invalid_cookie_write]
+            ).ok).to_be(false)
+        val maximum_cookie_write = ["x"; 4096].join("")
+        expect(browser_renderer_fetch_request_encode(
+            7, 1, 1, "fetch-1", "fetch", "https://example.test/",
+            "GET", "", "", "", "same-origin", [maximum_cookie_write]
+        ).ok).to_be(true)
+        val oversized_cookie_write = ["x"; 4097].join("")
+        expect(browser_renderer_fetch_request_encode(
+            7, 1, 1, "fetch-1", "fetch", "https://example.test/",
+            "GET", "", "", "", "same-origin", [oversized_cookie_write]
+        ).ok).to_be(false)
+        expect(browser_renderer_fetch_request_encode(
+            7, 1, 1, "fetch-1", "fetch", "https://example.test/",
+            "GET", "", "", "", "same-origin", ["x"; 32]
+        ).ok).to_be(true)
+        expect(browser_renderer_fetch_request_encode(
+            7, 1, 1, "fetch-1", "fetch", "https://example.test/",
+            "GET", "", "", "", "same-origin", ["x"; 33]
+        ).ok).to_be(false)
+        expect(browser_renderer_fetch_request_encode(
+            7, 1, 1, "fetch-1", "fetch", "https://example.test/",
+            "GET", "", "", "", "same-origin", [maximum_cookie_write; 32]
+        ).ok).to_be(true)
         expect(browser_renderer_network_response_encode(
             7, 1, "fetch-1", "fetch", "https://example.test/",
             0, "", "", ""

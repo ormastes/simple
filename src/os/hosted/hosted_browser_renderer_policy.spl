@@ -26,6 +26,7 @@ pub struct HostedBrowserRequestPolicy:
     ok: bool
     reason: text
     mode: RequestMode
+    credentials: text
     canonical_url: text
     sanitized_headers: text
     consumes_navigation: bool
@@ -61,7 +62,15 @@ pub fn hosted_browser_sanitize_fetch_headers(
         if (not _renderer_header_name_valid(name) or lowered == "host" or
             lowered == "connection" or lowered == "content-length" or
             lowered == "transfer-encoding" or lowered == "proxy-connection" or
-            lowered == "upgrade" or lowered == "origin"):
+            lowered == "upgrade" or lowered == "origin" or
+            lowered == "cookie" or lowered == "cookie2" or
+            lowered == "keep-alive" or lowered == "te" or
+            lowered == "trailer" or lowered == "referer" or
+            lowered == "accept-charset" or lowered == "accept-encoding" or
+            lowered.starts_with("access-control-request-") or
+            lowered == "date" or lowered == "dnt" or lowered == "expect" or
+            lowered == "permissions-policy" or lowered.starts_with("proxy-") or
+            lowered.starts_with("sec-") or lowered == "via"):
             return Err("forbidden-request-header")
         val value = line.slice(colon + 1, line.len()).trim()
         for ch in value:
@@ -95,6 +104,7 @@ fn _request_policy_reject(reason: text) -> HostedBrowserRequestPolicy:
         ok: false,
         reason: reason,
         mode: RequestMode.SameOrigin,
+        credentials: "omit",
         canonical_url: "",
         sanitized_headers: "",
         consumes_navigation: false
@@ -171,12 +181,13 @@ fn _hosted_browser_header_list_contains(
     false
 
 pub fn hosted_browser_cors_response_headers(
-    headers: text, preserve_location: bool
+    headers: text, preserve_location: bool, credentials: text = "omit"
 ) -> text:
     val exposed = hosted_browser_response_header_value(
         headers, "access-control-expose-headers"
     )
-    val expose_all = _hosted_browser_header_list_contains(exposed, "*")
+    val expose_all = (credentials != "include" and
+        _hosted_browser_header_list_contains(exposed, "*"))
     var lines: [text] = []
     for raw_line in headers.split("\n"):
         val line = raw_line.trim()
@@ -197,6 +208,31 @@ pub fn hosted_browser_cors_response_headers(
             _hosted_browser_header_list_contains(exposed, name) or
             (preserve_location and name == "location")
         )):
+            lines.push(line)
+    lines.join("\r\n")
+
+pub fn hosted_browser_remove_http_only_set_cookie(headers: text) -> text:
+    var lines: [text] = []
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        val colon = line.index_of(":")
+        if colon <= 0:
+            lines.push(line)
+            continue
+        val name = line.slice(0, colon).trim().to_lower()
+        if name == "set-cookie2":
+            continue
+        var http_only = false
+        if name == "set-cookie":
+            val parts = line.slice(colon + 1, line.len()).split(";")
+            var index: i64 = 1
+            while index < parts.len():
+                if parts[index].trim().to_lower() == "httponly":
+                    http_only = true
+                index = index + 1
+        if not http_only:
             lines.push(line)
     lines.join("\r\n")
 
@@ -250,6 +286,10 @@ pub fn hosted_browser_renderer_request_policy(
 ) -> HostedBrowserRequestPolicy:
     if not request.ok:
         return _request_policy_reject(request.reason)
+    if (request.credentials != "omit" and
+        request.credentials != "same-origin" and
+        request.credentials != "include"):
+        return _request_policy_reject("invalid-request-credentials")
     val request_url = hosted_browser_canonical_http_url(request.url)
     val candidate_url = if effective_url != "":
         effective_url
@@ -272,7 +312,8 @@ pub fn hosted_browser_renderer_request_policy(
             canonical_url != request_url or
             method != permit.method or sanitized_headers != permit.headers or
             request.body != permit.body or
-            request.content_type != permit.content_type):
+            request.content_type != permit.content_type or
+            request.credentials != "include"):
             return _request_policy_reject(
                 "unauthorized-document-request"
             )
@@ -280,6 +321,7 @@ pub fn hosted_browser_renderer_request_policy(
             ok: true,
             reason: "ok",
             mode: RequestMode.Navigate,
+            credentials: request.credentials,
             canonical_url: canonical_url,
             sanitized_headers: sanitized_headers,
             consumes_navigation: true
@@ -297,6 +339,7 @@ pub fn hosted_browser_renderer_request_policy(
             ok: true,
             reason: "ok",
             mode: RequestMode.SameOrigin,
+            credentials: request.credentials,
             canonical_url: canonical_url,
             sanitized_headers: sanitized_headers,
             consumes_navigation: false
@@ -309,6 +352,7 @@ pub fn hosted_browser_renderer_request_policy(
         ok: true,
         reason: "ok",
         mode: RequestMode.Cors,
+        credentials: request.credentials,
         canonical_url: canonical_url,
         sanitized_headers: "Origin: {document_origin}",
         consumes_navigation: false

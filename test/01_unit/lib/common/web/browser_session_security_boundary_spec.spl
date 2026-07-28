@@ -888,7 +888,7 @@ describe "BrowserSession production security boundary":
             nil:
                 fail("Expected sanitized navigation request")
 
-    it "honours fetch credentials for cookie attachment and storage":
+    it "leaves hosted cookie attachment to the broker":
         var session = BrowserSession.new()
         session.broker_network_policy = true
         session.open_html("https://safe.test/app", "<html><body>safe</body></html>")
@@ -909,8 +909,75 @@ describe "BrowserSession production security boundary":
 
         val _ = session.eval_script("fetch('https://safe.test:8443/include', { credentials: 'include' })")
         match session.take_pending_request():
-            Some(request): expect(request.headers).to_contain("Cookie: sid=secret")
+            Some(request): expect(request.headers.contains("Cookie:")).to_be(false)
             nil: fail("Expected include request")
+
+    it "retains admitted hosted script cookie setters in order":
+        var session = BrowserSession.new()
+        session.broker_network_policy = true
+        session.open_html(
+            "https://safe.test/", "<html><body>safe</body></html>"
+        )
+        val _ = session.eval_script(
+            "document.cookie = 'first=one; Path=/'"
+        )
+        val _ = session.eval_script(
+            "document.cookie = 'second=two; Path=/'"
+        )
+        val _ = session.eval_script(
+            "document.cookie = 'hidden=no; HttpOnly; Path=/'"
+        )
+        val writes = session.take_pending_script_cookie_writes()
+        expect(writes.len()).to_equal(2)
+        expect(writes[0]).to_equal("first=one; Path=/")
+        expect(writes[1]).to_equal("second=two; Path=/")
+        expect(session.take_pending_script_cookie_writes().len()).to_equal(0)
+        expect(session.document_cookie().contains("hidden=no")).to_be(false)
+
+    it "keeps hosted cookie setters ordered around fetch calls":
+        var session = BrowserSession.new()
+        session.broker_network_policy = true
+        session.open_html(
+            "https://safe.test/", "<html><body>safe</body></html>"
+        )
+        val _ = session.eval_script(
+            "document.cookie = 'first=one; Path=/'; " +
+            "fetch('/one'); " +
+            "document.cookie = 'second=two; Path=/'; " +
+            "fetch('/two')"
+        )
+        val first = session.take_pending_request()
+        val second = session.take_pending_request()
+        match first:
+            Some(request): expect(request.script_cookie_writes).to_equal([
+                "first=one; Path=/"
+            ])
+            nil: fail("Expected first fetch request")
+        match second:
+            Some(request): expect(request.script_cookie_writes).to_equal([
+                "second=two; Path=/"
+            ])
+            nil: fail("Expected second fetch request")
+
+    it "surfaces hosted script cookie setter overflow":
+        var session = BrowserSession.new()
+        session.broker_network_policy = true
+        session.open_html(
+            "https://safe.test/", "<html><body>safe</body></html>"
+        )
+        var i: i64 = 0
+        while i < 33:
+            val _ = session.eval_script(
+                "document.cookie = 'queued{i}=yes; Path=/'"
+            )
+            i = i + 1
+        val writes = session.take_pending_script_cookie_writes()
+        expect(writes.len()).to_equal(32)
+        expect(writes[0]).to_equal("queued0=yes; Path=/")
+        expect(writes[31]).to_equal("queued31=yes; Path=/")
+        expect(session.document_cookie().contains("queued31=yes")).to_be(true)
+        expect(session.document_cookie().contains("queued32=yes")).to_be(false)
+        expect(session.script_cookie_write_overflow).to_be(true)
 
     it "prevents script from replacing an HttpOnly cookie":
         var session = BrowserSession.new()

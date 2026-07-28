@@ -80,6 +80,7 @@ val BROWSER_DOM_BRIDGE_OVERSIZE = "\u0000simple-dom-oversize"
 val BROWSER_HISTORY_MAX_ENTRIES: i32 = 64
 val BROWSER_WARNING_MAX_ENTRIES: i64 = 128
 val BROWSER_WARNING_MAX_BYTES: i64 = 4096
+val BROWSER_PENDING_SCRIPT_COOKIE_WRITE_MAX_ENTRIES: i64 = 32
 
 class BrowserHistoryEntry:
     url: text
@@ -155,6 +156,7 @@ class BrowserRequest:
     site_for_cookies_url: text
     credentials: text
     is_top_level_navigation: bool
+    script_cookie_writes: [text]
 
     static fn create(id: text, kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
         BrowserRequest(
@@ -169,7 +171,8 @@ class BrowserRequest:
             redirect_origin_url: url,
             site_for_cookies_url: "",
             credentials: "include",
-            is_top_level_navigation: kind == "document"
+            is_top_level_navigation: kind == "document",
+            script_cookie_writes: []
         )
 
 class BrowserResponse:
@@ -1300,6 +1303,8 @@ class BrowserSession:
     animation_start_time_ms: i64
     hsts_policies: [BrowserHstsPolicy]
     broker_network_policy: bool
+    pending_script_cookie_writes: [text]
+    script_cookie_write_overflow: bool
 
     static fn new() -> BrowserSession:
         BrowserSession._create(true)
@@ -1360,7 +1365,9 @@ class BrowserSession:
             monotonic_time_ms: 0,
             animation_start_time_ms: 0,
             hsts_policies: [],
-            broker_network_policy: false
+            broker_network_policy: false,
+            pending_script_cookie_writes: [],
+            script_cookie_write_overflow: false
         )
 
 impl BrowserSession:
@@ -1403,6 +1410,11 @@ impl BrowserSession:
     me _store_cookie_text(header: text, url: text, from_http: bool):
         if header.len() > 4096 or header.contains("\r") or header.contains("\n"):
             return
+        if (not from_http and self.broker_network_policy and
+            self.pending_script_cookie_writes.len() >=
+                BROWSER_PENDING_SCRIPT_COOKIE_WRITE_MAX_ENTRIES):
+            self.script_cookie_write_overflow = true
+            return
         val now = self._cookie_now_seconds()
         val cookie = apply_max_age(
             apply_default_path(
@@ -1410,15 +1422,24 @@ impl BrowserSession:
             ), header, now
         )
         var cookies = self.cookies
+        var admitted_from_script = false
         if from_http:
             val _ = cookies.store_from_origin(
                 cookie, self._cookie_origin(url), now
             )
         else:
-            val _ = cookies.store_from_script(
+            val verdict = cookies.store_from_script(
                 cookie, self._cookie_origin(url), now
             )
+            admitted_from_script = verdict.accepted
         self.cookies = cookies
+        if self.broker_network_policy and admitted_from_script:
+            self.pending_script_cookie_writes.push(header)
+
+    me take_pending_script_cookie_writes() -> [text]:
+        val writes = self.pending_script_cookie_writes
+        self.pending_script_cookie_writes = []
+        writes
 
     me _script_cookie_for_url(url: text) -> text:
         self.cookies.script_cookie_header(
@@ -1471,9 +1492,12 @@ impl BrowserSession:
                     sanitized_lines.push(trimmed)
         var request_headers = sanitized_lines.join("\n")
         val initiator = if site_url != "": site_url else: self.document_url
-        val session_cookie = self._cookie_header_for_request_context(
-            url, method, initiator, is_top_level_navigation, credentials
-        )
+        val session_cookie = if self.broker_network_policy:
+            ""
+        else:
+            self._cookie_header_for_request_context(
+                url, method, initiator, is_top_level_navigation, credentials
+            )
         if session_cookie != "":
             if request_headers != "":
                 request_headers = request_headers + "\n"
@@ -1751,10 +1775,21 @@ impl BrowserSession:
             var drained = false
             var runtime = state.runtime
             var interpreter = runtime.interpreter
+            if interpreter.host_document_cookie_write_overflow:
+                self.script_cookie_write_overflow = true
+                interpreter.host_document_cookie_write_overflow = false
             var seen_request_ids: [text] = []
             while true:
                 match interpreter.take_pending_async_request():
                     Some(req_obj_id):
+                        val request_cookie_writes = (
+                            interpreter.last_taken_async_cookie_writes
+                        )
+                        interpreter.last_taken_async_cookie_writes = []
+                        for cookie_write in request_cookie_writes:
+                            self._store_cookie_text(
+                                cookie_write, self.document_url, false
+                            )
                         runtime.interpreter = interpreter
                         var request_id = ""
                         var kind = "fetch"
@@ -1856,15 +1891,6 @@ impl BrowserSession:
                             drained = true
                         elif not already_emitted:
                             seen_request_ids = seen_request_ids + [request_id]
-                            # Merge any document.cookie set by the running script into
-                            # the jar so freshly set cookies attach to this request.
-                            match interpreter.host_document_cookie_value:
-                                JsValue.String(doc_cookie):
-                                    if doc_cookie != "":
-                                        val visible_before = self._script_cookie_for_url(self.document_url)
-                                        if doc_cookie != visible_before:
-                                            self._store_cookie_text(doc_cookie, self.document_url, false)
-                                _: pass_dn("no document cookie to merge before draining request")
                             # Strip any caller-supplied or raw Cookie lines, then attach
                             # only the sanitized session cookie for this request URL.
                             var credentials = "same-origin"
@@ -1887,6 +1913,9 @@ impl BrowserSession:
                             drained_req.site_for_cookies_url = self.document_url
                             drained_req.credentials = credentials
                             drained_req.is_top_level_navigation = false
+                            drained_req.script_cookie_writes = (
+                                self.take_pending_script_cookie_writes()
+                            )
                             self.pending_requests.push(drained_req)
                             drained = true
                     nil:

@@ -51,6 +51,7 @@ use os.hosted.hosted_browser_renderer_policy.{
     hosted_browser_empty_navigation_permit,
     hosted_browser_hsts_upgrade_valid,
     hosted_browser_network_origin,
+    hosted_browser_remove_http_only_set_cookie,
     hosted_browser_remove_response_header,
     hosted_browser_redirect_status,
     hosted_browser_renderer_request_policy,
@@ -477,9 +478,24 @@ pub class HostedBrowserRendererProcess:
             val _ = rt_browser_http_job_free(handle)
 
     fn _requester_origin() -> text:
-        if self.provisional_document_origin != "":
+        if (self.pending_document_commit_url != "" and
+            self.provisional_document_origin != ""):
             return self.provisional_document_origin
         self.document_origin
+
+    fn _active_renderer_document_url() -> text:
+        if self.pending_document_commit_url != "":
+            return self.pending_document_commit_url
+        self.document_url
+
+    me _apply_script_cookie_writes(writes: [text]) -> bool:
+        if writes.len() == 0:
+            return true
+        val source_url = self._active_renderer_document_url()
+        val source_origin = self._requester_origin()
+        (source_url != "" and source_origin != "" and
+            hosted_browser_network_origin(source_url) == source_origin and
+            self.network.store_script_cookies(writes, source_url))
 
     me _replace_pending_navigation() -> bool:
         if self.command_deadline_ms <= 0:
@@ -662,15 +678,22 @@ pub class HostedBrowserRendererProcess:
         redirect_count: i64
     ) -> HostedBrowserNetworkResult?:
         val request = FetchRequest(
-            url: Url.parse(policy.canonical_url),
+            url: Url.parse_or_opaque(policy.canonical_url),
             method: fetch.method,
             headers: policy.sanitized_headers,
             body: rt_text_to_bytes(fetch.body),
             mode: policy.mode,
-            credentials: "omit"
+            credentials: policy.credentials
         )
         self.network.set_requester_origin(self._requester_origin())
-        match self.network.prepare_single_hop(request):
+        val active_document_url = self._active_renderer_document_url()
+        val site_for_cookies_url = if active_document_url != "":
+            active_document_url
+        else:
+            "about:blank"
+        match self.network.prepare_single_hop(
+            request, site_for_cookies_url, policy.consumes_navigation
+        ):
             Err(error):
                 return Some(_network_result(
                     0, "", "", error.message
@@ -747,7 +770,7 @@ pub class HostedBrowserRendererProcess:
         )
         if location == "" or redirect_count >= 20:
             return Err("invalid-navigation-redirect")
-        val base = Url.parse(policy.canonical_url)
+        val base = Url.parse_or_opaque(policy.canonical_url)
         val redirected = resolve_fetch_redirect_url(base, location)
         val original_redirected_url = hosted_browser_canonical_http_url(
             redirected.to_text()
@@ -811,13 +834,16 @@ pub class HostedBrowserRendererProcess:
                     return reason
                 Ok(headers):
                     response_headers = headers
+        response_headers = hosted_browser_remove_http_only_set_cookie(
+            response_headers
+        )
         if hosted_browser_redirect_status(response.status):
             val location = hosted_browser_response_header_value(
                 response_headers, "location"
             )
             if location != "":
                 val redirected = resolve_fetch_redirect_url(
-                    Url.parse(policy.canonical_url), location
+                    Url.parse_or_opaque(policy.canonical_url), location
                 )
                 val redirect_url = hosted_browser_canonical_http_url(
                     redirected.to_text()
@@ -843,7 +869,8 @@ pub class HostedBrowserRendererProcess:
         if policy.mode == RequestMode.Cors:
             response_headers = hosted_browser_cors_response_headers(
                 response_headers,
-                hosted_browser_redirect_status(response.status)
+                hosted_browser_redirect_status(response.status),
+                policy.credentials
             )
         if transport_upgrade:
             if response_headers != "":
@@ -1116,6 +1143,10 @@ pub class HostedBrowserRendererProcess:
                     self.expected_reply_to_request_id
                 ):
                     return Some(self.fail("stale-renderer-request"))
+                if not self._apply_script_cookie_writes(
+                    fetch.script_cookie_writes
+                ):
+                    return Some(self.fail("invalid-script-cookie-write"))
                 val effective_url = self._hsts_upgrade_url(fetch.url)
                 val policy = hosted_browser_renderer_request_policy(
                     self._requester_origin(),

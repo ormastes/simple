@@ -370,12 +370,29 @@ pub class CookieStore:
         self._store_under(jar_key, c)
         return verdict
 
-    me fn store_from_script(c: Cookie, origin: Origin, now: i64) -> CookieVerdict:
-        """Admit `document.cookie` without exposing or replacing HttpOnly rows."""
+    me fn validate_from_script(
+        c: Cookie, origin: Origin, now: i64
+    ) -> CookieVerdict:
+        """Validate `document.cookie` without admitting the candidate."""
         self._prune(now)
         if c.http_only:
             return CookieVerdict.reject("script-cannot-set-httponly")
-        val jar_key = effective_domain(c, origin)
+        var admitted = c
+        if is_expired(c, now):
+            admitted = Cookie(
+                name: c.name, value: c.value, domain: c.domain, path: c.path,
+                secure: c.secure, http_only: c.http_only,
+                same_site: c.same_site, expires_at: 0
+            )
+        val verdict = validate_set_cookie(admitted, origin, now)
+        if not verdict.accepted:
+            return verdict
+        val jar_key = effective_domain(admitted, origin)
+        if (not is_potentially_trustworthy(origin) and
+            self._secure_cookie_collision(jar_key, c)):
+            return CookieVerdict.reject(
+                "insecure-origin-cannot-replace-secure-cookie"
+            )
         var i = 0
         while i < self._domains.len():
             if self._domains[i] == jar_key:
@@ -384,7 +401,15 @@ pub class CookieStore:
                         existing.path == c.path):
                         return CookieVerdict.reject("script-cannot-overwrite-httponly")
             i = i + 1
-        return self.store_from_origin(c, origin, now)
+        verdict
+
+    me fn store_from_script(c: Cookie, origin: Origin, now: i64) -> CookieVerdict:
+        """Admit `document.cookie` without exposing or replacing HttpOnly rows."""
+        self._prune(now)
+        val verdict = self.validate_from_script(c, origin, now)
+        if not verdict.accepted:
+            return verdict
+        self.store_from_origin(c, origin, now)
 
     fn count() -> i64:
         return self._total_count()

@@ -135,6 +135,8 @@ pub struct BrowserRendererNetworkDecodeResult:
     headers: text
     body: text
     content_type: text
+    credentials: text
+    script_cookie_writes: [text]
     status: i32
     error: text
 
@@ -830,6 +832,8 @@ fn _browser_renderer_network_reject(
         headers: "",
         body: "",
         content_type: "",
+        credentials: "",
+        script_cookie_writes: [],
         status: 0,
         error: ""
     )
@@ -843,6 +847,8 @@ fn _browser_renderer_network_result(
     headers: text,
     body: text,
     content_type: text,
+    credentials: text,
+    script_cookie_writes: [text],
     status: i32,
     error: text
 ) -> BrowserRendererNetworkDecodeResult:
@@ -857,6 +863,8 @@ fn _browser_renderer_network_result(
         headers: headers,
         body: body,
         content_type: content_type,
+        credentials: credentials,
+        script_cookie_writes: script_cookie_writes,
         status: status,
         error: error
     )
@@ -875,6 +883,92 @@ fn _browser_renderer_network_common_valid(
         _browser_renderer_network_field_valid(url, BROWSER_RENDERER_MAX_URL_BYTES) and
         not url.contains("\n") and not url.contains("\r"))
 
+fn _browser_renderer_credentials_valid(credentials: text) -> bool:
+    credentials == "omit" or credentials == "same-origin" or
+        credentials == "include"
+
+fn _browser_renderer_script_cookie_write_valid(value: text) -> bool:
+    (_browser_renderer_network_field_valid(value, 4096) and
+        not value.contains("\r") and not value.contains("\n"))
+
+struct BrowserRendererScriptCookieWritesDecodeResult:
+    ok: bool
+    writes: [text]
+
+fn _browser_renderer_script_cookie_writes_encode(
+    writes: [text]
+) -> BrowserRendererEncodeResult:
+    if writes.len() > 32:
+        return _browser_renderer_reject_encode("invalid-script-cookie-writes")
+    var header_fields: [text] = [str(writes.len())]
+    var payload_bytes: i64 = 0
+    for write in writes:
+        if not _browser_renderer_script_cookie_write_valid(write):
+            return _browser_renderer_reject_encode("invalid-script-cookie-writes")
+        val byte_len = text_to_bytes(write).len().to_i64()
+        if byte_len > 131072 - payload_bytes:
+            return _browser_renderer_reject_encode("invalid-script-cookie-writes")
+        payload_bytes = payload_bytes + byte_len
+        header_fields.push(str(byte_len))
+    BrowserRendererEncodeResult(
+        ok: true,
+        reason: "ok",
+        wire: header_fields.join("\t") + "\n" + writes.join("")
+    )
+
+fn _browser_renderer_script_cookie_writes_decode(
+    payload: text
+) -> BrowserRendererScriptCookieWritesDecodeResult:
+    val header_end = _browser_renderer_header_end(payload)
+    if header_end < 0 or header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return BrowserRendererScriptCookieWritesDecodeResult(
+            ok: false, writes: []
+        )
+    val fields = _browser_renderer_byte_slice(
+        payload, 0, header_end
+    ).split("\t")
+    if fields.len() == 0:
+        return BrowserRendererScriptCookieWritesDecodeResult(
+            ok: false, writes: []
+        )
+    val count = fields[0].to_i64() ?? -1
+    if (count < 0 or count > 32 or str(count) != fields[0] or
+        fields.len().to_i64() != count + 1):
+        return BrowserRendererScriptCookieWritesDecodeResult(
+            ok: false, writes: []
+        )
+    var lengths: [i64] = []
+    var payload_bytes: i64 = 0
+    var field_index: i64 = 1
+    while field_index < fields.len():
+        val byte_len = fields[field_index].to_i64() ?? -1
+        if (byte_len < 0 or byte_len > 4096 or
+            str(byte_len) != fields[field_index] or
+            byte_len > 131072 - payload_bytes):
+            return BrowserRendererScriptCookieWritesDecodeResult(
+                ok: false, writes: []
+            )
+        lengths.push(byte_len)
+        payload_bytes = payload_bytes + byte_len
+        field_index = field_index + 1
+    if payload.len() != header_end + 1 + payload_bytes:
+        return BrowserRendererScriptCookieWritesDecodeResult(
+            ok: false, writes: []
+        )
+    var writes: [text] = []
+    var offset = header_end + 1
+    for byte_len in lengths:
+        val write = _browser_renderer_network_piece(
+            payload, offset, byte_len
+        )
+        if not _browser_renderer_script_cookie_write_valid(write):
+            return BrowserRendererScriptCookieWritesDecodeResult(
+                ok: false, writes: []
+            )
+        writes.push(write)
+        offset = offset + byte_len
+    BrowserRendererScriptCookieWritesDecodeResult(ok: true, writes: writes)
+
 fn _browser_renderer_network_piece(
     payload: text, offset: i64, byte_length: i64
 ) -> text:
@@ -890,14 +984,21 @@ pub fn browser_renderer_fetch_request_encode(
     method: text,
     headers: text,
     body: text,
-    content_type: text
+    content_type: text,
+    credentials: text,
+    script_cookie_writes: [text]
 ) -> BrowserRendererEncodeResult:
+    val encoded_cookie_writes = _browser_renderer_script_cookie_writes_encode(
+        script_cookie_writes
+    )
     if (reply_to_request_id <= 0 or
         not _browser_renderer_network_common_valid(request_id, kind, url) or
         not _browser_renderer_network_method_valid(method) or
         not _browser_renderer_network_field_valid(headers, BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES) or
         not _browser_renderer_network_field_valid(body, BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES) or
-        not _browser_renderer_network_field_valid(content_type, 256)):
+        not _browser_renderer_network_field_valid(content_type, 256) or
+        not _browser_renderer_credentials_valid(credentials) or
+        not encoded_cookie_writes.ok):
         return _browser_renderer_reject_encode("invalid-network-request")
     val id_len = text_to_bytes(request_id).len()
     val kind_len = text_to_bytes(kind).len()
@@ -906,10 +1007,13 @@ pub fn browser_renderer_fetch_request_encode(
     val headers_len = text_to_bytes(headers).len()
     val body_len = text_to_bytes(body).len()
     val content_type_len = text_to_bytes(content_type).len()
+    val credentials_len = text_to_bytes(credentials).len()
+    val script_cookie_writes_len = text_to_bytes(encoded_cookie_writes.wire).len()
     browser_renderer_message_encode(
         "fetch_request", generation, wire_request_id,
-        "SBRQ2\t{reply_to_request_id}\t{id_len}\t{kind_len}\t{url_len}\t{method_len}\t{headers_len}\t{body_len}\t{content_type_len}\n" +
-        request_id + kind + url + method + headers + body + content_type
+        "SBRQ3\t{reply_to_request_id}\t{id_len}\t{kind_len}\t{url_len}\t{method_len}\t{headers_len}\t{body_len}\t{content_type_len}\t{credentials_len}\t{script_cookie_writes_len}\n" +
+        request_id + kind + url + method + headers + body + content_type +
+        credentials + encoded_cookie_writes.wire
     )
 
 pub fn browser_renderer_fetch_request_decode(
@@ -923,7 +1027,7 @@ pub fn browser_renderer_fetch_request_decode(
     val fields = _browser_renderer_byte_slice(
         message.payload, 0, header_end
     ).split("\t")
-    if fields.len() != 9 or fields[0] != "SBRQ2":
+    if fields.len() != 11 or fields[0] != "SBRQ3":
         return _browser_renderer_network_reject("malformed-network-request")
     val reply_to_request_id = _browser_renderer_positive_i64(fields[1])
     if reply_to_request_id < 0:
@@ -940,7 +1044,7 @@ pub fn browser_renderer_fetch_request_decode(
         lengths[2] > BROWSER_RENDERER_MAX_URL_BYTES or lengths[3] > 16 or
         lengths[4] > BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES or
         lengths[5] > BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES or
-        lengths[6] > 256):
+        lengths[6] > 256 or lengths[7] > 11 or lengths[8] > 131235):
         return _browser_renderer_network_reject("network-request-too-large")
     var total_length = header_end + 1
     for length in lengths:
@@ -962,16 +1066,26 @@ pub fn browser_renderer_fetch_request_decode(
     offset = offset + lengths[5]
     val content_type = _browser_renderer_network_piece(message.payload, offset, lengths[6])
     offset = offset + lengths[6]
+    val credentials = _browser_renderer_network_piece(message.payload, offset, lengths[7])
+    offset = offset + lengths[7]
+    val encoded_cookie_writes = _browser_renderer_network_piece(message.payload, offset, lengths[8])
+    offset = offset + lengths[8]
+    val decoded_cookie_writes = _browser_renderer_script_cookie_writes_decode(
+        encoded_cookie_writes
+    )
     if (offset != message.payload.len() or
         not _browser_renderer_network_common_valid(request_id, kind, url) or
         not _browser_renderer_network_method_valid(method) or
         not _browser_renderer_network_field_valid(headers, BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES) or
         not _browser_renderer_network_field_valid(body, BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES) or
-        not _browser_renderer_network_field_valid(content_type, 256)):
+        not _browser_renderer_network_field_valid(content_type, 256) or
+        not _browser_renderer_credentials_valid(credentials) or
+        not decoded_cookie_writes.ok):
         return _browser_renderer_network_reject("invalid-network-request")
     _browser_renderer_network_result(
         reply_to_request_id,
-        request_id, kind, url, method, headers, body, content_type, 0, ""
+        request_id, kind, url, method, headers, body, content_type,
+        credentials, decoded_cookie_writes.writes, 0, ""
     )
 
 pub fn browser_renderer_network_response_encode(
@@ -1060,7 +1174,7 @@ pub fn browser_renderer_network_response_decode(
         (status > 0 and (status < 100 or error != ""))):
         return _browser_renderer_network_reject("invalid-network-response")
     _browser_renderer_network_result(
-        0, request_id, kind, url, "", headers, body, "",
+        0, request_id, kind, url, "", headers, body, "", "", [],
         status.to_i32(), error
     )
 

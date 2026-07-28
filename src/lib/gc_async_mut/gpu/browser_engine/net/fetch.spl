@@ -8,6 +8,7 @@
 
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types {FetchRequest, FetchResponse, RequestMode}
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types {Url, Origin}
+use std.gc_async_mut.gpu.browser_engine.net.entity.cookie_types.{Cookie}
 use std.gc_async_mut.gpu.browser_engine.net.entity.cors_types {PreflightResult}
 use std.gc_async_mut.gpu.browser_engine.shared.error {BrowserError, BrowserResult, network_error}
 use std.gc_async_mut.gpu.browser_engine.shared.logging {Logger, BrowserLogLevel}
@@ -68,6 +69,44 @@ class FetchEngine:
     me set_requester_origin(requester_origin: text):
         self.cors.set_origin(requester_origin)
 
+    me store_script_cookies(headers: [text], source_url: text) -> bool:
+        val parsed = Url.parse(source_url)
+        if not parsed.?:
+            return false
+        val url = parsed!
+        if (url.opaque or url.host == "" or
+            (url.scheme != "http" and url.scheme != "https") or
+            url.to_text() != source_url):
+            return false
+        if headers.len() > 32:
+            return false
+        val now = time_now_unix_micros() / 1000000
+        var cookies: [Cookie] = []
+        for header in headers:
+            if (header.len() > 4096 or header.contains("\0") or
+                header.contains("\r") or header.contains("\n")):
+                return false
+            val cookie = apply_max_age(
+                apply_default_path(
+                    parse_set_cookie(header), header, url.path
+                ),
+                header,
+                now
+            )
+            val verdict = self.cookie_store.validate_from_script(
+                cookie, Origin.from_url(url), now
+            )
+            if not verdict.accepted:
+                return false
+            cookies.push(cookie)
+        var cookie_store = self.cookie_store
+        for cookie in cookies:
+            val _ = cookie_store.store_from_script(
+                cookie, Origin.from_url(url), now
+            )
+        self.cookie_store = cookie_store
+        true
+
     # The main fetch function. Implements the Fetch specification request lifecycle.
     # Steps: CORS check -> cache -> DNS -> HTTP -> redirects -> cookies -> cache store.
     me fetch(request: FetchRequest) -> Result<FetchResponse>:
@@ -83,7 +122,9 @@ class FetchEngine:
         self.finalize_single_hop(prepared.request, response)
 
     me prepare_single_hop(
-        request: FetchRequest
+        request: FetchRequest,
+        site_for_cookies_url: text = "",
+        is_top_level_navigation: bool = false
     ) -> Result<FetchSingleHopPreparation>:
         self.logger.info("fetch: {request.method.to_upper()} {request.url.to_text()}")
 
@@ -122,7 +163,9 @@ class FetchEngine:
                 ))
 
         # Step 3: Attach cookies to the request
-        val request_with_cookies = self.attach_cookies(request)
+        val request_with_cookies = self.attach_cookies(
+            request, site_for_cookies_url, is_top_level_navigation
+        )
         Ok(FetchSingleHopPreparation.pending(request_with_cookies))
 
     me finalize_single_hop(
@@ -241,7 +284,11 @@ class FetchEngine:
     # NOTE: FetchRequest.headers/credentials are declared as raw `text`
     # (see entity/request_types.spl), not [Pair]/enum — this must stay
     # text-in, text-out or it corrupts the header block on redirects.
-    fn attach_cookies(request: FetchRequest) -> FetchRequest:
+    fn attach_cookies(
+        request: FetchRequest,
+        site_for_cookies_url: text = "",
+        is_top_level_navigation: bool = false
+    ) -> FetchRequest:
         # Only attach cookies if credentials mode allows it
         if not credentials_allow_request_cookies(
             request.credentials,
@@ -250,12 +297,18 @@ class FetchEngine:
             return request
 
         val target_origin = Origin.from_url(request.url)
+        val site_for_cookies = if site_for_cookies_url == "":
+            Some(self.cors.requester_origin())
+        else:
+            match Url.parse(site_for_cookies_url):
+                Some(site_url): Some(Origin.from_url(site_url))
+                nil: nil
         val cookie_header = self.cookie_store.get_header_for_origin(
             target_origin,
             request.url.path,
-            Some(self.cors.requester_origin()),
+            site_for_cookies,
             request.method,
-            false,
+            is_top_level_navigation,
             time_now_unix_micros() / 1000000
         )
         if cookie_header.len() == 0:

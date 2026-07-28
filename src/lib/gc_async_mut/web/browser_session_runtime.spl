@@ -1519,6 +1519,20 @@ impl BrowserSession:
         state.runtime = sync_storage_runtime_state(state.runtime, state.session_storage_id, self.session_storage)
         state.runtime = sync_storage_runtime_state(state.runtime, state.local_storage_id, self.local_storage)
 
+        var cookie_interpreter = state.runtime.interpreter
+        if cookie_interpreter.host_document_cookie_write_overflow:
+            self.script_cookie_write_overflow = true
+            cookie_interpreter.host_document_cookie_write_overflow = false
+        val cookie_writes = (
+            cookie_interpreter.pending_host_document_cookie_writes
+        )
+        cookie_interpreter.pending_host_document_cookie_writes = []
+        state.runtime.interpreter = cookie_interpreter
+        for cookie_write in cookie_writes:
+            self._store_cookie_text(
+                cookie_write, active_document_url, false
+            )
+
         var cookie_val = state.runtime.interpreter.host_document_cookie_value
         if strict_equals(cookie_val, JsValue.Undefined):
             cookie_val = state.runtime.get_host_property(
@@ -1528,7 +1542,8 @@ impl BrowserSession:
         match cookie_val:
             JsValue.String(cookie_text):
                 val visible_cookie_before_sync = self._script_cookie_for_url(active_document_url)
-                if cookie_text != visible_cookie_before_sync:
+                if (cookie_writes.len() == 0 and
+                    cookie_text != visible_cookie_before_sync):
                     self._store_cookie_text(cookie_text, active_document_url, false)
             _:
                 pass_dn
@@ -1601,6 +1616,7 @@ impl BrowserSession:
         request.site_for_cookies_url = site_for_cookies_url
         request.credentials = credentials
         request.is_top_level_navigation = is_top_level_navigation
+        request.script_cookie_writes = self.take_pending_script_cookie_writes()
         request
 
 fn browser_session_sync_location_object(state: BrowserRuntimeState, href: text):

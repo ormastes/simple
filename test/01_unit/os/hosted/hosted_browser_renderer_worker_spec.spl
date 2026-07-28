@@ -459,6 +459,7 @@ describe "hosted browser renderer worker":
         val fetch = browser_renderer_fetch_request_decode(
             fetch_message.message
         )
+        expect(fetch.credentials).to_equal("include")
         val response = browser_renderer_network_response_encode(
             7, 5, fetch.request_id, fetch.kind, fetch.url,
             200, "Content-Type: text/html", CSS_ANIMATION_HTML, ""
@@ -477,6 +478,63 @@ describe "hosted browser renderer worker":
         expect(worker.browser.animation_start_time_ms).to_equal(5000)
         expect(worker.scroll_milli_y).to_equal(0)
         expect(frame.next_animation_ms).to_equal(5016)
+
+    it "emits ordered hosted script cookie writes outside cookie-free fetch headers":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "https://safe.test/", "<p>safe</p>"
+        ).is_ok()).to_be(true)
+        val _ = worker.browser.eval_script(
+            "document.cookie = 'first=one; Path=/'; " +
+            "document.cookie = 'second=two; Path=/'; " +
+            "fetch('/data', { credentials: 'include' })"
+        )
+
+        val emitted = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "A1\t0"
+        ))
+        expect(emitted.ok).to_be(true)
+        val message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), emitted.wire
+        )
+        expect(message.message.kind).to_equal("fetch_request")
+        val fetch = browser_renderer_fetch_request_decode(message.message)
+        expect(fetch.ok).to_be(true)
+        expect(fetch.credentials).to_equal("include")
+        expect(fetch.headers.contains("Cookie:")).to_be(false)
+        expect(fetch.script_cookie_writes.len()).to_equal(2)
+        expect(fetch.script_cookie_writes[0]).to_equal("first=one; Path=/")
+        expect(fetch.script_cookie_writes[1]).to_equal("second=two; Path=/")
+        expect(
+            worker.browser.take_pending_script_cookie_writes().len()
+        ).to_equal(0)
+
+    it "fails closed when a script exceeds the cookie write batch":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "https://safe.test/", "<p>safe</p>"
+        ).is_ok()).to_be(true)
+        var i: i64 = 0
+        while i < 33:
+            val _ = worker.browser.eval_script(
+                "document.cookie = 'queued{i}=yes; Path=/'"
+            )
+            i = i + 1
+        val result = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "A1\t0"
+        ))
+        expect(result.ok).to_be(false)
+        expect(result.reason).to_equal("renderer-script-cookie-write-limit")
 
     it "keeps DOM focus and trusted chrome state across bounded actions":
         var worker = HostedBrowserRendererWorkerSession.create(80, 40)
@@ -534,6 +592,10 @@ describe "hosted browser renderer worker":
         expect(submitted.ok).to_be(false)
         expect(submitted.reason).to_equal("navigation-command-required")
 
+        worker.browser.apply_set_cookie_header(
+            "sid=broker-owned; Secure; Path=/",
+            "https://example.test/"
+        )
         val navigation_wire = browser_renderer_navigation_encode(
             7, 11, "open", "https://example.test", "GET", "", "", ""
         )
@@ -552,6 +614,8 @@ describe "hosted browser renderer worker":
         expect(fetch.ok).to_be(true)
         expect(fetch.reply_to_request_id).to_equal(11)
         expect(fetch.kind).to_equal("document")
+        expect(fetch.credentials).to_equal("include")
+        expect(fetch.headers.contains("Cookie:")).to_be(false)
         expect(fetch.url.starts_with("https://example.test")).to_be(true)
 
         val response_wire = browser_renderer_network_response_encode(
