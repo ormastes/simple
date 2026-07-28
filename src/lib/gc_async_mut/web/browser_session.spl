@@ -149,6 +149,24 @@ fn browser_status_is_success(status: i32) -> bool:
 fn browser_header_location(headers: text) -> text:
     browser_header_value(headers, "location")
 
+fn browser_document_content_type_supported(headers: text) -> bool:
+    var found = false
+    var content_type = ""
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if (colon > 0 and
+            line.slice(0, colon).trim().lower() == "content-type"):
+            found = true
+            content_type = line.slice(colon + 1, line.len()).trim().lower()
+            break
+    if not found:
+        return true
+    val separator = content_type.index_of(";")
+    if separator >= 0:
+        content_type = content_type.slice(0, separator)
+    content_type.trim() == "text/html"
+
 fn browser_header_value(headers: text, expected_name: text) -> text:
     val expected = expected_name.lower()
     for raw_line in headers.split("\n"):
@@ -1814,10 +1832,18 @@ impl BrowserSession:
                             next_request.redirect_origin_url = original.redirect_origin_url
                         self.pending_requests.push(next_request)
                         return Ok(true)
+            self._apply_response_headers(response.headers, response.url)
+            if not browser_document_content_type_supported(response.headers):
+                val content_type = browser_header_value(
+                    response.headers, "content-type"
+                )
+                self.stop_loading()
+                return Err(
+                    "unsupported document content type: {content_type}"
+                )
             self.pending_content_security_policy = browser_header_content_security_policy(
                 response.headers
             )
-            self._apply_response_headers(response.headers, response.url)
             self._trace_guest("document headers applied")
             return self.commit_navigation_html(response.body)
         if response.kind == "style":

@@ -1063,3 +1063,21 @@ implementation in progress / target evidence blocked
   active collector, so GC pause/count claims remain unsupported. Future honest
   telemetry must report allocated, reclaimed, and current registered objects
   and bytes through the existing heap/runtime ownership paths.
+- Document commits now reject an explicit MIME other than normalized
+  `text/html`, including an empty malformed MIME, after applying security
+  response headers but before replacing the document. The focused hosted
+  scenario requires both rejection errors and unchanged prior body/pixels.
+- Renderer frame protocol SBRF3 now carries bounded diagnostics while decoding
+  legacy SBRF2 frames. The worker reports actual BrowserSession runtime
+  diagnostics; the admitted Node/native scenario requires all five hostile
+  scripts to fail and `require`, `process`, and `Buffer` to be `undefined`.
+  The live wrapper release-gates thirteen focused browser scenarios.
+- The Linux pre-exec audit identified an ELF `DT_PREINIT_ARRAY` stage-one seam:
+  dependencies are mapped before constructors, allowing deny-all Landlock plus
+  a startup-safe network/fork/exec seccomp filter without loader allowlists.
+  A full-policy prototype still failed the bounded native gate after three
+  cycles and was reverted; the open bug now records the split-policy resume.
+- Honest allocation telemetry still requires one coordinated ABI change across
+  Rust `std::alloc` collections/heap ownership and generated C `calloc/free`.
+  Existing heap-registry counts and disabled/unlinked memtrack paths cannot
+  support runtime-byte or reclamation claims, so no misleading counters landed.

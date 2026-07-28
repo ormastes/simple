@@ -95,6 +95,48 @@ fn _require_production_file_scheme_denial():
         Ok(_):
             fail("file navigation was accepted by the production broker")
 
+fn _require_production_node_native_denial():
+    val artifact = env_get("HOSTED_WM_ARTIFACT")
+    val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+    if artifact == "":
+        fail("HOSTED_WM_ARTIFACT is required for Node API denial")
+    if expected_artifact_sha.len() != 64 or
+        file_hash_sha256(artifact) != expected_artifact_sha:
+        fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+
+    var renderer = HostedBrowserRendererProcess.create(43, 64, 48)
+    val started = renderer.start(artifact, 2000)
+    if not started.ok:
+        val closed = renderer.close()
+        if not closed:
+            fail("production renderer cleanup failed after Node start denial")
+        fail("production renderer start failed: {started.reason}")
+    val frame = renderer.render(
+        "init",
+        "<div style='width:32px;height:24px;background:#224466'>" +
+        "Node APIs denied</div>" +
+        "<script>require('fs').readFileSync('/etc/passwd')</script>" +
+        "<script>require('child_process').exec('id')</script>" +
+        "<script>require('net').connect(1)</script>" +
+        "<script>process.env.PATH</script>" +
+        "<script>process.send('denied')</script>" +
+        "<script type='text/simple'>native.host.exec</script>",
+        2000
+    )
+    val closed = renderer.close()
+    if not closed:
+        fail("production renderer cleanup failed after Node API denial")
+    if not frame.ok:
+        fail("production renderer Node API denial frame failed: {frame.reason}")
+    expect(frame.composition.batches.len()).to_be_greater_than(0)
+    expect(frame.diagnostics).to_contain(
+        "browser native globals: undefined:undefined:undefined"
+    )
+    expect(frame.diagnostics.split("inline script error:").len()).to_equal(6)
+    expect(frame.diagnostics).to_contain(
+        "simple script unsupported command: native.host.exec"
+    )
+
 fn _require_production_security_evidence():
     fail("REQ-WEB-BROWSER-010..019: production security evidence not implemented")
 
@@ -127,7 +169,7 @@ describe "Production Simple browser security envelope":
     it "should deny Node native filesystem process socket environment and IPC access":
         _hostile_page_fixture()
         _check_security_denial()
-        _require_production_security_evidence()
+        _require_production_node_native_denial()
 
     # @manual: folded
     it "should deny unaudited file navigation through the production broker":

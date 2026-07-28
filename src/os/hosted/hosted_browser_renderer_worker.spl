@@ -1,14 +1,15 @@
 """Hidden, fail-closed browser renderer worker entry."""
 
 use std.common.web.browser_renderer_protocol.{
-    BROWSER_RENDERER_MAX_VIEWPORT,
+    BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES, BROWSER_RENDERER_MAX_VIEWPORT,
     BROWSER_RENDERER_WORKER_ARG,
     BrowserRendererEncodeResult, BrowserRendererMessage,
     BrowserTextInputOverlay, browser_text_input_overlay_empty,
     browser_renderer_action_decode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_fetch_request_encode,
-    browser_renderer_frame_encode_with_witness, browser_renderer_message_encode,
+    browser_renderer_frame_encode_with_diagnostics,
+    browser_renderer_message_encode,
     browser_renderer_navigation_decode,
     browser_renderer_network_response_decode,
     browser_renderer_resize_decode
@@ -112,6 +113,12 @@ fn _worker_document_animation_time_ms(
     val elapsed = current_time_ms - session.animation_start_time_ms
     if elapsed > 0: elapsed else: 0
 
+fn _worker_diagnostics(session: BrowserSession) -> text:
+    val diagnostics = session.warnings.join("\n")
+    if diagnostics.len() <= BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES:
+        return diagnostics
+    diagnostics.slice(0, BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES)
+
 fn _worker_frame(
     session: BrowserSession,
     message: BrowserRendererMessage,
@@ -136,7 +143,7 @@ fn _worker_frame(
         session.animation_start_time_ms + layout.animation_end_ms
     else:
         layout.animation_end_ms
-    val encoded = browser_renderer_frame_encode_with_witness(
+    val encoded = browser_renderer_frame_encode_with_diagnostics(
         layout.composition,
         message.generation,
         response_request_id,
@@ -150,7 +157,8 @@ fn _worker_frame(
         layout.material_witness.cpu_composited_count,
         layout.material_witness.cpu_composited_sha256,
         layout.material_witness.solid_material_count,
-        layout.material_witness.solid_material_sha256
+        layout.material_witness.solid_material_sha256,
+        _worker_diagnostics(session)
     )
     if not encoded.ok:
         return _worker_result_reject(
@@ -696,7 +704,7 @@ pub fn hosted_browser_renderer_handle_init(
         session.animation_start_time_ms + layout.animation_end_ms
     else:
         layout.animation_end_ms
-    browser_renderer_frame_encode_with_witness(
+    browser_renderer_frame_encode_with_diagnostics(
         layout.composition,
         message.generation,
         response_request_id,
@@ -710,7 +718,8 @@ pub fn hosted_browser_renderer_handle_init(
         layout.material_witness.cpu_composited_count,
         layout.material_witness.cpu_composited_sha256,
         layout.material_witness.solid_material_count,
-        layout.material_witness.solid_material_sha256
+        layout.material_witness.solid_material_sha256,
+        _worker_diagnostics(session)
     )
 
 fn _worker_write(wire: text) -> bool:

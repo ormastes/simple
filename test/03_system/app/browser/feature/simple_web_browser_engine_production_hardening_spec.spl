@@ -103,9 +103,6 @@ fn _operate_page_controls():
 fn _operate_browser_navigation():
     step("Operate browser navigation controls")
 
-fn _require_production_browser_evidence():
-    fail("REQ-WEB-BROWSER-001..009: production browser evidence not implemented")
-
 describe "Production Simple browser user flow":
     # @manual: show
     # @capture(html)
@@ -601,4 +598,66 @@ describe "Production Simple browser user flow":
     it "should report unsupported content without fake success":
         _production_browser_fixture()
         step("Open unsupported and malformed compatibility fixtures")
-        _require_production_browser_evidence()
+        var session = HostedWebContentSession.create(
+            14,
+            "<style>#prior{width:32px;height:24px;" +
+            "background-color:#ef4444}</style>" +
+            "<div id='prior'>Prior</div>",
+            64, 48
+        )
+        val prior_body = session.current_body_html()
+        val prior_pixels = session.render_to_pixels()
+
+        expect(session.browser.begin_network_navigation(
+            "https://example.test/image", "GET", "", "", ""
+        ).is_ok()).to_equal(true)
+        match session.browser.take_pending_request():
+            Some(request):
+                val rejected = session.browser.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: request.id,
+                        kind: request.kind,
+                        url: request.url,
+                        status: 200,
+                        headers: "Content-Type: image/png",
+                        body: "<div id='fake'>Not an image</div>",
+                        error: ""
+                    )
+                )
+                match rejected:
+                    Err(error):
+                        expect(error).to_equal(
+                            "unsupported document content type: image/png"
+                        )
+                    Ok(_):
+                        fail("unsupported image response rendered as HTML")
+            nil:
+                fail("expected unsupported-content document request")
+
+        expect(session.browser.begin_network_navigation(
+            "https://example.test/malformed", "GET", "", "", ""
+        ).is_ok()).to_equal(true)
+        match session.browser.take_pending_request():
+            Some(request):
+                val rejected = session.browser.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: request.id,
+                        kind: request.kind,
+                        url: request.url,
+                        status: 200,
+                        headers: "Content-Type: ; charset=utf-8",
+                        body: "<div id='fake'>Malformed MIME</div>",
+                        error: ""
+                    )
+                )
+                expect(rejected.is_err()).to_equal(true)
+            nil:
+                fail("expected malformed-content document request")
+
+        expect(session.browser.has_pending_requests()).to_equal(false)
+        expect(session.current_body_html()).to_equal(prior_body)
+        val final_pixels = session.render_to_pixels()
+        expect(_pixels_equal(final_pixels, prior_pixels)).to_equal(true)
+        expect(_count_color(
+            final_pixels, 0xFFEF4444u32
+        )).to_be_greater_than(0)

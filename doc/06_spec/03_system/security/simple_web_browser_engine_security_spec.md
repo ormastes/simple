@@ -32,11 +32,28 @@ is closed on every start, initialization, denial, and cleanup branch.
 The canonical live-window wrapper executes this focused denial after source-
 manifest and artifact admission.
 
+## Production Node and native API denial
+
+The Node/native denial scenario starts the admitted sandboxed renderer and
+loads one visible page that attempts filesystem, child-process, socket,
+environment, and IPC access through Node globals, plus an unsupported ambient
+Simple Script host command. BrowserSession evaluates the actual page runtime's
+`require`, `process`, and `Buffer` visibility once, records each failed hostile
+script, and keeps the diagnostics bounded. The worker transports them in the
+versioned frame envelope and the host exposes them on
+`HostedBrowserRendererResult` without altering Draw IR.
+
+The scenario requires all five hostile scripts to fail, all three Node globals
+to be `undefined`, a nonempty rendered composition, and successful renderer
+cleanup. The decoder remains compatible with legacy
+`SBRF2` frames while admitted worker frames use diagnostic-capable `SBRF3`.
+An unchanged frame alone is not treated as denial evidence.
+
 ## Still unsupported
 
 All other scenarios in the executable spec intentionally remain explicit
 failure placeholders: TLS and certificate identity, origin/CORS/CSP/redirect
-and mixed-content policy, cookies/storage, hostile Node capabilities,
+and mixed-content policy, cookies/storage,
 data/javascript/custom/external scheme policy, malformed/late/duplicate/
 oversized renderer messages, renderer crash/resource/restart containment, and
 conformance/fuzz corpus accounting.

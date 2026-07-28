@@ -123,3 +123,9 @@ when the overall, input-receipt, semantic, text, replay-rejection, frame-marker,
 and frame-correlation statuses pass; the origin is `screen`; event and WM target
 IDs are positive; the semantic target is exactly `host-proof`; and callback and
 mutation counts are exactly one. A partial three-field receipt no longer passes.
+
+Before capture, the same admitted artifact and self-hosted runner must pass all
+thirteen focused browser scenarios: HTML/CSS, animation, controls,
+default-cancellation, Reload/Home, page-link, Favorite, stopped navigation,
+unsupported document content, Node/native denial, sandbox, scheme denial, and
+renderer lifecycle.

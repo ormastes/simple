@@ -68,9 +68,9 @@ text. Focus, key, before-input, input, and key-up handlers each publish visible
 DOM state; the committed value must be `Ada`. The input handler also activates
 a CSS attribute selector, so the final rendered control must be blue.
 
-This proves one hosted text-input flow and its rendered state. Default-action
-cancellation, form submission, other control types, and installed-browser
-event capture remain explicit fail-closed work.
+This proves one hosted text-input flow and its rendered state. Form submission,
+other control types, and installed-browser event capture remain explicit
+fail-closed work; default-action cancellation is covered below.
 The canonical live-window wrapper executes this focused scenario with its
 admitted self-hosted runner before live-window capture.
 
@@ -124,5 +124,18 @@ matching pointer press/release. The canceled button activation must not submit
 the form or enqueue navigation, and the body and pixel buffer must remain
 unchanged and red. This uses no alternate controller or network fixture.
 The canonical live-window wrapper executes the focused Reload/Home, page-link,
-Favorite, default-cancellation, and rejected-navigation scenarios with its
-admitted self-hosted runner before live-window capture.
+Favorite, default-cancellation, rejected-navigation, and unsupported-content
+scenarios with its admitted self-hosted runner before live-window capture.
+
+## Unsupported document content evidence
+
+The unsupported-content scenario starts from a rendered red HTML document,
+then commits successful network responses whose declared document types are
+`image/png` and a malformed empty MIME value. Both responses contain HTML-like
+text that would visibly replace the page if MIME policy were bypassed.
+
+The browser must report the unsupported type, finish both rejected loads
+without pending work, and preserve the original body and red pixel buffer. A
+missing `Content-Type` remains compatible with existing local fixtures, while
+an explicit type is accepted as a document only when its normalized MIME is
+`text/html`.

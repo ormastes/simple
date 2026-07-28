@@ -867,6 +867,7 @@ impl BrowserSession:
 
         self._persist_storage_for_url(previous_document_url)
         self._activate_storage_for_url(url)
+        var native_globals_diagnostic = ""
         if self.runtime_enabled and script_blocks.len() > 0:
             val cookie_text = document_cookie_text_for_url(self.cookies, url)
             var state = BrowserRuntimeState.create(
@@ -878,6 +879,17 @@ impl BrowserSession:
                 own_text(cookie_text)
             )
             state.runtime.interpreter.timer_current_time_ms = self.monotonic_time_ms
+            var runtime = state.runtime
+            match runtime.eval(
+                "typeof require + ':' + typeof process + ':' + typeof Buffer"
+            ):
+                Ok(JsValue.String(value)):
+                    native_globals_diagnostic = "browser native globals: {value}"
+                Ok(_):
+                    native_globals_diagnostic = "browser native globals: invalid-result"
+                Err(error):
+                    native_globals_diagnostic = "browser native globals check failed: {error.message}"
+            state.runtime = runtime
             self.runtime_state = Some(state)
             if url.starts_with("https://guest.runtime/"):
                 print "[BRS] runtime state created"
@@ -902,6 +914,8 @@ impl BrowserSession:
             script_blocks: script_blocks,
             style_sources: style_sources
         )
+        if native_globals_diagnostic != "":
+            load.warnings.push(native_globals_diagnostic)
         if script_blocks.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
             load.warnings.push(
                 "script resource limit reached; additional scripts ignored"

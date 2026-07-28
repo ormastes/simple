@@ -1,6 +1,7 @@
 """Bounded text framing for the isolated browser renderer process."""
 
 use std.common.base_encoding.utilities.{bytes_to_text, text_to_bytes}
+use std.common.base_encoding.base64.{base64_encode, base64_decode}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     simpleos_host_gpu_draw_ir_decode, simpleos_host_gpu_draw_ir_encode
 }
@@ -22,6 +23,7 @@ val BROWSER_RENDERER_MAX_TEXT_BYTES: i64 = 4096
 val BROWSER_RENDERER_MAX_URL_BYTES: i64 = 8192
 pub val BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES: i64 = 65536
 pub val BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES: i64 = 524288
+pub val BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES: i64 = 4096
 val BROWSER_RENDERER_MAX_STYLE_PROPS: i64 = 160
 val BROWSER_RENDERER_MAX_STYLE_KEY_BYTES: i64 = 128
 val BROWSER_RENDERER_MAX_STYLE_VALUE_BYTES: i64 = 65536
@@ -85,6 +87,7 @@ pub struct BrowserRendererFrameDecodeResult:
     cpu_composited_sha256: text
     solid_material_count: i32
     solid_material_sha256: text
+    diagnostics: text
 
 pub struct BrowserRendererActionDecodeResult:
     ok: bool
@@ -1032,7 +1035,8 @@ fn _browser_renderer_frame_reject(reason: text) -> BrowserRendererFrameDecodeRes
         cpu_composited_count: 0,
         cpu_composited_sha256: "",
         solid_material_count: 0,
-        solid_material_sha256: ""
+        solid_material_sha256: "",
+        diagnostics: ""
     )
 
 fn _browser_renderer_advance_list_valid(value: text) -> bool:
@@ -1198,6 +1202,45 @@ pub fn browser_renderer_frame_encode(
         composition, generation, request_id, request_id, -1, 0, "", 0, ""
     )
 
+pub fn browser_renderer_frame_encode_with_diagnostics(
+    composition: DrawIrComposition,
+    generation: i64,
+    request_id: i64,
+    reply_to_request_id: i64,
+    next_animation_ms: i64,
+    cpu_composited_count: i32,
+    cpu_composited_sha256: text,
+    solid_material_count: i32,
+    solid_material_sha256: text,
+    diagnostics: text
+) -> BrowserRendererEncodeResult:
+    if diagnostics.len() > BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES:
+        return _browser_renderer_reject_encode("invalid-frame-diagnostics")
+    if (reply_to_request_id <= 0 or next_animation_ms < -1 or
+        not _browser_renderer_material_digest_valid(
+            cpu_composited_count.to_i64(), cpu_composited_sha256) or
+        not _browser_renderer_material_digest_valid(
+            solid_material_count.to_i64(), solid_material_sha256)):
+        return _browser_renderer_reject_encode("invalid-material-witness")
+    val encoded = simpleos_host_gpu_draw_ir_encode(
+        _browser_renderer_normalize_draw_ir(composition),
+        BROWSER_RENDERER_MAX_PAYLOAD_BYTES - BROWSER_RENDERER_MAX_HEADER_BYTES -
+            BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES * 2 - 1,
+        BROWSER_RENDERER_MAX_COMMANDS
+    )
+    if not encoded.ok:
+        return _browser_renderer_reject_encode("draw-ir-" + encoded.reason)
+    val cpu_digest = if cpu_composited_sha256 == "": "-" else: cpu_composited_sha256
+    val solid_digest = if solid_material_sha256 == "": "-" else: solid_material_sha256
+    val diagnostic_payload = base64_encode(diagnostics)
+    val payload = (
+        "SBRF3\t{reply_to_request_id}\t{cpu_composited_count}\t{cpu_digest}" +
+        "\t{solid_material_count}\t{solid_digest}\t{next_animation_ms}" +
+        "\t{diagnostic_payload.len()}\n" + diagnostic_payload + "\n" +
+        bytes_to_text(encoded.bytes)
+    )
+    browser_renderer_message_encode("frame", generation, request_id, payload)
+
 pub fn browser_renderer_frame_reply_to_request_id(
     message: BrowserRendererMessage
 ) -> i64:
@@ -1209,7 +1252,8 @@ pub fn browser_renderer_frame_reply_to_request_id(
     val fields = _browser_renderer_byte_slice(
         message.payload, 0, header_end
     ).split("\t")
-    if fields.len() != 7 or fields[0] != "SBRF2":
+    if not ((fields.len() == 7 and fields[0] == "SBRF2") or
+        (fields.len() == 8 and fields[0] == "SBRF3")):
         return -1
     val reply_to_request_id = fields[1].to_i64() ?? -1
     if (reply_to_request_id <= 0 or
@@ -1226,7 +1270,9 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
     val fields = _browser_renderer_byte_slice(
         message.payload, 0, witness_end
     ).split("\t")
-    if fields.len() != 7 or fields[0] != "SBRF2":
+    val legacy_frame = fields.len() == 7 and fields[0] == "SBRF2"
+    val diagnostic_frame = fields.len() == 8 and fields[0] == "SBRF3"
+    if not legacy_frame and not diagnostic_frame:
         return _browser_renderer_frame_reject("malformed-material-witness")
     val reply_to_request_id = _browser_renderer_positive_i64(fields[1])
     val cpu_count = fields[2].to_i64() ?? -1
@@ -1243,9 +1289,29 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
         not _browser_renderer_material_digest_valid(
             solid_count, solid_digest)):
         return _browser_renderer_frame_reject("invalid-material-witness")
+    var diagnostics = ""
+    var draw_ir_start = witness_end + 1
+    if diagnostic_frame:
+        val diagnostic_len = fields[7].to_i64() ?? -1
+        if (diagnostic_len < 0 or diagnostic_len > 8192 or
+            str(diagnostic_len) != fields[7] or
+            draw_ir_start >= message.payload.len() or
+            diagnostic_len >= message.payload.len() - draw_ir_start):
+            return _browser_renderer_frame_reject("malformed-frame-diagnostics")
+        val diagnostic_end = draw_ir_start + diagnostic_len
+        if message.payload.byte_at(diagnostic_end) != 10:
+            return _browser_renderer_frame_reject("malformed-frame-diagnostics")
+        val encoded_diagnostics = _browser_renderer_byte_slice(
+            message.payload, draw_ir_start, diagnostic_end
+        )
+        diagnostics = base64_decode(encoded_diagnostics)
+        if (diagnostics.len() > BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES or
+            base64_encode(diagnostics) != encoded_diagnostics):
+            return _browser_renderer_frame_reject("invalid-frame-diagnostics")
+        draw_ir_start = diagnostic_end + 1
     val decoded = simpleos_host_gpu_draw_ir_decode(
         text_to_bytes(_browser_renderer_byte_slice(
-            message.payload, witness_end + 1, message.payload.len()
+            message.payload, draw_ir_start, message.payload.len()
         )),
         BROWSER_RENDERER_MAX_PAYLOAD_BYTES,
         BROWSER_RENDERER_MAX_COMMANDS
@@ -1264,5 +1330,6 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
         cpu_composited_count: cpu_count.to_i32(),
         cpu_composited_sha256: cpu_digest,
         solid_material_count: solid_count.to_i32(),
-        solid_material_sha256: solid_digest
+        solid_material_sha256: solid_digest,
+        diagnostics: diagnostics
     )
