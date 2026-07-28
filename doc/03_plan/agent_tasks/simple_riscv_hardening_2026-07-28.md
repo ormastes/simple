@@ -133,10 +133,18 @@ gate that survives one injection is not proven; the mutation must be in scope.
 
 - **R4 (HIR facade sweep) — critical path.** Three gates remain blocked on the
   self-hosted deploy, exactly as §1.1 predicted.
-- `check-riscv-fpga-sidecar-contract.shs` is **stale beyond the line R2 fixed**:
-  ~line 124 still demands `"gate": "rvfi_port_manifest", "status": "rvfi-ready"`
-  while the generator has emitted `placeholder-rejected` / `contract-not-ready`
-  since the truth campaign. **It will still fail after R4 lands the deploy.**
+- ~~`check-riscv-fpga-sidecar-contract.shs` stale expectations~~ **FIXED
+  `f3c351ff0bc`**: five stale asserts replaced with the generator's honest
+  values (cross-checked against `riscv_fpga_linux.spl:890-906` AND a real
+  generated bundle), each paired with a `check_absent` of the old claim so BOTH
+  a stale-old-claim and a fabricated `rvfi-ready`/PASS fail. Injection-proven
+  both directions under a self-hosted shim (stale → exit 1 naming the mismatch;
+  honest → `STATUS: PASS`). The seed-identity guard is untouched and still
+  fires first — the full gate stays red until the deploy, correctly. Its
+  `--self-test` also fails closed pre-deploy (pre-existing, reproduced at HEAD):
+  the deployed `bin/release/simple` wrapper refuses as "non-production runtime",
+  so the not-a-seed probe cannot pass until a production self-hosted binary
+  exists. That belongs to the deploy, not this script.
 - Pre-existing, unrelated: `soc_top_64` fails `bin/simple compile`
   (`undefined identifier: lsu64_load`, present at HEAD, de-JITs
   `core64_combinational` to the interpreter on every run);
