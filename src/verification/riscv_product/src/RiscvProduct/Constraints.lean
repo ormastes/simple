@@ -10,19 +10,21 @@ generated base model and states the stronger product/resource constraints.
 namespace RiscvProduct
 
 theorem rv32_profile_expected :
-    (profile Lane.rv32).abi = Abi.ilp32d ∧
+    (profile Lane.rv32).abi = Abi.ilp32 ∧
     (profile Lane.rv32).mmu = Mmu.sv32 ∧
     (profile Lane.rv32).maxLuts = 25000 ∧
     (profile Lane.rv32).targetMhz = 50 ∧
-    (profile Lane.rv32).formalGate = FormalGate.rvfiSby := by
+    (profile Lane.rv32).formalFlow = FormalFlow.rvfiSby ∧
+    (profile Lane.rv32).formalGate = FormalGate.placeholderRejected := by
   simp [profile]
 
 theorem rv64_profile_expected :
-    (profile Lane.rv64).abi = Abi.lp64d ∧
+    (profile Lane.rv64).abi = Abi.lp64 ∧
     (profile Lane.rv64).mmu = Mmu.sv39 ∧
     (profile Lane.rv64).maxLuts = 45000 ∧
     (profile Lane.rv64).targetMhz = 50 ∧
-    (profile Lane.rv64).formalGate = FormalGate.rvfiSby := by
+    (profile Lane.rv64).formalFlow = FormalFlow.rvfiSby ∧
+    (profile Lane.rv64).formalGate = FormalGate.placeholderRejected := by
   simp [profile]
 
 theorem profile_budgets_positive (l : Lane) :
@@ -56,9 +58,32 @@ theorem profiles_are_dual_arch :
     (profile Lane.rv32).lane ≠ (profile Lane.rv64).lane := by
   simp [profile]
 
-theorem all_profiles_use_rvfi_sby (l : Lane) :
-    (profile l).formalGate = FormalGate.rvfiSby := by
+/-- Preserved intent: RVFI+SBY remains the designated formal track for every lane.
+This is the fact the tool gates cite as `formal_flow = "rvfi+sby"` in the BYL. -/
+theorem all_profiles_use_rvfi_sby_flow (l : Lane) :
+    (profile l).formalFlow = FormalFlow.rvfiSby := by
   cases l <;> simp [profile]
+
+/-- Honesty constraint: no lane currently claims a passing formal gate. The
+generated cores are placeholders with no semantic RVFI, so the RVFI+SBY flow
+rejects them. -/
+theorem no_profile_claims_a_passing_formal_gate (l : Lane) :
+    (profile l).formalGate ≠ FormalGate.rvfiSby := by
+  cases l <;> simp [profile]
+
+/-- Honesty constraint: a lane that is not production-ready must not claim its
+formal gate passed. This is the invariant that keeps a future regeneration from
+re-introducing a fabricated `rvfi+sby` gate result on unready RTL. -/
+theorem unready_lanes_never_claim_a_passing_gate (l : Lane) :
+    (profile l).readiness = Readiness.contractNotReady →
+      (profile l).formalGate = FormalGate.placeholderRejected := by
+  cases l <;> simp [profile]
+
+/-- Honesty constraint: the generated cores have no F/D unit, so no lane may
+declare a hard-float ABI. -/
+theorem no_profile_claims_hard_float (l : Lane) :
+    (profile l).abi.isHardFloat = false := by
+  cases l <;> simp [profile, Abi.isHardFloat]
 
 theorem next_lane_alternates (l : Lane) :
     nextLane l ≠ l := by
