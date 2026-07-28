@@ -153,6 +153,11 @@ The existing HTML tree builder assigns monotonically increasing,
 document-local node IDs. IDs remain stable for the committed document and are
 invalid after navigation or structural replacement.
 
+Both canonical DOM parsing and direct render parsing admit at most 65,536
+document nodes. BrowserSession detects truncation before replacing the active
+document and returns `resource_limit`; direct rendering bounds its arena and
+returns the safe parsed prefix.
+
 `common.web.event_types.DomEvent` is the event type. BrowserSession adds:
 
 ```text

@@ -17,6 +17,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style}
 
 val HTML_MAX_TREE_DEPTH: i32 = 512
+val HTML_MAX_NODES: i64 = 65536
 
 # Preallocated owner keeps stack mutation O(1) without aliased array parameters.
 class _TreeStack:
@@ -174,6 +175,23 @@ fn _apply_attrs(node: BeDomNode, attrs: [HtmlAttr]) -> BeDomNode:
         n.set_attr(attr.name, attr.value)
     n
 
+fn _token_would_create_node(
+    tok: HtmlToken, in_body: bool, in_script: bool,
+    skipped_raw_text_tag: text
+) -> bool:
+    if tok.token_kind == HtmlTokenKind.StartTag:
+        val tag = tok.tag_name
+        if tag == "html" or tag == "head" or tag == "body":
+            return false
+        return tag != "style" and tag != "noscript"
+    if tok.token_kind == HtmlTokenKind.EndTag:
+        return tok.tag_name == "script" and in_script
+    if tok.token_kind == HtmlTokenKind.Character:
+        if in_script or skipped_raw_text_tag != "":
+            return false
+        return in_body or tok.data.trim().len() > 0
+    false
+
 pub class TreeBuilderResult:
     """Result from html_tree_builder_build_with_scripts.
 
@@ -181,10 +199,12 @@ pub class TreeBuilderResult:
         doc       - the built DOM tree (#document node)
         scripts   - collected <script> bodies in document order
         src_paths - collected <script src="..."> paths in document order
+        truncated - true when the requested or production node cap was reached
     """
     doc: BeDomNode
     scripts: [text]
     src_paths: [text]
+    truncated: bool
 
 pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
     """Build a BeDomNode tree. Returns a #document node with an html child."""
@@ -192,11 +212,22 @@ pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
     result.doc
 
 pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResult:
+    html_tree_builder_build_with_scripts_limit(html_text, HTML_MAX_NODES)
+
+pub fn html_tree_builder_build_with_scripts_limit(
+    html_text: text, requested_node_limit: i64
+) -> TreeBuilderResult:
     """Build a BeDomNode tree and collect <script> content.
 
     Returns a TreeBuilderResult with the DOM tree and any inline script
     bodies or external script src paths found during parsing.
     """
+    val node_limit = if requested_node_limit < 4:
+        4
+    elif requested_node_limit > HTML_MAX_NODES:
+        HTML_MAX_NODES
+    else:
+        requested_node_limit
     val tokenizer = html_tokenizer_new(html_text)
     val tokens = html_tokenizer_tokenize(tokenizer)
     val ntok = tokens.len()
@@ -228,10 +259,17 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
     var script_content = ""
     var script_src = ""
     var skipped_raw_text_tag = ""
+    var truncated = false
 
     var ti = 0
     while ti < ntok:
         val tok = tokens[ti]
+        if (next_node_id > node_limit and _token_would_create_node(
+            tok, in_body, in_script, skipped_raw_text_tag
+        )):
+            truncated = true
+            ti = ntok
+            continue
         ti = ti + 1
 
         if tok.token_kind == HtmlTokenKind.Eof:
@@ -386,4 +424,7 @@ pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResul
         stack.close_top()
 
     val final_doc = stack.root_or(doc_node)
-    TreeBuilderResult(doc: final_doc, scripts: script_bodies, src_paths: script_src_paths)
+    TreeBuilderResult(
+        doc: final_doc, scripts: script_bodies,
+        src_paths: script_src_paths, truncated: truncated
+    )

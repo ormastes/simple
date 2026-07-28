@@ -25,7 +25,9 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_default_submitter_id, be_dom_form_allows_direct_implicit_submit,
     be_dom_input_blocks_implicit_submission, be_dom_next_focus_id
 }
-use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build, html_tree_builder_build_with_scripts
+}
 use std.gc_async_mut.gpu.browser_engine.script.script_host.{
     script_host_apply_action_to_id
 }
@@ -978,8 +980,45 @@ impl BrowserSession:
             self.stop_loading()
             return Err("document exceeds 50 MiB resource limit")
         val previous_document_url = self.document_url
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] load page source start"
+        val script_blocks = extract_script_blocks(html)
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] script blocks={script_blocks.len()}"
+        val has_runtime_scripts = self.runtime_enabled and script_blocks.len() > 0
+        val cleaned_html = if has_runtime_scripts:
+            html
+        else:
+            strip_script_blocks(html)
+        val template_visible_html = strip_template_blocks(cleaned_html)
+        val visible_html = if self.runtime_enabled:
+            strip_noscript_blocks(template_visible_html)
+        else:
+            template_visible_html
+        val visible_parse = html_tree_builder_build_with_scripts(visible_html)
+        if visible_parse.truncated:
+            self.stop_loading()
+            return Err("resource_limit: DOM node limit exceeded (65536)")
+        val initial_title = own_text(extract_title_text(html))
+        val initial_body_html = own_text(extract_body_inner_html(visible_html))
+        val body_html = if initial_body_html.len() > 0:
+            initial_body_html
+        else:
+            own_text(cleaned_html)
+        val visible_bodies = be_dom_find_by_tag(visible_parse.doc, "body")
+        val final_parse = if visible_bodies.len() > 0:
+            html_tree_builder_build_with_scripts(
+                "<html>" + be_dom_serialize_html(visible_bodies[0]) + "</html>"
+            )
+        else:
+            html_tree_builder_build_with_scripts(
+                "<html><body>" + body_html + "</body></html>"
+            )
+        if final_parse.truncated:
+            self.stop_loading()
+            return Err("resource_limit: DOM node limit exceeded (65536)")
         # Atomic document replacement: the previous page survives until all
-        # response-level validation above has succeeded.
+        # response and parser validation above has succeeded.
         self.runtime_state = nil
         self.active_load = nil
         self.pending_requests = []
@@ -996,28 +1035,6 @@ impl BrowserSession:
         self.text_selection_focus_byte = 0
         self.content_security_policy = self.pending_content_security_policy
         self.pending_content_security_policy = ""
-        if url.starts_with("https://guest.runtime/"):
-            print "[BRS] load page source start"
-        val script_blocks = extract_script_blocks(html)
-        if url.starts_with("https://guest.runtime/"):
-            print "[BRS] script blocks={script_blocks.len()}"
-        val has_runtime_scripts = self.runtime_enabled and script_blocks.len() > 0
-        val cleaned_html = if has_runtime_scripts:
-            html
-        else:
-            strip_script_blocks(html)
-        val template_visible_html = strip_template_blocks(cleaned_html)
-        val visible_html = if self.runtime_enabled:
-            strip_noscript_blocks(template_visible_html)
-        else:
-            template_visible_html
-        val initial_title = own_text(extract_title_text(html))
-        val initial_body_html = own_text(extract_body_inner_html(visible_html))
-        val body_html = if initial_body_html.len() > 0:
-            initial_body_html
-        else:
-            own_text(cleaned_html)
-
         val style_sources = extract_stylesheet_sources(html)
         if url.starts_with("https://guest.runtime/"):
             print "[BRS] style sources={style_sources.len()}"
@@ -1059,16 +1076,7 @@ impl BrowserSession:
         self.current_body_html = body_html
         self.current_style_html = ""
         self.source_html = own_text(html)
-        val visible_dom = html_tree_builder_build(visible_html)
-        val visible_bodies = be_dom_find_by_tag(visible_dom, "body")
-        self.current_dom = if visible_bodies.len() > 0:
-            html_tree_builder_build(
-                "<html>" + be_dom_serialize_html(visible_bodies[0]) + "</html>"
-            )
-        else:
-            html_tree_builder_build(
-                "<html><body>" + body_html + "</body></html>"
-            )
+        self.current_dom = final_parse.doc
         if val Some(state) = self.runtime_state:
             state.bind_dom(self.current_dom)
             self.runtime_state = Some(state)

@@ -262,14 +262,16 @@ All defaults are compile-time constants with bounded production overrides:
 - IPC envelope: reuse existing 1 MiB ceiling;
 - URL/header/body/decoded resource;
 - redirects/connections;
-- DOM nodes/depth/attributes/text;
+- DOM nodes: 65,536 per parsed document; depth/attributes/text are also bounded;
 - script source/jobs/microtasks/timers;
 - frame callbacks and work time;
 - Draw IR commands/strings/images/pixels;
 - renderer RSS/CPU/wall time;
 - renderer restart rate.
 
-Limit failures are typed and do not allocate the rejected payload.
+BrowserSession node-limit failures return `resource_limit` before document
+replacement. Direct rendering allocates at most the fixed node arena and
+renders the admitted prefix.
 
 ## Errors
 

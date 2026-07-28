@@ -1327,3 +1327,7 @@ implementation in progress / target evidence blocked
   focused browser-session regression advances directly to 33 ms and requires
   the callback to observe 33, preventing delayed-frame animation lag. Timer
   handle refresh preserves the frame kind and does not retain a stale arg.
+- HTML parsing now caps both canonical BeDomNode creation and the independent
+  direct-render HNode arena at 65,536 nodes. BrowserSession parses before
+  clearing the active document and returns a stable `resource_limit` error on
+  truncation; direct rendering safely paints only the admitted prefix.

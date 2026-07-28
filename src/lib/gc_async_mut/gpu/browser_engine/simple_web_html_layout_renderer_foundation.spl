@@ -72,6 +72,7 @@ fn simple_web_backdrop_admission(backdrop: text) -> SimpleWebBackdropAdmission:
 # from this render-budget mechanism; do not paper over it by raising this
 # default.
 val WEB_RENDER_BUDGET_MS: i64 = 10000
+val SIMPLE_WEB_MAX_HTML_NODES: i32 = 65536
 
 # Optional override for WEB_RENDER_BUDGET_MS, read from the environment at the
 # start of every render so long/headless probes can raise the budget without
@@ -725,6 +726,15 @@ fn text_list_prefix(values: [text], count: i32) -> [text]:
     out
 
 fn parse_html(html: text) -> [HNode]:
+    _parse_html_with_node_limit(html, SIMPLE_WEB_MAX_HTML_NODES)
+
+fn _parse_html_with_node_limit(html: text, requested_node_limit: i32) -> [HNode]:
+    val node_limit = if requested_node_limit < 1:
+        1
+    elif requested_node_limit > SIMPLE_WEB_MAX_HTML_NODES:
+        SIMPLE_WEB_MAX_HTML_NODES
+    else:
+        requested_node_limit
     # Scan the document into a flat event list, two parallel LOCAL arrays:
     #   kind "g" -- tag: payload is the tag's inner text
     #   kind "x" -- text run between tags (raw, entities still encoded)
@@ -868,15 +878,22 @@ fn parse_html(html: text) -> [HNode]:
     # equality routes a boolean through the runtime call boundary the
     # freestanding build mis-marshals at depth (see text_matches_at).
     var node_count = 1
+    var node_limit_hit = false
     var e = 0
-    while e < ev_count:
+    while e < ev_count and not node_limit_hit:
         if kinds[e].char_code_at(0) == 103:
             if _html_tag_event_makes_node(payloads[e]):
-                node_count = node_count + 1
+                if node_count < node_limit:
+                    node_count = node_count + 1
+                else:
+                    node_limit_hit = true
         else:
             val ctxt = decode_html_entities(payloads[e])
             if ctxt.trim().len() > 0 or (kinds[e].char_code_at(0) == 120 and ctxt == " "):
-                node_count = node_count + 1
+                if node_count < node_limit:
+                    node_count = node_count + 1
+                else:
+                    node_limit_hit = true
         e = e + 1
     if node_count <= 1 and ev_count > 0:
         # Events arrived but none made a node: dump each event's kind code,
@@ -895,7 +912,7 @@ fn parse_html(html: text) -> [HNode]:
     var pstack: [i64] = [0; node_count]
     var stack_len = 1
     e = 0
-    while e < ev_count:
+    while e < ev_count and node_i < node_count:
         val kind_code = kinds[e].char_code_at(0)
         e = e + 1
         if kind_code != 103:
@@ -945,6 +962,11 @@ fn parse_html(html: text) -> [HNode]:
                 pstack[stack_len] = current_index
                 stack_len = stack_len + 1
     nodes
+
+pub fn simple_web_layout_debug_capped_node_count(
+    html: text, requested_node_limit: i32
+) -> i32:
+    _parse_html_with_node_limit(html, requested_node_limit).len() as i32
 
 pub fn simple_web_layout_debug_attr_by_id(html: text, id: text, attr: text) -> text:
     val nodes = parse_html(html)
