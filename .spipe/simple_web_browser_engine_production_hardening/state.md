@@ -1352,3 +1352,12 @@ implementation in progress / target evidence blocked
   instead of retaining attacker-sized diagnostics until load finalization.
 - Cached Back/Forward commits now reset the renderer-owned scroll position
   before painting the restored document; rejected navigation and Stop do not.
+- Browser JavaScript timer cancellation, handle retirement, and dispatch now
+  mutate the bounded pending-task arrays in place. The previous hot path
+  allocated replacement arrays for every clear, refresh, and fired callback.
+  Dispatch also stops scanning after the selected next-tick or due task while
+  preserving interval self-cancellation and the 1,000-call drain yield.
+- Before repaint, the hosted renderer releases the previous frame's full hit
+  graph after deriving its overlay and caret state, then installs the new hit
+  graph after rendering. Animated and scrolled documents no longer retain two
+  O(document) layout graphs across the peak allocation window.

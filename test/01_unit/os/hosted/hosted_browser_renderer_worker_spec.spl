@@ -20,6 +20,8 @@ use os.hosted.hosted_browser_renderer_worker.{
     hosted_browser_renderer_handle_request,
     hosted_browser_renderer_worker_main
 }
+
+extern fn rt_file_read_text(path: text) -> text
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_id}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_hit_test_index
@@ -54,6 +56,15 @@ fn _worker_command_index(
     -1
 
 describe "hosted browser renderer worker":
+
+    it "releases the previous hit graph before repaint allocation":
+        val source = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_worker.spl"
+        ) ?? ""
+        val release_at = source.find("self.last_hit_index = nil")
+        val repaint_at = source.find("val frame = _worker_frame(")
+        expect(release_at).to_be_greater_than(-1)
+        expect(repaint_at).to_be_greater_than(release_at)
     it "rejects hidden worker markers outside the exact spawn shape":
         expect(hosted_browser_renderer_worker_main([
             "hosted-entry", "extra", BROWSER_RENDERER_WORKER_ARG,
@@ -163,6 +174,7 @@ describe "hosted browser renderer worker":
             kind: "init", generation: 7, request_id: 2,
             payload: "<p>bounded diagnostics</p>"
         )).ok).to_be(true)
+        expect(worker.last_hit_index != nil).to_be(true)
         var index = 0
         while index < 256:
             worker.browser._append_warning(
@@ -172,6 +184,7 @@ describe "hosted browser renderer worker":
         val advanced = worker.handle(BrowserRendererMessage(
             kind: "advance", generation: 7, request_id: 3, payload: "16"
         ))
+        expect(worker.last_hit_index != nil).to_be(true)
         val decoded = browser_renderer_decoder_feed(
             browser_renderer_decoder_new(7), advanced.wire
         )

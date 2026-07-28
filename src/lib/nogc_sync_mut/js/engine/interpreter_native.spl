@@ -7927,26 +7927,22 @@ impl JsInterpreter:
     me _cancel_timer_id(timer_id: i64):
         if timer_id < 0:
             return
-        var rest: [PendingTimerTask] = []
         var i = 0
         while i < self.pending_timer_tasks.len():
             val task = self.pending_timer_tasks[i]
-            if task.id != timer_id:
-                rest.push(task)
+            if task.id == timer_id:
+                self.pending_timer_tasks.remove(i)
+                break
             i = i + 1
-        self.pending_timer_tasks = rest
 
     me _retire_timer_handle_lookup(timer_id: i64):
-        var retained_ids: [i64] = []
-        var retained_object_ids: [i64] = []
         var i = 0
         while i < self.timer_handle_ids.len() and i < self.timer_handle_object_ids.len():
-            if self.timer_handle_ids[i] != timer_id:
-                retained_ids.push(self.timer_handle_ids[i])
-                retained_object_ids.push(self.timer_handle_object_ids[i])
+            if self.timer_handle_ids[i] == timer_id:
+                self.timer_handle_ids.remove(i)
+                self.timer_handle_object_ids.remove(i)
+                break
             i = i + 1
-        self.timer_handle_ids = retained_ids
-        self.timer_handle_object_ids = retained_object_ids
 
     me _native_set_timer(arg_vals: [JsValue], is_interval: bool, timer_type: text) -> JsValue:
         if self.pending_timer_tasks.len() >= JS_TIMER_TASK_LIMIT:
@@ -8098,23 +8094,24 @@ impl JsInterpreter:
         if timer_id < 0:
             return this_val
         var refreshed = false
-        var rest: [PendingTimerTask] = []
         var i = 0
         while i < self.pending_timer_tasks.len():
             val task = self.pending_timer_tasks[i]
             if task.id == timer_id:
                 if task.is_animation_frame:
-                    rest.push(PendingTimerTask.create_animation_frame(
+                    self.pending_timer_tasks[i] = PendingTimerTask.create_animation_frame(
                         task.id, task.callback_id, task.delay_ms,
                         self.timer_current_time_ms
-                    ))
+                    )
                 else:
-                    rest.push(PendingTimerTask.create_with_args(task.id, task.callback_id, task.callback_args, task.delay_ms, self.timer_current_time_ms, task.is_interval))
+                    self.pending_timer_tasks[i] = PendingTimerTask.create_with_args(
+                        task.id, task.callback_id, task.callback_args,
+                        task.delay_ms, self.timer_current_time_ms,
+                        task.is_interval
+                    )
                 refreshed = true
-            else:
-                rest.push(task)
+                break
             i = i + 1
-        self.pending_timer_tasks = rest
         val handle_id = _get_obj_id(this_val)
         if handle_id >= 0:
             if not refreshed and to_boolean(self.get_object_property(handle_id, "completed")) and not to_boolean(self.get_object_property(handle_id, "closed")):

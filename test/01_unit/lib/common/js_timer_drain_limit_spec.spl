@@ -4,7 +4,29 @@ use std.js.engine.runtime.{JsRuntime}
 use std.js.engine.js_error.{Logger, LogLevel}
 use std.js.types.js_types.{JsValue}
 
+extern fn rt_file_read_text(path: text) -> text
+
 describe "JavaScript timer drain limit":
+
+    it "mutates the active timer queues without replacement arrays":
+        val async_source = rt_file_read_text(
+            "src/lib/nogc_sync_mut/js/engine/interpreter_async.spl"
+        ) ?? ""
+        val native_source = rt_file_read_text(
+            "src/lib/nogc_sync_mut/js/engine/interpreter_native.spl"
+        ) ?? ""
+        expect(async_source).to_contain(
+            "self.pending_timer_tasks.remove(selected_index)"
+        )
+        expect(native_source).to_contain(
+            "self.pending_timer_tasks.remove(i)"
+        )
+        expect(async_source.contains(
+            "var rest: [PendingTimerTask]"
+        )).to_be(false)
+        expect(native_source.contains(
+            "var rest: [PendingTimerTask]"
+        )).to_be(false)
 
     it "does not allocate Node timer handles in browser mode":
         var runtime = JsRuntime.new_browser(
@@ -65,6 +87,19 @@ describe "JavaScript timer drain limit":
                 fail("Expected final self-canceled interval metadata")
         expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
         expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
+
+    it "keeps an interval in its original same-deadline queue slot":
+        var runtime = JsRuntime.new(Logger.new("timer-order", LogLevel.Error))
+        expect(runtime.eval(
+            "var order = ''; var interval = setInterval(function() { order = order + 'A'; if (order === 'AA') { clearInterval(interval); } }, 10); setTimeout(function() { order = order + 'B'; }, 20);"
+        ).is_ok()).to_equal(true)
+        expect(runtime.drain_due_timers(10)).to_equal(1)
+        expect(runtime.drain_due_timers(20)).to_equal(2)
+        match runtime.eval("order"):
+            Ok(JsValue.String(order)):
+                expect(order).to_equal("AAB")
+            _:
+                fail("Expected interval ordering to remain stable")
 
     it "bounds pending timer tasks per document":
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
