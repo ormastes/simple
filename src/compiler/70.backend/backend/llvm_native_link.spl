@@ -1823,6 +1823,42 @@ fn simpleos_undefined_rt_symbols(objects: [text]) -> [text]:
                     names.push(part)
     names
 
+fn simpleos_undefined_simple_module_symbols(objects: [text]) -> [text]:
+    """Undefined pure-Simple (`lib__*` / `os__*`) references across the closure.
+
+    The OTHER half of the fabrication fail-open. The `rt_*` channel was built
+    after a nil-returning `rt_array_copy` shredded every array copy in the
+    guest, but the stub generator fabricates a weak nil body for ANY name left
+    undefined in the link set -- and `lib__*` / `os__*` were never filtered, so
+    a dropped pure-Simple body has been silently replaced by
+    `xor %eax,%eax; ret` since this guard was written.
+
+    Proven instance (2026-07-28): the WM kernel bound
+    `lib__gc_async_mut__gpu__browser_engine__simple_web_html_layout_renderer_layout__skip_wrap_spaces`
+    to an 8-byte nil stub from 3 call sites inside
+    `..._style__parse_font_shorthand_family`, because a cached object compiled
+    BEFORE that function moved to `..._foundation.spl` was reused and still
+    referenced the pre-move mangled name. The real body was in the same ELF
+    under the foundation prefix; nothing failed the link.
+
+    Uses its own `nm -u` pass for the same reason
+    `simpleos_undefined_rt_symbols` does: `extract_symbols_nm` drops undefined
+    entries."""
+    var seen: {text: bool} = {}
+    var names: [text] = []
+    for obj in objects:
+        val (nm_out, _nm_err, nm_code) = process_run("nm", ["-u", obj])
+        if nm_code != 0:
+            continue
+        for line in nm_out.split("\n"):
+            for part in line.split(" "):
+                if not (part.starts_with("lib__") or part.starts_with("os__")):
+                    continue
+                if not seen.has(part):
+                    seen[part] = true
+                    names.push(part)
+    names
+
 fn simpleos_defined_symbols_any_binding(objects: [text]) -> [text]:
     """Every DEFINED symbol in `objects`, deduped -- weak definitions included.
 
@@ -2324,8 +2360,22 @@ fn simpleos_fabricated_baseline(entry_key: text) -> {text: bool}:
     shrink-only record of debt that must go away. Keeping them in separate
     files is what stops migration pressure from converting an audited allowlist
     into a rubber stamp."""
+    simpleos_baseline_entries("config/simpleos_fabricated_rt_baseline.sdn", entry_key)
+
+fn simpleos_simple_symbol_baseline(entry_key: text) -> {text: bool}:
+    """Shrink-only ratchet baseline for fabricated `lib__*` / `os__*` bodies.
+
+    Deliberately a SEPARATE file from the `rt_*` baseline: the two record
+    different debts (a missing freestanding C implementation vs. a pure-Simple
+    body that failed to reach the link), and mixing them lets migration
+    pressure on one quietly grow the other. Same shrink-only contract: a
+    missing file means an EMPTY baseline, so deleting it can never weaken the
+    gate."""
+    simpleos_baseline_entries("config/simpleos_fabricated_lib_baseline.sdn", entry_key)
+
+fn simpleos_baseline_entries(path: text, entry_key: text) -> {text: bool}:
+    """Read one `<entry> <symbol>` ratchet baseline file, filtered to `entry_key`."""
     var allowed: {text: bool} = {}
-    val path = "config/simpleos_fabricated_rt_baseline.sdn"
     if not file_exists(path):
         return allowed
     for raw in file_read(path).split("\n"):
@@ -2421,6 +2471,46 @@ fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [text], 
             continue
         counted[name] = true
         fabricated.push(name)
+
+    # Channel 3 -- fabricated PURE-SIMPLE bodies (`lib__*` / `os__*`).
+    #
+    # Channels 1 and 2 only ever looked at `rt_*`, so every Simple method and
+    # free function has been unprotected since this guard was written. The stub
+    # generator does not care about the prefix: any name still undefined when
+    # the link set is assembled gets an 8-byte weak `xor %eax,%eax; ret`. For a
+    # `lib__*` body that is not a missing backend, it is a DROPPED
+    # IMPLEMENTATION -- there is no such thing as an "optional" pure-Simple
+    # function, which is why this channel has no allowlist counterpart to
+    # `simpleos_rt_symbol_is_optional_backend`, only the shrink-only baseline.
+    #
+    # Detected by reference-vs-definition rather than by body: a name the
+    # closure references and NOTHING in the closure (or the real objects)
+    # defines is, by construction, exactly what the stub generator will
+    # fabricate. That makes this channel independent of which fabricator ran,
+    # and it costs one `nm -u` pass -- no second objdump sweep.
+    #
+    # Definitions are collected at ANY binding for the same reason channel 1
+    # does: weak linkage does NOT imply fabricated.
+    val simple_referenced = simpleos_undefined_simple_module_symbols(user_objects)
+    var simple_novel: [text] = []
+    if simple_referenced.len() > 0:
+        var simple_defined: {text: bool} = {}
+        for name in simpleos_defined_symbols_any_binding(user_objects):
+            simple_defined[name] = true
+        for name in simpleos_defined_symbols_any_binding(real_objects):
+            simple_defined[name] = true
+        val simple_baseline = simpleos_simple_symbol_baseline(entry_key)
+        var simple_counted: {text: bool} = {}
+        for name in simple_referenced:
+            if simple_defined.has(name) or simple_baseline.has(name):
+                continue
+            if simple_counted.has(name):
+                continue
+            simple_counted[name] = true
+            simple_novel.push(name)
+    if simple_novel.len() > 0:
+        simple_novel.sort()
+        return Err("SimpleOS freestanding link refused for entry '{entry_key}': {simple_novel.len()} pure-Simple symbol(s) are newly fabricated -- the closure REFERENCES them but nothing DEFINES them, so the stub generator emits an 8-byte weak nil-returning body and the guest silently takes the false/zero branch at every call site instead of failing here: {simple_novel.join(\", \")}. A pure-Simple function is never optional: find why its body did not reach the link (a stale cached object still referencing a pre-move mangled name is the known cause -- purge the object cache and rebuild) and fix that. This entry's fabricated set must stay a SUBSET of config/simpleos_fabricated_lib_baseline.sdn, which is shrink-only and records pre-existing debt, never new debt.")
 
     val baseline = simpleos_fabricated_baseline(entry_key)
     var novel: [text] = []

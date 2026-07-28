@@ -102,3 +102,75 @@ blast radius today is exactly this one method — but the fail-open is general.
    `lib__*` / `os__*` symbol resolving to a fabricated weak nil body fails the
    freestanding link, exactly as a novel fabricated `rt_*` extern already does.
    A pure-Simple method must never be papered over by a stub.
+
+## ROOT CAUSE — PROVEN 2026-07-28 (stale object-cache reuse across a module move)
+
+The mechanism is not closure discovery and not name resolution. It is the
+native-build **object cache** keeping an object compiled against a mangled name
+that no longer exists, combined with the fabrication fail-open.
+
+Evidence chain for the currently-live instance (the ByteSpan pair is already
+real `T` in the 2026-07-28 10:40 kernel; this is the same defect, next symbol):
+
+1. `readelf -sW` on `simpleos_wm_production_desktop.elf`: exactly ONE 8-byte
+   WEAK `FUNC` with a `lib__`/`os__` prefix —
+   `lib__gc_async_mut__gpu__browser_engine__simple_web_html_layout_renderer_layout__skip_wrap_spaces`
+   at `0x08863010`, body `push rbp; mov rsp,rbp; xor eax,eax; pop rbp; ret`.
+2. The real body IS in the same ELF, under a different module prefix:
+   `..._foundation__skip_wrap_spaces` at `0x08126080` (`T`).
+3. Reached: 3 `movabs $0x8863010,%reg` sites, all inside
+   `..._style__parse_font_shorthand_family` — text wrapping and the CSS font
+   shorthand path.
+4. `skip_wrap_spaces` is defined exactly once in the tree, in
+   `..._foundation.spl:302`. It was MOVED there by `365a643236b` (07-28 04:46);
+   `..._layout.spl:241-246` carries the comment recording the move.
+5. A fresh compile resolves correctly. With `--emit-archive --entry-closure
+   --target x86_64-unknown-none` and `SIMPLE_LIB=src`, the style module emits
+   `parse_font_shorthand_family` referencing
+   `lib__..._foundation__skip_wrap_spaces`, and no `_layout__` name exists.
+   `SIMPLE_DEBUG_IMPORT_SYMBOL=skip_wrap_spaces` prints exactly one candidate:
+   the foundation one.
+6. The linked object is stale. In the gate's cache dir
+   (`build/simpleos_wm_fullscreen_evidence/native-cache/x86_64-unknown-none-elf/objects`)
+   the only object defining `..._style__parse_font_shorthand_family` was
+   `7446a1d1cef9e76e.o`, mtime 2026-07-26 23:47 — **before** the 07-28 04:46
+   move — and it carries `U ..._layout__skip_wrap_spaces`. The 07-28 10:38
+   build wrote 8 new objects and reused 679; none of the 8 contains any
+   style/`skip_wrap_spaces` symbol. Seven cached objects in total still
+   referenced the dead name and have been purged.
+
+So: module A's function moves to module B; unchanged caller module C keeps its
+cached object, which still references `A__f`; `A__f` no longer exists; the stub
+generator fabricates a weak nil `A__f`; the link succeeds; every call site in C
+silently gets `false`/`0`.
+
+### Two separate defects
+
+- **D1 (cache):** the per-module object cache key does not invalidate on a
+  cross-module function MOVE. `cross_module_layout_fingerprint`
+  (`src/compiler_rust/compiler/src/pipeline/native_project/mod.rs`) folds the
+  import map, yet a pre-move object was still a cache hit on 07-28 — INFERRED
+  gap, not yet isolated to a specific field. Until it is, a module move must be
+  followed by a cache purge.
+- **D2 (fail-open):** nothing failed the link. FIXED here by channel 3 of
+  `simpleos_check_no_fabricated_rt_stubs`.
+
+### Guard landed
+
+`src/compiler/70.backend/backend/llvm_native_link.spl` gains
+`simpleos_undefined_simple_module_symbols` + channel 3: any `lib__*` / `os__*`
+name the closure references and nothing defines refuses the freestanding link.
+Staged ratchet via `config/simpleos_fabricated_lib_baseline.sdn` (shrink-only,
+separate from the `rt_*` baseline, currently EMPTY — the one known instance is
+being fixed, not baselined). The `rt_*` channels are untouched.
+
+### Caveat — the guard is not live yet
+
+The deployed `bin/release/x86_64-unknown-linux-gnu/simple` (2026-07-28 05:45)
+contains neither `SimpleOS freestanding link refused` nor
+`simpleos_fabricated_rt_baseline` (`strings` count 0 for both), but does contain
+the Rust `Freestanding unresolved symbol check`. The pure-Simple guard —
+including the `rt_*` channels landed on 07-28 — therefore does NOT run in the
+SimpleOS WM gate today. It becomes effective only after a bootstrap redeploy of
+the self-hosted binary. Until then the equivalent refusal would have to live in
+`src/compiler_rust/compiler/src/pipeline/native_project/stubs.rs`.
