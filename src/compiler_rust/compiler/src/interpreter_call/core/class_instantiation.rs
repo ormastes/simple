@@ -129,7 +129,11 @@ pub(crate) fn instantiate_class(
         // 2. Has @inject / @sys_inject marker (missing args will be injected via DI)
         let new_param_count = new_method.params.len();
         let has_inject = has_inject_attr(new_method);
-        let should_call_new = args.len() == new_param_count || has_inject;
+        let named_args_fit_new = args.iter().all(|arg| match &arg.name {
+            Some(name) => new_method.params.iter().any(|param| &param.name == name),
+            None => true,
+        });
+        let should_call_new = (args.len() == new_param_count && named_args_fit_new) || has_inject;
 
         if should_call_new && !already_in_new {
             let self_val = Value::Object {

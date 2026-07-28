@@ -25,6 +25,22 @@ main = if sym.id == 7: 0 else: 1
 }
 
 #[test]
+fn named_field_literal_does_not_bind_unrelated_new_parameter() {
+    let source = r#"
+class Thing:
+    value: i64
+
+    static fn new(other: i64) -> Thing:
+        Thing(value: other + 1)
+
+val thing = Thing(value: 7)
+main = if thing.value == 7: 0 else: 1
+"#;
+
+    assert_eq!(parse_and_eval(source).unwrap(), 0);
+}
+
+#[test]
 fn impl_registers_every_static_method() {
     let source = r#"
 struct Config:
