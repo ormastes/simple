@@ -5,22 +5,23 @@ Simple has **two independent classification axes**. Do not conflate them:
 | Axis | Controls | Values |
 |------|----------|--------|
 | **Stdlib memory tier** | runtime / allocation / async model | `nogc_sync_mut`, `nogc_async_mut`, `gc_async_mut`, `nogc_async_mut_noalloc` (see `.claude/rules/structure.md`) |
-| **Strictness tier** (this guide) | code-quality strictness: which lints fire, at what severity, and whether proof-coverage is gated | `moderate`, `lib`, `reliable` |
+| **Strictness tier** (this guide) | code-quality strictness: which lints fire, at what severity, and whether proof-coverage is gated | `moderate`, `strict`, `robust`, `critical` |
 
 A build target picks one value on **each** axis; they compose freely — e.g. a
-`nogc_async_mut_noalloc` baremetal module can be built under `reliable`.
-"reliable" is **not** a memory tier and never changes the runtime model.
+`nogc_async_mut_noalloc` baremetal module can be built under `robust`.
+Strictness tiers are **not** memory tiers and never change the runtime model.
 
-## The three tiers
+## The four tiers
 
 | Tier | Audience | Lint behavior |
 |------|----------|---------------|
 | **moderate** | scripts, prototypes, examples | advisory only — every `deny` default is downgraded to `warn` |
-| **lib** | library / reusable code | current defaults (the regression-safe baseline) |
-| **reliable** | safety-relevant units | strictest — public-surface + safety/correctness lints elevated to `deny` |
+| **strict** | library / reusable code | current defaults (the regression-safe baseline) |
+| **robust** | safety-relevant units | Rust-parity level — public-surface + safety/correctness lints elevated to `deny` |
+| **critical** | mission-critical systems | robust + REQ-MC rules (`bare_primitive_internal` at `warn`); planned for REQ5+ |
 
-`reliable` is a **ladder**:
-1. current lint level (run at compile and, planned, link),
+The **robust** and **critical** tiers are part of a **ladder**:
+1. strict lint levels (currently run at compile; planned to also run at link),
 2. local/internal-primitive-use check surfaced as a WARNING with verified auto-fix (planned),
 3. formal-verification **coverage** meta-check — each feature-level public class /
    main-class-of-file *has* a discharged proof (planned; a coverage check, not a prover).
@@ -31,27 +32,46 @@ A build target picks one value on **each** axis; they compose freely — e.g. a
 
 ## Selecting a tier
 
-Three sources, **most-local-wins** precedence (`@lint_profile` > `--profile` > sdn):
+Five sources with precedence (**highest to lowest**):
+1. `@lint_profile(...)` — file-header attribute (top of file, before defs)
+2. `--profile=...` — explicit CLI flag
+3. `simple.sdn [lints] profile=...` — project default
+4. engine default — `moderate` (interpreter/JIT), `robust` at WARN severity (compiler/loader)
+5. legacy baseline — if no tier selected above, behavior is identical to today's defaults
+
+Examples:
 
 ```sdn
 # simple.sdn — project default
 [lints]
-profile = "reliable"
+profile = "robust"
 primitive_api = "deny"   # explicit per-lint override still wins over the tier
 ```
 
 ```bash
-simple lint src/foo.spl --profile=reliable   # CLI override
+simple lint src/foo.spl --profile=robust   # CLI override
 ```
 
 ```simple
-@lint_profile(reliable)   # file-header attribute (top of file, before defs)
+@lint_profile(critical)   # file-header attribute (top of file, before defs)
 
 # NOTE: distinct from @profile(critical), the R9 must-use annotation.
 ```
 
-When no tier is selected, behavior is identical to today's defaults (the legacy
-baseline) — selecting a tier is opt-in.
+**Note on compiler/loader defaults:** native builds and module loading use the `robust` tier by default, but all its `deny`-level rules run at `warn` severity during the migration window. Escalation to `error` is a later change, explicitly not yet implemented.
+
+## Deprecated tier aliases (pre-2026-07-28)
+
+The tier names were renamed on 2026-07-28 for clarity. Old spellings still work but emit a one-time deprecation warning per distinct old name:
+
+| Old name | New name |
+|----------|----------|
+| `lib` | `strict` |
+| `reliable` | `robust` |
+| `mission-critical` or `mission_critical` | `critical` |
+| `moderate` | `moderate` (unchanged) |
+
+Configs using old names continue to work with no behavior change — only the names have changed, not the semantics. Update your configs at your convenience.
 
 ## Per-lint configuration
 
@@ -65,9 +85,10 @@ families include: `unused_code` (W001-3), `style_convention` (ST001-3),
 
 ## Relationship to the rejected "High-robustness mode"
 
-`reliable` supersedes the previously-rejected "High-robustness mode"
-(`simple_language_comparison.md`). Instead of an unprovable blanket guarantee, it
-is the configurable strict-lint + `@deny(non_exhaustive_match)` + proof-coverage
-realization that document prescribed — dialed by context, not asserted.
+The `robust` and `critical` tiers supersede the previously-rejected "High-robustness mode"
+(`simple_language_comparison.md`). Instead of an unprovable blanket guarantee, they
+realize the configurable strict-lint + `@deny(non_exhaustive_match)` + proof-coverage
+approach that document prescribed — dialed by context, not asserted. `critical` adds
+mission-critical safeguards like bare-primitive-internal tracking.
 
 See also: `doc/glossary.md` ("Strictness Tiers"), `strictness_tiers_tldr.md`.
