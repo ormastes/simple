@@ -1170,8 +1170,11 @@ implementation in progress / target evidence blocked
   covers an astral character plus canceled input. A bounded pure-Simple
   Stage-2 diagnostic accepted the changed sources, then stopped at the known
   `JsValue.Symbol` MIR blocker before execution; no production PASS is claimed.
-- Performance: `script_host_apply_action_to_id` still clones every descendant
-  and scans untouched siblings after finding its target. Accepted text edits
-  call it twice, causing two O(N) whole-DOM allocation passes per keystroke.
-  This is confirmed allocation churn, not proof of an unbounded leak, and
-  remains the next shared-owner fix.
+- Performance: `script_host_apply_action_to_id` now stops at the first
+  preorder DOM identity and path-copies only the matching node's ancestors.
+  Missing targets return the original tree, later siblings are not traversed,
+  and intentional full-tree default actions remain unchanged. This removes
+  the two full-DOM clone/allocation passes previously paid by every accepted
+  text edit; focused coverage locks first-match, untouched-sibling, and
+  missing-target behavior. Executable production timing remains
+  blocked by the recorded `JsValue.Symbol` compiler defect.
