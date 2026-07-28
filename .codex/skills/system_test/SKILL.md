@@ -109,7 +109,7 @@ whenever a target profile or acceptance command changes.
 |---|---|---|
 | `TARGET_SIMPLE_SIM` / `fw/` | Host-model controller, FTL/FIL and command semantics | RV32 ELF, AXI, IRQ, PCIe, OpenSSD silicon |
 | `emu/` | Host/device memcpy seam, RAM NAND and emulator data path | Hardware MMIO, host queue DMA, PCIe or physical NAND |
-| `fw_rv32` + QEMU | RV32 firmware execution and scalar RAM-NAND policy | Host-issued NVMe MMIO/DMA unless the host endpoint is exercised |
+| `fw_rv32` + QEMU | Real RV32 ELF, external mailbox command sequence, guest PRP buffers, and scalar RAM-NAND recovery | AXI, queue DMA engine, IRQ, PCIe, or board transport |
 | RV32 + GHDL AXI | Synthesizable H1 AXI model evidence | PCIe enumeration, MSI/PERST, OpenSSD silicon |
 | KV260 FPGA | H1 FPGA-model evidence when the host protocol and transcript are real | OpenSSD/physical-NAND or PCIe acceptance |
 | Cosmos+ OpenSSD | Vendor/H2 target contract only when the board gate runs | Any claim from QEMU, GHDL, or internal selftest |
@@ -133,7 +133,10 @@ mailbox completion is endpoint evidence, not firmware or recovery evidence.
 The canonical real-firmware GHDL command is
 `sh scripts/fpga/ghdl_rv32_nvme_fw_in_loop.shs`; accept it only with
 `firmware=real transport=axi-ram` plus nonzero recovery, refresh, remap, and read
-counters in the retained transcript.
+counters in the retained transcript. QEMU firmware parity uses
+`sh scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs`; accept it only with
+`firmware=real transport=qemu-gdb-mailbox` and never promote it to AXI/DMA/IRQ
+evidence.
   An unresolved runtime symbol, nonzero exit, signal exit, or missing output is
   a FAIL; do not substitute a hand-edited manual or the Rust seed.
 - Scenario-oriented specs must produce manual-quality generated docs:

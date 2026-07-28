@@ -3,10 +3,11 @@
 """
 RV32 NVMe host AXI/MMIO transport contract.
 
-This executable spec runs both the endpoint protocol gate and the real resident
-RV32 firmware-in-loop gate. It proves host MMIO, queue/payload DMA, mailbox
-handoff, CQE/IRQ, Identify/Create/Write/Flush/Read, and RAM-NAND prevention,
-retry, FCR, and alternate remap. QEMU parity and physical H2 remain open gates.
+This executable spec runs the endpoint protocol gate, the real resident RV32
+firmware-in-loop AXI gate, and the QEMU command-parity gate. GHDL proves MMIO,
+queue/payload DMA, CQE/IRQ, and RAM-NAND recovery. QEMU proves the same firmware
+command sequence through a GDB-driven guest-RAM mailbox; it does not claim AXI
+or IRQ transport. Physical H2 remains open.
 """
 
 use std.spec.*
@@ -23,6 +24,7 @@ val DESIGN: text = "doc/05_design/rv32_nvme_host_axi_mmio.md"
 val TARGETS: text = "examples/09_embedded/simpleos_nvme_fw/fw/openssd_config.spl"
 val NAND_SPEC: text = "test/03_system/app/nvme_firmware/rv32_nvme_nand_read_level_spec.spl"
 val RUNNER: text = "scripts/check/check-rv32-nvme-host-axi-mmio.shs"
+val QEMU_RUNNER: text = "scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs"
 
 fn _source(path: text) -> text:
     file_read_text(path)
@@ -36,6 +38,14 @@ describe "RV32 NVMe host AXI/MMIO contract":
             expect(err).to_equal("")
             expect(out).to_contain("STATUS: PASS rv32-nvme-host-axi-mmio H1-ENDPOINT firmware=mocked")
             expect(out).to_contain("STATUS: PASS rv32-nvme-fw-in-loop firmware=real transport=axi-ram")
+
+        it "should pass real firmware command parity in QEMU":
+            step("Run the resident RV32 firmware with a GDB-driven host mailbox")
+            val (out, err, code) = process_run("/bin/sh", [QEMU_RUNNER])
+            expect(code).to_equal(0)
+            expect(err).to_equal("")
+            expect(out).to_contain("RV32_NVME_QEMU_HOST_PASS write=erase+program recovery=1 refresh=2 remap=1 reads=4")
+            expect(out).to_contain("STATUS: PASS rv32-nvme-qemu-host-parity firmware=real transport=qemu-gdb-mailbox")
 
     describe "REQ-001: NVMe register aperture":
         it "should retain the standard register offsets":
@@ -223,8 +233,8 @@ describe "RV32 NVMe host AXI/MMIO contract":
             expect(source).to_contain("PCIe enumeration")
             expect(source).to_contain("OpenSSD silicon")
 
-        it "should preserve the QEMU and board acceptance boundary":
+        it "should preserve the QEMU transport and board acceptance boundary":
             step("Check the operator guide claim boundary")
             val source = _source(GUIDE)
             expect(source).to_contain("internal selftest")
-            expect(source).to_contain("QEMU parity and board acceptance remain separate")
+            expect(source).to_contain("QEMU does not prove AXI, DMA, IRQ, PCIe, or board acceptance")

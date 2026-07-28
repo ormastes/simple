@@ -45,7 +45,7 @@ Use the profile that matches the transport actually exercised:
 |---|---|---|
 | `TARGET_SIMPLE_SIM` / `fw/` | Host-model NVMe controller, FTL/FIL and command semantics | RV32, AXI, IRQ, PCIe, or OpenSSD hardware |
 | `emu/` | Host/device memcpy seam and RAM-backed NAND emulator | Hardware MMIO, queue DMA, PCIe, or physical NAND |
-| `fw_rv32` + QEMU | RV32 ELF execution and scalar RAM-NAND policy | Host-issued NVMe MMIO/DMA unless host traffic is captured |
+| `fw_rv32` + QEMU | Real RV32 ELF, external mailbox command sequence, guest PRP buffers, scalar RAM-NAND recovery | AXI, queue DMA engine, IRQ, PCIe, or board transport |
 | RV32 + GHDL AXI | H1 synthesizable AXI model evidence | PCIe enumeration, MSI/PERST, physical NAND, OpenSSD silicon |
 | KV260 FPGA | H1 FPGA-model evidence with a real host trace | OpenSSD or physical-NAND acceptance |
 | Cosmos+ OpenSSD | H2/vendor profile only through its board gate | Any result inferred from QEMU/GHDL/internal selftest |
@@ -54,7 +54,9 @@ The standalone `rv32_nvme_host_axi_mmio` endpoint retains a focused mocked-mailb
 protocol check. The aggregate gate also boots the real resident RV32 service ELF
 and drives Create CQ/SQ, Identify, Write, Flush, and Read through shared AXI RAM,
 requiring recovery, prevention refresh, alternate remap, payload equality, CQE,
-and IRQ evidence. QEMU parity and board acceptance remain separate. The first
+and IRQ evidence. `scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs` repeats the same
+firmware command/recovery sequence through a GDB-driven guest-RAM mailbox.
+QEMU does not prove AXI, DMA, IRQ, PCIe, or board acceptance. The first
 host contract is qid 0/qid 1, depth 2..16,
 `4 << CAP.DSTRD` doorbells and one dword-aligned PRP1 contained in a page.
 Identify writes 256 bytes; current NAND Read/Write moves one 4-byte word.

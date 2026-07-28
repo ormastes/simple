@@ -23,9 +23,13 @@ MODE="${1:-}"
 # stub below must match this ABI or ld.lld rejects the link ("cannot link
 # object files with different floating-point ABI").
 LIBGCC="$(riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -print-libgcc-file-name)"
+QEMU_HOST_MODE="${NVME_RV32_QEMU_HOST:-0}"
 SERVICE_MODE="${NVME_RV32_SERVICE:-0}"
+[ "$QEMU_HOST_MODE" = "1" ] && SERVICE_MODE=1
 OUT="${NVME_RV32_OUT:-build/nvme_fw_rv32.elf}"
-if [ "$SERVICE_MODE" = "1" ] && [ -z "${NVME_RV32_OUT:-}" ]; then
+if [ "$QEMU_HOST_MODE" = "1" ] && [ -z "${NVME_RV32_OUT:-}" ]; then
+  OUT="build/nvme_fw_rv32_qemu_host.elf"
+elif [ "$SERVICE_MODE" = "1" ] && [ -z "${NVME_RV32_OUT:-}" ]; then
   OUT="build/nvme_fw_rv32_service.elf"
 fi
 OBJ="build/test-artifacts/nvme_fw_rv32.o"
@@ -436,10 +440,30 @@ int32_t rt_native_eq(int32_t left, int32_t right) { return left == right; }
 int32_t rt_native_neq(int32_t left, int32_t right) { return left != right; }
 uint32_t rt_rv32_nand_ram_load(uint32_t word) { return word < 64 ? _nandram_start[word] : 0; }
 void rt_rv32_nand_ram_store(uint32_t word, uint32_t value) { if (word < 64) _nandram_start[word] = value; }
+EOF_DIRECT_STUBS
+  if [ "$QEMU_HOST_MODE" = "1" ]; then
+    cat >>"$BOOT_STUB_LINK/rv32_direct_runtime_stubs.c" <<'EOF_QEMU_STUBS'
+static volatile uint32_t *const NVME_MMIO = (volatile uint32_t*)0x80100000UL;
+uint32_t rt_rv32_nvme_mmio_load(uint32_t offset) { return ((offset & 3U) == 0U && offset <= 0x64U) ? NVME_MMIO[offset >> 2] : 0U; }
+void rt_rv32_nvme_mmio_store(uint32_t offset, uint32_t value) {
+    if ((offset & 3U) != 0U || offset > 0x64U) return;
+    NVME_MMIO[offset >> 2] = value;
+    if (offset == 0x50U && value == 1U) { NVME_MMIO[0] &= ~1U; return; }
+    if (offset != 0x64U) return;
+    if (NVME_MMIO[0x58U >> 2] != 0U) { NVME_MMIO[0x64U >> 2] = 0x40000000U; return; }
+    volatile uint32_t *address = (volatile uint32_t*)(uintptr_t)NVME_MMIO[0x54U >> 2];
+    if (value == 1U) { NVME_MMIO[0x60U >> 2] = *address; NVME_MMIO[0x64U >> 2] = 0U; }
+    else if (value == 2U) { *address = NVME_MMIO[0x5CU >> 2]; NVME_MMIO[0x64U >> 2] = 0U; }
+    else NVME_MMIO[0x64U >> 2] = 0x40000000U;
+}
+EOF_QEMU_STUBS
+  else
+    cat >>"$BOOT_STUB_LINK/rv32_direct_runtime_stubs.c" <<'EOF_HARDWARE_STUBS'
 static volatile uint32_t *const NVME_MMIO = (volatile uint32_t*)0x20000000UL;
 uint32_t rt_rv32_nvme_mmio_load(uint32_t offset) { return ((offset & 3U) == 0U && offset <= 0x64U) ? NVME_MMIO[offset >> 2] : 0U; }
 void rt_rv32_nvme_mmio_store(uint32_t offset, uint32_t value) { if ((offset & 3U) == 0U && offset <= 0x64U) NVME_MMIO[offset >> 2] = value; }
-EOF_DIRECT_STUBS
+EOF_HARDWARE_STUBS
+  fi
   cat >"$BOOT_STUB_LINK/rv32_direct_entry.S" <<'EOF_DIRECT_START'
     .section .text.entry, "ax"
     .globl _rv32_direct_entry
@@ -638,7 +662,11 @@ rt_rv32_nvme_mmio_load:
     bnez    t0, 1f
     li      t0, 0x64
     bgtu    a0, t0, 1f
+#ifdef NVME_RV32_QEMU_HOST
+    li      t0, 0x80100000
+#else
     lui     t0, 0x20000
+#endif
     add     t0, t0, a0
     lw      a0, 0(t0)
     li      a1, 0
@@ -653,13 +681,48 @@ rt_rv32_nvme_mmio_store:
     bnez    t0, 1f
     li      t0, 0x64
     bgtu    a0, t0, 1f
+#ifdef NVME_RV32_QEMU_HOST
+    li      t0, 0x80100000
+    add     t1, t0, a0
+    sw      a1, 0(t1)
+    li      t2, 0x50
+    bne     a0, t2, 2f
+    li      t2, 1
+    bne     a1, t2, 1f
+    lw      t3, 0(t0)
+    andi    t3, t3, -2
+    sw      t3, 0(t0)
+1:  ret
+2:  li      t2, 0x64
+    bne     a0, t2, 1f
+    lw      t3, 0x58(t0)
+    bnez    t3, 5f
+    lw      t3, 0x54(t0)
+    li      t2, 1
+    beq     a1, t2, 3f
+    li      t2, 2
+    beq     a1, t2, 4f
+    j       5f
+3:  lw      t4, 0(t3)
+    sw      t4, 0x60(t0)
+    sw      zero, 0x64(t0)
+    ret
+4:  lw      t4, 0x5c(t0)
+    sw      t4, 0(t3)
+    sw      zero, 0x64(t0)
+    ret
+5:  li      t3, 0x40000000
+    sw      t3, 0x64(t0)
+#else
     lui     t0, 0x20000
     add     t0, t0, a0
     sw      a1, 0(t0)
+#endif
 1:  ret
 EOF_START
   SERVICE_CPPFLAG=""
   if [ "$SERVICE_MODE" = "1" ]; then SERVICE_CPPFLAG="-DNVME_RV32_SERVICE=1"; fi
+  if [ "$QEMU_HOST_MODE" = "1" ]; then SERVICE_CPPFLAG="$SERVICE_CPPFLAG -DNVME_RV32_QEMU_HOST=1"; fi
   if ! riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 $SERVICE_CPPFLAG -c "$START_ASM" -o "$START_OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
     echo "NVME_RV32_BUILD_FAILED start-stub out=$OUT_LOG err=$ERR_LOG" >&2
     tail -n 40 "$ERR_LOG" >&2 || true

@@ -28,6 +28,10 @@ P9 artifacts: `fw_rv32/entry.spl` is the scalar/array-free reference, and defaul
 after `build/nvme_fw_rv32.elf` is produced and prints `ALL RV32 NVME FW CHECKS PASS` /
 `RESULT: PASS`; the serial begins with `RV32 NVME FW BEGIN`. The rv32 smoke uses
 bounded no-alloc counter caps; host simulation owns full-width counter stress.
+The resident-service parity gate is
+`sh scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs`; it drives Create CQ/SQ,
+Identify, Write, Flush, recovery Read, and prevention Reads through guest RAM.
+Its `transport=qemu-gdb-mailbox` marker is firmware evidence, not AXI/IRQ proof.
 
 <!-- sdn-diagram:id=nvme_fw_emu_tldr -->
 ```

@@ -75,7 +75,10 @@ compares generated top/testbench output and separately covers both pinned files.
 
 - `TARGET_SIMPLE_SIM` and the existing `fw/` are host-runnable semantic
   baselines, not host AXI hardware.
-- `fw_rv32` plus QEMU/GHDL is the H1 no-alloc implementation target.
+- `fw_rv32` plus QEMU/GHDL is the H1 no-alloc implementation target. QEMU
+  `virt` has no custom NVMe endpoint: the external GDB host writes the fixed
+  mailbox and PRP buffers in guest RAM, proving firmware command/recovery
+  parity but not AXI, DMA, or IRQ. GHDL owns those transport claims.
 - KV260 FPGA execution can provide H1 FPGA-model evidence only when the host
   MMIO/DMA/IRQ protocol is exercised and retained.
 - Cosmos+ OpenSSD profiles remain explicit vendor/H2 targets. No QEMU or AXI

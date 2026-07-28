@@ -4,8 +4,11 @@
 
 - **H1 semantic:** source and scalar contract checks; useful for ABI review,
   but not transport acceptance.
-- **H1 transport:** host-driven QEMU/RAM-NAND and synthesizable GHDL AXI
-  runs. Requires real MMIO, queue DMA, IRQ, CQE, and NAND markers.
+- **H1 firmware parity:** QEMU runs the real RV32 ELF with an external GDB host
+  driving the mailbox and guest PRP buffers. It requires command, payload, and
+  NAND counters but cannot claim AXI/DMA/IRQ.
+- **H1 transport:** synthesizable GHDL AXI requires real MMIO, queue DMA, IRQ,
+  CQE, and NAND markers.
 - **H1 FPGA-model:** KV260 only after the H1 transport gate passes and the
   host protocol is captured through the board path.
 - **H2:** PCIe/OpenSSD silicon, BAR/MSI/PERST, physical NAND and vendor board
@@ -23,11 +26,13 @@
 | ST-006 | REQ-008 | MMIO/DMA/IRQ counters and retained protocol transcript are nonzero and consistent |
 | ST-007 | REQ-009..010 | Same H1 sequence across QEMU/GHDL; unknown profile and H2 claims rejected |
 
-The executable SSpec invokes the aggregate GHDL runner. It retains the focused
+The executable SSpec invokes the aggregate GHDL runner and QEMU parity runner.
+GHDL retains the focused
 mocked-mailbox endpoint check and additionally boots the resident RV32 service
 ELF against shared AXI RAM. Host-issued Create CQ/SQ, Identify, Write, Flush,
 and Read prove SQE/CQE and payload DMA, IRQ/ack, recovery FCR, prevention refresh,
-and alternate remap. QEMU parity, Vivado/board execution, and H2 remain open.
+and alternate remap. QEMU repeats the firmware command/recovery sequence through
+guest RAM without transport claims. Vivado/board execution and H2 remain open.
 
 ## Required artifacts for transport closure
 

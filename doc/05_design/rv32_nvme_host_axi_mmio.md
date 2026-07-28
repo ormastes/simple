@@ -50,7 +50,10 @@ The host testbench must count and retain:
 The runner-backed SSpec executes the focused endpoint test and the resident RV32
 service ELF against one AXI RAM containing firmware, NAND state, queues, CQEs,
 and PRP buffers. It retains recovery, prevention, and alternate-remap counters.
-QEMU parity remains a separate required scenario.
+The QEMU scenario executes the same Create CQ/SQ, Identify, Write, Flush, fault
+injection, recovery Read, and four prevention Reads against the resident ELF.
+An external GDB host writes the mailbox and PRP buffers in guest RAM. Its marker
+must say `transport=qemu-gdb-mailbox`; only GHDL may close AXI/DMA/IRQ evidence.
 
 ## Deliberate first-target limits
 
