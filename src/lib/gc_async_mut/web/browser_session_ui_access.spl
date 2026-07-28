@@ -14,6 +14,7 @@ use common.ui.access.{
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_url.{resolve_relative_url}
+use std.gc_async_mut.web.browser_session_form.{browser_select_value}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_find_by_tag, be_dom_get_attr, be_dom_get_text_content,
@@ -129,9 +130,35 @@ fn _browser_bookmark_nodes(session: BrowserSession) -> [UiAccessNode]:
         index = index + 1
     nodes
 
-fn _browser_page_control_nodes(dom: BeDomNode) -> [UiAccessNode]:
+class _BrowserPageControlBuckets:
+    buttons: [BeDomNode]
+    inputs: [BeDomNode]
+    textareas: [BeDomNode]
+    selects: [BeDomNode]
+
+fn _browser_collect_page_controls(
+    node: BeDomNode, buckets: _BrowserPageControlBuckets
+):
+    if node.tag_name == "button":
+        buckets.buttons.push(node)
+    elif node.tag_name == "input":
+        buckets.inputs.push(node)
+    elif node.tag_name == "textarea":
+        buckets.textareas.push(node)
+    elif node.tag_name == "select":
+        buckets.selects.push(node)
+    for child in node.children:
+        _browser_collect_page_controls(child, buckets)
+
+fn _browser_page_control_nodes(
+    dom: BeDomNode, ui_access_revision: i64
+) -> [UiAccessNode]:
     var nodes: [UiAccessNode] = []
-    val buttons = be_dom_find_by_tag(dom, "button")
+    val buckets = _BrowserPageControlBuckets(
+        buttons: [], inputs: [], textareas: [], selects: []
+    )
+    _browser_collect_page_controls(dom, buckets)
+    val buttons = buckets.buttons
     var button_index = 0
     while button_index < buttons.len():
         val button = buttons[button_index]
@@ -147,7 +174,7 @@ fn _browser_page_control_nodes(dom: BeDomNode) -> [UiAccessNode]:
         nodes.push(access_node)
         button_index = button_index + 1
 
-    val inputs = be_dom_find_by_tag(dom, "input")
+    val inputs = buckets.inputs
     var input_index = 0
     while input_index < inputs.len():
         val input = inputs[input_index]
@@ -184,7 +211,7 @@ fn _browser_page_control_nodes(dom: BeDomNode) -> [UiAccessNode]:
             nodes.push(access_node)
         input_index = input_index + 1
 
-    val textareas = be_dom_find_by_tag(dom, "textarea")
+    val textareas = buckets.textareas
     var textarea_index = 0
     while textarea_index < textareas.len():
         val textarea = textareas[textarea_index]
@@ -201,6 +228,22 @@ fn _browser_page_control_nodes(dom: BeDomNode) -> [UiAccessNode]:
         access_node.focused = be_dom_has_attr(textarea, "data-focused")
         nodes.push(access_node)
         textarea_index = textarea_index + 1
+
+    var select_index = 0
+    while select_index < buckets.selects.len():
+        val select = buckets.selects[select_index]
+        val enabled = not be_dom_has_attr(select, "disabled")
+        var access_node = _browser_node(
+            "page_select_{ui_access_revision}_{select.node_id}", "select",
+            browser_select_value(select), enabled, false,
+            if enabled: ["set_value"] else: [],
+            _browser_dom_control_props(
+                "page_select", select.node_id.to_text()
+            )
+        )
+        access_node.focused = be_dom_has_attr(select, "data-focused")
+        nodes.push(access_node)
+        select_index = select_index + 1
     nodes
 
 fn _browser_action_result(ok: bool, code: text, message: text, target_id: text, action: text) -> WinTextActionResult:
@@ -226,7 +269,9 @@ impl BrowserSession:
         )
         val link_nodes = _browser_link_nodes(self.current_dom, self.current_url)
         val bookmark_nodes = _browser_bookmark_nodes(self)
-        val page_control_nodes = _browser_page_control_nodes(self.current_dom)
+        val page_control_nodes = _browser_page_control_nodes(
+            self.current_dom, self.ui_access_revision
+        )
         val fixed_count = 8
         val node_count = fixed_count + bookmark_nodes.len() + link_nodes.len() + page_control_nodes.len()
         var nodes: [UiAccessNode] = [_browser_node("back", "button", "Back", self.can_go_back(), false, ["click"], _browser_control_props("back")); node_count]
@@ -253,7 +298,7 @@ impl BrowserSession:
             control_idx = control_idx + 1
         UiAccessSnapshot(
             protocol_version: 1,
-            snapshot_revision: 0,
+            snapshot_revision: self.ui_access_revision,
             mode: "browser_session",
             active_surface: BROWSER_SESSION_SURFACE_ID,
             surfaces: [surface],
@@ -302,6 +347,31 @@ impl BrowserSession:
                         )
                     return _browser_action_result(true, "ok", "input updated", request.target_id, request.action)
                 Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
+        if control == "page_select":
+            if not node.enabled:
+                return _browser_action_result(
+                    false, "disabled", "control disabled",
+                    request.target_id, request.action
+                )
+            if request.action != "set_value":
+                return _browser_action_result(
+                    false, "unsupported_operation",
+                    "unsupported select action '{request.action}'",
+                    request.target_id, request.action
+                )
+            val dom_target = _browser_dom_target(node)
+            match self.set_dom_select_value(dom_target, request.text_value):
+                Ok(changed):
+                    return _browser_action_result(
+                        true, "ok",
+                        if changed: "selection updated" else: "selection unchanged",
+                        request.target_id, request.action
+                    )
+                Err(e):
+                    return _browser_action_result(
+                        false, "action_failed", e,
+                        request.target_id, request.action
+                    )
         if not node.enabled:
             return _browser_action_result(false, "disabled", "control disabled", request.target_id, request.action)
         if request.action != "click":

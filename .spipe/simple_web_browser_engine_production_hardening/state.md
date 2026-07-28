@@ -1270,6 +1270,21 @@ implementation in progress / target evidence blocked
 - independent input/focus and transient-bridge reviews pass after public target
   normalization and after keeping the NUL-prefixed internal route out of every
   serialized UI-access property/result.
+- Native `select` controls now participate in BrowserSession UI access with
+  revision-and-node-stable canonical IDs, effective selected values, exact
+  internal routing, live value/disabled revalidation, and one atomic subtree
+  rewrite followed by `input` then `change`. Page buttons/inputs/textareas/
+  selects are collected in one DOM pass; option lookup is scalar and mutation
+  is bounded to the target select plus its ancestor path. Disabled options and
+  optgroups, missing values, duplicate author IDs, same-value idempotence,
+  focus-time disabling, and stale document targets fail without cross-control
+  mutation. Form submission now applies the same disabled-optgroup rule.
+- verify: working/staged direct-env guards, rendering-source coupling,
+  conflict-marker scan, and the `doc/06_spec/*_spec.spl == 0` layout gate pass.
+  Input/event, security, and perf reviewers report PASS. The focused Simple
+  system spec remains source-reviewed but unexecuted because the admitted
+  pure-Simple CLI still crashes and the three-cycle compiler/build cap is
+  exhausted; no bootstrap or Rust seed fallback was used.
 - Leak/perf review fixes: dead renderer detection now retains the PID until the
   canonical piped-process close frees its table row and file descriptors;
   stable-window reconciliation returns without rebuilding entry arrays;

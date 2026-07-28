@@ -331,6 +331,117 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(first_focused).to_equal(false)
         expect(second_focused).to_equal(true)
 
+    it "changes the exact live select and rejects stale or disabled values":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/select",
+            "<html><body><select id='duplicate'><option value='red'>Red</option><option value='blue' selected>Blue</option></select><select id='duplicate' oninput='set-attr:data-input-route=right' onchange='set-attr:data-change-route=right'><option value='red'>Red</option><option value='blue' selected>Blue</option><option value='black' disabled>Black</option><optgroup disabled><option value='green'>Green</option></optgroup></select><select disabled><option value='locked' selected>Locked</option></select></body></html>"
+        )
+
+        val before = ui_access_find_nodes(
+            session.ui_access_snapshot(), "browser:session", "select", "", 3
+        )
+        expect(before.len()).to_equal(3)
+        expect(before[0].text_value).to_equal("blue")
+        expect(before[1].text_value).to_equal("blue")
+        expect(before[0].canonical_id == before[1].canonical_id).to_equal(false)
+
+        val changed = session.ui_access_act(WinTextActionRequest(
+            target_id: before[1].canonical_id, action: "set_value",
+            text_value: "red", x: 0, y: 0
+        ))
+        expect(changed.ok).to_equal(true)
+        expect(changed.message).to_equal("selection updated")
+        val callback_count = session.dom_callback_count
+        expect(callback_count).to_equal(2)
+
+        val after = ui_access_find_nodes(
+            session.ui_access_snapshot(), "browser:session", "select", "", 3
+        )
+        expect(after[0].text_value).to_equal("blue")
+        expect(after[1].text_value).to_equal("red")
+        expect(after[0].focused).to_equal(false)
+        expect(after[1].focused).to_equal(true)
+        val dom_selects = be_dom_find_by_tag(session.current_dom, "select")
+        expect(be_dom_get_attr(dom_selects[0], "data-input-route")).to_equal("")
+        expect(be_dom_get_attr(dom_selects[1], "data-input-route")).to_equal("right")
+        expect(be_dom_get_attr(dom_selects[1], "data-change-route")).to_equal("right")
+
+        val unchanged = session.ui_access_act(WinTextActionRequest(
+            target_id: after[1].canonical_id, action: "set_value",
+            text_value: "red", x: 0, y: 0
+        ))
+        expect(unchanged.ok).to_equal(true)
+        expect(unchanged.message).to_equal("selection unchanged")
+        expect(session.dom_callback_count).to_equal(callback_count)
+
+        val disabled = session.ui_access_act(WinTextActionRequest(
+            target_id: after[1].canonical_id, action: "set_value",
+            text_value: "green", x: 0, y: 0
+        ))
+        expect(disabled.ok).to_equal(false)
+        expect(session.dom_callback_count).to_equal(callback_count)
+
+        val disabled_option = session.ui_access_act(WinTextActionRequest(
+            target_id: after[1].canonical_id, action: "set_value",
+            text_value: "black", x: 0, y: 0
+        ))
+        expect(disabled_option.ok).to_equal(false)
+        expect(session.dom_callback_count).to_equal(callback_count)
+
+        val missing = session.ui_access_act(WinTextActionRequest(
+            target_id: after[1].canonical_id, action: "set_value",
+            text_value: "missing", x: 0, y: 0
+        ))
+        expect(missing.ok).to_equal(false)
+        expect(session.dom_callback_count).to_equal(callback_count)
+
+        val disabled_select = session.ui_access_act(WinTextActionRequest(
+            target_id: after[2].canonical_id, action: "set_value",
+            text_value: "locked", x: 0, y: 0
+        ))
+        expect(disabled_select.ok).to_equal(false)
+        expect(disabled_select.code).to_equal("disabled")
+
+        val stale_target = after[1].canonical_id
+        session.open_html(
+            "https://example.com/replaced",
+            "<html><body><select><option value='new'>New</option></select></body></html>"
+        )
+        val stale = session.ui_access_act(WinTextActionRequest(
+            target_id: stale_target, action: "set_value",
+            text_value: "new", x: 0, y: 0
+        ))
+        expect(stale.ok).to_equal(false)
+        expect(stale.code).to_equal("target_not_found")
+
+        var focus_session = BrowserSession.new()
+        focus_session.open_html(
+            "https://example.com/focus-disable",
+            "<html><body><select onfocus='set-attr:disabled=disabled' oninput='set-attr:data-wrong=input'><option value='old' selected>Old</option><option value='new'>New</option></select></body></html>"
+        )
+        val focus_select = ui_access_find_nodes(
+            focus_session.ui_access_snapshot(), "browser:session",
+            "select", "", 1
+        )
+        val focus_disabled = focus_session.ui_access_act(
+            WinTextActionRequest(
+                target_id: focus_select[0].canonical_id,
+                action: "set_value", text_value: "new", x: 0, y: 0
+            )
+        )
+        expect(focus_disabled.ok).to_equal(false)
+        expect(focus_session.dom_callback_count).to_equal(1)
+        val live_select = be_dom_find_by_tag(
+            focus_session.current_dom, "select"
+        )[0]
+        expect(be_dom_get_attr(live_select, "data-wrong")).to_equal("")
+        val focus_after = ui_access_find_nodes(
+            focus_session.ui_access_snapshot(), "browser:session",
+            "select", "", 1
+        )
+        expect(focus_after[0].text_value).to_equal("old")
+
     it "hides secret form state and edits textarea through one focused route":
         var session = BrowserSession.new()
         session.open_html(

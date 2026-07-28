@@ -20,22 +20,123 @@ fn browser_form_encode(value: text) -> text:
 fn _browser_form_pair(name: text, value: text) -> text:
     browser_form_encode(name) + "=" + browser_form_encode(value)
 
-fn _browser_option_values(node: BeDomNode, selected_only: bool) -> [text]:
+fn _browser_option_value(node: BeDomNode) -> text:
+    if be_dom_has_attr(node, "value"):
+        return be_dom_get_attr(node, "value")
+    be_dom_get_text_content(node)
+
+fn _browser_option_values(
+    node: BeDomNode, selected_only: bool, ancestor_disabled: bool
+) -> [text]:
     var values: [text] = []
-    if node.tag_name == "option" and not be_dom_has_attr(node, "disabled"):
+    val disabled = ancestor_disabled or (
+        (node.tag_name == "optgroup" or node.tag_name == "option") and
+        be_dom_has_attr(node, "disabled")
+    )
+    if node.tag_name == "option" and not disabled:
         if not selected_only or be_dom_has_attr(node, "selected"):
-            val declared = be_dom_get_attr(node, "value")
-            values.push(
-                if be_dom_has_attr(node, "value"):
-                    declared
-                else:
-                    be_dom_get_text_content(node)
-            )
+            values.push(_browser_option_value(node))
         return values
     for child in node.children:
-        for value in _browser_option_values(child, selected_only):
+        for value in _browser_option_values(child, selected_only, disabled):
             values.push(value)
     values
+
+class BrowserSelectLookup:
+    found: bool
+    value: text
+
+fn _browser_select_lookup(
+    node: BeDomNode, selected_only: bool, ancestor_disabled: bool
+) -> BrowserSelectLookup:
+    val disabled = ancestor_disabled or (
+        (node.tag_name == "optgroup" or node.tag_name == "option") and
+        be_dom_has_attr(node, "disabled")
+    )
+    if node.tag_name == "option":
+        if not disabled and (
+            not selected_only or be_dom_has_attr(node, "selected")
+        ):
+            return BrowserSelectLookup(
+                found: true, value: _browser_option_value(node)
+            )
+        return BrowserSelectLookup(found: false, value: "")
+    for child in node.children:
+        val found = _browser_select_lookup(
+            child, selected_only, disabled
+        )
+        if found.found:
+            return found
+    BrowserSelectLookup(found: false, value: "")
+
+fn browser_select_value(node: BeDomNode) -> text:
+    val selected = _browser_select_lookup(node, true, false)
+    if selected.found:
+        return selected.value
+    if be_dom_has_attr(node, "multiple"):
+        return ""
+    _browser_select_lookup(node, false, false).value
+
+fn _browser_select_has_value(
+    node: BeDomNode, value: text, ancestor_disabled: bool
+) -> bool:
+    val disabled = ancestor_disabled or (
+        (node.tag_name == "optgroup" or node.tag_name == "option") and
+        be_dom_has_attr(node, "disabled")
+    )
+    if node.tag_name == "option":
+        return not disabled and _browser_option_value(node) == value
+    for child in node.children:
+        if _browser_select_has_value(child, value, disabled):
+            return true
+    false
+
+fn browser_select_has_value(node: BeDomNode, value: text) -> bool:
+    _browser_select_has_value(node, value, false)
+
+class BrowserSelectUpdate:
+    node: BeDomNode
+    found: bool
+    changed: bool
+
+fn _browser_select_update(
+    node: BeDomNode, value: text, ancestor_disabled: bool,
+    matched_before: bool
+) -> BrowserSelectUpdate:
+    var next = node
+    val disabled = ancestor_disabled or (
+        (next.tag_name == "optgroup" or next.tag_name == "option") and
+        be_dom_has_attr(next, "disabled")
+    )
+    if next.tag_name == "option":
+        val was_selected = be_dom_has_attr(next, "selected")
+        val matches = (
+            not matched_before and not disabled and
+            _browser_option_value(next) == value
+        )
+        if matches:
+            next.set_attr("selected", "selected")
+        else:
+            next.remove_attr("selected")
+        return BrowserSelectUpdate(
+            node: next, found: matches,
+            changed: was_selected != matches
+        )
+    var found = false
+    var changed = false
+    var children: [BeDomNode] = []
+    for child in next.children:
+        val update = _browser_select_update(
+            child, value, disabled, matched_before or found
+        )
+        children.push(update.node)
+        found = found or update.found
+        changed = changed or update.changed
+    next.children = children
+    BrowserSelectUpdate(node: next, found: found, changed: changed)
+
+fn browser_select_update(node: BeDomNode, value: text) -> BrowserSelectUpdate:
+    _browser_select_update(node, value, false, false)
 
 fn _browser_control_pairs(node: BeDomNode, submitter_id: text) -> [text]:
     var pairs: [text] = []
@@ -85,9 +186,9 @@ fn _browser_control_pairs(node: BeDomNode, submitter_id: text) -> [text]:
     if node.tag_name == "select":
         if name == "":
             return pairs
-        var values = _browser_option_values(node, true)
+        var values = _browser_option_values(node, true, false)
         if values.len() == 0 and not be_dom_has_attr(node, "multiple"):
-            val all_values = _browser_option_values(node, false)
+            val all_values = _browser_option_values(node, false, false)
             if all_values.len() > 0:
                 values.push(all_values[0])
         for value in values:

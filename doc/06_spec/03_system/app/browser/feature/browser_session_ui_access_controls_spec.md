@@ -113,6 +113,13 @@ Editing the second of two inputs with the same author `id` changes, focuses,
 and dispatches the listener mutation only on that second input. The first input
 remains unchanged while public author IDs retain their original value.
 
+#### changes the exact live select and rejects stale or disabled values
+
+Select controls expose their effective value and a node-stable `set_value`
+action. Changing the second of two duplicate-ID selects focuses and mutates only
+that select, then dispatches one `input`/`change` sequence. Repeating the value
+is event-free; disabled options and stale pre-navigation targets fail closed.
+
 #### hides secret form state and edits textarea through one focused route
 
 Hidden controls are absent, password values are redacted, and textarea edits
