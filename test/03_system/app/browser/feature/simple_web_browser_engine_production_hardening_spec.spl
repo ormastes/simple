@@ -275,6 +275,128 @@ describe "Production Simple browser user flow":
             session.render_to_pixels(), 0xFF2563EBu32
         )).to_be_greater_than(0)
 
+    # @manual: show
+    # @capture(text)
+    # @capture(protocol)
+    # @capture(gui)
+    it "should operate native controls and submit their successful values":
+        _production_browser_fixture()
+        _operate_page_controls()
+        step("Operate checkbox radio select and textarea controls through hosted hit testing")
+        var checkbox = HostedWebContentSession.create(
+            14,
+            "<input id='agree' type='checkbox' " +
+            "style='display:block;width:32px;height:24px' " +
+            "oninput='set-attr:data-input=yes' " +
+            "onchange='set-attr:data-change=yes'>",
+            80, 40
+        )
+        val checkbox_press = checkbox.dispatch_pointer_at(1, 5, 5, true)
+        val checkbox_release = checkbox.dispatch_pointer_at(2, 5, 5, false)
+        expect(checkbox_press.semantic_target_id).to_equal("agree")
+        expect(checkbox_release.semantic_target_id).to_equal("agree")
+        expect(checkbox_release.callback_count).to_be_greater_than(0)
+        expect(checkbox.current_body_html()).to_contain("checked=\"checked\"")
+        expect(checkbox.current_body_html()).to_contain("data-input=\"yes\"")
+        expect(checkbox.current_body_html()).to_contain("data-change=\"yes\"")
+
+        var radio = HostedWebContentSession.create(
+            15,
+            "<input id='plan' type='radio' name='plan' value='pro' " +
+            "style='display:block;width:32px;height:24px' " +
+            "oninput='set-attr:data-input=yes' " +
+            "onchange='set-attr:data-change=yes'>",
+            80, 40
+        )
+        val radio_press = radio.dispatch_pointer_at(3, 5, 5, true)
+        val radio_release = radio.dispatch_pointer_at(4, 5, 5, false)
+        expect(radio_press.semantic_target_id).to_equal("plan")
+        expect(radio_release.semantic_target_id).to_equal("plan")
+        expect(radio_release.callback_count).to_be_greater_than(0)
+        expect(radio.current_body_html()).to_contain("checked=\"checked\"")
+        expect(radio.current_body_html()).to_contain("data-input=\"yes\"")
+        expect(radio.current_body_html()).to_contain("data-change=\"yes\"")
+
+        var select = HostedWebContentSession.create(
+            16,
+            "<select id='tier' style='display:block;width:40px;height:24px' " +
+            "onfocus='set-attr:data-focus=yes'>" +
+            "<option value='basic'>Basic</option>" +
+            "<option value='plus' selected>Plus</option></select>",
+            80, 40
+        )
+        val select_press = select.dispatch_pointer_at(5, 5, 5, true)
+        val select_release = select.dispatch_pointer_at(6, 5, 5, false)
+        expect(select_press.semantic_target_id).to_equal("tier")
+        expect(select_release.semantic_target_id).to_equal("tier")
+        expect(select_press.callback_count).to_be_greater_than(0)
+        expect(select.current_body_html()).to_contain("data-focused=\"true\"")
+        expect(select.current_body_html()).to_contain("data-focus=\"yes\"")
+
+        var textarea = HostedWebContentSession.create(
+            17,
+            "<textarea id='notes' style='display:block;width:40px;height:24px' " +
+            "onbeforeinput='set-attr:data-before=yes' " +
+            "oninput='set-attr:data-input=yes'></textarea>",
+            80, 40
+        )
+        val textarea_press = textarea.dispatch_pointer_at(7, 5, 5, true)
+        val textarea_release = textarea.dispatch_pointer_at(8, 5, 5, false)
+        val textarea_edit = textarea.dispatch_text(9, "ready")
+        expect(textarea_press.semantic_target_id).to_equal("notes")
+        expect(textarea_release.semantic_target_id).to_equal("notes")
+        expect(textarea_edit.semantic_target_id).to_equal("notes")
+        expect(textarea_edit.callback_count).to_be_greater_than(0)
+        expect(textarea.current_body_html()).to_contain("ready")
+        expect(textarea.current_body_html()).to_contain("data-before=\"yes\"")
+        expect(textarea.current_body_html()).to_contain("data-input=\"yes\"")
+
+        step("Activate a hosted submit button and inspect the browser-owned POST request")
+        var form = HostedWebContentSession.create(
+            18,
+            "<style>#save{display:block;width:40px;height:28px;" +
+            "background-color:#ef4444}" +
+            "#save[data-click=yes]{background-color:#2563eb}</style>" +
+            "<form id='checkout' action='https://example.test/save' method='post' " +
+            "onsubmit='set-attr:data-submit=yes'>" +
+            "<input hidden name='agree' type='checkbox' checked>" +
+            "<input hidden name='plan' type='radio' value='pro' checked>" +
+            "<select hidden name='tier'><option value='plus' selected>Plus</option></select>" +
+            "<textarea hidden name='notes'>ready</textarea>" +
+            "<button id='save' type='submit' name='action' value='save' " +
+            "onclick='set-attr:data-click=yes'>Save</button></form>",
+            80, 40
+        )
+        expect(_count_color(
+            form.render_to_pixels(), 0xFFEF4444u32
+        )).to_be_greater_than(0)
+        val submit_press = form.dispatch_pointer_at(10, 5, 5, true)
+        val submit_release = form.dispatch_pointer_at(11, 5, 5, false)
+        expect(submit_press.semantic_target_id).to_equal("save")
+        expect(submit_release.semantic_target_id).to_equal("save")
+        expect(submit_release.callback_count).to_be_greater_than(0)
+        expect(form.current_body_html()).to_contain("data-click=\"yes\"")
+        expect(form.current_body_html()).to_contain("data-submit=\"yes\"")
+        expect(form.browser.has_pending_requests()).to_equal(true)
+        val request = form.browser.take_pending_request()
+        if request == nil:
+            fail("successful hosted form did not enqueue navigation")
+        val submission = request.unwrap()
+        expect(submission.kind).to_equal("document")
+        expect(submission.url).to_equal("https://example.test/save")
+        expect(submission.method).to_equal("POST")
+        expect(submission.content_type).to_equal(
+            "application/x-www-form-urlencoded"
+        )
+        expect(submission.body).to_contain("agree=on")
+        expect(submission.body).to_contain("plan=pro")
+        expect(submission.body).to_contain("tier=plus")
+        expect(submission.body).to_contain("notes=ready")
+        expect(submission.body).to_contain("action=save")
+        expect(_count_color(
+            form.render_to_pixels(), 0xFF2563EBu32
+        )).to_be_greater_than(0)
+
     # @manual: folded
     it "should cancel a default action after capture target and bubble dispatch":
         _production_browser_fixture()

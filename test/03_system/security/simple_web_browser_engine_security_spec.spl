@@ -95,6 +95,45 @@ fn _require_production_file_scheme_denial():
         Ok(_):
             fail("file navigation was accepted by the production broker")
 
+fn _require_production_oversized_text_denial():
+    val artifact = env_get("HOSTED_WM_ARTIFACT")
+    val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+    if artifact == "":
+        fail("HOSTED_WM_ARTIFACT is required for protocol denial")
+    if expected_artifact_sha.len() != 64 or
+        file_hash_sha256(artifact) != expected_artifact_sha:
+        fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+
+    var renderer = HostedBrowserRendererProcess.create(44, 64, 48)
+    val started = renderer.start(artifact, 2000)
+    if not started.ok:
+        val closed = renderer.close()
+        if not closed:
+            fail("production renderer cleanup failed after protocol start")
+        fail("production renderer start failed: {started.reason}")
+    val initialized = renderer.render(
+        "init", "<input id='bounded' value=''>", 2000
+    )
+    if not initialized.ok:
+        val closed = renderer.close()
+        if not closed:
+            fail("production renderer cleanup failed after protocol init")
+        fail("production renderer init failed: {initialized.reason}")
+    var oversized = ""
+    var bytes: i64 = 0
+    while bytes < 4097:
+        oversized = oversized + "x"
+        bytes = bytes + 1
+    val denied = renderer.begin_text_input(1, oversized, 2000)
+    val closed = renderer.close()
+    if not closed:
+        fail("production renderer cleanup failed after protocol denial")
+    match denied:
+        Err(reason):
+            expect(reason).to_equal("invalid-action")
+        Ok(_):
+            fail("oversized renderer text action was accepted")
+
 fn _require_production_node_native_denial():
     val artifact = env_get("HOSTED_WM_ARTIFACT")
     val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
@@ -187,10 +226,10 @@ describe "Production Simple browser security envelope":
         _require_platform_renderer_sandbox_evidence()
 
     # @manual: folded
-    it "should reject malformed late duplicate and oversized renderer messages":
+    it "should reject oversized renderer text through the production protocol":
         _hostile_page_fixture()
-        step("Send bounded IPC and Draw IR adversarial cases")
-        _require_production_security_evidence()
+        step("Reject a 4,097-byte text action before it reaches the worker")
+        _require_production_oversized_text_denial()
 
     # @manual: folded
     it "should contain renderer crash timeout memory and restart-rate failures":

@@ -1081,3 +1081,22 @@ implementation in progress / target evidence blocked
   Rust `std::alloc` collections/heap ownership and generated C `calloc/free`.
   Existing heap-registry counts and disabled/unlinked memtrack paths cannot
   support runtime-byte or reclamation claims, so no misleading counters landed.
+- Hosted native-control evidence now exercises checkbox and radio state plus
+  input/change callbacks, select focus, textarea beforeinput/input, and a real
+  successful POST form submission containing checkbox, radio, select,
+  textarea, and submitter values. The live wrapper release-gates this flow.
+- Production protocol evidence now starts and initializes the admitted worker,
+  rejects a 4,097-byte text action at the 4,096-byte host encoder boundary,
+  and closes cleanly. Malformed, late, and duplicate injection remain open.
+- CSP host sources with paths no longer widen to the entire matching origin:
+  slash-terminated sources use path-prefix matching, other non-root paths match
+  exactly, and root remains origin-wide. Focused BrowserSession evidence blocks
+  `/evil.js` while dispatching `/allowed/app.js` under one policy.
+- Production broker TLS identity is still not locally injectable: public-only
+  address admission rejects loopback before TLS and the real path then uses
+  immutable platform trust. The private rustls identity tests remain the
+  strongest safe local proof without adding forbidden runtime authority.
+- Honest NFR-003/NFR-004 latency evidence still needs input-ingress and
+  present-completion timestamps bound to event/revision, changed-frame timing
+  and present counters, plus wrapper percentile aggregation. Snapshot-only
+  retained-frame identity performs no presentation and cannot count as timing.

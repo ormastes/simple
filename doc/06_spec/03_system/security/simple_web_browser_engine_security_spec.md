@@ -49,11 +49,22 @@ cleanup. The decoder remains compatible with legacy
 `SBRF2` frames while admitted worker frames use diagnostic-capable `SBRF3`.
 An unchanged frame alone is not treated as denial evidence.
 
+## Production oversized protocol denial
+
+The oversized-text scenario starts and initializes the admitted sandboxed
+renderer, then sends a 4,097-byte text action through
+`HostedBrowserRendererProcess.begin_text_input`. The existing versioned
+protocol encoder rejects it as `invalid-action` at its 4,096-byte text bound,
+before a worker write occurs. The renderer closes before the denial assertion.
+This is real host-process protocol-boundary evidence, not raw-wire injection;
+malformed, late, and duplicate frame injection remain explicit fail-closed
+placeholders. SBRF2/SBRF3 frame compatibility is unchanged.
+
 ## Still unsupported
 
 All other scenarios in the executable spec intentionally remain explicit
 failure placeholders: TLS and certificate identity, origin/CORS/CSP/redirect
 and mixed-content policy, cookies/storage,
 data/javascript/custom/external scheme policy, malformed/late/duplicate/
-oversized renderer messages, renderer crash/resource/restart containment, and
+renderer messages, renderer crash/resource/restart containment, and
 conformance/fuzz corpus accounting.

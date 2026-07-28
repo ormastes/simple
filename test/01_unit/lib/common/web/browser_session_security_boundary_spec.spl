@@ -6,6 +6,7 @@ use std.gc_async_mut.web.browser_session.{
 }
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_context.{browser_csp_allows}
 use std.js.types.js_types.{JsValue}
 
 describe "BrowserSession production security boundary":
@@ -351,6 +352,69 @@ describe "BrowserSession production security boundary":
         expect(warnings).to_contain(
             "external script error: CSP blocked redirect: https://evil.test/app.js"
         )
+
+    it "enforces CSP host-source paths before script dispatch":
+        var session = BrowserSession.new()
+        val started = session.begin_network_navigation(
+            "https://safe.test/app", "GET", "", "", ""
+        )
+        expect(started.is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(request):
+                val committed = session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: request.id,
+                        kind: request.kind,
+                        url: request.url,
+                        status: 200,
+                        headers: "Content-Security-Policy: script-src https://cdn.test/allowed/",
+                        body: "<html><body><script src='https://cdn.test/evil.js'></script><script src='https://cdn.test/allowed/app.js'></script></body></html>",
+                        error: ""
+                    )
+                )
+                expect(committed.is_ok()).to_be(true)
+            nil:
+                fail("Expected CSP path document request")
+
+        match session.take_pending_request():
+            Some(script_request):
+                expect(script_request.kind).to_equal("script")
+                expect(script_request.url).to_equal(
+                    "https://cdn.test/allowed/app.js"
+                )
+            nil:
+                fail("Expected script within the CSP source path")
+        expect(session.warnings).to_contain(
+            "CSP blocked script: https://cdn.test/evil.js"
+        )
+        expect(browser_csp_allows(
+            "script-src HTTPS://cdn.test/allowed/",
+            "script-src",
+            "https://safe.test/app",
+            "https://cdn.test/allowed/upper.js",
+            false
+        )).to_be(true)
+        expect(browser_csp_allows(
+            "script-src https://cdn.test/exact.js",
+            "script-src",
+            "https://safe.test/app",
+            "https://cdn.test/exact.js?version=1",
+            false
+        )).to_be(true)
+        expect(browser_csp_allows(
+            "script-src https://cdn.test/exact.js",
+            "script-src",
+            "https://safe.test/app",
+            "https://cdn.test/exact.js/child",
+            false
+        )).to_be(false)
+        expect(browser_csp_allows(
+            "script-src https://cdn.test/",
+            "script-src",
+            "https://safe.test/app",
+            "https://cdn.test/any/path.js",
+            false
+        )).to_be(true)
 
     it "upgrades HSTS hosts and subdomains until max-age expires":
         var session = BrowserSession.new()

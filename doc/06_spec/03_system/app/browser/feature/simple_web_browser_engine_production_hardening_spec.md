@@ -68,11 +68,29 @@ text. Focus, key, before-input, input, and key-up handlers each publish visible
 DOM state; the committed value must be `Ada`. The input handler also activates
 a CSS attribute selector, so the final rendered control must be blue.
 
-This proves one hosted text-input flow and its rendered state. Form submission,
-other control types, and installed-browser event capture remain explicit
-fail-closed work; default-action cancellation is covered below.
+This proves one hosted text-input flow and its rendered state. Installed-browser
+event capture remains separate evidence; default-action cancellation is covered
+below.
 The canonical live-window wrapper executes this focused scenario with its
 admitted self-hosted runner before live-window capture.
+
+## Hosted native-control and successful form evidence
+
+The native-control scenario uses production hosted layout hit-testing to click
+a checkbox and radio input, requiring their checked DOM state and dispatched
+`input`/`change` handlers. It focuses a select and requires both native focus
+state and its focus callback, then focuses and edits a textarea through hosted
+pointer and committed-text dispatch, requiring `beforeinput`, `input`, and the
+visible `ready` value.
+
+The same scenario renders a red submit button over a form containing checked
+checkbox/radio values, a selected option, textarea text, and a named submitter.
+A matching hosted pointer press/release must run click and submit callbacks,
+turn the button blue, and enqueue a browser-owned HTTPS document request. The
+request must be POST, use `application/x-www-form-urlencoded`, and contain the
+successful `agree=on`, `plan=pro`, `tier=plus`, `notes=ready`, and
+`action=save` controls. DOM, pixel, callback, and request evidence are all
+required; no mock success marker substitutes for navigation creation.
 
 ## Hosted rejected-navigation evidence
 
