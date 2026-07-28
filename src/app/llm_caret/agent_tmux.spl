@@ -1,0 +1,56 @@
+# LLM Caret - Embedded tmux-style agent process view
+
+use app.llm_caret.agent_runtime.{AgentProcess, AgentTeamProcess}
+use common.tmux_session_model.{TmuxSession, tmux_session, tmux_split_active_pane}
+
+struct AgentProcessUsage:
+    agent_id: text
+    pid: i64
+    cpu_percent: f64
+    memory_mb: i64
+
+struct AgentTmuxEmbed:
+    team_id: text
+    session: TmuxSession
+    usages: [AgentProcessUsage]
+
+fn _process_command(proc: AgentProcess) -> text:
+    proc.agent_id + " pid=" + proc.pid.to_text() + " status=" + proc.status
+
+fn _usage_for(usages: [AgentProcessUsage], proc: AgentProcess) -> AgentProcessUsage:
+    for usage in usages:
+        if usage.agent_id == proc.agent_id or usage.pid == proc.pid:
+            return usage
+    AgentProcessUsage(agent_id: proc.agent_id, pid: proc.pid, cpu_percent: 0.0, memory_mb: 0)
+
+pub fn build_agent_tmux_embed(team: AgentTeamProcess, usages: [AgentProcessUsage]) -> AgentTmuxEmbed:
+    if team.processes.len() == 0:
+        return AgentTmuxEmbed(team_id: team.team_id, session: tmux_session(team.team_id, "idle"), usages: usages)
+    var session = tmux_session(team.team_id, _process_command(team.processes[0]))
+    var i = 1
+    while i < team.processes.len():
+        session = tmux_split_active_pane(session, _process_command(team.processes[i]))
+        i = i + 1
+    AgentTmuxEmbed(team_id: team.team_id, session: session, usages: usages)
+
+pub fn render_agent_tmux_tui(embed: AgentTmuxEmbed, team: AgentTeamProcess) -> text:
+    var out = "LLM Caret Embedded Tmux\n"
+    out = out + "Team: " + embed.team_id + "\n"
+    out = out + "Session: " + embed.session.name + "\n"
+    out = out + "Pane Process CPU Memory\n"
+    if team.processes.len() == 0:
+        return out + "pane[0] idle pid=-1 status=empty cpu=0.0% mem=0MB\n"
+    var i = 0
+    while i < team.processes.len():
+        val proc = team.processes[i]
+        val usage = _usage_for(embed.usages, proc)
+        out = out + "pane[" + i.to_text() + "] " + proc.agent_id
+        out = out + " pid=" + proc.pid.to_text()
+        out = out + " status=" + proc.status
+        out = out + " cpu=" + usage.cpu_percent.to_text() + "%"
+        out = out + " mem=" + usage.memory_mb.to_text() + "MB\n"
+        i = i + 1
+    out
+
+export AgentProcessUsage, AgentTmuxEmbed
+export build_agent_tmux_embed, render_agent_tmux_tui
