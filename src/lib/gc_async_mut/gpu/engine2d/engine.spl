@@ -2038,7 +2038,18 @@ class Engine2D with DrawIrRenderTarget:
         self.metal_backend = Some(metal)
         completed
 
-    me draw_ir_create_offscreen(width: i32, height: i32) -> Result<DrawIrRenderTarget, text>:
+    # Concrete-typed offscreen creator. Every branch already produces an
+    # Engine2D (create_shared_vulkan_offscreen / create_shared_metal_offscreen /
+    # create_offscreen all return Engine2D), so the trait-typed wrapper below is
+    # a pure widening.
+    #
+    # Draw IR's advanced executor calls THIS one, never the widened wrapper: a
+    # DrawIrRenderTarget-typed surface makes every later .read_pixels_with_source()
+    # / .shutdown() / .draw_image() on it lower to duck dispatch, and native
+    # codegen turns duck dispatch into a ud2 trap because `class Engine2D with
+    # DrawIrRenderTarget` (the mixin form) registers no vtable. See
+    # doc/08_tracking/bug/native_with_trait_impl_no_vtable_duck_trap_2026-07-28.md
+    me draw_ir_create_offscreen_engine(width: i32, height: i32) -> Result<Engine2D, text>:
         if self.backend_name() == "vulkan":
             val created = self.create_shared_vulkan_offscreen(width, height)
             match created:
@@ -2051,6 +2062,12 @@ class Engine2D with DrawIrRenderTarget:
                 Ok(target): Ok(target)
         else:
             Ok(Engine2D.create_offscreen(width, height))
+
+    me draw_ir_create_offscreen(width: i32, height: i32) -> Result<DrawIrRenderTarget, text>:
+        val created = self.draw_ir_create_offscreen_engine(width, height)
+        match created:
+            Err(reason): Err(reason)
+            Ok(target): Ok(target)
 
     me draw_ir_composite_readback(dst_x: i32, dst_y: i32, width: i32, height: i32, readback: Engine2DReadback, opacity_milli: i32) -> bool:
         if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
