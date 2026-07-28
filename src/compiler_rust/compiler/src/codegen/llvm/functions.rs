@@ -2271,7 +2271,13 @@ impl LlvmBackend {
                     "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
                         Some("rt_string_to_float")
                     }
-                    "index_of" | "find" | "find_str" => Some("rt_string_find"),
+                    // Receiver-polymorphic: see the matching note in
+                    // llvm/emitter.rs. Routing `index_of` to the string-only
+                    // `rt_string_find` made every array `index_of` return the
+                    // -1 receiver-mismatch sentinel under LLVM while the
+                    // Cranelift/JIT path returned the true index.
+                    "index_of" => Some("rt_index_of"),
+                    "find" | "find_str" => Some("rt_string_find"),
                     "rfind" | "last_index_of" => Some("rt_string_rfind"),
                     "to_string" | "to_text" | "str" => Some("rt_to_string"),
                     "slice" | "substring" => Some("rt_slice"),

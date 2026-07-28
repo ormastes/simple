@@ -188,7 +188,15 @@ impl LlvmEmitter<'_> {
             "to_string" | "str" => Some("rt_to_string"),
             "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
             "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
-            "index_of" | "find_str" => Some("rt_string_find"),
+            // Receiver-polymorphic: `index_of` must NOT go straight to the
+            // string-only `rt_string_find`, which returns its -1 receiver-
+            // mismatch sentinel for an array receiver. That made every
+            // `[T].index_of(v)` return -1 under LLVM — including when the
+            // element sat at index 0 — while the Cranelift/JIT emitter
+            // (codegen/instr/calls.rs) returned the correct index via
+            // `rt_index_of`. Same source, two different answers per backend.
+            "index_of" => Some("rt_index_of"),
+            "find_str" => Some("rt_string_find"),
             "rfind" | "last_index_of" => Some("rt_string_rfind"),
             "slice" | "substring" => Some("rt_slice"),
             "get" => Some("rt_index_get"),
