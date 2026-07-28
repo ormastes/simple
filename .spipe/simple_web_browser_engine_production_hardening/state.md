@@ -1350,3 +1350,5 @@ implementation in progress / target evidence blocked
 - Active document loads now apply the same duplicate-suppressing 128-entry,
   4096-byte warning cap at every script, module, WASM, stylesheet, and CSP append
   instead of retaining attacker-sized diagnostics until load finalization.
+- Cached Back/Forward commits now reset the renderer-owned scroll position
+  before painting the restored document; rejected navigation and Stop do not.

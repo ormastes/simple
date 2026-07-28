@@ -251,7 +251,8 @@ Ownership is split deliberately:
 
 Navigation/close cancels document work and clears listener, timer, promise,
 request, DOM, layout, image, and composition references before installing the
-next document. Detached-node animations and completed/canceled timers are
+next document. Cached back/forward commits also reset renderer-owned scroll
+before painting the restored document. Detached-node animations and completed/canceled timers are
 compacted. Engine/device/font state survives same-size navigation and is
 released exactly once on app close.
 

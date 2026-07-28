@@ -248,6 +248,49 @@ describe "hosted browser renderer worker":
             worker.last_hit_index.unwrap(), 5, 35
         )).to_equal("id:below")
 
+    it "resets scroll when cached history changes the document":
+        val tall = "<style>body{margin:0}main{height:240px}</style><main></main>"
+        var worker = HostedBrowserRendererWorkerSession.create(80, 50)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: tall
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "https://b.test/", tall
+        ).is_ok()).to_be(true)
+
+        worker.scroll_milli_y = 12000
+        val mismatched = browser_renderer_navigation_encode(
+            7, 3, "back", "https://wrong.test/", "GET", "", "", ""
+        )
+        val rejected = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), mismatched.wire
+        ).message)
+        expect(rejected.ok).to_be(false)
+        expect(rejected.reason).to_equal("navigation-target-mismatch")
+        expect(worker.scroll_milli_y).to_equal(12000)
+        expect(worker.browser.go_forward().is_ok()).to_be(true)
+
+        val back = browser_renderer_navigation_encode(
+            7, 3, "back", "simple-renderer://document", "GET", "", "", ""
+        )
+        val back_result = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), back.wire
+        ).message)
+        expect(back_result.ok).to_be(true)
+        expect(worker.scroll_milli_y).to_equal(0)
+        expect(back_result.resolved_scroll_y).to_equal(0)
+
+        worker.scroll_milli_y = 9000
+        val forward = browser_renderer_navigation_encode(
+            7, 4, "forward", "https://b.test/", "GET", "", "", ""
+        )
+        val forward_result = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), forward.wire
+        ).message)
+        expect(forward_result.ok).to_be(true)
+        expect(worker.scroll_milli_y).to_equal(0)
+        expect(forward_result.resolved_scroll_y).to_equal(0)
+
     it "clips hidden descendants from scrolling painting and hit testing":
         var worker = HostedBrowserRendererWorkerSession.create(80, 50)
         expect(worker.handle(BrowserRendererMessage(

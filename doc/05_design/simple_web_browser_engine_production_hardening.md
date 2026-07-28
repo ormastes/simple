@@ -253,6 +253,9 @@ On stop/navigation/close:
 6. allow normal GC;
 7. sample memtrack/heap/RSS after bounded quiescence.
 
+Cached back/forward navigation commits reset the worker scroll owner before the
+first restored-document frame; stopped or rejected navigation leaves it intact.
+
 No manual collection is added merely to make the soak pass. A retained root is
 fixed at its owner.
 
