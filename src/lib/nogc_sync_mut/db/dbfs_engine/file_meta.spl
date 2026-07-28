@@ -65,11 +65,14 @@ impl InodeHintsCache:
         InodeHintsCache(entries: {}, max_entries: capacity, hit_count: 0, miss_count: 0)
 
     me fn put(path: text, ino_id: i64, generation: i64):
-        val existing = self.entries.get(path)
-        val count = match existing:
-            Some(entry): entry.access_count
-            None: 0
-        if not existing.? and self.entries.keys().len() as i64 >= self.max_entries:
+        # NOTE: Dict.get() returns a corrupt Option for struct/class values under
+        # native codegen — see doc/07_guide/language/dict_native_pitfalls.md
+        val existed = self.entries.contains_key(path)
+        var count: i64 = 0
+        if existed:
+            val previous = self.entries[path]
+            count = previous.access_count
+        if not existed and self.entries.keys().len() as i64 >= self.max_entries:
             self.evict_lru()
         self.entries[path] = HintEntry(
             path: path,
@@ -80,20 +83,18 @@ impl InodeHintsCache:
         )
 
     me fn get(path: text) -> HintEntry?:
-        val entry = self.entries.get(path)
-        if entry.?:
+        if self.entries.contains_key(path):
             self.hit_count = self.hit_count + 1
-            val e = match entry:
-                Some(value): value
-                None: return nil
-            self.entries[path] = HintEntry(
+            val e = self.entries[path]
+            val refreshed = HintEntry(
                 path: e.path,
                 ino_id: e.ino_id,
                 gen: e.gen,
                 cached_at: e.cached_at,
                 access_count: e.access_count + 1
             )
-            return self.entries.get(path)
+            self.entries[path] = refreshed
+            return Some(refreshed)
         self.miss_count = self.miss_count + 1
         nil
 
@@ -114,14 +115,10 @@ impl InodeHintsCache:
         var min_count: i64 = -1
         var min_key: text = ""
         for key in self.entries.keys():
-            val entry = self.entries.get(key)
-            if entry.?:
-                val e = match entry:
-                    Some(value): value
-                    None: continue
-                if min_count < 0 or e.access_count < min_count:
-                    min_count = e.access_count
-                    min_key = key
+            val e = self.entries[key]
+            if min_count < 0 or e.access_count < min_count:
+                min_count = e.access_count
+                min_key = key
         if min_key.len() > 0:
             self.entries.remove(min_key)
 
