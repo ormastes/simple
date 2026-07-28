@@ -1749,6 +1749,377 @@ fn simpleos_spl_start_symbol(user_objects: [text]) -> text:
                 return symbol.name
     ""
 
+fn simpleos_rt_symbol_is_optional_backend(name: text) -> bool:
+    """Freestanding-optional families -- the `RT_KEEP` counterpart from the
+    Rust seed's guard (linker/native_binary/stubs.rs:129).
+
+    These are hardware-accelerator / host-service backends that genuinely have
+    no baremetal implementation, and every caller is written to treat the nil
+    result as "backend unavailable", so auto_stubs.c's weak zero-returning stub
+    is the INTENDED answer. Every other `rt_*` reaching that stub is a
+    silent-corruption bug, so keep this list short and audited.
+
+    NOT a prefix here on purpose: `rt_simd_`. That family is dominated by
+    ARITHMETIC kernels (`rt_simd_add_f32x4`, `rt_simd_fma_f32x8`, ...) where nil
+    is silent numeric corruption, not "unavailable" -- a `rt_simd_` prefix would
+    have swallowed exactly the bug class this guard exists to catch. Only the
+    capability-probe / diagnostic-counter members are allowlisted, by exact
+    name. Same reasoning keeps `rt_engine2d_simd_*` (real span blitters, whose
+    nil answer is a blank framebuffer) off this list entirely.
+
+    NOT a prefix here either, for the same reason: `rt_arm_virtio_`. It was one
+    until 2026-07-28, and that swept an entire block-STORAGE READ path into the
+    "nil means unavailable" bucket
+    (doc/08_tracking/bug/rt_arm_virtio_blk_prefix_allowlist_defeats_fabrication_guard_2026-07-28.md).
+    `virtio_blk_arm_read_sector_bytes`
+    (src/os/drivers/virtio/_VirtioBlk/driver_class.spl) reads the status word as
+    `0xFFFFFFFF` -> fail, non-zero -> fail, **zero -> success**, so a weak
+    zero-returning stub reports SUCCESS with an empty buffer and FAT32 metadata
+    mis-parses silently -- nil is corruption here, not "unavailable", exactly
+    the `rt_simd_` criterion above. Only the six MMIO transport / capability
+    probes are admitted, by exact name; they are also precisely the six carried
+    by `allow_arm_virtio()` in
+    test/03_system/check/simpleos_kernel_fabricated_rt_symbol_guard_spec.spl,
+    and the two lists must stay identical.
+
+    Deliberately NOT admitted (sector data path -- a missing definition must
+    fail the link, never link a nil stub): `rt_arm_virtio_blk_dma_base` (base of
+    the buffer that HOLDS the payload), `_prepare_read`, `_read_sector_direct`,
+    `_sector_bytes`, `_status_u8`, `_wait_completion`, `_read_prefix`,
+    `_read_hello_smf`. arm32/arm64 supply real bodies for all of them; any other
+    arch that starts linking this driver is meant to fail closed here."""
+    if (name.starts_with("rt_vulkan_") or name.starts_with("rt_metal_") or
+            name.starts_with("rt_cuda_") or name.starts_with("rt_rocm_") or
+            name.starts_with("rt_oneapi_") or name.starts_with("rt_opencl_") or
+            name.starts_with("rt_directx_") or
+            name.starts_with("rt_host_gpu_queue_")):
+        return true
+    if (name == "rt_arm_virtio_blk_configure_queue" or
+            name == "rt_arm_virtio_blk_mmio_read_u32" or
+            name == "rt_arm_virtio_blk_mmio_read_u64" or
+            name == "rt_arm_virtio_blk_mmio_write_u32" or
+            name == "rt_arm_virtio_blk_queue_base" or
+            name == "rt_arm_virtio_blk_set_mmio_base"):
+        return true
+    (name == "rt_simd_detect_profile" or
+        name == "rt_simd_engine2d_neon_hits" or
+        name == "rt_simd_engine2d_neon_reset")
+
+fn simpleos_undefined_rt_symbols(objects: [text]) -> [text]:
+    """Undefined `rt_*` references across the user's objects, deduped.
+
+    `extract_symbols_nm` deliberately drops undefined and weak entries, so the
+    reference side needs its own `nm -u` pass."""
+    var seen: {text: bool} = {}
+    var names: [text] = []
+    for obj in objects:
+        val (nm_out, _nm_err, nm_code) = process_run("nm", ["-u", obj])
+        if nm_code != 0:
+            continue
+        for line in nm_out.split("\n"):
+            for part in line.split(" "):
+                if part.starts_with("rt_") and not seen.has(part):
+                    seen[part] = true
+                    names.push(part)
+    names
+
+fn simpleos_defined_symbols_any_binding(objects: [text]) -> [text]:
+    """Every DEFINED symbol in `objects`, deduped -- weak definitions included.
+
+    Deliberately NOT `extract_symbols_nm`: that helper drops `W/w/V/v` as well
+    as `U/u` (llvm_backend_tools.spl:42), which is right for its own callers
+    (it feeds codegen symbol tables and `__module_init` discovery) but is
+    catastrophic here. Weak linkage does NOT imply fabricated:
+    `baremetal_stubs.c` declares real implementations `__attribute__((weak))`
+    -- `rt_memcpy`, `rt_memset`, `rt_dma_alloc`, `rt_dma_phys_of`,
+    `rt_dma_virt_of`, `rt_file_read_bytes` all have genuine bodies. Reusing the
+    weak-dropping helper made every one of them permanently unclassifiable as
+    real, so the guard accused six real implementations and refused the link on
+    the very entry point its own baseline was measured from
+    (doc/08_tracking/bug/simpleos_fabricated_rt_guard_weak_real_false_positive_2026-07-28.md).
+
+    Binding is not the classifier and neither is the name; only the
+    disassembled BODY is (`simpleos_trivial_body_rt_symbols`). This function
+    answers "is it defined here at all", and the caller then subtracts the ones
+    whose bodies are constant-return fakes. Only `U`/`u` are skipped, because an
+    undefined reference is by definition not a definition.
+
+    Changing `extract_symbols_nm` itself was rejected: it is exported
+    (backend/__init__.spl:174,182) and its weak-dropping is load-bearing for
+    `llvm_backend.spl`'s object symbol tables, so widening it there would change
+    codegen behaviour to fix a link-guard bug."""
+    var seen: {text: bool} = {}
+    var names: [text] = []
+    for obj in objects:
+        val (nm_out, _nm_err, nm_code) = process_run("nm", [obj])
+        if nm_code != 0:
+            continue
+        for line in nm_out.split("\n"):
+            var parts: [text] = []
+            for p in line.split(" "):
+                if p != "":
+                    parts.push(p)
+            val plen = parts.len()
+            if plen < 2:
+                continue
+            var type_code = ""
+            var sym_name = ""
+            if plen >= 3:
+                type_code = parts[1]
+                sym_name = parts[2]
+            else:
+                type_code = parts[0]
+                sym_name = parts[1]
+            if type_code == "U" or type_code == "u":
+                continue
+            if sym_name == "" or seen.has(sym_name):
+                continue
+            seen[sym_name] = true
+            names.push(sym_name)
+    names
+
+fn simpleos_objdump_symbol_name(line: text) -> text:
+    """`0000000000000000 <rt_foo>:` -> `rt_foo`."""
+    val open_parts = line.split("<")
+    if open_parts.len() < 2:
+        return ""
+    val close_parts = open_parts[open_parts.len() - 1].split(">")
+    close_parts[0]
+
+fn simpleos_objdump_normalized_insn(line: text) -> text:
+    """`4:<tab>xor    %eax,%eax` -> `xor %eax,%eax`; "" when not an instruction.
+
+    Operand text after a stray `:` (an x86 segment override) is dropped, which
+    can only make an instruction look LESS trivial -- the safe direction."""
+    if line.starts_with("Disassembly") or line.contains("file format"):
+        return ""
+    val colon_parts = line.split(":")
+    if colon_parts.len() < 2:
+        return ""
+    var flat = ""
+    for chunk in colon_parts[1].split("\t"):
+        flat = flat + " " + chunk
+    var toks: [text] = []
+    for tok in flat.split(" "):
+        if tok != "":
+            toks.push(tok)
+    toks.join(" ")
+
+fn simpleos_trivial_insn_class(insn: text) -> i64:
+    """0 = does real work, 1 = frame/no-op scaffolding, 2 = materializes a
+    constant return value. Covers x86-64 and aarch64 forms.
+
+    Unknown mnemonics deliberately classify as 0 (does real work), so an
+    unrecognised encoding makes the guard MISS a fake rather than accuse a real
+    implementation. Every error here is a false negative by construction."""
+    var toks: [text] = []
+    for tok in insn.split(" "):
+        if tok != "":
+            toks.push(tok)
+    if toks.len() == 0:
+        return 1
+    val op = toks[0]
+    val arg = if toks.len() > 1: toks[1] else: ""
+    if (op == "endbr64" or op == "ret" or op == "retq" or op == "leave" or
+            op == "nop" or op == "nopw" or op == "nopl" or op == "hlt"):
+        return 1
+    if op == "push" or op == "pushq" or op == "pop" or op == "popq":
+        return if arg == "%rbp": 1 else: 0
+    if op == "mov" or op == "movq" or op == "movl":
+        if arg == "%rsp,%rbp":
+            return 1
+        if arg.starts_with("$") and (arg.ends_with(",%eax") or arg.ends_with(",%rax")):
+            return 2
+        if arg == "w0," or arg == "x0,":
+            return 2
+        return 0
+    if op == "xor" or op == "xorl" or op == "xorq":
+        return if (arg == "%eax,%eax" or arg == "%rax,%rax"): 2 else: 0
+    if op == "movz" or op == "movn":
+        return if (arg == "w0," or arg == "x0,"): 2 else: 0
+    0
+
+fn simpleos_trivial_body_rt_symbols(objects: [text]) -> [text]:
+    """Defined `rt_*` whose body only sets up a frame and returns a constant.
+
+    GAP 1. A presence-only check ("is it defined outside auto_stubs.c?") is
+    structurally blind to the hand-written `return 0;` fakes in
+    `baremetal_stubs.c` / `baremetal_boot_stdout.c`: those are strong `T`
+    symbols in the shipped kernel whose bodies disassemble to
+    `xor %eax,%eax; ret` (`rt_pool_safepoint`, `rt_stderr_flush`, the whole
+    `rt_arm_elf64_pt_load_*` family). They are exactly as dangerous as the
+    generated weak ones and only a body-level predicate can see them.
+
+    A genuine constant-returning implementation trips this too; that is
+    intended. Such a symbol must be justified in
+    `simpleos_rt_symbol_is_optional_backend` or carried in the baseline, never
+    accepted silently."""
+    val objdump = find_objdump_portable()
+    if objdump == "":
+        return []
+    var out: [text] = []
+    var seen: {text: bool} = {}
+    for obj in objects:
+        val (dis, _derr, dcode) = process_run(objdump, ["-d", "--no-show-raw-insn", obj])
+        if dcode != 0:
+            continue
+        var sym = ""
+        var trivial = true
+        var constants = 0
+        var insns = 0
+        for raw in dis.split("\n"):
+            val line = raw.trim()
+            if line.ends_with(">:") and line.contains(" <"):
+                if sym.starts_with("rt_") and trivial and insns > 0 and constants <= 1 and not seen.has(sym):
+                    seen[sym] = true
+                    out.push(sym)
+                sym = simpleos_objdump_symbol_name(line)
+                trivial = true
+                constants = 0
+                insns = 0
+                continue
+            if sym == "":
+                continue
+            val insn = simpleos_objdump_normalized_insn(line)
+            if insn == "":
+                continue
+            insns = insns + 1
+            val cls = simpleos_trivial_insn_class(insn)
+            if cls == 2:
+                constants = constants + 1
+            elif cls == 0:
+                trivial = false
+        if sym.starts_with("rt_") and trivial and insns > 0 and constants <= 1 and not seen.has(sym):
+            seen[sym] = true
+            out.push(sym)
+    out
+
+fn simpleos_entry_key(output: text) -> text:
+    """Per-entry baseline key: the output binary's basename."""
+    val parts = output.split("/")
+    parts[parts.len() - 1]
+
+fn simpleos_fabricated_baseline(entry_key: text) -> {text: bool}:
+    """Shrink-only ratchet baseline for one entry point.
+
+    `config/simpleos_fabricated_rt_baseline.sdn`, one `<entry> <rt_symbol>` per
+    line, `#` comments. A missing file means an EMPTY baseline, i.e. maximum
+    strictness -- deleting the file can never weaken the gate.
+
+    This is NOT the allowlist. The allowlist
+    (`simpleos_rt_symbol_is_optional_backend`) is a permanent semantic claim
+    that nil is the correct answer; the baseline is a dated, per-entry,
+    shrink-only record of debt that must go away. Keeping them in separate
+    files is what stops migration pressure from converting an audited allowlist
+    into a rubber stamp."""
+    var allowed: {text: bool} = {}
+    val path = "config/simpleos_fabricated_rt_baseline.sdn"
+    if not file_exists(path):
+        return allowed
+    for raw in file_read(path).split("\n"):
+        val line = raw.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        var toks: [text] = []
+        for tok in line.split(" "):
+            if tok != "":
+                toks.push(tok)
+        if toks.len() < 2:
+            continue
+        if toks[0] == entry_key:
+            allowed[toks[1]] = true
+    allowed
+
+fn simpleos_check_no_fabricated_rt_stubs(entry_key: text, user_objects: [text], real_objects: [text]) -> Result<bool, text>:
+    """Task #97 guard, ported from the Rust seed
+    (linker/native_binary/stubs.rs:474-505), which the pure-Simple SimpleOS
+    link path never had -- which is why this class shipped silently.
+
+    auto_stubs.c fabricates ~4023 WEAK definitions that return NIL_VALUE (0x3)
+    so a freestanding link never fails on an unresolved cross-module ref. For
+    an optional accelerator that is intended; for a real ABI symbol it links
+    clean and only corrupts data at runtime. `rt_array_copy` had no
+    freestanding implementation, so in the guest EVERY `var x = <array-typed
+    place read>` -- which MIR lowers through it (mir_lowering_stmts.spl:240-254)
+    -- returned 0. An untagged 0 fails the inline array reader's `tag == 1`
+    check, which then yields its nil default, so every nested `.len()` read 0
+    with no fault and no diagnostic.
+
+    Fails the link rather than warning: a warning is what the weak stub already
+    is. There is deliberately NO env bypass (the seed has
+    SIMPLE_ALLOW_UNRESOLVED_RT=1); the in-tree escape hatch is
+    simpleos_rt_symbol_is_optional_backend, which is greppable and reviewable,
+    whereas an env var set once by a lane script is invisible silence again.
+
+    `real_objects` must NOT include the auto-stub object -- being satisfied
+    only by that object is precisely the condition being detected.
+
+    CLASSIFY BY BODY, NEVER BY LINKAGE OR BY NAME. A definition in
+    `real_objects` counts as real iff it is defined there (at ANY binding,
+    weak included -- `simpleos_defined_symbols_any_binding`) AND its
+    disassembled body is not a constant-return fake
+    (`simpleos_trivial_body_rt_symbols`). Both halves are load-bearing:
+    dropping weak definitions accused six real `baremetal_stubs.c`
+    implementations, and trusting presence alone missed the hand-written
+    `return 0;` fakes that sit right next to them in the same file
+    (`rt_dma_bytes_to_array` is literally `return 0; /* not called on x86_64
+    boot path */` while `rt_memcpy` two lines away is a real loop). Only the
+    body separates them."""
+    # One disassembly pass over `real_objects` serves both channels.
+    val trivial_names = simpleos_trivial_body_rt_symbols(real_objects)
+    var trivial: {text: bool} = {}
+    for name in trivial_names:
+        trivial[name] = true
+
+    var real: {text: bool} = {}
+    for name in simpleos_defined_symbols_any_binding(real_objects):
+        if not trivial.has(name):
+            real[name] = true
+    for obj in user_objects:
+        for symbol in extract_symbols_nm(obj):
+            real[symbol.name] = true
+
+    val referenced_names = simpleos_undefined_rt_symbols(user_objects)
+    var referenced: {text: bool} = {}
+    for name in referenced_names:
+        referenced[name] = true
+
+    var fabricated: [text] = []
+    var counted: {text: bool} = {}
+    # Channel 1 -- satisfied only by auto_stubs.c's weak NIL_VALUE stub.
+    for name in referenced_names:
+        if simpleos_rt_symbol_is_optional_backend(name):
+            continue
+        if real.has(name) or counted.has(name):
+            continue
+        counted[name] = true
+        fabricated.push(name)
+    # Channel 2 (GAP 1) -- hand-written trivial bodies. Channel 1 now sees most
+    # of these too (a trivial body is subtracted from `real` above), but this
+    # channel still catches the case where a user object ALSO defines the name,
+    # which puts it back in `real` presence-wise while the stub it actually
+    # binds is still a fake. Restricted to symbols the user objects actually
+    # reference, so --gc-sections'd stubs stay out of the report and the
+    # baseline tracks only what this entry really binds. Reuses the single
+    # disassembly pass computed above -- no second objdump sweep.
+    for name in trivial_names:
+        if simpleos_rt_symbol_is_optional_backend(name):
+            continue
+        if counted.has(name) or not referenced.has(name):
+            continue
+        counted[name] = true
+        fabricated.push(name)
+
+    val baseline = simpleos_fabricated_baseline(entry_key)
+    var novel: [text] = []
+    for name in fabricated:
+        if not baseline.has(name):
+            novel.push(name)
+    if novel.len() == 0:
+        return Ok(true)
+    novel.sort()
+    Err("SimpleOS freestanding link refused for entry '{entry_key}': {novel.len()} rt_* extern(s) are newly fabricated -- they resolve to a zero/nil-returning stub (auto_stubs.c's weak NIL_VALUE definition, or a hand-written constant-return body) and would silently return nil at runtime instead of failing here (task #97): {novel.join(\", \")}. This entry's fabricated set must stay a SUBSET of config/simpleos_fabricated_rt_baseline.sdn. Implement each in the arch's boot/baremetal_stubs.c, or add it to simpleos_rt_symbol_is_optional_backend with a written rationale naming the caller that treats nil as 'unavailable'. Do NOT add it to the baseline -- the baseline is shrink-only and records pre-existing debt, never new debt.")
+
 fn simpleos_module_init_symbols(user_objects: [text]) -> [text]:
     """Collect defined `__module_init` / `__module_init_<prefix>` symbols
     across the user's compiled objects, sorted + deduped by name.
@@ -1813,6 +2184,17 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
         case Ok(_): pass
     match compile_simpleos_arm64("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c", stubs_o, opt_level):
         case Err(e): return Err(e)
+        case Ok(_): pass
+
+    # GAP 3: this path previously never called the guard at all, and it links
+    # no auto_stubs.c -- so every fake here is a real body in
+    # arm64/boot/baremetal_stubs.c and ONLY the body-level predicate can see
+    # it. arm64/os_entry is the worst entry in the audit.
+    match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [crt_o, stubs_o]):
+        case Err(e):
+            file_delete(crt_o)
+            file_delete(stubs_o)
+            return Err(e)
         case Ok(_): pass
 
     val configured_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
@@ -1919,6 +2301,16 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
             return Err(e)
         case Ok(_): pass
     file_delete(init_c)
+
+    match simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [crt_o, stubs_o, type_o, init_o]):
+        case Err(e):
+            file_delete(crt_o)
+            file_delete(stubs_o)
+            file_delete(type_o)
+            file_delete(auto_o)
+            file_delete(init_o)
+            return Err(e)
+        case Ok(_): pass
 
     val linker_script_env = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     val linker_script = if linker_script_env != "":
