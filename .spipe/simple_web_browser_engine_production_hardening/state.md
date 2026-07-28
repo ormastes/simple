@@ -1096,10 +1096,9 @@ implementation in progress / target evidence blocked
   address admission rejects loopback before TLS and the real path then uses
   immutable platform trust. The private rustls identity tests remain the
   strongest safe local proof without adding forbidden runtime authority.
-- Honest NFR-003/NFR-004 latency evidence still needs input-ingress and
-  present-completion timestamps bound to event/revision, changed-frame timing
-  and present counters, plus wrapper percentile aggregation. Snapshot-only
-  retained-frame identity performs no presentation and cannot count as timing.
+- Honest NFR-003/NFR-004 latency completion still needs changed-frame timing,
+  every required input class, and percentile aggregation. The current receipt
+  proves one event/revision-bound input-to-present sample and real counters.
 - Cookie responses without a valid explicit Path now derive the RFC directory
   path from the response URL; focused evidence sends `/account/login` cookies
   to `/account/next` but not `/public`.
@@ -1110,5 +1109,18 @@ implementation in progress / target evidence blocked
   only for the same accepted semantic event, and records completed-present
   clock, exact delta, event/revision binding, real present count, and skipped
   frames. The wrapper gates one sample at 50 ms; no percentile/FPS claim is made.
-- Deterministic admitted-worker crash/timeout evidence remains open because no
-  public test seam can safely kill, pause, or fault the admitted child.
+- Dedicated parent-only fault commands now crash or stall an initialized
+  admitted worker, exercising the existing renderer-crashed/renderer-timeout
+  cleanup path and proving a fresh admitted renderer can restart afterward. A
+  correlated worker acknowledgement prevents an unconsumed hang command from
+  passing as a timeout.
+  Page content cannot access the parent-to-worker command channel. Memory
+  exhaustion and restart-rate budgets remain open.
+- Canonical CookieStore retrieval now checks the stored jar key for host-only
+  cookies before both network and script attachment, preventing one host's
+  cookie from crossing to another. BrowserSession still needs migration to
+  this typed owner before expiry and SameSite can be claimed end to end.
+- Current live verification is blocked before browser execution: the isolated
+  deployed pure-Simple compiler segfaults in both hosted `native-build` and
+  `check src/lib`. No bootstrap fallback was used; HTML/CSS, JavaScript/CSS
+  animation, and the new fault scenario therefore remain unexecuted this run.

@@ -120,8 +120,9 @@ structured interaction are not production browser evidence.
   default-cancellation, Reload/Home,
   page-link, Favorite,
   stopped-navigation, unsupported-content, Node/native denial, sandbox,
-  scheme-denial, oversized-protocol denial, and lifecycle scenarios before
-  live-window capture, then release-gates the admitted input-to-present sample.
+  scheme-denial, oversized-protocol denial, crash/timeout containment, and
+  lifecycle scenarios before live-window capture, then release-gates the
+  admitted input-to-present sample.
   Standalone runs are not artifact admission evidence.
 - text/HTML/protocol/exec/log/artifact:
   `build/test-artifacts/<spec-relative-path>/`

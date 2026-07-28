@@ -60,11 +60,34 @@ This is real host-process protocol-boundary evidence, not raw-wire injection;
 malformed, late, and duplicate frame injection remain explicit fail-closed
 placeholders. SBRF2/SBRF3 frame compatibility is unchanged.
 
+## Production renderer fault containment
+
+The `should contain admitted renderer crash and timeout failures`
+scenario exercises two dedicated, framed test controls on the admitted renderer
+only after its normal `ready` and `init` lifecycle has reached `active`.
+
+`Crash the admitted renderer after ready` makes the real sandboxed child exit
+before it emits a frame. The broker observes `renderer-crashed` through its
+ordinary polling path. `Hang the admitted renderer after ready` consumes the
+bounded framed command, emits its correlated `test_hang_ready` acknowledgement,
+then emits no frame. The broker accepts that acknowledgement only for its
+matching pending command; without it the deadline fails as
+`renderer-hang-unacknowledged`, preventing a false-green timeout. Only an
+acknowledged hang returns `renderer-timeout`, then its existing close path
+terminates the child process group. Page HTML and scripts cannot invoke or
+observe either control because they have no access to the parent-to-worker
+framed stdin channel.
+
+After each exact failure reason, the scenario starts, initializes, renders, and
+closes a fresh admitted renderer. This proves crash and timeout cleanup without
+using raw process APIs or a generic test transport. Memory and restart-rate
+budget evidence remains unsupported.
+
 ## Still unsupported
 
 All other scenarios in the executable spec intentionally remain explicit
 failure placeholders: TLS and certificate identity, origin/CORS/CSP/redirect
 and mixed-content policy, cookies/storage,
 data/javascript/custom/external scheme policy, malformed/late/duplicate/
-renderer messages, renderer crash/resource/restart containment, and
+renderer messages, renderer memory/resource/restart-rate containment, and
 conformance/fuzz corpus accounting.

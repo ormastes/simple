@@ -173,6 +173,7 @@ pub class HostedBrowserRendererProcess:
     expected_reply_to_request_id: i64
     command_deadline_ms: i64
     pending_operation: text
+    hang_acknowledged: bool
     next_animation_ms: i64
     pending_resize_width: i32
     pending_resize_height: i32
@@ -220,6 +221,7 @@ pub class HostedBrowserRendererProcess:
             expected_reply_to_request_id: 0,
             command_deadline_ms: 0,
             pending_operation: "",
+            hang_acknowledged: false,
             next_animation_ms: -1,
             pending_resize_width: 0,
             pending_resize_height: 0,
@@ -855,6 +857,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_wire_is_command = true
         self.command_deadline_ms = deadline
         self.pending_operation = operation
+        self.hang_acknowledged = false
         Ok(true)
 
     me _begin_after_animation(
@@ -918,6 +921,9 @@ pub class HostedBrowserRendererProcess:
         if rt_time_now_monotonic_ms() >= (
             self.command_deadline_ms
         ):
+            if (self.pending_operation == "test_hang_after_ready" and
+                not self.hang_acknowledged):
+                return Some(self.fail("renderer-hang-unacknowledged"))
             return Some(self.fail("renderer-timeout"))
         if self.pending_wire != "":
             val reason = self._flush_pending_wire_once()
@@ -935,6 +941,15 @@ pub class HostedBrowserRendererProcess:
         if decoded.status == "violation":
             return Some(self.fail(decoded.decoder.error))
         if decoded.status == "message":
+            if decoded.message.kind == "test_hang_ready":
+                if (self.pending_operation != "test_hang_after_ready" or
+                    self.hang_acknowledged or
+                    decoded.message.request_id != (
+                        self.expected_reply_to_request_id
+                    ) or decoded.message.payload != ""):
+                    return Some(self.fail("unexpected-test-hang-ready"))
+                self.hang_acknowledged = true
+                return nil
             if decoded.message.kind == "fetch_request":
                 val fetch = browser_renderer_fetch_request_decode(
                     decoded.message
@@ -1062,9 +1077,10 @@ pub class HostedBrowserRendererProcess:
 
     me _await_frame(
         request: BrowserRendererEncodeResult,
-        timeout_ms: i64
+        timeout_ms: i64,
+        operation: text = "sync"
     ) -> HostedBrowserRendererResult:
-        match self._begin_frame_request(request, "sync", timeout_ms):
+        match self._begin_frame_request(request, operation, timeout_ms):
             Err(reason):
                 if reason == "renderer-busy":
                     return _renderer_result(
@@ -1102,6 +1118,30 @@ pub class HostedBrowserRendererProcess:
                 kind, self.generation, self.next_request_id, payload
             )
         self._await_frame(request, timeout_ms)
+
+    me test_crash_after_ready(
+        timeout_ms: i64
+    ) -> HostedBrowserRendererResult:
+        if self.state != "active":
+            return self.fail("invalid-renderer-state")
+        self._await_frame(
+            browser_renderer_message_encode(
+                "test_crash_after_ready", self.generation,
+                self.next_request_id, ""
+            ), timeout_ms, "test_crash_after_ready"
+        )
+
+    me test_hang_after_ready(
+        timeout_ms: i64
+    ) -> HostedBrowserRendererResult:
+        if self.state != "active":
+            return self.fail("invalid-renderer-state")
+        self._await_frame(
+            browser_renderer_message_encode(
+                "test_hang_after_ready", self.generation,
+                self.next_request_id, ""
+            ), timeout_ms, "test_hang_after_ready"
+        )
 
     me begin_advance(
         animation_time_ms: i64,

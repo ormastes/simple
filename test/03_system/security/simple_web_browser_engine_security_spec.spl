@@ -176,6 +176,67 @@ fn _require_production_node_native_denial():
         "simple script unsupported command: native.host.exec"
     )
 
+fn _require_production_renderer_fault_containment():
+    val artifact = env_get("HOSTED_WM_ARTIFACT")
+    val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+    if artifact == "":
+        fail("HOSTED_WM_ARTIFACT is required for renderer fault containment")
+    if expected_artifact_sha.len() != 64 or
+        file_hash_sha256(artifact) != expected_artifact_sha:
+        fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+
+    var crashed_renderer = HostedBrowserRendererProcess.create(45, 64, 48)
+    val crashed_started = crashed_renderer.start(artifact, 2000)
+    if not crashed_started.ok:
+        fail("production renderer crash start failed: {crashed_started.reason}")
+    val crashed_initialized = crashed_renderer.render(
+        "init", "<div>crash containment</div>", 2000
+    )
+    if not crashed_initialized.ok:
+        fail("production renderer crash init failed: {crashed_initialized.reason}")
+    step("Crash the admitted renderer after ready")
+    val crashed = crashed_renderer.test_crash_after_ready(2000)
+    expect(crashed.ok).to_be(false)
+    expect(crashed.reason).to_equal("renderer-crashed")
+
+    var crash_restarted = HostedBrowserRendererProcess.create(46, 64, 48)
+    val crash_restart_started = crash_restarted.start(artifact, 2000)
+    if not crash_restart_started.ok:
+        fail("renderer did not restart after crash: {crash_restart_started.reason}")
+    val crash_restart_frame = crash_restarted.render(
+        "init", "<div>crash restart</div>", 2000
+    )
+    val crash_restart_closed = crash_restarted.close()
+    expect(crash_restart_frame.ok).to_be(true)
+    expect(crash_restart_frame.composition.batches.len()).to_be_greater_than(0)
+    expect(crash_restart_closed).to_be(true)
+
+    var hung_renderer = HostedBrowserRendererProcess.create(47, 64, 48)
+    val hung_started = hung_renderer.start(artifact, 2000)
+    if not hung_started.ok:
+        fail("production renderer hang start failed: {hung_started.reason}")
+    val hung_initialized = hung_renderer.render(
+        "init", "<div>timeout containment</div>", 2000
+    )
+    if not hung_initialized.ok:
+        fail("production renderer hang init failed: {hung_initialized.reason}")
+    step("Hang the admitted renderer after ready")
+    val hung = hung_renderer.test_hang_after_ready(500)
+    expect(hung.ok).to_be(false)
+    expect(hung.reason).to_equal("renderer-timeout")
+
+    var hang_restarted = HostedBrowserRendererProcess.create(48, 64, 48)
+    val hang_restart_started = hang_restarted.start(artifact, 2000)
+    if not hang_restart_started.ok:
+        fail("renderer did not restart after timeout: {hang_restart_started.reason}")
+    val hang_restart_frame = hang_restarted.render(
+        "init", "<div>timeout restart</div>", 2000
+    )
+    val hang_restart_closed = hang_restarted.close()
+    expect(hang_restart_frame.ok).to_be(true)
+    expect(hang_restart_frame.composition.batches.len()).to_be_greater_than(0)
+    expect(hang_restart_closed).to_be(true)
+
 fn _require_production_security_evidence():
     fail("REQ-WEB-BROWSER-010..019: production security evidence not implemented")
 
@@ -232,9 +293,14 @@ describe "Production Simple browser security envelope":
         _require_production_oversized_text_denial()
 
     # @manual: folded
-    it "should contain renderer crash timeout memory and restart-rate failures":
+    it "should contain admitted renderer crash and timeout failures":
         _platform_evidence_row()
-        step("Crash and exhaust only the hostile renderer")
+        _require_production_renderer_fault_containment()
+
+    # @manual: folded
+    it "should bound renderer memory and restart-rate failures":
+        _platform_evidence_row()
+        step("Bound renderer memory exhaustion and restart rate")
         _require_production_security_evidence()
 
     # @manual: folded
