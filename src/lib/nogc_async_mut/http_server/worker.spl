@@ -365,7 +365,9 @@ class Worker:
         self.op_to_fd.remove(op_id)
         self.op_type.remove(op_id)
 
-        val is_h2 = self.h2_connections.get(fd).?
+        # NOTE: contains_key presence test, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        val is_h2 = self.h2_connections.contains_key(fd)
 
         if result < 0:
             if typ == OP_OPEN_SENDFILE:
@@ -403,14 +405,16 @@ class Worker:
                 self.handle_send_complete(fd, now)
 
         elif typ == OP_OPEN_SENDFILE:
-            val pending = self.sendfile_pending.get(fd)
-            if not pending.?:
+            # NOTE: contains_key + index read, not .get() — Dict<K, aggregate>
+            # .get() returns a corrupt payload under native codegen.
+            if not self.sendfile_pending.contains_key(fd):
                 self.driver.submit_close(result)
                 if is_h2:
                     self.close_h2_connection(fd)
                 else:
                     self.close_connection(fd)
                 return
+            val pending = self.sendfile_pending[fd]
             val offset = pending.1
             val length = pending.2
             self.sendfile_pending.remove(fd)
@@ -441,8 +445,9 @@ class Worker:
         held in the accumulator until the next recv completes them.
         """
         # H2 connections are routed separately — feed raw bytes to avoid UTF-8 corruption
-        val h2conn = self.h2_connections.get(fd)
-        if h2conn.?:
+        # NOTE: contains_key presence test, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if self.h2_connections.contains_key(fd):
             self.handle_h2_recv(fd, raw_bytes, now)
             return
 
@@ -474,9 +479,10 @@ class Worker:
             return
 
         # TLS application data decryption path
-        val tls_session = self.tls_sessions.get(fd)
-        if tls_session.?:
-            var session = tls_session
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if self.tls_sessions.contains_key(fd):
+            var session = self.tls_sessions[fd]
             # Append new bytes to per-connection accumulator
             var acc = self.tls_rx_buf.get(fd) ?? []
             for b in raw_bytes:
@@ -518,10 +524,11 @@ class Worker:
                 self.op_type[op] = OP_RECV
                 return
             # Feed decrypted plaintext into the connection parser
-            val conn_tls = self.connections.get(fd)
-            if not conn_tls.?:
+            # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+            # returns a corrupt payload under native codegen.
+            if not self.connections.contains_key(fd):
                 return
-            var c_tls = conn_tls
+            var c_tls = self.connections[fd]
             val action_tls = c_tls.on_data_received(plaintext_all, now)
             self.connections[fd] = c_tls
             match action_tls:
@@ -545,11 +552,12 @@ class Worker:
                     self.send_response(fd, resp_tls, now)
             return
 
-        val conn = self.connections.get(fd)
-        if not conn.?:
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.connections.contains_key(fd):
             return
 
-        var c = conn
+        var c = self.connections[fd]
         val action = c.on_data_received(data, now)
         self.connections[fd] = c
 
@@ -580,11 +588,12 @@ class Worker:
 
     me handle_send_complete(fd: i64, now: i64):
         """Handle write completion on a connection."""
-        val conn = self.connections.get(fd)
-        if not conn.?:
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.connections.contains_key(fd):
             return
 
-        var c = conn
+        var c = self.connections[fd]
         val action = c.on_write_complete(now)
         self.connections[fd] = c
 
@@ -625,11 +634,12 @@ class Worker:
 
         Runs middleware phases, routes to handler, generates response.
         """
-        val conn = self.connections.get(fd)
-        if not conn.?:
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.connections.contains_key(fd):
             return
 
-        var c = conn
+        var c = self.connections[fd]
         val request = c.request
         if not request.?:
             self.send_error(fd, 500, "No request data", now)
@@ -780,15 +790,17 @@ class Worker:
         sendfile is transparently fallen back to portable-read for TLS
         connections since kernel sendfile cannot encrypt in-flight.
         """
-        val conn = self.connections.get(fd)
-        if not conn.?:
+        # NOTE: contains_key presence test, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.connections.contains_key(fd):
             return
 
         var response = resp
 
         # TLS connections must use portable-read for file bodies (sendfile bypasses encryption)
-        val tls_session_send = self.tls_sessions.get(fd)
-        if tls_session_send.?:
+        # NOTE: contains_key presence test, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if self.tls_sessions.contains_key(fd):
             if (worker_static_file_route(self.net_capabilities, resp) == "sendfile" or
                 worker_static_file_route(self.net_capabilities, resp) == "portable-read"):
                 response = worker_static_file_fallback_response(resp)
@@ -929,11 +941,12 @@ class Worker:
 
     me handle_h2_recv(fd: i64, data: [u8], now: i64):
         """Feed received raw bytes to an H2 connection and flush outbound frames."""
-        val h2conn = self.h2_connections.get(fd)
-        if not h2conn.?:
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.h2_connections.contains_key(fd):
             return
 
-        var conn = h2conn
+        var conn = self.h2_connections[fd]
         conn.h2_on_data_received(data, now)
         val keep_going = conn.consume_frames()
 

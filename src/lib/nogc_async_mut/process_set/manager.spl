@@ -94,15 +94,18 @@ class ProcessManager:
         self.supervisor.stop()
         if self.config.mode == ProcessMode.Separated:
             for w in self.config.workers:
-                val wp = self.workers.get(w.name)
-                if wp != nil and wp.pid > 1:
-                    process_kill(wp.pid)
-                    process_wait(wp.pid, 5000)
+                # NOTE: index read + contains_key, not .get() — Dict<K, struct>
+                # .get() returns a corrupt payload under native codegen.
+                if self.workers.contains_key(w.name):
+                    val wp = self.workers[w.name]
+                    if wp.pid > 1:
+                        process_kill(wp.pid)
+                        process_wait(wp.pid, 5000)
 
     me restart_worker(name: text) -> Result<(), ProcessSetError>:
-        val existing = self.workers.get(name)
-        if existing == nil:
+        if not self.workers.contains_key(name):
             return Err(ProcessSetError.ConfigError(message: "unknown worker: {name}"))
+        val existing = self.workers[name]
 
         if self.config.mode == ProcessMode.Separated:
             if existing.pid > 1:
@@ -129,13 +132,15 @@ class ProcessManager:
         self.supervisor.is_running()
 
     fn worker_status(name: text) -> Option<WorkerProcess>:
-        self.workers.get(name)
+        if self.workers.contains_key(name):
+            return Some(self.workers[name])
+        nil
 
     fn all_statuses() -> [WorkerProcess]:
         var result: [WorkerProcess] = []
         for w in self.config.workers:
-            val wp = self.workers.get(w.name)
-            if wp != nil:
+            if self.workers.contains_key(w.name):
+                val wp = self.workers[w.name]
                 result.push(wp)
         result
 
@@ -166,10 +171,11 @@ class ProcessManager:
     me call(service: text, method: text, args: text, timeout_ms: i64) -> Result<text, ProcessSetError>:
         if self.config.mode == ProcessMode.Shared:
             # Shared mode: synchronous direct dispatch via local handler table.
-            val ht = self.local_handlers.get(service)
-            if ht == nil:
+            # NOTE: contains_key + index read, not .get() — Dict<K, struct>
+            # .get() returns a corrupt payload under native codegen.
+            if not self.local_handlers.contains_key(service):
                 return Err(ProcessSetError.IpcError(message: "no handler registered for service: {service}"))
-            val handler_table = ht
+            val handler_table = self.local_handlers[service]
             val arg_list = [args]
             val result = handler_table.dispatch(method, arg_list)
             if result.is_ok():
@@ -178,10 +184,11 @@ class ProcessManager:
 
         if self.config.mode == ProcessMode.Actor:
             # Actor mode: enqueue message, run one scheduler step, then read reply.
-            val ht = self.local_handlers.get(service)
-            if ht == nil:
+            # NOTE: contains_key + index read, not .get() — Dict<K, struct>
+            # .get() returns a corrupt payload under native codegen.
+            if not self.local_handlers.contains_key(service):
                 return Err(ProcessSetError.IpcError(message: "no handler registered for service: {service}"))
-            val handler_table = ht
+            val handler_table = self.local_handlers[service]
             val arg_list = [args]
             val result = handler_table.dispatch(method, arg_list)
             if result.is_ok():
@@ -204,10 +211,11 @@ class ProcessManager:
     me cast(service: text, method: text, args: text) -> Result<(), ProcessSetError>:
         if self.config.mode == ProcessMode.Shared:
             # Shared mode: synchronous fire-and-forget dispatch; result discarded.
-            val ht = self.local_handlers.get(service)
-            if ht == nil:
+            # NOTE: contains_key + index read, not .get() — Dict<K, struct>
+            # .get() returns a corrupt payload under native codegen.
+            if not self.local_handlers.contains_key(service):
                 return Err(ProcessSetError.IpcError(message: "no handler registered for service: {service}"))
-            val handler_table = ht
+            val handler_table = self.local_handlers[service]
             val arg_list = [args]
             handler_table.dispatch(method, arg_list)
             return Ok(())
@@ -216,10 +224,11 @@ class ProcessManager:
             # Actor mode: enqueue message into the actor runtime mailbox and
             # advance the scheduler by one step so the message is processed
             # before returning.  The return value is discarded (fire-and-forget).
-            val ht = self.local_handlers.get(service)
-            if ht == nil:
+            # NOTE: contains_key + index read, not .get() — Dict<K, struct>
+            # .get() returns a corrupt payload under native codegen.
+            if not self.local_handlers.contains_key(service):
                 return Err(ProcessSetError.IpcError(message: "no handler registered for service: {service}"))
-            val handler_table = ht
+            val handler_table = self.local_handlers[service]
             val arg_list = [args]
             val rt = get_actor_runtime()
             val actor_ref = rt.spawn_actor(handler_table)

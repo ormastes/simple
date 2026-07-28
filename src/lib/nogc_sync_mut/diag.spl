@@ -243,10 +243,15 @@ fn dbg_deadline_check(label: text) -> bool:
     val armed = _g_deadline_armed_at.get(label)
     if armed == nil:
         return false
-    val d = _g_deadline_budget.get(label) ?? Deadline.new(0)
+    # NOTE: index read + contains_key, not .get() — Dict<K, class> .get()
+    # returns a corrupt payload under native codegen.
+    var timeout_ms = 0
+    if _g_deadline_budget.contains_key(label):
+        val d = _g_deadline_budget[label]
+        timeout_ms = d.timeout_ms
     val elapsed = rt_time_now_monotonic_ms() - (armed ?? 0)
-    if elapsed > d.timeout_ms:
-        _breach(label, d.timeout_ms, elapsed)
+    if elapsed > timeout_ms:
+        _breach(label, timeout_ms, elapsed)
         return true
     false
 
@@ -260,10 +265,13 @@ fn _deadline_check_all(now_ms: i64):
     for label in labels:
         val armed = _g_deadline_armed_at.get(label)
         if armed != nil:
-            val d = _g_deadline_budget.get(label) ?? Deadline.new(0)
+            var timeout_ms = 0
+            if _g_deadline_budget.contains_key(label):
+                val d = _g_deadline_budget[label]
+                timeout_ms = d.timeout_ms
             val elapsed = now_ms - (armed ?? 0)
-            if elapsed > d.timeout_ms:
-                _breach(label, d.timeout_ms, elapsed)
+            if elapsed > timeout_ms:
+                _breach(label, timeout_ms, elapsed)
 
 # Test-only introspection.
 fn dbg_deadline_breach_count() -> i64:
@@ -310,12 +318,11 @@ fn dbg_time_end(label: text):
         return
     val elapsed = rt_time_now_monotonic_ms() - (start ?? 0)
     _g_timer_begin.remove(label)
-    val prev = _g_timer_stats.get(label)
-    if prev == nil:
+    if not _g_timer_stats.contains_key(label):
         _g_timer_stats.set(label, _TimerStat(label: label, count: 1, total_ms: elapsed, max_ms: elapsed))
         _g_timer_labels.push(label)
     else:
-        val s = prev ?? _TimerStat(label: label, count: 0, total_ms: 0, max_ms: 0)
+        val s = _g_timer_stats[label]
         var new_max = s.max_ms
         if elapsed > new_max:
             new_max = elapsed
@@ -330,10 +337,9 @@ fn dbg_count(label: text, delta: i64):
     _g_counters.set(label, (cur ?? 0) + delta)
 
 fn dbg_timer_stats(label: text) -> DiagTimerStats:
-    val s = _g_timer_stats.get(label)
-    if s == nil:
+    if not _g_timer_stats.contains_key(label):
         return DiagTimerStats(count: 0, total_ms: 0, max_ms: 0)
-    val st = s ?? _TimerStat(label: label, count: 0, total_ms: 0, max_ms: 0)
+    val st = _g_timer_stats[label]
     DiagTimerStats(count: st.count, total_ms: st.total_ms, max_ms: st.max_ms)
 
 fn dbg_counter_value(label: text) -> i64:
@@ -342,9 +348,9 @@ fn dbg_counter_value(label: text) -> i64:
 fn _sorted_timer_stats() -> [_TimerStat]:
     var stats: [_TimerStat] = []
     for label in _g_timer_labels:
-        val s = _g_timer_stats.get(label)
-        if s != nil:
-            stats.push(s ?? _TimerStat(label: label, count: 0, total_ms: 0, max_ms: 0))
+        if _g_timer_stats.contains_key(label):
+            val s = _g_timer_stats[label]
+            stats.push(s)
     # descending by total_ms (stdlib sort — no duplicate sort implementation)
     array_sort_by(stats, \a, b: b.total_ms - a.total_ms)
 
