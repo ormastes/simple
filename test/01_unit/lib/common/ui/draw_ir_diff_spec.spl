@@ -8,9 +8,11 @@ use common.ui.draw_ir.{
     draw_ir_box_with_style,
     draw_ir_composition,
     draw_ir_embedding_config,
+    draw_ir_glyph_run_payload,
     draw_ir_rect_bounds,
     draw_ir_style_prop,
-    draw_ir_text
+    draw_ir_text,
+    draw_ir_text_shaped_font
 }
 use common.ui.draw_ir_diff.{draw_ir_diff_compositions, draw_ir_diff_report_to_json}
 
@@ -89,3 +91,35 @@ describe "Draw IR baseline diff":
         expect(report.removed_count).to_equal(1)
         expect(json).to_contain("\"state\":\"added\"")
         expect(json).to_contain("\"state\":\"removed\"")
+
+    it "reports shaped glyph-run-only changes":
+        val baseline = draw_ir_composition("baseline", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_text_shaped_font(
+                    "arabic", 4, 5, "اب", 0xffffffffu32, "Noto Sans Arabic",
+                    "sha256=test", [8, 12], 20, 32, 32,
+                    draw_ir_glyph_run_payload([288u32, 85u32], [3, 0], [2, 0], [1, 0], true)
+                )
+            ])
+        ])
+        val changed_payloads = [
+            draw_ir_glyph_run_payload([999u32, 85u32], [3, 0], [2, 0], [1, 0], true),
+            draw_ir_glyph_run_payload([288u32, 85u32], [4, 0], [2, 0], [1, 0], true),
+            draw_ir_glyph_run_payload([288u32, 85u32], [3, 0], [3, 0], [1, 0], true),
+            draw_ir_glyph_run_payload([288u32, 85u32], [3, 0], [2, 0], [0, 0], true),
+            draw_ir_glyph_run_payload([288u32, 85u32], [3, 0], [2, 0], [1, 0], false),
+            draw_ir_glyph_run_payload([288u32, 85u32], [3], [2, 0], [1, 0], true)
+        ]
+        for changed_payload in changed_payloads:
+            val current = draw_ir_composition("current", "scene", DRAW_IR_BACKEND_CPU, [
+                draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                    draw_ir_text_shaped_font(
+                        "arabic", 4, 5, "اب", 0xffffffffu32, "Noto Sans Arabic",
+                        "sha256=test", [8, 12], 20, 32, 32, changed_payload
+                    )
+                ])
+            ])
+            val report = draw_ir_diff_compositions(baseline, current)
+            expect(report.changed_count).to_equal(1)
+            expect(report.diffs[0].state).to_equal("changed")
+            expect(report.diffs[0].text_changed).to_equal(false)

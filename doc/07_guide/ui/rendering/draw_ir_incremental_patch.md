@@ -97,13 +97,15 @@ is documented, not a silent gap.
 `draw_ir_patch_commands_equal(a, b)` flattens both compositions via the id
 map and compares field-by-field: `kind`, `component_id`, `parent_id`,
 `x`/`y`/`width`/`height`, `color`, `text_value`, and `computed_style` (via
-the same style-diff helper). **It does not compare** `border_rect`,
-`content_rect`, `hit_rect`, `clip_rect`, `image_uri`, `edge`, `points`, or
-`glyph_run` — those fields are neither diffed nor patchable in this slice.
-The round-trip invariant is sound for the fields it does cover; it makes no
-claim of full-command coverage. Extending patchable fields means extending
-both the op-detection side (`_draw_ir_patch_build_forward_ops`) and the
-oracle (`draw_ir_patch_commands_equal`) together.
+the same style-diff helper), plus the full shaped `glyph_run`. A glyph-only
+change uses `UpdateStyle` as the existing full-command carrier. **It does not
+compare** `border_rect`,
+`content_rect`, `hit_rect`, `clip_rect`, `image_uri`, `edge`, or `points` —
+those remaining fields are neither diffed nor patchable in this slice. The
+round-trip invariant is sound for the fields it does cover; it makes no claim
+of full-command coverage. Extending patchable fields means extending both the
+op-detection side (`_draw_ir_patch_build_forward_ops`) and the oracle
+(`draw_ir_patch_commands_equal`) together.
 
 ## A filed, not-fixed-here bug: optional-lookup equality divergence
 
@@ -113,15 +115,16 @@ oracle (`draw_ir_patch_commands_equal`) together.
 diverges between the `simple test` daemon evaluator and `simple run` — a
 confirmed defect, filed as
 `doc/08_tracking/bug/bug_sspec_daemon_optional_lookup_equality_divergence_2026-07-20.md`,
-and left untouched in `draw_ir_diff.spl` per the additive-only constraint on
-that file's report semantics. `draw_ir_patch.spl`'s own style comparison
+and left untouched in `draw_ir_diff.spl` because that separate defect is
+outside this glyph-payload fix. `draw_ir_patch.spl`'s own style comparison
 instead uses a raw double-loop membership check with no optional in the
-comparison path, verified consistent under both evaluators.
+comparison path.
 
 ## Not proven
 
-This module has unit-spec coverage (12/12) for id-map diff/patch
-generation/apply/round-trip; it has not been wired into any live
+This module has 13 active unit scenarios for id-map diff/patch
+generation/apply/round-trip; current runner execution remains pending the
+self-hosted bootstrap repair. It has not been wired into any live
 DrawIrComposition producer/consumer pair (WM frame executor, host-GPU
 transport, etc.) as of this landing. Treat it as a library primitive, not
 yet an integrated incremental-render pipeline.
