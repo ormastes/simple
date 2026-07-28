@@ -291,21 +291,38 @@ fn text_index_of(haystack: text, needle: text) -> i32:
     find_from(haystack, needle, 0)
 
 fn text_matches_at(haystack: text, needle: text, offset: i32) -> bool:
-    # Compare CODE POINTS, not 1-char `text` handles. `char_at` allocates a
-    # fresh heap string per character and the `!=` between two of them crosses
-    # a runtime boolean-return boundary; `char_code_at` yields a plain integer
-    # so the decision stays in generated code. Besides removing two allocations
-    # per compared byte, this is the freestanding-safe form: the SimpleOS
-    # x86_64 kernel build mis-marshals boolean results from text builtins at
-    # depth (doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md,
+    # BYTE-indexed. `offset` is a byte offset and every index below is a byte
+    # index. This is the only self-consistent choice: `len()`, `slice()`,
+    # `substring()` and `index_of()` are ALL byte-indexed, and callers feed the
+    # offsets these scanners return straight into `substring`/`slice`.
+    #
+    # Do NOT reintroduce `char_code_at`/`char_at` here. Both are CHARACTER-
+    # indexed, so bounding a loop with `len()` (bytes) while probing with
+    # `char_code_at` (characters) silently returns a character index into a
+    # byte-indexed world; on any multi-byte document every downstream
+    # `substring` then cuts mid-sequence and truncates. That was the defect
+    # this form replaces (regression guard:
+    # test/01_unit/lib/gc_async_mut/gpu/browser_engine/
+    # simple_web_html_layout_renderer_scan_index_space_spec.spl).
+    #
+    # `bytes()` keeps the original freestanding-safety property that motivated
+    # `char_code_at`: the comparison is between two plain integers, so no
+    # boolean crosses a runtime text-builtin boundary. The SimpleOS x86_64
+    # kernel build mis-marshals boolean results from text builtins at depth
+    # (doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md,
     # residual item 3), which is what collapsed `_html_scan_events` to zero
-    # events in the guest while the host produced a full DOM.
-    val needle_len = needle.len()
-    if offset < 0 or offset + needle_len > haystack.len():
+    # events in the guest while the host produced a full DOM. It also avoids
+    # the per-character heap string `char_at` would allocate.
+    val needle_len = needle.len() as i32
+    if offset < 0 or offset + needle_len > (haystack.len() as i32):
         return false
+    if needle_len == 0:
+        return true
+    val hb = haystack.bytes()
+    val nb = needle.bytes()
     var j = 0
     while j < needle_len:
-        if haystack.char_code_at(offset + j) != needle.char_code_at(j):
+        if hb[offset + j] != nb[j]:
             return false
         j = j + 1
     true
@@ -319,9 +336,16 @@ fn text_starts_with_portable(s: text, prefix: text) -> bool:
 # ..._style.spl (parse_font_shorthand_family) and ..._layout.spl call it, and
 # _style sits below _layout in the import order.
 fn skip_wrap_spaces(txt: text, off: i32) -> i32:
+    # BYTE-indexed: `off` in, byte offset out, so the result composes with
+    # `substring`/`slice`. A space is ASCII, but the INDEX still has to be a
+    # byte index — `char_code_at` here returned a character index that callers
+    # then cut on, truncating any string containing multi-byte text.
     var out = off
-    val n = txt.len()
-    while out < n and txt.char_code_at(out) == 32:
+    val n = txt.len() as i32
+    if out >= n:
+        return out
+    val b = txt.bytes()
+    while out < n and b[out] == 32:
         out = out + 1
     out
 
@@ -332,6 +356,7 @@ fn find_from(s: text, needle: text, pos: i32) -> i32:
     # bogus near-zero offset for non-zero starts. Keeping this in Simple also
     # lets older deployed interpreters run current web-renderer source without
     # requiring a newly added runtime extern.
+    # BYTE-indexed throughout: `pos` in, byte index out, matching `index_of`.
     val start = if pos < 0: 0 else: pos
     val nlen = needle.len() as i32
     if nlen == 0:
@@ -340,35 +365,61 @@ fn find_from(s: text, needle: text, pos: i32) -> i32:
     if start >= slen or slen < nlen:
         return -1
     val limit = slen - nlen
+    # Decode both operands to bytes ONCE, then compare integers. Calling
+    # text_matches_at per probe would re-decode the whole haystack at every
+    # offset; the previous `char_code_at` form was worse still, since each
+    # `char_code_at(i)` re-walks the UTF-8 from byte 0, making the scan
+    # quadratic in the match position.
+    val hb = s.bytes()
+    val nb = needle.bytes()
+    val first = nb[0]
     var i = start
     while i <= limit:
-        if text_matches_at(s, needle, i):
-            return i
+        if hb[i] == first:
+            var j = 1
+            var matched = true
+            while j < nlen:
+                if hb[i + j] != nb[j]:
+                    matched = false
+                    j = nlen
+                else:
+                    j = j + 1
+            if matched:
+                return i
         i = i + 1
     -1
 
 fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
     if key_len == 0:
         return 0
-    val inner_len = inner.len()
+    # BYTE-indexed, like the other scanners here: the returned index is used as
+    # a byte offset by callers. `char_at` is CHARACTER-indexed, so pairing it
+    # with `inner.len()` (bytes) mis-located every attribute in a tag whose
+    # inner text contained multi-byte characters (e.g. a non-ASCII alt/title
+    # value preceding the attribute being read).
+    val inner_len = inner.len() as i32
     if inner_len < key_len:
         return -1
-    val first = key.char_at(0)
+    val ib = inner.bytes()
+    val kb = key.bytes()
+    val first = kb[0]
     val limit = inner_len - key_len
     var i = 0
     # Quote-aware scan: a key substring that lands INSIDE a quoted attribute
     # value is not a real attribute. This matters for values that embed markup —
     # e.g. an <iframe srcdoc="...div style='height:10px'..."> must not have its
     # own `style=`/`width=`/`height=` read from inside the srcdoc value.
-    var quote = ""
+    # 0 = not inside a quoted value; otherwise the opening quote byte
+    # (34 = '"', 39 = '\''). Byte comparisons keep this freestanding-safe.
+    var quote = 0
     while i <= limit:
-        val ci = inner.char_at(i)
-        if quote != "":
+        val ci = ib[i]
+        if quote != 0:
             if ci == quote:
-                quote = ""
+                quote = 0
             i = i + 1
             continue
-        if ci == "\"" or ci == "'":
+        if ci == 34 or ci == 39:
             quote = ci
             i = i + 1
             continue
@@ -380,13 +431,14 @@ fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
             # inside `data-bgcolor=`, `width=` inside `data-width=`.
             var at_token_start = i == 0
             if not at_token_start:
-                val prev = inner.char_at(i - 1)
-                at_token_start = prev == " " or prev == "\t" or prev == "\n" or prev == "\r"
+                # 32 = space, 9 = tab, 10 = LF, 13 = CR
+                val prev = ib[i - 1]
+                at_token_start = prev == 32 or prev == 9 or prev == 10 or prev == 13
             if at_token_start:
                 var j = 1
                 var matched = true
                 while j < key_len:
-                    if inner.char_at(i + j) != key.char_at(j):
+                    if ib[i + j] != kb[j]:
                         matched = false
                         break
                     j = j + 1
