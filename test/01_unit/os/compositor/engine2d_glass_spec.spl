@@ -12,7 +12,7 @@
 # All four ops are exercised through the canonical `glass_dispatch.cap_*`
 # helpers, matching how production callers reach them.
 
-use std.spec.{describe, context, it, expect}
+use std.spec.{describe, context, it, expect, step}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.glass_dispatch.{cap_blend_rect, cap_blur_region, cap_gradient_v, cap_read_pixel}
@@ -42,6 +42,28 @@ describe "Engine2dCompositorBackend CompositorGlassCapable (D2 Phase 2)":
             val backend = _make_backend(16, 16, 0xFF000000)
             val cap = backend.as_glass_capable()
             expect(cap != nil).to_equal(true)
+
+    context "override lifecycle":
+
+        it "releases retained override pixels on disable and owner shutdown":
+            var backend = _make_backend(4, 4, 0xFF000000)
+            val pixels: [u32] = [0xFF112233u32; 16]
+
+            step("Install and disable one override frame")
+            backend.set_pixel_buffer_override(pixels)
+            expect(backend.retained_pixel_buffer_override_count()).to_equal(16)
+            backend.clear(0xFF000000u32)
+            expect(backend.retained_pixel_buffer_override_count()).to_equal(0)
+
+            step("Preserve another owner's frame and release the owning frame")
+            backend.set_pixel_buffer_override(pixels)
+            var other = _make_backend(4, 4, 0xFF000000)
+            other.clear(0xFF000000u32)
+            expect(backend.retained_pixel_buffer_override_count()).to_equal(16)
+            other.shutdown()
+            expect(backend.retained_pixel_buffer_override_count()).to_equal(16)
+            backend.shutdown()
+            expect(backend.retained_pixel_buffer_override_count()).to_equal(0)
 
     context "blend_rect":
 

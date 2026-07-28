@@ -753,6 +753,11 @@ pipeline and must not be re-implemented by hand-drawing engine2d primitives:
 |------|-----|----------------|
 | Interactive WM/MDI | `src/os/hosted/hosted_entry.spl` | `HostCompositor` + `seed_host_compositor_shared_mdi` rendering Simple Web MDI app content through `HostedWinitBufferBackend`, with real event routing (`comp.pointer_move`, `comp.handle_left_button` — click-focus, titlebar drag, close-X; keyboard Tab/W/M/R/Esc). Widget→pixels uses the real `common.ui.builder` → `init_state` → `app.ui.render.html_widgets.render_html_tree` → `simple_web_render_html_to_pixels_with_engine2d_backend` path; hit-testing via `shared_wm_translate_pointer_event` (`src/lib/common/ui/window_scene.spl`). |
 
+The persistent `Engine2dCompositorBackend` owns any temporary pixel-buffer
+override. Replacement releases the singleton prior buffer; direct rendering
+and shutdown release only an override owned by that backend. This prevents a
+closed browser renderer from leaving a full-frame global pixel array rooted.
+
 Verify the interactive WM with the framebuffer/logic gate (not a screenshot):
 `scripts/check/check-shared-wm-renderer-unification-evidence.shs` expects
 `shared_wm_renderer_unification_status=pass` and `logic_passed >= 4`. macOS

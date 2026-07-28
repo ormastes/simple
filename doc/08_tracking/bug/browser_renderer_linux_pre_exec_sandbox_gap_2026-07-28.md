@@ -1,6 +1,7 @@
 # Browser renderer Linux pre-exec sandbox gap
 
-Status: implemented; production admission pending, release-blocking
+Status: implemented and admission-guarded; installed production evidence
+pending, release-blocking
 
 `rt_browser_renderer_spawn_sandboxed` scrubs descriptors/environment and then
 executes the full hosted renderer. The worker installs rlimits, `no_new_privs`,
@@ -43,3 +44,9 @@ on verification cycle 2. Keep this issue release-blocking until the admitted
 pure-Simple renderer completes ready/frame protocol evidence with the same
 artifact; current target construction is blocked by the compiler/runtime link
 failure recorded in the SPipe state.
+
+Stage-two entry now additionally requires the preinit-active marker. The
+focused C gate proves a normal process cannot call stage two and reach READY
+without stage one, while the broker-spawned marker path still completes both
+stages. This closes artifact/link omission as an admission bypass; it does not
+replace the still-pending installed-artifact ready/frame evidence.

@@ -271,7 +271,9 @@ Broker rules:
 
 Platform enforcement:
 
-- Linux: `no_new_privs`, Landlock, seccomp, no socket/exec/fork;
+- Linux: an argv-bound ELF preinit stage installs `no_new_privs`, Landlock,
+  and startup-safe seccomp before constructors; stage-two admission fails
+  unless that marker is active, then adds rlimits and the full worker filter;
 - macOS: signed App Sandbox helper/XPC profile;
 - Windows: AppContainer plus kill-on-close Job Object and explicit handles.
 

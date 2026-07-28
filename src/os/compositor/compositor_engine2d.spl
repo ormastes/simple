@@ -16,6 +16,15 @@ var _engine2d_compositor_override_width: i32 = 0
 var _engine2d_compositor_override_height: i32 = 0
 var _engine2d_compositor_override_pixels: [u32] = []
 
+fn _engine2d_compositor_clear_override(owner_id: i32):
+    if owner_id > 0 and _engine2d_compositor_override_id != owner_id:
+        return
+    _engine2d_compositor_override_enabled = false
+    _engine2d_compositor_override_id = 0
+    _engine2d_compositor_override_width = 0
+    _engine2d_compositor_override_height = 0
+    _engine2d_compositor_override_pixels = []
+
 # WM raster backend key. SIMPLE_GUI_BACKEND selects the Engine2D backend for
 # the compositor raster lane (e.g. "metal"); default "software" keeps the
 # historical CPU behavior. CPU stays the default until GPU parity + perf are
@@ -105,16 +114,22 @@ class Engine2dCompositorBackend:
 
     fn set_pixel_buffer_override(pixels: [u32]):
         self.invalidate_frame_receipt()
+        _engine2d_compositor_clear_override(0)
         _engine2d_compositor_override_id = self.id
         _engine2d_compositor_override_width = self.w
         _engine2d_compositor_override_height = self.h
         _engine2d_compositor_override_pixels = pixels
         _engine2d_compositor_override_enabled = true
 
+    fn retained_pixel_buffer_override_count() -> i64:
+        if _engine2d_compositor_override_id == self.id:
+            return _engine2d_compositor_override_pixels.len().to_i64()
+        0
+
     me render_draw_ir_composition(composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
         """Execute one canonical Draw IR frame on this persistent session and
         return its validated readback candidate to the hosted presenter."""
-        _engine2d_compositor_override_enabled = false
+        _engine2d_compositor_clear_override(self.id)
         self.invalidate_frame_receipt()
         var web_content_image_count = 0
         var batch_index = 0
@@ -159,6 +174,7 @@ class Engine2dCompositorBackend:
 
     me shutdown():
         self.invalidate_frame_receipt()
+        _engine2d_compositor_clear_override(self.id)
         self.engine.shutdown()
 
 impl CompositorBackend for Engine2dCompositorBackend:
@@ -170,19 +186,19 @@ impl CompositorBackend for Engine2dCompositorBackend:
 
     me clear(color: u32):
         self.invalidate_frame_receipt()
-        _engine2d_compositor_override_enabled = false
+        _engine2d_compositor_clear_override(self.id)
         self.engine.clear(color)
         self.engine.present()
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         self.invalidate_frame_receipt()
-        _engine2d_compositor_override_enabled = false
+        _engine2d_compositor_clear_override(self.id)
         self.engine.draw_rect_filled(x, y, w, h, color)
         self.engine.present()
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
         self.invalidate_frame_receipt()
-        _engine2d_compositor_override_enabled = false
+        _engine2d_compositor_clear_override(self.id)
         self.engine.draw_text_bg(x, y, text_str, fg, bg, 16)
         self.engine.present()
 
@@ -194,7 +210,7 @@ impl CompositorBackend for Engine2dCompositorBackend:
 
     me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         self.invalidate_frame_receipt()
-        _engine2d_compositor_override_enabled = false
+        _engine2d_compositor_clear_override(self.id)
         self.engine.draw_image(x, y, w, h, pixels)
         self.engine.present()
 

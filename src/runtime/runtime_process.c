@@ -2354,7 +2354,8 @@ static bool browser_renderer_apply_seccomp(void) {
 }
 
 bool rt_browser_renderer_sandbox_enter(void) {
-    if (!browser_renderer_set_limit(RLIMIT_CORE, 0, 0) ||
+    if (!s_browser_renderer_preinit_active ||
+        !browser_renderer_set_limit(RLIMIT_CORE, 0, 0) ||
         !browser_renderer_set_limit(
             RLIMIT_AS, 512U * 1024U * 1024U, 512U * 1024U * 1024U) ||
         !browser_renderer_set_limit(RLIMIT_CPU, 30, 30) ||

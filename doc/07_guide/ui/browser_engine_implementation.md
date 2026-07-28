@@ -175,6 +175,11 @@ Failed child close retries once per second, and successful close releases the
 broker decoder/cache/history state retained by its failure tombstone while
 preserving learned HSTS for persistence.
 
+On Linux, renderer READY is admissible only after the executable preinit hook
+has activated the stage-one Landlock/seccomp marker. Calling the stage-two
+sandbox entry without that marker fails closed before applying worker limits;
+`test/01_unit/runtime/run_process_piped_write_test.shs` covers both paths.
+
 ## Milestone History
 
 | Milestone | Gate | Status |

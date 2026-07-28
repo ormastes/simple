@@ -362,6 +362,19 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         second_closed && cleaned && renderer_slot_released && mutation_blocked;
 }
 
+static int sandbox_enter_without_preinit_fails_closed(void) {
+    pid_t child = fork();
+    if (child == 0) {
+        _exit(rt_browser_renderer_sandbox_enter() ? 1 : 0);
+    }
+    if (child < 0) return 0;
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) return 0;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 static int stopped(pid_t pid) {
     if (pid <= 0) return 0;
     if (kill(pid, 0) != 0) return errno == ESRCH;
@@ -603,7 +616,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && strcmp(argv[1], "--sandbox-probe") == 0) {
         return sandbox_probe(argc, argv);
     }
-    if (rt_browser_renderer_preinit_active_for_test()) return 10;
+    if (rt_browser_renderer_preinit_active_for_test()) return 11;
     if (!closed_child_write_is_nonfatal()) return 1;
     if (!interrupted_large_write_completes()) return 2;
     if (!bounded_write_reports_backpressure()) return 3;
@@ -613,5 +626,6 @@ int main(int argc, char** argv) {
     if (!close_recycles_slots_and_rejects_unknown_handles()) return 7;
     if (!parent_death_stops_child()) return 8;
     if (!sandboxed_renderer_is_sanitized_and_contained()) return 9;
+    if (!sandbox_enter_without_preinit_fails_closed()) return 10;
     return 0;
 }

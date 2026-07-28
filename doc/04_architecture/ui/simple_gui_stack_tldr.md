@@ -248,6 +248,8 @@ MCP, Render, Test API — all thin. GUI policy stays in Simple.
   unavailable states explicitly.
 - hot path: no full-tree scans, repeated file reads, subprocess retry loops, or
   per-frame device probing.
+- Engine2D override frames release on replacement and owner disable/shutdown;
+  non-owner rendering preserves the active frame.
 - dependency gates: non-capable lanes prove no HTML/CSS/GUI/web closure.
 - dynSMF startup: enabled artifacts must exist and start with `SMF\0` before
   `smf_dlopen`.

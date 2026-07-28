@@ -1310,3 +1310,15 @@ implementation in progress / target evidence blocked
   `doc/06_spec/*_spec.spl == 0` layout gate pass. Two independent focused
   reviews pass. Live Simple unit execution remains unavailable for the
   admitted pure-runtime ABI failure; no bootstrap or Rust seed was used.
+- Linux sandbox admission now fails unless the argv-bound ELF preinit hook
+  activated stage-one Landlock/seccomp before constructors. The focused C
+  subprocess gate proves an ordinary process cannot enter stage two, while the
+  production spawn shape still completes pre-main denials and stage-two
+  containment. The gate passes; installed pure-Simple READY/frame evidence
+  remains compiler-blocked and no bootstrap or seed fallback was used.
+- Engine2D override lifecycle now releases the globally retained full-frame
+  pixel array on replacement, direct-render disable, and owning backend
+  shutdown. A non-owner shutdown preserves the active owner's frame. Focused
+  coverage checks both paths, closing the browser-raster teardown leak that
+  could otherwise retain an 8K ARGB frame for process lifetime; executable
+  Simple evidence remains compiler-blocked and was not rerun.

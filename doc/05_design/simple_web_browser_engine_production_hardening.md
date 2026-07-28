@@ -224,7 +224,9 @@ outside that viewport before Draw IR submission.
 - read back only in explicit evidence mode;
 - resize replaces the device exactly once when required;
 - navigation retains compatible engine/font state;
-- app close shuts down once.
+- app close shuts down once;
+- pixel-buffer overrides are released on replacement and owner disable or
+  shutdown; another backend cannot clear the active owner.
 
 Atlas/cache/face handles never appear in Draw IR.
 
