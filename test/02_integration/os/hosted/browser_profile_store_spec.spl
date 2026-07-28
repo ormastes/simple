@@ -10,6 +10,7 @@ use os.hosted.browser_profile_store.{
     BrowserBookmarkStore, BrowserProfileStore
 }
 use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
+use common.ui.access.{WinTextActionRequest}
 
 extern fn rt_file_delete(path: text) -> bool
 
@@ -60,6 +61,68 @@ describe "hosted browser profile store":
         expect(registry.sessions.len()).to_equal(1)
         expect(registry.close()).to_equal(true)
         expect(registry.sessions.len()).to_equal(0)
+
+    it "round trips add open and remove bookmark controls across host restarts":
+        remove_profile_files()
+        var first = HostedWebContentRegistry.create_with_bookmark_store(
+            BrowserBookmarkStore.from_profile(
+                BrowserProfileStore.open(PROFILE_PATH)?
+            )
+        )
+        val _ = first.advance_window(
+            47, "<div>first host</div>", 64, 48, 100000, true
+        )
+        var first_session = first.sessions[0]
+        expect(first_session.browser.open_html(
+            "https://restart.test/saved",
+            "<html><body>Saved page</body></html>"
+        ).is_ok()).to_equal(true)
+        first.sessions[0] = first_session
+        val _ = first.dispatch_chrome_pointer(1, 47, "favorite", true)
+        expect(first.dispatch_chrome_pointer(
+            2, 47, "favorite", false
+        ).callback_count).to_equal(1)
+        expect(first.close()).to_equal(true)
+
+        var restarted = HostedWebContentRegistry.create_with_bookmark_store(
+            BrowserBookmarkStore.from_profile(
+                BrowserProfileStore.open(PROFILE_PATH)?
+            )
+        )
+        val _ = restarted.advance_window(
+            48, "<div>restarted host</div>", 64, 48, 100000, true
+        )
+        var restarted_session = restarted.sessions[0]
+        restarted_session.browser.register_resource(
+            "https://restart.test/saved",
+            "<html><body>Reopened saved page</body></html>"
+        )
+        val opened = restarted_session.browser.ui_access_act(
+            WinTextActionRequest(
+                target_id: "browser:session#bookmark_0",
+                action: "click", text_value: "", x: 0, y: 0
+            )
+        )
+        expect(opened.ok).to_equal(true)
+        expect(restarted_session.browser.current_url).to_equal(
+            "https://restart.test/saved"
+        )
+        expect(restarted_session.browser.current_body_html).to_contain(
+            "Reopened saved page"
+        )
+        restarted.sessions[0] = restarted_session
+        val _ = restarted.dispatch_chrome_pointer(
+            3, 48, "favorite", true
+        )
+        expect(restarted.dispatch_chrome_pointer(
+            4, 48, "favorite", false
+        ).callback_count).to_equal(1)
+        expect(restarted.close()).to_equal(true)
+
+        var removed = BrowserProfileStore.open(PROFILE_PATH)?
+        expect(removed.load_bookmarks()?.entries.len()).to_equal(0)
+        removed.close()?
+        remove_profile_files()
 
     it "persists validated bookmarks and HSTS across reopen and removal":
         remove_profile_files()
