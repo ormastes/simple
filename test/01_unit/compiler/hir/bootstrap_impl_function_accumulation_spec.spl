@@ -65,3 +65,26 @@ describe "bootstrap impl function accumulation", tag: ["only-compiled"]:
         expect(function_name_count(mixed, "free_value")).to_equal(1)
         expect(function_name_count(mixed, "first")).to_equal(1)
         expect(function_name_count(mixed, "second")).to_equal(1)
+
+        step("Retain local symbols without duplicating imported symbols")
+        val provider = parse_and_build_module(
+            "pub fn imported_value() -> i64: 42\n", "provider")
+        val consumer = parse_and_build_module(
+            "use provider.{imported_value}\nfn local_value() -> i64: imported_value()\n",
+            "consumer")
+        var modules: Dict<text, any> = {}
+        modules["provider"] = provider
+        var consumer_lowering = HirLowering.with_filename("consumer")
+        consumer_lowering.modules_by_name = modules
+        val consumer_hir: HirModule? = consumer_lowering.lower_parser_module_unstub(consumer)
+        expect(consumer_hir != nil).to_equal(true)
+        val cached_symbols = bootstrap_hir_module_symbols_at(bootstrap_hir_module_count() - 1)
+        var imported_count = 0
+        var local_count = 0
+        for symbol in cached_symbols:
+            if symbol.name == "imported_value":
+                imported_count = imported_count + 1
+            if symbol.name == "local_value":
+                local_count = local_count + 1
+        expect(imported_count).to_equal(0)
+        expect(local_count).to_be_greater_than(0)
