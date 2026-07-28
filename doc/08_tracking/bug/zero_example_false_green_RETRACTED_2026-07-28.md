@@ -86,6 +86,35 @@ separate open question — whether they predate the `is_nil` fix or were exposed
 by it (`validate()` previously returned `Ok` for every input, so assertions
 against it could not fail).
 
+## Second correction to the same commit: `is_nil()` was never silently Ok
+
+That commit also states that `spec.is_nil()` "never fired and `validate()`
+returned Ok for every input". **Also wrong.** Restoring the old form and
+re-running shows `is_nil()` is a hard runtime error on this engine:
+
+```
+semantic: method 'is_nil' not found on type 'enum' (receiver value: Option::None)
+```
+
+So the old form did not fail *open*, it failed *loudly* — and the spec was
+worse with it: 5 failures instead of 4. The `== nil` fix converted one of
+those errors into a real pass and caused zero failures.
+
+The marker spec's 4 failures were therefore **exposed, not introduced**, and
+the cause was not nil-checking at all. The spec was wrong on two independent
+counts:
+
+1. It asserted `"[boot] entry"` while the registry namespace is
+   `MarkerNamespace.Boot -> "[BOOT]"` (uppercase), which is what every real
+   emitter writes. `find_spec("[boot] entry")` correctly returned nil.
+2. It referenced `NAMESPACE_BOOT`, which has never existed —
+   `semantic: variable 'NAMESPACE_BOOT' not found`. `markers.spl` exports
+   `NS_BOOT` (a `text`), and `marker_string` takes a `MarkerNamespace` enum,
+   so no rename of that constant would have worked either.
+
+Neither is fallout from the parallel session's `namespace` -> `.ns` field
+rename, which is complete and consistent across all 22 registry entries.
+
 ## Standing method rule, restated
 
 Capture to a file, read the **tail**, and take `$?` from the command under
