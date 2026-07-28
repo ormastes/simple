@@ -1,6 +1,6 @@
 # COLL006 "string concat in loop" fires on plain integer accumulators (`i = i + 1`)
 
-**Status:** open
+**Status:** fixed 2026-07-28 (working copy) — see .spipe/lint_coll006/state.md
 **Found:** 2026-07-27 (KV260 JTAG-console completeness work)
 **Area:** compiler/35.semantics/lint — `collection_patterns.spl`
 **Severity:** medium — CRITICAL-severity false positive; makes `simple lint` red

@@ -17,15 +17,18 @@ use compiler.core.ast_expr.{
     EXPR_WHILE, EXPR_FOR, EXPR_ASSIGN, EXPR_BINARY,
     EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_INT_LIT, EXPR_IDENT,
     EXPR_COMPOUND_ASSIGN, EXPR_SLICE, EXPR_STRING_LIT,
+    EXPR_INTERPOLATED_STRING,
     expr_tag, expr_i_val, expr_s_val, expr_left, expr_right, expr_args, expr_stmts
 }
+use compiler.core.types.{TYPE_TEXT}
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN,
     STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_COMPOUND_ASSIGN,
-    stmt_tag, stmt_expr, stmt_name, stmt_body
+    stmt_tag, stmt_expr, stmt_name, stmt_body, stmt_type_tag
 }
 use compiler.core.ast.{
-    DECL_FN, DECL_VAR, decl_tag, decl_name, decl_body_stmts
+    DECL_FN, DECL_VAR, decl_tag, decl_name, decl_body_stmts,
+    decl_param_names, decl_param_types
 }
 use compiler.core.tokens.{TOK_PLUS}
 
@@ -54,7 +57,8 @@ fn check_collection_patterns(decl_indices: [i64]) -> [CollectionLintWarning]:
         if decl_tag[idx] == DECL_FN:
             val fn_name = decl_name[idx]
             val body = decl_body_stmts[idx]
-            val fn_warnings = check_fn_body(body, fn_name)
+            val text_vars = collect_text_var_names(body, fn_param_text_names(idx))
+            val fn_warnings = check_fn_body(body, fn_name, text_vars)
             for w in fn_warnings:
                 warnings.push(w)
 
@@ -74,7 +78,7 @@ fn check_collection_patterns(decl_indices: [i64]) -> [CollectionLintWarning]:
 # Function Body Walker
 # ============================================================================
 
-fn check_fn_body(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
+fn check_fn_body(stmts: [i64], fn_name: text, text_vars: [text]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
 
     for s in stmts:
@@ -84,11 +88,11 @@ fn check_fn_body(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
 
         # Recurse into nested blocks/if/match
         if tag == STMT_IF:
-            val nested = check_fn_body(stmt_body[s], fn_name)
+            val nested = check_fn_body(stmt_body[s], fn_name, text_vars)
             for w in nested:
                 warnings.push(w)
         elif tag == STMT_BLOCK:
-            val nested = check_fn_body(stmt_body[s], fn_name)
+            val nested = check_fn_body(stmt_body[s], fn_name, text_vars)
             for w in nested:
                 warnings.push(w)
 
@@ -96,20 +100,20 @@ fn check_fn_body(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
         if tag == STMT_FOR:
             val iter_var = stmt_name[s]
             val loop_body = stmt_body[s]
-            val loop_warnings = check_loop_body(loop_body, fn_name, iter_var)
+            val loop_warnings = check_loop_body(loop_body, fn_name, iter_var, text_vars)
             for w in loop_warnings:
                 warnings.push(w)
             # Also recurse into loop body for nested loops
-            val nested = check_fn_body(loop_body, fn_name)
+            val nested = check_fn_body(loop_body, fn_name, text_vars)
             for w in nested:
                 warnings.push(w)
 
         elif tag == STMT_WHILE:
             val loop_body = stmt_body[s]
-            val loop_warnings = check_loop_body(loop_body, fn_name, "")
+            val loop_warnings = check_loop_body(loop_body, fn_name, "", text_vars)
             for w in loop_warnings:
                 warnings.push(w)
-            val nested = check_fn_body(loop_body, fn_name)
+            val nested = check_fn_body(loop_body, fn_name, text_vars)
             for w in nested:
                 warnings.push(w)
 
@@ -117,13 +121,13 @@ fn check_fn_body(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
         if tag == STMT_EXPR:
             val e = stmt_expr[s]
             if e >= 0:
-                val expr_warnings = check_expr_for_loops(e, fn_name)
+                val expr_warnings = check_expr_for_loops(e, fn_name, text_vars)
                 for w in expr_warnings:
                     warnings.push(w)
 
     warnings
 
-fn check_expr_for_loops(e: i64, fn_name: text) -> [CollectionLintWarning]:
+fn check_expr_for_loops(e: i64, fn_name: text, text_vars: [text]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
     if e < 0:
         return warnings
@@ -132,19 +136,19 @@ fn check_expr_for_loops(e: i64, fn_name: text) -> [CollectionLintWarning]:
     if tag == EXPR_FOR:
         val iter_var = expr_s_val[e]
         val loop_stmts = expr_stmts[e]
-        val loop_warnings = check_loop_body(loop_stmts, fn_name, iter_var)
+        val loop_warnings = check_loop_body(loop_stmts, fn_name, iter_var, text_vars)
         for w in loop_warnings:
             warnings.push(w)
-        val nested = check_fn_body(loop_stmts, fn_name)
+        val nested = check_fn_body(loop_stmts, fn_name, text_vars)
         for w in nested:
             warnings.push(w)
 
     elif tag == EXPR_WHILE:
         val loop_stmts = expr_stmts[e]
-        val loop_warnings = check_loop_body(loop_stmts, fn_name, "")
+        val loop_warnings = check_loop_body(loop_stmts, fn_name, "", text_vars)
         for w in loop_warnings:
             warnings.push(w)
-        val nested = check_fn_body(loop_stmts, fn_name)
+        val nested = check_fn_body(loop_stmts, fn_name, text_vars)
         for w in nested:
             warnings.push(w)
 
@@ -154,7 +158,7 @@ fn check_expr_for_loops(e: i64, fn_name: text) -> [CollectionLintWarning]:
 # Loop Body Pattern Checks
 # ============================================================================
 
-fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text) -> [CollectionLintWarning]:
+fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text]) -> [CollectionLintWarning]:
     var warnings: [CollectionLintWarning] = []
 
     for s in stmts:
@@ -175,7 +179,7 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text) -> [CollectionLi
                         item_name: fn_name
                     ))
                 # COLL006: str = str + x in loop (non-array RHS)
-                if is_string_concat_assign_expr(e):
+                if is_string_concat_assign_expr(e, text_vars):
                     warnings.push(CollectionLintWarning(
                         code: "COLL006",
                         severity: "CRITICAL",
@@ -207,7 +211,7 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text) -> [CollectionLi
                         item_name: fn_name
                     ))
                 # COLL006 via expression-level assign
-                if is_string_concat_assign_expr(e):
+                if is_string_concat_assign_expr(e, text_vars):
                     warnings.push(CollectionLintWarning(
                         code: "COLL006",
                         severity: "CRITICAL",
@@ -363,9 +367,125 @@ fn is_loop_invariant_call(e: i64, iter_var: text) -> bool:
                     return true
     false
 
+# ----------------------------------------------------------------------------
+# Text-typing evidence for COLL006
+#
+# The collection lint runs on the freshly parsed arena AST, BEFORE type
+# inference, so there is no inferred type for an arbitrary expression here.
+# The only type facts available at this point are syntactic:
+#   * a declared type annotation (`stmt_type_tag` / `decl_param_types`, which
+#     carry the raw TYPE_* fixed tags), and
+#   * literal/known text-returning method evidence on an initializer or RHS.
+#
+# COLL006 therefore requires positive text evidence before firing. Without it
+# the rule matched ANY `x = x + <non-array>` and reported every integer
+# accumulator (`total = total + i`, `i = i + 1`) as an O(n^2) string concat at
+# Deny severity. Numeric accumulation is the most common loop shape in the
+# language, so the rule was unusable; see doc/08_tracking/bug/.
+# ----------------------------------------------------------------------------
+
+# Methods whose result is text regardless of receiver type. Deliberately
+# conservative: only names that cannot plausibly return a collection.
+fn is_text_returning_method(name: text) -> bool:
+    if name == "to_text" or name == "to_string" or name == "to_str":
+        return true
+    if name == "fmt" or name == "format" or name == "join":
+        return true
+    if name == "trim" or name == "trim_start" or name == "trim_end":
+        return true
+    if name == "to_upper" or name == "to_lower":
+        return true
+    if name == "to_uppercase" or name == "to_lowercase":
+        return true
+    if name == "substring" or name == "substr" or name == "replace":
+        return true
+    if name == "pad_left" or name == "pad_right":
+        return true
+    false
+
+# True when the expression is syntactically known to produce text.
+fn is_text_valued_expr(e: i64) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_tag[e]
+    if tag == EXPR_STRING_LIT:
+        return true
+    if tag == EXPR_INTERPOLATED_STRING:
+        return true
+    if tag == EXPR_METHOD_CALL:
+        return is_text_returning_method(expr_s_val[e])
+    if tag == EXPR_BINARY:
+        if expr_i_val[e] == TOK_PLUS:
+            if is_text_valued_expr(expr_left[e]):
+                return true
+            if is_text_valued_expr(expr_right[e]):
+                return true
+    false
+
+fn name_in_list(names: [text], target: text) -> bool:
+    if target == "":
+        return false
+    for n in names:
+        if n == target:
+            return true
+    false
+
+# Parameter names of a function declared `: text`.
+fn fn_param_text_names(decl_idx: i64) -> [text]:
+    var names: [text] = []
+    val param_names = decl_param_names[decl_idx]
+    val param_types = decl_param_types[decl_idx]
+    var i = 0
+    while i < param_names.len() and i < param_types.len():
+        if param_types[i] == TYPE_TEXT:
+            names.push(param_names[i])
+        i = i + 1
+    names
+
+# Local names known to hold text: declared `: text`, or initialized/assigned
+# from a syntactically text-valued expression. Walks the whole function body
+# first so declaration order does not matter.
+fn collect_text_var_names(stmts: [i64], seed: [text]) -> [text]:
+    var names = seed
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val declared = stmt_name[s]
+            if declared != "" and not name_in_list(names, declared):
+                if stmt_type_tag[s] == TYPE_TEXT:
+                    names.push(declared)
+                elif is_text_valued_expr(stmt_expr[s]):
+                    names.push(declared)
+
+        if tag == STMT_ASSIGN:
+            # stmt_expr holds the whole EXPR_ASSIGN node; unwrap target/value.
+            val ae = stmt_expr[s]
+            var assigned = stmt_name[s]
+            var assigned_value = ae
+            if ae >= 0 and expr_tag[ae] == EXPR_ASSIGN:
+                assigned_value = expr_right[ae]
+                val at = expr_left[ae]
+                if at >= 0 and expr_tag[at] == EXPR_IDENT:
+                    assigned = expr_s_val[at]
+            if assigned != "" and not name_in_list(names, assigned):
+                if is_text_valued_expr(assigned_value):
+                    names.push(assigned)
+
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
+            val nested = collect_text_var_names(stmt_body[s], names)
+            for n in nested:
+                if not name_in_list(names, n):
+                    names.push(n)
+    names
+
 # COLL006: Detect str = str + x in loop (string concat, NOT array concat)
-# Same shape as COLL001 but RHS right operand is NOT EXPR_ARRAY_LIT
-fn is_string_concat_assign_expr(e: i64) -> bool:
+# Same shape as COLL001 but RHS right operand is NOT EXPR_ARRAY_LIT, AND the
+# assignment target is known to be text (declared/initialized as text, or the
+# appended value is syntactically text). Numeric accumulation never matches.
+fn is_string_concat_assign_expr(e: i64, text_vars: [text]) -> bool:
     if e < 0:
         return false
     val tag = expr_tag[e]
@@ -378,17 +498,35 @@ fn is_string_concat_assign_expr(e: i64) -> bool:
                 val rhs_right = expr_right[value]
                 val rhs_left = expr_left[value]
                 # Exclude array concat (COLL001 handles that)
-                if rhs_right >= 0 and expr_tag[rhs_right] != EXPR_ARRAY_LIT:
-                    if rhs_left >= 0 and expr_tag[rhs_left] == EXPR_IDENT:
-                        if target >= 0 and expr_tag[target] == EXPR_IDENT:
-                            if expr_s_val[rhs_left] == expr_s_val[target]:
+                if rhs_right >= 0 and rhs_left >= 0 and expr_tag[target] == EXPR_IDENT:
+                    val target_name = expr_s_val[target]
+                    val target_is_text = name_in_list(text_vars, target_name)
+                    # Append form: s = s + x
+                    if expr_tag[rhs_right] != EXPR_ARRAY_LIT and expr_tag[rhs_left] == EXPR_IDENT:
+                        if expr_s_val[rhs_left] == target_name:
+                            if target_is_text:
+                                return true
+                            if is_text_valued_expr(rhs_right):
+                                return true
+                    # Prepend form: s = x + s (also O(n^2); previously a false
+                    # negative — see config_int_to_text in config_core/schema).
+                    if expr_tag[rhs_left] != EXPR_ARRAY_LIT and expr_tag[rhs_right] == EXPR_IDENT:
+                        if expr_s_val[rhs_right] == target_name:
+                            if target_is_text:
+                                return true
+                            if is_text_valued_expr(rhs_left):
                                 return true
 
-    # Compound assign: str += x (non-array)
+    # Compound assign: str += x (non-array, text-typed target)
     if tag == EXPR_COMPOUND_ASSIGN:
+        val target = expr_left[e]
         val value = expr_right[e]
         if value >= 0 and expr_tag[value] != EXPR_ARRAY_LIT:
-            return true
+            if target >= 0 and expr_tag[target] == EXPR_IDENT:
+                if name_in_list(text_vars, expr_s_val[target]):
+                    return true
+            if is_text_valued_expr(value):
+                return true
 
     false
 

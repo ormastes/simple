@@ -1,6 +1,6 @@
 # COLL006 "string concat in loop" fires on loops with no string concatenation
 
-**Status:** Open
+**Status:** Fixed 2026-07-28 (working copy) — see .spipe/lint_coll006/state.md
 **Found by:** lane URLPARSE, 2026-07-27
 **Component:** `bin/simple lint` — rule `COLL006`
 
