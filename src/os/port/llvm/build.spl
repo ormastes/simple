@@ -26,6 +26,18 @@ val SUPPORTED_TARGETS = [
     "riscv32imac-simpleos",
 ]
 
+## compiler-rt in this port is only ever configured freestanding/baremetal
+## (`COMPILER_RT_BAREMETAL_BUILD=ON`, `-ffreestanding -nostdlib`) and is staged
+## into a SimpleOS sysroot / clang resource dir. Such an archive is wrong for a
+## hosted target, so every compiler-rt entry point is gated on this predicate.
+##
+## Both triple spellings used in this file (`x86_64-simpleos` and
+## `x86_64-unknown-simpleos`) carry the `-simpleos` suffix, so the suffix — not
+## an allowlist — is the invariant. Gate is fail-closed: anything unrecognised
+## is refused rather than silently granted compiler-rt.
+fn is_simpleos_triple(triple: text) -> bool:
+    triple.ends_with("-simpleos")
+
 val LLVM_REPO = "https://github.com/ormastes/llvm-project.git"
 val LLVM_REVISION = "3b33ba807a99855133981897fa8c9d91933f759d"
 val DEFAULT_INSTALL_PREFIX = "/opt/simpleos-toolchain"
@@ -135,6 +147,12 @@ fn clone_or_update_source(config: BuildConfig):
     process.run_checked("git", ["-C", config.source_dir, "checkout", "--detach", LLVM_REVISION])
 
 fn build_llvm(config: BuildConfig):
+    # Fail fast, before hours of LLVM build work: compiler-rt here is
+    # SimpleOS-only. Refusing up front beats discovering it at install time,
+    # when `ninja install` would already be writing into the prefix.
+    if config.build_compiler_rt and not is_simpleos_triple(config.target):
+        panic("compiler-rt is SimpleOS-only: target '{config.target}' does not end in -simpleos (re-run with --no-compiler-rt)")
+
     print "Building LLVM for target: {config.target}"
     print "  Source:  {config.source_dir}"
     print "  Build:   {config.build_dir}"
@@ -171,6 +189,12 @@ fn build_llvm(config: BuildConfig):
     print "LLVM build complete for {config.target}."
 
 fn build_compiler_rt(config: BuildConfig):
+    # Defence at the point of harm: this function ends in `ninja install` into
+    # config.install_prefix. A non-SimpleOS triple here would overwrite a
+    # hosted toolchain's compiler-rt with a baremetal `-nostdlib` build.
+    if not is_simpleos_triple(config.target):
+        panic("Refusing to build compiler-rt for non-SimpleOS target '{config.target}' (triple must end in -simpleos)")
+
     print "Building compiler-rt for {config.target}..."
     val rt_build_dir = "{config.build_dir}-compiler-rt"
 
@@ -251,6 +275,12 @@ val CROSS_SUPPORTED_TARGETS: [text] = [
 val CLANG_RESOURCE_VERSION: text = "20"
 
 fn cross_target_supported(triple: text) -> bool:
+    # Shape gate first: `cross_selected_targets()` accepts arbitrary strings
+    # from SIMPLE_TARGET / --target / --targets, so reject anything that is not
+    # a SimpleOS triple before the allowlist (and before cross_llvm_arch_for,
+    # which panics on an unrecognised arch).
+    if not is_simpleos_triple(triple):
+        return false
     for supported in CROSS_SUPPORTED_TARGETS:
         if triple == supported:
             return true
@@ -396,6 +426,13 @@ fn build_compiler_rt_for_target(triple: text) -> bool:
     resulting archives into the resource dir where the clang driver looks
     for them.
     """
+    # Gate before anything is built or staged: the archives this produces land
+    # in `lib/clang/<ver>/lib/<triple>/`, a path the clang driver keys on.
+    # Populating a non-SimpleOS triple's slot would mislink hosted builds.
+    if not is_simpleos_triple(triple):
+        print "[compiler-rt] Refusing non-SimpleOS triple '{triple}' (must end in -simpleos)"
+        return false
+
     if not cross_build_stage_for_target(stage: "compiler-rt", triple: triple):
         return false
 
