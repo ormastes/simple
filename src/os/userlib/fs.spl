@@ -45,6 +45,21 @@ fn write_text(path: text, content: text) -> Result<bool, text>:
     val resp = _vfs_request(VFS_WRITE, payload)?
     Ok(true)
 
+fn _fs_node_kind_from_u8(v: u8) -> FsNodeKind:
+    """Map a VFS wire kind byte to FsNodeKind, in declaration order.
+
+    Deliberately a free function, not an enum `static fn`: enum associated
+    functions are miscompiled on the JIT (they yield a value matching no
+    `case` arm), so a static here would reintroduce the same defect this
+    replaces. Unknown bytes fall back to File rather than fabricating a
+    discriminant.
+    """
+    if v == 1: return FsNodeKind.Directory
+    if v == 2: return FsNodeKind.Symlink
+    if v == 3: return FsNodeKind.Device
+    if v == 4: return FsNodeKind.Pipe
+    FsNodeKind.File
+
 fn stat(path: text) -> Result<FsNode, text>:
     val resp = _vfs_request(VFS_STAT, path)?
     # Parse response into FsNode
@@ -56,7 +71,7 @@ fn stat(path: text) -> Result<FsNode, text>:
     val size_val = parts[1].parse_u64()
     val name_val = parts[2]
     Ok(FsNode(
-        kind: FsNodeKind.from_u8(kind_val),
+        kind: _fs_node_kind_from_u8(kind_val),
         size: size_val,
         name: name_val
     ))
@@ -80,7 +95,7 @@ fn readdir(path: text) -> Result<[DirEntry], text>:
                 val kind_val = parts[0].parse_u8()
                 val name_val = parts[1]
                 entries.push(DirEntry(
-                    kind: FsNodeKind.from_u8(kind_val),
+                    kind: _fs_node_kind_from_u8(kind_val),
                     name: name_val
                 ))
         i = i + 1
