@@ -1,8 +1,11 @@
 # Native path: `.parse_f64()` and `.to_upper()` unresolved in MIR lowering
 
 **Date:** 2026-07-17
-**Severity:** Medium (loud build failure, not silent-wrong; but a real
-functionality gap vs. the oracle)
+**Severity:** Medium *for the two methods reported here* (loud build failure in
+the configuration tested, not silent-wrong; but a real functionality gap vs. the
+oracle). **This rating does NOT extend to the underlying Task #145
+unresolved-method mechanism** — see the 2026-07-28 correction below before
+citing this doc to deprioritise that.
 **Status:** SOURCE FIXED (current Cranelift execution pending)
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
@@ -61,10 +64,48 @@ this method; only "does native-build succeed at all" was checked here. Not
 filed separately — the seed is bootstrap-only per repo convention and this
 lane's mandate is native-vs-oracle parity for the native (pure-Simple) path.
 
-Both failures are **loud** (correctly so, per the existing Task #145
-"silent-null risk" guard converting unresolved calls into hard errors rather
-than silently emitting a placeholder) — filed as functionality gaps, not
-silent-wrong-answer bugs.
+Both failures were observed **loud** in the configuration tested here — filed as
+functionality gaps, not silent-wrong-answer bugs.
+
+> **CORRECTION 2026-07-28.** This paragraph originally read: *"Both failures are
+> loud (correctly so, per the existing Task #145 'silent-null risk' guard
+> converting unresolved calls into hard errors rather than silently emitting a
+> placeholder)."* **The parenthetical is wrong and is retained here only so the
+> claim is not silently deleted — it has been cited to deprioritise Task #145.**
+>
+> There is no such guard. At
+> `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:2485-2500`,
+> `self.error("unresolved method call: {method}", nil)` is followed by the
+> const-0 placeholder being emitted anyway — the call does **not** abort
+> lowering. The in-source comment states the reason directly: `self.error` only
+> *collects*, and both the bootstrap lane (`driver_bootstrap.spl` reads
+> `ctx.errors`, never `MirLowering.errors`) and the native-build worker drop that
+> list, so "the const-0 placeholder below then ships as SILENT data loss (exit 0,
+> no stderr) — exactly how the `.join()` no-op survived undetected." The `print`
+> WARNING quoted at lines 22 and 41 above exists *because* the error is not
+> reliably fatal, not as belt-and-braces on top of a guard that is.
+>
+> So fatality depends on the **consumer of the error list**, not on the guard.
+> This doc's own repro output — which shows the placeholder warning firing — is
+> evidence for that, not against it.
+>
+> Measured on `b410e53a7a2`, same probe, two lanes: `native-build` default → 3
+> const-0 warnings, hard error surfaced, rc=1; `native-build` with
+> `SIMPLE_BOOTSTRAP=1` → 3 const-0 warnings, **hard error not surfaced at all**,
+> corroborating the comment.
+>
+> **Still NOT demonstrated:** an end-to-end exit-0-with-a-wrong-value. The
+> bootstrap run died before codegen for an unrelated reason (`semantic: function
+> expects argument for parameter 'span'`). Mechanism confirmed and one
+> error-swallowing lane confirmed; silent wrong answer not yet reproduced. To
+> close it, find a lane that reaches codegen with the error list dropped. Note
+> the in-source comment names the native-build worker as such a lane, but the
+> default-lane measurement above shows it currently propagating — so that part of
+> the comment may be stale.
+>
+> Severity of the *underlying* Task #145 mechanism is therefore unresolved, not
+> Medium. Do not cite this doc as evidence that unresolved-method lowering is
+> loud-by-construction.
 
 Note: this is a different symptom from the older, already-tracked
 `pure_simple_text_split_lines_missing_2026-07-13.md`-style "seed oracle lacks

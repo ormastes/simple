@@ -189,19 +189,41 @@ Still open, and now the substance of Stage 0:
    diagnostic originates in the **pure-Simple** compiler
    (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:1881` and siblings) —
    *not* the Rust seed this plan concerns, so it is outside this workstream's
-   scope entirely; and the pre-existing bug doc
-   `doc/08_tracking/bug/native_string_methods_unresolved_in_mir_2026-07-17.md`
-   already characterises the whole family as *"Medium (loud build failure, not
-   silent-wrong; but a real functionality gap vs. the oracle)"*.
+   scope entirely.
 
-   Residual risk worth keeping, unresolved: the
-   `unresolved method call ... lowered to const-0 placeholder (silent-null risk,
-   Task #145)` warning fires three times *alongside* the fatal error. So the
-   placeholder machinery is real and reachable, and only this configuration was
-   shown to pair it with a hard error. Whether any configuration emits the
-   const-0 **without** the error is Task #145's concern and remains untested.
-   That, not the backend split, is the silent-wrong-answer risk here.
-2. **`rt_string_index_of` is still unreachable.** At `origin/main` it appears
+   **Withdrawn corroboration.** An earlier revision also cited
+   `doc/08_tracking/bug/native_string_methods_unresolved_in_mir_2026-07-17.md` as
+   independently confirming the family is loud. **That citation was wrong and is
+   withdrawn.** That doc asserted a Task #145 guard "converting unresolved calls
+   into hard errors rather than silently emitting a placeholder"; no such guard
+   exists, and the doc has now been corrected (2026-07-28). Do not re-cite it for
+   this purpose.
+
+2. **Task #145 const-0 placeholder — the real silent-wrong-answer risk, OPEN.**
+   At `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:2485-2500`,
+   `self.error("unresolved method call: {method}", nil)` does **not** abort
+   lowering — the const-0 placeholder is emitted immediately after. The in-source
+   comment says why: `self.error` only *collects*, and both the bootstrap lane
+   (`driver_bootstrap.spl` reads `ctx.errors`, never `MirLowering.errors`) and
+   the native-build worker drop that list, so the placeholder "ships as SILENT
+   data loss (exit 0, no stderr) — exactly how the `.join()` no-op survived
+   undetected." The `print` WARNING exists *because* the error is not reliably
+   fatal. **Fatality depends on the consumer of the error list, not on the
+   guard.**
+
+   Measured on `b410e53a7a2`: `native-build` default → 3 const-0 warnings, hard
+   error surfaced, rc=1. `native-build` with `SIMPLE_BOOTSTRAP=1` → 3 warnings,
+   **hard error not surfaced at all**.
+
+   NOT yet demonstrated: end-to-end exit-0-with-a-wrong-value. The bootstrap run
+   died pre-codegen for an unrelated reason. Mechanism confirmed, one
+   error-swallowing lane confirmed, silent wrong answer not reproduced. To close
+   it, find a lane reaching codegen with the error list dropped.
+
+   This is the same failure shape as the nil-sentinel-3 defect this plan exists
+   to fix — a placeholder value indistinguishable from real data — and it is the
+   highest-value open item in Stage 0.
+3. **`rt_string_index_of` is still unreachable.** At `origin/main` it appears
    only as a `RuntimeFuncSpec` registration (`runtime_sffi.rs:413`); no
    method-name dispatch selects it. It remains the only genuinely
    Option-returning implementation, so it is the natural target once `index_of`
