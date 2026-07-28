@@ -291,7 +291,7 @@ identically on the pre-fix binary:
 
 A first cut of the condition/bool-return lowering hand-built the `and`/`or`/`not`
 HIR instead of going through `lower_expr`. That bypassed the normal dispatcher
-and perturbed the JIT's extern set, producing a spurious
+and reached a codegen path that emits `rt_index_of`, producing an
 `unresolved external symbol 'rt_index_of'` bailout that demoted the whole
 browser-engine module to the interpreter — the showcase style pass went from
 JIT-compiled to **384 s interpreted**. Routing those forms back through
@@ -299,6 +299,31 @@ JIT-compiled to **384 s interpreted**. Routing those forms back through
 final binary runs the showcase with `codegen_fallback_hits=0` and zero JIT
 fallbacks. The lesson is recorded here because the symptom (a perf cliff, not a
 wrong answer) is easy to ship unnoticed.
+
+**That bailout was NOT an artifact of the first cut — it is a real standing
+defect this change merely stopped triggering.** Corrected after the fact, and
+worth stating precisely because a first pass over it concluded "`rt_index_of`
+does not exist / is dead code", which would send a fixer down the wrong path:
+
+- `rt_index_of` **is** defined, and deliberately: `#[no_mangle] pub extern "C"
+  fn rt_index_of` at `src/compiler_rust/runtime/src/value/collections.rs:3051`,
+  a documented receiver-polymorphic dispatcher that tries `rt_array_index_of`
+  then falls back to `rt_string_find`. It is not dead code.
+- It is missing from the build-script-generated `RUNTIME_SYMBOL_ENTRIES` table
+  (`runtime/build.rs`) that the JIT resolves `rt_*` through — verified absent
+  from **all five** generated tables under `target/release/build/simple-runtime-*/`,
+  including one regenerated during this work, so this is a generator miss, not
+  staleness. Its own sibling `rt_array_index_of`, declared identically twenty
+  lines earlier in the same file, **is** in the table.
+- Because nothing registers or references it, the linker drops it:
+  `nm bin/release/x86_64-unknown-linux-gnu/simple | grep rt_index_of` → 0,
+  while `rt_string_find` → 1. So any codegen path that emits a call to it
+  (`codegen/instr/closures_structs.rs:1284`, `codegen/instr/calls.rs:3234`,
+  plus the two LLVM paths) produces an unresolvable symbol at JIT time.
+
+The fix is to get the existing symbol into the generated table, not to write a
+new function or delete the call sites. Filed as adjacent work; it is a
+link/registration defect, out of scope for this `.?` change.
 
 Measurement caveat for anyone re-running these: this host was concurrently
 running another session's `stage2_*` jobs holding ~95 GB RSS at load average
