@@ -121,9 +121,11 @@ Profiles are:
   apertures; useful only for H0 link checks.
 - `silicon-bound`: must be generated from an immutable manifest tying the exact
   bitstream hash to NFC/PCIe tokens and the reserved uncached DMA interval.
-  The current build/package lane emits and checks that identity in the ELF
-  note and package receipt. Only a matching physical package can enter board
-  acceptance.
+  The build receipt covers every compiled source/header plus compiler/linker
+  identities. Package manifest v3 additionally requires a clean repository
+  revision, board serial/revision, boot mode, Bootgen identity, contract token,
+  DMA/toggle addresses, and hashes for every input/output. Only a verified
+  matching physical package can enter board acceptance.
 
 The QEMU and unbound profiles remain software-only. The bound profile is still
 not production acceptance: the exact approved bitstream, real Bootgen output,
@@ -183,7 +185,8 @@ MMU small-page W^X contracts passed in scoped runs. Corrective bridge/admin
 evidence covers Abort/queue/SMART fields, zero-write-only completion retry,
 post-start non-retry, and PRP edges. Official Bootgen v2026.1, the pinned
 upstream HDF/`OpenSSD2.bit`, vendor-generated FSBL, and real silicon package
-now have retained host hashes.
+now have retained host hashes. Manifest v3 software provenance and standalone
+artifact verification pass; identified-board execution still does not.
 
 The unchanged-tree bootstrap rebuilt authority and passed Stage 2/3 sanity.
 Stage 4 cleared the prior parser/HIR crashes, then failed on unresolved names

@@ -9,7 +9,7 @@
 #define COSMOS_PROFILE_OPENSSD2_8CH8WAY_V300 1
 #define COSMOS_PROFILE_SELECTOR "openssd2-8ch8way-v3.0.0"
 #define COSMOS_PROFILE_NAME "cosmos-plus-openssd2-8ch8way-v3.0.0"
-#define COSMOS_PROFILE_BUILD_RECEIPT_FORMAT "cosmos-clean-build-receipt-v1"
+#define COSMOS_PROFILE_BUILD_RECEIPT_FORMAT "cosmos-clean-build-receipt-v2"
 #define COSMOS_PROFILE_ELF_SYMBOL cosmos_profile_cosmos_plus_openssd2_8ch8way_v300
 #define COSMOS_PROFILE_NOTE_NAME "COSMOS"
 #define COSMOS_PROFILE_NOTE_TYPE 0x00030000

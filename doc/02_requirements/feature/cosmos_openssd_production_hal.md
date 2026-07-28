@@ -99,8 +99,9 @@ silicon composition now binds persistent FTL/NFC media, 4 KiB-to-16 KiB
 staging, fail-closed UART foreground dispatch, page-tag validation, and
 transactional ECC refresh relocation. No current `bin/release/simple` exists.
 Official Bootgen v2026.1, the pinned bitstream, vendor FSBL, and a real package
-are retained locally. Complete package-manifest provenance, current SSpec/docgen
-evidence, the requested QEMU/FEMU and KV260/FPGA profile implementations, and
-all physical board evidence remain absent.
+are retained locally. Package manifest v3 now binds clean repository, complete
+compiled-source closure, tools, profile/contract, board identity, boot mode,
+DMA bounds, and artifact hashes with omission/mutation rejection. Current
+SSpec/docgen evidence and all physical board evidence remain absent.
 The supported claim is **production BLOCKED/FAIL; silicon acceptance is not
 established**.

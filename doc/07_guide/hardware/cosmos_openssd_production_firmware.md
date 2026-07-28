@@ -109,23 +109,25 @@ has real Bootgen output. Production acceptance still requires identified-board
 provenance and retained board evidence. Do not work around the gates by
 defining tokens manually without a verified artifact and evidence record.
 
-The shared NVMe firmware also has implemented Simple-simulator, OpenSSD
-2Ch8Way, and OpenSSD 8Ch8Way configurations. Explicit QEMU/FEMU and KV260/FPGA
-profiles are requested under `FR-NVME-FW-TARGETS-0001`; until implemented they
-remain unavailable and must not fall back to the simulator. New targets add a
-profile and evidence adapter rather than forking the command, FTL, or recovery
-core.
+The shared NVMe firmware has explicit Simple-simulator, QEMU/RAM-NAND,
+OpenSSD 2Ch8Way/8Ch8Way, and KV260/FPGA profiles. QEMU firmware parity passes;
+KV260 and physical OpenSSD availability remains fail closed pending their
+hardware gates. New targets add a profile and evidence adapter rather than
+forking the command, FTL, or recovery core.
 
 The production manifest must include at least:
 
 ```text
-format=cosmos-zynq-boot-v2
+format=cosmos-zynq-boot-v3
 board=cosmos-plus-openssd
 board.serial=<serial>
-profile=silicon-bound
+board.revision=<revision>
+boot.mode=sd
+profile=cosmos-plus-openssd2-8ch8way-v3.0.0
 source.revision=<jj-or-git-revision>
 source.dirty=false
-bitstream.contract=openssd2-8c8w-3.0.0
+bitstream.contract=openssd2-8ch8way-v3.0.0
+bitstream.contract.token=0x00030000
 bitstream.sha256=<verified-hash>
 nfc.dma.base=<hex>
 nfc.dma.end=<hex>
@@ -133,15 +135,20 @@ nfc.toggle_payload=<hex>
 fsbl.sha256=<hash>
 firmware.sha256=<hash>
 boot.sha256=<hash>
-tool.clang=<version>
-tool.lld=<version>
-tool.bootgen=<version>
+tool.clang.version=<version>
+tool.clang.sha256=<hash>
+tool.lld.version=<version>
+tool.lld.sha256=<hash>
+tool.bootgen.version=<version>
+tool.bootgen.sha256=<hash>
 ```
 
-The current receipt/self-test records and checks board/profile identity,
-canonical artifact snapshots, hashes, contract identity, and strict ELF/
-Bootgen metadata. Installed Bootgen output is retained below; physical board
-provenance remains external evidence.
+The receipt/self-test records and checks full compiled-source closure,
+compiler/linker identity, clean repository revision, board/profile identity,
+boot mode, canonical artifact snapshots, hashes, contract/DMA identity, and
+strict ELF/Bootgen metadata. `--verify-manifest` rechecks required unique fields,
+artifact hashes, and that the current clean checkout matches `source.revision`.
+Physical board execution remains external H2 evidence.
 
 ## Host Prerequisites
 
@@ -231,16 +238,18 @@ bin/release/simple test \
 sh src/os/kernel/arch/arm32/cosmos/package_boot.shs --self-test
 ```
 
-The package self-test observed on 2026-07-26 ended with:
+The package provenance self-test ends with:
 
 ```text
+COSMOS_PACKAGE_PROVENANCE_PASS source=clean board=bound tools=clang,lld,bootgen artifacts=fsbl,bitstream,firmware,boot
 STATUS: PASS cosmos-package-boot self-test
 ```
 
 It checks positive and rejection fixtures, including ELF type/entry/segments,
 silicon/QEMU identity, bitstream sync, Bootgen headers/metadata, empty/truncated
 output, failure, and canonical aliases. Its fake Bootgen and synthetic artifacts
-do not prove BootROM boot or matching PL logic.
+also reject missing provenance and mismatched hashes. They do not prove BootROM
+boot or matching PL logic.
 
 ## Required Host Mock-MMIO Gate
 
@@ -357,8 +366,13 @@ sh src/os/kernel/arch/arm32/cosmos/package_boot.shs \
   --fsbl path/to/fsbl.elf \
   --bitstream path/to/OpenSSD2.bit \
   --elf build/os/simpleos_cosmos_openssd_silicon_bound.elf \
+  --board-serial <board-serial> \
+  --board-revision <board-revision> \
+  --boot-mode sd \
   --output build/os/cosmos-production-boot.bin
 
+sh src/os/kernel/arch/arm32/cosmos/package_boot.shs \
+  --verify-manifest build/os/cosmos-production-boot.bin.manifest
 sha256sum build/os/cosmos-production-boot.bin \
   build/os/cosmos-production-boot.bin.manifest
 bootgen -arch zynq -read build/os/cosmos-production-boot.bin

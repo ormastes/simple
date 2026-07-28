@@ -24,7 +24,7 @@
 | ST-009 | SMP/cache runner checks section descriptors, TTBR0 WBWA/shareability, `clz(ways-1)` set/way operands, per-core initialization, and PL310 contract markers. | H1 executed |
 | ST-010 | Bounded QEMU injections execute the production prefetch/data-abort vectors and verify kind, syndrome, fault address, PC, and terminal non-resumption. | H1 executed |
 | ST-011 | Packager accepts explicit valid fixtures and rejects missing/empty/aliased input, non-ELF, wrong endian/machine/type, zero entry, no `PT_LOAD`, QEMU identity, absent silicon identity, unsynchronized bitstream, malformed/truncated/empty Bootgen output, and unparseable partition metadata. Manifest hashes must match. | H1 executed |
-| ST-012 | Profile note, contract-token, receipt, and package checks bind the approved source/bitstream identity; real approved-bitstream/Bootgen provenance remains external evidence. | H1 partial |
+| ST-012 | Profile note, full source closure, compiler/linker receipt, and manifest v3 bind clean revision, board identity, boot mode, contract/DMA values, Bootgen, and all artifact hashes; omission/hash mutation is rejected. | H1 executed; physical package use remains H2 |
 | ST-013 | NVMe IO callback core executes empty/success/invalid/media-failure/budget/retry paths, preserves queue/slot/sequence/CID, validates SCT/SC/DNR and controller AUTO-DMA spans, and compiles for ARM. | H1 executed |
 | ST-014 | PCIe bridge runner decodes DW0/DW1/DW6..DW12, validates direct PRP2 and controller-managed PRP-list edges, preserves identity, retries only before any completion write, and treats post-start failure as non-retryable. | H1 corrected host/ARM PASS |
 | ST-015 | NVMe admin runner covers bounded Identify/SMART, queue lifecycle, Number-of-Queues NSID/max, Abort result bits, CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, AER, publication retry/latching, and unsupported format/firmware rejection. | H1 corrected host/ARM PASS |
@@ -118,7 +118,7 @@ Detailed execution and evidence retention are in
 
 Scoped H0/H1 runners pass through persistent FTL/NFC composition, UART startup,
 dispatcher routing, ECC refresh relocation, and strict ARM linkage. External
-provenance in `ST-012` remains partial. `ST-018` is blocked because no current
+software package provenance in `ST-012` passes. `ST-018` is blocked because no current
 pure-Simple runner exists. The unchanged-tree strict bootstrap rebuilt Rust
 authority and passed Stage 2/3 sanity. Stage 2 was
 `00fcb65729acfe1f7bd30e113d7d96bea4cd7ff2e4f596667cda8c6a97c89411`;
@@ -127,6 +127,7 @@ Stage 3 was
 Stage 4 cleared the prior parser/HIR crashes, then failed on unresolved names
 from partial/header-only import facades at 5,492,252 KiB peak RSS.
 Official Bootgen v2026.1, the pinned bitstream, vendor-generated FSBL, and real
-package have retained hashes. Final SSpec/doc generation and all `BT-*`
+package have retained hashes. Manifest v3 and its standalone verifier pass on
+synthetic fixtures; final SSpec/doc generation and all `BT-*`
 evidence remain pending. Production is **BLOCKED/FAIL**;
 REQ-012/NFR-011 remain excluded from passing executable `@req` declarations.

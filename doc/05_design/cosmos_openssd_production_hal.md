@@ -156,18 +156,21 @@ UART TX polling is bounded and permanently disables an unresponsive UART.
 
 ## Package and Manifest
 
-`package_boot.shs` accepts only `--fsbl`, `--bitstream`, `--elf`, and optional
-`--output`. It validates files, canonical path/inode aliases, ARM ELF identity,
+`package_boot.shs` requires `--fsbl`, `--bitstream`, `--elf`, `--board-serial`,
+`--board-revision`, and `--boot-mode sd|qspi`, with optional `--output`. It
+rejects dirty or unidentified source trees and validates files, canonical path/inode aliases, ARM ELF identity,
 nonzero entry, `PT_LOAD`, silicon marker, Xilinx sync word, Bootgen result size,
 Zynq width/signature words, and `bootgen -read` metadata. It emits partitions
 in FSBL -> bitstream -> firmware order and atomically publishes `boot.bin` plus
 `boot.bin.manifest`.
 
-Manifest v1 records format, board, silicon profile, firmware identity,
-canonical paths, and SHA-256 for FSBL, bitstream, firmware, and boot output.
-The build receipt now binds the exact bitstream contract, DMA reservation,
-source/profile identity, and immutable artifact snapshots before packaging.
-The synthetic packager self-test proves validation and rejection logic, and the
+Manifest v3 records the clean repository revision, board serial/revision, boot
+mode, silicon profile/contract, DMA/toggle addresses, compiler/linker/Bootgen
+versions and executable hashes, canonical paths, and SHA-256 for FSBL,
+bitstream, firmware receipt/ELF, metadata, and boot output. The build receipt
+binds every compiled source/header and the exact compiler/linker identities.
+`--verify-manifest` revalidates required unique fields and current artifact
+hashes. The synthetic packager self-test proves validation and rejection logic, and the
 pinned artifacts pass a real Bootgen v2026.1 invocation. Physical BootROM and
 board runs are still required for production evidence.
 
@@ -234,7 +237,8 @@ SSpec/doc generation remains blocked. The unchanged-tree strict build passed
 Stage 2/3 sanity, cleared the prior parser/HIR crashes, and failed Stage 4 on
 unresolved names from partial/header-only import facades. Official Bootgen
 v2026.1, the pinned bitstream, vendor-generated FSBL, and real package are
-available with retained hashes; board evidence remains pending.
+available with retained hashes. Manifest v3 software provenance and tamper
+checks pass; board evidence remains pending.
 
 ## Error and Evidence Rules
 

@@ -260,10 +260,12 @@ Runs:
 sh src/os/kernel/arch/arm32/cosmos/package_boot.shs --self-test
 ```
 
-Requires exit `0`, no `FAIL`, and
-`STATUS: PASS cosmos-package-boot self-test`. The wrapper owns malformed ELF,
-profile, bitstream, alias, Bootgen metadata, hash, and manifest rejection
-coverage.
+Requires exit `0`, no `FAIL`,
+`COSMOS_PACKAGE_PROVENANCE_PASS source=clean board=bound tools=clang,lld,bootgen`,
+and `STATUS: PASS cosmos-package-boot self-test`. The wrapper owns malformed
+ELF, profile, bitstream, alias, Bootgen metadata, complete compiled-source
+closure, clean revision, board/boot identity, tool identity, hash, missing-key,
+and manifest-mutation rejection coverage.
 
 ### 14. ARM runtime ABI edges
 
@@ -297,7 +299,7 @@ that `cosmos_uart.c` executes `cosmos_runtime_selftest()` and reports the
 | NFR-005 | Host SMP/cache coherency contract | Host checked; board pending |
 | NFR-006 | ARM link closure and ABI edge scenario | Host checked |
 | NFR-007 | ELF identity/profile note and package checks | Host checked |
-| NFR-008 | Package manifest/hash self-test | Partial; full board/tool provenance pending |
+| NFR-008 | Package manifest v3 source/board/tool/hash self-test | Software package provenance checked; board campaign environment pending |
 | NFR-009 | Exact QEMU lane statuses and terminal verdict | Host checked |
 | NFR-010 | This matrix plus all fourteen scenarios | Host checks passed individually; final SSpec blocked |
 | NFR-011 | No executable claim; BT-003/BT-006 endurance campaign | **Board pending; excluded from `@req`** |
@@ -317,11 +319,14 @@ contract runner can satisfy them.
 ## Current Execution Status
 
 The runtime, MMIO, PCIe, NVMe IO, corrected PCIe bridge/admin, SMP/cache,
-QEMU/silicon, and package results passed in scoped runs. Corrected coverage
+QEMU/silicon, and package results passed in scoped runs. Package manifest v3
+binds clean source revision, complete build-source closure, board/boot/profile,
+compiler/linker/Bootgen identities, DMA contract, and artifact hashes with a
+standalone verifier and negative controls. Corrected coverage
 includes admin Abort/queue/SMART fields, zero-write-only completion retry,
 non-retryable post-start completion behavior, and PRP edges. Official Bootgen
-v2026.1 and the pinned upstream bitstream are available locally, but the
-approved FSBL and real package are not. The latest strict bootstrap passed
+v2026.1 and the pinned upstream bitstream are available locally, but no
+identified-board execution receipt has been accepted. The latest strict bootstrap passed
 Stage 2/3 sanity at 2,549,240 KiB peak RSS, then failed provenance because the
 tracked dirty state changed during measurement. A focused Stage 4 continuation
 cleared the address-of parser failure and segfaulted in
@@ -330,5 +335,5 @@ RSS. A null imported-trait payload is the leading hypothesis. There is no
 current deployed `bin/release/simple`, so the fourteen-scenario SSpec and
 generated manual have
 not been executed/generated with the current tree. Production is therefore
-**BLOCKED/FAIL**, not accepted. Current SSpec/docgen, FSBL/package evidence,
-and physical board proof remain open.
+**BLOCKED/FAIL**, not accepted. Current SSpec/docgen and physical board proof
+remain open.

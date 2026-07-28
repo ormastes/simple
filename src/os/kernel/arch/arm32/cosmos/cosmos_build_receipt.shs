@@ -1,7 +1,7 @@
 #!/bin/sh
 # Shared deterministic provenance and ELF policy for Cosmos build/package tools.
 
-COSMOS_RECEIPT_FORMAT=cosmos-clean-build-receipt-v1
+COSMOS_RECEIPT_FORMAT=cosmos-clean-build-receipt-v2
 
 cosmos_sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -12,6 +12,24 @@ cosmos_sha256_file() {
         echo "missing SHA-256 tool" >&2
         return 1
     fi
+}
+
+cosmos_tool_version() {
+    "$1" --version 2>&1 | awk '
+        NF {
+            gsub(/[[:space:]]+/, " ")
+            sub(/^ /, "")
+            sub(/ $/, "")
+            print
+            exit
+        }
+    '
+}
+
+cosmos_tool_sha256() {
+    _cr_tool_path="$(command -v "$1")" || return 1
+    [ -f "$_cr_tool_path" ] || return 1
+    cosmos_sha256_file "$_cr_tool_path"
 }
 
 cosmos_profile_define() {
@@ -80,6 +98,12 @@ cosmos_write_source_manifest() (
         cosmos_nvme_dispatch.h \
         cosmos_ftl.c \
         cosmos_ftl.h \
+        cosmos_ftl_nfc_backend.c \
+        cosmos_ftl_nfc_backend.h \
+        cosmos_nvme_ftl_media.c \
+        cosmos_nvme_ftl_media.h \
+        cosmos_storage.c \
+        cosmos_storage.h \
         cosmos_hal.h \
         cosmos_zynq_regs.h \
         cosmos_nfc_regs.h \
@@ -255,6 +279,13 @@ cosmos_write_receipt() (
     _cr_supplied_sources="${8:-}"
     _cr_sources="$_cr_target.sources.$$"
     _cr_payload="$_cr_target.payload.$$"
+    _cr_clang="${CLANG:-clang}"
+    _cr_lld="${LLD:-ld.lld}"
+    command -v "$_cr_clang" >/dev/null 2>&1 || return 1
+    command -v "$_cr_lld" >/dev/null 2>&1 || return 1
+    _cr_clang_version="$(cosmos_tool_version "$_cr_clang")" || return 1
+    _cr_lld_version="$(cosmos_tool_version "$_cr_lld")" || return 1
+    [ -n "$_cr_clang_version" ] && [ -n "$_cr_lld_version" ] || return 1
     if [ -n "$_cr_supplied_sources" ]; then
         cp "$_cr_supplied_sources" "$_cr_sources" || {
             rm -f "$_cr_sources" "$_cr_payload"
@@ -299,6 +330,12 @@ cosmos_write_receipt() (
         printf 'dma.end=%s\n' "$COSMOS_DMA_END"
         printf 'mmio.base=%s\n' "$COSMOS_MMIO_BASE"
         printf 'mmio.end=%s\n' "$COSMOS_MMIO_END"
+        printf 'tool.clang.version=%s\n' "$_cr_clang_version"
+        printf 'tool.clang.sha256=%s\n' \
+            "$(cosmos_tool_sha256 "$_cr_clang")"
+        printf 'tool.lld.version=%s\n' "$_cr_lld_version"
+        printf 'tool.lld.sha256=%s\n' \
+            "$(cosmos_tool_sha256 "$_cr_lld")"
     } > "$_cr_payload" || {
         rm -f "$_cr_sources" "$_cr_payload"
         return 1

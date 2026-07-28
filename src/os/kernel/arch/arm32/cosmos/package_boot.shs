@@ -3,6 +3,7 @@
 set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../../../../../.." && pwd)"
 PROFILE_HEADER="$SCRIPT_DIR/cosmos_profile_openssd2_8ch8way_v300.h"
 RECEIPT_HELPER="$SCRIPT_DIR/cosmos_build_receipt.shs"
 [ -f "$RECEIPT_HELPER" ] || {
@@ -12,13 +13,53 @@ RECEIPT_HELPER="$SCRIPT_DIR/cosmos_build_receipt.shs"
 . "$RECEIPT_HELPER"
 
 usage() {
-    echo "usage: $0 --fsbl FSBL --bitstream BITSTREAM --elf ELF [--output BOOT.BIN]" >&2
+    echo "usage: $0 --fsbl FSBL --bitstream BITSTREAM --elf ELF --board-serial SERIAL --board-revision REV --boot-mode sd|qspi [--output BOOT.BIN]" >&2
     exit 2
 }
 
 fail() {
     echo "STATUS: FAIL cosmos-package-boot: $1" >&2
     exit 1
+}
+
+validate_identity() {
+    _pb_value="$1"
+    _pb_label="$2"
+    [ -n "$_pb_value" ] || fail "missing $_pb_label"
+    case "$_pb_value" in
+        *[!A-Za-z0-9_.:+-]*) fail "invalid $_pb_label" ;;
+    esac
+}
+
+capture_source_provenance() {
+    if command -v jj >/dev/null 2>&1 &&
+       [ "$(CDPATH= cd -- "$ROOT" && jj root 2>/dev/null)" = "$ROOT" ]; then
+        SOURCE_REVISION="$(CDPATH= cd -- "$ROOT" &&
+            jj log -r @- --no-graph -T 'commit_id ++ "\n"')" ||
+            fail "cannot read jj source revision"
+        if [ -n "$(CDPATH= cd -- "$ROOT" && jj diff --summary)" ]; then
+            SOURCE_DIRTY=true
+        else
+            SOURCE_DIRTY=false
+        fi
+    elif command -v git >/dev/null 2>&1 &&
+         git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        SOURCE_REVISION="$(git -C "$ROOT" rev-parse HEAD)" ||
+            fail "cannot read git source revision"
+        if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
+            SOURCE_DIRTY=true
+        else
+            SOURCE_DIRTY=false
+        fi
+    else
+        fail "source tree has no jj or git provenance"
+    fi
+    case "$SOURCE_REVISION" in
+        ''|*[!0-9a-f]*) fail "invalid source revision" ;;
+    esac
+    [ "${#SOURCE_REVISION}" -eq 40 ] || [ "${#SOURCE_REVISION}" -eq 64 ] ||
+        fail "invalid source revision length"
+    [ "$SOURCE_DIRTY" = false ] || fail "source tree is dirty"
 }
 
 PROFILE_SELECTOR="$(cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_SELECTOR)"
@@ -65,6 +106,12 @@ COSMOS_MMIO_BASE="$(
 )"
 COSMOS_MMIO_END="$(
     cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_MMIO_IDENTITY_END
+)"
+COSMOS_TOGGLE_PAYLOAD="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_NFC_TOGGLE_PAYLOAD_ADDRESS
+)"
+PROFILE_BITSTREAM_CONTRACT="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_PCIE_BITSTREAM_CONTRACT
 )"
 [ "$PROFILE_RECEIPT_FORMAT" = "$COSMOS_RECEIPT_FORMAT" ] ||
     fail "profile/receipt schema mismatch"
@@ -381,6 +428,90 @@ receipt_value() {
     ' "$_pb_receipt"
 }
 
+manifest_hash() {
+    _pb_key="$1"
+    _pb_manifest="$2"
+    _pb_value="$(receipt_value "$_pb_key" "$_pb_manifest")" ||
+        fail "manifest missing or duplicates $_pb_key"
+    case "$_pb_value" in
+        *[!0-9a-f]*) fail "manifest has invalid $_pb_key" ;;
+    esac
+    [ "${#_pb_value}" -eq 64 ] || fail "manifest has invalid $_pb_key"
+    printf '%s\n' "$_pb_value"
+}
+
+validate_manifest() (
+    _pb_manifest="$1"
+    require_file "$_pb_manifest" package-manifest
+    [ "$(receipt_value format "$_pb_manifest")" = "cosmos-zynq-boot-v3" ] ||
+        fail "manifest format mismatch"
+    [ "$(receipt_value board "$_pb_manifest")" = "cosmos-plus-openssd" ] ||
+        fail "manifest board mismatch"
+    validate_identity "$(receipt_value board.serial "$_pb_manifest")" board.serial
+    validate_identity "$(receipt_value board.revision "$_pb_manifest")" board.revision
+    case "$(receipt_value boot.mode "$_pb_manifest")" in
+        sd|qspi) ;;
+        *) fail "manifest boot.mode mismatch" ;;
+    esac
+    [ "$(receipt_value profile "$_pb_manifest")" = "$PROFILE_NAME" ] ||
+        fail "manifest profile mismatch"
+    [ "$(receipt_value profile.selector "$_pb_manifest")" = "$PROFILE_SELECTOR" ] ||
+        fail "manifest profile selector mismatch"
+    [ "$(receipt_value profile.source.commit "$_pb_manifest")" = "$PROFILE_SOURCE_COMMIT" ] ||
+        fail "manifest upstream source mismatch"
+    [ "$(receipt_value profile.hdf.sha256 "$_pb_manifest")" = "$PROFILE_HDF_SHA256" ] ||
+        fail "manifest HDF identity mismatch"
+    [ "$(receipt_value profile.bitstream.sha256 "$_pb_manifest")" = "$PROFILE_BITSTREAM_SHA256" ] ||
+        fail "manifest profile bitstream mismatch"
+    [ "$(receipt_value bitstream.contract "$_pb_manifest")" = "$PROFILE_SELECTOR" ] ||
+        fail "manifest bitstream contract mismatch"
+    [ "$(receipt_value bitstream.contract.token "$_pb_manifest")" = "$PROFILE_BITSTREAM_CONTRACT" ] ||
+        fail "manifest bitstream contract token mismatch"
+    [ "$(receipt_value nfc.dma.base "$_pb_manifest")" = "$COSMOS_DMA_BASE" ] ||
+        fail "manifest DMA base mismatch"
+    [ "$(receipt_value nfc.dma.end "$_pb_manifest")" = "$COSMOS_DMA_END" ] ||
+        fail "manifest DMA end mismatch"
+    [ "$(receipt_value nfc.toggle_payload "$_pb_manifest")" = "$COSMOS_TOGGLE_PAYLOAD" ] ||
+        fail "manifest toggle payload mismatch"
+    _pb_source="$(receipt_value source.revision "$_pb_manifest")" ||
+        fail "manifest missing source.revision"
+    case "$_pb_source" in
+        ''|*[!0-9a-f]*) fail "manifest source revision is invalid" ;;
+    esac
+    [ "${#_pb_source}" -eq 40 ] || [ "${#_pb_source}" -eq 64 ] ||
+        fail "manifest source revision is invalid"
+    [ "$(receipt_value source.dirty "$_pb_manifest")" = false ] ||
+        fail "manifest source is dirty"
+    for _pb_tool in clang lld bootgen; do
+        [ -n "$(receipt_value "tool.$_pb_tool.version" "$_pb_manifest")" ] ||
+            fail "manifest missing tool.$_pb_tool.version"
+        manifest_hash "tool.$_pb_tool.sha256" "$_pb_manifest" >/dev/null
+    done
+    for _pb_artifact in fsbl bitstream firmware firmware.receipt boot; do
+        _pb_path="$(receipt_value "$_pb_artifact.path" "$_pb_manifest")" ||
+            fail "manifest missing $_pb_artifact.path"
+        [ "$(canonical_path "$_pb_path")" = "$_pb_path" ] ||
+            fail "manifest $_pb_artifact.path is not canonical"
+        require_file "$_pb_path" "manifest $_pb_artifact"
+        _pb_expected="$(manifest_hash "$_pb_artifact.sha256" "$_pb_manifest")"
+        [ "$(cosmos_sha256_file "$_pb_path")" = "$_pb_expected" ] ||
+            fail "manifest $_pb_artifact hash mismatch"
+    done
+    manifest_hash firmware.source.sha256 "$_pb_manifest" >/dev/null
+    manifest_hash firmware.load.sha256 "$_pb_manifest" >/dev/null
+    manifest_hash bootgen.metadata.sha256 "$_pb_manifest" >/dev/null
+    [ "$(receipt_value bitstream.sha256 "$_pb_manifest")" = "$BITSTREAM_EXPECTED_SHA" ] ||
+        fail "manifest bitstream is not the approved profile artifact"
+)
+
+verify_manifest_for_current_source() (
+    _pb_manifest="$1"
+    validate_manifest "$_pb_manifest"
+    capture_source_provenance
+    [ "$(receipt_value source.revision "$_pb_manifest")" = "$SOURCE_REVISION" ] ||
+        fail "manifest source revision does not match checkout"
+)
+
 write_manifest() {
     _pb_target="$1"
     _pb_fsbl_path="$2"
@@ -395,9 +526,16 @@ write_manifest() {
     _pb_boot_path="$1"
     _pb_boot_snapshot="$2"
     _pb_metadata="$3"
+    _pb_bootgen_version="$4"
+    _pb_bootgen_sha="$5"
     {
-        echo "format=cosmos-zynq-boot-v2"
+        echo "format=cosmos-zynq-boot-v3"
         echo "board=cosmos-plus-openssd"
+        echo "board.serial=$BOARD_SERIAL"
+        echo "board.revision=$BOARD_REVISION"
+        echo "boot.mode=$BOOT_MODE"
+        echo "source.revision=$SOURCE_REVISION"
+        echo "source.dirty=$SOURCE_DIRTY"
         echo "profile=$PROFILE_NAME"
         echo "profile.selector=$PROFILE_SELECTOR"
         echo "profile.source.commit=$PROFILE_SOURCE_COMMIT"
@@ -406,6 +544,11 @@ write_manifest() {
         echo "profile.hdf.sha256=$PROFILE_HDF_SHA256"
         echo "profile.bitstream.member=$PROFILE_BITSTREAM_MEMBER"
         echo "profile.bitstream.sha256=$PROFILE_BITSTREAM_SHA256"
+        echo "bitstream.contract=$PROFILE_SELECTOR"
+        echo "bitstream.contract.token=$PROFILE_BITSTREAM_CONTRACT"
+        echo "nfc.dma.base=$COSMOS_DMA_BASE"
+        echo "nfc.dma.end=$COSMOS_DMA_END"
+        echo "nfc.toggle_payload=$COSMOS_TOGGLE_PAYLOAD"
         printf 'fsbl.path=%s\nfsbl.sha256=%s\n' \
             "$_pb_fsbl_path" "$(cosmos_sha256_file "$_pb_fsbl_snapshot")"
         printf 'bitstream.path=%s\nbitstream.sha256=%s\n' \
@@ -419,6 +562,16 @@ write_manifest() {
             "$(receipt_value source.sha256 "$_pb_receipt_snapshot")"
         printf 'firmware.load.sha256=%s\n' \
             "$(receipt_value elf.load.sha256 "$_pb_receipt_snapshot")"
+        printf 'tool.clang.version=%s\n' \
+            "$(receipt_value tool.clang.version "$_pb_receipt_snapshot")"
+        printf 'tool.clang.sha256=%s\n' \
+            "$(receipt_value tool.clang.sha256 "$_pb_receipt_snapshot")"
+        printf 'tool.lld.version=%s\n' \
+            "$(receipt_value tool.lld.version "$_pb_receipt_snapshot")"
+        printf 'tool.lld.sha256=%s\n' \
+            "$(receipt_value tool.lld.sha256 "$_pb_receipt_snapshot")"
+        printf 'tool.bootgen.version=%s\n' "$_pb_bootgen_version"
+        printf 'tool.bootgen.sha256=%s\n' "$_pb_bootgen_sha"
         printf 'boot.path=%s\nboot.sha256=%s\n' \
             "$_pb_boot_path" "$(cosmos_sha256_file "$_pb_boot_snapshot")"
         printf 'bootgen.metadata.sha256=%s\n' \
@@ -434,6 +587,13 @@ run_package() (
     _pb_elf="$3"
     _pb_output="$4"
     _pb_manifest="$_pb_output.manifest"
+    validate_identity "$BOARD_SERIAL" board.serial
+    validate_identity "$BOARD_REVISION" board.revision
+    case "$BOOT_MODE" in
+        sd|qspi) ;;
+        *) fail "invalid boot mode" ;;
+    esac
+    [ "$SOURCE_DIRTY" = false ] || fail "source tree is dirty"
     require_file "$_pb_fsbl" FSBL
     require_file "$_pb_bitstream" bitstream
     require_file "$_pb_elf" firmware-ELF
@@ -513,6 +673,18 @@ run_package() (
     _pb_bootgen="${BOOTGEN:-bootgen}"
     command -v "$_pb_bootgen" >/dev/null 2>&1 ||
         fail "missing bootgen: $_pb_bootgen"
+    _pb_bootgen_version="$("$_pb_bootgen" -help 2>&1 | awk '
+        NF {
+            gsub(/[[:space:]]+/, " ")
+            sub(/^ /, "")
+            sub(/ $/, "")
+            print
+            exit
+        }
+    ')" || fail "cannot identify bootgen"
+    [ -n "$_pb_bootgen_version" ] || fail "cannot identify bootgen"
+    _pb_bootgen_sha="$(cosmos_tool_sha256 "$_pb_bootgen")" ||
+        fail "cannot hash bootgen"
     "$_pb_bootgen" -arch zynq -image "$_pb_bif" -w -o "$_pb_bin" ||
         fail "bootgen failed"
     [ -s "$_pb_bin" ] || fail "bootgen produced an empty boot image"
@@ -529,9 +701,14 @@ run_package() (
     write_manifest "$_pb_manifest_tmp" \
         "$_pb_fsbl_abs" "$_pb_bit_abs" "$_pb_elf_abs" "$_pb_receipt_abs" \
         "$_pb_fsbl_snap" "$_pb_bit_snap" "$_pb_elf_snap" \
-        "$_pb_receipt_snap" "$_pb_output_abs" "$_pb_bin" "$_pb_metadata"
+        "$_pb_receipt_snap" "$_pb_output_abs" "$_pb_bin" "$_pb_metadata" \
+        "$_pb_bootgen_version" "$_pb_bootgen_sha"
     mv "$_pb_bin" "$_pb_output_abs"
     mv "$_pb_manifest_tmp" "$_pb_manifest_abs"
+    if ! validate_manifest "$_pb_manifest_abs"; then
+        rm -f "$_pb_output_abs" "$_pb_manifest_abs"
+        fail "published manifest validation failed"
+    fi
     printf 'STATUS: PASS cosmos-package-boot: %s (sha256=%s, manifest=%s)\n' \
         "$_pb_output" "$(cosmos_sha256_file "$_pb_output_abs")" "$_pb_manifest"
 )
@@ -591,6 +768,10 @@ run_self_test() {
     cat > "$_pb_fake_bin/bootgen" <<'EOF'
 #!/bin/sh
 set -eu
+if [ "${1:-}" = "-help" ]; then
+    echo "Bootgen self-test 2026.1"
+    exit 0
+fi
 out=
 bif=
 read_image=
@@ -664,6 +845,23 @@ fi
 EOF
     chmod +x "$_pb_fake_bin/bootgen"
 
+    BOARD_SERIAL=self-test-board-001
+    BOARD_REVISION=rev-a
+    BOOT_MODE=sd
+    SOURCE_REVISION=0000000000000000000000000000000000000000
+    SOURCE_DIRTY=false
+
+    _pb_sources="$_pb_test_dir/sources.manifest"
+    cosmos_write_source_manifest "$SCRIPT_DIR" "$_pb_sources" ||
+        fail "self-test could not capture source closure"
+    for _pb_source in cosmos_ftl_nfc_backend.c cosmos_ftl_nfc_backend.h \
+        cosmos_nvme_ftl_media.c cosmos_nvme_ftl_media.h \
+        cosmos_storage.c cosmos_storage.h
+    do
+        grep -Eq "  $_pb_source$" "$_pb_sources" ||
+            fail "source closure omits $_pb_source"
+    done
+
     _pb_build_out="$_pb_test_dir/build"
     COSMOS_OUT="$_pb_build_out" \
     COSMOS_BUILD_MODE=silicon \
@@ -681,6 +879,10 @@ EOF
         fail "self-test receipt lacks source hash"
     grep -Eq '^elf.load.sha256=[0-9a-f]{64}$' "$_pb_receipt" ||
         fail "self-test receipt lacks load hash"
+    grep -Eq '^tool.clang.version=.+$' "$_pb_receipt" ||
+        fail "self-test receipt lacks clang version"
+    grep -Eq '^tool.lld.version=.+$' "$_pb_receipt" ||
+        fail "self-test receipt lacks lld version"
 
     _pb_fsbl="$_pb_test_dir/fsbl.elf"
     _pb_bitstream="$_pb_test_dir/OpenSSD2.bit"
@@ -703,6 +905,29 @@ EOF
         "$_pb_manifest" || fail "manifest receipt hash mismatch"
     grep -Fxq "profile.bitstream.sha256=$PROFILE_BITSTREAM_SHA256" \
         "$_pb_manifest" || fail "manifest official bitstream identity mismatch"
+    grep -Fxq "board.serial=$BOARD_SERIAL" "$_pb_manifest" ||
+        fail "manifest board serial mismatch"
+    grep -Fxq "board.revision=$BOARD_REVISION" "$_pb_manifest" ||
+        fail "manifest board revision mismatch"
+    grep -Fxq "source.revision=$SOURCE_REVISION" "$_pb_manifest" ||
+        fail "manifest source revision mismatch"
+    grep -Fxq "source.dirty=false" "$_pb_manifest" ||
+        fail "manifest dirty-state mismatch"
+    grep -Eq '^tool.bootgen.version=.+$' "$_pb_manifest" ||
+        fail "manifest lacks bootgen version"
+    validate_manifest "$_pb_manifest"
+
+    _pb_missing="$_pb_test_dir/missing-source.manifest"
+    sed '/^source[.]revision=/d' "$_pb_manifest" > "$_pb_missing"
+    if (validate_manifest "$_pb_missing") >/dev/null 2>&1; then
+        fail "self-test accepted manifest without source revision"
+    fi
+    _pb_wrong_hash="$_pb_test_dir/wrong-boot-hash.manifest"
+    sed 's/^boot[.]sha256=.*/boot.sha256=0000000000000000000000000000000000000000000000000000000000000000/' \
+        "$_pb_manifest" > "$_pb_wrong_hash"
+    if (validate_manifest "$_pb_wrong_hash") >/dev/null 2>&1; then
+        fail "self-test accepted manifest with wrong boot hash"
+    fi
 
     _pb_wrapping_fsbl="$_pb_test_dir/wrapping-fsbl.elf"
     cp "$_pb_fsbl" "$_pb_wrapping_fsbl"
@@ -774,6 +999,7 @@ EOF
         "$_pb_fsbl" "$_pb_wrong_bit" "$_pb_firmware" \
         "$_pb_test_dir/wrong-bit.bin"
 
+    echo "COSMOS_PACKAGE_PROVENANCE_PASS source=clean board=bound tools=clang,lld,bootgen artifacts=fsbl,bitstream,firmware,boot"
     echo "STATUS: PASS cosmos-package-boot self-test"
 }
 
@@ -783,18 +1009,37 @@ if [ "${1:-}" = "--self-test" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--verify-manifest" ]; then
+    [ "$#" -eq 2 ] || usage
+    verify_manifest_for_current_source "$2"
+    echo "STATUS: PASS cosmos-package-manifest verified"
+    exit 0
+fi
+
 FSBL=
 BITSTREAM=
 ELF=
 OUTPUT=build/os/boot.bin
+BOARD_SERIAL=
+BOARD_REVISION=
+BOOT_MODE=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --fsbl) [ "$#" -ge 2 ] || usage; FSBL="$2"; shift 2 ;;
         --bitstream) [ "$#" -ge 2 ] || usage; BITSTREAM="$2"; shift 2 ;;
         --elf) [ "$#" -ge 2 ] || usage; ELF="$2"; shift 2 ;;
         --output) [ "$#" -ge 2 ] || usage; OUTPUT="$2"; shift 2 ;;
+        --board-serial) [ "$#" -ge 2 ] || usage; BOARD_SERIAL="$2"; shift 2 ;;
+        --board-revision) [ "$#" -ge 2 ] || usage; BOARD_REVISION="$2"; shift 2 ;;
+        --boot-mode) [ "$#" -ge 2 ] || usage; BOOT_MODE="$2"; shift 2 ;;
         *) usage ;;
     esac
 done
-[ -n "$FSBL" ] && [ -n "$BITSTREAM" ] && [ -n "$ELF" ] || usage
+[ -n "$FSBL" ] && [ -n "$BITSTREAM" ] && [ -n "$ELF" ] &&
+    [ -n "$BOARD_SERIAL" ] && [ -n "$BOARD_REVISION" ] &&
+    [ -n "$BOOT_MODE" ] || usage
+validate_identity "$BOARD_SERIAL" board.serial
+validate_identity "$BOARD_REVISION" board.revision
+case "$BOOT_MODE" in sd|qspi) ;; *) usage ;; esac
+capture_source_provenance
 run_package "$FSBL" "$BITSTREAM" "$ELF" "$OUTPUT"

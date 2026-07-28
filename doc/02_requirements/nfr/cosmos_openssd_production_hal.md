@@ -73,5 +73,6 @@ no current pure-Simple runner for final SSpec/doc generation.
 
 Current status: **BLOCKED/FAIL for production acceptance**. REQ-012 and
 NFR-011 remain board-only and excluded from passing executable `@req` claims.
-Current Stage-4 SSpec/docgen evidence, complete package provenance, requested
-multi-target profiles, and board proof remain required.
+Package manifest v3 software provenance now passes its positive and tamper
+self-tests. Current Stage-4 SSpec/docgen evidence and physical board proof
+remain required.

@@ -10,7 +10,7 @@
 
 ## FR-NVME-FW-TARGETS-0001 - Make firmware target configuration explicit
 
-- **Status:** Requested.
+- **Status:** Implemented profile matrix; QEMU firmware parity passes and unavailable hardware remains fail closed.
 - **Priority:** P0.
 - **Acceptance:** One target-neutral firmware core selects explicit profiles
   for Simple simulation, QEMU/FEMU, Cosmos+ OpenSSD 2Ch8Way and 8Ch8Way, and
@@ -22,7 +22,7 @@
 
 ## FR-COSMOS-002 - Complete production package provenance
 
-- **Status:** Requested.
+- **Status:** Implemented and self-tested; identified-board package execution remains under FR-COSMOS-003.
 - **Priority:** P1.
 - **Acceptance:** The package manifest binds repository revision and dirty
   state, tool versions, selected profile, board identity, and hashes for FSBL,
