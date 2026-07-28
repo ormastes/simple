@@ -100,6 +100,10 @@ describe "<Feature Name>":
 ### NVMe/RV32 Transport Profile Rules
 
 Use these profile names consistently in NVMe firmware specs and manuals:
+The agent-facing configuration inventory, exact runners, MMIO apertures, and
+open evidence gates are in
+`doc/07_guide/app/llm/simple_riscv_nvme_feature_inventory.md`; update that page
+whenever a target profile or acceptance command changes.
 
 | Profile | What it proves | What it does not prove |
 |---|---|---|

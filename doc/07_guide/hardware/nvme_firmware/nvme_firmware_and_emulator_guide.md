@@ -33,7 +33,8 @@ the ELF, and fails unless that 256-byte range receives reads and writes and the
 prevention/recovery/final markers are observed over AXI4-Lite. `.nandram` is
 linker-resident emulated media state transported by AXI; it is not a NAND MMIO
 register device.
-Host-issued NVMe-over-AXI/MMIO remains tracked in
+Host-issued NVMe-over-AXI/MMIO endpoint evidence and its remaining
+firmware-in-loop work are tracked in
 `doc/08_tracking/feature/rv32_nvme_host_axi_mmio_2026-07-28.md`.
 
 ### Profile catalog and evidence boundary
@@ -49,9 +50,10 @@ Use the profile that matches the transport actually exercised:
 | KV260 FPGA | H1 FPGA-model evidence with a real host trace | OpenSSD or physical-NAND acceptance |
 | Cosmos+ OpenSSD | H2/vendor profile only through its board gate | Any result inferred from QEMU/GHDL/internal selftest |
 
-The `rv32_nvme_host_axi_mmio` contract is the missing host transport. Its
-closure requires external MMIO register traffic, host SQE/CQE queue DMA,
-payload DMA, IRQ assertion/acknowledgement, and host completion consumption.
+The standalone `rv32_nvme_host_axi_mmio` endpoint now proves external MMIO,
+host SQE/CQE queue DMA, IRQ assertion/acknowledgement, and host completion
+consumption with a mocked firmware mailbox. Contract closure still requires
+the real RV32 firmware ELF to service that mailbox and drive payload/recovery.
 The current `.nandram` AXI gate and USER4 transcript remain valid backend
 recovery evidence, but they are CPU-driven internal selftest evidence, not
 host-NVMe evidence. The first host contract is qid 0/qid 1, depth 2..16,

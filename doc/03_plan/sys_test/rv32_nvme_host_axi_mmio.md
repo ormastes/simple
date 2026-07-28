@@ -26,7 +26,9 @@
 The executable SSpec now invokes the GHDL H1 endpoint runner. That runner proves
 host MMIO, two posted SQE fetches, mocked firmware mailbox completion, CQE DMA,
 IRQ/ack, and invalid-CC behavior. Firmware-in-the-loop payload/recovery, QEMU
-parity, generator/top-level integration, and H2 remain open.
+parity, Vivado/board execution, and H2 remain open. The RV32 K26 top and its
+testbench are generator-owned and now include the endpoint, mailbox decode,
+DMA master, host AXI-Lite slave, and PS interrupt wiring.
 
 ## Required artifacts for transport closure
 

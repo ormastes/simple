@@ -49,8 +49,8 @@ architecture sim of tb_rv32_k26_ddr_boot is
   signal rst_n : std_logic := '0';
   signal uart_tx : std_logic;
   signal done : boolean := false;
-  signal trace_reads  : natural := 0;
-  signal trace_writes : natural := 0;
+  signal trace_reads : natural := 0;
+  signal trace_writes: natural := 0;
 
   -- AXI4 (core master -> DDR model)
   signal awaddr  : std_logic_vector(31 downto 0);
@@ -179,6 +179,31 @@ begin
       m_axi_hp_rdata => rdata, m_axi_hp_rresp => rresp,
       m_axi_hp_rlast => rlast, m_axi_hp_rvalid => rvalid,
       m_axi_hp_rready => rready,
+      m_axi_nvme_dma_awaddr => open, m_axi_nvme_dma_awlen => open,
+      m_axi_nvme_dma_awsize => open, m_axi_nvme_dma_awburst => open,
+      m_axi_nvme_dma_awcache => open, m_axi_nvme_dma_awprot => open,
+      m_axi_nvme_dma_awvalid => open, m_axi_nvme_dma_awready => '0',
+      m_axi_nvme_dma_wdata => open, m_axi_nvme_dma_wstrb => open,
+      m_axi_nvme_dma_wlast => open, m_axi_nvme_dma_wvalid => open,
+      m_axi_nvme_dma_wready => '0', m_axi_nvme_dma_bresp => "00",
+      m_axi_nvme_dma_bvalid => '0', m_axi_nvme_dma_bready => open,
+      m_axi_nvme_dma_araddr => open, m_axi_nvme_dma_arlen => open,
+      m_axi_nvme_dma_arsize => open, m_axi_nvme_dma_arburst => open,
+      m_axi_nvme_dma_arcache => open, m_axi_nvme_dma_arprot => open,
+      m_axi_nvme_dma_arvalid => open, m_axi_nvme_dma_arready => '0',
+      m_axi_nvme_dma_rdata => (others => '0'), m_axi_nvme_dma_rresp => "00",
+      m_axi_nvme_dma_rlast => '0', m_axi_nvme_dma_rvalid => '0',
+      m_axi_nvme_dma_rready => open, nvme_irq => open,
+      s_axi_nvme_awaddr => (others => '0'), s_axi_nvme_awprot => "000",
+      s_axi_nvme_awvalid => '0', s_axi_nvme_awready => open,
+      s_axi_nvme_wdata => (others => '0'), s_axi_nvme_wstrb => (others => '0'),
+      s_axi_nvme_wvalid => '0', s_axi_nvme_wready => open,
+      s_axi_nvme_bresp => open, s_axi_nvme_bvalid => open,
+      s_axi_nvme_bready => '0', s_axi_nvme_araddr => (others => '0'),
+      s_axi_nvme_arprot => "000", s_axi_nvme_arvalid => '0',
+      s_axi_nvme_arready => open, s_axi_nvme_rdata => open,
+      s_axi_nvme_rresp => open, s_axi_nvme_rvalid => open,
+      s_axi_nvme_rready => '0',
       s_axi_ctrl_awaddr => l_awaddr, s_axi_ctrl_awprot => "000",
       s_axi_ctrl_awvalid => l_awvalid, s_axi_ctrl_awready => l_awready,
       s_axi_ctrl_wdata => l_wdata, s_axi_ctrl_wstrb => "1111",

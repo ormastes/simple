@@ -10,13 +10,17 @@
 - **Status:** Open. The standalone synthesizable endpoint H1 gate now passes
   host register access, two posted SQE DMA fetches, testbench-modeled firmware
   completions, CQE DMA, IRQ/ack, and invalid-CC handling. Firmware-in-the-loop,
-  CPU/top-level generator wiring, QEMU parity, and physical H2 remain open.
+  generated CPU/top-level wiring is implemented and byte-identical to its
+  generated output. The resident service ELF builds and enters the mailbox
+  loop. A full K26 boot rehearsal is waiting for its RV32 kernel fixture, and
+  firmware-in-the-loop host-command simulation,
+  QEMU parity, Vivado/board evidence, and physical H2 remain open.
 - **Current evidence:**
   `sh scripts/fpga/ghdl_rv32_nvme_host_axi_mmio.shs` reports
   `STATUS: PASS rv32-nvme-host-axi-mmio H1-ENDPOINT firmware=mocked`.
-  The RV32 start/MMIO assembly compiles, but the firmware ELF build is blocked
-  because the deployed pure-Simple runtime crashes its bounded `test --help`
-  ABI probe.
+  `NVME_RV32_SERVICE=1` builds `build/nvme_fw_rv32_service.elf` with the
+  verified Stage 3 pure-Simple compiler. Full CLI deployment remains blocked
+  by Stage-4 memory growth, not by the former stale-ABI crash.
 - **Requested-semantics:** Add an NVMe register/doorbell and DMA transport that
   lets an external host create admin and I/O queues and submit commands to the
   same firmware controller path. Keep QEMU, RAM-NAND, OpenSSD, and FPGA target

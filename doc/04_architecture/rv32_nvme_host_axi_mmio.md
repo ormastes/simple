@@ -11,18 +11,18 @@ exposes observation registers. Neither is a host NVMe controller endpoint.
 ```text
 host AXI-Lite MMIO
         |
-  NVMe register/doorbell slave ---- IRQ ----> RV32 external machine interrupt
-        |                                      |
-  queue/DMA engine AXI4 master <----> host DDR |
-        |                                      v
-  fixed CPU mailbox -----------------> RV32 firmware service loop
+  NVMe register/doorbell slave ---- IRQ ----> host/PS interrupt
+        |
+  queue/DMA engine AXI4 master <----> host DDR
+        |
+  fixed CPU mailbox <---------------- RV32 firmware polling loop
                                            |
                                   existing RAM-NAND policy
 ```
 
 ### NVMe endpoint
 
-Add one synthesizable, generator-owned endpoint. It implements the standard
+Add one synthesizable endpoint with a pinned hand-owned RTL source. It implements the standard
 register aperture (`CAP`, `VS`, interrupt mask/clear, `CC`, `CSTS`, `AQA`,
 `ASQ`, `ACQ`) and queue doorbells. `CC.EN` transitions are serialized: disable
 clears ready, queue base/size validation happens before enable, and invalid
@@ -57,18 +57,19 @@ prevention, retry, FCR, SECDED, and remap remain backend policy.
 
 ### Interrupt path
 
-Extend the RV32 core variant with an external machine-interrupt input and
-bounded trap entry. The top-level connects the endpoint IRQ to that input.
-The handler acknowledges the endpoint and services the mailbox; a missing IRQ
-or a timeout is a test failure. Existing debug/UART observation remains a
-separate slave.
+The top-level connects the endpoint IRQ to the ZynqMP `pl_ps_irq0` input so the
+host/PS can consume completions. The RV32 firmware polls the fixed mailbox; it
+does not need a second interrupt path. A missing host IRQ, acknowledgement, or
+mailbox completion is a test failure. Existing debug/UART observation remains
+a separate slave.
 
 ## Ownership and generation
 
-The VHDL generator is authoritative. The endpoint, core IRQ port, top-level
-connections, and DMA fabric must be represented in `src/lib/hardware/vhdl_gen`
-and regenerated into the FPGA RTL tree. A generator truth check must compare
-the generated source with the checked-in target source.
+The VHDL generator is authoritative for the RV32 K26 top and boot testbench.
+The dedicated endpoint is hand-owned, hash-pinned RTL because reproducing a
+single 600-line state machine as generated string data adds no independent
+source of truth. The golden gate must compare generated top/testbench output
+with the checked-in targets and must separately cover the pinned endpoint.
 
 ## Profile boundaries
 

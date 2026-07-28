@@ -23,7 +23,11 @@ MODE="${1:-}"
 # stub below must match this ABI or ld.lld rejects the link ("cannot link
 # object files with different floating-point ABI").
 LIBGCC="$(riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -print-libgcc-file-name)"
-OUT="build/nvme_fw_rv32.elf"
+SERVICE_MODE="${NVME_RV32_SERVICE:-0}"
+OUT="${NVME_RV32_OUT:-build/nvme_fw_rv32.elf}"
+if [ "$SERVICE_MODE" = "1" ] && [ -z "${NVME_RV32_OUT:-}" ]; then
+  OUT="build/nvme_fw_rv32_service.elf"
+fi
 OBJ="build/test-artifacts/nvme_fw_rv32.o"
 START_OBJ="build/test-artifacts/nvme_fw_rv32_start.o"
 START_ASM="build/test-artifacts/nvme_fw_rv32_start.S"
@@ -412,6 +416,15 @@ else
   done
   sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' \
     examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl >"$DIRECT_ENTRY"
+  if [ "$SERVICE_MODE" = "1" ]; then
+    sed -i '/^fn main() -> i64:/,$d' "$DIRECT_ENTRY"
+    cat >>"$DIRECT_ENTRY" <<'EOF_SERVICE_MAIN'
+fn main() -> i64:
+    while true:
+        nvme_fw_rv32_service_once()
+    0
+EOF_SERVICE_MAIN
+  fi
   mkdir -p "$BOOT_STUB_LINK"
   cat >"$BOOT_STUB_LINK/rv32_direct_runtime_stubs.c" <<'EOF_DIRECT_STUBS'
 #include <stdint.h>
@@ -506,6 +519,11 @@ else
     .globl _start
 _start:
     la      sp, _stack_top
+#ifdef NVME_RV32_SERVICE
+service_loop:
+    call    nvme_fw_rv32_service_once
+    j       service_loop
+#else
     call    rt_rv32_boot_optional_nvme_fw_selftest
     bnez    a0, fail
     lui     t0, 0x10000
@@ -559,6 +577,7 @@ done:
     sw      t1, 0(t0)
 1:  wfi
     j       1b
+#endif
 
     .globl rt_riscv_uart_put
 rt_riscv_uart_put:
@@ -639,7 +658,9 @@ rt_rv32_nvme_mmio_store:
     sw      a1, 0(t0)
 1:  ret
 EOF_START
-  if ! riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -c "$START_ASM" -o "$START_OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
+  SERVICE_CPPFLAG=""
+  if [ "$SERVICE_MODE" = "1" ]; then SERVICE_CPPFLAG="-DNVME_RV32_SERVICE=1"; fi
+  if ! riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 $SERVICE_CPPFLAG -c "$START_ASM" -o "$START_OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
     echo "NVME_RV32_BUILD_FAILED start-stub out=$OUT_LOG err=$ERR_LOG" >&2
     tail -n 40 "$ERR_LOG" >&2 || true
     exit 1
