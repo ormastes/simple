@@ -169,6 +169,14 @@ still reached 7,374,600 KiB RSS at 5m46s. The logging fix removes avoidable I/O
 and no-GC allocations, but does not change the primary whole-phase AST/HIR
 retention diagnosis below.
 
+The first strict pure-Simple `native_build_worker` was admitted through an
+exact 13-root runtime projection and then used to compile the hosted browser
+entry closure. Its RSS reached 48,167,848 KiB in 6m20s before the run was
+stopped. The equivalent current Rust-seed worker stayed near 2.1 GiB RSS but
+remained CPU-bound without producing an artifact after 45 minutes. This proves
+the production blocker is the self-hosted compiler's retained allocation
+growth, not the browser renderer or the runtime-provider link boundary.
+
 ## Required structural fix
 
 Introduce a two-pass, streaming HIR pipeline using `ModuleSurface` as compact
