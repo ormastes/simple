@@ -841,6 +841,19 @@ int main(int argc, char **argv)
     struct bytes hello_object_payload = read_file(getenv("SIMPLEOS_HELLO_OBJECT"));
     struct bytes hello_ir_payload = read_file(getenv("SIMPLEOS_HELLO_IR"));
     struct bytes fsexec_payload = read_file(getenv("SIMPLEOS_FSEXEC_BINARY"));
+    /* The fullscreen WM showcase stages a REAL freestanding browser client at
+     * ::/SYS/APPS/BROWSMF.SMF. When SIMPLEOS_BROWSER_DEMO_BINARY is supplied it
+     * is authoritative: an explicitly requested client must never be silently
+     * replaced by the synthesized marker stub, so an unreadable/empty path is a
+     * hard error rather than a fallback. The stub remains only for callers that
+     * supply no binary at all (e.g. desktop-fonts profiles). */
+    const char *browser_demo_path = getenv("SIMPLEOS_BROWSER_DEMO_BINARY");
+    struct bytes browser_payload = read_file(getenv("SIMPLEOS_BROWSER_DEMO_BINARY"));
+    if (browser_demo_path && browser_demo_path[0] != '\0' && !browser_payload.len) {
+        fprintf(stderr, "SIMPLEOS_BROWSER_DEMO_BINARY could not be read: %s\n",
+                browser_demo_path);
+        return 1;
+    }
     struct bytes font_payloads[FONT_ASSET_COUNT];
     struct bytes font_metadata_payloads[FONT_ASSET_COUNT];
     struct bytes font_license_payloads[FONT_ASSET_COUNT];
@@ -944,7 +957,7 @@ int main(int argc, char **argv)
     struct bytes fat4k = text_bytes("SIMPLEOS_FAT32_DIRECT_IO_4K_FIXTURE\n");
 
     struct bytes hello = smf(platform_elf(platform, hello_marker));
-    struct bytes browser = smf(platform_elf(platform, gui_marker));
+    struct bytes browser = smf(browser_payload.len ? browser_payload : platform_elf(platform, gui_marker));
     struct bytes simple_cli = simple_role_payload(platform, "SIMPLE", simple_payload);
     struct bytes simple_compiler = simple_role_payload(platform, "SIMPLE_COMPILER", simple_payload);
     struct bytes simple_interpreter = simple_role_payload(platform, "SIMPLE_INTERPRETER", simple_payload);
