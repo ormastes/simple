@@ -129,6 +129,18 @@ Stage4 now skips both materializing and retaining that parallel aggregate;
 non-Stage4 entry-closure behavior is unchanged. This is a bounded retention
 repair, not yet evidence that the remaining whole-phase peak fits the host.
 
+The next retained-log audit found that the earlier "physical" source dedup was
+still lexical: `_driver_unique_physical_sources` normalized `.` and `..` but did
+not resolve repository symlinks. The same file therefore still entered Phase 3
+through aliases such as `src/lib/...` and `src/std/...`; one measured
+`nogc_async_mut/io.spl` duplicate added about 15.6 million registry entries.
+The shared source key now drives closure-scan membership, parse dedup, and alias
+cache lookup through `rt_path_absolute` (realpath on POSIX, platform-canonical
+absolute paths elsewhere) with lexical normalization as the final fallback. A focused regression
+pins both the `src/std -> src/lib` and `src/compiler/frontend -> 10.frontend`
+aliases. This removes proven duplicate lowering; it does not claim to solve the
+necessary whole-phase AST/HIR lifetime.
+
 ## Required structural fix
 
 Introduce a two-pass, streaming HIR pipeline using `ModuleSurface` as compact
