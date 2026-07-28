@@ -50,13 +50,12 @@ Use the profile that matches the transport actually exercised:
 | KV260 FPGA | H1 FPGA-model evidence with a real host trace | OpenSSD or physical-NAND acceptance |
 | Cosmos+ OpenSSD | H2/vendor profile only through its board gate | Any result inferred from QEMU/GHDL/internal selftest |
 
-The standalone `rv32_nvme_host_axi_mmio` endpoint now proves external MMIO,
-host SQE/CQE queue DMA, IRQ assertion/acknowledgement, and host completion
-consumption with a mocked firmware mailbox. Contract closure still requires
-the real RV32 firmware ELF to service that mailbox and drive payload/recovery.
-The current `.nandram` AXI gate and USER4 transcript remain valid backend
-recovery evidence, but they are CPU-driven internal selftest evidence, not
-host-NVMe evidence. The first host contract is qid 0/qid 1, depth 2..16,
+The standalone `rv32_nvme_host_axi_mmio` endpoint retains a focused mocked-mailbox
+protocol check. The aggregate gate also boots the real resident RV32 service ELF
+and drives Create CQ/SQ, Identify, Write, Flush, and Read through shared AXI RAM,
+requiring recovery, prevention refresh, alternate remap, payload equality, CQE,
+and IRQ evidence. QEMU parity and board acceptance remain separate. The first
+host contract is qid 0/qid 1, depth 2..16,
 `4 << CAP.DSTRD` doorbells and one dword-aligned PRP1 contained in a page.
 Identify writes 256 bytes; current NAND Read/Write moves one 4-byte word.
 Unsupported PRP2/multi-page requests fail closed. See the feature artifacts

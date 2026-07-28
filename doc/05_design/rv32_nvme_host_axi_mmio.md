@@ -47,9 +47,10 @@ The host testbench must count and retain:
 - completion CID/status/phase and queue wrap;
 - NAND policy markers and final read-after-write bytes.
 
-The endpoint sequence runs through the synthesizable GHDL target. The
-runner-backed endpoint SSpec invokes that gate. QEMU firmware payload/recovery
-integration remains a separate required scenario.
+The runner-backed SSpec executes the focused endpoint test and the resident RV32
+service ELF against one AXI RAM containing firmware, NAND state, queues, CQEs,
+and PRP buffers. It retains recovery, prevention, and alternate-remap counters.
+QEMU parity remains a separate required scenario.
 
 ## Deliberate first-target limits
 

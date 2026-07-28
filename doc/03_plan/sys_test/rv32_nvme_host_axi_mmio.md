@@ -23,12 +23,11 @@
 | ST-006 | REQ-008 | MMIO/DMA/IRQ counters and retained protocol transcript are nonzero and consistent |
 | ST-007 | REQ-009..010 | Same H1 sequence across QEMU/GHDL; unknown profile and H2 claims rejected |
 
-The executable SSpec now invokes the GHDL H1 endpoint runner. That runner proves
-host MMIO, two posted SQE fetches, mocked firmware mailbox completion, CQE DMA,
-IRQ/ack, and invalid-CC behavior. Firmware-in-the-loop payload/recovery, QEMU
-parity, Vivado/board execution, and H2 remain open. The RV32 K26 top and its
-testbench are generator-owned and now include the endpoint, mailbox decode,
-DMA master, host AXI-Lite slave, and PS interrupt wiring.
+The executable SSpec invokes the aggregate GHDL runner. It retains the focused
+mocked-mailbox endpoint check and additionally boots the resident RV32 service
+ELF against shared AXI RAM. Host-issued Create CQ/SQ, Identify, Write, Flush,
+and Read prove SQE/CQE and payload DMA, IRQ/ack, recovery FCR, prevention refresh,
+and alternate remap. QEMU parity, Vivado/board execution, and H2 remain open.
 
 ## Required artifacts for transport closure
 

@@ -49,7 +49,7 @@ implemented.
 
 ### Firmware service
 
-Extract or share the existing scalar queue/media helpers. The service loop
+The resident service reuses the existing scalar queue/media helpers. Its loop
 consumes one mailbox command at a time, validates opcode/NSID/queue/PRP and
 dispatches Identify/Create queues/Read/Write/Flush into the existing NAND-RAM
 policy. It emits explicit completion status for every rejection. Recovery,
@@ -66,10 +66,10 @@ a separate slave.
 ## Ownership and generation
 
 The VHDL generator is authoritative for the RV32 K26 top and boot testbench.
-The dedicated endpoint is hand-owned, hash-pinned RTL because reproducing a
-single 600-line state machine as generated string data adds no independent
-source of truth. The golden gate must compare generated top/testbench output
-with the checked-in targets and must separately cover the pinned endpoint.
+The dedicated endpoint and firmware-in-loop testbench are hand-owned,
+hash-pinned RTL because reproducing state machines and test orchestration as
+generated string data adds no independent source of truth. The golden gate
+compares generated top/testbench output and separately covers both pinned files.
 
 ## Profile boundaries
 

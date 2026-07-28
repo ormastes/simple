@@ -130,6 +130,10 @@ Source/evidence assertions document design obligations but never satisfy a
 `@req` by themselves. Once an endpoint exists, its SSpec must invoke the real
 runner and tag only requirements exercised by that runner. A mocked firmware
 mailbox completion is endpoint evidence, not firmware or recovery evidence.
+The canonical real-firmware GHDL command is
+`sh scripts/fpga/ghdl_rv32_nvme_fw_in_loop.shs`; accept it only with
+`firmware=real transport=axi-ram` plus nonzero recovery, refresh, remap, and read
+counters in the retained transcript.
   An unresolved runtime symbol, nonzero exit, signal exit, or missing output is
   a FAIL; do not substitute a hand-edited manual or the Rust seed.
 - Scenario-oriented specs must produce manual-quality generated docs:

@@ -12,7 +12,7 @@ operation and recovery behavior lives in
 | `1` | `TARGET_OPENSSD_2CH8WAY` | Cosmos+ PCIe/NFC + physical NAND | Profile present; H2 board gate postponed |
 | `2` | `TARGET_OPENSSD_8CH8WAY` | Cosmos+ PCIe/NFC + physical NAND | Profile present; H2 board gate postponed |
 | `3` | `TARGET_RV32_QEMU_RAM_NAND` | RV32 ELF + 256-byte `.nandram` | H1 instruction/model evidence |
-| `4` | `TARGET_RV32_KV260_AXI_RAM_NAND` | AXI host endpoint + queue DMA + firmware mailbox + RAM NAND | H1 model integration; firmware-in-loop and board evidence open |
+| `4` | `TARGET_RV32_KV260_AXI_RAM_NAND` | AXI host endpoint + queue DMA + firmware mailbox + RAM NAND | H1 real firmware-in-loop PASS; board evidence open |
 
 Unknown IDs return `TARGET_INVALID`; they never fall back to the simulator.
 The canonical profile source is
@@ -48,8 +48,8 @@ Build the resident mailbox-service ELF with
 `NVME_RV32_SERVICE=1 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs`;
 the default build remains the internal recovery self-test image.
 
-`rv32_nvme_host_axi_mmio` currently ends at the mocked firmware mailbox marker
-`H1-ENDPOINT firmware=mocked`. Do not claim firmware-in-loop, PCIe enumeration,
+`rv32_nvme_host_axi_mmio` retains the focused mocked-mailbox test and now also
+passes `rv32-nvme-fw-in-loop firmware=real transport=axi-ram`. Do not claim QEMU parity, PCIe enumeration,
 MSI/PERST, KV260 board acceptance, physical NAND, or OpenSSD silicon until the
 corresponding retained gate passes. The source-matched Stage 3 pure-Simple
 compiler builds the resident service ELF and VHDL generator; SSpec/docgen still
