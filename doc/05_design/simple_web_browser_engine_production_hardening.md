@@ -271,6 +271,7 @@ All defaults are compile-time constants with bounded production overrides:
   variable output bounded to 1 MiB/16 fallback levels, and selector groups/parts
   bounded to 256 per rule; keyframe offsets/declarations are also capped at 256;
 - script source/jobs/microtasks/timers;
+- active-load and committed warnings: 128 unique entries, 4096 bytes each;
 - frame callbacks and work time;
 - Draw IR commands/strings/images/pixels;
 - renderer RSS/CPU/wall time;

@@ -256,7 +256,8 @@ compacted. Engine/device/font state survives same-size navigation and is
 released exactly once on app close.
 
 Document warnings are duplicate-suppressed, capped at 128 entries and 4096
-bytes per entry. Renderer diagnostics consume only the first 4096 characters
+bytes per entry at append time, including the in-progress load state before
+script/style/WASM finalization. Renderer diagnostics consume only the first 4096 characters
 without joining the retained warning set, so timer/animation traffic cannot
 turn repeated policy denials into growing retained memory or per-frame work.
 Failed child cleanup retries once per second while its window remains live;

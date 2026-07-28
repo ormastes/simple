@@ -260,6 +260,46 @@ describe "BrowserSession production security boundary":
         oversized._append_warning(oversized_text)
         expect(oversized.warnings[0].len()).to_equal(4096)
 
+    it "bounds active-load warnings before finalization":
+        var html = "<html><body>"
+        var index = 0
+        while index < 130:
+            html = html + "<script src='/bad-{index}.js'></script>"
+            index = index + 1
+        html = html + "</body></html>"
+
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://safe.test/app", html
+        ).is_ok()).to_be(true)
+        index = 0
+        while index < 129:
+            match session.take_pending_request():
+                Some(request):
+                    val error = "error-{index}-" + "x".repeat(5000)
+                    expect(session.commit_network_response(
+                        BrowserResponse.create(
+                            request_id: request.id,
+                            kind: request.kind,
+                            url: request.url,
+                            status: 0,
+                            headers: "",
+                            body: "",
+                            error: error
+                        )
+                    ).is_ok()).to_be(true)
+                nil:
+                    fail("Expected hostile script request {index}")
+            index = index + 1
+
+        match session.active_load:
+            Some(load):
+                expect(load.warnings.len()).to_equal(128)
+                for warning in load.warnings:
+                    expect(warning.len()).to_be_less_than(4097)
+            nil:
+                fail("Expected the final script request to keep loading active")
+
     it "still exports same-origin page fetches":
         var session = BrowserSession.new()
         session.open_html(

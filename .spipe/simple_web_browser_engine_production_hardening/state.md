@@ -1347,3 +1347,6 @@ implementation in progress / target evidence blocked
   rejected sources also skip keyframe extraction. Variable expansion is bounded
   to 1 MiB and 16 fallback levels; selector groups/parts and keyframe
   offsets/declarations are capped at 256.
+- Active document loads now apply the same duplicate-suppressing 128-entry,
+  4096-byte warning cap at every script, module, WASM, stylesheet, and CSP append
+  instead of retaining attacker-sized diagnostics until load finalization.
