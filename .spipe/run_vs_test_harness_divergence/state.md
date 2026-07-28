@@ -72,11 +72,20 @@ binary predates them (07-27 22:06). A rebuild is expected to close the six
 - `build/probe_divergence/fast_results.tsv`, `results.tsv`
 
 ## Measurement integrity
+- **Both drivers completed all 60 cases and agree 60/60 on every value.** The
+  engine-level substitution (`SIMPLE_EXECUTION_MODE`) and the real
+  `bin/simple run` / `bin/simple test` pair give identical results. A naive
+  string diff shows 15 rows differing only by the fast driver's extra
+  `exit=139` / `<via-jit-bailout>` annotations; no semantic value differs.
 - `probe_driver` records a spec with `0 examples` or with no `N examples` line
-  as `<UNMEASURED>`, never as agreement.
-- The fast (`SIMPLE_EXECUTION_MODE`) substitution was cross-validated against the
-  real `bin/simple test` on the first 10 cases: **10/10 exact match** on both
-  columns.
+  as `<UNMEASURED>`, never as agreement. **0 of 60 hit either condition.**
+- **Assertion calibration passed:** a deliberately-wrong spec
+  (`expect(a.index_of(10)).to_equal(999)`) DID fail under `bin/simple test`
+  (`expected 0 to equal 999`, 1 example / 1 failure, exit 1). The harness really
+  executes `it` bodies and assertions. Note this contradicts the caveat in
+  `.claude/rules/testing.md` that interpreter mode "only verifies file loading,
+  NOT `it` block execution" — that caveat did not hold here and should be
+  re-checked. Calibration spec deliberately NOT committed.
 
 ## Next (not done — measurement task)
 1. Rebuild `bin/simple`, re-run `fast_driver.shs`, diff.
@@ -84,3 +93,19 @@ binary predates them (07-27 22:06). A rebuild is expected to close the six
 3. Make the JIT dispatch table fail closed instead of exit-0-with-garbage.
 4. Collapse the four parallel Rust dispatch tables into one.
 5. Retire or wire up `SIMPLE_NO_JIT`.
+
+## Re-measurement 2026-07-28 (item 1 above: DONE)
+60-probe corpus re-run on freshly built `src/compiler_rust/target/debug/simple`
+(mtime 2026-07-28 11:06:17): **51 AGREE / 9 DISAGREE / 0 UNMEASURED** (was
+31/18/11). 0 silent JIT fallbacks. 12 probes fixed; 6 still divergent; **3 new
+regressions** (`dict_get_or_present`, `dict_get_or_absent`,
+`dict_insert_then_keys` — dict now JIT-compiles instead of bailing out, so `run`
+went from correct-via-bailout to wrong-with-exit-0 on missing `Dict.get_or` /
+`Dict.insert`). Dict is **no longer uncompilable** on the JIT (0/11 bail out),
+superseding the original blanket finding. `arr_filter`/`arr_any`/`arr_all`
+changed SIGSEGV → silent wrong value (same verdict, worse failure mode).
+Item 3 (fail closed instead of exit-0-with-garbage) is now the highest-value
+follow-up — it is the mechanism behind all 3 regressions. Full table + three
+groups: `doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`
+§ "Re-measurement". `fast_driver.shs` gained a `PROBE_BIN` override; it had
+hardcoded the stale deployed `bin/simple`.

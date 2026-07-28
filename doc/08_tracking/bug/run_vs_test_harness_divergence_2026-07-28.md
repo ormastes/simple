@@ -342,3 +342,228 @@ so `contains` takes an entirely different path and proves nothing about
 `rt_array_index_of`'s calling convention. The open question is whether
 `rt_array_index_of` is entered at all for a typed array receiver, and if so why
 `rt_value_eq` fails on JIT-boxed elements.
+
+---
+
+# Re-measurement — 2026-07-28 (later same day, post-fix)
+
+The original table above is **kept intact as history**. This section is a fresh
+run of the same 60-probe corpus, same probe names, after the `to_upper` /
+`strip` / `enumerate` / `first` / `index_of` fixes landed.
+
+## Binary under test
+
+| | |
+|---|---|
+| Command | `cd src/compiler_rust && cargo build -p simple-driver` |
+| Binary | `/home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple` |
+| mtime | **2026-07-28 11:06:17.100 +0000** |
+| Size | 479,899,928 bytes |
+
+**Driver fix (important).** `build/probe_divergence/fast_driver.shs` hardcoded
+`$ROOT/bin/simple` — the *deployed* release copy, mtime `2026-07-28 05:45:35`,
+which predates this build and does **not** contain the fixes. Measuring through
+it would have reproduced the old table and reported the fixes as not landed. The
+driver now takes the binary from `PROBE_BIN` (default unchanged), and echoes the
+binary path + `ls -l` to stderr at start so every future run self-documents which
+artifact produced it. Invocation used:
+
+```sh
+PROBE_BIN=$ROOT/src/compiler_rust/target/debug/simple \
+PROBE_OUTDIR=$ROOT/build/probe_divergence/fast_0728b \
+PROBE_RESULTS=$ROOT/build/probe_divergence/fast_results_0728b.tsv \
+  timeout 1800 sh build/probe_divergence/fast_driver.shs
+```
+
+Method is otherwise unchanged: one method per probe file, `SIMPLE_EXECUTION_MODE=jit`
+vs `SIMPLE_EXECUTION_MODE=interpreter` on the same source, output captured to
+files, `$?` taken from the command under test, `timeout 120` per run.
+
+## Silent-fallback audit
+
+Every one of the 60 JIT logs was re-grepped independently of the driver for
+`JIT compilation failed` and `JIT panicked`:
+
+**0 probes fell back to the interpreter.** No probe in this run is a false AGREE
+caused by a demoted program, and nothing is reported as UNMEASURED.
+
+This is also confirmed at the source level: `should_prefer_interpreter_for_source`
+(`driver/src/exec_core.rs`) returns `false` as soon as `SIMPLE_EXECUTION_MODE` is
+set, so the heuristic interpreter-preemption path cannot silently engage here, and
+both remaining bailout paths print to stderr.
+
+## Totals
+
+| Verdict | 2026-07-28 (original) | 2026-07-28 (re-measured) | Δ |
+|---|---|---|---|
+| AGREE | 31 | **51** | +20 |
+| DISAGREE | 18 | **9** | −9 |
+| UNMEASURED on JIT | 11 | **0** | −11 |
+
+Transition census (all 60 accounted for): 12 `DISAGREE→AGREE`, 8
+`UNMEASURED→AGREE`, 3 `UNMEASURED→DISAGREE`, 37 unchanged (31 AGREE + 6 DISAGREE).
+**Zero `AGREE→DISAGREE`.**
+
+By receiver: array **4 DISAGREE / 27**, dict **3 DISAGREE / 11**, text
+**2 DISAGREE / 22**.
+
+## Full table
+
+| Probe | Recv | JIT (`run`) | Interp (`test`) | Verdict |
+|---|---|---|---|---|
+| `arr_len` | array | `3` | `3` | AGREE |
+| `arr_index_of_first` | array | `0` | `0` | AGREE |
+| `arr_index_of_mid` | array | `1` | `1` | AGREE |
+| `arr_index_of_last` | array | `2` | `2` | AGREE |
+| `arr_index_of_absent` | array | `-1` | `-1` | AGREE |
+| `arr_index_of_empty` | array | `-1` | `-1` | AGREE |
+| `arr_index_of_text` | array | `2` | `2` | AGREE |
+| `arr_contains_yes` | array | `true` | `true` | AGREE |
+| `arr_contains_no` | array | `false` | `false` | AGREE |
+| `arr_contains_text` | array | `true` | `true` | AGREE |
+| `arr_push_len` | array | `3` | `3` | AGREE |
+| `arr_push_last` | array | `3` | `3` | AGREE |
+| `arr_enumerate_len` | array | `3` | `3` | AGREE |
+| `arr_index0` | array | `10` | `10` | AGREE |
+| `arr_index_last` | array | `30` | `30` | AGREE |
+| `arr_first` | array | `10` | `10` | AGREE |
+| `arr_last` | array | `30` | `30` | AGREE |
+| `arr_pop` | array | `3` | `3` | AGREE |
+| `arr_reverse` | array | `30` | `30` | AGREE |
+| `arr_sort` | array | `10` | `10` | AGREE |
+| `arr_join` | array | `a-b` | `a-b` | AGREE |
+| `arr_slice` | array | `2` | `2` | AGREE |
+| `arr_is_empty` | array | `true` | `true` | AGREE |
+| `arr_map` | array | `3` (+ stderr `Runtime error: Function 'Array.map' not found`, **exit 0**) | `2` | **DISAGREE** |
+| `arr_filter` | array | `0` (**exit 0** — was SIGSEGV 139) | `2` | **DISAGREE** |
+| `arr_any` | array | `nil` (**exit 0** — was SIGSEGV 139) | `true` | **DISAGREE** |
+| `arr_all` | array | `nil` (**exit 0** — was SIGSEGV 139) | `true` | **DISAGREE** |
+| `dict_keys_len` | dict | `2` | `2` | AGREE |
+| `dict_values_len` | dict | `2` | `2` | AGREE |
+| `dict_contains_key_yes` | dict | `true` | `true` | AGREE |
+| `dict_contains_key_no` | dict | `false` | `false` | AGREE |
+| `dict_get_or_present` | dict | `error` (+ stderr `Runtime error: Function 'Dict.get_or' not found`, **exit 0**) | `1` | **DISAGREE** |
+| `dict_get_or_absent` | dict | `error` (+ stderr `Runtime error: Function 'Dict.get_or' not found`, **exit 0**) | `-7` | **DISAGREE** |
+| `dict_index_read` | dict | `2` | `2` | AGREE |
+| `dict_len` | dict | `2` | `2` | AGREE |
+| `dict_insert_then_keys` | dict | `1` (+ stderr `Runtime error: Function 'Dict.insert' not found`, **exit 0**) | `2` | **DISAGREE** |
+| `dict_index_write` | dict | `2` | `2` | AGREE |
+| `dict_get` | dict | `1` | `1` | AGREE |
+| `text_len` | text | `11` | `11` | AGREE |
+| `text_contains_yes` | text | `true` | `true` | AGREE |
+| `text_contains_no` | text | `false` | `false` | AGREE |
+| `text_index_of_present` | text | `2` | `2` | AGREE |
+| `text_index_of_first` | text | `0` | `0` | AGREE |
+| `text_index_of_absent` | text | `-1` | `-1` | AGREE |
+| `text_substring` | text | `hello` | `hello` | AGREE |
+| `text_slice` | text | `hello` | `hello` | AGREE |
+| `text_starts_with` | text | `true` | `true` | AGREE |
+| `text_ends_with` | text | `true` | `true` | AGREE |
+| `text_replace` | text | `hello there` | `hello there` | AGREE |
+| `text_split_len` | text | `2` | `2` | AGREE |
+| `text_strip` | text | `pad` | `pad` | AGREE |
+| `text_to_upper` | text | `HELLO` | `HELLO` | AGREE |
+| `text_to_lower` | text | `abc` | `abc` | AGREE |
+| `text_char_code_at` | text | `104` | `104` | AGREE |
+| `text_lines_len` | text | `-1` (+ stderr `Runtime error: Function 'str.lines' not found`, **exit 0**) | `3` | **DISAGREE** |
+| `text_char_at` | text | `e` | `e` | AGREE |
+| `text_find_str` | text | `2` | `2` | AGREE |
+| `text_rfind` | text | `3` | `3` | AGREE |
+| `text_parse_int` | text | `0.000…0002` (float-formatted) | `42` | **DISAGREE** |
+| `text_to_string` | text | `hi` | `hi` | AGREE |
+
+## (a) Newly fixed since the last run — 12 probes
+
+All confirmed on the binary above; each was **DISAGREE** and is now **AGREE**.
+
+| Probe | Was | Now |
+|---|---|---|
+| `arr_index_of_first` | `<value:0xffffffffffffffff>` | `0` |
+| `arr_index_of_mid` | `<value:0xffffffffffffffff>` | `1` |
+| `arr_index_of_last` | `<value:0xffffffffffffffff>` | `2` |
+| `arr_index_of_absent` | `<value:0xffffffffffffffff>` | `-1` |
+| `arr_index_of_empty` | `<value:0xffffffffffffffff>` | `-1` |
+| `arr_index_of_text` | `<value:0xffffffffffffffff>` | `2` |
+| `arr_enumerate_len` | `-1` + "not found", exit 0 | `3` |
+| `arr_first` | `80` (`10 << 3`) | `10` |
+| `arr_last` | `240` (`30 << 3`) | `30` |
+| `arr_pop` | `24` (`3 << 3`) | `3` |
+| `text_strip` | no output, `str.strip` not found | `pad` |
+| `text_to_upper` | `hello` (silent no-op) | `HELLO` |
+
+Note `arr_last` and `arr_pop` were **not** on the hand-verified list but were
+carried along by the same tag-box fix — the `<< 3` family is fixed as a class,
+not case by case.
+
+### (a′) Newly measurable and agreeing — 8 dict probes
+
+Formerly UNMEASURED (whole-program JIT bailout), now genuinely compiled by the
+JIT and matching the interpreter: `dict_keys_len`, `dict_values_len`,
+`dict_contains_key_yes`, `dict_contains_key_no`, `dict_index_read`, `dict_len`,
+`dict_index_write`, `dict_get`.
+
+## (b) Still divergent — 6 probes
+
+Unchanged verdicts, carried over from the original table.
+
+| Probe | JIT | Interp | Note |
+|---|---|---|---|
+| `arr_map` | `3` | `2` | `Array.map` not found; exit 0 |
+| `arr_filter` | `0` | `2` | **character changed**: SIGSEGV → silent `0` |
+| `arr_any` | `nil` | `true` | **character changed**: SIGSEGV → silent `nil` |
+| `arr_all` | `nil` | `true` | **character changed**: SIGSEGV → silent `nil` |
+| `text_lines_len` | `-1` | `3` | `str.lines` not found; exit 0 |
+| `text_parse_int` | float-formatted `0` | `42` | unchanged |
+
+**The three closure-taking array probes got worse in kind, not in count.**
+`arr_filter` / `arr_any` / `arr_all` previously **crashed loudly (exit 139)**.
+They now **exit 0 and return a wrong value**. The verdict column is identical, so
+a count-only comparison of the two tables shows no change here — but a loud crash
+became silent data corruption, which is strictly harder to catch downstream. Do
+not read "still DISAGREE" as "unchanged".
+
+## (c) Newly divergent — 3 probes (REGRESSION)
+
+These are the ones that matter, and they are real.
+
+| Probe | Before (via JIT bailout) | Now (JIT compiles it) | Interp |
+|---|---|---|---|
+| `dict_get_or_present` | `1` ✅ | `error` ❌ | `1` |
+| `dict_get_or_absent` | `-7` ✅ | `error` ❌ | `-7` |
+| `dict_insert_then_keys` | `2` ✅ | `1` ❌ | `2` |
+
+The verdict transition is `UNMEASURED → DISAGREE`, which is easy to wave away as
+"it was never measured, so nothing regressed". **That reading is wrong.** Before,
+the JIT could not compile dict at all, bailed out, and the interpreter answered —
+so `bin/simple run` printed the *correct* value. Now the JIT compiles the dict
+program, does **not** bail out, and `bin/simple run` prints a *wrong* value with
+**exit 0**. User-visible `run` behaviour went from correct to silently wrong on
+these three. That is a genuine regression introduced alongside the fixes.
+
+Mechanism is the same fail-open pattern in all three: dict *lowering* now
+succeeds, but the method bodies are missing (`Function 'Dict.get_or' not found`,
+`Function 'Dict.insert' not found`). The runtime prints `Runtime error:` to
+stderr and then **continues with exit 0**, so the missing method degrades into a
+bad value instead of a failure. `Dict.get_or` and `Dict.insert` are the two
+missing symbols.
+
+Zero probes went `AGREE → DISAGREE` — no previously-correct operation broke.
+
+## Is dict still uncompilable on the JIT?
+
+**No — that has changed.** The original run recorded "the JIT cannot compile
+*any* dict operation" with all 11 dict probes bailing out. In this run **0 of 11
+dict probes bail out**; all 11 compile and execute under Cranelift. 8 agree with
+the interpreter, and 3 fail on missing method bodies rather than on compilation.
+The blanket dict-bailout finding in the original section is superseded.
+
+## Artifacts
+
+| | |
+|---|---|
+| Results TSV | `build/probe_divergence/fast_results_0728b.tsv` (name, JIT, interp, jit-exit, interp-exit) |
+| Per-probe logs | `build/probe_divergence/fast_0728b/{j,i}_<name>.log` |
+| Driver log | `build/probe_divergence/rerun_0728b.log` |
+| Corpus | `build/probe_divergence/cases.txt` (unchanged, 60 cases) |
+
+The original `fast_results.tsv` and `fast/` from the first run are left in place.
