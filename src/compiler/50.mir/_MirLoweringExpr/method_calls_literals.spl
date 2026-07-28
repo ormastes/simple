@@ -1814,21 +1814,24 @@ impl MirLowering:
         # (Opaque "str") are tagged first (tag_str_local_if_raw, same scheme
         # as the push fallback below). Arity-gated so a user method with the
         # same name but different arity still reaches `case Unresolved:`.
-        # rfind: rt_string_rfind returns -1 for not-found while the language
-        # contract is `i64?` (nil for not-found). Under the bootstrap
-        # bare-payload Optional repr the difference is only observable through
-        # a `?? default` / nil-test; the known closure site
-        # (io_runtime.spl file_write: `rfind("/") ?? 0` then `<= 0` guard)
-        # behaves identically for -1 and nil. Revisit if a closure site ever
-        # distinguishes them.
+        # rfind: rt_string_rfind returns a plain i64, -1 for not-found. That
+        # IS the language contract -- src/lib/text.spl declares both the
+        # `rt_string_rfind` extern and `last_index_of` as `-> i64`, matching
+        # runtime.h, runtime_native.c, collections.rs, runtime_sffi.rs,
+        # core_string.spl and common/string_core.spl. (This comment used to
+        # claim the contract was `i64?` with nil for not-found; text.spl has
+        # since been corrected to `-> i64`, so there is no -1-vs-nil mismatch
+        # here at all. Callers must test `>= 0`, not nil -- a `?? default` on
+        # this result never fires on a miss, and would corrupt a genuine
+        # offset of 3, which is the bare-payload nil sentinel.)
         # find (native_env_closure_unsupported_methods lane, 2026-07-16):
         # same family as rfind, mapped to rt_string_find (already exported by
         # the deployed seed and used by rfind above -- verified via `nm` on
         # the deployed binary and a direct extern-call probe). Confirmed the
         # seed interpreter (interpreter_method/string.rs "find") returns a
         # plain i64, -1 for not-found, identical to rt_string_find -- so
-        # find/rfind share both the runtime symbol pattern AND the -1-vs-nil
-        # equivalence noted above. std.env.variables.expand_var_expr's
+        # find/rfind share both the runtime symbol pattern AND the plain-i64
+        # `-1 means not-found` contract noted above. std.env.variables.expand_var_expr's
         # `expr.find(":-")` / `.find(":=")` (the native_env_closure_
         # unsupported_methods_2026-07-16 blocker) matches this exact
         # zero-arg-string-arg / i64-result shape.

@@ -1,0 +1,60 @@
+# @cover test/system/qemu/os/common/qemu_os_harness.spl 5%
+#
+# QEMU Harness — hostfwd port extraction Specification
+#
+# Regression guard for an off-by-one in `_extract_hostfwd_port_from_args`.
+#
+# `pos = arg.index_of("hostfwd=tcp::", 0)` returns the index of the FIRST
+# character of the match (the `h`). The literal "hostfwd=tcp::" is 13
+# characters, so the port digits begin at `pos + 13`. The code used
+# `pos + 14`, which skipped the first digit and silently truncated the
+# port: "hostfwd=tcp::2222-:22" parsed as 222 instead of 2222. A harness
+# that then probes/SSHes to port 222 fails in a way that looks like a guest
+# boot failure rather than a host-side parse bug.
+#
+# These specs assert exact port values, so they cannot pass vacuously:
+# with the `+ 14` off-by-one restored every multi-digit case fails.
+#
+# **Feature:** qemu-harness-hostfwd
+# **Category:** Infrastructure
+
+use std.spec.{describe, it, expect}
+use test.system.qemu.os.common.qemu_os_harness.{_extract_hostfwd_port_from_args, _extract_hostfwd_port}
+
+describe "_extract_hostfwd_port_from_args":
+    describe "multi-digit port (off-by-one regression)":
+        it "parses the full 4-digit SSH port 2222, not the truncated 222":
+            val args = ["-netdev", "user,id=n0,hostfwd=tcp::2222-:22"]
+            expect(_extract_hostfwd_port_from_args(args)).to_equal(2222)
+
+        it "parses a 5-digit port without dropping the leading digit":
+            val args = ["-netdev", "user,id=n0,hostfwd=tcp::12345-:22"]
+            expect(_extract_hostfwd_port_from_args(args)).to_equal(12345)
+
+        it "returns the first hostfwd entry when several are present":
+            val args = ["-netdev", "user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80"]
+            expect(_extract_hostfwd_port_from_args(args)).to_equal(2222)
+
+    describe "not-found handling":
+        it "returns -1 when no hostfwd argument is present":
+            val args = ["-nographic", "-m", "1024"]
+            expect(_extract_hostfwd_port_from_args(args)).to_equal(-1)
+
+        it "returns -1 for an empty argument list":
+            val args: [text] = []
+            expect(_extract_hostfwd_port_from_args(args)).to_equal(-1)
+
+        it "returns -1 when hostfwd is present but the -:22 terminator is not":
+            val args = ["user,id=n0,hostfwd=tcp::2222"]
+            expect(_extract_hostfwd_port_from_args(args)).to_equal(-1)
+
+describe "_extract_hostfwd_port":
+    it "prefers the target extras over the scenario extras":
+        val target = ["user,id=n0,hostfwd=tcp::2222-:22"]
+        val scenario = ["user,id=n0,hostfwd=tcp::9999-:22"]
+        expect(_extract_hostfwd_port(target, scenario)).to_equal(2222)
+
+    it "falls back to the scenario extras when the target has no hostfwd":
+        val target = ["-nographic"]
+        val scenario = ["user,id=n0,hostfwd=tcp::9999-:22"]
+        expect(_extract_hostfwd_port(target, scenario)).to_equal(9999)
