@@ -1199,3 +1199,12 @@ implementation in progress / target evidence blocked
   case) while keeping the base table for every descendant. Existing geometry
   probes cover percentage and absolute sizing; execution remains blocked by
   the recorded `JsValue.Symbol` compiler defect, so no bootstrap retry was made.
+- Events: the isolated hosted renderer now preserves DOM focus after clicking
+  a native non-text control while clearing only its text-overlay/caret state.
+  A focused worker scenario clicks a checkbox, proves focus survives, and then
+  activates it with Space through the production keyboard route.
+- Open security finding: secondary `app_id == "browser"` windows still route
+  through in-process `HostedWebContentRegistry` and can evaluate page script in
+  the parent instead of owning a `HostedBrowserRendererProcess`. This violates
+  REQ-WEB-BROWSER-014 and needs a per-window broker registry (or a temporary
+  fail-closed refusal); it is not accepted as production-complete.

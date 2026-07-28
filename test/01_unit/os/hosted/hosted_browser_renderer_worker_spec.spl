@@ -305,6 +305,49 @@ describe "hosted browser renderer worker":
         expect(committed.ok).to_be(true)
         expect(worker.browser.current_body_html).to_contain("Loaded")
 
+    it "keeps clicked native controls focused for keyboard activation":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        step("Open a native checkbox in the isolated browser worker")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{margin:0}input{display:block;width:20px;height:18px}</style><input id='text' value='abc' data-focused><input id='toggle' type='checkbox'>"
+        )).ok).to_be(true)
+        expect(worker.browser.text_selection_target_id).to_equal("text")
+        expect(worker.input_view_target_key).not.to_equal("")
+        worker.input_view_start_byte = 2
+        worker.caret_blink_epoch_ms = 17
+
+        step("Click the checkbox and retain its DOM focus")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t5\t25\t1"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t2\t5\t25\t0"
+        )).ok).to_be(true)
+        expect(be_dom_focused_id(worker.browser.dom_root())).to_equal("toggle")
+        expect(worker.browser.text_selection_target_id).to_equal("")
+        expect(worker.input_view_target_key).to_equal("")
+        expect(worker.input_view_start_byte).to_equal(0)
+        expect(worker.caret_blink_epoch_ms).to_equal(0)
+        expect(worker.browser.current_body_html).to_contain(
+            "checked=\"checked\""
+        )
+
+        step("Activate the focused checkbox with Space")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 5,
+            payload: "K1\t3\t32\t1"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 6,
+            payload: "K1\t4\t32\t0"
+        )).ok).to_be(true)
+        expect(worker.browser.current_body_html.contains(
+            "checked=\"checked\""
+        )).to_be(false)
+
     it "edits the focused address draft by UTF-8 scalar through worker actions":
         var worker = HostedBrowserRendererWorkerSession.create(80, 40)
         expect(worker.handle(BrowserRendererMessage(
