@@ -1340,3 +1340,10 @@ implementation in progress / target evidence blocked
   into atomic BrowserSession admission. Direct render parsing reuses the 1 MiB
   renderer envelope and a 262,144-part structural cap before `split`/event
   allocation; rejected root-only results cannot enter split-heavy diagnostics.
+- CSS extraction now applies the shared HTML source admission, dynamically
+  sizes candidate storage, bounds both brace directions before splitting, and
+  enforces the 4,096-rule quota across all style blocks. Valid prefix rules
+  continue to render through software pixels and Draw IR under brace storms;
+  rejected sources also skip keyframe extraction. Variable expansion is bounded
+  to 1 MiB and 16 fallback levels; selector groups/parts and keyframe
+  offsets/declarations are capped at 256.

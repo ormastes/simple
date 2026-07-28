@@ -166,6 +166,14 @@ load failure. Direct render parsing rejects payloads above the existing 1 MiB
 renderer envelope or 262,144 structural parts before split/event allocation or
 degenerate diagnostics.
 
+CSS scanning applies the same source admission, retains at most 4,096 rules per
+document, and bounds both opening- and closing-brace split structure before
+allocation. Later style blocks consume only the remaining document rule budget;
+the first admitted rules remain authoritative. Variable substitution cannot
+expand beyond the 1 MiB source envelope or recurse through more than 16 fallback
+levels. Each rule retains at most 256 selector groups and 256 selector parts.
+Keyframe offset lists and declaration lists retain at most 256 entries.
+
 `common.web.event_types.DomEvent` is the event type. BrowserSession adds:
 
 ```text

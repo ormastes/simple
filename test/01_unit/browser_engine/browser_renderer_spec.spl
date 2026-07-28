@@ -10,7 +10,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_software_pixels,
     simple_web_layout_render_html_draw_ir_result,
     simple_web_layout_debug_capped_node_count,
-    simple_web_layout_debug_capped_input_node_count
+    simple_web_layout_debug_capped_input_node_count,
+    simple_web_layout_debug_capped_css_rule_count
 }
 
 val WEB_W: i32 = 64
@@ -47,6 +48,75 @@ describe "BrowserRenderer HTML/CSS expect-draw evidence":
         expect(
             oversized_layout.composition.batches.len()
         ).to_be_greater_than(0)
+
+    it "caps CSS rules across style blocks and preserves the valid prefix":
+        val html = "<style>.a{color:red}.b{color:green}</style><style>.c{color:blue}</style>"
+        val open_storm = "<style>body{background-color:#123456}" +
+            "x".repeat(20000) + "{".repeat(13000) + "</style><body></body>"
+        val close_storm = "<style>body{background-color:#123456}" +
+            "x".repeat(20000) + "}".repeat(13000) + "</style><body></body>"
+
+        expect(simple_web_layout_debug_capped_css_rule_count(
+            html, 2
+        )).to_equal(2)
+        val open_pixels = simple_web_layout_render_html_software_pixels(
+            open_storm, 4, 4
+        )
+        val close_pixels = simple_web_layout_render_html_software_pixels(
+            close_storm, 4, 4
+        )
+        val open_layout = simple_web_layout_render_html_draw_ir_result(
+            open_storm, 4, 4
+        )
+        val close_layout = simple_web_layout_render_html_draw_ir_result(
+            close_storm, 4, 4
+        )
+        expect(open_pixels[0]).to_equal(0xFF123456u32)
+        expect(close_pixels[0]).to_equal(0xFF123456u32)
+        expect(open_layout.composition.batches.len()).to_be_greater_than(0)
+        expect(close_layout.composition.batches.len()).to_be_greater_than(0)
+        expect(open_layout.composition.batches[0].commands[0].color).to_equal(
+            0xFF123456u32
+        )
+        expect(close_layout.composition.batches[0].commands[0].color).to_equal(
+            0xFF123456u32
+        )
+
+    it "bounds CSS variable expansion and selector lists":
+        val amplified = "<style>:root{--x:" + "a".repeat(4096) +
+            ";}body{background-color:#123456}" +
+            ".unused{content:var(--x)}".repeat(300) +
+            "</style><body></body>"
+        val selector_storm = "<style>body{background-color:#123456}" +
+            ".never,".repeat(1000) +
+            "body{background-color:#abcdef}</style><body></body>"
+        val combinator_storm = "<style>body{background-color:#123456}" +
+            ("x>".repeat(300)) +
+            "body{background-color:#abcdef}</style><body></body>"
+
+        expect(simple_web_layout_render_html_software_pixels(
+            amplified, 4, 4
+        )[0]).to_equal(0xFF123456u32)
+        expect(simple_web_layout_render_html_software_pixels(
+            selector_storm, 4, 4
+        )[0]).to_equal(0xFF123456u32)
+        expect(simple_web_layout_render_html_software_pixels(
+            combinator_storm, 4, 4
+        )[0]).to_equal(0xFF123456u32)
+
+    it "admits exactly 256 declarations and rejects the next":
+        val base = "<style>body{background-color:#123456}body{"
+        val exact = base + "background-color:#abcdef;" +
+            "unused:value;".repeat(255) + "}</style><body></body>"
+        val over = base + "background-color:#abcdef;" +
+            "unused:value;".repeat(256) + "}</style><body></body>"
+
+        expect(simple_web_layout_render_html_software_pixels(
+            exact, 4, 4
+        )[0]).to_equal(0xFFABCDEFu32)
+        expect(simple_web_layout_render_html_software_pixels(
+            over, 4, 4
+        )[0]).to_equal(0xFF123456u32)
 
     it "captures source HTML and visible text before pixel evidence":
         val html = _expect_draw_web_html()

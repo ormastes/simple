@@ -266,6 +266,10 @@ All defaults are compile-time constants with bounded production overrides:
 - DOM nodes: 65,536 per parsed document; depth/attributes/text are also bounded;
 - HTML parse work: 262,144 tokens, 65,536 retained attributes, and a 1 MiB
   direct-render source / 262,144 structural-part ceiling;
+- CSS parse work: 6,000 bounded candidates per block and 4,096 admitted rules
+  per document, with opening/closing brace structure truncated before split,
+  variable output bounded to 1 MiB/16 fallback levels, and selector groups/parts
+  bounded to 256 per rule; keyframe offsets/declarations are also capped at 256;
 - script source/jobs/microtasks/timers;
 - frame callbacks and work time;
 - Draw IR commands/strings/images/pixels;

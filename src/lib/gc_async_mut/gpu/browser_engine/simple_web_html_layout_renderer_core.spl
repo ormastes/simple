@@ -11,6 +11,11 @@ class CssRuleScan:
     declarations: [text]
     wrappers: [text]
 
+val CSS_SCAN_CANDIDATE_CAP: i32 = 6000
+val CSS_VAR_FALLBACK_DEPTH_CAP: i32 = 16
+val CSS_SELECTOR_GROUP_CAP: i32 = 256
+val CSS_SELECTOR_PART_CAP: i32 = 256
+
 class RuleBuckets:
     id_keys: [text]
     id_rules: [[i32]]
@@ -122,7 +127,7 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
         return ""
     text_list_prefix(base_entries, base_entry_i).join("") + text_list_prefix(variant_entries, variant_entry_i).join("")
 
-fn _css_resolve_vars(css: text, props: text) -> text:
+fn _css_resolve_vars(css: text, props: text, fallback_depth: i32 = 0) -> text:
     if props.len() == 0 or css.index_of("var(") < 0:
         return css
     var names: [text] = [""; 200]
@@ -148,6 +153,7 @@ fn _css_resolve_vars(css: text, props: text) -> text:
         return css
     var chunks: [text] = [""; 801]
     var chunk_count = 0
+    var resolved_len = 0
     val css_len = css.len()
     var scan = 0
     var vg = 0
@@ -199,18 +205,31 @@ fn _css_resolve_vars(css: text, props: text) -> text:
                 prop_idx = prop_scan
                 break
             prop_scan = prop_scan - 1
-        chunks[chunk_count] = css.substring(scan, open)
+        val prefix = css.substring(scan, open)
+        chunks[chunk_count] = prefix
         chunk_count = chunk_count + 1
+        var replacement = ""
         if prop_idx >= 0:
-            chunks[chunk_count] = values[prop_idx]
+            replacement = values[prop_idx]
         elif comma >= 0:
-            chunks[chunk_count] = _css_resolve_vars(inner.substring(comma + 1, inner_len).trim(), props)
+            val fallback = inner.substring(comma + 1, inner_len).trim()
+            replacement = if fallback_depth >= CSS_VAR_FALLBACK_DEPTH_CAP:
+                css.substring(open, close + 1)
+            else:
+                _css_resolve_vars(fallback, props, fallback_depth + 1)
         else:
-            chunks[chunk_count] = css.substring(open, close + 1)
+            replacement = css.substring(open, close + 1)
+        if resolved_len + prefix.len() + replacement.len() > SIMPLE_WEB_MAX_HTML_BYTES:
+            return css
+        resolved_len = resolved_len + prefix.len() + replacement.len()
+        chunks[chunk_count] = replacement
         chunk_count = chunk_count + 1
         scan = close + 1
     if scan < css_len and chunk_count < chunks.len():
-        chunks[chunk_count] = css.substring(scan, css_len)
+        val suffix = css.substring(scan, css_len)
+        if resolved_len + suffix.len() > SIMPLE_WEB_MAX_HTML_BYTES:
+            return css
+        chunks[chunk_count] = suffix
         chunk_count = chunk_count + 1
     text_list_prefix(chunks, chunk_count).join("")
 
@@ -283,20 +302,50 @@ fn extract_css(html: text) -> Rules:
 # those small pieces — genuine O(total_css_len). A brace-depth stack tracks
 # @-wrappers so depth-1 rules carry their wrapper prelude, matching the
 # depth-0-rule / depth-1-child-of-@-wrapper emission the layout cascade
-# expects.
-fn _css_scan_rules_simple(css: text) -> CssRuleScan:
-    val cap = 6000
+# expects. Native replacement counts admit normal sheets; hostile delimiter
+# storms keep only a byte-bounded prefix before either split allocates.
+fn _css_scan_rules_simple(css: text, requested_rule_cap: i32) -> CssRuleScan:
+    val rule_cap = if requested_rule_cap < 0:
+        0
+    elif requested_rule_cap > CSS_SCAN_CANDIDATE_CAP:
+        CSS_SCAN_CANDIDATE_CAP
+    else:
+        requested_rule_cap
+    if rule_cap == 0:
+        return CssRuleScan(selectors: [], declarations: [], wrappers: [])
+    val structural_cap = rule_cap * 2 + 64
+    var cutoff = css.len()
+    var excessive_structure = false
+    if css.len() > structural_cap:
+        excessive_structure = (
+            css.len() - css.replace("{", "").len() > structural_cap
+        )
+        if not excessive_structure:
+            excessive_structure = (
+                css.len() - css.replace("}", "").len() > structural_cap
+            )
+    if excessive_structure:
+        # ponytail: hostile sheets keep a byte-bounded prefix; add a native
+        # positional-count primitive only if standards-level recovery matters.
+        cutoff = structural_cap
+    val bounded_css = if cutoff < css.len():
+        css.substring(0, cutoff)
+    else:
+        css
+    # Brace-depth stack of opener (selector / @-prelude) strings.
+    var stack: [text] = [""; 64]
+    var depth = 0
+    val parts = bounded_css.split("{")
+    val np = parts.len()
+    if np <= 1:
+        return CssRuleScan(selectors: [], declarations: [], wrappers: [])
+    var cap = np - 1
+    if cap > rule_cap:
+        cap = rule_cap
     var sels: [text] = [""; cap]
     var decls: [text] = [""; cap]
     var wraps: [text] = [""; cap]
     var out = 0
-    # Brace-depth stack of opener (selector / @-prelude) strings.
-    var stack: [text] = [""; 64]
-    var depth = 0
-    val parts = css.split("{")
-    val np = parts.len()
-    if np == 0:
-        return CssRuleScan(selectors: [], declarations: [], wrappers: [])
     var sel_pending: text = parts[0]
     var k = 1
     while k < np:
@@ -338,6 +387,24 @@ fn _css_scan_rules_simple(css: text) -> CssRuleScan:
     )
 
 fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Rules:
+    _extract_css_vw_with_rule_limit(
+        html, viewport_w, trace_stages, WEB_STYLE_RULE_QUOTA
+    )
+
+fn _extract_css_vw_with_rule_limit(
+    html: text, viewport_w: i32, trace_stages: bool,
+    requested_rule_limit: i32
+) -> Rules:
+    val rule_limit = if requested_rule_limit < 0:
+        0
+    elif requested_rule_limit > WEB_STYLE_RULE_QUOTA:
+        WEB_STYLE_RULE_QUOTA
+    else:
+        requested_rule_limit
+    if (rule_limit == 0 or not _simple_web_html_source_admitted(
+        html, SIMPLE_WEB_MAX_HTML_BYTES
+    )):
+        return Rules(group_parts: [], decls: [])
     # First pass: collect CSS custom properties from all :root blocks
     var html_tag = find_from(html, "<html", 0)
     var html_tag_guard = 0
@@ -380,7 +447,7 @@ fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Ru
     var pos = 0
     var guard = 0
     var total_candidates = 0
-    while guard < 1000:
+    while guard < 1000 and group_parts.len() < rule_limit:
         guard = guard + 1
         val sp = find_from(html, "<style", pos)
         if sp < 0:
@@ -392,13 +459,16 @@ fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Ru
         if close < 0:
             break
         val css_raw = html.substring(open + 1, close)
-        val css = _css_resolve_vars(css_raw, custom_props)
+        val css = _css_resolve_vars(css_raw, custom_props, 0)
         # Rule-boundary scan: split the sheet ONCE on "{"/"}" natively rather
         # than walking it a character at a time in interpreted Simple (which
         # cost seconds-to-minutes on a realistic theme sheet). See
         # `_css_scan_rules_simple`. Selector-group splitting, @media condition
         # evaluation, and CSS-variable substitution stay in Simple below.
-        val bounds: CssRuleScan = _css_scan_rules_simple(css)
+        val remaining_rules = rule_limit - group_parts.len()
+        val bounds: CssRuleScan = _css_scan_rules_simple(
+            css, CSS_SCAN_CANDIDATE_CAP
+        )
         val b_sel_text: [text] = bounds.selectors
         val b_decl_text: [text] = bounds.declarations
         val b_wrapper: [text] = bounds.wrappers
@@ -410,11 +480,15 @@ fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Ru
             while trace_rule_i < candidate_count:
                 print "[layout-trace] css_scan rule={trace_rule_i} selector={b_sel_text[trace_rule_i]} decl_len={b_decl_text[trace_rule_i].len()}"
                 trace_rule_i = trace_rule_i + 1
-        var block_group_parts: [[[text]]] = [[[]]; candidate_count]
-        var block_decls: [text] = [""; candidate_count]
+        val block_cap = if candidate_count < remaining_rules:
+            candidate_count
+        else:
+            remaining_rules
+        var block_group_parts: [[[text]]] = [[[]]; block_cap]
+        var block_decls: [text] = [""; block_cap]
         var out_i = 0
         var bi = 0
-        while bi < candidate_count:
+        while bi < candidate_count and out_i < remaining_rules:
             val wrapper_prelude: text = b_wrapper[bi]
             var include = true
             if wrapper_prelude.len() > 0 and wrapper_prelude.lower().starts_with("@media"):
@@ -464,6 +538,13 @@ fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Ru
     if total_candidates > 0 and group_parts.len() == 0:
         print "[css-extract] degenerate candidates={total_candidates} groups=0"
     result
+
+pub fn simple_web_layout_debug_capped_css_rule_count(
+    html: text, requested_rule_limit: i32
+) -> i32:
+    _extract_css_vw_with_rule_limit(
+        html, -1, false, requested_rule_limit
+    ).group_parts.len()
 
 fn unquote_css_attr_value(raw: text) -> text:
     val v = raw.trim()
@@ -892,7 +973,7 @@ fn split_selector_groups(sel: text) -> [text]:
     val sel_len = sel.len()
     var group_count = 0
     var group_start = 0
-    while i < sel_len:
+    while i < sel_len and group_count < CSS_SELECTOR_GROUP_CAP:
         val ch = sel.char_at(i)
         if ch == "(":
             depth = depth + 1
@@ -903,14 +984,14 @@ fn split_selector_groups(sel: text) -> [text]:
             group_count = group_count + 1
             group_start = i + 1
         i = i + 1
-    if sel.substring(group_start, sel_len).trim().len() > 0:
+    if group_count < CSS_SELECTOR_GROUP_CAP and sel.substring(group_start, sel_len).trim().len() > 0:
         group_count = group_count + 1
     var groups: [text] = [""; group_count]
     depth = 0
     i = 0
     var group_i = 0
     group_start = 0
-    while i < sel_len:
+    while i < sel_len and group_i < group_count:
         val ch = sel.char_at(i)
         if ch == "(":
             depth = depth + 1
@@ -922,9 +1003,10 @@ fn split_selector_groups(sel: text) -> [text]:
             group_i = group_i + 1
             group_start = i + 1
         i = i + 1
-    val tail = sel.substring(group_start, sel_len).trim()
-    if tail.len() > 0:
-        groups[group_i] = tail
+    if group_i < groups.len():
+        val tail = sel.substring(group_start, sel_len).trim()
+        if tail.len() > 0:
+            groups[group_i] = tail
     groups
 
 fn normalize_child_combinators(group: text) -> text:
@@ -932,7 +1014,7 @@ fn normalize_child_combinators(group: text) -> text:
     val group_len = group.len()
     var depth = 0
     var combinator_count = 0
-    while i < group_len:
+    while i < group_len and combinator_count <= CSS_SELECTOR_PART_CAP:
         val ch = group.char_at(i)
         if ch == "(":
             depth = depth + 1
@@ -942,6 +1024,8 @@ fn normalize_child_combinators(group: text) -> text:
         elif ch == ">" and depth == 0:
             combinator_count = combinator_count + 1
         i = i + 1
+    if combinator_count > CSS_SELECTOR_PART_CAP:
+        return ""
     if combinator_count == 0:
         return group.trim()
     val chunk_count = combinator_count * 2 + 1
@@ -977,7 +1061,7 @@ fn selector_group_parts(group: text) -> [text]:
     var depth = 0
     var in_token = false
     var pi = 0
-    while pi < norm_len:
+    while pi < norm_len and token_count <= CSS_SELECTOR_PART_CAP:
         val ch = normalized.char_at(pi)
         if ch == "(" or ch == "[":
             depth = depth + 1
@@ -994,6 +1078,8 @@ fn selector_group_parts(group: text) -> [text]:
                 token_count = token_count + 1
                 in_token = true
         pi = pi + 1
+    if token_count > CSS_SELECTOR_PART_CAP:
+        return []
     if token_count == 0:
         return [""]
     var parts: [text] = [""; token_count]
