@@ -25,8 +25,8 @@ These options apply to all commands:
 | `--version` | `-V` | Print version and exit |
 | `--verbose` | `-v` | Enable verbose output |
 | `--backend=NAME` | | Code generation backend (`auto`, `cranelift`, `llvm`, `llvm-lib`) |
-| `--interpret` | | Force interpreter mode |
-| `--no-jit` | | Disable JIT compilation |
+| `--interpret` | | Force interpreter mode. **No-op on the deployed seed binary** — use `SIMPLE_EXECUTION_MODE=interpret`. See [execution engine selection](../../runtime/execution_engine_selection.md) |
+| `--no-jit` | | Disable JIT compilation. **Does not select the engine** — see [execution engine selection](../../runtime/execution_engine_selection.md) |
 | `--jit-threshold=N` | | JIT compilation threshold (default: 10) |
 | `--gc-log` | | Enable GC logging |
 | `--gc-off` | | Disable garbage collection |

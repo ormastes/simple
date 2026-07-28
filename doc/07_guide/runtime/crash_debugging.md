@@ -26,7 +26,7 @@ queryable reason. Diagnostics with per-call overhead are env-gated and
 | Flag | Effect | Overhead when off |
 |------|--------|-------------------|
 | `SIMPLE_ACTOR_TRACE` | per-message log line on actor handler dispatch errors | none (flag read once at scheduler construction) |
-| `SIMPLE_EXECUTION_MODE` | `interpret` / `cranelift` / `llvm` — pin the execution path when bisecting a JIT-vs-interpreter divergence | none |
+| `SIMPLE_EXECUTION_MODE` | `interpret` / `cranelift` / `llvm` — pin the execution path when bisecting a JIT-vs-interpreter divergence. **The only knob that works**; `SIMPLE_NO_JIT`, `--interpret` and `--no-jit` do not select the engine, and an unrecognized value falls back to JIT silently. See [execution engine selection](execution_engine_selection.md) | none |
 | `SIMPLE_RESOLVER_TRACE` | module resolution tracing | none |
 
 All always-on recording above is failure-path-only: zero allocation and zero

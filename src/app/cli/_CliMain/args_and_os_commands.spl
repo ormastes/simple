@@ -15,6 +15,7 @@ use app.io.env_ops.{env_get}
 use app.io.cli_ops.{cli_get_args}
 use app.io.cli_commands.{cli_run_lex}
 use app.io.cli_ops.{fault_set_stack_overflow_detection, fault_set_max_recursion_depth, fault_set_timeout, fault_set_execution_limit}
+use app.io.cli_ops.{_cli_eprint}
 use app.io.cli_commands.{cli_handle_linkers, cli_run_file}
 use app.cli.cli_helpers.{print_cli_help, read_sdn_run_config}
 
@@ -297,10 +298,16 @@ fn parse_global_flags(args: [text]) -> GlobalFlags:
     var interpreter_mode = core.interpreter_mode
     var run_config = core.run_config
 
-    # Check SIMPLE_EXECUTION_MODE env var as fallback
+    # Check SIMPLE_EXECUTION_MODE env var as fallback.
+    #
+    # Engine selection must never fail open: an unrecognized value used to fall
+    # through to the JIT silently, so a typo (or the `interpreter` spelling the
+    # Rust seed accepts) produced JIT results while the caller believed they had
+    # pinned the interpreter. Accept both spellings and warn on anything else.
+    # See doc/07_guide/runtime/execution_engine_selection.md
     if not force_interpret and backend == "auto":
         val env_mode = env_get("SIMPLE_EXECUTION_MODE")
-        if env_mode == "interpret":
+        if env_mode == "interpret" or env_mode == "interpreter":
             force_interpret = true
         elif env_mode == "interpret-optimized":
             force_interpret = true
@@ -313,6 +320,16 @@ fn parse_global_flags(args: [text]) -> GlobalFlags:
             backend = "vhdl"
         elif env_mode == "jit":
             backend = "auto"
+        elif env_mode != "" and env_mode != nil:
+            _cli_eprint("warning: SIMPLE_EXECUTION_MODE=\"{env_mode}\" is not a recognized execution mode; running with the default JIT. Valid: interpret, interpreter, interpret-optimized, jit, cranelift, llvm, vhdl.")
+
+    # SIMPLE_NO_JIT=1 is a long-documented knob (and the `--no-jit` flag sets it),
+    # but it only ever reached the interpreter's JIT threshold — it never selected
+    # the engine, so A/B runs done with it silently compared JIT against JIT.
+    # Treat it as a real request for the interpreter.
+    if not force_interpret and backend == "auto":
+        if core.no_jit or env_get("SIMPLE_NO_JIT") == "1":
+            force_interpret = true
 
     # Read run-config from simple.sdn if not set via CLI/env
     if run_config == "":
