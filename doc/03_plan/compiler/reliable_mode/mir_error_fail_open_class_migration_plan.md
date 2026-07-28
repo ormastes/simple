@@ -231,3 +231,84 @@ Making `self.error()` itself raise. With 124 call sites and a collect-then-batch
 reporting contract (the driver reports *all* MIR errors, not just the first),
 converting it to a raise would truncate diagnostics and rewrite control flow at
 every site. Phases 1–3 achieve fail-closed behaviour without that.
+
+---
+
+## 6. EXECUTION STATUS — 2026-07-28 (landed)
+
+**Landed:** commit `4b22f7e2121` on `main`.
+
+### What was done
+The message-text mechanism was **replaced**, not patched around:
+
+* `MirError` gained an explicit `fatal: bool` field
+  (`50.mir/mir_lowering_types.spl`).
+* New `MirLowering.error_fatal(message, span)` sets it
+  (`50.mir/_MirLowering/asm_and_targets.spl`). `error()` keeps the old
+  non-fatal behaviour. `MirError` has exactly one construction site, so the
+  migration surface was a single push expression.
+* `_driver_collect_mir_errors` now aborts on `err.fatal or
+  _mir_error_is_fatal(err.message)`. The allowlist is retained as a
+  **deprecated fallback** and annotated to route new fatal sites to
+  `error_fatal`, so the 99 already-fatal sites behave bit-identically.
+* **All 17 class-B fail-open sites converted** to `error_fatal` — this
+  subsumes plan Phase 1 and Phase 3's "restore to fatal" half.
+
+Collection semantics are unchanged: `error_fatal` still only pushes onto
+`self.errors`, so batch diagnostics survive and lowering keeps going.
+
+### Corrected finding: the allowlist matched *none* of the 17
+
+Section 3.1 called out `.unwrap_err()` as "the" live instance. Mechanically
+evaluating the real predicate against all 17 real message strings gives
+**17 of 17 downgraded** — the allowlist matched **zero** class-B sites. Two are
+near-miss wording drifts where an entry was clearly *intended* to cover them:
+
+| site message | allowlist entry | why it missed |
+|---|---|---|
+| `unsupported Result {operation} payload type` | `unsupported Result unwrap payload type` | `unwrap_err` breaks `starts_with` |
+| `enum construction: missing runtime identity for '…'` | `enum construction: unregistered enum` | diverges after `enum construction: ` |
+| `unsupported MIR assignment target: …` | `unsupported MIR expression:` | different noun |
+
+And two sites (`asm_and_targets.spl` 163, 193) pass `arm.error_message` —
+**user-authored `compile_error("…")` text**, which no allowlist in the driver
+layer can ever enumerate. That is the structural argument for the replacement,
+independent of any individual wording bug.
+
+Contrapositive now expressible: the adjacent asm `"note: target backend differs
+from recommended version"` diagnostics stay on `error()` and remain non-fatal,
+sitting directly beside fatal siblings — a distinction prefix matching could not
+draw.
+
+### Phase 4 (regression specs) — NOT done
+Still open, and now blocked by the gate below.
+
+### BLOCKER: the native smoke matrix currently proves nothing
+
+`scripts/check/native-smoke-matrix.shs` defaults to `SIMPLE_BINARY=bin/simple`,
+which is the **Rust seed** (0 occurrences of `unresolved method call` or
+`for-in over non-array iterables`); it cannot execute 50.mir/80.driver at all.
+Pointed at the only pure-Simple binary on the box
+(`build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple`, 2026-07-27) the
+matrix is **24/24 FAIL**, every case with the identical
+hyphen/underscore module-name collision — no case reaches lowering. Filed as
+`doc/08_tracking/bug/native_build_blocked_by_hyphen_underscore_module_collisions_2026-07-28.md`.
+
+Therefore **"what turns red" is not yet measurable**. It needs, in order:
+1. the module-collision bug fixed, then
+2. a redeploy of a pure-Simple binary built from a tree containing
+   `4b22f7e2121` (blocked today: bootstrap peaks ~65 GB against a 64 GB cap),
+3. then a matrix run, whose new failures must be triaged one by one as real
+   defects the placeholder was hiding versus over-broad fatality.
+
+Nothing was disabled, allowlisted, or weakened to reach a green result; the
+matrix is simply not currently a functioning gate.
+
+### Left deliberately unchanged
+The single **class-D** site, `asm_and_targets.spl` "asm assert failed" (a static
+assert demoted to a warning, so the assert effectively passes). It is fail-open
+in spirit but emits no bogus operand, is outside the stated 17, and making an
+assert fatal deserves its own change with its own evidence. Note the
+near-identical `cannot evaluate asm target backend version` line lives in this
+same assert path and was likewise left alone — only the arm-matching copy
+(`Some(arm.span)`) was converted.
