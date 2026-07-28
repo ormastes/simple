@@ -378,3 +378,102 @@ quadratic. Filed as part of this bug.
    takes 176 s to parse on the stage3 pure-Simple compiler. Pre-existing (see
    `project_lexer_on2_perf_and_native_slice_2026-07-12`), but it is now the
    blocking obstacle to building a cheap HIR feedback loop.
+
+## Third pass 2026-07-28: loop ESTABLISHED, cost LOCALIZED, two fixes REJECTED
+
+### The feedback loop now exists (~4 min build + ~7 min measure)
+
+The "only faithful lane is the multi-hour stage-4 run" claim above is wrong.
+
+1. **Rebuild stage2 only** (~90-200 s, 692 modules) by replaying
+   `build/bootstrap/stage3/<triple>/stage2-command.transcript` with the seed at
+   `.../stage2-runtime-authority/simple` and `-o <scratch>`. That binary is
+   pure-Simple and *does* contain `src/compiler/20.hir/**` edits.
+2. **Measure on a REDUCED source set.** `native-build ... --source
+   src/compiler/10.frontend --source src/app/cli --entry src/app/cli/main.spl`
+   (entry must stay `src/app/cli/main.spl`: `SIMPLE_BOOTSTRAP_STAGE4=1` rejects
+   any other entry, and the `[BOOTSTRAP-PHASE]` profile only exists on that
+   lane). Do NOT pass `--entry-closure` — it prunes to the entry and nothing
+   lowers. This reaches `tokens` in ~5 min and reproduces the defect
+   **exactly**: heap delta 26,035,386, byte-identical to the full stage-4 run.
+
+### The probes were silently mute (Trap D, now fixed)
+
+`hir_module_perf_probe` existed but its gate was
+`if (rt_env_get("X") ?? "") == "1":` inline — that evaluates FALSE on the
+native bootstrap binary even when X=1. Binding the read to a `val` first, via
+`hir_module_env_get`, makes it fire. Every probe in `module_lowering.spl`
+depended on it, so the whole file was uninstrumented.
+
+### Where the time actually goes (measured, `SIMPLE_HIR_PERF_PROBE=1`)
+
+For `compiler.10.frontend.core.tokens` (162,331 ms total HIR):
+
+| region | ms | allocations |
+|---|---|---|
+| `resolve_package_sibling_symbols` | **162,273** | **26,011,445** |
+| everything else (declare, 10 function bodies, consts, tail) | 58 | 23,941 |
+
+Per-sibling breakdown of that sweep (26 siblings):
+
+| sibling | ms | allocations |
+|---|---|---|
+| **`compiler.10.frontend.core.__init__`** | **194,381** | **26,002,095** |
+| `...core.types` | 33 | 2,710 |
+| `...core.parser` | 12 | 609 |
+| remaining 23 siblings | 2-5 each | < 1,200 each |
+
+So **99.96 % of the cost is a single sibling: the package facade
+`__init__.spl`**, whose `export <member>.*` lines are expanded transitively by
+`register_glob_imported_symbols_depth` to depth 8.
+
+### Why `tokens` and not `lexer_struct` — the symlink spelling split
+
+`lexer_struct` lowers in 118 ms with a 34 ms sweep. The two files are NOT in
+the same package as far as this code is concerned: `tokens` registers as
+`compiler.10.frontend.core.tokens` and `lexer_struct` as
+`compiler.frontend.core.lexer_struct`. Different `pkg_prefix` ⇒ different
+sibling sets, and only the `10.frontend` spelling has `__init__` as a direct
+sibling. (See `.claude/memory/reference_compiler_symlink_module_spellings.md`;
+the earlier "worth checking" note was correct.)
+
+### Two fixes built, measured, and REJECTED
+
+Both were full stage2 rebuilds measured on the loop above.
+
+1. **Visited set keyed by module key** (recommended fix 2 in this report).
+   `heap+26,011,445` before → `heap+26,011,445` after — **byte-identical**.
+   The memo never fires: the sweep does not revisit the same key. Recommended
+   fix 2 as written is refuted.
+2. **Visited set keyed by the module's FILE PATH** (spelling-independent).
+   `heap+26,008,738` — still 26.0 M, no speedup, and it **changed the symbol
+   set**: `tokens` ended with **2,317** symbols instead of **2,574**. Rejected
+   on correctness.
+3. Also tried and reverted as a no-op: changing `register_imported_symbol` /
+   `register_imported_type_methods` / `find_reexport_source` from
+   `Module` (by value) to `any`, on the theory that the by-value struct
+   parameter deep-copied the module. No measurable change.
+
+The memo results together say the expansion visits ~26 M allocations' worth of
+**distinct** modules exactly once — i.e. expanding `core.__init__`'s star
+exports transitively pulls essentially the whole module graph into the
+importer's scope. Memoization cannot help; the fix has to be to stop the
+package-facade sweep from recursing through `export <member>.*` into the
+transitive world (or to build the facade surface once, globally, instead of
+once per lowered file).
+
+### Do not repeat
+
+- Recommended fix 1 (flatten `SymbolTable`) — refuted in the second pass.
+- Recommended fix 2 (visited set) — refuted here, both key choices.
+- The `Module`-by-value theory — refuted here.
+- `resolve_import_symbols` / per-symbol registry lookup — refuted in pass 1.
+- The whole `lower_module` body-lowering path: 58 ms of 162,331 ms.
+
+### Instrumentation
+
+Level-gated and default-off, in `module_lowering.spl`:
+`SIMPLE_HIR_PERF_PROBE=1` (`[HIR-PERF] t= heap= <phase>`) and
+`SIMPLE_HIR_SYMBOL_DUMP=1` (`[HIR-SYMS] <module>\t<name>\t<kind>\t<owner>`,
+for before/after symbol-set equivalence diffs). The symbol-set count is the
+cheap equivalence check: `unstub:flat_symbols:done n=` per module.
