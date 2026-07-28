@@ -9,7 +9,8 @@ use os.kernel.types.vmspace_types.{VmArea, ProcessVmSpace}
 use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read64, mmio_write64}
 use os.kernel.memory.vmm_core.{
     PAGE_SIZE, VMM_KERNEL_SPACE_START, VMM_MAX_VMAS,
-    VMM_VMA_ANON, VMM_VMA_FILE, VMM_VMA_SHARED, VMM_VMA_EXEC, VMM_VMA_COW,
+    VMM_VMA_ANON, VMM_VMA_FILE, VMM_VMA_SHARED, VMM_VMA_SHARED_FILE,
+    VMM_VMA_EXEC, VMM_VMA_COW,
     PTE_PRESENT, PTE_WRITABLE, PTE_ADDR_MASK, PTE_HUGE_PAGE,
     g_next_as_id,
     _phys_to_virt, _read_pte, _write_pte, _pte_is_present, _pte_phys_addr,
@@ -20,7 +21,14 @@ use os.kernel.memory.vmm_address_space.{
     vmm_map_page_in, vmm_read_pte_in, vmm_unmap_page_in, vmm_replace_pte_in,
     vmm_cow_clone_pages
 }
-use os.kernel.memory.pmm.{pmm_alloc_page_raw, pmm_free_page_raw, pmm_put_page}
+use os.kernel.memory.pmm.{pmm_alloc_page_raw, pmm_free_page_raw, pmm_put_page, pmm_ref_page}
+use os.kernel.memory.vmm_shared.{
+    SHM_OK, SHM_RIGHT_READ, SHM_RIGHT_WRITE,
+    vmm_shared_map, vmm_shared_unmap,
+    vmm_shared_rights_ok, vmm_shared_page_frame,
+    vmm_shared_frame_ref, vmm_shared_frame_unref,
+    vmm_shared_page_bytes, vmm_shared_store_page_bytes, vmm_shared_intern_page
+}
 
 struct VmmCowCloneResult:
     ok: bool
@@ -233,9 +241,22 @@ fn vmm_mmap(
     backing: u64,
     backing_offset: u64
 ) -> i64:
-    """Reserve a virtual address range in `space` and add a VMA."""
+    """Reserve a virtual address range in `space` and add a VMA.
+
+    For `kind == VMM_VMA_SHARED_FILE` the backing handle MUST already be
+    registered with `vmm_shared_register_backing`, and the requested `flags`
+    must be within the rights that handle holds. Both checks fail closed
+    (-EOPNOTSUPP / -EACCES) — a shared writable mapping never widens authority
+    beyond the file handle it was derived from, and an unknown handle is never
+    silently downgraded to an anonymous private mapping.
+    """
     if len == 0:
         return -22  # -EINVAL
+
+    if kind == VMM_VMA_SHARED_FILE:
+        val rights_rc = vmm_shared_rights_ok(backing, flags & (SHM_RIGHT_READ | SHM_RIGHT_WRITE))
+        if rights_rc != SHM_OK:
+            return rights_rc as i64
 
     val aligned_len = _align_up(len, PAGE_SIZE)
 
@@ -247,6 +268,18 @@ fn vmm_mmap(
     else:
         chosen = _align_down(chosen, PAGE_SIZE)
 
+    if kind == VMM_VMA_SHARED_FILE:
+        val share_rc = vmm_shared_map(
+            space.id,
+            chosen,
+            aligned_len,
+            backing,
+            backing_offset,
+            flags & (SHM_RIGHT_READ | SHM_RIGHT_WRITE)
+        )
+        if share_rc != SHM_OK:
+            return share_rc as i64
+
     val area = VmArea(
         start: chosen,
         len: aligned_len,
@@ -257,6 +290,10 @@ fn vmm_mmap(
     )
     val rc = vma_add(space, area)
     if rc != 0:
+        # Roll the shared region back so a rejected VMA never leaves a live
+        # shared-page reference behind.
+        if kind == VMM_VMA_SHARED_FILE:
+            _ = vmm_shared_unmap(space.id, chosen, aligned_len)
         return rc as i64
 
     chosen as i64
@@ -270,6 +307,13 @@ fn vmm_munmap_result(space: ProcessVmSpace, vaddr: u64, len: u64) -> VmmMunmapRe
     val aligned_start = _align_down(vaddr, PAGE_SIZE)
     val aligned_len   = _align_up(len, PAGE_SIZE)
     val aligned_end   = aligned_start + aligned_len
+
+    # Shared file mappings: flush live frames into the shared page cache and
+    # drop this space's share of each page BEFORE any PTE or frame is released.
+    # `vmm_shared_unmap` writes a page back to the backing file image and
+    # retires it once its last mapping goes away.
+    vmm_shared_flush_frames(updated, aligned_start, aligned_len)
+    _ = vmm_shared_unmap(updated.id, aligned_start, aligned_len)
 
     val as_handle = AddressSpace(phys_root: updated.pml4, id: updated.id)
     var detached_vaddrs: [u64] = []
@@ -486,6 +530,11 @@ fn vmm_handle_file_fault(space: ProcessVmSpace, vaddr: u64) -> i32:
     val page_base = _align_down(vaddr, PAGE_SIZE)
     val area_opt = vma_find(space, vaddr)
     if val Some(area) = area_opt:
+        if area.kind == VMM_VMA_SHARED_FILE:
+            # The page-fault ISR dispatches anon-then-file without consulting
+            # `kind`, so shared file faults arrive here. Delegate rather than
+            # rejecting them.
+            return vmm_handle_shared_file_fault(space, vaddr)
         if area.kind != VMM_VMA_FILE:
             return -22
         val cached = _file_cache_lookup(area.backing)
@@ -518,6 +567,115 @@ fn vmm_handle_file_fault(space: ProcessVmSpace, vaddr: u64) -> i32:
             return -12
         return 0
     -22
+
+fn vmm_handle_shared_file_fault(space: ProcessVmSpace, vaddr: u64) -> i32:
+    """Demand-page handler for a writable MAP_SHARED file fault at `vaddr`.
+
+    Unlike `vmm_handle_file_fault`, which hands every faulting address space a
+    private copy, this maps the SINGLE frame that `vmm_shared.spl` records for
+    the (backing handle, file page) pair. Every address space that faults on
+    that page therefore shares one frame, which is what makes stores mutually
+    visible. Each mapping takes one `pmm_ref_page`; `vmm_munmap_result` drops
+    exactly one via `pmm_put_page`, so the frame is freed on the last unmap.
+    """
+    val page_base = _align_down(vaddr, PAGE_SIZE)
+    val area_opt = vma_find(space, vaddr)
+    if val Some(area) = area_opt:
+        if area.kind != VMM_VMA_SHARED_FILE:
+            return -22  # -EINVAL — wrong handler for this VMA kind
+        val file_offset = area.backing_offset + (page_base - area.start)
+        val page_index = file_offset / PAGE_SIZE
+        if vmm_shared_intern_page(area.backing, page_index) != SHM_OK:
+            return -95  # -EOPNOTSUPP — backing handle is not registered
+
+        var pa = vmm_shared_page_frame(area.backing, page_index)
+        if pa == 0:
+            # First materialisation of this file page: allocate the shared
+            # frame and prime it from the shared page cache.
+            pa = pmm_alloc_page_raw()
+            if pa == 0:
+                return -12  # -ENOMEM
+            val bytes = vmm_shared_page_bytes(area.backing, page_index)
+            val frame_virt = _phys_to_virt(pa)
+            var bi: u64 = 0
+            while bi < PAGE_SIZE:
+                if (bi as i64) < bytes.len():
+                    mmio_write8(frame_virt + bi, bytes[bi as i64])
+                else:
+                    mmio_write8(frame_virt + bi, 0 as u8)
+                bi = bi + 1
+            if vmm_shared_frame_ref(area.backing, page_index, pa) != SHM_OK:
+                pmm_free_page_raw(pa)
+                return -14  # -EFAULT
+        else:
+            # Additional address space joining an already-materialised page:
+            # one physical ref for the new PTE, one residency ref so the frame
+            # identity survives until the LAST address space unmaps it.
+            pmm_ref_page(pa)
+            if vmm_shared_frame_ref(area.backing, page_index, pa) != SHM_OK:
+                pmm_put_page(pa)
+                return -14  # -EFAULT
+
+        var flag_bits: u32 = 1          # VM_PRESENT
+        if (area.flags & 2) != 0:       # VMA_WRITE — already attenuated at mmap
+            flag_bits = flag_bits | 2
+        flag_bits = flag_bits | 4       # VM_USER
+        flag_bits = flag_bits | 32      # VM_NO_EXECUTE — data mapping
+
+        val as_handle = AddressSpace(phys_root: space.pml4, id: space.id)
+        val mapped = vmm_map_page_in(
+            as_handle,
+            VirtAddr(addr: page_base),
+            PhysAddr(addr: pa),
+            VmFlags(bits: flag_bits)
+        )
+        if not mapped:
+            # Give back both refs taken above, in the same order the unmap
+            # path uses: residency identity first, then the physical frame.
+            _ = vmm_shared_frame_unref(area.backing, page_index)
+            pmm_put_page(pa)
+            return -12  # -ENOMEM
+        return 0
+
+    -22  # -EINVAL — address not in any VMA
+
+fn vmm_shared_flush_frames(space: ProcessVmSpace, vaddr: u64, len: u64):
+    """Copy shared frames covering [vaddr, vaddr+len) back into the page cache.
+
+    Must run BEFORE the PTEs are detached and the frames released, otherwise
+    the last unmap would write back stale bytes.
+
+    Only pages this address space actually FAULTED (PTE present) are flushed
+    and residency-unref'd. A region can be mapped without ever being touched;
+    unref'ing such a page would retire the frame identity while another space
+    still holds a live PTE on it.
+    """
+    val aligned_start = _align_down(vaddr, PAGE_SIZE)
+    val aligned_end = aligned_start + _align_up(len, PAGE_SIZE)
+    val as_handle = AddressSpace(phys_root: space.pml4, id: space.id)
+    var pg = aligned_start
+    while pg < aligned_end:
+        val area_opt = vma_find(space, pg)
+        if val Some(area) = area_opt:
+            if area.kind == VMM_VMA_SHARED_FILE:
+                val pte = vmm_read_pte_in(as_handle, VirtAddr(addr: pg))
+                if (pte & PTE_PRESENT) != 0:
+                    val file_offset = area.backing_offset + (pg - area.start)
+                    val page_index = file_offset / PAGE_SIZE
+                    val pa = vmm_shared_page_frame(area.backing, page_index)
+                    if pa != 0:
+                        val frame_virt = _phys_to_virt(pa)
+                        var bytes: [u8] = []
+                        var bi: u64 = 0
+                        while bi < PAGE_SIZE:
+                            bytes.push(mmio_read8(frame_virt + bi))
+                            bi = bi + 1
+                        _ = vmm_shared_store_page_bytes(area.backing, page_index, bytes)
+                        # Drop this space's residency ref. On the last drop the
+                        # frame identity is cleared here, just before the caller
+                        # releases the final pmm_put_page below.
+                        _ = vmm_shared_frame_unref(area.backing, page_index)
+        pg = pg + PAGE_SIZE
 
 var _file_cache_handles: [u64] = []
 var _file_cache_bytes: [[u8]] = []

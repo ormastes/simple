@@ -62,8 +62,10 @@ for something not actually done — a defect, tracked below).
 | dlopen/dlsym/dlclose — SMF | C | partial (stub entry point) | `src/os/posix/dynlib.spl` |
 | dlopen/dlsym/dlclose — PE/COFF | C | stub — honestly returns `Invalid` (WS3 not landed) | `src/os/posix/dynlib.spl` |
 | mmap() anonymous private | A-equivalent/B | implemented (real syscall 10 path) | `src/os/libc/simpleos_libc.c` |
-| mmap() writable MAP_SHARED | C | **absent by design** — now fails closed with `EOPNOTSUPP` (was DISHONEST, fixed this lane) | `src/os/libc/simpleos_libc.c`; documented in `src/os/posix/mod.spl` |
-| mmap() file-backed (any fd) | C | **absent** — now fails closed with `EOPNOTSUPP` (was DISHONEST, fixed this lane) | `src/os/libc/simpleos_libc.c` |
+| mmap() writable MAP_SHARED — libc surface | C | **absent** — fails closed with `EOPNOTSUPP` (was DISHONEST, fixed earlier lane; still unreachable, see kernel row) | `src/os/libc/simpleos_libc.c`; documented in `src/os/posix/mod.spl` |
+| mmap() file-backed (any fd) — libc surface | C | **absent** — fails closed with `EOPNOTSUPP` | `src/os/libc/simpleos_libc.c` |
+| writable shared file mapping — kernel model | C | **partial (model)** — shared page-cache objects, per-page map refcounts, rights attenuation from the backing handle, msync/last-unmap write-back, frame-residency refcount separate from the map refcount; spec-proven in userspace only. The physical-frame path is coded but **unproven on hardware** (needs the QEMU gate). Not reachable from libc. | `src/os/kernel/memory/vmm_shared.spl`, `vmm_handle_shared_file_fault` in `src/os/kernel/memory/vmm_vma.spl` |
+| msync() | C | **absent at the libc surface**; kernel-side `vmm_shared_msync` flushes the shared page cache into the backing file image only | `src/os/kernel/memory/vmm_shared.spl` |
 | munmap()/mprotect() | B | implemented | `src/os/libc/simpleos_libc.c` |
 | pthread_create/join/detach | C | stub — honestly returns `ENOSYS` | `src/os/libc/simpleos_pthread.c` |
 | pthread mutex/attr | C | implemented as single-threaded no-ops (correct: no concurrent thread exists to race) | `src/os/libc/simpleos_pthread.c` |
@@ -90,9 +92,9 @@ for something not actually done — a defect, tracked below).
 ## Row counts by status (as of this audit)
 
 - implemented: 20
-- partial: 5
+- partial: 6 (writable shared file mapping added as **model-only**)
 - stub (honest ENOSYS/error): 9
-- absent: 6
+- absent: 7
 - DISHONEST (open defect): 1 — `flock()`, filed above; `mmap()` writable-shared/
   file-backed was the second instance and is now fixed (see below)
 
@@ -119,6 +121,67 @@ still real (uses the real `simpleos_syscall(10, ...)` path).
 Spec: `test/01_unit/os/posix/posix_honest_failure_spec.spl` pins this
 contract, plus a companion assertion that `pthread_create()` still honestly
 reports `ENOSYS` rather than faking thread creation.
+
+## Writable shared mmap — kernel model landed (lane MMAP), surface still closed
+
+The capability the honest failure above was standing in for now exists in the
+kernel, as a **model**, not as a shipped POSIX facility. Read this section
+before quoting the matrix.
+
+**What is real.** `src/os/kernel/memory/vmm_shared.spl` implements shared
+file-backed page objects: one page-cache page per `(backing handle, file page
+index)`, shared by every address space that maps it, with a per-page map
+refcount. Rights come from the backing handle and are attenuated deny-wins — a
+read-only handle cannot yield a writable shared mapping (`EACCES`), and an
+unregistered handle cannot be mapped at all (`EOPNOTSUPP`). Write-back is an
+explicit **msync-required** policy: stores are visible to all shared mappings
+at once, but reach the backing file image only on `vmm_shared_msync` or when a
+page's last mapping goes away. `vmm_mmap` gates VMA kind
+`VMM_VMA_SHARED_FILE`, `vmm_handle_shared_file_fault` maps one physical frame
+into every faulting address space (one `pmm_ref_page` per mapping, released by
+the existing `pmm_put_page` in `vmm_munmap_result`), and munmap flushes frames
+into the page cache before releasing them.
+
+A shared page now carries a **frame-residency refcount** distinct from its map
+refcount (`vmm_shared_frame_ref` / `vmm_shared_frame_unref`, lane MMAP2).
+Residency counts the address spaces holding a live PTE on the frame; the map
+count counts mapped regions, which may never have faulted. The identity of the
+frame is retired at exactly the moment the last residency ref drops — the same
+moment `vmm_munmap_result` issues the final `pmm_put_page`. Without that split,
+a region that was mapped but never touched could fault *after* the frame it
+inherited had been returned to the allocator, ref-and-map a freed frame, and
+expose another process's memory. That was a real defect in the first model
+increment and is fixed and spec-covered.
+
+**What is proven.** The byte-level model only, by
+`test/01_unit/os/kernel/memory/vmm_shared_mmap_spec.spl` — 9 blocks, 45
+examples, 0 failures on both the JIT and
+`SIMPLE_EXECUTION_MODE=interpreter`: cross-space visibility, private-mapping
+isolation, rights attenuation, refcount/unmap, process-exit teardown,
+write-back through a normal file read, frame-residency retirement, and a
+deliberate-red calibration block proving the spec can fail.
+
+**What is NOT proven and NOT claimed.**
+- The physical-frame path has no test. It touches real page tables and the
+  HHDM and needs a real-firmware QEMU run (OVMF pflash — never `-kernel`, never
+  `isa-debug-exit`) with two user tasks mapping one file `MAP_SHARED|PROT_WRITE`
+  and observing each other's stores, then a host-side read after msync.
+- Multi-core TLB shootdown on the write-back/unmap edge is not implemented.
+- On-disk persistence: write-back lands in the kernel's file image, not the
+  VFS. A `pwrite` in `src/os/kernel/ipc/syscall_spm.spl` is still needed.
+- `mmap()` in libc still returns `EOPNOTSUPP`, deliberately. It hard-codes
+  `kind = VMA_ANON` / `backing = 0`, the syscall trampoline has no slot for
+  `backing_offset` (kernel arg5), and nothing registers the shared object's
+  rights. Relaxing the errno before those land would hand userspace a VMA the
+  fault path cannot serve.
+
+**SQLite WAL is therefore still blocked.** `xShmMap` in
+`src/os/port/sqlite/sqlite_vfs_contract.spl` must keep failing closed. Note for
+that contract's owner: the unblock condition is the three wiring items above,
+not this model landing.
+
+Design record, remaining wiring, and the exact gate:
+`.spipe/writable_shared_mmap/state.md`.
 
 ## Follow-up (not fixed this increment)
 
