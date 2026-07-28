@@ -162,6 +162,28 @@ fn par_had_error_set(value: bool):
 fn par_had_error_get() -> bool:
     par_had_error
 
+# Process-global mirror of par_had_error.
+#
+# A module-level `var` written inside the parse call tree is NOT visible to a
+# read made after control has returned across a module boundary: on 2026-07-28
+# `bin/simple lint` observed par_had_error == false right after the parser had
+# emitted six errors for an unparseable file, so lint reported it clean
+# (doc/08_tracking/bug/lint_does_not_detect_syntax_errors_2026-07-28.md). The
+# env channel is the same process-global fallback par_line/par_col already use
+# (see parser_env_i64 / par_env_save_enabled above) and survives that boundary.
+#
+# Only parse_module_silent_checked() clears and reads this mirror, so no
+# existing parser or bootstrap behaviour changes; the cost is one rt_env_set on
+# the (cold) error paths.
+fn par_had_error_mirror_set():
+    rt_env_set("SIMPLE_PARSER_HAD_ERROR", "1")
+
+fn par_had_error_mirror_clear():
+    rt_env_set("SIMPLE_PARSER_HAD_ERROR", "")
+
+fn par_had_error_mirror_get() -> bool:
+    (rt_env_get("SIMPLE_PARSER_HAD_ERROR") ?? "") == "1"
+
 fn parser_diagnostics_suppressed_get() -> bool:
     par_diagnostics_suppressed
 
@@ -242,6 +264,7 @@ fn parser_expect(expected: i64) -> bool:
         print "[parser_error] {msg}"
         par_diagnostic_emit_count = par_diagnostic_emit_count + 1
     par_had_error_set(true)
+    par_had_error_mirror_set()
     false
 
 fn parser_error(msg: text):
@@ -251,6 +274,7 @@ fn parser_error(msg: text):
         print "[parser_error_ctx] path " + module_get_path() + " kind " + int_to_str(par_kind_get()) + " text '" + par_text_get() + "'"
         par_diagnostic_emit_count = par_diagnostic_emit_count + 1
     par_had_error_set(true)
+    par_had_error_mirror_set()
 
 fn parser_guarded_int_text(t: text) -> i64:
     # Lexer bugs must surface as located parser errors, not location-less
@@ -815,6 +839,18 @@ fn parse_module(source: text, path: text):
 
 fn parse_module_silent(source: text, path: text):
     _parse_module_with_diagnostics(source, path, true)
+
+# Parse quietly and RETURN whether the parse failed.
+#
+# Callers outside this module must use this instead of
+# `parse_module_silent(...)` followed by `parser_has_errors()`: the flag written
+# during the parse does not survive the return across the module boundary, so
+# the two-step form silently reports success on files that do not parse. The
+# bool is returned by value and is therefore reliable.
+fn parse_module_silent_checked(source: text, path: text) -> bool:
+    par_had_error_mirror_clear()
+    _parse_module_with_diagnostics(source, path, true)
+    par_had_error_get() or par_had_error_mirror_get()
 
 fn parse_module_file(source: text, path: text):
     # Parse additional file without resetting AST

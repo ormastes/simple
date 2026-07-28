@@ -6,6 +6,41 @@ Lint configuration is fail-closed: inside `simple.sdn`'s `[lints]` section,
 unknown profiles or rule names, and levels other than `allow`, `warn`, or
 `deny`, make `simple lint` return usage status 2.
 
+## Lint fails closed on files that do not parse
+
+`bin/simple lint` parses every `.spl` target before running any semantic pass.
+A file that does not parse is reported as `PARSE001` at `deny` level and lint
+exits non-zero:
+
+```
+$ bin/simple lint broken.spl
+broken.spl:1:0: error[PARSE001]: Source did not parse
+
+Lint failed in 1 file(s)
+$ echo $?
+1
+```
+
+So `bin/simple lint` exit 0 *is* evidence that a file is syntactically valid.
+
+This was not true before 2026-07-28. The `PARSE001` gate existed but read the
+parse-failure flag back out of a module-level `var` after `parse_module_silent`
+returned; that write does not survive the return across a module boundary, so
+the gate always saw "no errors" and lint printed `Lint passed: all files clean`
+on files the compiler rejects outright. Lint now calls
+`parse_module_silent_checked()`, which **returns** the flag by value. Any future
+caller checking for parse failure must use the `*_checked` form —
+`parse_module_silent(...)` followed by `parser_has_errors()` silently fails
+open. See
+[../../08_tracking/bug/lint_does_not_detect_syntax_errors_2026-07-28.md](../../08_tracking/bug/lint_does_not_detect_syntax_errors_2026-07-28.md).
+
+Regression guard (checks both directions — rejects unparseable, still passes
+valid):
+
+```bash
+sh scripts/check/check-lint-rejects-unparseable.shs
+```
+
 ---
 
 ## Quick Start

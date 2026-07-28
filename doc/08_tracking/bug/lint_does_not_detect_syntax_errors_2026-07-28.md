@@ -1,6 +1,6 @@
 # `bin/simple lint` reports "all files clean" on files that do not parse
 
-**Status:** open
+**Status:** FIXED 2026-07-28
 **Found:** 2026-07-28 (stage-4 bootstrap campaign — agent verification audit)
 **Area:** `bin/simple lint` (pure-Simple source linter), `src/lib/nogc_sync_mut/tooling/`
 **Severity:** high — not a wrong-output bug, a **false-assurance** bug. Lint is
@@ -77,11 +77,80 @@ One of, in preference order:
 What is NOT acceptable is the current behaviour: analyse an unparseable file and
 report `all files clean`.
 
-## Guidance until fixed
+## Root cause (established 2026-07-28 by instrumented runs, not inspection)
 
-**`bin/simple lint` exit 0 is not proof that a file is syntactically valid.**
-Use `bin/simple compile <file>`, which reports `parse:` errors and exits 1. Keep
-lint as a secondary style/family check.
+The gate was already there and was already reached. `lint_cli_source()` in
+`src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl` did:
+
+```
+parse_module_silent(content, path)
+val parse_failed = parser_has_errors()
+```
+
+Instrumenting that line showed `parse_failed=false` on the repro file. Swapping
+`parse_module_silent` for the non-silent `parse_module` showed the parser had
+in fact emitted **six** errors on that same file:
+
+```
+[parser_error] line 5:12: expected parameter name
+[parser_error] path .../broken.spl line 5:15: expected ), got Ident 'i64'
+...
+[lintprobe] parse_failed=false decls=5
+```
+
+So the parser detects the syntax errors correctly; the *flag* is lost.
+`par_had_error` (and `par_diagnostic_emit_count`, checked the same way — it read
+back `0` after six increments) is a module-level `var` in
+`src/compiler/10.frontend/core/parser.spl`. Writes made to it inside the parse
+call tree are not visible to a read taken after control returns across a module
+boundary. Converting it to the single-element slot-array pattern the file
+already uses for `par_kind_slot`/`par_line_slot` did **not** help — the whole
+module-global cell is restored, not just the scalar. A value returned from the
+function *does* cross correctly, and a `rt_env_set` mirror *does* survive; both
+were confirmed in the same instrumented run (`local=false env=true`).
+
+This is the same family as the interpreter place-model defects already on
+record; the parser file itself carries nil-guards commented "module-level vars
+may be nil in native binaries" and mirrors `par_line`/`par_col` into env vars
+for exactly this reason.
+
+## Fix
+
+- `src/compiler/10.frontend/core/parser.spl` — added
+  `parse_module_silent_checked(source, path) -> bool`, which clears a
+  process-global mirror, parses, and **returns** `had_error` by value.
+  `parser_error()` and `parser_expect()` additionally set the mirror
+  (`par_had_error_mirror_set()`) on their existing cold error paths. Only the
+  new `*_checked` entry point clears/reads the mirror, so no existing parser or
+  bootstrap behaviour changes.
+- `src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl` — `lint_cli_source`
+  now uses `parse_module_silent_checked()` instead of the
+  `parse_module_silent` + `parser_has_errors()` pair.
+- `scripts/check/check-lint-rejects-unparseable.shs` — regression guard,
+  checks both directions.
+
+**Any other caller that needs to know whether a parse failed must use the
+`*_checked` form.** `parse_module_silent(...)` followed by `parser_has_errors()`
+silently fails open.
+
+## Verified
+
+```
+$ bin/simple lint broken.spl
+broken.spl:1:0: error[PARSE001]: Source did not parse
+
+Lint failed in 1 file(s)
+$ echo $?
+1
+```
+
+and a valid file still exits 0 with no `PARSE001`.
+
+## Prior guidance (no longer required)
+
+Before the fix: **`bin/simple lint` exit 0 was not proof that a file is
+syntactically valid.** `bin/simple compile <file>` was the substitute, reporting
+`parse:` errors and exiting 1.
 
 Caveat when compiling a single file in isolation: unresolved imports can produce
 errors pointing at unrelated files. Compare error sets BEFORE vs AFTER an edit on
