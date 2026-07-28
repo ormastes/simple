@@ -5,6 +5,8 @@ val SURFACE = "src/compiler/20.hir/hir_lowering/module_surface.spl"
 val LOWERING = "src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl"
 val DRIVER = "src/compiler/80.driver/driver.spl"
 val PRODUCER = "scripts/bootstrap/bootstrap-from-scratch.sh"
+val RUNTIME = "src/runtime/runtime_native.c"
+val RUNTIME_CHECK = "src/runtime/test/rt_transient_heap_scope_selfcheck.c"
 
 describe "Stage4 streaming surface ownership":
     it "retains type aliases and required declaration carriers":
@@ -49,6 +51,15 @@ describe "Stage4 streaming surface ownership":
         expect(reclaim).to_be_greater_than(promote)
         expect(body.contains("rt_transient_heap_promote(module)")).to_equal(false)
 
+    it "walks retained graphs through raw struct allocations":
+        val runtime = file_read(RUNTIME)
+        val check = file_read(RUNTIME_CHECK)
+        expect(runtime).to_contain("RT_CORE_TRANSIENT_RAW")
+        expect(runtime).to_contain("rt_core_transient_raw_lookup(raw)")
+        expect(runtime).to_contain("offset + sizeof(int64_t) <= node.bytes")
+        expect(check).to_contain("tagged raw root promotes through collection and raw aggregate edges")
+        expect(check).to_contain("a second promotion of the retained graph succeeds")
+
     it "reclaims each reparsed AST after persistent HIR lowering":
         val driver = file_read(DRIVER)
         val start = driver.index_of("me lower_streaming_surface_source")
@@ -59,14 +70,15 @@ describe "Stage4 streaming surface ownership":
         val pause = body.index_of("rt_transient_array_scope_pause()")
         val lower = body.index_of("lowering.lower_parser_module_unstub(module)")
         val promote = body.index_of("rt_transient_heap_promote(hir_module)")
-        val state_promote = body.index_of("rt_transient_heap_promote(lowering)")
+        val diagnostic_promote = body.index_of("rt_transient_heap_promote(lowering.errors)")
         val reclaim = body.index_of("driver_end_transient_parse_scope()")
         expect(parse).to_be_greater_than(begin)
         expect(pause).to_be_greater_than(parse)
         expect(lower).to_be_greater_than(pause)
         expect(promote).to_be_greater_than(lower)
-        expect(state_promote).to_be_greater_than(promote)
-        expect(reclaim).to_be_greater_than(state_promote)
+        expect(diagnostic_promote).to_be_greater_than(promote)
+        expect(reclaim).to_be_greater_than(diagnostic_promote)
+        expect(body.contains("rt_transient_heap_promote(lowering)")).to_equal(false)
 
     it "clears parser roots before ending a transient scope":
         val driver = file_read(DRIVER)

@@ -44,8 +44,9 @@ placeholder stub today)**.
 
 The RV32 NVMe `.nandram` section is ordinary linker-resident RAM. In the AXI
 configuration its loads/stores traverse full AXI4; in the BRAM configuration
-they do not. Neither configuration currently accepts host-issued NVMe commands
-through AXI MMIO.
+they do not. The AXI firmware-in-loop gate accepts host-issued Create CQ/SQ,
+Identify, Write, Flush, and Read through MMIO plus queue/PRP DMA and IRQ. The
+BRAM lane remains a CPU-local recovery/boot check, not host NVMe transport.
 
 ## Code Map
 

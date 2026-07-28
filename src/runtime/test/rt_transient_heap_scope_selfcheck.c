@@ -81,12 +81,26 @@ int main(void) {
 
     check(rt_transient_array_scope_begin() == 1, "promoted scope begins");
     Graph kept = make_graph(700002);
+    int64_t* carrier_child = (int64_t*)rt_alloc((int64_t)sizeof(int64_t));
+    int64_t* carrier_root = (int64_t*)rt_alloc((int64_t)sizeof(int64_t));
+    check(carrier_child && carrier_root, "raw aggregate carriers allocate");
+    carrier_child[0] = (int64_t)(uintptr_t)kept.inner;
+    carrier_root[0] = (int64_t)(uintptr_t)kept.outer;
+    rt_array_push(kept.outer, (int64_t)(uintptr_t)carrier_child);
     check(rt_transient_array_scope_pause() == 1, "scope pauses before promotion");
-    check(rt_transient_heap_promote((int64_t)(uintptr_t)kept.outer) == 1,
-          "nested graph promotes from its array root");
+    int carriers_promoted =
+        rt_transient_heap_promote((int64_t)((uintptr_t)carrier_root | 1));
+    check(carriers_promoted == 1,
+          "tagged raw root promotes through collection and raw aggregate edges");
+    check(rt_transient_heap_promote(kept.dict) == 1,
+          "a second promotion of the retained graph succeeds");
     check(rt_transient_array_scope_end() == 1, "promoted scope ends");
+    if (carriers_promoted) {
+        rt_free(carrier_root);
+        rt_free(carrier_child);
+    }
     check(rt_heap_registry_count() == baseline + 6, "promoted graph registry count is bounded");
-    check(rt_array_len(kept.outer) == 1, "promoted array survives");
+    check(rt_array_len(kept.outer) == 2, "promoted array survives");
     check(rt_dict_get(kept.dict, kept.enum_value) == kept.closure,
           "promoted dict key and value survive");
     check(rt_enum_payload(kept.enum_value) == kept.float_value,

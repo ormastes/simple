@@ -330,3 +330,34 @@ The production launcher now sets both flags, matching the existing bounded
 memory runner, and both unit/system contracts require the pair. The one-attempt
 cap leaves Stage-4 compilation, deployment, and NVMe post-bootstrap SSpec/docgen
 for the next bounded run.
+
+## 2026-07-28 raw aggregate promotion repair
+
+Retry 7 completed and sanity-checked Stage 2 and Stage 3, passed source
+attestation, and selected the paired Stage-4 streaming/low-memory path. It
+failed on the first physical source with `module surface promotion failed for
+src/app/cli/main.spl`. The run took 29m43s, peaked at 1,643,920 KiB RSS, and
+performed zero swaps. Stage 2 SHA-256 was
+`b5389b154911bdab6c2a9ca5d7e62e12ee01e95f45eafdc335e297cef4ba8e5f`;
+Stage 3 SHA-256 was
+`697eda4ed6f86c22e6b98fb6bb8a32e378fd31d943f75fe766ea32c6815e428d`.
+
+The failure was an ownership-graph representation mismatch. Native Simple
+structs are raw `rt_alloc` word aggregates, but `rt_transient_heap_promote`
+could traverse only tagged arrays, dictionaries, enums, floats, and closures.
+The runtime now records raw allocations in a scope-local hash table and walks
+their complete i64 words when they are reachable from a promoted root. The
+walker marks reachable raw blocks persistent; scope end frees the remaining
+parser-owned raw blocks and clears the metadata.
+`HirLowering` itself is created before each parser scope, so it is not a valid
+scope-owned root. Its redundant promotion was removed: lowering runs only
+after the scope is paused, its newly allocated state is persistent, and the
+retained `HirModule` root promotes shared parser-origin graph nodes.
+The registered `lowering.errors` array is promoted separately so diagnostic
+spans remain valid when the caller reports errors after scope end.
+The focused core-C self-check passes through two nested raw carriers into the
+existing cyclic array/dictionary/enum/closure graph. The deployed Simple test
+runner could not execute the source contract because this worktree lacks its
+`simple_seed` sibling and `std.spec` names did not resolve; that infrastructure
+failure is not counted as Stage-4 evidence. The next bounded strict retry must
+still prove live slope, deployment, and NVMe SSpec/docgen.

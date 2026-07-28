@@ -111,6 +111,8 @@ evidence class; a target ID alone is not a complete test configuration.
 For RV32 IDs `3`/`4`, catalog presence is not runtime dispatch: require evidence
 from the selected build mode and transport runner before naming the profile as
 exercised.
+The RV32 `.nandram` lane proves scalar digital prevention/recovery policy; only
+`src/lib/hardware/nand_emu/` may be labeled per-cell Vt/analog NAND emulation.
 
 | Profile | What it proves | What it does not prove |
 |---|---|---|

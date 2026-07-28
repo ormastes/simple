@@ -33,8 +33,9 @@ the ELF, and fails unless that 256-byte range receives reads and writes and the
 prevention/recovery/final markers are observed over AXI4-Lite. `.nandram` is
 linker-resident emulated media state transported by AXI; it is not a NAND MMIO
 register device.
-Host-issued NVMe-over-AXI/MMIO endpoint evidence and its remaining
-firmware-in-loop work are tracked in
+Host-issued NVMe-over-AXI/MMIO firmware-in-loop evidence is complete in GHDL;
+QEMU repeats the command/recovery sequence without claiming AXI. Physical
+source-matched board evidence remains open and is tracked in
 `doc/08_tracking/feature/rv32_nvme_host_axi_mmio_2026-07-28.md`.
 
 ### Profile catalog and evidence boundary

@@ -36,9 +36,9 @@ requires `ALL RV32 NVME FW CHECKS PASS` with no firmware failure marker.
 The RV32 image is a deterministic controller-policy model. It does not claim
 analog threshold-voltage fidelity or implement the full FTL free-block pool.
 Those remain the responsibility of `hardware.nand_emu` and the full firmware
-FTL. The retained physical-board PASS proves the compiled policy and USER4
-observation path execute on FPGA; it does not prove host NVMe-over-AXI commands.
-That remaining transport is tracked by
+FTL. The recorded USER4 PASS is historical; no current physical PASS exists
+until a fresh source-matched ELF/bitstream/transcript bundle is retained. The
+host NVMe-over-AXI firmware sequence is proved in GHDL and tracked by
 `doc/08_tracking/feature/rv32_nvme_host_axi_mmio_2026-07-28.md`.
 
 ## Current gate status

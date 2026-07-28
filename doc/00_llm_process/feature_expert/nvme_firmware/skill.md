@@ -26,10 +26,10 @@ The canonical target profile catalog is
 | ID | Constant | Evidence boundary |
 |---|---|---|
 | 0 | `TARGET_SIMPLE_SIM` | Host controller/FTL/FIL with RAM NAND |
-| 1 | `TARGET_OPENSSD_2CH8WAY` | Cosmos+ profile; physical gate open |
-| 2 | `TARGET_OPENSSD_8CH8WAY` | Cosmos+ profile; physical gate open |
+| 1 | `TARGET_OPENSSD_2CH8WAY` | Cosmos+ profile; `available=false`, H2 board gate postponed |
+| 2 | `TARGET_OPENSSD_8CH8WAY` | Cosmos+ profile; `available=false`, H2 board gate postponed |
 | 3 | `TARGET_RV32_QEMU_RAM_NAND` | Real RV32 ELF and firmware parity; no AXI/IRQ |
-| 4 | `TARGET_RV32_KV260_AXI_RAM_NAND` | AXI firmware-in-loop GHDL; physical host path open |
+| 4 | `TARGET_RV32_KV260_AXI_RAM_NAND` | AXI firmware-in-loop GHDL PASS; `available=false`, physical bundle open |
 
 Unknown IDs return `TARGET_INVALID`. New targets extend this selector and add
 an evidence adapter; they do not fork command, FTL, or recovery logic.

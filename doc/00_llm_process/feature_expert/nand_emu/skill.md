@@ -68,8 +68,8 @@ NVMe firmware's FIL seam.
   `doc/01_research/hardware/nand_recovery/nand_ssd_recovery_prevention_taxonomy.md`
 - Local gap analysis (what fw has / lacks, with file:line):
   `doc/01_research/hardware/nand_recovery/nand_recovery_gap_analysis_local.md`
-  — headline: vref actuator wired end-to-end but no policy calls it;
-  scrub_once / wear_level_once / rain_seal / alloc_spare implemented-but-UNWIRED.
+  — historical pre-v1 gap snapshot. The full firmware wiring listed below has
+  since closed its unwired ladder/reclaim/retire rows.
 - Architecture (THE LAW: shared logic layer-neutral, placeable on FTL or FIL
   unless it needs L2P/hotness/GC state): `rel_*` module family below `fil`
   (depends only on nvme_types), pure verdict-returning policies + thin
@@ -78,8 +78,8 @@ NVMe firmware's FIL seam.
 - Detail design (v1 SLC-validatable set: ladder, ROR-lite, FCR/DEAR-lite,
   STRAW-lite, SREA-lite, wiring pass):
   `doc/05_design/hardware/nand_recovery/recovery_algorithms_design.md`
-- Prerequisite seams before implementing: `FilRead.corrected`,
-  `fil.read_at_vref`, NandEmu wrapper re-export of vt_histogram/read_margin.
+- Landed prerequisite seams: `FilRead.corrected`, `fil.read_at_vref`, and the
+  NandEmu wrapper re-export of `vt_histogram`/`read_margin`.
 
 ## Implementation status (2026-07-19: v1 engine LIVE)
 
@@ -95,9 +95,11 @@ NVMe firmware's FIL seam.
   in `nvme_controller.io_process` + `firmware.service_tick`; erase-reset trio +
   retire→`alloc_spare` wired. Gaps A2/A7 of the gap analysis closed;
   `rel_wiring_check.spl` is the integration oracle set.
-- rv32 port: deliberately deferred with trigger + port shape in
-  `doc/03_plan/hardware/nvme_fw_rel_rv32_port_plan.md` (trigger — rel_* having
-  production callers — is now TRUE, so the port is a live follow-up).
+- RV32 has a separate scalar `.nandram` implementation in
+  `fw_rv32/{entry,logic_nand_read_level}.spl`: read-count prevention, bounded
+  read-level retry, SECDED/FCR, retirement, alternate-slot verification, and
+  remap are exercised by QEMU and AXI GHDL. It is not the per-cell analog
+  `hardware.nand_emu` model or a full `rel_*` FTL port.
 - Emulator address math consolidated onto geometry.spl canon (ne_block_of/
   ne_page_in_block/ne_block_first_row); chip.spl `self.` info-lint is a parser
   FALSE POSITIVE (self.field is the body convention — do not "fix" it).

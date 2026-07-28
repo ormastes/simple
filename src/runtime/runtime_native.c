@@ -874,6 +874,14 @@ static _Thread_local int rt_core_transient_array_scope_paused = 0;
 static _Thread_local void** rt_core_transient_heap_scope_objects = NULL;
 static _Thread_local size_t rt_core_transient_heap_scope_object_len = 0;
 static _Thread_local size_t rt_core_transient_heap_scope_object_cap = 0;
+typedef struct RtCoreTransientRawAlloc {
+    uintptr_t ptr;
+    size_t bytes;
+} RtCoreTransientRawAlloc;
+static _Thread_local RtCoreTransientRawAlloc* rt_core_transient_raw_allocs = NULL;
+static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
+static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
+static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
 static RtCoreMutex** rt_core_mutex_registry = NULL;
 static size_t rt_core_mutex_registry_len = 0;
 static size_t rt_core_mutex_registry_cap = 0;
@@ -883,6 +891,7 @@ static int rt_core_register_immortal_ptr(void* ptr);
 static int rt_core_is_registered_immortal_ptr(void* ptr);
 static int rt_core_unregister_immortal_ptr(void* ptr);
 static void rt_core_reclaim_transient_immortal(uint32_t scope_id);
+static void rt_core_reclaim_transient_raw(void);
 static atomic_flag rt_core_heap_lifecycle_lock = ATOMIC_FLAG_INIT;
 
 static void rt_core_heap_lifecycle_acquire(void) {
@@ -1067,7 +1076,8 @@ int64_t rt_heap_registry_count(void) {
 }
 
 int8_t rt_transient_array_scope_begin(void) {
-    if (rt_core_transient_array_scope_active || rt_core_transient_heap_scope_object_len != 0) return 0;
+    if (rt_core_transient_array_scope_active || rt_core_transient_heap_scope_object_len != 0 ||
+        rt_core_transient_raw_alloc_len != 0) return 0;
     uint32_t next_id =
         atomic_load_explicit(&rt_core_transient_array_scope_next_id, memory_order_relaxed);
     while (next_id != 0) {
@@ -1098,6 +1108,7 @@ int8_t rt_transient_array_scope_end(void) {
     rt_core_transient_array_scope_paused = 0;
 
     rt_core_reclaim_transient_immortal(scope_id);
+    rt_core_reclaim_transient_raw();
     return 1;
 }
 
@@ -1166,6 +1177,114 @@ static inline size_t rt_core_immortal_hash_ptr(uintptr_t p) {
     x *= 0xff51afd7ed558ccdULL;
     x ^= x >> 33;
     return (size_t)x;
+}
+
+#define RT_CORE_TRANSIENT_RAW_TOMBSTONE ((uintptr_t)1)
+#define RT_CORE_TRANSIENT_RAW_OWNED_BIT ((size_t)1 << (sizeof(size_t) * CHAR_BIT - 1))
+#define RT_CORE_TRANSIENT_RAW_SIZE_MASK (~RT_CORE_TRANSIENT_RAW_OWNED_BIT)
+
+static int rt_core_transient_raw_insert_raw(uintptr_t ptr, size_t bytes) {
+    size_t mask = rt_core_transient_raw_alloc_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
+    size_t first_tomb = SIZE_MAX;
+    for (;;) {
+        uintptr_t entry = rt_core_transient_raw_allocs[i].ptr;
+        if (entry == 0) {
+            size_t target = first_tomb == SIZE_MAX ? i : first_tomb;
+            rt_core_transient_raw_allocs[target] = (RtCoreTransientRawAlloc){ptr, bytes};
+            if (first_tomb != SIZE_MAX) rt_core_transient_raw_alloc_tombs--;
+            rt_core_transient_raw_alloc_len++;
+            return 1;
+        }
+        if (entry == RT_CORE_TRANSIENT_RAW_TOMBSTONE) {
+            if (first_tomb == SIZE_MAX) first_tomb = i;
+        } else if (entry == ptr) {
+            rt_core_transient_raw_allocs[i].bytes = bytes;
+            return 1;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+static int rt_core_transient_raw_grow(void) {
+    size_t next_cap = rt_core_transient_raw_alloc_cap == 0
+        ? 256
+        : rt_core_transient_raw_alloc_cap * 2;
+    if (next_cap > SIZE_MAX / sizeof(RtCoreTransientRawAlloc)) return 0;
+    RtCoreTransientRawAlloc* fresh = (RtCoreTransientRawAlloc*)calloc(
+        next_cap, sizeof(RtCoreTransientRawAlloc));
+    if (!fresh) return 0;
+    RtCoreTransientRawAlloc* old = rt_core_transient_raw_allocs;
+    size_t old_cap = rt_core_transient_raw_alloc_cap;
+    rt_core_transient_raw_allocs = fresh;
+    rt_core_transient_raw_alloc_cap = next_cap;
+    rt_core_transient_raw_alloc_len = 0;
+    rt_core_transient_raw_alloc_tombs = 0;
+    for (size_t i = 0; i < old_cap; i++) {
+        uintptr_t old_ptr = old[i].ptr;
+        if (old_ptr != 0 && old_ptr != RT_CORE_TRANSIENT_RAW_TOMBSTONE) {
+            rt_core_transient_raw_insert_raw(old_ptr, old[i].bytes);
+        }
+    }
+    free(old);
+    return 1;
+}
+
+static int rt_core_transient_raw_register_state(void* ptr, size_t bytes, int owned) {
+    if (!ptr || !rt_core_transient_array_scope_active) return ptr != NULL;
+    if (bytes > RT_CORE_TRANSIENT_RAW_SIZE_MASK) return 0;
+    if ((rt_core_transient_raw_alloc_len + rt_core_transient_raw_alloc_tombs + 1) * 10
+            >= rt_core_transient_raw_alloc_cap * 7 && !rt_core_transient_raw_grow()) {
+        return 0;
+    }
+    size_t stored = bytes | (owned ? RT_CORE_TRANSIENT_RAW_OWNED_BIT : 0);
+    return rt_core_transient_raw_insert_raw((uintptr_t)ptr, stored);
+}
+
+static int rt_core_transient_raw_register(void* ptr, size_t bytes) {
+    return rt_core_transient_raw_register_state(
+        ptr, bytes, !rt_core_transient_array_scope_paused);
+}
+
+static RtCoreTransientRawAlloc* rt_core_transient_raw_lookup(uintptr_t ptr) {
+    if (!ptr || rt_core_transient_raw_alloc_cap == 0) return NULL;
+    size_t mask = rt_core_transient_raw_alloc_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
+    for (;;) {
+        uintptr_t entry = rt_core_transient_raw_allocs[i].ptr;
+        if (entry == 0) return NULL;
+        if (entry == ptr) return &rt_core_transient_raw_allocs[i];
+        i = (i + 1) & mask;
+    }
+}
+
+static void rt_core_transient_raw_erase(void* ptr) {
+    RtCoreTransientRawAlloc* entry = rt_core_transient_raw_lookup((uintptr_t)ptr);
+    if (!entry) return;
+    entry->ptr = RT_CORE_TRANSIENT_RAW_TOMBSTONE;
+    entry->bytes = 0;
+    rt_core_transient_raw_alloc_len--;
+    rt_core_transient_raw_alloc_tombs++;
+}
+
+static void rt_core_transient_raw_clear(void) {
+    if (rt_core_transient_raw_alloc_cap != 0) {
+        memset(rt_core_transient_raw_allocs, 0,
+            rt_core_transient_raw_alloc_cap * sizeof(RtCoreTransientRawAlloc));
+    }
+    rt_core_transient_raw_alloc_len = 0;
+    rt_core_transient_raw_alloc_tombs = 0;
+}
+
+static void rt_core_reclaim_transient_raw(void) {
+    for (size_t i = 0; i < rt_core_transient_raw_alloc_cap; i++) {
+        RtCoreTransientRawAlloc* entry = &rt_core_transient_raw_allocs[i];
+        if (entry->ptr == 0 || entry->ptr == RT_CORE_TRANSIENT_RAW_TOMBSTONE) continue;
+        if (entry->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) {
+            free((void*)entry->ptr);
+        }
+    }
+    rt_core_transient_raw_clear();
 }
 
 /* caller holds the lock; table has a free slot */
@@ -1485,12 +1604,14 @@ enum {
     RT_CORE_TRANSIENT_DICT,
     RT_CORE_TRANSIENT_ENUM,
     RT_CORE_TRANSIENT_FLOAT,
-    RT_CORE_TRANSIENT_CLOSURE
+    RT_CORE_TRANSIENT_CLOSURE,
+    RT_CORE_TRANSIENT_RAW
 };
 
 typedef struct RtCoreTransientNode {
     void* ptr;
     uint8_t kind;
+    size_t bytes;
 } RtCoreTransientNode;
 
 typedef struct RtCoreTransientPlan {
@@ -1535,7 +1656,8 @@ static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t pt
     }
 }
 
-static int rt_core_transient_plan_push(RtCoreTransientPlan* plan, void* ptr, uint8_t kind) {
+static int rt_core_transient_plan_push(
+    RtCoreTransientPlan* plan, void* ptr, uint8_t kind, size_t bytes) {
     if (plan->len == plan->cap) {
         size_t next_cap = plan->cap == 0 ? 32 : plan->cap * 2;
         if (next_cap > RT_CORE_TRANSIENT_MAX_NODES) return 0;
@@ -1545,30 +1667,39 @@ static int rt_core_transient_plan_push(RtCoreTransientPlan* plan, void* ptr, uin
         plan->nodes = fresh;
         plan->cap = next_cap;
     }
-    plan->nodes[plan->len++] = (RtCoreTransientNode){ptr, kind};
+    plan->nodes[plan->len++] = (RtCoreTransientNode){ptr, kind, bytes};
     return 1;
 }
 
 /* 1 = tracked node, 0 = immediate or persistent string, -1 = invalid node. */
 static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) {
+    uintptr_t raw = (uintptr_t)value;
+    uintptr_t raw_ptr = raw & RT_VALUE_TAG_MASK ? raw & ~RT_VALUE_TAG_MASK : raw;
+    RtCoreTransientRawAlloc* allocation = rt_core_transient_raw_lookup(raw_ptr);
+    if (allocation) {
+        *node = (RtCoreTransientNode){
+            (void*)raw_ptr, RT_CORE_TRANSIENT_RAW,
+            allocation->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK};
+        return 1;
+    }
     if (!rt_core_is_heap(value)) return 0;
     void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
     if (rt_core_is_registered_immortal_ptr(ptr)) {
         switch (rt_core_registered_object_kind(ptr)) { /* membership checked first */
             case RT_VALUE_HEAP_ARRAY:
-                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_ARRAY};
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_ARRAY, 0};
                 return 1;
             case RT_VALUE_HEAP_DICT:
-                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_DICT};
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_DICT, 0};
                 return 1;
             case RT_VALUE_HEAP_ENUM:
-                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_ENUM};
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_ENUM, 0};
                 return 1;
             case RT_VALUE_HEAP_FLOAT:
-                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_FLOAT};
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_FLOAT, 0};
                 return 1;
             case RT_VALUE_HEAP_CLOSURE:
-                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_CLOSURE};
+                *node = (RtCoreTransientNode){ptr, RT_CORE_TRANSIENT_CLOSURE, 0};
                 return 1;
             case RT_VALUE_HEAP_STRING:
                 return 0;
@@ -1587,7 +1718,7 @@ static int rt_core_transient_add(RtCoreTransientPlan* plan, int64_t value) {
     int seen = rt_core_transient_seen_insert(plan, (uintptr_t)node.ptr);
     if (seen < 0) return -1;
     if (!seen) return 1;
-    return rt_core_transient_plan_push(plan, node.ptr, node.kind) ? 1 : -1;
+    return rt_core_transient_plan_push(plan, node.ptr, node.kind, node.bytes) ? 1 : -1;
 }
 
 int8_t rt_transient_heap_promote(int64_t value) {
@@ -1620,6 +1751,13 @@ int8_t rt_transient_heap_promote(int64_t value) {
             for (int64_t j = 0; j < closure->capture_count && ok; j++) {
                 ok = rt_core_transient_add(&plan, closure->captures[j]) == 1;
             }
+        } else if (node.kind == RT_CORE_TRANSIENT_RAW) {
+            for (size_t offset = 0; offset + sizeof(int64_t) <= node.bytes && ok;
+                    offset += sizeof(int64_t)) {
+                int64_t child;
+                memcpy(&child, (const uint8_t*)node.ptr + offset, sizeof(child));
+                ok = rt_core_transient_add(&plan, child) == 1;
+            }
         }
     }
     if (ok) {
@@ -1633,6 +1771,12 @@ int8_t rt_transient_heap_promote(int64_t value) {
                 case RT_CORE_TRANSIENT_ENUM: object_scope = &((RtCoreEnum*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_FLOAT: object_scope = &((RtCoreFloat*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_CLOSURE: object_scope = &((RtCoreClosure*)node.ptr)->transient_scope_id; break;
+                case RT_CORE_TRANSIENT_RAW: {
+                    RtCoreTransientRawAlloc* raw =
+                        rt_core_transient_raw_lookup((uintptr_t)node.ptr);
+                    if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+                    break;
+                }
             }
             if (object_scope && *object_scope == scope_id) *object_scope = 0;
         }
@@ -3353,14 +3497,41 @@ int64_t rt_net_http_plain_local_probe(void) {
  * ================================================================ */
 
 void* rt_alloc(int64_t size) {
-    return malloc((size_t)size);
+    if (size < 0) return NULL;
+    void* ptr = malloc((size_t)size);
+    if (ptr && !rt_core_transient_raw_register(ptr, (size_t)size)) {
+        free(ptr);
+        return NULL;
+    }
+    return ptr;
 }
 
 void* rt_realloc(void* ptr, int64_t size) {
-    return realloc(ptr, (size_t)size);
+    if (size < 0) return NULL;
+    if (!ptr) return rt_alloc(size);
+    RtCoreTransientRawAlloc* tracked = rt_core_transient_raw_lookup((uintptr_t)ptr);
+    if (!tracked) return realloc(ptr, (size_t)size);
+    if (size == 0) {
+        rt_core_transient_raw_erase(ptr);
+        free(ptr);
+        return NULL;
+    }
+    size_t old_size = tracked->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+    int owned = (tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
+    void* next = malloc((size_t)size);
+    if (!next) return NULL;
+    if (!rt_core_transient_raw_register_state(next, (size_t)size, owned)) {
+        free(next);
+        return NULL;
+    }
+    memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
+    rt_core_transient_raw_erase(ptr);
+    free(ptr);
+    return next;
 }
 
 void rt_free(void* ptr) {
+    rt_core_transient_raw_erase(ptr);
     free(ptr);
 }
 
