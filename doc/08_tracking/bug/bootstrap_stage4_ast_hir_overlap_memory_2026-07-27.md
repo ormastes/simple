@@ -447,3 +447,24 @@ and same-owner, `A -> B -> A`, plus ownerless-wrapper regressions pass, as does
 the serialized 21-test module
 global suite. Retry 11 must rebuild this Rust authority and prove the Stage-4
 zero-diagnostic admission gate before deployment or NVMe SSpec/docgen.
+
+## 2026-07-28 Retry 11 provenance fix insufficient
+
+Retry 11 rebuilt commit `a7b53d603fc0` and passed Stage 2/3 sanity,
+provenance, and native capability. Stage 4 still failed after 1,278 released
+surfaces: the first OOB was `idx=6783` against `arena_len=101` immediately
+after surface 374, followed by 10,292 OOB reads, 5,146 missing tags,
+`n_modules=0`, and missing streaming surfaces. Wall time was 51m55s, peak RSS
+2,650,944 KiB, swap zero. The provenance/owner-packet repair is therefore not
+the complete root fix; Retry 12 is postponed until a focused regression proves
+the remaining arena/context ownership or ordering defect.
+
+The first focused repair after Retry 11 preserves defining-owner metadata for
+imported global aliases. This directly covers the observed split reset:
+`module_state.spl` imported declaration pools were previously discarded on
+return while its owned statement arena reset persisted. An AST-shaped
+two-module parallel-arena regression and the serialized 22-test module-global
+suite pass. Entry publication, imported-alias refresh, and block/function
+shadow relay regressions bring the serialized suite to 25/25. This is focused
+evidence only; method/lambda lifecycle review and a
+new bounded Retry 12 remain required for Stage 4 admission.

@@ -61,6 +61,9 @@ Goal: produce the requested Simple executable without throwing away useful cache
   copy them back over newer owner-global state unless the caller mutates them.
   Carry updates with their owner through foreign-module frames, then refresh
   the matching caller so an outer dirty snapshot cannot clobber a deeper write.
+- If owned and imported parallel arenas diverge after reset, preserve the
+  imported alias's `(defining owner, source name)` in the frame. Bare-name
+  return sync can persist local resets while silently discarding imported ones.
 
 ## Error Triage
 

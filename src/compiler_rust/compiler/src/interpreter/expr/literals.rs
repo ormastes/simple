@@ -276,20 +276,13 @@ pub(super) fn eval_literal_expr(
             // Imported globals can change during a nested call, so refresh only
             // bindings with exact owner provenance at the point of each read.
             if let Some(val) = env.get(name) {
-                if !env.is_local(name) {
-                    let imported = crate::interpreter::CURRENT_EXEC_MODULE.with(|owner_cell| {
-                        let owner = owner_cell.borrow();
-                        let owner = owner.as_ref()?;
-                        crate::interpreter::MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|bindings_cell| {
-                            let bindings = bindings_cell.borrow();
-                            let (defining_owner, defining_name) = bindings.get(owner)?.get(name)?;
-                            crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|globals_cell| {
-                                globals_cell.borrow().get(defining_owner)?.get(defining_name).cloned()
-                            })
-                        })
-                    });
-                    if let Some(imported) = imported {
-                        return Ok(Some(imported));
+                if !env.is_local(name) && env.is_refreshed_global(name) {
+                    if let Some((owner, source_name)) = env.global_binding(name) {
+                        let live = crate::interpreter::MODULE_GLOBALS_BY_OWNER
+                            .with(|globals_cell| globals_cell.borrow().get(owner)?.get(source_name).cloned());
+                        if let Some(live) = live {
+                            return Ok(Some(live));
+                        }
                     }
                 }
                 return Ok(Some(val.clone()));

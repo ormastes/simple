@@ -92,14 +92,62 @@ fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &Env) -> Env
                     globals
                         .get(defining_owner)
                         .and_then(|owner_globals| owner_globals.get(defining_name))
-                        .map(|value| (local_name.clone(), value.clone()))
+                        .map(|value| {
+                            (
+                                local_name.clone(),
+                                Arc::clone(defining_owner),
+                                defining_name.clone(),
+                                value.clone(),
+                            )
+                        })
                 })
                 .collect::<Vec<_>>()
         })
     });
-    base.extend(imported_globals);
-    base.extend(owner_globals);
-    Env::with_base(Arc::new(base))
+    base.extend(
+        imported_globals
+            .iter()
+            .map(|(local_name, _, _, value)| (local_name.clone(), value.clone())),
+    );
+    base.extend(owner_globals.clone());
+    let mut env = Env::with_base(Arc::new(base));
+    for (local_name, defining_owner, defining_name, _) in imported_globals {
+        env.bind_global(local_name, defining_owner, defining_name);
+    }
+    for (name, _) in owner_globals {
+        env.bind_global(name.clone(), Arc::clone(&owner), name);
+    }
+    env
+}
+
+fn publish_live_bound_globals(env: &Env) {
+    let changed = env
+        .overlay_entries()
+        .filter(|(name, _)| !env.is_local(name) && !env.is_refreshed_global(name))
+        .filter_map(|(name, value)| {
+            env.global_binding(name)
+                .map(|(owner, source_name)| (Arc::clone(owner), source_name.clone(), value.clone()))
+        })
+        .collect::<Vec<_>>();
+    if changed.is_empty() {
+        return;
+    }
+    MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        let mut globals_by_owner = cell.borrow_mut();
+        for (owner, name, value) in &changed {
+            if let Some(globals) = globals_by_owner.get_mut(owner) {
+                if globals.contains_key(name) {
+                    globals.insert(name.clone(), value.clone());
+                }
+            }
+        }
+    });
+    MODULE_GLOBALS.with(|cell| {
+        let mut globals = cell.borrow_mut();
+        for (_, name, value) in changed {
+            globals.insert(name, value);
+        }
+    });
 }
 
 fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &mut Env) {
@@ -109,28 +157,38 @@ fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &
     };
     let (changed, live_for_caller) = MODULE_GLOBALS_BY_OWNER.with(|cell| {
         let mut globals_by_owner = cell.borrow_mut();
-        let Some(owner_globals) = globals_by_owner.get_mut(&owner) else {
+        if !globals_by_owner.contains_key(&owner) {
             return (Vec::new(), Vec::new());
-        };
+        }
         let mut changed = Vec::new();
         let mut live_for_caller = Vec::new();
-        for (name, value) in local_env.overlay_entries() {
-            if !owner_globals.contains_key(name)
-                || func.params.iter().any(|param| param.name == *name)
-                || local_env.is_local(name)
-            {
+        for (local_name, value) in local_env.overlay_entries() {
+            if func.params.iter().any(|param| param.name == *local_name) || local_env.is_local(local_name) {
                 continue;
             }
-            if local_env.is_refreshed_global(name) {
-                live_for_caller.push((name.clone(), owner_globals[name].clone()));
+            let (target_owner, target_name) = local_env
+                .global_binding(local_name)
+                .cloned()
+                .unwrap_or_else(|| (Arc::clone(&owner), local_name.clone()));
+            let Some(current) = globals_by_owner
+                .get(&target_owner)
+                .and_then(|globals| globals.get(&target_name))
+                .cloned()
+            else {
+                continue;
+            };
+            if local_env.is_refreshed_global(local_name) {
+                live_for_caller.push((target_owner, target_name, current));
             } else {
-                let entry = (name.clone(), value.clone());
+                let entry = (target_owner, target_name, value.clone());
                 changed.push(entry.clone());
                 live_for_caller.push(entry);
             }
         }
-        for (name, value) in &changed {
-            owner_globals.insert(name.clone(), value.clone());
+        for (target_owner, target_name, value) in &changed {
+            if let Some(globals) = globals_by_owner.get_mut(target_owner) {
+                globals.insert(target_name.clone(), value.clone());
+            }
         }
         (changed, live_for_caller)
     });
@@ -149,7 +207,7 @@ fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &
     if !changed.is_empty() {
         MODULE_GLOBALS.with(|cell| {
             let mut globals = cell.borrow_mut();
-            for (name, value) in &changed {
+            for (_, name, value) in &changed {
                 globals.insert(name.clone(), value.clone());
             }
         });
@@ -161,8 +219,8 @@ fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &
         .forwarded_globals()
         .map(|((owner, name), value)| ((Arc::clone(owner), name.clone()), value.clone()))
         .collect::<HashMap<_, _>>();
-    for (name, value) in live_for_caller {
-        forwarded.insert((Arc::clone(&owner), name), value);
+    for (target_owner, name, value) in live_for_caller {
+        forwarded.insert((target_owner, name), value);
     }
     let mut refreshed = Vec::new();
     for ((entry_owner, name), fallback) in forwarded {
@@ -176,8 +234,11 @@ fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &
         if entry_owner == caller_owner {
             if !outer_env.is_local(&name) {
                 refreshed.push((name, value));
+            } else {
+                outer_env.forward_globals(entry_owner, [(name, value)]);
             }
         } else {
+            outer_env.refresh_bound_global(&entry_owner, &name, value.clone());
             outer_env.forward_globals(entry_owner, [(name, value)]);
         }
     }
@@ -666,6 +727,7 @@ pub(crate) fn exec_function_with_values_and_self(
     self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
+        publish_live_bound_globals(outer_env);
         let mut local_env = captured_env_with_live_globals(func, &Env::new());
 
         // Set up self context if provided
@@ -730,6 +792,7 @@ pub(crate) fn exec_function_with_captured_env(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
+        publish_live_bound_globals(outer_env);
         let mut local_env = captured_env_with_live_globals(func, captured_env);
 
         let self_mode = SelfMode::IncludeSelf;
@@ -987,6 +1050,7 @@ fn exec_function_inner(
         cov.lock().unwrap().record_function_call(&func.name);
     }
 
+    publish_live_bound_globals(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
 
     if let Some((class_name, fields)) = self_ctx {
@@ -1078,6 +1142,7 @@ fn exec_function_with_values_and_writeback_inner(
         cov.lock().unwrap().record_function_call(&func.name);
     }
 
+    publish_live_bound_globals(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
     let self_mode = SelfMode::IncludeSelf;
     let bound = bind_args_with_values(
@@ -1171,6 +1236,7 @@ fn exec_function_with_bound_args_inner(
         cov.lock().unwrap().record_function_call(&func.name);
     }
 
+    publish_live_bound_globals(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();

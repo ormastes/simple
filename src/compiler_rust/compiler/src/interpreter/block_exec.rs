@@ -55,12 +55,16 @@ fn capture_block_scope_shadows(block: &Block, env: &mut Env) -> Vec<(String, Opt
             if seen.insert(name.clone()) {
                 let prior_value = env.get(&name).cloned();
                 if !env.is_local(&name) {
-                    let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
-                    if let (Some(owner), Some(value)) = (owner, prior_value.as_ref()) {
+                    let target = env.global_binding(&name).cloned().or_else(|| {
+                        crate::interpreter::CURRENT_EXEC_MODULE
+                            .with(|cell| cell.borrow().clone())
+                            .map(|owner| (owner, name.clone()))
+                    });
+                    if let (Some((owner, source_name)), Some(value)) = (target, prior_value.as_ref()) {
                         crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
                             if let Some(globals) = cell.borrow_mut().get_mut(&owner) {
-                                if globals.contains_key(&name) {
-                                    globals.insert(name.clone(), value.clone());
+                                if globals.contains_key(&source_name) {
+                                    globals.insert(source_name, value.clone());
                                 }
                             }
                         });
@@ -83,17 +87,25 @@ fn restore_block_scope_shadows(shadows: Vec<(String, Option<Value>)>, env: &mut 
         let owner_global = if env.is_local(&name) {
             None
         } else {
-            let owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
-            owner.and_then(|owner| {
-                crate::interpreter::MODULE_GLOBALS_BY_OWNER
-                    .with(|cell| cell.borrow().get(&owner).and_then(|globals| globals.get(&name).cloned()))
+            let target = env.global_binding(&name).cloned().or_else(|| {
+                crate::interpreter::CURRENT_EXEC_MODULE
+                    .with(|cell| cell.borrow().clone())
+                    .map(|owner| (owner, name.clone()))
+            });
+            target.and_then(|(owner, source_name)| {
+                crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|cell| {
+                    cell.borrow()
+                        .get(&owner)
+                        .and_then(|globals| globals.get(&source_name).cloned())
+                })
             })
         };
-        match owner_global.or(prior_value) {
-            Some(value) => {
+        match (owner_global, prior_value) {
+            (Some(value), _) => env.refresh_globals([(name, value)]),
+            (None, Some(value)) => {
                 env.insert(name, value);
             }
-            None => {
+            (None, None) => {
                 env.remove(&name);
             }
         }

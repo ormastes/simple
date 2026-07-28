@@ -289,6 +289,8 @@ pub struct CowEnv {
     refreshed_globals: HashSet<String>,
     /// Owner-qualified updates crossing frames from another module.
     forwarded_globals: HashMap<(Arc<str>, String), Value>,
+    /// Local global name to defining module/name, including imported aliases.
+    global_bindings: HashMap<String, (Arc<str>, String)>,
 }
 
 impl CowEnv {
@@ -302,6 +304,7 @@ impl CowEnv {
             block_local_bindings: HashMap::new(),
             refreshed_globals: HashSet::new(),
             forwarded_globals: HashMap::new(),
+            global_bindings: HashMap::new(),
         }
     }
 
@@ -327,7 +330,9 @@ impl CowEnv {
     }
 
     pub fn mark_local(&mut self, name: impl Into<String>) {
-        self.local_bindings.insert(name.into());
+        let name = name.into();
+        self.global_bindings.remove(&name);
+        self.local_bindings.insert(name);
     }
 
     pub fn enter_block_local(&mut self, name: impl Into<String>) {
@@ -515,6 +520,27 @@ impl CowEnv {
         self.forwarded_globals.iter()
     }
 
+    pub fn bind_global(&mut self, local_name: String, owner: Arc<str>, source_name: String) {
+        if !self.is_local(&local_name) {
+            self.global_bindings.insert(local_name, (owner, source_name));
+        }
+    }
+
+    pub fn global_binding(&self, local_name: &str) -> Option<&(Arc<str>, String)> {
+        self.global_bindings.get(local_name)
+    }
+
+    pub fn refresh_bound_global(&mut self, owner: &Arc<str>, source_name: &str, value: Value) {
+        let local_names = self
+            .global_bindings
+            .iter()
+            .filter(|(_, (bound_owner, bound_name))| bound_owner == owner && bound_name == source_name)
+            .map(|(local_name, _)| local_name.clone())
+            .filter(|local_name| !self.is_local(local_name))
+            .collect::<Vec<_>>();
+        self.refresh_globals(local_names.into_iter().map(|local_name| (local_name, value.clone())));
+    }
+
     /// Create a CowEnv from an existing HashMap (map becomes the overlay).
     pub fn from_map(map: HashMap<String, Value>) -> Self {
         CowEnv {
@@ -525,6 +551,7 @@ impl CowEnv {
             block_local_bindings: HashMap::new(),
             refreshed_globals: HashSet::new(),
             forwarded_globals: HashMap::new(),
+            global_bindings: HashMap::new(),
         }
     }
 
@@ -538,6 +565,7 @@ impl CowEnv {
             block_local_bindings: HashMap::new(),
             refreshed_globals: HashSet::new(),
             forwarded_globals: HashMap::new(),
+            global_bindings: HashMap::new(),
         }
     }
 
@@ -570,6 +598,7 @@ impl CowEnv {
         self.block_local_bindings.clear();
         self.refreshed_globals.clear();
         self.forwarded_globals.clear();
+        self.global_bindings.clear();
         if let Some(ref base) = self.base {
             // Tombstone all base keys
             self.tombstones = base.keys().cloned().collect();
@@ -609,6 +638,7 @@ impl Clone for CowEnv {
             block_local_bindings: self.block_local_bindings.clone(),
             refreshed_globals: self.refreshed_globals.clone(),
             forwarded_globals: self.forwarded_globals.clone(),
+            global_bindings: self.global_bindings.clone(),
         }
     }
 }

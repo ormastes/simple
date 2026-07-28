@@ -454,6 +454,44 @@ interpreter regressions reproduce deeper writes across same-owner frames, an
 `interpreter_flattened_module_globals` suite passes all 21 tests. A new strict bootstrap is still required to rebuild the authority
 and prove zero stale-index diagnostics plus retained streaming surfaces.
 
+## 2026-07-28 Retry 11 evidence
+
+Retry 11 rebuilt the pushed Rust authority at `a7b53d603fc0`, passed Stage 2
+sanity, Stage 3 sanity/provenance, and the Stage 2 native capability gate, but
+the Stage 4 admission still failed. The first stale statement read appeared
+after surface 374 at `idx=6783` with `arena_len=101`. The run released 1,278
+surfaces, emitted 10,292 OOB reads and 5,146 missing-tag diagnostics, then
+reported `n_modules=0` and `Streaming module surfaces missing after phase 2`.
+
+This disproves the provenance-only repair as a complete Stage 4 fix. The run
+took 51m55s, peaked at 2,650,944 KiB RSS, and used zero swap, so the remaining
+failure is semantic state ownership/order rather than memory exhaustion. Stage
+2 SHA-256 was
+`e29146d77f45a71e4c7c36e8ad727ba6a6f2f76487c011c1e74dd4af65bda827`;
+Stage 3 SHA-256 was
+`ecfa4b16745732c8d25ee66e09d4189ba5322f259552d253f672e321cd4b20ae`.
+Do not run Retry 12 until the remaining arena/context ownership path has a
+focused failing regression and root fix.
+
+The focused root trace identified imported-global ownership loss: function
+capture copied imported aliases as bare `(local_name, Value)` pairs, while
+return sync inferred ownership only from the executing module. Consequently,
+`ast_reset()` successfully reset its owned statement arena but discarded clears
+of declaration pools imported from `decl_nodes.spl`, producing the exact stale
+declaration-body/new-statement-arena mismatch.
+
+`CowEnv` now retains each global binding as
+`local_name -> (defining_owner, source_name)`. Entry capture records owned and
+imported bindings, locals remove inherited bindings when they shadow a name,
+and return sync writes dirty aliases to the defining owner. The new two-module
+parallel-arena regression reproduces a stale declaration index against a reset
+statement arena and now passes. The serialized module-global suite passes all
+25 tests. The five core entry paths publish dirty owner-qualified bindings
+before capture; forwarded updates refresh matching imported aliases; block and
+function-parameter shadows relay rather than discard packets. Retry 12 remains
+postponed pending review and the remaining method/
+lambda frame-lifecycle work; this focused pass alone is not Stage 4 admission.
+
 ## Related
 
 - `f4adc39bf39d` — lint fail-open fix (workaround at one site).

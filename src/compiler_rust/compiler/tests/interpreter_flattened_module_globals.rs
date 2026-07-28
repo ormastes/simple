@@ -109,6 +109,31 @@ fn reentrant_cross_module_write_survives_enclosing_frame_return() {
 }
 
 #[test]
+fn reentrant_callback_refreshes_foreign_imported_array_before_mutation() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let bridge_path = dir.path().join("bridge.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var values: [i32] = []\n\nfn inner():\n    values.push(2)\n\nfn outer(middle: fn(fn())) -> i32:\n    values.clear()\n    values.push(1)\n    middle(inner)\n    return values.len()\n\nfn sum() -> i32:\n    var total = 0\n    for value in values:\n        total = total + value\n    return total\n",
+    )
+    .unwrap();
+    fs::write(
+        bridge_path,
+        "use state.{values}\n\nfn middle(callback: fn()):\n    callback()\n    values.push(3)\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{outer, sum}\nuse bridge.{middle}\n\nfn main() -> i32:\n    return outer(middle) * 10 + sum()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 36);
+}
+
+#[test]
 fn ownerless_nested_frame_relays_newer_global_write() {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("state.spl");
@@ -125,6 +150,50 @@ fn ownerless_nested_frame_relays_newer_global_write() {
     .unwrap();
 
     assert_eq!(evaluate_unflattened_clean(&main_path), 22);
+}
+
+#[test]
+fn function_parameter_shadow_relays_newer_same_owner_global() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nfn inner():\n    value = 2\n\nfn wrapper(value: i32) -> i32:\n    inner()\n    return value\n\nfn outer() -> i32:\n    value = 1\n    wrapper(9)\n    return value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{outer, read}\n\nfn main() -> i32:\n    return outer() * 10 + read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 22);
+}
+
+#[test]
+fn imported_parallel_arena_reset_updates_defining_owner() {
+    let dir = tempdir().unwrap();
+    let decls_path = dir.path().join("decls.spl");
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        decls_path,
+        "var decl_body: [[i32]] = []\n\nfn seed_old():\n    decl_body.clear()\n    decl_body.push([199])\n\nfn first_index() -> i32:\n    return decl_body[0][0]\n",
+    )
+    .unwrap();
+    fs::write(
+        state_path,
+        "use decls.{decl_body}\n\nvar stmt_tag: [i32] = []\n\nfn seed_old():\n    stmt_tag.clear()\n    var i = 0\n    while i < 200:\n        stmt_tag.push(i)\n        i = i + 1\n\nfn reset_and_build():\n    stmt_tag.clear()\n    stmt_tag.push(7)\n    decl_body.clear()\n    decl_body.push([0])\n\nfn first_tag() -> i32:\n    return stmt_tag[0]\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "import decls\nimport state\n\nfn main() -> i32:\n    decls.seed_old()\n    state.seed_old()\n    state.reset_and_build()\n    return decls.first_index() * 10 + state.first_tag()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 7);
 }
 
 #[test]
@@ -263,6 +332,31 @@ fn nested_local_shadow_reveals_latest_owner_global() {
     .unwrap();
 
     assert_eq!(evaluate_unflattened_clean(&main_path), 77);
+}
+
+#[test]
+fn imported_global_shadow_reveals_latest_defining_owner_value() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let worker_path = dir.path().join("worker.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nfn set_value():\n    value = 7\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        worker_path,
+        "use state.{value, set_value}\n\nfn shadow_then_update() -> i32:\n    if true:\n        val value = 5\n        set_value()\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{read}\nuse worker.{shadow_then_update}\n\nfn main() -> i32:\n    return shadow_then_update() * 10 + read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 77);
 }
 
 #[test]
