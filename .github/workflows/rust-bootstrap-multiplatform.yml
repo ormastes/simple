@@ -307,17 +307,43 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Run Rust-seed custom enum identity parity
+      # Self-consistency, NOT parity. This step runs ONE compiler (the Rust
+      # seed) on every side of the case: its llvm codegen against its own
+      # cranelift codegen against a fixed expected literal. It cannot detect a
+      # seed-vs-native divergence and no longer claims to — it prints
+      # native_self_consistency=<bool>, never native_seed_parity=<bool>.
+      # Until 2026-07-28 this step was named "...parity" and pointed a
+      # two-compiler harness at a single binary, so it was green by
+      # construction. The real parity oracle is the step below.
+      - name: Run Rust-seed custom enum identity self-consistency (not parity)
         if: matrix.backend == 'llvm'
         shell: bash
         run: |
           seed="src/compiler_rust/target/bootstrap/simple"
           test -x "$seed"
-          SIMPLE_BINARY="$seed" \
+          PARITY_MODE=self-consistency \
+            SIMPLE_BINARY="$seed" \
             NATIVE_PARITY_CASES=crossmodule_result_u8 \
             NATIVE_PARITY_FAIL_ON_XFAIL=1 \
             PARITY_WORK_DIR="build/check/rust-seed-enum-identity" \
             sh scripts/check/check-native-seed-parity.shs
+
+      # The REAL seed-vs-native parity oracle: an independent Rust seed on one
+      # side, the self-hosted compiler on the other. Auto-activating by binary
+      # IDENTITY, never by a flag — while no self-hosted binary is deployed it
+      # prints a loud, annotated SKIP and exits 0 (a permanently red job gets
+      # muted, which is the same fail-open it is meant to remove). The first
+      # run after the bootstrap campaign deposits a self-hosted binary, this
+      # gates automatically. There is no re-enable step to forget.
+      - name: Run seed-vs-native parity (auto-activates when self-hosted exists)
+        if: matrix.backend == 'llvm'
+        shell: bash
+        run: |
+          SEED_BINARY="src/compiler_rust/target/bootstrap/simple" \
+            NATIVE_PARITY_CASES=crossmodule_result_u8 \
+            NATIVE_PARITY_FAIL_ON_XFAIL=1 \
+            PARITY_WORK_DIR="build/check/seed-vs-native-parity" \
+            sh scripts/check/check-native-parity-if-selfhosted.shs
 
       - name: Test
         working-directory: src/compiler_rust
