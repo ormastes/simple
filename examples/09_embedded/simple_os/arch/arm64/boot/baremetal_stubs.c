@@ -1836,9 +1836,22 @@ RuntimeValue rt_cli_print(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_cli_println(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
 RuntimeValue rt_cli_eprint(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_cli_eprintln(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
-RuntimeValue rt_eprint_str(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
+/* rt_eprint_str/rt_eprintln_str take a (ptr, len) string slice, NOT a tagged
+ * RuntimeValue -- see src/runtime/runtime.h:509. These previously declared a
+ * RuntimeValue parameter, so the raw pointer the codegen passes failed every
+ * tag test in rt_print and every message printed as "<value>", making
+ * guest-side panic text unreadable on the serial console. */
+void rt_eprint_str(const uint8_t *ptr, uint64_t len)
+{
+    if (!ptr) return;
+    for (uint64_t i = 0; i < len; i++) serial_putchar((char)ptr[i]);
+}
 RuntimeValue rt_eprint_value(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
-RuntimeValue rt_eprintln_str(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
+void rt_eprintln_str(const uint8_t *ptr, uint64_t len)
+{
+    rt_eprint_str(ptr, len);
+    serial_puts("\r\n");
+}
 RuntimeValue rt_eprintln_value(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
 RuntimeValue rt_cstring_to_text(RuntimeValue p) { (void)p; return NIL_VALUE; }
 RuntimeValue rt_profiler_is_active(void) { return ENCODE_INT(0); }
