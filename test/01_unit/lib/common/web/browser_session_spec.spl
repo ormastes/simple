@@ -605,6 +605,60 @@ describe "BrowserSession script bridge":
             nil =>
                 fail("Expected current history entry after history.replaceState")
 
+    it "keeps push and replace neighbors stable through traversal":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.com/start", "<html><body>URL</body></html>"
+        ).is_ok()).to_be(true)
+        expect(session.eval_script(
+            "history.pushState(1, '', '/one')"
+        ).is_ok()).to_be(true)
+        expect(session.eval_script(
+            "history.pushState(2, '', '/two')"
+        ).is_ok()).to_be(true)
+        expect(session.eval_script(
+            "history.replaceState(3, '', '/two-final')"
+        ).is_ok()).to_be(true)
+
+        expect(session.history.len()).to_equal(3)
+
+        expect(session.history[0].url).to_equal("https://example.com/start")
+        expect(session.history[1].url).to_equal("https://example.com/one")
+        expect(session.history[2].url).to_equal(
+            "https://example.com/two-final"
+        )
+        expect(session.current_index).to_equal(2)
+        expect(session.history_back_url()).to_equal("https://example.com/one")
+        expect(session.history_forward_url()).to_equal("")
+
+        expect(session.go_back().is_ok()).to_be(true)
+        expect(session.current_url).to_equal("https://example.com/one")
+        expect(session.history_back_url()).to_equal(
+            "https://example.com/start"
+        )
+        expect(session.history_forward_url()).to_equal(
+            "https://example.com/two-final"
+        )
+        expect(session.go_back().is_ok()).to_be(true)
+        expect(session.current_url).to_equal("https://example.com/start")
+        expect(session.go_forward().is_ok()).to_be(true)
+        expect(session.current_url).to_equal("https://example.com/one")
+        expect(session.go_forward().is_ok()).to_be(true)
+        expect(session.current_url).to_equal("https://example.com/two-final")
+        expect(session.history.len()).to_equal(3)
+
+    it "rejects oversized same-origin History API URLs":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.com/start", "<html><body>URL</body></html>"
+        ).is_ok()).to_be(true)
+        val oversized = ["x"; 8193].join("")
+        expect(session.eval_script(
+            "history.pushState(1, '', '/" + oversized + "')"
+        ).is_ok()).to_be(true)
+        expect(session.current_url).to_equal("https://example.com/start")
+        expect(session.history.len()).to_equal(1)
+
     it "supports URLSearchParams in inline browser scripts":
         var session = BrowserSession.new()
         session.open_html(

@@ -10,7 +10,9 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_frame_decode, browser_renderer_frame_encode,
     browser_renderer_frame_encode_with_diagnostics,
+    browser_renderer_frame_encode_with_state,
     browser_renderer_frame_encode_with_witness,
+    browser_renderer_frame_reply_to_request_id,
     browser_renderer_fetch_request_decode,
     browser_renderer_fetch_request_encode,
     browser_renderer_key_encode, browser_renderer_key_with_shift_encode,
@@ -250,6 +252,10 @@ describe "isolated browser renderer protocol":
         expect(frame.ok).to_be(true)
         expect(frame.reply_to_request_id).to_equal(1)
         expect(frame.next_animation_ms).to_equal(-1)
+        expect(frame.history_state_present).to_be(false)
+        expect(frame.history_current_url).to_equal("")
+        expect(frame.history_back_url).to_equal("")
+        expect(frame.history_forward_url).to_equal("")
         expect(frame.composition.backend_target).to_equal(DRAW_IR_BACKEND_AUTO)
         expect(frame.composition.batches[0].backend_target).to_equal(DRAW_IR_BACKEND_AUTO)
         expect(frame.cpu_composited_count).to_equal(0)
@@ -304,6 +310,70 @@ describe "isolated browser renderer protocol":
         expect(diagnostic_frame.diagnostics).to_equal(
             "browser native globals: undefined:undefined:undefined"
         )
+        expect(diagnostic_frame.history_state_present).to_be(false)
+        expect(diagnostic_frame.history_current_url).to_equal("")
+        expect(diagnostic_frame.history_back_url).to_equal("")
+        expect(diagnostic_frame.history_forward_url).to_equal("")
+
+        val state = browser_renderer_frame_encode_with_state(
+            _renderer_protocol_fixture(),
+            7,
+            4,
+            43,
+            44,
+            0,
+            "",
+            0,
+            "",
+            "history diagnostics",
+            "https://example.test/caf\u00e9?q=1#section",
+            "https://example.test/back?tab=a",
+            "https://example.test/forward?tab=b"
+        )
+        expect(state.ok).to_be(true)
+        val state_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), state.wire
+        )
+        expect(browser_renderer_frame_reply_to_request_id(
+            state_message.message
+        )).to_equal(43)
+        val state_frame = browser_renderer_frame_decode(
+            state_message.message, 64, 48
+        )
+        expect(state_frame.ok).to_be(true)
+        expect(state_frame.history_state_present).to_be(true)
+        expect(state_frame.history_current_url).to_equal(
+            "https://example.test/caf\u00e9?q=1#section"
+        )
+        expect(state_frame.history_back_url).to_equal(
+            "https://example.test/back?tab=a"
+        )
+        expect(state_frame.history_forward_url).to_equal(
+            "https://example.test/forward?tab=b"
+        )
+        expect(state_frame.diagnostics).to_equal("history diagnostics")
+        expect(browser_renderer_frame_encode_with_state(
+            _renderer_protocol_fixture(), 7, 5, 44, -1,
+            0, "", 0, "", "", "https://example.test/\nforged", "", ""
+        ).ok).to_be(false)
+        expect(browser_renderer_frame_encode_with_state(
+            _renderer_protocol_fixture(), 7, 5, 44, -1,
+            0, "", 0, "", "", ["x"; 8193].join(""), "", ""
+        ).ok).to_be(false)
+        val malformed_state = browser_renderer_frame_decode(
+            BrowserRendererMessage(
+                kind: "frame", generation: 7, request_id: 5,
+                payload: "SBRF4\t44\t0\t-\t0\t-\t-1\t0\t10925\t0\t0\n" +
+                    state_message.message.payload.slice(
+                        state_message.message.payload.index_of("\n") + 1,
+                        state_message.message.payload.len()
+                    )
+            ),
+            64,
+            48
+        )
+        expect(malformed_state.ok).to_be(false)
+        expect(malformed_state.reason).to_equal("malformed-frame-state")
 
         var incomplete_canvas = _renderer_protocol_fixture()
         var incomplete_batches = incomplete_canvas.batches

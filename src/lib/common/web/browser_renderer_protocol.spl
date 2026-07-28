@@ -22,6 +22,7 @@ val BROWSER_RENDERER_MAX_READ_CHUNK_BYTES: i64 = 8192
 val BROWSER_RENDERER_MAX_COORDINATE: i64 = 1048576
 val BROWSER_RENDERER_MAX_TEXT_BYTES: i64 = 4096
 val BROWSER_RENDERER_MAX_URL_BYTES: i64 = 8192
+val BROWSER_RENDERER_MAX_URL_ENCODED_BYTES: i64 = 10924
 pub val BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES: i64 = 65536
 pub val BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES: i64 = 524288
 pub val BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES: i64 = 4096
@@ -83,6 +84,10 @@ pub struct BrowserRendererFrameDecodeResult:
     reason: text
     reply_to_request_id: i64
     next_animation_ms: i64
+    history_state_present: bool
+    history_current_url: text
+    history_back_url: text
+    history_forward_url: text
     composition: DrawIrComposition
     cpu_composited_count: i32
     cpu_composited_sha256: text
@@ -1063,6 +1068,10 @@ fn _browser_renderer_frame_reject(reason: text) -> BrowserRendererFrameDecodeRes
         reason: reason,
         reply_to_request_id: 0,
         next_animation_ms: -1,
+        history_state_present: false,
+        history_current_url: "",
+        history_back_url: "",
+        history_forward_url: "",
         composition: draw_ir_composition("", "", "", []),
         cpu_composited_count: 0,
         cpu_composited_sha256: "",
@@ -1273,6 +1282,72 @@ pub fn browser_renderer_frame_encode_with_diagnostics(
     )
     browser_renderer_message_encode("frame", generation, request_id, payload)
 
+fn _browser_renderer_history_url_valid(
+    value: text, byte_len: i64
+) -> bool:
+    (byte_len <= BROWSER_RENDERER_MAX_URL_BYTES and
+        not value.contains("\0") and not value.contains("\r") and
+        not value.contains("\n"))
+
+pub fn browser_renderer_frame_encode_with_state(
+    composition: DrawIrComposition,
+    generation: i64,
+    request_id: i64,
+    reply_to_request_id: i64,
+    next_animation_ms: i64,
+    cpu_composited_count: i32,
+    cpu_composited_sha256: text,
+    solid_material_count: i32,
+    solid_material_sha256: text,
+    diagnostics: text,
+    history_current_url: text,
+    history_back_url: text,
+    history_forward_url: text
+) -> BrowserRendererEncodeResult:
+    val current_len = text_to_bytes(history_current_url).len()
+    val back_len = text_to_bytes(history_back_url).len()
+    val forward_len = text_to_bytes(history_forward_url).len()
+    if diagnostics.len() > BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES:
+        return _browser_renderer_reject_encode("invalid-frame-diagnostics")
+    if (not _browser_renderer_history_url_valid(
+            history_current_url, current_len
+        ) or not _browser_renderer_history_url_valid(
+            history_back_url, back_len
+        ) or not _browser_renderer_history_url_valid(
+            history_forward_url, forward_len
+        )):
+        return _browser_renderer_reject_encode("invalid-frame-state")
+    if (reply_to_request_id <= 0 or next_animation_ms < -1 or
+        not _browser_renderer_material_digest_valid(
+            cpu_composited_count.to_i64(), cpu_composited_sha256) or
+        not _browser_renderer_material_digest_valid(
+            solid_material_count.to_i64(), solid_material_sha256)):
+        return _browser_renderer_reject_encode("invalid-material-witness")
+    val diagnostic_payload = base64_encode(diagnostics)
+    val current_payload = base64_encode(history_current_url)
+    val back_payload = base64_encode(history_back_url)
+    val forward_payload = base64_encode(history_forward_url)
+    val encoded = simpleos_host_gpu_draw_ir_encode(
+        _browser_renderer_normalize_draw_ir(composition),
+        BROWSER_RENDERER_MAX_PAYLOAD_BYTES - BROWSER_RENDERER_MAX_HEADER_BYTES -
+            diagnostic_payload.len() - current_payload.len() -
+            back_payload.len() - forward_payload.len(),
+        BROWSER_RENDERER_MAX_COMMANDS
+    )
+    if not encoded.ok:
+        return _browser_renderer_reject_encode("draw-ir-" + encoded.reason)
+    val cpu_digest = if cpu_composited_sha256 == "": "-" else: cpu_composited_sha256
+    val solid_digest = if solid_material_sha256 == "": "-" else: solid_material_sha256
+    val payload = (
+        "SBRF4\t{reply_to_request_id}\t{cpu_composited_count}\t{cpu_digest}" +
+        "\t{solid_material_count}\t{solid_digest}\t{next_animation_ms}" +
+        "\t{diagnostic_payload.len()}\t{current_payload.len()}" +
+        "\t{back_payload.len()}\t{forward_payload.len()}\n" +
+        diagnostic_payload + current_payload + back_payload +
+        forward_payload + bytes_to_text(encoded.bytes)
+    )
+    browser_renderer_message_encode("frame", generation, request_id, payload)
+
 pub fn browser_renderer_frame_reply_to_request_id(
     message: BrowserRendererMessage
 ) -> i64:
@@ -1285,7 +1360,8 @@ pub fn browser_renderer_frame_reply_to_request_id(
         message.payload, 0, header_end
     ).split("\t")
     if not ((fields.len() == 7 and fields[0] == "SBRF2") or
-        (fields.len() == 8 and fields[0] == "SBRF3")):
+        (fields.len() == 8 and fields[0] == "SBRF3") or
+        (fields.len() == 11 and fields[0] == "SBRF4")):
         return -1
     val reply_to_request_id = fields[1].to_i64() ?? -1
     if (reply_to_request_id <= 0 or
@@ -1304,7 +1380,8 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
     ).split("\t")
     val legacy_frame = fields.len() == 7 and fields[0] == "SBRF2"
     val diagnostic_frame = fields.len() == 8 and fields[0] == "SBRF3"
-    if not legacy_frame and not diagnostic_frame:
+    val state_frame = fields.len() == 11 and fields[0] == "SBRF4"
+    if not legacy_frame and not diagnostic_frame and not state_frame:
         return _browser_renderer_frame_reject("malformed-material-witness")
     val reply_to_request_id = _browser_renderer_positive_i64(fields[1])
     val cpu_count = fields[2].to_i64() ?? -1
@@ -1322,16 +1399,18 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
             solid_count, solid_digest)):
         return _browser_renderer_frame_reject("invalid-material-witness")
     var diagnostics = ""
+    var history_current_url = ""
+    var history_back_url = ""
+    var history_forward_url = ""
     var draw_ir_start = witness_end + 1
-    if diagnostic_frame:
+    if diagnostic_frame or state_frame:
         val diagnostic_len = fields[7].to_i64() ?? -1
         if (diagnostic_len < 0 or diagnostic_len > 8192 or
             str(diagnostic_len) != fields[7] or
-            draw_ir_start >= message.payload.len() or
-            diagnostic_len >= message.payload.len() - draw_ir_start):
+            draw_ir_start >= message.payload.len()):
             return _browser_renderer_frame_reject("malformed-frame-diagnostics")
         val diagnostic_end = draw_ir_start + diagnostic_len
-        if message.payload.byte_at(diagnostic_end) != 10:
+        if diagnostic_end >= message.payload.len():
             return _browser_renderer_frame_reject("malformed-frame-diagnostics")
         val encoded_diagnostics = _browser_renderer_byte_slice(
             message.payload, draw_ir_start, diagnostic_end
@@ -1340,7 +1419,65 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
         if (diagnostics.len() > BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES or
             base64_encode(diagnostics) != encoded_diagnostics):
             return _browser_renderer_frame_reject("invalid-frame-diagnostics")
-        draw_ir_start = diagnostic_end + 1
+        if diagnostic_frame:
+            if message.payload.byte_at(diagnostic_end) != 10:
+                return _browser_renderer_frame_reject(
+                    "malformed-frame-diagnostics"
+                )
+            draw_ir_start = diagnostic_end + 1
+        else:
+            val current_len = fields[8].to_i64() ?? -1
+            val back_len = fields[9].to_i64() ?? -1
+            val forward_len = fields[10].to_i64() ?? -1
+            if (current_len < 0 or back_len < 0 or forward_len < 0 or
+                current_len > BROWSER_RENDERER_MAX_URL_ENCODED_BYTES or
+                back_len > BROWSER_RENDERER_MAX_URL_ENCODED_BYTES or
+                forward_len > BROWSER_RENDERER_MAX_URL_ENCODED_BYTES or
+                str(current_len) != fields[8] or
+                str(back_len) != fields[9] or
+                str(forward_len) != fields[10]):
+                return _browser_renderer_frame_reject(
+                    "malformed-frame-state"
+                )
+            val history_end = (
+                diagnostic_end + current_len + back_len + forward_len
+            )
+            if history_end >= message.payload.len():
+                return _browser_renderer_frame_reject(
+                    "malformed-frame-state"
+                )
+            val encoded_current_url = _browser_renderer_byte_slice(
+                message.payload, diagnostic_end,
+                diagnostic_end + current_len
+            )
+            val history_back_start = diagnostic_end + current_len
+            val encoded_back_url = _browser_renderer_byte_slice(
+                message.payload, history_back_start,
+                history_back_start + back_len
+            )
+            val history_forward_start = (
+                history_back_start + back_len
+            )
+            val encoded_forward_url = _browser_renderer_byte_slice(
+                message.payload, history_forward_start, history_end
+            )
+            history_current_url = base64_decode(encoded_current_url)
+            history_back_url = base64_decode(encoded_back_url)
+            history_forward_url = base64_decode(encoded_forward_url)
+            val current_raw_len = text_to_bytes(history_current_url).len()
+            val back_raw_len = text_to_bytes(history_back_url).len()
+            val forward_raw_len = text_to_bytes(history_forward_url).len()
+            if (not _browser_renderer_history_url_valid(
+                    history_current_url, current_raw_len
+                ) or not _browser_renderer_history_url_valid(
+                    history_back_url, back_raw_len
+                ) or not _browser_renderer_history_url_valid(
+                    history_forward_url, forward_raw_len
+                ) or base64_encode(history_current_url) != encoded_current_url or
+                base64_encode(history_back_url) != encoded_back_url or
+                base64_encode(history_forward_url) != encoded_forward_url):
+                return _browser_renderer_frame_reject("invalid-frame-state")
+            draw_ir_start = history_end
     val decoded = simpleos_host_gpu_draw_ir_decode(
         text_to_bytes(_browser_renderer_byte_slice(
             message.payload, draw_ir_start, message.payload.len()
@@ -1358,6 +1495,10 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
         reason: "ok",
         reply_to_request_id: reply_to_request_id,
         next_animation_ms: next_animation_ms,
+        history_state_present: state_frame,
+        history_current_url: history_current_url,
+        history_back_url: history_back_url,
+        history_forward_url: history_forward_url,
         composition: decoded.composition,
         cpu_composited_count: cpu_count.to_i32(),
         cpu_composited_sha256: cpu_digest,

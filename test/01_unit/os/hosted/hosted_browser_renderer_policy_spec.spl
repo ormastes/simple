@@ -2,6 +2,7 @@ use std.spec.*
 use std.common.web.browser_renderer_protocol.{
     BrowserRendererNetworkDecodeResult,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_navigation_decode,
     browser_renderer_network_response_decode
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
@@ -254,6 +255,115 @@ describe "hosted browser renderer broker policy":
         expect(broker.history_urls[0]).to_equal(
             "https://example.test/new"
         )
+
+    it "synchronizes same-origin history state into parent Back and Forward":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.state = "active"
+        broker.document_url = "https://example.test/start"
+        broker.document_origin = "https://example.test"
+        broker.history_urls = ["https://example.test/start"]
+        broker.history_index = 0
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next#view",
+            "https://example.test/start",
+            ""
+        )).to_be(true)
+        expect(broker._frame_history_state_valid(
+            "https://attacker.test/", "", ""
+        )).to_be(false)
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next", "https://attacker.test/", ""
+        )).to_be(false)
+        broker.history_urls = [
+            "https://unrelated.test/",
+            "https://previous.test/",
+            "https://example.test/start"
+        ]
+        broker.history_index = 2
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next",
+            "https://previous.test/",
+            ""
+        )).to_be(true)
+        expect(broker._frame_history_state_valid(
+            "https://example.test/next",
+            "https://unrelated.test/",
+            ""
+        )).to_be(false)
+        broker.history_urls = ["https://example.test/start"]
+        broker.history_index = 0
+        broker._apply_frame_history_state(
+            "https://example.test/next#view",
+            "https://example.test/start",
+            ""
+        )
+        expect(broker.document_url).to_equal(
+            "https://example.test/next#view"
+        )
+        expect(broker.begin_go_back(1000).is_ok()).to_be(true)
+        val back = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), broker.pending_wire
+        )
+        val back_navigation = browser_renderer_navigation_decode(back.message)
+        expect(back_navigation.ok).to_be(true)
+        expect(back_navigation.action).to_equal("back")
+        expect(back_navigation.url).to_equal("https://example.test/start")
+
+        broker.pending_wire = ""
+        broker.pending_wire_is_command = false
+        broker.command_deadline_ms = 0
+        broker.pending_operation = ""
+        broker._apply_frame_history_state(
+            "https://example.test/start",
+            "",
+            "https://example.test/next#view"
+        )
+        expect(broker.begin_go_forward(1000).is_ok()).to_be(true)
+        val forward = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), broker.pending_wire
+        )
+        val forward_navigation = browser_renderer_navigation_decode(
+            forward.message
+        )
+        expect(forward_navigation.ok).to_be(true)
+        expect(forward_navigation.action).to_equal("forward")
+        expect(forward_navigation.url).to_equal(
+            "https://example.test/next#view"
+        )
+
+    it "accepts the previous displayed URL across a network commit":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.document_url = "https://a.test/start"
+        broker.document_origin = "https://a.test"
+        broker.history_urls = ["https://a.test/start"]
+        broker.history_index = 0
+        broker.history_current_url = "https://a.test/start#view"
+        broker.pending_document_commit_url = "https://b.test/next"
+        broker.pending_history_action = "push"
+        expect(broker._frame_history_state_valid(
+            "https://b.test/next",
+            "https://a.test/start#view",
+            ""
+        )).to_be(true)
+
+    it "resolves duplicate history URLs in the requested direction":
+        var back = HostedBrowserRendererProcess.create(1, 640, 480)
+        back.state = "active"
+        back.history_urls = ["https://a.test/", "https://a.test/"]
+        back.history_index = 1
+        back.history_current_url = "https://a.test/"
+        back.history_back_url = "https://a.test/"
+        expect(back.begin_go_back(1000).is_ok()).to_be(true)
+        expect(back.pending_history_index).to_equal(0)
+
+        var forward = HostedBrowserRendererProcess.create(1, 640, 480)
+        forward.state = "active"
+        forward.history_urls = ["https://a.test/", "https://a.test/"]
+        forward.history_index = 0
+        forward.history_current_url = "https://a.test/"
+        forward.history_forward_url = "https://a.test/"
+        expect(forward.begin_go_forward(1000).is_ok()).to_be(true)
+        expect(forward.pending_history_index).to_equal(1)
 
     it "queues asynchronous page input without draining the pipe":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)

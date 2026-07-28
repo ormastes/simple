@@ -75,6 +75,20 @@ extern fn rt_browser_http_job_take_error(handle: i64) -> text
 extern fn rt_browser_http_job_cancel(handle: i64) -> bool
 extern fn rt_browser_http_job_free(handle: i64) -> bool
 
+fn _hosted_browser_canonical_history_url(raw: text) -> text:
+    if (raw == "" or raw != raw.trim() or raw.contains("\0") or
+        raw.contains("\r") or raw.contains("\n") or
+        rt_text_to_bytes(raw).len() > 8192):
+        return ""
+    val fragment_at = raw.index_of("#")
+    val transport = if fragment_at >= 0:
+        raw.slice(0, fragment_at)
+    else:
+        raw
+    if hosted_browser_canonical_http_url(transport) != transport:
+        return ""
+    raw
+
 pub struct HostedBrowserRendererResult:
     ok: bool
     reason: text
@@ -203,6 +217,10 @@ pub class HostedBrowserRendererProcess:
     history_urls: [text]
     history_index: i64
     pending_history_index: i64
+    pending_history_target_url: text
+    history_current_url: text
+    history_back_url: text
+    history_forward_url: text
     home_url: text
     pending_history_action: text
     pending_document_commit_url: text
@@ -255,6 +273,10 @@ pub class HostedBrowserRendererProcess:
             history_urls: [],
             history_index: -1,
             pending_history_index: -1,
+            pending_history_target_url: "",
+            history_current_url: "",
+            history_back_url: "",
+            history_forward_url: "",
             home_url: "",
             pending_history_action: "",
             pending_document_commit_url: "",
@@ -342,9 +364,9 @@ pub class HostedBrowserRendererProcess:
                 next_history.push(self.history_urls[index])
                 index = index + 1
             next_history.push(url)
-            if next_history.len() > 256:
+            if next_history.len() > 64:
                 var bounded: [text] = []
-                index = next_history.len() - 256
+                index = next_history.len() - 64
                 while index < next_history.len():
                     bounded.push(next_history[index])
                     index = index + 1
@@ -356,6 +378,91 @@ pub class HostedBrowserRendererProcess:
             self.history_index < self.history_urls.len()):
             self.history_urls[self.history_index] = url
         self.pending_history_action = ""
+        self._sync_history_neighbors_from_ledger()
+
+    me _sync_history_neighbors_from_ledger():
+        self.history_current_url = self.document_url
+        self.history_back_url = ""
+        self.history_forward_url = ""
+        if self.history_index > 0:
+            self.history_back_url = self.history_urls[self.history_index - 1]
+        if (self.history_index >= 0 and
+            self.history_index < self.history_urls.len() - 1):
+            self.history_forward_url = self.history_urls[self.history_index + 1]
+
+    fn _history_back_index(url: text) -> i64:
+        var index = self.history_index
+        if (index >= 0 and index < self.history_urls.len() and
+            self.history_urls[index] == self.history_current_url):
+            index = index - 1
+        while index >= 0:
+            if self.history_urls[index] == url:
+                return index
+            index = index - 1
+        -1
+
+    fn _history_forward_index(url: text) -> i64:
+        var index = self.history_index
+        if index < 0:
+            index = 0
+        elif (index < self.history_urls.len() and
+            self.history_urls[index] == self.history_current_url):
+            index = index + 1
+        while index < self.history_urls.len():
+            if self.history_urls[index] == url:
+                return index
+            index = index + 1
+        -1
+
+    fn _history_neighbor_allowed(url: text, current_url: text) -> bool:
+        if url == "":
+            return true
+        val canonical = _hosted_browser_canonical_history_url(url)
+        if canonical == "":
+            return false
+        if hosted_browser_network_origin(canonical) == (
+            hosted_browser_network_origin(current_url)
+        ):
+            return true
+        (canonical == self.document_url or
+            canonical == self.history_current_url or
+            canonical == self.history_back_url or
+            canonical == self.history_forward_url or
+            (self.history_index > 0 and
+                self.history_urls[self.history_index - 1] == canonical) or
+            (self.history_index >= 0 and
+                self.history_index < self.history_urls.len() - 1 and
+                self.history_urls[self.history_index + 1] == canonical))
+
+    fn _frame_history_state_valid(
+        current_url: text, back_url: text, forward_url: text
+    ) -> bool:
+        val current = _hosted_browser_canonical_history_url(current_url)
+        if current == "":
+            return false
+        var trusted_url = self.document_url
+        if self.pending_document_commit_url != "":
+            trusted_url = self.pending_document_commit_url
+        elif self.pending_history_target_url != "":
+            trusted_url = self.pending_history_target_url
+        elif (self.pending_history_index >= 0 and
+            self.pending_history_index < self.history_urls.len()):
+            trusted_url = self.history_urls[self.pending_history_index]
+        val trusted = _hosted_browser_canonical_history_url(trusted_url)
+        if (trusted == "" or hosted_browser_network_origin(current) !=
+            hosted_browser_network_origin(trusted)):
+            return false
+        (self._history_neighbor_allowed(back_url, current) and
+            self._history_neighbor_allowed(forward_url, current))
+
+    me _apply_frame_history_state(
+        current_url: text, back_url: text, forward_url: text
+    ):
+        self.document_url = current_url
+        self.document_origin = hosted_browser_network_origin(current_url)
+        self.history_current_url = current_url
+        self.history_back_url = back_url
+        self.history_forward_url = forward_url
 
     me _cancel_network_job():
         val handle = self.network_job_handle
@@ -390,6 +497,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_resize_width = 0
         self.pending_resize_height = 0
         self.pending_history_index = -1
+        self.pending_history_target_url = ""
         self.navigation_permit = hosted_browser_empty_navigation_permit()
         self.pending_history_action = ""
         self.pending_document_commit_url = ""
@@ -417,6 +525,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_resize_width = 0
         self.pending_resize_height = 0
         self.pending_history_index = -1
+        self.pending_history_target_url = ""
         self.navigation_permit = hosted_browser_empty_navigation_permit()
         self.pending_history_action = ""
         self.pending_document_commit_url = ""
@@ -431,6 +540,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_resize_width = 0
         self.pending_resize_height = 0
         self.pending_history_index = -1
+        self.pending_history_target_url = ""
         self.navigation_permit = hosted_browser_empty_navigation_permit()
         self.pending_history_action = ""
         self.pending_document_commit_url = ""
@@ -456,6 +566,9 @@ pub class HostedBrowserRendererProcess:
         )
         self.history_urls = []
         self.history_index = -1
+        self.history_current_url = ""
+        self.history_back_url = ""
+        self.history_forward_url = ""
         self.document_url = ""
         self.document_origin = ""
         self.home_url = ""
@@ -1069,6 +1182,26 @@ pub class HostedBrowserRendererProcess:
             )
             if not frame.ok:
                 return Some(self.fail(frame.reason))
+            val has_trusted_document = (
+                self.document_url != "" or
+                self.pending_document_commit_url != ""
+            )
+            val unchanged_history_state = (
+                self.pending_document_commit_url == "" and
+                self.pending_history_target_url == "" and
+                self.pending_history_index < 0 and
+                frame.history_current_url == self.history_current_url and
+                frame.history_back_url == self.history_back_url and
+                frame.history_forward_url == self.history_forward_url
+            )
+            if (frame.history_state_present and has_trusted_document and
+                not unchanged_history_state and
+                not self._frame_history_state_valid(
+                    frame.history_current_url,
+                    frame.history_back_url,
+                    frame.history_forward_url
+                )):
+                return Some(self.fail("invalid-frame-history"))
             if self.pending_document_commit_url != "":
                 self._commit_document_url(
                     self.pending_document_commit_url
@@ -1082,7 +1215,16 @@ pub class HostedBrowserRendererProcess:
                     self.document_url
                 )
                 self.provisional_document_origin = ""
+                self._sync_history_neighbors_from_ledger()
+            if (frame.history_state_present and has_trusted_document and
+                not unchanged_history_state):
+                self._apply_frame_history_state(
+                    frame.history_current_url,
+                    frame.history_back_url,
+                    frame.history_forward_url
+                )
             self.pending_history_index = -1
+            self.pending_history_target_url = ""
             if self.pending_operation == "resize":
                 self.width = self.pending_resize_width
                 self.height = self.pending_resize_height
@@ -1291,41 +1433,57 @@ pub class HostedBrowserRendererProcess:
         started
 
     me begin_go_back(timeout_ms: i64) -> Result<bool, text>:
-        if self.history_index <= 0:
+        val target_url = if self.history_back_url != "":
+            self.history_back_url
+        elif self.history_index > 0:
+            self.history_urls[self.history_index - 1]
+        else:
+            ""
+        if target_url == "":
             return Err("cannot-go-back")
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
-        self.pending_history_index = self.history_index - 1
+        self.pending_history_index = self._history_back_index(target_url)
+        self.pending_history_target_url = target_url
         self.provisional_document_origin = hosted_browser_network_origin(
-            self.history_urls[self.pending_history_index]
+            target_url
         )
         val started = self._begin_navigation_command(
             "back",
-            self.history_urls[self.pending_history_index],
+            target_url,
             "GET", "", "", "", "history", timeout_ms
         )
         if val Err(_) = started:
             self.pending_history_index = -1
+            self.pending_history_target_url = ""
             self.provisional_document_origin = ""
         started
 
     me begin_go_forward(timeout_ms: i64) -> Result<bool, text>:
-        if (self.history_index < 0 or
-            self.history_index >= self.history_urls.len() - 1):
+        val target_url = if self.history_forward_url != "":
+            self.history_forward_url
+        elif (self.history_index >= 0 and
+            self.history_index < self.history_urls.len() - 1):
+            self.history_urls[self.history_index + 1]
+        else:
+            ""
+        if target_url == "":
             return Err("cannot-go-forward")
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
-        self.pending_history_index = self.history_index + 1
+        self.pending_history_index = self._history_forward_index(target_url)
+        self.pending_history_target_url = target_url
         self.provisional_document_origin = hosted_browser_network_origin(
-            self.history_urls[self.pending_history_index]
+            target_url
         )
         val started = self._begin_navigation_command(
             "forward",
-            self.history_urls[self.pending_history_index],
+            target_url,
             "GET", "", "", "", "history", timeout_ms
         )
         if val Err(_) = started:
             self.pending_history_index = -1
+            self.pending_history_target_url = ""
             self.provisional_document_origin = ""
         started
 

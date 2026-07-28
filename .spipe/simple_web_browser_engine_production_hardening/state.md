@@ -1415,5 +1415,19 @@ implementation in progress / target evidence blocked
   deployed pure-Simple wrapper still fails its bounded test-ABI admission probe,
   so focused Simple specs remain source-reviewed but unexecuted; no bootstrap or
   Rust seed fallback was used.
-- open: worker `history.pushState()` state is not yet synchronized into broker
-  chrome/history, so parent Back can reject after a same-origin pushState.
+- Worker frames now carry one bounded current/back/forward history snapshot;
+  the broker validates same-origin state and broker-known cross-origin
+  neighbors before atomically updating chrome. Parent Back/Forward use those
+  neighbors, while the broker-owned network ledger remains the authority.
+  BrowserSession, protocol, worker, and broker regressions cover push/push/
+  replace traversal, bounded/malformed frames, exact emitted neighbors, and
+  same-origin parent controls. The base64 wire snapshot is transient and
+  capped at three 8192-byte decoded URLs; History API admission enforces the
+  same bound, and broker network history retention now matches the worker's
+  64-entry bound. Unchanged frames skip broker URL parsing, framing avoids a
+  per-frame length vector, and retained state is replaced rather than appended.
+- verify: direct-env working guard, conflict-marker scan, and
+  `doc/06_spec/*_spec.spl == 0` pass. Target Simple checks remain unexecuted:
+  the isolated workspace has no admitted pure-Simple CLI, and invoking the
+  deployed artifact reached the prohibited seed/wrapper admission path, so it
+  was stopped without bootstrap or seed fallback.

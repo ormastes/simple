@@ -46,7 +46,8 @@ versioned frame envelope and the host exposes them on
 The scenario requires all five hostile scripts to fail, all three Node globals
 to be `undefined`, a nonempty rendered composition, and successful renderer
 cleanup. The decoder remains compatible with legacy
-`SBRF2` frames while admitted worker frames use diagnostic-capable `SBRF3`.
+`SBRF2` frames while admitted worker frames use bounded diagnostic/history
+`SBRF4` frames; `SBRF3` remains decode-compatible.
 An unchanged frame alone is not treated as denial evidence.
 
 ## Production oversized protocol denial
@@ -58,7 +59,8 @@ protocol encoder rejects it as `invalid-action` at its 4,096-byte text bound,
 before a worker write occurs. The renderer closes before the denial assertion.
 This is real host-process protocol-boundary evidence, not raw-wire injection;
 malformed, late, and duplicate frame injection remain explicit fail-closed
-placeholders. SBRF2/SBRF3 frame compatibility is unchanged.
+placeholders. SBRF2/SBRF3 frame compatibility is unchanged, while SBRF4 adds
+length-delimited current/back/forward URL state for validated browser chrome.
 
 ## Production renderer fault containment
 
