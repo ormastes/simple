@@ -577,13 +577,30 @@ fn _push_host_key_algorithms(buf: [u8], host_keys: HostKeySet) -> [u8]:
     if host_keys.ecdsa_p256_pkcs8 != nil:
         return _push_ecdsa_p256(buf)
 
-    _push_ssh_ed25519(buf)
+    # Fail closed: no host key is configured, so advertise an EMPTY name-list.
+    # Defaulting to ssh-ed25519 here would offer an algorithm the operator has
+    # switched off (or that the server holds no key for); ssh_negotiate_algorithms
+    # rejects an empty server list with "no matching host key algorithm".
+    _push_empty_string(buf)
+
+fn host_key_set_has_any_algorithm(host_keys: HostKeySet) -> bool:
+    """True when at least one host key algorithm is actually configured.
+
+    Callers must refuse to serve when this is false rather than falling back to
+    a default algorithm.
+    """
+    host_keys.ed25519_seed != nil or
+        host_keys.rsa_pkcs8 != nil or
+        host_keys.ecdsa_p256_pkcs8 != nil
 
 fn host_key_set_advertised_algorithms(host_keys: HostKeySet) -> text:
     """Return comma-separated list of host key algorithms the server can offer.
 
     Priority order: ssh-ed25519, rsa-sha2-256, rsa-sha2-512, ecdsa-sha2-nistp256.
     RSA algorithms are both listed when an RSA key is present (same key, two hash choices).
+
+    Fail closed: returns "" when no host key is configured. A disabled algorithm
+    must never appear in the advertised list.
     """
     var algos: text = ""
     if host_keys.ed25519_seed != nil:
@@ -598,12 +615,14 @@ fn host_key_set_advertised_algorithms(host_keys: HostKeySet) -> text:
             algos = algos + ",ecdsa-sha2-nistp256"
         else:
             algos = "ecdsa-sha2-nistp256"
-    if algos.len() == 0:
-        algos = "ssh-ed25519"
     algos
 
 fn host_key_algorithms_with_certificates(host_keys: HostKeySet, host_certs: HostCertificateSet) -> text:
-    """Return host key algorithms, preferring configured OpenSSH certificates."""
+    """Return host key algorithms, preferring configured OpenSSH certificates.
+
+    Fail closed: returns "" when neither a host key nor a certificate is
+    configured, so a disabled algorithm is never advertised.
+    """
     var algos: text = ""
     if host_certs.ssh_ed25519_cert != nil:
         algos = "ssh-ed25519-cert-v01@openssh.com"
@@ -620,8 +639,6 @@ fn host_key_algorithms_with_certificates(host_keys: HostKeySet, host_certs: Host
     if host_keys.ecdsa_p256_pkcs8 != nil:
         algos = if algos.len() > 0: algos + ",ecdsa-sha2-nistp256" else: "ecdsa-sha2-nistp256"
 
-    if algos.len() == 0:
-        algos = "ssh-ed25519"
     algos
 
 fn _host_certificates_empty(host_certs: HostCertificateSet) -> bool:
@@ -634,4 +651,5 @@ export SshKexState, SshSessionKeys
 export HostKeySet, HostCertificateSet
 export ssh_build_ed25519_host_key_blob
 export curve25519_shared_secret_mpint_bytes
+export host_key_set_has_any_algorithm
 use os.apps.sshd.ssh_hex.{format_hex}

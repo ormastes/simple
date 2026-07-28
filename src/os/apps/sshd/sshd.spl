@@ -11,7 +11,7 @@
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
 use os.apps.sshd.ssh_session.{SshSession, SessionState}
 use os.apps.sshd.ssh_kex.{ssh_build_kexinit_for_host_keys_and_certs}
-use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, host_key_set_has_any_algorithm}
 use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
 use os.kernel.net.rt_net_socket_facade.{rt_net_close}
 # NOTE: call the x86_64 spawn DIRECTLY (single non-@cfg pub fn) rather than the
@@ -231,6 +231,22 @@ pub fn sshd_build_host_keys_for_session_for_test(
         ecdsa_p256_pkcs8: ecdsa_p256_pkcs8
     )
 
+pub fn sshd_host_key_policy_satisfiable_for_test(
+    advertise_ed25519: bool,
+    ed25519_seed: [u8]?,
+    rsa_pkcs8: [u8]?,
+    ecdsa_p256_pkcs8: [u8]?,
+    ed25519_cert: [u8]?
+) -> bool:
+    """Test hook for the fail-closed host-key policy gate used by start()."""
+    val keys = HostKeySet(
+        ed25519_seed: if advertise_ed25519: ed25519_seed else: nil,
+        rsa_pkcs8: rsa_pkcs8,
+        rsa_public_blob: nil,
+        ecdsa_p256_pkcs8: ecdsa_p256_pkcs8
+    )
+    host_key_set_has_any_algorithm(keys) or ed25519_cert != nil
+
 pub fn sshd_build_production_session_kexinit_for_test(
     advertise_ed25519: bool,
     ed25519_seed: [u8],
@@ -371,6 +387,12 @@ impl SshDaemon:
         Creates a TCP socket, binds to the configured port, and enters
         the accept loop. This method does not return until stop() is called.
         """
+        # Fail closed: refuse to serve when the configuration leaves no host key
+        # algorithm enabled. Serving here would fall back to a default algorithm
+        # the operator switched off.
+        if not self.host_key_policy_satisfiable():
+            serial_println("[sshd] refusing to start: no host key algorithm enabled")
+            return Err("sshd: no host key algorithm enabled")
         match self.bind_and_ready():
             Ok(_): pass
             Err(err): return Err(err)
@@ -562,6 +584,19 @@ impl SshDaemon:
             rsa_public_blob: nil,
             ecdsa_p256_pkcs8: nil
         )
+
+    fn host_key_policy_satisfiable() -> bool:
+        """True when at least one host key algorithm or certificate is enabled.
+
+        Fail-closed gate: when this is false the daemon must refuse to serve
+        rather than advertising a default host key algorithm that the operator
+        has disabled.
+        """
+        val certs = self.build_host_certificates_for_session()
+        host_key_set_has_any_algorithm(self.build_host_keys_for_session()) or
+            certs.ssh_ed25519_cert != nil or
+            certs.rsa_sha2_256_cert != nil or
+            certs.rsa_sha2_512_cert != nil
 
     fn build_host_certificates_for_session() -> HostCertificateSet:
         HostCertificateSet(
