@@ -316,10 +316,10 @@ class Worker:
         record-layer encrypt/decrypt, then dispatches via dispatch_by_alpn
         for HTTP/1.1 or HTTP/2. On failure, closes the fd.
 
-        Note: current TLS 1.2 implementation does not negotiate ALPN,
-        so all connections default to HTTP/1.1. When ALPN support
-        lands in tls_handshake.spl, extract it from the handshake
-        state and pass to dispatch_by_alpn.
+        The protocol comes from `state.alpn`, negotiated during the
+        handshake (RFC 7301) and echoed back to the client in ServerHello.
+        It is "" when the client offered no ALPN extension, which routes
+        the connection to HTTP/1.1.
         """
         var cfg = self.tls_config
         val hs_result = perform_server_handshake(
@@ -345,8 +345,7 @@ class Worker:
                     client_seq: state.client_seq,
                     server_seq: state.server_seq
                 )
-                # TODO: [stdlib][P2] extract ALPN from handshake state when ALPN is implemented
-                self.dispatch_by_alpn("", client_fd, now)
+                self.dispatch_by_alpn(state.alpn, client_fd, now)
             Err(e):
                 tcp_backend_close(client_fd)
 
@@ -989,10 +988,9 @@ class Worker:
         Called after TLS accept when the handshake result carries a negotiated
         ALPN string. Logs the chosen protocol and routes accordingly.
 
-        Currently:
+        Routing:
           - Http1 (or empty ALPN) → standard handle_accept() H1 path
-          - Http2                 → log + fall through to H1 for now
-                                    TODO(AC-4): wire h2_server_conn_new() here
+          - Http2                 → handle_h2_accept(): H2 framing + SETTINGS
           - Http3                 → reject (H3 arrives on UDP, not TCP)
 
         Args:

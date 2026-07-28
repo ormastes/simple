@@ -13,6 +13,7 @@ use std.nogc_async_mut.io.driver.{IoDriver}
 use std.tls.types.{
     CONTENT_TYPE_CHANGE_CIPHER_SPEC,
     CONTENT_TYPE_HANDSHAKE,
+    EXTENSION_TYPE_ALPN,
     TLS_VERSION_1_2,
     HANDSHAKE_TYPE_CLIENT_HELLO,
     HANDSHAKE_TYPE_SERVER_HELLO,
@@ -127,6 +128,11 @@ fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Res
         case EchDecision.NotPresent:
             pass_dn
 
+    # --- ALPN negotiation (RFC 7301) ---
+    # Empty when the client offered no ALPN extension, or offered only
+    # protocols this server cannot serve.
+    val negotiated_alpn = negotiate_alpn(ch_extensions)
+
     # --- 2. Select cipher suite ---
     val selected_cipher = negotiate_cipher(ch_cipher_suites)
     if selected_cipher < 0:
@@ -137,7 +143,7 @@ fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Res
     val server_random = generate_random(32)
 
     # --- 4. Build and send ServerHello ---
-    val sh_body = build_server_hello_bytes(TLS_VERSION_1_2, server_random, selected_cipher)
+    val sh_body = build_server_hello_bytes(TLS_VERSION_1_2, server_random, selected_cipher, negotiated_alpn)
     val sh_hs = build_handshake_wire(HANDSHAKE_TYPE_SERVER_HELLO, sh_body)
     all_handshake_bytes = concat_bytes(all_handshake_bytes, wire_to_bytes(sh_hs))
 
@@ -310,7 +316,8 @@ fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Res
         handshake_messages: bytes_to_wire(all_handshake_bytes),
         session_keys: Some(session_keys),
         client_seq: 1,
-        server_seq: 1
+        server_seq: 1,
+        alpn: negotiated_alpn
     ))
 
 # ============================================================================
@@ -372,17 +379,22 @@ fn negotiate_cipher(client_ciphers: [i64]) -> i64:
         si = si + 1
     -1
 
-fn build_server_hello_bytes(version: i64, random: [i64], cipher_suite: i64) -> text:
+fn build_server_hello_bytes(version: i64, random: [i64], cipher_suite: i64, alpn: text) -> text:
     """Construct the ServerHello body as wire bytes.
 
-    Format: version(2) + random(32) + session_id_len(1) + cipher_suite(2) + compression(1)
+    Format: version(2) + random(32) + session_id_len(1) + cipher_suite(2) +
+            compression(1) [+ extensions]
+
+    When `alpn` is non-empty the selected protocol is echoed back in an ALPN
+    extension (RFC 7301 §3.1) — without that echo a client never considers
+    ALPN negotiated and keeps speaking HTTP/1.1.
     """
     var result = encode_u16_be(version)
     result = result + bytes_to_wire(random)
     result = result + encode_u8(0)
     result = result + encode_u16_be(cipher_suite)
     result = result + encode_u8(0)
-    result
+    result + build_alpn_extension_block(alpn)
 
 fn build_certificate_body(chain: TlsCertificateChain) -> text:
     """Build the Certificate handshake body.
@@ -414,6 +426,102 @@ fn extract_encrypted_pms(cke_data: [i64]) -> text:
     if data_len < 2 + pms_len:
         return bytes_to_wire(slice(cke_data, 2, data_len))
     bytes_to_wire(slice(cke_data, 2, 2 + pms_len))
+
+fn find_alpn_extension_data(extensions: [i64]) -> [i64]:
+    """Locate the ALPN extension inside a ClientHello extensions block.
+
+    `extensions` is the block exactly as `parse_client_hello_payload` returns
+    it: a 2-byte total length followed by `type(2) + length(2) + data` entries.
+
+    Args:
+        extensions: Raw ClientHello extensions block.
+
+    Returns:
+        The ALPN extension's data field, or [] when absent or malformed.
+    """
+    val ext_len = len(extensions)
+    if ext_len < 4:
+        return []
+
+    val total = (byte_at(extensions, 0) * 256) + byte_at(extensions, 1)
+    val end = 2 + total
+    if end > ext_len:
+        return []
+
+    var pos = 2
+    while pos + 4 <= end:
+        val ext_type = (byte_at(extensions, pos) * 256) + byte_at(extensions, pos + 1)
+        val ext_data_len = (byte_at(extensions, pos + 2) * 256) + byte_at(extensions, pos + 3)
+        pos = pos + 4
+        if pos + ext_data_len > end:
+            return []
+        if ext_type == EXTENSION_TYPE_ALPN:
+            # Copied byte-by-byte on purpose: byte_at() reads zeros out of a
+            # slice() result, so slicing here silently yields an all-zero
+            # extension and negotiation always lands on "". See
+            # doc/08_tracking/bug/byte_at_reads_zero_from_slice_result_2026-07-28.md
+            var data: [i64] = []
+            var d = 0
+            while d < ext_data_len:
+                data.push(byte_at(extensions, pos + d))
+                d = d + 1
+            return data
+        pos = pos + ext_data_len
+    []
+
+fn negotiate_alpn(extensions: [i64]) -> text:
+    """Select the ALPN protocol to serve for a ClientHello (RFC 7301).
+
+    Takes the client's most-preferred offer and accepts it only when this
+    server can actually serve it. A client whose offers are all unsupported
+    is answered without an ALPN extension, which leaves it on HTTP/1.1 —
+    lenient by design rather than a no_application_protocol alert.
+
+    Args:
+        extensions: Raw ClientHello extensions block.
+
+    Returns:
+        Negotiated protocol name, or "" when ALPN is not negotiated.
+    """
+    val ext_data = find_alpn_extension_data(extensions)
+    if len(ext_data) == 0:
+        return ""
+
+    val offered = parse_alpn_extension(ext_data)
+    val server_protocols = ["h2", "http/1.1"]
+    val server_count = len(server_protocols)
+    var i = 0
+    while i < server_count:
+        if server_protocols[i] == offered:
+            return offered
+        i = i + 1
+    ""
+
+fn build_alpn_extension_block(protocol: text) -> text:
+    """Build the ServerHello extensions block carrying the selected protocol.
+
+    Format: extensions_len(2) + type(2) + ext_len(2) + list_len(2) +
+            name_len(1) + name
+
+    Args:
+        protocol: Protocol selected by `negotiate_alpn`. May be "".
+
+    Returns:
+        Wire bytes for the extensions block, or "" when no ALPN was selected.
+    """
+    # `len` on wire text is the byte count directly; wire_to_bytes() is NOT
+    # usable here — it returns [] on both engines (see the bug note in
+    # doc/08_tracking/bug/wire_to_bytes_returns_empty_2026-07-28.md).
+    val name_len = len(protocol)
+    if name_len == 0:
+        return ""
+
+    var ext = encode_u16_be(EXTENSION_TYPE_ALPN)
+    ext = ext + encode_u16_be(name_len + 3)
+    ext = ext + encode_u16_be(name_len + 1)
+    ext = ext + encode_u8(name_len)
+    ext = ext + protocol
+    encode_u16_be(name_len + 7) + ext
 
 fn parse_alpn_extension(ext_data: [i64]) -> text:
     """Parse a TLS ALPN extension payload (RFC 7301) and return the first protocol name.
@@ -451,22 +559,12 @@ fn parse_alpn_extension(ext_data: [i64]) -> text:
     if name_len == 0 or data_len < 3 + name_len:
         return ""
 
-    val name_bytes = slice(ext_data, 3, 3 + name_len)
-    _bytes_to_text(name_bytes)
-
-fn _bytes_to_text(bytes: [i64]) -> text:
-    """Convert a slice of ASCII byte values to a text string."""
-    var result = ""
+    # Build the name straight off `ext_data` via the shared byte->wire hook.
+    # slice() + a printable-ASCII lookup table was the previous route and
+    # yielded "" for every input while this function was dead code.
+    var name = ""
     var i = 0
-    while i < len(bytes):
-        result = result + _byte_to_char(byte_at(bytes, i))
+    while i < name_len:
+        name = name + bytes_to_wire([byte_at(ext_data, 3 + i)])
         i = i + 1
-    result
-
-fn _byte_to_char(b: i64) -> text:
-    """Convert a single ASCII byte value to a one-character text string."""
-    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
-    val offset = b - 32
-    if offset < 0 or offset >= len_text(chars):
-        return "?"
-    chars.char_at(offset)
+    name
