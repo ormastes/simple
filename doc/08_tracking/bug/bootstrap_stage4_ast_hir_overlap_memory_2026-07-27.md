@@ -424,3 +424,26 @@ The focused Simple spec is present but could not run because Stage3 rejects
 the `test` command and the deployed CLI fails its bounded test-ABI probe;
 using the Rust seed would violate bootstrap policy. Deployment and NVMe
 SSpec/docgen remain pending the next bounded retry.
+
+## 2026-07-28 Retry 10 module-global copy-out failure
+
+Retry 10 rebuilt Rust authority, passed Stage 2/3 sanity and attestation, and
+entered Stage 4 with `SIMPLE_NATIVE_ARENA_DECLS=1` present in the process
+environment. It nevertheless reproduced the exact first stale statement IDs
+at surface 375, eventually releasing 1,277 surfaces with 15,483 stale-tag
+diagnostics. Phase 2 then returned with `ctx.module_surfaces` missing. The run
+took 64m57s, peaked at 2,649,080 KiB RSS, and used zero swaps. Stage 2 SHA-256
+was `3aa6334770a6ac18e3bc145990e6b27e5013da7f77caa5d4d67853e2220d3a77`;
+Stage 3 SHA-256 was
+`bd09bf6247475863d5ddddc47613de25554ba9b6c7c194b03dbbae8c128eda7b`.
+
+The shared root was not the environment flag: Rust interpreter frame teardown
+wrote callee-refreshed global overlays back as if the enclosing caller had
+mutated them, clobbering newer AST counters, mode state, and retained compiler
+context. `CowEnv` now distinguishes refreshed values from caller writes; all
+mutation entry points clear that provenance, and owner-qualified updates cross
+foreign-module frames without colliding by bare name. Focused scalar/write/array
+and same-owner, `A -> B -> A`, plus ownerless-wrapper regressions pass, as does
+the serialized 21-test module
+global suite. Retry 11 must rebuild this Rust authority and prove the Stage-4
+zero-diagnostic admission gate before deployment or NVMe SSpec/docgen.

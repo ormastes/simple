@@ -50,6 +50,84 @@ fn imported_functions_share_live_module_globals() {
 }
 
 #[test]
+fn nested_write_survives_enclosing_frame_return() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var enabled = false\n\nfn reset():\n    enabled = false\n\nfn enable():\n    enabled = true\n\nfn reset_then_enable():\n    reset()\n    enable()\n\nfn read() -> i32:\n    if enabled:\n        return 1\n    return 0\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "import state\n\nfn main() -> i32:\n    state.reset_then_enable()\n    return state.read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_unflattened_clean(&main_path), 1);
+}
+
+#[test]
+fn inner_write_survives_two_enclosing_frame_returns() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nfn set_value(next: i32):\n    value = next\n\nfn inner():\n    set_value(2)\n\nfn middle():\n    inner()\n\nfn outer() -> i32:\n    value = 1\n    middle()\n    return value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "import state\n\nfn main() -> i32:\n    return state.outer() * 10 + state.read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_unflattened_clean(&main_path), 22);
+}
+
+#[test]
+fn reentrant_cross_module_write_survives_enclosing_frame_return() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let bridge_path = dir.path().join("bridge.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "import bridge\n\nvar value = 0\n\nfn inner():\n    value = 2\n\nfn outer() -> i32:\n    value = 1\n    bridge.middle(inner)\n    return value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(bridge_path, "fn middle(callback: fn()):\n    callback()\n").unwrap();
+    fs::write(
+        &main_path,
+        "import state\n\nfn main() -> i32:\n    return state.outer() * 10 + state.read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_unflattened_clean(&main_path), 22);
+}
+
+#[test]
+fn ownerless_nested_frame_relays_newer_global_write() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nfn inner():\n    value = 2\n\nfn outer() -> i32:\n    value = 1\n    fn wrapper():\n        inner()\n    wrapper()\n    return value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "import state\n\nfn main() -> i32:\n    return state.outer() * 10 + state.read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_unflattened_clean(&main_path), 22);
+}
+
+#[test]
 fn unflattened_transitive_alias_sees_growing_global_array() {
     let dir = tempdir().unwrap();
     let arena_path = dir.path().join("arena.spl");
@@ -334,11 +412,7 @@ fn flattened_export_use_alias_facade_reads_live_mutable_globals() {
         "var values: [i32] = []\n\nfn push_value(value: i32):\n    values.push(value)\n",
     )
     .unwrap();
-    fs::write(
-        facade_path,
-        "export use leaf.{values as facade_values, push_value}\n",
-    )
-    .unwrap();
+    fs::write(facade_path, "export use leaf.{values as facade_values, push_value}\n").unwrap();
     fs::write(
         consumer_path,
         "use facade.{facade_values, push_value}\n\nfn push_then_read(value: i32) -> i32:\n    push_value(value)\n    return facade_values[0]\n",

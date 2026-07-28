@@ -103,30 +103,36 @@ fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &Env) -> Env
 }
 
 fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &mut Env) {
-    let Some(owner) = function_module_owner(func) else {
+    let caller_owner = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
+    let Some(owner) = function_module_owner(func).or_else(|| caller_owner.clone()) else {
         return;
     };
-    let changed = MODULE_GLOBALS_BY_OWNER.with(|cell| {
+    let (changed, live_for_caller) = MODULE_GLOBALS_BY_OWNER.with(|cell| {
         let mut globals_by_owner = cell.borrow_mut();
         let Some(owner_globals) = globals_by_owner.get_mut(&owner) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
-        let changed = local_env
-            .overlay_entries()
-            .filter_map(|(name, value)| {
-                if !owner_globals.contains_key(name)
-                    || func.params.iter().any(|param| param.name == *name)
-                    || local_env.is_local(name)
-                {
-                    return None;
-                }
-                Some((name.clone(), value.clone()))
-            })
-            .collect::<Vec<_>>();
+        let mut changed = Vec::new();
+        let mut live_for_caller = Vec::new();
+        for (name, value) in local_env.overlay_entries() {
+            if !owner_globals.contains_key(name)
+                || func.params.iter().any(|param| param.name == *name)
+                || local_env.is_local(name)
+            {
+                continue;
+            }
+            if local_env.is_refreshed_global(name) {
+                live_for_caller.push((name.clone(), owner_globals[name].clone()));
+            } else {
+                let entry = (name.clone(), value.clone());
+                changed.push(entry.clone());
+                live_for_caller.push(entry);
+            }
+        }
         for (name, value) in &changed {
             owner_globals.insert(name.clone(), value.clone());
         }
-        changed
+        (changed, live_for_caller)
     });
     // Mirror mutated owned globals into the shared flat MODULE_GLOBALS. Deferred
     // lazy imports keep each module's globals in MODULE_GLOBALS_BY_OWNER, but a
@@ -148,15 +154,34 @@ fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &
             }
         });
     }
-    let caller_has_same_owner =
-        CURRENT_EXEC_MODULE.with(|cell| cell.borrow().as_ref().is_some_and(|current| current == &owner));
-    if caller_has_same_owner {
-        let refreshed = changed
-            .into_iter()
-            .filter(|(name, _)| !outer_env.is_local(name))
-            .collect::<Vec<_>>();
-        outer_env.extend(refreshed);
+    let Some(caller_owner) = caller_owner else {
+        return;
+    };
+    let mut forwarded = local_env
+        .forwarded_globals()
+        .map(|((owner, name), value)| ((Arc::clone(owner), name.clone()), value.clone()))
+        .collect::<HashMap<_, _>>();
+    for (name, value) in live_for_caller {
+        forwarded.insert((Arc::clone(&owner), name), value);
     }
+    let mut refreshed = Vec::new();
+    for ((entry_owner, name), fallback) in forwarded {
+        let value = MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            cell.borrow()
+                .get(&entry_owner)
+                .and_then(|globals| globals.get(&name))
+                .cloned()
+                .unwrap_or(fallback)
+        });
+        if entry_owner == caller_owner {
+            if !outer_env.is_local(&name) {
+                refreshed.push((name, value));
+            }
+        } else {
+            outer_env.forward_globals(entry_owner, [(name, value)]);
+        }
+    }
+    outer_env.refresh_globals(refreshed);
 }
 
 fn mark_pattern_locals(pattern: &Pattern, env: &mut Env) {
@@ -1170,4 +1195,99 @@ fn exec_function_with_bound_args_inner(
     trace_interpreter_call_exit(trace_start, &func.name, if result.is_ok() { "ok" } else { "err" });
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_parser::Parser;
+
+    #[test]
+    fn refreshed_globals_do_not_clobber_newer_callee_writes() {
+        let mut parser = Parser::new("fn probe():\n    0\n");
+        let module = parser.parse().expect("parse probe");
+        let function = module
+            .items
+            .into_iter()
+            .find_map(|node| match node {
+                Node::Function(function) => Some(function),
+                _ => None,
+            })
+            .expect("probe function");
+        let owner: Arc<str> = Arc::from("test/module_global_refresh.spl");
+        let function_key = &function as *const FunctionDef as usize;
+
+        FUNCTION_MODULE_OWNER.with(|cell| {
+            cell.borrow_mut().insert(function_key, Arc::clone(&owner));
+        });
+        CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = Some(Arc::clone(&owner)));
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+        MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            cell.borrow_mut().insert(
+                Arc::clone(&owner),
+                HashMap::from([
+                    ("stale".to_string(), Value::Bool(false)),
+                    ("caller_write".to_string(), Value::Bool(true)),
+                    ("items".to_string(), Value::array(vec![Value::Int(1)])),
+                ]),
+            );
+        });
+
+        let mut frame = Env::new();
+        frame.refresh_globals([
+            ("stale".to_string(), Value::Bool(false)),
+            ("caller_write".to_string(), Value::Bool(true)),
+            ("items".to_string(), Value::array(vec![Value::Int(1)])),
+        ]);
+        MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            cell.borrow_mut()
+                .get_mut(&owner)
+                .expect("owner globals")
+                .insert("stale".to_string(), Value::Bool(true));
+        });
+        frame.insert("caller_write".to_string(), Value::Bool(false));
+        let Value::Array(items) = frame.get_mut("items").expect("items") else {
+            panic!("items must be an array");
+        };
+        Arc::make_mut(items).push(Value::Int(2));
+
+        let mut outer = Env::new();
+        sync_owned_captured_globals(&function, &frame, &mut outer);
+
+        assert_eq!(outer.get("stale"), Some(&Value::Bool(true)));
+        assert!(outer.is_refreshed_global("stale"));
+
+        MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            let globals = cell.borrow();
+            let globals = globals.get(&owner).expect("owner globals");
+            assert_eq!(globals.get("stale"), Some(&Value::Bool(true)));
+            assert_eq!(globals.get("caller_write"), Some(&Value::Bool(false)));
+            let Value::Array(items) = globals.get("items").expect("items") else {
+                panic!("items must be an array");
+            };
+            assert_eq!(items.as_slice(), &[Value::Int(1), Value::Int(2)]);
+        });
+
+        let foreign_owner: Arc<str> = Arc::from("test/foreign_frame.spl");
+        FUNCTION_MODULE_OWNER.with(|cell| {
+            cell.borrow_mut().insert(function_key, Arc::clone(&foreign_owner));
+        });
+        MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            cell.borrow_mut().insert(Arc::clone(&foreign_owner), HashMap::new());
+        });
+        let mut foreign_frame = Env::new();
+        foreign_frame.forward_globals(Arc::clone(&owner), [("stale".to_string(), Value::Bool(false))]);
+        let mut owner_frame = Env::new();
+        sync_owned_captured_globals(&function, &foreign_frame, &mut owner_frame);
+        assert_eq!(owner_frame.get("stale"), Some(&Value::Bool(true)));
+
+        FUNCTION_MODULE_OWNER.with(|cell| cell.borrow_mut().remove(&function_key));
+        MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            let mut globals = cell.borrow_mut();
+            globals.remove(&owner);
+            globals.remove(&foreign_owner);
+        });
+        MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
+        CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = None);
+    }
 }

@@ -3,8 +3,8 @@
 - **Id:** module_global_write_lost_on_frame_pop_2026-07-28
 - **Found:** 2026-07-28, while root-causing `bin/simple lint` reporting
   "all files clean" on files that do not parse (fixed in `f4adc39bf39d`).
-- **Status:** OPEN — Rust seed **interpreter** defect. JIT (cranelift) is correct.
-  Only per-site workarounds exist.
+- **Status:** FIX IMPLEMENTED 2026-07-28 — Stage-4 admission pending Retry 11.
+  JIT (cranelift) was already correct.
 - **Sibling:** `module_global_write_invisible_to_callee_2026-07-27.md` is the
   *downward* half of the same place-model defect (a write is invisible to a
   callee) and is marked FIXED 2026-07-28 (lane GFIX). This document is the
@@ -424,6 +424,35 @@ Until one lands, interim guidance for authors:
 - Do not "fix" such a site by wrapping it in a one-element array.
 - Any regression test for this must run under
   `SIMPLE_EXECUTION_MODE=interpreter`; the JIT passes and will hide it.
+
+## 2026-07-28 fix and Retry 10 evidence
+
+Retry 10 rebuilt current Rust authority, passed Stage 2 and Stage 3 sanity and
+source attestation, then reproduced the defect in Stage 4 despite
+`SIMPLE_NATIVE_ARENA_DECLS=1` being present in `/proc/<pid>/environ`. It
+released 1,277 surfaces, emitted 15,483 stale flat-AST diagnostics, and then
+lost `ctx.module_surfaces` at the Phase-2 frame return. The run took 64m57s,
+peaked at 2,649,080 KiB RSS, and performed zero swaps. Stage 2 SHA-256 was
+`3aa6334770a6ac18e3bc145990e6b27e5013da7f77caa5d4d67853e2220d3a77`;
+Stage 3 SHA-256 was
+`bd09bf6247475863d5ddddc47613de25554ba9b6c7c194b03dbbae8c128eda7b`.
+
+The return-side fix gives each `CowEnv` frame a set of owner globals refreshed
+from callees. Refreshed values stay readable but are excluded from that
+frame's later owner-global write-back. Owner-qualified updates are forwarded
+through intervening foreign-module frames and refreshed when they reach their
+owner's caller. Every mutation API (`insert`, `extend`,
+`entry`, `get_mut`, `remove`, and `clear`) clears the corresponding provenance,
+so a real caller assignment or copy-on-write array mutation still publishes.
+This is the minimal per-frame clean/dirty model; it avoids generation storage
+while preserving the current synchronous thread-local interpreter semantics.
+
+The focused Rust unit regression proves a newer callee scalar survives, a real
+caller overwrite wins, and an array mutation is published. The end-to-end
+interpreter regressions reproduce deeper writes across same-owner frames, an
+`A -> B -> A` callback, and an ownerless nested wrapper. The serialized
+`interpreter_flattened_module_globals` suite passes all 21 tests. A new strict bootstrap is still required to rebuild the authority
+and prove zero stale-index diagnostics plus retained streaming surfaces.
 
 ## Related
 

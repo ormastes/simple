@@ -285,6 +285,10 @@ pub struct CowEnv {
     local_bindings: HashSet<String>,
     /// Names shadowed by currently executing nested blocks.
     block_local_bindings: HashMap<String, usize>,
+    /// Owner-global values copied from a callee for reads, not caller writes.
+    refreshed_globals: HashSet<String>,
+    /// Owner-qualified updates crossing frames from another module.
+    forwarded_globals: HashMap<(Arc<str>, String), Value>,
 }
 
 impl CowEnv {
@@ -296,6 +300,8 @@ impl CowEnv {
             tombstones: HashSet::new(),
             local_bindings: HashSet::new(),
             block_local_bindings: HashMap::new(),
+            refreshed_globals: HashSet::new(),
+            forwarded_globals: HashMap::new(),
         }
     }
 
@@ -316,6 +322,7 @@ impl CowEnv {
     /// Insert a key-value pair. Returns the previous value if any.
     pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
         self.tombstones.remove(&key);
+        self.refreshed_globals.remove(&key);
         self.overlay.insert(key, value)
     }
 
@@ -350,6 +357,7 @@ impl CowEnv {
     /// the first `Arc::make_mut` and only then mutates in place.
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
         if self.overlay.contains_key(key) {
+            self.refreshed_globals.remove(key);
             return self.overlay.get_mut(key);
         }
         if self.tombstones.contains(key) {
@@ -361,6 +369,7 @@ impl CowEnv {
         };
         if let Some(v) = promoted {
             self.overlay.insert(key.to_string(), v);
+            self.refreshed_globals.remove(key);
             return self.overlay.get_mut(key);
         }
         None
@@ -368,6 +377,7 @@ impl CowEnv {
 
     /// Remove a key. Returns the removed value if any.
     pub fn remove(&mut self, key: &str) -> Option<Value> {
+        self.refreshed_globals.remove(key);
         if let Some(v) = self.overlay.remove(key) {
             // If the key also exists in base, add a tombstone so we don't see it
             if let Some(ref base) = self.base {
@@ -478,9 +488,31 @@ impl CowEnv {
     /// Extend the overlay with entries from an iterator.
     pub fn extend<I: IntoIterator<Item = (String, Value)>>(&mut self, iter: I) {
         for (k, v) in iter {
-            self.tombstones.remove(&k);
-            self.overlay.insert(k, v);
+            self.insert(k, v);
         }
+    }
+
+    /// Refresh globals after a callee without marking them as caller writes.
+    pub fn refresh_globals<I: IntoIterator<Item = (String, Value)>>(&mut self, iter: I) {
+        for (key, value) in iter {
+            self.tombstones.remove(&key);
+            self.overlay.insert(key.clone(), value);
+            self.refreshed_globals.insert(key);
+        }
+    }
+
+    pub fn is_refreshed_global(&self, name: &str) -> bool {
+        self.refreshed_globals.contains(name)
+    }
+
+    pub fn forward_globals<I: IntoIterator<Item = (String, Value)>>(&mut self, owner: Arc<str>, iter: I) {
+        for (name, value) in iter {
+            self.forwarded_globals.insert((Arc::clone(&owner), name), value);
+        }
+    }
+
+    pub fn forwarded_globals(&self) -> impl Iterator<Item = (&(Arc<str>, String), &Value)> {
+        self.forwarded_globals.iter()
     }
 
     /// Create a CowEnv from an existing HashMap (map becomes the overlay).
@@ -491,6 +523,8 @@ impl CowEnv {
             tombstones: HashSet::new(),
             local_bindings: HashSet::new(),
             block_local_bindings: HashMap::new(),
+            refreshed_globals: HashSet::new(),
+            forwarded_globals: HashMap::new(),
         }
     }
 
@@ -502,6 +536,8 @@ impl CowEnv {
             tombstones: HashSet::new(),
             local_bindings: HashSet::new(),
             block_local_bindings: HashMap::new(),
+            refreshed_globals: HashSet::new(),
+            forwarded_globals: HashMap::new(),
         }
     }
 
@@ -532,6 +568,8 @@ impl CowEnv {
         self.overlay.clear();
         self.local_bindings.clear();
         self.block_local_bindings.clear();
+        self.refreshed_globals.clear();
+        self.forwarded_globals.clear();
         if let Some(ref base) = self.base {
             // Tombstone all base keys
             self.tombstones = base.keys().cloned().collect();
@@ -541,6 +579,7 @@ impl CowEnv {
     /// Provide entry-like API by delegating to the overlay.
     /// If the key exists in base but not overlay, copy it to overlay first.
     pub fn entry(&mut self, key: String) -> std::collections::hash_map::Entry<'_, String, Value> {
+        self.refreshed_globals.remove(&key);
         // If key is in base but not in overlay, promote it
         if !self.overlay.contains_key(&key) && !self.tombstones.contains(&key) {
             if let Some(ref base) = self.base {
@@ -568,6 +607,8 @@ impl Clone for CowEnv {
             tombstones: self.tombstones.clone(), // small
             local_bindings: self.local_bindings.clone(),
             block_local_bindings: self.block_local_bindings.clone(),
+            refreshed_globals: self.refreshed_globals.clone(),
+            forwarded_globals: self.forwarded_globals.clone(),
         }
     }
 }

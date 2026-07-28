@@ -55,6 +55,12 @@ Goal: produce the requested Simple executable without throwing away useful cache
   Stage 2/3 may execute the Rust runtime plus `runtime_memory.c`; keep ownership
   helpers behaviorally paired with `runtime_native.c` instead of assuming the
   final core-C bundle is already authoritative.
+- If `/proc/<pid>/environ` proves an arena/config flag is set but interpreted
+  module globals revert after nested calls, inspect return-side frame sync.
+  Callee-refreshed overlays are readable snapshots, not caller writes; never
+  copy them back over newer owner-global state unless the caller mutates them.
+  Carry updates with their owner through foreign-module frames, then refresh
+  the matching caller so an outer dirty snapshot cannot clobber a deeper write.
 
 ## Error Triage
 
