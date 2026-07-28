@@ -95,7 +95,7 @@ RuntimeValue arm32_harden_print_canary(void)
 #define TAG_SPECIAL 0x3U
 
 #define ENCODE_INT(v)  ((RuntimeValue)(((uint32_t)(int32_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int32_t)((uint32_t)(v) >> 3))
+#define DECODE_INT(v)  ((int32_t)(v) >> 3)
 
 #define ENCODE_PTR(p)  ((RuntimeValue)((uint32_t)(uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v)  ((void*)((uint32_t)(v) & ~TAG_MASK))

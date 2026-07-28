@@ -10,7 +10,7 @@ typedef intptr_t RuntimeValue;
 #define NIL_VALUE ((RuntimeValue)TAG_SPECIAL)
 
 #define ENCODE_INT(v) ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v) ((int64_t)((uint64_t)(v) >> 3))
+#define DECODE_INT(v) ((int64_t)(v) >> 3)
 #define ENCODE_PTR(p) ((RuntimeValue)((uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v) ((void *)((uintptr_t)(v) & ~TAG_MASK))
 #define IS_INT(v) (((uintptr_t)(v) & TAG_MASK) == TAG_INT)

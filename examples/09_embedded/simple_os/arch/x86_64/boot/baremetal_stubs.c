@@ -248,7 +248,7 @@ static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
 #define TAG_SPECIAL 0x3ULL
 
 #define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int64_t)((uint64_t)(v) >> 3))
+#define DECODE_INT(v)  ((int64_t)(v) >> 3)
 
 #define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v)  ((void*)((uint64_t)(v) & ~TAG_MASK))

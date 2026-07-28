@@ -1356,7 +1356,9 @@ static inline uint64_t rt_core_special_payload(int64_t value) {
 static inline int64_t rt_core_numeric_arg(int64_t value) {
     uint64_t raw = (uint64_t)value;
     if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_INT && raw >= 8) {
-        return (int64_t)(raw >> 3);
+        /* ARITHMETIC shift: boxed negatives are (v << 3); a logical >>3 turned
+         * boxed -1 into 2305843009213693951 instead of -1. */
+        return value >> 3;
     }
     return value;
 }
@@ -1979,7 +1981,10 @@ int64_t rt_to_string(int64_t value) {
 
     char buf[64];
     if (rt_core_is_int(value)) {
-        int64_t n = (int64_t)((uint64_t)value >> 3);
+        /* ARITHMETIC shift: a boxed negative int is stored as (v << 3), so the
+         * unbox must sign-extend. A logical >>3 rendered boxed -1 as
+         * 2305843009213693951 (== (uint64_t)-1 >> 3) -- see rt_core_as_int. */
+        int64_t n = rt_core_as_int(value);
         int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
         return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
     }

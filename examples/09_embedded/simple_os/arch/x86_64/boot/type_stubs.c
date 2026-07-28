@@ -28,7 +28,7 @@ typedef int64_t RuntimeValue;
 
 #define NIL_VALUE       ((RuntimeValue)0x3)
 #define ENCODE_INT(v)   ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3)))
-#define DECODE_INT(v)   ((int64_t)((uint64_t)(v) >> 3))
+#define DECODE_INT(v)   ((int64_t)(v) >> 3)
 #define ENCODE_PTR(p)   ((RuntimeValue)((uint64_t)(uintptr_t)(p) | 1))
 #define DECODE_PTR(v)   ((void *)((uint64_t)(v) & ~(uint64_t)7))
 
