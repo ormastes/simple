@@ -268,6 +268,29 @@ class: `vfs_boot_init_virtio_fat32` (`src/os/services/vfs/vfs_boot_init.spl:1288
 silently resolves to nothing **on every architecture**, not just RV64. Worth its
 own bug; row 16 understates it as an RV64-only gap.
 
+> **RETRACTED 2026-07-28 — both factual claims above are wrong.** See
+> `doc/08_tracking/bug/rt_arm_virtio_blk_prefix_allowlist_defeats_fabrication_guard_2026-07-28.md`.
+> (a) *Method error:* the cited grep was scoped to `src/`, but the definitions
+> live at `examples/09_embedded/simple_os/arch/{arm64,arm32}/boot/baremetal_stubs.c`
+> — **14 real strong definitions each**. The true population is **12 declared
+> externs** (`driver_class.spl:118-132`); "20" counted references, not
+> declarations. (b) *"Every architecture" is false:* `vfs_boot_init_virtio_fat32`
+> has exactly one production caller,
+> `examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl:153`, and
+> tests assert the RV64/x86_64 guests do not call it. The single arch that
+> reaches this code is the one that implements it for real. Row 16's RV64
+> framing was closer to correct than this item's generalization.
+>
+> A **real but different** defect was found in its place:
+> `simpleos_rt_symbol_is_optional_backend`
+> (`src/compiler/70.backend/backend/llvm_native_link.spl:1752`) allowlists
+> `rt_arm_virtio_` by **prefix**, sweeping a storage read path into the
+> "nil means backend unavailable" bucket — the exact mistake that function's own
+> docstring refuses to make for `rt_simd_`. Six `rt_arm_virtio_blk_*` symbols are
+> confirmed `W` (weak) in a built guest ELF. Severity is bounded: the surface is
+> read-only, so the failure mode is silently wrong reads / FAT32 mis-parse, not
+> write-drop or on-media data loss.
+
 **C3 — `stage4_link_undefined_peer_symbols_2026-07-28.md` misattributes its own
 root cause.** Filed today, its heading claims "Root (genuine missing/renamed
 defs, NOT compiler)". Both named symbols are refuted in §1.1: symbol 1's rename
