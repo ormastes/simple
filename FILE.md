@@ -40,7 +40,7 @@ FILE.md files) are allowed.
 | `.agents` | Agent definitions |
 | `.gemini` | Gemini settings |
 | `.github` | GitHub workflows and config |
-| `.spipe` | SPipe state files |
+| `.spipe` | SPipe state files (per-session `.spipe/<slug>/` state; children are not individually declared) |
 | `.simple` | Simple language config |
 | `.vscode` | VS Code settings |
 | `build` | Build output (mutable, includes target/ and bootstrap/) |
