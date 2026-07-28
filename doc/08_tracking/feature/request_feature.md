@@ -11,6 +11,11 @@
 | FR-GPU-QEMU-0001 | simpleos_gpu | P0 | Complete cross-host QEMU GPU acceleration | [link](doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md; doc/02_requirements/nfr/simpleos_qemu_host_gpu_2d.md) | - |
 | FR-GPU-BOARD-0001 | simpleos_gpu | P1 | Add UNO Q Adreno 702 native GPU adapter | [link](doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md; doc/02_requirements/nfr/simpleos_qemu_host_gpu_2d.md) | - |
 | FR-GPU-BOARD-0003 | simpleos_gpu | P1 | Add UP Squared N4200 Intel native GPU adapter | [link](doc/02_requirements/feature/simpleos_qemu_host_gpu_2d.md; doc/02_requirements/nfr/simpleos_qemu_host_gpu_2d.md) | - |
+| FR-COSMOS-001 | cosmos_openssd | P0 | Admit and execute the production SSpec | [link](doc/02_requirements/feature/cosmos_openssd_production_hal.md; doc/02_requirements/nfr/cosmos_openssd_production_hal.md) | - |
+| FR-NVME-FW-TARGETS-0001 | nvme_firmware | P0 | Add explicit QEMU, OpenSSD, and KV260/FPGA profiles | [link](doc/02_requirements/feature/cosmos_openssd_production_hal.md; doc/02_requirements/nfr/cosmos_openssd_production_hal.md) | - |
+| FR-COSMOS-002 | cosmos_openssd | P1 | Complete production package provenance | [link](doc/02_requirements/feature/cosmos_openssd_production_hal.md; doc/02_requirements/nfr/cosmos_openssd_production_hal.md) | - |
+| FR-COSMOS-003 | cosmos_openssd | P0 | Execute physical production acceptance | [link](doc/02_requirements/feature/cosmos_openssd_production_hal.md; doc/02_requirements/nfr/cosmos_openssd_production_hal.md) | - |
+| FR-COSMOS-004 | cosmos_openssd | P2 | Run supplementary UNO Q portability checks | [link](doc/02_requirements/feature/cosmos_openssd_production_hal.md; doc/02_requirements/nfr/cosmos_openssd_production_hal.md) | - |
 | FR-COMPILER-013 | compiler_—_native_list_concat_lowering | P1 | Lower builtin `list + [item]` to fresh-copy push | - | - |
 | FR-DRIVER-0003 | lexer_+_parser_+_hir_+_struct_layout | P2 | Native bitfield syntax `struct Foo @packed { a: u16:4 }` | - | - |
 | ECDSA_P384_P521_RUNTIME_PRIMITIVES_2026_05_02 | ecdsa | P2 | ECDSA-P-384 + ECDSA-P-521 primitives for TLS 1.3 | - | - |

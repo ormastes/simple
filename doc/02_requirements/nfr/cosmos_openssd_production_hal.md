@@ -49,6 +49,10 @@
 - **NFR-012 - Claim discipline.** Compilation, QEMU, static source guards,
   synthetic ELF/bitstream fixtures, and fake Bootgen validate software checks
   only. Physical success requires retained evidence from the identified board.
+- **NFR-013 - Target isolation and extension.** Adding a board shall add a
+  profile and evidence adapter without forking the NVMe command, FTL, or
+  recovery core. A target's unavailable capability shall remain explicit, and
+  evidence from one target shall not satisfy another target's hardware gate.
 
 ## Current Claim and Notes
 
@@ -69,5 +73,5 @@ no current pure-Simple runner for final SSpec/doc generation.
 
 Current status: **BLOCKED/FAIL for production acceptance**. REQ-012 and
 NFR-011 remain board-only and excluded from passing executable `@req` claims.
-Current Stage-4 SSpec/docgen evidence, real Bootgen package, and board proof remain
-required.
+Current Stage-4 SSpec/docgen evidence, complete package provenance, requested
+multi-target profiles, and board proof remain required.

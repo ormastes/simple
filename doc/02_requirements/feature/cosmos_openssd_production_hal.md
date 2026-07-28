@@ -80,6 +80,12 @@ REQ-011 and REQ-012.
   NAND power-loss recovery, PCIe BAR/MSI/reset/DMA/queue behavior, and dual-core
   interrupt/cache coherency stress. Board acceptance shall not be inferred from
   QEMU, compilation, source guards, self-tests, or synthetic Bootgen fixtures.
+- **REQ-013 - Multi-target firmware configuration.** The target-neutral NVMe
+  command, FTL, and recovery core shall select an explicit configuration for
+  Simple simulation, QEMU/FEMU, Cosmos+ OpenSSD 2Ch8Way and 8Ch8Way, and
+  KV260/FPGA. Each profile shall declare geometry, transport, media, MMIO,
+  runner, capability state, and evidence class. Unknown or unavailable
+  hardware targets shall fail closed and shall never execute as the simulator.
 
 ## Current Claim
 
@@ -92,7 +98,9 @@ completion retry, non-retryable post-start completion, and PRP edges. The
 silicon composition now binds persistent FTL/NFC media, 4 KiB-to-16 KiB
 staging, fail-closed UART foreground dispatch, page-tag validation, and
 transactional ECC refresh relocation. No current `bin/release/simple` exists.
-Official Bootgen v2026.1 and the pinned bitstream are available locally, but
-the approved FSBL/real package and all physical board evidence remain absent.
+Official Bootgen v2026.1, the pinned bitstream, vendor FSBL, and a real package
+are retained locally. Complete package-manifest provenance, current SSpec/docgen
+evidence, the requested QEMU/FEMU and KV260/FPGA profile implementations, and
+all physical board evidence remain absent.
 The supported claim is **production BLOCKED/FAIL; silicon acceptance is not
 established**.

@@ -193,3 +193,12 @@ was produced or deployed. The active compiler defect is tracked in
 No current pure-Simple runner exists for final SSpec/doc generation.
 Production status is **BLOCKED/FAIL**. Fresh SSpec/docgen and H2 board proof
 remain required.
+
+# Multi-target boundary
+
+The NVMe command, FTL, journal, and recovery core remains target-neutral.
+Target profiles own geometry, MMIO apertures, transport/media adapters, build
+runner, availability, and evidence class. Simulator, QEMU/FEMU, OpenSSD, and
+KV260/FPGA profiles must be explicit; an unknown or unavailable hardware target
+fails closed instead of inheriting simulator behavior. This extension is
+tracked by `FR-NVME-FW-TARGETS-0001` and is not yet a production claim.

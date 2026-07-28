@@ -1,0 +1,130 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SPEC_DIR="$ROOT/test/03_system/app/nvme_firmware"
+SIM_SPEC="$SPEC_DIR/nvme_firmware_simulation_spec.spl"
+COSMOS_SPEC="$SPEC_DIR/nvme_cosmos_openssd_boot_spec.spl"
+REMAINING_SPEC="$SPEC_DIR/nvme_firmware_remaining_gates_spec.spl"
+TARGET_CONFIG="$ROOT/examples/09_embedded/simpleos_nvme_fw/fw/openssd_config.spl"
+REQUESTS="$ROOT/doc/08_tracking/feature/cosmos_nvme_firmware_remaining_requests_2026-07-28.md"
+TODO_DOC="$ROOT/doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md"
+PACKAGE="$ROOT/src/os/kernel/arch/arm32/cosmos/package_boot.shs"
+ESSENTIAL="$ROOT/scripts/check/check-bootstrap-essential-tools-smoke.shs"
+SIMPLE_BINARY=${SIMPLE_BINARY:-"$ROOT/bin/simple"}
+
+fail() {
+    echo "STATUS: FAIL nvme-firmware-remaining-gates: $1" >&2
+    exit 1
+}
+
+require_file() {
+    [ -f "$1" ] || fail "missing $2: $1"
+}
+
+require_text() {
+    grep -Fq "$2" "$1" || fail "$3"
+}
+
+check_target_matrix() {
+    require_file "$TARGET_CONFIG" "target configuration"
+    require_file "$REQUESTS" "remaining feature requests"
+    require_text "$TARGET_CONFIG" "TARGET_SIMPLE_SIM" "simulator profile missing"
+    require_text "$TARGET_CONFIG" "TARGET_OPENSSD_2CH8WAY" "OpenSSD 2Ch8Way profile missing"
+    require_text "$TARGET_CONFIG" "TARGET_OPENSSD_8CH8WAY" "OpenSSD 8Ch8Way profile missing"
+    require_text "$REQUESTS" "QEMU/FEMU" "QEMU/FEMU target request missing"
+    require_text "$REQUESTS" "KV260/FPGA" "KV260/FPGA target request missing"
+    require_text "$REQUESTS" "fail closed" "unknown-target fail-closed contract missing"
+    echo "TARGET simple-sim IMPLEMENTED"
+    echo "TARGET openssd-2ch8way IMPLEMENTED"
+    echo "TARGET openssd-8ch8way IMPLEMENTED"
+    echo "TARGET qemu-femu REQUESTED"
+    echo "TARGET kv260-fpga POSTPONED"
+}
+
+check_board_evidence() {
+    evidence_dir=$1
+    result="$evidence_dir/result.md"
+    manifest="$evidence_dir/manifest.txt"
+    require_file "$result" "board result matrix"
+    require_file "$manifest" "board campaign manifest"
+    for id in BT-001 BT-002 BT-003 BT-004 BT-005 BT-006; do
+        grep -Eq "^${id}[[:space:]]*\\|[[:space:]]*PASS[[:space:]]*\\|" "$result" ||
+            fail "$id is not retained as PASS"
+    done
+    for key in board.serial source.commit package.boot_bin.sha256; do
+        grep -Eq "^${key}=[^[:space:]].*" "$manifest" ||
+            fail "board manifest missing $key"
+    done
+    echo "STATUS: PASS cosmos-board-evidence-bundle"
+}
+
+self_test() {
+    require_file "$SIM_SPEC" "simulation SSpec"
+    require_file "$COSMOS_SPEC" "Cosmos SSpec"
+    require_file "$REMAINING_SPEC" "remaining-gates SSpec"
+    require_file "$TODO_DOC" "remaining TODO document"
+    require_file "$PACKAGE" "Cosmos package wrapper"
+    require_file "$ESSENTIAL" "pure-Simple admission gate"
+    check_target_matrix
+
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT INT TERM
+    mkdir -p "$work/incomplete" "$work/complete"
+    printf '%s\n' 'BT-001 | PASS | boot.log' >"$work/incomplete/result.md"
+    : >"$work/incomplete/manifest.txt"
+    if (check_board_evidence "$work/incomplete") >/dev/null 2>&1; then
+        fail "incomplete board evidence was accepted"
+    fi
+    for id in BT-001 BT-002 BT-003 BT-004 BT-005 BT-006; do
+        printf '%s | PASS | %s.log\n' "$id" "$id" >>"$work/complete/result.md"
+    done
+    cat >"$work/complete/manifest.txt" <<'EOF'
+board.serial=self-test-board
+source.commit=0123456789abcdef
+package.boot_bin.sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+EOF
+    check_board_evidence "$work/complete" >/dev/null
+    echo "STATUS: PASS nvme-firmware-remaining-gates self-test"
+    echo "STATUS: POSTPONED uno-q-supplementary environment-unavailable"
+    echo "STATUS: POSTPONED cosmos-board BT-001..BT-006"
+}
+
+post_bootstrap() {
+    [ -x "$SIMPLE_BINARY" ] || fail "missing executable pure-Simple runtime: $SIMPLE_BINARY"
+    SIMPLE_BINARY="$SIMPLE_BINARY" sh "$ESSENTIAL"
+    sh "$PACKAGE" --self-test
+    for spec in "$SIM_SPEC" "$COSMOS_SPEC" "$REMAINING_SPEC"; do
+        SIMPLE_LIB="$ROOT/src" "$SIMPLE_BINARY" test "$spec" \
+            --mode=interpreter --no-session-daemon --sequential --no-db \
+            --no-cache --assert-ran --fail-fast
+        SIMPLE_LIB="$ROOT/src" "$SIMPLE_BINARY" spipe-docgen "$spec" \
+            --output "$ROOT/doc/06_spec" --no-index
+    done
+    find "$ROOT/doc/06_spec" -name '*_spec.spl' -print -quit | grep -q . &&
+        fail "executable SSpec found under doc/06_spec"
+    echo "STATUS: PASS nvme-firmware-post-bootstrap-host"
+    echo "STATUS: POSTPONED cosmos-production pending-BT-001..BT-006"
+}
+
+uno_q_build() {
+    [ -x "$SIMPLE_BINARY" ] || fail "missing executable pure-Simple runtime: $SIMPLE_BINARY"
+    SIMPLE_BINARY="$SIMPLE_BINARY" sh "$ESSENTIAL"
+    sh "$ROOT/scripts/os/run_simpleos_stm32u585.shs" --build-only
+    echo "STATUS: PASS uno-q-supplementary-build"
+    echo "STATUS: NOT-APPLICABLE cosmos-production-acceptance"
+}
+
+case "${1:---self-test}" in
+    --self-test) self_test ;;
+    --post-bootstrap) post_bootstrap ;;
+    --uno-q-build) uno_q_build ;;
+    --board-evidence)
+        [ "$#" -eq 2 ] || fail "--board-evidence requires a campaign directory"
+        check_board_evidence "$2"
+        ;;
+    *)
+        echo "usage: $0 --self-test | --post-bootstrap | --uno-q-build | --board-evidence DIR" >&2
+        exit 2
+        ;;
+esac

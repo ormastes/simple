@@ -109,6 +109,13 @@ has real Bootgen output. Production acceptance still requires identified-board
 provenance and retained board evidence. Do not work around the gates by
 defining tokens manually without a verified artifact and evidence record.
 
+The shared NVMe firmware also has implemented Simple-simulator, OpenSSD
+2Ch8Way, and OpenSSD 8Ch8Way configurations. Explicit QEMU/FEMU and KV260/FPGA
+profiles are requested under `FR-NVME-FW-TARGETS-0001`; until implemented they
+remain unavailable and must not fall back to the simulator. New targets add a
+profile and evidence adapter rather than forking the command, FTL, or recovery
+core.
+
 The production manifest must include at least:
 
 ```text
@@ -311,6 +318,28 @@ Before production can move from **BLOCKED/FAIL**, complete:
 1. One current pure-Simple SSpec run/docgen when a current runner is available.
 2. Execute and retain the BT-001..BT-006 board campaign with the pinned package.
    REQ-012 and NFR-011 remain board-only.
+
+After the runner blocker is solved, execute the consolidated host gate:
+
+```sh
+SIMPLE_BINARY=bin/release/simple \
+  sh scripts/check/check-nvme-firmware-remaining-gates.shs --post-bootstrap
+```
+
+An optional UNO Q portability build is supplementary only:
+
+```sh
+SIMPLE_BINARY=bin/release/simple \
+  sh scripts/check/check-nvme-firmware-remaining-gates.shs --uno-q-build
+```
+
+Physical execution remains postponed until the target environment exists. The
+retained campaign can then be checked without running destructive commands:
+
+```sh
+sh scripts/check/check-nvme-firmware-remaining-gates.shs \
+  --board-evidence evidence/cosmos/<UTC>-<board-serial>
+```
 
 ## Build the Board Package
 
