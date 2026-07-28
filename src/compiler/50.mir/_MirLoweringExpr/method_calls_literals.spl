@@ -791,6 +791,19 @@ impl MirLowering:
             if self.is_runtime_value_local(some_val_uw.id):
                 self.mark_runtime_value_local(result_local_uw.id)
 
+            # `.unwrap()` yields the SAME value the receiver carried, so it must
+            # carry the receiver's struct identity across too. Without this the
+            # payload's struct name (registered on a dict/array read by
+            # lower_dict_runtime_get / lower_array_lit) dies at the fresh merge
+            # temp, and resolve_field_index's fallback chain defaults every
+            # field access on `opt.unwrap()` to index 0 -- silently reading
+            # field 0 for `.n` on `Tr(name, n)`. Index-read via `contains_key`
+            # already avoided this only because it skips unwrap entirely.
+            # contains + index read (never Dict.get) per the native
+            # struct-valued Dict.get landmine this same change fixes.
+            if self.struct_value_syms.contains(receiver_local.id):
+                self.struct_value_syms[result_local_uw.id] = self.struct_value_syms[receiver_local.id]
+
             var b_merge_uw = self.builder
             b_merge_uw.switch_to_block(merge_block_uw)
             self.builder = b_merge_uw
@@ -1244,22 +1257,22 @@ impl MirLowering:
         if receiver_is_dict and method == "get" and args.len() == 1:
             val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
             val key_local = self.lower_dict_key(args[0].value)
-            var get_value_type = MirType.i64()
-            val dict_mir_type_get = self.local_mir_type_of(receiver_local)
-            if dict_mir_type_get != nil:
-                match dict_mir_type_get.kind:
-                    case Dict(_, value_type): get_value_type = value_type
-                    case _: ()
-            val get_op2 = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_dict_get"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
-            ))
-            var b_get2 = self.builder
-            val get_res2 = b_get2.emit_call(get_op2, [mir_operand_copy(receiver_local), mir_operand_copy(key_local)], MirType.i64())
-            self.builder = b_get2
-            if val get_local2 = get_res2:
-                return self.decode_runtime_value(get_local2, get_value_type)
-            return receiver_local
+            # Bug native_dict_get_struct_value_corrupt_option_2026-07-27: this
+            # arm used to inline its OWN weaker copy of the read -- a single
+            # unguarded `local_mir_type_of` lookup that left the value type at
+            # the `MirType.i64()` default whenever the receiver local was not
+            # tracked with a `Dict(_, V)` MIR type (a `Dict`-typed struct FIELD
+            # read is exactly that shape: local_is_runtime_dict says yes via
+            # the id-keyed runtime_dict_locals set, while the projection temp
+            # is typed i64). decode_runtime_value then took its is_integer arm
+            # and right-shifted a struct value's heap POINTER by 3, so
+            # `d.get(k)` on a hit handed back a wild address that segfaulted on
+            # the first field read, and it never registered the value's struct
+            # name for resolve_field_index either. A miss stayed correct only
+            # because nil survives the shift as nil. Route through the shared
+            # helper the `d[k]` index read uses, so both readers of rt_dict_get
+            # resolve, decode and register identically.
+            return self.lower_dict_runtime_get(receiver, receiver_local, key_local)
 
         # `.remove(key)` / `.delete(key)` -> rt_dict_remove (mutates in place,
         # returns whether the key was present -- discarded here). The oracle
