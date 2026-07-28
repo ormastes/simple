@@ -339,11 +339,15 @@ hits in `src/compiler_rust/**/*.rs` at `origin/main`; it comes from the
 
 ### Task #145 const-0 placeholder — the guard is a warning, not a hard fail
 
-The 2026-07-17 doc above describes the Task #145 guard as "converting
-unresolved calls into hard errors rather than silently emitting a placeholder".
-**That is not what the code does**, and the difference matters because a
-const-0 where a value was expected is the same failure shape as the nil
-sentinel reading as a real integer — this report's own defect class.
+The 2026-07-17 doc above *originally* described the Task #145 guard as
+"converting unresolved calls into hard errors rather than silently emitting a
+placeholder". **That is not what the code does**, and the difference matters
+because a const-0 where a value was expected is the same failure shape as the
+nil sentinel reading as a real integer — this report's own defect class.
+(That doc has since been corrected in `c95282e20d1`, which also scoped its
+Medium severity to the two methods it reported and noted that the placeholder
+was firing in its own repro transcript all along. The two docs now agree; the
+analysis below is kept because it is the evidence.)
 
 At `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:2485-2500`
 the unresolved path calls `self.error(...)` and then *continues*, emitting the
