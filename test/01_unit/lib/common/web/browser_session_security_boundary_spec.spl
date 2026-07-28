@@ -686,6 +686,7 @@ describe "BrowserSession production security boundary":
                         fail("Expected document.cookie text")
             Err(e):
                 fail("Expected document.cookie read: {e}")
+
         match session.eval_script("typeof __simple_modules"):
             Ok(value):
                 match value:
@@ -707,6 +708,36 @@ describe "BrowserSession production security boundary":
                 expect(request.headers.contains("forged=yes")).to_be(false)
             nil:
                 fail("Expected sanitized same-origin fetch")
+
+    it "defaults cookie Path to the response URL directory":
+        var session = BrowserSession.new()
+        val started = session.begin_network_navigation(
+            "https://safe.test/account/login", "GET", "", "", ""
+        )
+        expect(started.is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(request):
+                val committed = session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: request.id,
+                        kind: request.kind,
+                        url: request.url,
+                        status: 200,
+                        headers: "Set-Cookie: account=private; Secure",
+                        body: "<html><body>account</body></html>",
+                        error: ""
+                    )
+                )
+                expect(committed.is_ok()).to_be(true)
+            nil:
+                fail("Expected account document request")
+
+        expect(session.cookie_header_for_url(
+            "https://safe.test/account/next"
+        )).to_equal("account=private")
+        expect(session.cookie_header_for_url(
+            "https://safe.test/public"
+        )).to_equal("")
 
     it "rejects a fetch redirect that crosses the page origin":
         var session = BrowserSession.new()

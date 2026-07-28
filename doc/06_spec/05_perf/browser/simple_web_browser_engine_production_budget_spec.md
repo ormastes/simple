@@ -4,15 +4,15 @@
 
 | Tests | Implemented | Explicit blockers |
 |-------|-------------|-------------------|
-| 7 | 1 | 6 |
+| 8 | 2 | 6 |
 
 This manual keeps unsupported production claims visible. The implemented
-current-host slice binds the executable to `HOSTED_WM_ARTIFACT` and
+current-host slices bind the executable to `HOSTED_WM_ARTIFACT` and
 `HOSTED_WM_ARTIFACT_SHA256`, runs 32 sequential hidden renderer subprocesses,
-obtains a real frame from each, and verifies bounded process teardown. It does
-not claim 60-minute RSS, GC, 10,000-cycle stability, unchanged-frame allocation
-avoidance, or Engine2D/font lifecycle counts because those metrics are not
-exposed by the production renderer today.
+obtains a real frame from each, verifies bounded process teardown, and records
+one accepted-input-to-completed-present interval on the real hosted winit path.
+It does not claim an input p95, FPS, 60-minute RSS, GC, 10,000-cycle stability,
+unchanged-frame allocation avoidance, or Engine2D/font lifecycle counts.
 
 ## Required admission inputs
 
@@ -28,6 +28,22 @@ Its evidence receipt records
 focused scenario succeeds.
 
 ## Implemented scenario
+
+### Record one admitted input-to-present sample within 50 ms
+
+1. On platform event ingress, capture a positive monotonic `input_received_us`;
+   retain it only when that event is semantically accepted, bound to its
+   `event_id` and `mutation_revision`.
+2. Immediately after `hosted_winit_present_pure_simple_pixels` reports a
+   successful native present, record `present_completed_us`, the real winit
+   `present_count`, and compositor `skipped_frame_count`.
+3. Require `input_to_present_us` to equal the monotonic timestamp difference,
+   be positive, and be at most 50,000 microseconds.
+4. Require the snapshot render event/revision to equal the input receipt and
+   run the focused perf scenario against the same admitted artifact digest.
+
+This is one current-host sample. It is not NFR-WEB-BROWSER-004 p95 evidence and
+does not cover every required input class.
 
 ### Close 32 admitted renderer subprocesses within bounded intervals
 
@@ -72,7 +88,8 @@ The following scenarios intentionally fail until their named production metrics
 and receipts exist:
 
 - warm/cold startup, first-render, and navigation percentiles;
-- changed/unchanged frame and input-to-present percentiles;
+- changed/unchanged frame percentiles and input-to-present p95 across every
+  required input class;
 - 60-minute heap/RSS, browser-resource, and 10,000-cycle stability;
 - GC pause, callback-queue, and post-cancel activity;
 - Engine2D device/font/render-session/readback create-release counters;

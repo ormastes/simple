@@ -116,11 +116,12 @@ structured interaction are not production browser evidence.
   `scripts/check/check-linux-hosted-wm-live-window-evidence.shs`. The spec
   hashes the exact native `src/os/hosted/hosted_entry.spl` artifact before
   launch, and that wrapper runs the focused static HTML/CSS, animation,
-  controls, native-controls/form-submit, default-cancellation, Reload/Home,
+  controls, native-controls/form-submit, Tab/Shift+Tab focus traversal,
+  default-cancellation, Reload/Home,
   page-link, Favorite,
   stopped-navigation, unsupported-content, Node/native denial, sandbox,
   scheme-denial, oversized-protocol denial, and lifecycle scenarios before
-  live-window capture.
+  live-window capture, then release-gates the admitted input-to-present sample.
   Standalone runs are not artifact admission evidence.
 - text/HTML/protocol/exec/log/artifact:
   `build/test-artifacts/<spec-relative-path>/`

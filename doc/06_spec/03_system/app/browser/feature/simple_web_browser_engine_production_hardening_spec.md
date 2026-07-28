@@ -92,6 +92,21 @@ successful `agree=on`, `plan=pro`, `tier=plus`, `notes=ready`, and
 `action=save` controls. DOM, pixel, callback, and request evidence are all
 required; no mock success marker substitutes for navigation creation.
 
+## Hosted keyboard focus traversal evidence
+
+The focus-traversal scenario begins with an unfocused text input and button,
+then sends real hosted Tab key-down/key-up edges. The first Tab must report the
+input semantic target, run its focus callback, publish live focused DOM state,
+and turn the input from red to blue. The next Tab must report the button,
+publish the input's blur state, and turn the button green. Shift+Tab must return
+the semantic target and blue focused pixels to the input. Callback counts,
+key-edge receipts, DOM attributes, and raster colors are all required.
+
+Hosted wheel input was audited but is not claimed here. The current compositor
+can offset and repaint a hovered window for a wheel delta, but that route does
+not yet expose a page semantic target or browser-owned DOM scroll state; pixel
+movement alone is insufficient for this production user-flow contract.
+
 ## Hosted rejected-navigation evidence
 
 The rejection scenario starts from a rendered red page. It submits a

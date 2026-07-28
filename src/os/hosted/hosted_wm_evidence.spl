@@ -7,7 +7,6 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
-
 val WM_EVIDENCE_SNAPSHOT_ENV: text = "SIMPLE_WM_EVIDENCE_SNAPSHOT_PATH"
 val WM_EVIDENCE_CAPTURE_ENV: text = "SIMPLE_WM_EVIDENCE_CAPTURE_PATH"
 val WM_EVIDENCE_INPUT_ENV: text = "SIMPLE_WM_EVIDENCE_INPUT_FIFO"
@@ -49,6 +48,11 @@ struct HostWmInputReceipt:
     callback_count: i64
     mutation_revision: i64
     semantic_reason: text
+    input_received_us: i64
+    present_completed_us: i64
+    input_to_present_us: i64
+    present_count: i64
+    skipped_frame_count: i64
 
 fn host_wm_input_receipt() -> HostWmInputReceipt:
     HostWmInputReceipt(
@@ -71,7 +75,12 @@ fn host_wm_input_receipt() -> HostWmInputReceipt:
         semantic_target_id: "",
         callback_count: 0,
         mutation_revision: 0,
-        semantic_reason: ""
+        semantic_reason: "",
+        input_received_us: 0,
+        present_completed_us: 0,
+        input_to_present_us: 0,
+        present_count: 0,
+        skipped_frame_count: 0
     )
 
 fn host_wm_input_record_key(receipt: HostWmInputReceipt, scancode: i64, keycode: i64, down: bool) -> HostWmInputReceipt:
@@ -112,7 +121,10 @@ fn host_wm_input_record_pointer_button(receipt: HostWmInputReceipt, button: i64,
     out.last_pointer_button = button
     out
 
-fn host_wm_input_record_semantic(receipt: HostWmInputReceipt, event_id: i64, wm_target_id: i64, semantic_target_id: text, callback_count: i64, mutation_revision: i64, reason: text) -> HostWmInputReceipt:
+fn host_wm_input_record_semantic(receipt: HostWmInputReceipt, event_id: i64, wm_target_id: i64, semantic_target_id: text, callback_count: i64, mutation_revision: i64, reason: text, input_received_us: i64) -> HostWmInputReceipt:
+    if (event_id <= 0 or callback_count <= 0 or reason != "" or
+        input_received_us <= 0):
+        return receipt
     var out = receipt
     out.event_id = event_id
     out.event_origin = "screen"
@@ -121,6 +133,29 @@ fn host_wm_input_record_semantic(receipt: HostWmInputReceipt, event_id: i64, wm_
     out.callback_count = callback_count
     out.mutation_revision = mutation_revision
     out.semantic_reason = reason
+    out.input_received_us = 0
+    out.present_completed_us = 0
+    out.input_to_present_us = 0
+    out.present_count = 0
+    out.skipped_frame_count = 0
+    out.input_received_us = input_received_us
+    out
+
+fn host_wm_input_record_presented(
+    receipt: HostWmInputReceipt,
+    present_completed_us: i64,
+    present_count: i64,
+    skipped_frame_count: i64
+) -> HostWmInputReceipt:
+    var out = receipt
+    if (out.event_id <= 0 or out.input_received_us <= 0 or
+        present_completed_us < out.input_received_us or present_count <= 0 or
+        skipped_frame_count < 0):
+        return out
+    out.present_completed_us = present_completed_us
+    out.input_to_present_us = present_completed_us - out.input_received_us
+    out.present_count = present_count
+    out.skipped_frame_count = skipped_frame_count
     out
 
 fn host_wm_evidence_config(snapshot_path: text, capture_path: text, input_fifo: text) -> HostWmEvidenceConfig:
@@ -162,7 +197,7 @@ fn _json_text(value: text) -> text:
     "\"{escaped_newlines}\""
 
 fn host_wm_input_receipt_json(receipt: HostWmInputReceipt) -> text:
-    "{\"key_down_count\":{receipt.key_down_count},\"key_up_count\":{receipt.key_up_count},\"pointer_move_count\":{receipt.pointer_move_count},\"pointer_button_down_count\":{receipt.pointer_button_down_count},\"pointer_button_up_count\":{receipt.pointer_button_up_count},\"text_commit_count\":{receipt.text_commit_count},\"last_text\":{_json_text(receipt.last_text)},\"last_event_kind\":{_json_text(receipt.last_event_kind)},\"last_scancode\":{receipt.last_scancode},\"last_keycode\":{receipt.last_keycode},\"last_pointer_x\":{receipt.last_pointer_x},\"last_pointer_y\":{receipt.last_pointer_y},\"last_pointer_button\":{receipt.last_pointer_button},\"event_id\":{receipt.event_id},\"event_origin\":{_json_text(receipt.event_origin)},\"wm_target_id\":{receipt.wm_target_id},\"semantic_target_id\":{_json_text(receipt.semantic_target_id)},\"callback_count\":{receipt.callback_count},\"mutation_revision\":{receipt.mutation_revision},\"semantic_reason\":{_json_text(receipt.semantic_reason)}}"
+    "{\"key_down_count\":{receipt.key_down_count},\"key_up_count\":{receipt.key_up_count},\"pointer_move_count\":{receipt.pointer_move_count},\"pointer_button_down_count\":{receipt.pointer_button_down_count},\"pointer_button_up_count\":{receipt.pointer_button_up_count},\"text_commit_count\":{receipt.text_commit_count},\"last_text\":{_json_text(receipt.last_text)},\"last_event_kind\":{_json_text(receipt.last_event_kind)},\"last_scancode\":{receipt.last_scancode},\"last_keycode\":{receipt.last_keycode},\"last_pointer_x\":{receipt.last_pointer_x},\"last_pointer_y\":{receipt.last_pointer_y},\"last_pointer_button\":{receipt.last_pointer_button},\"event_id\":{receipt.event_id},\"event_origin\":{_json_text(receipt.event_origin)},\"wm_target_id\":{receipt.wm_target_id},\"semantic_target_id\":{_json_text(receipt.semantic_target_id)},\"callback_count\":{receipt.callback_count},\"mutation_revision\":{receipt.mutation_revision},\"semantic_reason\":{_json_text(receipt.semantic_reason)},\"input_received_us\":{receipt.input_received_us},\"present_completed_us\":{receipt.present_completed_us},\"input_to_present_us\":{receipt.input_to_present_us},\"present_count\":{receipt.present_count},\"skipped_frame_count\":{receipt.skipped_frame_count}}"
 
 # `compositor_json` is the receiver-built HostCompositor.evidence_compositor_json()
 # fragment. Passing the HostCompositor aggregate by value into this free

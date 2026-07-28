@@ -2,7 +2,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 25 | 25 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 ## Covered boundaries
 
@@ -17,6 +17,8 @@
   writes a cross-origin `location`, and reject cross-origin History API URLs.
 - Permit same-origin fetch within request limits.
 - Keep HttpOnly/transport cookie state outside page-visible JavaScript.
+- Derive a missing cookie `Path` from the response URL directory so account
+  cookies are not widened to unrelated paths on the same host.
 - Enforce document CSP before inline/external style, JavaScript, Simple Script,
   module/Wasm, and fetch dispatch.
 - Recheck CSP on every normalized/HSTS-upgraded style, script, module, Wasm,

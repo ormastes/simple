@@ -1100,3 +1100,15 @@ implementation in progress / target evidence blocked
   present-completion timestamps bound to event/revision, changed-frame timing
   and present counters, plus wrapper percentile aggregation. Snapshot-only
   retained-frame identity performs no presentation and cannot count as timing.
+- Cookie responses without a valid explicit Path now derive the RFC directory
+  path from the response URL; focused evidence sends `/account/login` cookies
+  to `/account/next` but not `/public`.
+- Hosted Tab and Shift+Tab evidence now binds focus/blur callbacks, semantic
+  targets, DOM attributes, and changed pixels. Wheel remains open because the
+  compositor route has no page semantic target or BrowserSession scroll state.
+- The hosted receipt now captures the platform-event ingress clock, retains it
+  only for the same accepted semantic event, and records completed-present
+  clock, exact delta, event/revision binding, real present count, and skipped
+  frames. The wrapper gates one sample at 50 ms; no percentile/FPS claim is made.
+- Deterministic admitted-worker crash/timeout evidence remains open because no
+  public test seam can safely kill, pause, or fault the admitted child.

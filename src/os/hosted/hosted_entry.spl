@@ -70,7 +70,8 @@ use os.hosted.hosted_wm_evidence.{
     host_wm_input_record_semantic,
     host_wm_input_record_text,
     host_wm_input_record_pointer_button,
-    host_wm_input_record_pointer_move
+    host_wm_input_record_pointer_move,
+    host_wm_input_record_presented
 }
 
 extern fn rt_winit_event_loop_new() -> i64
@@ -726,6 +727,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             shared_wm_motion_background_consume_due(motion_due)
         var ev = rt_winit_event_loop_poll_events(el, 1)
         while ev != 0:
+            val input_received_us = rt_time_now_micros()
             val kind = rt_winit_event_get_type(ev)
             if kind == EVT_CLOSE:
                 if surface.phase == HostDisplayTransitionPhase.Requested or surface.phase == HostDisplayTransitionPhase.AwaitingResize:
@@ -934,7 +936,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     input_receipt = host_wm_input_record_semantic(
                         input_receipt, semantic_event_id, target.window_id,
                         semantic_target_id, callback_count,
-                        mutation_revision, action_reason
+                        mutation_revision, action_reason, input_received_us
                     )
                     print "[hosted-wm] semantic event_origin=browser-chrome event_id={semantic_event_id} wm_target_id={target.window_id} semantic_target_id={semantic_target_id} callback_count={callback_count} reason={action_reason}"
                 elif button == 0 and content_target != nil:
@@ -955,7 +957,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             input_receipt, semantic_event_id,
                             target.window_id, "browser:page",
                             callback_count, comp.render_revision,
-                            action_reason
+                            action_reason, input_received_us
                         )
                     else:
                         val dispatch = web_sessions.dispatch_pointer(
@@ -968,7 +970,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             dispatch.wm_target_id,
                             dispatch.semantic_target_id,
                             dispatch.callback_count,
-                            dispatch.mutation_revision, dispatch.reason
+                            dispatch.mutation_revision, dispatch.reason,
+                            input_received_us
                         )
                         if dispatch.mutation_revision > 0:
                             comp = host_compositor_update_window_content(
@@ -1054,7 +1057,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             "browser:parent#address"
                         else:
                             "browser:page",
-                        callback_count, comp.render_revision, action_reason
+                        callback_count, comp.render_revision, action_reason,
+                        input_received_us
                     )
                 elif focused > 0:
                     semantic_event_id = semantic_event_id + 1
@@ -1068,7 +1072,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         dispatch.wm_target_id,
                         dispatch.semantic_target_id,
                         dispatch.callback_count,
-                        dispatch.mutation_revision, dispatch.reason
+                        dispatch.mutation_revision, dispatch.reason,
+                        input_received_us
                     )
                     if dispatch.callback_count > 0:
                         comp = host_compositor_update_window_content(
@@ -1170,7 +1175,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             else:
                                 "browser:page",
                             callback_count, comp.render_revision,
-                            action_reason
+                            action_reason, input_received_us
                         )
                     elif focused > 0:
                         semantic_event_id = semantic_event_id + 1
@@ -1182,7 +1187,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             dispatch.wm_target_id,
                             dispatch.semantic_target_id,
                             dispatch.callback_count,
-                            dispatch.mutation_revision, dispatch.reason
+                            dispatch.mutation_revision, dispatch.reason,
+                            input_received_us
                         )
                         if dispatch.callback_count > 0:
                             comp = host_compositor_update_window_content(
@@ -1343,9 +1349,14 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 print "ERROR: hosted WM live pure-Simple frame presentation failed"
                 running = false
                 continue
+            val present_completed_us = rt_time_now_micros()
             if input_receipt.event_id > presented_event_id:
                 presented_event_id = input_receipt.event_id
                 presented_mutation_revision = input_receipt.mutation_revision
+                input_receipt = host_wm_input_record_presented(
+                    input_receipt, present_completed_us,
+                    presenter.present_count, comp.skipped_frame_count
+                )
             if warmup_frames < 12:
                 warmup_frames = warmup_frames + 1
                 if warmup_frames == 12:

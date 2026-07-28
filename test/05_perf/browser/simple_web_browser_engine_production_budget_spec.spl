@@ -18,6 +18,55 @@ val PRODUCTION_BUDGET_HTML = (
     "<div style='width:16px;height:16px;background:#224466'>budget</div>"
 )
 val SHORT_CYCLE_RSS_LIMIT_KIB: i64 = 393_216
+val SINGLE_INPUT_TO_PRESENT_LIMIT_US: i64 = 50_000
+
+fn _required_positive_env_i64(name: text) -> i64:
+    val value = env_get(name).to_i64() ?? 0
+    if value <= 0:
+        fail("{name} must be a positive admitted receipt value")
+    value
+
+fn _require_single_input_to_present_evidence():
+    val artifact = env_get("HOSTED_WM_ARTIFACT")
+    val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+    if artifact == "" or expected_artifact_sha.len() != 64 or
+        file_hash_sha256(artifact) != expected_artifact_sha:
+        fail("input-to-present receipt is not bound to the admitted artifact")
+    val input_received_us = _required_positive_env_i64(
+        "HOSTED_WM_INPUT_RECEIVED_US"
+    )
+    val present_completed_us = _required_positive_env_i64(
+        "HOSTED_WM_PRESENT_COMPLETED_US"
+    )
+    val input_to_present_us = _required_positive_env_i64(
+        "HOSTED_WM_INPUT_TO_PRESENT_US"
+    )
+    val event_id = _required_positive_env_i64("HOSTED_WM_INPUT_EVENT_ID")
+    val mutation_revision = _required_positive_env_i64(
+        "HOSTED_WM_INPUT_MUTATION_REVISION"
+    )
+    val present_count = _required_positive_env_i64("HOSTED_WM_PRESENT_COUNT")
+    val skipped_frame_count = env_get(
+        "HOSTED_WM_SKIPPED_FRAME_COUNT"
+    ).to_i64() ?? -1
+    expect(present_completed_us >= input_received_us).to_be(true)
+    expect(
+        present_completed_us - input_received_us
+    ).to_equal(input_to_present_us)
+    expect(input_to_present_us).to_be_less_than(
+        SINGLE_INPUT_TO_PRESENT_LIMIT_US + 1
+    )
+    expect(event_id).to_be_greater_than(0)
+    expect(mutation_revision).to_be_greater_than(0)
+    expect(present_count).to_be_greater_than(0)
+    expect(skipped_frame_count).to_be_greater_than(-1)
+    step(
+        "Record one input-to-present sample input_to_present_us=" +
+        input_to_present_us.to_text() + " event_id=" + event_id.to_text() +
+        " mutation_revision=" + mutation_revision.to_text() +
+        " present_count=" + present_count.to_text() +
+        " skipped_frame_count=" + skipped_frame_count.to_text()
+    )
 
 fn _proc_status_kib(pid: i64, label: text) -> i64:
     val path = "/proc/{pid}/status"
@@ -165,11 +214,19 @@ describe "Production Simple browser performance and GC budgets":
     # @manual: show
     # @capture(log)
     # @capture(artifact)
-    it "should meet changed unchanged frame and input-to-present budgets":
+    it "should meet changed and unchanged frame budgets":
         _browser_budget_fixture()
-        step("Run animation pointer keyboard text and scroll workloads")
+        step("Run changed and retained-frame workloads")
         _check_budget_row()
         _require_production_budget_evidence()
+
+    # @manual: show
+    # @capture(log)
+    # @capture(artifact)
+    it "should record one admitted input-to-present sample within 50 ms":
+        _browser_budget_fixture()
+        step("Bind one accepted input event to the completed production present")
+        _require_single_input_to_present_evidence()
 
     # @manual: show
     # @capture(log)
