@@ -223,6 +223,32 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        // `xs.get(i)` on an array is the SAME read as `xs[i]`, but the generic
+        // dotted-name path emitted a bare `rt_index_get` and fed the tag-boxed
+        // slot word (`rt_value_int(v) == v << 3`) straight into an int-typed
+        // VReg — so every `[i64].get(i)` came back exactly 8x too large,
+        // silently, exit 0. `xs[i]` is correct precisely because
+        // `lower_index_expr` pairs the read with an explicit
+        // `UnboxInt`/`UnboxFloat` (+ `UnitNarrow` for narrow element widths).
+        // Route `.get(i)` through that exact path. This sits BEFORE the receiver
+        // and args are lowered, so nothing is evaluated twice. Dict/String/tuple
+        // receivers are untouched — `receiver_is_array` gates it.
+        // See doc/08_tracking/bug/list_get_returns_tag_boxed_value_shifted_left_3_2026-07-28.md
+        if method == "get" && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
+            let element_ty = self
+                .type_registry
+                .and_then(|tr| {
+                    tr.get(receiver.ty)
+                        .or_else(|| receiver_local_ty.and_then(|ty| tr.get(ty)))
+                })
+                .and_then(|ty| match ty {
+                    HirType::Array { element, .. } => Some(*element),
+                    _ => None,
+                })
+                .unwrap_or(TypeId::ANY);
+            return self.lower_index_expr(receiver, &args[0], element_ty);
+        }
+
         // rt_array_push returns bool, not a new pointer — no store-back needed.
         let _receiver_local_index: Option<usize> = None;
 
@@ -329,6 +355,73 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // `first` / `last` / `pop` hand back an array SLOT verbatim, and array
+        // slots hold tag-boxed values (`rt_value_int(v) == v << 3`). The generic
+        // dotted-name path fed that tagged word straight into an int-typed VReg,
+        // so on the JIT every `[i64].first()/.last()/.pop()` read exactly 8x too
+        // large — silently, exit 0. The `arr[i]` path is correct precisely
+        // because IndexGet is always paired with an explicit `UnboxInt` (see
+        // `compile_index_get`: codegen deliberately returns the RuntimeValue raw
+        // and leaves type-specific unboxing to MIR). Restore that pairing here.
+        // Only native scalar element types unbox; text/struct/array elements are
+        // already valid RuntimeValue pointers and must pass through untouched.
+        if args.is_empty() && matches!(method, "first" | "last" | "pop") {
+            let element_ty = self
+                .type_registry
+                .and_then(|tr| {
+                    tr.get(receiver.ty)
+                        .or_else(|| receiver_local_ty.and_then(|ty| tr.get(ty)))
+                })
+                .and_then(|ty| match ty {
+                    HirType::Array { element, .. } => Some(*element),
+                    _ => None,
+                });
+            if let Some(element_ty) = element_ty {
+                let rt_name = match method {
+                    "first" => "rt_array_first",
+                    "last" => "rt_array_last",
+                    _ => "rt_array_pop",
+                };
+                let needs_int_unbox = matches!(
+                    element_ty,
+                    TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::BOOL
+                );
+                let needs_float_unbox = matches!(element_ty, TypeId::F32 | TypeId::F64);
+                if needs_int_unbox || needs_float_unbox {
+                    return self.with_func(|func, current_block| {
+                        let raw_result = func.new_vreg();
+                        let unboxed = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(raw_result),
+                            target: crate::mir::effects::CallTarget::from_name(rt_name),
+                            args: vec![receiver_reg],
+                        });
+                        if needs_int_unbox {
+                            block.instructions.push(MirInst::UnboxInt {
+                                dest: unboxed,
+                                value: raw_result,
+                            });
+                        } else {
+                            block.instructions.push(MirInst::UnboxFloat {
+                                dest: unboxed,
+                                value: raw_result,
+                            });
+                        }
+                        unboxed
+                    });
+                }
+            }
+        }
+
         let is_array_append_method = method == "push" || method == "append";
 
         if is_array_append_method
@@ -429,6 +522,56 @@ impl<'a> MirLowerer<'a> {
             if needs_push_boxing || needs_push_float_boxing {
                 let raw_arg = arg_regs[0];
                 let use_float = needs_push_float_boxing;
+                let boxed_arg = self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    if use_float {
+                        block.instructions.push(MirInst::BoxFloat {
+                            dest: boxed,
+                            value: raw_arg,
+                        });
+                    } else {
+                        block.instructions.push(MirInst::BoxInt {
+                            dest: boxed,
+                            value: raw_arg,
+                        });
+                    }
+                    boxed
+                })?;
+                arg_regs[0] = boxed_arg;
+            }
+        }
+
+        // Box the `[T].index_of(v)` needle for the SAME reason `push` boxes its
+        // argument just above: array elements are stored TAG-BOXED (see the
+        // array-literal lowering's BoxInt/BoxFloat), and `rt_array_index_of`
+        // compares them with `rt_value_eq`. A raw native int needle can never
+        // equal a tagged element, so every `[i64].index_of(n)` returned -1 even
+        // when the element was present at index 0 — while `[text].index_of(s)`
+        // happened to work, because a string argument is already a tagged heap
+        // pointer and needs no boxing. Gated on an array receiver so
+        // `text.index_of(sub)` (which routes to rt_string_find) is untouched.
+        if method == "index_of" && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
+            let needle_ty = args[0].ty;
+            let needs_needle_int_boxing = matches!(
+                needle_ty,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::BOOL
+            );
+            // Floats go through BoxFloat for the same lossless-tagging reason as
+            // the push path (an untagged double's low mantissa bits read as a
+            // runtime tag).
+            let needs_needle_float_boxing = matches!(needle_ty, TypeId::F32 | TypeId::F64);
+            if needs_needle_int_boxing || needs_needle_float_boxing {
+                let raw_arg = arg_regs[0];
+                let use_float = needs_needle_float_boxing;
                 let boxed_arg = self.with_func(|func, current_block| {
                     let boxed = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();

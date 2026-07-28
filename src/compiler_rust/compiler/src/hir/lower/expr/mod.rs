@@ -1022,6 +1022,18 @@ impl Lowerer {
                     }
                 }
                 "contains" | "is_empty" => Some(TypeId::BOOL),
+                // `[T].index_of(v)` returns a raw i64 position (-1 when absent),
+                // exactly like the string table's `index_of` above. This table
+                // omitting it is the SAME class of gap as `"length"`/`"bytes"`:
+                // the call fell through to generic dynamic dispatch typed
+                // TypeId::ANY, so MIR emitted NO `BoxInt` on the result — the
+                // raw i64 was then handed to `to_string`/`print` as if it were
+                // an already-tagged RuntimeValue and misdecoded by its bit
+                // pattern (0 -> "0", 1 -> "nil", 2 -> "0.0", -1 ->
+                // "<value:0xffffffffffffffff>"). Typing it I64 restores the
+                // BoxInt and picks static dispatch, which codegen already
+                // routes to `rt_index_of`.
+                "index_of" => Some(TypeId::I64),
                 "join" => Some(TypeId::STRING),
                 "slice" | "filter" | "map" => Some(receiver.ty), // Returns same array type
                 "first" | "last" | "get" => {
