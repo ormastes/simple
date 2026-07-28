@@ -1546,3 +1546,12 @@ implementation in progress / target evidence blocked
 - The optimizer/perf runner and executable rendering spec remain unexecuted
   because the admitted pure-Simple CLI crash and exhausted three-cycle compiler
   cap are unchanged. No bootstrap, Rust seed, or compiler workaround was used.
+- Renderer IPC now rejects skipped outer request IDs after endpoint startup,
+  closing a stream-poisoning denial where one high ID made every later valid
+  frame look duplicate. Input deferred behind an already-sent animation frame
+  is re-encoded with the current request ID at activation, so intervening Fetch
+  response commands cannot make the worker reject or time out keyboard/pointer
+  work. Focused protocol and broker regressions cover consecutive/gapped IDs,
+  trailing-message rejection, and the animation -> network -> deferred-input
+  sequence. Executable Simple evidence remains compiler-blocked; no bootstrap
+  or seed fallback was used.

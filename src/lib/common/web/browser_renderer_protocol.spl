@@ -243,6 +243,20 @@ pub fn browser_renderer_message_encode(kind: text, generation: i64, request_id: 
         return _browser_renderer_reject_encode("header-too-large")
     BrowserRendererEncodeResult(ok: true, reason: "ok", wire: header + payload)
 
+pub fn browser_renderer_message_resequence(
+    wire: text, generation: i64, request_id: i64
+) -> BrowserRendererEncodeResult:
+    val decoded = browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(generation), wire
+    )
+    if (decoded.status != "message" or
+        decoded.decoder.buffer_len != 0):
+        return _browser_renderer_reject_encode("invalid-message")
+    browser_renderer_message_encode(
+        decoded.message.kind, generation, request_id,
+        decoded.message.payload
+    )
+
 pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: text) -> BrowserRendererDecodeResult:
     if decoder.error != "":
         return _browser_renderer_violation(decoder, decoder.error)
@@ -300,6 +314,11 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
             return _browser_renderer_violation(decoder, "stale-generation")
         if request_id <= decoder.last_request_id:
             return _browser_renderer_violation(decoder, "duplicate-request")
+        if (decoder.last_request_id > 0 and
+            request_id != decoder.last_request_id + 1):
+            return _browser_renderer_violation(
+                decoder, "unexpected-request-id"
+            )
         payload_start = header_end + 1
         expected_total = payload_start + payload_length
         pending_kind = fields[1]

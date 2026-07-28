@@ -17,6 +17,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_frame_reply_to_request_id,
     browser_renderer_key_encode, browser_renderer_key_with_shift_encode,
     browser_renderer_message_encode,
+    browser_renderer_message_resequence,
     browser_renderer_navigation_encode,
     browser_renderer_network_response_encode,
     browser_renderer_pointer_encode, browser_renderer_resize_encode,
@@ -1022,10 +1023,15 @@ pub class HostedBrowserRendererProcess:
         self.deferred_resize_height = resize_height
         Ok(true)
 
-    me _activate_deferred_command():
+    me _activate_deferred_command() -> text:
         if self.deferred_wire == "":
-            return
-        self.pending_wire = self.deferred_wire
+            return ""
+        val request = browser_renderer_message_resequence(
+            self.deferred_wire, self.generation, self.next_request_id
+        )
+        if not request.ok:
+            return request.reason
+        self.pending_wire = request.wire
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = self.next_request_id
         self.pending_wire_is_command = true
@@ -1038,6 +1044,7 @@ pub class HostedBrowserRendererProcess:
         self.deferred_timeout_ms = 0
         self.deferred_resize_width = 0
         self.deferred_resize_height = 0
+        ""
 
     me poll() -> HostedBrowserRendererResult?:
         if self.command_deadline_ms <= 0:
@@ -1233,7 +1240,9 @@ pub class HostedBrowserRendererProcess:
             self.next_animation_ms = frame.next_animation_ms
             self.command_deadline_ms = 0
             self.pending_operation = ""
-            self._activate_deferred_command()
+            val deferred_reason = self._activate_deferred_command()
+            if deferred_reason != "":
+                return Some(self.fail(deferred_reason))
             self.state = "active"
             return Some(_renderer_frame_result(
                 frame.composition,

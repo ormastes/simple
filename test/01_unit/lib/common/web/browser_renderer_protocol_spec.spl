@@ -17,6 +17,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_fetch_request_encode,
     browser_renderer_key_encode, browser_renderer_key_with_shift_encode,
     browser_renderer_message_encode,
+    browser_renderer_message_resequence,
     browser_renderer_navigation_decode,
     browser_renderer_navigation_encode,
     browser_renderer_network_response_decode,
@@ -588,6 +589,39 @@ describe "isolated browser renderer protocol":
         val duplicate = browser_renderer_decoder_feed(decoded.decoder, encoded.wire)
         expect(duplicate.status).to_equal("violation")
         expect(duplicate.decoder.error).to_equal("duplicate-request")
+
+        val first_sequence = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7),
+            browser_renderer_message_encode("state", 7, 1, "one").wire
+        )
+        val skipped_sequence = browser_renderer_decoder_feed(
+            first_sequence.decoder,
+            browser_renderer_message_encode("state", 7, 3, "three").wire
+        )
+        expect(skipped_sequence.status).to_equal("violation")
+        expect(skipped_sequence.decoder.error).to_equal(
+            "unexpected-request-id"
+        )
+        val next_sequence = browser_renderer_decoder_feed(
+            first_sequence.decoder,
+            browser_renderer_message_encode("state", 7, 2, "two").wire
+        )
+        expect(next_sequence.status).to_equal("message")
+        expect(next_sequence.message.payload).to_equal("two")
+
+        val resequenced = browser_renderer_message_resequence(
+            browser_renderer_pointer_encode(7, 3, 9, 4, 5, true).wire,
+            7, 4
+        )
+        expect(resequenced.ok).to_be(true)
+        val resequenced_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), resequenced.wire
+        )
+        expect(resequenced_message.message.kind).to_equal("pointer")
+        expect(resequenced_message.message.request_id).to_equal(4)
+        expect(browser_renderer_message_resequence(
+            resequenced.wire + resequenced.wire, 7, 5
+        ).ok).to_be(false)
 
         val stale_wire = browser_renderer_message_encode("state", 6, 2, "").wire
         val stale = browser_renderer_decoder_feed(browser_renderer_decoder_new(7), stale_wire)
