@@ -66,8 +66,12 @@ class TarjanSCC:
         var adj: Dict<text, [text]> = {}
         for sig in signals:
             adj = adj.set(sig, [])
+        # contains_key + index read throughout this type, never `.get()`: a
+        # native `Dict.get()` HIT returns a corrupt Option for array/struct
+        # values and a still-boxed value for i64/bool.
+        # See doc/07_guide/language/dict_native_pitfalls.md
         for dep in deps:
-            var targets = adj.get(dep.0) ?? []
+            var targets = if adj.contains_key(dep.0): adj[dep.0] else: []
             targets = targets.push(dep.1)
             adj = adj.set(dep.0, targets)
         TarjanSCC(
@@ -84,7 +88,7 @@ class TarjanSCC:
     me find_cycles() -> [[text]]:
         """Run Tarjan's algorithm and return SCCs that form cycles."""
         for node in self.nodes:
-            if not self.index_of.get(node).?:
+            if not self.index_of.contains_key(node):
                 self.strongconnect(node)
 
         var cycles: [[text]] = []
@@ -95,7 +99,7 @@ class TarjanSCC:
             elif scc.len() == 1:
                 # Single-node SCC: only a cycle if self-loop exists
                 val node = scc[0]
-                val neighbors = self.adj.get(node) ?? []
+                val neighbors = if self.adj.contains_key(node): self.adj[node] else: []
                 var has_self_loop = false
                 for n in neighbors:
                     if n == node:
@@ -113,25 +117,25 @@ class TarjanSCC:
         self.stack = self.stack.push(v)
         self.on_stack = self.on_stack.set(v, true)
 
-        val neighbors = self.adj.get(v) ?? []
+        val neighbors = if self.adj.contains_key(v): self.adj[v] else: []
         for w in neighbors:
-            if not self.index_of.get(w).?:
+            if not self.index_of.contains_key(w):
                 # w not yet visited — recurse
                 self.strongconnect(w)
-                val w_low = self.lowlink.get(w) ?? 0
-                val v_low = self.lowlink.get(v) ?? 0
+                val w_low = if self.lowlink.contains_key(w): self.lowlink[w] else: 0
+                val v_low = if self.lowlink.contains_key(v): self.lowlink[v] else: 0
                 if w_low < v_low:
                     self.lowlink = self.lowlink.set(v, w_low)
-            elif self.on_stack.get(w) ?? false:
+            elif self.on_stack.contains_key(w) and self.on_stack[w]:
                 # w is on stack — part of current SCC
-                val w_idx = self.index_of.get(w) ?? 0
-                val v_low = self.lowlink.get(v) ?? 0
+                val w_idx = if self.index_of.contains_key(w): self.index_of[w] else: 0
+                val v_low = if self.lowlink.contains_key(v): self.lowlink[v] else: 0
                 if w_idx < v_low:
                     self.lowlink = self.lowlink.set(v, w_idx)
 
         # If v is a root node of an SCC, pop the SCC from stack
-        val v_idx = self.index_of.get(v) ?? 0
-        val v_low = self.lowlink.get(v) ?? 0
+        val v_idx = if self.index_of.contains_key(v): self.index_of[v] else: 0
+        val v_low = if self.lowlink.contains_key(v): self.lowlink[v] else: 0
         if v_low == v_idx:
             var scc: [text] = []
             var done = false
@@ -206,10 +210,13 @@ class VhdlConstraintChecker:
 
     me add_implicit_cross_domain_constraint(source: text, dest: text, span: Span):
         """Add a CDC constraint using registered source/destination domains."""
-        val source_domain = self.signal_domains.get(source)
-        val dest_domain = self.signal_domains.get(dest)
-        if val source_domain_name = source_domain:
-            if val dest_domain_name = dest_domain:
+        # contains_key + index read, never `.get()`.
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        val has_dest_domain = self.signal_domains.contains_key(dest)
+        if self.signal_domains.contains_key(source):
+            val source_domain_name = self.signal_domains[source]
+            if has_dest_domain:
+                val dest_domain_name = self.signal_domains[dest]
                 if source_domain_name != dest_domain_name:
                     self.add_constraint(VhdlConstraint.ClockDomainCrossing(
                         source: source,
@@ -233,13 +240,13 @@ class VhdlConstraintChecker:
 
     me register_driver(signal: text, driver: text):
         """Register a driver for a signal."""
-        var drivers = self.signal_drivers.get(signal) ?? []
+        var drivers = if self.signal_drivers.contains_key(signal): self.signal_drivers[signal] else: []
         drivers = drivers.push(driver)
         self.signal_drivers = self.signal_drivers.set(signal, drivers)
 
     me register_dependency(source: text, dest: text):
         """Register a combinational dependency edge."""
-        var deps = self.dependency_graph.get(source) ?? []
+        var deps = if self.dependency_graph.contains_key(source): self.dependency_graph[source] else: []
         deps = deps.push(dest)
         self.dependency_graph = self.dependency_graph.set(source, deps)
 
@@ -300,10 +307,11 @@ class VhdlConstraintChecker:
                     Ok(())
 
             case SameClockDomain(s1, s2, span):
-                val d1 = self.signal_domains.get(s1)
-                val d2 = self.signal_domains.get(s2)
-                if val source_domain = d1:
-                    if val dest_domain = d2:
+                val has_d2 = self.signal_domains.contains_key(s2)
+                if self.signal_domains.contains_key(s1):
+                    val source_domain = self.signal_domains[s1]
+                    if has_d2:
+                        val dest_domain = self.signal_domains[s2]
                         if source_domain != dest_domain:
                             val src_domain = self.domain_display_name(source_domain)
                             val dst_domain = self.domain_display_name(dest_domain)
@@ -425,8 +433,8 @@ class VhdlConstraintChecker:
                     kind: VhdlConstraintErrorKind.InvalidClockDomain
                 ))
             val sanitized = self.sanitize_clock_domain_name(domain.name)
-            val previous = sanitized_to_original.get(sanitized)
-            if val previous_name = previous:
+            if sanitized_to_original.contains_key(sanitized):
+                val previous_name = sanitized_to_original[sanitized]
                 if previous_name != domain.name:
                     result = result.push(VhdlConstraintError(
                         code: "E0712",

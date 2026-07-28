@@ -194,9 +194,10 @@ impl VhdlBackend:
             if not helper_reachable.has(func.name) or not self.helper_subprogram_shape_supported(func):
                 continue
             val safe_name = vhdl_sanitize_identifier(func.name)
-            val prior = used.get(safe_name)
-            if prior != nil:
-                return Err(self.backend_error(vhdl_helper_collision_message(safe_name, prior, func.name)))
+            # contains_key + index read, never `.get()`.
+            # See doc/07_guide/language/dict_native_pitfalls.md
+            if used.contains_key(safe_name):
+                return Err(self.backend_error(vhdl_helper_collision_message(safe_name, used[safe_name], func.name)))
             used[safe_name] = func.name
             self.active_helper_name_by_source[func.name] = safe_name
         Ok(())
@@ -227,7 +228,7 @@ impl VhdlBackend:
                     match self.validate_function_supported_before_emit(func, false):
                         case Ok(_): ()
                         case Err(err): return Err(err)
-                elif self.active_helper_name_by_source.get(func.name).?:
+                elif self.active_helper_name_by_source.contains_key(func.name):
                     match self.validate_function_supported_before_emit(func, true):
                         case Ok(_): ()
                         case Err(err): return Err(err)
@@ -458,9 +459,11 @@ impl VhdlBackend:
                 case Const(_, _, _) | Copy(_, _) | Move(_, _) | BinOp(_, _, _, _) | CheckedBinOp(_, _, _, _) | UnaryOp(_, _, _) | Aggregate(_, _, _) | GetField(_, _, _) | SetField(_, _, _) | Cast(_, _, _) | Bitcast(_, _, _) | VhdlSignalAssign(_, _, _) | VhdlVarAssign(_, _) | VhdlPortMap(_, _, _) | VhdlResize(_, _, _, _) | VhdlSlice(_, _, _, _) | VhdlConcat(_, _) | Nop:
                     Ok(())
                 case VhdlProcess(_, body_block):
-                    val block = blocks.get(body_block.id)
-                    if block.?:
-                        self.validate_block_supported_before_emit(block, blocks, false, allow_clocked_state)
+                    # contains_key + index read, never `.get()`: a native
+                    # struct-valued `Dict.get()` HIT returns a corrupt Option.
+                    # See doc/07_guide/language/dict_native_pitfalls.md
+                    if blocks.contains_key(body_block.id):
+                        self.validate_block_supported_before_emit(blocks[body_block.id], blocks, false, allow_clocked_state)
                     else:
                         Err(self.backend_error("VHDL process references unknown block BB{body_block.id}"))
                 case Call(_, func, _):
@@ -519,8 +522,7 @@ impl VhdlBackend:
         val target = match self.call_target_name(func):
             case Ok(result): result
             case Err(err): return Err(err)
-        val helper_name = self.active_helper_name_by_source.get(target)
-        if not helper_name.?:
+        if not self.active_helper_name_by_source.contains_key(target):
             # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
             # contains_key + indexed read. See doc/07_guide/language/dict_native_pitfalls.md
             if self.active_function_by_name.contains_key(target):
@@ -668,7 +670,7 @@ impl VhdlBackend:
         var has_payload = false
         for v in variants:
             val safe_name = self.sanitize_vhdl_identifier(v.name)
-            if used_names.get(safe_name).?:
+            if used_names.contains_key(safe_name):
                 return Err(self.backend_error(
                     "Duplicate VHDL enum literal after sanitization in `{type_def.name}`: `{safe_name}`"
                 ))
@@ -688,7 +690,7 @@ impl VhdlBackend:
             match v.payload:
                 case Some(payload):
                     val field_name = self.payload_enum_field_name(v)
-                    if used_payload_fields.get(field_name).?:
+                    if used_payload_fields.contains_key(field_name):
                         return Err(self.backend_error(
                             "Duplicate VHDL payload enum field after sanitization in `{type_def.name}`: `{field_name}`"
                         ))
@@ -745,7 +747,7 @@ impl VhdlBackend:
                 for element in elements:
                     self.register_tuple_types_in_type(element)
                 val tuple_key = self.tuple_type_key(ty)
-                if not self.active_tuple_type_names.get(tuple_key).?:
+                if not self.active_tuple_type_names.contains_key(tuple_key):
                     val tuple_name = "tuple_t_{self.active_tuple_type_order.len()}"
                     self.active_tuple_type_names[tuple_key] = tuple_name
                     self.active_tuple_type_shapes[tuple_key] = elements
@@ -874,7 +876,7 @@ impl VhdlBackend:
                 var idx = 0
                 while idx < elements.len():
                     val name = self.vhdl_return_field_name(func, idx)
-                    if used.get(name).?:
+                    if used.contains_key(name):
                         return Err(self.backend_error("Duplicate VHDL output port after sanitization: {name}"))
                     used[name] = true
                     fields = fields.push(VhdlReturnField(
@@ -902,7 +904,7 @@ impl VhdlBackend:
                         var idx = 0
                         for field in struct_fields:
                             val name = self.sanitize_vhdl_identifier(field.name)
-                            if used.get(name).?:
+                            if used.contains_key(name):
                                 return Err(self.backend_error("Duplicate VHDL output port after sanitization: {name}"))
                             used[name] = true
                             var port_type = field.type_

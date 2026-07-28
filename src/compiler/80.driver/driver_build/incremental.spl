@@ -446,36 +446,36 @@ impl BuildCache:
 
     fn has_cached_object(source: text) -> bool:
         """Check if source has a cached entry with fresh fingerprint and existing outputs."""
-        # Combined stage4-lane idiom: has() answers the MISSING case (a .get
-        # miss returns a 0-nil that if-val wrongly enters — 0 vs sentinel 3),
-        # while .get + if-val delivers the VALUE for present keys (the
-        # has()+bracket re-fetch pair returned nil for present keys). The
-        # staleness check is inlined as a direct field comparison: a method
-        # call on the struct-FIELD receiver (entry.fingerprint.is_stale(..))
-        # hits the stage4 receiver-transport defect.
-        if not self.entries.has(source):
+        # contains_key + index read, never `.get()`: a native struct-valued
+        # `Dict.get()` HIT hands back a non-nil Option whose payload is the
+        # value's heap pointer shifted by 3, so `entry.fingerprint` segfaults.
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        # The staleness check stays inlined as a direct field comparison: a
+        # method call on the struct-FIELD receiver
+        # (entry.fingerprint.is_stale(..)) hits the stage4 receiver-transport
+        # defect.
+        if not self.entries.contains_key(source):
             return false
-        if val entry = self.entries.get(source):
-            val fresh = FileFingerprint.from_file(source)
-            if val fingerprint = fresh:
-                if entry.fingerprint.content_hash != fingerprint.content_hash:
+        val entry = self.entries[source]
+        val fresh = FileFingerprint.from_file(source)
+        if val fingerprint = fresh:
+            if entry.fingerprint.content_hash != fingerprint.content_hash:
+                return false
+            # Check all output files still exist on disk
+            for out in entry.outputs:
+                if not incremental_file_exists(out):
                     return false
-                # Check all output files still exist on disk
-                for out in entry.outputs:
-                    if not incremental_file_exists(out):
-                        return false
-                return true
-            return false
+            return true
         false
 
     fn get_cached_outputs(source: text) -> [text]?:
         """Return cached output paths if entry is fresh, else nil."""
         if not self.has_cached_object(source):
             return nil
-        # Bare return (flat implicit lift), .get read — no Some(...) box,
-        # no bracket-after-has re-fetch.
-        if val entry = self.entries.get(source):
-            return entry.outputs
+        # contains_key + index read, never `.get()`.
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        if self.entries.contains_key(source):
+            return self.entries[source].outputs
         nil
 
     me invalidate(source: text):
@@ -483,11 +483,12 @@ impl BuildCache:
         self.remove_entry(source)
 
     fn get_entry(source: text) -> DependencyEntry?:
-        # has() guards the missing case (see has_cached_object), .get
-        # delivers the present value flat-safely — no Some(...) box.
-        if not self.entries.has(source):
+        # contains_key guards the missing case, the index read delivers the
+        # present value; a native struct-valued `.get()` HIT is corrupt.
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        if not self.entries.contains_key(source):
             return nil
-        self.entries.get(source)
+        Some(self.entries[source])
 
     fn detect_changes(source_files: [text]) -> IncrChangeSet:
         """Detect changes since last build."""

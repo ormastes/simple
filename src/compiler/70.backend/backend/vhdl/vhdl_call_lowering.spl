@@ -275,11 +275,15 @@ impl VhdlBackend:
             case Const(value, _):
                 match value:
                     case Str(name):
-                        val known = self.active_function_by_name.get(name)
-                        match known:
-                            case Some(func):
-                                if vhdl_function_is_hardware_entity(func): Some(func) else: nil
-                            case None: nil
+                        # contains_key + index read, never `.get()`: a native
+                        # struct-valued `Dict.get()` HIT returns a corrupt
+                        # Option that segfaults on field access.
+                        # See doc/07_guide/language/dict_native_pitfalls.md
+                        if self.active_function_by_name.contains_key(name):
+                            val func = self.active_function_by_name[name]
+                            if vhdl_function_is_hardware_entity(func): Some(func) else: nil
+                        else:
+                            nil
                     case _: nil
             case _: nil
 
@@ -434,7 +438,7 @@ impl VhdlBackend:
                     case Call(_, operand, _):
                         val callee = self.direct_hardware_callee(operand)
                         if callee.? and self.hardware_call_uses_port_map(func, operand):
-                            if not emitted.get(callee.unwrap().name).?:
+                            if not emitted.contains_key(callee.unwrap().name):
                                 return false
                     case _: ()
         true
@@ -461,7 +465,7 @@ impl VhdlBackend:
         while order.len() < total:
             var progressed = false
             for func in functions:
-                if emitted.get(func.name).?:
+                if emitted.contains_key(func.name):
                     continue
                 if self.hardware_dependencies_emitted(func, emitted):
                     order = order.push(func)
@@ -691,19 +695,19 @@ impl VhdlBackend:
             for inst in block.instructions:
                 match inst.kind:
                     case LoadGlobal(dest, symbol):
-                        if hardware_args.get(dest.id).?:
+                        if hardware_args.contains_key(dest.id):
                             val static_ = match self.clocked_static(symbol):
                                 case Ok(value): value
                                 case Err(err): return Err(err)
                             self.active_inline_exprs[dest.id] = self.clocked_static_name(static_)
                     case Copy(dest, src) | Move(dest, src):
-                        if hardware_args.get(dest.id).?:
+                        if hardware_args.contains_key(dest.id):
                             val expr = match self.local_operand_expr(src):
                                 case Ok(value): value
                                 case Err(err): return Err(err)
                             self.active_inline_exprs[dest.id] = expr
                     case Const(dest, value, ty):
-                        if hardware_args.get(dest.id).?:
+                        if hardware_args.contains_key(dest.id):
                             val expr = match self.const_value_to_vhdl_at(value, ty, inst.span):
                                 case Ok(result): result
                                 case Err(err): return Err(err)
@@ -739,7 +743,7 @@ impl VhdlBackend:
                             case None:
                                 match dest:
                                     case Some(local):
-                                        if hardware_args.get(local.id).?:
+                                        if hardware_args.contains_key(local.id):
                                             val expr = match self.helper_call_expr(operand, args, false):
                                                 case Ok(value): value
                                                 case Err(err): return Err(err)

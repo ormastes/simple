@@ -574,9 +574,10 @@ impl MirTextCodegen for MirToLlvm:
         is set (MIR-level U8/U16/U32 source) instead of always sext'ing.
         See select_widen_instruction / is_unsigned_mir_kind."""
         var src_ty = self.valid_llvm_type(from_ty)
-        val maybe_actual_ty = self.value_types.get(value)
-        if maybe_actual_ty.?:
-            src_ty = self.valid_llvm_type(maybe_actual_ty.unwrap())
+        # contains_key + index read, never `.get()`: a native `Dict.get()` HIT
+        # does not round-trip. See doc/07_guide/language/dict_native_pitfalls.md
+        if self.value_types.contains_key(value):
+            src_ty = self.valid_llvm_type(self.value_types[value])
         val dst_ty = self.valid_llvm_type(to_ty)
         if src_ty == dst_ty:
             return self.ret_value_for_type(dst_ty, value)
@@ -603,9 +604,9 @@ impl MirTextCodegen for MirToLlvm:
         behavior of always-sext widening, so this is only ever additive."""
         match operand.kind:
             case Copy(local):
-                self.unsigned_locals.get(self.local_id_value(local)) ?? false
+                if self.unsigned_locals.contains_key(self.local_id_value(local)): self.unsigned_locals[self.local_id_value(local)] else: false
             case Move(local):
-                self.unsigned_locals.get(self.local_id_value(local)) ?? false
+                if self.unsigned_locals.contains_key(self.local_id_value(local)): self.unsigned_locals[self.local_id_value(local)] else: false
             case Const(value, type_):
                 self.is_unsigned_mir_kind(type_.kind)
             case _:
@@ -615,9 +616,10 @@ impl MirTextCodegen for MirToLlvm:
         var src_ty = self.valid_llvm_type(from_ty)
         # POSITIVE `.?` form only (see get_local_type): Option-match on
         # Dict.get mis-dispatches under the seed interpreter.
-        val maybe_actual_ty = self.value_types.get(value)
-        if maybe_actual_ty.?:
-            src_ty = self.valid_llvm_type(maybe_actual_ty.unwrap())
+        # contains_key + index read, never `.get()`: a native `Dict.get()` HIT
+        # does not round-trip. See doc/07_guide/language/dict_native_pitfalls.md
+        if self.value_types.contains_key(value):
+            src_ty = self.valid_llvm_type(self.value_types[value])
         val dst_ty = self.valid_llvm_type(to_ty)
         if src_ty == dst_ty:
             return self.ret_value_for_type(dst_ty, value)
@@ -930,9 +932,11 @@ impl MirTextCodegen for MirToLlvm:
         # including translate_call's override, writes it), so prefer it when
         # present; only fall back to the sticky flags via `get_local_type`
         # when local_types has no entry to consult.
-        val recorded_src_ty = self.local_types.get(src_id)
-        var ty = if recorded_src_ty.? and recorded_src_ty.unwrap() != nil and recorded_src_ty.unwrap() != "nil" and recorded_src_ty.unwrap() != "":
-            self.valid_llvm_type(recorded_src_ty.unwrap())
+        # contains_key + index read, never `.get()`.
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        val has_recorded_src_ty = self.local_types.contains_key(src_id)
+        var ty = if has_recorded_src_ty and self.local_types[src_id] != nil and self.local_types[src_id] != "nil" and self.local_types[src_id] != "":
+            self.valid_llvm_type(self.local_types[src_id])
         else:
             self.valid_llvm_type(self.get_local_type(src_id))
         # Bug (nested-array/dict handle unbox): a destination local PRIMED
@@ -1392,9 +1396,11 @@ impl MirTextCodegen for MirToLlvm:
         Only a local with NO declared type at all (truly malformed MIR)
         still falls back to `undef` so LLVM stays valid.
         """
-        if self.defined_locals.get(id).?:
+        # contains_key, never `.get(...).?`.
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        if self.defined_locals.contains_key(id):
             return self.get_local(id)
-        if self.ptr_locals.get(id).? or self.bool_locals.get(id).? or self.local_types.get(id).?:
+        if self.ptr_locals.contains_key(id) or self.bool_locals.contains_key(id) or self.local_types.contains_key(id):
             return self.get_local(id)
         # ponytail: malformed MIR (no declared local at all) lowers to
         # `undef` so LLVM stays valid.
@@ -1402,22 +1408,20 @@ impl MirTextCodegen for MirToLlvm:
 
     fn get_local_type(id: i64) -> text:
         """Get LLVM type for a local variable, falling back to native int type."""
-        val maybe_ptr = self.ptr_locals.get(id)
-        if maybe_ptr.?:
+        if self.ptr_locals.contains_key(id):
             return "ptr"
-        val maybe_bool = self.bool_locals.get(id)
-        if maybe_bool.?:
+        if self.bool_locals.contains_key(id):
             return "i1"
-        # POSITIVE `.?` form only: `match dict.get(): case Some(ty)/nil`
-        # mis-dispatches under the seed interpreter (same struct-boxed-optional
-        # quirk documented in var_reassign_ssa.spl), returning literal nil for
-        # locals whose type IS tracked -- every caller then fell back to
-        # native_int, which is the root of the "backend does not track local
-        # types" #135 symptom family (typed copies emitted as `add i64`,
+        # contains_key + index read, never `.get()`: `match dict.get():` and
+        # `.get(k).unwrap()` both mis-dispatch -- the seed interpreter returns
+        # literal nil for locals whose type IS tracked, and native codegen
+        # returns a non-round-tripping payload on a hit. Every caller then fell
+        # back to native_int, which is the root of the "backend does not track
+        # local types" #135 symptom family (typed copies emitted as `add i64`,
         # double operands fed to `mul nsw i64`, call args typed nil).
-        val maybe_ty = self.local_types.get(id)
-        if maybe_ty.?:
-            val ty = maybe_ty.unwrap()
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        if self.local_types.contains_key(id):
+            val ty = self.local_types[id]
             if ty == nil or ty == "nil":
                 self.native_int()
             else:
@@ -1548,7 +1552,7 @@ impl MirTextCodegen for MirToLlvm:
         Defaults to false (signed) when the slot is unknown."""
         match ptr.kind:
             case Copy(local) | Move(local):
-                self.alloca_elem_unsigned.get(self.local_id_value(local)) ?? false
+                if self.alloca_elem_unsigned.contains_key(self.local_id_value(local)): self.alloca_elem_unsigned[self.local_id_value(local)] else: false
             case _:
                 false
 

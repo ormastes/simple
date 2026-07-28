@@ -243,8 +243,10 @@ fn module_surface_trait_origin_key(surface: ModuleSurface, trait_name: text) -> 
     "{surface.module_name}::{trait_name}"
 
 fn module_surfaces_add_name(index_by_name: Dict<text, i64>, name: text, surface_index: i64) -> Result<Dict<text, i64>, text>:
-    val existing = index_by_name.get(name)
-    if existing != nil and index_by_name[name] != surface_index:
+    # contains_key + index read, never `.get()`: a native `Dict.get()` HIT
+    # returns a still-boxed i64 (7 reads back as 56).
+    # See doc/07_guide/language/dict_native_pitfalls.md
+    if index_by_name.contains_key(name) and index_by_name[name] != surface_index:
         return Err("module surface name conflict: {name}")
     index_by_name[name] = surface_index
     Ok(index_by_name)
@@ -256,12 +258,14 @@ fn module_surfaces_from_modules(modules: Dict<text, Module>, sources: [SourceFil
     var source_index = 0
     while source_index < sources.len():
         val source = sources[source_index]
-        if paths.get(source.path) == nil:
-            val module: Module? = modules.get(source.module_name)
-            if module == nil:
+        if not paths.contains_key(source.path):
+            # Struct-valued `.get()` yields a corrupt Option under native
+            # codegen; contains_key + index read decode correctly.
+            if not modules.contains_key(source.module_name):
                 return Err("missing parsed module for source: {source.module_name}")
+            val module = modules[source.module_name]
             val surface_index = surfaces.len()
-            val surface = module_surface_from_module(module ?? panic("unreachable"), source, source_index)
+            val surface = module_surface_from_module(module, source, source_index)
             surfaces = surfaces.push(surface)
             paths[source.path] = surface_index
             val canonical_result = module_surfaces_add_name(index_by_name, surface.module_name, surface_index)
@@ -276,8 +280,7 @@ fn module_surfaces_from_modules(modules: Dict<text, Module>, sources: [SourceFil
 
     for alias in modules.keys():
         val module = modules[alias]
-        val canonical = index_by_name.get(module.name)
-        if canonical == nil:
+        if not index_by_name.contains_key(module.name):
             return Err("parsed module has no source surface: {module.name}")
         val alias_result = module_surfaces_add_name(index_by_name, alias, index_by_name[module.name])
         if alias_result.is_err():
