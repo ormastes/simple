@@ -71,7 +71,22 @@ global queue and then to work-stealing — a duplicate-dispatch hazard.
 - **Lint:** every edited file re-linted and A/B'd against its `HEAD` version.
   Error counts are identical to baseline (`variables.spl` 2 = 2,
   `ftp_utils.spl` 13 = 13) — **zero new lint errors introduced**.
-- **New spec:** `test/01_unit/language/nil_presence_idioms_spec.spl`, lint-clean.
+- **New spec:** `test/01_unit/language/nil_presence_idioms_spec.spl`, lint-clean
+  but **never executed** — see below.
+
+### `simple test` exits 0 without running any example (separate defect)
+
+`bin/simple test build/nilq_probe/vacuous_spec.spl` **exited 0** after emitting
+901 bytes consisting solely of lint warnings, with **zero**
+`"N examples, M failures"` lines. Since sspec prints one such line per
+`describe` block, their total absence means no example was scheduled. Exit 0
+with nothing run is a **false green** that any CI would score as PASS.
+
+This is why no PASS is claimed for the new spec here, and why every assertion in
+it was instead verified individually through `bin/simple run` on both engines
+before being written down. It also means green `simple test` results in this
+worktree are not, on their own, evidence that anything was checked — worth a
+dedicated lane.
 
 ### Honest limitation on the end-to-end A/B
 

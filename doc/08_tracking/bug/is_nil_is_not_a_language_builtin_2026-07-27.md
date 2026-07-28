@@ -66,3 +66,81 @@ patched by this lane** (several lanes are live there).
 
 `== nil` / `!= nil` — verified 15/15 correct and mutually consistent on **both**
 engines including `Option<struct>` (`build/nilq_probe/tt_cmp.spl`).
+
+---
+
+## DECISION (2026-07-28, lane MATCHER): (b) — do NOT make `is_nil` a builtin
+
+`is_nil` stays a **user-type method name**. Spec call sites that reach for it on
+an ordinary value must use `== nil` / `!= nil`, or `expect(x).to_be_nil()` /
+`.to_not_be_nil()`. Resolution: **WONTFIX for (a); the remaining open work is the
+diagnostic, below.**
+
+### Reasoning
+
+1. **A universal `is_nil` builtin would silently break the 26 existing correct
+   call sites.** In `interpreter_helpers/method_dispatch.rs::call_method_on_value`
+   the built-in receiver-type arms are matched **first** (lines ~45-618); user
+   `impl` methods are only consulted afterwards (line 619 `// Custom class
+   methods`, and `_impl_methods.get(class)` at 639 / `.get(enum_name)` at 664).
+   So a universal `is_nil` arm would **shadow** every user `fn is_nil` — the
+   compiler/interpreter `Value` types in `src/app/interpreter/core/value.spl`,
+   `src/compiler/70.backend/backend_types.spl`, `src/lib/*/runtime_value.spl`,
+   `src/lib/*/runtime/value.spl`. On those receivers `is_nil` means "is this
+   `Value` the `Nil` **variant**", which is a completely different question from
+   "is this runtime value absent". A builtin would answer the second question
+   (always `false`, since a `Value` object is a present struct) while the code
+   reads as asking the first. That converts 26 currently-correct call sites into
+   **silent wrong answers** — strictly worse than today's loud failure.
+2. **Two correct spellings already exist and are verified.** `== nil` is 15/15 on
+   both engines (NILQ). `expect(x).to_be_nil()` / `.to_be_none()` /
+   `.to_not_be_nil()` already exist in
+   `src/compiler_rust/compiler/src/interpreter_method/mod.rs:404,587` and route
+   through `Value::is_nil_like()`, so they accept both nil representations. Since
+   2026-07-28 `assert_nil` / `assert_not_nil` do too (see below). Adding a third
+   universal spelling is over-engineering with no new expressive power.
+3. **Today's failure mode is loud, not silent.** Both engines reject `is_nil`;
+   nothing ships a wrong result. The cost of NOT implementing it is a
+   confusing error message, which is cheap to fix (item below).
+
+### Production fallout found while applying the decision — OPEN, needs an owner
+
+Sweeping for `.is_nil()` on non-user receivers turned up **one production call
+site**, and it means the function it guards has never worked:
+
+```
+src/os/kernel/log/markers.spl:245
+    fn validate(raw: text) -> Result<(), text>:
+        val spec = find_spec(raw)
+        if spec.is_nil():                      # <-- unresolvable; find_spec returns an Option
+            return Result.err("unknown marker: " + raw)
+        Result.ok(())
+```
+
+`markers.validate()` is what the SimpleOS serial-marker test harness uses to
+assert that no unknown markers slip through. Calling it raises
+``semantic: method `is_nil` not found on type `enum` (receiver value:
+Option::None)`` on the interpreter (and would be a *runtime* error on the JIT),
+so the harness's unknown-marker gate cannot run at all. Reproduce with
+`test/01_unit/os/kernel/logging/marker_wire_format_spec.spl` → describe
+"validate() rejects level-prefixed markers", 2 examples, both red on this.
+
+Fix is one line — `if spec == nil:`. **Lane MATCHER did not apply it**: its
+charter explicitly excludes `src/os/**`. Needs an owner with that path.
+
+(Every other in-tree `.is_nil()` — `src/lib/*/runtime_value.spl:84,219,355,374`
+and the `test/01_unit/runtime/runtime_value_test.spl` /
+`test/03_system/compiler/mir_types_spec.spl` sites — is on a user `Value`-like
+receiver and is correct. This was the only false one.)
+
+### Still open (NOT fixed by this decision) — item 2 of "Why it still deserves a bug"
+
+The **failure phase** still differs per engine: the interpreter rejects `is_nil`
+as a semantic/compile-time error, the JIT defers it to a runtime error, so a
+`.is_nil()` on a cold path ships and only detonates when reached. Also the JIT
+error text leaks internal type spellings (`str`, `Array`, bare `is_nil`).
+Desired: reject unresolved methods at the same phase on both engines, and for
+the specific name `is_nil` emit a diagnostic pointing at `== nil`. That fix
+belongs in `src/compiler/**` (several lanes live there) and is **out of scope for
+lane MATCHER**, whose owned paths are `interpreter_method/**` /
+`interpreter_helpers/**`. Left open under this bug ID.

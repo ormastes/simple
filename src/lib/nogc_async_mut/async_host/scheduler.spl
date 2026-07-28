@@ -242,44 +242,44 @@ impl HostScheduler:
         # Execute task
         match task_id:
             case Some(id):
-                match self.tasks.get(id):
-                    case Some(task):
-                        var t = task
-                        t.state = TaskState.Running
+                # NOTE: index read + contains_key, not .get() — Dict<K, struct>
+                # .get() returns a corrupt payload under native codegen.
+                if not self.tasks.contains_key(id):
+                    return false
+                var t = self.tasks[id]
+                t.state = TaskState.Running
 
-                        val previous_task_id = enter_scheduler_task_id(id)
-                        match t.poll_fn():
-                            case Poll.Ready(_):
-                                t.state = TaskState.Completed
-                                # W2-5: record death reason — tag with task key at time of completion.
-                                # If the runtime wired an error into task_error, record it as a
-                                # failure; otherwise record clean completion so joiners can correlate.
-                                val tkey = current_unified_task_key("unknown-task")
-                                if t.task_error != "":
-                                    val rec = TaskDeathRecord(
-                                        task_key: tkey,
-                                        task_id: id,
-                                        reason: t.task_error
-                                    )
-                                    self.death_records = self.death_records.push(rec)
-                                # Wake waiters
-                                match t.waker:
-                                    case Some(w): w.wake()
-                                    case nil: pass
-                            case Poll.Pending:
-                                # Check if waker fired during poll
-                                if waker_check(id):
-                                    waker_clear(id)
-                                    t.state = TaskState.Pending
-                                    self.global_queue = self.global_queue.push(id)
-                                else:
-                                    t.state = TaskState.Suspended
+                val previous_task_id = enter_scheduler_task_id(id)
+                match t.poll_fn():
+                    case Poll.Ready(_):
+                        t.state = TaskState.Completed
+                        # W2-5: record death reason — tag with task key at time of completion.
+                        # If the runtime wired an error into task_error, record it as a
+                        # failure; otherwise record clean completion so joiners can correlate.
+                        val tkey = current_unified_task_key("unknown-task")
+                        if t.task_error != "":
+                            val rec = TaskDeathRecord(
+                                task_key: tkey,
+                                task_id: id,
+                                reason: t.task_error
+                            )
+                            self.death_records = self.death_records.push(rec)
+                        # Wake waiters
+                        match t.waker:
+                            case Some(w): w.wake()
+                            case nil: pass
+                    case Poll.Pending:
+                        # Check if waker fired during poll
+                        if waker_check(id):
+                            waker_clear(id)
+                            t.state = TaskState.Pending
+                            self.global_queue = self.global_queue.push(id)
+                        else:
+                            t.state = TaskState.Suspended
 
-                        exit_scheduler_task_id(previous_task_id)
-                        self.tasks[id] = t
-                        return true
-                    case nil:
-                        return false
+                exit_scheduler_task_id(previous_task_id)
+                self.tasks[id] = t
+                return true
             case nil:
                 return false
 
@@ -306,15 +306,12 @@ impl HostScheduler:
 
     fn wake_task(task_id: usize):
         """Wake suspended task."""
-        match self.tasks.get(task_id):
-            case Some(task):
-                var t = task
-                if t.state == TaskState.Suspended:
-                    t.state = TaskState.Pending
-                    self.tasks[task_id] = t
-                    self.global_queue = self.global_queue.push(task_id)
-            case nil:
-                pass
+        if self.tasks.contains_key(task_id):
+            var t = self.tasks[task_id]
+            if t.state == TaskState.Suspended:
+                t.state = TaskState.Pending
+                self.tasks[task_id] = t
+                self.global_queue = self.global_queue.push(task_id)
 
     # ----------------------------------------------------------------
     # W2-5: Death-reason query API
@@ -341,13 +338,10 @@ impl HostScheduler:
         Called by runtime.spl when a Result-returning task body returns Err.
         No-op if the task_id is not found (already completed or stolen).
         """
-        match self.tasks.get(task_id):
-            case Some(task):
-                var t = task
-                t.task_error = error_text
-                self.tasks[task_id] = t
-            case nil:
-                pass
+        if self.tasks.contains_key(task_id):
+            var t = self.tasks[task_id]
+            t.task_error = error_text
+            self.tasks[task_id] = t
 
 # Note: HostScheduler implements SchedulerCore via duck typing
 

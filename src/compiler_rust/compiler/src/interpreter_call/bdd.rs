@@ -1512,7 +1512,13 @@ pub(super) fn eval_bdd_builtin(
         }
         "assert_nil" => {
             let val = eval_arg(args, 0, Value::Bool(true), env, functions, classes, enums, impl_methods)?;
-            if val != Value::Nil {
+            // `nil` has two runtime representations: the bare `Value::Nil` literal and
+            // `Option::None` (what a `T?`-returning function yields for `return nil`).
+            // Both mean "absent", and `== nil` / `expect(x).to_be_nil()` already accept
+            // both via `Value::is_nil_like()`. `assert_nil` must agree, or a correct
+            // `Option::None` result fails the matcher. Still strict: `Some(_)`,
+            // `Result::Err`, `false`, `0`, and `""` are all NOT nil.
+            if !val.is_nil_like() {
                 BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
                 BDD_FAILURE_MSG.with(|cell| {
                     *cell.borrow_mut() = Some(format!("assert_nil failed: got {}", val.to_display_string()));
@@ -1522,10 +1528,13 @@ pub(super) fn eval_bdd_builtin(
         }
         "assert_not_nil" => {
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            if val == Value::Nil {
+            // Mirror of `assert_nil`: `Option::None` is nil, so it must FAIL here.
+            // The old `val == Value::Nil` test let a typed `None` pass as "not nil".
+            if val.is_nil_like() {
                 BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
                 BDD_FAILURE_MSG.with(|cell| {
-                    *cell.borrow_mut() = Some("assert_not_nil failed: got nil".to_string());
+                    *cell.borrow_mut() =
+                        Some(format!("assert_not_nil failed: got {}", val.to_display_string()));
                 });
             }
             Ok(Some(Value::Nil))

@@ -503,9 +503,8 @@ impl ActorScheduler:
         id
     me terminate(actor_id: i64):
         """Terminate an actor."""
-        val act = self.actors.get(actor_id)
-        if act.?:
-            var ctx = act.unwrap()
+        if self.actors.contains_key(actor_id):
+            var ctx = self.actors[actor_id]
             ctx.set_dead()
 
             # Remove from run queue
@@ -524,9 +523,8 @@ impl ActorScheduler:
     me notify_links(dead_id: i64, links: [i64]):
         """Notify linked actors of termination."""
         for link_id in links:
-            val linked = self.actors.get(link_id)
-            if linked.?:
-                var ctx = linked.unwrap()
+            if self.actors.contains_key(link_id):
+                var ctx = self.actors[link_id]
                 ctx.unlink(dead_id)
 
                 # If not trapping exits, terminate linked actor too
@@ -536,9 +534,8 @@ impl ActorScheduler:
     me notify_monitors(dead_id: i64, monitors: [i64]):
         """Notify monitoring actors of termination."""
         for monitor_id in monitors:
-            val monitoring = self.actors.get(monitor_id)
-            if monitoring.?:
-                var ctx = monitoring.unwrap()
+            if self.actors.contains_key(monitor_id):
+                var ctx = self.actors[monitor_id]
                 ctx.demonitor(dead_id)
                 # Send DOWN message to the monitoring actor via high-priority channel
                 # Data pointer 0 and size 0 signal a system DOWN notification
@@ -551,11 +548,10 @@ impl ActorScheduler:
             return false
 
         val id = actor_id.unwrap()
-        val act = self.actors.get(id)
-        if not act.?:
+        if not self.actors.contains_key(id):
             return false
 
-        var ctx = act.unwrap()
+        var ctx = self.actors[id]
 
         # Context switch
         self.current_actor_id = Some(id)
@@ -599,37 +595,33 @@ impl ActorScheduler:
         nil
     me wake_actor(actor_id: i64):
         """Wake a waiting actor (e.g., when message arrives)."""
-        val act = self.actors.get(actor_id)
-        if act.?:
-            var ctx = act.unwrap()
+        if self.actors.contains_key(actor_id):
+            var ctx = self.actors[actor_id]
             if ctx.state == ActorState.Waiting:
                 ctx.set_runnable()
                 val queue_idx = actor_id % self.config.scheduler_count
                 self.run_queues[queue_idx].enqueue(actor_id, ctx.priority)
     me suspend_actor(actor_id: i64):
         """Suspend an actor (remove from run queue)."""
-        val act = self.actors.get(actor_id)
-        if act.?:
-            var ctx = act.unwrap()
+        if self.actors.contains_key(actor_id):
+            var ctx = self.actors[actor_id]
             ctx.set_suspended()
             for queue in self.run_queues:
                 queue.remove(actor_id)
     me resume_actor(actor_id: i64):
         """Resume a suspended actor."""
-        val act = self.actors.get(actor_id)
-        if act.?:
-            var ctx = act.unwrap()
+        if self.actors.contains_key(actor_id):
+            var ctx = self.actors[actor_id]
             if ctx.state == ActorState.Suspended:
                 ctx.set_runnable()
                 val queue_idx = actor_id % self.config.scheduler_count
                 self.run_queues[queue_idx].enqueue(actor_id, ctx.priority)
     me send_message(to_id: i64, data_ptr: i64, size: i64, from_id: i64?) -> bool:
         """Send message to an actor."""
-        val act = self.actors.get(to_id)
-        if not act.?:
+        if not self.actors.contains_key(to_id):
             return false
 
-        var ctx = act.unwrap()
+        var ctx = self.actors[to_id]
         val result = ctx.mailbox.send_normal(data_ptr, size, from_id)
 
         if result.is_success():
@@ -641,11 +633,10 @@ impl ActorScheduler:
         false
     me send_high_priority(to_id: i64, data_ptr: i64, size: i64, from_id: i64?) -> bool:
         """Send high priority message (system messages, timeouts)."""
-        val act = self.actors.get(to_id)
-        if not act.?:
+        if not self.actors.contains_key(to_id):
             return false
 
-        var ctx = act.unwrap()
+        var ctx = self.actors[to_id]
         val result = ctx.mailbox.send_high(data_ptr, size, from_id)
 
         if result.is_success():
@@ -656,47 +647,35 @@ impl ActorScheduler:
         false
     me link_actors(id1: i64, id2: i64):
         """Create bidirectional link between actors."""
-        val act1 = self.actors.get(id1)
-        val act2 = self.actors.get(id2)
-
-        if act1.? and act2.?:
-            var ctx1 = act1.unwrap()
-            var ctx2 = act2.unwrap()
+        if self.actors.contains_key(id1) and self.actors.contains_key(id2):
+            var ctx1 = self.actors[id1]
+            var ctx2 = self.actors[id2]
             ctx1.link(id2)
             ctx2.link(id1)
     me unlink_actors(id1: i64, id2: i64):
         """Remove link between actors."""
-        val act1 = self.actors.get(id1)
-        val act2 = self.actors.get(id2)
-
-        if act1.?:
-            var ctx1 = act1.unwrap()
+        if self.actors.contains_key(id1):
+            var ctx1 = self.actors[id1]
             ctx1.unlink(id2)
 
-        if act2.?:
-            var ctx2 = act2.unwrap()
+        if self.actors.contains_key(id2):
+            var ctx2 = self.actors[id2]
             ctx2.unlink(id1)
     me monitor_actor(monitor_id: i64, target_id: i64):
         """Set up monitoring (unidirectional)."""
-        val monitor = self.actors.get(monitor_id)
-        val target = self.actors.get(target_id)
-
-        if monitor.? and target.?:
-            var mon_ctx = monitor.unwrap()
-            var tgt_ctx = target.unwrap()
+        if self.actors.contains_key(monitor_id) and self.actors.contains_key(target_id):
+            var mon_ctx = self.actors[monitor_id]
+            var tgt_ctx = self.actors[target_id]
             mon_ctx.monitor(target_id)
             tgt_ctx.add_monitored_by(monitor_id)
     me demonitor_actor(monitor_id: i64, target_id: i64):
         """Remove monitoring."""
-        val monitor = self.actors.get(monitor_id)
-        val target = self.actors.get(target_id)
-
-        if monitor.?:
-            var mon_ctx = monitor.unwrap()
+        if self.actors.contains_key(monitor_id):
+            var mon_ctx = self.actors[monitor_id]
             mon_ctx.demonitor(target_id)
 
-        if target.?:
-            var tgt_ctx = target.unwrap()
+        if self.actors.contains_key(target_id):
+            var tgt_ctx = self.actors[target_id]
             tgt_ctx.remove_monitored_by(monitor_id)
     fn has_runnable() -> bool:
         """Check if any actors are runnable."""
@@ -712,7 +691,9 @@ impl ActorScheduler:
         count
     fn get_actor(id: i64) -> ActorContext?:
         """Get actor context by ID."""
-        self.actors.get(id)
+        if self.actors.contains_key(id):
+            return Some(self.actors[id])
+        nil
     fn get_stats() -> SchedulerStats:
         """Get scheduler statistics."""
         self.stats

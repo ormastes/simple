@@ -101,10 +101,27 @@ is correct. The hazard is evidenced generically by the isolated truth table
 instead. The repairs stand as engine-independence fixes. No PASS is claimed
 that was not observed.
 
-**The `simple test` runner produced zero output on two attempts (>560s, known
-deployed-seed runner hang), so the new spec is lint-clean but has NOT been run
-by the runner.** Every one of its assertions was instead verified individually
-via `bin/simple run` on both engines.
+**The `simple test` runner never executed either spec.** The vacuity probe
+(`build/nilq_probe/vacuous_spec.spl`) eventually **exited 0** — but its entire
+901-byte output is lint warnings, with **zero** `"N examples, M failures"`
+lines. Per the sspec contract (one such line per `describe` block), the absence
+of any line means **no example ran at all**. So this is not a hang: it is a
+**false green** — `simple test <file>` exits 0 having run nothing, which any CI
+would read as PASS. That is a separate defect in its own right and is filed
+below. The second run (the real spec) was still pending at lane close.
+
+Consequence: the new spec is lint-clean but has **NOT** been executed by the
+runner, and no PASS is claimed for it. Every one of its assertions was instead
+verified individually via `bin/simple run` on both engines, which is why the
+spec was written to assert only those independently-verified propositions.
+
+### Additional defect observed: `simple test` exits 0 without running examples
+
+`bin/simple test build/nilq_probe/vacuous_spec.spl` → exit 0, no examples
+executed, no failure reported. A spec that cannot even be scheduled reports
+success. This deserves its own lane; it means green `simple test` results are
+not by themselves evidence that anything was verified. (Consistent with the
+prior `sspec false-green` and `SMF-stub shadowing` findings in memory.)
 
 ## Artifacts
 
