@@ -9,7 +9,7 @@ extern fn rt_file_read_text(path: text) -> text
 
 # REQ-LSPVIS-008: Track whether client supports structured visibility metadata.
 # Set during initialize from client capabilities.experimental.simpleVisibility.
-var CLIENT_SUPPORTS_VISIBILITY = false
+var CLIENT_SUPPORTS_VISIBILITY: bool = false
 
 fn client_supports_visibility() -> bool:
     CLIENT_SUPPORTS_VISIBILITY
@@ -63,11 +63,7 @@ fn _shell_cmd(command: text) -> (text, i64):
 
 fn _extract_uri(body: text) -> text:
     val td_search = Q() + "textDocument" + Q() + ":"
-    val td_idx_result = body.index_of(td_search)
-    var td_idx = -1
-    match td_idx_result:
-        Some(i): td_idx = i
-        nil: return ""
+    val td_idx = body.index_of(td_search)
     if td_idx < 0:
         return ""
     val td_start = td_idx + td_search.len()
@@ -81,11 +77,7 @@ fn _uri_to_path(uri: text) -> text:
 
 fn _extract_line(body: text) -> text:
     val pos_search = Q() + "position" + Q() + ":"
-    val pos_idx_result = body.index_of(pos_search)
-    var pos_idx = -1
-    match pos_idx_result:
-        Some(i): pos_idx = i
-        nil: return "0"
+    val pos_idx = body.index_of(pos_search)
     if pos_idx < 0:
         return "0"
     val pos_start = pos_idx + pos_search.len()
@@ -97,11 +89,7 @@ fn _extract_line(body: text) -> text:
 
 fn _extract_character(body: text) -> text:
     val pos_search = Q() + "position" + Q() + ":"
-    val pos_idx_result = body.index_of(pos_search)
-    var pos_idx = -1
-    match pos_idx_result:
-        Some(i): pos_idx = i
-        nil: return "0"
+    val pos_idx = body.index_of(pos_search)
     if pos_idx < 0:
         return "0"
     val pos_start = pos_idx + pos_search.len()
@@ -291,32 +279,29 @@ fn _parse_text_diagnostic(line: text, file_path: text) -> text:
     var diag_col = 0
     var diag_msg = line
     var severity = 1
-    val colon_idx = line.index_of(":")
-    match colon_idx:
-        Some(ci):
-            val after = line.substring(ci + 1)
-            val second_colon = after.index_of(":")
-            match second_colon:
-                Some(ci2):
-                    val line_str = after.substring(0, ci2).trim()
-                    val line_num = int(line_str)
-                    if line_num > 0:
-                        diag_line = line_num - 1
-                        val after2 = after.substring(ci2 + 1)
-                        val third_colon = after2.index_of(":")
-                        match third_colon:
-                            Some(ci3):
-                                val col_str = after2.substring(0, ci3).trim()
-                                val col_num = int(col_str)
-                                if col_num > 0:
-                                    diag_col = col_num - 1
-                                diag_msg = after2.substring(ci3 + 1).trim()
-                            nil:
-                                diag_msg = after2.trim()
-                nil:
-                    val _x = 0
-        nil:
+    val ci = line.index_of(":")
+    if ci >= 0:
+        val after = line.substring(ci + 1)
+        val ci2 = after.index_of(":")
+        if ci2 >= 0:
+            val line_str = after.substring(0, ci2).trim()
+            val line_num = int(line_str)
+            if line_num > 0:
+                diag_line = line_num - 1
+                val after2 = after.substring(ci2 + 1)
+                val ci3 = after2.index_of(":")
+                if ci3 >= 0:
+                    val col_str = after2.substring(0, ci3).trim()
+                    val col_num = int(col_str)
+                    if col_num > 0:
+                        diag_col = col_num - 1
+                    diag_msg = after2.substring(ci3 + 1).trim()
+                else:
+                    diag_msg = after2.trim()
+        else:
             val _x = 0
+    else:
+        val _x = 0
     if diag_msg.starts_with("warning"):
         severity = 2
         diag_msg = diag_msg.replace("warning:", "").trim()
@@ -555,16 +540,16 @@ fn lsp_handle_semantic_tokens_range(id: text, body: text) -> text:
         return make_json_result(id=id, result="{\"data\":[]}")
     val range_raw = extract_nested(json=body, key="range")
     val start_line = extract_field(json=range_raw, key="line")
+    # last_index_of returns a plain i64 with -1 for not-found, not an Option;
+    # the old `match Some(i)` took the nil arm on a real hit and the Some arm
+    # (binding nil) on a miss. Not-found still leaves end_line == start_line.
     val end_idx = range_raw.last_index_of("\"line\"")
     var end_line = start_line
-    match end_idx:
-        Some(i):
-            val tail = range_raw.substring(i)
-            val maybe_end = extract_field(json=tail, key="line")
-            if maybe_end != "":
-                end_line = maybe_end
-        nil:
-            val _x = 0
+    if end_idx >= 0:
+        val tail = range_raw.substring(end_idx)
+        val maybe_end = extract_field(json=tail, key="line")
+        if maybe_end != "":
+            end_line = maybe_end
     var cmd = _visibility_query_cmd("semantic-tokens " + file_path + " --start-line " + start_line + " --end-line " + end_line)
     var out = ""
     var exit_code: i64 = 0
@@ -779,12 +764,10 @@ fn _parse_code_action(line: text, uri: text) -> text:
     val tab_idx = line.index_of("\t")
     var title = line
     var action_kind = "quickfix"
-    match tab_idx:
-        Some(ti):
-            title = line.substring(0, ti)
-            action_kind = line.substring(ti + 1).trim()
-        nil:
-            val _x = 0
+    # index_of returns a plain i64 (-1 == not found), not an Option.
+    if tab_idx >= 0:
+        title = line.substring(0, tab_idx)
+        action_kind = line.substring(tab_idx + 1).trim()
     jo2(jp("title", js(title)), jp("kind", js(action_kind)))
 
 # --- Pull Diagnostics (LSP 3.17 — textDocument/diagnostic) ---

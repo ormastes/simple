@@ -9,6 +9,8 @@
 use os.userlib.syscall_raw.{syscall}
 use os.kernel.process_compat.{posix_spawn_with_args, posix_kill}
 use os.userlib.process.{spawn, get_task_info}
+use os.kernel.loader.spawn_authority.{spawn_authority_note_recipe, spawn_authority_clear_recipe}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
 
 use os.kernel.log.klog_api.{log_raw_println}
 use os.services.vfs.vfs_init.{g_vfs_read_file_text}
@@ -346,23 +348,21 @@ fn _ensure_seeded_app_slot(slot: u64, path: text):
         app_count = slot + 1
 
 fn _path_basename(path: text) -> text:
+    # last_index_of returns a plain i64 with -1 for not-found, not an Option.
     val last_slash = path.last_index_of("/")
-    match last_slash:
-        case Some(idx):
-            if idx + 1 >= path.len():
-                return ""
-            path.slice(idx + 1, path.len())
-        case _:
-            path
+    if last_slash < 0:
+        return path
+    if last_slash + 1 >= path.len():
+        return ""
+    path.slice(last_slash + 1, path.len())
 
 fn _is_directory_path(path: text) -> bool:
     """Return true if path looks like a directory (ends with '/' or last segment has no '.')."""
     if path.ends_with("/"):
         return true
+    # last_index_of returns a plain i64 with -1 for not-found, not an Option.
     val last_slash = path.last_index_of("/")
-    val segment = match last_slash:
-        case Some(idx): path.slice(idx + 1, path.len())
-        case _: path
+    val segment = if last_slash >= 0: path.slice(last_slash + 1, path.len()) else: path
     not segment.contains(".")
 
 fn _resolve_against_cwd(path: text, cwd: text) -> text:
@@ -413,6 +413,23 @@ fn _record_detached_process(pid: u64, path: text):
     process_sequence = process_sequence + 1
     process_count = process_count + 1
 
+fn _launcher_spawn_under_recipe(path: text, args: [text]) -> i64:
+    """Launch an app under the APP_LAUNCHER SpawnSpec recipe.
+
+    Master plan §5.4: the launcher is a migrated caller. It declares
+    `SPAWN_RECIPE_APP_LAUNCHER` before descending into the spawn syscall, so the
+    kernel gate admits it after the boot seal is armed and mints the child a
+    pouch of exactly FileExec + FileRead under `/sys/apps/` plus ProcessSpawn —
+    instead of the `spawn_full()` god-mode set it inherited before.
+
+    Same single spawn path as before: only the capability set the child receives
+    changes. The recipe is cleared on every exit so a later unmigrated spawn is
+    not silently admitted on this one's declaration."""
+    spawn_authority_note_recipe(SPAWN_RECIPE_APP_LAUNCHER)
+    val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
+    spawn_authority_clear_recipe()
+    pid_result
+
 fn _looks_like_executable_path(path: text) -> bool:
     if path == "":
         return false
@@ -455,7 +472,7 @@ pub fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
             _ensure_seeded_app_slot(slot, tracked_path)
         val name = if seeded_index >= 0: _seeded_app_name_for_path(path) else: app_name[slot]
         log_raw_println("[launcher] posix_spawn begin name={name} path={path}")
-        val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
+        val pid_result = _launcher_spawn_under_recipe(path, args)
         log_raw_println("[launcher] posix_spawn returned name={name} result={pid_result}")
         if pid_result < 0:
             app_launch_state[slot] = "failed"
@@ -464,7 +481,7 @@ pub fn launcher_launch_path_with_args(path: text, args: [text]) -> i64:
             return pid_result
         return _finalize_launch(slot, name, pid_result.to_u64(), tracked_path)
 
-    val pid_result = posix_spawn_with_args(path, args, APP_PRIORITY)
+    val pid_result = _launcher_spawn_under_recipe(path, args)
     log_raw_println("[launcher] detached posix_spawn returned path={path} result={pid_result}")
     if pid_result < 0:
         log_raw_println("[launcher] Failed to launch path={path}: {pid_result}")

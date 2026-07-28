@@ -87,3 +87,88 @@ would fail against `main` until the fix lands.
    than silently passed through.
 3. Fix the interpreter's wildcard arm so `_` always matches.
 4. Repair the 17 confirmed sites, starting with `jsonrpc.spl`.
+
+## Sites repaired
+
+### Contract, re-measured (lane IDXFIX2, `build/idxfix2/*.spl`)
+
+`bin/simple run` and `SIMPLE_NO_JIT=1 bin/simple run` gave **identical** results
+for every probe, so on the current toolchain this defect is not engine-specific.
+
+| expression (`s = "hello"`; found = 1, miss = -1) | result |
+|---|---|
+| `match idx: Some(i) / nil` | **always** `Some`, binds **nil** |
+| `idx == nil` | **always false** — the not-found branch is dead code |
+| `idx != nil` | **always true** — the guard never rejects `-1` |
+| `idx ?? N` | returns raw `idx`; `-1` leaks through |
+| `idx.?` | **truthiness** — false at index `0`, true at `-1` (inverted at both ends) |
+| `idx.unwrap()` | `nil` when found; `<value:0xff..ff>` when not |
+| `s.find(x).unwrap_or(-1)` | `<value:0x6>` / `<value:0xff..ff>` |
+| `"a/b/c".last_index_of("/")` = 3, matched as Option | takes the **nil** arm |
+| `"abc".last_index_of("/")` = -1, matched as Option | takes the **Some** arm, binds nil |
+
+**`text.last_index_of` / `rfind` are also plain `i64`.** `src/lib/text.spl:61`
+declares `-> i64?`, but the builtin intercepts first
+(`interpreter/eval_methods.spl:459` returns `val_make_int(… ?? -1)`;
+`compiler/cg_expr.spl:555` emits `spl_str_last_index_of`), so callers see a raw
+`i64`. Any earlier note calling `last_index_of` "correctly Option-shaped" is
+wrong.
+
+### Repaired (lane IDXFIX2 — 28 files)
+
+Rule applied: `>= 0` = found, `< 0` = not found; each site's existing not-found
+branch was kept verbatim, only the test changed.
+
+| file | shape |
+|---|---|
+| `src/app/mcp/api_tools.spl`, `src/lib/nogc_async_mut/mcp/api_tools.spl` | `.? == false` guard + `(idx ?? 0)` (4 each) |
+| `src/lib/nogc_async_mut/mcp/resources.spl` | `q_idx.?` + `(q_idx ?? 0)` |
+| `src/lib/{nogc_sync_mut,gc_async_mut,nogc_async_mut}/resource_tracker.spl` | `.? == nil` + `?? 0` / `?? (len-1)` |
+| `src/lib/{nogc_sync_mut,gc_async_mut,nogc_async_mut}/process_monitor.spl` | `.? == nil` + `?? 0` |
+| `src/lib/{nogc_sync_mut,gc_async_mut,nogc_async_mut}/http/accept_encoding.spl` | `.? and …` (3 each) |
+| `src/lib/nogc_async_mut/http_server/parser.spl` | `.? and …` (5) |
+| `src/lib/nogc_sync_mut/http_server/mime.spl` | `dot_idx == nil` |
+| `src/lib/nogc_sync_mut/ui_test/{parse,client,http}.spl` | `== nil` / `!= nil` (8) |
+| `src/lib/{nogc_sync_mut,nogc_async_mut}/dependency_tracker/graph.spl` | `index_of(x) ?? 0` |
+| `src/{app,lib/nogc_sync_mut,lib/nogc_async_mut}/debug/remote/protocol/trace32.spl` | `colon_idx != nil` |
+| `src/app/llm_caret/claude_full/constants/files.spl` | `dot == nil` |
+| `src/app/interpreter/utils/path_resolution.spl` | `idx.?` + `idx.unwrap()` |
+| `src/app/mcpgdb/debug_backend_common.spl` | `last_index_of` + `match Some(idx)` |
+| `src/lib/nogc_sync_mut/lsp/lsp_handlers.spl` | `last_index_of` + `match Some(i)` |
+| `src/os/services/launcher/launcher_registry.spl` | `last_index_of` + `case Some(idx)` (2) |
+| `src/os/apps/shell/_ShellTools/text_tools.spl` | `== nil` + `.unwrap()` |
+
+### Live failures the repairs removed (A/B, `build/idxfix2/verify*.spl`)
+
+| function | before | after |
+|---|---|---|
+| `api_tools.extract_nested_string` on valid JSON | `""` — **never extracted anything** | `v1` |
+| `http_server/parser` blank line = end of headers | `need-more` — **terminator unreachable**, headers never finished | `END-OF-HEADERS` |
+| `ui_test/client` contains-assertion on a miss | `true` — **the assertion could never fail** | `false` |
+| `ui_test/http.extract_body` with no `\r\n\r\n` | `"defgh"` — body sliced from offset 3 of an unrelated response | `""` |
+| `mime_from_path("noext")` | treated the whole path as the extension | `application/octet-stream` |
+| `accept_encoding` q-value `".5"` | `nodot` → q parsed as 0 | `int=[] frac=[5]` |
+
+### Deferred (outside this lane's owned paths)
+
+| file | owner |
+|---|---|
+| `src/os/tools/net/wget_tool.spl:31,41,54,68` (`if val Some(i) = …`) | URL-parsing lane |
+| `src/lib/{nogc_sync_mut,nogc_async_mut}/ftp_utils.spl:501,508` (`at_idx.?` with no `>= 0`) | URL-parsing lane |
+| `src/lib/nogc_async_mut/http_server/proxy.spl:310` (`qmark.? and qmark >= 0`) | URL-parsing lane |
+| `src/os/services/llm/_McpOsServer/helpers.spl:56,63,72,80,83` | lane UIQUERY |
+| `src/lib/common/ui/parse/{sdn,sdn_tree}.spl` (`index_of(n) ?? -1`) | lane UIQUERY — benign no-op |
+
+### Separate defects found while repairing
+
+1. **`text[a..b]` (double-dot range slice) is corrupt.** `"/a/b"[0..2]` yields a
+   text whose `.len()` is `-1` and which makes string interpolation swallow the
+   entire output line; `[0:2]` and `.slice(0,2)` are correct. Pre-existing —
+   it had silently broken `parent_dirname` in
+   `src/app/interpreter/utils/path_resolution.spl`, now switched to `[0:idx]`.
+2. **`[T].index_of(v)` returns `-1` even when the element is present**
+   (`build/idxfix/arr2.spl`). Array `index_of` looks unimplemented; distinct
+   from the Option-shape bug and not fixed here.
+3. `.?` on an `i64` is plain truthiness, so it is wrong at *both* ends: it
+   rejects a genuine match at index `0` and accepts the `-1` sentinel. Sites
+   half-repaired as `if x.? and x >= 0:` still drop index-0 matches.
