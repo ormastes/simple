@@ -1,8 +1,14 @@
 # Theme snapshot catalog review hard stop
 
-**Status:** open / fail-closed  
+**Status:** open / fail-closed — re-verified against `origin/main` 2026-07-27,
+both P1 gaps still fire today  
 **Iteration state:** three-cycle cap reached  
-**Integration state:** rejected commits are not integrated
+**Integration state:** rejected commits are not integrated. The three shas
+below are **unrecoverable** — isolated worktrees, never pushed, and they no
+longer resolve in either the git or the jj object store. Do not attempt
+`git show` or a cherry-pick. No catalog landed by other means either: only a
+single hardcoded `aetheric_dark` generated snapshot exists. See
+[report](../../09_report/theme_hard_stops_unlanded_2026-07-27.md).
 
 ## Scope
 

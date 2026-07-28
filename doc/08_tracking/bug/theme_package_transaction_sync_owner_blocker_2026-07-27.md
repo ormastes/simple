@@ -1,7 +1,11 @@
 # Theme package transaction synchronization-owner blocker
 
-**Status:** open prerequisite  
-**Candidate:** `4f84131c55` rejected and unintegrated  
+**Status:** open prerequisite — re-verified against `origin/main` 2026-07-27,
+still live (`ThemePackageTransactionStore` does not exist anywhere in `src/**`)  
+**Candidate:** `4f84131c55` rejected and unintegrated, and **unrecoverable** —
+never pushed, no longer resolves in the git or jj object store. The wire codec
+`b1d0b3e27ff8` cited below **is** confirmed landed (ancestor of `origin/main`).
+See [report](../../09_report/theme_hard_stops_unlanded_2026-07-27.md).  
 **Iteration state:** cycle 2 stopped read-only; cycle 3 stopped and fully
 reverted without a commit
 

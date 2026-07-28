@@ -1,8 +1,14 @@
 # Theme IPC K2 review hard stop
 
-**Status:** open / fail-closed  
+**Status:** open / fail-closed — re-verified against `origin/main` 2026-07-27,
+still live  
 **Iteration state:** three-cycle cap reached  
-**Integration state:** K1 is landed; K2 candidates are rejected/unintegrated
+**Integration state:** K1 is landed; K2 candidates are rejected/unintegrated.
+The three K2 shas below are **unrecoverable** — they were made in isolated
+worktrees that were never pushed, and no longer resolve in either the git or
+the jj object store. Do not attempt `git show` or a cherry-pick; the
+fresh-lane resume contract below is the only path. See
+[report](../../09_report/theme_hard_stops_unlanded_2026-07-27.md).
 
 ## Scope
 
