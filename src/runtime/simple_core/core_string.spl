@@ -266,6 +266,19 @@ pub fn rt_string_chars(value: i64) -> i64:
         free(ascii_cache)
     return out
 
+# Return the Unicode code point at CHARACTER index `index`.
+#
+# Semantics are unchanged; only the cost is. Inside an ASCII prefix a character
+# index is also a byte index, so scan bytes for the first one >= 0x80 and, when
+# `index` falls strictly inside that prefix, read it directly instead of running
+# the multi-byte decode loop below.
+#
+# NOTE: unlike the hosted C/Rust runtimes, this freestanding lane does NOT cache
+# the all-ASCII result in the string header, so it stays O(index) per call rather
+# than becoming O(1). The header bit the hosted runtimes use is bit 31 of the
+# `reserved` field, which lands on the sign bit of the i64 word at offset 0 and
+# is awkward to set safely from Simple. Filed as follow-up; this change is still
+# a strict improvement (plain byte compare instead of full UTF-8 decode).
 pub fn rt_string_char_code_at(value: i64, index: i64) -> i64:
     val ptr = string_ptr(value)
     if index < 0:
@@ -280,6 +293,14 @@ pub fn rt_string_char_code_at(value: i64, index: i64) -> i64:
             return 0
         while spl_load_u8(data, len) != 0:
             len = len + 1
+    # ASCII-prefix short-circuit: if every byte up to and including `index` is
+    # ASCII, the character at `index` is simply the byte at `index`.
+    if index < len:
+        var probe = 0
+        while probe <= index and (spl_load_u8(data, probe) & 255) < 128:
+            probe = probe + 1
+        if probe > index:
+            return spl_load_u8(data, index) & 255
     var byte_index = 0
     var char_index = 0
     while byte_index < len:

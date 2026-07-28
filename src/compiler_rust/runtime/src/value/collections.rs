@@ -231,6 +231,11 @@ pub(crate) unsafe fn alloc_runtime_string(len: u64) -> Option<*mut RuntimeString
 /// `reserved` padding field (`HeapHeader::reserved`), so no layout changes.
 pub(crate) const RT_STRING_FLAG_SHARED: u16 = 1;
 
+/// Set once a string has been proven to contain no byte >= 0x80. Positive-only:
+/// set means proven ASCII, unset means unknown (never "proven non-ASCII"), so a
+/// stale-miss can only cost a rescan. Sound because Simple strings are immutable.
+pub(crate) const RT_STRING_FLAG_ASCII: u16 = 1 << 1;
+
 /// Set `RT_STRING_FLAG_SHARED` on a cache-owned string. No-op for NIL (an
 /// allocation failure) or a non-heap value.
 fn mark_string_shared(value: RuntimeValue) {
@@ -2179,7 +2184,45 @@ pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> Runtime
     }
 }
 
+/// Byte offset of the first byte >= 0x80, or `bytes.len()` when all-ASCII.
+/// Word-at-a-time so an all-ASCII document costs ~len/8 iterations.
+fn first_non_ascii(bytes: &[u8]) -> usize {
+    let mut i = 0usize;
+    while i + 8 <= bytes.len() {
+        let w = u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
+        if w & 0x8080_8080_8080_8080 != 0 {
+            break;
+        }
+        i += 8;
+    }
+    while i < bytes.len() && bytes[i] < 0x80 {
+        i += 1;
+    }
+    i
+}
+
 /// Return the Unicode code point at the given character index, or 0 if missing.
+///
+/// SEMANTICS ARE UNCHANGED: `index` is a CHARACTER (codepoint) index, and the
+/// `index >= len` bound still uses the BYTE length exactly as before. Only the
+/// cost changed.
+///
+/// The old body was `s.chars().nth(index)` -- a codepoint walk from byte 0 on
+/// every call, i.e. O(index). That made every `while i < s.len(): char_code_at(i)`
+/// loop in the codebase O(n^2); the web renderer's hand-rolled `find_from` /
+/// `text_matches_at` scanners rest entirely on this primitive.
+///
+/// Within an ASCII prefix a character index IS a byte index, so we answer
+/// directly out of the buffer:
+///   - flag cached          -> O(1) direct byte read
+///   - whole string ASCII   -> cache the flag, O(1) read
+///   - `index` inside prefix-> O(1) read
+///   - otherwise            -> the exact original codepoint walk
+///
+/// The fallback never costs more than the old code did, so no input regresses.
+/// The cached flag is sound because Simple strings are immutable and the flag is
+/// positive-only (set => proven ASCII, unset => unknown), so a missed cache costs
+/// a rescan, never a wrong answer.
 #[no_mangle]
 pub extern "C" fn rt_string_char_code_at(string: RuntimeValue, index: i64) -> i64 {
     let len = rt_string_len(string);
@@ -2194,8 +2237,28 @@ pub extern "C" fn rt_string_char_code_at(string: RuntimeValue, index: i64) -> i6
 
     unsafe {
         let bytes = std::slice::from_raw_parts(data, len as usize);
+        let idx = index as usize;
+
+        let hdr = string.as_heap_ptr();
+        if !hdr.is_null() && (*hdr).reserved & RT_STRING_FLAG_ASCII != 0 {
+            return bytes[idx] as i64;
+        }
+
+        let first_hi = first_non_ascii(bytes);
+        if first_hi == bytes.len() {
+            // Whole string is ASCII: character index == byte index, permanently.
+            if !hdr.is_null() {
+                (*hdr).reserved |= RT_STRING_FLAG_ASCII;
+            }
+            return bytes[idx] as i64;
+        }
+        if first_hi > idx {
+            // `index` lies strictly inside the ASCII prefix.
+            return bytes[idx] as i64;
+        }
+
         let s = std::str::from_utf8_unchecked(bytes);
-        s.chars().nth(index as usize).map_or(0, |c| c as i64)
+        s.chars().nth(idx).map_or(0, |c| c as i64)
     }
 }
 

@@ -351,8 +351,23 @@ if let Value::Str(ref s) = recv_val {
             }
         }
         "char_code_at" => {
-            // Return the Unicode code point of the character at the given index
+            // Return the Unicode code point of the character at the given index.
+            //
+            // SEMANTICS ARE UNCHANGED: `idx` is a CHARACTER (codepoint) index.
+            // Only the cost changed. `s.chars().nth(idx)` walked from byte 0 on
+            // every call -- O(idx) -- which made every
+            // `while i < s.len(): s.char_code_at(i)` loop O(n^2). Inside an
+            // ASCII prefix a character index IS a byte index, so answer straight
+            // out of the buffer; fall back to the original walk otherwise.
             let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let bytes = s.as_bytes();
+            if shared_text_is_ascii(s) {
+                return Ok(Value::Int(bytes.get(idx).map_or(0, |b| *b as i64)));
+            }
+            if first_non_ascii(bytes) > idx {
+                // `idx` lies strictly inside the ASCII prefix.
+                return Ok(Value::Int(bytes[idx] as i64));
+            }
             match s.chars().nth(idx) {
                 Some(c) => return Ok(Value::Int(c as i64)),
                 None => return Ok(Value::Int(0)),

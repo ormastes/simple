@@ -2232,6 +2232,46 @@ const char* rt_interp_cstr(int64_t v) {
     return s ? (const char*)s->data : (const char*)(uintptr_t)v;
 }
 
+/* Scan for the first non-ASCII byte. Returns the byte offset of the first byte
+ * >= 0x80, or `len` when the whole buffer is ASCII. Word-at-a-time so the
+ * common all-ASCII document costs ~len/8 iterations rather than len. */
+static uint64_t rt_str_first_non_ascii(const uint8_t* data, uint64_t len) {
+    uint64_t i = 0;
+    while (i + 8 <= len) {
+        uint64_t w;
+        memcpy(&w, data + i, 8);
+        if (w & 0x8080808080808080ULL) break;
+        i += 8;
+    }
+    while (i < len && data[i] < 0x80) i++;
+    return i;
+}
+
+/* Return the Unicode code point at character index `index`.
+ *
+ * SEMANTICS ARE UNCHANGED: `index` is a CHARACTER (codepoint) index, exactly as
+ * before. Only the cost changed.
+ *
+ * The old body walked UTF-8 from byte 0 on every call, making this O(index) and
+ * turning every `while i < s.len(): s.char_code_at(i)` loop in the codebase into
+ * O(n^2). Within an ASCII prefix a character index IS a byte index, so we can
+ * answer directly out of the buffer:
+ *
+ *   - flag cached  -> O(1) direct byte read.
+ *   - else scan for the first non-ASCII byte:
+ *       none in the string   -> whole string is ASCII, cache the flag, O(1) read
+ *       first one is past    -> `index` still sits in the ASCII prefix, O(1) read
+ *       first one is at/before -> fall back to the exact original decode walk.
+ *
+ * The fallback is never reached without having already paid <= the cost the old
+ * code paid, so no input gets slower. The cached flag is sound because Simple
+ * strings are immutable and the flag is positive-only (set => proven ASCII;
+ * unset => unknown), so a missed cache only costs a rescan, never a wrong answer.
+ *
+ * NOTE: deliberately does NOT touch the cp-count field (bits [29:0]). That field
+ * overlaps RT_CORE_STRING_FLAG_SHARED at bit 0, so writing a cp-count would clear
+ * the SHARED bit and defeat rt_string_free's refusal to free interned literals.
+ * See the report accompanying this change. */
 int64_t rt_string_char_code_at(int64_t string, int64_t index) {
     RtCoreString* s = rt_core_as_string(string);
     const uint8_t* data;
@@ -2246,6 +2286,26 @@ int64_t rt_string_char_code_at(int64_t string, int64_t index) {
         data = (const uint8_t*)(uintptr_t)string;
         if (!data) return 0;
         len = strlen((const char*)data);
+    }
+    if ((uint64_t)index >= len) {
+        /* Byte length bounds the character count, so an index at or past it can
+         * only resolve inside a multi-byte string; let the walk decide (it
+         * returns 0 when the index is genuinely out of range). */
+        if (s && (s->reserved & SIMD_CACHE_FLAG_IS_ASCII)) return 0;
+    } else if (s && (s->reserved & SIMD_CACHE_FLAG_IS_ASCII)) {
+        return data[index];
+    } else {
+        uint64_t first_hi = rt_str_first_non_ascii(data, len);
+        if (first_hi == len) {
+            /* Whole string is ASCII: char index == byte index, now and forever. */
+            if (s) s->reserved |= SIMD_CACHE_FLAG_IS_ASCII;
+            return data[index];
+        }
+        if (first_hi > (uint64_t)index) {
+            /* `index` lies strictly inside the ASCII prefix. */
+            return data[index];
+        }
+        /* Multi-byte content at or before `index`: fall through to the walk. */
     }
     while (byte_index < len) {
         uint8_t b0 = data[byte_index];

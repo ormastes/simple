@@ -17,6 +17,70 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Byte offset of the first byte >= 0x80, or `bytes.len()` when all-ASCII.
+/// Word-at-a-time so an all-ASCII document costs ~len/8 iterations.
+fn first_non_ascii(bytes: &[u8]) -> usize {
+    let mut i = 0usize;
+    while i + 8 <= bytes.len() {
+        let w = u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
+        if w & 0x8080_8080_8080_8080 != 0 {
+            break;
+        }
+        i += 8;
+    }
+    while i < bytes.len() && bytes[i] < 0x80 {
+        i += 1;
+    }
+    i
+}
+
+// Memo for `char_code_at`'s ASCII fast path. The interpreter's strings are
+// `Arc<String>` with no spare header bits (unlike the two native runtimes, which
+// cache the same fact in the string header), so the answer is memoized here,
+// keyed on Arc identity.
+//
+// Soundness: each slot holds its own `Arc` clone, which keeps that allocation
+// alive, so a pointer can never be recycled under a live entry -- `Arc::ptr_eq`
+// therefore cannot alias two different strings. Strings are immutable, so a hit
+// stays valid. 4 slots (round-robin) rather than 1 so that alternating between a
+// couple of documents does not thrash back to a rescan on every call.
+const ASCII_MEMO_SLOTS: usize = 4;
+
+thread_local! {
+    static ASCII_MEMO: RefCell<(Vec<(Arc<String>, bool)>, usize)> =
+        const { RefCell::new((Vec::new(), 0)) };
+}
+
+/// True when `s` contains no byte >= 0x80. Memoized per string allocation.
+fn shared_text_is_ascii(s: &Arc<String>) -> bool {
+    ASCII_MEMO.with(|cell| {
+        let mut m = cell.borrow_mut();
+        let (slots, next) = &mut *m;
+        for (cached, is_ascii) in slots.iter() {
+            if Arc::ptr_eq(cached, s) {
+                return *is_ascii;
+            }
+        }
+        let is_ascii = first_non_ascii(s.as_bytes()) == s.len();
+        if slots.len() < ASCII_MEMO_SLOTS {
+            slots.push((Arc::clone(s), is_ascii));
+        } else {
+            slots[*next] = (Arc::clone(s), is_ascii);
+            *next = (*next + 1) % ASCII_MEMO_SLOTS;
+        }
+        is_ascii
+    })
+}
+
+/// Drop the `char_code_at` ASCII memo, releasing the `Arc` clones it holds.
+pub fn clear_ascii_memo() {
+    ASCII_MEMO.with(|cell| {
+        let mut m = cell.borrow_mut();
+        m.0.clear();
+        m.1 = 0;
+    });
+}
+
 // Thread-local storage for pinned strings used by the "ptr" method on strings.
 // Strings are kept alive here so that raw pointers returned to SFFI/codegen remain valid.
 // Call `clear_pinned_strings()` between test runs or when the interpreter resets to reclaim memory.
