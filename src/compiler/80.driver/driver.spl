@@ -22,6 +22,11 @@ use compiler.hir.hir.*
 use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTypeDef, MirBody}
 use compiler.frontend.frontend.{parse_full_frontend}
+# Profile-gated severity mapping for the safety pass (lane SE1, 2026-07-28).
+# Self-contained on purpose -- see driver_safety_severity.spl header for why
+# it must not import compiler.tools.lint.main (layering + the interp
+# dict-to-int contamination bug).
+use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity}
 use compiler.core.parser.{par_had_error_get}
 use compiler.core.ast.{ast_reset}
 use compiler.frontend.parser_types.*
@@ -1173,8 +1178,17 @@ pub class CompilerDriver:
         # SIMPLE_TYPECHECK_WARN convention above, this pass is gated behind
         # SIMPLE_SAFETY_WARN=1 and only LOGS warnings (it never pushes to
         # ctx.errors), so the default build is unaffected.
-        if (rt_env_get("SIMPLE_SAFETY_WARN") ?? "") == "1":
-            val safety_warnings = run_safety_warn_pass(phase_hir_modules)
+        # Since 2026-07-28 (lane SE1) the pass is PROFILE-GATED, not only
+        # log-opt-in: SIMPLE_SAFETY_PROFILE=robust routes each diagnostic to
+        # ctx.add_warning (visible, never fails the build -- the migration
+        # window); =critical routes to ctx.add_error and fails the build.
+        # Default (unset) stays Advisory: log-only under SIMPLE_SAFETY_WARN=1,
+        # exactly the pre-SE1 behavior, so no existing build changes.
+        val safety_enforcing = match safety_pass_severity():
+            case SafetyPassSeverity.Advisory: false
+            case _: true
+        if ((rt_env_get("SIMPLE_SAFETY_WARN") ?? "") == "1") or safety_enforcing:
+            val safety_warnings = run_safety_warn_pass(phase_ctx, phase_hir_modules)
             log_warn("safety warn-only pass: {safety_warnings.len()} diagnostic(s)")
             var sw_idx = 0
             while sw_idx < safety_warnings.len():
@@ -1522,15 +1536,24 @@ pub fn run_typecheck_warn_pass(hir_modules: Dict<text, HirModule>) -> [text]:
 #
 # Runs the fully-implemented but previously-unwired SafetyChecker
 # (compiler.semantics.safety_checker) over every lowered HIR module and returns
-# its diagnostics as formatted text. It pushes NOTHING to the compile context —
-# the caller (lower_and_check_impl) logs the result — so it can never fail a
-# build. It is only invoked when SIMPLE_SAFETY_WARN=1. SafetyChecker currently
+# its diagnostics as formatted text (the caller still logs that list exactly
+# as before) and, since lane SE1, ALSO routes each diagnostic into ctx at the
+# profile-gated severity -- Advisory: log-only; robust: warning; critical:
+# build-failing error. Invoked when SIMPLE_SAFETY_WARN=1 or when the resolved
+# severity is enforcing. SafetyChecker currently
 # implements exactly one rule (inline asm outside `unsafe:`); the declared
 # RawPointerOutsideUnsafe / UnsafeFfiOutsideUnsafe variants are never
 # constructed and InlineAsmMatch has no dedicated case, so this pass only
 # surfaces plain InlineAsm violations today. See
 # doc/08_tracking/bug/safety_checker_pass_never_invoked_2026-07-27.md.
-pub fn run_safety_warn_pass(hir_modules: Dict<text, HirModule>) -> [text]:
+pub fn run_safety_warn_pass(ctx: CompileContext, hir_modules: Dict<text, HirModule>) -> [text]:
+    # Lane SE1 (2026-07-28): in addition to returning the formatted list for
+    # the existing log path (unchanged), each diagnostic is ALSO routed into
+    # `ctx` at the severity SIMPLE_SAFETY_PROFILE resolves to: Advisory
+    # touches nothing, Warn calls ctx.add_warning, Deny calls ctx.add_error
+    # and therefore fails the build. CompileContext is a class (reference
+    # semantics, driver_types.spl:34), so these mutations persist.
+    val severity = safety_pass_severity()
     var out: [text] = []
     for name in hir_modules.keys():
         val m = hir_modules[name]
@@ -1540,12 +1563,44 @@ pub fn run_safety_warn_pass(hir_modules: Dict<text, HirModule>) -> [text]:
         while s_idx < serrors.len():
             match serrors[s_idx]:
                 case InlineAsmOutsideUnsafe(span):
-                    out = out.push("[safety inline-asm-outside-unsafe] {name}: inline asm used outside an `unsafe:` block at {span.line}:{span.col}")
+                    val msg = "[safety inline-asm-outside-unsafe] {name}: inline asm used outside an `unsafe:` block at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
                 case UnsafeFfiOutsideUnsafe(span):
-                    out = out.push("[safety unsafe-ffi-outside-unsafe] {name}: unsafe FFI call used outside an `unsafe:` block at {span.line}:{span.col}")
+                    val msg = "[safety unsafe-ffi-outside-unsafe] {name}: unsafe FFI call used outside an `unsafe:` block at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
                 case RawPointerOutsideUnsafe(span):
-                    out = out.push("[safety raw-pointer-outside-unsafe] {name}: raw pointer operation used outside an `unsafe:` block at {span.line}:{span.col}")
+                    val msg = "[safety raw-pointer-outside-unsafe] {name}: raw pointer operation used outside an `unsafe:` block at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
                 case Other(message, span):
-                    out = out.push("[safety other] {name}: {message} at {span.line}:{span.col}")
+                    val msg = "[safety other] {name}: {message} at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
             s_idx = s_idx + 1
     out
