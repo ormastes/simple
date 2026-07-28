@@ -130,24 +130,26 @@ impl DebugBackend for NativeBackend:
 
     fn remove_breakpoint(file: String, line: Int) -> Result<Nil, String>:
         val key = "{file}:{line}"
-        match self.breakpoint_addrs.get(key):
-            case Some(addr):
-                match self.original_bytes.get(addr):
-                    case Some(orig):
-                        rt_ptrace_write_memory(self.pid, addr, orig)
-                    case nil:
-                        pass
-                self.breakpoint_addrs.remove(key)
-                Ok(nil)
-            case nil:
-                Err("No breakpoint at {key}")
+        # NOTE: Dict.get() returns a still-boxed value for i64 dicts under native
+        # codegen — see doc/07_guide/language/dict_native_pitfalls.md
+        if self.breakpoint_addrs.contains_key(key):
+            val addr = self.breakpoint_addrs[key]
+            if self.original_bytes.contains_key(addr):
+                val orig = self.original_bytes[addr]
+                rt_ptrace_write_memory(self.pid, addr, orig)
+            self.breakpoint_addrs.remove(key)
+            Ok(nil)
+        else:
+            Err("No breakpoint at {key}")
 
     fn stack_trace() -> Result<[FrameInfo], String>:
         # Walk native stack using frame pointers + DWARF unwind info
         var frames: [FrameInfo] = []
         if self.pid > 0 and self.dwarf_handle != 0:
             val regs = rt_ptrace_get_registers(self.pid)
-            val rip = regs.get("rip") ?? 0
+            # NOTE: Dict.get() returns a still-boxed value for i64 dicts under
+            # native codegen — see doc/07_guide/language/dict_native_pitfalls.md
+            val rip = if regs.contains_key("rip"): regs["rip"] else: 0
             # Map instruction pointer to source
             val loc_str = rt_dwarf_addr_to_line(self.dwarf_handle, rip)
             val func_name = rt_dwarf_function_at(self.dwarf_handle, rip)
@@ -162,8 +164,8 @@ impl DebugBackend for NativeBackend:
         var vars: [VarInfo] = []
         if self.pid > 0 and self.dwarf_handle != 0:
             val regs = rt_ptrace_get_registers(self.pid)
-            val rip = regs.get("rip") ?? 0
-            val rbp = regs.get("rbp") ?? 0
+            val rip = if regs.contains_key("rip"): regs["rip"] else: 0
+            val rbp = if regs.contains_key("rbp"): regs["rbp"] else: 0
             val raw = rt_dwarf_locals_at(self.dwarf_handle, rip, rbp)
             for entry in raw:
                 # Format: "name:type:offset"
@@ -178,7 +180,7 @@ impl DebugBackend for NativeBackend:
     fn current_location() -> Result<LocationInfo, String>:
         if self.pid > 0 and self.dwarf_handle != 0:
             val regs = rt_ptrace_get_registers(self.pid)
-            val rip = regs.get("rip") ?? 0
+            val rip = if regs.contains_key("rip"): regs["rip"] else: 0
             val loc_str = rt_dwarf_addr_to_line(self.dwarf_handle, rip)
             val func_name = rt_dwarf_function_at(self.dwarf_handle, rip)
             match DwarfLineInfo.from_string(loc_str):
