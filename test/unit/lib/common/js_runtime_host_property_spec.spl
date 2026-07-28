@@ -6,7 +6,7 @@ use std.js.types.js_types.{JsValue}
 describe "JS runtime host property object store invariants":
 
     it "keeps host-property arrays aligned for object store readers":
-        val runtime = JsRuntime.new(Logger.new(LogLevel.Error))
+        val runtime = JsRuntime.new(Logger.new("host-property-spec", LogLevel.Error))
         val parent_id = runtime.create_host_object()
         val child_id = runtime.create_host_object()
 
@@ -35,3 +35,35 @@ describe "JS runtime host property object store invariants":
 
         val snapshot = store.get_object(parent_id)
         expect(snapshot.properties.len()).to_equal(2)
+
+    it "re-adds a deleted property as enumerable":
+        val runtime = JsRuntime.new(Logger.new("host-property-spec", LogLevel.Error))
+        val object_id = runtime.create_host_object()
+        runtime.set_host_property(object_id, "color", JsValue.String(v: "red"))
+        var store = runtime.interpreter.object_store
+        store.remove_property(object_id, "color")
+        runtime.interpreter.object_store = store
+        runtime.set_host_property(object_id, "color", JsValue.String(v: "blue"))
+
+        val snapshot = runtime.interpreter.object_store.get_object(object_id)
+        expect(snapshot.properties.len()).to_equal(1)
+        expect(snapshot.properties[0].key).to_equal("color")
+
+    it "overwrites repeated properties without retaining history":
+        val runtime = JsRuntime.new(Logger.new("host-property-spec", LogLevel.Error))
+        val object_id = runtime.create_host_object()
+
+        runtime.set_host_property(object_id, "backgroundColor", JsValue.String(v: "red"))
+        val count_after_first_write = runtime.interpreter.object_store.prop_values.len()
+        var frame = 0
+        while frame < 120:
+            runtime.set_host_property(object_id, "backgroundColor", JsValue.String(v: "blue"))
+            frame = frame + 1
+
+        val store = runtime.interpreter.object_store
+        expect(store.prop_values.len()).to_equal(count_after_first_write)
+        match store.get_property(object_id, "backgroundColor"):
+            JsValue.String(v):
+                expect(v).to_equal("blue")
+            _:
+                expect(false).to_equal(true)
