@@ -62,6 +62,32 @@ fn binop_result_type(op: crate::hir::BinOp, lhs_ty: Option<crate::hir::TypeId>) 
     }
 }
 
+/// Source-level spelling of a primitive `TypeId`, used to disambiguate method
+/// symbols that share a leaf name but differ in receiver type (`f64.to_f32` vs
+/// `i64.to_f32`). Returns `None` for aggregate/user types, whose `TypeId` is an
+/// interned index and carries no spelling here.
+#[cfg(feature = "llvm")]
+fn primitive_type_symbol_name(ty: crate::hir::TypeId) -> Option<&'static str> {
+    use crate::hir::TypeId;
+
+    Some(match ty {
+        TypeId::BOOL => "bool",
+        TypeId::I8 => "i8",
+        TypeId::I16 => "i16",
+        TypeId::I32 => "i32",
+        TypeId::I64 => "i64",
+        TypeId::U8 => "u8",
+        TypeId::U16 => "u16",
+        TypeId::U32 => "u32",
+        TypeId::U64 => "u64",
+        TypeId::F32 => "f32",
+        TypeId::F64 => "f64",
+        TypeId::STRING => "string",
+        TypeId::CHAR => "char",
+        _ => return None,
+    })
+}
+
 #[cfg(feature = "llvm")]
 fn build_vreg_types(
     func: &MirFunction,
@@ -2201,6 +2227,94 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                // FLOAT conversion builtins. `pipeline/native_project/mangle.rs`
+                // deliberately leaves `to_f32`/`to_f64`/`to_float` BARE when the
+                // receiver type was erased, on the documented contract that codegen
+                // lowers them through builtin numeric conversion. Cranelift honours
+                // that contract (`codegen/instr/methods.rs` numeric_cast_target), but
+                // the LLVM arm above covered only the INTEGER targets -- so a bare
+                // `to_f32` fell through to the suffix scan below and aborted with
+                // "ambiguous LLVM method resolution" the moment a module declared
+                // more than one `T.to_f32`. That asymmetry is why only the LLVM lane
+                // was blocked. Semantics below mirror the cranelift table exactly.
+                //
+                // NOTE: `coerce_value_to_type` must NOT be used for the int->float
+                // direction here: it BITCASTS i64 <-> f64 to preserve the tagged-value
+                // ABI, which would reinterpret an integer's bits as a double instead
+                // of converting its value.
+                let float_cast_bits = match method {
+                    "to_f32" => Some(32u32),
+                    "to_f64" | "to_float" => Some(64u32),
+                    _ => None,
+                };
+                if let Some(bits) = float_cast_bits {
+                    use crate::hir::TypeId;
+                    let recv_val = self.get_vreg(receiver, vreg_map)?;
+                    let f32_ty = self.context_ref().f32_type();
+                    let f64_ty = self.context_ref().f64_type();
+                    let target_ty = if bits == 32 { f32_ty } else { f64_ty };
+                    let from_ty = vreg_types.get(receiver).copied();
+                    let converted: inkwell::values::BasicValueEnum<'static> = match recv_val {
+                        inkwell::values::BasicValueEnum::FloatValue(fv) => {
+                            let cur = fv.get_type();
+                            if cur == target_ty {
+                                fv.into()
+                            } else if bits == 64 {
+                                builder
+                                    .build_float_ext(fv, f64_ty, "fpext")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("to_f64 fpext", &e))?
+                                    .into()
+                            } else {
+                                builder
+                                    .build_float_trunc(fv, f32_ty, "fptrunc")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("to_f32 fptrunc", &e))?
+                                    .into()
+                            }
+                        }
+                        inkwell::values::BasicValueEnum::IntValue(iv) => {
+                            // A HIR-float receiver carried in the tagged i64 ABI must be
+                            // REINTERPRETED, not numerically converted -- same rule
+                            // `coerce_value_to_type` applies for i64 <-> f64.
+                            let hir_float = matches!(from_ty, Some(TypeId::F32) | Some(TypeId::F64));
+                            if hir_float && iv.get_type().get_bit_width() == 64 {
+                                let as_f64 = builder
+                                    .build_bit_cast(iv, f64_ty, "i2f")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("bitcast_i2f", &e))?
+                                    .into_float_value();
+                                if bits == 32 {
+                                    builder
+                                        .build_float_trunc(as_f64, f32_ty, "fptrunc")
+                                        .map_err(|e| crate::error::factory::llvm_build_failed("to_f32 fptrunc", &e))?
+                                        .into()
+                                } else {
+                                    as_f64.into()
+                                }
+                            } else {
+                                let unsigned = matches!(
+                                    from_ty,
+                                    Some(TypeId::U8) | Some(TypeId::U16) | Some(TypeId::U32) | Some(TypeId::U64)
+                                );
+                                if unsigned {
+                                    builder
+                                        .build_unsigned_int_to_float(iv, target_ty, "uitofp")
+                                        .map_err(|e| crate::error::factory::llvm_build_failed("uitofp", &e))?
+                                        .into()
+                                } else {
+                                    builder
+                                        .build_signed_int_to_float(iv, target_ty, "sitofp")
+                                        .map_err(|e| crate::error::factory::llvm_build_failed("sitofp", &e))?
+                                        .into()
+                                }
+                            }
+                        }
+                        other => self.coerce_value_to_type(other, Some(target_ty.into()), builder)?,
+                    };
+                    if let Some(d) = dest {
+                        vreg_map.insert(*d, converted);
+                    }
+                    return Ok(());
+                }
+
                 if matches!(method, "chr" | "to_char") {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
@@ -2436,6 +2550,46 @@ impl LlvmBackend {
                                 matches.push((name, f));
                             }
                             func_opt = f.get_next_function();
+                        }
+                        // The scan above keys on the LEAF NAME ONLY, so every symbol
+                        // ending in `.<method>` collides regardless of its receiver
+                        // type. Narrow by RECEIVER TYPE first, then by arity:
+                        // `f64.to_f32` and `i64.to_f32` stop being ambiguous the
+                        // moment the receiver's type is known.
+                        //
+                        // Narrowing never INVENTS a pick. A filter is applied only
+                        // when it leaves exactly one candidate; if the receiver type
+                        // is unknown, or still does not single one out, the ambiguity
+                        // is reported exactly as before. Silently taking a first hit
+                        // is the defect class this guard exists to catch.
+                        if matches.len() > 1 {
+                            if let Some(recv_name) =
+                                vreg_types.get(receiver).copied().and_then(primitive_type_symbol_name)
+                            {
+                                let qualified = format!(".{}", recv_name);
+                                let narrowed: Vec<_> = matches
+                                    .iter()
+                                    .filter(|(name, _)| match name.strip_suffix(&suffix) {
+                                        Some(head) => head == recv_name || head.ends_with(&qualified),
+                                        None => false,
+                                    })
+                                    .cloned()
+                                    .collect();
+                                if narrowed.len() == 1 {
+                                    matches = narrowed;
+                                }
+                            }
+                        }
+                        if matches.len() > 1 {
+                            let expected_params = 1 + args.len();
+                            let narrowed: Vec<_> = matches
+                                .iter()
+                                .filter(|(_, f)| f.get_type().get_param_types().len() == expected_params)
+                                .cloned()
+                                .collect();
+                            if narrowed.len() == 1 {
+                                matches = narrowed;
+                            }
                         }
                         match matches.len() {
                             0 => Ok(None),
