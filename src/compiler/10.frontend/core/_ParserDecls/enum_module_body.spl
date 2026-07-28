@@ -30,13 +30,14 @@ use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPT
 use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
 use compiler.core.types.{int_to_str, type_tag_name, flat_span_new}
 use compiler.core.types.{named_type_register, named_type_update, named_type_find, custom_primitive_register}
+use compiler.core.types.{newunit_register}
 use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors, par_struct_names}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
-use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE}
+use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN}
 
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
@@ -85,6 +86,7 @@ fn parse_enum_decl() -> i64:
     parser_expect(181)
 
     var variant_names: [text] = []
+    var variant_discriminants: [i64] = []
     var parse_enum_method_ids: [i64] = []
 
     for i in 0..1000:
@@ -156,7 +158,12 @@ fn parse_enum_decl() -> i64:
                 if par_kind_get() == 160:
                     parser_advance()
             parser_expect(141)
+        var discriminant = -1
+        if par_kind_get() == TOK_ASSIGN:
+            parser_advance()
+            discriminant = parse_expr()
         variant_names.push(vname)
+        variant_discriminants.push(discriminant)
         # G42: pipe-separated variants on the same line (e.g. `Escape | F1 | F2`).
         # Pure separator, no semantic change -- loop back to the top and parse
         # the next variant name immediately (no newline/dedent between them).
@@ -171,7 +178,7 @@ fn parse_enum_decl() -> i64:
             continue
         parser_skip_newlines_and_semicolons()
 
-    val enum_d = decl_enum_def(enum_name, variant_names, 0)
+    val enum_d = decl_enum_def(enum_name, variant_names, variant_discriminants, 0)
     if parse_enum_method_ids.len() > 0:
         val enum_impl = decl_impl_block(enum_name, parse_enum_method_ids, 0)
         module_add_decl(enum_impl)
@@ -302,14 +309,36 @@ var PENDING_CLOCKED_ARGS: [text] = []
 var PENDING_VHDL_GENERIC_ARGS: [i64] = []
 var PENDING_FLATTEN_STRUCT_OUTPUT: i64 = 0
 
+# Pending `@unsafe(reason: "...", capabilities: [raw_ptr, ffi, mmio])`
+# annotation. Metadata-only capture (no enforcement): attached to the NEXT
+# parsed decl by name into UNSAFE_ANNOTATIONS. Block-level `@unsafe` is NOT
+# captured here (module-decl loop only) — see the gap note in
+# doc/08_tracking/bug/safety_checker_pass_never_invoked_2026-07-27.md.
+var PENDING_UNSAFE: i64 = 0
+var PENDING_UNSAFE_REASON: text = ""
+var PENDING_UNSAFE_CAPS: [text] = []
+# One entry per annotated decl: "decl_name|reason|cap1,cap2". Reset per module.
+var UNSAFE_ANNOTATIONS: [text] = []
+
+fn parser_unsafe_annotations_get() -> [text]:
+    UNSAFE_ANNOTATIONS
+
+fn parser_record_unsafe_annotation(decl_name: text):
+    if PENDING_UNSAFE == 1:
+        UNSAFE_ANNOTATIONS.push(decl_name + "|" + PENDING_UNSAFE_REASON + "|" + PENDING_UNSAFE_CAPS.join(","))
+
 fn parser_reset_pending_vhdl_decorators():
     PENDING_HARDWARE = 0
     PENDING_CLOCKED_ARGS = []
     PENDING_VHDL_GENERIC_ARGS = []
     PENDING_FLATTEN_STRUCT_OUTPUT = 0
+    PENDING_UNSAFE = 0
+    PENDING_UNSAFE_REASON = ""
+    PENDING_UNSAFE_CAPS = []
 
 fn parse_module_body():
     parser_reset_pending_vhdl_decorators()
+    UNSAFE_ANNOTATIONS = []
     for i in 0..100000:
         parser_skip_newlines_and_semicolons()
         if par_kind_get() == 190:
@@ -326,6 +355,7 @@ fn parse_module_body():
                     decl_set_clocked_args(visible_decl, PENDING_CLOCKED_ARGS)
                     decl_set_vhdl_generic_args(visible_decl, PENDING_VHDL_GENERIC_ARGS)
                     decl_set_flatten_struct_output(visible_decl, PENDING_FLATTEN_STRUCT_OUTPUT)
+                parser_record_unsafe_annotation(decl_get_name(visible_decl))
                 module_add_decl(visible_decl)
                 parser_reset_pending_vhdl_decorators()
             continue
@@ -348,6 +378,7 @@ fn parse_module_body():
                 decl_set_clocked_args(d, PENDING_CLOCKED_ARGS)
                 decl_set_vhdl_generic_args(d, PENDING_VHDL_GENERIC_ARGS)
                 decl_set_flatten_struct_output(d, PENDING_FLATTEN_STRUCT_OUTPUT)
+            parser_record_unsafe_annotation(decl_get_name(d))
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 34:
@@ -566,6 +597,33 @@ fn parse_module_body():
                         PENDING_VHDL_GENERIC_ARGS.push(parse_expr())
                         if par_kind_get() == 160:
                             parser_advance()
+                    elif decorator_name == "unsafe":
+                        # @unsafe(reason: "...", capabilities: [raw_ptr, ffi, mmio])
+                        # Metadata-only capture; unknown arg forms are skipped.
+                        if par_kind_get() == 6:
+                            val u_arg_name = par_text_get()
+                            parser_advance()
+                            if par_kind_get() == 161 or par_kind_get() == 100:
+                                parser_advance()
+                                if u_arg_name == "reason":
+                                    if par_kind_get() == 3:
+                                        PENDING_UNSAFE_REASON = parser_decorator_arg_text(par_text_get())
+                                        parser_advance()
+                                elif u_arg_name == "capabilities":
+                                    if par_kind_get() == 144:
+                                        parser_advance()
+                                        for u_ci in 0..100:
+                                            if par_kind_get() == 145 or par_kind_get() == 190:
+                                                break
+                                            if par_kind_get() == 6:
+                                                PENDING_UNSAFE_CAPS.push(par_text_get())
+                                            parser_advance()
+                                        if par_kind_get() == 145:
+                                            parser_advance()
+                        elif par_kind_get() == 160:
+                            parser_advance()
+                        else:
+                            parser_advance()
                     else:
                         parser_advance()
                 parser_expect(141)
@@ -580,6 +638,10 @@ fn parse_module_body():
                 pass_dn
             elif decorator_name == "flatten_struct_output":
                 PENDING_FLATTEN_STRUCT_OUTPUT = 1
+            elif decorator_name == "unsafe":
+                # Args already collected into PENDING_UNSAFE_* above; the next
+                # parsed decl records itself via parser_record_unsafe_annotation.
+                PENDING_UNSAFE = 1
             elif decorator_name == "gpu_kernel" or decorator_name == "gpu":
                 if par_kind_get() == 20 or par_kind_get() == 34:
                     val d = parse_fn_decl(0)
@@ -645,6 +707,7 @@ fn parse_module_body():
             pass_dn
             named_type_register(nt_name, ["value"], [inner_type])
             custom_primitive_register(nt_name, inner_type)
+            newunit_register(nt_name, suffix_name, inner_type)
             val nt_field_names: [text] = ["value"]
             val nt_field_types: [i64] = [inner_type]
             val nt_field_defaults: [i64] = [-1]

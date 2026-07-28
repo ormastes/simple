@@ -3,7 +3,6 @@
 - **Date:** 2026-07-25
 - **Lane:** redeploy gate (`scripts/check/cert/redeploy_gate/redeploy_gate.shs`), macOS stage4
 - **Status:** open — deploy policy fell back to gate-parity (candidate = incumbent = 10/11)
-- **Verification needed:** Re-run the redeploy gate live on macOS at different times/load levels to confirm whether the JIT-vs-interpreter mode flip reproduces and to isolate its trigger.
 
 ## Observation (timeline, same fixture `struct_copy_isolation.spl`)
 - 13:12-13:13: candidate built from `d5a6312d` gates **11/11**; struct-copy prints 5.

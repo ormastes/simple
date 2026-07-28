@@ -16,7 +16,7 @@
 use std.gc_async_mut.svllm.model_executor.model_loader.tensor_pack.{TensorPack, TensorInfo, ChunkInfo}
 use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
 
-enum ManifestError:
+enum ModelManifestError:
     NotFound
     Malformed
     UnsupportedVersion
@@ -24,7 +24,7 @@ enum ManifestError:
     TensorChunkMismatch
 
 # Parsed manifest representation. parse_manifest(sdn_text) produces one
-# of these or returns a ManifestError. This first parser accepts the canonical
+# of these or returns a ModelManifestError. This first parser accepts the canonical
 # v0 single-line manifest emitted by serialize_manifest.
 struct TensorPackManifest:
     schema_version: i32
@@ -152,7 +152,7 @@ fn _object_blocks(body: text) -> [text]:
             i = i + 1
     out
 
-fn _parse_dtype_label(label: text) -> Result<Dtype, ManifestError>:
+fn _parse_dtype_label(label: text) -> Result<Dtype, ModelManifestError>:
     if label == "F32":
         return Ok(Dtype.F32)
     if label == "F16":
@@ -173,7 +173,7 @@ fn _parse_dtype_label(label: text) -> Result<Dtype, ManifestError>:
         return Ok(Dtype.U8)
     if label == "BOOL":
         return Ok(Dtype.Bool)
-    Err(ManifestError.Malformed)
+    Err(ModelManifestError.Malformed)
 
 fn _is_lower_hex_char(ch: text) -> bool:
     (ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")
@@ -214,10 +214,10 @@ fn _shape_field(source: text) -> [i64]:
         i = i + 1
     out
 
-fn _parse_chunks(source: text, expected_count: i64) -> Result<[ChunkInfo], ManifestError>:
+fn _parse_chunks(source: text, expected_count: i64) -> Result<[ChunkInfo], ModelManifestError>:
     val blocks = _object_blocks(_array_body(source, "chunks"))
     if blocks.len() != expected_count:
-        return Err(ManifestError.Malformed)
+        return Err(ModelManifestError.Malformed)
     var out: [ChunkInfo] = []
     var i = 0
     while i < blocks.len():
@@ -227,9 +227,9 @@ fn _parse_chunks(source: text, expected_count: i64) -> Result<[ChunkInfo], Manif
         val byte_len = _field_i64(block, "byte_len", -1)
         val digest_hex = _field_text(block, "digest_hex")
         if id < 0 or relative_path == "" or byte_len < 0:
-            return Err(ManifestError.Malformed)
+            return Err(ModelManifestError.Malformed)
         if not _valid_digest_hex(digest_hex, byte_len):
-            return Err(ManifestError.ChecksumMismatch)
+            return Err(ModelManifestError.ChecksumMismatch)
         out.push(ChunkInfo(
             id: id as i32,
             relative_path: relative_path,
@@ -239,10 +239,10 @@ fn _parse_chunks(source: text, expected_count: i64) -> Result<[ChunkInfo], Manif
         i = i + 1
     Ok(out)
 
-fn _parse_tensors(source: text, expected_count: i64) -> Result<[TensorInfo], ManifestError>:
+fn _parse_tensors(source: text, expected_count: i64) -> Result<[TensorInfo], ModelManifestError>:
     val blocks = _object_blocks(_array_body(source, "tensors"))
     if blocks.len() != expected_count:
-        return Err(ManifestError.Malformed)
+        return Err(ModelManifestError.Malformed)
     var out: [TensorInfo] = []
     var i = 0
     while i < blocks.len():
@@ -255,7 +255,7 @@ fn _parse_tensors(source: text, expected_count: i64) -> Result<[TensorInfo], Man
         val offset = _field_i64(block, "offset_in_chunk", -1)
         val byte_len = _field_i64(block, "byte_len", -1)
         if name == "" or chunk_id < 0 or offset < 0 or byte_len < 0:
-            return Err(ManifestError.Malformed)
+            return Err(ModelManifestError.Malformed)
         out.push(TensorInfo(
             name: name,
             shape: shape,
@@ -283,26 +283,26 @@ fn _validate_tensor_chunks(tensors: [TensorInfo], chunks: [ChunkInfo]) -> bool:
         i = i + 1
     true
 
-fn parse_manifest(sdn_text: text) -> Result<TensorPackManifest, ManifestError>:
+fn parse_manifest(sdn_text: text) -> Result<TensorPackManifest, ModelManifestError>:
     val trimmed = sdn_text.trim()
     if not trimmed.starts_with("{"):
-        return Err(ManifestError.Malformed)
+        return Err(ModelManifestError.Malformed)
     val version = _field_i64(trimmed, "schema_version", -1)
     if version < 0:
-        return Err(ManifestError.Malformed)
+        return Err(ModelManifestError.Malformed)
     if version != 0:
-        return Err(ManifestError.UnsupportedVersion)
+        return Err(ModelManifestError.UnsupportedVersion)
     val model_id = _field_text(trimmed, "model_id")
     val revision = _field_text(trimmed, "revision")
     val preferred = _field_i64(trimmed, "preferred_chunk_bytes", -1)
     val chunk_count = _array_item_count(trimmed, "chunks")
     val tensor_count = _array_item_count(trimmed, "tensors")
     if model_id == "" or preferred < 0 or chunk_count < 0 or tensor_count < 0:
-        return Err(ManifestError.Malformed)
+        return Err(ModelManifestError.Malformed)
     val chunks = _parse_chunks(trimmed, chunk_count)?
     val tensors = _parse_tensors(trimmed, tensor_count)?
     if not _validate_tensor_chunks(tensors, chunks):
-        return Err(ManifestError.TensorChunkMismatch)
+        return Err(ModelManifestError.TensorChunkMismatch)
     Ok(TensorPackManifest(
         schema_version: version as i32,
         model_id: model_id,
@@ -315,11 +315,11 @@ fn parse_manifest(sdn_text: text) -> Result<TensorPackManifest, ManifestError>:
     ))
 
 # Materializer for parsed canonical v0 manifest details.
-fn build_tensor_pack(pack_root: text, m: TensorPackManifest) -> Result<TensorPack, ManifestError>:
+fn build_tensor_pack(pack_root: text, m: TensorPackManifest) -> Result<TensorPack, ModelManifestError>:
     if m.tensor_count != m.tensors.len() or m.chunk_count != m.chunks.len():
-        return Err(ManifestError.Malformed)
+        return Err(ModelManifestError.Malformed)
     if not _validate_tensor_chunks(m.tensors, m.chunks):
-        return Err(ManifestError.TensorChunkMismatch)
+        return Err(ModelManifestError.TensorChunkMismatch)
     Ok(TensorPack(
         pack_root: pack_root,
         model_id: m.model_id,

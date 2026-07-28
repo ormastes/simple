@@ -123,12 +123,12 @@ right gate ships a stale binary. **A small change is NOT a full bootstrap.**
   every build**, so T1 is *substantially faster than a full rebuild, not instant*.
   Reuse also requires the **same seed binary**: rebuilding the seed changes
   `compiler_fingerprint` and invalidates every cached object (by design). Safety:
-  the object cache key always folds in a global build fingerprint (opt-level,
-  entry-closure flag, target, linker-script, and the closure's cross-module
-  struct/enum/signature layout) whenever the cache is live, so ANY cross-module
-  structural change auto-falls-back to a full rebuild — a leaf edit never ships
-  a stale wrong binary. `SIMPLE_NATIVE_INCREMENTAL` only controls whether the
-  `[native-incremental] N reused / M rebuilt` receipt prints.
+  the `SIMPLE_NATIVE_INCREMENTAL` key folds in a global build fingerprint
+  (opt-level, entry-closure flag, target, linker-script, and the closure's
+  cross-module struct/enum/signature layout), so ANY cross-module structural change
+  auto-falls-back to a full rebuild and prints the reason — a leaf edit never
+  ships a stale wrong binary. Default is OFF; legacy content-only keying is
+  unchanged until this path has soaked.
 - **T2 — full kernel rebuild.** Any big/structural change: new modules, trait/type
   layout changes, entry-closure set changes, linker-script or flag/target/opt-level
   changes. (Under T1 these auto-trigger a full rebuild anyway; run T2 directly when

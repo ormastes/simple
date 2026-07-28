@@ -196,8 +196,25 @@ impl Lowerer {
                     ty = any_array_ty;
                 }
 
-                // W1003: Check for mutable binding with shared pointer type
-                self.check_mutable_shared_binding(&name, ty, let_stmt.mutability, let_stmt.span);
+                // W1003: Check for mutable binding with shared pointer type.
+                //
+                // Gate on the SYNTACTIC annotation, not the resolved TypeId:
+                // `resolve_type` represents `T?` (Optional) as
+                // `HirType::Pointer { kind: Shared }` purely as a nullable-pointer
+                // representation, so `is_shared_pointer` cannot tell `*T` from `T?`.
+                // Without this gate every `var x: T? = nil` — the idiomatic
+                // "search loop assigns Some(hit)" form — was rejected as a
+                // shared-pointer rebinding, which is not what W1003 means and
+                // aborted HIR lowering for the whole module. The rule still
+                // fires for genuine `var x: *T`.
+                let annotated_optional = let_stmt
+                    .ty
+                    .as_ref()
+                    .or(pattern_type)
+                    .is_some_and(|t| matches!(t, ast::Type::Optional(_)));
+                if !annotated_optional {
+                    self.check_mutable_shared_binding(&name, ty, let_stmt.mutability, let_stmt.span);
+                }
 
                 // W1002: Check for implicit unique pointer copy (unless explicit move)
                 if let Some(ref v) = value {

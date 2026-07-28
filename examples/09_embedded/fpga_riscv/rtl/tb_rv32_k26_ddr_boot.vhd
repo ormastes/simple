@@ -32,10 +32,7 @@ entity tb_rv32_k26_ddr_boot is
     -- print an empty line). Set true to fill all DDR words beyond the
     -- loaded kernel image with a deterministic nonzero pseudo-random
     -- pattern, rehearsing what silicon actually provides.
-    G_GARBAGE_FILL : boolean := false;
-    G_MARKER       : string := "TEST PASSED";
-    G_TRACE_BASE   : natural := 0;
-    G_TRACE_BYTES  : natural := 0
+    G_GARBAGE_FILL : boolean := false
   );
 end entity tb_rv32_k26_ddr_boot;
 
@@ -49,8 +46,6 @@ architecture sim of tb_rv32_k26_ddr_boot is
   signal rst_n : std_logic := '0';
   signal uart_tx : std_logic;
   signal done : boolean := false;
-  signal trace_reads : natural := 0;
-  signal trace_writes: natural := 0;
 
   -- AXI4 (core master -> DDR model)
   signal awaddr  : std_logic_vector(31 downto 0);
@@ -179,31 +174,6 @@ begin
       m_axi_hp_rdata => rdata, m_axi_hp_rresp => rresp,
       m_axi_hp_rlast => rlast, m_axi_hp_rvalid => rvalid,
       m_axi_hp_rready => rready,
-      m_axi_nvme_dma_awaddr => open, m_axi_nvme_dma_awlen => open,
-      m_axi_nvme_dma_awsize => open, m_axi_nvme_dma_awburst => open,
-      m_axi_nvme_dma_awcache => open, m_axi_nvme_dma_awprot => open,
-      m_axi_nvme_dma_awvalid => open, m_axi_nvme_dma_awready => '0',
-      m_axi_nvme_dma_wdata => open, m_axi_nvme_dma_wstrb => open,
-      m_axi_nvme_dma_wlast => open, m_axi_nvme_dma_wvalid => open,
-      m_axi_nvme_dma_wready => '0', m_axi_nvme_dma_bresp => "00",
-      m_axi_nvme_dma_bvalid => '0', m_axi_nvme_dma_bready => open,
-      m_axi_nvme_dma_araddr => open, m_axi_nvme_dma_arlen => open,
-      m_axi_nvme_dma_arsize => open, m_axi_nvme_dma_arburst => open,
-      m_axi_nvme_dma_arcache => open, m_axi_nvme_dma_arprot => open,
-      m_axi_nvme_dma_arvalid => open, m_axi_nvme_dma_arready => '0',
-      m_axi_nvme_dma_rdata => (others => '0'), m_axi_nvme_dma_rresp => "00",
-      m_axi_nvme_dma_rlast => '0', m_axi_nvme_dma_rvalid => '0',
-      m_axi_nvme_dma_rready => open, nvme_irq => open,
-      s_axi_nvme_awaddr => (others => '0'), s_axi_nvme_awprot => "000",
-      s_axi_nvme_awvalid => '0', s_axi_nvme_awready => open,
-      s_axi_nvme_wdata => (others => '0'), s_axi_nvme_wstrb => (others => '0'),
-      s_axi_nvme_wvalid => '0', s_axi_nvme_wready => open,
-      s_axi_nvme_bresp => open, s_axi_nvme_bvalid => open,
-      s_axi_nvme_bready => '0', s_axi_nvme_araddr => (others => '0'),
-      s_axi_nvme_arprot => "000", s_axi_nvme_arvalid => '0',
-      s_axi_nvme_arready => open, s_axi_nvme_rdata => open,
-      s_axi_nvme_rresp => open, s_axi_nvme_rvalid => open,
-      s_axi_nvme_rready => '0',
       s_axi_ctrl_awaddr => l_awaddr, s_axi_ctrl_awprot => "000",
       s_axi_ctrl_awvalid => l_awvalid, s_axi_ctrl_awready => l_awready,
       s_axi_ctrl_wdata => l_wdata, s_axi_ctrl_wstrb => "1111",
@@ -234,7 +204,6 @@ begin
       if rst_n = '0' then
         arready <= '0'; rvalid <= '0'; rlast <= '0';
         awready <= '0'; wready <= '0'; bvalid <= '0';
-        trace_reads <= 0; trace_writes <= 0;
         phase := 0; jitter := 1;
       else
         -- default deasserts for one-shot handshakes
@@ -249,11 +218,6 @@ begin
             if arvalid = '1' then
               arready <= '1';
               saved_addr := unsigned(araddr);
-              if G_TRACE_BYTES > 0 and
-                 saved_addr >= G_TRACE_BASE and
-                 saved_addr < G_TRACE_BASE + G_TRACE_BYTES then
-                trace_reads <= trace_reads + 1;
-              end if;
               jitter := (jitter mod 4) + 1;
               wait_n := jitter;
               phase := 1;
@@ -261,11 +225,6 @@ begin
               awready <= '1';
               wready  <= '1';
               saved_addr := unsigned(awaddr);
-              if G_TRACE_BYTES > 0 and
-                 saved_addr >= G_TRACE_BASE and
-                 saved_addr < G_TRACE_BASE + G_TRACE_BYTES then
-                trace_writes <= trace_writes + 1;
-              end if;
               -- capture write immediately
               addr_v := saved_addr;
               is_rdisk := addr_v >= (DDR_BASE + RDISK_OFF);
@@ -343,7 +302,7 @@ begin
     variable last_count : natural := 0;
     -- Rolling match on the terminal marker so the run ends on SUCCESS rather
     -- than on a guessed timeout.
-    constant MARKER : string := G_MARKER;
+    constant MARKER : string := "TEST PASSED";
     variable mi : natural := 0;
     variable matched : boolean := false;
 
@@ -465,7 +424,7 @@ begin
 
     if txt /= null and txt'length > 0 then writeline(output, txt); end if;
     if matched then
-      write(txt, string'("K26_MARKER_SEEN"));
+      write(txt, string'("K26_MARKER_TEST_PASSED_SEEN"));
     else
       write(txt, string'("K26_MARKER_NOT_SEEN"));
     end if;
@@ -479,8 +438,6 @@ begin
     write(txt, string'("K26_AXI_READS=0x")); hwrite(txt, rd); writeline(output, txt);
     lite_read(x"0020", rd);
     write(txt, string'("K26_AXI_WRITES=0x")); hwrite(txt, rd); writeline(output, txt);
-    write(txt, string'("K26_TRACE_READS=")); write(txt, trace_reads); writeline(output, txt);
-    write(txt, string'("K26_TRACE_WRITES=")); write(txt, trace_writes); writeline(output, txt);
     write(txt, string'("K26_UART_BYTES=")); write(txt, count); writeline(output, txt);
     write(txt, string'("K26_DDR_TB_DONE"));
     writeline(output, txt);

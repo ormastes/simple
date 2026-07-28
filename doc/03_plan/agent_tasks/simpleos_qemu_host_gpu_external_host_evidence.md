@@ -8,7 +8,7 @@ This plan is the P1 execution owner for the critical pure-Simple
 `WM -> GUI/Web -> DrawIrComposition -> Engine2D` chain. CPU-SIMD is the exact
 oracle; Vulkan and Metal must retain device-origin readback and the same ordered
 input/event sequence. Electron is not a prerequisite and remains separately
-tracked as a noncritical corroborating row under TODO317.
+postponed under TODO 583.
 
 The parent acceptance and design links are:
 

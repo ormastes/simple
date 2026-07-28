@@ -1,18 +1,6 @@
 # Simple RenderDoc external-host qualification TODO
 
-Authoritative acceptance ID: **TODO317**. The consolidated cross-host matrix,
-immutable artifact contract, owners, and final acceptance rule are maintained
-in `doc/08_tracking/feature/wm_gui_web_2d_host_environment_acceptance_evidence_2026-07-28.md`.
-This file remains the stable detailed RenderDoc/QEMU handoff and the `todo_db`
-source path; it does not define a second acceptance scope.
-
 Status: postponed until local implementation and aggregate checks are green.
-
-Local implementation lanes A/B/C, including compiler, backend, producer/parser,
-and wrapper defects, remain with their existing owners; TODO317 consumes their
-green outputs and does not turn them into external-host deferrals.
-Only prepared native ISA, live display/GPU/RenderDoc/browser, platform/QEMU/
-board, and qualified performance-host execution is postponed here.
 
 Historical 4K/8K performance-regression baseline policy is tracked separately
 in `doc/08_tracking/todo/rendering_performance_historical_regression_baseline_2026-07-27.md`.
@@ -29,12 +17,6 @@ in `doc/08_tracking/todo/rendering_performance_historical_regression_baseline_20
 | Physical boards | Identity, firmware, boot, receipt, external capture, and oracle evidence | Board-specific lane |
 | Chrome/Electron | Vulkan backing, interaction, RDC capture, and exact ARGB | Prepared browser host |
 
-The prepared Linux display handoff is additionally blocked while the canonical
-wrapper contains `GLYPH_RGB_SHA256=pending`. Calibrate only from a reviewed
-glyph crop captured by the real X11/Vulkan lane, then pin the lowercase SHA-256
-and rerun the same wrapper. Fixtures, synthetic crops, CPU mirrors, fallback
-pixels, and screenshots cannot satisfy this calibration.
-
 The prepared-host Simple resume entrypoint now performs both halves of the
 focused lane. It captures
 `<GUI_WEB_2D_VULKAN_BUILD_DIR>/renderdoc/simple/evidence.env`, passes that exact
@@ -43,12 +25,14 @@ to `build/renderdoc/simple-gate/evidence.env`. Capture or gate failure is
 reported through typed setup status/reason rows and a nonzero exit. This closes
 the local resume-path gap only; no external-host RenderDoc row is promoted.
 
-Browser parity artifact-freshness follow-up is implemented locally: the setup
-producer emits SHA-256 bindings for all three ARGB and all three diff artifacts,
-the pure contract rejects missing, malformed, or duplicate bindings, and
-`test_host_env` re-hashes six current regular/no-follow files before admitting
-the Vulkan row. External-host qualification remains postponed and still needs
-fresh browser/Vulkan evidence from the prepared host.
+Browser parity artifact-freshness follow-up: the pure host classifier now
+requires producer-admitted source files, nonempty ARGB/diff paths, exact
+viewport bindings, and zero-mismatch pairwise receipts. The setup producer does
+not yet emit SHA-256 bindings for all three ARGB and diff artifacts, so
+`test_host_env` cannot independently re-hash those current files as it does for
+RenderDoc and live-WM captures. Add those hashes and regular/no-follow
+revalidation before claiming cryptographic freshness; this does not weaken the
+new scalar/provenance gate.
 
 ## Concrete external-host handoff
 
@@ -83,18 +67,9 @@ retained backend proof. Resume both with a fresh Stage-4 build/run; the
 canonical ARM entry's unrelated stale macOS/HVF RAM-tail wrapper reversion must
 still be reconciled by its owner before commit.
 
-Current preparation: generic cross-ISA compilation and QEMU x86/NEON/RVV
-target binaries pass. The local per-operation noalloc SIMD owners required by
-blocker B remain absent; these target builds do not complete them. RenderDoc
-v1.44 source and rootless Linux dependencies are prepared, but no external-host
-row is promoted.
-
-TODO317 owns only the prepared host's fresh retained coverage report and its
-admitted executable/report hashes. Local admission logic is complete in
-`scripts/check/check-wm-gui-web-2d-coverage-admission.shs`; promotion still
-requires rerunning the instrumented owners with the fresh source-matched
-pure-Simple executable on that host. Synthetic fixtures and annotations on
-shell-only specs cannot satisfy this external row.
+Current preparation: cross-ISA owner compilation and QEMU x86/NEON/RVV target
+binaries pass. RenderDoc v1.44 source and rootless Linux dependencies are
+prepared, but no external-host row is promoted.
 
 Full-system QEMU remains postponed: guest-local `uname` cannot distinguish a
 VM from physical hardware. Promotion from such guests needs an external native
@@ -105,15 +80,13 @@ The current diagnostic runner cannot replace the Stage-4 row: interpreter
 execution stops at its stale `rt_is_interpreter_runtime` extern table, while
 native SSpec mode delegates to the forbidden Rust seed and omits the source
 argument. Do not rerun those modes until a newly admitted pure-Simple Stage-4
-binary is installed. That fresh binary must run the existing
-`test/01_unit/lib/common/renderdoc/backend_render_receipt_wire_spec.spl` and
-`test/03_system/os/qemu/simpleos_render_evidence_protocol_spec.spl` identity
-contracts once; the formerly cited `qemu_firmware_identity_spec.spl` path does
-not exist and is not an acceptance artifact.
+binary is installed. That fresh binary must also run
+`test/01_unit/os/qemu_firmware_identity_spec.spl`: the diagnostic runner
+reached the mandatory three-cycle cap at 1/2, after which its incorrect
+postfix-optional presence assertion was corrected without another retry.
 
 Resume only after
 `doc/08_tracking/feature/simple_renderdoc_counterpart_completion_2026-07-27.md`
 has no placeholders and its canonical aggregate check is green.
 
-This stable ledger is registered as TODO317 in the shared TODO database; the
-authoritative feature request above defines the single acceptance scope.
+This standalone ledger avoids the concurrently modified shared TODO database.

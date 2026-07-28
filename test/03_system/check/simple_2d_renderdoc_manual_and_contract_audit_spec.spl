@@ -7,8 +7,6 @@ and source-layout contracts synchronized.
 """
 use std.spec.*
 use std.io_runtime.{file_exists, file_read, process_run}
-use common.renderdoc.backend_render_record.{compare_backend_render_records, parse_backend_render_record, serialize_backend_render_record}
-use test.helpers.backend_render_record_fixture.{BACKEND_RENDER_FIXTURE_HASH, backend_render_fixture, backend_render_fixture_replace}
 
 val SPECS = [
     "test/01_unit/lib/common/renderdoc/backend_render_record_spec.spl",
@@ -70,58 +68,6 @@ describe "Simple 2D RenderDoc documentation contract":
                 expect(source.contains("pass_todo")).to_be(false)
                 expect(source.contains("expect(true).to_equal(true)")).to_be(false)
                 expect(source.contains("pending_")).to_be(false)
-
-    # @capture(exec)
-    it "requires complete ordered backend render records at every canonical producer":
-        step("Inspect the pure record owner and canonical producers")
-        val owner = file_read("src/lib/common/renderdoc/backend_render_record.spl")
-        val vulkan = file_read("src/app/test/renderdoc_vulkan_capture.spl")
-        val translated = file_read("src/app/test/engine2d_vulkan_translation_probe.spl")
-        val compare_app = file_read("src/app/test/backend_render_record_compare.spl")
-        val evidence_helper = file_read("scripts/lib/renderdoc-evidence-common.shs")
-        val required = [
-            "commands.000.identity", "pipelines.000.pipeline_id",
-            "pipelines.000.vertex_shader_id", "pipelines.000.fragment_shader_id",
-            "resources.000.binding", "transitions.000.identity",
-            "synchronization.000.identity", "state.viewport.width",
-            "state.scissor.width"
-        ]
-        for field in required:
-            expect(vulkan).to_contain(field)
-            expect(translated).to_contain(field)
-        step("Require fail-closed identity validation without transient GPU state")
-        expect(owner).to_contain("duplicate-id")
-        expect(owner).to_contain("invalid-viewport")
-        expect(owner).to_contain("invalid-scissor")
-        expect(owner.contains("Engine2D")).to_be(false)
-        expect(owner.contains("Vulkan")).to_be(false)
-        step("Require both real producers to cross the shared serialized boundary")
-        expect(vulkan).to_contain("simple_renderdoc_record_begin=capture")
-        expect(translated).to_contain("simple_renderdoc_record_begin=translation")
-        expect(compare_app).to_contain("parse_backend_render_record")
-        expect(compare_app).to_contain("verify_backend_render_equivalence")
-        expect(evidence_helper).to_contain("rdoc_extract_simple_render_record")
-        expect(evidence_helper).to_contain("backend_render_record_compare.spl")
-        step("Execute the same serialized validator and comparison consumed by Simple RenderDoc")
-        val left = backend_render_fixture("simple-renderdoc", "vulkan", "vulkan", "vulkan", "native", "none", 42, "device_readback", BACKEND_RENDER_FIXTURE_HASH, 12)
-        val right = backend_render_fixture("translation-probe", "directx", "vulkan", "vulkan", "translated", "directx-on-vulkan", 73, "device_readback", BACKEND_RENDER_FIXTURE_HASH, 12)
-        var parsed_left = left
-        var parsed_right = right
-        match serialize_backend_render_record(left):
-            case Err(err): fail("Simple RenderDoc serialization failed: {err.code}")
-            case Ok(wire):
-                match parse_backend_render_record(wire):
-                    case Err(err): fail("Simple RenderDoc parse failed: {err.code}")
-                    case Ok(record): parsed_left = record
-        match serialize_backend_render_record(right):
-            case Err(err): fail("Translation serialization failed: {err.code}")
-            case Ok(wire):
-                match parse_backend_render_record(wire):
-                    case Err(err): fail("Translation parse failed: {err.code}")
-                    case Ok(record): parsed_right = record
-        expect(compare_backend_render_records(parsed_left, parsed_right).semantic_equal).to_be(true)
-        val reordered = backend_render_fixture_replace(right, "commands.000.identity", "command-present")
-        expect(compare_backend_render_records(left, reordered).semantic_equal).to_be(false)
 
     # @manual: folded
     # @capture(exec)

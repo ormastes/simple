@@ -124,6 +124,40 @@ describe "disk_image.build -- FAT32 builder defect fixes":
         expect(_od_hex(out_path, long_dir_offset + 64 + 26, 6)).to_equal("03 00 01 00 00 00")
         _cleanup(root)
 
+    it "encodes BMP and astral UTF-8 leaf names as UTF-16LE LFN units":
+        val root = "/tmp/disk_image_builder_spec_lfn_unicode"
+        _cleanup(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val out_path = root + "/disk.img"
+        val result = build(DiskImageConfig(
+            size_mb: 1u64,
+            payloads: [],
+            nested_payloads: [PayloadEntry(path: "UNICOD~1.TTF", data: [0xAAu8], guest_path: "/日本😀.ttf")]
+        ), out_path)
+        expect(result.is_ok()).to_equal(true)
+        val root_dir_offset: i64 = 34 * 512
+        # 日 (U+65E5), 本 (U+672C), 😀 (U+D83D U+DE00), and '.' in UTF-16LE.
+        expect(_od_hex(out_path, root_dir_offset + 1, 10)).to_equal("e5 65 2c 67 3d d8 00 de 2e 00")
+        _cleanup(root)
+
+    it "permits an astral surrogate pair to cross a 13-unit LFN slot boundary":
+        val root = "/tmp/disk_image_builder_spec_lfn_surrogate_boundary"
+        _cleanup(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val out_path = root + "/disk.img"
+        val result = build(DiskImageConfig(
+            size_mb: 1u64,
+            payloads: [],
+            nested_payloads: [PayloadEntry(path: "BOUNDA~1.TTF", data: [0xAAu8], guest_path: "/abcdefghijkl😀.ttf")]
+        ), out_path)
+        expect(result.is_ok()).to_equal(true)
+        val root_dir_offset: i64 = 34 * 512
+        # Ordinal 1 ends with the high surrogate; ordinal 2 begins with low.
+        expect(_od_hex(out_path, root_dir_offset, 3)).to_equal("42 00 de")
+        expect(_od_hex(out_path, root_dir_offset + 32, 1)).to_equal("01")
+        expect(_od_hex(out_path, root_dir_offset + 62, 2)).to_equal("3d d8")
+        _cleanup(root)
+
     it "assigns unique short aliases to colliding 14-character directory names":
         val root = "/tmp/disk_image_builder_spec_lfn_collision"
         _cleanup(root)

@@ -159,9 +159,7 @@ Common variables:
 - `RDOC_ELECTRON`: Electron binary for Electron HTML capture. If unset, the
   helper checks the repo-local `tools/electron-shell/node_modules` install.
 - `RDOC_OUTPUT_DIR`: base output directory.
-- `RDOC_CAPTURE_TIMEOUT_SECS`: positive bounded capture timeout. `capture-simple`
-  requires portable `timeout`/`gtimeout`; a timeout or other nonzero capture
-  command exit writes typed fail evidence and cannot admit an `.rdc`.
+- `RDOC_CAPTURE_TIMEOUT_SECS`: bounded capture timeout.
 - `RDOC_HTML_PATH`: HTML fixture for `capture-html`.
 - `RDOC_ELECTRON_WIDTH`, `RDOC_ELECTRON_HEIGHT`, `RDOC_ELECTRON_SETTLE_MS`:
   Electron capture viewport and settle controls.
@@ -351,51 +349,6 @@ completion evidence. The 8K row must likewise prove
 `gui_showcase_8k_perf_retained_redraw_status=pass`, RSS budget status, and the
 same native binary provenance fields. Interpreter or fallback rows remain useful
 diagnostics, but they are not 4K/8K completion evidence.
-Real runs require `GUI_SHOWCASE_PERF_BASELINE_ENV`, its expected SHA-256, and
-explicit producer-owned OS/architecture/CPU/GPU/driver/compiler/runtime and
-executable-SHA fields. The producer derives the bucket with fixed
-warmup/sample/timing fields. The immutable manual input uses schema
-`widget-showcase-perf-v2`; it also records resolution, source revision, capture
-timestamp, evidence artifact path/content SHA, p50/p95, FPS, and max RSS.
-Create or update it only as an explicit reviewed change;
-neither producer nor aggregate has an update mode. Median and p95 must remain
-within +10%, max RSS within +5%, and all existing absolute gates still apply.
-The producer re-stats and rehashes the baseline and artifact just before PASS.
-The aggregate reopens both, derives the bucket from exact fields, and recomputes
-limits/deltas so forged producer PASS rows fail closed.
-
-Run retained-performance commands from the repository root. The checked-in
-`test/fixtures/gui/widget_showcase_perf_baseline_*` files are classifier
-fixtures only; never use them as real 4K/8K evidence. On a prepared host, first
-confirm the selected accepted baseline's resolution, source revision, artifact
-path/SHA, and canonical identity fields. Its executable SHA must describe the
-native binary produced by the exact command below; the real wrapper rebuilds
-that binary and fails before measurement if the hash differs:
-
-```bash
-perf_resolution=4k # or 8k
-perf_build_dir=build/widget-showcase-${perf_resolution}-perf-ready
-perf_simple=/absolute/path/to/bin/release/<triple>/simple
-env PLAN_ONLY=1 RESOLUTION="$perf_resolution" BUILD_DIR="$perf_build_dir" \
-  SIMPLE_BIN="$perf_simple" SIMPLE_BIN_SOURCE=self-hosted-release \
-  sh scripts/check/check-widget-showcase-4k-200fps.shs
-"$perf_simple" native-build --source src --source examples \
-  --entry "$perf_build_dir/widget_showcase_${perf_resolution}_perf.spl" \
-  --entry-closure --opt-level=aggressive --strip \
-  --output "$perf_build_dir/widget_showcase_gui_perf"
-sha256sum "$perf_build_dir/widget_showcase_gui_perf"
-```
-
-Compare the plan row's `*_source_revision` and the printed executable SHA with
-the reviewed baseline before the real run. Pass the baseline path, its current
-SHA, and each explicit identity field to the wrapper; do not override
-`SOURCE_REVISION` for real evidence. A mismatch is a typed pre-measurement
-failure and requires review of a new baseline, never an automatic refresh.
-Real producer runs reject both `SOURCE_REVISION` and `SOURCE_REVISION_FILES`;
-only `PERF_BASELINE_VALIDATE_ONLY=1` classifier fixtures may inject them. The
-aggregate similarly ignores `GUI_SHOWCASE_CURRENT_SOURCE_REVISION` unless
-`GUI_RENDERDOC_AGGREGATE_FIXTURE_MODE=1` is explicitly set. That fixture mode
-is test-only and must never appear in retained real-run or release commands.
 The aggregate validates producer-side native artifact proof for completion rows:
 missing alias source, native binary, native executable bit, recognized native
 binary format, or native build log status turns an otherwise passing retained
@@ -1232,17 +1185,9 @@ Important keys:
   `renderdoccmd`.
 - `gui_web_2d_vulkan_renderdoc_install_hint`: platform-specific install or
   `RDOC_HOME` hint when `renderdoccmd` is missing.
-- `rdoc_log`: capture log path. Simple capture evidence also records
-  `rdoc_log_sha256`; the Simple gate requires the path exactly once, rejects
-  symlinks/non-regular files, recomputes the lowercase SHA-256, and publishes
-  `rdoc_simple_gate_capture_log_*` bindings for host-aggregate revalidation.
+- `rdoc_log`: capture log path.
 - `rdoc_capture_status`: `pass`, `fail`, or `unavailable`.
 - `rdoc_capture_reason`: concrete pass/fail/unavailable reason.
-- `rdoc_capture_command_exit`: retained `capture-simple` command exit; `124` or
-  `137` is classified as `simple-capture-timeout`. The Simple gate accepts
-  exactly one decimal value and requires `0`; missing, duplicate, malformed,
-  and nonzero values have distinct failure reasons. A failed command removes
-  partial `.rdc` files before evidence is published.
 - `rdoc_capture_file`: `.rdc` path when one exists.
 - `rdoc_capture_magic`: `RDOC` for a valid RenderDoc capture.
 - `rdoc_chromium_requested_api`: requested Chromium graphics API for Electron

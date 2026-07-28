@@ -2,13 +2,11 @@
 
 ## Status
 
-PARTIALLY FIXED, pending strict Stage 4 verification. The native `Dict.get()`
-crash is fixed by using
+PARTIALLY FIXED. The native `Dict.get()` crash is fixed by using
 `contains_key` plus index reads for struct-valued module entries. A fresh
 strict bootstrap now passes Stages 2 and 3 and lowers all Stage-4 modules
 without a segfault, but the full CLI remains blocked by deterministic import
-resolution errors. The current facade/import repair has focused closure
-evidence but has not yet completed the required unchanged-tree strict run.
+resolution errors.
 
 ## Evidence
 
@@ -41,7 +39,7 @@ The unchanged-tree strict follow-up passed Stage 2/3 sanity and entered Stage
 4. It no longer crashed in `HirLowering.lower_trait`; it reported unresolved
 names beginning with `cli_run_file` in
 `app.cli._CliMain.args_and_os_commands`, followed by other symbols supplied
-through glob import facades.
+through partial/header-only import facades.
 
 - Follow-up Stage 2 SHA-256:
   `00fcb65729acfe1f7bd30e113d7d96bea4cd7ff2e4f596667cda8c6a97c89411`
@@ -96,25 +94,6 @@ current generated callers pass pointer/length pairs. GDB observed libc
 `strlen` dereferencing `0x1b`. Current runtime source already has the four-
 argument ABI, so the stale executable must not be used as verification evidence.
 
-The partial/header-only hypothesis was falsified by focused native probes:
-`Dict<text, Module>.get()` corrupts struct-valued hit payloads, while
-`Dict.len()` returns `-1` for ordinary dictionaries. The repair therefore uses
-`contains_key` plus bracket indexing, removes the invalid `len() < 0` gates and
-the missing module-registry experiment, and completes one depth-bounded glob
-surface walker. Enum definitions now follow that same registration path in
-normal and entry-closure bootstrap lowering. Trait defaults remain local to
-each lowering symbol table. Focused regressions cover transitive star facades,
-dotted bare exports, export aliases, conflicting enum aliases, and imported
-trait aliases/defaults.
-
-The retained Stage 3 compiler rebuilt the current
-`src/app/cli/bootstrap_main.spl` closure with
-`SIMPLE_NO_STUB_FALLBACK=1`: 9 modules compiled, 682 came from the preserved
-cache, zero failed, and `build/mini_builds/hir_facade_bootstrap_v3` passed its
-help/sanity entry. The run took 2:47.78 wall time and peaked at 944,796 KiB RSS.
-This is focused diagnostic evidence, not a replacement for the strict full-CLI
-run.
-
 ## Required Fix
 
 Finish canonical facade re-export, transitive-star, receiver-keyword, and
@@ -122,44 +101,6 @@ numbered/unnumbered module-key resolution without restoring opaque-symbol
 fallbacks. Preserve cross-module default-method lowering from issue #190.
 Then run one strict bootstrap from an unchanged tracked tree and replace the
 stale deployed executable only after the Stage-4 admission gates pass.
-
-## Current Strict Attempt
-
-The one unchanged-tree strict run for commit `124b8845d6a0` rebuilt the Rust
-seed/runtime and passed Stage 2 sanity. Stage 3 then stopped before Stage 4
-because compiling
-`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` exceeded the
-per-file 60-second timeout. Strict mode refused seed fallback as required; the
-run was not retried.
-
-- Output: `build/bootstrap/hir-facade-strict-20260727`
-- Stage 3 log:
-  `build/bootstrap/hir-facade-strict-20260727/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`
-- Elapsed time: 49:33.77
-- Peak RSS: 2,543,296 KiB
-
-This result does not invalidate the focused 691-module HIR closure evidence,
-but it prevents the fresh deployed runner, focused HIR spec, full CLI checks,
-and Stage 4 admission from being claimed in this session.
-
-### Per-file timeout correction
-
-History and source-shape review found cumulative growth rather than a change
-from the facade fix: `lower_method_call` remained the declaration-level
-hotspot, while the literal-lowering tail had grown the physical source to
-3,389 lines. The existing methods from `lower_array_lit` through
-`lower_const_expr` were moved byte-for-byte into
-`_MirLoweringExpr/literals.spl` and re-exported by `mir_lowering_expr.spl`.
-This reduces `method_calls_literals.spl` to 2,723 lines without changing MIR
-behavior.
-
-The strict command above was not rerun. A separate 210-second diagnostic with
-an isolated cache and a 180-second per-file timeout discovered the 692-file
-closure but hit its outer bound before compilation began (peak RSS 280,620
-KiB). The admitted Stage-2 bootstrap binary has no `check` command, and the
-seed check could not delegate because this worktree has no deployed
-`bin/simple`. Therefore the split is a source correction, not new strict
-admission evidence; a fresh self-hosted run remains required.
 
 ## 2026-07-27 Final Bounded Attempt
 

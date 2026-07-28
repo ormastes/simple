@@ -59,7 +59,6 @@ GEN_DIR="${VHDL_GEN_DIR:-$ROOT/build/os/rtl}"
 # silicon-lane scan that check-riscv-rtl-truth.shs performs on build/os/rtl.
 GEN_EXT_DIR="${VHDL_GEN_EXT_DIR:-${GEN_DIR}_external}"
 CORES="rv32_exec_core.vhd rv64_exec_core.vhd rv32_exec_core_flat.vhd rv64_exec_core_flat.vhd rv32_exec_core_axi.vhd rv64_exec_core_axi.vhd"
-RTL_HAND_OWNED="rv32_nvme_axi.vhd tb_rv32_nvme_host_axi_mmio.vhd tb_rv32_nvme_fw_in_loop.vhd"
 
 # The remaining 24 pinned RTL files, also emitted by src/lib/hardware/vhdl_gen/.
 # Kept as a separate list from CORES so the six per-core keys above stay stable
@@ -82,9 +81,7 @@ tb_rv32_product_sv32_pmp.vhd:test/01_unit/lib/hardware/fpga_linux/rv32_product_s
 tb_rv64_product_sv39_pmp.vhd:test/01_unit/lib/hardware/fpga_linux/rv64_product_sv39_pmp_ghdl/tb_rv64_product_sv39_pmp.vhd \
 tb_rv64_product_wb_axi.vhd:test/01_unit/lib/hardware/fpga_linux/rv64_product_wb_axi_ghdl/tb_rv64_product_wb_axi.vhd"
 
-# Generation is the DEFAULT expectation for generated RTL. Dedicated endpoint
-# state machines listed in RTL_HAND_OWNED are hash-pinned but not string-generated.
-# The remaining 30 pinned RTL files are emitted by
+# Generation is the DEFAULT expectation: all 30 pinned RTL files are emitted by
 # src/lib/hardware/vhdl_gen/, so a missing build/os/rtl/<file>.vhd is a failure
 # unless the caller explicitly opts out with --allow-missing. --require-generated
 # is kept as an accepted no-op so existing lanes and evidence docs that pass it
@@ -354,8 +351,8 @@ for pair in $RTL_EXTERNAL; do
 done
 
 # ---------------------------------------------------------------------------
-# Layer 4: coverage audit. Every .vhd in the golden dir MUST appear in CORES,
-# RTL_REST, or RTL_HAND_OWNED. Without this, a new (or restored) golden is invisible to the
+# Layer 4: coverage audit. Every .vhd in the golden dir MUST appear in CORES or
+# RTL_REST. Without this, a new (or restored) golden is simply invisible to the
 # gate: on 2026-07-27 tb_rv32_nvme_bram_soc.vhd was live at origin, unpinned and
 # ungenerated, and a stray local deletion of it went unnoticed for exactly that
 # reason. A hash check cannot catch a file it was never told about.
@@ -364,11 +361,11 @@ uncovered=0
 for gpath in "$GOLDEN_DIR"/*.vhd; do
     [ -e "$gpath" ] || continue
     gname=$(basename "$gpath")
-    case " $CORES $RTL_REST $RTL_HAND_OWNED " in
+    case " $CORES $RTL_REST " in
         *" $gname "*) ;;
         *)
-            echo "UNCOVERED GOLDEN: $gname is not declared generated or hand-owned"
-            echo "  Add it to this gate and its authoritative ownership path."
+            echo "UNCOVERED GOLDEN: $gname is in $GOLDEN_DIR but in neither CORES nor RTL_REST"
+            echo "  Add it to this gate AND to the generator, or the gate is blind to it."
             uncovered=$((uncovered + 1))
             overall_fail=1
             ;;
@@ -379,7 +376,6 @@ done
 # Summary (stable keys, one per line).
 # ---------------------------------------------------------------------------
 echo "vhdl_golden_match_external_total=5"
-echo "vhdl_golden_match_hand_owned_total=$(printf '%s\n' $RTL_HAND_OWNED | wc -l | tr -d ' ')"
 echo "vhdl_golden_match_external_pass=$ext_pass"
 echo "vhdl_golden_match_external_fail=$ext_fail"
 echo "vhdl_golden_match_external_missing=$ext_missing"

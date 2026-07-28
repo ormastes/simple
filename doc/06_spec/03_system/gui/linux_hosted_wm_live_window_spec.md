@@ -113,13 +113,7 @@ The event phase drives the real window with `xdotool`. Focus, pointer motion,
 button input, committed UTF-8 text, and keyboard Tab must appear in the winit
 event log and production receipt. The text commit changes the focused window
 title through the existing compositor lifecycle action, so the snapshot proves
-both receipt and state mutation. The receipt captures `input_received_us` when
-the platform event is polled, retains it only for an accepted semantic event,
-and binds it to `present_completed_us` immediately after the real winit
-present, with exact `input_to_present_us`, event/revision, `present_count`, and
-`skipped_frame_count`. The gate requires one positive interval no greater than
-50,000 microseconds; this single sample is not a percentile claim. Internal
-maximize and restore commands must update the focused window,
+both receipt and state mutation. Internal maximize and restore commands must update the focused window,
 restore the exact pre-maximize window array, and advance the render revision.
 The retained env records exact baseline/input/move/maximize/restore nonces
 `1/2/3/4/5`, plus each phase's revision, Engine2D backend, readback source,

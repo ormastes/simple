@@ -220,12 +220,10 @@ text_file_write("output.txt", "line1\nline2\n", win_cfg)  # Forces CRLF
 # 1. Install QEMU and seed ISO tooling
 sudo apt install qemu-system-x86 qemu-utils openssh-client wget xz-utils genisoimage
 
-# 2. Download the pristine base image and run the repo-managed smoke
-sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke --download
+# 2. Run the repo-managed FreeBSD bootstrap smoke in QEMU
+sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke
 
-# 3. For a persistent VM used for manual SSH debugging, use the lower-level setup
-bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
-# While that VM is running:
+# 3. SSH access for manual debugging
 ssh -p 2222 freebsd@localhost
 ```
 

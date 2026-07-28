@@ -1444,8 +1444,7 @@ pub(crate) fn build_stage4_runtime_capsule_archive(
 /// Project the requested Rust runtime exports without exposing the rlib's
 /// remaining global ABI. Allowed runtime externals must be supplied by the
 /// adjacent exact Stage-4 capsules.
-#[doc(hidden)]
-pub fn build_stage4_rust_runtime_projection_archive(
+pub(crate) fn build_stage4_rust_runtime_projection_archive(
     rust_runtime_archive: &Path,
     requested_symbols: &[String],
     allowed_external_runtime_symbols: &[String],
@@ -1467,6 +1466,9 @@ fn project_stage4_archive_closure(
     temp_dir: &Path,
     stem: &str,
 ) -> Result<PathBuf, String> {
+    if !cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")) {
+        return Err("Stage4 archive projection currently requires native GNU/Linux or macOS linker semantics".to_string());
+    }
     let output = temp_dir.join(format!("libsimple_{stem}.a"));
     let closure_object = temp_dir.join(format!("{stem}_closure.o"));
     let localized_object = temp_dir.join(format!("{stem}_local.o"));
@@ -1486,13 +1488,7 @@ fn project_stage4_archive_closure(
     if requested.len() != requested_symbols.len() {
         return Err("Stage4 requested symbol set contains duplicates".to_string());
     }
-    if let Some(symbol) = requested.iter().find(|symbol| !is_stage4_archive_symbol(symbol)) {
-        return Err(format!("Stage4 requested symbol `{symbol}` is not a C identifier"));
-    }
     let allowed_external: BTreeSet<String> = allowed_external_runtime_symbols.iter().cloned().collect();
-    if let Some(symbol) = allowed_external.iter().find(|symbol| !is_stage4_archive_symbol(symbol)) {
-        return Err(format!("Stage4 allowed external `{symbol}` is not a C identifier"));
-    }
     if let Some(symbol) = allowed_external
         .iter()
         .find(|symbol| !symbol.starts_with("rt_") && !symbol.starts_with("spl_"))
@@ -1500,9 +1496,6 @@ fn project_stage4_archive_closure(
         return Err(format!(
             "Stage4 allowed external `{symbol}` is not a runtime ABI symbol"
         ));
-    }
-    if !cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")) {
-        return Err("Stage4 archive projection currently requires native GNU/Linux or macOS linker semantics".to_string());
     }
 
     let _ = std::fs::remove_file(&output);
@@ -1752,12 +1745,6 @@ fn project_stage4_archive_closure(
         let _ = std::fs::remove_file(&output);
     }
     result
-}
-
-fn is_stage4_archive_symbol(symbol: &str) -> bool {
-    let mut bytes = symbol.bytes();
-    matches!(bytes.next(), Some(b'_' | b'a'..=b'z' | b'A'..=b'Z'))
-        && bytes.all(|byte| matches!(byte, b'_' | b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'))
 }
 
 /// Build the Stage-4 compiler hook archive without importing a second runtime.

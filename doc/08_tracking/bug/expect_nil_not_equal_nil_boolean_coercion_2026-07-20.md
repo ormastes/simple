@@ -1,7 +1,6 @@
 # `expect(nil != nil)` yields nil instead of boolean false (only when both sides are nil)
 
-**Status:** fixed
-**Verified fixed (2026-07-28):** `interpreter/expr/ops.rs:933-936` `BinOp::NotEq` explicitly special-cases nil-vs-nil, returning a proper `Value::Bool(!(left.is_nil_like() && right.is_nil_like()))` (mirrors the `BinOp::Eq` handling at :910-917) — not raw `nil` propagation. The int fast-path (`fast_int_binop`, :97-122) is unrelated since nil operands never take that branch.
+**Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** interpreter — `!=` operator / SSpec `expect()` boolean coercion
 

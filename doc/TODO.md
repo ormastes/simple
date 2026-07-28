@@ -1,14 +1,14 @@
 # TODO Tracking
 
-**Total:** 317 items | **Open:** 317 | **Blocked:** 0
+**Total:** 312 items | **Open:** 312 | **Blocked:** 0
 
 ## By Priority
 
 | Priority | Count |
 |----------|-------|
-| P0 | 3 |
-| P1 | 1 |
-| P2 | 1 |
+| P0 | 0 |
+| P1 | 0 |
+| P2 | 0 |
 | P3 | 312 |
 
 ## By Area
@@ -16,19 +16,6 @@
 | Area | Count |
 |------|-------|
 | general | 312 |
-| cosmos | 3 |
-| nvme | 1 |
-| uno_q | 1 |
-
-## P0 Critical
-
-- [TODO] **Produce a source-matched pure-Simple runner, then execute ST-018 and regenerate the Cosmos SSpec manual.** - `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md:6`
-- [TODO] **Implement fail-closed multi-target firmware profiles for Simple simulation, QEMU/FEMU, Cosmos OpenSSD, and KV260/FPGA without silently mapping unknown hardware to the simulator.** - `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md:7`
-- [TODO] **POSTPONED until identified Cosmos+ hardware and lab fixtures are available: execute and retain BT-001 through BT-006.** - `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md:10`
-
-## P1 High Priority
-
-- [TODO] Complete package-manifest provenance for repository revision, dirty state, tool versions, bound profile, board identity, and immutable artifact hashes. - `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md:8`
 
 ## All TODOs
 
@@ -346,8 +333,3 @@
 | 309 | TODO | general | P3 | s{} is_subset operator not yet implemented — using manual check | `test/feature/usage/set_literal_spec.spl` | 117 |
 | 310 | TODO | general | P3 | s{} is_disjoint operator not yet implemented — using manual check | `test/feature/usage/set_literal_spec.spl` | 134 |
 | 311 | TODO | general | P3 | Enable when decorator on impl blocks is supported | `test/feature/usage/trait_coherence_spec.spl` | 342 |
-| 312 | TODO | cosmos | P0 | Produce a source-matched pure-Simple runner, then execute ST-018 and regenerate the Cosmos SSpec manual. | `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md` | 6 |
-| 313 | TODO | nvme | P0 | Implement fail-closed multi-target firmware profiles for Simple simulation, QEMU/FEMU, Cosmos OpenSSD, and KV260/FPGA without silently mapping unknown hardware to the simulator. | `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md` | 7 |
-| 314 | TODO | cosmos | P1 | Complete package-manifest provenance for repository revision, dirty state, tool versions, bound profile, board identity, and immutable artifact hashes. | `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md` | 8 |
-| 315 | TODO | uno_q | P2 | POSTPONED until an Arduino UNO Q and debug access are available: run supplementary QRB2210 AArch64 and STM32U585 build/UART checks without claiming Cosmos hardware acceptance. | `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md` | 9 |
-| 316 | TODO | cosmos | P0 | POSTPONED until identified Cosmos+ hardware and lab fixtures are available: execute and retain BT-001 through BT-006. | `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md` | 10 |

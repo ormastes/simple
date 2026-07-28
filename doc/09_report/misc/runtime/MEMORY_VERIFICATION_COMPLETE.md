@@ -442,3 +442,27 @@ This provides:
 - **Developer friendly**: Clear errors and debugging tools
 
 The memory model implementation is **complete** with 45 tests passing and 860+ lines of formally verified code.
+
+---
+
+## Correction 2026-07-28
+
+The "Implementation Details" section above (capability system attributed to a working Rust
+implementation) overstates what is actually enforced, and its paths are stale (they predate
+the `src/compiler` → `src/compiler_rust` rename; `src/compiler/` is now the pure-Simple
+self-hosted compiler). The original text is preserved above; the corrected state as of
+2026-07-28 is:
+
+- **Lean formal model:** genuinely complete (`MemoryCapabilities.lean`, `MemoryModelDRF.lean`)
+  — this part of the report stands.
+- **Rust seed (`src/compiler_rust/`):** the only capability check that runs is actor-mode
+  *compatibility* (`function.rs:571-572`). There is no general capability/aliasing checker
+  of the kind the `capability.rs` excerpt implies.
+- **Pure-Simple self-hosted compiler (`src/compiler/`):** has NO capability-checking pass at
+  all; `mut`/`iso` capability enums survive only as name-mangling metadata
+  (`monomorphize/util.spl:221-228`).
+- Consequently the "compile-time prevention via reference capabilities" claim in the
+  conclusion describes the modeled design, not shipped enforcement.
+
+Full evidence audit: `doc/01_research/language/simple_vs_rust_safety_property_audit_2026-07-28.md`
+(property #3 "Aliasing control" and "False completion claims").

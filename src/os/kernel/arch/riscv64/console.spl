@@ -22,7 +22,8 @@ use os.kernel.arch.riscv64.sbi.{sbi_console_putchar}
 use os.kernel.arch.riscv64.shell_lite.{rv64_shell_banner, rv64_shell_prompt, rv64_shell_dispatch, rv64_shell_format_dir_entries}
 use os.apps.sshd.ssh_auth.{SshUserDb, sshd_create_default_users}
 use os.services.vfs.vfs_write_ops.{g_vfs_readdir}
-use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn}
+use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn_with_recipe}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_CONSOLE_SHELL}
 
 # ============================================================================
 # UART MMIO Base Address (QEMU virt)
@@ -292,7 +293,12 @@ fn _shell_launch(line: text) -> text:
     while i < parts.len():
         argv.push(parts[i])
         i = i + 1
-    val pid = fs_exec_spawn(path, argv, [])
+    # Master plan §5.4: the console shell is a migrated caller. The serial
+    # console runs in kernel context, so the caller id stays the kernel-origin
+    # sentinel (0) — but the LAUNCHED PROGRAM no longer inherits `spawn_full()`.
+    # `SPAWN_RECIPE_CONSOLE_SHELL` mints it FileExec+FileRead under `/bin/` plus
+    # ProcessSpawn and nothing else.
+    val pid = fs_exec_spawn_with_recipe(0, SPAWN_RECIPE_CONSOLE_SHELL, path, argv, [])
     if pid > 0:
         return "launched " + path + " pid=" + pid.to_text()
     return "launch failed errno=" + pid.to_text()

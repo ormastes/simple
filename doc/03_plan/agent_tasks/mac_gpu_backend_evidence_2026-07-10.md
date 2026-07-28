@@ -229,7 +229,7 @@ Shared rules:
 
 ### Agent A: bootstrap closure and deployment
 
-1. Start from TODO317 and the entry-closure no-object-progress bug report.
+1. Start from TODO 580 and the entry-closure no-object-progress bug report.
 2. Treat entry closure as resolved: the retained cycle-3 log reaches all 396
    files and `Driver start`. Do not repeat the bucket/profile cycle.
 3. Resume the bounded worker at the Stage 2 owner-global repair. Require

@@ -6,10 +6,7 @@ changes runtime behavior for the keys routed through this helper, though the
 one current call site, `load_test_config_from_path`, has ALSO been hard-bypassed
 with an early `return config` before it ever calls the parser — see Notes — so
 this is not currently reachable in production)
-**Status:** fixed
-**Verified fixed (2026-07-28):** commit `002863a059c` (2026-07-27) deleted `apply_test_config_value` entirely, routing config through `std.common.config_core` instead; current `src/lib/nogc_sync_mut/test_runner/test_config.spl:6-13` explicitly cites this bug doc by name as the reason the hand-rolled merge was removed.
-
-**Status (original):** open — language/runtime defect, not fixed here (found while writing
+**Status:** open — language/runtime defect, not fixed here (found while writing
 new hardening unit specs for `src/lib/nogc_sync_mut/test_runner/test_config.spl`,
 out of scope for that task)
 

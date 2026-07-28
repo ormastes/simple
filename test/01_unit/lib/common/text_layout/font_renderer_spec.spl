@@ -3,9 +3,11 @@ use common.text_layout.font_renderer.{
     browser_chrome_compatible_normal_font_name,
     browser_chrome_compatible_normal_font_path,
     browser_chrome_compatible_vector_font_name,
-    CachedGlyph, GlyphCache, FontRenderer, FontRenderBatch, ResolvedFontMetrics, resolve_font_metrics, resolve_font_metrics_with_language,
+    CachedGlyph, GlyphCache, FontRenderer, FontRenderBatch, FontRenderConfig, FontExecutionPolicy, ResolvedFontMetrics, resolve_font_metrics, resolve_font_metrics_with_language,
     font_renderer_register_selected_bytes,
     font_renderer_use_registered_selected_bytes_only,
+    _font_renderer_reset_registered_selected_bytes_for_test,
+    font_render_config_selection_supported,
     browser_font_download_script_path, browser_font_face_source_urls,
     browser_font_face_family_value, browser_font_face_source_from_family_value,
     browser_font_cache_dir, browser_font_face_cached_source_path, ensure_browser_font_face_sources,
@@ -702,6 +704,7 @@ describe "shared font renderer fallbacks":
         expect(cache.max_bytes).to_equal(33554432)
 
     it "shapes registered-only Arabic and Devanagari without filesystem reads":
+        _font_renderer_reset_registered_selected_bytes_for_test()
         val candidates = selected_font_asset_candidates()
         var registered = 0
         for candidate in candidates:
@@ -729,3 +732,20 @@ describe "shared font renderer fallbacks":
         val hindi_batch = renderer.prepare_selected_glyph_run(hindi.glyph_run, 4294967295u32, 32)
         expect(hindi_batch.valid).to_be(true)
         expect(hindi_batch.quads.len()).to_be_greater_than(0)
+        val arabic_config = FontRenderConfig(
+            family: "Noto Sans Arabic", category: "sans", language: "ar", script: "arab", size: 32,
+            weight: "normal", style: "normal", hinting: "none", antialiasing: "grayscale",
+            atlas_policy: "shared-alpha-1024", execution_target: "cpu",
+            execution_policy: FontExecutionPolicy.Required
+        )
+        val configured_batch = renderer.prepare_text_configured("العربية", 4294967295u32, arabic_config)
+        expect(configured_batch.valid).to_be(true)
+        expect(configured_batch.font_identity).to_equal(arabic.identity)
+        val unregistered_config = FontRenderConfig(
+            family: "Noto Sans SC", category: "sans", language: "zh", script: "hans", size: 32,
+            weight: "normal", style: "normal", hinting: "none", antialiasing: "grayscale",
+            atlas_policy: "shared-alpha-1024", execution_target: "cpu",
+            execution_policy: FontExecutionPolicy.Required
+        )
+        expect(font_render_config_selection_supported(unregistered_config)).to_be(true)
+        expect(renderer.prepare_text_configured("中文", 4294967295u32, unregistered_config).valid).to_be(false)

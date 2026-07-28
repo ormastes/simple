@@ -1,8 +1,7 @@
 # rv64 smoke testbench instantiates dangling entity `soc_top_rv64`
 
 - **Date:** 2026-07-21
-- **Status:** fixed
-- **Verified fixed (2026-07-28):** `examples/09_embedded/fpga_riscv/rtl/soc_top_rv64.vhd:26` now defines `entity soc_top_rv64` (tracked in git), added by commit `c35ef5b7807`.
+- **Status:** open
 - **Severity:** medium (clean-checkout reproducibility failure; blocks honest
   rv64 smoke evidence)
 - **Area:** `examples/09_embedded/fpga_riscv/rtl/tb_rv64_wb_soc_smoke.vhd`

@@ -4,7 +4,6 @@
 - **Severity:** P2 (blocks running any arena-AST lint pass from interpreted app code; blocks reliable-mode R2 wiring and the dormant `_run_ast_lint_passes` suite in the LSP/query path)
 - **Area:** interpreter / compiler.core (parse + AST arena, HIR lowering)
 - **Status:** open — reproduced across 3 wiring approaches
-- **Verification needed:** Re-run the `bin/simple run` repro; the two named functions may now exist/export correctly in source, and interpreted-path resolution isn't statically confirmable without an actual run.
 - **Found during:** reliable-mode P1/R2 (wiring `check_primitive_api_arena` into `query_lint`)
 
 ## Summary

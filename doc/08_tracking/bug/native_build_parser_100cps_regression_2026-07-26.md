@@ -2,13 +2,7 @@
 
 - **Date:** 2026-07-26 (run 9 trace evidence, first observable harness build)
 - **Lane:** deployed stage4 `bin/release/aarch64-apple-darwin-macho/simple` `native-build` (cranelift, `--target x86_64-unknown-none`, `--entry-closure`, harness env `SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$ROOT/src SIMPLE_ALLOW_FREESTANDING_STUBS=1`)
-- **Status:** open — root cause CONFIRMED 2026-07-26 evening (O(n²) linear-scan
-  enum/closure registries in `runtime_native.c`); fix not yet landed (requires
-  a C runtime change plus the next stage4 rebuild+redeploy)
-- **Reconciled (2026-07-28):** header updated from "root cause not yet
-  isolated" to "root cause CONFIRMED, fix not yet landed" — the body's
-  "Root cause CONFIRMED" section (with falsification test) contradicted the
-  original header text; no fix commit found, so status stays open.
+- **Status:** open — measured, root cause not yet isolated
 
 ## Measured (SIMPLE_COMPILER_TRACE=1, harness run 9, 10800s wall — expired in parse)
 `[BOOTSTRAP-PHASE] phase2:parse:file` timings from `native-build.out` (19MB):

@@ -246,12 +246,3 @@ No function may translate `UNAVAILABLE`, `INVALID`, `TIMEOUT`, or `HW_ERROR`
 into `OK`. No board procedure may reuse QEMU output as evidence. Each run stores
 command, exit code, stdout/stderr, artifact hashes, tool versions, and for H2
 the board serial/revision and fixture identity.
-
-# Deferred multi-target detail
-
-`FR-NVME-FW-TARGETS-0001` extends the existing `OpenSsdConfig` concept into an
-explicit target registry. Each entry supplies identity, CPU/transport/media,
-geometry and apertures, runner, availability, and evidence class. Selection
-must return an error for unknown or postponed hardware profiles; it must not
-reuse `TARGET_SIMPLE_SIM`. The existing simulator and OpenSSD 2Ch/8Ch entries
-are the compatibility baseline.

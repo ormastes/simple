@@ -2,7 +2,6 @@
 
 - **Date:** 2026-07-20
 - **Status:** open
-- **Verification needed:** Run `bin/simple test` on the seed against the failing spec, and complete the blocked `bin/simple run` A/B, to confirm the test-vs-run enum-variant-construction dispatch divergence still holds (source unchanged).
 - **Area:** SSpec `test` evaluator (Rust seed interpreter), same family as the
   documented test-path-vs-run-path divergence in
   `generic_class_static_method_unresolved_under_test_2026-07-20.md` /

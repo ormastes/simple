@@ -2,7 +2,6 @@
 
 - **Date:** 2026-07-20
 - **Status:** open (worked around at the spec level, not root-fixed)
-- **Verification needed:** Build and re-run the repro to statically confirm the `.?`-in-call-argument path in `interpreter_method`/`interpreter_call` (src/compiler_rust) — not yet located via grep.
 - **Area:** interpreter evaluation of the `.?` operator (`.? over is_* predicates`
   is the documented idiom per `.claude/rules/language.md`), under
   `bin/simple test` (SSpec evaluator).

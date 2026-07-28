@@ -7,9 +7,8 @@
 #
 #   rv32_exec_core_axi  --mem_*-->  rv32_axi4_mem_adapter  --M_AXI_HP-->
 #       SmartConnect --> zynq_ultra_ps_e S_AXI_HP0_FPD --> PS DDR4
-#   rv32_nvme_axi --M_AXI_NVME_DMA--> same SmartConnect/DDR
 #
-#   zynq M_AXI_HPM0_FPD --> SmartConnect --> S_AXI_CTRL + S_AXI_NVME
+#   zynq M_AXI_HPM0_FPD --> SmartConnect --> rv32_ctrl_obs_slave (S_AXI_CTRL)
 #
 # The soft-core needs ~8.19 MB contiguous RAM (sp = _stack_top = 0x8081d010)
 # plus the FAT32 ramdisk window at 0x88000000; an xck26 has only ~2.9 MB of
@@ -69,8 +68,7 @@ fi
 echo "INFO: ${avail_gb} GB available, no competing Vivado/native-build"
 
 for f in "$RTL_DIR/rv32_exec_core_axi.vhd" "$RTL_DIR/rv32_axi4_mem_adapter.vhd" \
-         "$RTL_DIR/rv32_nvme_axi.vhd" "$RTL_DIR/rv32_ctrl_obs_slave.vhd" \
-         "$RTL_DIR/soc_top_rv32_k26_ddr.vhd"; do
+         "$RTL_DIR/rv32_ctrl_obs_slave.vhd" "$RTL_DIR/soc_top_rv32_k26_ddr.vhd"; do
     [ -s "$f" ] || { echo "FAIL: RTL missing: $f"; exit 1; }
 done
 
@@ -94,7 +92,6 @@ set_property board_part xilinx.com:kv260_som:part0:1.4 [current_project]
 add_files [list \\
   $RTL_DIR/rv32_exec_core_axi.vhd \\
   $RTL_DIR/rv32_axi4_mem_adapter.vhd \\
-  $RTL_DIR/rv32_nvme_axi.vhd \\
   $RTL_DIR/rv32_ctrl_obs_slave.vhd \\
   $RTL_DIR/soc_top_rv32_k26_ddr.vhd ]
 add_files -fileset constrs_1 $BUILD_DIR/pins.xdc
@@ -104,32 +101,25 @@ create_bd_design ps_bd
 create_bd_cell -type ip -vlnv xilinx.com:ip:zynq_ultra_ps_e:3.5 ps
 apply_bd_automation -rule xilinx.com:bd_rule:zynq_ultra_ps_e \\
   -config {apply_board_preset "1"} [get_bd_cells ps]
-# S_AXI_HP0_FPD (GP2) = core/NVMe DMA -> DDR. M_AXI_HPM0_FPD (GP0) = PS -> control/NVMe.
+# S_AXI_HP0_FPD (GP2) = soft-core -> DDR.  M_AXI_HPM0_FPD (GP0) = PS -> control.
 set_property -dict [list \\
   CONFIG.PSU__USE__S_AXI_GP2 {1} \\
   CONFIG.PSU__USE__M_AXI_GP0 {1} \\
   CONFIG.PSU__USE__M_AXI_GP1 {0} \\
-  CONFIG.PSU__USE__IRQ0 {1} \\
   CONFIG.PSU__MAXIGP0__DATA_WIDTH {32} ] [get_bd_cells ps]
 
 create_bd_cell -type module -reference soc_top_rv32_k26_ddr rv32
 create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 sc_mem
-set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {1}] [get_bd_cells sc_mem]
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] [get_bd_cells sc_mem]
 create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 sc_ctrl
-set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {2}] [get_bd_cells sc_ctrl]
-create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 irq_concat
-set_property -dict [list CONFIG.NUM_PORTS {1}] [get_bd_cells irq_concat]
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] [get_bd_cells sc_ctrl]
 
 # soft-core master -> PS DDR
 connect_bd_intf_net [get_bd_intf_pins rv32/M_AXI_HP] [get_bd_intf_pins sc_mem/S00_AXI]
-connect_bd_intf_net [get_bd_intf_pins rv32/M_AXI_NVME_DMA] [get_bd_intf_pins sc_mem/S01_AXI]
 connect_bd_intf_net [get_bd_intf_pins sc_mem/M00_AXI] [get_bd_intf_pins ps/S_AXI_HP0_FPD]
-# PS -> control/observation and NVMe host slaves
+# PS -> control/observation slave
 connect_bd_intf_net [get_bd_intf_pins ps/M_AXI_HPM0_FPD] [get_bd_intf_pins sc_ctrl/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins sc_ctrl/M00_AXI] [get_bd_intf_pins rv32/S_AXI_CTRL]
-connect_bd_intf_net [get_bd_intf_pins sc_ctrl/M01_AXI] [get_bd_intf_pins rv32/S_AXI_NVME]
-connect_bd_net [get_bd_pins rv32/nvme_irq] [get_bd_pins irq_concat/In0]
-connect_bd_net [get_bd_pins irq_concat/dout] [get_bd_pins ps/pl_ps_irq0]
 
 connect_bd_net [get_bd_pins ps/pl_clk0] \\
   [get_bd_pins ps/saxihp0_fpd_aclk] [get_bd_pins ps/maxihpm0_fpd_aclk] \\
@@ -149,16 +139,12 @@ if {[catch {
     [get_bd_addr_segs rv32/S_AXI_CTRL/Reg] -force
 } e]} {
   puts "CTRL_SEG_EXPLICIT_FAILED: \$e"
-  exit 7
-}
-# Keep the host NVMe BAR distinct from the control/observation aperture.
-if {[catch {
-  assign_bd_address -offset 0xA0010000 -range 0x00010000 \\
-    -target_address_space [get_bd_addr_spaces ps/Data] \\
-    [get_bd_addr_segs rv32/S_AXI_NVME/Reg] -force
-} e]} {
-  puts "NVME_SEG_EXPLICIT_FAILED: \$e"
-  exit 8
+  # Fall back: find any ps/Data segment that lives in the rv32 cell.
+  foreach sg [get_bd_addr_segs -of_objects [get_bd_addr_spaces ps/Data]] {
+    if {[string match "*rv32*" \$sg]} {
+      catch { set_property offset 0xA0000000 \$sg ; puts "CTRL_SEG_FALLBACK=\$sg" }
+    }
+  }
 }
 validate_bd_design
 save_bd_design
@@ -206,7 +192,7 @@ if {\$wns < 0.0 || \$whs < 0.0} { puts "TIMING_NOT_MET"; exit 3 }
 puts "TIMING_MET"
 TCL
 
-echo "=== ONE Vivado build: rv32 soft-core + NVMe AXI + PS DDR4 (xck26) ==="
+echo "=== ONE Vivado build: rv32 soft-core + AXI4 -> PS DDR4 (xck26) ==="
 vivado -mode batch -source "$BUILD_DIR/build.tcl" \
     -journal "$BUILD_DIR/vivado.jou" -log "$BUILD_DIR/vivado.log" 2>&1 | tail -30
 

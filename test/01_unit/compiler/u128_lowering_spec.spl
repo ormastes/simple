@@ -1,0 +1,127 @@
+# Regression spec: `u128` / `i128` annotations must lower through HIR.
+#
+# BUG-U128-64BIT (2026-07-28)
+# ---------------------------
+# Before the fix, `hir/lower/type_resolver.rs` had no case for the spellings
+# `u128` / `i128`, so every module that merely MENTIONED one failed HIR
+# lowering with:
+#
+#     [INFO] JIT compilation failed, falling back to interpreter:
+#     HIR lowering error: Unknown type: u128
+#
+# The blast radius was far larger than the annotation: `os.crypto.curve25519`
+# spells `u128` in `fe_mul_scalar` / `_fe_carry_wide`, `os.crypto.ed25519`
+# imports it, and so importing ed25519 ANYWHERE demoted the entire program to
+# the interpreter. Three lanes measured the cost: no engine A/B was possible
+# for any crypto spec, signature ops ran ~2.8 s each, and Ed25519-touching
+# specs sat against a 60 s session wall with no margin.
+#
+# WHAT `u128` ACTUALLY MEANS IN THIS TREE
+# ---------------------------------------
+# It is a 64-bit integer, and it always has been, on BOTH engines:
+#   - interpreter: `Value::Int(i64)` (compiler/src/value.rs) — no wider variant
+#   - JIT/MIR:     uniform tagged-i64 value model; `clif_int_type_for_bits`
+#                  (codegen/instr/units.rs) saturates at `types::I64`
+# So the pre-fix state was NOT "u128 is unsupported, and that is safe". It was
+# "the interpreter silently truncates u128 to 64 bits, and the JIT refuses to
+# run at all" — the worst of both. Resolving `u128`/`i128` to `TypeId::I64`
+# (the same precedent as the adjacent `usize` / `isize` arm) makes the JIT
+# agree with the interpreter exactly, and unblocks the A/B.
+#
+# `I64` and not `U64` is load-bearing: `BinOp::ShiftRight` in
+# codegen/instr/core.rs dispatches sshr vs ushr on LHS signedness. `I64` keeps
+# the JIT's `>>` an arithmetic shift, byte-identical to the interpreter's
+# `i64 >>`. `U64` would emit `ushr` and silently diverge on high-bit-set limbs.
+#
+# WHAT THIS SPEC PINS
+# -------------------
+# 1. `u128` / `i128` annotations lower and RUN (pre-fix: whole file demoted).
+# 2. The curve25519-style carry chain (`*`, `>>`, `&`, `+`) is exact.
+# 3. The results are identical under `--interp` and under the default JIT.
+#
+# WHAT THIS SPEC DELIBERATELY DOES NOT CLAIM
+# ------------------------------------------
+# It does not test values above 2^60. The JIT's tagged-i64 payload ceiling is
+# 2^60-1, so a genuinely wide operand would diverge between engines. Every
+# operand and intermediate below is chosen to stay under that ceiling, because
+# the fix restores ENGINE AGREEMENT, not 128-bit width. Real 128-bit arithmetic
+# needs a `TypeId::I128` plus an interpreter value variant — see
+# doc/08_tracking/bug/u128_not_a_128bit_type_2026-07-28.md.
+
+use std.spipe.*
+
+# 51-bit limb mask, exactly as os.crypto.curve25519 spells it.
+val LIMB_MASK: u128 = 2251799813685247
+
+# A 40-bit limb and a small scalar: the product is ~2^50, and every
+# intermediate below stays under the 2^60 tagged-payload ceiling.
+val LIMB_A: u128 = 1099511627776
+val SCALAR_S: u128 = 1000
+
+fn u128_mul(a: u128, s: u128) -> u128:
+    a * s
+
+fn u128_shr(a: u128, n: u128) -> u128:
+    a >> n
+
+fn u128_and(a: u128, m: u128) -> u128:
+    a & m
+
+fn i128_add(a: i128, b: i128) -> i128:
+    a + b
+
+# The exact shape of the carry step in curve25519's `fe_mul_scalar`:
+# multiply a limb by a scalar, split the 51-bit low part off, carry the rest.
+fn carry_low(a: u128, s: u128) -> u128:
+    val wide: u128 = a * s
+    wide & LIMB_MASK
+
+fn carry_out(a: u128, s: u128) -> u128:
+    val wide: u128 = a * s
+    wide >> 51
+
+# Two-limb carry propagation, so a dropped carry cannot pass unnoticed.
+fn two_limb_carry(a0: u128, a1: u128, s: u128) -> u128:
+    val w0: u128 = a0 * s
+    val c: u128 = w0 >> 51
+    val n1: u128 = (a1 * s) + c
+    n1
+
+describe "u128 and i128 annotations lower through HIR":
+    it "accepts a u128 parameter and returns an exact product":
+        expect(u128_mul(LIMB_A, SCALAR_S)).to_equal(1099511627776000)
+
+    it "accepts an i128 parameter and returns an exact sum":
+        expect(i128_add(576460752303423000, 488)).to_equal(576460752303423488)
+
+    it "shifts a u128 value right arithmetically like the interpreter":
+        expect(u128_shr(1099511627776000, 51)).to_equal(0)
+
+    it "shifts a wider u128 value right across the 51-bit boundary":
+        # 2^55 >> 51 == 2^4 == 16
+        expect(u128_shr(36028797018963968, 51)).to_equal(16)
+
+    it "masks a u128 value to 51 bits":
+        expect(u128_and(36028797018963968, LIMB_MASK)).to_equal(0)
+
+describe "u128 carry chain matches curve25519 field arithmetic":
+    it "splits the low 51 bits off a limb product":
+        # 2^55 * 1 = 2^55; low 51 bits are zero, so the whole value carries.
+        expect(carry_low(36028797018963968, 1)).to_equal(0)
+
+    it "produces the matching carry-out":
+        expect(carry_out(36028797018963968, 1)).to_equal(16)
+
+    it "keeps a sub-2^51 product entirely in the low word with no carry":
+        expect(carry_low(LIMB_A, SCALAR_S)).to_equal(1099511627776000)
+
+    it "emits no carry when the product fits in 51 bits":
+        expect(carry_out(LIMB_A, SCALAR_S)).to_equal(0)
+
+    it "propagates a carry into the next limb":
+        # a0 * s = 2^55 -> carry 16; a1 * s = 2^40 * 1 = 2^40.
+        # n1 = 2^40 + 16 = 1099511627792
+        expect(two_limb_carry(36028797018963968, 1099511627776, 1)).to_equal(1099511627792)
+
+    it "adds no carry when the low limb does not overflow 51 bits":
+        expect(two_limb_carry(1, 1099511627776, 1)).to_equal(1099511627776)

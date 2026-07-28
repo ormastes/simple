@@ -1,7 +1,7 @@
 # Rendering performance historical-regression baseline TODO
 
 - ID: `FR-RENDER-PERF-BASELINE-0001`
-- Status: implemented; focused shell contract checks passed
+- Status: open; policy selection and implementation required
 - Owner: rendering performance lane
 - Scope: the canonical 4K and 8K widget-showcase performance evidence
 
@@ -13,10 +13,13 @@ absolute 4K/8K limits: at least 200 FPS, p95 frame time at or below the derived
 5 ms budget, the configured maximum RSS, and the existing output/provenance
 checks. These limits remain required.
 
-Before this change they did not compare a run with an accepted historical
-measurement. The implemented relative gate now rejects that false-green.
+They do not compare a run with an accepted historical measurement. A current
+run can therefore become materially slower than its predecessor and still
+report PASS when it remains at or above 200 FPS and at or below 5 ms. For
+example, an accepted p95 of 3 ms followed by 4.8 ms is a regression that the
+current absolute gate does not identify.
 
-## Implemented feature
+## Required feature
 
 Add a required, immutable baseline for each resolution and compatible execution
 environment. A comparison is valid only when both records have the same
@@ -45,7 +48,7 @@ The aggregate checker must validate the baseline artifact and recompute the
 comparison. It must not accept a producer-authored `status=pass` without
 matching baseline data.
 
-## Contract coverage
+## Required tests
 
 Extend the widget-showcase performance contract and aggregate fixtures to prove:
 
@@ -62,19 +65,19 @@ Extend the widget-showcase performance contract and aggregate fixtures to prove:
 Tests use checked-in fixtures and the comparison/classification surface; they
 must not require the local machine to reproduce another host's timing.
 
-## Selected policy
+## User decision required
 
-NFR-006 selects +10% for median and p95 and +5% for maximum RSS. FPS is retained
-with its signed delta as diagnostic evidence while the existing absolute
-200-FPS gate remains mandatory. The producer and aggregate implement this
-policy without an automatic baseline-create or update path.
+Do not implement an inferred regression tolerance. The user must select the
+allowed p95-frame-time delta and maximum-RSS delta (and whether FPS receives a
+separate relative delta or remains a derived diagnostic). Candidate thresholds
+must be presented with pros, cons, expected flake sensitivity, and effort before
+selection. Until that decision is recorded, this feature request remains open
+and no baseline comparison may claim PASS.
 
 ## Acceptance
 
 - Absolute 200 FPS, 5 ms p95, RSS, output, and provenance gates remain active.
 - Every 4K/8K PASS is bound to an immutable, matching environment baseline.
-- Baseline source revision equals the producer's measured-source revision, and
-  aggregate recomputation enforces the same equality.
 - Relative regression status is independently reproducible from retained data.
 - Baseline updates are explicit/manual and visible in review.
 - The false-green example above is a failing fixture.

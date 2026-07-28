@@ -32,7 +32,6 @@
 | ST-017 | Dispatcher runner proves one destructive FIFO fetch per entry, queue-zero admin routing, nonzero IO routing, reserved-field rejection, and completion retry/terminal blocking. | H1 host/ARM PASS before final compile-only cleanup |
 | ST-018 | A current pure-Simple runner executes the fourteen-scenario SSpec and generates its manual. | **Blocked:** no current runner; Stage 2/3 pass and Stage 4 clears the prior parser/HIR crashes, then fails on unresolved partial/header-only facade imports. |
 | ST-019 | Focused host composition injects corrected ECC, returns intact data, relocates and rereads the page, rejects a stale PPA, preserves L2P on injected copy failure, remounts/replays the destination, and passes strict ARM compile plus relocatable link. | H1 PASS |
-| ST-020 | The remaining-gates SSpec and wrapper retain implemented simulator/OpenSSD profiles, track QEMU/FEMU and KV260/FPGA profiles without fabricating support, reject incomplete BT evidence, and keep UNO Q supplementary. | H0 ready; execution blocked with ST-018 |
 
 The host MMIO, ARM abort, and SMP/cache runners are executable H1 evidence. Static source
 guards and synthetic package fixtures remain supplementary; they do not replace
@@ -59,7 +58,6 @@ sh test/02_integration/os/cosmos/run_cosmos_smp_cache_contract_test.shs
 readelf -hW build/os/simpleos_cosmos_openssd_silicon.elf
 test -z "$(nm -u build/os/simpleos_cosmos_openssd_silicon.elf)"
 sh src/os/kernel/arch/arm32/cosmos/package_boot.shs --self-test
-sh scripts/check/check-nvme-firmware-remaining-gates.shs --self-test
 bin/release/simple test \
   test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl \
   --mode=interpreter
@@ -104,7 +102,6 @@ source/board/boot-mode/artifact binding through `boot.bin.manifest`.
 | REQ-010 | ST-011, ST-012 | BT-001 |
 | REQ-011 | ST-001..ST-019 | N/A |
 | REQ-012 | N/A | BT-001..BT-006 |
-| REQ-013 | ST-020 | Target-specific H2 after implementation |
 | NFR-001 | ST-005..ST-019 | BT-002, BT-004, BT-005 |
 | NFR-002 | ST-002, ST-003, ST-007, ST-012 | BT-001 |
 | NFR-003 | ST-010 | BT-001 |
@@ -117,7 +114,6 @@ source/board/boot-mode/artifact binding through `boot.bin.manifest`.
 | NFR-010 | This matrix, ST-018 after execution | BT-001..BT-006 |
 | NFR-011 | N/A | BT-003, BT-006 |
 | NFR-012 | ST-001..ST-019 | BT-001..BT-006 |
-| NFR-013 | ST-020 | Target-specific H2 after implementation |
 
 ## Current Evidence, 2026-07-27
 

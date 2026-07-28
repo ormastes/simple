@@ -20,7 +20,7 @@ use compiler.core.ast.{expr_get, expr_get_tag, expr_get_int, expr_get_str}
 use compiler.core.ast.{expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_stmts}
 use compiler.core.ast.{stmt_get_tag, stmt_get_expr}
 use compiler.core.ast.{decl_get, decl_get_tag, decl_get_name, decl_get_param_names, decl_get_param_types}
-use compiler.core.ast.{decl_get_ret_type, decl_get_body, decl_get_fields, decl_get_field_types}
+use compiler.core.ast.{decl_get_ret_type, decl_get_body, decl_get_fields, decl_get_field_types, decl_get_field_defaults}
 use compiler.core.ast.{decl_get_imports, decl_count, decl_get_is_async}
 use compiler.core.ast.{module_get_decls}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_IF, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK}
@@ -38,12 +38,14 @@ use compiler.core.types.{fn_sig_param_count, fn_sig_get_param_names, fn_sig_get_
 use compiler.core.types.{int_to_str}
 use compiler.core.compiler.cg_helpers.{cg_emit, cg_emit_line, cg_emit_blank, cg_indent_inc, cg_indent_dec}
 use compiler.core.compiler.cg_helpers.{cg_output_get, cg_reset}
+use compiler.core.compiler.cg_helpers.{et_reset, et_add}
 use compiler.core.compiler.cg_helpers.{vt_reset, vt_push_scope, vt_pop_scope, vt_add, vt_find}
 use compiler.core.compiler.cg_helpers.{st_reset, st_add, st_find}
 use compiler.core.compiler.cg_helpers.{sa_reset}
 use compiler.core.compiler.cg_helpers.{cg_infer_expr_type}
 use compiler.core.compiler.cg_expr.{cg_expr, cg_stmt}
 use compiler.core.compiler.cg_expr.{cg_emit_if_as_stmt, cg_emit_for_as_stmt, cg_emit_while_as_stmt}
+use compiler.core.enum_discriminant_eval.{eval_enum_discriminant_expr}
 
 # ===== Declaration Codegen =====
 
@@ -85,6 +87,9 @@ fn cg_register_pass():
                 val m_ptypes = decl_get_param_types(m_idx)
                 val m_ret = decl_get_ret_type(m_idx)
                 fn_sig_register(m_name, decl_get_param_names(m_idx), m_ptypes, m_ret, 0)
+
+        if tag == DECL_ENUM:
+            et_add(decl_get_name(decl_idx))
 
 fn cg_emit_preamble():
     val lb = "{"
@@ -258,15 +263,36 @@ fn cg_emit_enums():
         if tag == DECL_ENUM:
             val name = decl_get_name(decl_idx)
             val variants = decl_get_fields(decl_idx)
+            val discriminant_exprs = decl_get_field_defaults(decl_idx)
+            var resolved_discriminants: [i64] = []
+            var next_discriminant: i64 = 0
             cg_emit_line("/* enum " + name + " */")
             for j in range(0, variants.len()):
                 val v_name: text = variants[j]
+                var discriminant = next_discriminant
+                if j < discriminant_exprs.len() and discriminant_exprs[j] >= 0:
+                    val evaluated = eval_enum_discriminant_expr(
+                        discriminant_exprs[j], name, variants[0:j], resolved_discriminants
+                    )
+                    if not evaluated.valid:
+                        cg_emit_line("#error enum " + name + " variant " + v_name + ": " + evaluated.error)
+                        return
+                    discriminant = evaluated.value
+                if discriminant < 0 or discriminant > 2147483647:
+                    cg_emit_line("#error enum " + name + " variant " + v_name + " discriminant is outside 0..2147483647")
+                    return
+                for prior_discriminant in resolved_discriminants:
+                    if prior_discriminant == discriminant:
+                        cg_emit_line("#error enum " + name + " has a duplicate discriminant")
+                        return
                 var enum_line: text = "static const int64_t " + name + "_"
                 enum_line = enum_line + v_name
                 enum_line = enum_line + " = "
-                enum_line = enum_line + int_to_str(j)
+                enum_line = enum_line + int_to_str(discriminant)
                 enum_line = enum_line + ";"
                 cg_emit_line(enum_line)
+                resolved_discriminants.push(discriminant)
+                next_discriminant = discriminant + 1
             cg_emit_blank()
 
 fn cg_emit_forward_decls():
@@ -723,6 +749,7 @@ fn cg_emit_main():
 
 fn codegen_program() -> text:
     cg_reset()
+    et_reset()
     vt_reset()
     st_reset()
     sa_reset()

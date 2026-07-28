@@ -28,6 +28,12 @@ fn collect_cross_block_vregs(func: &MirFunction) -> HashSet<VReg> {
     cross_block
 }
 
+fn sorted_cross_block_vregs(func: &MirFunction) -> Vec<VReg> {
+    let mut vregs: Vec<_> = collect_cross_block_vregs(func).into_iter().collect();
+    vregs.sort_by_key(|v| v.0);
+    vregs
+}
+
 /// Derive the bit-width unit-type from (bits, signed). Used by `build_vreg_types`
 /// to map `UnitWiden` / `UnitNarrow` destination widths back onto the integer
 /// TypeId constants.
@@ -359,18 +365,16 @@ fn def_var_coerced_typed(
     builder.def_var(var, coerced);
 }
 
-/// Sync vreg_values → Variables: call def_var for all vregs that have values.
-/// VRegs are sorted to ensure deterministic Variable definition order.
+/// Sync cross-block vreg values to their predeclared Variables.
 fn sync_vregs_to_vars(
     builder: &mut FunctionBuilder,
     vreg_values: &HashMap<VReg, cranelift_codegen::ir::Value>,
     vreg_vars: &HashMap<VReg, Variable>,
     vreg_types: &HashMap<VReg, TypeId>,
+    sorted_cross_block_vregs: &[VReg],
 ) {
-    let mut sorted: Vec<_> = vreg_values.iter().collect();
-    sorted.sort_by_key(|(v, _)| v.0);
-    for (vreg, &val) in sorted {
-        if let Some(&var) = vreg_vars.get(vreg) {
+    for vreg in sorted_cross_block_vregs {
+        if let (Some(&val), Some(&var)) = (vreg_values.get(vreg), vreg_vars.get(vreg)) {
             def_var_coerced_typed(builder, var, val, vreg_types.get(vreg).copied());
         }
     }
@@ -455,17 +459,13 @@ pub fn compile_function_body<M: Module>(
     // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
     // VRegs are sorted to ensure deterministic Variable ID assignment.
+    let sorted_cross_block_vregs = sorted_cross_block_vregs(func);
     let mut vreg_vars: HashMap<VReg, Variable> = HashMap::new();
-    {
-        let all_vregs = collect_cross_block_vregs(func);
-        let mut sorted_vregs: Vec<_> = all_vregs.into_iter().collect();
-        sorted_vregs.sort_by_key(|v| v.0);
-        for vreg in &sorted_vregs {
-            let var = Variable::from_u32(var_idx);
-            builder.declare_var(var, types::I64); // default to i64; type is refined on def_var
-            vreg_vars.insert(*vreg, var);
-            var_idx += 1;
-        }
+    for vreg in &sorted_cross_block_vregs {
+        let var = Variable::from_u32(var_idx);
+        builder.declare_var(var, types::I64); // default to i64; type is refined on def_var
+        vreg_vars.insert(*vreg, var);
+        var_idx += 1;
     }
 
     // Base Cranelift Variable index for dynamically-created locals (temp locals
@@ -845,7 +845,13 @@ pub fn compile_function_body<M: Module>(
                 };
                 compile_yield(&mut instr_ctx, &mut builder, *value)?;
                 // Sync vreg_values → Variables after yield
-                sync_vregs_to_vars(&mut builder, &vreg_values, &vreg_vars, &vreg_types);
+                sync_vregs_to_vars(
+                    &mut builder,
+                    &vreg_values,
+                    &vreg_vars,
+                    &vreg_types,
+                    &sorted_cross_block_vregs,
+                );
                 returned_via_yield = true;
                 break;
             } else {
@@ -914,7 +920,13 @@ pub fn compile_function_body<M: Module>(
             continue;
         }
         // Sync all vreg_values to Variables before terminators (for cross-block SSA)
-        sync_vregs_to_vars(&mut builder, &vreg_values, &vreg_vars, &vreg_types);
+        sync_vregs_to_vars(
+            &mut builder,
+            &vreg_values,
+            &vreg_vars,
+            &vreg_types,
+            &sorted_cross_block_vregs,
+        );
         match &mir_block.terminator {
             Terminator::Return(val) => {
                 let mut mark_done = false;
@@ -1150,6 +1162,42 @@ mod tests {
     use crate::hir::{BinOp, TypeId};
     use crate::mir::{BlockId, MirFunction, MirInst, Terminator, VReg};
     use simple_parser::ast::Visibility;
+
+    #[test]
+    fn cross_block_sync_candidates_ignore_block_local_vregs() {
+        let mut func = MirFunction::new("wide_dispatch".to_string(), TypeId::I64, Visibility::Private);
+        let shared = func.new_vreg();
+        func.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: shared, value: 1 });
+
+        let blocks: Vec<_> = (0..128).map(|_| func.new_block()).collect();
+        func.block_mut(BlockId(0)).unwrap().terminator = Terminator::Jump(blocks[0]);
+
+        for (index, block_id) in blocks.iter().copied().enumerate() {
+            let copied = func.new_vreg();
+            let locals: Vec<_> = (0..64).map(|_| func.new_vreg()).collect();
+            let block = func.block_mut(block_id).unwrap();
+            block.instructions.push(MirInst::Copy {
+                dest: copied,
+                src: shared,
+            });
+            for local in locals {
+                block.instructions.push(MirInst::ConstInt {
+                    dest: local,
+                    value: index as i64,
+                });
+            }
+            block.terminator = if index + 1 < blocks.len() {
+                Terminator::Jump(blocks[index + 1])
+            } else {
+                Terminator::Return(Some(shared))
+            };
+        }
+
+        assert_eq!(sorted_cross_block_vregs(&func), vec![shared]);
+    }
 
     /// FR-DRIVER-0002a: verify `build_vreg_types` populates a TypeId for every
     /// dest VReg produced by the covered MIR op kinds. This is the acceptance

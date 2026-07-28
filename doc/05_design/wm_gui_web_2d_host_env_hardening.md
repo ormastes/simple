@@ -85,26 +85,13 @@ stride, blank output, checksum zero, and absent/invalid RenderDoc artifacts.
 Display/input admission also requires exact `pass` values for the retained
 focus, pointer, keyboard, move, maximize, and restore status rows. Missing,
 malformed, or non-pass values fail closed before framebuffer admission.
-It additionally requires exactly one positive value for each of the six
-screen-originated event counters: key down, key up, pointer move, pointer button
-down, pointer button up, and text commit. A missing, zero, malformed, or
-duplicate counter rejects the row even when all summary statuses say `pass`.
 The live wrapper resolves the input receipt's WM target against the same
 snapshot's compositor window list, requires exactly one match, and retains the
 matched ID separately. The pure aggregate requires both retained IDs to be
 positive and equal.
-The host aggregate also re-hashes the retained RenderDoc capture, capture-log,
-and replay XML paths, failing when any current artifact no longer matches its
-exact-one gate binding or is a symlink/non-regular path. The Simple producer
-records `rdoc_log` plus its lowercase SHA-256 after capture; the gate recomputes
-that digest before replay and again before publishing its duplicate-safe log
-binding.
-The shared Simple capture command and replay inspector both have positive,
-portable timeout bounds. A timeout or other nonzero capture-command exit emits
-typed fail evidence, deletes partial `.rdc` bytes, and cannot pass the gate.
-The gate and host classifier require one decimal capture-command exit equal to
-zero. The `timeout` path is fixture-tested; `gtimeout` resolution remains a
-structurally reviewed portability branch rather than a live-host claim.
+The host aggregate also re-hashes the retained RenderDoc capture path and
+replay XML path, failing when either current artifact no longer matches its
+exact-one gate binding or is a symlink/non-regular path.
 Framebuffer admission requires both correlated backend values to be `vulkan`;
 matching CPU fallback values in retained evidence fail validation.
 The input frame must also retain `composition_id=wm-composite` and a positive
@@ -128,17 +115,6 @@ browser-backing env files all exist. RenderDoc, SIMD, and framebuffer artifacts
 referenced by an existing env file are validation inputs, so missing, changed,
 or substituted referenced artifacts make that retained row `fail`, not
 `blocked`.
-
-SIMD admission recomputes the retained frame receipt from architecture,
-executed feature, native execution environment, executed/bit-exact flags,
-positive native-hit count, every fill/copy/alpha/alpha-edge/scroll/diagram
-expected checksum, actual checksum, and mismatch count, plus canonical-source
-and compiler hashes. The architecture matrix then independently rechecks the
-requested architecture and exact compiler path, current regular non-symlink
-source/compiler bytes, architecture-specific feature, scalar-oracle equality,
-zero mismatches, positive hits/checksum, and receipt hash. Its bounded
-`--self-test` uses temporary artifacts and this same production validator; it
-proves fail-closed admission behavior but never counts as native SIMD evidence.
 
 For the SimpleOS remote-client row, validation also rejects owner port `0`,
 resident placeholder apps, missing focus/input IPC sends, missing
@@ -168,31 +144,13 @@ it is not WM damage, dirty-region redraw, or full-frame repaint throughput.
 The content revision binds this measurement to the direct Engine2D owners
 `engine.spl` and `backend_software.spl` as well as the probe sources, so changes
 to the measured present path invalidate retained rows before aggregation.
-Every real 4K/8K run also consumes an explicit immutable baseline env plus its
-expected SHA-256 and producer-owned OS, architecture, CPU, GPU, driver,
-compiler, runtime, executable-SHA, warmup, sample-count, and timing-scope
-fields. The canonical bucket is derived from those exact values. The v2
-baseline records them plus resolution, source revision, capture timestamp,
-artifact path/content SHA, p50/p95, FPS, and max RSS. The
-producer fails before launch for missing, linked, malformed, hash-stale, or
-bucket-mismatched input and never writes or refreshes that file. NFR-006 keeps
-the absolute gates and additionally caps both median and p95 at 110% of the
-baseline and max RSS at 105%. The producer re-stats and rehashes the baseline
-and artifact immediately before PASS. The aggregate independently repeats
-artifact freshness, bucket derivation, and limit calculation.
 
 ## Coverage Collection
 
-The MIR lowerer inventories user-authored `if`, `while`, `for`, short-circuit,
-and match-arm decision/condition sites with deterministic path/span IDs.
-Generated match mechanics and coverage-wrapper control flow are excluded;
-the selected authored match body emits one true and N-1 false arm outcomes
-without re-evaluating patterns or changing dispatch control flow. Wrapper
-preprocessing preserves the authored path. The compiler emits one strict zero-count SDN
-manifest, including a header-only form for branchless sources. Stage4 text LLVM
-lowers reserved probes to the core-C coverage owner, whose deterministic dump
-is merged by the test runner before it applies the 98/100% thresholds. Coverage
-requests fail closed for unsupported/automatic backend selection.
+The evaluator uses each AST expression ID as the stable decision ID. Existing
+interpreter externs forward decision/condition probes to the runtime collector,
+and the existing coverage dump appends that decision SDN to line/function SDN.
+The test runner remains the sole merger, reporter, and threshold owner.
 
 ## Browser Vulkan And Pixel-Parity Admission
 
@@ -213,8 +171,7 @@ three pairwise statuses must be `pass`, all mismatch counts must be `0`, and the
 aggregate must be `pass` in `pairwise-argb-diff` mode. The existing row passes
 only when this classifier and `host_vulkan_evidence_passes` both pass.
 
-The setup producer binds all three ARGB JSON files and all three pairwise PPM
-diffs to lowercase SHA-256 values. The pure classifier requires unique valid
-hash fields, and the app boundary re-hashes each current regular/no-follow path
-before admitting the Vulkan row. Atomic open-and-hash remains the separately
-documented local-artifact TOCTOU ceiling.
+Current-file hash revalidation is outside this bounded classifier because the
+setup producer does not emit ARGB/diff SHA-256 bindings. That provenance
+follow-up remains explicit in the external-host TODO; nonempty artifact paths
+alone must not be described as cryptographic freshness proof.

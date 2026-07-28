@@ -78,11 +78,26 @@ lines) and `build/idxfix2/nilcmp.txt` (producer → `== nil` / `!= nil` / `??` /
 | 23 | src/os/services/launcher/launcher_registry.spl:351,364 | `last_index_of` + `case Some(idx)` | whole path as basename |
 | 24 | src/os/apps/shell/_ShellTools/text_tools.spl:141 | `== nil` + `.unwrap()` | whole trimmed content |
 
+### Also repaired — `.?`-truthiness residue left by lane NILQ
+
+`.?` on an `i64` is plain truthiness, so it is wrong at **both** ends: false at
+index `0`, true at `-1`. Sites half-repaired as `if x.? and x >= 0:` still drop
+a genuine match at index 0.
+
+| # | file:line | shape |
+|---|---|---|
+| 25 | src/lib/nogc_async_mut/http_server/parser.spl:94,106,128,223,235 | `.? and …` — `line_end == 0` (end-of-headers) was unreachable |
+| 26 | src/lib/nogc_sync_mut/http/accept_encoding.spl:34,110,125 | `.? and …` |
+| 27 | src/lib/gc_async_mut/http/accept_encoding.spl:34,110,125 | same |
+| 28 | src/lib/nogc_async_mut/http/accept_encoding.spl:34,110,125 | same |
+
 ### Deferred — outside this lane's owned paths
 
 | file:line | owner |
 |---|---|
 | src/os/tools/net/wget_tool.spl:31,41,54,68 (4× `if val Some(i) = …`) | URL-parsing exclusion |
+| src/lib/{nogc_sync_mut,nogc_async_mut}/ftp_utils.spl:501,508 (`at_idx.?` with **no** `>= 0`) | URL-parsing exclusion |
+| src/lib/nogc_async_mut/http_server/proxy.spl:310 (`qmark.? and qmark >= 0`) | URL-parsing exclusion |
 | src/os/services/llm/_McpOsServer/helpers.spl:56,63,72,80,83 | lane UIQUERY (still shows `== nil` / `!= nil` guards) |
 | src/lib/common/ui/parse/sdn.spl:38, sdn_tree.spl:43 (`index_of(n) ?? -1`) | lane UIQUERY (benign — `?? -1` is a no-op that yields the right value) |
 
@@ -102,3 +117,40 @@ branch verbatim; only the test changes.
   defect, not fixed here.
 - `Dict.get(k) ?? default` — different family (native `Dict.get` corruption,
   `.claude/rules/code-style.md`); untouched.
+
+## Verification
+
+A/B harnesses (`build/idxfix2/verify2.spl`, `verify3.spl`, `verify4.spl`) run the
+repaired logic next to the verbatim pre-fix logic from `git show HEAD:<file>`:
+
+| function | before | after |
+|---|---|---|
+| `api_tools.extract_nested_string` on valid JSON | `""` — never extracted anything | `v1` |
+| `http_server/parser` blank line = end of headers | `need-more` — terminator unreachable | `END-OF-HEADERS` |
+| `ui_test/client` contains-assertion on a miss | `true` — could never fail | `false` |
+| `ui_test/http.extract_body`, no `\r\n\r\n` | `"defgh"` — sliced from offset 3 | `""` |
+| `mime_from_path("noext")` | whole path used as the extension | `application/octet-stream` |
+| `accept_encoding` q-value `".5"` | `nodot` → q parsed as 0 | `int=[] frac=[5]` |
+| `parent_dirname("/b")` | `""` | `"/"` |
+| `resource_tracker.extract_quoted_value` | unchanged (accidentally equivalent) | unchanged |
+| `trace32` address-prefix strip | unchanged (accidentally equivalent) | unchanged |
+
+Spec runs (per file, `Results:` line is authoritative):
+
+| spec | verdict |
+|---|---|
+| test/01_unit/app/lsp_handlers_spec.spl | 8 total, 8 passed, 0 failed |
+| test/unit/lib/nogc_async_mut/ui_test/ui_test_facade_spec.spl | 1 total, 1 passed, 0 failed |
+| test/unit/app/debug/remote/trace32_client_spec.spl | 30 total, 30 passed, 0 failed |
+| test/01_unit/app/mcp_unit/provider_mime_spec.spl | 26 total, 26 passed, 0 failed |
+| test/01_unit/compiler_core/interpreter/interp_resource_tracker_spec.spl | 18 total, 18 passed, 0 failed |
+
+**No covering spec exists** for: `http/accept_encoding.spl`,
+`http_server/parser.spl`, `http_server/mime.spl`, `process_monitor.spl`,
+`dependency_tracker/graph.spl`, `path_resolution.spl`, `launcher_registry.spl`,
+`mcp/api_tools.spl`, `_ShellTools/text_tools.spl`,
+`llm_caret/.../constants/files.spl`. Those rest on the A/B harness only.
+
+Engines: every probe was run under both `bin/simple run` and
+`SIMPLE_NO_JIT=1 bin/simple run` and produced identical output, so neither
+engine disagrees on the repaired code.

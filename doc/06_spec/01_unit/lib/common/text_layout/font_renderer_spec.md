@@ -3,7 +3,7 @@
 **Status:** manually synchronized; executable docgen refresh pending
 **Executable:** `test/01_unit/lib/common/text_layout/font_renderer_spec.spl`
 
-Forty unit scenarios cover the canonical transient `FontRenderer` material.
+Forty-two unit scenarios cover the canonical transient `FontRenderer` material.
 Architecture excludes producer-owned GUI/Web/WM/Draw IR/Engine2D/Engine3D
 atlas caches; this unit manual covers the renderer contract itself.
 
@@ -19,6 +19,9 @@ atlas caches; this unit manual covers the renderer contract itself.
 5. Prove face generation, configuration identity, glyph cache hits/misses,
    dirty rectangles, fallback, shaping, and browser-facing material remain
    coherent.
+6. After resetting process-global test state, register only Arabic and
+   Devanagari bytes; resolve configured Arabic and reject a valid but
+   unregistered Chinese face without touching host files.
 
 The executable assertions are authoritative. The vector and bitmap regressions
 compare clean and forged-environment `FontRenderBatch` material from fresh

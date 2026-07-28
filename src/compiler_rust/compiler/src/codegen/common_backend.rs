@@ -1594,15 +1594,18 @@ impl<M: Module> CodegenBackend<M> {
                 // to prevent buffer overflows when GlobalStore writes a full i64.
                 let size = std::cmp::max(super::types_util::type_id_size(*ty) as usize, 8);
                 if let Some(&raw_init) = global_init_values.get(name) {
-                    // A typed BOOL global is loaded as a raw i8 (see GlobalLoad in
-                    // codegen/instr/mod.rs + types_util::type_id_to_cranelift), but the
-                    // module_pass capture stores a *tag-boxed* bool constant
-                    // (TAG_SPECIAL 0b011 | payload<<3): false=0b10011=19, true=0b1011=11.
-                    // Writing that tagged byte into .data makes `false` read back as 19
-                    // (nonzero => truthy). Untag typed bools to raw 0/1 here so the i8
-                    // load matches native GlobalStore semantics (icmp results are 0/1).
-                    // ANY-typed bool globals keep the tagged encoding (loaded as i64
-                    // boxed values), so only untag when the declared type is BOOL.
+                    // Module-global slots hold *raw* values, not tag-boxed RuntimeValues:
+                    // a typed BOOL is loaded as a raw i8 (see GlobalLoad in
+                    // codegen/instr/mod.rs + types_util::type_id_to_cranelift), and an
+                    // ANY-typed slot is loaded as a plain i64 and branched on directly.
+                    // `module_pass::bool_global_init` therefore now captures bool literals
+                    // as raw 0/1 for every declared type, so this untag is a no-op
+                    // backstop for any other producer that still hands us a tag-boxed
+                    // (TAG_SPECIAL 0b011 | payload<<3) bool. It stays gated on
+                    // TypeId::BOOL on purpose: for an untyped slot a tagged `true` (11)
+                    // is indistinguishable from the integer initializer `11`, so
+                    // value-sniffing here would corrupt integer globals.
+                    // See doc/08_tracking/bug/cranelift_unannotated_module_bool_global_tagbox_truthy_2026-07-27.md
                     let init_val = if *ty == TypeId::BOOL && (raw_init & 0b111) == 0b011 {
                         (raw_init >> 3) & 1
                     } else {

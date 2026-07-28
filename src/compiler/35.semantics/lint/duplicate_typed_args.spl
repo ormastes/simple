@@ -13,7 +13,7 @@
 # 3. Emit warning with suggestion to use named args
 
 use compiler.core.ast_expr.{
-    EXPR_CALL, EXPR_METHOD_CALL, EXPR_IDENT, EXPR_FIELD_ACCESS,
+    EXPR_CALL, EXPR_METHOD_CALL, EXPR_IDENT,
     EXPR_BINARY, EXPR_UNARY, EXPR_LAMBDA, EXPR_ARRAY_LIT, EXPR_INDEX,
     expr_tag, expr_s_val, expr_left, expr_right, expr_args, expr_owner_arg_names, expr_stmts
 }
@@ -24,7 +24,8 @@ use compiler.frontend.core.ast_stmt.{
 }
 use compiler.core.ast.{
     DECL_FN, DECL_CLASS, DECL_STRUCT, DECL_IMPL,
-    decl_tag, decl_name, decl_body_stmts, decl_params, decl_param_types
+    decl_tag, decl_name, decl_body_stmts, decl_params, decl_param_types,
+    expr_get_span, span_is_valid, span_line
 }
 
 # ============================================================================
@@ -37,6 +38,7 @@ struct DuplicateTypedArgWarning:
     message: text
     hint: text
     fn_name: text
+    line: i64 = 0
 
     fn fmt() -> text:
         "[{self.code}] {self.severity}: {self.message} in '{self.fn_name}' — {self.hint}"
@@ -97,7 +99,7 @@ fn find_duplicate_typed_indices(param_types: [text]) -> {i64: bool}:
 # Call Site Checking
 # ============================================================================
 
-fn check_call_site(callee_name: text, arg_count: i64, named_arg_indices: {i64: bool}) -> [DuplicateTypedArgWarning]:
+fn check_call_site(callee_name: text, arg_count: i64, arg_names: [text], line: i64 = 0) -> [DuplicateTypedArgWarning]:
     """Check a call site for positional args to duplicate-typed params."""
     var warnings: [DuplicateTypedArgWarning] = []
 
@@ -134,22 +136,56 @@ fn check_call_site(callee_name: text, arg_count: i64, named_arg_indices: {i64: b
                         peers.push(param_names[other_idx])
             peer_map[idx] = peers.join("`, `")
 
-    # Check each positional argument
+    # Bind source arguments exactly as the interpreter does: a named argument
+    # reserves its declared parameter, while a positional argument takes the
+    # next unbound parameter.  Indexing source arguments directly is wrong for
+    # mixed calls such as `pair(right: 2, 1)`.
+    var bound: {i64: bool} = {}
+    var positional_params: {i64: i64} = {}
+    var next_pos: i64 = 0
     var arg_idx = 0
     while arg_idx < arg_count:
-        if not named_arg_indices.has(arg_idx):
-            # Positional argument
-            if dup_indices.has(arg_idx):
-                if arg_idx < param_names.len() and arg_idx < param_types.len():
-                    val param_name = param_names[arg_idx]
-                    val param_type = param_types[arg_idx]
-                    val peers = peer_map[arg_idx] ?? ""
+        val arg_name = if arg_idx < arg_names.len(): arg_names[arg_idx] else: ""
+        var target: i64 = -1
+        if arg_name != "":
+            var param_idx = 0
+            while param_idx < param_names.len():
+                if param_names[param_idx] == arg_name:
+                    target = param_idx
+                    break
+                param_idx = param_idx + 1
+            # The runtime rejects unknown or duplicate named arguments; do not
+            # report a positional-style warning for an invalid call.
+            if target < 0 or bound.has(target):
+                return []
+        else:
+            while next_pos < param_names.len() and bound.has(next_pos):
+                next_pos = next_pos + 1
+            if next_pos >= param_names.len():
+                return []
+            target = next_pos
+            next_pos = next_pos + 1
+            positional_params[arg_idx] = target
+        bound[target] = true
+        arg_idx = arg_idx + 1
+
+    # Check each positional argument against the parameter it actually binds.
+    arg_idx = 0
+    while arg_idx < arg_count:
+        if positional_params.has(arg_idx):
+            val param_idx = positional_params[arg_idx]
+            if dup_indices.has(param_idx):
+                if param_idx < param_names.len() and param_idx < param_types.len():
+                    val param_name = param_names[param_idx]
+                    val param_type = param_types[param_idx]
+                    val peers = peer_map[param_idx] ?? ""
                     warnings.push(DuplicateTypedArgWarning(
                         code: "DTYP001",
                         severity: "WARNING",
                         message: "positional arg for `{param_name}` shares type `{param_type}` with `{peers}`",
                         hint: "use named argument: `{param_name}: <value>`",
-                        fn_name: callee_name
+                        fn_name: callee_name,
+                        line: line
                     ))
         arg_idx = arg_idx + 1
     warnings
@@ -172,9 +208,6 @@ fn check_expr_calls(e: i64) -> [DuplicateTypedArgWarning]:
         if callee >= 0:
             if expr_tag[callee] == EXPR_IDENT:
                 callee_name = expr_s_val[callee]
-            elif expr_tag[callee] == EXPR_FIELD_ACCESS:
-                callee_name = expr_s_val[callee]
-
         if callee_name != "":
             val call_args = expr_args[e]
             var named: {i64: bool} = {}

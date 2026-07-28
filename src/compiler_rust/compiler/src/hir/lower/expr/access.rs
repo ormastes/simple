@@ -853,6 +853,36 @@ impl Lowerer {
         index: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        // ROOT FIX (slice_dotdot_index_returns_nil_2026-07-28): `s[a..b]` parses
+        // as Index{ index: Expr::Range }, NOT as Expr::Slice. Falling through to
+        // the generic index path lowered the range via `rt_range`, which
+        // *materializes an integer array* — so `s[a..b]` became
+        // `rt_index_get(text, [a, a+1, ...])`, an unhandled receiver/index pair
+        // that silently returned nil (`.len()` == -1, and interpolating it
+        // swallowed the whole print line). Worse, open-ended `s[a..]` lowered
+        // `end` to i64::MAX and tried to allocate a 9-quintillion-element array,
+        // aborting the process (SIGABRT). The interpreter always handled this
+        // correctly, so the bug was JIT/codegen-only and silently divergent.
+        // A range in index position IS slicing (`[a:b]` is the same operation),
+        // so delegate to the existing slice lowering.
+        if let Expr::Range { start, end, bound } = index {
+            let inclusive_end;
+            let end_ref: Option<&Expr> = match end {
+                Some(e) if matches!(bound, simple_parser::ast::RangeBound::Inclusive) => {
+                    // `a..=b` slices through b, i.e. exclusive end is b + 1.
+                    inclusive_end = Expr::Binary {
+                        op: simple_parser::ast::BinOp::Add,
+                        left: e.clone(),
+                        right: Box::new(Expr::Integer(1)),
+                    };
+                    Some(&inclusive_end)
+                }
+                Some(e) => Some(e.as_ref()),
+                None => None,
+            };
+            return self.lower_slice(receiver, start.as_deref(), end_ref, None, ctx);
+        }
+
         let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
         let idx_hir = Box::new(self.lower_expr(index, ctx)?);
         self.require_integer_index_operand(recv_hir.ty, idx_hir.ty)?;

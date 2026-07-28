@@ -6,32 +6,6 @@
 - **Found by:** lane PMS (interpreter place-model work), independently reproduced and
   characterized by the coordinator
 
-> **CORRECTED 2026-07-27 (lane CAUDIT + lane JITCA).** Three claims in the
-> original write-up below were wrong. (1) The result is `target = rhs` — the
-> **operator is dropped too**, not just the load: `var y=100; y -= 7` gives `7`,
-> not `-7` or `93`; `s.n *= 3` with `n=10` gives `3`. `+=` cannot distinguish
-> `0+rhs` from `=rhs`, which is why the first characterization stuck.
-> (2) **Plain local variables are equally affected** — `var x=100; x += 7` → `7`;
-> a `for` loop accumulator `sum += k` → the last `k`. So "convert the call sites"
-> is NOT a containment strategy; the fix must be in the compiler.
-> (3) `parser_extensions.spl:224` is **inside a `"""` docstring**, not live code —
-> the "compiler's own parser miscounts" claim was false. Of 741 hits in owned
-> `src/**`, 367 were in scope, 24 field/index-shaped, **20 of those false
-> positives** (code generators emitting Rust/C/PTX, comments) and the 4 real ones
-> all in removed/dead `src/app/interpreter/`. **Live exposure found: zero.**
->
-> **Root cause (JITCA), exact:** `src/compiler/50.mir/mir_lowering_stmts.spl`,
-> `MirLowering.lower_assign` — the `case Field` and `case Index` arms accept
-> `op: HirAssignOp?` and **never read it**, emitting the same MIR as a plain `=`.
-> There is no load in the MIR at all. The sibling `lower_assign_var` handles `op`
-> correctly, which is why locals looked different at first. Fix written, blocked
-> on redeploy.
->
-> **Severity caveat:** every measurement here was taken on Rust bootstrap **seed**
-> binaries (`bin/simple` is seed-clobbered; no self-hosted binary currently
-> exists). Re-run `build/caudit_probe/probe3.spl` on a real self-hosted binary
-> before acting on the CRITICAL rating.
-
 ## Symptom
 
 On the JIT/native path — the **default** engine — a compound assignment to a struct

@@ -1,8 +1,7 @@
 # Bug: local variable named `kernel` shadowed by module name — HIR lowering + interp hard-fail
 
 - **Date:** 2026-07-06
-- **Status:** fixed
-- **Verified fixed (2026-07-28):** commit `116187d85d5` ("fix(seed): keyword-as-identifier patterns bind lowercase") landed the fix; `src/compiler_rust/parser/src/parser_patterns.rs` plain-identifier fallback now reads `Ok(Pattern::Identifier(name.to_lowercase()))`, matching the doc's proposed one-line fix.
+- **Status:** open (workaround applied at call sites)
 - **Area:** compiler name resolution (HIR lowering + interpreter semantic pass)
 
 ## Symptom

@@ -4,63 +4,6 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 QEMU_BIN="${QEMU_SYSTEM_AARCH64:-qemu-system-aarch64}"
 QEMU_TIMEOUT="${ARM64_WM_QEMU_READINESS_TIMEOUT:-3}"
-TIMEOUT_BACKEND="${ARM64_WM_QEMU_TIMEOUT_BACKEND:-auto}"
-
-run_bounded_posix() {
-    seconds="$1"
-    shift
-    "$@" &
-    command_pid=$!
-    timeout_marker="${TMPDIR:-/tmp}/simple-arm64-wm-timeout.$$.${command_pid}"
-    rm -f "$timeout_marker"
-    (
-        sleep "$seconds"
-        if kill -0 "$command_pid" 2>/dev/null; then
-            : >"$timeout_marker"
-            kill "$command_pid" 2>/dev/null || true
-            sleep 1
-            kill -0 "$command_pid" 2>/dev/null && kill -9 "$command_pid" 2>/dev/null || true
-        fi
-    ) &
-    watchdog_pid=$!
-    wait "$command_pid"
-    command_status=$?
-    kill "$watchdog_pid" 2>/dev/null || true
-    wait "$watchdog_pid" 2>/dev/null || true
-    if [ -f "$timeout_marker" ]; then
-        rm -f "$timeout_marker"
-        return 124
-    fi
-    rm -f "$timeout_marker"
-    return "$command_status"
-}
-
-run_bounded() {
-    seconds="$1"
-    shift
-    if [ "$TIMEOUT_BACKEND" = auto ] && command -v timeout >/dev/null 2>&1; then
-        timeout "${seconds}s" "$@"
-    elif [ "$TIMEOUT_BACKEND" = auto ] && command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "${seconds}s" "$@"
-    else
-        run_bounded_posix "$seconds" "$@"
-    fi
-}
-
-if [ "${1:-}" = "--self-test-timeout" ]; then
-    TIMEOUT_BACKEND=posix
-    set +e
-    run_bounded 2 sh -c 'exit 7'
-    quick_status=$?
-    run_bounded 1 sh -c 'sleep 5' >/dev/null 2>&1
-    timeout_status=$?
-    set -e
-    [ "$quick_status" -eq 7 ] || exit 1
-    [ "$timeout_status" -eq 124 ] || exit 1
-    echo "arm64_wm_qemu_timeout_self_test=pass"
-    echo "arm64_wm_qemu_timeout_backend=posix"
-    exit 0
-fi
 
 ENTRY="${ROOT_DIR}/examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
 RAMFB="${ROOT_DIR}/src/os/kernel/arch/arm64/ramfb.spl"
@@ -77,7 +20,7 @@ host_os="$(uname -s 2>/dev/null || echo unknown)"
 host_machine="$(uname -m 2>/dev/null || echo unknown)"
 accelerator="tcg"
 cpu="cortex-a57"
-if [ "$host_os" = "Darwin" ] && [ "$host_machine" = "arm64" ]; then
+if [ "$host_os" = "Darwin" ]; then
     accelerator="hvf"
     cpu="host"
 elif [ "$host_os" = "Linux" ] && [ "$host_machine" = "aarch64" ] && [ -e /dev/kvm ]; then
@@ -115,7 +58,7 @@ else
         reason="qemu-system-aarch64 does not list ramfb device"
     else
         set +e
-        dry_out="$(run_bounded "$QEMU_TIMEOUT" "$QEMU_BIN" \
+        dry_out="$(timeout "${QEMU_TIMEOUT}s" "$QEMU_BIN" \
             -machine virt -cpu "$cpu" -accel "$accelerator" -m 384M \
             -display none -serial none -monitor none \
             -device ramfb -S 2>&1)"

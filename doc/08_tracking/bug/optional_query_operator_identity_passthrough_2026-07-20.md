@@ -4,7 +4,6 @@
 **Severity:** high (silently wrong boolean result; `.?` is the prescribed
 idiom per `.claude/rules/language.md`: "Use `.?` over `is_*` predicates")
 **Status:** open
-**Verification needed:** Run the doc's `.?` repro against a rebuilt interpreter/self-hosted binary and grep for a `DotQuestion` token consumer to confirm the operator is still an unwired pass-through (vs. already fixed).
 **Found by:** whole-suite triage campaign, `test/feature/plugin/` cluster
 (`plugin_startup_block_spec.spl` / `runtime_api_plugin_spec.spl` /
 `sugar_plugin_spec.spl`)

@@ -315,12 +315,122 @@ Whichever is chosen, also remove the two silent-drop guards in §Mechanism item 
 (`function_exec.rs:118`, `block_execution.rs:325`): a write to a global missing
 from the owner map should create the entry or raise, never be discarded.
 
-## Regression spec (to add with the fix)
+## Fix applied (lane GFIX, 2026-07-28)
 
-Port `build/global_repro/gtf.spl` + `gtf_spec.spl` (rows 1-5) into
-`test/01_unit/compiler/module_global_write_visibility_spec.spl`. It must run on
-the **interpreter** to be meaningful — the spec runner already does, but assert
-it rather than assume. A JIT-only run is a false green: every row passes there.
+**Option (b'), publish-on-write-at-call-entry.** Single file:
+`src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs`.
+
+- New `publish_live_owned_globals(env: &Env)`: publishes the *currently
+  executing* frame's global writes (its `Env` **overlay** entries that are
+  present in `MODULE_GLOBALS_BY_OWNER[CURRENT_EXEC_MODULE]` and are not
+  frame-locals) into the owner map, and mirrors them into the flat
+  `MODULE_GLOBALS` fallback — exactly what `sync_owned_captured_globals` does on
+  return.
+- Called at the five `exec_function_*` entry points on `outer_env`, immediately
+  before `captured_env_with_live_globals` builds the callee env, so the callee's
+  `base.extend(owner_globals)` copies the *fresh* value instead of the committed
+  snapshot.
+
+Why not the other two options:
+
+- **(a)** lifting the BDD `Node::Assignment` seed/sync into `exec_block_fn` is
+  partial by construction — `resolve_module_global_target` only handles
+  `Expr::Identifier`, so rows 3 (indexed) and 4 (push loop) stay broken.
+- **(c)** shared `Rc<RefCell<Value>>` global slots is the correct end state but
+  rewrites the env/value model and every read path. Still the right follow-up.
+- **(b')** publishes the *env overlay*, not a parsed assignment target, so it is
+  target-form agnostic and fixes every write form at once. Publishing at call
+  entry rather than per statement is the minimum correct number of publish
+  points (a write is only observable to another frame across a call) and costs
+  one overlay scan per call — the same order as the existing per-return sync.
+
+**Why this is low risk.** The publish predicate is *identical* to the existing
+return-path predicate (params are marked local by `execute_function_body`, so
+that path's extra `func.params` filter is subsumed by `is_local`). The set of
+names published is unchanged; only the timing moves earlier — the fix cannot
+publish a name the return path would not already have published. Only overlay
+entries are published, never base entries, so a frame holding a stale inherited
+snapshot can never write it back over a newer committed value. The
+write-back-on-return path is untouched.
+
+The two silent-drop guards in §Mechanism item 4 were **kept**. They do not mask
+this fix (all repro globals are declared and present in the owner map), and
+removing them would promote every unmarked frame temporary to a module global —
+a larger semantic change than this correctness fix requires. Still open as a
+follow-up: a write to a global missing from the owner map should create or
+raise, never be discarded.
+
+### Truth table after the fix
+
+Binary: `build/gfix_out/simple` (fix). Baseline column re-measured with
+`build/gfix_out/simple_base` — the identical tree with only this file reverted,
+since HEAD is not a valid baseline while other lanes hold uncommitted edits.
+
+| # | Engine | callee sees (baseline) | callee sees (fix) | Verdict |
+|---|--------|------------------------|-------------------|---------|
+| A/B/G/H | JIT | correct | correct | PASS → PASS |
+| G' | interp | len 0, n 0 | **len 4, n 4** | FAIL → **PASS** |
+| H' | interp | len 0, n 0 | **len 4, n 99** | FAIL → **PASS** |
+| E | interp | len 0, n 0 | **len 4, n 4** | FAIL → **PASS** |
+| F | interp | len 0, n 0 | **len 4, n 99** | FAIL → **PASS** |
+| 1 | interp | 0 | **42** | FAIL → **PASS** |
+| 2 | interp | 0 | **7** | FAIL → **PASS** |
+| 3 | interp | 0 | **55** | FAIL → **PASS** |
+| 4 | interp | len 4 | **len 7** | FAIL → **PASS** |
+| 5 | interp | 0 | **777** | FAIL → **PASS** |
+
+Every JIT row stayed PASS; every interpreter row flipped to PASS.
+
+### Verification
+
+- `cargo test --release -p simple-compiler`: baseline 3369 passed / 113 failed;
+  with fix 3370 passed / 112 failed. **New-only failures: none.** The single
+  delta is `pipeline::native_project::tests::test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source`,
+  which fails on the baseline and passes with the fix (another lane edited
+  `pipeline/native_project/mod.rs` between the two runs; unrelated to this
+  change). The other 112 failure names are identical in both sets.
+- All 63 specs in `test/01_unit/compiler/` run on both binaries: **identical
+  results except the new regression spec** (2/13 baseline → 13/13 fixed).
+- `test/01_unit/os/kernel/smp/smp_spec.spl` 14/14 both — SMPFIX's build-local /
+  publish-once workaround stays correct.
+- `test/01_unit/os/posix/fd_table_spec.spl` 14/20 both — GLOBALSWEEP's source
+  repairs stay correct; the residual 6 are the DEPTH / two-hop place-model
+  defect, untouched by this fix as predicted.
+- `duplicate_owner_spec` 7/7, `ecs_spec` 16/16, `ds_service_spec` 19/19,
+  `container_escape_suite_spec` 32/32,
+  `two_hop_field_method_mutation_spec` 5/5,
+  `closure_capture_statements_spec` 30/30 — identical baseline and fixed.
+
+### Still open after this fix
+
+1. **Option (c)** — real shared global storage — remains the correct end state.
+2. The silent-drop guards should create-or-raise rather than discard.
+3. Separate pre-existing defect (already noted above): a module-level `var` in
+   the **entry** file (a spec file, or the module holding `fn main()`) is
+   rejected under the interpreter with `cannot reassign to immutable variable`
+   (`build/global_repro/main_ctl.spl`, `g_spec.spl`). Needs its own bug.
+4. Arg-evaluation ordering hole: a global written *during* evaluation of a
+   callee's arguments is still not seen by that callee, because
+   `captured_env_with_live_globals` runs before `bind_args`. Not in the truth
+   table; not addressed here.
+
+## Regression spec (added with the fix)
+
+`test/01_unit/compiler/global_write_visible_to_callee_spec.spl` (13 examples),
+with fixtures `test/fixtures/global_write_visibility/gwv_owner.spl` and
+`gwv_reader.spl`.
+
+Covers scalar, whole-array, indexed, push-loop and nested-`if`/`while` writes,
+each asserted from a same-module callee **and** from a callee in another module,
+plus a mid-write ordering case (the callee must see the write before it and not
+the one after it) and two write-back-on-return controls. Each fixture writer
+returns what its callee observed, so every expectation is an assertion about the
+callee's mid-write view rather than about a printed transcript.
+
+It runs on the **interpreter** (the spec runner's engine), which is the engine
+that was broken; a JIT-only run would be a false green. Guard value: **2/13 on
+the baseline binary, 13/13 with the fix** — the 2 baseline passes are the
+write-back-on-return controls, which must stay green and do.
 
 ## Artifacts
 

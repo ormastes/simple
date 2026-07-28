@@ -153,6 +153,11 @@ impl Lowerer {
                 return Ok(result);
             }
 
+            // Handle the abort builtin
+            if let Some(result) = self.lower_abort_builtin(name, args, ctx)? {
+                return Ok(result);
+            }
+
             // Check for spawn
             if name == BUILTIN_SPAWN && args.len() == 1 {
                 let body_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
@@ -383,6 +388,50 @@ impl Lowerer {
             Ok(Some(self.lower_builtin_call(name, args, TypeId::NIL, ctx)?))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Handle the `panic(msg)` abort builtin.
+    ///
+    /// `panic` is a registered runtime builtin everywhere else in the compiler —
+    /// the interpreter extern table (`insert_simple!("panic", ...)`), the native
+    /// binary stub list, and the C runtime (`void panic(int64_t msg)`) — but HIR
+    /// lowering never knew it. That made `panic(...)` lower as a plain
+    /// identifier, fail with `UnknownVariable: panic`, and (because a HIR
+    /// lowering error discards the WHOLE module) drop every module that
+    /// transitively uses it back to the interpreter. `FailSafeResult.unwrap` is
+    /// the load-bearing case: it is on the web render path.
+    ///
+    /// Type is ANY, not NIL: `panic` diverges, so it must unify with whatever
+    /// the surrounding expression needs (e.g. the `case Err(e): panic(...)` arm
+    /// of a `-> T` match). Stamping NIL would inject a bogus concrete type.
+    /// Returns Some(HirExpr) if the name matches, None otherwise.
+    fn lower_abort_builtin(
+        &mut self,
+        name: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        if name != "panic" {
+            return Ok(None);
+        }
+        match args.len() {
+            // Bare `panic()` — the interpreter defaults the message to "panic";
+            // the native symbol takes one argument, so synthesize it here.
+            0 => Ok(Some(HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "panic".to_string(),
+                    args: vec![HirExpr {
+                        kind: HirExprKind::String("panic".to_string()),
+                        ty: TypeId::STRING,
+                    }],
+                },
+                ty: TypeId::ANY,
+            })),
+            1 => Ok(Some(self.lower_builtin_call(name, args, TypeId::ANY, ctx)?)),
+            n => Err(LowerError::Unsupported(format!(
+                "panic expects at most one argument, got {n}"
+            ))),
         }
     }
 

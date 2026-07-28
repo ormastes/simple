@@ -25,6 +25,16 @@ Tests the reference capability system for memory safety:
 - LockBase - `mut T` and `iso T` allowed
 - Unsafe - All capabilities allowed
 
+> **Normative note (2026-07-28, superseded direction):** the blanket "Unsafe = all
+> capabilities allowed" escape hatch remains the CURRENT behavior for non-mission-critical
+> builds, but is a superseded direction for the mission-critical profile. In the MC profile,
+> blanket-allow is replaced by capability-scoped
+> `@unsafe(reason: "...", capabilities: [...])` plus a reviewed unsafe-boundary manifest.
+> See `doc/01_research/language/simple_vs_rust_safety_property_audit_2026-07-28.md`
+> ("Documented design conflicts" #2),
+> `doc/01_research/language/simple_vs_rust_mission_critical_2026-07-27.md` §3.3, and lane SF2
+> in `doc/03_plan/agent_tasks/mission_critical_robustness_parallel_agents_2026-07-27.md`.
+
 ## Syntax
 
 ```simple
@@ -225,6 +235,11 @@ fn update(counter: mut Counter, delta: i64) -> i64:
 
     Tests that unsafe mode allows all capabilities.
 
+> **Note (2026-07-28):** these examples document the CURRENT non-mission-critical behavior.
+> Under the mission-critical profile this blanket allowance is superseded by
+> capability-scoped `@unsafe(reason, capabilities:[...])` + manifest (see normative note in
+> "Concurrency Modes" above).
+
 ### Scenario: General
 
 | # | Example | Status |
@@ -343,7 +358,7 @@ fn update(counter: mut Counter, delta: i64) -> i64:
 | 1 | actor message passing with iso | pass |
 | 2 | lock-based concurrent modification | pass |
 | 3 | builder pattern with mut | pass |
-| 4 | unsafe mode escape hatch | pass |
+| 4 | unsafe mode escape hatch (current non-MC behavior; superseded in MC profile — see 2026-07-28 note) | pass |
 | 5 | iso transfer semantics | pass |
 | 6 | mixed const and mut parameters | pass |
 

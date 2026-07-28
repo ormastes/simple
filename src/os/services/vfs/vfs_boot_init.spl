@@ -6,6 +6,7 @@
 # the boot init functions that bring up the storage stack.
 
 use os.services.vfs.vfs.{VfsManager, Filesystem}
+use os.kernel.loader.container_namespace.{ContainerNamespaceView}
 use os.services.vfs.vfs_service.{VfsService}
 use common.string_core.{char_from_code}
 use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_adapter_lease}
@@ -863,20 +864,8 @@ fn _vfs_boot_read_short_name_from_dir_raw(start_cluster: u32, short_name: text) 
         dir_cluster = _vfs_boot_fat32_next_cluster(dir_cluster)
     []
 
-# Per-cluster read tracing. Default OFF: the 1.7MB font read walks ~1674
-# clusters and these two lines were 93% of all guest serial output, and
-# serial I/O is slow enough that the spam alone pushed the first frame
-# past the evidence harness budget. Kept (not deleted) per the log
-# retention policy; flip to true when debugging cluster reads.
-# NOTE: a module-level `val` gate does NOT work here -- freestanding guest
-# builds never run module initialisers, so the global reads uninitialised
-# and every gated line printed anyway. A function is the reliable form.
-fn _vfs_boot_trace_enabled() -> bool:
-    false
-
 fn _vfs_boot_read_cluster_to_scratch(cluster: u32) -> bool:
-    if _vfs_boot_trace_enabled():
-        serial_println("[vfs-init] scalar scratch read begin cluster={cluster}")
+    serial_println("[vfs-init] scalar scratch read begin cluster={cluster}")
     val byte_len = g_boot_fat32_sectors_per_cluster.to_u64() * g_boot_fat32_bytes_per_sector.to_u64()
     if g_boot_fat32_scratch_cpu_addr == 0u64 or g_boot_fat32_scratch_phys_addr == 0u64 or g_boot_fat32_scratch_byte_len < byte_len:
         serial_println("[vfs-init] cluster scratch invalid")
@@ -894,8 +883,7 @@ fn _vfs_boot_read_cluster_to_scratch(cluster: u32) -> bool:
     if read.is_err():
         serial_println("[vfs-init] scalar scratch read failed")
         return false
-    if _vfs_boot_trace_enabled():
-        serial_println("[vfs-init] scalar scratch read ok cluster={cluster}")
+    serial_println("[vfs-init] scalar scratch read ok cluster={cluster}")
     true
 
 fn _vfs_boot_read_file_chain_raw(first_cluster: u32, size: u32) -> [u8]:
@@ -2075,6 +2063,96 @@ pub fn vfs_get_manager() -> VfsManager:
     g_vfs
 
 # ============================================================================
+# Ambient container context — the ONE identity the free-function VFS API has
+# ============================================================================
+#
+# The `g_vfs_*` free functions in vfs_write_ops.spl / vfs_init.spl take no
+# caller identity and cannot be given one today (no process->VfsManager binding
+# exists in SimpleOS). They are *ambient*: they act on whatever the global VFS
+# is currently resolving on behalf of. That ambient identity already exists and
+# is already gated — it is `g_vfs.container_view`, wired by lane CONTWIRE.
+#
+# These accessors are NOT a second gate. They forward, verbatim, to the single
+# converged choke point `VfsManager.enforce_lookup_grants`, which delegates the
+# actual decision to `container_view_allows_path`. One owner per decision.
+#
+# They live HERE, in the module that declares `g_vfs`, on purpose: a class-typed
+# module global mutated through a `me` method from another module loses the
+# write on the interpreter. Mutation is done extract-mutate-write-back, in-module.
+
+pub fn vfs_ambient_enforce(operation: text, path: text) -> Result<bool, text>:
+    """Ask the ambient VFS manager whether `operation` on `path` is permitted.
+
+    Host context (no container view) always answers Ok(true) — this is the
+    non-container no-regression contract, inherited unchanged from CONTWIRE.
+    """
+    g_vfs.enforce_lookup_grants(operation, path)
+
+pub fn vfs_ambient_allows(operation: text, path: text) -> bool:
+    """Boolean form of `vfs_ambient_enforce`, for the bool-returning free API."""
+    val decision = vfs_ambient_enforce(operation, path)
+    decision.is_ok()
+
+pub fn vfs_ambient_in_container() -> bool:
+    """True when the ambient VFS is confined to a container namespace.
+
+    Used by operations that construct or destroy namespace structure (mount /
+    unmount): those are refused wholesale inside a container, since there is no
+    path that makes them safe.
+
+    Normalised to a real `true`/`false`: `VfsManager.in_container()` is written
+    as `self.container_view.?`, and on the interpreter `.?` yields the option
+    itself rather than a bool. Truthiness happens to be correct, but a bool-typed
+    return must not depend on that.
+    """
+    if g_vfs.in_container():
+        return true
+    false
+
+pub fn vfs_ambient_enter_container_view(view: ContainerNamespaceView):
+    """Confine the ambient VFS to `view` (pass ContainerWorld.kernel_view_of).
+
+    A stopped or reaped container's view is already rootless, so entering it
+    resolves nothing — lifecycle failure stays fail-closed by construction.
+    """
+    var manager = g_vfs
+    manager.enter_container_view(view)
+    g_vfs = manager
+
+pub fn vfs_ambient_enter_container(root: text, pids: [u64]):
+    """Convenience: confine the ambient VFS to `root` with `pids`."""
+    var manager = g_vfs
+    manager.enter_container(root, pids)
+    g_vfs = manager
+
+pub fn vfs_ambient_enter_rootless_container():
+    """Enter the deny-everything view a stopped/unpopulated container holds."""
+    var manager = g_vfs
+    manager.enter_rootless_container()
+    g_vfs = manager
+
+pub fn vfs_ambient_leave_container():
+    """Return the ambient VFS to HOST context (unrestricted)."""
+    var manager = g_vfs
+    manager.leave_container()
+    g_vfs = manager
+
+pub fn _vfs_ambient_mount_for_test(path: text, fs_type: text, fs: Filesystem) -> bool:
+    """Mount `fs` into the ambient manager so free-function specs have a sink.
+
+    Same in-module extract-mutate-write-back rule as the enter/leave pair.
+    Sibling of the existing `_mount_hosted_rootfs_for_test`.
+    """
+    var manager = g_vfs
+    val r = manager.mount(path, fs_type, "dev0", false, fs)
+    g_vfs = manager
+    r.is_ok()
+
+pub fn _vfs_ambient_reset_for_test():
+    """Drop the ambient manager back to a bare host-context VfsManager."""
+    g_vfs = VfsManager.new()
+
+# ============================================================================
 # Internal helpers used by boot init
 # ============================================================================
 
@@ -2173,27 +2251,6 @@ fn _seed_root_fat32_exec_cache(root: Fat32Core):
         val seed_bytes = _seed_root_fat32_exec_bytes(root, seed_entry.canonical_path, seed_path)
         if seed_bytes.len() > 0:
             app_registry_cache_bytes(seed_entry.canonical_path, seed_bytes)
-
-fn g_vfs_root_read_file_bytes(driver: Fat32Core, path: text) -> [u8]:
-    val cached = _g_vfs_root_read_file_bytes_once(driver, path)
-    if cached.len() > 0:
-        return cached
-
-    # Live desktop-disk QEMU currently reaches a state where the persisted
-    # root-driver instance can fail lookups even though the device and volume
-    # are healthy. Retry with a fresh mount on the same block adapter so
-    # filesystem-backed app exec can still use real disk bytes.
-    var retry_driver = Fat32Core.new(g_c_adapter)
-    val retry_mount = retry_driver.mount("", "")
-    if retry_mount.is_err():
-        log_raw_println("[vfs-root] retry_mount_failed path={path} err={retry_mount.unwrap_err()}")
-        return []
-    log_raw_println("[vfs-root] retry_mount_ok path={path}")
-    val retried = _g_vfs_root_read_file_bytes_once(retry_driver, path)
-    if retried.len() > 0:
-        return retried
-
-    []
 
 fn _g_vfs_root_read_file_bytes_once(driver: Fat32Core, path: text) -> [u8]:
     val flags = FileFlags(read: true, write: false, create: false, append: false, truncate: false)

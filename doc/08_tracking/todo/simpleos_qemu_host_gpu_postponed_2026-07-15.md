@@ -1,10 +1,5 @@
 # SimpleOS QEMU host-GPU postponed work
 
-Cross-host acceptance is aggregated by **TODO317** in
-`doc/08_tracking/feature/wm_gui_web_2d_host_environment_acceptance_evidence_2026-07-28.md`.
-This ledger continues to own the SimpleOS transport/QEMU implementation
-details and does not define a second acceptance scope.
-
 Host-only work completed on 2026-07-15:
 
 - A diagnostic pure-Simple Stage 2/3 bootstrap succeeded; final source-matched admission remains postponed under TODO548.

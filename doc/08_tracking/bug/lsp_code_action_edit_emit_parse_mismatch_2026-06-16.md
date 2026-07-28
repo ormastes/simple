@@ -3,8 +3,7 @@
 - **ID:** lsp_code_action_edit_emit_parse_mismatch_2026-06-16
 - **Severity:** P2 (LSP quickfix/refactor actions surface but apply no edit)
 - **Area:** lsp / app
-- **Status:** fixed
-- **Verified fixed (2026-07-28):** `src/lib/nogc_sync_mut/lsp/lsp_handlers.spl` `_parse_code_action` (line 712) now calls `_extract_emitted_range(line)` (line 687) to consume the nested `edit.changes` range first, building `documentChanges` from it, and only falls back to the legacy flat `editLine`/`editCol` keys — implementing proposed-fix step 1-2 from this doc.
+- **Status:** open — root-caused, fix attempted and reverted (see Notes)
 - **Found during:** reliable-mode plan P1 / R3 (doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md)
 
 ## Summary

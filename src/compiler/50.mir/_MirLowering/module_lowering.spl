@@ -93,16 +93,6 @@ fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirC
         else: 0
     )
 
-fn coverage_row_compare(a: text, b: text) -> i64:
-    if a < b: -1
-    elif a > b: 1
-    else: 0
-
-fn coverage_user_source(path: text, function_name: text) -> bool:
-    """The reserved runner dump function is generated, never authored coverage."""
-    val _ = path
-    function_name != "__simple_cov_dump"
-
 impl MirLowering:
     static fn new(symbols: SymbolTable) -> MirLowering:
         val target_context = mir_target_context_from("", "unknown", "unknown", "llvm", -1)
@@ -151,6 +141,7 @@ impl MirLowering:
             option_value_locals: {},
             nil_locals: {},
             enum_variant_index: {},
+            enum_variant_discriminants: {},
             enum_runtime_id_index: {},
             enum_runtime_id_names: {},
             lambda_bindings: {},
@@ -161,187 +152,12 @@ impl MirLowering:
             next_canonical_type_symbol: 1000000000,
             global_symbol_ids: {},
             global_const_exprs: {},
-            coverage_enabled: false,
-            coverage_current_file: "",
-            coverage_current_function_name: "",
-            coverage_decision_stack: [],
-            coverage_decision_ids: [],
-            coverage_decision_keys: [],
-            coverage_decision_files: [],
-            coverage_decision_lines: [],
-            coverage_decision_columns: [],
-            coverage_condition_decision_ids: [],
-            coverage_condition_ids: [],
-            coverage_condition_keys: [],
-            coverage_condition_files: [],
-            coverage_condition_lines: [],
-            coverage_condition_columns: [],
+            array_global_mutation_warned: {},
             target_context: target_context
         )
 
     fn symbol_id_value(symbol: SymbolId) -> i64:
         symbol.id
-
-    me enable_coverage_inventory(enabled: bool):
-        self.coverage_enabled = enabled
-
-    fn coverage_file() -> text:
-        var file = self.coverage_current_file.replace("\\", "/")
-        if file == "":
-            file = "<unknown>"
-        file
-
-    fn coverage_escape_file(file: text) -> text:
-        # Keep probe identity raw. Escape once, at the strict CSV render edge,
-        # in the same percent-first order as runtime_coverage_core.c.
-        file.replace("%", "%25").replace(",", "%2C").replace("\r", "%0A").replace("\n", "%0A")
-
-    fn coverage_location(value: i64) -> i64:
-        if value < 0: 0
-        elif value > 2147483647: 2147483647
-        else: value
-
-    me coverage_register_decision(span: Span, kind: text, excluded: bool) -> i64:
-        if not self.coverage_enabled:
-            return -1
-        if excluded or not coverage_user_source(self.coverage_current_file, self.coverage_current_function_name):
-            return -2
-        val file = self.coverage_file()
-        val key = "{file}|{span.start}|{span.end}|{span.line}|{span.col}|{kind}"
-        val id = (hm_hash_text(key) % 2147483646) + 2
-        var i = 0
-        while i < self.coverage_decision_ids.len():
-            if self.coverage_decision_ids[i] == id:
-                if self.coverage_decision_keys[i] != key:
-                    self.error("coverage decision ID collision", Some(span))
-                    return -2
-                return id
-            i = i + 1
-        var ids = self.coverage_decision_ids
-        var keys = self.coverage_decision_keys
-        var files = self.coverage_decision_files
-        var lines = self.coverage_decision_lines
-        var columns = self.coverage_decision_columns
-        ids.push(id)
-        keys.push(key)
-        files.push(file)
-        lines.push(self.coverage_location(span.line))
-        columns.push(self.coverage_location(span.col))
-        self.coverage_decision_ids = ids
-        self.coverage_decision_keys = keys
-        self.coverage_decision_files = files
-        self.coverage_decision_lines = lines
-        self.coverage_decision_columns = columns
-        id
-
-    me coverage_register_condition(decision_id: i64, span: Span, index: i64) -> i64:
-        if not self.coverage_enabled or decision_id < 0:
-            return -1
-        val file = self.coverage_file()
-        val key = "{decision_id}|{file}|{span.start}|{span.end}|{span.line}|{span.col}|condition|{index}"
-        val id = (hm_hash_text(key) % 2147483646) + 2
-        var i = 0
-        while i < self.coverage_condition_ids.len():
-            if self.coverage_condition_decision_ids[i] == decision_id and self.coverage_condition_ids[i] == id:
-                if self.coverage_condition_keys[i] != key:
-                    self.error("coverage condition ID collision", Some(span))
-                    return -1
-                return id
-            i = i + 1
-        var decision_ids = self.coverage_condition_decision_ids
-        var ids = self.coverage_condition_ids
-        var keys = self.coverage_condition_keys
-        var files = self.coverage_condition_files
-        var lines = self.coverage_condition_lines
-        var columns = self.coverage_condition_columns
-        decision_ids.push(decision_id)
-        ids.push(id)
-        keys.push(key)
-        files.push(file)
-        lines.push(self.coverage_location(span.line))
-        columns.push(self.coverage_location(span.col))
-        self.coverage_condition_decision_ids = decision_ids
-        self.coverage_condition_ids = ids
-        self.coverage_condition_keys = keys
-        self.coverage_condition_files = files
-        self.coverage_condition_lines = lines
-        self.coverage_condition_columns = columns
-        id
-
-    me coverage_push_decision(id: i64):
-        if id != -1:
-            var stack = self.coverage_decision_stack
-            stack.push(id)
-            self.coverage_decision_stack = stack
-
-    me coverage_pop_decision(id: i64):
-        if id != -1 and self.coverage_decision_stack.len() > 0:
-            self.coverage_decision_stack = self.coverage_decision_stack[0:self.coverage_decision_stack.len() - 1]
-
-    fn coverage_current_decision() -> i64:
-        if self.coverage_decision_stack.len() == 0:
-            return -1
-        self.coverage_decision_stack[self.coverage_decision_stack.len() - 1]
-
-    me coverage_emit_probe(name: text, decision_id: i64, condition_id: i64, result: LocalId, span: Span):
-        if not self.coverage_enabled or decision_id < 0:
-            return
-        val str_type = MirType(kind: MirTypeKind.Opaque("str"))
-        var args: [MirOperand] = [
-            mir_operand_const_int(decision_id)
-        ]
-        if condition_id >= 0:
-            args.push(mir_operand_const_int(condition_id))
-        args.push(mir_operand_copy(result))
-        args.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(self.coverage_file()), str_type)))
-        args.push(mir_operand_const_int(self.coverage_location(span.line)))
-        args.push(mir_operand_const_int(self.coverage_location(span.col)))
-        var b = self.builder
-        b.emit(MirInst(kind: MirInstKind.Intrinsic(nil, name, args), span: Some(span)))
-        self.builder = b
-
-    me coverage_emit_decision_probe(decision_id: i64, result: LocalId, span: Span):
-        self.coverage_emit_probe("__simple_coverage_decision_probe", decision_id, -1, result, span)
-
-    me coverage_emit_condition_probe(decision_id: i64, condition_id: i64, result: LocalId, span: Span):
-        self.coverage_emit_probe("__simple_coverage_condition_probe", decision_id, condition_id, result, span)
-
-    fn coverage_manifest_sdn() -> text:
-        if not self.coverage_enabled:
-            return ""
-        var decisions: [text] = []
-        var i = 0
-        while i < self.coverage_decision_ids.len():
-            val file = coverage_escape_file(self.coverage_decision_files[i])
-            decisions.push("{self.coverage_decision_ids[i]}, {file}, {self.coverage_decision_lines[i]}, {self.coverage_decision_columns[i]}, 0, 0")
-            i = i + 1
-        decisions = array_sort_by(decisions, coverage_row_compare)
-        var conditions: [text] = []
-        i = 0
-        while i < self.coverage_condition_ids.len():
-            val file = coverage_escape_file(self.coverage_condition_files[i])
-            conditions.push("{self.coverage_condition_decision_ids[i]}, {self.coverage_condition_ids[i]}, {file}, {self.coverage_condition_lines[i]}, {self.coverage_condition_columns[i]}, 0, 0")
-            i = i + 1
-        conditions = array_sort_by(conditions, coverage_row_compare)
-        var lines: [text] = [
-            "version: 1.0",
-            "decisions |id, file, line, column, true_count, false_count|"
-        ]
-        for row in decisions:
-            lines.push(row)
-        lines.push("conditions |decision_id, condition_id, file, line, column, true_count, false_count|")
-        for row in conditions:
-            lines.push(row)
-        lines.join("\n")
-
-    fn emit_coverage_manifest():
-        val payload = self.coverage_manifest_sdn()
-        if payload == "":
-            return
-        # Protocol output must be byte-exact; process_ops.eprint adds a prefix.
-        print "__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__"
-        print payload
-        print "__SIMPLE_COMPILER_COVERAGE_MANIFEST_END__"
 
     fn composite_layout_key(symbol: Symbol) -> text:
         val defining_module = symbol.defining_module ?? ""
@@ -382,6 +198,45 @@ impl MirLowering:
 
     me register_enum_runtime_id(enum_def: HirEnum):
         self.register_enum_runtime_name(enum_def.runtime_name, enum_def.name, Some(enum_def.span))
+
+    me register_enum_variants(enum_def: HirEnum):
+        """Register names and resolved portable runtime discriminants."""
+        var names: [text] = []
+        var discriminants: [i64] = []
+        var next_value: i64 = 0
+        var vi = 0
+        while vi < enum_def.variants.len():
+            val variant = enum_def.variants[vi]
+            var value = next_value
+            if variant.has_discriminant:
+                val folded = self.lower_const_expr(variant.discriminant)
+                if val const_value = folded:
+                    match const_value:
+                        case Int(int_value): value = int_value
+                        case _:
+                            self.error("enum variant '{enum_def.name}.{variant.name}' discriminant must be an integer constant", Some(variant.span))
+                else:
+                    self.error("enum variant '{enum_def.name}.{variant.name}' discriminant must be a constant integer expression", Some(variant.span))
+            if value < 0 or value > 2147483647:
+                self.error("enum variant '{enum_def.name}.{variant.name}' discriminant {value} is outside portable runtime range 0..2147483647", Some(variant.span))
+            var duplicate = false
+            var di = 0
+            while di < discriminants.len():
+                if discriminants[di] == value:
+                    duplicate = true
+                di = di + 1
+            if duplicate:
+                self.error("enum '{enum_def.name}' has duplicate discriminant {value}", Some(variant.span))
+            names.push(variant.name)
+            discriminants.push(value)
+            next_value = value + 1
+            vi = vi + 1
+        var variant_index = self.enum_variant_index
+        variant_index[enum_def.name] = names
+        self.enum_variant_index = variant_index
+        var variant_discriminants = self.enum_variant_discriminants
+        variant_discriminants[enum_def.name] = discriminants
+        self.enum_variant_discriminants = variant_discriminants
 
     fn hir_bitfield_fields(bitfield_def: HirBitfield) -> [HirBitfieldField]:
         match bitfield_def:
@@ -727,7 +582,6 @@ impl MirLowering:
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
         self.symbols = module.symbols
-        self.coverage_current_file = if module.path != "": module.path else: module.name
         var function_names: [text] = []
         for func in module.functions.values():
             function_names.push(func.name)
@@ -901,18 +755,13 @@ impl MirLowering:
             self.struct_field_order[struct_def.name] = field_names
             si = si + 1
 
-        # Build enum variant-index registry (enum NAME -> ordered variant names).
-        # A variant's index is its runtime discriminant. Name-keyed like structs.
+        # Build enum variant registry. Explicit values win; omitted variants
+        # continue from the previous value, matching enum declaration semantics.
         val enum_values = module.enums.values()
         var ei = 0
         while ei < enum_values.len():
             val enum_def = enum_values[ei]
-            var variant_names: [text] = []
-            var vi = 0
-            while vi < enum_def.variants.len():
-                variant_names.push(enum_def.variants[vi].name)
-                vi = vi + 1
-            self.enum_variant_index[enum_def.name] = variant_names
+            self.register_enum_variants(enum_def)
             self.register_enum_runtime_id(enum_def)
             ei = ei + 1
 
@@ -923,6 +772,7 @@ impl MirLowering:
         # to an undefined callee. Skip if user code shadows the name.
         if not self.enum_variant_index.has("Result"):
             self.enum_variant_index["Result"] = ["Ok", "Err"]
+            self.enum_variant_discriminants["Result"] = [0, 1]
         if not self.enum_runtime_id_index.has("Result"):
             self.enum_runtime_id_index["Result"] = 0
 
@@ -933,6 +783,7 @@ impl MirLowering:
         # user code shadows the name.
         if not self.enum_variant_index.has("Option"):
             self.enum_variant_index["Option"] = ["Some", "None"]
+            self.enum_variant_discriminants["Option"] = [0, 1]
         if not self.enum_runtime_id_index.has("Option"):
             self.enum_runtime_id_index["Option"] = 1
 
@@ -1368,7 +1219,7 @@ impl MirLowering:
         if name == "Some" or name == "None":
             return "Option"
         for ename in self.enum_variant_index.keys():
-            if enum_variant_disc(self.enum_variant_index[ename], name) >= 0:
+            if self.enum_variant_discriminant(ename, name) >= 0:
                 return ename
         ""
 

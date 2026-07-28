@@ -29,7 +29,7 @@ backend_render_equivalence_spec -> test
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -52,9 +52,6 @@ Proves that semantic agreement is accepted only when independent producers,
 real completion, positive handles, and exact absolute pixels all agree.
 
 ## Scenarios
-
-Capture and translation records are also serialized independently, parsed and
-validated, then passed to the production equivalence policy.
 
 ### Backend render equivalence
 
@@ -206,17 +203,12 @@ expect(result.reason).to_equal("left-contradictory-provenance")
 
 </details>
 
-#### should reject reordered command identities
-
-Two independently valid records with the same command inventory in a different
-identity order fail with `semantic-record-mismatch`.
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

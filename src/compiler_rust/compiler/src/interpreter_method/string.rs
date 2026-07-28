@@ -287,11 +287,19 @@ if let Value::Str(ref s) = recv_val {
             if start == 0 && end >= s.len() {
                 return Ok(Value::shared_text(s.clone()));
             }
-            // Work with char indices for unicode safety
-            let chars: Vec<char> = s.chars().collect();
-            let end = end.min(chars.len());
+            // BYTE-indexed, matching the JIT/native lane (`rt_slice`, which
+            // slices `s->data + begin` raw) and this interpreter's own
+            // byte-valued `len` / `index_of`. Indexing by character here made
+            // an index produced by `len`/`index_of` invalid input to `slice`:
+            // for "caféZdef" (9 bytes / 8 chars) `index_of("Z")` is 5, and a
+            // char-indexed `slice(0, 5)` wrongly yielded "caféZ".
+            let bytes = s.as_bytes();
+            let end = end.min(bytes.len());
             let start = start.min(end);
-            let result: String = chars[start..end].iter().collect();
+            // A range that splits a multi-byte codepoint cannot be held in
+            // Rust's UTF-8 `String`; substitute U+FFFD, which prints
+            // byte-identically to what the native lane emits for such a range.
+            let result = String::from_utf8_lossy(&bytes[start..end]).into_owned();
             return Ok(Value::text(result));
         }
         "repeat" => {

@@ -4,14 +4,7 @@
 **Severity:** Medium-High (loud build failure, but a real functionality gap:
 any closure that references a captured variable only through string
 interpolation cannot build at all)
-**Status:** fixed
-**Reconciled (2026-07-28):** header updated from "open" to "fixed" to match
-body — independently verified in the live repo:
-`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2540-2544`
-`lambda_capture_scan_supported`'s `StringLit` case now calls
-`self.string_interps_capture_scan_supported(its)` (defined at line 2591) instead
-of the old `not interps.?` exclusion, matching the "Resolution (2026-07-17)"
-section below.
+**Status:** open
 **Task:** #178 native text interpolation + string ops verification round 2 (lane S47)
 
 ## Symptom

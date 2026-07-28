@@ -1221,18 +1221,20 @@ else
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
       "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
       "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-      "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
       "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" \
+      "SIMPLE_NATIVE_BUILD_TARGET=${PLATFORM}" \
+      "SIMPLE_NATIVE_BUILD_THREADS=${selfhost_jobs}" \
+      "SIMPLE_NATIVE_BUILD_CACHE_DIR=${stage3_cache_absolute}" \
+      "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
+      "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
-      --source src/compiler --source src/app --source src/lib \
-      --entry-closure --threads "${selfhost_jobs}" \
+      --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
-      --entry src/app/cli/bootstrap_main.spl \
       --runtime-path "${stage_runtime_absolute}" \
-      -o "${stage3_bin}"
+      -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
   )
   rm -f "${stage2_bin}" "${stage3_bin}"
   bootstrap_stage3_directory_snapshot \
@@ -1312,8 +1314,8 @@ else
 
   # Stage 3: stage2 recompiles bootstrap_main.spl (self-host verification)
   # Note: Stage3 is optional — the stage2 binary may lack features needed for
-  # self-hosting (e.g., --entry-closure support in rt_native_build, or LLVM
-  # symbol conflicts). When Stage 3 fails, the wrapper stops before Stage 4.
+  # pure in-process self-hosting. When Stage 3 fails, the wrapper stops before
+  # Stage 4.
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
   rm -rf "${stage3_provenance_cache}"
@@ -1343,22 +1345,24 @@ else
     SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-    SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+    SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
+    SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
+    SIMPLE_NATIVE_BUILD_CACHE_DIR="${stage3_cache_absolute}" \
+    SIMPLE_RUNTIME_PATH="${stage_runtime_absolute}" \
+    SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap \
     SIMPLE_BINARY="${stage2_admitted_absolute}" -- \
     "${stage2_admitted_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
-    --source src/compiler --source src/app --source src/lib \
-    --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
-    --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "${stage_runtime_absolute}" \
-    -o "${stage3_bin}"
+    -o "${stage3_bin}" \
+    src/app/cli/bootstrap_main.spl
   stage3_status=$?
   set -e
   if [ "${stage2_admitted_sha_before_stage3}" != absent ]; then

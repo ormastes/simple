@@ -779,8 +779,10 @@ impl MirTextCodegen for MirToLlvm:
         """Translate a block terminator."""
         match term:
             case Ret(value):
-                if value.is_some():
-                    val ret_operand: MirOperand = value.unwrap()
+                # Decay-safe optional extraction, matching the call-dest path:
+                # compiled cross-module MirOperand? values can arrive flat.
+                if value != nil:
+                    val ret_operand: MirOperand = value ?? mir_operand_const_int(0)
                     if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                         match ret_operand.kind:
                             case Const(const_value, const_type):
@@ -884,24 +886,26 @@ impl MirTextCodegen for MirToLlvm:
                     arg_vals = arg_vals.push("{arg_ty} {arg_val}")
                     arg_i = arg_i + 1
                 val args_str = arg_vals.join(", ")
-                match dest:
-                    Some(dest_local):
-                        val dest_id = self.local_id_value(dest_local)
-                        val dest_name = self.get_local(dest_id)
-                        val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
-                        match unwind:
-                            Some(unwind_block):
-                                self.builder.emit("  {dest_name} = invoke {ret_ty} {call_func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{self.block_id_value(unwind_block)}")
-                            nil:
-                                self.builder.emit("  {dest_name} = call {ret_ty} {call_func_val}({args_str})")
-                                self.builder.emit_br("bb{self.block_id_value(normal)}")
-                    nil:
-                        match unwind:
-                            Some(unwind_block):
-                                self.builder.emit("  invoke void {call_func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{self.block_id_value(unwind_block)}")
-                            nil:
-                                self.builder.emit("  call void {call_func_val}({args_str})")
-                                self.builder.emit_br("bb{self.block_id_value(normal)}")
+                # Decay-safe optional access on dest/unwind (see translate_call
+                # above): cross-module optional payloads can DECAY to the bare
+                # object, so no `match: Some/nil` on them here.
+                val has_unwind = unwind != nil
+                val uw_id = if has_unwind: self.block_id_value(unwind ?? BlockId(id: 0)) else: 0
+                if dest != nil:
+                    val dest_id = self.local_id_value(dest ?? LocalId(id: 0))
+                    val dest_name = self.get_local(dest_id)
+                    val ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
+                    if has_unwind:
+                        self.builder.emit("  {dest_name} = invoke {ret_ty} {call_func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{uw_id}")
+                    else:
+                        self.builder.emit("  {dest_name} = call {ret_ty} {call_func_val}({args_str})")
+                        self.builder.emit_br("bb{self.block_id_value(normal)}")
+                else:
+                    if has_unwind:
+                        self.builder.emit("  invoke void {call_func_val}({args_str}) to label %bb{self.block_id_value(normal)} unwind label %bb{uw_id}")
+                    else:
+                        self.builder.emit("  call void {call_func_val}({args_str})")
+                        self.builder.emit_br("bb{self.block_id_value(normal)}")
 
     # === Required: per-category instruction methods ===
 

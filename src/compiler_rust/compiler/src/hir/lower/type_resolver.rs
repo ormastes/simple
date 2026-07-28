@@ -208,6 +208,31 @@ impl Lowerer {
                         }))
                     }
                     "usize" | "isize" => return Ok(TypeId::I64),
+                    // BUG-U128-64BIT: neither engine has a 128-bit integer.
+                    // The interpreter's `Value::Int` is an `i64`; the JIT/MIR
+                    // value model is a tagged `i64` and
+                    // `codegen::instr::units::clif_int_type_for_bits` saturates
+                    // at `types::I64`. `u128`/`i128` annotations were therefore
+                    // ALREADY silently 64-bit under the interpreter, while HIR
+                    // lowering rejected them outright with
+                    // `Unknown type: u128` — which demoted every module that
+                    // merely mentions the spelling (all of `crypto.ed25519`,
+                    // and anything importing it) to interpreter-only, making
+                    // an engine A/B impossible.
+                    //
+                    // Resolving to `TypeId::I64` (NOT `U64`) is the
+                    // semantics-preserving choice: `>>` dispatches sshr/ushr on
+                    // LHS signedness (codegen/instr/core.rs `BinOp::ShiftRight`),
+                    // so `I64` keeps the JIT's arithmetic shift byte-identical
+                    // to the interpreter's `i64 >>`. Picking `U64` would make
+                    // the JIT emit `ushr` and silently diverge from the
+                    // interpreter on high-bit-set limbs.
+                    //
+                    // This does NOT make `u128` wide: values above 2^63-1 wrap,
+                    // on both engines, exactly as they already did. Genuine
+                    // 128-bit arithmetic needs a real `TypeId::I128` plus an
+                    // interpreter value variant; see the bug doc.
+                    "u128" | "i128" => return Ok(TypeId::I64),
                     _ => {}
                 }
                 if self.lenient_types {

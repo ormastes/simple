@@ -4,10 +4,7 @@
 **Severity:** high (silently asserts the OPPOSITE of what the test author
 intended; a naive grep found 18 spec files using this exact pattern, listed
 below -- not audited/fixed here, out of scope for this task)
-**Status:** fixed
-**Verified fixed (2026-07-28):** commit `dfec06170ae` (2026-07-20) changed `bdd.rs` Eq/NotEq handling to mark a mismatch only as a PROVISIONAL failure (not a hard fail); current `src/compiler_rust/compiler/src/interpreter_call/bdd.rs` (~lines 843-925) confirms a chained `.to_equal(false)`/`.to_be(false)` now clears the provisional flag and is authoritative.
-
-**Status (original):** open — found incidentally while writing new hardening unit specs
+**Status:** open — found incidentally while writing new hardening unit specs
 for the test-runner engine packages; not fixed here (test-authoring landmine,
 not something a spec-only task should patch in the runner/matcher source)
 

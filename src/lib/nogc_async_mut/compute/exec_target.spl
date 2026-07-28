@@ -15,7 +15,7 @@ use std.nogc_async_mut.io.env_ops.{env_get}
 # ---------------------------------------------------------------------------
 # Level 1 — device class (what you tag / configure)
 # ---------------------------------------------------------------------------
-enum DeviceClass:
+enum ComputeDeviceClass:
     Default
     Cpu
     SimdCpu
@@ -48,18 +48,18 @@ enum EnforceMode:
     Suggest
     Require
 
-fn device_class_name(c: DeviceClass) -> text:
-    if c == DeviceClass.Default:
+fn device_class_name(c: ComputeDeviceClass) -> text:
+    if c == ComputeDeviceClass.Default:
         return "default"
-    if c == DeviceClass.Cpu:
+    if c == ComputeDeviceClass.Cpu:
         return "cpu"
-    if c == DeviceClass.SimdCpu:
+    if c == ComputeDeviceClass.SimdCpu:
         return "simd_cpu"
-    if c == DeviceClass.Gpu:
+    if c == ComputeDeviceClass.Gpu:
         return "gpu"
-    if c == DeviceClass.Fpga:
+    if c == ComputeDeviceClass.Fpga:
         return "fpga"
-    if c == DeviceClass.Simd:
+    if c == ComputeDeviceClass.Simd:
         return "simd"
     return "unknown"
 
@@ -90,20 +90,20 @@ fn compute_backend_name(b: ComputeBackend) -> text:
         return "pure_simple"
     return "none"
 
-fn parse_device_class(name: text) -> DeviceClass:
+fn parse_device_class(name: text) -> ComputeDeviceClass:
     if name == "" or name == "default" or name == "auto":
-        return DeviceClass.Default
+        return ComputeDeviceClass.Default
     if name == "cpu":
-        return DeviceClass.Cpu
+        return ComputeDeviceClass.Cpu
     if name == "simd_cpu" or name == "simd-cpu":
-        return DeviceClass.SimdCpu
+        return ComputeDeviceClass.SimdCpu
     if name == "gpu":
-        return DeviceClass.Gpu
+        return ComputeDeviceClass.Gpu
     if name == "fpga" or name == "vhdl":
-        return DeviceClass.Fpga
+        return ComputeDeviceClass.Fpga
     if name == "simd":
-        return DeviceClass.Simd
-    return DeviceClass.Default
+        return ComputeDeviceClass.Simd
+    return ComputeDeviceClass.Default
 
 fn parse_enforce_mode(name: text) -> EnforceMode:
     if name == "require" or name == "must":
@@ -137,13 +137,13 @@ class BackendCaps:
 # Resolved target
 # ---------------------------------------------------------------------------
 class ExecTarget:
-    dclass: DeviceClass        # requested class (level 1)
+    dclass: ComputeDeviceClass        # requested class (level 1)
     backend: ComputeBackend    # resolved concrete backend (level 2)
     enforce: EnforceMode
     resolved: bool             # false => requirement unmet (caller fail-closes rt_exit 70)
     reason: text
 
-    static fn create(dclass: DeviceClass, backend: ComputeBackend, enforce: EnforceMode, resolved: bool, reason: text) -> ExecTarget:
+    static fn create(dclass: ComputeDeviceClass, backend: ComputeBackend, enforce: EnforceMode, resolved: bool, reason: text) -> ExecTarget:
         ExecTarget(dclass: dclass, backend: backend, enforce: enforce, resolved: resolved, reason: reason)
 
     fn is_cpu() -> bool:
@@ -184,32 +184,32 @@ fn gpu_backend_available(b: ComputeBackend, caps: BackendCaps) -> bool:
     return false
 
 # A failed requirement: caller fail-closes (rt_exit 70).
-fn unmet(dclass: DeviceClass, enforce: EnforceMode, reason: text) -> ExecTarget:
+fn unmet(dclass: ComputeDeviceClass, enforce: EnforceMode, reason: text) -> ExecTarget:
     ExecTarget.create(dclass, ComputeBackend.NoneBackend, enforce, false, reason)
 
 # Resolve a (class, optional explicit backend, enforce) request against machine caps.
 # `requested` may be NoneBackend to mean "auto-pick best for the class".
-fn resolve_exec_target(dclass: DeviceClass, requested: ComputeBackend, enforce: EnforceMode, caps: BackendCaps) -> ExecTarget:
+fn resolve_exec_target(dclass: ComputeDeviceClass, requested: ComputeBackend, enforce: EnforceMode, caps: BackendCaps) -> ExecTarget:
     val require = enforce == EnforceMode.Require
 
-    if dclass == DeviceClass.Cpu:
+    if dclass == ComputeDeviceClass.Cpu:
         return ExecTarget.create(dclass, ComputeBackend.Scalar, enforce, true, "cpu-scalar")
 
-    if dclass == DeviceClass.SimdCpu:
+    if dclass == ComputeDeviceClass.SimdCpu:
         if caps.has_simd_cpu:
             return ExecTarget.create(dclass, ComputeBackend.Neon, enforce, true, "simd-cpu")
         if require:
             return unmet(dclass, enforce, "require simd_cpu: no SIMD CPU backend")
         return ExecTarget.create(dclass, ComputeBackend.Scalar, enforce, true, "suggest simd_cpu -> cpu fallback")
 
-    if dclass == DeviceClass.Fpga:
+    if dclass == ComputeDeviceClass.Fpga:
         if caps.has_fpga:
             return ExecTarget.create(dclass, ComputeBackend.Vhdl, enforce, true, "fpga-vhdl")
         if require:
             return unmet(dclass, enforce, "require fpga: no FPGA backend")
         return ExecTarget.create(dclass, ComputeBackend.PureSimple, enforce, true, "suggest fpga -> cpu fallback")
 
-    if dclass == DeviceClass.Gpu:
+    if dclass == ComputeDeviceClass.Gpu:
         # Explicit backend requested?
         if requested != ComputeBackend.NoneBackend:
             if gpu_backend_available(requested, caps):
@@ -224,7 +224,7 @@ fn resolve_exec_target(dclass: DeviceClass, requested: ComputeBackend, enforce: 
             return unmet(dclass, enforce, "require gpu: no GPU backend")
         return ExecTarget.create(dclass, ComputeBackend.PureSimple, enforce, true, "suggest gpu -> cpu fallback")
 
-    if dclass == DeviceClass.Simd:
+    if dclass == ComputeDeviceClass.Simd:
         # Umbrella: prefer gpu, then simd_cpu, then fpga; else cpu.
         val best = best_gpu_backend(caps)
         if best != ComputeBackend.NoneBackend:
@@ -240,10 +240,10 @@ fn resolve_exec_target(dclass: DeviceClass, requested: ComputeBackend, enforce: 
     # Default: best overall — gpu, then simd_cpu, then cpu. Never fails.
     val best = best_gpu_backend(caps)
     if best != ComputeBackend.NoneBackend:
-        return ExecTarget.create(DeviceClass.Default, best, enforce, true, "default -> gpu")
+        return ExecTarget.create(ComputeDeviceClass.Default, best, enforce, true, "default -> gpu")
     if caps.has_simd_cpu:
-        return ExecTarget.create(DeviceClass.Default, ComputeBackend.Neon, enforce, true, "default -> simd_cpu")
-    return ExecTarget.create(DeviceClass.Default, ComputeBackend.PureSimple, enforce, true, "default -> cpu")
+        return ExecTarget.create(ComputeDeviceClass.Default, ComputeBackend.Neon, enforce, true, "default -> simd_cpu")
+    return ExecTarget.create(ComputeDeviceClass.Default, ComputeBackend.PureSimple, enforce, true, "default -> cpu")
 
 # Convenience: parse a backend name (for SIMPLE_COMPUTE_BACKEND); "" => auto.
 fn parse_compute_backend(name: text) -> ComputeBackend:
@@ -268,7 +268,7 @@ fn exec_target_from_env(caps: BackendCaps) -> ExecTarget:
     val enforce = parse_enforce_mode(env_get("SIMPLE_COMPUTE_ENFORCE"))
     resolve_exec_target(dclass, requested, enforce, caps)
 
-export DeviceClass, ComputeBackend, EnforceMode, BackendCaps, ExecTarget
+export ComputeDeviceClass, ComputeBackend, EnforceMode, BackendCaps, ExecTarget
 export device_class_name, compute_backend_name, parse_device_class, parse_enforce_mode
 export parse_compute_backend, best_gpu_backend, gpu_backend_available
 export resolve_exec_target, exec_target_from_env

@@ -1,7 +1,6 @@
 # test-runner post-spec lint gate invokes simple_lint with an empty/missing file arg
 
 **Status:** open
-**Verification needed:** Run `bin/simple test test/01_unit/tools/cat_spec.spl` on a rebuilt test-runner and trace the post-spec lint-gate call site to confirm whether `simple_lint` is still invoked with an empty file argument.
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** app/test_runner (SSpec `simple test` harness)
 

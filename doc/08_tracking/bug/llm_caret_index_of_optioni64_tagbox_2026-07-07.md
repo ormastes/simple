@@ -3,8 +3,7 @@
 - **Filed:** 2026-07-07
 - **Severity:** P1 (silent data loss in any Option<i64>-returning stdlib call)
 - **Component:** self-hosted interpreter — string/Option value boxing
-- **Status:** superseded; worked around in `src/app/llm_caret/json_helpers.spl`
-- **Superseded (2026-07-28):** see to_int_optional_lies_and_some_i64_payload_shift_2026-07-27.md
+- **Status:** open; worked around in `src/app/llm_caret/json_helpers.spl`
 
 ## Symptom
 

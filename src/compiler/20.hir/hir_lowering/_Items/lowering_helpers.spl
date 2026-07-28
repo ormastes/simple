@@ -285,3 +285,37 @@ fn bootstrap_hir_symbol_for_name(name: text) -> SymbolId:
     if name == "main":
         return SymbolId(id: 6)
     SymbolId(id: 100)
+
+fn bootstrap_hir_symbol_known_name(name: text) -> bool:
+    """True only for the small fixed set of the compiler's OWN bootstrap CLI
+    entry functions bootstrap_hir_symbol_for_name assigns a hardcoded id to.
+    Callers must gate on this BEFORE calling bootstrap_hir_symbol_for_name:
+    that function's fallback for any other name is a bare SymbolId(id: 100)
+    that is never inserted into self.symbols (no `define()` call), so it is
+    absent from the flat symbol table the --entry-closure MIR path builds
+    from `self.symbols.symbols.values()`. Every OTHER top-level function
+    (any real user program's `fn build() -> Reg: ...`, not just class
+    statics -- see native_flat_static_method_call_unknown_100) used to fall
+    into that same silent id=100 hole: the CALL SITE still linked fine
+    (bootstrap_flat_function_symbol_name emits a plain function's body under
+    its bare name unconditionally, independent of func.symbol), but
+    resolved_call_hir_return_type(id=100) always found nothing, so a
+    function returning a class/struct never threaded its return type onto
+    the call result -- struct_value_syms was never populated for `val r =
+    build()`, and every method call / field read on `r` afterward silently
+    misresolved (const-0 method calls, wrong field offsets). Routing any
+    unrecognized name through the qualified lookup-or-define path instead
+    (declaration_lowering.spl) reuses the SAME symbol module_lowering.spl's
+    declare-loop pre-pass already defined for it (present in the flat
+    table, carrying the real declared return type) -- exactly the fix
+    already proven for static methods, generalized to every function name
+    this fixed list does not own."""
+    if name == "bootstrap_version": return true
+    if name == "native_build_help": return true
+    if name == "compile_result_exit": return true
+    if name == "bootstrap_output_from_args": return true
+    if name == "run_native_build_bootstrap": return true
+    if name == "rt_native_build": return true
+    if name == "get_cli_args": return true
+    if name == "main": return true
+    false

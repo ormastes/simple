@@ -106,6 +106,64 @@ impl MirLowering:
             sti = sti + 1
         nil
 
+    # B2 (bug cranelift_native_aggregate_return_nil_receiver_hosted_wm_
+    # 2026-07-26): 952d2ca34d7's re-lowering fallback at the bottom of
+    # `try_lower_global_read` is sound ONLY for a never-mutated binding --
+    # its own argument is "every reference constructing an equal, independent
+    # value is observationally identical to sharing one" (see
+    # `global_const_exprs`, mir_lowering_types.spl). A module-level `var` of
+    # ARRAY type violates that end to end: `lower_static`
+    # (module_lowering.spl) declines to emit a `MirStatic` for an array type,
+    # so the write hook (`lower_assign_var`, mir_lowering_stmts.spl) finds no
+    # backing static and silently degrades the store to a function-local SSA
+    # copy, while every read re-builds the ORIGINAL initializer -- the
+    # mutation is dropped and the program reads the initial value forever
+    # (`module=0` in the freestanding RCA). 952d2ca34d7 turned what used to be
+    # a loud "undefined variable" error into silent data loss; this restores
+    # the noise.
+    #
+    # Declared mutability is used as the "is ever assigned" marker on purpose.
+    # It is a superset of the true answer, and unlike the write hook's
+    # `find_global_static`-returns-nil marker it is available at the FIRST
+    # read, independent of the order functions happen to be lowered in (a read
+    # lowered before the mutating function would otherwise never be flagged).
+    # It also covers index-assignment (`G[i] = v`), whose base read comes
+    # through this same path.
+    #
+    # Reported once per symbol. Loud by default, promoted to a hard lowering
+    # error by `SIMPLE_STRICT_ARRAY_GLOBALS=1`, so a build can be made to fail
+    # instead of corrupting at runtime. NOT a hard error by default because
+    # the tree still carries many module-level `var` array bindings written
+    # against the old silent behaviour; flipping the default belongs with the
+    # real fix (null-init static slots + backend module-init wiring).
+    me report_mutable_array_global(symbol_id: i64):
+        if self.array_global_mutation_warned.contains(symbol_id):
+            return
+        var is_mutable = false
+        var type_is_array = false
+        var global_name = "<unnamed>"
+        if val global_symbol = self.symbols.get_symbol_raw(symbol_id):
+            is_mutable = global_symbol.is_mutable
+            global_name = global_symbol.name
+            if val declared_type = global_symbol.type_:
+                match declared_type.kind:
+                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        type_is_array = true
+                    # rationale: only array/slice globals are unrepresentable
+                    # as a MirStatic; every other declared type either folds
+                    # to a scalar constant or gets real `@g_name` storage.
+                    case _:
+                        ()
+        if not is_mutable:
+            return
+        if not type_is_array:
+            return
+        self.array_global_mutation_warned[symbol_id] = true
+        val message = "mutable array-typed module global '{global_name}' has no backing static: its initializer is re-lowered at every read and writes to it are dropped (bug cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26)"
+        print "[mir-lower] WARNING: {message}"
+        if (mir_expr_env_get("SIMPLE_STRICT_ARRAY_GLOBALS") ?? "") == "1":
+            self.error(message, nil)
+
     me try_lower_global_read(symbol_id: i64) -> LocalId?:
         if not self.global_symbol_ids.contains(symbol_id):
             return nil
@@ -199,6 +257,12 @@ impl MirLowering:
         # error only if no initializer expr was recorded (should not happen
         # once `lower_const` has run for this symbol).
         if self.global_const_exprs.contains(symbol_id):
+            # B2: the "immutable, so re-lowering is observationally identical"
+            # premise above does NOT hold for a mutable array global -- say so
+            # loudly (and fail the build under SIMPLE_STRICT_ARRAY_GLOBALS=1)
+            # instead of quietly emitting code that drops every write. See
+            # `report_mutable_array_global`.
+            self.report_mutable_array_global(symbol_id)
             val hir_init = self.global_const_exprs[symbol_id]
             return Some(self.lower_expr(hir_init))
         nil
@@ -238,8 +302,26 @@ impl MirLowering:
                     if element_name != "":
                         self.runtime_array_locals[result.id] = true
                         self.mark_runtime_value_local(result.id)
-                        if element_name != "__runtime_array__":
-                            self.array_element_struct_syms[result.id] = element_name
+                        # A1 (bug cranelift_native_aggregate_return_nil_
+                        # receiver_hosted_wm_2026-07-26): record the
+                        # "__runtime_array__" sentinel too, not only a real
+                        # struct name. A field declared `events: [[text]]`
+                        # gets exactly that sentinel from module_lowering.spl
+                        # (its element is an Array, not a `Named` type), and
+                        # dropping it here left `theme.events[i]` with no way
+                        # to know the ELEMENT is itself a runtime array: the
+                        # Index lowering below then decoded the element HANDLE
+                        # as a plain i64/bootstrap-text scalar and never
+                        # entered the decoded local in `runtime_array_locals`,
+                        # so a following `.len()`/`[j]` lowered off a
+                        # non-array local. Every consumer of this table
+                        # already treats the sentinel as "not a real struct
+                        # name" (`has_real_struct_name` in the Index case
+                        # below, `for_has_real_struct_name` in
+                        # mir_lowering_stmts.spl) and the copy-forward sites
+                        # only test `!= ""`, so storing it is inert for them
+                        # and adds only the element-is-an-array signal.
+                        self.array_element_struct_syms[result.id] = element_name
 
     fn mir_type_is_str(t: MirType) -> bool:
         """True for the native string MIR types: the fat-pointer struct
@@ -372,7 +454,24 @@ impl MirLowering:
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
         ))
         var b_num = self.builder
-        val num_res = b_num.emit_call(num_op, [render_src], MirType.i64())
+        # Dest type must be Opaque("str"), NOT i64: rt_raw_*_to_string returns
+        # a TAGGED heap string handle (see this fn's docstring -- "render the
+        # scalar to a TAGGED heap string"), and callers of this helper (the
+        # `str(x)` builtin below and the `+` text-concat lowering) both re-test
+        # the returned local via local_is_str()/coerce_concat_operand() before
+        # deciding whether to render it AGAIN. Tagging the dest i64 (the old
+        # code) made every downstream local_is_str() check see a plain numeric
+        # local instead of a string, so e.g. `"n=" + str(count())` rendered
+        # count() to a string once (correct) and then coerce_concat_operand
+        # rendered THAT tagged handle through rt_raw_i64_to_string a SECOND
+        # time -- printing rt_raw_i64_to_string's decimal rendering of the
+        # first call's string-handle integer instead of the count (bug
+        # native_double_stringify_concat_operand). The LLVM backend already
+        # freely mixes i64/Opaque("str") operands at call sites keyed off the
+        # SysV x86_64 ABI (both single 8-byte registers, see rt_strcat_tagged
+        # call sites taking a `ptr`-typed and an `i64`-typed arg side by side),
+        # so retyping this dest changes only mid-end type tracking, not codegen.
+        val num_res = b_num.emit_call(num_op, [render_src], MirType(kind: MirTypeKind.Opaque("str")))
         self.builder = b_num
         if val num_local = num_res:
             return mir_operand_copy(num_local)
@@ -489,6 +588,28 @@ impl MirLowering:
         if val sn = struct_name:
             if sn != "":
                 self.array_element_struct_syms[container.id] = sn
+        # Same shredding class, ARRAY elements (nested `[[text]]` /
+        # `[[[text]]]`). Nothing else in the pipeline can tell an Index READ
+        # that a container's elements are themselves runtime arrays: the
+        # `__runtime_array__` sentinel is only ever written from a STRUCT FIELD
+        # declaration, never into the per-local map the read consults, and an
+        # outer container born from an empty `[]` literal has its element type
+        # fixed at the erased i64 default. `outer[i] = inner` stores the inner
+        # handle verbatim (box_runtime_value's runtime_array_locals
+        # passthrough), so the store is the only site that still knows -- record
+        # it here so the read reaches decode_runtime_value's Array arm (handle
+        # copied through, runtime_array_locals re-registered) instead of the
+        # is_integer `>> 3`, which turned every `outer[i].len()` into a silent
+        # 0 while the outer `.len()` stayed correct.
+        if self.local_is_runtime_array(value_local):
+            var elem_array_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+            if vt != nil:
+                match vt.kind:
+                    case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
+                        elem_array_type = vt
+                    case _:
+                        ()
+            self.runtime_elem_value_type[container.id] = elem_array_type
 
     me decode_runtime_value(raw: LocalId, result_type: MirType) -> LocalId:
         var b = self.builder
@@ -1159,8 +1280,24 @@ impl MirLowering:
         # empty `[]` literal fixes the element type at the i64 default;
         # a later `a.push(0.1)` / `a[i] = 0.1` heap-boxes, so decoding
         # as i64 would shred the box pointer via `>>3`.
-        if rt_enum_discriminant(result_type.kind) == rt_enum_discriminant(MirTypeKind.I64) and self.runtime_elem_value_type.contains(base_local.id):
-            result_type = self.runtime_elem_value_type[base_local.id]
+        if self.runtime_elem_value_type.contains(base_local.id):
+            val noted_elem_type = self.runtime_elem_value_type[base_local.id]
+            val array_disc = rt_enum_discriminant(MirTypeKind.Array(MirType.i64(), 0))
+            val slice_disc = rt_enum_discriminant(MirTypeKind.Slice(MirType.i64()))
+            val noted_disc = rt_enum_discriminant(noted_elem_type.kind)
+            val result_disc = rt_enum_discriminant(result_type.kind)
+            val noted_is_array = noted_disc == array_disc or noted_disc == slice_disc
+            val result_is_array = result_disc == array_disc or result_disc == slice_disc
+            # The erased-i64 gate alone cannot rescue nested arrays in the
+            # freestanding lane: when the base MIR type was never threaded the
+            # SIMPLE_BOOTSTRAP default a few lines up has ALREADY forced `text`,
+            # and rt_interp_cstr on an inner array handle destroys it exactly as
+            # `>> 3` would. A store-side ARRAY observation overrides that
+            # default too — but never a result_type that is already an array,
+            # whose element type came from the base and is the more precise of
+            # the two (it feeds the next nesting level's own Index read).
+            if result_disc == rt_enum_discriminant(MirTypeKind.I64) or (noted_is_array and not result_is_array):
+                result_type = noted_elem_type
         val runtime_array = self.local_is_runtime_array(base_local)
         if runtime_array or (mir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             val getter = MirOperand(kind: MirOperandKind.Const(
@@ -1191,11 +1328,42 @@ impl MirLowering:
                 val elem_struct_name = self.array_element_struct_syms.get(base_local.id)
                 val esn = elem_struct_name ?? ""
                 val has_real_struct_name = esn != "" and esn != "__runtime_array__"
+                # A1 (bug cranelift_native_aggregate_return_nil_receiver_
+                # hosted_wm_2026-07-26): an element that is ITSELF an array
+                # (`[[text]]`, `[[i64]]`) sits in the outer slot as a runtime
+                # array HANDLE, exactly like a named-struct element -- but
+                # only the named-struct branch marked the raw `rt_array_get`
+                # result as a runtime value, so an array element went down the
+                # scalar decode (`>>3` shreds the handle) and the decoded
+                # local was never registered in `runtime_array_locals`.
+                # `nested[i].len()` / `nested[i][j]` then lowered off a
+                # non-array local. Detected only when `result_type` did NOT
+                # already derive to an Array/Slice from the base's MIR/HIR
+                # type -- in that case the existing decode already takes the
+                # Array arm. Registration mirrors
+                # `emit_resolved_direct_call`'s Array/Slice return handling
+                # (switch_operators_calls.spl): route the decode through an
+                # Array-typed `decode_type` so `decode_runtime_value`'s
+                # Array/Slice arm copies the handle untouched and sets both
+                # `runtime_array_locals` and `mark_runtime_value_local` on the
+                # decoded element. The inner element type is the best guess
+                # available here (`result_type`, i.e. the scalar leaf default)
+                # -- recovering the real one is the A2 lane's job.
+                var elem_is_runtime_array = false
+                if esn == "__runtime_array__":
+                    match result_type.kind:
+                        # rationale: an already Array/Slice-typed result_type
+                        # reaches decode_runtime_value's Array arm on its own,
+                        # which does this registration -- nothing to add.
+                        case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_): ()
+                        case _: elem_is_runtime_array = true
                 val decode_type = if has_real_struct_name:
                     MirType(kind: MirTypeKind.Opaque(esn))
+                elif elem_is_runtime_array:
+                    MirType(kind: MirTypeKind.Slice(result_type))
                 else:
                     result_type
-                if has_real_struct_name:
+                if has_real_struct_name or elem_is_runtime_array:
                     self.mark_runtime_value_local(getter_local.id)
                 val decoded_elem = self.decode_runtime_value(getter_local, decode_type)
                 # Bug (array-of-structs field misread): propagate the
@@ -1220,6 +1388,54 @@ impl MirLowering:
             self.builder = b
             loaded
 
+
+    me lower_cast_expr(operand: HirExpr, target: HirType, span: Span) -> LocalId:
+        """Lower casts, extracting a runtime enum's resolved discriminant."""
+        val operand_local = self.lower_expr(operand)
+        val mir_target = self.lower_type(target)
+        var target_is_integer = false
+        match target.kind:
+            case HirTypeKind.Int(_, _): target_is_integer = true
+            case _: ()
+        var operand_is_enum = false
+        # Flat/bootstrap HIR frequently leaves expression .type_ unset. Enum
+        # constructors register their result in local_hir_type_values, and let
+        # bindings propagate that entry, so consult the shared local registry
+        # after lowering before falling back to syntax annotations.
+        if self.local_enum_type_id(operand_local) >= 0:
+            operand_is_enum = true
+        if self.option_value_locals.contains(operand_local.id):
+            operand_is_enum = true
+        if operand.has_type_:
+            match operand.type_.kind:
+                case HirTypeKind.Named(symbol, _):
+                    val symbol_info = self.symbols.get_symbol_raw(symbol.id)
+                    if val info = symbol_info:
+                        operand_is_enum = self.enum_variant_index.has(info.name)
+                case HirTypeKind.Optional(_): operand_is_enum = true
+                case HirTypeKind.Result(_, _): operand_is_enum = true
+                case _: ()
+        if target_is_integer and operand_is_enum:
+            var enum_builder = self.builder
+            val disc_func = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_enum_discriminant"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            val disc_result = enum_builder.emit_call(disc_func, [mir_operand_copy(operand_local)], MirType.i64())
+            self.builder = enum_builder
+            if val resolved_disc = disc_result:
+                if rt_enum_discriminant(mir_target.kind) == rt_enum_discriminant(MirTypeKind.I64):
+                    return resolved_disc
+                var cast_builder = self.builder
+                val narrowed = cast_builder.emit_cast(mir_operand_copy(resolved_disc), mir_target)
+                self.builder = cast_builder
+                return narrowed
+            self.error("enum-to-integer cast could not read runtime discriminant", Some(span))
+            return operand_local
+        var cast_builder = self.builder
+        val result = cast_builder.emit_cast(mir_operand_copy(operand_local), mir_target)
+        self.builder = cast_builder
+        result
 
     me lower_expr(expr: HirExpr) -> LocalId:
         """Lower HIR expression to MIR, return result local.
@@ -1397,12 +1613,7 @@ impl MirLowering:
         if expr_disc == cast_disc:
             match expr_value.kind:
                 case HirExprKind.Cast(operand, target):
-                    val operand_local = self.lower_expr(operand)
-                    val mir_target = self.lower_type(target)
-                    var cast_builder = self.builder
-                    val cast_result = cast_builder.emit_cast(mir_operand_copy(operand_local), mir_target)
-                    self.builder = cast_builder
-                    return cast_result
+                    return self.lower_cast_expr(operand, target, expr.span)
                 case _:
                     pass
         val call_disc = rt_enum_discriminant(HirExprKind.Call(nil_expr, [], []))
@@ -1632,7 +1843,7 @@ impl MirLowering:
                 if symbol_id < 0:
                     self.error("undefined variable", Some(expr_value.span))
                     var b_nil = self.builder
-                    val nil_tmp = b_nil.new_temp(MirType.i64())
+                    val nil_tmp = b_nil.emit_const_int(0)
                     self.builder = b_nil
                     nil_tmp
                 elif self.find_local(symbol_id).id >= 0:
@@ -1642,7 +1853,7 @@ impl MirLowering:
                 else:
                     self.error("undefined variable", Some(expr_value.span))
                     var b_err = self.builder
-                    val err_tmp = b_err.new_temp(MirType.i64())
+                    val err_tmp = b_err.emit_const_int(0)
                     self.builder = b_err
                     err_tmp
 
@@ -1672,7 +1883,7 @@ impl MirLowering:
                     if symbol_id < 0:
                         self.error("undefined variable: {name}", Some(expr_value.span))
                         var b_err3 = self.builder
-                        val err_tmp3 = b_err3.new_temp(MirType.i64())
+                        val err_tmp3 = b_err3.emit_const_int(0)
                         self.builder = b_err3
                         err_tmp3
                     elif self.find_local(symbol_id).id >= 0:
@@ -1682,7 +1893,7 @@ impl MirLowering:
                     else:
                         self.error("undefined variable: {name}", Some(expr_value.span))
                         var b_err2 = self.builder
-                        val err_tmp2 = b_err2.new_temp(MirType.i64())
+                        val err_tmp2 = b_err2.emit_const_int(0)
                         self.builder = b_err2
                         err_tmp2
 
@@ -1916,7 +2127,7 @@ impl MirLowering:
                                 # allowlist (80.driver/driver_pipeline.spl).
                                 self.error("unresolved method call: operator overload for struct {binop_struct_name} (no matching __add__/__sub__/__mul__/__div__/__eq__/__lt__/__gt__ impl)", Some(expr_value.span))
                                 var b_err_op = self.builder
-                                val err_op_temp = b_err_op.new_temp(MirType.i64())
+                                val err_op_temp = b_err_op.emit_const_int(0)
                                 self.builder = b_err_op
                                 return err_op_temp
                         # String `+` is CONCATENATION, not arithmetic. On the
@@ -2764,12 +2975,7 @@ impl MirLowering:
 
             # Type cast: expr as Type
             case Cast(operand, target):
-                val operand_local = self.lower_expr(operand)
-                val mir_target = self.lower_type(target)
-                var b = self.builder
-                val result = b.emit_cast(mir_operand_copy(operand_local), mir_target)
-                self.builder = b
-                result
+                self.lower_cast_expr(operand, target, expr.span)
 
             # B5b Phase 1: lower MatchCase on integer-literal patterns to
             # MirTerminator.Switch (dense >=4 arms, span <= 1024) or to a
@@ -2843,7 +3049,7 @@ impl MirLowering:
                     var owner_count = 0
                     if bname != "":
                         for ename in self.enum_variant_index.keys():
-                            if enum_variant_disc(self.enum_variant_index[ename], bname) >= 0:
+                            if self.enum_variant_discriminant(ename, bname) >= 0:
                                 owner = ename
                                 owner_count = owner_count + 1
                     if owner_count == 1:

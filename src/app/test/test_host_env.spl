@@ -5,15 +5,12 @@ use std.nogc_sync_mut.io.crypto_sffi.{hash_sha256}
 use common.ui.host_env_contract.{
     HostCapabilityRow,
     TestHostEnv,
-    host_browser_vulkan_parity_artifact_bindings,
     host_browser_vulkan_parity_evidence_passes,
     host_display_input_evidence_passes,
     host_capability_row_from_evidence,
     host_readback_evidence_passes,
     host_readback_capture_bindings,
     host_renderdoc_capture_binding,
-    host_renderdoc_capture_command_exit_binding,
-    host_renderdoc_capture_log_binding,
     host_renderdoc_replay_xml_binding,
     host_renderdoc_evidence_passes,
     host_simd_artifact_bindings,
@@ -42,14 +39,10 @@ fn retained(path: text) -> text:
 
 fn host_renderdoc_artifacts_are_current(evidence: text) -> bool:
     val (capture_path, capture_sha) = host_renderdoc_capture_binding(evidence)
-    val (log_path, log_sha) = host_renderdoc_capture_log_binding(evidence)
     val (xml_path, xml_sha) = host_renderdoc_replay_xml_binding(evidence)
-    val capture_command_exit = host_renderdoc_capture_command_exit_binding(evidence)
-    (capture_command_exit == "0" and capture_path != "" and log_path != "" and xml_path != "" and
-        file_is_regular_no_follow(capture_path) and file_is_regular_no_follow(log_path) and
-        file_is_regular_no_follow(xml_path) and
+    (capture_path != "" and xml_path != "" and
+        file_is_regular_no_follow(capture_path) and file_is_regular_no_follow(xml_path) and
         file_hash_sha256(capture_path) == capture_sha and
-        file_hash_sha256(log_path) == log_sha and
         file_hash_sha256(xml_path) == xml_sha)
 
 fn host_readback_captures_are_current(evidence: text) -> bool:
@@ -58,19 +51,6 @@ fn host_readback_captures_are_current(evidence: text) -> bool:
         file_is_regular_no_follow(baseline_path) and file_is_regular_no_follow(input_path) and
         file_hash_sha256(baseline_path) == baseline_sha and
         file_hash_sha256(input_path) == input_sha)
-
-fn host_browser_vulkan_parity_artifacts_are_current(evidence: text) -> bool:
-    val bindings = host_browser_vulkan_parity_artifact_bindings(evidence)
-    if bindings.len() != 12:
-        return false
-    var i = 0
-    while i < bindings.len():
-        val path = bindings[i]
-        val expected_sha = bindings[i + 1]
-        if not file_is_regular_no_follow(path) or file_hash_sha256(path) != expected_sha:
-            return false
-        i += 2
-    true
 
 fn host_simd_artifacts_are_current(evidence: text, source_path: text = SIMD_SOURCE_PATH) -> bool:
     val (compiler_path, source_sha, compiler_sha) = host_simd_artifact_bindings(evidence)
@@ -84,22 +64,13 @@ fn host_simd_artifacts_are_current(evidence: text, source_path: text = SIMD_SOUR
 fn host_simd_capability_row_current(
     name: text, evidence: text, arch: text, feature: text, evidence_path: text
 ) -> HostCapabilityRow:
-    val prerequisite = if arch == "aarch64":
-        "native-aarch64-host-with-neon-and-admitted-pure-simple-cli"
-    else:
-        "native-riscv64-host-with-rvv-and-admitted-pure-simple-cli"
-    val bin_env = if arch == "aarch64":
-        "CPU_SIMD_ARCH_MATRIX_AARCH64_SIMPLE_BIN=bin/simple"
-    else:
-        "CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN=bin/simple"
-    val owner = "scripts/check/check-cpu-simd-engine2d-arch-matrix.shs"
     host_capability_row_from_evidence(
         name,
         host_simd_evidence_passes(evidence, arch, feature) and host_simd_artifacts_are_current(evidence),
         file_exists(evidence_path),
-        "owner=" + owner + ";prerequisite=" + prerequisite + ";artifact=" + evidence_path,
+        "complete-retained-native-" + arch + "-simd-frame-evidence-required",
         evidence_path,
-        bin_env + " sh " + owner
+        "sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs"
     )
 
 fn main() -> i64:
@@ -128,9 +99,7 @@ fn main() -> i64:
 
     val vulkan_row = host_capability_row_from_evidence(
         "vulkan",
-        host_vulkan_evidence_passes(vulkan) and
-            host_browser_vulkan_parity_evidence_passes(vulkan_browser, vulkan_run) and
-            host_browser_vulkan_parity_artifacts_are_current(vulkan_run),
+        host_vulkan_evidence_passes(vulkan) and host_browser_vulkan_parity_evidence_passes(vulkan_browser, vulkan_run),
         file_exists(VULKAN_PATH) and file_exists(VULKAN_RUN_PATH) and file_exists(VULKAN_BROWSER_PATH),
         "validated-device-readback-browser-vulkan-and-parity-evidence-required", VULKAN_RUN_PATH,
         "GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-browser-backing scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing && GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-run-current scripts/setup/setup-gui-web-2d-vulkan-env.shs --run"

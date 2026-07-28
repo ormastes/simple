@@ -1,0 +1,453 @@
+# @cover src/lib/nogc_sync_mut/database/server/durability.spl 85%
+# @cover src/lib/nogc_sync_mut/database/server/server.spl 60%
+# @req REQ-DBSERVER-002
+"""
+# Simple DB Server Tier — Increment 2: Durable Commit
+
+**Category:** Stdlib / Infrastructure
+**Status:** In Progress (increment 2 of the server tier)
+**Design:** `.spipe/db_durability/state.md`
+**Contract:** the module docstring of
+`src/lib/nogc_sync_mut/database/server/durability.spl`
+
+## Overview
+
+Increment 1 of the server tier could open a session, run a transaction and
+answer `OK applied=1` — and then lose the write completely if the process died
+a moment later, because COMMIT only ever touched memory. This manual covers
+the increment that fixes that: **a COMMIT is acknowledged only after the store
+has been written to durable media.**
+
+The interesting question is not "does the happy path work". It is "what does
+the database look like if the machine dies in the middle". So most of this
+manual is a crash-point matrix: the process is killed at each step of the
+commit pipeline, the database file is then re-read from disk by a brand new
+reader, and the value it finds is compared against an absolute expected value.
+
+## The commit pipeline and where we kill it
+
+| Step | What happens |
+|------|--------------|
+| P1 precheck | every buffered write still matches the row version it observed |
+| P2 undo | the pre-image of every touched key is snapshotted |
+| P3 apply | the overlay is applied to the in-memory tables |
+| P4 persist | `save()` — lock, write `<path>.tmp`, fsync, rename over `<path>` |
+| P5 ack | `OK applied=N` goes back to the client |
+
+The **commit point** is the rename in P4. Everything before it is invisible to
+a restarted process; everything after it is permanent.
+
+## What a reader may observe
+
+Never a torn mixture. Either every value of the transaction is there, or none
+of them is. Two independent mechanisms enforce this: the half-written bytes
+only ever exist under the name `<path>.tmp`, which no reader opens; and the
+file body carries a crc32 header, so a torn file that somehow did reach
+`<path>` is refused outright instead of being parsed into a half-new state.
+
+## The honest gap
+
+A crash after P4 but before P5 leaves the data permanently stored while the
+client is told nothing. The client cannot distinguish that from a crash before
+P4. This tier is therefore **at-least-once** at the connection level: after a
+dropped connection a client must re-read, and must not assume a retry is free.
+
+## Related Specifications
+
+- `test/03_system/database/server/db_server_tier_spec.spl` — increment 1:
+  sessions, capabilities, transaction isolation.
+- `std.database.core` / `std.database.atomic` — the store and the locking this
+  tier reuses. No second storage or locking engine was written.
+"""
+
+use std.spec
+use std.database.core.{ SdnTable, SdnDatabase }
+use std.database.atomic.{ file_exists, file_delete, file_write }
+use std.database.server.capability.{ CapabilityTable, capability_with, grant_key }
+use std.database.server.server.{ DbServerCapsule }
+use std.database.server.txn.{ begin_txn, txn_record, TxnWrite, TxnState, WRITE_PUT }
+use std.database.server.durability.{
+    DurabilityPolicy, DurableOutcome, durable_commit,
+    durability_on, durability_off, durability_crash_at,
+    durable_value, durable_file_loads, temp_path_exists,
+    CRASH_BEFORE_PERSIST, CRASH_MID_PERSIST, CRASH_AFTER_PERSIST,
+    CRASH_PERSIST_FAILS
+}
+
+# ============================================================================
+# Fixtures
+#
+# Every scenario gets its OWN file so a leftover from one crash simulation can
+# never be mistaken for the result of another.
+# ============================================================================
+
+val ABSENT: text = "<absent>"
+
+fn scrub(path: text):
+    if file_exists(path):
+        file_delete(path)
+    if file_exists(path + ".tmp"):
+        file_delete(path + ".tmp")
+    if file_exists(path + ".lock"):
+        file_delete(path + ".lock")
+    if file_exists(path + ".wal"):
+        file_delete(path + ".wal")
+
+fn fresh_store(path: text) -> SdnDatabase:
+    scrub(path)
+    var db = SdnDatabase.new(path)
+    db.set_table("users", SdnTable.new("users", ["id", "name", "valid"]))
+    db
+
+fn alice_policy() -> CapabilityTable:
+    var policy = CapabilityTable.new()
+    policy.register(capability_with("alice", [
+        grant_key("users", "read"),
+        grant_key("users", "write")
+    ]))
+    policy
+
+# Read a single column straight off DISK with a brand new reader.  This is the
+# oracle for every durability claim: asking the running server what it thinks
+# it stored would prove nothing.
+fn on_disk(path: text, key: text) -> text:
+    durable_value(path, "users", key, "name") ?? ABSENT
+
+# ============================================================================
+# @manual_section A commit that returns OK is on disk
+# ============================================================================
+
+describe "DB durability — the acknowledged commit is permanent":
+
+    it "stores a committed row where a brand new reader finds it":
+        val path = "build/dbdur_happy.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=old")
+        assert_equal(server.handle_message("COMMIT session=1"), "OK applied=1")
+        # The oracle is a fresh load, not the server's own memory.
+        assert_equal(on_disk(path, "u1"), "old")
+
+    it "stores an update over an already durable row":
+        val path = "build/dbdur_update.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=old")
+        server.handle_message("COMMIT session=1")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=new")
+        assert_equal(server.handle_message("COMMIT session=1"), "OK applied=1")
+        assert_equal(on_disk(path, "u1"), "new")
+
+    it "makes a committed delete permanent too":
+        val path = "build/dbdur_delete.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=old")
+        server.handle_message("COMMIT session=1")
+        assert_equal(on_disk(path, "u1"), "old")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("DEL session=1 tbl=users id=u1")
+        assert_equal(server.handle_message("COMMIT session=1"), "OK applied=1")
+        assert_equal(on_disk(path, "u1"), ABSENT)
+
+    it "persists every write of a multi-row transaction or none of them":
+        val path = "build/dbdur_multi.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=a name=one")
+        server.handle_message("PUT session=1 tbl=users id=b name=two")
+        server.handle_message("PUT session=1 tbl=users id=c name=three")
+        assert_equal(server.handle_message("COMMIT session=1"), "OK applied=3")
+        assert_equal(on_disk(path, "a"), "one")
+        assert_equal(on_disk(path, "b"), "two")
+        assert_equal(on_disk(path, "c"), "three")
+
+    it "never writes anything a transaction rolled back":
+        val path = "build/dbdur_rollback.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=old")
+        server.handle_message("COMMIT session=1")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=rolled_back")
+        assert_equal(server.handle_message("ROLLBACK session=1"), "OK")
+        assert_equal(on_disk(path, "u1"), "old")
+
+# ============================================================================
+# @manual_section Crash-point matrix
+#
+# Each scenario kills the process at one step of the commit pipeline, then
+# re-reads the file from scratch.  The expected value is absolute: the whole
+# old state, or the whole new state, and never a mixture of the two.
+# ============================================================================
+
+describe "DB durability — crash-point matrix":
+
+    it "crash BEFORE persist leaves the old value on disk":
+        val path = "build/dbdur_crash_before.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=old")
+        server.handle_message("COMMIT session=1")
+        assert_equal(on_disk(path, "u1"), "old")
+
+        step("kill the process after the overlay is applied, before save()")
+        var crashed = DbServerCapsule.new_with_durability(
+            SdnDatabase.load(path) ?? fresh_store(path),
+            alice_policy(),
+            durability_crash_at(CRASH_BEFORE_PERSIST)
+        )
+        crashed.handle_message("OPEN as=alice")
+        crashed.handle_message("BEGIN session=1")
+        crashed.handle_message("PUT session=1 tbl=users id=u1 name=new")
+        val reply = crashed.handle_message("COMMIT session=1")
+        assert_contains(reply, "code=crashed")
+
+        step("a restarted reader sees the OLD value, and no new key leaked")
+        assert_equal(on_disk(path, "u1"), "old")
+
+    it "crash MID persist leaves the old value on disk and never exposes the temp file":
+        val path = "build/dbdur_crash_mid.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=old")
+        server.handle_message("COMMIT session=1")
+
+        step("kill the process between writing <path>.tmp and renaming it")
+        var crashed = DbServerCapsule.new_with_durability(
+            SdnDatabase.load(path) ?? fresh_store(path),
+            alice_policy(),
+            durability_crash_at(CRASH_MID_PERSIST)
+        )
+        crashed.handle_message("OPEN as=alice")
+        crashed.handle_message("BEGIN session=1")
+        crashed.handle_message("PUT session=1 tbl=users id=u1 name=new")
+        assert_contains(crashed.handle_message("COMMIT session=1"), "code=crashed")
+
+        step("the torn bytes exist, but only under the temp name")
+        assert_true(temp_path_exists(path))
+        step("the database file itself is intact and still holds the OLD value")
+        assert_true(durable_file_loads(path))
+        assert_equal(on_disk(path, "u1"), "old")
+        file_delete(path + ".tmp")
+
+    it "crash AFTER persist but before the acknowledgement leaves the NEW value on disk":
+        val path = "build/dbdur_crash_after.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=old")
+        server.handle_message("COMMIT session=1")
+
+        step("kill the process after the rename, before OK reaches the client")
+        var crashed = DbServerCapsule.new_with_durability(
+            SdnDatabase.load(path) ?? fresh_store(path),
+            alice_policy(),
+            durability_crash_at(CRASH_AFTER_PERSIST)
+        )
+        crashed.handle_message("OPEN as=alice")
+        crashed.handle_message("BEGIN session=1")
+        crashed.handle_message("PUT session=1 tbl=users id=u1 name=new")
+        step("the client is never acknowledged")
+        assert_contains(crashed.handle_message("COMMIT session=1"), "code=crashed")
+
+        step("yet the write IS permanent — this is the at-least-once gap")
+        assert_equal(on_disk(path, "u1"), "new")
+
+    it "a recoverable persist failure rolls memory back to the last durable state":
+        val path = "build/dbdur_persist_fail.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=old")
+        server.handle_message("COMMIT session=1")
+
+        step("save() fails but the process keeps running")
+        var failing = DbServerCapsule.new_with_durability(
+            SdnDatabase.load(path) ?? fresh_store(path),
+            alice_policy(),
+            durability_crash_at(CRASH_PERSIST_FAILS)
+        )
+        failing.handle_message("OPEN as=alice")
+        failing.handle_message("BEGIN session=1")
+        failing.handle_message("PUT session=1 tbl=users id=u1 name=new")
+        val reply = failing.handle_message("COMMIT session=1")
+        step("the client is told the commit did NOT happen")
+        assert_contains(reply, "code=durability")
+
+        step("disk still holds the old value")
+        assert_equal(on_disk(path, "u1"), "old")
+        step("and the live server's memory agrees with disk — no split brain")
+        failing.handle_message("BEGIN session=1")
+        assert_equal(
+            failing.handle_message("GET session=1 tbl=users id=u1 col=name"),
+            "OK value=old"
+        )
+
+    it "rolls an insert back out of memory when the persist fails":
+        val path = "build/dbdur_persist_fail_insert.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=old")
+        server.handle_message("COMMIT session=1")
+
+        var failing = DbServerCapsule.new_with_durability(
+            SdnDatabase.load(path) ?? fresh_store(path),
+            alice_policy(),
+            durability_crash_at(CRASH_PERSIST_FAILS)
+        )
+        failing.handle_message("OPEN as=alice")
+        failing.handle_message("BEGIN session=1")
+        failing.handle_message("PUT session=1 tbl=users id=ghost name=phantom")
+        assert_contains(failing.handle_message("COMMIT session=1"), "code=durability")
+
+        step("the row that only ever existed in the failed commit is gone")
+        failing.handle_message("BEGIN session=1")
+        assert_contains(
+            failing.handle_message("GET session=1 tbl=users id=ghost col=name"),
+            "code=not_found"
+        )
+        assert_equal(on_disk(path, "ghost"), ABSENT)
+
+    it "refuses a torn database file instead of parsing half of it":
+        val path = "build/dbdur_torn.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=old")
+        server.handle_message("COMMIT session=1")
+        assert_true(durable_file_loads(path))
+
+        step("simulate a torn file reaching <path> despite the rename design")
+        file_write(path, "#sdn-crc32:12345\nusers |id, name, valid|\n    u1, ha")
+        step("the crc32 header makes the reader fail closed, not read a mixture")
+        assert_false(durable_file_loads(path))
+        assert_equal(on_disk(path, "u1"), ABSENT)
+        scrub(path)
+
+# ============================================================================
+# @manual_section Increment 1 guarantees survive the durable rewrite
+#
+# `sys_commit` was rewritten to persist before acknowledging.  These two
+# scenarios re-check the properties that rewrite could plausibly have broken:
+# the optimistic conflict check, and transaction isolation between peers.
+# ============================================================================
+
+describe "DB durability — the transaction guarantees are unchanged":
+
+    it "still refuses a conflicting commit, and persists nothing when it does":
+        val path = "build/dbdur_conflict.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=first")
+        server.handle_message("BEGIN session=2")
+        server.handle_message("PUT session=2 tbl=users id=u1 name=second")
+        assert_equal(server.handle_message("COMMIT session=1"), "OK applied=1")
+        step("session 2 observed a version that session 1 has since moved")
+        assert_contains(server.handle_message("COMMIT session=2"), "code=conflict")
+        step("only the winner is on disk")
+        assert_equal(on_disk(path, "u1"), "first")
+
+    it "still hides an uncommitted write from a peer, on disk as well as in memory":
+        val path = "build/dbdur_isolation.sdn"
+        var server = DbServerCapsule.new_with_durability(
+            fresh_store(path), alice_policy(), durability_on()
+        )
+        server.handle_message("OPEN as=alice")
+        server.handle_message("OPEN as=alice")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=private")
+        step("the peer sees nothing before COMMIT")
+        assert_contains(
+            server.handle_message("GET session=2 tbl=users id=u1 col=name"),
+            "code=not_found"
+        )
+        assert_equal(on_disk(path, "u1"), ABSENT)
+        step("and everything after it")
+        assert_equal(server.handle_message("COMMIT session=1"), "OK applied=1")
+        assert_equal(
+            server.handle_message("GET session=2 tbl=users id=u1 col=name"),
+            "OK value=private"
+        )
+        assert_equal(on_disk(path, "u1"), "private")
+
+# ============================================================================
+# @manual_section Durability is reported, never assumed
+# ============================================================================
+
+describe "DB durability — the contract is explicit about what it did":
+
+    it "reports a pathless store as in-memory only rather than as durable":
+        var db = SdnDatabase.new("")
+        db.set_table("users", SdnTable.new("users", ["id", "name", "valid"]))
+        var state: TxnState = begin_txn()
+        state = txn_record(state, TxnWrite(
+            table: "users", key: "u1", kind: WRITE_PUT,
+            fields: {"name": "ephemeral"}, base_version: -1
+        ))
+        val outcome: DurableOutcome = durable_commit(db, state, durability_on())
+        assert_true(outcome.ok)
+        assert_equal(outcome.applied, 1)
+        step("it committed, and it says plainly that nothing was persisted")
+        assert_false(outcome.persisted)
+
+    it "reports a durable commit as persisted":
+        val path = "build/dbdur_flag.sdn"
+        var db = fresh_store(path)
+        var state: TxnState = begin_txn()
+        state = txn_record(state, TxnWrite(
+            table: "users", key: "u1", kind: WRITE_PUT,
+            fields: {"name": "kept"}, base_version: -1
+        ))
+        val outcome: DurableOutcome = durable_commit(db, state, durability_on())
+        assert_true(outcome.ok)
+        assert_true(outcome.persisted)
+        assert_equal(on_disk(path, "u1"), "kept")
+
+    it "does not touch the disk when durability is switched off":
+        val path = "build/dbdur_off.sdn"
+        var db = fresh_store(path)
+        var state: TxnState = begin_txn()
+        state = txn_record(state, TxnWrite(
+            table: "users", key: "u1", kind: WRITE_PUT,
+            fields: {"name": "memory_only"}, base_version: -1
+        ))
+        val outcome: DurableOutcome = durable_commit(db, state, durability_off())
+        assert_true(outcome.ok)
+        assert_false(outcome.persisted)
+        assert_false(file_exists(path))

@@ -3,6 +3,11 @@
 # Maintains a fixed-capacity pool of tagged slots that can be
 # acquired and released by index or tag. Inactive slots are
 # recycled on subsequent acquire calls.
+#
+# Generation contract: slots follow the shared generation-counted handle
+# contract documented on ArenaHandle in src/lib/nogc_sync_mut/storage/arena.spl
+# (live slots start at generation >= 1, reuse bumps the generation, and
+# is_valid(index, generation) rejects stale handles).
 
 # ============================================================================
 # PoolSlot — single slot in the object pool
@@ -55,7 +60,7 @@ impl ObjectPool:
             val new_slot = PoolSlot(
                 value: tag,
                 active: true,
-                generation: 0
+                generation: 1
             )
             self.slots = self.slots.push(new_slot)
             self.active_count = self.active_count + 1
@@ -94,6 +99,27 @@ impl ObjectPool:
         if index >= 0 and index < self.slots.len():
             return self.slots[index].active
         false
+
+    fn generation_of(self, index: i32) -> i64:
+        """Current generation of the slot at index, or 0 for an invalid index.
+
+        0 is never a live generation, so it never validates via is_valid.
+        """
+        if index >= 0 and index < self.slots.len():
+            return self.slots[index].generation
+        0
+
+    fn is_valid(self, index: i32, generation: i64) -> bool:
+        """Check a (index, generation) handle against the current slot state.
+
+        Returns true only when the index is in range, the slot is active, and
+        the generation matches — stale handles from before a release/reuse
+        are rejected.
+        """
+        if index < 0 or index >= self.slots.len():
+            return false
+        val slot = self.slots[index]
+        slot.active and slot.generation == generation
 
     fn count(self) -> i32:
         """Return the number of active slots."""

@@ -54,7 +54,7 @@
   audit misses C paths, and RV32 compat wrappers regress to `ENOSYS`.
 - Windows Vulkan/SIMD, Linux Vulkan/RenderDoc/SIMD, and unavailable QEMU/native
   rows remain explicit prepared-host requests; postponement is not PASS.
-- Electron remains a noncritical corroborating row under TODO317.
+- Electron remains a noncritical postponed wrapper under TODO 583.
 - Merge owner: `/root`; every native/device/QEMU row requires independent
   highest-capability review.
 

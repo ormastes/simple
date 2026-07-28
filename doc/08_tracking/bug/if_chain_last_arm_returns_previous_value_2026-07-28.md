@@ -1,6 +1,10 @@
 # A statement-leading `-`/`+` at the same indent is silently glued to the previous line
 
 **Filed:** 2026-07-28 · **Lane:** IFCHAIN · **Severity:** critical (silent wrong arithmetic)
+**Status:** OPEN (parser fix deferred) — **interim guard LANDED**: lint `LEADOP001`
+(`src/compiler/35.semantics/lint/leading_operator.spl`, Warn) flags the same-indent
+shape. 276 existing sites inventoried in `build/leadop_sites.txt`; escalate the rule
+to Deny once they are converted. Lane state: `.spipe/leading_operator_lint/state.md`.
 **Component:** Rust seed parser (`src/compiler_rust/parser`) — **not** the pure-Simple parser
 **Reported as:** "the last arm of a long single-line `if`-chain returns the PREVIOUS arm's value"
 

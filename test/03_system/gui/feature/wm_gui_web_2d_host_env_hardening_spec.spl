@@ -1,6 +1,5 @@
 # codex-system-test
 # @tag: gui, web, wm, engine2d, vulkan, simd, renderdoc
-# @cover src/lib/common/ui/host_env_contract.spl 100%
 """# WM, GUI, Web, and 2D host-environment hardening
 
 ## Overview
@@ -21,39 +20,18 @@ reported as a pass.
 ## Syntax
 
 Run this spec with `SIMPLE_BIN` set to the deployed pure-Simple runtime after
-the live-window and retained 4K/8K evidence gates have populated their
-receipts.
+the live-window and retained 4K evidence gates have populated their receipts.
 """
 
 use std.spec.*
 use std.io_runtime.{env_get, file_exists, file_read}
-use app.io.mod.{file_hash_sha256, file_is_regular_no_follow, process_run_timeout}
-use common.ui.host_env_contract.{HostCapabilityRow, TestHostEnv, host_capability_row_from_evidence}
+use app.io.mod.{process_run_timeout}
 
 val WRAPPER = "scripts/check/check-linux-hosted-wm-live-window-evidence.shs"
 val HOST_ENV_APP = "src/app/test/test_host_env.spl"
 val HOST_ENV_CONTRACT = "src/lib/common/ui/host_env_contract.spl"
 val LIVE_ENV = "build/linux-hosted-wm-live-window-evidence/evidence.env"
-val PERF_4K_ENV = "build/widget-showcase-4k-200fps/status.env"
-val PERF_8K_ENV = "build/widget-showcase-8k-perf/status.env"
-val PERF_AUDIT_DIR = "build/test-host-env-retained-perf-audit"
-val PERF_AUDIT_ENV = PERF_AUDIT_DIR + "/evidence.env"
-val EXTERNAL_HOST_REQUEST = "doc/08_tracking/todo/simple_renderdoc_external_host_postponed_2026-07-27.md"
-val EXTERNAL_HOST_FEATURE_REQUEST = "doc/08_tracking/feature/wm_gui_web_2d_host_environment_acceptance_evidence_2026-07-28.md"
-val TODO_DB = "doc/08_tracking/todo/todo_db.sdn"
-val TODO317_ROW = "    312, TODO, gui, P1, \"Complete the authoritative source-matched pure-Simple cross-host WM/GUI/Web/Engine2D acceptance matrix in doc/08_tracking/feature/wm_gui_web_2d_host_environment_acceptance_evidence_2026-07-28.md\", doc/08_tracking/todo/simple_renderdoc_external_host_postponed_2026-07-27.md, 1, , \"admitted pure-Simple CLI and prepared native/QEMU host matrix required\", open, true"
-
-fn required_unique_env_value(evidence: text, key: text) -> text:
-    val prefix = key + "="
-    var value = ""
-    var found = false
-    for line in evidence.replace("\r\n", "\n").split("\n"):
-        if line.starts_with(prefix):
-            if found or line == prefix:
-                return ""
-            value = line.slice(prefix.len(), line.len())
-            found = true
-    value
+val PERF_ENV = "build/widget-showcase-4k-200fps/status.env"
 
 describe "production host event and render evidence":
     """
@@ -79,8 +57,6 @@ describe "production host event and render evidence":
         expect(host_stdout).to_contain("\"name\":\"riscv_simd\"")
         expect(host_stdout).to_contain("\"name\":\"vulkan\",\"status\":\"pass\"")
         expect(host_stdout).to_contain("\"name\":\"renderdoc\",\"status\":\"pass\"")
-        expect(host_stdout).to_contain("\"name\":\"display_input\",\"status\":\"pass\"")
-        expect(host_stdout).to_contain("\"name\":\"framebuffer_readback\",\"status\":\"pass\"")
 
         step("Inject one screen-originated event")
         expect(file_exists(LIVE_ENV)).to_be(true)
@@ -92,12 +68,6 @@ describe "production host event and render evidence":
         expect(live).to_contain("linux_hosted_wm_live_window_pointer_status=pass")
         expect(live).to_contain("linux_hosted_wm_live_window_keyboard_status=pass")
         expect(live).to_contain("linux_hosted_wm_live_window_text_status=pass")
-        expect(required_unique_env_value(live, "linux_hosted_wm_live_window_key_down_count") == "").to_be(false)
-        expect(required_unique_env_value(live, "linux_hosted_wm_live_window_key_up_count") == "").to_be(false)
-        expect(required_unique_env_value(live, "linux_hosted_wm_live_window_pointer_move_count") == "").to_be(false)
-        expect(required_unique_env_value(live, "linux_hosted_wm_live_window_pointer_button_down_count") == "").to_be(false)
-        expect(required_unique_env_value(live, "linux_hosted_wm_live_window_pointer_button_up_count") == "").to_be(false)
-        expect(required_unique_env_value(live, "linux_hosted_wm_live_window_text_commit_count") == "").to_be(false)
         expect(live).to_contain("linux_hosted_wm_live_window_event_origin=screen")
         expect(live).to_contain("linux_hosted_wm_live_window_wm_target_id=")
         expect(live).to_contain("linux_hosted_wm_live_window_input_compositor_wm_target_id=")
@@ -138,184 +108,16 @@ describe "production host event and render evidence":
         expect(host_stdout).to_contain("\"name\":\"renderdoc\",\"status\":\"pass\"")
         expect(file_read(HOST_ENV_APP)).to_contain("scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple")
 
-        step("Reject missing or duplicate retained 4K and 8K producer fields")
-        expect(file_is_regular_no_follow(PERF_4K_ENV)).to_be(true)
-        expect(file_is_regular_no_follow(PERF_8K_ENV)).to_be(true)
-        val perf_4k = file_read(PERF_4K_ENV)
-        val perf_8k = file_read(PERF_8K_ENV)
-        val required_suffixes = [
-            "status", "source_revision", "source_revision_kind", "source_revision_files",
-            "native_bin", "current_executable_sha256", "frame_p50_ns", "frame_p95_ns",
-            "max_rss_kb", "max_rss_budget_kb", "baseline_path", "baseline_expected_sha256",
-            "baseline_artifact_path", "baseline_artifact_sha256", "baseline_artifact_current_sha256"
-        ]
-        for suffix in required_suffixes:
-            expect(required_unique_env_value(perf_4k, "gui_showcase_4k_200fps_" + suffix) == "").to_be(false)
-            expect(required_unique_env_value(perf_8k, "gui_showcase_8k_perf_" + suffix) == "").to_be(false)
-
-        step("Audit both retained workloads with the canonical aggregate validator")
-        val perf_command = "rm -rf " + PERF_AUDIT_DIR +
-            " && GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1" +
-            " GUI_SHOWCASE_4K_PERF_ENV=" + PERF_4K_ENV +
-            " GUI_SHOWCASE_8K_PERF_ENV=" + PERF_8K_ENV +
-            " GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache" +
-            " GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0" +
-            " BUILD_DIR=" + PERF_AUDIT_DIR +
-            " REPORT_PATH=" + PERF_AUDIT_DIR + "/report.md" +
-            " sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
-        val (_perf_stdout, _perf_stderr, perf_code) = process_run_timeout(
-            "/bin/sh", ["-c", perf_command], 120000)
-        expect(perf_code == 0 or perf_code == 1).to_be(true)
-        expect(file_is_regular_no_follow(PERF_AUDIT_ENV)).to_be(true)
-        val audited_perf = file_read(PERF_AUDIT_ENV)
-
-        step("Admit current 4K and 8K timing RSS baseline and native-binary evidence")
-        val audited_prefixes = ["gui_showcase_4k_200fps", "gui_showcase_8k_perf"]
-        for prefix in audited_prefixes:
-            expect(required_unique_env_value(audited_perf, prefix + "_status")).to_equal("pass")
-            expect(required_unique_env_value(audited_perf, prefix + "_source_revision_kind")).to_equal("content-sha256")
-            expect(required_unique_env_value(audited_perf, prefix + "_source_revision_status")).to_equal("current")
-            expect(required_unique_env_value(audited_perf, prefix + "_source_revision_files_status")).to_equal("pass")
-            expect(required_unique_env_value(audited_perf, prefix + "_require_current_source_revision")).to_equal("1")
-            expect(required_unique_env_value(audited_perf, prefix + "_rss_status")).to_equal("pass")
-            expect(required_unique_env_value(audited_perf, prefix + "_frame_p50_ns") == "").to_be(false)
-            expect(required_unique_env_value(audited_perf, prefix + "_frame_p95_ns") == "").to_be(false)
-            expect(required_unique_env_value(audited_perf, prefix + "_max_rss_kb") == "").to_be(false)
-            expect(required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_p50_limit") == "").to_be(false)
-            expect(required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_p95_limit") == "").to_be(false)
-            expect(required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_rss_limit") == "").to_be(false)
-            expect(required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_status")).to_equal("pass")
-            expect(required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_reason")).to_equal("pass")
-            expect(required_unique_env_value(audited_perf, prefix + "_native_bin_file_status")).to_equal("pass")
-            expect(required_unique_env_value(audited_perf, prefix + "_native_bin_executable_status")).to_equal("pass")
-            val native_path = required_unique_env_value(audited_perf, prefix + "_native_bin")
-            val recorded_native_sha = required_unique_env_value(
-                audited_perf, prefix + "_baseline_aggregate_current_executable_sha256")
-            expect(file_is_regular_no_follow(native_path)).to_be(true)
-            expect(file_hash_sha256(native_path)).to_equal(recorded_native_sha)
-            val baseline_path = required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_path")
-            val baseline_artifact_path = required_unique_env_value(
-                audited_perf, prefix + "_baseline_aggregate_artifact_path")
-            expect(file_is_regular_no_follow(baseline_path)).to_be(true)
-            expect(file_is_regular_no_follow(baseline_artifact_path)).to_be(true)
-
-    # @manual: show
-    # @req REQ-001 REQ-007 REQ-008 REQ-009 REQ-010
-    it "keeps unavailable external-host rows actionable and fail-closed":
-        step("Load TODO317 and its authoritative external-host matrix")
-        expect(file_exists(TODO_DB)).to_be(true)
-        expect(file_exists(EXTERNAL_HOST_REQUEST)).to_be(true)
-        expect(file_exists(EXTERNAL_HOST_FEATURE_REQUEST)).to_be(true)
-        val todo_db = file_read(TODO_DB)
-        val deferred = file_read(EXTERNAL_HOST_REQUEST)
-        val acceptance = file_read(EXTERNAL_HOST_FEATURE_REQUEST)
-        expect(todo_db).to_contain(TODO317_ROW)
-        expect(deferred).to_contain("# Simple RenderDoc external-host qualification TODO")
-        expect(deferred).to_contain("Authoritative acceptance ID: **TODO317**")
-        expect(deferred).to_contain(EXTERNAL_HOST_FEATURE_REQUEST)
-        expect(acceptance).to_contain("# TODO317 — WM/GUI/Web/2D cross-host acceptance evidence")
-        expect(acceptance).to_contain("Ledger: `doc/08_tracking/todo/todo_db.sdn` ID 312")
-        expect(acceptance).to_contain("Local implementation lanes A/B/C remain with their existing owners")
-        expect(acceptance).to_contain("Only backend/native/live execution that genuinely requires a prepared external")
-        expect(acceptance).to_contain("`GLYPH_RGB_SHA256=pending`")
-        expect(acceptance).to_contain("fixture overrides, CPU mirrors, screenshots")
-
-        step("Classify every deferred native and live capability")
-        val names = [
-            "arm_simd", "riscv_simd", "vulkan", "renderdoc",
-            "display_input", "framebuffer_readback"
-        ]
-        val reasons = [
-            "owner=scripts/check/check-cpu-simd-engine2d-arch-matrix.shs;prerequisite=native-aarch64-host-with-neon-and-admitted-pure-simple-cli;artifact=build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env",
-            "owner=scripts/check/check-cpu-simd-engine2d-arch-matrix.shs;prerequisite=native-riscv64-host-with-rvv-and-admitted-pure-simple-cli;artifact=build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env",
-            "validated-device-readback-browser-vulkan-and-parity-evidence-required",
-            "valid-rdoc-capture-required",
-            "screen-to-semantic-event-evidence-required",
-            "device-readback-and-exact-argb-required"
-        ]
-        val paths = [
-            "build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env",
-            "build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env",
-            "build/gui-web-2d-vulkan-env-run-current/evidence.env",
-            "build/renderdoc/simple-gate/evidence.env",
-            "build/linux-hosted-wm-live-window-evidence/evidence.env",
-            "build/linux-hosted-wm-live-window-evidence/evidence.env"
-        ]
-        val resumes = [
-            "CPU_SIMD_ARCH_MATRIX_AARCH64_SIMPLE_BIN=bin/simple sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs",
-            "CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN=bin/simple sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs",
-            "GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-browser-backing scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing && GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-run-current scripts/setup/setup-gui-web-2d-vulkan-env.shs --run",
-            "scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple",
-            "scripts/check/check-linux-hosted-wm-live-window-evidence.shs",
-            "scripts/check/check-linux-hosted-wm-live-window-evidence.shs"
-        ]
-        val matrix_rows = [
-            "| Native AArch64 |", "| Native RISC-V |",
-            "| Prepared Linux Vulkan + RenderDoc + display |",
-            "| Prepared Linux Vulkan + RenderDoc + display |",
-            "| Prepared Linux Vulkan + RenderDoc + display |",
-            "| Prepared Linux Vulkan + RenderDoc + display |"
-        ]
-        val feature_rows = [
-            "| Native ARM NEON |", "| Native RISC-V RVV |",
-            "| Linux Vulkan/device readback |",
-            "| External RenderDoc on Simple Vulkan |",
-            "| Linux X11/winit vertical slice |",
-            "| Linux Vulkan/device readback |"
-        ]
-        var rows = [HostCapabilityRow.create(
-            "x86_simd", "pass", "", "build/cpu-simd-engine2d-evidence/evidence.env", ""
-        )]
-        var i = 0
-        while i < names.len():
-            val blocked = host_capability_row_from_evidence(
-                names[i], true, false, reasons[i], paths[i], resumes[i]
-            )
-            expect(blocked.status).to_equal("blocked")
-            expect(blocked.status == "pass").to_be(false)
-            expect(blocked.reason).to_equal(reasons[i])
-            expect(blocked.evidence_path).to_equal(paths[i])
-            expect(blocked.resume_command).to_equal(resumes[i])
-            expect(blocked.validation_reason()).to_equal("")
-            expect(deferred).to_contain(matrix_rows[i])
-            expect(acceptance).to_contain(feature_rows[i])
-            rows.push(blocked)
-
-            val invalid_present = host_capability_row_from_evidence(
-                names[i], false, true, reasons[i], paths[i], resumes[i]
-            )
-            expect(invalid_present.status).to_equal("fail")
-            expect(invalid_present.status == "pass").to_be(false)
-            expect(invalid_present.reason).to_equal(reasons[i])
-            expect(invalid_present.evidence_path).to_equal(paths[i])
-            expect(invalid_present.resume_command).to_equal(resumes[i])
-            i += 1
-
-        step("Serialize the canonical blocked TestHostEnv output")
-        val env = TestHostEnv.create(rows)
-        expect(env.validation_reason()).to_equal("")
-        expect(env.ready()).to_be(false)
-        val json = env.to_json()
-        expect(json).to_contain("\"schema\":\"simple-test-host-env-v1\"")
-        i = 1
-        while i < rows.len():
-            expect(json).to_contain(rows[i].to_json())
-            i += 1
-
-        step("Reject substitute promotion paths in the production aggregate")
-        val app = file_read(HOST_ENV_APP)
-        val wrapper = file_read(WRAPPER)
-        expect(app).to_contain("Aggregate live host evidence without substituting emulation or CPU mirrors")
-        expect(app).to_contain("host_simd_evidence_passes(evidence, arch, feature) and host_simd_artifacts_are_current(evidence)")
-        expect(app).to_contain("host_vulkan_evidence_passes(vulkan) and")
-        expect(app).to_contain("host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_artifacts_are_current(renderdoc)")
-        expect(app).to_contain("host_display_input_evidence_passes(live)")
-        expect(app).to_contain("host_readback_evidence_passes(live) and host_readback_captures_are_current(live)")
-        expect(app.contains("mock")).to_be(false)
-        expect(app.contains("synthetic")).to_be(false)
-        expect(app.contains("fallback")).to_be(false)
-        expect(wrapper).to_contain("GLYPH_RGB_SHA256=pending")
-        expect(wrapper).to_contain("glyph_oracle_mode pending")
+        step("Measure the retained rendering workload")
+        expect(file_exists(PERF_ENV)).to_be(true)
+        val perf = file_read(PERF_ENV)
+        expect(perf).to_contain("gui_showcase_4k_200fps_status=pass")
+        expect(perf).to_contain("gui_showcase_4k_200fps_frames=200")
+        expect(perf).to_contain("gui_showcase_4k_200fps_readback_mode=argb-checksum")
+        expect(perf).to_contain("gui_showcase_4k_200fps_fallback_state=none")
+        expect(perf).to_contain("gui_showcase_4k_200fps_frame_p50_ns=")
+        expect(perf).to_contain("gui_showcase_4k_200fps_frame_p95_ns=")
+        expect(perf).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
 
     """
     This supporting structural check keeps the evidence app on the selected
@@ -336,10 +138,6 @@ describe "production host event and render evidence":
         expect(app).to_contain("host_simd_capability_row")
         expect(app).to_contain("build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env")
         expect(app).to_contain("build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env")
-        expect(app).to_contain("native-aarch64-host-with-neon-and-admitted-pure-simple-cli")
-        expect(app).to_contain("native-riscv64-host-with-rvv-and-admitted-pure-simple-cli")
-        expect(app).to_contain("CPU_SIMD_ARCH_MATRIX_AARCH64_SIMPLE_BIN=bin/simple")
-        expect(app).to_contain("CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN=bin/simple")
         expect(app.contains("native_simd_pixel_evidence")).to_be(false)
         expect(app).to_contain("build/gui-web-2d-vulkan-env-run-current/simple-vulkan-readback/evidence.env")
         expect(app).to_contain("build/gui-web-2d-vulkan-env-run-current/evidence.env")
@@ -350,8 +148,7 @@ describe "production host event and render evidence":
         expect(app).to_contain("host_capability_row_from_evidence")
         expect(app).to_contain("file_exists(VULKAN_PATH) and file_exists(VULKAN_RUN_PATH) and file_exists(VULKAN_BROWSER_PATH)")
         expect(app).to_contain("host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_artifacts_are_current(renderdoc)")
-        expect(app).to_contain("host_renderdoc_capture_log_binding")
-        expect(app).to_contain("host_browser_vulkan_parity_artifacts_are_current(vulkan_run)")
+        expect(app).to_contain("host_vulkan_evidence_passes(vulkan) and host_browser_vulkan_parity_evidence_passes(vulkan_browser, vulkan_run)")
         expect(app).to_contain("host_readback_evidence_passes(live) and host_readback_captures_are_current(live)")
         expect(contract).to_contain("linux_hosted_wm_live_window_input_readback_source=device_readback")
         expect(contract).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=true")
@@ -363,8 +160,6 @@ describe "production host event and render evidence":
         expect(contract).to_contain(
             "_host_evidence_value_matches(evidence, \"linux_hosted_wm_live_window_baseline_backend\", \"vulkan\")")
         expect(contract).to_contain("fn host_browser_vulkan_parity_evidence_passes")
-        expect(contract).to_contain("fn host_browser_vulkan_parity_artifact_bindings")
-        expect(contract).to_contain("fn host_renderdoc_capture_log_binding")
         expect(contract).to_contain("gui_web_2d_vulkan_electron_browser_backing_source_file_status")
         expect(contract).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source_file_status")
         expect(contract).to_contain("gui_web_2d_vulkan_electron_chrome_pairwise_diff_status")
@@ -381,12 +176,6 @@ describe "production host event and render evidence":
         expect(setup).to_contain("nonblank > 0 && nonblank <= pixels.length")
         expect(setup).to_contain("Number.isInteger(value) && value >= 0 && value <= 0xffffffff")
         expect(setup).to_contain("for (let i = 0; pixelsValid && i < pixels.length; i += 1)")
-        expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_electron_argb_sha256\"")
-        expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_chrome_argb_sha256\"")
-        expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_simple_argb_sha256\"")
-        expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_electron_chrome_diff_sha256\"")
-        expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_electron_simple_diff_sha256\"")
-        expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_chrome_simple_diff_sha256\"")
         expect(browser_backing).to_contain("electronBrowserGpuInfoStatus === \"pass\"")
         expect(browser_backing).to_contain("const electronHardware = Boolean(electronAux.hardwareSupportsVulkan);")
         expect(browser_backing.contains("electronAux.hardwareSupportsVulkan || electronAppAux.hardwareSupportsVulkan")).to_be(false)

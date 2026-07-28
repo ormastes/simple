@@ -85,7 +85,6 @@ class HostedWebContentSession:
     failure_reason: text
     last_target_id: text
     pressed_target_id: text
-    published_style_html: text
     published_body_html: text
     started_at_ms: i64
     profile_enabled: bool
@@ -109,6 +108,9 @@ class HostedWebContentSession:
         var failure_reason = ""
         if val Err(reason) = opened:
             failure_reason = reason
+        val published_html = (
+            browser.current_style_html + browser.current_body_html
+        )
         HostedWebContentSession(
             window_id: window_id,
             width: width,
@@ -121,8 +123,7 @@ class HostedWebContentSession:
             failure_reason: failure_reason,
             last_target_id: "",
             pressed_target_id: "",
-            published_style_html: browser.current_style_html,
-            published_body_html: browser.current_body_html,
+            published_body_html: published_html,
             started_at_ms: -1,
             profile_enabled: false,
             chrome_focus: "",
@@ -135,10 +136,6 @@ class HostedWebContentSession:
 
     fn presentation_html() -> text:
         self.browser.current_style_html + self.browser.current_body_html
-
-    me _mark_published():
-        self.published_style_html = self.browser.current_style_html
-        self.published_body_html = self.browser.current_body_html
 
     me _commit_network_error(request: BrowserRequest, message: text):
         val _ = self.browser.commit_network_response(
@@ -241,10 +238,10 @@ class HostedWebContentSession:
             return
         if val Some(request) = self.browser.take_pending_request():
             self.network.set_requester_origin(
-                Origin.from_url(Url.parse(self.browser.document_url)).to_text()
+                Origin.from_url(Url.parse_or_opaque(self.browser.document_url)).to_text()
             )
             val fetch_request = FetchRequest(
-                url: Url.parse(request.url),
+                url: Url.parse_or_opaque(request.url),
                 method: request.method,
                 headers: _hosted_fetch_headers(request),
                 body: rt_text_to_bytes(request.body),
@@ -313,7 +310,7 @@ class HostedWebContentSession:
         self._cancel_orphaned_network_job()
         if result.ok:
             if self.browser.current_body_html != before_body:
-                self._mark_published()
+                self.published_body_html = self.presentation_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
             event_id: event_id,
@@ -382,11 +379,10 @@ class HostedWebContentSession:
             self.started_at_ms = now_ms
         val _ = self.browser.advance_time(now_ms - self.started_at_ms)
         self._pump_network_once()
-        if self.browser.current_style_html == self.published_style_html and (
-            self.browser.current_body_html == self.published_body_html
-        ):
+        val body_html = self.presentation_html()
+        if body_html == self.published_body_html:
             return false
-        self._mark_published()
+        self.published_body_html = body_html
         self.mutation_revision = self.mutation_revision + 1
         true
 
@@ -444,7 +440,7 @@ class HostedWebContentSession:
             self._cancel_orphaned_network_job()
             val changed = self.browser.current_body_html != before
             if changed:
-                self._mark_published()
+                self.published_body_html = self.presentation_html()
                 self.mutation_revision = self.mutation_revision + 1
             return HostedWebContentDispatch(
                 event_id: event_id,
@@ -471,7 +467,7 @@ class HostedWebContentSession:
         self.last_target_id = be_dom_focused_id(self.browser.dom_root())
         val changed = self.browser.current_body_html != before
         if changed:
-            self._mark_published()
+            self.published_body_html = self.presentation_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
             event_id: event_id,
@@ -530,7 +526,7 @@ class HostedWebContentSession:
         self.last_target_id = active_id
         val changed = self.browser.current_body_html != before
         if changed:
-            self._mark_published()
+            self.published_body_html = self.presentation_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
             event_id: event_id,
@@ -618,7 +614,7 @@ class HostedWebContentSession:
         self.last_target_id = active_id
         val changed = self.browser.current_body_html != before
         if changed:
-            self._mark_published()
+            self.published_body_html = self.presentation_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
             event_id: event_id,

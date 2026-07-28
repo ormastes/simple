@@ -96,8 +96,6 @@ Each row has a normal (`N`), edge (`E`), and denial/error (`D`) case.
 - BrowserSession script/history/control specs;
 - Draw IR and Engine2D specs;
 - generic platform TLS and sandbox unit tests.
-- private runtime-TLS identity tests for trusted localhost, hostname mismatch,
-  and an untrusted test CA; these support but do not replace live broker proof.
 
 Supporting evidence is linked from the three production specs but does not
 replace their live assertions.
@@ -115,19 +113,7 @@ structured interaction are not production browser evidence.
   `HOSTED_WM_ARTIFACT_SHA256` from
   `scripts/check/check-linux-hosted-wm-live-window-evidence.shs`. The spec
   hashes the exact native `src/os/hosted/hosted_entry.spl` artifact before
-  launch, and that wrapper runs the focused static HTML/CSS, animation,
-  controls, native-controls/form-submit, Tab/Shift+Tab focus traversal,
-  default-cancellation, Reload/Home,
-  page-link, Favorite,
-  stopped-navigation, unsupported-content, Node/native denial, sandbox,
-  scheme-denial, oversized-protocol denial, crash/timeout containment, and
-  lifecycle scenarios before live-window capture, then release-gates the
-  admitted input-to-present sample.
-  When the full CLI cannot be admitted, provide the source-matched focused
-  executables with `SIMPLE_NATIVE_BUILDER` and `SIMPLE_TEST_RUNNER`; the wrapper
-  requires their matching `*_SHA256` pins, then records and rechecks both hashes.
-  `SIMPLE_BIN` remains the single-CLI fallback.
-  Standalone runs are not artifact admission evidence.
+  launch; it does not accept `bin/simple` or silently substitute a worker.
 - text/HTML/protocol/exec/log/artifact:
   `build/test-artifacts/<spec-relative-path>/`
 - GUI images:

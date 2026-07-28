@@ -54,10 +54,16 @@ fn _run_test(kind: text) -> bool:
         return kind == "skipped"
     kind != "skipped"
 
-fn _write_test_result_evidence():
+fn _write_test_result_evidence(passed: i64, failed: i64):
+    """Persist the running tally.
+
+    Counts are passed in rather than read from test_passed/test_failed: a global
+    write is not visible to callees until the writing function returns, so
+    reading them here recorded the totals from BEFORE the test that just ran —
+    which meant a failing final test could leave false-green evidence behind."""
     val path = rt_env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
     if path != "":
-        val _ = rt_file_write_text(path, "simple-bdd-v1\n{test_passed}\n{test_failed}\n")
+        val _ = rt_file_write_text(path, "simple-bdd-v1\n{passed}\n{failed}\n")
 
 # ================================================================
 # Test Suite Structure
@@ -105,15 +111,20 @@ fn _execute_it(name: text, block: fn()):
         hook()
 
     # Check result via Option pattern
+    var passed = test_passed
+    var failed = test_failed
     if current_test_error == nil:
-        test_passed = test_passed + 1
+        passed = passed + 1
+        test_passed = passed
         print "{indent}  it {name} ... ok"
     else:
-        test_failed = test_failed + 1
+        failed = failed + 1
+        test_failed = failed
         print "{indent}  it {name} ... FAILED"
         print "{indent}    Error: {current_test_error}"
         test_errors.push("{full_name}: {current_test_error}")
-    _write_test_result_evidence()
+    # global write is not visible to callees until return — pass the tallies
+    _write_test_result_evidence(passed, failed)
 
 pub fn it(name: text, block: fn()):
     if not _run_test("normal"):

@@ -31,7 +31,7 @@ struct VectorizedLoop:
 
 fn create_vector_loop(
     ctx: VectorizeContext,
-    loop: LoopInfo,
+    loop_info: LoopInfo,
     body_blocks: [MirBlock]
 ) -> VectorizedLoop:
     """
@@ -39,33 +39,33 @@ fn create_vector_loop(
     Returns complete vectorized loop structure with prologue, body, and epilogue.
     """
     # Generate prologue (alignment and peeling)
-    val prologue = generate_prologue(ctx, loop)
+    val prologue = generate_prologue(ctx, loop_info)
 
     # Generate vectorized body
-    val vector_body = generate_vector_body(ctx, loop, body_blocks)
+    val vector_body = generate_vector_body(ctx, loop_info, body_blocks)
 
     # Emit optimization plugin metadata event.
     # kernel_id uses the loop header block id as a stable identifier.
     # changed = true because create_vector_loop is only called when vectorization
     # was decided (cost model approved it in auto_vectorize_cost.spl).
-    val kernel_id = "loop_bb{loop.header_block.id}"
+    val kernel_id = "loop_bb{loop_info.header_block.id}"
     plugin_hook_vectorize_event(kernel_id, true)
 
     # Generate epilogue (remainder loop)
-    val epilogue = generate_epilogue(ctx, loop, body_blocks)
+    val epilogue = generate_epilogue(ctx, loop_info, body_blocks)
 
     VectorizedLoop(
         prologue_blocks: prologue,
         vector_blocks: vector_body,
         epilogue_blocks: epilogue,
-        original_loop: loop
+        original_loop: loop_info
     )
 
 # ============================================================================
 # Prologue Generation
 # ============================================================================
 
-fn generate_prologue(ctx: VectorizeContext, loop: LoopInfo) -> [MirBlock]:
+fn generate_prologue(ctx: VectorizeContext, loop_info: LoopInfo) -> [MirBlock]:
     """
     Generate prologue code:
     - Alignment checks
@@ -78,16 +78,16 @@ fn generate_prologue(ctx: VectorizeContext, loop: LoopInfo) -> [MirBlock]:
     var blocks: [MirBlock] = []
 
     # Create alignment check block
-    val align_block = create_alignment_check_block(ctx, loop)
+    val align_block = create_alignment_check_block(ctx, loop_info)
     blocks.push(align_block)
 
     # Create peeling iterations block (if needed); no body clone available here.
-    val peel_block = create_peeling_block(ctx, loop, [])
+    val peel_block = create_peeling_block(ctx, loop_info, [])
     blocks.push(peel_block)
 
     blocks
 
-fn create_alignment_check_block(ctx: VectorizeContext, loop: LoopInfo) -> MirBlock:
+fn create_alignment_check_block(ctx: VectorizeContext, loop_info: LoopInfo) -> MirBlock:
     """
     Create block that computes mismatch = (end - start) % chunk_width at runtime
     and branches: if mismatch == 0 → vector loop (next_local+2); else → peeling block
@@ -117,8 +117,8 @@ fn create_alignment_check_block(ctx: VectorizeContext, loop: LoopInfo) -> MirBlo
     val mismatch_dest = LocalId(id: ctx.next_local + 101)
 
     # Operands: loop bounds and chunk width come from LoopInfo / VectorizeContext
-    val end_op   = MirOperand(kind: MirOperandKind.Const("i64", "{loop.end_value}"))
-    val start_op = MirOperand(kind: MirOperandKind.Const("i64", "{loop.start_value}"))
+    val end_op   = MirOperand(kind: MirOperandKind.Const("i64", "{loop_info.end_value}"))
+    val start_op = MirOperand(kind: MirOperandKind.Const("i64", "{loop_info.start_value}"))
     val vf_op    = MirOperand(kind: MirOperandKind.Const("i64", "{ctx.vector_width}"))
 
     # %range = end - start
@@ -149,7 +149,7 @@ fn create_alignment_check_block(ctx: VectorizeContext, loop: LoopInfo) -> MirBlo
         terminator:   terminator
     )
 
-fn create_peeling_block(ctx: VectorizeContext, loop: LoopInfo, body_blocks: [MirBlock]) -> MirBlock:
+fn create_peeling_block(ctx: VectorizeContext, loop_info: LoopInfo, body_blocks: [MirBlock]) -> MirBlock:
     """
     Create scalar-fixup peeling block that runs the loop body for the misaligned
     suffix (remainder iterations after the vector loop).
@@ -182,7 +182,7 @@ fn create_peeling_block(ctx: VectorizeContext, loop: LoopInfo, body_blocks: [Mir
 
     # Compute static mismatch: how many scalar iterations remain after vector loop.
     # mismatch > 0 only when loop.end_value > 0 and end_value % vector_width != 0.
-    val mismatch = if loop.end_value > 0: loop.end_value % ctx.vector_width else: 0
+    val mismatch = if loop_info.end_value > 0: loop_info.end_value % ctx.vector_width else: 0
 
     val has_body = body_blocks.len() > 0
 
@@ -222,7 +222,7 @@ fn create_peeling_block(ctx: VectorizeContext, loop: LoopInfo, body_blocks: [Mir
 # Vector Body Generation
 # ============================================================================
 
-fn generate_vector_body(ctx: VectorizeContext, loop: LoopInfo, body_blocks: [MirBlock]) -> [MirBlock]:
+fn generate_vector_body(ctx: VectorizeContext, loop_info: LoopInfo, body_blocks: [MirBlock]) -> [MirBlock]:
     """
     Generate vectorized loop body.
     Replaces scalar operations with SIMD equivalents.
@@ -254,7 +254,7 @@ fn generate_vector_body(ctx: VectorizeContext, loop: LoopInfo, body_blocks: [Mir
 # Epilogue Generation
 # ============================================================================
 
-fn generate_epilogue(ctx: VectorizeContext, loop: LoopInfo, body_blocks: [MirBlock]) -> [MirBlock]:
+fn generate_epilogue(ctx: VectorizeContext, loop_info: LoopInfo, body_blocks: [MirBlock]) -> [MirBlock]:
     """
     Generate epilogue (remainder loop).
     Handles last few iterations when trip count not multiple of vector width.

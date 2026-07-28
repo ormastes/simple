@@ -50,12 +50,3 @@ The Linux production slice is accepted only when its real input, semantic
 dispatch, canonical rendering, and framebuffer receipt correlate in one run.
 The umbrella goal remains incomplete while required ARM, RISC-V, Vulkan, or
 RenderDoc native rows lack fresh evidence.
-
-Local implementation blockers are not postponed acceptance evidence. Before
-TODO317 qualification begins, the shared owners must complete: (A) the strict
-RenderDoc producer/replay/classifier identity join, (B) the target-owned
-x86_64/AArch64/RV64 per-operation SIMD-to-BRR1 producers and host join, and (C)
-the detailed command/pipeline/shader/resource/transition snapshot. TODO317 owns
-only reviewed glyph calibration and admitted pure-Simple native/live-host
-evidence. It cannot waive A/B/C or convert their absence into `blocked` host
-rows.

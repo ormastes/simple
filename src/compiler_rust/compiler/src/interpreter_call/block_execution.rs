@@ -148,17 +148,20 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         Value::Tuple(t) => Ok(t.clone()),
         Value::Str(s) => Ok(s.chars().map(|c| Value::text(c.to_string())).collect()),
         Value::Generator(gen) => Ok(gen.collect_remaining()),
+        // Sorted-by-key canonical order, matching `keys()`/`values()`/`entries()`
+        // and `interpreter_helpers::collections` -- module-scope and
+        // function-body for-loops must agree on dict iteration order.
         Value::FrozenDict(map) => {
-            let entries: Vec<Value> = map
-                .iter()
+            let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
+                .into_iter()
                 .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
                 .collect();
             Ok(entries)
         }
         Value::Dict(map) => {
             // Iterate over dict returns (key, value) tuples
-            let entries: Vec<Value> = map
-                .iter()
+            let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
+                .into_iter()
                 .map(|(k, v)| Value::Tuple(vec![Value::text(k.clone()), v.clone()]))
                 .collect();
             Ok(entries)

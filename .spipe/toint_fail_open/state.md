@@ -90,7 +90,25 @@ compiler trees, so it was NOT patched (step-5 rule). Instead:
 
 ## Verification
 
-- `test/01_unit/lib/common/convert_fail_closed_spec.spl` — **14 examples, 0 failures.**
+All spec verdicts below come from **`bin/simple run <spec>`**, which executes
+the sspec and prints the per-describe `N examples, M failures` lines.
+
+> **Runner caveat — `bin/simple test` NEVER produced a verdict.**
+> `bin/simple test test/01_unit/lib/common/convert_fail_closed_spec.spl` was
+> run twice, both times with a definitive non-result:
+>   1. **Exited 0** after printing only unrelated lint warnings from
+>      `test_runner_types.spl` — **zero examples, no `N examples, M failures`
+>      line at all.** A silent false-green: exit 0 with nothing executed.
+>   2. Re-run against the final spec: **killed at the 900 s timeout with a
+>      0-byte output file** — no verdict, no examples, no progress.
+>
+> Do NOT read an exit-0 from `bin/simple test` on this spec as a pass. This
+> looks like the same family as the already-filed
+> `doc/08_tracking/bug/test_level_filters_never_match_numbered_trees_2026-07-27.md`
+> (another lane). The `bin/simple run` verdicts below are the load-bearing
+> ones, and they are the only executed evidence in this lane.
+
+- `test/01_unit/lib/common/convert_fail_closed_spec.spl` — **14 examples, 0 failures** (`bin/simple run`).
 - Deliberate red: changed `try_parse_int`'s `return nil` to `return 0` (the
   fail-open regression) → **14 examples, 6 failures**, including
   "must not admit a non-numeric session id as session 0". Reverted, green again.

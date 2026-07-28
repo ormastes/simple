@@ -125,7 +125,43 @@ fn _parse_literal(v: text) -> DbValue:
     if _is_numeric_text(v):
         val n = v.to_int() ?? 0
         return DbValue.Integer(value: n)
+    # A decimal literal such as 2.5 is a REAL, not a string. _is_numeric_text
+    # accepts only [-]?[0-9]+, so without this branch every REAL literal was
+    # stored as TEXT and all numeric comparisons on it degraded to
+    # lexicographic string ordering.
+    if _is_real_text(v):
+        return DbValue.Real(value: v.to_float() ?? 0.0)
     DbValue.Text(value: v)
+
+# Accepts [-]?<digits>.<digits> — a decimal literal with digits on both sides.
+# Deliberately narrower than a full float grammar (no exponent form) so that
+# nothing which is not unambiguously numeric is reclassified away from TEXT.
+fn _is_real_text(v: text) -> bool:
+    if v.len() == 0:
+        return false
+    var i: i64 = 0
+    if v.char_at(0) == "-":
+        if v.len() == 1:
+            return false
+        i = 1
+    var digits_before: i64 = 0
+    while i < v.len() and v.char_at(i) >= "0" and v.char_at(i) <= "9":
+        digits_before = digits_before + 1
+        i = i + 1
+    if digits_before == 0:
+        return false
+    if i >= v.len():
+        return false
+    if v.char_at(i) != ".":
+        return false
+    i = i + 1
+    var digits_after: i64 = 0
+    while i < v.len() and v.char_at(i) >= "0" and v.char_at(i) <= "9":
+        digits_after = digits_after + 1
+        i = i + 1
+    if digits_after == 0:
+        return false
+    i >= v.len()
 
 fn _is_numeric_text(v: text) -> bool:
     if v.len() == 0:
@@ -150,6 +186,11 @@ fn _dbval_eq(a: DbValue, b: DbValue) -> bool:
         return false
     if _dbval_is_int(a) and _dbval_is_int(b):
         return _dbval_as_i64(a) == _dbval_as_i64(b)
+    # A Real on either side must still compare NUMERICALLY. Falling through to
+    # to_text() here made 5.0 = 5 false and made every REAL/INTEGER comparison
+    # lexicographic ("2.5" > "10" is true as text, false as numbers).
+    if _dbval_is_num(a) and _dbval_is_num(b):
+        return _dbval_as_f64(a) == _dbval_as_f64(b)
     a.to_text() == b.to_text()
 
 fn _check_pk_eq_operands(left: SqlExpr, right: SqlExpr, col_names: [text], pk_ci: i32) -> text:
@@ -531,6 +572,20 @@ fn _dbval_as_i64(v: DbValue) -> i64:
         DbValue.Integer(value): value
         _: 0
 
+# True for any numeric cell (INTEGER or REAL). Used to keep mixed-type
+# comparisons on the numeric path instead of the lexicographic fallback.
+fn _dbval_is_num(v: DbValue) -> bool:
+    match v:
+        DbValue.Integer(_): true
+        DbValue.Real(_): true
+        _: false
+
+fn _dbval_as_f64(v: DbValue) -> f64:
+    match v:
+        DbValue.Integer(value): value as f64
+        DbValue.Real(value): value
+        _: 0.0
+
 fn _dbval_cmp(a: DbValue, b: DbValue) -> i64:
     if _dbval_is_int(a) and _dbval_is_int(b):
         val ai = _dbval_as_i64(a)
@@ -538,6 +593,17 @@ fn _dbval_cmp(a: DbValue, b: DbValue) -> i64:
         if ai > bi:
             return 1
         if ai < bi:
+            return -1
+        return 0
+    # Mixed INTEGER/REAL (or REAL/REAL) must compare numerically. Without this
+    # branch ORDER BY, MIN/MAX, BETWEEN and every range WHERE on a REAL column
+    # fell back to lexicographic text ordering.
+    if _dbval_is_num(a) and _dbval_is_num(b):
+        val af = _dbval_as_f64(a)
+        val bf = _dbval_as_f64(b)
+        if af > bf:
+            return 1
+        if af < bf:
             return -1
         return 0
     val at = a.to_text()
@@ -729,6 +795,9 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
         val uval = _eval_expr(expr.left, cols, vals, params)
         val uop = expr.value.to_upper()
         if uop == "NOT":
+            # NOT UNKNOWN is UNKNOWN, not TRUE.
+            if uval.is_null():
+                return DbValue.Null
             return DbValue.Bool(value: not _dbval_truthy(uval))
         if uop == "-":
             match uval:
@@ -905,7 +974,41 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
         return DbValue.Text(value: "*")
     DbValue.Null
 
+# True when every visible cell of column `ci` is INTEGER or NULL.
+# The integer range/single-bound fast paths compare with _dbval_as_i64, which
+# silently reads a REAL (or TEXT) cell as 0 — so on a REAL column they answered
+# `WHERE amount > 10` with zero rows. NULL is permitted because a NULL cell
+# never satisfies a comparison and the scan skips it explicitly.
+fn _typed_col_int_scannable(typed: [[DbValue]], vis: [bool], n_tuples: i32, ci: i32) -> bool:
+    var ri: i32 = 0
+    while ri < n_tuples:
+        if vis[ri]:
+            val rv = typed[ri]
+            if ci < rv.len() as i32:
+                val cell = rv[ci]
+                if not _dbval_is_int(cell) and not cell.is_null():
+                    return false
+        ri = ri + 1
+    true
+
+# Comparison operators subject to SQL three-valued logic. AND/OR are excluded
+# on purpose: Kleene AND/OR over a NULL comparand already yields the correct
+# WHERE outcome via _dbval_truthy(Null) == false.
+fn _is_cmp_op(op: text) -> bool:
+    if op == "=" or op == "!=" or op == "<>":
+        return true
+    if op == ">" or op == "<" or op == ">=" or op == "<=":
+        return true
+    op == "LIKE"
+
 fn _apply_binop(op: text, a: DbValue, b: DbValue) -> DbValue:
+    # SQL three-valued logic: a comparison with a NULL operand is UNKNOWN, not
+    # TRUE/FALSE. Returning Bool here made `WHERE col = NULL` match the NULL
+    # rows (real SQL matches none) and made `WHERE col != 'x'` return NULL rows.
+    # `_dbval_truthy(Null)` is already false, so returning Null filters the row
+    # out of WHERE while keeping IS NULL / IS NOT NULL as the only NULL tests.
+    if _is_cmp_op(op) and (a.is_null() or b.is_null()):
+        return DbValue.Null
     if op == "=":
         return DbValue.Bool(value: _dbval_eq(a, b))
     if op == "AND":
@@ -976,6 +1079,9 @@ fn _eval_expr_fast(expr: SqlExpr, cm: Dict<text, i32>, vals: [DbValue], params: 
         val uval = _eval_expr_fast(expr.left, cm, vals, params)
         val uop = expr.value.to_upper()
         if uop == "NOT":
+            # NOT UNKNOWN is UNKNOWN, not TRUE.
+            if uval.is_null():
+                return DbValue.Null
             return DbValue.Bool(value: not _dbval_truthy(uval))
         if uop == "-":
             match uval:
@@ -1320,22 +1426,30 @@ fn _agg_col_name(expr: SqlExpr) -> text:
 
 # ── DROP TABLE parser ────────────────────────────────────────────────────────
 
-fn _parse_drop_table(sql: text) -> text:
+# Returns [if_exists, table_name]; [] if not a DROP TABLE statement.
+fn _parse_drop_table(sql: text) -> [text]:
     val trimmed = sql.trim()
     val upper = trimmed.to_upper()
     if not upper.starts_with("DROP TABLE"):
-        return ""
+        return []
     var rest = trimmed.slice(10, trimmed.len()).trim()
     val rest_up = rest.to_upper()
+    var if_exists = "false"
     if rest_up.starts_with("IF EXISTS"):
+        if_exists = "true"
         rest = rest.slice(9, rest.len()).trim()
     # Strip trailing semicolon
     if rest.ends_with(";"):
         rest = rest.slice(0, rest.len() - 1).trim()
-    rest
+    if rest == "":
+        return []
+    var out: [text] = []
+    out.push(if_exists)
+    out.push(rest)
+    out
 
 # ── CREATE INDEX parser ──────────────────────────────────────────────────────
-# Returns [is_unique, index_name, table_name, col1, col2, ...]
+# Returns [is_unique, if_not_exists, index_name, table_name, col1, col2, ...]
 # Returns [] if not a CREATE INDEX statement.
 
 fn _parse_create_index(sql: text) -> [text]:
@@ -1355,6 +1469,11 @@ fn _parse_create_index(sql: text) -> [text]:
     # Strip trailing semicolon from rest too
     if rest.ends_with(";"):
         rest = rest.slice(0, rest.len() - 1).trim()
+    # Optional IF NOT EXISTS guard, e.g. "CREATE INDEX IF NOT EXISTS i ON t (c)"
+    var if_not_exists = "false"
+    if rest.to_upper().starts_with("IF NOT EXISTS"):
+        if_not_exists = "true"
+        rest = rest.slice(13, rest.len()).trim()
     # rest = "idx_name ON table (col1, col2)"
     val parts = rest.split(" ")
     if parts.len() < 3:
@@ -1386,6 +1505,7 @@ fn _parse_create_index(sql: text) -> [text]:
     val col_parts = cols_str.split(",")
     var result: [text] = []
     result.push(is_unique)
+    result.push(if_not_exists)
     result.push(idx_name)
     result.push(tbl_name)
     var ci: i32 = 0
@@ -1398,15 +1518,25 @@ fn _parse_create_index(sql: text) -> [text]:
 
 # ── DROP INDEX parser ───────────────────────────────────────────────────────
 
-fn _parse_drop_index(sql: text) -> text:
+# Returns [if_exists, index_name]; [] if not a DROP INDEX statement.
+fn _parse_drop_index(sql: text) -> [text]:
     val trimmed = sql.trim()
     val upper = trimmed.to_upper()
     if not upper.starts_with("DROP INDEX"):
-        return ""
+        return []
     var rest = trimmed.slice(10, trimmed.len()).trim()
     if rest.ends_with(";"):
         rest = rest.slice(0, rest.len() - 1).trim()
-    rest
+    var if_exists = "false"
+    if rest.to_upper().starts_with("IF EXISTS"):
+        if_exists = "true"
+        rest = rest.slice(9, rest.len()).trim()
+    if rest == "":
+        return []
+    var out: [text] = []
+    out.push(if_exists)
+    out.push(rest)
+    out
 
 fn _parse_txn_command(sql: text) -> text:
     val trimmed = sql.trim()

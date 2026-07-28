@@ -2,6 +2,7 @@
 # Path utilities, header handling, logging, and other helpers
 
 use nogc_async_mut.platform.{normalize_path, join_path}
+use std.convert (try_parse_int)
 
 # =============================================================================
 # Path Utilities
@@ -87,9 +88,26 @@ fn parse_range_header(range: text) -> (i64, i64):
             var end_start = dash_idx + 1
             var end_str = range_part.substring(end_start, range_part.length())
 
-            start = start_str.to_int() ?? 0
+            # Fail-CLOSED: a malformed Range must be IGNORED (serve the whole
+            # entity, per RFC 9110), not coerced to 0. `.to_int() ?? 0` /
+            # `?? -1` could never fire -- `.to_int()` is typed `i64?` but its
+            # runtime returns a plain int64_t and cannot produce nil, so
+            # "bytes=abc-def" silently became "bytes=0-0".
+            val parsed_start = try_parse_int(start_str)
+            if parsed_start == nil:
+                return (0, -1)
+            val ps: i64 = parsed_start ?? -1
+            if ps < 0:
+                return (0, -1)
+            start = ps
             if end_str.length() > 0:
-                end = end_str.to_int() ?? -1
+                val parsed_end = try_parse_int(end_str)
+                if parsed_end == nil:
+                    return (0, -1)
+                val pe: i64 = parsed_end ?? -1
+                if pe < 0:
+                    return (0, -1)
+                end = pe
 
 
     (start, end)

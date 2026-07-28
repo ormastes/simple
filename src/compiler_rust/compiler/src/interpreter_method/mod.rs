@@ -1786,6 +1786,26 @@ pub(crate) fn evaluate_method_call_with_self_update(
         "merge",
         "delete",
     ];
+    // `pop` is the ONE mutator in the list above whose expression result is not the
+    // mutated receiver: it yields the popped ELEMENT (see the contract cited in
+    // interpreter_method/collections.rs). The same-discriminant test below therefore
+    // cannot recover the write-back value for it — `Int` vs `Array` never matches, so
+    // it would compute `updated_self = None` and SILENTLY DROP the mutation for every
+    // field/index/deep place (`self.gray_stack.pop()` in src/lib/nogc_sync_mut/gc.spl,
+    // `self.connections.pop()` in src/lib/nogc_sync_mut/redis/pool.spl). Derive the
+    // trimmed receiver from `recv_val` directly instead. Popping an empty array is a
+    // no-op, so it needs no write-back.
+    if method == "pop" {
+        if let Value::Array(arr) = &recv_val {
+            if arr.is_empty() {
+                return Ok((result, None));
+            }
+            let mut trimmed = arr.as_ref().clone();
+            trimmed.pop();
+            return Ok((result, Some(Value::array(trimmed))));
+        }
+    }
+
     let updated_self =
         if MUTATING_METHODS.contains(&method) && std::mem::discriminant(&result) == std::mem::discriminant(&recv_val) {
             Some(result.clone())

@@ -1081,23 +1081,18 @@ Tracking split:
   admission requires `wm-composite` plus a positive Web content-image count.
   Focused structural and mutation specs were updated; no live host PASS is
   claimed while the admitted pure-Simple runner remains unavailable.
-- coverage-denominator-gap: The pure-Simple compiler now emits a deterministic
-  zero-count decision/condition inventory before execution, including untouched
-  sites and valid header-only inventories for branchless sources. Authored
-  for-loops and match arms are included; each selected match body records one
-  true plus N-1 false arm outcomes while generated match/wrapper mechanics are
-  excluded and the original dispatch remains unchanged. Wrapper probes retain
-  the authored source path. The runner merges runtime outcomes onto that inventory, closing
-  the false-100% denominator gap in code; 98-100% proof remains unclaimed until
-  an admitted source-matched pure-Simple runner executes the focused specs.
+- coverage-denominator-gap: Review confirmed the runtime aggregate contains
+  only decision sites that emitted rows; completely untouched functions can be
+  absent while the report says 100%. TODO594 requires a compiler-owned
+  zero/zero decision manifest. Current thresholds are documented as
+  observed-decision outcome coverage and are not accepted as the requested
+  98-100% full source-coverage proof.
 - coverage-manifest-runner-groundwork: The parent runner now has a strict
   compiler-manifest ingestion boundary that accepts only zero/zero SDN table
   rows, pre-registers untouched decisions, and merges later runtime outcomes
-  onto the same key. Focused scenarios reject positive-count/event input,
-  malformed or duplicate blocks, and accept a strict header-only inventory.
-  Stage4 LLVM and its core-C runtime now own the probe ABI and deterministic
-  SDN dump; static reviews and C selfchecks pass, but no admitted pure-Simple
-  runner was available for the end-to-end execution check.
+  onto the same key. Focused unit scenarios reject positive-count and event
+  input. TODO594 remains open because the pure-Simple compiler does not yet
+  emit the manifest and no admitted pure-Simple runner was available.
 - event-receipt-duplicate-keys: The WM/browser validator parsed production and
   Simple composition evidence with last-write-wins objects, so a leading
   `status=fail` could be hidden by a later pass row. Both receipts now reuse one
@@ -1176,43 +1171,5 @@ Tracking split:
   aggregate pairwise pass are mandatory. Complete and focused mutation fixtures
   plus structural source checks cover the pure classifier; no
   browser/Simple/QEMU run is claimed.
-- browser-parity-artifact-freshness: The Vulkan setup producer now binds all
-  three ARGB JSON files and all three pairwise PPM diff files to portable
-  lowercase SHA-256 values. The pure contract rejects absent, malformed, or
-  duplicate bindings, and `test_host_env` requires every current path to remain
-  a regular no-follow file with matching bytes. Focused fixtures cover all six
-  changed, deleted, and same-byte symlink substitutions; external live browser
-  qualification remains postponed.
-- renderdoc-capture-log-freshness: The shared Simple RenderDoc producer now
-  hashes its retained `rdoc_log`; the gate requires an exact-one nonempty path,
-  regular no-follow file, and matching lowercase SHA-256 before pass. The host
-  aggregate revalidates the gate-bound log with the `.rdc` and replay XML, and
-  focused tests reject changed, deleted, and same-byte symlink log artifacts.
-  The gate also reopens and re-hashes the log after replay, rejecting mutation
-  during inspection rather than publishing a stale PASS.
-  The gate output emits replay XML byte size exactly once, with a direct
-  producer-to-duplicate-safe-classifier regression assertion.
-- renderdoc-simple-capture-timeout: The shared `capture-simple` producer now
-  requires a positive `RDOC_CAPTURE_TIMEOUT_SECS`, resolves portable
-  `timeout`/`gtimeout`, retains the command exit, and converts timeout or other
-  nonzero completion to typed fail evidence even when partial `.rdc` bytes
-  exist. A synthetic sleeping `renderdoccmd` fixture covers the owner boundary;
-  no live RenderDoc run is claimed.
-- renderdoc-simple-capture-exit-gate: The gate and host classifier now require
-  exactly one decimal `rdoc_capture_command_exit=0`, with typed missing,
-  duplicate, malformed, and nonzero failures. Synthetic timeout and generic
-  exit-7 fixtures pass through the gate; failed captures remove partial and
-  orphan `.rdc` files. The `gtimeout` fallback was reviewed statically but was
-  not executed, and no live RenderDoc run is claimed.
-- retained-performance-historical-baseline: The canonical 4K/8K producer now
-  requires an explicit immutable v2 baseline and derives its bucket from
-  producer-owned OS/arch/CPU/GPU/driver/compiler/runtime/executable SHA plus
-  fixed warmup/sample/timing fields. Timestamped artifact path/content-SHA
-  provenance is revalidated by both producer and aggregate. It preserves the absolute 200-FPS,
-  5-ms p95, RSS, and output gates while enforcing selected NFR-006 limits of
-  +10% median/p95 and +5% max RSS. The aggregate rereads and hashes the baseline
-  and independently recomputes limits and deltas, so a forged producer PASS
-  cannot hide the 3-ms to 4.8-ms false-green. Focused headless fixtures cover
-  pass, stale/duplicate baseline, resolution/bucket mismatch, median/p95/RSS
-  regression, matching 8K, and
-  forged status; no live 4K/8K, bootstrap, RenderDoc, or QEMU run is claimed.
+  ARGB/diff SHA-256 current-file revalidation remains an explicit producer
+  follow-up because those hash bindings do not exist yet.

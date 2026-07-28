@@ -26,6 +26,7 @@ use std.nogc_sync_mut.io.tcp.*
 # TCP I/O externs
 # ============================================================================
 
+extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_net_close(sock_fd: i64) -> i64
 extern fn rt_net_send_bytes(sock_fd: i64, data: [u8]) -> i64
 extern fn rt_net_recv_bytes(sock_fd: i64, max_len: i64) -> [u8]
@@ -135,7 +136,19 @@ class Tls13ClientConfig:
     client_cert_chain: [[u8]]
     client_pkcs8: [u8]
     client_sig_scheme: u16
+    # Trust anchors for peer-certificate verification. An EMPTY root_store is an
+    # ERROR at handshake time, not a request to skip verification — see
+    # `_CertVerify/peer_policy.spl` for the full rationale.
     root_store: [[u8]]
+    # The single, loudly-named opt-out. `false` (the default) means: verify the
+    # peer's certificate chain, validity period, and hostname, and REFUSE to
+    # connect if any of that cannot be done. `true` disables all three.
+    # `grep -rn insecure_disable_certificate_verification` audits every opt-out.
+    insecure_disable_certificate_verification: bool
+    # Unix seconds used for the notBefore/notAfter check. `-1` (the default)
+    # means "read the system clock at handshake time"; a pinned value is for
+    # tests and for devices with an externally supplied time source.
+    verify_time_unix: i64
     # Optional PSK / session resumption (RFC 8446 §2.2 + §4.2.11).
     # When offered_psk_count > 0 the client offers pre_shared_key + psk_key_exchange_modes
     # extensions. The actual binder MAC is computed at the partial-CH-emit site
@@ -156,6 +169,21 @@ class Tls13Io:
     kind: text
     tcp_fd: i64
     host_stream: TcpStream
+
+fn tls13_verification_time(config: Tls13ClientConfig) -> i64:
+    """Unix seconds to check notBefore/notAfter against.
+
+    A pinned `config.verify_time_unix >= 0` wins. Otherwise the system clock is
+    read; if it is unavailable or implausible (<= 0) this returns -1, which
+    `verify_cert_validity` treats as a REFUSAL rather than a skip. A client with
+    no clock must opt out via `insecure_disable_certificate_verification`.
+    """
+    if config.verify_time_unix >= 0:
+        return config.verify_time_unix
+    val micros = rt_time_now_unix_micros()
+    if micros <= 0:
+        return -1
+    micros / 1000000
 
 fn _tls_debug(msg: text):
     val _unused = msg.len()

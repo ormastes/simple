@@ -1,0 +1,118 @@
+# CPU SIMD Engine2D Evidence
+
+- status: fail
+- reason: simple-bin-forbidden
+- simple_bin: bin/simple
+- simple_bin_source: explicit-env-rust-seed-forbidden
+- simple_bin_status: forbidden
+- canonical source SHA-256:
+- copied source SHA-256:
+- compiler SHA-256:
+- frame receipt SHA-256:
+- arch: unknown
+- feature: unknown
+- execution environment: unknown
+- level: unknown
+- checksum: 0
+- native_simd_executed: unknown
+- native_simd_bit_exact: unknown
+- native_simd_hits: 0
+- provider_hits: 0
+- provider_changes: 0
+- fill expected checksum: 0
+- fill actual checksum: 0
+- fill mismatch count: 0
+- copy expected checksum: 0
+- copy actual checksum: 0
+- copy mismatch count: 0
+- alpha expected checksum: 0
+- alpha actual checksum: 0
+- alpha mismatch count: 0
+- alpha edge expected checksum: 0
+- alpha edge actual checksum: 0
+- alpha edge mismatch count: 0
+- scroll expected checksum: 0
+- scroll actual checksum: 0
+- scroll mismatch count: 0
+- diagram pixel count: 0
+- diagram expected checksum: 0
+- diagram actual checksum: 0
+- diagram mismatch count: 0
+- diagram fill hits: 0
+- diagram copy hits: 0
+- diagram alpha hits: 0
+- diagram blit hits: 0
+- diagram scroll hits: 0
+- facade draw_image clip/mask spec: test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.spl
+- facade draw_image clip/mask status: unknown
+- facade draw_image clip/mask examples: 0
+- facade draw_image clip/mask failures: 0
+- cpu_simd facade draw_image clip/mask status: unknown
+- policy: exact bitmap, no blur, no tolerance
+- blur/tolerance used: false
+- x86_status: unknown
+- arm_status: unknown
+- riscv_status: unknown
+- evidence_log: build/cpu-simd-engine2d-evidence/evidence.log
+- evidence_log_bytes: 0
+- evidence_log_cksum: 0
+
+## Raw Evidence
+- cpu_simd_evidence_status=fail
+- cpu_simd_evidence_reason=simple-bin-forbidden
+- cpu_simd_evidence_simple_bin=bin/simple
+- cpu_simd_evidence_simple_bin_source=explicit-env-rust-seed-forbidden
+- cpu_simd_evidence_simple_bin_status=forbidden
+- cpu_simd_evidence_canonical_source_sha256=
+- cpu_simd_evidence_copied_source_sha256=
+- cpu_simd_evidence_compiler_sha256=
+- cpu_simd_evidence_frame_receipt_sha256=
+- cpu_simd_evidence_arch=unknown
+- cpu_simd_evidence_feature=unknown
+- cpu_simd_evidence_execution_environment=unknown
+- cpu_simd_evidence_level=unknown
+- cpu_simd_evidence_checksum=0
+- cpu_simd_evidence_native_simd_executed=unknown
+- cpu_simd_evidence_native_simd_bit_exact=unknown
+- cpu_simd_evidence_native_simd_hits=0
+- cpu_simd_evidence_provider_hits=0
+- cpu_simd_evidence_provider_changes=0
+- cpu_simd_evidence_fill_expected_checksum=0
+- cpu_simd_evidence_fill_actual_checksum=0
+- cpu_simd_evidence_fill_mismatch_count=
+- cpu_simd_evidence_copy_expected_checksum=0
+- cpu_simd_evidence_copy_actual_checksum=0
+- cpu_simd_evidence_copy_mismatch_count=
+- cpu_simd_evidence_alpha_expected_checksum=0
+- cpu_simd_evidence_alpha_actual_checksum=0
+- cpu_simd_evidence_alpha_mismatch_count=
+- cpu_simd_evidence_alpha_edge_expected_checksum=0
+- cpu_simd_evidence_alpha_edge_actual_checksum=0
+- cpu_simd_evidence_alpha_edge_mismatch_count=
+- cpu_simd_evidence_scroll_expected_checksum=0
+- cpu_simd_evidence_scroll_actual_checksum=0
+- cpu_simd_evidence_scroll_mismatch_count=
+- cpu_simd_evidence_diagram_pixel_count=0
+- cpu_simd_evidence_diagram_expected_checksum=0
+- cpu_simd_evidence_diagram_actual_checksum=0
+- cpu_simd_evidence_diagram_mismatch_count=
+- cpu_simd_evidence_diagram_fill_hits=0
+- cpu_simd_evidence_diagram_copy_hits=0
+- cpu_simd_evidence_diagram_alpha_hits=0
+- cpu_simd_evidence_diagram_blit_hits=0
+- cpu_simd_evidence_diagram_scroll_hits=0
+- cpu_simd_evidence_facade_draw_image_clip_mask_spec=test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.spl
+- cpu_simd_evidence_facade_draw_image_clip_mask_status=unknown
+- cpu_simd_evidence_facade_draw_image_clip_mask_examples=0
+- cpu_simd_evidence_facade_draw_image_clip_mask_failures=0
+- cpu_simd_evidence_cpu_simd_facade_draw_image_clip_mask_status=unknown
+- cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance
+- cpu_simd_evidence_blur_or_tolerance_used=false
+- cpu_simd_evidence_x86_status=unknown
+- cpu_simd_evidence_arm_status=unknown
+- cpu_simd_evidence_riscv_status=unknown
+- cpu_simd_evidence_log=build/cpu-simd-engine2d-evidence/evidence.log
+- cpu_simd_evidence_log_bytes=0
+- cpu_simd_evidence_log_cksum=0
+
+## Evidence Log

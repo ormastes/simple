@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 34 | 34 | 0 | 0 |
+| 33 | 33 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -68,12 +68,6 @@ GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature
    the RenderDoc-specific keys to report pass.
 
 ## Evidence Inputs
-
-The aggregate also requires retained coverage admitted by
-`scripts/check/check-wm-gui-web-2d-coverage-admission.shs`. The gate binds the
-exact executable and coverage report hashes to the current six-owner source
-revision, requires 100% classifier and at least 98% overall decision coverage,
-and rejects missing, duplicate, stale, substituted, or forged evidence.
 
 The aggregate consumes existing evidence from these paths unless overridden by
 environment variables:
@@ -1523,6 +1517,8 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=font
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_font_offload_status=unavailable")
 expect(evidence).to_contain("production_gui_web_renderer_parity_core_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_core_reason=pass")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-renderdoc")
 expect(blocked_gates.contains("production GUI/web parity evidence with live Tauri and Chrome captures")).to_equal(false)
 expect(blocked_gates.contains("production GUI/web font offload readback evidence")).to_equal(true)
 ```
@@ -2466,6 +2462,8 @@ expect(evidence).to_contain("blocked_completion_gate=Simple Vulkan Engine2D Rend
 val electron_required_blocked_gates = _value_of(evidence, "blocked_completion_gates")
 expect(electron_required_blocked_gates).to_contain("Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof")
 expect(electron_required_blocked_gates).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-simple-widget-renderdoc")
 ```
 
 </details>
@@ -2830,33 +2828,14 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_
 expect(evidence).to_contain("blocked_completion_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic")
 expect(evidence).to_contain("blocked_completion_gate_count=8")
 expect(evidence).to_contain("blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-simple-widget-renderdoc")
 ```
 
 </details>
 
 
 </details>
-
-## Scenario: rejects dishonest retained WM GUI web 2D coverage evidence
-
-1. Run `sh scripts/check/check-wm-gui-web-2d-coverage-admission.shs --self-test`.
-2. Require exit code `0`.
-3. Require these exact self-test rows to be `pass`:
-   `wm_gui_web_2d_coverage_self_test_100_98`,
-   `wm_gui_web_2d_coverage_self_test_classifier_99`,
-   `wm_gui_web_2d_coverage_self_test_overall_97`,
-   `wm_gui_web_2d_coverage_self_test_version_missing`,
-   `wm_gui_web_2d_coverage_self_test_condition_summary`,
-   `wm_gui_web_2d_coverage_self_test_substitution`,
-   `wm_gui_web_2d_coverage_self_test_symlink_report`,
-   `wm_gui_web_2d_coverage_self_test_hardlink_exe`,
-   `wm_gui_web_2d_coverage_self_test_missing`,
-   `wm_gui_web_2d_coverage_self_test_duplicate_key`, and
-   `wm_gui_web_2d_coverage_self_test_status`.
-4. Run `WM_GUI_WEB_2D_COVERAGE_FIXTURE=pass sh scripts/check/check-wm-gui-web-2d-coverage-admission.shs`.
-5. Require exit code `1`,
-   `wm_gui_web_2d_coverage_admission_status=fail`, and
-   `wm_gui_web_2d_coverage_admission_reason=coverage-fixture-forbidden-outside-self-test`.
 
 ## Scenario Summary
 

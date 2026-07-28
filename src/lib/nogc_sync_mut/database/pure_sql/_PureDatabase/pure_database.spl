@@ -48,6 +48,8 @@ class PureDatabase:
     _snap_tbl_rowids: [i64]
     _snap_indexes: [[[text]]]
     _snap_index_unique: [[bool]]
+    _snap_tbl_pk_col: [i32]
+    _snap_tbl_pk_name: [text]
     _tbl_typed: [[[DbValue]]]
     _tbl_pk_col: [i32]
     _tbl_pk_map: [Dict<text, i32>]
@@ -97,6 +99,8 @@ class PureDatabase:
             _snap_tbl_rowids: [],
             _snap_indexes: [],
             _snap_index_unique: [],
+            _snap_tbl_pk_col: [],
+            _snap_tbl_pk_name: [],
             _tbl_typed: [],
             _tbl_pk_col: [],
             _tbl_pk_map: [],
@@ -1163,24 +1167,25 @@ class PureDatabase:
             return self._do_alter_add_column(a_tbl, a_col, a_type)
         # Handle CREATE INDEX before parsing
         val ci_parts = _parse_create_index(sql)
-        if ci_parts.len() >= 4:
+        if ci_parts.len() >= 5:
             val ci_unique = ci_parts[0] == "true"
-            val ci_name = ci_parts[1]
-            val ci_tbl = ci_parts[2]
+            val ci_ine = ci_parts[1] == "true"
+            val ci_name = ci_parts[2]
+            val ci_tbl = ci_parts[3]
             var ci_cols: [text] = []
-            var cci: i32 = 3
+            var cci: i32 = 4
             while cci < ci_parts.len() as i32:
                 ci_cols.push(ci_parts[cci])
                 cci = cci + 1
-            return self._do_create_index(ci_unique, ci_name, ci_tbl, ci_cols)
+            return self._do_create_index(ci_unique, ci_ine, ci_name, ci_tbl, ci_cols)
         # Handle DROP INDEX before parsing
-        val drop_idx = _parse_drop_index(sql)
-        if drop_idx != "":
-            return self._do_drop_index(drop_idx)
+        val di_parts = _parse_drop_index(sql)
+        if di_parts.len() == 2:
+            return self._do_drop_index(di_parts[0] == "true", di_parts[1])
         # Handle DROP TABLE before parsing (parser has no DropTable variant)
-        val drop_tbl = _parse_drop_table(sql)
-        if drop_tbl != "":
-            return self._do_drop(drop_tbl)
+        val dt_parts = _parse_drop_table(sql)
+        if dt_parts.len() == 2:
+            return self._do_drop(dt_parts[0] == "true", dt_parts[1])
         # Handle INSERT OR REPLACE / REPLACE INTO
         var actual_sql = sql
         var is_replace = false
@@ -1526,9 +1531,13 @@ class PureDatabase:
         self._snap_tbl_rowids = []
         self._snap_indexes = []
         self._snap_index_unique = []
+        self._snap_tbl_pk_col = []
+        self._snap_tbl_pk_name = []
         var ti: i32 = 0
         while ti < self._tbl_names.len() as i32:
             self._snap_tbl_names.push(self._tbl_names[ti])
+            self._snap_tbl_pk_col.push(self._tbl_pk_col[ti])
+            self._snap_tbl_pk_name.push(self._tbl_pk_name[ti])
             # Deep copy columns
             var cols_copy: [text] = []
             var ci: i32 = 0
@@ -1544,10 +1553,25 @@ class PureDatabase:
             var tbl = self._tbl_data[ti]
             val visible = tbl.scan(snap)
             self._tbl_data[ti] = tbl
+            # An MvccTuple's `data` is NOT always a serialized row: the typed
+            # fast INSERT path stores a positional handle ("{tuple_pos}") that
+            # indexes _tbl_typed, while the slow path stores _serialize_row(..).
+            # Snapshotting `data` verbatim therefore captured "0"/"1" for
+            # fast-path tables, and ROLLBACK restored rows that deserialized to
+            # a single NULL cell — row counts looked right while every value was
+            # destroyed. Normalize to a serialized row here so the snapshot has
+            # exactly one representation.
+            val typed_now = self._tbl_typed[ti]
             var ri: i32 = 0
             while ri < visible.len() as i32:
+                val raw = visible[ri]
+                var row_ser = raw
+                if _is_numeric_text(raw):
+                    val pos = raw.to_int() ?? -1
+                    if pos >= 0 and pos < typed_now.len() as i64:
+                        row_ser = _serialize_row(typed_now[pos as i32])
                 self._snap_row_tidx.push(ti)
-                self._snap_row_data.push(visible[ri])
+                self._snap_row_data.push(row_ser)
                 ri = ri + 1
             ti = ti + 1
 
@@ -1571,6 +1595,20 @@ class PureDatabase:
         self._indexes = []
         self._index_unique = []
         self._pk_flat = {}
+        # These per-table parallel arrays were previously pushed-without-reset
+        # (growing to 2N per ROLLBACK) or ignored entirely (left stale at N).
+        # Either way the parallel-array invariant broke and index-based reads
+        # returned rows from the rolled-back transaction, or no rows at all.
+        self._tbl_all_visible = []
+        self._tbl_pk_dirty = []
+        self._tbl_mvcc_stale = []
+        self._tbl_pk_name = []
+        self._tbl_typed = []
+        self._tbl_pk_col = []
+        self._tbl_pk_map = []
+        self._tbl_fts_next_doc_id = []
+        self._tbl_fts_doc_ids = []
+        self._tbl_dirty = []
         var restore_ni: Dict<text, i32> = {}
         var restore_ci: [Dict<text, i32>] = []
         var ti: i32 = 0
@@ -1592,11 +1630,21 @@ class PureDatabase:
             self._scan_cache_key.push("")
             self._scan_cache_res.push([])
             self._tbl_all_visible.push(true)
-            self._tbl_pk_dirty.push(false)
+            # pk_map was reset above, so it must be rebuilt before the next
+            # PK-indexed read (true == needs rebuild).
+            self._tbl_pk_dirty.push(true)
             self._tbl_mvcc_stale.push(false)
-            self._tbl_pk_name.push("")
+            self._tbl_pk_name.push(self._snap_tbl_pk_name[ti])
             self._indexes.push(self._snap_indexes[ti])
             self._index_unique.push(self._snap_index_unique[ti])
+            self._tbl_pk_col.push(self._snap_tbl_pk_col[ti])
+            var restore_pk_map: Dict<text, i32> = {}
+            self._tbl_pk_map.push(restore_pk_map)
+            self._tbl_fts_next_doc_id.push(0)
+            self._tbl_fts_doc_ids.push([])
+            var restore_typed: [[DbValue]] = []
+            self._tbl_typed.push(restore_typed)
+            self._tbl_dirty.push(true)
             restore_ni[self._snap_tbl_names[ti]] = ti
             restore_ci.push(_build_col_map(self._snap_tbl_cols[ti]))
             ti = ti + 1
@@ -1614,6 +1662,15 @@ class PureDatabase:
                 tbl.insert(tid, row_data)
                 self._tbl_data[idx] = tbl
                 self._txn.commit(tid)
+                # _tbl_typed is read directly by every fast read path and is
+                # never rebuilt lazily, so it must be repopulated in lockstep
+                # with the MVCC re-insert. Extract-mutate-write-back: a
+                # two-hop mutating chain loses the write on the interpreter.
+                var typed_acc = self._tbl_typed[idx]
+                typed_acc.push(_deserialize_row(row_data))
+                self._tbl_typed[idx] = typed_acc
+                # _tbl_vis is left empty on purpose: _tbl_vis_xmax is -1 here,
+                # which forces the visibility cache to recompute on next read.
             ri = ri + 1
 
     me _do_begin() -> Result<i64, DbError>:
@@ -1722,14 +1779,15 @@ class PureDatabase:
 
     # ── Internal: CREATE INDEX ──────────────────────────────────────────
 
-    me _do_create_index(is_unique: bool, idx_name: text, tbl_name: text, idx_cols: [text]) -> Result<i64, DbError>:
+    me _do_create_index(is_unique: bool, if_not_exists: bool, idx_name: text, tbl_name: text, idx_cols: [text]) -> Result<i64, DbError>:
         val ti = _find_idx(self._tbl_names, tbl_name)
         if ti < 0:
             return Err(DbError.QueryFailed(
                 sql: "CREATE INDEX",
                 message: "no such table: {tbl_name}"
             ))
-        # Check for duplicate index name across all tables
+        # Check for duplicate index name across all tables.
+        # With IF NOT EXISTS an existing name is a no-op, matching SQLite.
         var tti: i32 = 0
         while tti < self._indexes.len() as i32:
             val tbl_idxs = self._indexes[tti]
@@ -1738,6 +1796,9 @@ class PureDatabase:
                 val existing = tbl_idxs[ii]
                 if existing.len() > 0:
                     if existing[0] == idx_name:
+                        if if_not_exists:
+                            self._last_changes = 0
+                            return Ok(0)
                         return Err(DbError.QueryFailed(
                             sql: "CREATE INDEX",
                             message: "index already exists: {idx_name}"
@@ -1788,7 +1849,7 @@ class PureDatabase:
         self._last_changes = 0
         Ok(0)
 
-    me _do_drop_index(idx_name: text) -> Result<i64, DbError>:
+    me _do_drop_index(if_exists: bool, idx_name: text) -> Result<i64, DbError>:
         var found_ti: i32 = -1
         var found_ii: i32 = -1
         var tti: i32 = 0
@@ -1804,6 +1865,9 @@ class PureDatabase:
                 ii = ii + 1
             tti = tti + 1
         if found_ti < 0:
+            if if_exists:
+                self._last_changes = 0
+                return Ok(0)
             return Err(DbError.QueryFailed(
                 sql: "DROP INDEX",
                 message: "no such index: {idx_name}"
@@ -1991,9 +2055,12 @@ class PureDatabase:
 
     # ── Internal: DROP TABLE ────────────────────────────────────────────
 
-    me _do_drop(table_name: text) -> Result<i64, DbError>:
+    me _do_drop(if_exists: bool, table_name: text) -> Result<i64, DbError>:
         val ti = _find_idx(self._tbl_names, table_name)
         if ti < 0:
+            if if_exists:
+                self._last_changes = 0
+                return Ok(0)
             return Err(DbError.QueryFailed(
                 sql: "DROP TABLE",
                 message: "no such table: {table_name}"
@@ -2332,7 +2399,7 @@ class PureDatabase:
         var used_range_path = false
         if not used_pk_path and use_typed and not has_join:
             val rng = _extract_int_range(sel.where_expr, col_map)
-            if rng.len() == 5:
+            if rng.len() == 5 and _typed_col_int_scannable(typed, vis, n_tuples, rng[0] as i32):
                 val rng_ci = rng[0] as i32
                 val rng_lo = rng[1]
                 val rng_hi = rng[2]
@@ -2342,7 +2409,7 @@ class PureDatabase:
                 while ri < n_tuples:
                     if vis[ri]:
                         val rv = typed[ri]
-                        if rng_ci < rv.len() as i32:
+                        if rng_ci < rv.len() as i32 and not rv[rng_ci].is_null():
                             val cv = _dbval_as_i64(rv[rng_ci])
                             var lo_ok = false
                             if rng_lo_inc:
@@ -2364,7 +2431,7 @@ class PureDatabase:
         var used_single_bound = false
         if not used_pk_path and not used_range_path and use_typed and not has_join:
             val sb = _extract_single_int_bound(sel.where_expr, col_map)
-            if sb.len() == 3:
+            if sb.len() == 3 and _typed_col_int_scannable(typed, vis, n_tuples, sb[0] as i32):
                 val sb_ci = sb[0] as i32
                 val sb_val = sb[1]
                 val sb_kind = sb[2]
@@ -2372,7 +2439,7 @@ class PureDatabase:
                 while ri < n_tuples:
                     if vis[ri]:
                         val rv = typed[ri]
-                        if sb_ci < rv.len() as i32:
+                        if sb_ci < rv.len() as i32 and not rv[sb_ci].is_null():
                             val cv = _dbval_as_i64(rv[sb_ci])
                             var ok = false
                             if sb_kind == 0:

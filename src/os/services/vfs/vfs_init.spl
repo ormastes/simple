@@ -29,7 +29,10 @@ use os.services.vfs.vfs_boot_init.{
     vfs_boot_storage_acceptance_ready,
     vfs_boot_read_pure_nvme_fat32_path_bytes,
     vfs_service_start, vfs_service_init_port, vfs_service_poll,
-    vfs_is_ready, vfs_get_manager
+    vfs_is_ready, vfs_get_manager,
+    vfs_ambient_allows, vfs_ambient_in_container, vfs_ambient_enforce,
+    vfs_ambient_enter_container, vfs_ambient_enter_container_view,
+    vfs_ambient_enter_rootless_container, vfs_ambient_leave_container
 }
 use os.services.vfs.vfs_dispatch.{
     g_vfs_dispatch_read_file_text, g_vfs_dispatch_read_file_bytes,
@@ -41,6 +44,7 @@ use os.services.vfs.vfs_write_ops.{
     g_vfs_select_file, g_vfs_get_selected_file, g_vfs_clear_selected_file,
     g_vfs_write_file_text, g_vfs_write_file_bytes,
     g_vfs_delete_file, g_vfs_readdir, g_vfs_file_exists,
+    g_vfs_abs_path, g_vfs_root_path,
     vfs_mount_removable, vfs_unmount_removable
 }
 use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease_checked}
@@ -77,21 +81,10 @@ val C_FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432
 fn _vfs_c_fat32_bridge_allowed() -> bool:
     g_vfs_initialized and not vfs_boot_storage_is_pure_simple()
 
-fn g_vfs_abs_path(name: text) -> Path:
-    """Return an absolute Path for name, prepending '/' if bare."""
-    if name.starts_with("/"):
-        Path(raw: name)
-    else:
-        Path(raw: "/" + name)
-
-fn g_vfs_root_path(name: text) -> text:
-    if name.starts_with("/"):
-        name
-    else:
-        "/" + name
-
-fn _vfs_text_to_bytes(text_value: text) -> [u8]:
-    rt_text_to_bytes(text_value)
+# `g_vfs_abs_path` / `g_vfs_root_path` / `_vfs_text_to_bytes` used to be
+# duplicated verbatim here. Deleted by lane VFSBYPASS — the path helpers are
+# imported from vfs_write_ops (one owner), and `_vfs_text_to_bytes` had no
+# caller in this module at all.
 
 fn _vfs_bytes_to_text(buf: [u8], count: i64) -> text:
     var result: text = ""
@@ -270,7 +263,12 @@ fn _cache_exec_bytes_if_valid(cache_key: text, path: text, bytes: [u8]) -> [u8]:
     _cache_lazy_exec_bytes(cache_key, bytes)
 
 pub fn g_vfs_read_fat32_path_bytes(path: text) -> [u8]:
-    """Read arbitrary FAT32 bytes through the C-backed QEMU boot bridge."""
+    """Read arbitrary FAT32 bytes through the C-backed QEMU boot bridge.
+
+    AMBIENT CONTAINER GATE — see `g_vfs_write_file_text` in vfs_write_ops.spl.
+    """
+    if not vfs_ambient_allows("read", g_vfs_root_path(path)):
+        return []
     if vfs_boot_storage_is_pure_simple():
         return vfs_boot_read_pure_nvme_fat32_path_bytes(path)
     if not _vfs_c_fat32_bridge_allowed():
@@ -379,7 +377,14 @@ fn _vfs_read_direct_exec_candidate(cache_key: text, path: text) -> [u8]:
     _cache_exec_bytes_if_valid(cache_key, path, bytes)
 
 pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
-    """Read seeded executable bytes, preferring the registry cache then FAT32 path bridge."""
+    """Read seeded executable bytes, preferring the registry cache then FAT32 path bridge.
+
+    AMBIENT CONTAINER GATE, applied BEFORE the registry cache: a cache hit is
+    still a read of a path the caller may not name, and serving executable
+    bytes across a namespace boundary is the escape this lane exists to close.
+    """
+    if not vfs_ambient_allows("read", g_vfs_root_path(name)):
+        return []
     # 1. Check registry cache
     val cached = app_registry_cached_bytes(name)
     if cached.len() > 0:
@@ -500,7 +505,11 @@ pub fn g_vfs_read_file_text(name: text) -> text:
     Accepts bare FAT32 names ("HELLO.TXT") or absolute paths ("/HELLO.TXT").
     Returns empty string on any error (mirrors rt_fat32_read_file_text semantics).
     Prefer this over rt_fat32_read_file_text for all new callers.
+
+    AMBIENT CONTAINER GATE — see `g_vfs_write_file_text` in vfs_write_ops.spl.
     """
+    if not vfs_ambient_allows("read", g_vfs_root_path(name)):
+        return ""
     if g_root_fat32 != nil:
         return g_vfs_root_read_file_text(g_root_fat32.unwrap(), g_vfs_root_path(name))
     if g_root_nvfs_hosted != nil:
@@ -534,7 +543,12 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
 
     Accepts bare FAT32 names ("HELLO.TXT") or absolute paths ("/HELLO.TXT").
     Returns an empty byte array on any error.
+
+    AMBIENT CONTAINER GATE, applied before the registry cache — same reasoning
+    as `g_vfs_read_executable_bytes`.
     """
+    if not vfs_ambient_allows("read", g_vfs_root_path(name)):
+        return []
     val seeded_exec = app_registry_cached_bytes(name)
     if seeded_exec.len() > 0:
         return _clone_bytes(seeded_exec)
@@ -649,7 +663,11 @@ pub fn g_vfs_file_size(name: text) -> Option<VfsFileSize>:
 
     Accepts bare FAT32 names or absolute paths.
     Prefer this over rt_fat32_file_size for all new callers.
+
+    AMBIENT CONTAINER GATE — size is existence plus a side channel.
     """
+    if not vfs_ambient_allows("stat", g_vfs_root_path(name)):
+        return nil
     if g_root_fat32 != nil:
         val root_size_first = g_vfs_root_file_size(g_root_fat32.unwrap(), g_vfs_root_path(name))
         if root_size_first >= 0:

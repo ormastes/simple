@@ -16,7 +16,44 @@ use std::collections::{HashMap, HashSet};
 // Import IN_NEW_METHOD from interpreter_call module
 use crate::interpreter::IN_NEW_METHOD;
 
-fn constructor_value_type_matches_name(value: &Value, expected: &str) -> bool {
+/// Collect every generic type parameter that is in scope for `func` when it is
+/// declared inside a class: the class's own parameters (`class Foo<T>`) plus the
+/// method's own (`static fn bar<U>(...)`).
+fn constructor_scope_type_params(class_generic_params: &[String], func: &FunctionDef) -> HashSet<String> {
+    let mut params: HashSet<String> = class_generic_params.iter().cloned().collect();
+    params.extend(func.generic_params.iter().cloned());
+    params
+}
+
+/// True when `ty` is (or contains) a reference to an in-scope generic type
+/// parameter, i.e. the declared type is a placeholder rather than a nominal type.
+fn constructor_type_mentions_param(ty: &Type, type_params: &HashSet<String>) -> bool {
+    match ty {
+        Type::Simple(name) => type_params.contains(name),
+        Type::Generic { name, args } => {
+            type_params.contains(name) || args.iter().any(|arg| constructor_type_mentions_param(arg, type_params))
+        }
+        Type::Array { element, .. } => constructor_type_mentions_param(element, type_params),
+        _ => false,
+    }
+}
+
+fn constructor_value_type_matches_name(value: &Value, expected: &str, type_params: &HashSet<String>) -> bool {
+    // An in-scope generic type parameter is NOT a nominal type: `static fn
+    // from_data(data: [T])` on `class PureTensor<T>` declares `T` as a
+    // placeholder that any argument instantiates. Scoring it like a class name
+    // made `value.type_name() == "T"` false for every possible argument, so
+    // constructor_overload_score returned None, the candidate list came out
+    // empty and the call was reported as "unknown static method from_data on
+    // class PureTensor" — as if the method did not exist at all. Statics whose
+    // signature mentioned no type parameter (`zeros`/`ones`/`randn`) resolved
+    // fine, which is exactly the asymmetry recorded in bug doc
+    // generic_static_method_type_param_unresolved_2026-07-25.md. Treat a type
+    // parameter as a wildcard here; the scorer below still prefers a concrete
+    // nominal match over a wildcard one so real overloads are not disturbed.
+    if type_params.contains(expected) {
+        return true;
+    }
     match value {
         // A concrete object's class name rarely equals the declared parameter
         // type verbatim when the parameter is a trait/interface (e.g. `fn
@@ -37,28 +74,39 @@ fn constructor_value_type_matches_name(value: &Value, expected: &str) -> bool {
     }
 }
 
-fn constructor_value_matches_type(value: &Value, ty: &Type) -> bool {
+fn constructor_value_matches_type(value: &Value, ty: &Type, type_params: &HashSet<String>) -> bool {
     match ty {
         Type::Generic { name, args } if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 => {
             match value {
-                Value::Array(items) => items.iter().all(|item| constructor_value_matches_type(item, &args[0])),
-                Value::FrozenArray(items) => items.iter().all(|item| constructor_value_matches_type(item, &args[0])),
-                Value::Tuple(items) => items.iter().all(|item| constructor_value_matches_type(item, &args[0])),
+                Value::Array(items) => {
+                    items.iter().all(|item| constructor_value_matches_type(item, &args[0], type_params))
+                }
+                Value::FrozenArray(items) => {
+                    items.iter().all(|item| constructor_value_matches_type(item, &args[0], type_params))
+                }
+                Value::Tuple(items) => {
+                    items.iter().all(|item| constructor_value_matches_type(item, &args[0], type_params))
+                }
                 _ => false,
             }
         }
-        Type::Simple(name) | Type::Generic { name, .. } => constructor_value_type_matches_name(value, name),
+        Type::Simple(name) | Type::Generic { name, .. } => {
+            constructor_value_type_matches_name(value, name, type_params)
+        }
         Type::Array { element, .. } => match value {
-            Value::Array(items) => items.iter().all(|item| constructor_value_matches_type(item, element)),
-            Value::FrozenArray(items) => items.iter().all(|item| constructor_value_matches_type(item, element)),
-            Value::Tuple(items) => items.iter().all(|item| constructor_value_matches_type(item, element)),
+            Value::Array(items) => items.iter().all(|item| constructor_value_matches_type(item, element, type_params)),
+            Value::FrozenArray(items) => {
+                items.iter().all(|item| constructor_value_matches_type(item, element, type_params))
+            }
+            Value::Tuple(items) => items.iter().all(|item| constructor_value_matches_type(item, element, type_params)),
             _ => false,
         },
         _ => true,
     }
 }
 
-fn constructor_overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
+fn constructor_overload_score(func: &FunctionDef, values: &[Value], class_generic_params: &[String]) -> Option<usize> {
+    let type_params = constructor_scope_type_params(class_generic_params, func);
     let total_params = func.params.len();
     let required_params = func.params.iter().filter(|p| p.default.is_none()).count();
     let provided = values.len();
@@ -72,14 +120,25 @@ fn constructor_overload_score(func: &FunctionDef, values: &[Value]) -> Option<us
     let mut score = if provided == total_params { 100usize } else { 0usize };
     for (param, value) in func.params.iter().zip(values.iter()) {
         if let Some(ty) = &param.ty {
-            if !constructor_value_matches_type(value, ty) {
+            if !constructor_value_matches_type(value, ty, &type_params) {
                 return None;
             }
-            score += match ty {
-                Type::Array { .. } => 4,
-                Type::Generic { name, args } if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 => 4,
-                Type::Simple(_) | Type::Generic { .. } => 2,
-                _ => 1,
+            // A position matched through a generic type parameter is a weaker
+            // fit than a concrete nominal match, so a `[f64]` overload still
+            // beats a `[T]` one at the same position.
+            score += if constructor_type_mentions_param(ty, &type_params) {
+                1
+            } else {
+                match ty {
+                    Type::Array { .. } => 4,
+                    Type::Generic { name, args }
+                        if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 =>
+                    {
+                        4
+                    }
+                    Type::Simple(_) | Type::Generic { .. } => 2,
+                    _ => 1,
+                }
             };
         }
     }
@@ -184,7 +243,8 @@ pub fn handle_constructor_methods(
         if let Some(method_def) = candidates
             .into_iter()
             .filter_map(|candidate| {
-                constructor_overload_score(candidate, &positional_values).map(|score| (score, candidate))
+                constructor_overload_score(candidate, &positional_values, &class_def.generic_params)
+                    .map(|score| (score, candidate))
             })
             .max_by_key(|(score, _)| *score)
             .map(|(_, candidate)| candidate)

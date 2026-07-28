@@ -2,8 +2,7 @@
 
 - **Date:** 2026-07-06
 - **Severity:** HIGH — blocks ALL live GUI interaction on macOS (clicks, typing, drag, programmatic control)
-- **Status:** fixed
-- **Verified fixed (2026-07-28):** `src/runtime/spl_winit/src/lib.rs` (added by commit 056fa88adfd, not `spl_winit` under `src/compiler_rust` as originally miscited) now calls `app.setActivationPolicy(NSApplicationActivationPolicy::Regular)` + `app.activateIgnoringOtherApps(true)` (lines ~361/366) and sets `EventLoopBuilder::with_activation_policy(ActivationPolicy::Regular)` + `with_activate_ignoring_other_apps(true)` (lines ~443-444/92) — matching the doc's proposed fix.
+- **Status:** open
 - **Area:** GUI / winit runtime / macOS launch path
 - **Fix owner:** GuiRenderer / spl_winit work (task #25)
 - **Related:** `doc/08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md` (predecessor: window not displayed at all; this bug is the residue after the .app-bundle workaround makes it display)

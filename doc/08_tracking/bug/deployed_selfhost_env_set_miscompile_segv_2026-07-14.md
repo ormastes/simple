@@ -138,26 +138,6 @@ candidate must pass:
 
 The Rust seed remains bootstrap-only and is not verification evidence.
 
-## 2026-07-28 bounded rebuild and memory profile
-
-A fresh `--full-bootstrap --deploy --no-mcp --jobs=min` run rebuilt the stale
-Rust/runtime authority and completed source-matched pure-Simple Stage 2 and
-Stage 3. Both passed bootstrap sanity:
-
-- Stage 2 SHA-256: `d44ed0548871f2aa49dda98242a8a66ee190e8582d10b499f0b06bfa1b790815`
-- Stage 3 SHA-256: `b437fe6d059a026e547297d1b5944d2df8771cc36f9977026e4599f1a21ff276`
-
-Stage 4 remained at full CPU for 49 minutes 32 seconds and grew to
-64,552,584 KiB RSS (about 61.6 GiB) under `--low-memory`, leaving 39 GiB host
-memory available and producing no full CLI. It was intentionally interrupted
-once at the safety threshold; no retry was started. Evidence is retained in
-`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`.
-
-The verified Stage 3 compiler then built the narrow VHDL generator (42 modules,
-0 failures) and the RV32 resident NVMe service ELF successfully. This proves
-the stale `rt_env_set` artifact no longer blocks narrow self-hosted builds, but
-does not admit or deploy a full CLI. Stage-4 memory growth remains open.
-
 ## 2026-07-15 source-matched admission result
 
 A fresh strict Cranelift bootstrap completed Stage 2 and self-hosted Stage 3

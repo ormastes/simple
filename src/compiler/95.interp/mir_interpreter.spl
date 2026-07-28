@@ -22,8 +22,6 @@ extern fn rt_actor_spawn(handler: i64) -> i64
 extern fn rt_actor_send(target: i64, message: i64) -> i64
 extern fn rt_actor_recv(timeout: i64) -> i64
 extern fn rt_thread_yield() -> i64
-extern fn rt_coverage_decision_probe(decision_id: u32, result: bool, file_ptr: i64, line: u32, column: u32)
-extern fn rt_coverage_condition_probe(decision_id: u32, condition_id: u32, result: bool, file_ptr: i64, line: u32, column: u32)
 
 
 # ============================================================================
@@ -287,8 +285,17 @@ impl MirInterpreter:
                 nil
 
             case Intrinsic(dest, name, args):
-                if (name == "__simple_coverage_decision_probe" or name == "__simple_coverage_condition_probe") and (dest.? or not coverage_probe_args_valid(name, args)):
-                    return Some(InterpError.UnsupportedOperation(op: "malformed coverage probe intrinsic: {name}"))
+                # bounds_check must trap loudly, mirroring the native path
+                # (__simple_intrinsic_bounds_check in runtime.c: PANIC + exit).
+                # Handled here (not in _execute_intrinsic) because lowering may
+                # discard the dest, so a returned value would be silently lost.
+                if name == "bounds_check":
+                    return self._execute_bounds_check(dest, args)
+                # abort as an *instruction* was a silent 0-return no-op; the
+                # Abort terminator already errors — keep instruction parity.
+                if name == "abort":
+                    print "PANIC: abort intrinsic executed"
+                    return Some(InterpError.RuntimeError(message: "Abort intrinsic executed"))
                 val result = self._execute_intrinsic(name, args)
                 if dest.?:
                     self.set_local(dest.unwrap(), result)
@@ -635,40 +642,27 @@ impl MirInterpreter:
                     if v < 0: -v else: v
                 else:
                     0
-            case "__simple_coverage_decision_probe":
-                val file_z = coverage_probe_file(args[2]) + "\0"
-                rt_coverage_decision_probe(
-                    self.get_operand(args[0]) as u32,
-                    self.get_operand(args[1]) != 0,
-                    file_z.ptr(),
-                    self.get_operand(args[3]) as u32,
-                    self.get_operand(args[4]) as u32
-                )
-                0
-            case "__simple_coverage_condition_probe":
-                val file_z = coverage_probe_file(args[3]) + "\0"
-                rt_coverage_condition_probe(
-                    self.get_operand(args[0]) as u32,
-                    self.get_operand(args[1]) as u32,
-                    self.get_operand(args[2]) != 0,
-                    file_z.ptr(),
-                    self.get_operand(args[4]) as u32,
-                    self.get_operand(args[5]) as u32
-                )
-                0
-            case "bounds_check":
-                if args.len() >= 2:
-                    val index = self.get_operand(args[0])
-                    val len = self.get_operand(args[1])
-                    if index < 0 or index >= len:
-                        1
-                    else:
-                        0
-                else:
-                    1
+            # NOTE: "bounds_check" is intercepted in execute_instruction's
+            # Intrinsic case (_execute_bounds_check) so OOB traps loudly
+            # instead of returning a value lowering may discard.
             case _:
                 # Unknown intrinsic - return 0
                 0
+
+    me _execute_bounds_check(dest: LocalId?, args: [MirOperand]) -> InterpError?:
+        """Loud OOB trap — parity with runtime.c __simple_intrinsic_bounds_check
+        (PANIC + exit(1)) and the tree-walk interpreter's index checks."""
+        if args.len() < 2:
+            print "PANIC: bounds_check intrinsic malformed (got {args.len()} args, need 2)"
+            return Some(InterpError.RuntimeError(message: "bounds_check intrinsic malformed: {args.len()} args"))
+        val index = self.get_operand(args[0])
+        val len = self.get_operand(args[1])
+        if index < 0 or index >= len:
+            print "PANIC: bounds_check intrinsic index={index} len={len}"
+            return Some(InterpError.OutOfBounds(index: index, size: len))
+        if dest.?:
+            self.set_local(dest.unwrap(), 0)
+        nil
 
     # ========================================================================
     # Async Runtime Support
@@ -836,37 +830,3 @@ fn _extract_func_name(op: MirOperand) -> text?:
                 case Str(name): Some(name)
                 case _: nil
         case _: nil
-
-fn coverage_probe_file(operand: MirOperand) -> text:
-    match operand.kind:
-        case Const(value, _):
-            match value:
-                case Str(file): file
-                case _: panic("malformed coverage probe file operand")
-        case _: panic("malformed coverage probe file operand")
-
-fn coverage_probe_args_valid(name: text, args: [MirOperand]) -> bool:
-    val expected = if name == "__simple_coverage_decision_probe": 5 else: 6
-    val result_index = if expected == 5: 1 else: 2
-    val file_index = if expected == 5: 2 else: 3
-    if args.len() != expected:
-        return false
-    for i in 0..args.len():
-        match args[i].kind:
-            case Const(value, _):
-                if i == result_index:
-                    return false
-                if i == file_index:
-                    match value:
-                        case Str(_): ()
-                        case _: return false
-                else:
-                    match value:
-                        case Int(_): ()
-                        case _: return false
-            case Copy(_):
-                if i != result_index:
-                    return false
-            case _:
-                return false
-    true

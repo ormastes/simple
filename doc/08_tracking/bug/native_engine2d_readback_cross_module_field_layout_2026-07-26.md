@@ -2,7 +2,7 @@
 
 ## Status
 
-Source fixed; deployment and live Vulkan readback remain open under TODO317.
+Source fixed; deployment and live Vulkan readback remain open under TODO 580.
 
 ## Evidence
 

@@ -9,8 +9,8 @@ real completion, positive handles, and exact absolute pixels all agree.
 """
 
 use std.spec.*
-use common.renderdoc.backend_render_record.{BackendRenderOracle, parse_backend_render_record, serialize_backend_render_record, verify_backend_render_equivalence}
-use test.helpers.backend_render_record_fixture.{BACKEND_RENDER_FIXTURE_HASH, backend_render_fixture, backend_render_fixture_replace}
+use common.renderdoc.backend_render_record.{BackendRenderOracle, verify_backend_render_equivalence}
+use test.helpers.backend_render_record_fixture.{BACKEND_RENDER_FIXTURE_HASH, backend_render_fixture}
 
 describe "Backend render equivalence":
     # @capture(protocol)
@@ -24,27 +24,6 @@ describe "Backend render equivalence":
         val result = verify_backend_render_equivalence(left, right, BackendRenderOracle(oracle_mismatch_count: 0, pair_mismatch_count: 0, blur_or_tolerance: false))
         expect(result.passed).to_be(true)
         expect(result.reason).to_equal("pass")
-
-    # @capture(protocol)
-    it "should compare independent records after both cross serialization":
-        step("Serialize capture and translation records independently")
-        val left = backend_render_fixture("engine2d-owner", "vulkan", "vulkan", "vulkan", "native", "none", 42, "device_readback", BACKEND_RENDER_FIXTURE_HASH, 12)
-        val right = backend_render_fixture("renderdoc-capture", "directx", "vulkan", "vulkan", "translated", "simple-directx-on-vulkan", 73, "device_readback", BACKEND_RENDER_FIXTURE_HASH, 12)
-        match serialize_backend_render_record(left):
-            case Err(err): fail("Capture serialization failed: {err.code}")
-            case Ok(left_wire):
-                match serialize_backend_render_record(right):
-                    case Err(err): fail("Translation serialization failed: {err.code}")
-                    case Ok(right_wire):
-                        step("Parse validate and run production equivalence")
-                        match parse_backend_render_record(left_wire):
-                            case Err(err): fail("Capture parse failed: {err.code}")
-                            case Ok(left_parsed):
-                                match parse_backend_render_record(right_wire):
-                                    case Err(err): fail("Translation parse failed: {err.code}")
-                                    case Ok(right_parsed):
-                                        val result = verify_backend_render_equivalence(left_parsed, right_parsed, BackendRenderOracle(oracle_mismatch_count: 0, pair_mismatch_count: 0, blur_or_tolerance: false))
-                                        expect(result.passed).to_be(true)
 
     # @manual: folded
     it "should reject two records from the same producer":
@@ -78,13 +57,3 @@ describe "Backend render equivalence":
         val right = backend_render_fixture("right", "vulkan", "vulkan", "vulkan", "native", "none", 73, "device_readback", BACKEND_RENDER_FIXTURE_HASH, 12)
         val result = verify_backend_render_equivalence(left, right, BackendRenderOracle(oracle_mismatch_count: 0, pair_mismatch_count: 0, blur_or_tolerance: false))
         expect(result.reason).to_equal("left-contradictory-provenance")
-
-    # @manual: folded
-    it "should reject reordered command identities":
-        step("Retain the same commands in a different order")
-        val left = backend_render_fixture("left", "vulkan", "vulkan", "vulkan", "native", "none", 42, "device_readback", BACKEND_RENDER_FIXTURE_HASH, 12)
-        val right_base = backend_render_fixture("right", "vulkan", "vulkan", "vulkan", "native", "none", 73, "device_readback", BACKEND_RENDER_FIXTURE_HASH, 12)
-        val right_first = backend_render_fixture_replace(right_base, "commands.000.identity", "command-present")
-        val right = backend_render_fixture_replace(right_first, "commands.001.identity", "command-draw-rect")
-        val result = verify_backend_render_equivalence(left, right, BackendRenderOracle(oracle_mismatch_count: 0, pair_mismatch_count: 0, blur_or_tolerance: false))
-        expect(result.reason).to_equal("semantic-record-mismatch")

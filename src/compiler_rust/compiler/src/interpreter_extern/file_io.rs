@@ -1059,7 +1059,11 @@ mod tests {
         };
         // 1 top-level file + 4 subdirs * 1 file each = 5 files total; the 4
         // subdirectory paths themselves must NOT appear in the result.
-        assert_eq!(paths.len(), 5, "directories must be recursed-into, not counted as entries");
+        assert_eq!(
+            paths.len(),
+            5,
+            "directories must be recursed-into, not counted as entries"
+        );
     }
 
     #[test]
@@ -1100,7 +1104,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777, 0o4740);
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+                0o4740
+            );
         }
 
         let occupied = dir.path().join("occupied");
@@ -1265,8 +1272,7 @@ mod tests {
         symlink(&target, &link).expect("symlink");
 
         let classify = |path: &Path| {
-            rt_file_is_regular_no_follow(&[Value::text(path.to_string_lossy().to_string())])
-                .expect("classify")
+            rt_file_is_regular_no_follow(&[Value::text(path.to_string_lossy().to_string())]).expect("classify")
         };
         assert_eq!(classify(&target), Value::Bool(true));
         assert_eq!(classify(&link), Value::Bool(false));

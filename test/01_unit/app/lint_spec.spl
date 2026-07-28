@@ -3,8 +3,20 @@
 
 use compiler.tools.lint.main.{lint_accessor_and_parent_names, Linter}
 use compiler.tools.fix.rules.impl_.lint_annotation.{check_unknown_attribute, check_unknown_decorator}
+use compiler.core.parser.{parse_module_silent}
+use compiler.core.ast.{module_get_decls}
+use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 
 # NOTE: describe, it, expect are built-in - no imports needed
+
+fn count_collection_lint(source: text, code: text) -> i64:
+    parse_module_silent(source, "sample.spl")
+    val decls = module_get_decls()
+    var count = 0
+    for warning in check_collection_patterns(decls):
+        if warning.code == code:
+            count = count + 1
+    count
 
 fn count_name_lint(source: text, code: text) -> i64:
     val warnings = lint_accessor_and_parent_names("sample.spl", source)
@@ -242,3 +254,85 @@ describe "Linter - accessor and inherited name checks":
         expect(linter.is_pascal_case("9abc")).to_equal(false)
         expect(linter.is_pascal_case("_Foo")).to_equal(false)
         expect(linter.is_pascal_case("")).to_equal(false)
+
+# Regression: COLL006 "string concat in loop" matched ANY `x = x + <non-array>`
+# inside a loop with no type check, and is escalated to Deny severity. Every
+# integer accumulator (`total = total + i`, `i = i + 1`) was reported as an
+# O(n^2) string concat, which made `simple lint` unusable across the tree.
+# The rule now requires positive text evidence on the assignment target.
+describe "COLL006 string-concat-in-loop rule":
+    it "does not fire on an integer accumulator loop with no strings":
+        val source = "fn main():\n" +
+            "    var total = 0\n" +
+            "    var i = 0\n" +
+            "    while i < 10:\n" +
+            "        total = total + i\n" +
+            "        i = i + 1\n" +
+            "    print(total)\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)
+
+    it "does not fire on a float accumulator loop":
+        val source = "fn accum(xs: [f64]) -> f64:\n" +
+            "    var sum = 0.0\n" +
+            "    for x in xs:\n" +
+            "        sum = sum + x\n" +
+            "    sum\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)
+
+    it "does not fire on integer compound assignment in a loop":
+        val source = "fn counter() -> i64:\n" +
+            "    var n = 0\n" +
+            "    var i = 0\n" +
+            "    while i < 10:\n" +
+            "        n += i\n" +
+            "        i += 1\n" +
+            "    n\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)
+
+    it "still fires on a genuine text concat with a string literal":
+        val source = "fn build_text() -> text:\n" +
+            "    var out = \"\"\n" +
+            "    var i = 0\n" +
+            "    while i < 10:\n" +
+            "        out = out + \"x\"\n" +
+            "        i = i + 1\n" +
+            "    out\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(1)
+
+    it "still fires when the target is declared text and the value is not a literal":
+        val source = "fn joiner(parts: [text]) -> text:\n" +
+            "    var out: text = \"\"\n" +
+            "    for p in parts:\n" +
+            "        out = out + p\n" +
+            "    out\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(1)
+
+    it "still fires on text compound assignment in a loop":
+        val source = "fn joiner2(parts: [text]) -> text:\n" +
+            "    var out = \"\"\n" +
+            "    for p in parts:\n" +
+            "        out += p\n" +
+            "    out\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(1)
+
+    # Previously a false NEGATIVE: only the append form `s = s + x` matched, so
+    # the prepend form used by every hand-rolled int-to-text loop was missed.
+    it "fires on the prepend form s = x + s":
+        val source = "fn int_to_text(n: i64) -> text:\n" +
+            "    var result = \"\"\n" +
+            "    var remaining = n\n" +
+            "    while remaining > 0:\n" +
+            "        result = \"d\" + result\n" +
+            "        remaining = remaining / 10\n" +
+            "    result\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(1)
+
+    it "does not fire on the integer prepend form acc = i + acc":
+        val source = "fn swapadd(n: i64) -> i64:\n" +
+            "    var acc = 1\n" +
+            "    var i = 0\n" +
+            "    while i < n:\n" +
+            "        acc = i + acc\n" +
+            "        i = i + 1\n" +
+            "    acc\n"
+        expect(count_collection_lint(source, "COLL006")).to_equal(0)

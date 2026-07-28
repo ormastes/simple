@@ -137,6 +137,16 @@ fn fetch_and_log(url: str) -> str:
 
     Tests that @unsafe functions can perform unchecked operations.
 
+> **Normative note (2026-07-28, superseded direction):** "@unsafe = unchecked, no
+> obligation" remains the CURRENT behavior for non-mission-critical builds. Under the
+> mission-critical profile this is superseded: `@unsafe` carries a reviewed-boundary
+> obligation — capability-scoped `@unsafe(reason, capabilities:[...])` recorded in a
+> reviewed unsafe-boundary manifest. See
+> `doc/01_research/language/simple_vs_rust_safety_property_audit_2026-07-28.md`
+> ("Documented design conflicts" #3),
+> `doc/01_research/language/simple_vs_rust_mission_critical_2026-07-27.md` §3.3, and lane SF2
+> in `doc/03_plan/agent_tasks/mission_critical_robustness_parallel_agents_2026-07-27.md`.
+
 ### Scenario: General
 
 | # | Example | Status |

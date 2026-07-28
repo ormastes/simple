@@ -2,8 +2,7 @@
 
 **Date:** 2026-07-04
 **Severity:** high (blocks CARD 16 office GUI; hidden by a test-aware fast path)
-**Status:** fixed
-**Verified fixed (2026-07-28):** the doc's own "RESOLVED (2026-07-05)" section's fix functions (`_css_collect_custom_props`, `_css_scan_rules_simple`) are present in current source — relocated by a later file split to `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl` (lines 42, 287). The `rt_css_scan_rule_bounds` extern / `css_scan.rs` described as superseded is indeed gone. Note: the earlier-round `decl_get2`/`parse_decl_pairs` names cited by the prior audit no longer exist standalone — they were subsumed by this later, more complete fix, not left unfixed.
+**Status:** open — diagnosis complete, measured
 
 ## Symptom
 

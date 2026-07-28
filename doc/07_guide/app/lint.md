@@ -83,6 +83,21 @@ not treated as duplicate artifacts.
 
 ---
 
+## Strictness Profiles
+
+The lint system enforces different rule sets per strictness profile (2026-07-28):
+
+| Profile | Old name | Contract | Default |
+|---------|----------|----------|---------|
+| `moderate` | `moderate` | Safety always on; discipline relaxed | `run`/`test` on interpreter |
+| `strict` | `lib` | Public-API discipline at warn | — |
+| `robust` | `reliable` | Rust-level enforced: all escapes denied | compiler/loader native build |
+| `critical` | `mission-critical` | Beyond Rust: proofs, evidence, internal-primitive ban, fail-closed | — |
+
+Old profile spellings are deprecated aliases (warn once on parse). See `doc/02_requirements/language/mission_critical_profile.md` for full requirements per tier and engine-default pairing (interpreter→moderate; compiler/loader→robust at WARN severity during migration).
+
+---
+
 ## Lint Layers
 
 The lint system operates at three layers:
@@ -481,6 +496,7 @@ wildcard_match = "allow"
 |------|---------|-------------|
 | `primitive_api` | warn | Bare primitives in public APIs |
 | `bare_bool` | warn | Boolean parameters (suggest enum) |
+| `const_ref_default` | warn | Unannotated parameter mutation (W-MC-REF-001); critical profile v2 (formerly mission-critical) escalates to deny |
 | `print_in_test_spec` | warn | `print()` in test specs |
 | `todo_format` | warn | TODO/FIXME format compliance |
 | `spipe_no_print_based_tests` | **deny** | Print-based BDD tests |

@@ -1,19 +1,34 @@
 # Bug: `safetychecker_check_module` (unsafe-context safety pass) has zero callers — no unsafe-boundary enforcement exists anywhere
 
 **Date:** 2026-07-27
-**Status:** partially fixed (2026-07-28) — `safetychecker_check_module` is now wired
-into `src/compiler/80.driver/driver.spl` warn-only and env-gated behind
-`SIMPLE_SAFETY_WARN=1` (default off, unset/anything-else = pass is skipped
-entirely, matching the `SIMPLE_TYPECHECK_WARN` convention at driver.spl:970-989).
-When enabled it only `log_warn`s formatted diagnostics — it never pushes to
-`ctx.errors`, so it cannot fail a build even when on. Fatal (build-breaking)
-enforcement remains **blocked**: at least 23 owned files have inline asm with
-no `unsafe:` block at all (see Migration blocker section below and
-`doc/09_report/unsafe_enforcement_port_plan_2026-07-27.md`) and must be
-remediated first. The two unconstructed variants
-(`RawPointerOutsideUnsafe`, `UnsafeFfiOutsideUnsafe`) and the missing
-`InlineAsmMatch` case in `safety_checker.spl` were left as-is per scope — only
-the existing single rule (`InlineAsmOutsideUnsafe`) is wired and surfaced.
+**Status:** fixed at warn level (2026-07-28, lane SF2) — the pass now runs BY
+DEFAULT on every compile (driver.spl `lower_and_check_impl`): unset
+`SIMPLE_SAFETY_WARN` = pass runs and emits a single summary line when
+diagnostics exist; `SIMPLE_SAFETY_WARN=1` (legacy force-flag) = full
+per-diagnostic listing; `SIMPLE_SAFETY_WARN=0` = pass skipped. It still only
+`log_warn`s — it never pushes to `ctx.errors`, so it cannot fail a build.
+All three declared rules are now implemented in `safety_checker.spl`:
+`InlineAsmOutsideUnsafe` (now also covering `InlineAsmMatch`, previously the
+wildcard no-op), `RawPointerOutsideUnsafe` (calls to `rt_ptr_read*`,
+`rt_ptr_write*`, `rt_alloc`, `rt_free`, `ptr_add*`, `ptr_sub*` outside
+`unsafe:`), and `UnsafeFfiOutsideUnsafe` (direct calls to module-local
+`extern fn`s outside `unsafe:`; cross-module imported externs are NOT yet
+tracked — name knowledge is module-local). The self-hosted (pure-Simple)
+lexer+parser now also parses `unsafe:` / `danger:` blocks contextually
+(core/parser_stmts.spl, EXPR_UNSAFE_BLOCK, bridged to ExprKind.UnsafeBlock —
+same node the seed produces), so the checker sees unsafe scopes on both parse
+lanes. `@unsafe(reason:, capabilities:)` on module-level fns is parsed and
+recorded (metadata only, `parser_unsafe_annotations_get()` in
+core/_ParserDecls/enum_module_body.spl); **gap:** block-level and
+method-level `@unsafe` attachment is not captured (the decorator handler only
+runs in the module-decl loop), and the metadata is not yet threaded into
+HIR/decl arenas — enforcement/threading is future work. Fatal
+(build-breaking) enforcement remains **blocked**: at least 23 owned files
+have inline asm with no `unsafe:` block at all (see Migration blocker section
+below and `doc/09_report/unsafe_enforcement_port_plan_2026-07-27.md`) and
+must be remediated first. Specs:
+`test/01_unit/core/parser_unsafe_block_spec.spl`,
+`test/01_unit/compiler/semantics/safety_checker_unsafe_boundary_spec.spl`.
 **Found:** side-finding while agents worked on other tasks, 2026-07-27
 **Area:** compiler / semantics (`src/compiler/35.semantics/safety_checker.spl`) — unsafe-context enforcement
 **Severity:** High — a security boundary that silently does nothing; neither compiler enforces it

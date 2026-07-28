@@ -215,12 +215,38 @@ is unpassable for essentially any counted `while` loop in the repo, which is
 worth confirming against other trees before anyone treats a COLL006 count as a
 quality signal.
 
-Remaining COLL006 hits in this tree are all of that false-positive shape
-(`ssh_client_kexinit.spl:32,64` and `ssh_client_kex.spl:45` are the `i = i + 1`
-counters in `while` loops; `ssh_client_kex.spl:45` is `_sshcli_copy`, which
-contains no string at all). They are deliberately NOT worked around — the
-alternative would be contorting correct byte-copy loops to appease a broken
-check.
+**Final tally after the real fix — 13 COLL006 errors remain, all verified
+false positives:**
+
+| File | errors | warnings |
+|---|---|---|
+| `ssh_client_auth.spl` | 0 | 5 |
+| `ssh_client_channel.spl` | 0 | 4 |
+| `ssh_client_kex.spl` | 1 | 4 |
+| `ssh_client_kexinit.spl` | 2 | 2 |
+| `ssh_client_session.spl` | 2 | 3 |
+| `ssh_client_version.spl` | 3 | 7 |
+| `ssh_known_hosts.spl` | 5 | 13 |
+| `mod.spl` | (import-only, no summary) | |
+
+Verified rather than assumed. Every COLL006 location resolves to a function
+whose only self-assignment is an integer:
+
+    _b64_char_value, ssh_base64_encode_bytes, ssh_known_hosts_parse,
+    _sshcli_blobs_equal, ssh_known_hosts_status, _sshcli_find_crlf,
+    _sshcli_slice, _sshcli_has_control_bytes, _sshcli_copy (x2),
+    _sshcli_append, ssh_client_build_kexinit, ssh_client_kexinit_proposal
+
+and a grep for every `x = x + ...` assignment in the whole tree returns 16
+hits, all integers (`i = i + 1`, `i = i + 3`, `bits = bits + 6`,
+`lines = lines + 1`, `lineno = lineno + 1`, `offset = end + 2`) — **zero**
+`text` self-concatenations. The single `var _: text` declaration in the tree
+(`ssh_client_channel.spl:212`) is assigned, never concatenated. So the one
+genuine O(n^2) is fixed and none remains.
+
+These are deliberately NOT worked around — the alternative would be contorting
+correct byte-copy loops to appease a broken check, which is exactly the silent
+normalization the repo rules forbid.
 
 **Warnings** (not gate-failing, left as-is with the sshd tree's precedent):
 `RAW-RT-001` (this tree declares `extern fn rt_bytes_u8_at` directly, copied

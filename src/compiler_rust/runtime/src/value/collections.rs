@@ -2396,6 +2396,39 @@ pub extern "C" fn rt_string_bytes(string: RuntimeValue) -> RuntimeValue {
     }
 }
 
+/// Split a string into lines, returning an array of strings.
+///
+/// Mirrors the interpreter's `text.lines()` / `text.split_lines()`
+/// (`interpreter_method/string.rs`, which delegates to Rust's `str::lines`) so
+/// JIT/native code can call `.lines()` instead of only the interpreter. Before
+/// this existed the method had NO codegen mapping at all and every compiled
+/// call died with `Runtime error: Function 'str.lines' not found`, after which
+/// `.len()` on the nil result yielded `-1`.
+///
+/// `str::lines` semantics, which this deliberately inherits: a final trailing
+/// newline does NOT produce a trailing empty line (`"a\n"` -> 1), the empty
+/// string yields 0 lines, and a `\r\n` terminator has its `\r` stripped.
+#[no_mangle]
+pub extern "C" fn rt_string_lines(string: RuntimeValue) -> RuntimeValue {
+    let str_len = rt_string_len(string);
+    if str_len <= 0 {
+        return rt_array_new(0);
+    }
+    let str_data = rt_string_data(string);
+    if str_data.is_null() {
+        return rt_array_new(0);
+    }
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
+        let result = rt_array_new(0);
+        for line in s.lines() {
+            let line_rv = rt_string_new(line.as_ptr(), line.len() as u64);
+            rt_array_push(result, line_rv);
+        }
+        result
+    }
+}
+
 /// Return the characters of a string as an array of single-character strings.
 /// Mirrors the interpreter's `text.chars()` (`interpreter_method/string.rs`).
 #[no_mangle]

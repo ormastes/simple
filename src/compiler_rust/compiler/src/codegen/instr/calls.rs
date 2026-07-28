@@ -3224,6 +3224,7 @@ pub fn compile_call<M: Module>(
                 "split" => Some("rt_string_split"),
                 "bytes" => Some("rt_string_bytes"),
                 "chars" => Some("rt_string_chars"),
+                "lines" | "split_lines" => Some("rt_string_lines"),
                 "replace" => Some("rt_string_replace"),
                 "to_upper" | "upper" => Some("rt_string_to_upper"),
                 "to_lower" | "lower" => Some("rt_string_to_lower"),

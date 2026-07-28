@@ -33,7 +33,7 @@ fn map_sffi_name(func_name: &str) -> &str {
 fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
     match rt_name {
         "rt_len" | "rt_to_string" | "rt_string_to_int" | "rt_string_to_float" | "rt_string_to_upper"
-        | "rt_string_to_lower" | "rt_string_trim" | "rt_string_bytes" | "rt_string_chars" | "rt_array_pop"
+        | "rt_string_to_lower" | "rt_string_trim" | "rt_string_bytes" | "rt_string_chars" | "rt_string_lines" | "rt_array_pop"
         | "rt_array_sort" | "rt_array_reverse" | "rt_array_clear" | "rt_dict_keys" | "rt_dict_values"
         | "rt_is_none" | "rt_is_some" | "rt_enum_payload" => Some(1),
         "rt_string_starts_with"
@@ -2085,6 +2085,7 @@ impl LlvmBackend {
                 "split" => Some("rt_string_split"),
                 "bytes" => Some("rt_string_bytes"),
                 "chars" => Some("rt_string_chars"),
+                "lines" | "split_lines" => Some("rt_string_lines"),
                 "trim" => Some("rt_string_trim"),
                 "trim_start" => Some("rt_string_trim_start"),
                 "trim_end" => Some("rt_string_trim_end"),

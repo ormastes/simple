@@ -311,6 +311,20 @@ pub static STRING_METHODS: &[MethodInfo] = &[
         description: "returns characters as a string array",
     },
     MethodInfo {
+        name: "lines",
+        runtime_fn: RuntimeFn::Simple("rt_string_lines"),
+        param_count: 0,
+        is_mutating: false,
+        description: "returns lines as a string array",
+    },
+    MethodInfo {
+        name: "split_lines",
+        runtime_fn: RuntimeFn::Simple("rt_string_lines"),
+        param_count: 0,
+        is_mutating: false,
+        description: "returns lines as a string array",
+    },
+    MethodInfo {
         name: "replace",
         runtime_fn: RuntimeFn::Simple("rt_string_replace"),
         param_count: 2,

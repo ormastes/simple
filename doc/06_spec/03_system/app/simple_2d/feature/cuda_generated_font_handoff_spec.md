@@ -20,8 +20,8 @@ Fail-closed evidence for the source-tracked CUDA font artifact while its
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl` |
-| Updated | 2026-07-19 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-25 |
+| Generator | manually synchronized; executable docgen refresh pending |
 
 Fail-closed evidence for the source-tracked CUDA font artifact while its
 straight-ARGB semantics lag the current common compositor. Canonical
@@ -32,9 +32,12 @@ CUDA device-readback promotion can run again.
 
 ### CUDA generated font handoff evidence
 
-#### should reject the stale tracked artifact until canonical regeneration
+#### should reject PTX whose pinned provenance differs from canonical CUDA source
 
-- Compare the retained artifact identity with the corrected common compositor
+- Compare the retained artifact provenance with the canonical CUDA emitter
+   - Expected: canonical source and version digests pass independently
+   - Expected: either tampered digest fails independently
+   - Expected: retained source and version digests remain stale
    - Expected: FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256 equals `sha256_text(ptx)`
    - Expected: FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION equals `FONT_ATLAS_COMPOSITE_PROGRAM_VERSION`
    - Expected: FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION equals `1`
@@ -44,15 +47,23 @@ CUDA device-readback promotion can run again.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Compare the retained artifact identity with the corrected common compositor")
+step("Compare the retained artifact provenance with the canonical CUDA emitter")
 val ptx = cuda_font_atlas_composite_ptx()
 val current = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Cuda)
-expect(FONT_ATLAS_COMPOSITE_CUDA_SOURCE_SHA256 == portable_compute_artifact_source_hash(current)).to_be(false)
-expect(FONT_ATLAS_COMPOSITE_CUDA_VERSION_SHA256 == portable_compute_artifact_version_hash(current)).to_be(false)
+val current_source_sha256 = portable_compute_artifact_source_hash(current)
+val current_version_sha256 = portable_compute_artifact_version_hash(current)
+val source_matches = FONT_ATLAS_COMPOSITE_CUDA_SOURCE_SHA256 == current_source_sha256
+val version_matches = FONT_ATLAS_COMPOSITE_CUDA_VERSION_SHA256 == current_version_sha256
+expect(cuda_font_atlas_composite_provenance_trusted(current_source_sha256, current_version_sha256)).to_be(true)
+expect(cuda_font_atlas_composite_provenance_trusted("tampered", current_version_sha256)).to_be(false)
+expect(cuda_font_atlas_composite_provenance_trusted(current_source_sha256, "tampered")).to_be(false)
+expect(source_matches).to_be(false)
+expect(version_matches).to_be(false)
+expect(source_matches and version_matches).to_be(false)
 expect(FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256).to_equal(sha256_text(ptx))
 expect(FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION).to_equal(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION)
 expect(FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION).to_equal(1)

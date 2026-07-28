@@ -966,6 +966,18 @@ impl Lowerer {
                         .types
                         .register(HirType::Array { element: TypeId::STRING, size: None }),
                 ),
+                // `.lines()` / `.split_lines()` had NO codegen mapping at all
+                // until `rt_string_lines` was added alongside the sibling
+                // `rt_string_bytes`/`rt_string_chars` unary string->array
+                // runtime helpers, so every compiled call failed at runtime
+                // with `Function 'str.lines' not found` and the nil result made
+                // `.len()` report `-1`. That `-1` is the ordinary "len of a nil
+                // receiver" answer, NOT the `Dict.len()` native sentinel.
+                "lines" | "split_lines" => Some(
+                    self.module
+                        .types
+                        .register(HirType::Array { element: TypeId::STRING, size: None }),
+                ),
                 // find/rfind return -1 if not found, position if found (raw i64 from rt_string_find)
                 "find" | "index_of" | "find_str" | "rfind" | "last_index_of" => Some(TypeId::I64),
                 // `.bytes()` returns UTF-8 bytes as an array of ints (see

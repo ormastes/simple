@@ -13,11 +13,6 @@ Phase 1: Research     →  Phase 2: Design     →  Phase 3: Impl     →  Phase
 
 Every phase is **self-sufficient**. Any LLM can do any phase alone. If a prior phase was skipped, do it yourself before proceeding.
 
-For RV32 NVMe firmware, RAM-NAND, QEMU, GHDL, KV260, and Cosmos+ profile
-status, start with
-`doc/07_guide/app/llm/simple_riscv_nvme_feature_inventory.md`. It is the compact
-agent inventory; the linked operator guide remains the detailed source.
-
 ---
 
 ## Concurrent Session Hygiene

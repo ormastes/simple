@@ -3,6 +3,7 @@
 **Date**: 2026-01-19
 **Purpose**: Map Rust's ~500 error codes to Simple, identifying applicable errors and missing features
 **Status**: Complete
+**Correction 2026-07-28**: Earlier revisions claimed "Simple has no `unsafe`". That is false: `unsafe:`/`danger:` blocks are parsed (seed parser `src/compiler_rust/.../core.rs:829-836`) and flow through AST/HIR/MIR; enforcement is being activated via `safety_checker.spl`. Unsafe-related rows below are corrected accordingly. See `doc/01_research/language/simple_vs_rust_safety_property_audit_2026-07-28.md`.
 
 ---
 
@@ -61,9 +62,9 @@ Rust has **~500-600 error codes** (E0001-E0805+) covering a mature compiler with
 
 | Rust Code | Name | Simple Status | Action |
 |-----------|------|---------------|--------|
-| E0200 | Unsafe Trait Impl | ❌ Not Applicable | Simple has no `unsafe` |
+| E0200 | Unsafe Trait Impl | ❌ Not Applicable | Simple has `unsafe:`/`danger:` blocks, but no unsafe *traits* |
 | E0201 | Duplicate Assoc Item | 📋 Add to Plan | **E1025**: Duplicate method in impl |
-| E0204 | Unsafe Trait | ❌ Not Applicable | No `unsafe` |
+| E0204 | Unsafe Trait | ❌ Not Applicable | No unsafe *traits* (unsafe *blocks* exist) |
 | E0206 | Assoc Type Not in Trait | 📋 Add to Plan | **E1026**: Associated type not declared in trait |
 | E0207 | Unconstrained Type Param | 📋 Add to Plan | **E1027**: Type parameter not constrained |
 | E0210 | Orphan Rule Violation | ❌ Not Applicable | Simple may not have orphan rules |
@@ -326,11 +327,11 @@ Rust has **~500-600 error codes** (E0001-E0805+) covering a mature compiler with
 | E0802 | Generic Const Eval | Generic const evaluation error | ❌ Not Applicable | No const generics |
 | E0803 | `#[diagnostic]` Attribute | Diagnostic attribute errors | ❌ Not Applicable | Internal compiler |
 | E0804 | Invalid Stability Attr | Stability annotation error | ❌ Not Applicable | No stability system |
-| E0805 | Invalid Unsafe Block | Unsafe block validation | ❌ Not Applicable | No unsafe |
+| E0805 | Invalid Unsafe Block | Unsafe block validation | 📋 Add to Plan | Simple HAS `unsafe:`/`danger:` blocks (seed parser `core.rs:829-836`); validation lands with `safety_checker` activation |
 | E0806 | Next Available | Placeholder | 📌 Reserved | For future use |
 
 **Feature Gaps**:
-- ❌ **`unsafe` System** - Not applicable to Simple
+- 🔧 **`unsafe` System** - Simple HAS `unsafe:`/`danger:` blocks (parsed, flow through AST/HIR/MIR); enforcement being activated via `safety_checker` — needs its own error codes
 - ❌ **Inline Assembly** - Not in Simple
 - ❌ **Advanced FFI** (C-unwind, repr, etc.) - Simpler FFI model
 - ❌ **Stability Attributes** - Not needed
@@ -748,7 +749,7 @@ Scenario: Invalid const expression
 **Rust has ~500-600 error codes**, but **~60% are not applicable** to Simple due to different design choices:
 - No borrow checker (GC-based memory model)
 - No explicit lifetimes
-- No `unsafe` blocks
+- `unsafe`/`danger` blocks exist but enforcement is only now being activated (few unsafe-validation codes needed yet)
 - No const generics (yet)
 - Simpler FFI model
 

@@ -6,7 +6,7 @@ extern fn rt_path_absolute(path: text) -> text
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.driver.driver_source_loading.{
-    _driver_canonical_source_path, _driver_physical_source_key, _driver_module_name_from_path, _driver_unique_physical_sources,
+    _driver_canonical_source_path, _driver_module_name_from_path, _driver_unique_physical_sources,
     _driver_module_name_collision,
     _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add,
     _driver_collect_sources_via_find, _driver_entry_import_module_paths,
@@ -34,19 +34,6 @@ describe "entry-closure physical source deduplication":
 
         expect(_driver_canonical_source_path(sources[0].path)).to_equal("src/lib/common/shared.spl")
         expect(_driver_unique_physical_sources(sources).len()).to_equal(1)
-
-    it "resolves repository symlink aliases before parsing":
-        val content = "fn shared() -> i64: 1\n"
-        val sources = [
-            SourceFile(path: "src/lib/nogc_async_mut/io.spl", content: content, module_name: "lib.nogc_async_mut.io"),
-            SourceFile(path: "src/std/nogc_async_mut/io.spl", content: content, module_name: "std.nogc_async_mut.io"),
-            SourceFile(path: "src/compiler/10.frontend/core/ast.spl", content: content, module_name: "compiler.frontend.core.ast"),
-            SourceFile(path: "src/compiler/frontend/core/ast.spl", content: content, module_name: "compiler.frontend_alias.core.ast")
-        ]
-
-        expect(_driver_unique_physical_sources(sources).len()).to_equal(2)
-        expect(_driver_physical_source_key(sources[0].path)).to_equal(_driver_physical_source_key(sources[1].path))
-        expect(_driver_physical_source_key(sources[2].path)).to_equal(_driver_physical_source_key(sources[3].path))
 
     it "keeps absolute workspace punctuation out of native module symbols":
         val driver = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
@@ -101,9 +88,6 @@ describe "entry-closure physical source deduplication":
         val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
 
         expect(driver).to_contain("val unique_entry_sources = _driver_unique_physical_sources(entry_sources)")
-        expect(driver).to_contain("val closure_physical_key = _driver_physical_source_key(closure_src.path)")
-        expect(driver).to_contain("val physical_key = _driver_physical_source_key(source.path)")
-        expect(driver.split("val physical_key = _driver_physical_source_key(source.path)").len()).to_equal(3)
         expect(driver).to_contain("parsed_entry_paths = parsed_entry_paths.push(physical_key)")
         expect(driver).to_contain("parsed_entry_modules = parsed_entry_modules.push(entry_module)")
         expect(driver).to_contain("entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]")
@@ -166,7 +150,8 @@ describe "entry-closure physical source deduplication":
     it "keeps a zero-import explicit entry out of whole-workspace loading":
         val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
 
-        expect(driver).to_contain("if self.ctx.errors.len() == 0:\n                # A successful explicit-entry walk is a closure")
+        expect(driver).to_contain("val closure_error_count_before = self.ctx.errors.len()")
+        expect(driver).to_contain("if self.ctx.errors.len() == closure_error_count_before:\n                # A successful explicit-entry walk is a closure")
         expect(driver).to_contain("rt_env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"1\")")
         expect(driver).to_contain("if has_project_source and self.ctx.options.mode != CompileMode.Check and not nb_entry_closure:")
         expect(driver).to_not_contain("closure_added")

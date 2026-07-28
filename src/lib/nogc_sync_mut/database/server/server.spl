@@ -16,6 +16,7 @@
 # contract, the crash-point matrix and the reason the WAL is not the commit
 # point all live in `durability.spl` — read that before changing sys_commit.
 
+use std.convert (try_parse_int)
 use std.database.core.{ SdnRow, SdnTable, SdnDatabase }
 use std.database.server.protocol.{
     DbRequest, DbResponse,
@@ -23,8 +24,29 @@ use std.database.server.protocol.{
     ok_response, ok_with, err_response,
     ERR_MALFORMED, ERR_UNKNOWN_OP, ERR_MISSING_ARG, ERR_NO_SESSION,
     ERR_DENIED, ERR_NO_TXN, ERR_TXN_OPEN, ERR_CONFLICT, ERR_NO_TABLE,
-    ERR_NOT_FOUND, ERR_DURABILITY, ERR_CRASHED
+    ERR_NOT_FOUND, ERR_DURABILITY, ERR_CRASHED, ERR_SERVE_BOUND
 }
+
+# Bounded-wait guard for serve(): a connection drain that stops making progress
+# must fail loudly rather than hang its caller (a spec runner, a service loop).
+# Far above any real connection length in this tier.
+val SERVE_MAX_MESSAGES: i64 = 100000
+
+# What one connection drain produced: how many messages were answered, and the
+# channel as it stands AFTER the drain (replies captured, inbound consumed).
+# serve() returns the channel rather than relying on the caller's binding being
+# updated in place — see the note on serve().
+class ServeOutcome:
+    served: i64
+    channel: MemoryTransport
+
+    fn sent_count() -> i64:
+        val ch = self.channel
+        ch.sent_count()
+
+    fn all_sent() -> [text]:
+        val ch = self.channel
+        ch.all_sent()
 use std.database.server.durability.{
     DurabilityPolicy, DurableOutcome, durable_commit, durability_on
 }
@@ -232,10 +254,14 @@ class DbServerCapsule:
         val session_text = request.arg("session") ?? ""
         if session_text == "":
             return err_response(ERR_MISSING_ARG, "{op} requires session=<id>")
-        val parsed = session_text.to_int()
+        # `text.to_int()` NEVER returns nil — "notanumber" silently became 0, so
+        # this guard never fired and a malformed frame was answered with
+        # `no_session` instead of `malformed`.  `try_parse_int` is the
+        # fail-closed parse.
+        val parsed = try_parse_int(session_text)
         if parsed == nil:
             return err_response(ERR_MALFORMED, "session id is not a number: {session_text}")
-        val session_id: i64 = parsed
+        val session_id: i64 = parsed ?? 0
         if not self.registry.is_open(session_id):
             return err_response(ERR_NO_SESSION, "session {session_id} is not open")
 
@@ -283,14 +309,35 @@ class DbServerCapsule:
     # Connection lifecycle over a transport port
     # ------------------------------------------------------------------
 
-    # Drain one connection: read until EOF, answer every message.  Returns the
-    # number of messages served.  The loop never aborts on a bad message — that
-    # is the fail-closed requirement.
-    me serve(transport: MemoryTransport) -> i64:
+    # Drain one connection: read until EOF, answer every message.  The loop
+    # never aborts on a bad message — that is the fail-closed requirement.
+    #
+    # Returns a ServeOutcome carrying BOTH the served count and the drained
+    # channel.  The channel must be handed back: a transport passed in as a
+    # parameter is mutated on serve()'s own copy, so a caller that kept only
+    # its original binding observed zero sent replies.  Callers read the
+    # replies off `outcome.channel`, never off the value they passed in.
+    #
+    # `channel` MUST be bound ONCE, outside the loop.  Re-binding it from the
+    # `transport` parameter on every iteration (as this used to do) throws away
+    # read_message()'s write-back, so the queue never drains and the same first
+    # message is re-served forever — an unbounded spin that hung the whole spec
+    # file behind a 120 s runner timeout.  See .spipe/db_server_hang/state.md.
+    #
+    # SERVE_MAX_MESSAGES is a bounded-wait guard, not a policy limit: a drain
+    # that fails to make progress must fail loudly instead of hanging its
+    # caller.  It is far above any real connection length in this tier.
+    me serve(transport: MemoryTransport) -> ServeOutcome:
+        var channel = transport
         var served = 0
         var running = true
         while running:
-            var channel = transport
+            if served >= SERVE_MAX_MESSAGES:
+                # Loud, bounded failure: the drain is not making progress.
+                channel.write_message(encode_response(
+                    err_response(ERR_SERVE_BOUND, "serve exceeded message bound")))
+                running = false
+                continue
             val message = channel.read_message()
             match message:
                 Some(line):
@@ -299,7 +346,7 @@ class DbServerCapsule:
                     served = served + 1
                 nil:
                     running = false
-        served
+        ServeOutcome(served: served, channel: channel)
 
 # ============================================================================
 # Convenience constructors

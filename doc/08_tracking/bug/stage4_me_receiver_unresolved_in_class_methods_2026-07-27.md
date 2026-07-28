@@ -1,6 +1,6 @@
 # `me` (receiver) reported as an unresolved NAME in class methods during stage-4 lowering
 
-**Status:** fixed
+**Status:** fixed (residual 20 — see Remaining)
 **Found:** 2026-07-27 (RISC-V hardening campaign, Lane H — stage-4 full-CLI bootstrap)
 **Area:** HIR lowering (`src/compiler/20.hir/`), bootstrap/stage-4 path
 **Severity:** high — 543 errors; one of the two remaining stage-4 full-CLI blockers
@@ -98,34 +98,11 @@ Measured:
 - all 1,752 HIR modules lower
 - zero segfaults
 
-## Correction (2026-07-27)
+## Remaining
 
-**Caution:** when counting symbol classes in build logs, ANCHOR the grep
-(`'name: X$'`) — unanchored counts silently absorb longer symbols that share
-the prefix.
-
-The "residual 20" figure previously reported here was a measurement error by
-the lead (me): the monitor used `grep -c 'unresolved name: me'`, which
-substring-matched `unresolved name: metal_sffi_quarantine_submission` and
-similar `metal_*` symbols, not additional `me`-receiver failures.
-
-The anchored count `grep -cE 'unresolved name: me$'` returns **0** in the
-current stage-4 log
-(`/home/ormastes/.claude/jobs/4403a7d8/tmp/stage4_repro25.log`) and also 0 in
-the earlier one. So the receiver-aliasing fix (commit `8af2dc555960`) took
-`me` from 543 to **0**. The bug is fully fixed; there is no residual `me`
-count to chase.
-
-The 20 `metal_sffi_*` errors are a separate, source-level issue:
-`src/lib/.../gc_async_mut/io/backend_metal.spl` (lines ~29-30) imports
-`metal_sffi_quarantine_submission`, `metal_sffi_reap_submission_quarantine`
-and `metal_sffi_release_uncommitted_submission`, which are defined in
-`nogc_sync_mut/io/metal_sffi.spl` (~lines 68, 80, 91). The re-export chain
-passes through `gc_async_mut/io/metal_sffi.spl:3` (a wildcard) and
-`nogc_async_mut/io/metal_sffi.spl:9` (an explicit name list) — and that
-explicit list omits all three names. Fix: add them to the middle facade's
-export list. Cross-reference
-`doc/09_report/stage4_residual_me_and_text_2026-07-27.md`.
+20 `me` errors survive — likely a different shape (e.g. `me` inside a
+nested/lambda scope, or a class whose receiver type failed to resolve). Not
+yet investigated. Follow-up needed.
 
 ## Evidence
 

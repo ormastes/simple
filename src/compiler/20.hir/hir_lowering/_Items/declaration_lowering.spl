@@ -162,7 +162,35 @@ impl HirLowering:
             self.declared_callable_type(fn_, nil)
         else:
             nil
-        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not fn_.is_method:
+        # The bare-name bootstrap fast path below owns ONLY the compiler's own
+        # fixed set of top-level CLI entry functions (bootstrap_version,
+        # main, ...) -- bootstrap_hir_symbol_known_name is that same fixed
+        # list. Any OTHER non-method function (a class `static fn`, which
+        # carries is_method=false too, but ALSO an ordinary top-level
+        # function like `fn build() -> Reg: ...` in a real compiled program)
+        # used to fall through bootstrap_hir_symbol_for_name's catch-all to a
+        # hardcoded SymbolId(100) that is NEVER inserted into self.symbols
+        # (no `define()` call), so it is absent from the flat symbol table
+        # the --entry-closure MIR path builds from
+        # `self.symbols.symbols.values()`. For a static method call site that
+        # resolves the same id via struct_method_syms["static::Type::method"]
+        # and looks it up, this produced `unknown_100` -> ld.lld "undefined
+        # symbol: unknown_100" (bug native_flat_static_method_call_unknown_100).
+        # For a plain function returning a class/struct, the callee NAME still
+        # linked fine (bootstrap_flat_function_symbol_name emits a non-method
+        # function under its bare name regardless of func.symbol validity),
+        # but resolved_call_hir_return_type(id=100) always found nothing, so
+        # remember_call_hir_return never threaded the declared return type
+        # onto the call result -- struct_value_syms was never populated for
+        # `val r = build()`, and every method call / field read on `r`
+        # afterward silently misresolved (bug
+        # native_flat_free_fn_struct_return_symbol_100). Routing any
+        # unrecognized name through the qualified lookup-or-define branch
+        # instead reuses the SAME symbol the declare loop (module_lowering.spl
+        # signature-declaration pre-pass) already defined for it -- present in
+        # the flat table, carrying the real declared type -- so both the
+        # call site and the emitted body agree on one real, linkable symbol.
+        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not fn_.is_method and bootstrap_hir_symbol_known_name(fn_.name):
             fn_symbol_id = bootstrap_hir_symbol_for_name(fn_.name)
         else:
             val fn_symbol_lookup = self.symbols.lookup(fn_symbol_name)
@@ -696,10 +724,16 @@ impl HirLowering:
                     hir_fields = hir_fields.push(self.lower_field(f))
                 HirVariantKind.Struct(hir_fields)
 
+        var discriminant = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: v.span)
+        if v.has_discriminant:
+            discriminant = self.lower_hir_expr(v.discriminant)
+
         HirVariant(
             symbol: symbol,
             name: v.name,
             kind: kind,
+            has_discriminant: v.has_discriminant,
+            discriminant: discriminant,
             span: v.span
         )
 

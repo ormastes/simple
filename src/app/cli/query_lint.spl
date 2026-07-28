@@ -16,6 +16,7 @@ use compiler.tools.lint._LintMain.config_and_model.{LintConfig, LintLevel, map_l
 use compiler.core.ast.{ast_reset, module_get_decls}
 use compiler.core.parser.{parse_module_silent, parser_has_errors}
 use compiler.semantics.lint.argument_count.{check_argument_count}
+use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.duplicate_typed_args.{check_duplicate_typed_args}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
@@ -31,6 +32,7 @@ use compiler.semantics.lint.param_tag.{ParamTagWarning, check_param_tag, extract
 fn _governed_lint_codes() -> [text]:
     ["primitive_api", "bare_bool", "simple_script_required",
      "T001", "T002", "T003", "T004", "ARG001", "ARG002", "ACC001", "NAME001",
+     "DTYP001",
      "STUB001", "STUB002", "STUB003",
      "SPIPE001", "SPIPE002", "SPIPE003", "SPIPE004", "SPIPE005", "SPIPE006", "SPIPE007",
      "I001", "I002", "I003", "C002",
@@ -89,17 +91,16 @@ fn _lint_code_suppressed(code: text) -> bool:
     _DIAG_SEVERITY_OVERRIDE.has(code) and _DIAG_SEVERITY_OVERRIDE[code] < 0
 
 # Reliable-mode R2: surface bare-primitive public-API usage on the LSP/build path.
-# Mirrors the canonical compiled-engine check in
+# Mirrors the compiled-engine check in
 # `compiler.tools.fix.rules.impl_.lint_primitive_api` (pub fns, params + return,
-# pure-math exemption; excludes bool, which has its own `bare_bool` lint). Reuses
+# pure-math exemption; includes bool per the canonical table). Reuses
 # `param_tag`'s text signature parsers so the parsing logic is not duplicated. Tier-
 # gated: emits only when a strictness tier / [lints] config is active, and the
 # `_DIAG_SEVERITY_OVERRIDE` map (governed code "primitive_api") then routes severity
 # per tier — moderate suppresses, lib warns, reliable denies.
+# Canonical table: compiler.semantics.lint.primitive_types.
 fn _pa_is_primitive(t: text) -> bool:
-    (t == "i8" or t == "i16" or t == "i32" or t == "i64"
-     or t == "u8" or t == "u16" or t == "u32" or t == "u64"
-     or t == "f32" or t == "f64")
+    is_bare_primitive_name(t)
 
 fn _pa_ret_type(sig: text) -> text:
     val cp = sig.index_of(")")
@@ -679,7 +680,7 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
     for w in dtyp_warnings:
         if _lint_code_suppressed(w.code):
             continue
-        val line_num = _find_fn_line_in_source(lines, w.fn_name)
+        val line_num = w.line
         val sev = _severity_text_to_json(w.severity)
         if format == "json":
             val msg = _escape_json(w.message)

@@ -26,7 +26,6 @@ FTL, boot integration, or board proof.
 | NVMe bridge/admin | `cosmos_nvme_pcie_adapter.*`, `cosmos_nvme_admin.*` | Decode controller commands, preserve completion identity/publication semantics, and serve bounded admin callbacks. | Corrected host/ARM runners pass Abort/queue/SMART fields, retry boundaries, and PRP edges; FTL/UART polling binding is implemented and ARM-compiled, with final SSpec and board service pending. |
 | Host tests | Cosmos SSpec plus native runners | Execute completion, malformed state, timeout, ordering, and callback-service paths without board MMIO. | H1 runners passed: runtime, MMIO, PCIe, NVMe IO, bridge, admin, SMP/cache; final SSpec blocked on bootstrap. |
 | Board tests | Guide procedures and retained evidence bundle | BT-001..BT-006 on identified Cosmos+ hardware. | **Pending:** no board success claimed. |
-| Multi-target profiles | `openssd_config.spl`, simulation/Cosmos SSpecs, remaining-gates wrapper | Preserve one NVMe/FTL/recovery core; add explicit QEMU/FEMU and KV260/FPGA profiles with fail-closed capability selection. | Requested under FR-NVME-FW-TARGETS-0001; current simulator and OpenSSD profiles retained. |
 
 ## Parallel Execution Plan
 

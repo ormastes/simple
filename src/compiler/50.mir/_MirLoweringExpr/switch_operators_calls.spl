@@ -52,14 +52,20 @@ fn int_list_contains(xs: [i64], v: i64) -> bool:
         i = i + 1
     false
 
-fn enum_variant_disc(names: [text], variant: text) -> i64:
-    """Discriminant = index of `variant` in the enum's declared variant order."""
-    var i = 0
-    while i < names.len():
-        if names[i] == variant:
-            return i
-        i = i + 1
-    -1
+impl MirLowering:
+    me enum_variant_discriminant(enum_name: text, variant: text) -> i64:
+        if not self.enum_variant_index.has(enum_name):
+            return -1
+        if not self.enum_variant_discriminants.has(enum_name):
+            return -1
+        val names = self.enum_variant_index[enum_name]
+        val discriminants = self.enum_variant_discriminants[enum_name]
+        var i = 0
+        while i < names.len() and i < discriminants.len():
+            if names[i] == variant:
+                return discriminants[i]
+            i = i + 1
+        -1
 
 fn enum_pat_binding_sym(payload: HirPatternPayload?) -> SymbolId?:
     """The single payload-binding symbol of `case Circle(r):` (Tuple([Binding(r)])),
@@ -830,7 +836,25 @@ impl MirLowering:
             if val bs_reg_ty = bootstrap_fn_ret_type_lookup(call_name):
                 return bs_reg_ty
         if call_name != "":
-            return self.bootstrap_call_return_type(call_name)
+            val builtin_ret_ty = self.bootstrap_call_return_type(call_name)
+            # Last rescue before the erased i64: the name-keyed HIR registry
+            # (filled for EVERY flat closure module by
+            # bootstrap_register_flat_function_values, before any module is
+            # lowered; ambiguous duplicates never answer). It is the only
+            # freestanding source that still carries an aggregate return —
+            # bootstrap_fn_ret_type above records Str returns ONLY (W93), so a
+            # declared `-> [text]` degraded to i64, emit_resolved_direct_call
+            # stopped registering array identity, and a direct
+            # `Box(items: make_items())` consumed the call's pointer bits as an
+            # integer (a named local only hid it via a type-recovering Copy).
+            # Gated on the builtin table having no answer of its own so the
+            # more accurate MIR-side shapes (get_args -> ptr(Array(str))) are
+            # never shadowed — the exact W93 regression that kept the registry
+            # off this path.
+            if builtin_ret_ty.kind == MirTypeKind.I64:
+                if val reg_hir_ret_ty = bootstrap_fn_ret_hir_type_lookup(call_name):
+                    return self.lower_type(reg_hir_ret_ty)
+            return builtin_ret_ty
         self.resolved_call_return_type(symbol)
 
     me try_lower_bootstrap_cli_arg_index(base: HirExpr, index_local: LocalId) -> LocalId?:
@@ -1188,7 +1212,7 @@ impl MirLowering:
                             case _: ""
                     var d: i64 = -1
                     if self.enum_variant_index.has(enum_name):
-                        d = enum_variant_disc(self.enum_variant_index[enum_name], variant)
+                        d = self.enum_variant_discriminant(enum_name, variant)
                     if d < 0:
                         # Bare pattern (`case Circle(r)` — no qualifier survived
                         # to HIR) or variant missing from the presumed enum:
@@ -1198,11 +1222,11 @@ impl MirLowering:
                         var owner = ""
                         var owner_count = 0
                         for ename in self.enum_variant_index.keys():
-                            if enum_variant_disc(self.enum_variant_index[ename], variant) >= 0:
+                            if self.enum_variant_discriminant(ename, variant) >= 0:
                                 owner = ename
                                 owner_count = owner_count + 1
                         if owner_count == 1:
-                            d = enum_variant_disc(self.enum_variant_index[owner], variant)
+                            d = self.enum_variant_discriminant(owner, variant)
                             if enum_name == "":
                                 enum_name = owner
                         elif owner_count > 1:
@@ -1224,6 +1248,99 @@ impl MirLowering:
                 case _:
                     self.error("enum match: unsupported arm pattern", Some(arm.pattern.span))
             ai = ai + 1
+
+        # ---- Option dual-ABI normalization (bug: Dict.get / any raw-or-nil
+        # producer feeding `match ... case Some(x)`) -------------------------
+        # Option has TWO physical forms in this codebase (see lower_try's
+        # docstring below for the full write-up): the BOXED enum handle built
+        # by lower_enum_construct_named -> rt_enum_new, and the FLAT nullable
+        # ABI whose raw i64 word IS its own payload with no discriminant at
+        # all (`val x: i64? = 3`, `d.get(k)` -> rt_dict_get raw-or-nil,
+        # `d[k]`, and every other raw-or-nil producer). rt_enum_discriminant
+        # returns -1 for the flat form, so the plain compare chain below
+        # matched NEITHER Some nor None and every flat Option silently fell
+        # through to the default arm -- a present key read as absent, or a
+        # nil-payload Some at the interpreter tier.
+        #
+        # Fix mirrors what `?` (lower_try) and `if val Some(x)` already do:
+        # discriminate the lane at runtime, then feed the SAME compare chain a
+        # normalized discriminant. Scoped to Option only, so every other enum
+        # match stays byte-identical.
+        var option_flat_lane = enum_name == "Option"
+        if option_flat_lane:
+            var some_disc_v = 0
+            var none_disc_v = 1
+            if self.enum_variant_index.has("Option"):
+                # enum_variant_disc returns -1 when absent, which collides with
+                # rt_enum_discriminant's "not a boxed enum" sentinel. Keep the
+                # reserved Some=0/None=1 defaults in that case.
+                val looked_up_some = enum_variant_disc(self.enum_variant_index["Option"], "Some")
+                val looked_up_none = enum_variant_disc(self.enum_variant_index["Option"], "None")
+                if looked_up_some >= 0: some_disc_v = looked_up_some
+                if looked_up_none >= 0: none_disc_v = looked_up_none
+            var b_norm = self.builder
+            val norm_disc = b_norm.new_temp(MirType.i64())
+            val not_enum_key2 = b_norm.emit_const_int(-1)
+            val is_boxed2 = b_norm.emit_binop(MirBinOp.Ne, mir_operand_copy(disc_local), mir_operand_copy(not_enum_key2), MirType.bool())
+            val opt_boxed_blk = b_norm.new_block(Some("ematch_opt_boxed"))
+            val opt_flat_blk = b_norm.new_block(Some("ematch_opt_flat"))
+            val opt_flat_some_blk = b_norm.new_block(Some("ematch_opt_flat_some"))
+            val opt_flat_none_blk = b_norm.new_block(Some("ematch_opt_flat_none"))
+            val opt_norm_merge = b_norm.new_block(Some("ematch_opt_merge"))
+            b_norm.terminate_if(mir_operand_copy(is_boxed2), opt_boxed_blk, opt_flat_blk)
+            self.builder = b_norm
+
+            # Boxed lane: the discriminant is already exact.
+            var b_obx = self.builder
+            b_obx.switch_to_block(opt_boxed_blk)
+            b_obx.emit_copy(norm_disc, disc_local)
+            b_obx.terminate_goto(opt_norm_merge)
+            self.builder = b_obx
+
+            # Flat lane: rt_is_some's sentinel check is exact here (no boxed
+            # enum hash involved) -- the same helper lower_try's flat lane uses.
+            var b_oft = self.builder
+            b_oft.switch_to_block(opt_flat_blk)
+            val opt_is_some_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_is_some"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                )))
+            ))
+            val opt_is_some_res = b_oft.emit_call(opt_is_some_op, [mir_operand_copy(scrut_local)], MirType.bool())
+            val opt_is_some_local = opt_is_some_res ?? LocalId(id: 0)
+            b_oft.terminate_if(mir_operand_copy(opt_is_some_local), opt_flat_some_blk, opt_flat_none_blk)
+            self.builder = b_oft
+
+            var b_ofs = self.builder
+            b_ofs.switch_to_block(opt_flat_some_blk)
+            val opt_some_key = b_ofs.emit_const_int(some_disc_v)
+            b_ofs.emit_copy(norm_disc, opt_some_key)
+            b_ofs.terminate_goto(opt_norm_merge)
+            self.builder = b_ofs
+
+            var b_ofn = self.builder
+            b_ofn.switch_to_block(opt_flat_none_blk)
+            val opt_none_key = b_ofn.emit_const_int(none_disc_v)
+            b_ofn.emit_copy(norm_disc, opt_none_key)
+            b_ofn.terminate_goto(opt_norm_merge)
+            self.builder = b_ofn
+
+            var b_omg = self.builder
+            b_omg.switch_to_block(opt_norm_merge)
+            self.builder = b_omg
+            disc_local = norm_disc
+
+        # Payload reader for the arm blocks. rt_enum_payload returns
+        # rt_core_nil() for anything that is not a registered boxed enum, which
+        # is exactly wrong for a flat Option whose raw word IS the payload --
+        # that nil is the "field access on nil receiver" crash. rt_unwrap_or_self
+        # is the runtime's own dual-lane reader (`disc >= 0 ? payload : value`),
+        # so it is correct on BOTH lanes. Only Option switches to it; every
+        # other enum keeps rt_enum_payload verbatim.
+        var payload_symbol = "rt_enum_payload"
+        if option_flat_lane:
+            payload_symbol = "rt_unwrap_or_self"
 
         var b = self.builder
         val result = b.new_temp(self.match_result_mir_type(expected_type))
@@ -1255,9 +1372,12 @@ impl MirLowering:
             if bind_syms.len() == 1 and enum_arities[ci] <= 1:
                 # Single-field payload: byte-stable fast path, unchanged from
                 # before #164 -- the raw i64 payload IS the field value.
+                # payload_symbol is rt_enum_payload for every enum except
+                # Option, which uses the dual-lane rt_unwrap_or_self (see the
+                # Option normalization block above).
                 var bp = self.builder
                 val pf = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("rt_enum_payload"),
+                    MirConstValue.Str(payload_symbol),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                 ))
                 val pr = bp.emit_call(pf, [mir_operand_copy(scrut_local)], MirType.i64())
@@ -1544,7 +1664,7 @@ impl MirLowering:
                     b_boxed.switch_to_block(boxed_block)
                     var none_disc = 1
                     if self.enum_variant_index.has("Option"):
-                        none_disc = enum_variant_disc(self.enum_variant_index["Option"], "None")
+                        none_disc = self.enum_variant_discriminant("Option", "None")
                     val none_key = b_boxed.emit_const_int(none_disc)
                     val is_boxed_none = b_boxed.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(none_key), MirType.bool())
                     val boxed_some_block = b_boxed.new_block(Some("try_opt_boxed_some"))
@@ -1719,11 +1839,10 @@ impl MirLowering:
         if not self.enum_variant_index.has(enum_name):
             self.error("enum construction: unregistered enum '{enum_name}'", nil)
             var be = self.builder
-            val te = be.new_temp(MirType.i64())
+            val te = be.emit_const_int(0)
             self.builder = be
             return te
-        val variant_names = self.enum_variant_index[enum_name]
-        val disc = enum_variant_disc(variant_names, variant)
+        val disc = self.enum_variant_discriminant(enum_name, variant)
         var b = self.builder
         # I64 (not I32): the cranelift lane is uniformly i64 (see the Bool
         # note in cranelift_codegen_adapter mir_type_to_cl); I32 consts here
@@ -1819,8 +1938,7 @@ impl MirLowering:
         `Shape.Circle(7)` arrives as receiver=`Shape`, method=`Circle`. The enum
         is known by NAME (registered in enum_variant_index); the single tuple
         payload is args[0] (0 for Unit variants)."""
-        val variant_names = self.enum_variant_index[enum_name]
-        val disc = enum_variant_disc(variant_names, variant)
+        val disc = self.enum_variant_discriminant(enum_name, variant)
         var b = self.builder
         val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
         b.emit_const(enum_id_local, MirConstValue.Int(self.enum_runtime_id(enum_name)), MirType(kind: MirTypeKind.I32))
@@ -2069,6 +2187,19 @@ impl MirLowering:
                     match field_hir_types[fi].kind:
                         case HirTypeKind.Optional(_):
                             v = self.ensure_option_handle(v, field_hir_types[fi])
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            # Field slot is the one position with no other
+                            # repair: the operand goes straight into
+                            # emit_aggregate, so if the arg was a CALL whose
+                            # return type resolved to the erased i64 the store
+                            # writes it as a plain word and the later read
+                            # inttoptr's a non-array — rt_array_len then sees 0
+                            # with no fault. The field's DECLARED type is
+                            # authoritative here regardless of how the callee's
+                            # return type resolved, so re-assert array identity
+                            # (same shape as the Optional arm above).
+                            self.runtime_array_locals[v.id] = true
+                            self.mark_runtime_value_local(v.id)
                         case _:
                             ()
                 ops = ops.push(mir_operand_copy(v))
@@ -2680,6 +2811,7 @@ impl MirLowering:
                 lw.struct_method_return_is_array = self.struct_method_return_is_array
                 lw.enum_payload_struct_names = self.enum_payload_struct_names
                 lw.enum_variant_index = self.enum_variant_index
+                lw.enum_variant_discriminants = self.enum_variant_discriminants
                 lw.canonical_type_symbols = self.canonical_type_symbols
                 lw.next_canonical_type_symbol = self.next_canonical_type_symbol
                 lw.global_symbol_ids = self.global_symbol_ids
@@ -2863,6 +2995,7 @@ impl MirLowering:
             if direct_name == "Some" or direct_name == "None":
                 if not self.enum_variant_index.has("Option"):
                     self.enum_variant_index["Option"] = ["Some", "None"]
+                    self.enum_variant_discriminants["Option"] = [0, 1]
                 return self.lower_enum_construct_named("Option", direct_name, args)
 
         if is_direct:

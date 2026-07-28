@@ -9,7 +9,8 @@
 use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.services.vfs.vfs_boot_init.{
     g_root_fat32, g_root_nvfs_hosted, g_vfs_initialized, g_mount_table, g_vfs,
-    vfs_boot_storage_is_pure_simple
+    vfs_boot_storage_is_pure_simple,
+    vfs_ambient_allows, vfs_ambient_in_container
 }
 use os.services.vfs.vfs_dispatch.{
     g_vfs_dispatch_write_file_text, g_vfs_dispatch_write_file_bytes,
@@ -24,7 +25,7 @@ use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
-use common.string_core.{str_char_at, char_from_code}
+use common.string_core.{str_char_at}
 use os.kernel.loader.app_registry.{app_registry_fat32_alias}
 use os.kernel.log.klog_api.{log_raw_println}
 extern fn serial_println(msg: text)
@@ -37,25 +38,18 @@ fn _vfs_c_fat32_bridge_allowed() -> bool:
 fn _vfs_text_to_bytes(text_value: text) -> [u8]:
     rt_text_to_bytes(text_value)
 
-fn _vfs_bytes_to_text(buf: [u8], count: i64) -> text:
-    var result: text = ""
-    var i: i64 = 0
-    while i < count and i < buf.len():
-        # `.chr()` has no native-lane lowering (empty on baremetal);
-        # char_from_code is pure Simple and kernel-proven.
-        val b: i64 = buf[i as i32] as i64
-        result = result + char_from_code(b)
-        i = i + 1
-    result
+pub fn g_vfs_abs_path(name: text) -> Path:
+    """Return an absolute Path for name, prepending '/' if bare.
 
-fn g_vfs_abs_path(name: text) -> Path:
-    """Return an absolute Path for name, prepending '/' if bare."""
+    Sole owner of this arithmetic — vfs_init.spl imports it rather than
+    carrying the second copy it used to.
+    """
     if name.starts_with("/"):
         Path(raw: name)
     else:
         Path(raw: "/" + name)
 
-fn g_vfs_root_path(name: text) -> text:
+pub fn g_vfs_root_path(name: text) -> text:
     if name.starts_with("/"):
         name
     else:
@@ -149,18 +143,26 @@ pub fn g_vfs_clear_selected_file():
     """Clear the VFS file cursor."""
     g_vfs_selected_file = ""
 
-fn g_vfs_write_selected_file_text(content: text) -> bool:
-    """Write content to the currently selected file via the mount table."""
-    if g_vfs_selected_file == "":
-        return false
-    g_vfs_write_file_text(name: g_vfs_selected_file, content: content)
+# NOTE: the write-through-cursor helper (`g_vfs_write_selected_file_text`) was
+# DELETED by lane VFSBYPASS. It was an unauthenticated write entry point with
+# zero callers anywhere in src/ or test/; an unreachable unauthenticated write
+# is pure liability, so it was removed rather than gated. The cursor itself
+# (select/get/clear above) touches no filesystem and stays.
 
 pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
     """Write content as UTF-8 text to name via the mount table.
 
     Accepts bare FAT32 names or absolute paths.
     Returns true on success, false on any error.
+
+    AMBIENT CONTAINER GATE: this free function carries no caller identity, so it
+    resolves under the ambient one — `g_vfs`'s container view, the same view
+    `VfsManager`'s own path ops are gated on. Delegated to
+    `vfs_ambient_allows`, which forwards to `VfsManager.enforce_lookup_grants`.
+    Host context (no view) is unaffected. See .spipe/vfs_bypass_closure/state.md.
     """
+    if not vfs_ambient_allows("write", g_vfs_root_path(name)):
+        return false
     if g_root_fat32 != nil:
         return g_vfs_root_write_file_text(g_root_fat32.unwrap(), g_vfs_root_path(name), content)
     if g_root_nvfs_hosted != nil:
@@ -189,7 +191,11 @@ pub fn g_vfs_write_file_bytes(name: text, data: [u8]) -> bool:
 
     Accepts bare FAT32 names or absolute paths.
     Returns true on success, false on any error.
+
+    AMBIENT CONTAINER GATE — see `g_vfs_write_file_text`.
     """
+    if not vfs_ambient_allows("write", g_vfs_root_path(name)):
+        return false
     if g_root_fat32 != nil:
         return g_vfs_root_write_file_bytes(g_root_fat32.unwrap(), g_vfs_root_path(name), data)
     if g_root_nvfs_hosted != nil:
@@ -218,7 +224,11 @@ pub fn g_vfs_delete_file(name: text) -> bool:
 
     Accepts bare FAT32 names or absolute paths.
     Returns true on success, false on any error.
+
+    AMBIENT CONTAINER GATE — see `g_vfs_write_file_text`.
     """
+    if not vfs_ambient_allows("unlink", g_vfs_root_path(name)):
+        return false
     if g_root_fat32 != nil:
         val d = g_root_fat32.unwrap()
         val p = Path(raw: g_vfs_root_path(name))
@@ -262,7 +272,14 @@ pub fn g_vfs_file_exists(name: text) -> bool:
 
     Accepts bare FAT32 names or absolute paths.
     Prefer this over rt_fat32_file_exists for all new callers.
+
+    AMBIENT CONTAINER GATE — see `g_vfs_write_file_text`. Existence is an
+    information leak across a namespace boundary, so the gate is applied at
+    entry: NONE of the four fallback lanes below (root FAT32, hosted nvfs,
+    mount table, transitional C FAT32 bridge) runs under a denying view.
     """
+    if not vfs_ambient_allows("stat", g_vfs_root_path(name)):
+        return false
     if g_root_fat32 != nil:
         if g_vfs_root_file_exists(g_root_fat32.unwrap(), g_vfs_root_path(name)):
             return true
@@ -333,7 +350,15 @@ pub fn vfs_mount_removable(device_index: u64, mount_path: text) -> bool:
 
     Safe to call when root is on NVMe; avoid when VirtIO-BLK is already
     the root device — probe_nth mutates the runtime's single MMIO base.
+
+    FAIL-CLOSED IN A CONTAINER: mounting is namespace *construction*, not a
+    lookup, so there is no path argument that could make it safe — a confined
+    caller that can attach a filesystem has escaped its view by definition.
+    Refused outright whenever the ambient VFS is confined.
     """
+    if vfs_ambient_in_container():
+        serial_println("[removable] refused: mount not permitted in container namespace")
+        return false
     val dev_opt = VirtioBlkDriver.probe_nth(device_index)
     if dev_opt == nil:
         serial_println("[removable] probe_nth failed index={device_index}")
@@ -353,7 +378,14 @@ pub fn vfs_mount_removable(device_index: u64, mount_path: text) -> bool:
     true
 
 pub fn vfs_unmount_removable(mount_path: text) -> bool:
-    """Unmount a previously mounted removable filesystem at mount_path."""
+    """Unmount a previously mounted removable filesystem at mount_path.
+
+    FAIL-CLOSED IN A CONTAINER — see `vfs_mount_removable`. Detaching a
+    filesystem another namespace is using is an escape in the other direction.
+    """
+    if vfs_ambient_in_container():
+        serial_println("[removable] refused: unmount not permitted in container namespace")
+        return false
     val unmount_r = g_mount_table.unmount(mount_path)
     if unmount_r.is_err():
         serial_println("[removable] unmount failed path={mount_path}")

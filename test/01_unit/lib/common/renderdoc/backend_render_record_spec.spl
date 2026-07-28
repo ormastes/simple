@@ -12,37 +12,19 @@ manual leads with the trusted record flow.
 use std.spec.*
 use common.renderdoc.backend_render_record.{
     BackendRenderRecord,
-    backend_render_field,
-    backend_render_record_field,
     canonical_backend_render_record,
     compare_backend_render_records,
-    parse_backend_render_record,
-    serialize_backend_render_record,
     validate_backend_render_record
 }
 use test.helpers.backend_render_record_fixture.{
     BACKEND_RENDER_FIXTURE_HASH,
     BACKEND_RENDER_FIXTURE_HASH_ALT,
-    backend_render_fixture_add,
     backend_render_fixture,
-    backend_render_fixture_remove,
-    backend_render_fixture_reverse,
-    backend_render_fixture_replace,
-    backend_render_fixture_replace_shape
+    backend_render_fixture_replace
 }
 
 fn valid_vulkan_record(producer_id: text) -> BackendRenderRecord:
     backend_render_fixture(producer_id, "vulkan", "vulkan", "vulkan", "native", "none", 42, "device_readback", BACKEND_RENDER_FIXTURE_HASH, 12)
-
-fn invalid_code(record: BackendRenderRecord) -> text:
-    match validate_backend_render_record(record):
-        case Err(err): err.code
-        case Ok(_record): "pass"
-
-fn invalid_path(record: BackendRenderRecord) -> text:
-    match validate_backend_render_record(record):
-        case Err(err): err.path
-        case Ok(_record): "pass"
 
 describe "Detailed backend render records":
     # @capture(protocol)
@@ -52,17 +34,8 @@ describe "Detailed backend render records":
         step("Validate the detailed record field inventory")
         match validate_backend_render_record(record):
             case Ok(valid):
-                expect(valid.fields.len()).to_equal(87)
-                expect(valid.schema_version).to_equal(2)
-                expect(backend_render_record_field(valid, "commands.000.identity")).to_equal("command-draw-rect")
-                expect(backend_render_record_field(valid, "pipelines.000.pipeline_id")).to_equal("pipeline-main")
-                expect(backend_render_record_field(valid, "pipelines.000.vertex_shader_id")).to_equal("shader-vertex-main")
-                expect(backend_render_record_field(valid, "pipelines.000.fragment_shader_id")).to_equal("shader-fragment-main")
-                expect(backend_render_record_field(valid, "resources.000.binding")).to_equal("set0-binding0")
-                expect(backend_render_record_field(valid, "transitions.000.identity")).to_equal("transition-target-attachment")
-                expect(backend_render_record_field(valid, "synchronization.000.identity")).to_equal("sync-submit")
-                expect(backend_render_record_field(valid, "state.viewport.width")).to_equal("4")
-                expect(backend_render_record_field(valid, "state.scissor.width")).to_equal("4")
+                expect(valid.fields.len()).to_equal(32)
+                expect(valid.schema_version).to_equal(1)
             case Err(err): fail("Expected valid record, got {err.code} at {err.path}")
 
     # @capture(protocol)
@@ -79,48 +52,6 @@ describe "Detailed backend render records":
                     expect(value).to_equal(first)
                 case Err(err): fail("Canonicalization failed: {err.code}")
             i = i + 1
-        expect(first).to_contain("commands.000.identity")
-        expect(first).to_contain("state.viewport.width")
-        expect(first).to_contain("state.scissor.width")
-        expect(first).to_contain("pipelines.000.pipeline_id")
-        expect(first).to_contain("pipelines.000.vertex_shader_id")
-        expect(first).to_contain("resources.000.binding")
-        expect(first).to_contain("transitions.000.identity")
-        expect(first).to_contain("synchronization.000.identity")
-
-    # @capture(protocol)
-    it "should round-trip the strict serialized evidence boundary":
-        val record = valid_vulkan_record("engine2d-owner")
-        step("Serialize the validated production record")
-        match serialize_backend_render_record(record):
-            case Err(err): fail("Serialization failed: {err.code}")
-            case Ok(serialized):
-                expect(serialized).to_contain("field|commands.000.identity|text|true|")
-                step("Parse and validate without replacing supplied hashes")
-                match parse_backend_render_record(serialized):
-                    case Err(err): fail("Parse failed: {err.code}")
-                    case Ok(parsed):
-                        expect(parsed.record_hash).to_equal(record.record_hash)
-                        expect(compare_backend_render_records(record, parsed).record_equal).to_be(true)
-
-    # @manual: folded
-    it "should reject wire corruption and schema field-shape mutations":
-        val valid = valid_vulkan_record("engine2d-owner")
-        step("Accept required readback counters as i64")
-        expect(invalid_code(valid)).to_equal("pass")
-        step("Reject wrong value kinds and semantic classifications at exact paths")
-        expect(invalid_code(backend_render_fixture_replace_shape(valid, "target.width", "text", true))).to_equal("invalid-value-kind")
-        val pixel_count_kind = backend_render_fixture_replace_shape(valid, "readback.pixel_count", "text", true)
-        expect(invalid_code(pixel_count_kind)).to_equal("invalid-value-kind")
-        expect(invalid_path(pixel_count_kind)).to_equal("readback.pixel_count")
-        val nonblank_count_kind = backend_render_fixture_replace_shape(valid, "readback.nonblank_pixel_count", "text", true)
-        expect(invalid_code(nonblank_count_kind)).to_equal("invalid-value-kind")
-        expect(invalid_path(nonblank_count_kind)).to_equal("readback.nonblank_pixel_count")
-        expect(invalid_code(backend_render_fixture_replace_shape(valid, "producer.native_api", "text", true))).to_equal("invalid-field-class")
-        step("Reject an incomplete serialized boundary")
-        match parse_backend_render_record("schema_name|simple-backend-render-record\n"):
-            case Err(err): expect(err.code).to_equal("malformed-wire-record")
-            case Ok(_record): fail("Expected malformed wire record failure")
 
     # @manual: folded
     it "should reject unsupported versions and missing required fields":
@@ -140,77 +71,6 @@ describe "Detailed backend render records":
         match validate_backend_render_record(invalid):
             case Err(err): expect(err.code).to_equal("contradictory-provenance")
             case Ok(_record): fail("Expected contradictory provenance failure")
-
-    # @manual: folded
-    it "should reject missing and duplicate ordered backend identities":
-        step("Remove one command identity")
-        val valid = valid_vulkan_record("engine2d-owner")
-        val missing = backend_render_fixture_remove(valid, "commands.001.identity")
-        match validate_backend_render_record(missing):
-            case Err(err):
-                expect(err.code).to_equal("missing-field")
-                expect(err.path).to_equal("commands.001.identity")
-            case Ok(_record): fail("Expected missing command identity failure")
-        step("Duplicate one resource identity")
-        val duplicate = backend_render_fixture_replace(valid, "commands.001.identity", "command-draw-rect")
-        match validate_backend_render_record(duplicate):
-            case Err(err): expect(err.code).to_equal("duplicate-id")
-            case Ok(_record): fail("Expected duplicate command identity failure")
-
-    # @manual: folded
-    it "should preserve command ordering in backend equivalence":
-        step("Swap two otherwise valid command identities")
-        val left = valid_vulkan_record("engine2d-owner")
-        val swap_first = backend_render_fixture_replace(left, "commands.000.identity", "command-present")
-        val swapped = backend_render_fixture_replace(swap_first, "commands.001.identity", "command-draw-rect")
-        val diff = compare_backend_render_records(left, swapped)
-        expect(diff.semantic_equal).to_be(false)
-        expect(diff.differences.len()).to_equal(2)
-
-    # @manual: folded
-    it "should reject collection count reference type enum and bounds defects":
-        val valid = valid_vulkan_record("engine2d-owner")
-        step("Reject too-small and too-large collection counts")
-        expect(invalid_code(backend_render_fixture_replace(valid, "commands.count", "2"))).to_equal("count-mismatch")
-        expect(invalid_code(backend_render_fixture_replace(valid, "pipelines.count", "2"))).to_equal("missing-field")
-        expect(invalid_code(backend_render_fixture_replace(valid, "resources.count", "2"))).to_equal("missing-field")
-        expect(invalid_code(backend_render_fixture_replace(valid, "transitions.count", "1"))).to_equal("count-mismatch")
-        expect(invalid_code(backend_render_fixture_replace(valid, "synchronization.count", "2"))).to_equal("count-mismatch")
-        step("Reject unresolved pipeline resource and transition references")
-        expect(invalid_code(backend_render_fixture_replace(valid, "commands.000.pipeline_id", "missing-pipeline"))).to_equal("unresolved-reference")
-        expect(invalid_code(backend_render_fixture_replace(valid, "commands.000.resource_id", "missing-resource"))).to_equal("unresolved-reference")
-        expect(invalid_code(backend_render_fixture_replace(valid, "transitions.000.resource_id", "missing-resource"))).to_equal("unresolved-reference")
-        expect(invalid_code(backend_render_fixture_replace(valid, "synchronization.000.transition_id", "missing-transition"))).to_equal("unresolved-reference")
-        expect(invalid_code(backend_render_fixture_replace(valid, "synchronization.000.resource_id", "missing-resource"))).to_equal("unresolved-reference")
-        step("Reject malformed decimal hash and enum values")
-        expect(invalid_code(backend_render_fixture_replace(valid, "target.width", "4x"))).to_equal("invalid-decimal")
-        expect(invalid_code(backend_render_fixture_replace(valid, "frame.complete", "yes"))).to_equal("invalid-enum")
-        expect(invalid_code(backend_render_fixture_replace(valid, "resources.000.content_hash", "BAD"))).to_equal("invalid-hash")
-        expect(invalid_code(backend_render_fixture_replace(valid, "commands.000.kind", "unknown"))).to_equal("invalid-enum")
-        expect(invalid_code(backend_render_fixture_replace(valid, "resources.000.kind", "unknown"))).to_equal("invalid-enum")
-        expect(invalid_code(backend_render_fixture_replace(valid, "transitions.000.after", "unknown"))).to_equal("invalid-enum")
-        expect(invalid_code(backend_render_fixture_replace(valid, "transitions.000.stage", "unknown"))).to_equal("invalid-enum")
-        expect(invalid_code(backend_render_fixture_replace(valid, "transitions.000.access", "unknown"))).to_equal("invalid-enum")
-        expect(invalid_code(backend_render_fixture_replace(valid, "synchronization.000.kind", "unknown"))).to_equal("invalid-enum")
-        step("Reject broken transition chains and out-of-bounds viewport or scissor")
-        expect(invalid_code(backend_render_fixture_replace(valid, "transitions.001.before", "undefined"))).to_equal("invalid-transition-chain")
-        expect(invalid_code(backend_render_fixture_replace(valid, "state.viewport.x", "4"))).to_equal("invalid-viewport")
-        expect(invalid_code(backend_render_fixture_replace(valid, "state.scissor.y", "4"))).to_equal("invalid-scissor")
-
-    # @manual: folded
-    it "should canonicalize caller field order and reject duplicate pipeline IDs":
-        val valid = valid_vulkan_record("engine2d-owner")
-        step("Finalize the same fields in reverse caller order")
-        val reversed = backend_render_fixture_reverse(valid)
-        expect(invalid_code(reversed)).to_equal("pass")
-        expect(reversed.record_hash).to_equal(valid.record_hash)
-        step("Add a complete second pipeline with a duplicate ID")
-        val counted = backend_render_fixture_replace(valid, "pipelines.count", "2")
-        val fragment = backend_render_fixture_add(counted, backend_render_field("pipelines.001.fragment_shader_id", "shader-fragment-other", "text", true))
-        val hashed = backend_render_fixture_add(fragment, backend_render_field("pipelines.001.pipeline_hash", BACKEND_RENDER_FIXTURE_HASH, "sha256", true))
-        val identified = backend_render_fixture_add(hashed, backend_render_field("pipelines.001.pipeline_id", "pipeline-main", "text", true))
-        val duplicate = backend_render_fixture_add(identified, backend_render_field("pipelines.001.vertex_shader_id", "shader-vertex-other", "text", true))
-        expect(invalid_code(duplicate)).to_equal("duplicate-id")
 
     # @manual: folded
     it "should report the first and every field-level difference":

@@ -1,0 +1,73 @@
+# RawNvmeArena generation safety — stale handles must be rejected.
+#
+# RED history: before the fix, RawNvmeArena hardcoded generation == 0 on every
+# handle and never validated h.generation, so a handle from before an
+# arena_create() re-initialisation (or discard/re-register) kept working and
+# could read/append the NEW arena contents (use-after-reuse).
+
+use std.spec
+use std.db.dbfs_engine.raw_nvme_arena.{RawNvmeArena}
+use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.storage.arena.{ArenaHandle}
+use std.storage.storage_class.{StorageClass}
+use std.storage.durability.{DurabilityClass}
+
+describe "RawNvmeArena generational handles":
+
+    it "current handle appends and reads normally":
+        val dev = MemBlockDevice.new(1024u64, 512u32)
+        val arena = RawNvmeArena.new(dev, 2, 8)
+        val h = arena.arena_handle()
+        val r = arena.arena_append(h, [1u8, 2u8, 3u8, 4u8], DurabilityClass.BestEffort)
+        expect(r.bytes_written).to_equal(4)
+        expect(r.generation >= 0).to_equal(true)
+        val got = arena.arena_read_bytes(h, 0, 4)
+        expect(got.len()).to_equal(4)
+        expect(got[0] as i64).to_equal(1)
+
+    it "rejects a stale handle after arena_create reuses the region":
+        val dev = MemBlockDevice.new(1024u64, 512u32)
+        val arena = RawNvmeArena.new(dev, 20, 8)
+        val h_old = arena.arena_handle()
+        val r0 = arena.arena_append(h_old, [9u8, 9u8], DurabilityClass.BestEffort)
+        expect(r0.bytes_written).to_equal(2)
+
+        # Reuse the region: re-provision the arena. Old handle is now stale.
+        val h_new = arena.arena_create(StorageClass.GENERAL_MUTABLE, 0)
+        expect(h_new.generation != h_old.generation).to_equal(true)
+
+        # Stale append must be refused.
+        val r1 = arena.arena_append(h_old, [7u8], DurabilityClass.BestEffort)
+        expect(r1.bytes_written).to_equal(0)
+        expect(r1.generation).to_equal(-1)
+
+        # Stale reads must return nothing.
+        val fresh = arena.arena_append(h_new, [5u8, 6u8], DurabilityClass.BestEffort)
+        expect(fresh.bytes_written).to_equal(2)
+        expect(arena.arena_read_bytes(h_old, 0, 2).len()).to_equal(0)
+        var buf: [u8] = [0u8, 0u8]
+        expect(arena.arena_readv(h_old, 0, buf)).to_equal(0)
+
+        # Stale seal/discard must be refused.
+        expect(arena.arena_seal(h_old, 0)).to_equal(false)
+        expect(arena.arena_discard(h_old)).to_equal(false)
+
+        # New handle keeps working.
+        expect(arena.arena_read_bytes(h_new, 0, 2).len()).to_equal(2)
+
+    it "rejects a pre-discard handle after the region is re-registered":
+        val dev = MemBlockDevice.new(1024u64, 512u32)
+        val arena = RawNvmeArena.new(dev, 40, 8)
+        val h_old = arena.arena_handle()
+        expect(arena.arena_discard(h_old)).to_equal(true)
+
+        # Re-register the same base_block (fresh device binding = reuse).
+        val dev2 = MemBlockDevice.new(1024u64, 512u32)
+        val arena2 = RawNvmeArena.new(dev2, 40, 8)
+        val h_new = arena2.arena_handle()
+        expect(h_new.generation != h_old.generation).to_equal(true)
+
+        val r = arena2.arena_append(h_old, [1u8], DurabilityClass.BestEffort)
+        expect(r.bytes_written).to_equal(0)
+        val r2 = arena2.arena_append(h_new, [1u8], DurabilityClass.BestEffort)
+        expect(r2.bytes_written).to_equal(1)

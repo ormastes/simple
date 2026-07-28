@@ -352,7 +352,7 @@ fn _openssh_disconnect_payload_live() -> [u8]:
 # Types
 # ============================================================================
 
-enum SessionState:
+enum SshSessionState:
     VersionExchange
     KexInit
     KexDh
@@ -376,7 +376,7 @@ class SshSession:
     Manages the full lifecycle from TCP accept through interactive shell.
     """
     socket_fd: i64
-    state: SessionState
+    state: SshSessionState
     cipher: SshCipher
     channels: ChannelTable
     user_db: SshUserDb
@@ -453,7 +453,7 @@ impl SshSession:
         """Create a new SSH session with a full HostKeySet."""
         SshSession(
             socket_fd: socket_fd,
-            state: SessionState.VersionExchange,
+            state: SshSessionState.VersionExchange,
             cipher: SshCipher.new(),
             channels: ChannelTable.new(),
             user_db: user_db,
@@ -588,7 +588,7 @@ impl SshSession:
                     pass_dn
                 else:
                     serial_println("[sshd-session] auth empty read limit")
-                    self.state = SessionState.Closed
+                    self.state = SshSessionState.Closed
                     return false
             else:
                 empty_reads = 0
@@ -605,7 +605,7 @@ impl SshSession:
                 self.send_packet(success)
                 serial_println("[sshd-session] auth ok user=root method=password fast")
                 log_info("[app.sshd] " + "[sshd-session] auth ok")
-                self.state = SessionState.Interactive
+                self.state = SshSessionState.Interactive
                 return true
             else:
                 val auth_msg_type = _u8_at(payload, 0)
@@ -622,7 +622,7 @@ impl SshSession:
                         serial_println("[sshd-session] auth fast user err")
                         val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
                         self.send_packet(disc)
-                        self.state = SessionState.Closed
+                        self.state = SshSessionState.Closed
                         return false
                     val user = r_user.unwrap()
                     val r_service = _read_text_field_fast(payload, user.next_offset)
@@ -631,7 +631,7 @@ impl SshSession:
                         serial_println("[sshd-session] auth fast service err")
                         val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
                         self.send_packet(disc)
-                        self.state = SessionState.Closed
+                        self.state = SshSessionState.Closed
                         return false
                     val service = r_service.unwrap()
                     if not _payload_field_is_ssh_connection(payload, user.next_offset):
@@ -639,7 +639,7 @@ impl SshSession:
                         serial_println("[sshd-session] auth fast bad service branch")
                         val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
                         self.send_packet(disc)
-                        self.state = SessionState.Closed
+                        self.state = SshSessionState.Closed
                         return false
 
                     if _payload_field_is_none(payload, service.next_offset):
@@ -651,7 +651,7 @@ impl SshSession:
                             attempts = attempts + 1
                             val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
                             self.send_packet(disc)
-                            self.state = SessionState.Closed
+                            self.state = SshSessionState.Closed
                             return false
                         var off = service.next_offset + 4 + 8 + 1
                         val r_password = _read_text_field_fast(payload, off)
@@ -659,7 +659,7 @@ impl SshSession:
                             attempts = attempts + 1
                             val disc = ssh_build_disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "bad auth service")
                             self.send_packet(disc)
-                            self.state = SessionState.Closed
+                            self.state = SshSessionState.Closed
                             return false
                         val password = r_password.unwrap().value
                         if self.user_db.authenticate_password(user.value, password):
@@ -668,14 +668,14 @@ impl SshSession:
                             self.send_packet(success)
                             serial_println("[sshd-session] auth ok user={user.value} method=password")
                             log_info("[app.sshd] " + "[sshd-session] auth ok")
-                            self.state = SessionState.Interactive
+                            self.state = SshSessionState.Interactive
                             return true
                         else:
                             attempts = attempts + 1
                             val fail = _password_only_auth_failure_payload()
                             serial_println("[sshd-session] auth password fail branch")
                             self.send_packet(fail)
-                            self.state = SessionState.Closed
+                            self.state = SshSessionState.Closed
                             return false
                     else:
                         attempts = attempts + 1
@@ -689,12 +689,12 @@ impl SshSession:
     me do_interactive_inline():
         """Handle channel packets in the live session module."""
         log_info("[app.sshd] " + "[sshd-session] interactive")
-        self.state = SessionState.Interactive
+        self.state = SshSessionState.Interactive
         serial_println("[sshd-session] interactive-inline enter state={self.state} recv_buf_len={self.recv_buf.len()} seq_c2s={self.cipher.seq_c2s}")
         var iterations: u64 = 0
         while iterations < 128:
             iterations = iterations + 1
-            if self.state == SessionState.Closed:
+            if self.state == SshSessionState.Closed:
                 serial_println("[sshd-session] interactive-inline break closed")
                 return
 
@@ -713,7 +713,7 @@ impl SshSession:
                     rt_thread_sleep(5)
                     continue
                 serial_println("[sshd-session] interactive-inline empty payload closing recv_buf_len={self.recv_buf.len()} seq_c2s={self.cipher.seq_c2s} recv_seq={self.recv_seq}")
-                self.state = SessionState.Closed
+                self.state = SshSessionState.Closed
                 return
 
             if payload_len == 24 and self.cipher.seq_c2s == 5u32:
@@ -723,7 +723,7 @@ impl SshSession:
 
             if payload_len == 33 and self.cipher.seq_c2s == 9u32:
                 serial_println("[sshd-session] interactive-inline disconnect fast path len={payload_len} seq_c2s={self.cipher.seq_c2s}")
-                self.state = SessionState.Closed
+                self.state = SshSessionState.Closed
                 return
 
             val msg_type = _u8_at(payload, 0)
@@ -742,7 +742,7 @@ impl SshSession:
             elif msg_type == 98:
                 self._handle_channel_request_inline(payload)
             elif msg_type == SSH_MSG_DISCONNECT:
-                self.state = SessionState.Closed
+                self.state = SshSessionState.Closed
                 return
             elif msg_type == SSH_MSG_IGNORE:
                 pass_dn
@@ -753,7 +753,7 @@ impl SshSession:
                 serial_println("[sshd-session] interactive-inline ignore msg_type=0x{format_hex(msg_type.to_i64())}")
 
         serial_println("[sshd-session] interactive-inline iteration limit closing")
-        self.state = SessionState.Closed
+        self.state = SshSessionState.Closed
 
     me _handle_live_channel_open_session_fast_inline():
         val remote_id: u32 = 0
@@ -890,7 +890,7 @@ impl SshSession:
             self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
             self.pending_ring3_exec_command = command
-            self.state = SessionState.Closed
+            self.state = SshSessionState.Closed
             return
 
         # Phase 2e Inc 1/2: a command beginning with 'c' (e.g. `ssh ... clang
@@ -911,7 +911,7 @@ impl SshSession:
             self.pending_ring3_exec_local_id = local_id
             self.pending_ring3_exec = true
             self.pending_ring3_exec_command = command
-            self.state = SessionState.Closed
+            self.state = SshSessionState.Closed
             return
 
         # Phase 2e Inc 3 (getfile): `ssh root@host getfile /path` returns the raw
@@ -989,7 +989,7 @@ impl SshSession:
         self.pending_ring3_exec_local_id = local_id
         self.pending_ring3_exec = true
         self.pending_ring3_exec_command = command
-        self.state = SessionState.Closed
+        self.state = SshSessionState.Closed
 
     me _handle_channel_data_inline(payload: [u8]):
         if payload.len() < 10:
@@ -1003,7 +1003,7 @@ impl SshSession:
             return
         if val shell = self.shell:
             if not shell.feed_remote_input(r_data.unwrap().value):
-                self.state = SessionState.Closed
+                self.state = SshSessionState.Closed
             self._forward_shell_output_inline()
 
     me _scp_step_inline(payload: [u8]):
@@ -1069,7 +1069,7 @@ impl SshSession:
         self.channels.close(recipient)
         self.channels.remove_closed()
         if self.channels.channels.len() == 0:
-            self.state = SessionState.Closed
+            self.state = SshSessionState.Closed
 
     me _mark_channel_shell_inline(local_id: u32):
         var i: u64 = 0
@@ -1103,7 +1103,7 @@ impl SshSession:
         self.channels.close(local_id)
         self.channels.remove_closed()
         if self.channels.channels.len() == 0:
-            self.state = SessionState.Closed
+            self.state = SshSessionState.Closed
 
     me _send_deferred_ring3_exec_response():
         """Send the real exit status for a deferred ring-3 execution after the spawn completes.
@@ -1175,7 +1175,7 @@ impl SshSession:
         val write_rc = rt_net_send_ssh_banner(self.socket_fd as i64)
         serial_println("[sshd-session] version banner send rc={write_rc}")
         if write_rc < 0:
-            self.state = SessionState.Closed
+            self.state = SshSessionState.Closed
             return false
         serial_println("[sshd-session] version send done")
 
@@ -1196,13 +1196,13 @@ impl SshSession:
             serial_println("[sshd-session] version recv text={client_version_text}")
             if not client_version_text.starts_with("SSH-2.0-"):
                 serial_println("[sshd-session] invalid client version text={client_version_text}")
-                self.state = SessionState.Closed
+                self.state = SshSessionState.Closed
                 return false
             self.client_version = client_version_text
             self.client_version_bytes = _ssh_identification_text_to_bytes_stable(client_version_text)
         serial_println("[sshd-session] version bytes stored len={self.client_version_bytes.len()}")
         serial_println("[sshd-session] version bytes stored hex={_bytes_to_hex(self.client_version_bytes)}")
-        self.state = SessionState.KexInit
+        self.state = SshSessionState.KexInit
         serial_println("[sshd-session] version exchange ok")
         true
 
@@ -1445,7 +1445,7 @@ impl SshSession:
         val msg = ssh_build_disconnect(reason, description)
         serial_println("[sshd-session] disconnect payload={_bytes_to_hex(msg)}")
         self.send_packet(msg)
-        self.state = SessionState.Closed
+        self.state = SshSessionState.Closed
 
     me raw_send(data: [u8]):
         """Send raw bytes over the TCP socket."""
@@ -1460,7 +1460,7 @@ impl SshSession:
     pub me close():
         """Clean up session resources."""
         rt_net_close(self.socket_fd as i64)
-        self.state = SessionState.Closed
+        self.state = SshSessionState.Closed
 
 # ============================================================================
 # Test helpers — kept here so test files can import from os.apps.sshd.ssh_session

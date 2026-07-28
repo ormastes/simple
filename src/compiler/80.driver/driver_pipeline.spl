@@ -39,9 +39,6 @@ fn _driver_env_bool(key: text) -> bool:
     val value = (rt_env_get(key) ?? "").to_lower()
     value == "1" or value == "true" or value == "yes" or value == "on"
 
-fn _driver_coverage_inventory_enabled(ctx: CompileContext) -> bool:
-    (ctx.config.get("coverage") ?? "") == "1"
-
 # Diagnostics-plumbing: MirLowering.errors was silently dropped on the
 # native-build worker path (nothing outside 70.backend read it), so a bare
 # `nosuchfn(1)` call or an unsupported construct produced broken MIR that
@@ -476,11 +473,9 @@ impl CompilerDriver:
                 return false
             log_phase("aot:bootstrap_fixed:start module=app.cli.bootstrap_main functions={bootstrap_hir.functions.len()}")
             var bootstrap_lowering = MirLowering.new_for_target(bootstrap_hir.symbols, target_context)
-            bootstrap_lowering.enable_coverage_inventory(_driver_coverage_inventory_enabled(self.ctx))
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
-            bootstrap_lowering.emit_coverage_manifest()
             log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()}")
             return self.ctx.errors.len() == 0
 
@@ -501,7 +496,6 @@ impl CompilerDriver:
             # (native_build_entry_struct_construction_buildfail_2026-07-20).
             # Guard: test/03_system/native/struct_construct_native.spl.
             var direct_lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
-            direct_lowering.enable_coverage_inventory(_driver_coverage_inventory_enabled(self.ctx))
             # Crossmodule field-index prepass: the entry module is lowered
             # BEFORE the dependency modules it imports, so without this an
             # imported struct's field order was unknown while lowering the
@@ -543,7 +537,6 @@ impl CompilerDriver:
                     self.ctx.bootstrap_entry_mir = Some(mir_direct)
                 direct_idx = direct_idx + 1
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
-            direct_lowering.emit_coverage_manifest()
             return self.ctx.errors.len() == 0
 
         # Canonical constructor — this was a SECOND hand-duplicated
@@ -552,7 +545,6 @@ impl CompilerDriver:
         # native_build_entry_struct_construction_buildfail_2026-07-20, so the
         # nil-fill landmine was still live on this fallback path).
         var lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
-        lowering.enable_coverage_inventory(_driver_coverage_inventory_enabled(self.ctx))
 
         # BUG-001 diagnostic: log module count entering MIR lowering
         log_debug("[lower_to_mir] lowering to MIR")
@@ -571,7 +563,6 @@ impl CompilerDriver:
                 if name == "app.cli.bootstrap_main":
                     self.ctx.bootstrap_entry_mir = Some(mir_module)
             _driver_collect_mir_errors(self.ctx, lowering.errors)
-            lowering.emit_coverage_manifest()
             log_debug("[lower_to_mir] MIR done")
             return self.ctx.errors.len() == 0
         for src3 in self.ctx.sources:

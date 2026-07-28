@@ -78,68 +78,12 @@ and is implementable + testable here.
   `query`. `grant` on an opaque origin is a silent no-op — an opaque origin can never
   hold a grant, so a revoked or foreign origin can never observe `Granted`.
 
-## 3. Spec — `test/01_unit/browser_engine/security/origin_model_spec.spl`
+## 3. Spec
 
-8 describe blocks, **122 examples, 0 failures**, byte-identical verdicts on
-`bin/simple run` (JIT) and `SIMPLE_EXECUTION_MODE=interpreter`:
-
-| block | examples |
-|---|---|
-| origin derivation is fail-closed | 15 |
-| same-origin equality is a strict tuple comparison | 9 |
-| opaque origins trust nothing | 9 |
-| same-origin policy decision points | 15 |
-| cookie admission enforces the attribute rules | 20 |
-| cookie delivery honours domain, path, Secure and SameSite | 26 |
-| permissions are default-deny and origin-scoped | 21 |
-| deliberate-red calibration proves the oracles bite | 7 |
-
-### Deliberate-red calibrations (source really broken, then reverted)
-
-| # | injected breach | result |
-|---|---|---|
-| RED 1 | `same_origin` reduced to `left.host == right.host` | **6 reds**: `denies http://x:80 vs https://x:443`, `denies ws vs http…`, `denies two ports…`, `denies access across a scheme change…`, and both equality calibrations |
-| RED 2 | `is_public_suffix` rejection deleted from `validate_set_cookie` | **4 reds**: `rejects Domain=com`, `rejects Domain=co.uk`, `rejects a dot-prefixed public suffix`, and the public-suffix calibration |
-| RED 3 | `PermissionSet.query` default flipped to `Granted` | **10 reds** across default-deny, every cross-origin/scheme/port/subdomain leak case, revoke, `revoke_origin`, and the default-deny calibration |
-
-Each red was reverted from a byte-for-byte backup under `build/brorigin_*.bak`
-and the suite re-verified green on both engines afterwards.
-
-Note on spec authoring: describe-level `val` fixtures are NOT reliably visible
-inside every `it` body on this runner (10 examples failed with
-`semantic: variable 'secure_origin' not found` while sibling examples in the
-same context resolved it). Fixtures are module-level functions instead.
-
-## 3b. Regression A/B on the touched shared entity
-
-Adding `expires_at` to `Cookie` required updating all 11 existing literal
-construction sites (a struct literal that OMITS a defaulted field is nil-filled
-to `3` on the JIT — probe `build/brorigin_probe/defaults.spl` prints `b=3` under
-`bin/simple run` and `b=7` under the interpreter — which would have made every
-existing cookie look expired at unix 3).
-
-`test/01_unit/browser_engine/net/cookie_store_spec.spl` reports **22 examples,
-2 failures** both before and after the change (A/B'd by restoring the three
-files from `HEAD` and re-running): identical failures
-`AC-6: stored cookie is returned for matching request` and
-`AC-6: newer cookie with same name replaces older one`. **Pre-existing, not
-caused by this lane.** Root cause looks like the multi-hop mutation landmine:
-`CookieStore.store` does `val jar = self._jars[idx]` then `jar.add(c)` — the
-extracted array element is mutated without being written back.
-
-## 3c. Lint
-
-`bin/simple lint src/lib/gc_async_mut/gpu/browser_engine/security/` reports
-`COLL006 string concat in loop` on functions that contain no concatenation at
-all (`_parse_port`, `_cut_at_delims`, `_is_scheme_token`, `_is_host_token`,
-`is_known_feature`). This is ambient false-positive noise, not a defect
-introduced here: the same rule fires on the untouched peers
-`src/lib/common/web/public_suffix.spl:7` (`_public_suffix_text_less`, also
-concat-free) and `src/lib/gc_async_mut/gpu/browser_engine/net/cookie_store.spl:13`.
-`primitive_api` fires on `now: i64` timestamps; introducing a newtype for a
-unix-seconds clock value would be over-engineering against the tree's
-conventions. `non_exhaustive_match` fires on matches that DO cover every enum
-variant; adding an unreachable catch-all would be dead code.
+`test/01_unit/browser_engine/security/origin_model_spec.spl` — adversarial matrix
+(cross-origin document access, scheme/port distinctness, opaque non-identity,
+`SameSite=None` without Secure, `Domain=com`, permission leak/revoke) plus two
+deliberate-red calibrations.
 
 ## 4. Explicitly still BLOCKED (do not read this lane as Phase 7 done)
 - renderer / network / GPU **process split** and site isolation — multi-session, needs

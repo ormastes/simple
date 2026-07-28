@@ -35,7 +35,15 @@ bin/simple run test/01_unit/os/kernel/ipc/reply_object_spec.spl
   8 examples, 0 failures   # G4 attenuation / deny-wins on transfer
   7 examples, 0 failures   # G5 atomicity
 SIMPLE_EXECUTION_MODE=interpreter bin/simple run ...  -> identical 6/6/6/8/7, 0 failures
+
+bin/simple test test/01_unit/os/kernel/ipc/reply_object_spec.spl
+  6/6/6/8/7 examples, 0 failures
+  Failed: 0
+  Results: 33 total, 33 passed, 0 failed        # exit 0
 ```
+
+All three lanes (JIT `run`, interpreter `run`, canonical test-runner) agree:
+33 examples, 0 failures.
 
 Deliberate-red calibrations (each applied alone, then reverted; green re-verified):
 

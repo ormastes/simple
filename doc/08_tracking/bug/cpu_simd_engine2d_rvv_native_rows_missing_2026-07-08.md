@@ -56,17 +56,3 @@ SIMPLE_RUNTIME_RISCV64_VECTOR=1 bin/simple native-build \
 qemu-riscv64 -cpu rv64,v=true,vlen=128,elen=64 \
   -L /usr/riscv64-linux-gnu build/llvm_simd_row_native_probe_rvv
 ```
-## Local implementation update — 2026-07-28
-
-The native owner gap is closed locally. The RV64 owner builds for the real
-`rv64gc` platform baseline and enters RVV blocks only after safe `misa.V` and
-`vlenb` detection. The QEMU catalog enables V with a 128-bit vector length.
-Fill, copy, alpha, alpha-edge, and diagram qualification use vector arithmetic;
-the scalar oracle remains independent. The architecture guest entry invokes
-the qualification closure, so the evidence path is reachable from production
-guest startup rather than only from a standalone barrel.
-
-Local cross-compilation, ABI-symbol, and per-ISA instruction checks pass for
-x86_64 AVX2/SSE4.2, AArch64 NEON, and RV64 RVV. This issue remains externally
-blocked only on a successful Simple-language guest link/build and a live QEMU
-receipt proving the qualification marker on each target.

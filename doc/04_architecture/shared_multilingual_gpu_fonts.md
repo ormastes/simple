@@ -171,9 +171,11 @@ identity, then store the exact bytes under readable registry-owned VFAT long
 names in `/SYS/FONTS`; unique 8.3 aliases remain compatibility byte sources,
 never alternate identities. The pure-Simple writer emits the LFN slots and the
 shared pure-Simple reader resolves them before the raw 8.3 fallback.
-This writer/reader contract is ASCII VFAT today: nested directories grow by FAT
-cluster chains, while the fixed root cluster rejects more than 16 directory
-slots instead of corrupting data. Non-ASCII UTF-16 LFN support remains pending.
+This writer/reader contract uses UTF-16LE VFAT slots, including valid BMP and
+surrogate-pair astral scalars. Malformed surrogate chains fail closed to the
+backing 8.3 alias. Nested directories grow by FAT cluster chains, while the
+fixed root cluster rejects more than 16 directory slots instead of corrupting
+data.
 The production Simple Browser registers those exact VFS bytes with the current
 font facade before Web layout and Engine2D execution and rejects any skipped
 Draw IR command. A guest path marker without glyph/framebuffer evidence is not

@@ -31,6 +31,14 @@ Tests for basic external function invocation through the FFI interface.
     Given val result = rt_math_sqrt(16.0)
     Then  expect(result == 4.0)
 
+> **Note (2026-07-28):** direct calls to raw `extern fn` signatures (as in the examples
+> here) remain the CURRENT behavior for non-mission-critical builds. Under the
+> mission-critical profile, `extern fn` is not exposed directly: the public Simple-facing
+> API must be a generated, checked semantic wrapper (raw ABI primitives stay internal).
+> See `doc/01_research/language/simple_vs_rust_mission_critical_2026-07-27.md` §3.3 and
+> `doc/01_research/language/simple_vs_rust_safety_property_audit_2026-07-28.md`
+> (property #14 "FFI boundary").
+
 ### Scenario: when passing parameters to extern function
 
 ### Scenario: Parameter Passing

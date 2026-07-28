@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -37,7 +37,7 @@ fn create_file_symlink(target: text, link: text) -> i64:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -55,7 +55,6 @@ expect(source).to_contain(
     "host_x86_simd_evidence_passes(cpu_simd) and host_simd_artifacts_are_current(cpu_simd),")
 expect(source).to_contain("host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_artifacts_are_current(renderdoc)")
 expect(source).to_contain("host_simd_capability_row_current(")
-expect(source).to_contain("CPU_SIMD_ARCH_MATRIX_TARGET_BUILD=1 sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs")
 expect(source).to_contain(
     "host_simd_evidence_passes(evidence, arch, feature) and host_simd_artifacts_are_current(evidence),")
 expect(source).to_contain("\"arm_simd\", arm_simd, \"aarch64\", \"neon\", ARM_SIMD_PATH")
@@ -141,122 +140,34 @@ file_delete(compiler_target_path)
 
 </details>
 
-#### rejects stale or substituted browser parity artifacts
-
-- Establish six current SHA-bound ARGB and pairwise diff artifacts
-- Reject changed or deleted bytes for every artifact
-- Reject same-byte symlink substitution for every artifact
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: complete scenario folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val paths = [
-    "/tmp/simple-test-host-env-electron-argb.json",
-    "/tmp/simple-test-host-env-chrome-argb.json",
-    "/tmp/simple-test-host-env-simple-argb.json",
-    "/tmp/simple-test-host-env-electron-chrome.ppm",
-    "/tmp/simple-test-host-env-electron-simple.ppm",
-    "/tmp/simple-test-host-env-chrome-simple.ppm"
-]
-val targets = [
-    "/tmp/simple-test-host-env-electron-argb-target.json",
-    "/tmp/simple-test-host-env-chrome-argb-target.json",
-    "/tmp/simple-test-host-env-simple-argb-target.json",
-    "/tmp/simple-test-host-env-electron-chrome-target.ppm",
-    "/tmp/simple-test-host-env-electron-simple-target.ppm",
-    "/tmp/simple-test-host-env-chrome-simple-target.ppm"
-]
-val contents = ["electron", "chrome", "simple", "ec-diff", "es-diff", "cs-diff"]
-var i = 0
-while i < paths.len():
-    file_delete(paths[i])
-    file_delete(targets[i])
-    expect(file_write(paths[i], contents[i])).to_be(true)
-    i += 1
-val evidence = browser_parity_artifact_evidence(paths)
-expect(host_browser_vulkan_parity_artifacts_are_current(evidence)).to_be(true)
-
-step("Reject changed or deleted bytes for each ARGB and diff artifact")
-i = 0
-while i < paths.len():
-    expect(file_write(paths[i], "changed")).to_be(true)
-    expect(host_browser_vulkan_parity_artifacts_are_current(evidence)).to_be(false)
-    expect(file_write(paths[i], contents[i])).to_be(true)
-    file_delete(paths[i])
-    expect(host_browser_vulkan_parity_artifacts_are_current(evidence)).to_be(false)
-    expect(file_write(paths[i], contents[i])).to_be(true)
-    i += 1
-
-step("Reject same-byte symlink substitution for every retained artifact")
-i = 0
-while i < paths.len():
-    expect(file_write(targets[i], contents[i])).to_be(true)
-    file_delete(paths[i])
-    expect(create_file_symlink(targets[i], paths[i])).to_equal(0)
-    expect(file_hash_sha256(paths[i])).to_equal(file_hash_sha256(targets[i]))
-    expect(host_browser_vulkan_parity_artifacts_are_current(evidence)).to_be(false)
-    file_delete(paths[i])
-    expect(file_write(paths[i], contents[i])).to_be(true)
-    i += 1
-
-for path in paths:
-    file_delete(path)
-for target in targets:
-    file_delete(target)
-```
-
-</details>
-
 #### rejects deleted or changed retained RenderDoc artifacts
 
-- Bind the retained receipt to current capture, capture log, and replay XML bytes
-- Reject a same-byte capture log symlink
+- Bind the retained receipt to current capture and replay XML bytes
 - Reject a same-byte replay XML symlink
-- Change and remove each retained RenderDoc artifact
+- Change and remove either retained RenderDoc artifact
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: complete scenario folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Bind the retained receipt to current capture log and replay XML bytes")
+step("Bind the retained receipt to current capture and replay XML bytes")
 val capture_path = "/tmp/simple-test-host-env-renderdoc-current.rdc"
-val log_path = "/tmp/simple-test-host-env-renderdoc-current.log"
-val log_target_path = "/tmp/simple-test-host-env-renderdoc-target.log"
 val xml_path = "/tmp/simple-test-host-env-renderdoc-current.xml"
 val xml_target_path = "/tmp/simple-test-host-env-renderdoc-target.xml"
 file_delete(capture_path)
-file_delete(log_path)
-file_delete(log_target_path)
 file_delete(xml_path)
 file_delete(xml_target_path)
 expect(file_write(capture_path, "RDOC-original")).to_be(true)
-expect(file_write(log_path, "capture-log-original")).to_be(true)
 expect(file_write(xml_path, "replay-original")).to_be(true)
-val log_sha = file_hash_sha256(log_path)
 val xml_sha = file_hash_sha256(xml_path)
-val evidence = "rdoc_simple_gate_capture_command_exit=0\n" +
-    "rdoc_simple_gate_capture_file=" + capture_path + "\n" +
+val evidence = "rdoc_simple_gate_capture_file=" + capture_path + "\n" +
     "rdoc_simple_gate_capture_file_sha256=" + file_hash_sha256(capture_path) + "\n" +
-    "rdoc_simple_gate_capture_log_path=" + log_path + "\n" +
-    "rdoc_simple_gate_capture_log_file_sha256=" + log_sha + "\n" +
     "rdoc_simple_gate_replay_xml_path=" + xml_path + "\n" +
     "rdoc_simple_gate_replay_xml_file_sha256=" + xml_sha
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(true)
-step("Reject a same-byte capture log symlink")
-expect(file_write(log_target_path, "capture-log-original")).to_be(true)
-file_delete(log_path)
-expect(create_file_symlink(log_target_path, log_path)).to_equal(0)
-expect(file_hash_sha256(log_path)).to_equal(log_sha)
-expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
-file_delete(log_path)
-expect(file_write(log_path, "capture-log-original")).to_be(true)
 step("Reject a same-byte replay XML symlink")
 expect(file_write(xml_target_path, "replay-original")).to_be(true)
 file_delete(xml_path)
@@ -266,26 +177,18 @@ expect(file_hash_sha256(xml_path)).to_equal(xml_sha)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
 file_delete(xml_path)
 expect(file_write(xml_path, "replay-original")).to_be(true)
-step("Change and remove each retained RenderDoc artifact")
-expect(file_write(log_path, "capture-log-changed")).to_be(true)
-expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
-expect(file_write(log_path, "capture-log-original")).to_be(true)
+step("Change and remove either retained RenderDoc artifact")
 expect(file_write(xml_path, "replay-changed")).to_be(true)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
 expect(file_write(xml_path, "replay-original")).to_be(true)
 expect(file_write(capture_path, "RDOC-changed")).to_be(true)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
 expect(file_write(capture_path, "RDOC-original")).to_be(true)
-file_delete(log_path)
-expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
-expect(file_write(log_path, "capture-log-original")).to_be(true)
 file_delete(xml_path)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
 expect(file_write(xml_path, "replay-original")).to_be(true)
 file_delete(capture_path)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
-file_delete(log_path)
-file_delete(log_target_path)
 file_delete(xml_path)
 file_delete(xml_target_path)
 ```
@@ -359,8 +262,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

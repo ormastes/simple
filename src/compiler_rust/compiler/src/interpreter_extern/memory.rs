@@ -24,15 +24,11 @@ pub fn rt_heap_registry_count(_args: &[Value]) -> Result<Value, CompileError> {
 
 /// Dispatch a hosted-runtime transient parser-array scope operation.
 pub fn rt_transient_array_scope_begin(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(
-        simple_runtime::value::rt_transient_array_scope_begin(),
-    ))
+    Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_begin()))
 }
 
 pub fn rt_transient_array_scope_pause(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(
-        simple_runtime::value::rt_transient_array_scope_pause(),
-    ))
+    Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_pause()))
 }
 
 pub fn rt_transient_array_scope_end(_args: &[Value]) -> Result<Value, CompileError> {

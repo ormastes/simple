@@ -319,8 +319,25 @@ impl Lowerer {
 
     /// Lower a dictionary literal to HIR: {key: value, ...}
     ///
-    /// Creates a dictionary with key-value pairs.
-    /// The type is represented as ANY since dictionaries are dynamically typed at runtime.
+    /// Creates a dictionary with key-value pairs. A HOMOGENEOUS literal gets a
+    /// concrete `Dict { key, value }` type inferred from its entries, exactly
+    /// as `lower_array` infers `Array { element }`; a heterogeneous, empty, or
+    /// otherwise unresolvable literal stays `TypeId::ANY` (dictionaries are
+    /// dynamically typed at runtime, and every dynamic-dict consumer keeps its
+    /// current behaviour).
+    ///
+    /// Why the inference is load-bearing, not a nicety: `d[k]` lowers via
+    /// `lower_index_expr`, which recovers the element type from
+    /// `HirType::Dict { value, .. }` and only then pairs `rt_index_get` with the
+    /// `UnboxInt` that turns the returned RuntimeValue back into a native int.
+    /// With `ty: ANY` the receiver is not a Dict in the registry, the recovery
+    /// yields ANY, NO `UnboxInt` is emitted, and the raw RuntimeValue leaks into
+    /// an i64-typed VReg — `val d = {1: 10, 2: 20}; d[2]` printed
+    /// `<value:0x14>` under the Cranelift JIT while the annotated
+    /// `val d: {i64: i64} = ...` printed `20`, and the interpreter (which is
+    /// tag-aware end to end) printed `20` for both. The same erasure left the
+    /// method path dispatching on the unqualified name `get` instead of
+    /// `Dict.get`, so `d.get(k)` diverged from the annotated form too.
     pub(super) fn lower_dict(&mut self, pairs: &[(Expr, Expr)], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         let mut hir_pairs = Vec::new();
 
@@ -330,9 +347,51 @@ impl Lowerer {
             hir_pairs.push((key_hir, value_hir));
         }
 
+        let dict_ty = self.infer_dict_literal_type(&hir_pairs);
+
         Ok(HirExpr {
             kind: HirExprKind::Dict(hir_pairs),
-            ty: TypeId::ANY, // Dictionaries are dynamically typed
+            ty: dict_ty,
+        })
+    }
+
+    /// Infer `Dict { key, value }` for a homogeneous dict literal, or `ANY`.
+    ///
+    /// Deliberately conservative — it only commits to a concrete Dict type when
+    /// the literal leaves no room for doubt:
+    /// - non-empty (`{}` has nothing to infer from and stays ANY, as before),
+    /// - every key shares one TypeId and every value shares one TypeId,
+    /// - neither of those TypeIds is itself ANY/NIL (an erased entry type would
+    ///   register a `Dict { .., value: ANY }` that reads back exactly like ANY
+    ///   for unboxing purposes while still flipping method dispatch onto the
+    ///   `Dict.*` qualified names — behaviour change with no correctness win),
+    /// - no lambda-kind entry, whose `HirExpr::ty` is not the function type
+    ///   (`lower_array` reconstructs it specially; a dict of closures has no
+    ///   unboxing stake, so it simply stays ANY here).
+    ///
+    /// Any literal failing these falls through to `TypeId::ANY`, i.e. exactly
+    /// the behaviour every dict had before this inference existed.
+    fn infer_dict_literal_type(&mut self, hir_pairs: &[(HirExpr, HirExpr)]) -> TypeId {
+        let Some((first_key, first_value)) = hir_pairs.first() else {
+            return TypeId::ANY;
+        };
+        let key_ty = first_key.ty;
+        let value_ty = first_value.ty;
+        if matches!(key_ty, TypeId::ANY | TypeId::NIL) || matches!(value_ty, TypeId::ANY | TypeId::NIL) {
+            return TypeId::ANY;
+        }
+        let uniform = hir_pairs.iter().all(|(k, v)| {
+            k.ty == key_ty
+                && v.ty == value_ty
+                && !matches!(k.kind, HirExprKind::Lambda { .. })
+                && !matches!(v.kind, HirExprKind::Lambda { .. })
+        });
+        if !uniform {
+            return TypeId::ANY;
+        }
+        self.module.types.register(HirType::Dict {
+            key: key_ty,
+            value: value_ty,
         })
     }
 

@@ -9009,9 +9009,10 @@ RuntimeValue rt_cli_eprint(RuntimeValue v) { rt_print(v); return NIL_VALUE; }
 RuntimeValue rt_cli_eprintln(RuntimeValue v) { rt_print(v); serial_puts("\r\n"); return NIL_VALUE; }
 /* rt_eprint_str/rt_eprintln_str take a (ptr, len) string slice, NOT a tagged
  * RuntimeValue -- see src/runtime/runtime.h:509. These previously declared a
- * RuntimeValue parameter, so the raw pointer the codegen passes failed every
- * tag test in rt_print and every message printed as "<value>", making
- * guest-side panic text unreadable on the serial console. */
+ * RuntimeValue parameter, so the raw pointer the codegen passes in rdi failed
+ * every tag test in rt_print and every message printed as "<value>". That made
+ * guest-side panics (e.g. the duck-typed-dispatch trap that precedes ud2)
+ * unreadable on the serial console. */
 void rt_eprint_str(const uint8_t *ptr, uint64_t len)
 {
     if (!ptr) return;

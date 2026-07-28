@@ -21,7 +21,7 @@ count as hardware passes.
   bootstrap artifact is deployed on their host.
 - Merge owner: bootstrap lane owner.
 - Final reviewer: highest-capability model, read-only, after all receipts exist.
-- Stop after three failed build/test cycles per lane and update TODO317 with
+- Stop after three failed build/test cycles per lane and update TODO 580 with
   the exact blocker instead of retrying.
 
 ## 2026-07-25 Linux Vulkan checkpoint
@@ -45,8 +45,7 @@ count as hardware passes.
   link has zero unresolved Vulkan symbols and fails on 70 unrelated optional
   OpenCL, OpenGL, oneAPI, Intel, and WebGPU runtime symbols retained by the
   monolithic Engine2D closure.
-- The retained historical `v7` native-all archive (formerly catalogued under
-  a superseded missing ledger row) exports every one of those
+- The retained TODO 580 `v7` native-all archive exports every one of those
   families plus Vulkan. Relative, absolute, and direct-environment runtime-path
   attempts all remain forced onto `core-c-bootstrap` by the cached Stage3, so
   the archive is not admitted and no hardware run is claimed.

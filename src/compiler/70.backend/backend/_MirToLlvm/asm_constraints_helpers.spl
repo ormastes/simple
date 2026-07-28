@@ -172,12 +172,6 @@ impl MirToLlvm:
         # array-handle-returning rt_array_* function above.
         self.builder.emit("declare ptr @rt_array_repeat(i64, i64)")
         self.builder.emit("declare i64 @__simple_intrinsic_bounds_check(i64, i64)")
-        self.builder.emit("declare i1 @rt_coverage_enabled()")
-        self.builder.emit("declare void @rt_coverage_clear()")
-        self.builder.emit("declare ptr @rt_coverage_dump_sdn()")
-        self.builder.emit("declare void @rt_coverage_free_sdn(ptr)")
-        self.builder.emit("declare void @rt_coverage_decision_probe(i32, i1, ptr, i32, i32)")
-        self.builder.emit("declare void @rt_coverage_condition_probe(i32, i32, i1, ptr, i32, i32)")
         self.builder.emit("declare ptr @rt_engine2d_simd_fill_row_u32(i64, i64)")
         self.builder.emit("declare ptr @rt_engine2d_simd_fill_rows_u32(i64, i64, i64, i64)")
         self.builder.emit("declare ptr @rt_engine2d_simd_copy_row_u32(ptr)")
@@ -260,12 +254,6 @@ impl MirToLlvm:
         self.defined_func_names["rt_println"] = true
         self.defined_func_names["rt_panic"] = true
         self.defined_func_names["__simple_intrinsic_bounds_check"] = true
-        self.defined_func_names["rt_coverage_enabled"] = true
-        self.defined_func_names["rt_coverage_clear"] = true
-        self.defined_func_names["rt_coverage_dump_sdn"] = true
-        self.defined_func_names["rt_coverage_free_sdn"] = true
-        self.defined_func_names["rt_coverage_decision_probe"] = true
-        self.defined_func_names["rt_coverage_condition_probe"] = true
         self.defined_func_names["rt_interp_cstr"] = true
         self.defined_func_names["rt_text_eq_any"] = true
         self.defined_func_names["rt_text_cmp_any"] = true
@@ -284,20 +272,36 @@ impl MirToLlvm:
         self.remember_function_param_types("rt_raw_i64_to_string", ["i64"])
         self.remember_function_param_types("rt_raw_u64_to_string", ["i64"])
         self.remember_function_param_types("rt_raw_bool_to_string", ["i64"])
+        # rt_strcat_tagged is declared `ptr, ptr` (see the declare comment
+        # above) but its operands frequently arrive as the i64-typed SSA
+        # result of a raw-render call (rt_raw_i64_to_string et al. all
+        # return a tagged string handle through an i64 register -- same
+        # ABI-identical rationale as that declare comment). Without a
+        # registered param-type entry here, translate_call's param_ty
+        # lookup (core_codegen.spl) returns "" and skips value_as_type's
+        # coercion entirely, so the arg is emitted as `ptr %lN` referencing
+        # an SSA value actually DEFINED `i64 %lN` -- an invalid type
+        # mismatch llc rejects ("defined with type 'i64' but expected
+        # 'ptr'"). Registering ["ptr", "ptr"] here makes translate_call
+        # insert the missing `inttoptr` the same way every other coerced
+        # callee already gets it.
+        self.remember_function_param_types("rt_strcat_tagged", ["ptr", "ptr"])
+        # rt_interp_cstr is declared `ptr @rt_interp_cstr(i64)` and is in
+        # defined_func_names but had NO param-type entry, so translate_call's
+        # param_ty lookup returned "" and skipped coercion: an i64-typed SSA arg
+        # (a tagged string handle) was emitted as `ptr %lN` against a value
+        # DEFINED `i64 %lN` -> llc "defined with type 'i64' but expected 'ptr'"
+        # (surfaced by the full MCP build). Register ["i64"] so the arg is
+        # emitted as the declared i64 (a no-op coercion, value already i64).
+        self.remember_function_param_types("rt_interp_cstr", ["i64"])
         self.remember_function_param_types("rt_text_eq_any", ["i64", "i64"])
         self.remember_function_param_types("rt_text_cmp_any", ["i64", "i64"])
         self.remember_function_param_types("rt_env_get_value", ["i64"])
         self.remember_function_return_type("rt_env_get_value", "ptr")
-        self.remember_function_return_type("rt_coverage_enabled", "i1")
-        self.remember_function_return_type("rt_coverage_clear", "void")
-        self.remember_function_return_type("rt_coverage_dump_sdn", "ptr")
-        self.remember_function_return_type("rt_coverage_free_sdn", "void")
-        self.remember_function_return_type("rt_coverage_decision_probe", "void")
-        self.remember_function_return_type("rt_coverage_condition_probe", "void")
-        self.remember_function_param_types("rt_coverage_free_sdn", ["ptr"])
-        self.remember_function_param_types("rt_coverage_decision_probe", ["i32", "i1", "ptr", "i32", "i32"])
-        self.remember_function_param_types("rt_coverage_condition_probe", ["i32", "i32", "i1", "ptr", "i32", "i32"])
         self.remember_function_param_types("__simple_rt_string_char_code_at", ["i64", "i64"])
+        self.remember_function_param_types("rt_array_get", ["ptr", "i64"])
+        self.remember_function_param_types("rt_array_set", ["ptr", "i64", "i64"])
+        self.remember_function_param_types("rt_array_push", ["ptr", "i64"])
         self.remember_function_return_type("__simple_rt_string_char_code_at", "i64")
         # Process tuple facades: register param types so translate_call
         # coerces the cmd text value (a ptr-typed local) to the declared
@@ -311,6 +315,7 @@ impl MirToLlvm:
         self.remember_function_param_types("rt_process_run_bounded_tuple", ["i64", "ptr", "i64", "i64"])
         self.remember_function_param_types("rt_process_run_inherit_value", ["i64", "ptr"])
         self.remember_function_param_types("rt_process_run_timeout_tuple", ["i64", "ptr", "i64"])
+        self.remember_function_return_type("rt_env_get_value", "ptr")
         self.remember_function_return_type("rt_process_run_tuple", "ptr")
         self.remember_function_return_type("rt_process_run_bounded_tuple", "ptr")
         self.remember_function_return_type("rt_process_run_inherit_value", "i64")

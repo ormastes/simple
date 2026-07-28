@@ -539,6 +539,15 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
         val src_path = _nb_resolve_under_root("src", segs)
         if src_path != "":
             return src_path
+        # Working-directory root. The driver-side resolver
+        # (_driver_resolve_entry_import) has always probed cwd, but that walk is
+        # skipped under --entry-closure, where this function is the only
+        # resolver. Without it a positional entry (no --source) could not reach
+        # any sibling module of its own repo-relative import path -- the closure
+        # shipped the entry file alone and the callee died as "unresolved name".
+        val cwd_path = _nb_resolve_under_root(".", segs)
+        if cwd_path != "":
+            return cwd_path
     # Unprefixed tier-qualified paths (`nogc_sync_mut.io_runtime` from the
     # std.io_runtime shim's `export use`; `common.ui.access_types`) live
     # under src/lib but carry no std./lib. prefix — no root above matches.
@@ -787,13 +796,12 @@ fn cli_native_build(args: [text]) -> i64:
                 entry_closure = true
             elif cli_native_build_is_entry_arg(a):
                 if a.contains("="):
-                    val eq_idx = a.index_of("=")
-                    match eq_idx:
-                        Some(idx):
-                            entry_point = a.substring(idx + 1)
-                        nil:
-                            _cli_eprint("Error: --entry requires an argument")
-                            return 1
+                    val idx = a.index_of("=")
+                    if idx >= 0:
+                        entry_point = a.substring(idx + 1)
+                    else:
+                        _cli_eprint("Error: --entry requires an argument")
+                        return 1
                 elif j + 1 < args.len():
                     j = j + 1
                     entry_point = args[j]

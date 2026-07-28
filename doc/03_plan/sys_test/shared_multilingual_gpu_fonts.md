@@ -3,10 +3,11 @@
 
 ## Scope
 
-Eleven executable/manual pairs comprise seven system SSpecs for manifest/assets,
+Twelve executable/manual pairs comprise seven system SSpecs for manifest/assets,
 exact-face shaping, shared 2D/3D batch, Web/GUI/WM routing, portable emission,
-generated CUDA handoff, and native graphics readback, plus four focused unit
-gates for selected Arabic/Devanagari faces and release asset layout. Among the
+generated CUDA handoff, and native graphics readback, plus five focused unit
+gates for runtime configuration, selected Arabic/Devanagari faces, and release
+asset layout. Among the
 system SSpecs, the first five exercise host-available contracts; the sixth is a
 focused conditional CUDA gate, and the seventh is a fail-closed promotion gate
 whose three independent live evidence rows remain unavailable.
@@ -38,12 +39,13 @@ Planned executable/manual pairs:
 | `test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.md` |
 | `test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl` | `doc/06_spec/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.md` |
 
-Focused exact-face unit gates (execution pending; per-row manual status):
+Focused unit gates (execution pending; per-row manual status):
 
 | Executable SSpec | Generated manual |
 |---|---|
 | `test/01_unit/lib/skia/selected_devanagari_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_devanagari_spec.md` |
 | `test/01_unit/lib/skia/selected_arabic_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_arabic_spec.md` |
+| `test/01_unit/lib/common/text_layout/font_render_config_spec.spl` | `doc/06_spec/01_unit/lib/common/text_layout/font_render_config_spec.md` (manual draft; canonical generation pending) |
 | `test/01_unit/app/release/install_font_assets_spec.spl` | `doc/06_spec/01_unit/app/release/install_font_assets_spec.md` (manual draft; canonical generation pending) |
 | `test/01_unit/app/release/release_archive_layout_spec.spl` | `doc/06_spec/01_unit/app/release/release_archive_layout_spec.md` (manual draft; canonical generation pending) |
 
@@ -158,7 +160,7 @@ behavior.
 | REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical-owner legacy atlas/pipeline dependency exclusion; canonical SimpleOS pixels | canonical-owner dependency exclusion, canonical `taskbar-clock` WM DrawIR source route, 56x48 dynamic crop, pinned cross-verified pixel hash, and wrapper/kernel/FAT32 hash recomputation are source-covered; hosted image/motion/nested parity and a current retained QEMU PASS remain pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
-| REQ-014 | eleven executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 11/11 canonical manuals now regenerate with zero stubs and preserve module scope prose, but their executable specs remain unadmitted, so 0/11 pairs are accepted |
+| REQ-014 | twelve executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 12/12 manual files are present and preserve module scope prose, but the new configuration manual and two release manuals still await canonical generation and their executable specs remain unadmitted, so 0/12 pairs are accepted |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; canonical `rocm` target with `hip` alias; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | source includes ROCm/HIP identity and policy-plan cases; the reduced 2D spec links and the mutex receiver fault is fixed, but all three cycles still exit 132 before results |
 
 | NFR | Evidence | Pass condition | Current evidence |
@@ -208,10 +210,11 @@ collector produces a passing durable record.
 
 ## Environment and order
 
-Use the self-hosted release binary. Run the eleven specs in this order: manifest,
+Use the self-hosted release binary. Run the twelve specs in this order: manifest,
 shaping, shared surfaces, legacy Web/GUI/WM route, emission, CUDA generated
 handoff, native readback, `selected_devanagari_spec.spl`,
-`selected_arabic_spec.spl`, `install_font_assets_spec.spl`, and
+`selected_arabic_spec.spl`, `font_render_config_spec.spl`,
+`install_font_assets_spec.spl`, and
 `release_archive_layout_spec.spl`. Native specs require a declared promoted
 graphics backend/driver; other backends may provide compile-only rows. Pin
 fixtures, viewport, premultiplication, rounding, warmups, samples, and percentile
@@ -258,7 +261,7 @@ compatibility bitmap renderers as supporting evidence rather than PASS.
 
 ## Pass/fail
 
-Pass requires every REQ/NFR row above, eleven zero-stub manuals, one real promoted
+Pass requires every REQ/NFR row above, twelve zero-stub manuals, one real promoted
 graphics backend for both 2D and 3D, and all selected thresholds. Missing
 hardware is not a failure for non-promoted rows, but no promoted native row is a
 release failure. Placeholder assertions, environment-only payloads, mirrors, or

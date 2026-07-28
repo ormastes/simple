@@ -2,8 +2,17 @@
 
 **Date:** 2025-12-23
 **Features:** #1096-1103 (Reference Capabilities & Concurrency Modes)
-**Status:** ✅ COMPLETE
+**Status:** ⚠️ PARTIAL — syntax + Lean model complete; enforcement NOT implemented (corrected 2026-07-28)
 **Test Coverage:** 32 capability tests + 572 compiler tests passing
+
+> **Correction 2026-07-28:** The original "✅ COMPLETE" status is not corroborated by the
+> current codebase. Actual state: the Lean formal model is complete
+> (`verification/lean/.../MemoryCapabilities.lean`); the Rust seed checks ONLY actor-mode
+> compatibility (`src/compiler_rust/.../function.rs:571-572`); the pure-Simple (self-hosted)
+> compiler has NO capability-checking pass — capability enums survive only as name-mangling
+> metadata (`src/compiler/.../monomorphize/util.spl:221-228`). Aliasing/isolation rules
+> described below are parsed and modeled but not enforced. Evidence and gap plan:
+> `doc/01_research/language/simple_vs_rust_safety_property_audit_2026-07-28.md`.
 
 ---
 

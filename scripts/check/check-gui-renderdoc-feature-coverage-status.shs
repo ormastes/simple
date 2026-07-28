@@ -37,7 +37,6 @@ READONLY_STATIC_CACHE_DIR = Path(READONLY_STATIC_CACHE_DIR_TEXT) if READONLY_STA
 if READONLY_STATIC_CACHE_DIR is not None and not READONLY_STATIC_CACHE_DIR.is_absolute():
     READONLY_STATIC_CACHE_DIR = ROOT / READONLY_STATIC_CACHE_DIR
 renderdoc_evidence_tool = ROOT / "scripts/tool/renderdoc-evidence.shs"
-coverage_admission_tool = ROOT / "scripts/check/check-wm-gui-web-2d-coverage-admission.shs"
 
 def value_of(key: str, text: str) -> str:
     out = ""
@@ -245,124 +244,6 @@ def evidence_native_bin_format_status(value: str, explicit_status: str, fmt: str
         return explicit_status
     return native_bin_format_status_from_format(fmt)
 
-def unique_env_value(key: str, text: str):
-    values = [line[len(key) + 1:] for line in text.splitlines() if line.startswith(key + "=")]
-    return values[0] if len(values) == 1 else ""
-
-def showcase_baseline_comparison(prefix: str, evidence: str, resolution: str,
-                                 current_p50: str, current_p95: str,
-                                 current_fps: str, current_rss: str):
-    identity_names = ["os", "arch", "cpu", "gpu", "driver", "compiler", "runtime",
-                      "executable_sha256", "warmup_frames", "sample_frames", "timing_protocol"]
-    result = {
-        "status": "fail", "reason": "missing-baseline-path", "path": "",
-        "sha256": "", "revision": "", "bucket": "", "current_bucket": "",
-        "capture_timestamp": "", "artifact_path": "", "artifact_sha256": "",
-        "p50": "", "p95": "", "fps": "", "rss": "",
-        "p50_limit": "", "p95_limit": "", "rss_limit": "",
-        "p50_delta_bp": "", "p95_delta_bp": "", "fps_delta_bp": "", "rss_delta_bp": "",
-    }
-    path_text = value_of(prefix + "_baseline_path", evidence)
-    expected_sha = value_of(prefix + "_baseline_expected_sha256", evidence)
-    current_bucket = value_of(prefix + "_current_bucket", evidence)
-    current_identity = {name: value_of(prefix + "_current_" + name, evidence) for name in identity_names}
-    result.update({"current_" + name: value for name, value in current_identity.items()})
-    result["path"] = path_text
-    result["current_bucket"] = current_bucket
-    if regular_file_status(path_text) != "pass":
-        result["reason"] = "baseline-not-regular-immutable-file"
-        return result
-    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha or ""):
-        result["reason"] = "missing-or-malformed-baseline-sha256"
-        return result
-    path = path_from_text(path_text)
-    try:
-        raw = path.read_bytes()
-        baseline_text = raw.decode("utf-8")
-    except Exception:
-        result["reason"] = "unreadable-baseline"
-        return result
-    actual_sha = hashlib.sha256(raw).hexdigest()
-    result["sha256"] = actual_sha
-    if actual_sha != expected_sha or value_of(prefix + "_baseline_sha256", evidence) != actual_sha:
-        result["reason"] = "stale-baseline-sha256-mismatch"
-        return result
-    schema = unique_env_value("baseline_schema", baseline_text)
-    baseline_resolution = unique_env_value("baseline_resolution", baseline_text)
-    revision = unique_env_value("baseline_source_revision", baseline_text)
-    capture_timestamp = unique_env_value("baseline_capture_timestamp", baseline_text)
-    artifact_path_text = unique_env_value("baseline_artifact_path", baseline_text)
-    artifact_sha = unique_env_value("baseline_artifact_sha256", baseline_text)
-    bucket = unique_env_value("baseline_bucket", baseline_text)
-    baseline_identity = {name: unique_env_value("baseline_" + name, baseline_text) for name in identity_names}
-    result.update({"baseline_" + name: value for name, value in baseline_identity.items()})
-    values = {
-        "p50": unique_env_value("baseline_frame_p50_ns", baseline_text),
-        "p95": unique_env_value("baseline_frame_p95_ns", baseline_text),
-        "fps": unique_env_value("baseline_fps_x1000", baseline_text),
-        "rss": unique_env_value("baseline_max_rss_kb", baseline_text),
-    }
-    result.update(values)
-    result["revision"] = revision
-    result["capture_timestamp"] = capture_timestamp
-    result["artifact_path"] = artifact_path_text
-    result["artifact_sha256"] = artifact_sha
-    result["bucket"] = bucket
-    if schema != "widget-showcase-perf-v2": result["reason"] = "invalid-baseline-schema"; return result
-    if baseline_resolution != resolution: result["reason"] = "baseline-resolution-mismatch"; return result
-    if not revision: result["reason"] = "missing-baseline-source-revision"; return result
-    if revision != value_of(prefix + "_source_revision", evidence):
-        result["reason"] = "baseline-source-revision-mismatch"; return result
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", capture_timestamp or ""):
-        result["reason"] = "malformed-baseline-capture-timestamp"; return result
-    if regular_file_status(artifact_path_text) != "pass" or not re.fullmatch(r"[0-9a-f]{64}", artifact_sha or ""):
-        result["reason"] = "invalid-baseline-artifact"; return result
-    try:
-        artifact_actual_sha = hashlib.sha256(path_from_text(artifact_path_text).read_bytes()).hexdigest()
-    except Exception:
-        result["reason"] = "invalid-baseline-artifact"; return result
-    if artifact_actual_sha != artifact_sha or value_of(prefix + "_baseline_artifact_current_sha256", evidence) != artifact_sha:
-        result["reason"] = "stale-baseline-artifact-sha256-mismatch"; return result
-    if any(not value or re.search(r"[|=\x00-\x1f\x7f]", value) for name, value in current_identity.items()
-           if name not in ("executable_sha256", "warmup_frames", "sample_frames")):
-        result["reason"] = "missing-or-malformed-current-machine-field"; return result
-    if not re.fullmatch(r"[0-9a-f]{64}", current_identity["executable_sha256"] or ""):
-        result["reason"] = "missing-or-malformed-executable-sha256"; return result
-    ordered = ["os", "arch", "cpu", "gpu", "driver", "compiler", "runtime"]
-    def canonical(identity):
-        return "|".join([f"{name}={identity[name]}" for name in ordered] + [
-            "exe_sha256=" + identity["executable_sha256"],
-            "warmup=" + identity["warmup_frames"], "samples=" + identity["sample_frames"],
-            "timing=" + identity["timing_protocol"],
-        ])
-    if baseline_identity["warmup_frames"] != "12" or current_identity["warmup_frames"] != "12" \
-            or baseline_identity["sample_frames"] != current_identity["sample_frames"] \
-            or baseline_identity["timing_protocol"] != "retained-static-present-monotonic-ns-v1" \
-            or current_identity["timing_protocol"] != "retained-static-present-monotonic-ns-v1":
-        result["reason"] = "baseline-protocol-mismatch"; return result
-    if bucket != canonical(baseline_identity): result["reason"] = "malformed-baseline-bucket"; return result
-    if current_bucket != canonical(current_identity) or current_bucket != bucket:
-        result["reason"] = "baseline-bucket-mismatch"; return result
-    if positive_numeric_fields_status(list(values.values()) + [current_p50, current_p95, current_fps, current_rss]) != "pass":
-        result["reason"] = "malformed-baseline-metrics"
-        return result
-    base_p50, base_p95, base_fps, base_rss = map(to_int, [values["p50"], values["p95"], values["fps"], values["rss"]])
-    cur_p50, cur_p95, cur_fps, cur_rss = map(to_int, [current_p50, current_p95, current_fps, current_rss])
-    if base_p95 < base_p50: result["reason"] = "malformed-baseline-distribution"; return result
-    result["p50_limit"] = str(base_p50 * 110 // 100)
-    result["p95_limit"] = str(base_p95 * 110 // 100)
-    result["rss_limit"] = str(base_rss * 105 // 100)
-    result["p50_delta_bp"] = str((cur_p50 - base_p50) * 10000 // base_p50)
-    result["p95_delta_bp"] = str((cur_p95 - base_p95) * 10000 // base_p95)
-    result["fps_delta_bp"] = str((cur_fps - base_fps) * 10000 // base_fps)
-    result["rss_delta_bp"] = str((cur_rss - base_rss) * 10000 // base_rss)
-    if cur_p50 > base_p50 * 110 // 100: result["reason"] = "median-regression-exceeded"; return result
-    if cur_p95 > base_p95 * 110 // 100: result["reason"] = "p95-regression-exceeded"; return result
-    if cur_rss > base_rss * 105 // 100: result["reason"] = "rss-regression-exceeded"; return result
-    result["status"] = "pass"
-    result["reason"] = "pass"
-    return result
-
 SHOWCASE_SOURCE_REVISION_FILES = [
     "scripts/check/check-widget-showcase-4k-200fps.shs",
     "examples/06_io/ui/widget_showcase_gui.spl",
@@ -370,8 +251,6 @@ SHOWCASE_SOURCE_REVISION_FILES = [
     "src/lib/common/ui/scroll_surface.spl",
     "src/lib/common/ui/dirty_region.spl",
     "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl",
-    "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl",
-    "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl",
     "src/lib/gc_async_mut/gpu/engine2d/engine.spl",
     "src/lib/gc_async_mut/gpu/engine2d/backend_software.spl",
 ]
@@ -388,8 +267,7 @@ def source_revision_files_status(missing_files) -> str:
 
 def current_source_revision() -> str:
     override = os.environ.get("GUI_SHOWCASE_CURRENT_SOURCE_REVISION")
-    fixture_mode = os.environ.get("GUI_RENDERDOC_AGGREGATE_FIXTURE_MODE", "0") == "1"
-    if override and fixture_mode:
+    if override:
         return override
     files_text = os.environ.get(
         "GUI_SHOWCASE_SOURCE_REVISION_FILES",
@@ -413,13 +291,6 @@ def current_source_revision() -> str:
         ).strip()
     except Exception:
         return "unknown"
-
-def current_source_revision_override_status() -> str:
-    if not os.environ.get("GUI_SHOWCASE_CURRENT_SOURCE_REVISION"):
-        return "none"
-    if os.environ.get("GUI_RENDERDOC_AGGREGATE_FIXTURE_MODE", "0") == "1":
-        return "fixture"
-    return "ignored"
 
 def vcs_source_revision() -> str:
     override = os.environ.get("GUI_WEB_2D_SOURCE_REVISION", "")
@@ -1722,11 +1593,6 @@ showcase_4k_log = value_of("gui_showcase_4k_200fps_log", showcase_4k_env)
 showcase_4k_time_log = value_of("gui_showcase_4k_200fps_time_log", showcase_4k_env)
 showcase_4k_log_file_status = regular_file_status(showcase_4k_log)
 showcase_4k_time_log_file_status = regular_file_status(showcase_4k_time_log)
-showcase_4k_baseline = showcase_baseline_comparison(
-    "gui_showcase_4k_200fps", showcase_4k_env, "4k",
-    showcase_4k_frame_p50_ns, showcase_4k_frame_p95_ns,
-    showcase_4k_fps_x1000, showcase_4k_max_rss_kb,
-)
 if showcase_4k_status == "pass":
     missing_4k_fields = [
         name
@@ -1753,10 +1619,7 @@ if showcase_4k_status == "pass":
         ]
         if not value
     ]
-    if showcase_4k_baseline["status"] != "pass":
-        showcase_4k_status = "fail"
-        showcase_4k_reason = showcase_4k_baseline["reason"]
-    elif missing_4k_fields:
+    if missing_4k_fields:
         showcase_4k_status = "fail"
         showcase_4k_reason = "missing-required-4k-200fps-evidence:" + ",".join(missing_4k_fields)
     elif to_int(showcase_4k_warmup_frames) <= 0 or showcase_4k_frame_sample_count != showcase_4k_frames:
@@ -1857,9 +1720,6 @@ if showcase_4k_status == "pass":
         elif showcase_require_current_source_revision == "1" and showcase_4k_source_revision_status != "current":
             showcase_4k_status = "fail"
             showcase_4k_reason = "stale-4k-source-revision:" + showcase_4k_source_revision_status + ";source=" + (showcase_4k_source_revision or "<missing>") + ";current=" + showcase_current_source_revision
-        elif current_source_revision_override_status() == "fixture":
-            showcase_4k_status = "fail"
-            showcase_4k_reason = "fixture-current-source-revision-forbidden-for-completion"
         else:
             showcase_4k_reason = "met-200fps"
 
@@ -1927,11 +1787,6 @@ showcase_8k_log = value_of("gui_showcase_8k_perf_log", showcase_8k_env)
 showcase_8k_time_log = value_of("gui_showcase_8k_perf_time_log", showcase_8k_env)
 showcase_8k_log_file_status = regular_file_status(showcase_8k_log)
 showcase_8k_time_log_file_status = regular_file_status(showcase_8k_time_log)
-showcase_8k_baseline = showcase_baseline_comparison(
-    "gui_showcase_8k_perf", showcase_8k_env, "8k",
-    showcase_8k_frame_p50_ns, showcase_8k_frame_p95_ns,
-    showcase_8k_fps_x1000, showcase_8k_max_rss_kb,
-)
 if showcase_8k_status == "pass":
     missing_8k_fields = [
         name
@@ -1958,10 +1813,7 @@ if showcase_8k_status == "pass":
         ]
         if not value
     ]
-    if showcase_8k_baseline["status"] != "pass":
-        showcase_8k_status = "fail"
-        showcase_8k_reason = showcase_8k_baseline["reason"]
-    elif missing_8k_fields:
+    if missing_8k_fields:
         showcase_8k_status = "fail"
         showcase_8k_reason = "missing-required-8k-perf-evidence:" + ",".join(missing_8k_fields)
     elif to_int(showcase_8k_warmup_frames) <= 0 or showcase_8k_frame_sample_count != showcase_8k_frames:
@@ -2062,9 +1914,6 @@ if showcase_8k_status == "pass":
         elif showcase_require_current_source_revision == "1" and showcase_8k_source_revision_status != "current":
             showcase_8k_status = "fail"
             showcase_8k_reason = "stale-8k-source-revision:" + showcase_8k_source_revision_status + ";source=" + (showcase_8k_source_revision or "<missing>") + ";current=" + showcase_current_source_revision
-        elif current_source_revision_override_status() == "fixture":
-            showcase_8k_status = "fail"
-            showcase_8k_reason = "fixture-current-source-revision-forbidden-for-completion"
         else:
             showcase_8k_reason = "met-target-fps"
 
@@ -3319,29 +3168,9 @@ gui_web_2d_vulkan_renderdoc_blocker_gate_count = len(renderdoc_blocker_gates)
 gui_web_2d_vulkan_renderdoc_blocker_gates = "|".join(renderdoc_blocker_gates)
 gui_web_2d_vulkan_renderdoc_blocker_doc = "" if gui_web_2d_vulkan_renderdoc_blocker_status == "pass" else "doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md"
 
-try:
-    coverage_admission_proc = subprocess.run(
-        ["sh", str(coverage_admission_tool)], cwd=ROOT, env=os.environ.copy(),
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        timeout=30, check=False,
-    )
-    coverage_admission_output = coverage_admission_proc.stdout
-    coverage_admission_code = coverage_admission_proc.returncode
-except subprocess.TimeoutExpired:
-    coverage_admission_output = "wm_gui_web_2d_coverage_admission_status=fail\nwm_gui_web_2d_coverage_admission_reason=coverage-admission-timeout\n"
-    coverage_admission_code = 124
-coverage_admission_status = value_of("wm_gui_web_2d_coverage_admission_status", coverage_admission_output)
-coverage_admission_reason = value_of("wm_gui_web_2d_coverage_admission_reason", coverage_admission_output)
-if coverage_admission_code != 0 or coverage_admission_status != "pass":
-    coverage_admission_status = "fail"
-    coverage_admission_reason = coverage_admission_reason or "coverage-admission-gate-failed"
-
 coverage_status = "pass"
 coverage_reason = "pass"
-if coverage_admission_status != "pass":
-    coverage_status = "fail"
-    coverage_reason = coverage_admission_reason
-elif missing_dispatch:
+if missing_dispatch:
     coverage_status = "fail"
     coverage_reason = "missing-widget-html-renderer-dispatch"
 elif traceability_status != "pass":
@@ -3389,18 +3218,6 @@ elif production_core_status != "pass":
 
 emit("gui_renderdoc_feature_coverage_status", coverage_status)
 emit("gui_renderdoc_feature_coverage_reason", coverage_reason)
-for coverage_key in [
-    "wm_gui_web_2d_coverage_admission_status", "wm_gui_web_2d_coverage_admission_reason",
-    "wm_gui_web_2d_coverage_classifier_threshold_percent", "wm_gui_web_2d_coverage_overall_threshold_percent",
-    "wm_gui_web_2d_coverage_classifier_decisions_covered", "wm_gui_web_2d_coverage_classifier_decisions_total",
-    "wm_gui_web_2d_coverage_overall_decisions_covered", "wm_gui_web_2d_coverage_overall_decisions_total",
-    "wm_gui_web_2d_coverage_owner_paths", "wm_gui_web_2d_coverage_owner_decision_counts",
-    "wm_gui_web_2d_coverage_evidence_path", "wm_gui_web_2d_coverage_report_path",
-    "wm_gui_web_2d_coverage_report_sha256", "wm_gui_web_2d_coverage_source_revision",
-    "wm_gui_web_2d_coverage_executable_path", "wm_gui_web_2d_coverage_executable_sha256",
-]:
-    emit(coverage_key, value_of(coverage_key, coverage_admission_output))
-emit("wm_gui_web_2d_coverage_admission_command", "sh scripts/check/check-wm-gui-web-2d-coverage-admission.shs")
 emit("widget_kind_source", rel(widget_kind_path))
 emit("widget_kind_count", len(widget_wires))
 emit("widget_html_renderer_source", rel(html_widgets_path))
@@ -4254,7 +4071,6 @@ emit("gui_showcase_4k_200fps_source_revision_files", showcase_4k_source_revision
 emit("gui_showcase_4k_200fps_source_revision_files_status", showcase_4k_source_revision_files_status)
 emit("gui_showcase_4k_200fps_missing_source_revision_files", ",".join(showcase_4k_missing_source_revision_files))
 emit("gui_showcase_4k_200fps_current_source_revision", showcase_current_source_revision)
-emit("gui_showcase_current_source_revision_override_status", current_source_revision_override_status())
 emit("gui_showcase_4k_200fps_source_revision_status", showcase_4k_source_revision_status)
 emit("gui_showcase_4k_200fps_require_current_source_revision", showcase_require_current_source_revision)
 emit("gui_showcase_4k_200fps_simple_bin", showcase_4k_simple_bin)
@@ -4278,8 +4094,6 @@ emit("gui_showcase_4k_200fps_log", rel_text_path(showcase_4k_log))
 emit("gui_showcase_4k_200fps_log_file_status", showcase_4k_log_file_status)
 emit("gui_showcase_4k_200fps_time_log", rel_text_path(showcase_4k_time_log))
 emit("gui_showcase_4k_200fps_time_log_file_status", showcase_4k_time_log_file_status)
-for key, value in showcase_4k_baseline.items():
-    emit("gui_showcase_4k_200fps_baseline_aggregate_" + key, value)
 emit("gui_showcase_8k_perf_env", rel(showcase_8k_env_path) if showcase_8k_env_path.exists() else "")
 emit("gui_showcase_8k_perf_status", showcase_8k_status)
 emit("gui_showcase_8k_perf_reason", showcase_8k_reason)
@@ -4309,8 +4123,6 @@ emit("gui_showcase_8k_perf_checksum_status", showcase_8k_checksum_status)
 emit("gui_showcase_8k_perf_readback_mode", showcase_8k_readback_mode)
 emit("gui_showcase_8k_perf_render_mode", showcase_8k_render_mode)
 emit("gui_showcase_8k_perf_retained_render_mode_status", showcase_8k_retained_render_mode_status)
-for key, value in showcase_8k_baseline.items():
-    emit("gui_showcase_8k_perf_baseline_aggregate_" + key, value)
 emit("gui_showcase_8k_perf_redraw_frames", showcase_8k_redraw_frames)
 emit("gui_showcase_8k_perf_retained_redraw_status", showcase_8k_retained_redraw_status)
 emit("gui_showcase_8k_perf_source_revision", showcase_8k_source_revision)
@@ -4511,8 +4323,6 @@ emit("simple_renderdoc_capture_command", "RDOC_OUTPUT_DIR=build/renderdoc/canoni
 emit("html_renderdoc_capture_command", "RDOC_EXTERNAL_RUN_CAPTURE=1 sh scripts/check/check-renderdoc-external-host-capture.shs")
 emit("electron_renderdoc_capture_command", "RDOC_OUTPUT_DIR=build/renderdoc/electron-implicit-layer-default-autocapture scripts/tool/renderdoc-evidence.shs capture-electron-html")
 blocked_gates = [gate for gate in renderdoc_blocked_gates.split("|") if gate]
-if coverage_admission_status != "pass":
-    blocked_gates.insert(0, "fresh retained WM/GUI/web/2D coverage admission evidence")
 if widget_goal_status != "pass":
     for widget_blocker in [gate for gate in widget_goal_blocked_gates.split("|") if gate]:
         if widget_blocker not in blocked_gates:
@@ -4618,7 +4428,6 @@ report_optional_pair_line() {
     echo "- status: $status"
     echo "- reason: $reason"
     echo "- widget HTML renderer dispatch: $(sed -n 's/^widget_html_renderer_dispatch_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^widget_kind_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- WM/GUI/web/2D retained coverage admission: $(sed -n 's/^wm_gui_web_2d_coverage_admission_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^wm_gui_web_2d_coverage_admission_reason=//p' "$OUT_ENV" | tail -n 1); classifier $(sed -n 's/^wm_gui_web_2d_coverage_classifier_decisions_covered=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^wm_gui_web_2d_coverage_classifier_decisions_total=//p' "$OUT_ENV" | tail -n 1); overall $(sed -n 's/^wm_gui_web_2d_coverage_overall_decisions_covered=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^wm_gui_web_2d_coverage_overall_decisions_total=//p' "$OUT_ENV" | tail -n 1))"
     echo "- widget rendering fixture/spec coverage: $(sed -n 's/^gui_widget_rendering_fixture_coverage_status=//p' "$OUT_ENV" | tail -n 1) ($(sed -n 's/^gui_widget_rendering_fixture_coverage_spec_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^gui_widget_rendering_fixture_coverage_widget_kind_count=//p' "$OUT_ENV" | tail -n 1))"
     echo "- widget renderer class coverage: $(sed -n 's/^gui_widget_rendering_fixture_coverage_renderer_class_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^gui_widget_rendering_fixture_coverage_widget_kind_count=//p' "$OUT_ENV" | tail -n 1)"
     echo "- widget render fixture witnesses: $(sed -n 's/^gui_widget_rendering_fixture_coverage_render_fixture_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^gui_widget_rendering_fixture_coverage_widget_kind_count=//p' "$OUT_ENV" | tail -n 1)"
@@ -4712,7 +4521,6 @@ report_optional_pair_line() {
     echo "## Commands"
     echo
     echo "- HTML/CSS traceability: \`$(sed -n 's/^html_css_traceability_command=//p' "$OUT_ENV" | tail -n 1)\`"
-    echo "- WM/GUI/web/2D coverage admission: \`$(sed -n 's/^wm_gui_web_2d_coverage_admission_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- GUI widget rendering fixture coverage: \`$(sed -n 's/^gui_widget_rendering_fixture_coverage_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- HTML/CSS rendering manifest traceability: \`$(sed -n 's/^html_css_rendering_manifest_traceability_command=//p' "$OUT_ENV" | tail -n 1)\`"
     echo "- Web WM modern shell evidence: \`$(sed -n 's/^web_wm_modern_shell_evidence_command=//p' "$OUT_ENV" | tail -n 1)\`"

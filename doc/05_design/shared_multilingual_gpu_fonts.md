@@ -355,10 +355,12 @@ The pure-Simple builders and shared LFN reader are canonical. The still-live C
 image writer mirrors the same 16 readable names and fixed short aliases for its
 existing toolchain/evidence payload callers; it does not become a second font
 registry or renderer.
-The writer accepts ASCII VFAT components up to 255 characters, emits standard
-13-code-unit slots and checksums, and sizes nested directory FAT chains from the
-actual slot count. It rejects invalid characters and fixed-root overflow;
-non-ASCII UTF-16 names are outside this slice.
+The pure-Simple writer accepts valid VFAT components up to 255 UTF-16 code
+units, emits standard 13-code-unit UTF-16LE slots and checksums, and sizes
+nested directory FAT chains from the actual slot count. The shared readers
+decode complete chains so valid surrogate pairs may cross slot boundaries;
+malformed pairs fail closed to the backing 8.3 alias. The writer rejects
+invalid characters and fixed-root overflow.
 
 Remaining completion behavior is intentionally narrow:
 

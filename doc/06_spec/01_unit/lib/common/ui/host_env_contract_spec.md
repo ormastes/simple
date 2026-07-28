@@ -211,7 +211,7 @@ expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -225,9 +225,6 @@ val (duplicate_path, _, _, _) = host_readback_capture_bindings(
     complete + "\nlinux_hosted_wm_live_window_baseline_capture=/tmp/stale.ppm")
 expect(duplicate_path).to_equal("")
 expect(host_readback_evidence_passes(complete)).to_be(true)
-expect(host_readback_evidence_passes(complete.replace("linux_hosted_wm_live_window_compatibility_fallback_status=pass\n", ""))).to_be(false)
-expect(host_readback_evidence_passes(complete.replace("compatibility_fallback_status=pass", "compatibility_fallback_status=fail"))).to_be(false)
-expect(host_readback_evidence_passes(complete + "\nlinux_hosted_wm_live_window_compatibility_fallback_status=pass")).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("event_origin=screen", "event_origin=synthetic"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("framebuffer_status=pass", "framebuffer_status=fail"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("glyph_crop_status=pass", "glyph_crop_status=fail"))).to_be(false)
@@ -437,14 +434,13 @@ and requires all three pairwise comparisons to pass.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 79 lines folded for reproduction.
+Runnable source: 69 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val browser = complete_browser_vulkan_evidence()
 val run = complete_browser_vulkan_parity_run_evidence()
 expect(host_browser_vulkan_parity_evidence_passes(browser, run)).to_be(true)
-expect(host_browser_vulkan_parity_artifact_bindings(run).len()).to_equal(12)
 
 step("Reject incomplete or non-Vulkan browser receipts")
 expect(host_browser_vulkan_parity_evidence_passes(browser.replace("browser_backing_mode=gpu-feature-status", "browser_backing_mode=unknown"), run)).to_be(false)
@@ -497,16 +493,6 @@ expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_a
 expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_nonblank_pixel_count=900000", "simple_argb_nonblank_pixel_count=921601"))).to_be(false)
 expect(host_browser_vulkan_parity_evidence_passes(browser, run + "\ngui_web_2d_vulkan_electron_argb_pixel_count=921600")).to_be(false)
 
-step("Reject missing malformed or duplicate artifact SHA-256 bindings")
-expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_electron_argb_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "gui_web_2d_vulkan_electron_argb_sha256="))).to_be(false)
-expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_chrome_argb_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "gui_web_2d_vulkan_chrome_argb_sha256="))).to_be(false)
-expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_simple_argb_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "gui_web_2d_vulkan_simple_argb_sha256="))).to_be(false)
-expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_electron_chrome_diff_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "gui_web_2d_vulkan_electron_chrome_diff_sha256="))).to_be(false)
-expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_electron_simple_diff_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "gui_web_2d_vulkan_electron_simple_diff_sha256="))).to_be(false)
-expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_chrome_simple_diff_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "gui_web_2d_vulkan_chrome_simple_diff_sha256="))).to_be(false)
-expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_electron_argb_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "gui_web_2d_vulkan_electron_argb_sha256=ABC"))).to_be(false)
-expect(host_browser_vulkan_parity_artifact_bindings(run + "\ngui_web_2d_vulkan_electron_argb_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").len()).to_equal(0)
-
 step("Reject any missing or nonzero pairwise result and aggregate failure")
 expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_chrome_diff_path=/tmp/electron-chrome.ppm", "electron_chrome_diff_path="))).to_be(false)
 expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_chrome_pairwise_diff_status=pass", "electron_chrome_pairwise_diff_status=fail"))).to_be(false)
@@ -546,13 +532,6 @@ val (missing_path, missing_sha256) = host_renderdoc_capture_binding(
     complete.replace("rdoc_simple_gate_capture_file=/tmp/frame.rdc\n", ""))
 expect(missing_path).to_equal("")
 expect(missing_sha256).to_equal("")
-val (log_path, log_sha256) = host_renderdoc_capture_log_binding(complete)
-expect(log_path).to_equal("/tmp/renderdoc-simple.log")
-expect(log_sha256).to_equal("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
-val (duplicate_log_path, duplicate_log_sha256) = host_renderdoc_capture_log_binding(
-    complete + "\nrdoc_simple_gate_capture_log_path=/tmp/stale.log")
-expect(duplicate_log_path).to_equal("")
-expect(duplicate_log_sha256).to_equal("")
 val (xml_path, xml_sha256) = host_renderdoc_replay_xml_binding(complete)
 expect(xml_path).to_equal("/tmp/frame.xml")
 expect(xml_sha256).to_equal("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
@@ -561,17 +540,11 @@ val (duplicate_xml_path, duplicate_xml_sha256) = host_renderdoc_replay_xml_bindi
 expect(duplicate_xml_path).to_equal("")
 expect(duplicate_xml_sha256).to_equal("")
 expect(host_renderdoc_evidence_passes(complete)).to_be(true)
-expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_command_exit=0", "rdoc_simple_gate_capture_command_exit=7"))).to_be(false)
-expect(host_renderdoc_evidence_passes(complete + "\nrdoc_simple_gate_capture_command_exit=0")).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("\n", "\r\n"))).to_be(true)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_status=pass", "rdoc_simple_gate_status=fail"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_file_magic=RDOC", "rdoc_simple_gate_capture_file_magic=bad"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "rdoc_simple_gate_capture_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_hash_status=pass", "rdoc_simple_gate_capture_hash_status=fail"))).to_be(false)
-expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_log_path=/tmp/renderdoc-simple.log", "rdoc_simple_gate_capture_log_path="))).to_be(false)
-expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_log_file_status=pass", "rdoc_simple_gate_capture_log_file_status=symlink"))).to_be(false)
-expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_log_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "rdoc_simple_gate_capture_log_sha256=bad"))).to_be(false)
-expect(host_renderdoc_evidence_passes(complete + "\nrdoc_simple_gate_capture_log_path=/tmp/duplicate.log")).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_renderdoc_capturing_before_end=1", "rdoc_simple_gate_renderdoc_capturing_before_end=0"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_renderdoc_device=41", "rdoc_simple_gate_renderdoc_device=0"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_record_valid=1", "rdoc_simple_gate_record_valid=0"))).to_be(false)
@@ -610,7 +583,7 @@ move, maximize, and restore status must each be exactly `pass`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -628,15 +601,6 @@ expect(host_display_input_evidence_passes(complete.replace("text_status=pass", "
 expect(host_display_input_evidence_passes(complete.replace("focus_status=pass", "focus_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("pointer_status=pass", "pointer_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("keyboard_status=pass", "keyboard_status=fail"))).to_be(false)
-expect(host_display_input_evidence_passes(complete.replace("key_down_count=1", "key_down_count=0"))).to_be(false)
-expect(host_display_input_evidence_passes(complete.replace("key_up_count=1", "key_up_count=0"))).to_be(false)
-expect(host_display_input_evidence_passes(complete.replace("pointer_move_count=1", "pointer_move_count=0"))).to_be(false)
-expect(host_display_input_evidence_passes(complete.replace("pointer_button_down_count=1", "pointer_button_down_count=0"))).to_be(false)
-expect(host_display_input_evidence_passes(complete.replace("pointer_button_up_count=1", "pointer_button_up_count=0"))).to_be(false)
-expect(host_display_input_evidence_passes(complete.replace("text_commit_count=1", "text_commit_count=0"))).to_be(false)
-expect(host_display_input_evidence_passes(
-    complete + "\nlinux_hosted_wm_live_window_pointer_button_down_count=1"
-)).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("move_status=pass", "move_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("maximize_status=pass", "maximize_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("restore_status=pass", "restore_status=fail"))).to_be(false)

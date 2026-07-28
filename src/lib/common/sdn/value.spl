@@ -164,12 +164,24 @@ pub enum SdnValue:
                     return None
         Some(current)
 
-    # NOTE: SdnValue is an immutable enum; the interpreter does not propagate
-    # in-place mutation of an enum-held collection, so insert/push report
-    # whether the operation applies to this variant rather than mutating.
+    # Writes through `_sdn_dict_put` rather than `d[key] = value`: a
+    # `case Dict(d)` binding is an immutable borrow, so a direct subscript write
+    # silently no-ops under the interpreter and the JIT rejects it outright with
+    # W1006 "mutation without mut capability". Going through a `mut` parameter
+    # is the only form the interpreter propagates back into the enum payload.
+    #
+    # KNOWN DEFECT (doc/08_tracking/bug/enum_payload_dict_copied_on_function_return_2026-07-28.md):
+    # the write only persists when the SdnValue was constructed in the caller's
+    # own frame. An SdnValue returned from a function — including
+    # SdnValue.empty_dict() — has its dict payload copied at the return
+    # boundary, so the write lands on a dead copy and `get` still reports None.
+    # Do NOT rely on insert() for values obtained from a constructor until that
+    # compiler defect is fixed; build the dict first and wrap it once.
     fn insert(self, key: text, value: SdnValue) -> bool:
         match self:
-            case Dict(_): true
+            case Dict(d):
+                _sdn_dict_put(d, key, value)
+                true
             case _: false
 
     fn push(self, value: SdnValue) -> bool:
@@ -217,6 +229,12 @@ pub enum SdnValue:
                 "{...}"
             case Table(_, _):
                 "[[...]]"
+
+# Write into a dict held by an SdnValue.Dict payload. The `mut` parameter is
+# load-bearing: it is the only form under which the interpreter propagates the
+# write back into the aliased enum payload (see SdnValue.insert).
+fn _sdn_dict_put(mut d: Dict<text, SdnValue>, key: text, value: SdnValue):
+    d[key] = value
 
 fn _sdn_needs_quotes(s: text) -> bool:
     s == "" or s.contains(" ") or s.contains(":")

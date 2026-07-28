@@ -2,8 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Lane:** stage4 native-build (cranelift), full-CLI closure
-- **Status:** fixed
-- **Verified fixed (2026-07-28):** commit `eb8e64320a9` (2026-07-27) "split 2497-line _dispatch_function into category sub-dispatchers" landed (741 insertions/682 deletions in `formula.spl`); commit message states largest body reduced 2497→527 lines with all 275 dispatch arms preserved. Workaround (fix #2) applied; the proper compiler-side codegen fix (#1) remains a separate, not-yet-done follow-up per the commit message.
+- **Status:** open — blocks stage4 full-CLI build (last remaining compile blocker)
 
 ## Symptom
 `native-build` of `src/app/office/sheets/formula.spl` fails:

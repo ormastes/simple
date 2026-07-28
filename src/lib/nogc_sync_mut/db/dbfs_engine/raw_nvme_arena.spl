@@ -11,7 +11,11 @@
 # - sector_size() from the BlockDevice determines the granularity of all reads
 #   and writes. arena_preferred_granule returns sector_size().
 # - Arena ids are synthesised from base_block so one RawNvmeArena instance
-#   corresponds to exactly one ArenaHandle (id == base_block, generation == 0).
+#   corresponds to exactly one ArenaHandle (id == base_block). Handles are
+#   generation-stamped: registration starts at generation 1, and every reuse
+#   (arena_create re-provision or re-registration of the same base_block)
+#   bumps the generation, so stale handles are rejected on every access.
+#   See src/lib/nogc_sync_mut/storage/arena.spl for the generation contract.
 # - No compression, dedup, or encryption at this layer; those are caller concerns.
 # - No rt_* externs are introduced; all I/O goes through BlockDevice.read_sector
 #   and BlockDevice.write_sector.
@@ -35,6 +39,7 @@ struct _NvmeArenaMeta:
     sealed:      bool
     discarded:   bool
     total_bytes: i64
+    generation:  i64
 
 # Parallel lists keyed by instance index (base_block is the stable key).
 var _nvm_bases:  [i64]          = []
@@ -52,6 +57,79 @@ fn _nvm_find(base_block: i64) -> i32:
             return i
         i = i + 1
     -1
+
+fn _nvm_gen_of(base_block: i64) -> i64:
+    """Current generation for a registered arena, or 0 if unregistered."""
+    val idx = _nvm_find(base_block)
+    if idx < 0:
+        return 0
+    _nvm_metas[idx].generation
+
+fn _nvm_idx_for_handle(h: ArenaHandle) -> i32:
+    """Return registry index for a handle, validating its generation.
+
+    Returns -1 when the arena is unknown OR the handle is stale (its
+    generation does not match the arena's current generation).
+    """
+    val idx = _nvm_find(h.id)
+    if idx < 0:
+        return -1
+    if _nvm_metas[idx].generation != h.generation:
+        return -1
+    idx
+
+fn _nvm_register(dev: BlockDevice, base_block: i64, block_count: i64):
+    """Register (or rebind) an arena slot; bumps generation on reuse.
+
+    Module-level fn on purpose: static-fn writes to module globals are lost
+    under the interpreter (same reason mem_block_device delegates to
+    _mem_bd_register). Fresh registrations start at generation 1 so that a
+    handle stamped 0 (never-registered arena) can never validate.
+    """
+    val existing = _nvm_find(base_block)
+    val next_gen = if existing >= 0: _nvm_metas[existing].generation + 1 else: 1
+    val meta = _NvmeArenaMeta(
+        base_block:  base_block,
+        block_count: block_count,
+        class_tag:   0,
+        sealed:      false,
+        discarded:   false,
+        total_bytes: 0,
+        generation:  next_gen,
+    )
+    if existing >= 0:
+        _nvm_metas[existing] = meta
+        _nvm_devs[existing] = dev
+        _nvm_clear_mirror_for_idx(existing)
+        return
+    _nvm_bases.push(base_block)
+    _nvm_metas.push(meta)
+    _nvm_devs.push(dev)
+
+fn _nvm_set_meta(idx: i32, m: _NvmeArenaMeta):
+    """Persist a meta update (module-level fn so the write survives interp)."""
+    _nvm_metas[idx] = m
+
+fn _nvm_reprovision(base_block: i64, class_tag: i32) -> i64:
+    """Re-provision an arena slot for reuse: reset state, bump generation.
+
+    Returns the new generation, or 0 when the arena is unregistered.
+    """
+    val idx = _nvm_find(base_block)
+    if idx < 0:
+        return 0
+    val old = _nvm_metas[idx]
+    val next_gen = old.generation + 1
+    _nvm_metas[idx] = _NvmeArenaMeta(
+        base_block:  old.base_block,
+        block_count: old.block_count,
+        class_tag:   class_tag,
+        sealed:      false,
+        discarded:   false,
+        total_bytes: 0,
+        generation:  next_gen,
+    )
+    next_gen
 
 fn _nvm_clear_mirror_for_idx(idx: i32):
     """Drop cached sectors for an arena slot when a fresh device is registered."""
@@ -132,50 +210,32 @@ struct RawNvmeArena:
         """Register a new arena over the given BlockDevice region.
 
         If an arena at base_block is already registered it is rebound to the
-        fresh BlockDevice and its sparse sector mirror is cleared.
+        fresh BlockDevice, its sparse sector mirror is cleared, and its
+        generation is bumped so handles from before the rebind become stale.
         block_count must be >= 2 (block 0 = metadata, blocks 1..N-1 = data).
         """
-        val meta = _NvmeArenaMeta(
-            base_block:  base_block,
-            block_count: block_count,
-            class_tag:   0,
-            sealed:      false,
-            discarded:   false,
-            total_bytes: 0,
-        )
-        val existing = _nvm_find(base_block)
-        if existing >= 0:
-            _nvm_metas[existing] = meta
-            _nvm_devs[existing] = dev
-            _nvm_clear_mirror_for_idx(existing)
-            return RawNvmeArena(base_block: base_block, block_count: block_count)
-
-        _nvm_bases.push(base_block)
-        _nvm_metas.push(meta)
-        _nvm_devs.push(dev)
+        _nvm_register(dev, base_block, block_count)
         RawNvmeArena(base_block: base_block, block_count: block_count)
 
     fn arena_handle(self) -> ArenaHandle:
-        """Return the opaque handle for this arena."""
-        ArenaHandle(id: self.base_block, generation: 0)
+        """Return the opaque handle for this arena at its CURRENT generation.
+
+        Handles carry the generation they were minted at; after the region is
+        reused (arena_create / re-register) older handles stop validating.
+        """
+        ArenaHandle(id: self.base_block, generation: _nvm_gen_of(self.base_block))
 
 impl Arena for RawNvmeArena:
     fn arena_create(class: StorageClass, hint_bytes: i64) -> ArenaHandle:
-        """Re-initialise the arena with a new class tag; resets total_bytes."""
-        val idx = _nvm_find(self.base_block)
-        if idx < 0:
+        """Re-initialise the arena with a new class tag; resets total_bytes.
+
+        This is a slot REUSE: the generation is bumped so every previously
+        minted handle for this arena becomes stale and is rejected.
+        """
+        val new_gen = _nvm_reprovision(self.base_block, class as i32)
+        if new_gen <= 0:
             return ArenaHandle.null()
-        val old = _nvm_metas[idx]
-        val updated = _NvmeArenaMeta(
-            base_block:  old.base_block,
-            block_count: old.block_count,
-            class_tag:   class as i32,
-            sealed:      false,
-            discarded:   false,
-            total_bytes: 0,
-        )
-        _nvm_metas[idx] = updated
-        ArenaHandle(id: self.base_block, generation: 0)
+        ArenaHandle(id: self.base_block, generation: new_gen)
 
     fn arena_append(h: ArenaHandle, data: [u8], durability: DurabilityClass) -> ArenaAppendResult:
         """Append bytes to the arena; writes full sectors (zero-padded at tail).
@@ -186,7 +246,7 @@ impl Arena for RawNvmeArena:
         val null_result = ArenaAppendResult(bytes_written: 0, generation: -1)
         if h.id != self.base_block:
             return null_result
-        val idx = _nvm_find(self.base_block)
+        val idx = _nvm_idx_for_handle(h)
         if idx < 0:
             return null_result
         val meta = _nvm_metas[idx]
@@ -240,11 +300,11 @@ impl Arena for RawNvmeArena:
                     sealed:      meta.sealed,
                     discarded:   meta.discarded,
                     total_bytes: meta.total_bytes + (written - (pos - intra)),
+                    generation:  meta.generation,
                 )
-                _nvm_metas[idx] = partial
-                return ArenaAppendResult(bytes_written: written, generation: h.generation + 1)
+                _nvm_set_meta(idx, partial)
+                return ArenaAppendResult(bytes_written: written, generation: meta.generation)
 
-        val new_gen = h.generation + 1
         val updated = _NvmeArenaMeta(
             base_block:  meta.base_block,
             block_count: meta.block_count,
@@ -252,9 +312,10 @@ impl Arena for RawNvmeArena:
             sealed:      false,
             discarded:   false,
             total_bytes: meta.total_bytes + n,
+            generation:  meta.generation,
         )
-        _nvm_metas[idx] = updated
-        ArenaAppendResult(bytes_written: n, generation: new_gen)
+        _nvm_set_meta(idx, updated)
+        ArenaAppendResult(bytes_written: n, generation: meta.generation)
 
     fn arena_readv(h: ArenaHandle, off: i64, mut buf: [u8]) -> i64:
         """Read buf.len() bytes at logical offset off from the arena data region.
@@ -263,7 +324,7 @@ impl Arena for RawNvmeArena:
         """
         if h.id != self.base_block:
             return 0
-        val idx = _nvm_find(self.base_block)
+        val idx = _nvm_idx_for_handle(h)
         if idx < 0:
             return 0
         val meta = _nvm_metas[idx]
@@ -301,7 +362,7 @@ impl Arena for RawNvmeArena:
         """Read bytes from the arena data region and return them by value."""
         if h.id != self.base_block or len <= 0:
             return []
-        val idx = _nvm_find(self.base_block)
+        val idx = _nvm_idx_for_handle(h)
         if idx < 0:
             return []
         val meta = _nvm_metas[idx]
@@ -331,10 +392,10 @@ impl Arena for RawNvmeArena:
         out
 
     fn arena_seal(h: ArenaHandle, target_gen: i64) -> bool:
-        """Seal the arena; idempotent. Returns false if unknown or discarded."""
+        """Seal the arena; idempotent. Returns false if unknown, stale, or discarded."""
         if h.id != self.base_block:
             return false
-        val idx = _nvm_find(self.base_block)
+        val idx = _nvm_idx_for_handle(h)
         if idx < 0:
             return false
         val meta = _nvm_metas[idx]
@@ -349,15 +410,19 @@ impl Arena for RawNvmeArena:
             sealed:      true,
             discarded:   false,
             total_bytes: meta.total_bytes,
+            generation:  meta.generation,
         )
-        _nvm_metas[idx] = updated
+        _nvm_set_meta(idx, updated)
         true
 
     fn arena_discard(h: ArenaHandle) -> bool:
-        """Mark the arena as discarded; data blocks are not zeroed (caller trims)."""
+        """Mark the arena as discarded; data blocks are not zeroed (caller trims).
+
+        Requires a current-generation handle; a stale handle cannot discard.
+        """
         if h.id != self.base_block:
             return false
-        val idx = _nvm_find(self.base_block)
+        val idx = _nvm_idx_for_handle(h)
         if idx < 0:
             return false
         val meta = _nvm_metas[idx]
@@ -368,8 +433,9 @@ impl Arena for RawNvmeArena:
             sealed:      meta.sealed,
             discarded:   true,
             total_bytes: meta.total_bytes,
+            generation:  meta.generation,
         )
-        _nvm_metas[idx] = updated
+        _nvm_set_meta(idx, updated)
         true
 
     fn arena_clone_range(src: ArenaHandle, src_off: i64, dst: ArenaHandle, dst_off: i64, len: i64) -> bool:
@@ -379,8 +445,8 @@ impl Arena for RawNvmeArena:
         This implementation is a read-then-write; no Simple Copy Command.
         Returns false on any error (unknown arena, out of bounds, dst sealed).
         """
-        val src_idx = _nvm_find(src.id)
-        val dst_idx = _nvm_find(dst.id)
+        val src_idx = _nvm_idx_for_handle(src)
+        val dst_idx = _nvm_idx_for_handle(dst)
         if src_idx < 0 or dst_idx < 0:
             return false
         val src_meta = _nvm_metas[src_idx]

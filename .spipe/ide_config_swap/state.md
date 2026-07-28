@@ -70,57 +70,7 @@ so the defaults exist once.
   `test/03_system/.spipe_matchers_editor_settings_{schema,platform}_spec.spl`.
 
 ## 4. Results
-
-Line delta (`git show HEAD:<f> | wc -l` vs now):
-
-| File | HEAD | now | delta |
-|---|---|---|---|
-| `src/lib/editor/00.common/settings_schema.spl` | 303 | 120 | **-183** |
-| `src/lib/editor/view/settings_view.spl` | 133 | 122 | **-11** |
-| `src/lib/common/config_core/schema.spl` | 296 | 396 | +100 (5 shared fns) |
-
-**IDE net: -194 lines. Product-code net: -94.**
-Sites converted: 9 (rows 4-12 of the survey). Sites kept with a reason: 9.
-
-Spec verdicts (all block lines checked; `bin/simple test`, JIT engine):
-
-| Spec | Verdict |
-|---|---|
-| `test/01_unit/lib/editor/settings_schema_config_spec.spl` (new) | **PASS 19/0** |
-| … same spec, `SIMPLE_EXECUTION_MODE=interpreter` | **PASS 19/0** |
-| `test/01_unit/lib/common/config_core/config_layers_spec.spl` | **PASS 33/0** (no regression) |
-| `test/01_unit/lib/test_runner/test_config_spec.spl` (CFG3) | **PASS 10/0** (no regression) |
-| `test/01_unit/lib/editor/config_core_migration_spec.spl` (CFG2) | **PASS 30/0** (22+6+2) |
-| `test/03_system/gui/editor_settings_schema_spec.spl` | **PASS 24/0** (was 8 pass / 16 fail) |
-| `test/03_system/gui/editor_settings_platform_spec.spl` | **PASS 9/0** (was 6/3) |
-| `test/03_system/gui/editor_settings_view_spec.spl` | **PASS 10/0** |
-| `test/03_system/gui/editor_settings_gui_spec.spl` | **PASS 9/0** |
-| `test/system/editor_settings_{schema,platform}_spec.spl` | **PASS 24/0, 9/0** |
-
-Two of the source-text assertions in `editor_settings_schema_spec` were failing
-**before** this lane (they asserted `extern fn rt_file_write_text` and
-`rt_file_write_text(path, content)`, which CFG2 replaced with the
-`std.io_runtime` `file_write` facade). Verified pre-existing by grepping
-`git show HEAD:src/lib/editor/00.common/config.spl` — 0 hits at HEAD as well.
-They are now updated to the current truth rather than left red.
-
-`test/03_system/gui/editor_controller_spec.spl` reports **27 failures — all
-pre-existing**, all in the LSP / markdown / wiki describes, none touching
-settings. Proven by an explicit A/B: the five modified source files were replaced
-with their `HEAD` contents, the spec re-run (65 passed / 27 failed — byte-identical
-verdict), then restored.
-
-Lint (`bin/simple lint`, HEAD vs now, same two files):
-`config_core/schema.spl` 8 -> 10 errors, `settings_schema.spl` 3 -> 0 errors —
-net -1. The two "new" errors in the core are the COLL006/COLL002 false positives
-that used to fire on `settings_search` in the editor; they moved with the code.
-The `method 'get' not found on type 'str'` diagnostic when linting
-`settings_view.spl` reproduces on the HEAD copy — pre-existing.
-
-Note: the binary used prints the "Rust-built Simple binary is a bootstrap seed
-only" banner. Evidence is attributed accordingly.
-
-Ledger updated: the `config:` note line in
+See the lane report / the `config:` note line in
 `doc/08_tracking/os/production_status.sdn`.
 
 ## 5. Follow-up (not done in this lane)

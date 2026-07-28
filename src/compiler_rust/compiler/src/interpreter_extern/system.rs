@@ -1359,10 +1359,7 @@ mod tests {
 
     #[test]
     fn interpreter_runtime_reports_interpreter_abi() {
-        assert_eq!(
-            rt_is_interpreter_runtime(&[]).unwrap(),
-            Value::Bool(true)
-        );
+        assert_eq!(rt_is_interpreter_runtime(&[]).unwrap(), Value::Bool(true));
     }
 
     // Note: Can't test sys_exit() as it terminates the process

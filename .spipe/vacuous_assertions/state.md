@@ -119,7 +119,7 @@ engines, per file. This avoids the trap of a whole-tree "baseline" pass that
 races the rewrites (a first attempt did exactly that and was discarded).
 Verdicts are the sum of sspec's per-describe `N examples, M failures` lines.
 
-Verified: **17 of 62** primary-tree specs.
+Verified: **62 of 62** primary-tree specs.
 
 | spec | before JIT | before interp | after JIT | after interp |
 |---|---|---|---|---|
@@ -140,6 +140,51 @@ Verified: **17 of 62** primary-tree specs.
 | `test/01_unit/lib/common/validation_coverage_spec.spl` | 182ex/3f | 182ex/3f | 182ex/1f | 182ex/1f |
 | `test/01_unit/lib/dynamic_loader_spec.spl` | 11ex/2f | 11ex/2f | 11ex/0f | 11ex/0f |
 | `test/01_unit/lib/ffi/ffi_signature_spec.spl` | 7ex/2f | 7ex/2f | 7ex/0f | 7ex/0f |
+| `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl` | LOAD-FAIL | n/a | LOAD-FAIL | LOAD-FAIL |
+| `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tmp_50plus_spec.spl` | n/a | n/a | LOAD-FAIL | LOAD-FAIL |
+| `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tmp_63to74_spec.spl` | n/a | n/a | 12ex/1f | 12ex/0f |
+| `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tmp_75to98_spec.spl` | n/a | n/a | 26ex/8f | 26ex/5f |
+| `test/01_unit/lib/nogc_async_mut/game3d/game_loop_spec.spl` | n/a | n/a | LOAD-FAIL | LOAD-FAIL |
+| `test/01_unit/lib/nogc_async_mut/http/http_hardening_spec.spl` | n/a | n/a | 34ex/2f | 34ex/2f |
+| `test/01_unit/lib/nogc_async_mut/thread_pool_spec.spl` | n/a | n/a | 4ex/0f | 4ex/0f |
+| `test/01_unit/lib/nogc_async_mut/tls/ech_spec.spl` | n/a | n/a | 6ex/0f | 6ex/0f |
+| `test/01_unit/lib/package/installer/installer_spec.spl` | n/a | n/a | 16ex/16f | 16ex/16f |
+| `test/01_unit/lib/security/remote_security_redis_spec.spl` | n/a | n/a | 6ex/0f | 6ex/0f |
+| `test/01_unit/lib/std/compiler/loader/jit_instantiator_spec.spl` | n/a | n/a | LOAD-FAIL | LOAD-FAIL |
+| `test/01_unit/multi_mode_test_runner_spec.spl` | n/a | n/a | 34ex/34f | 34ex/34f |
+| `test/01_unit/os/drivers/input/ps2_keyboard_spec.spl` | n/a | n/a | 33ex/12f | 33ex/12f |
+| `test/01_unit/os/drivers/input/ps2_mouse_spec.spl` | n/a | n/a | 16ex/0f | 16ex/0f |
+| `test/01_unit/os/drivers/pci/pci_provider_spec.spl` | n/a | n/a | 7ex/0f | 7ex/0f |
+| `test/01_unit/os/drivers/pci/pci_spec.spl` | n/a | n/a | 18ex/9f | 18ex/9f |
+| `test/01_unit/os/kernel/memory/heap_mimalloc_spec.spl` | n/a | n/a | 6ex/1f | 6ex/1f |
+| `test/01_unit/os/memory/mimalloc_os_spec.spl` | n/a | n/a | 18ex/14f | 18ex/14f |
+| `test/01_unit/os/services/vfs/vfs_spec.spl` | n/a | n/a | 19ex/11f | 19ex/11f |
+| `test/01_unit/std/runtime_parser_bugs_spec.spl` | n/a | n/a | 21ex/0f | 21ex/0f |
+| `test/02_integration/app/bug_tracking_scenario_spec.spl` | n/a | n/a | 12ex/0f | 12ex/0f |
+| `test/02_integration/app/cli_dispatch_spec.spl` | n/a | n/a | 6ex/1f | 6ex/1f |
+| `test/02_integration/app/simple_portal/simple_portal_content_db_spec.spl` | n/a | n/a | 5ex/1f | 5ex/1f |
+| `test/02_integration/baremetal/remote_riscv32_spec.spl` | n/a | n/a | 85ex/10f | 85ex/10f |
+| `test/02_integration/compiler/c_backend_e2e_spec.spl` | n/a | n/a | 15ex/0f | 15ex/0f |
+| `test/02_integration/compiler/llvm_backend_e2e_spec.spl` | n/a | n/a | 26ex/3f | 26ex/3f |
+| `test/02_integration/compiler/llvm_compiled_proof_spec.spl` | n/a | n/a | 53ex/3f | 53ex/3f |
+| `test/02_integration/fs_driver/multi_mount_test.spl` | n/a | n/a | 16ex/5f | 16ex/5f |
+| `test/02_integration/lib/database_atomic_spec.spl` | n/a | n/a | 11ex/0f | 11ex/0f |
+| `test/02_integration/lib/database_core_spec.spl` | n/a | n/a | 35ex/0f | 35ex/0f |
+| `test/02_integration/storage/dbfs/dbfs_capability_spec.spl` | n/a | n/a | 11ex/11f | 11ex/11f |
+| `test/03_system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl` | n/a | n/a | 9ex/3f | 9ex/3f |
+| `test/03_system/core/edge_case/edge_case_10_system_spec.spl` | n/a | n/a | 28ex/2f | 28ex/2f |
+| `test/03_system/coverage/coverage_build_spec.spl` | n/a | n/a | LOAD-FAIL | LOAD-FAIL |
+| `test/03_system/feature/app/native_exe_spec.spl` | n/a | n/a | 47ex/0f | 47ex/0f |
+| `test/03_system/feature/app/t32_tools/t32_mcp_dialog_spec.spl` | n/a | n/a | 41ex/0f | 41ex/0f |
+| `test/03_system/feature/plugin/sugar_plugin_spec.spl` | n/a | n/a | 13ex/1f | 13ex/1f |
+| `test/03_system/feature/usage/architecture_spec.spl` | n/a | n/a | 27ex/0f | 27ex/0f |
+| `test/03_system/feature/usage/cmm_lsp/cmm_v2025_spec.spl` | n/a | n/a | 0ex/0f | 0ex/0f |
+| `test/03_system/feature/usage/table_spec.spl` | n/a | n/a | LOAD-FAIL | LOAD-FAIL |
+| `test/03_system/net_connect_completion_spec.spl` | n/a | n/a | 4ex/0f | 4ex/0f |
+| `test/03_system/os/boot_smoke_spec.spl` | n/a | n/a | 16ex/2f | 16ex/2f |
+| `test/03_system/os/os_tls_hosted_interop_basic_spec.spl` | n/a | n/a | 2ex/2f | 2ex/2f |
+| `test/03_system/tools/llm/claude_full/bridge/bridgeConfig_spec.spl` | n/a | n/a | 3ex/0f | 3ex/0f |
+| `test/03_system/tools/llm/claude_full/components/agents_list_spec.spl` | n/a | n/a | 5ex/0f | 5ex/0f |
 
 
 ## 7. Newly-revealed genuine failures
@@ -321,6 +366,51 @@ are red-by-design until the port lands), `expected Option::None to equal nil`
 ## Not comparable (one side produced no verdict — timeout or load failure)
 
 - `test/01_unit/app/tooling/test_db_performance_spec.spl` before=LOAD-FAIL after=LOAD-FAIL
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl` before=LOAD-FAIL after=LOAD-FAIL
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tmp_50plus_spec.spl` before=n/a after=LOAD-FAIL
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tmp_63to74_spec.spl` before=n/a after=12ex/1f
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tmp_75to98_spec.spl` before=n/a after=26ex/8f
+- `test/01_unit/lib/nogc_async_mut/game3d/game_loop_spec.spl` before=n/a after=LOAD-FAIL
+- `test/01_unit/lib/nogc_async_mut/http/http_hardening_spec.spl` before=n/a after=34ex/2f
+- `test/01_unit/lib/nogc_async_mut/thread_pool_spec.spl` before=n/a after=4ex/0f
+- `test/01_unit/lib/nogc_async_mut/tls/ech_spec.spl` before=n/a after=6ex/0f
+- `test/01_unit/lib/package/installer/installer_spec.spl` before=n/a after=16ex/16f
+- `test/01_unit/lib/security/remote_security_redis_spec.spl` before=n/a after=6ex/0f
+- `test/01_unit/lib/std/compiler/loader/jit_instantiator_spec.spl` before=n/a after=LOAD-FAIL
+- `test/01_unit/multi_mode_test_runner_spec.spl` before=n/a after=34ex/34f
+- `test/01_unit/os/drivers/input/ps2_keyboard_spec.spl` before=n/a after=33ex/12f
+- `test/01_unit/os/drivers/input/ps2_mouse_spec.spl` before=n/a after=16ex/0f
+- `test/01_unit/os/drivers/pci/pci_provider_spec.spl` before=n/a after=7ex/0f
+- `test/01_unit/os/drivers/pci/pci_spec.spl` before=n/a after=18ex/9f
+- `test/01_unit/os/kernel/memory/heap_mimalloc_spec.spl` before=n/a after=6ex/1f
+- `test/01_unit/os/memory/mimalloc_os_spec.spl` before=n/a after=18ex/14f
+- `test/01_unit/os/services/vfs/vfs_spec.spl` before=n/a after=19ex/11f
+- `test/01_unit/std/runtime_parser_bugs_spec.spl` before=n/a after=21ex/0f
+- `test/02_integration/app/bug_tracking_scenario_spec.spl` before=n/a after=12ex/0f
+- `test/02_integration/app/cli_dispatch_spec.spl` before=n/a after=6ex/1f
+- `test/02_integration/app/simple_portal/simple_portal_content_db_spec.spl` before=n/a after=5ex/1f
+- `test/02_integration/baremetal/remote_riscv32_spec.spl` before=n/a after=85ex/10f
+- `test/02_integration/compiler/c_backend_e2e_spec.spl` before=n/a after=15ex/0f
+- `test/02_integration/compiler/llvm_backend_e2e_spec.spl` before=n/a after=26ex/3f
+- `test/02_integration/compiler/llvm_compiled_proof_spec.spl` before=n/a after=53ex/3f
+- `test/02_integration/fs_driver/multi_mount_test.spl` before=n/a after=16ex/5f
+- `test/02_integration/lib/database_atomic_spec.spl` before=n/a after=11ex/0f
+- `test/02_integration/lib/database_core_spec.spl` before=n/a after=35ex/0f
+- `test/02_integration/storage/dbfs/dbfs_capability_spec.spl` before=n/a after=11ex/11f
+- `test/03_system/app/compiler/feature/optimization_plugin_jit_hotspot_system_spec.spl` before=n/a after=9ex/3f
+- `test/03_system/core/edge_case/edge_case_10_system_spec.spl` before=n/a after=28ex/2f
+- `test/03_system/coverage/coverage_build_spec.spl` before=n/a after=LOAD-FAIL
+- `test/03_system/feature/app/native_exe_spec.spl` before=n/a after=47ex/0f
+- `test/03_system/feature/app/t32_tools/t32_mcp_dialog_spec.spl` before=n/a after=41ex/0f
+- `test/03_system/feature/plugin/sugar_plugin_spec.spl` before=n/a after=13ex/1f
+- `test/03_system/feature/usage/architecture_spec.spl` before=n/a after=27ex/0f
+- `test/03_system/feature/usage/cmm_lsp/cmm_v2025_spec.spl` before=n/a after=0ex/0f
+- `test/03_system/feature/usage/table_spec.spl` before=n/a after=LOAD-FAIL
+- `test/03_system/net_connect_completion_spec.spl` before=n/a after=4ex/0f
+- `test/03_system/os/boot_smoke_spec.spl` before=n/a after=16ex/2f
+- `test/03_system/os/os_tls_hosted_interop_basic_spec.spl` before=n/a after=2ex/2f
+- `test/03_system/tools/llm/claude_full/bridge/bridgeConfig_spec.spl` before=n/a after=3ex/0f
+- `test/03_system/tools/llm/claude_full/components/agents_list_spec.spl` before=n/a after=5ex/0f
 
 ## 8. Landmines confirmed in passing
 

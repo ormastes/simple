@@ -167,12 +167,32 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
      * per-process private mappings (see src/os/posix/mod.spl "What's NOT
      * supported"). A writable MAP_SHARED request — the profile-C
      * cross-process/writable-shared case, and any request naming a real
-     * fd for a file-backed mapping — cannot be honored: the kernel has no
-     * shared-page or file-backed-page-cache path behind this syscall.
+     * fd for a file-backed mapping — cannot be honored HERE.
+     *
      * Previously this function silently discarded `flags`/`fd`/`offset`
      * and handed back an anonymous private mapping, so callers asking for
      * shared or file-backed memory got what looked like success but was
-     * neither shared nor backed by the file. Fail closed instead. */
+     * neither shared nor backed by the file. That downgrade is gone; do
+     * NOT reintroduce it.
+     *
+     * The kernel now has the shared page-cache object model and the fault
+     * path for writable shared file mappings —
+     * `src/os/kernel/memory/vmm_shared.spl` plus
+     * `vmm_handle_shared_file_fault` in
+     * `src/os/kernel/memory/vmm_vma.spl` (VMA kind VMM_VMA_SHARED_FILE).
+     * This C surface still cannot reach it, for three concrete reasons:
+     *   1. the call below hard-codes kind = VMA_ANON (arg3) and
+     *      backing = 0 (arg4), so no fd ever reaches the kernel;
+     *   2. `simpleos_syscall` carries only arg0..arg4, so `offset`
+     *      (kernel arg5, backing_offset) has no slot at all;
+     *   3. the shared object must first be registered with its file image
+     *      and its handle rights via `vmm_shared_register_backing`, which
+     *      happens in `src/os/kernel/ipc/syscall_spm.spl`
+     *      (`_handle_sys_mmap`) and is not wired for this kind yet.
+     * Until all three land, returning a mapping here would hand userspace a
+     * VMA the fault path cannot serve — i.e. a hard #PF dressed up as
+     * success. Keep failing closed. See .spipe/writable_shared_mmap/state.md
+     * for the exact remaining wiring and the QEMU gate. */
     if ((flags & MAP_SHARED) != 0 && (prot & PROT_WRITE) != 0) {
         errno = EOPNOTSUPP;
         return MAP_FAILED;

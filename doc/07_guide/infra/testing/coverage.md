@@ -336,21 +336,10 @@ annotation fail the run even when aggregate coverage passes. Canonical
 `test/03_system/**` specs require at least one annotation unless
 `--no-cover-check` is explicitly selected.
 
-The compiler-owned zero-count inventory is merged before runtime outcomes, so
-untouched instrumented sites remain in the denominator. A reported percentage
-is still release evidence only when produced by an admitted source-matched
-pure-Simple runtime; TODO317 owns that pending 98-100% execution proof as an
-admission prerequisite of the cross-host acceptance matrix.
-
-Shell-driven or live-host specs must not claim production coverage with an
-annotation when they only inspect artifacts. The WM/GUI/web/2D lane retains a
-source-revision-bound report and admits it with
-`sh scripts/check/check-wm-gui-web-2d-coverage-admission.shs`. The admission
-requires exact owner paths and decision counts, 100% classifier coverage, at
-least 98% overall coverage, an exact admitted executable hash, and a current
-regular/no-follow report hash. Missing, duplicate, stale, substituted, or
-summary/count-forged evidence is a hard failure.
-
+Until TODO594 merges a compiler-owned inventory of all decision sites, this
+percentage is **observed-decision outcome coverage**: it rejects weak outcomes
+for emitted rows but cannot count a function that never emitted any row. Do not
+use it alone to claim 98–100% source branch coverage.
 
 ### Source Coverage in CI
 

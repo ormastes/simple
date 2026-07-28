@@ -1,0 +1,383 @@
+# X.509 certificate validity period — RFC 5280 §4.1.2.5.
+#
+# A certificate carries a `Validity ::= SEQUENCE { notBefore Time, notAfter Time }`
+# that bounds the window in which its issuer vouches for the binding between the
+# subject name and the public key. Outside that window the CA has stopped
+# asserting anything: a key compromised after expiry, a domain that changed
+# hands, a CA that wound down — none of those are covered. Chain verification
+# and hostname verification both check statements the CA made *at issuance*;
+# only this check asks whether those statements are still in force.
+#
+# Before this module the repo had no notion of certificate time at all (zero
+# hits for notBefore/notAfter across src/os/tls13 and src/os/tls12), so a
+# certificate that expired a decade ago verified exactly like a fresh one.
+#
+# Fail-closed rules, all deliberate:
+#   - Only the two encodings RFC 5280 §4.1.2.5.1/§4.1.2.5.2 permit are accepted:
+#     UTCTime "YYMMDDHHMMSSZ" (exactly 13 bytes) and GeneralizedTime
+#     "YYYYMMDDHHMMSSZ" (exactly 15 bytes). Local-time offsets, omitted seconds
+#     and fractional seconds are all REJECTED, not guessed at. A parser that
+#     guesses is a parser an attacker can steer.
+#   - Any DER structure error, any non-digit byte, any out-of-range field, any
+#     notBefore > notAfter — all produce an error, never a pass.
+#   - `now_unix < 0` (no trusted clock) is an error, not "skip the check". A
+#     device without a clock must be told to opt out loudly; it must not get a
+#     silent bypass. See peer_policy.spl for how that opt-out is spelled.
+#
+# UTCTime two-digit years follow RFC 5280 §4.1.2.5.1: 00-49 => 20yy, 50-99 => 19yy.
+#
+# This module is intentionally free of `extern` declarations so specs can import
+# it without dragging in the socket runtime; the clock is read by the caller and
+# passed in as `now_unix`, which also makes every oracle here time-pinnable.
+
+use os.tls13.cert_verify.*
+
+# ============================================================================
+# Result types
+# ============================================================================
+
+class CertValidity:
+    """Parsed notBefore/notAfter as Unix seconds. `ok` false means: do not use."""
+    ok: bool
+    not_before: i64
+    not_after: i64
+    err: text
+
+class DerTimeResult:
+    """One decoded ASN.1 Time. `ok` false means the encoding was rejected."""
+    ok: bool
+    unix_seconds: i64
+    err: text
+
+class VTlv:
+    """Bounds-checked DER TLV. `ok` false means the header did not fit the buffer."""
+    ok: bool
+    tag: u8
+    value_offset: u64
+    value_length: u64
+    total_length: u64
+
+# ============================================================================
+# Bounds-checked DER reader
+#
+# Deliberately not reusing `_der_read_tlv` from der_parsing.spl: that helper
+# trusts its input and can hand back a value_length past the end of the buffer,
+# which is fine for the already-signature-checked paths it serves but is exactly
+# the wrong shape for a parser that runs before any trust decision.
+# ============================================================================
+
+fn _v_bad_tlv() -> VTlv:
+    VTlv(ok: false, tag: 0u8, value_offset: 0u64, value_length: 0u64, total_length: 0u64)
+
+fn _v_read_tlv(data: [u8], offset: u64) -> VTlv:
+    """Read one DER TLV, returning ok=false rather than reading out of bounds."""
+    val n = data.len().to_u64()
+    if offset >= n:
+        return _v_bad_tlv()
+    if offset + 1u64 >= n:
+        return _v_bad_tlv()
+    val tag = data[offset]
+    val len0 = data[offset + 1u64].to_u64()
+    var value_offset: u64 = 0u64
+    var value_length: u64 = 0u64
+    var header: u64 = 0u64
+    if len0 < 128u64:
+        header = 2u64
+        value_length = len0
+    else:
+        val count = len0 - 128u64
+        if count == 0u64 or count > 4u64:
+            return _v_bad_tlv()
+        if offset + 2u64 + count > n:
+            return _v_bad_tlv()
+        var acc: u64 = 0u64
+        var i: u64 = 0u64
+        while i < count:
+            acc = acc * 256u64 + data[offset + 2u64 + i].to_u64()
+            i = i + 1u64
+        header = 2u64 + count
+        value_length = acc
+    value_offset = offset + header
+    if value_offset > n:
+        return _v_bad_tlv()
+    if value_length > n:
+        return _v_bad_tlv()
+    if value_offset + value_length > n:
+        return _v_bad_tlv()
+    VTlv(
+        ok: true,
+        tag: tag,
+        value_offset: value_offset,
+        value_length: value_length,
+        total_length: header + value_length
+    )
+
+# ============================================================================
+# Digit / calendar helpers
+# ============================================================================
+
+fn _v_digit(b: u8) -> i64:
+    """ASCII digit to value, or -1 for anything else."""
+    val v = b.to_u64().to_i64()
+    var r: i64 = -1
+    if v >= 48 and v <= 57:
+        r = v - 48
+    r
+
+fn _v_num(data: [u8], start: u64, count: u64) -> i64:
+    """Decode `count` ASCII digits at `start`. Returns -1 if any byte is not a digit."""
+    var acc: i64 = 0
+    var bad: bool = false
+    var i: u64 = 0u64
+    while i < count:
+        val d = _v_digit(data[start + i])
+        if d < 0:
+            bad = true
+            i = count
+        else:
+            acc = acc * 10 + d
+            i = i + 1u64
+    var out: i64 = acc
+    if bad:
+        out = -1
+    out
+
+fn _v_is_leap(y: i64) -> bool:
+    """Proleptic Gregorian leap year."""
+    var r: bool = false
+    if y % 4 == 0:
+        r = true
+        if y % 100 == 0:
+            r = false
+            if y % 400 == 0:
+                r = true
+    r
+
+fn _v_days_in_month(y: i64, m: i64) -> i64:
+    """Days in month `m` (1-12) of year `y`, or -1 if `m` is out of range."""
+    if m < 1 or m > 12:
+        return -1
+    val table: [i64] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    var n: i64 = table[(m - 1).to_u64()]
+    if m == 2 and _v_is_leap(y):
+        n = 29
+    n
+
+fn _v_days_from_civil(y0: i64, m: i64, d: i64) -> i64:
+    """Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant)."""
+    var y: i64 = y0
+    if m <= 2:
+        y = y - 1
+    var era: i64 = 0
+    if y >= 0:
+        era = y / 400
+    else:
+        era = (y - 399) / 400
+    val yoe = y - era * 400
+    var mp: i64 = m + 9
+    if m > 2:
+        mp = m - 3
+    val doy = (153 * mp + 2) / 5 + d - 1
+    val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+
+# ============================================================================
+# ASN.1 Time decoding
+# ============================================================================
+
+fn _v_time_err(msg: text) -> DerTimeResult:
+    DerTimeResult(ok: false, unix_seconds: 0, err: msg)
+
+fn parse_der_time(tag: u8, value: [u8]) -> DerTimeResult:
+    """Decode an RFC 5280-profile UTCTime (0x17) or GeneralizedTime (0x18).
+
+    Only the fully-specified Zulu forms are accepted — see the module header for
+    why the tolerant forms are rejected instead of guessed at.
+    """
+    val tag_i = tag.to_u64().to_i64()
+    val n = value.len().to_u64()
+    var year_digits: u64 = 0u64
+    if tag_i == 0x17:
+        if n != 13u64:
+            return _v_time_err("certificate time: UTCTime must be 13 bytes YYMMDDHHMMSSZ")
+        year_digits = 2u64
+    elif tag_i == 0x18:
+        if n != 15u64:
+            return _v_time_err("certificate time: GeneralizedTime must be 15 bytes YYYYMMDDHHMMSSZ")
+        year_digits = 4u64
+    else:
+        return _v_time_err("certificate time: tag is neither UTCTime nor GeneralizedTime")
+
+    if value[n - 1u64].to_u64().to_i64() != 0x5A:
+        return _v_time_err("certificate time: must end in 'Z' (UTC); local-time forms are rejected")
+
+    val raw_year = _v_num(value, 0u64, year_digits)
+    val month = _v_num(value, year_digits, 2u64)
+    val day = _v_num(value, year_digits + 2u64, 2u64)
+    val hour = _v_num(value, year_digits + 4u64, 2u64)
+    val minute = _v_num(value, year_digits + 6u64, 2u64)
+    val second = _v_num(value, year_digits + 8u64, 2u64)
+    if raw_year < 0 or month < 0 or day < 0 or hour < 0 or minute < 0 or second < 0:
+        return _v_time_err("certificate time: non-digit byte in time field")
+
+    var year: i64 = raw_year
+    if year_digits == 2u64:
+        # RFC 5280 §4.1.2.5.1 sliding window.
+        if raw_year < 50:
+            year = 2000 + raw_year
+        else:
+            year = 1900 + raw_year
+
+    if year < 1950 or year > 9999:
+        return _v_time_err("certificate time: year out of representable range")
+    if month < 1 or month > 12:
+        return _v_time_err("certificate time: month out of range")
+    val dim = _v_days_in_month(year, month)
+    if day < 1 or day > dim:
+        return _v_time_err("certificate time: day out of range for month")
+    if hour > 23:
+        return _v_time_err("certificate time: hour out of range")
+    if minute > 59:
+        return _v_time_err("certificate time: minute out of range")
+    if second > 60:
+        return _v_time_err("certificate time: second out of range")
+
+    val days = _v_days_from_civil(year, month, day)
+    val secs = days * 86400 + hour * 3600 + minute * 60 + second
+    DerTimeResult(ok: true, unix_seconds: secs, err: "")
+
+# ============================================================================
+# Certificate validity extraction
+# ============================================================================
+
+fn _v_invalid(msg: text) -> CertValidity:
+    CertValidity(ok: false, not_before: 0, not_after: 0, err: msg)
+
+fn parse_cert_validity(cert_der: [u8]) -> CertValidity:
+    """Extract notBefore/notAfter (Unix seconds) from an X.509 certificate.
+
+    Walks TBSCertificate: [0] version (optional), serialNumber, signature,
+    issuer, then Validity. Every structural surprise is an error.
+    """
+    if cert_der.len() == 0:
+        return _v_invalid("certificate validity: empty certificate")
+
+    val cert_tlv = _v_read_tlv(cert_der, 0u64)
+    if not cert_tlv.ok:
+        return _v_invalid("certificate validity: malformed outer SEQUENCE")
+    if cert_tlv.tag.to_u64().to_i64() != 0x30:
+        return _v_invalid("certificate validity: outer TLV is not a SEQUENCE")
+
+    val tbs_tlv = _v_read_tlv(cert_der, cert_tlv.value_offset)
+    if not tbs_tlv.ok:
+        return _v_invalid("certificate validity: malformed TBSCertificate")
+    if tbs_tlv.tag.to_u64().to_i64() != 0x30:
+        return _v_invalid("certificate validity: TBSCertificate is not a SEQUENCE")
+    val tbs_end = tbs_tlv.value_offset + tbs_tlv.value_length
+
+    var pos: u64 = tbs_tlv.value_offset
+    if pos >= tbs_end:
+        return _v_invalid("certificate validity: empty TBSCertificate")
+    if cert_der[pos].to_u64().to_i64() == 0xA0:
+        val ver = _v_read_tlv(cert_der, pos)
+        if not ver.ok:
+            return _v_invalid("certificate validity: malformed version field")
+        pos = pos + ver.total_length
+
+    # serialNumber, signature (AlgorithmIdentifier), issuer (Name)
+    var skipped: u64 = 0u64
+    while skipped < 3u64:
+        if pos >= tbs_end:
+            return _v_invalid("certificate validity: TBSCertificate truncated before Validity")
+        val f = _v_read_tlv(cert_der, pos)
+        if not f.ok:
+            return _v_invalid("certificate validity: malformed TBSCertificate field")
+        pos = pos + f.total_length
+        skipped = skipped + 1u64
+
+    if pos >= tbs_end:
+        return _v_invalid("certificate validity: Validity field absent")
+    val val_tlv = _v_read_tlv(cert_der, pos)
+    if not val_tlv.ok:
+        return _v_invalid("certificate validity: malformed Validity SEQUENCE")
+    if val_tlv.tag.to_u64().to_i64() != 0x30:
+        return _v_invalid("certificate validity: Validity is not a SEQUENCE")
+    if pos + val_tlv.total_length > tbs_end:
+        return _v_invalid("certificate validity: Validity overruns TBSCertificate")
+
+    val nb_tlv = _v_read_tlv(cert_der, val_tlv.value_offset)
+    if not nb_tlv.ok:
+        return _v_invalid("certificate validity: malformed notBefore")
+    val nb_bytes = _v_slice(cert_der, nb_tlv.value_offset, nb_tlv.value_length)
+    val nb = parse_der_time(nb_tlv.tag, nb_bytes)
+    if not nb.ok:
+        return _v_invalid("notBefore: {nb.err}")
+
+    val na_off = val_tlv.value_offset + nb_tlv.total_length
+    if na_off >= val_tlv.value_offset + val_tlv.value_length:
+        return _v_invalid("certificate validity: notAfter absent")
+    val na_tlv = _v_read_tlv(cert_der, na_off)
+    if not na_tlv.ok:
+        return _v_invalid("certificate validity: malformed notAfter")
+    val na_bytes = _v_slice(cert_der, na_tlv.value_offset, na_tlv.value_length)
+    val na = parse_der_time(na_tlv.tag, na_bytes)
+    if not na.ok:
+        return _v_invalid("notAfter: {na.err}")
+
+    if nb.unix_seconds > na.unix_seconds:
+        return _v_invalid("certificate validity: notBefore is after notAfter")
+
+    CertValidity(ok: true, not_before: nb.unix_seconds, not_after: na.unix_seconds, err: "")
+
+fn _v_slice(data: [u8], start: u64, length: u64) -> [u8]:
+    """Copy a byte range into a FRESH array; empty array if out of bounds.
+
+    Kept a function (not an inline loop over a loop-local `var`) for the same
+    aliasing reason documented in hostname_verify.spl.
+    """
+    var out: [u8] = []
+    if length == 0u64:
+        return out
+    if start + length > data.len().to_u64():
+        return out
+    var i: u64 = 0u64
+    while i < length:
+        out.push(data[start + i])
+        i = i + 1u64
+    out
+
+# ============================================================================
+# Public checks
+# ============================================================================
+
+fn verify_cert_validity(cert_der: [u8], now_unix: i64) -> CertVerifyResult:
+    """Refuse a certificate that is expired, not yet valid, or unparseable.
+
+    `now_unix` < 0 means "no trusted clock", which is a refusal, not a bypass.
+    """
+    if now_unix < 0:
+        return CertVerifyResult.Err(msg: "certificate validity: no trusted clock available")
+    val v = parse_cert_validity(cert_der)
+    if not v.ok:
+        return CertVerifyResult.Err(msg: v.err)
+    if now_unix < v.not_before:
+        return CertVerifyResult.Err(msg: "certificate is not yet valid (notBefore={v.not_before}, now={now_unix})")
+    if now_unix > v.not_after:
+        return CertVerifyResult.Err(msg: "certificate has expired (notAfter={v.not_after}, now={now_unix})")
+    CertVerifyResult.Ok
+
+fn verify_chain_validity(chain: [[u8]], now_unix: i64) -> CertVerifyResult:
+    """Every certificate in the presented chain must be inside its validity window."""
+    if chain.len() == 0:
+        return CertVerifyResult.Err(msg: "certificate validity: empty chain")
+    var i: u64 = 0u64
+    var failure: text = ""
+    while i < chain.len().to_u64():
+        if failure == "":
+            val r = verify_cert_validity(chain[i], now_unix)
+            if val CertVerifyResult.Err(m) = r:
+                failure = "chain[{i}]: {m}"
+        i = i + 1u64
+    if failure != "":
+        return CertVerifyResult.Err(msg: failure)
+    CertVerifyResult.Ok

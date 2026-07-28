@@ -16,19 +16,19 @@
 
 # ===== Coverage Instrumentation =====
 extern fn rt_coverage_enabled() -> bool
-extern fn rt_coverage_decision_probe(decision_id: u32, result: bool, file_ptr: i64, line: u32, column: u32)
+extern fn rt_coverage_decision_probe(file: text, line: i64, decision_id: i64, taken: bool)
 var coverage_counter: i64 = 0
 
 fn record_decision(file: text, line: i64, taken: bool):
     if rt_coverage_enabled():
         coverage_counter = coverage_counter + 1
-        val file_z = file + "\0"
-        rt_coverage_decision_probe(coverage_counter as u32, taken, file_z.ptr(), line as u32, 0 as u32)
+        rt_coverage_decision_probe(file, line, coverage_counter, taken)
 
 # ===== Type Checking Integration =====
 # Basic runtime type checking for function parameters
 
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
+use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_NAMED_BASE, TYPE_STRUCT, named_type_name, type_tag_name}
 
 # ===== Structural Subtyping =====
@@ -245,6 +245,43 @@ fn eval_has_error() -> bool:
 
 # ===== Expression Evaluation =====
 
+fn eval_integer_cast_type(type_tag: i64) -> bool:
+    if type_tag == TYPE_I64 or type_tag == TYPE_U8 or type_tag == TYPE_U16: return true
+    if type_tag == TYPE_U32 or type_tag == TYPE_U64 or type_tag == TYPE_I8: return true
+    type_tag == TYPE_I16 or type_tag == TYPE_I32
+
+fn eval_cast_expr(eid: i64) -> i64:
+    val cast_node = expr_get(eid)
+    if not eval_integer_cast_type(cast_node.i_val):
+        eval_set_error("core interpreter only supports enum/integer casts to integer types")
+        return -1
+    val operand_id = cast_node.left
+    val operand = expr_get(operand_id)
+    if operand.tag == EXPR_FIELD_ACCESS:
+        val base = expr_get(operand.left)
+        if base.tag == EXPR_IDENT:
+            val variants = enum_table_lookup(base.s_val)
+            if variants != "":
+                for variant_name in variants.split(","):
+                    if variant_name == operand.s_val:
+                        val discriminant = env_lookup_global(base.s_val + "." + variant_name)
+                        if val_is_int(discriminant):
+                            return discriminant
+    val value = eval_expr(operand_id)
+    if val_is_int(value):
+        return value
+    if val_is_struct(value):
+        val full_name = val_get_struct_name(value)
+        for enum_name in enum_reg_names:
+            val prefix = enum_name + "::"
+            if full_name.starts_with(prefix):
+                val variant_name = full_name.substring(prefix.len())
+                val discriminant = env_lookup_global(enum_name + "." + variant_name)
+                if val_is_int(discriminant):
+                    return discriminant
+    eval_set_error("cast operand is not an enum discriminant or integer")
+    -1
+
 fn eval_expr(eid: i64) -> i64:
     if eid < 0: return val_make_nil()
     if eval_had_error: return -1
@@ -294,12 +331,16 @@ fn eval_expr(eid: i64) -> i64:
         if tag == EXPR_INTERPOLATED_STRING: return eval_interpolated_string(eid)
         if tag == EXPR_SLICE: return eval_slice_expr(eid)
         if tag == EXPR_NULL_COALESCE: return eval_null_coalesce(eid)
+        if tag == EXPR_CAST: return eval_cast_expr(eid)
         if tag == EXPR_UNIT: return val_make_nil()
         if tag == EXPR_PASS: return val_make_nil()
         if tag == EXPR_PASS_TODO: return val_make_nil()
         if tag == EXPR_PASS_DO_NOTHING: return val_make_nil()
         if tag == EXPR_PASS_DN: return val_make_nil()
         if tag == EXPR_DO_BLOCK: return eval_do_block(eid)
+        # unsafe:/danger: block — evaluates its body like a do-block; the
+        # unsafe distinction is a compile-time safety-checker concern only.
+        if tag == EXPR_UNSAFE_BLOCK: return eval_do_block(eid)
         if tag == EXPR_LIST_COMP: return eval_list_comp(eid)
         if tag == EXPR_DICT_COMP: return eval_dict_comp(eid)
         if tag == EXPR_ATOM: return eval_atom_expr(eid)
@@ -741,6 +782,18 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
     if tag == EXPR_IDENT:
         val name = e_node.s_val
         if name == "_": return true
+        # Nullary variant patterns must NOT be read as bindings. `case None:`
+        # bound a variable literally named `None` and then matched every
+        # scrutinee, so a `case Some(x)` / `case None` pair silently took
+        # whichever arm came first. Same for a bare boxed variant (`case Red:`).
+        if name == "None":
+            if val_is_boxed_enum(value_id):
+                return val_get_text(val_struct_get_field_idx(value_id, 0)) == "None"
+            return val_is_nil(value_id)
+        if enum_variant_is_declared(name):
+            if val_is_boxed_enum(value_id):
+                return val_get_text(val_struct_get_field_idx(value_id, 0)) == name
+            return false
         # Binding: bind value to name
         env_define(name, value_id)
         return true
@@ -761,10 +814,111 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
     if tag == EXPR_NIL_LIT:
         return val_is_nil(value_id)
 
+    # Enum-variant patterns: `case Some(x)`, `case None`, `case Type.Variant`,
+    # `case Type.Variant(x)`, `case Circle(r)`.
+    #
+    # match_pattern had NO enum-variant case at all before this: `case Some(x)`
+    # fell through to the "try equality" default below, which EVALUATED the
+    # pattern `Some(x)` with `x` unbound -- so the arm compared the scrutinee
+    # against `Some(nil)` and the binding never happened. That is the
+    # interpreter half of the Dict.get/Option defect (bug
+    # cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26).
+    #
+    # Option carries a DUAL runtime ABI, here and in the native lane alike
+    # (50.mir/_MirLoweringExpr/switch_operators_calls.spl `lower_enum_match`):
+    #   - BOXED: a "Type::Variant" struct with fields [__tag, __payload], built
+    #     by eval_enum_variant_call (eval_access.spl).
+    #   - FLAT:  a bare raw-or-nil word. Every raw producer yields this form --
+    #     `Dict.get(k)` (call_method_eval.spl), `d[k]`, and any `T?` value.
+    #     Wrapping those producers instead would break ~4,000 raw-or-nil call
+    #     sites (`?? default`, `== nil`, direct use), so the decode side is
+    #     what adapts -- the same choice `??`, `?` and `if val` already made
+    #     (see eval_option_binding_value above, eval_null_coalesce/eval_try in
+    #     eval_access.spl).
+    if tag == EXPR_CALL:
+        val callee_variant = pattern_enum_variant_name(e_node.left, val_is_boxed_enum(value_id))
+        if callee_variant != "":
+            return match_enum_variant_pattern(value_id, callee_variant, e_node.args)
+
+    if tag == EXPR_FIELD_ACCESS:
+        # `case Type.Variant:` — only claim it when the scrutinee really is a
+        # boxed enum, so ordinary constant patterns (`case Colors.RED:`) keep
+        # falling through to the equality default below.
+        if val_is_boxed_enum(value_id):
+            val fa_variant = e_node.s_val
+            if fa_variant != "":
+                return match_enum_variant_pattern(value_id, fa_variant, [])
+
     # Default: try equality comparison
     val pattern_val = eval_expr(pattern_eid)
     if eval_had_error: return false
     val_equals(value_id, pattern_val)
+
+fn val_is_boxed_enum(value_id: i64) -> bool:
+    """True when `value_id` is the boxed [__tag, __payload] struct that
+    eval_enum_variant_call builds for every enum variant construction."""
+    if value_id < 0: return false
+    if val_is_struct(value_id) == false: return false
+    # Dict literals are also dynamic-field structs; a dict is never an enum.
+    if val_get_struct_name(value_id) == "__dict": return false
+    val_struct_find_field_idx(value_id, "__tag") >= 0
+
+fn pattern_enum_variant_name(callee_eid: i64, value_is_boxed_enum: bool) -> text:
+    """Variant name of an enum-variant call pattern, or "" when the callee is
+    not a variant reference. `Some(x)` -> "Some"; `Option.Some(x)` -> "Some";
+    `helper(x)` -> "" (left to the equality default)."""
+    if callee_eid < 0: return ""
+    val c_node = expr_get(callee_eid)
+    if c_node.tag == EXPR_FIELD_ACCESS:
+        # Qualified `Type.Variant(...)` — the field name IS the variant.
+        return c_node.s_val
+    if c_node.tag == EXPR_IDENT:
+        val cname = c_node.s_val
+        # Option/Result variants are variant patterns unconditionally: they are
+        # the two enums with a flat (unboxed) encoding, so the scrutinee alone
+        # cannot identify them. Any other bare identifier is only treated as a
+        # variant when the scrutinee is actually a boxed enum — which keeps
+        # ordinary `case helper(x):`-shaped call patterns on the equality path.
+        if cname == "Some" or cname == "None" or cname == "Ok" or cname == "Err":
+            return cname
+        if enum_variant_is_declared(cname):
+            return cname
+        if value_is_boxed_enum:
+            return cname
+    ""
+
+fn match_enum_variant_pattern(value_id: i64, variant: text, arg_eids: [i64]) -> bool:
+    """Match `value_id` against enum variant `variant`, binding sub-patterns
+    from the payload. Handles the boxed [__tag, __payload] struct form and the
+    flat raw-or-nil form of Option."""
+    # Boxed form: compare the runtime __tag against the pattern's variant.
+    if val_is_boxed_enum(value_id):
+        val tag_text = val_get_text(val_struct_get_field_idx(value_id, 0))
+        if tag_text != variant: return false
+        if arg_eids.len() == 0: return true
+        val payload = val_struct_get_field_idx(value_id, 1)
+        if arg_eids.len() == 1:
+            return match_pattern(payload, arg_eids[0])
+        # Multi-field payloads are stored as an array (eval_enum_variant_call).
+        if val_get_kind(payload) != VAL_ARRAY: return false
+        val elems = val_get_array(payload)
+        if elems.len() != arg_eids.len(): return false
+        var mi = 0
+        while mi < arg_eids.len():
+            if match_pattern(elems[mi], arg_eids[mi]) == false: return false
+            mi = mi + 1
+        return true
+
+    # Flat form: the raw word is its own payload; nil means absent. Only
+    # Option's variants have a flat encoding — Result and user enums are
+    # always boxed, so an unboxed value simply does not match them.
+    if variant == "None":
+        return val_is_nil(value_id)
+    if variant == "Some":
+        if val_is_nil(value_id): return false
+        if arg_eids.len() == 0: return true
+        return match_pattern(value_id, arg_eids[0])
+    false
 
 # ===== Re-exports from split files =====
 # These ensure backward compatibility for external imports from eval.spl

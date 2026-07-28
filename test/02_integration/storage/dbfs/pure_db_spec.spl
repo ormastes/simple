@@ -873,6 +873,72 @@ describe "PureDatabase":
         # Dropping non-existent index should fail
         val dr2 = db.exec_sql("DROP INDEX di_idx")
         expect(dr2.is_err()).to_be(true)
+    it "supports CREATE INDEX IF NOT EXISTS":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE ine_t (id INTEGER, name TEXT)").unwrap()
+        db.exec_sql("INSERT INTO ine_t (id, name) VALUES (1, 'Alice')").unwrap()
+        val c1 = db.exec_sql("CREATE INDEX IF NOT EXISTS ine_idx ON ine_t (name)")
+        expect(c1.is_ok()).to_be(true)
+        # Repeat must be a no-op, not an error
+        val c2 = db.exec_sql("CREATE INDEX IF NOT EXISTS ine_idx ON ine_t (name)")
+        expect(c2.is_ok()).to_be(true)
+        # The index must really exist: DROP must succeed exactly once
+        val d1 = db.exec_sql("DROP INDEX ine_idx")
+        expect(d1.is_ok()).to_be(true)
+        val d2 = db.exec_sql("DROP INDEX ine_idx")
+        expect(d2.is_err()).to_be(true)
+        # Table data must be untouched by all of the above
+        val rows = db.query("SELECT * FROM ine_t", []).unwrap()
+        expect(rows.len()).to_equal(1)
+    it "supports CREATE UNIQUE INDEX IF NOT EXISTS and still enforces uniqueness":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE uine_t (id INTEGER, name TEXT)").unwrap()
+        db.exec_sql("INSERT INTO uine_t (id, name) VALUES (1, 'Alice')").unwrap()
+        val c1 = db.exec_sql("CREATE UNIQUE INDEX IF NOT EXISTS uine_idx ON uine_t (name)")
+        expect(c1.is_ok()).to_be(true)
+        val c2 = db.exec_sql("CREATE UNIQUE INDEX IF NOT EXISTS uine_idx ON uine_t (name)")
+        expect(c2.is_ok()).to_be(true)
+        # IF NOT EXISTS must not weaken the constraint
+        val dup = db.exec_sql("INSERT INTO uine_t (id, name) VALUES (2, 'Alice')")
+        expect(dup.is_err()).to_be(true)
+        val ok = db.exec_sql("INSERT INTO uine_t (id, name) VALUES (3, 'Bob')")
+        expect(ok.is_ok()).to_be(true)
+        val rows = db.query("SELECT * FROM uine_t", []).unwrap()
+        expect(rows.len()).to_equal(2)
+    it "CREATE INDEX without IF NOT EXISTS still rejects a duplicate name":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE dupidx_t (id INTEGER, name TEXT)").unwrap()
+        val c1 = db.exec_sql("CREATE INDEX dupidx ON dupidx_t (name)")
+        expect(c1.is_ok()).to_be(true)
+        val c2 = db.exec_sql("CREATE INDEX dupidx ON dupidx_t (name)")
+        expect(c2.is_err()).to_be(true)
+    it "CREATE INDEX IF NOT EXISTS still rejects an unknown table":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        val c1 = db.exec_sql("CREATE INDEX IF NOT EXISTS ghost_idx ON no_such_table (name)")
+        expect(c1.is_err()).to_be(true)
+    it "CREATE INDEX IF NOT EXISTS still rejects an unknown column":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE badcol_t (id INTEGER, name TEXT)").unwrap()
+        val c1 = db.exec_sql("CREATE INDEX IF NOT EXISTS badcol_idx ON badcol_t (nope)")
+        expect(c1.is_err()).to_be(true)
+    it "supports DROP INDEX IF EXISTS":
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
+        db.exec_sql("CREATE TABLE die_t (id INTEGER, name TEXT)").unwrap()
+        db.exec_sql("CREATE INDEX die_idx ON die_t (name)").unwrap()
+        val d1 = db.exec_sql("DROP INDEX IF EXISTS die_idx")
+        expect(d1.is_ok()).to_be(true)
+        # Repeat must be a no-op, not an error
+        val d2 = db.exec_sql("DROP INDEX IF EXISTS die_idx")
+        expect(d2.is_ok()).to_be(true)
+        # Bare DROP INDEX on a missing index must still error
+        val d3 = db.exec_sql("DROP INDEX die_idx")
+        expect(d3.is_err()).to_be(true)
     it "FTS uses shared engine for bm25_search":
         val r = PureDatabase.memory()
         var db = r.unwrap()

@@ -24,6 +24,8 @@ use compiler.semantics.lint.param_tag.{check_param_tag}
 use compiler.semantics.lint.module_init_literal.{check_module_init_literal}
 use compiler.semantics.lint.raw_rt_access.{check_raw_rt_access}
 use compiler.semantics.lint.leading_operator.{check_leading_operator}
+use compiler.semantics.lint.const_ref_default.{check_const_ref_default}
+use compiler.semantics.lint.bare_primitive_internal.{check_bare_primitive_internal}
 
 # File I/O wrapper
 
@@ -167,6 +169,16 @@ impl Linter:
         lints.push(Lint.new("DIAG001", LintLevel.Warn, LintCategory.Correctness,
             "Stale SDN diagram — run 'simple md-diagram-update' to regenerate"))
 
+        # Const-by-default reference lint (W-MC-REF-001 / const_ref_default)
+        lints.push(Lint.new("W-MC-REF-001", LintLevel.Warn, LintCategory.Correctness,
+            "Parameter is mutated but not declared 'mut' (references are const by default)"))
+
+        # Bare-primitive internal binding lint (W-MC-VAL-001 /
+        # bare_primitive_internal, REQ-MC-011). Allow by default — warn only
+        # under the mission-critical profile (would flood non-MC code).
+        lints.push(Lint.new("W-MC-VAL-001", LintLevel.Allow, LintCategory.Correctness,
+            "Internal binding typed only by a bare primitive (mission-critical: use domain types)"))
+
         # Try to load project-level lint config from simple.sdn
         # Search in common project root locations
         var config = LintConfig.new()
@@ -204,6 +216,8 @@ impl Linter:
         self.check_module_init_literal_spl(path, content)
         self.check_raw_rt_access_spl(path, content)
         self.check_leading_operator_spl(path, content)
+        self.check_const_ref_default_spl(path, content)
+        self.check_bare_primitive_internal_spl(path, content)
 
         # Run shared EasyFix rules and attach as lint results
         val shared_fixes = check_all_rules(content, path)
@@ -327,6 +341,31 @@ impl Linter:
         val findings = check_leading_operator(content, path)
         for finding in findings:
             val lint = Lint.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
+                .with_fix(finding.note)
+            self.results.push(LintResult.new(path, finding.line_num, 0, lint))
+
+    # W-MC-REF-001 (const_ref_default): const-by-default references — warn when
+    # a fn body mutates a parameter not declared `mut`. Warn-level in ALL tiers
+    # including reliable; escalation to deny is a later profile-v2 change
+    # (deliberately not implemented here). Text-level heuristic — see
+    # const_ref_default.spl for the ponytail note and semantic upgrade path.
+    me check_const_ref_default_spl(path: String, content: String):
+        val findings = check_const_ref_default(content, path)
+        for finding in findings:
+            val lint = Lint.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
+                .with_fix(finding.note)
+            self.results.push(LintResult.new(path, finding.line_num, 0, lint))
+
+    # W-MC-VAL-001 (bare_primitive_internal): REQ-MC-011 — internal `val`/`var`
+    # bindings typed only by a bare primitive. Constructed at Allow level: the
+    # end-of-lint_source config filter suppresses them by default and promotes
+    # to Warn under the mission-critical profile. Text-level heuristic — see
+    # bare_primitive_internal.spl for the ponytail note and typed-HIR upgrade
+    # path.
+    me check_bare_primitive_internal_spl(path: String, content: String):
+        val findings = check_bare_primitive_internal(content, path)
+        for finding in findings:
+            val lint = Lint.new(finding.code, LintLevel.Allow, LintCategory.Correctness, finding.message)
                 .with_fix(finding.note)
             self.results.push(LintResult.new(path, finding.line_num, 0, lint))
 

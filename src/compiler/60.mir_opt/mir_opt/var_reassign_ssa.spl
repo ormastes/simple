@@ -836,6 +836,10 @@ fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
                         pass_do_nothing
                     case Store(_, _):
                         pass_do_nothing
+                    case LoadGlobal(_, _):
+                        pass_do_nothing
+                    case StoreGlobal(_, _):
+                        pass_do_nothing
                     case _:
                         return false
     true
@@ -1142,6 +1146,8 @@ fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
         case Intrinsic(_, _, args):
             for arg in args:
                 result = ssa_operand_push_local(result, arg)
+        case StoreGlobal(_, value):
+            result = ssa_operand_push_local(result, value)
         case _:
             pass_do_nothing
     result
@@ -1197,6 +1203,23 @@ fn ssa_cross_block_live_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i
             if not ssa_local_is_param(mir_locals, local_id):
                 if not ssa_local_defined_in_block(block, local_id):
                     result = local_list_push_unique(result, local_id)
+    result
+
+fn ssa_reassigned_param_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i64]:
+    """Params (kind Arg) that are ALSO written by some instruction. `var p =
+    param` reuses the param's local id, so a later `p = ...` reassignment emits
+    a second def of the arg SSA value (`%l0`) -> llc `multiple definition of
+    local value named 'l0'`. ssa_cross_block_live_locals excludes params (a
+    pure arg is live from entry and needs no slot), so this class slips through
+    both nets. Slot them like any reassigned local; the driver also seeds the
+    slot with an entry Store of the incoming arg, since a param has no defining
+    instruction for ssa_alloca_apply_def_store to convert into the first store."""
+    var result: [i64] = []
+    for block in blocks:
+        for inst in block.instructions:
+            val written_id = _ssa_written_local_id(inst)
+            if written_id >= 0 and ssa_local_is_param(mir_locals, written_id):
+                result = local_list_push_unique(result, written_id)
     result
 
 # --- read-side: rewrite a use of a possibly-reassigned local into a Load ---
@@ -1551,9 +1574,12 @@ fn ssa_alloca_transform_blocks(blocks: [MirBlock], mir_locals: [MirLocal], entry
     # single-def locals whose use escapes their defining block.
     val reassigned = ssa_reassigned_locals_for_blocks(blocks)
     val cross_block = ssa_cross_block_live_locals(blocks, mir_locals)
+    val param_reassigned = ssa_reassigned_param_locals(blocks, mir_locals)
     var slotted = reassigned
     for cross_id in cross_block:
         slotted = local_list_push_unique(slotted, cross_id)
+    for param_id in param_reassigned:
+        slotted = local_list_push_unique(slotted, param_id)
     if slotted.len() == 0:
         return ssa_var_transform_reject("no slotted locals", blocks, [])
 
@@ -1568,6 +1594,18 @@ fn ssa_alloca_transform_blocks(blocks: [MirBlock], mir_locals: [MirLocal], entry
         slot_values = slot_values.push(slot_id)
         val elem_type = ssa_local_type_lookup(mir_locals, local_id)
         alloc_insts = alloc_insts.push(MirInst(kind: MirInstKind.Alloc(ssa_local(slot_id), elem_type), span: nil))
+    # Seed each reassigned-param slot with the incoming arg value. These run
+    # AFTER the allocs (append order) so the slot exists, and BEFORE the entry
+    # block's rewritten reads (prepended raw, bypassing operand rewriting) so
+    # the `Copy(param)` reads the arg `%lN`, not a load of the empty slot.
+    for param_id in param_reassigned:
+        val pidx = local_count_index(slot_keys, param_id)
+        if pidx >= 0:
+            val pslot = slot_values[pidx]
+            alloc_insts = alloc_insts.push(MirInst(
+                kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(ssa_local(pslot))), MirOperand(kind: MirOperandKind.Copy(ssa_local(param_id)))),
+                span: nil
+            ))
 
     val entry_id = ssa_block_id_value(entry_block)
     var next_temp = next_id

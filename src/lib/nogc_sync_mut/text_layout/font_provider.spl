@@ -1,6 +1,24 @@
 use std.nogc_sync_mut.sffi.io.{dir_create_all, file_exists}
-use std.nogc_sync_mut.sffi.system.{process_run_timeout}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_physical_path}
+
+# `rt_process_run_timeout` is declared here rather than imported through
+# `std.nogc_sync_mut.sffi.system.{process_run_timeout}` ON PURPOSE.
+#
+# This module is in the web renderer's import graph (font_provider ->
+# font_renderer -> ..._foundation -> the whole browser engine). Pulling in
+# `sffi.system` drags its module-level `extern fn rt_sleep_ms` along, and
+# `rt_sleep_ms` has no address in the Cranelift JIT's runtime symbol table.
+# The JIT's pre-finalize NULL-jump guard then rejects the WHOLE module and the
+# driver silently falls back to the interpreter — measured at ~285x slower for
+# the CSS cascade, which is what made the `web x headless` showcase cell miss
+# its paint budget with a uniform frame.
+#
+# Declaring the one extern we actually use keeps that edge out of the graph.
+# See doc/08_tracking/bug/web_render_budget_interpreter_gap_2026-07-25.md.
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    rt_process_run_timeout(cmd, args, timeout_ms)
 
 # Font Provider — browser font candidate lists, CSS @font-face URL parsing,
 # font materialization (download / local resolution).

@@ -145,7 +145,6 @@ fn host_import_capability_id(name: &str) -> Option<u64> {
             || name.starts_with("native_udp_")
             || name.starts_with("rt_io_tcp_")
             || name.starts_with("rt_http_")
-            || name.starts_with("rt_browser_http_job_")
             || name.starts_with("rt_dns_")
             || name.starts_with("rt_tls_")
             || name.starts_with("rt_monoio_tcp_")
@@ -627,25 +626,6 @@ fn flush_sandbox_lowering(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn browser_http_job_imports_require_network_capability() {
-        let network = Some(security_metadata_id("Network"));
-        for name in [
-            "rt_browser_http_job_start_public_limited",
-            "rt_browser_http_job_poll",
-            "rt_browser_http_job_take_response",
-            "rt_browser_http_job_take_error",
-            "rt_browser_http_job_cancel",
-            "rt_browser_http_job_free",
-        ] {
-            assert_eq!(host_import_capability_id(name), network, "{name}");
-        }
-        assert_eq!(
-            host_import_capability_id("rt_browser_renderer_write_protocol_some"),
-            None
-        );
-    }
 
     #[test]
     fn tracks_security_gate_runtime_counters() {

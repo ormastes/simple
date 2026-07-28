@@ -1,0 +1,294 @@
+# Const-By-Default Reference Lint
+#
+# const_ref_default: warns when a function body mutates a parameter that is
+# not declared `mut`. References are const-by-default (user decision); a
+# mutation of an unannotated parameter is either a bug or a missing `mut`.
+#
+# W-MC-REF-001: fn body mutates a parameter not declared `mut`   WARNING
+#
+# What counts as mutation of parameter `p`:
+#   - reassignment:            `p = ...` (and compound: `p += ...`, `p -= ...`, ...)
+#   - index assignment:        `p[i] = ...` (compound too)
+#   - known-mutating methods:  `p.push(..)`, `p.pop(..)`, `p.insert(..)`,
+#                              `p.remove(..)`, `p.clear(..)`, `p.sort(..)`
+#
+# What does NOT warn:
+#   - `mut`-annotated parameters
+#   - locals (including `var` locals)
+#   - a param shadowed by a `var p = ...` / `val p = ...` re-declaration that
+#     precedes the mutation in the same function body (best-effort)
+#   - receiver mutation (`self`) — already gated by `me` methods, out of scope
+#   - `extern fn` declarations (no body)
+#   - vendored sources (src/compiler_rust/vendor, src/runtime/vendor)
+#
+# ponytail: text-level heuristic over trimmed lines with a small mutating-method
+# name list — acceptable for a warning-level rule; upgrade path = semantic
+# effect analysis on HIR (track param places through calls and aliasing).
+#
+# Always Warn-level in ALL tiers including reliable; escalation to deny is a
+# later profile-v2 change (deliberately not implemented here).
+
+# ============================================================================
+# Finding Struct
+# ============================================================================
+
+pub struct ConstRefFinding:
+    code: text
+    message: text
+    param: text
+    note: text
+    line_num: i64
+
+    fn fmt() -> text:
+        "[{self.code}] WARNING: {self.message} — {self.note}"
+
+# ============================================================================
+# Character / Line Helpers
+# ============================================================================
+
+fn _crd_is_ident_char(ch: text) -> bool:
+    """True for identifier characters (alnum or underscore)."""
+    if ch == "_":
+        return true
+    val is_lower = ch >= "a" and ch <= "z"
+    val is_upper = ch >= "A" and ch <= "Z"
+    val is_digit = ch >= "0" and ch <= "9"
+    is_lower or is_upper or is_digit
+
+fn _crd_indent(line: text) -> i64:
+    """Leading-whitespace width (spaces and tabs each count 1)."""
+    var i = 0
+    val n = line.len()
+    while i < n:
+        val ch = line.substring(i, i + 1)
+        if ch == " " or ch == "\t":
+            i = i + 1
+        else:
+            break
+    i
+
+fn _crd_is_fn_header(t: text) -> bool:
+    """True when the trimmed line begins a function definition with a param
+    list on the same line. `extern fn` declarations are skipped (no body)."""
+    if t.starts_with("extern "):
+        return false
+    var is_fn = false
+    if t.starts_with("fn ") or t.starts_with("pub fn "):
+        is_fn = true
+    if t.starts_with("static fn ") or t.starts_with("pub static fn "):
+        is_fn = true
+    if t.starts_with("me ") or t.starts_with("pub me "):
+        is_fn = true
+    is_fn and t.contains("(")
+
+# ============================================================================
+# Parameter Extraction
+# ============================================================================
+
+fn _crd_unmut_params(t: text) -> [text]:
+    """Extract parameter names NOT annotated `mut` from a single-line fn
+    header. Multi-line headers are skipped (best-effort text heuristic)."""
+    var out: [text] = []
+    val open_idx = t.find("(")
+    if open_idx < 0:
+        return out
+    # Find the matching close paren for the param list.
+    var depth = 0
+    var i = open_idx
+    var close_idx = -1
+    val tlen = t.len()
+    while i < tlen:
+        val ch = t.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                close_idx = i
+                break
+        i = i + 1
+    if close_idx < 0:
+        return out
+    val inner = t.substring(open_idx + 1, close_idx)
+    # Split on top-level commas (ignore commas nested in (), [], <>).
+    var parts: [text] = []
+    var cur = ""
+    var d = 0
+    var j = 0
+    val ilen = inner.len()
+    while j < ilen:
+        val ch = inner.substring(j, j + 1)
+        if ch == "(" or ch == "[" or ch == "<":
+            d = d + 1
+            cur = cur + ch
+        elif ch == ")" or ch == "]" or ch == ">":
+            if d > 0:
+                d = d - 1
+            cur = cur + ch
+        elif ch == "," and d == 0:
+            parts.push(cur)
+            cur = ""
+        else:
+            cur = cur + ch
+        j = j + 1
+    if cur.trim() != "":
+        parts.push(cur)
+    for part in parts:
+        val p = part.trim()
+        if p == "":
+            continue
+        if p.starts_with("mut "):
+            continue
+        # Leading identifier characters form the param name.
+        var name = ""
+        var k = 0
+        val plen = p.len()
+        while k < plen:
+            val ch = p.substring(k, k + 1)
+            if _crd_is_ident_char(ch):
+                name = name + ch
+            else:
+                break
+            k = k + 1
+        if name == "" or name == "self" or name == "me":
+            continue
+        if name.starts_with("_"):
+            continue
+        out.push(name)
+    out
+
+# ============================================================================
+# Shadowing / Mutation Detection
+# ============================================================================
+
+fn _crd_shadows(t: text, p: text) -> bool:
+    """True when the trimmed line re-declares `p` as a local (`var p ...` or
+    `val p ...`), shadowing the parameter for the rest of the body."""
+    var rest = ""
+    if t.starts_with("var "):
+        rest = t.substring(4, t.len()).trim()
+    elif t.starts_with("val "):
+        rest = t.substring(4, t.len()).trim()
+    else:
+        return false
+    if not rest.starts_with(p):
+        return false
+    val after = rest.substring(p.len(), rest.len())
+    if after == "":
+        return true
+    not _crd_is_ident_char(after.substring(0, 1))
+
+fn _crd_assign_follows(after: text) -> bool:
+    """True when `after` (text following an lvalue) begins an assignment:
+    `=` (but not `==`) or a compound assignment operator."""
+    val a = after.trim()
+    if a.starts_with("=="):
+        return false
+    if a.starts_with("="):
+        return true
+    if a.starts_with("+=") or a.starts_with("-=") or a.starts_with("*="):
+        return true
+    if a.starts_with("/=") or a.starts_with("%="):
+        return true
+    false
+
+fn _crd_mutating_methods() -> [text]:
+    # ponytail: small known-mutating name list, text-level match; upgrade
+    # path = semantic effect analysis (per-method mutation effects).
+    ["push", "pop", "insert", "remove", "clear", "sort"]
+
+fn _crd_mutates(t: text, p: text) -> bool:
+    """True when the trimmed line mutates parameter `p`: reassignment,
+    compound assignment, index assignment, or a known-mutating method call."""
+    if t.starts_with(p):
+        val rest = t.substring(p.len(), t.len())
+        if rest != "" and not _crd_is_ident_char(rest.substring(0, 1)):
+            # `p = ...` / `p += ...`
+            if _crd_assign_follows(rest):
+                return true
+            # `p[i] = ...` / `p[i] += ...`
+            val rt = rest.trim()
+            if rt.starts_with("["):
+                var d = 0
+                var i = 0
+                var close = -1
+                val rlen = rt.len()
+                while i < rlen:
+                    val ch = rt.substring(i, i + 1)
+                    if ch == "[":
+                        d = d + 1
+                    elif ch == "]":
+                        d = d - 1
+                        if d == 0:
+                            close = i
+                            break
+                    i = i + 1
+                if close >= 0:
+                    val after = rt.substring(close + 1, rt.len())
+                    if _crd_assign_follows(after):
+                        return true
+    # Known-mutating method calls anywhere on the line: `p.push(...)` etc.
+    for m in _crd_mutating_methods():
+        val pat = p + "." + m + "("
+        val idx = t.find(pat)
+        if idx >= 0:
+            if idx == 0:
+                return true
+            val before = t.substring(idx - 1, idx)
+            if not _crd_is_ident_char(before) and before != ".":
+                return true
+    false
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+pub fn check_const_ref_default(source: text, file_path: text) -> [ConstRefFinding]:
+    """Text-based heuristic for W-MC-REF-001 (const_ref_default).
+
+    Emits one WARNING per (function, parameter) for the first mutation of a
+    parameter not declared `mut`. Vendored sources are skipped."""
+    var findings: [ConstRefFinding] = []
+    if file_path.contains("src/compiler_rust/vendor") or file_path.contains("src/runtime/vendor"):
+        return findings
+    val lines = source.split("\n")
+    val n = lines.len()
+    var i = 0
+    while i < n:
+        val line = lines[i]
+        val t = line.trim()
+        if not _crd_is_fn_header(t):
+            i = i + 1
+            continue
+        val header_indent = _crd_indent(line)
+        var active = _crd_unmut_params(t)
+        var j = i + 1
+        while j < n and active.len() > 0:
+            val bline = lines[j]
+            val bt = bline.trim()
+            if bt == "":
+                j = j + 1
+                continue
+            if _crd_indent(bline) <= header_indent:
+                break
+            if not bt.starts_with("#"):
+                var keep: [text] = []
+                for p in active:
+                    if _crd_shadows(bt, p):
+                        # Local re-declaration shadows the param — stop tracking.
+                        continue
+                    if _crd_mutates(bt, p):
+                        findings.push(ConstRefFinding(
+                            code: "W-MC-REF-001",
+                            message: "parameter `{p}` is mutated but not declared `mut`",
+                            param: p,
+                            note: "declare it `mut {p}` or mutate a local copy (references are const by default)",
+                            line_num: j + 1
+                        ))
+                        # One finding per param per function.
+                        continue
+                    keep.push(p)
+                active = keep
+            j = j + 1
+        i = i + 1
+    findings
