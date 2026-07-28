@@ -38,24 +38,40 @@
 # definitions, while the code used `extract_symbols_nm`, which DROPS them.)
 # Build the entry's boot objects with the same flags as
 # `compile_simpleos_x86_64_c` (cc -c -m64 -ffreestanding -fno-pic -fno-pie
-# -mno-red-zone -ffunction-sections -fdata-sections -O2), then:
+# -mno-red-zone -ffunction-sections -fdata-sections <OPT>), where <OPT> follows
+# the LINK's opt level, not a fixed -O2: `opt_level <= 0` gives -O0, 1 gives
+# -Os, otherwise -O2. The entry measured below builds with `--opt-level=none`,
+# so its REAL_OBJS are -O0. (An earlier revision of this comment said -O2
+# unconditionally; the -O0 and -O2 shapes of a constant return differ, so the
+# wrong flag silently changes the `trivial` set.) Then:
 #
 #   REAL_OBJS = crt0.o baremetal_stubs.o type_stubs.o module_init.o
 #               (auto_stubs.o is deliberately EXCLUDED -- being satisfied only
 #                by that object is the condition being detected)
+#               module_init.o is generated per link and defines no rt_* at all,
+#               so omitting it from a manual regeneration does not move the set.
 #
-#   trivial  = `<objdump> -d --no-show-raw-insn REAL_OBJS` rt_* whose body is
+#   trivial  = `<objdump> -d -r --no-show-raw-insn REAL_OBJS` rt_* whose body is
 #              only frame setup plus a constant return
 #              (`simpleos_trivial_body_rt_symbols`)
-#              <objdump> MUST be the tool `find_objdump_portable()` selects,
-#              which on Linux prefers **llvm-objdump** and only falls back to
-#              GNU `objdump`. Do NOT regenerate with plain `objdump`: the two
-#              print different operand spacing (`xor %eax,%eax` vs
-#              `xorl %eax, %eax`), and the x86-64 branch of
-#              `simpleos_trivial_insn_class` matches the GNU spacing only. That
-#              makes the x86-64 rows below tool-dependent -- see the 2026-07-28
-#              note under the riscv section. Same class of doc-vs-code drift as
-#              the `nm`/`extract_symbols_nm` mismatch described above.
+#              `-r` is REQUIRED and is part of the predicate, not cosmetic. A
+#              relocated immediate prints as a bare literal: the body of
+#              `rt_baremetal_heap_start` (`return (uintptr_t)_heap;`) is
+#              `movl $0x0, %eax; retq` and is indistinguishable from
+#              `return 0;` until the relocation is shown. Without `-r` this
+#              procedure reports 26 trivial symbols for the entry below; with
+#              `-r` it reports 25, and the one it drops is a real function.
+#              <objdump> may be EITHER the tool `find_objdump_portable()`
+#              selects (on Linux it prefers llvm-objdump) or the matching GNU
+#              cross-objdump: as of 2026-07-28 the classifier normalizes both
+#              the mnemonic suffix (`xorl` vs `xor`) and the operand spacing
+#              (`%eax, %eax` vs `%eax,%eax`), and the two tools are verified to
+#              produce identical verdicts on x86-64, aarch64 and riscv probe
+#              objects at -O0 and -O2. Before that fix the x86-64 branch matched
+#              GNU spacing only while the code selected llvm-objdump, so this
+#              channel detected NOTHING on x86-64 -- the arch these rows were
+#              measured on. Same class of doc-vs-code drift as the
+#              `nm`/`extract_symbols_nm` mismatch described above.
 #   real     = `nm REAL_OBJS` defined symbols at ANY binding, i.e. skipping only
 #              U/u and KEEPING W/w/V/v (`simpleos_defined_symbols_any_binding`),
 #              MINUS `trivial`;  union  `nm <user objects>` defined symbols
@@ -80,6 +96,37 @@
 # --- current link. They agree with each other exactly.
 # --- Entries other than this one are not yet measured; they carry no rows and
 # --- are therefore maximally strict, which is the intended ratchet behaviour.
+#
+# --- RE-MEASURED 2026-07-28 after the x86-64 channel was un-blinded. Until that
+# --- fix `simpleos_trivial_insn_class` matched GNU objdump spelling while the
+# --- code ran llvm-objdump, so channel 2 contributed ZERO rows on x86-64 and
+# --- every row above came from channel 1 alone. Turning the channel on is a
+# --- STAGED RATCHET: the newly-visible set is locked in as baseline here and
+# --- only NEW fabrication fails the link. No pre-existing debt was required to
+# --- be fixed first, and the predicate was not weakened to shrink the number.
+# --- Fresh inputs, not the 2026-07-22 proxies: user objects came from a live
+# --- `native-build --target x86_64-unknown-none --opt-level=none` of
+# --- examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl run on
+# --- 2026-07-28 with the pure-Simple build/bootstrap/stage3 binary (exit 0,
+# --- 9674 KB kernel, 713-file staging directory snapshotted mid-link since the
+# --- build deletes it on success); REAL_OBJS rebuilt from
+# --- examples/09_embedded/simple_os/arch/x86_64/boot/{crt0.s,baremetal_stubs.c,
+# --- type_stubs.c} with the -O0 flags above.
+# --- Measured: `trivial` = 25 rt_* (26 before `-r` was added; the extra one was
+# --- rt_baremetal_heap_start, a REAL function whose relocated immediate looked
+# --- like a constant). `trivial INTERSECT refs` = 9, of which 8 were already
+# --- carried above or allowlisted. Net: exactly ONE new row,
+# --- rt_gui_simd_fill_enabled -- classified by BODY (`movl $0x1, %eax; retq`,
+# --- no relocation) and confirmed in baremetal_stubs.c as a bare `return 1;`
+# --- feature flag under `#if defined(__x86_64__)`. It is debt, not an
+# --- allowlist entry: nothing has established that a constant 1 is the correct
+# --- permanent answer for it.
+# --- KNOWN GAP, deliberately not papered over: the ELF above is produced by
+# --- native-build's own freestanding link ("Linked (freestanding) ... via clang
+# --- --target=x86_64-unknown-elf"), NOT by `link_simpleos_x86_64`, so this
+# --- guard does not actually run on that build path. These rows describe what
+# --- the guard WOULD compute for this entry; they are not yet confirmed by an
+# --- observed live refusal on x86-64.
 simpleos_wm_production_desktop.elf rt_arm_virtio_blk_dma_base
 simpleos_wm_production_desktop.elf rt_arm_virtio_blk_read_sector_direct
 simpleos_wm_production_desktop.elf rt_arm_virtio_blk_sector_bytes
@@ -106,6 +153,7 @@ simpleos_wm_production_desktop.elf rt_font_glyph_advance_index
 simpleos_wm_production_desktop.elf rt_font_glyph_bitmap_index
 simpleos_wm_production_desktop.elf rt_font_glyph_index
 simpleos_wm_production_desktop.elf rt_gui_get_glyph_8x16
+simpleos_wm_production_desktop.elf rt_gui_simd_fill_enabled
 simpleos_wm_production_desktop.elf rt_hlt
 simpleos_wm_production_desktop.elf rt_log_target_semihost_write_bytes
 simpleos_wm_production_desktop.elf rt_pool_safepoint
