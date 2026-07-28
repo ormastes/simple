@@ -217,11 +217,18 @@ baseline (DDR: 446, tiny: 568).
 
 ## 6.5 NVMe firmware on the core
 
-The minimal NVMe firmware PASSES on the rv32 core in GHDL
-(`build/ghdl/rv32_nvme_verify/verify.log`) — it was the difftest workload that
-hardened the core (§4). A silicon lane (same load-and-release flow, tiny-BRAM
-SoC preferred since the fw is small) is in progress; the same `.bss`/GARBAGE_FILL
-discipline applies.
+The RV32 NVMe controller-policy firmware passes three pre-board GHDL lanes:
+behavioral core, exact synthesizable BRAM SoC (clean and `GARBAGE_FILL=1`), and
+full AXI4 with wait-state-injected RAM. Run the AXI NAND gate first:
+
+```sh
+sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
+```
+
+It derives `.nandram` from the ELF and proves nonzero AXI reads/writes plus
+prevention and recovery. The corrected physical image also passes on KV260
+with all 229 emitted UART bytes recovered through the tiny-BRAM SoC's USER4
+JTAG observation path. This is not host-driven NVMe MMIO.
 
 ## 7. rv64
 

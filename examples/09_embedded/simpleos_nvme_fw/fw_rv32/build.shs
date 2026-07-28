@@ -300,6 +300,30 @@ rt_rv32_shm_store:
     sw      a2, 0(t0)
     ret
 
+    .globl rt_rv32_nand_ram_load
+rt_rv32_nand_ram_load:
+    li      t0, 64
+    bgeu    a0, t0, 1f
+    slli    a0, a0, 2
+    la      t0, _nandram_start
+    add     t0, t0, a0
+    lw      a0, 0(t0)
+    li      a1, 0
+    ret
+1:  li      a0, 0
+    li      a1, 0
+    ret
+
+    .globl rt_rv32_nand_ram_store
+rt_rv32_nand_ram_store:
+    li      t0, 64
+    bgeu    a0, t0, 1f
+    slli    a0, a0, 2
+    la      t0, _nandram_start
+    add     t0, t0, a0
+    sw      a1, 0(t0)
+1:  ret
+
     .globl rt_rv32_fence
 rt_rv32_fence:
     fence   rw, rw
@@ -392,8 +416,13 @@ else
   cat >"$BOOT_STUB_LINK/rv32_direct_runtime_stubs.c" <<'EOF_DIRECT_STUBS'
 #include <stdint.h>
 #define UART0 ((volatile uint8_t*)0x10000000UL)
+extern volatile uint32_t _nandram_start[];
 void rt_riscv_uart_put(uint64_t b) { uint8_t out = (uint8_t)b; while (!(UART0[5] & 0x20)) {} UART0[0] = out; }
 long long rt_pool_safepoint(void) { return 0; }
+int32_t rt_native_eq(int32_t left, int32_t right) { return left == right; }
+int32_t rt_native_neq(int32_t left, int32_t right) { return left != right; }
+uint32_t rt_rv32_nand_ram_load(uint32_t word) { return word < 64 ? _nandram_start[word] : 0; }
+void rt_rv32_nand_ram_store(uint32_t word, uint32_t value) { if (word < 64) _nandram_start[word] = value; }
 EOF_DIRECT_STUBS
   cat >"$BOOT_STUB_LINK/rv32_direct_entry.S" <<'EOF_DIRECT_START'
     .section .text.entry, "ax"
@@ -542,6 +571,44 @@ rt_pool_safepoint:
     li      a0, 0
     li      a1, 0
     ret
+
+    .globl rt_native_eq
+rt_native_eq:
+    xor     a0, a0, a1
+    seqz    a0, a0
+    li      a1, 0
+    ret
+
+    .globl rt_native_neq
+rt_native_neq:
+    xor     a0, a0, a1
+    snez    a0, a0
+    li      a1, 0
+    ret
+
+    .globl rt_rv32_nand_ram_load
+rt_rv32_nand_ram_load:
+    li      t0, 64
+    bgeu    a0, t0, 1f
+    slli    a0, a0, 2
+    la      t0, _nandram_start
+    add     t0, t0, a0
+    lw      a0, 0(t0)
+    li      a1, 0
+    ret
+1:  li      a0, 0
+    li      a1, 0
+    ret
+
+    .globl rt_rv32_nand_ram_store
+rt_rv32_nand_ram_store:
+    li      t0, 64
+    bgeu    a0, t0, 1f
+    slli    a0, a0, 2
+    la      t0, _nandram_start
+    add     t0, t0, a0
+    sw      a1, 0(t0)
+1:  ret
 EOF_START
   if ! riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -c "$START_ASM" -o "$START_OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
     echo "NVME_RV32_BUILD_FAILED start-stub out=$OUT_LOG err=$ERR_LOG" >&2
@@ -553,9 +620,9 @@ EOF_START
   $BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 "$SIMPLE_BIN" native-build --backend llvm \
     --source build/os/generated \
     --entry "$DIRECT_ENTRY" --entry-closure \
-    --linker-script src/os/kernel/arch/riscv32/linker.ld \
+    --linker-script examples/09_embedded/fpga_riscv/rtl/nvme_fw_rv32_bram.ld \
     --target riscv32-unknown-none \
-    -o "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"
+    --emit-object -o "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"
   rc=$?
   BUILD_END_EPOCH=$(date +%s)
   BUILD_ELAPSED_SECS=$((BUILD_END_EPOCH - BUILD_START_EPOCH))
@@ -581,7 +648,7 @@ EOF_START
     exit 0
   fi
   llvm-objcopy --redefine-sym _start=__simple_unused_start "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG" || true
-  if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" "$LIBGCC" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
+  if ! ld.lld -m elf32lriscv -T examples/09_embedded/fpga_riscv/rtl/nvme_fw_rv32_bram.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" "$LIBGCC" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
     echo "NVME_RV32_BUILD_FAILED link out=$OUT_LOG err=$ERR_LOG" >&2
     tail -n 40 "$ERR_LOG" >&2 || true
     exit 1

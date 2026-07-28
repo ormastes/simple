@@ -293,8 +293,8 @@ architecture rtl of rv32_bram_soc is
   signal ubuf_raddr_q : natural range 0 to UARTBUF_WORDS - 1 := 0;
 
   -- Marker matchers.
-  constant PASS_S : string := "TEST PASSED";
-  constant FAIL_S : string := "TEST FAILED";
+  constant PASS_S : string := "ALL RV32 NVME FW CHECKS PASS";
+  constant FAIL_S : string := "RV32 NVME FW FAIL";
   signal pass_idx_q : natural range 1 to PASS_S'length + 1 := 1;
   signal fail_idx_q : natural range 1 to FAIL_S'length + 1 := 1;
   signal pass_seen_q : std_logic := '0';
@@ -530,7 +530,7 @@ begin
           uartbuf(wi)(lane * 8 + 7 downto lane * 8) <= dbg_uart_byte;
         end if;
         uart_count_q <= uart_count_q + 1;
-        -- "TEST PASSED" matcher
+        -- Firmware final-pass matcher.
         if dbg_uart_byte = chr8(PASS_S(pass_idx_q)) then
           if pass_idx_q = PASS_S'length then
             pass_seen_q <= '1';
@@ -543,7 +543,7 @@ begin
         else
           pass_idx_q <= 1;
         end if;
-        -- "TEST FAILED" matcher
+        -- Firmware final-fail matcher.
         if dbg_uart_byte = chr8(FAIL_S(fail_idx_q)) then
           if fail_idx_q = FAIL_S'length then
             fail_seen_q <= '1';

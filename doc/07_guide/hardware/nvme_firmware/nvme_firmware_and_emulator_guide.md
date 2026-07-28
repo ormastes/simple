@@ -14,6 +14,33 @@ deliberately avoided — see the caveats below):
 > `build/nvme_fw_rv32.elf` is produced; the full no-alloc firmware port is still not complete
 > (see "rv32 status").
 
+## RV32 RAM-backed read-level lane
+
+The RV32 firmware reserves `.nandram` for media state and executes startup,
+admin/I/O queue creation, erase, program, read, preventive refresh, read retry,
+and recovery refresh on the CPU. The canonical order is:
+
+```sh
+sh scripts/check/check-rv32-nvme-nand-recovery.shs --self-test
+sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
+sh scripts/check/check-rv32-nvme-nand-recovery.shs --ghdl
+sh scripts/check/check-rv32-nvme-nand-recovery.shs --fpga
+```
+
+The AXI gate runs before board programming. It executes the firmware through
+`rv32_axi4_mem_adapter` into wait-state-injected RAM, derives `.nandram` from
+the ELF, and fails unless that 256-byte range receives reads and writes and the
+prevention/recovery/final markers are observed over AXI4-Lite. `.nandram` is
+linker-resident emulated media state transported by AXI; it is not a NAND MMIO
+register device.
+Host-issued NVMe-over-AXI/MMIO remains tracked in
+`doc/08_tracking/feature/rv32_nvme_host_axi_mmio_2026-07-28.md`.
+
+`--fpga` rebuilds the same ELF used by GHDL, builds/programs the KV260
+bitstream, reads the captured UART through JTAG USER4, checks every lifecycle
+marker, and retains ELF/bitstream hashes. Never substitute QEMU/GHDL output for
+the JTAG transcript.
+
 ---
 
 ## 1. The firmware (`fw/`)
@@ -251,10 +278,11 @@ NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32
 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs build/nvme_fw_rv32.elf
 ```
 
-When the ELF exists, the boot must print `RV32 NVME FW BEGIN`,
-`ALL RV32 NVME FW CHECKS PASS`, and exit `RESULT: PASS`;
+When the ELF exists, the boot must print `RV32 NVME FW BEGIN`, the ordered NAND
+stage markers, `NAND EVIDENCE D1 U1 F5 C3 T1 M1 Q3 X2 S1 PASS`,
+`ALL RV32 NVME FW CHECKS PASS`, and exit `RESULT: PASS`.
 `boot.shs --self-test` separately proves the wrapper fails closed on bad serial output. This is
-P9 direct-smoke evidence, not the full firmware port. Set
+direct single-hart controller-policy evidence, not the full firmware port. Set
 `NVME_RV32_BUILD_OS_BOOT=1` only when intentionally exercising the slower full rv32 OS boot/source
 graph; the full 22-module no-alloc port remains open. The rv32 scalar smoke uses
 bounded no-alloc caps for internal counters; host simulation remains the source
@@ -278,11 +306,28 @@ for full-width counter stress.
 
 ## Running the fw on the Simple rv32 FPGA core
 
-The minimal NVMe firmware PASSES on the Simple-generated rv32 soft-core in GHDL
-(`build/ghdl/rv32_nvme_verify/verify.log`); it was the difftest workload that
-found and fixed three real core RTL bugs. Launch procedure (GHDL rehearsal →
-Vivado bitstream → KV260 board via JTAG, incl. the mandatory `GARBAGE_FILL=1`
-run and `.bss`-zero step): see
+The corrected full-word SECDED and alternate-slot remap ELF passes QEMU,
+behavioral GHDL, exact-BRAM GHDL with clean and garbage-filled RAM, and the full
+AXI4 RAM gate. The measured behavioral completion is 10.897245 ms. The AXI run
+observed 847 reads and 460 writes inside `.nandram`. The rebuilt KV260 image
+also passed with all 229 UART bytes recovered through USER4 JTAG, no loss, and
+no firmware failure marker.
+Run the complete gate with:
+
+```sh
+sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
+sh scripts/check/check-rv32-nvme-nand-recovery.shs --ghdl
+sh scripts/check/check-rv32-nvme-nand-recovery.shs --fpga
+```
+
+The workload is designed to execute startup, admin and I/O queue creation,
+SQ/CQ full/empty/deletion behavior, completion reaping,
+erase/program/read, downward retention recovery, upward disturb recovery,
+neighbor prevention, independently decoded SECDED, verified FCR, and
+failed-primary alternate-slot remap from the same ELF. It verifies controller
+policy after the gate passes, not analog NAND physics or host-driven NVMe MMIO.
+Launch details and the `.bss`-zero requirement:
+see
 `doc/07_guide/hardware/fpga/simpleos_on_simple_riscv_fpga.md` §5–6.5 — the fw
 uses the same load-and-release flow as SimpleOS (tiny-BRAM SoC preferred; the
-fw is small). Silicon lane in progress 2026-07-26.
+fw is small).

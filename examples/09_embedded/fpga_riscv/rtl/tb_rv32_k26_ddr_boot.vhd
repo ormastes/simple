@@ -32,7 +32,10 @@ entity tb_rv32_k26_ddr_boot is
     -- print an empty line). Set true to fill all DDR words beyond the
     -- loaded kernel image with a deterministic nonzero pseudo-random
     -- pattern, rehearsing what silicon actually provides.
-    G_GARBAGE_FILL : boolean := false
+    G_GARBAGE_FILL : boolean := false;
+    G_MARKER       : string := "TEST PASSED";
+    G_TRACE_BASE   : natural := 0;
+    G_TRACE_BYTES  : natural := 0
   );
 end entity tb_rv32_k26_ddr_boot;
 
@@ -46,6 +49,8 @@ architecture sim of tb_rv32_k26_ddr_boot is
   signal rst_n : std_logic := '0';
   signal uart_tx : std_logic;
   signal done : boolean := false;
+  signal trace_reads  : natural := 0;
+  signal trace_writes : natural := 0;
 
   -- AXI4 (core master -> DDR model)
   signal awaddr  : std_logic_vector(31 downto 0);
@@ -204,6 +209,7 @@ begin
       if rst_n = '0' then
         arready <= '0'; rvalid <= '0'; rlast <= '0';
         awready <= '0'; wready <= '0'; bvalid <= '0';
+        trace_reads <= 0; trace_writes <= 0;
         phase := 0; jitter := 1;
       else
         -- default deasserts for one-shot handshakes
@@ -218,6 +224,11 @@ begin
             if arvalid = '1' then
               arready <= '1';
               saved_addr := unsigned(araddr);
+              if G_TRACE_BYTES > 0 and
+                 saved_addr >= G_TRACE_BASE and
+                 saved_addr < G_TRACE_BASE + G_TRACE_BYTES then
+                trace_reads <= trace_reads + 1;
+              end if;
               jitter := (jitter mod 4) + 1;
               wait_n := jitter;
               phase := 1;
@@ -225,6 +236,11 @@ begin
               awready <= '1';
               wready  <= '1';
               saved_addr := unsigned(awaddr);
+              if G_TRACE_BYTES > 0 and
+                 saved_addr >= G_TRACE_BASE and
+                 saved_addr < G_TRACE_BASE + G_TRACE_BYTES then
+                trace_writes <= trace_writes + 1;
+              end if;
               -- capture write immediately
               addr_v := saved_addr;
               is_rdisk := addr_v >= (DDR_BASE + RDISK_OFF);
@@ -302,7 +318,7 @@ begin
     variable last_count : natural := 0;
     -- Rolling match on the terminal marker so the run ends on SUCCESS rather
     -- than on a guessed timeout.
-    constant MARKER : string := "TEST PASSED";
+    constant MARKER : string := G_MARKER;
     variable mi : natural := 0;
     variable matched : boolean := false;
 
@@ -424,7 +440,7 @@ begin
 
     if txt /= null and txt'length > 0 then writeline(output, txt); end if;
     if matched then
-      write(txt, string'("K26_MARKER_TEST_PASSED_SEEN"));
+      write(txt, string'("K26_MARKER_SEEN"));
     else
       write(txt, string'("K26_MARKER_NOT_SEEN"));
     end if;
@@ -438,6 +454,8 @@ begin
     write(txt, string'("K26_AXI_READS=0x")); hwrite(txt, rd); writeline(output, txt);
     lite_read(x"0020", rd);
     write(txt, string'("K26_AXI_WRITES=0x")); hwrite(txt, rd); writeline(output, txt);
+    write(txt, string'("K26_TRACE_READS=")); write(txt, trace_reads); writeline(output, txt);
+    write(txt, string'("K26_TRACE_WRITES=")); write(txt, trace_writes); writeline(output, txt);
     write(txt, string'("K26_UART_BYTES=")); write(txt, count); writeline(output, txt);
     write(txt, string'("K26_DDR_TB_DONE"));
     writeline(output, txt);

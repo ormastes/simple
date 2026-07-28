@@ -1167,6 +1167,24 @@ same false-green rules apply (conditional PASS markers only; final line
   `doc/00_llm_process/feature_expert/riscv_soc_linux/skill.md` — read it
   before any "does X exist / why does it fail" hardware question.
 
+### RV32 NVMe NAND evidence order
+
+For the direct RV32 NVMe firmware, do not treat the BRAM memory port as full
+AXI4 and do not treat USER4 observation as host NVMe MMIO. Run these distinct
+gates in order:
+
+1. `sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs` — real firmware loads/stores
+   traverse `rv32_axi4_mem_adapter` into wait-state RAM; ELF-derived `.nandram`
+   read/write counts and prevention/recovery markers are mandatory.
+2. `sh scripts/check/check-rv32-nvme-nand-recovery.shs --ghdl` — behavioral
+   core plus exact synthesizable BRAM SoC, including garbage fill.
+3. `sh scripts/check/check-rv32-nvme-nand-recovery.shs --fpga` — physical
+   tiny-BRAM image and retained USER4 JTAG transcript/hashes.
+
+The scalar `.nandram` model verifies controller policy. Analog Vt fidelity
+belongs to `src/lib/hardware/nand_emu/`; host-issued NVMe over AXI is a separate
+integration lane.
+
 ## Reproduce-first for bug-fix specs
 
 A regression spec that was written *after* the fix is unproven — it may assert

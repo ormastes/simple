@@ -28,6 +28,13 @@ NVMe firmware's FIL seam.
 - NVMe adapter: `examples/09_embedded/simpleos_nvme_fw/fw/fil_nand_emu.spl`
   (+ `fil_nand_emu_check.spl`) — opt-in drop-in for the `fil_nand.Nand` seam
   (same API as `fil_nand_device.spl`); NOT the default backend.
+- RV32 controller-policy model:
+  `examples/09_embedded/simpleos_nvme_fw/fw_rv32/{entry,logic_nand_read_level}.spl`.
+  Its 256-byte `.nandram` stores active, neighbor, SECDED, and alternate-remap
+  state. `scripts/fpga/ghdl_rv32_nvme_axi_ram.shs` proves those ordinary
+  loads/stores cross full AXI4 into RAM and observes prevention/recovery over
+  AXI4-Lite before the physical BRAM/JTAG gate. Current evidence: 847 reads,
+  460 writes in `.nandram`; KV260 USER4 captured all 229 emitted bytes.
 
 ## Design Invariants (do not regress)
 
@@ -41,6 +48,9 @@ NVMe firmware's FIL seam.
   single-plane command set; two-plane/2KB-compat bytes are recognized and
   logged as violations, never faked.
 - Unsupported/illegal sequences → NeViolation events, never silent guessing.
+- Do not claim the RV32 scalar `.nandram` lane has per-cell Vt, retention-time,
+  wear, or analog fidelity; those remain owned by this `nand_emu` module. Do
+  not claim its USER4 transcript is host NVMe-over-AXI MMIO.
 
 ## Known Landmines
 

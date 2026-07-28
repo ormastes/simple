@@ -95,6 +95,43 @@ The rv32 scalar smoke uses bounded no-alloc counter caps for firmware counters
 whose full simulation model uses larger host-side sentinels. NVMe command-word
 validation still checks the 32-bit field width.
 
+## RAM-backed NAND read-level recovery and prevention (2026-07-28)
+
+The single-hart image reserves a 256-byte `.nandram` region and now runs a
+stateful media lifecycle on every RV32 target: device startup, admin queue, I/O
+queue, erase, program, read, preventive refresh, shifted-level read retry, and
+recovery refresh. Data, page state, stored threshold level, selected reference,
+block read count, refresh/recovery/retirement/remap-request counters, ECC status,
+SQ/CQ cursors, and lifecycle state are volatile RAM words. The fixed retention
+ladder is `128,120,112,104`; the disturb ladder is `128,136,144,152`.
+Both level-116 retention and level-140 disturb injections fail the nominal read
+and recover at retry index one only after the raw-error count enters the ECC
+budget. FCR then performs erase, reprogram, and read-verify. A forced primary
+verify failure retires the modeled page, verifies corrected data in the
+alternate slot, and switches the active mapping only after verification.
+
+Run the complete evidence sequence with:
+
+```sh
+sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
+sh scripts/check/check-rv32-nvme-nand-recovery.shs --ghdl
+sh scripts/check/check-rv32-nvme-nand-recovery.shs --fpga
+```
+
+The full-AXI RAM gate and exact-BRAM GHDL are mandatory before board programming.
+FPGA PASS requires every ordered `NAND ... PASS`
+line, the live evidence marker
+`NAND EVIDENCE D1 U1 F5 C3 T1 M1 Q3 X2 S1 PASS`, and the final firmware marker from
+the USER4 JTAG transcript. The prior 226-byte KV260 capture predates the
+independent-SECDED and alternate-slot remap fix and is not evidence for the
+current image. The corrected image passes AXI RAM with 847 `.nandram` reads and
+460 writes, exact-BRAM GHDL with clean/garbage fill, and KV260 USER4 with all
+229 bytes recovered and no loss. This bounded model verifies controller policy;
+it does not model analog threshold distributions or host-driven NVMe MMIO.
+`hardware.nand_emu` owns analog concerns.
+
+Tracking: `doc/08_tracking/bug/rv32_nvme_nand_secded_ghdl_deadline_2026-07-28.md`.
+
 ## 4-core SMP mode (wave-3/4, 2026-07-19): index-handles, SPSC IPC, coroutines
 
 The firmware now runs on four cores with a clean partition: hart0=HIL (host

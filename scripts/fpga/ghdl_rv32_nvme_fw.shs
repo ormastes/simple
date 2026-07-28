@@ -21,13 +21,14 @@ cd "$ROOT_DIR"
 RTL_DIR="$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl"
 WORK_DIR="$ROOT_DIR/build/ghdl/rv32_nvme_fw"
 LD_SCRIPT="$RTL_DIR/nvme_fw_rv32_bram.ld"
-FW_OBJ="$ROOT_DIR/build/test-artifacts/nvme_fw_rv32_minimal.o"
-START_OBJ="$ROOT_DIR/build/test-artifacts/nvme_fw_rv32_minimal_start.o"
+FW_OBJ="${FW_OBJ:-$ROOT_DIR/build/test-artifacts/nvme_fw_rv32_minimal.o}"
+START_OBJ="${START_OBJ:-$ROOT_DIR/build/test-artifacts/nvme_fw_rv32_minimal_start.o}"
+PREBUILT_FW_ELF="${FW_ELF:-}"
 
 command -v ghdl >/dev/null 2>&1 || { echo "ERROR: ghdl not found in PATH"; exit 1; }
 command -v ld.lld >/dev/null 2>&1 || { echo "ERROR: ld.lld not found in PATH"; exit 1; }
 
-if [ ! -f "$FW_OBJ" ] || [ ! -f "$START_OBJ" ]; then
+if [ -z "$PREBUILT_FW_ELF" ] && { [ ! -f "$FW_OBJ" ] || [ ! -f "$START_OBJ" ]; }; then
   echo "ERROR: firmware objects missing. Run first:"
   echo "  scripts/check/check-nvme-rv32-minimal-live.shs"
   echo "(it native-builds $FW_OBJ and $START_OBJ)."
@@ -37,18 +38,31 @@ fi
 mkdir -p "$WORK_DIR"
 echo "=== GHDL RV32 NVMe firmware SoC-sim ==="
 
-# 1. Relink firmware into the single 64 KB BRAM window.
+# 1. Relink firmware into the single 64 KB BRAM window, or admit an already
+# linked image whose reset entry and stack are both inside that window.
 FW_ELF="$WORK_DIR/nvme_fw_rv32_bram.elf"
-FW_OBJ_LOCAL="$WORK_DIR/fw.o"
-cp "$FW_OBJ" "$FW_OBJ_LOCAL"
-# The firmware object defines its own _start; the assembly start-stub supplies the
-# real one (same as the QEMU gate). Rename the object's _start out of the way.
-llvm-objcopy --redefine-sym _start=__simple_unused_start "$FW_OBJ_LOCAL"
-LIBGCC="$(riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -print-libgcc-file-name)"
-printf "  Linking firmware (%s) ... " "$(basename "$LD_SCRIPT")"
-ld.lld -m elf32lriscv -T "$LD_SCRIPT" --no-relax --gc-sections \
-  -o "$FW_ELF" "$START_OBJ" "$FW_OBJ_LOCAL" "$LIBGCC"
-echo "OK"
+if [ -n "$PREBUILT_FW_ELF" ]; then
+  [ -f "$PREBUILT_FW_ELF" ] || { echo "ERROR: prebuilt firmware ELF missing: $PREBUILT_FW_ELF"; exit 1; }
+  entry="$(llvm-nm -n "$PREBUILT_FW_ELF" | awk '$3=="_rv32_direct_entry"{print $1}')"
+  stack="$(llvm-nm -n "$PREBUILT_FW_ELF" | awk '$3=="_stack_top"{print $1}')"
+  [ "$entry" = "80000000" ] || { echo "ERROR: prebuilt reset entry is not 0x80000000: $entry"; exit 1; }
+  [ -n "$stack" ] && [ "$((0x$stack))" -le "$((0x80010000))" ] || {
+    echo "ERROR: prebuilt stack is outside 64 KiB BRAM: $stack"; exit 1;
+  }
+  cp "$PREBUILT_FW_ELF" "$FW_ELF"
+  echo "  Using prebuilt firmware ELF (entry=0x$entry stack=0x$stack)"
+else
+  FW_OBJ_LOCAL="$WORK_DIR/fw.o"
+  cp "$FW_OBJ" "$FW_OBJ_LOCAL"
+  # The firmware object defines its own _start; the assembly start-stub supplies the
+  # real one (same as the QEMU gate). Rename the object's _start out of the way.
+  llvm-objcopy --redefine-sym _start=__simple_unused_start "$FW_OBJ_LOCAL"
+  LIBGCC="$(riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -print-libgcc-file-name)"
+  printf "  Linking firmware (%s) ... " "$(basename "$LD_SCRIPT")"
+  ld.lld -m elf32lriscv -T "$LD_SCRIPT" --no-relax --gc-sections \
+    -o "$FW_ELF" "$START_OBJ" "$FW_OBJ_LOCAL" "$LIBGCC"
+  echo "OK"
+fi
 
 # 2. Flatten to the core's init_rom file (32-bit little-endian words, hex).
 llvm-objcopy -O binary "$FW_ELF" "$WORK_DIR/fw.bin"
@@ -78,7 +92,7 @@ echo "OK"
 # 4. Run from WORK_DIR so the core's relative init_rom open finds rv32_payload.mem.
 printf "  Running simulation ... "
 sim="$(cd "$WORK_DIR" && ghdl -r --std=08 --workdir="$WORK_DIR" \
-  tb_rv32_nvme_fw_smoke --stop-time=6ms 2>&1)" || true
+  tb_rv32_nvme_fw_smoke --stop-time=18ms 2>&1)" || true
 echo
 echo "$sim" | grep -E "RV32_NVME_FW_(PASS|FAIL_MARKER|STUCK|TIMEOUT)" | tail -8
 if echo "$sim" | grep -q "RV32_NVME_FW_PASS" &&

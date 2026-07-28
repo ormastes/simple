@@ -5,6 +5,10 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **RV32 NVMe NAND recovery evidence** — run bounded SECDED read retry,
+  prevention, verified FCR, alternate-slot remap, and queue lifecycle against
+  linker-resident NAND RAM through QEMU, exact BRAM, full AXI4 RAM, and a
+  229-byte KV260 USER4 JTAG capture.
 - **LLM Caret Electron and native Metal GUIs** — launch the semantic browser
   chat in the canonical Electron shell or lower pure-Simple HTML/layout through
   Draw IR to Engine2D Metal with keyboard, click, and fail-closed device-readback
