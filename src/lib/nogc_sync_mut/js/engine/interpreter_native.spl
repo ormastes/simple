@@ -7927,14 +7927,6 @@ impl JsInterpreter:
     me _cancel_timer_id(timer_id: i64):
         if timer_id < 0:
             return
-        var already_canceled = false
-        var cancel_i = 0
-        while cancel_i < self.canceled_timer_ids.len():
-            if self.canceled_timer_ids[cancel_i] == timer_id:
-                already_canceled = true
-            cancel_i = cancel_i + 1
-        if not already_canceled:
-            self.canceled_timer_ids.push(timer_id)
         var rest: [PendingTimerTask] = []
         var i = 0
         while i < self.pending_timer_tasks.len():
@@ -7943,6 +7935,18 @@ impl JsInterpreter:
                 rest.push(task)
             i = i + 1
         self.pending_timer_tasks = rest
+
+    me _retire_timer_handle_lookup(timer_id: i64):
+        var retained_ids: [i64] = []
+        var retained_object_ids: [i64] = []
+        var i = 0
+        while i < self.timer_handle_ids.len() and i < self.timer_handle_object_ids.len():
+            if self.timer_handle_ids[i] != timer_id:
+                retained_ids.push(self.timer_handle_ids[i])
+                retained_object_ids.push(self.timer_handle_object_ids[i])
+            i = i + 1
+        self.timer_handle_ids = retained_ids
+        self.timer_handle_object_ids = retained_object_ids
 
     me _native_set_timer(arg_vals: [JsValue], is_interval: bool, timer_type: text) -> JsValue:
         if self.pending_timer_tasks.len() >= JS_TIMER_TASK_LIMIT:
@@ -8030,6 +8034,7 @@ impl JsInterpreter:
                 self.set_object_property(handle_id, "cleared", JsValue.Boolean(v: true))
                 self.set_object_property(handle_id, "clearedBy", JsValue.String(v: clear_type))
             handle_i = handle_i + 1
+        self._retire_timer_handle_lookup(timer_id)
         JsValue.Undefined
 
     me _native_timer_ref(this_val: JsValue) -> JsValue:
@@ -8077,6 +8082,7 @@ impl JsInterpreter:
             self.set_object_property(handle_id, "active", JsValue.Boolean(v: false))
             self.set_object_property(handle_id, "cleared", JsValue.Boolean(v: true))
             self.set_object_property(handle_id, "clearedBy", JsValue.String(v: "close"))
+        self._retire_timer_handle_lookup(timer_id)
         this_val
 
     me _native_timer_refresh(this_val: JsValue) -> JsValue:
@@ -8089,7 +8095,7 @@ impl JsInterpreter:
         while i < self.pending_timer_tasks.len():
             val task = self.pending_timer_tasks[i]
             if task.id == timer_id:
-                rest.push(PendingTimerTask.create_with_args(task.id, task.callback_id, task.callback_args, task.delay_ms, 0, task.is_interval))
+                rest.push(PendingTimerTask.create_with_args(task.id, task.callback_id, task.callback_args, task.delay_ms, self.timer_current_time_ms, task.is_interval))
                 refreshed = true
             else:
                 rest.push(task)
@@ -8118,16 +8124,19 @@ impl JsInterpreter:
                 while callback_arg_i < callback_arg_count:
                     callback_args.push(self.get_object_property(handle_id, "__simple_timer_callback_arg_" + callback_arg_i.to_text()))
                     callback_arg_i = callback_arg_i + 1
-                self.pending_timer_tasks.push(PendingTimerTask.create_with_args(timer_id, callback_id, callback_args, delay_ms, 0, false))
+                self.pending_timer_tasks.push(PendingTimerTask.create_with_args(timer_id, callback_id, callback_args, delay_ms, self.timer_current_time_ms, false))
                 refreshed = true
             self.set_object_property(handle_id, "refreshed", JsValue.Boolean(v: refreshed))
-            self.set_object_property(handle_id, "refreshedAt", JsValue.Number(v: 0.0))
+            self.set_object_property(handle_id, "refreshedAt", JsValue.Number(v: self.timer_current_time_ms.to_f64()))
             if refreshed:
-                self.set_object_property(handle_id, "scheduledAt", JsValue.Number(v: 0.0))
+                self._retire_timer_handle_lookup(timer_id)
+                self.timer_handle_ids.push(timer_id)
+                self.timer_handle_object_ids.push(handle_id)
+                self.set_object_property(handle_id, "scheduledAt", JsValue.Number(v: self.timer_current_time_ms.to_f64()))
                 self.set_object_property(handle_id, "active", JsValue.Boolean(v: true))
                 self.set_object_property(handle_id, "completed", JsValue.Boolean(v: false))
                 match self.get_object_property(handle_id, "delay"):
-                    JsValue.Number(v): self.set_object_property(handle_id, "dueAt", JsValue.Number(v: v))
+                    JsValue.Number(v): self.set_object_property(handle_id, "dueAt", JsValue.Number(v: self.timer_current_time_ms.to_f64() + v))
                     _:
                         pass_dn
         this_val

@@ -1116,10 +1116,8 @@ implementation in progress / target evidence blocked
   passing as a timeout.
   Page content cannot access the parent-to-worker command channel. Memory
   exhaustion and restart-rate budgets remain open.
-- Canonical CookieStore retrieval now checks the stored jar key for host-only
-  cookies before both network and script attachment, preventing one host's
-  cookie from crossing to another. BrowserSession still needs migration to
-  this typed owner before expiry and SameSite can be claimed end to end.
+- BrowserSession now routes storage, attachment, HttpOnly, SameSite,
+  credentials, and redirects through the bounded canonical CookieStore.
 - Current live verification is blocked before browser execution: the isolated
   deployed pure-Simple compiler segfaults in both hosted `native-build` and
   `check src/lib`. No bootstrap fallback was used; HTML/CSS, JavaScript/CSS
@@ -1130,3 +1128,15 @@ implementation in progress / target evidence blocked
   objects without HIR/type failure, then stopped at the minimal core-C link
   boundary. A full admitted CLI and measured Stage 4 memory receipt remain
   required before browser verification resumes.
+- JavaScript timer draining no longer retains canceled-ID tombstones or
+  completed timer lookup rows. Overdue intervals coalesce to one callback per
+  clock advance; self-clear and completed-handle refresh preserve metadata and
+  timing. Focused runnable specs cover the lifecycle, but could not execute.
+- Browser history now trims stale forward entries and retains at most 64
+  newest entries within the existing 50 MiB resource budget on push paths.
+  Reload replacement remains deliberately bounded by two resource budgets.
+- One isolated, cargo-disabled pure-Simple compiler refresh was essential
+  because both admitted self-hosted compilers lacked the committed multiline
+  condition parser fix. It failed once at Stage 2 linking on missing
+  `rt_index_of` and `rt_file_is_regular_no_follow`; no retry or broader
+  bootstrap was attempted. Fresh HTML/CSS/animation pixels remain blocked.

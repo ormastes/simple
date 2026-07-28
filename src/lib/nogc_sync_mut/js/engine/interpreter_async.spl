@@ -70,19 +70,9 @@ impl JsInterpreter:
             var selected_delay_ms = 0
             var selected_scheduled_at_ms = 0
             var selected_is_interval = false
-            var rest: [PendingTimerTask] = []
             var i = 0
             while i < self.pending_timer_tasks.len():
                 val task = self.pending_timer_tasks[i]
-                var canceled = false
-                var cancel_i = 0
-                while cancel_i < self.canceled_timer_ids.len():
-                    if self.canceled_timer_ids[cancel_i] == task.id:
-                        canceled = true
-                    cancel_i = cancel_i + 1
-                if canceled:
-                    i = i + 1
-                    continue
                 val due_at = task.scheduled_at_ms + task.delay_ms
                 if selected_id < 0 and due_at <= current_time_ms and task.is_next_tick:
                     selected_id = task.id
@@ -96,15 +86,6 @@ impl JsInterpreter:
                 i = 0
                 while i < self.pending_timer_tasks.len():
                     val task = self.pending_timer_tasks[i]
-                    var canceled = false
-                    var cancel_i = 0
-                    while cancel_i < self.canceled_timer_ids.len():
-                        if self.canceled_timer_ids[cancel_i] == task.id:
-                            canceled = true
-                        cancel_i = cancel_i + 1
-                    if canceled:
-                        i = i + 1
-                        continue
                     val due_at = task.scheduled_at_ms + task.delay_ms
                     if selected_id < 0 and due_at <= current_time_ms:
                         selected_id = task.id
@@ -117,43 +98,41 @@ impl JsInterpreter:
             if selected_id >= 0:
                 drained_count = drained_count + 1
                 keep_scanning = true
-                if selected_callback_id >= 0:
-                    val ignored = self._invoke_promise_callback(selected_callback_id, selected_callback_args)
-                    ran_count = ran_count + 1
+                var selected_handle_id = -1
                 var handle_i = 0
                 while handle_i < self.timer_handle_ids.len():
                     if self.timer_handle_ids[handle_i] == selected_id:
-                        val handle_id = self.timer_handle_object_ids[handle_i]
-                        var fire_count = 0
-                        match self.get_object_property(handle_id, "fireCount"):
-                            JsValue.Number(v): fire_count = f64_to_i64(v)
-                            _:
-                                pass_dn
-                        fire_count = fire_count + 1
-                        self.set_object_property(handle_id, "fired", JsValue.Boolean(v: true))
-                        self.set_object_property(handle_id, "fireCount", JsValue.Number(v: fire_count.to_f64()))
-                        self.set_object_property(handle_id, "lastFiredAt", JsValue.Number(v: selected_scheduled_at_ms.to_f64()))
-                        if selected_is_interval:
-                            self.set_object_property(handle_id, "scheduledAt", JsValue.Number(v: selected_scheduled_at_ms.to_f64()))
-                            self.set_object_property(handle_id, "dueAt", JsValue.Number(v: (selected_scheduled_at_ms + selected_delay_ms).to_f64()))
-                        if not selected_is_interval:
-                            self.set_object_property(handle_id, "active", JsValue.Boolean(v: false))
-                            self.set_object_property(handle_id, "completed", JsValue.Boolean(v: true))
+                        selected_handle_id = self.timer_handle_object_ids[handle_i]
                     handle_i = handle_i + 1
+                if selected_callback_id >= 0:
+                    val ignored = self._invoke_promise_callback(selected_callback_id, selected_callback_args)
+                    ran_count = ran_count + 1
+                if selected_handle_id >= 0:
+                    var fire_count = 0
+                    match self.get_object_property(selected_handle_id, "fireCount"):
+                        JsValue.Number(v): fire_count = f64_to_i64(v)
+                        _:
+                            pass_dn
+                    fire_count = fire_count + 1
+                    self.set_object_property(selected_handle_id, "fired", JsValue.Boolean(v: true))
+                    self.set_object_property(selected_handle_id, "fireCount", JsValue.Number(v: fire_count.to_f64()))
+                    self.set_object_property(selected_handle_id, "lastFiredAt", JsValue.Number(v: selected_scheduled_at_ms.to_f64()))
+                    if selected_is_interval and not to_boolean(self.get_object_property(selected_handle_id, "closed")):
+                        self.set_object_property(selected_handle_id, "scheduledAt", JsValue.Number(v: current_time_ms.to_f64()))
+                        self.set_object_property(selected_handle_id, "dueAt", JsValue.Number(v: (current_time_ms + selected_delay_ms).to_f64()))
+                    if not selected_is_interval:
+                        self.set_object_property(selected_handle_id, "active", JsValue.Boolean(v: false))
+                        self.set_object_property(selected_handle_id, "completed", JsValue.Boolean(v: true))
+                if not selected_is_interval:
+                    self._retire_timer_handle_lookup(selected_id)
+            var rest: [PendingTimerTask] = []
             i = 0
             while i < self.pending_timer_tasks.len():
                 val task = self.pending_timer_tasks[i]
                 if task.id != selected_id:
                     rest.push(task)
-                else:
-                    var canceled_after_callback = false
-                    var cancel_i = 0
-                    while cancel_i < self.canceled_timer_ids.len():
-                        if self.canceled_timer_ids[cancel_i] == task.id:
-                            canceled_after_callback = true
-                        cancel_i = cancel_i + 1
-                    if selected_is_interval and not canceled_after_callback:
-                        rest.push(PendingTimerTask.create_with_args(task.id, selected_callback_id, selected_callback_args, selected_delay_ms, selected_scheduled_at_ms, true))
+                elif selected_is_interval:
+                    rest.push(PendingTimerTask.create_with_args(task.id, selected_callback_id, selected_callback_args, selected_delay_ms, current_time_ms, true))
                 i = i + 1
             self.pending_timer_tasks = rest
         ran_count

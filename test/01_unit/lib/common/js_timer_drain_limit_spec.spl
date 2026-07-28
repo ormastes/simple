@@ -38,6 +38,15 @@ describe "JavaScript timer drain limit":
                 expect(ticks).to_equal(1.0)
             _:
                 fail("Expected one self-canceled interval callback")
+        match runtime.eval(
+            "timer.fireCount + ':' + timer.closed + ':' + timer.active"
+        ):
+            Ok(JsValue.String(metadata)):
+                expect(metadata).to_equal("1:true:false")
+            _:
+                fail("Expected final self-canceled interval metadata")
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
 
     it "bounds pending timer tasks per document":
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
@@ -66,3 +75,78 @@ describe "JavaScript timer drain limit":
                 expect(frames).to_equal(4097.0)
             _:
                 fail("Expected requestAnimationFrame chain past 4096 handles")
+
+    it "fires chained animation frames once and retires completed lookups":
+        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        val scheduled = runtime.eval(
+            "var frames = 0; function frame() { frames = frames + 1; if (frames < 3) { requestAnimationFrame(frame); } } requestAnimationFrame(frame);"
+        )
+        expect(scheduled.is_ok()).to_equal(true)
+
+        expect(runtime.drain_due_timers(16)).to_equal(1)
+        expect(runtime.drain_due_timers(32)).to_equal(1)
+        expect(runtime.drain_due_timers(48)).to_equal(1)
+        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(0)
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
+        expect(runtime.eval(
+            "var canceled = setTimeout(function() { frames = frames + 100; }, 1); clearTimeout(canceled);"
+        ).is_ok()).to_equal(true)
+        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(0)
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
+        match runtime.eval("frames"):
+            Ok(JsValue.Number(frames)):
+                expect(frames).to_equal(3.0)
+            _:
+                fail("Expected each requestAnimationFrame callback once")
+
+    it "refreshes a completed timeout from the current clock":
+        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        expect(runtime.eval(
+            "var refreshTicks = 0; var refreshed = setTimeout(function() { refreshTicks = refreshTicks + 1; }, 10); var numericId = refreshed.valueOf(); var refBefore = refreshed.hasRef(); refreshed.unref(); var unrefed = refreshed.hasRef(); refreshed.ref(); var rerefed = refreshed.hasRef();"
+        ).is_ok()).to_equal(true)
+        match runtime.eval(
+            "numericId === refreshed.id && refBefore === true && unrefed === false && rerefed === true"
+        ):
+            Ok(JsValue.Boolean(usable)):
+                expect(usable).to_equal(true)
+            _:
+                fail("Expected timer handle methods to remain usable")
+
+        expect(runtime.drain_due_timers(10)).to_equal(1)
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
+        match runtime.eval(
+            "refreshed.unref(); var completedUnrefed = refreshed.hasRef(); refreshed.ref(); numericId === refreshed.valueOf() && completedUnrefed === false && refreshed.hasRef() === true"
+        ):
+            Ok(JsValue.Boolean(usable)):
+                expect(usable).to_equal(true)
+            _:
+                fail("Expected completed timer handle methods to remain usable")
+        match runtime.eval("refreshed.refresh() === refreshed"):
+            Ok(JsValue.Boolean(same_handle)):
+                expect(same_handle).to_equal(true)
+            _:
+                fail("Expected refresh to return the completed handle")
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(1)
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(1)
+        match runtime.eval(
+            "refreshed.scheduledAt + ':' + refreshed.refreshedAt + ':' + refreshed.dueAt + ':' + refreshed.active + ':' + refreshed.completed"
+        ):
+            Ok(JsValue.String(metadata)):
+                expect(metadata).to_equal("10:10:20:true:false")
+            _:
+                fail("Expected refreshed timeout deadlines from the current clock")
+
+        expect(runtime.drain_due_timers(19)).to_equal(0)
+        expect(runtime.drain_due_timers(20)).to_equal(1)
+        expect(runtime.drain_due_timers(21)).to_equal(0)
+        expect(runtime.interpreter.timer_handle_ids.len()).to_equal(0)
+        expect(runtime.interpreter.timer_handle_object_ids.len()).to_equal(0)
+        match runtime.eval(
+            "refreshTicks + ':' + refreshed.fireCount + ':' + refreshed.active + ':' + refreshed.completed"
+        ):
+            Ok(JsValue.String(metadata)):
+                expect(metadata).to_equal("2:2:false:true")
+            _:
+                fail("Expected refreshed timeout to fire once and retire")
