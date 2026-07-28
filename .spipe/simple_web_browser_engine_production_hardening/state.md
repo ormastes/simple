@@ -1504,3 +1504,15 @@ implementation in progress / target evidence blocked
   source-reviewed but unexecuted because no admitted working pure-Simple CLI is
   available, and the three-cycle compiler/build cap was already reached. No
   bootstrap or Rust seed fallback was used.
+- Navigation and Stop now batch-remove every pending runtime fetch registry
+  entry and reject its promise before discarded broker queues can retain old
+  handlers. The O(n) drain replaces per-request registry rebuilding; the normal
+  side-effect pump runs once after the replacement document is queued, keeping
+  document ordering while exposing callback-created fetches. A focused async
+  regression covers queued/inflight cancellation, exact-once catches, Stop,
+  late-response rejection, preserved page state, and post-cancel recovery.
+- verify: working/staged direct-env guards, rendering-source coupling,
+  conflict/placeholder scans, and the `doc/06_spec/*_spec.spl == 0` layout gate
+  pass. Executable Simple tests remain unrun under the recorded compiler crash
+  and exhausted three-cycle build cap; no bootstrap or Rust seed fallback was
+  used.

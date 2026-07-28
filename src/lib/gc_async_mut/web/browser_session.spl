@@ -1508,6 +1508,7 @@ impl BrowserSession:
         self.is_loading = true
         self.stop_requested = false
         self.warnings = []
+        self._cancel_runtime_fetches("navigation-canceled")
 
     me can_stop_loading() -> bool:
         self.is_loading or self.active_load != nil or
@@ -1529,6 +1530,8 @@ impl BrowserSession:
         self.inflight_requests = []
         self.active_load = nil
         self.pending_content_security_policy = ""
+        self._cancel_runtime_fetches("navigation-canceled")
+        self._flush_runtime_side_effects()
 
     me open_html(url: text, html: text) -> Result<bool, text>:
         self.begin_navigation(url)
@@ -1546,6 +1549,7 @@ impl BrowserSession:
             return self.open_html(normalized, override_body)
         self.begin_navigation(normalized)
         self.pending_requests.push(self._build_request("document", normalized, method, headers, body, content_type))
+        self._flush_runtime_side_effects()
         Ok(true)
 
     me begin_network_reload() -> Result<bool, text>:
@@ -1560,6 +1564,7 @@ impl BrowserSession:
         self.pending_requests.push(self._build_request(
             "document", normalized, "GET", "", "", ""
         ))
+        self._flush_runtime_side_effects()
         Ok(true)
 
     me take_pending_request() -> BrowserRequest?:
@@ -1703,6 +1708,15 @@ impl BrowserSession:
             state.runtime = runtime
             self.runtime_state = Some(state)
             self._flush_runtime_side_effects()
+
+    me _cancel_runtime_fetches(error: text):
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            var interpreter = runtime.interpreter
+            if interpreter.cancel_pending_async_fetches(error) > 0:
+                runtime.interpreter = interpreter
+                state.runtime = runtime
+                self.runtime_state = Some(state)
 
     me has_pending_requests() -> bool:
         self.pending_request_count() > 0

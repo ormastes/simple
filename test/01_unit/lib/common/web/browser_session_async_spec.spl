@@ -94,6 +94,93 @@ describe "BrowserSession async fetch":
             nil:
                 fail("Expected pending fetch request after fetch setup")
 
+    it "rejects queued and inflight fetches when navigation is canceled":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body>Old page<script>var canceled = ''; var cancelCount = 0; fetch('/slow-a').catch(function(e) { canceled = canceled + e; cancelCount = cancelCount + 1; fetch('/during-cancel'); }); fetch('/slow-b').catch(function(e) { canceled = canceled + ':' + e; cancelCount = cancelCount + 1; });</script></body></html>"
+        )
+
+        val old_request = session.take_pending_request()
+        match old_request:
+            Some(request): expect(request.kind).to_equal("fetch")
+            nil: fail("Expected one old fetch request to become inflight")
+        val nav = session.begin_network_navigation(
+            "https://example.com/next", "GET", "", "", ""
+        )
+        expect(nav.is_ok()).to_equal(true)
+        val document_request = session.take_pending_request()
+        match document_request:
+            Some(request):
+                expect(request.kind).to_equal("document")
+            nil:
+                fail("Expected replacement document request")
+        val cancellation_request = session.take_pending_request()
+        match cancellation_request:
+            Some(request):
+                expect(request.url).to_equal(
+                    "https://example.com/during-cancel"
+                )
+            nil:
+                fail("Expected cancellation callback fetch to be pumped")
+        session.stop_loading()
+        expect(session.current_url).to_equal("https://example.com/app")
+        expect(session.current_body_html).to_contain("Old page")
+
+        match session.eval_script("cancelCount + ':' + canceled"):
+            Ok(value):
+                expect(_display_js(value)).to_equal(
+                    "2:navigation-canceled:navigation-canceled"
+                )
+            Err(e):
+                fail("Expected canceled fetch handlers to run once: {e}")
+        match cancellation_request:
+            Some(request):
+                val late = session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: request.id,
+                        kind: request.kind,
+                        url: request.url,
+                        status: 200,
+                        headers: "",
+                        body: "late",
+                        error: ""
+                    )
+                )
+                match late:
+                    Err(e):
+                        expect(e).to_equal(
+                            "unknown or canceled request: {request.id}"
+                        )
+                    Ok(_): fail("Expected late canceled response to fail")
+            nil:
+                fail("Expected cancellation callback fetch to become inflight")
+
+        val queued = session.eval_script(
+            "var recovered = 'pending'; fetch('/after').then(function(r) { return r.text(); }).then(function(t) { recovered = t; }); 'queued'"
+        )
+        expect(queued.is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(request.url).to_equal("https://example.com/after")
+                val committed = session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: request.id,
+                        kind: request.kind,
+                        url: request.url,
+                        status: 200,
+                        headers: "",
+                        body: "ok",
+                        error: ""
+                    )
+                )
+                expect(committed.is_ok()).to_equal(true)
+            nil:
+                fail("Expected fetch after stopped navigation")
+        match session.eval_script("recovered"):
+            Ok(value): expect(_display_js(value)).to_equal("ok")
+            Err(e): fail("Expected post-cancel fetch to settle: {e}")
+
     it "rejects promise callbacks on transport error":
         var session = BrowserSession.new()
         session.open_html(
