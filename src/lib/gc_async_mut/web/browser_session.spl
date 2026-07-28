@@ -1260,7 +1260,7 @@ class BrowserSession:
     pending_request_head: i64
     pending_request_tombstone: BrowserRequest
     inflight_requests: [BrowserRequest]
-    next_request_seq: i32
+    next_request_seq: i64
     subresource_request_count: i32
     active_load: BrowserLoadState?
     resource_overrides: [Pair<text, text>]
@@ -1912,12 +1912,17 @@ impl BrowserSession:
                 return true
         false
 
-    me _take_inflight(request_id: text) -> BrowserRequest?:
+    me _take_inflight(response: BrowserResponse) -> BrowserRequest?:
         var found: BrowserRequest? = nil
         var remaining: [BrowserRequest] = []
+        var taken = false
         for existing in self.inflight_requests:
-            if existing.id == request_id:
+            if (not taken and existing.id == response.request_id and
+                existing.kind == response.kind and
+                normalize_browser_url(existing.url) ==
+                    normalize_browser_url(response.url)):
                 found = Some(existing)
+                taken = true
             else:
                 remaining.push(existing)
         self.inflight_requests = remaining
@@ -1947,14 +1952,18 @@ impl BrowserSession:
 
     me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
         self._trace_guest("commit response kind={response.kind}")
-        val inflight = self._take_inflight(response.request_id)
+        val inflight = self._take_inflight(response)
         if inflight == nil:
+            for request in self.inflight_requests:
+                if request.id == response.request_id:
+                    if request.kind != response.kind:
+                        return Err(
+                            "response kind mismatch: expected {request.kind}, got {response.kind}"
+                        )
+                    if (normalize_browser_url(request.url) !=
+                        normalize_browser_url(response.url)):
+                        return Err("response URL mismatch")
             return Err("unknown or canceled request: {response.request_id}")
-        if val Some(request) = inflight:
-            if request.kind != response.kind:
-                return Err("response kind mismatch: expected {request.kind}, got {response.kind}")
-            if normalize_browser_url(request.url) != normalize_browser_url(response.url):
-                return Err("response URL mismatch")
         if not browser_resource_size_allowed(response.body.len()):
             val limit_error = "response body exceeds 50 MiB resource limit"
             if response.kind == "fetch":

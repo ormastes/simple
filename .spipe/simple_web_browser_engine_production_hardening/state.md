@@ -1516,3 +1516,10 @@ implementation in progress / target evidence blocked
   pass. Executable Simple tests remain unrun under the recorded compiler crash
   and exhausted three-cycle build cap; no bootstrap or Rust seed fallback was
   used.
+- Runtime fetch IDs now continue through the existing session-wide `i64`
+  request sequence across document replacement and lazy runtime creation.
+  Inflight responses are removed only after ID, kind, and normalized URL all
+  match, so stale same-URL responses and mismatched responses cannot consume a
+  current request or mutate cookies/HSTS. Focused regressions prove the stale
+  response is rejected, the current fetch remains commit-able, and URL mismatch
+  retry succeeds without adding a counter, registry, or request-path scan.

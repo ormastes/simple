@@ -181,6 +181,84 @@ describe "BrowserSession async fetch":
             Ok(value): expect(_display_js(value)).to_equal("ok")
             Err(e): fail("Expected post-cancel fetch to settle: {e}")
 
+    it "rejects a late old-page response without consuming the new fetch":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/old",
+            "<html><body><script>fetch('/same')</script></body></html>"
+        )
+        val old_request = session.take_pending_request()
+
+        val started = session.begin_network_navigation(
+            "https://example.com/new", "GET", "", "", ""
+        )
+        expect(started.is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(document_request):
+                val committed = session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: document_request.id,
+                        kind: document_request.kind,
+                        url: document_request.url,
+                        status: 200,
+                        headers: "",
+                        body: "<html><body><script>var outcome = 'pending'; fetch('/same').then(function(r) { return r.text(); }).then(function(t) { outcome = t; });</script></body></html>",
+                        error: ""
+                    )
+                )
+                expect(committed.is_ok()).to_be(true)
+            nil:
+                fail("Expected replacement document request")
+
+        val new_request = session.take_pending_request()
+        match old_request:
+            Some(old_fetch):
+                expect(old_fetch.id).to_equal("fetch-1")
+                match new_request:
+                    Some(new_fetch):
+                        expect(new_fetch.id).to_equal("fetch-2")
+                        expect(new_fetch.url).to_equal(old_fetch.url)
+                        val late = session.commit_network_response(
+                            BrowserResponse.create(
+                                request_id: old_fetch.id,
+                                kind: old_fetch.kind,
+                                url: old_fetch.url,
+                                status: 200,
+                                headers: "Set-Cookie: stale=yes; Path=/\nStrict-Transport-Security: max-age=3600",
+                                body: "stale",
+                                error: ""
+                            )
+                        )
+                        match late:
+                            Err(e):
+                                expect(e).to_equal(
+                                    "unknown or canceled request: {old_fetch.id}"
+                                )
+                            Ok(_):
+                                fail("Expected stale old-page response rejection")
+                        expect(session.cookies.count()).to_equal(0)
+                        expect(session.hsts_policies.len()).to_equal(0)
+                        expect(session.has_inflight_request(new_fetch)).to_be(true)
+                        val fresh = session.commit_network_response(
+                            BrowserResponse.create(
+                                request_id: new_fetch.id,
+                                kind: new_fetch.kind,
+                                url: new_fetch.url,
+                                status: 200,
+                                headers: "",
+                                body: "fresh",
+                                error: ""
+                            )
+                        )
+                        expect(fresh.is_ok()).to_be(true)
+                    nil:
+                        fail("Expected new-page fetch request")
+            nil:
+                fail("Expected old-page fetch request")
+        match session.eval_script("outcome"):
+            Ok(value): expect(_display_js(value)).to_equal("fresh")
+            Err(e): fail("Expected only the new response to settle: {e}")
+
     it "rejects promise callbacks on transport error":
         var session = BrowserSession.new()
         session.open_html(
