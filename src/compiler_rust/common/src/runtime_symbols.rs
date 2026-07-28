@@ -1629,6 +1629,13 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_is_some",
     "rt_log_clear_scope_levels",
     "SCOPE_LEVELS_dot_has",
+    // Array predicate/closure helpers. Codegen emits these names; without a
+    // manifest entry the JIT import never resolves and the WHOLE module silently
+    // falls back to the interpreter (correct but ~1000x slower).
+    "rt_array_all",
+    "rt_array_any",
+    "rt_array_filter",
+    "rt_array_find",
     "rt_log_debug",
     "rt_log_emit",
     "rt_log_emit_rv",
@@ -2032,14 +2039,22 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_value_is_float",
     // Auto-registered batch 2: lib/app extern fns + dynamic rt_opt_* (JIT NULL-jump fix 2026-07-24).
     "rt_array_push_i64_raw",
+    "rt_cuda_launch_kernel_name",
+    "rt_cuda_module_load_data_bytes",
     "rt_dict_get_i64_raw",
     "rt_dict_set_i64_raw",
+    "rt_exec",
     "rt_opt_bool_to_string",
     "rt_opt_f64_to_string",
     "rt_opt_i64_to_string",
     "rt_file_delete", // -> rt_file_remove
+    "rt_neighbor_load",
     "rt_print",       // -> rt_print_value
     "rt_println",     // -> rt_println_value
+    "rt_sleep_ms",
+    "rt_str_hash",
+    "rt_value_as_int",
+    "rt_write_file",
     "sys_get_args",   // -> rt_get_args
     "sys_exit",       // -> rt_exit
 ];
