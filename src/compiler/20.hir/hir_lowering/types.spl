@@ -57,6 +57,8 @@ class HirLowering:
     module_resolver: ModuleResolverPort?   # Optional resolver for 2-pass import resolution (FR-COMPILER-003)
     loaded_modules: [text]         # Paths of modules already loaded (for cycle detection in A2 resolve pass)
     modules_by_name: HirModulesByName       # All parsed modules keyed by module name (for resolve_import_symbols)
+    package_sibling_modules: [text] # Direct sibling module keys, resolved lazily by bare-name lookup
+    package_sibling_misses: {text: bool}
     current_method_self_type: HirType?
     lowered_impl_functions: HirImplFunctions
     lowered_traits: HirTraitsByName   # Traits lowered in this module (by name), for injecting defaults into impls
@@ -139,6 +141,8 @@ enum LoweringErrorKind:
 fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages: [text], diagnostic_recovered: [bool]) -> HirLowering:
     val empty_loaded_modules: [text] = []
     val empty_modules_by_name: HirModulesByName = {}
+    val empty_package_sibling_modules: [text] = []
+    val empty_package_sibling_misses: {text: bool} = {}
     val empty_impl_functions: HirImplFunctions = {}
     val empty_traits: HirTraitsByName = {}
     val empty_imported_enums: HirImportedEnumsByName = {}
@@ -161,6 +165,8 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         module_resolver: nil,
         loaded_modules: empty_loaded_modules,
         modules_by_name: empty_modules_by_name,
+        package_sibling_modules: empty_package_sibling_modules,
+        package_sibling_misses: empty_package_sibling_misses,
         current_method_self_type: nil,
         lowered_impl_functions: empty_impl_functions,
         lowered_traits: empty_traits,
@@ -503,7 +509,7 @@ impl HirLowering:
                     self.error("Dict type expects 2 type arguments", span)
                     HirTypeKind.Error
             case _:
-                val symbol_id = self.symbols.lookup_or_invalid(name)
+                val symbol_id = self.lookup_package_symbol_or_invalid(name, span)
                 if symbol_id.is_valid():
                     if custom_primitive_is_name(name):
                         custom_primitive_bind_symbol(name, symbol_id.id)

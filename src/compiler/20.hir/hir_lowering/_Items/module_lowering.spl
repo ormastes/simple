@@ -941,10 +941,12 @@ impl HirLowering:
         """Directory-package semantics: files in one source directory share a
         namespace — e.g. std.common.json.array_ops calls json_array from
         types.spl with NO import line. The seed's flat global registry gives
-        this for free; the entry-closure HIR path must register each sibling
-        module's public symbols explicitly, or every bare cross-file call in a
-        package dies with "unresolved name" (fatal since HIR lowering errors
-        became build errors)."""
+        this for free. Retain only the direct sibling keys here; eagerly
+        registering every declaration from every sibling made package lowering
+        quadratic. lookup_package_symbol registers one requested name on the
+        first ordinary symbol-table miss."""
+        self.package_sibling_modules = []
+        self.package_sibling_misses = {}
         var self_name = module.name
         if self_name.ends_with(".spl"):
             self_name = self_name[0:self_name.len() - 4]
@@ -962,7 +964,6 @@ impl HirLowering:
             pkg = pkg + self_segs[pkg_si]
             pkg_si = pkg_si + 1
         val pkg_prefix = pkg + "."
-        val sibling_span = Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
         for sibling_name in self.modules_by_name.keys():
             if sibling_name == self_name or sibling_name == module.name:
                 continue
@@ -972,7 +973,30 @@ impl HirLowering:
             if sibling_name.substring(pkg_prefix.len()).contains("."):
                 continue
             if self.modules_by_name.contains_key(sibling_name):
-                self.register_glob_imported_symbols(self.modules_by_name[sibling_name], sibling_name, sibling_span)
+                self.package_sibling_modules.push(sibling_name)
+
+    me lookup_package_symbol(name: text, span: Span) -> SymbolId?:
+        val local = self.symbols.lookup(name)
+        if local != nil:
+            return local
+        if self.package_sibling_misses.contains_key(name):
+            return nil
+        val active_scope = self.symbols.current_scope
+        self.symbols.current_scope = ScopeId(id: 0)
+        for sibling_name in self.package_sibling_modules:
+            if self.modules_by_name.contains_key(sibling_name):
+                self.register_imported_symbol(self.modules_by_name[sibling_name], sibling_name, name, name, span)
+                val imported = self.symbols.lookup(name)
+                if imported != nil:
+                    self.symbols.current_scope = active_scope
+                    return self.symbols.lookup(name)
+        self.symbols.current_scope = active_scope
+        self.package_sibling_misses[name] = true
+        nil
+
+    me lookup_package_symbol_or_invalid(name: text, span: Span) -> SymbolId:
+        self.lookup_package_symbol(name, span)
+        self.symbols.lookup_or_invalid(name)
 
     # Uniquely-named entry point for the driver's unstub `-c`/`run` path.
     # `lowering.lower_module(...)` from the driver never enters this impl's body
@@ -1651,7 +1675,7 @@ impl HirLowering:
             while mi < meth_keys.len():
                 val name = meth_keys[mi]
                 val method = impl_.methods[name]
-                val owner_symbol = self.symbols.lookup_or_invalid(owner_name)
+                val owner_symbol = self.lookup_package_symbol_or_invalid(owner_name, impl_.span)
                 val symbol_name = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
                 val symbol_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
                 val owner_context: SymbolId? = if owner_symbol.is_valid(): Some(owner_symbol) else: nil

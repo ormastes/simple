@@ -106,6 +106,27 @@ The next fix must replace repeated eager package-wide registration with an
 indexed or lazy sibling resolver and retain equivalent bare cross-file name
 semantics. No further build is permitted in this verification window.
 
+### 2026-07-28 lazy sibling resolution repair
+
+`resolve_package_sibling_symbols` now retains only direct sibling module keys.
+Ordinary expression, named-type, pattern, async-type, and impl-owner lookup
+registers one requested sibling symbol on the first miss, at module scope, and
+caches genuine misses. The existing `register_imported_symbol` path remains the
+single owner of visibility, re-export, callable-signature, type-method, enum,
+and trait-default semantics. A focused unit regression requires bare sibling
+function/type resolution while proving an unused sibling declaration is not
+registered; a three-file disk fixture covers the equivalent native package.
+
+One pure-Simple incremental compiler build accepted the source (693 compiled,
+zero failed, 647.3 seconds), producing
+`build/native_probe/lazy-sibling-stage3-cycle1/simple`, SHA-256
+`16f89715874448595f91a6a39043222c1967e320e9b73a9d519e61db4ab2c4c4`.
+That artifact linked 43 unresolved compatibility stubs and crashed when used
+as a second-generation native-build producer, so it is not admitted runtime
+evidence. The retained full-Stage4 three-cycle cap still forbids another broad
+build in this verification window; elapsed/RSS and essential-tools acceptance
+remain open.
+
 ## Required fix and regression
 
 1. Add bounded phase/progress reporting to the pure-Simple native-build driver

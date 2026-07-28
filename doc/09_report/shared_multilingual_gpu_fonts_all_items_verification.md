@@ -994,4 +994,21 @@ Afterward the source branch was completion-time rebased onto newer
 The remaining compiler performance blocker is tracked in
 `doc/08_tracking/bug/stage4_low_memory_rss_growth_2026-07-18.md`.
 
+## 2026-07-28 lazy package-sibling repair
+
+The profiled eager package-sibling path now records only direct module keys and
+registers a sibling declaration on its first real symbol/type/pattern/impl
+lookup miss, at module scope. This removes package-wide declaration and method
+lowering from every file while preserving the existing import/re-export owner.
+The regression requires `Box` and `answer` to resolve but `unused` to remain
+absent, which the old eager path cannot satisfy.
+
+A pure-Simple incremental source build completed 693 files with zero failures
+in 647.3s and produced SHA-256
+`16f89715874448595f91a6a39043222c1967e320e9b73a9d519e61db4ab2c4c4`.
+The linked producer contained 43 unresolved compatibility stubs and crashed on
+a second native-build invocation. Per the existing three-cycle cap, no new full
+Stage4 run was started. Resource, essential-tools, and font evidence therefore
+remain open and `STATUS: FAIL` is unchanged.
+
 `STATUS: FAIL`

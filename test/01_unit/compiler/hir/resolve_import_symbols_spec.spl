@@ -28,6 +28,24 @@ describe "resolve_import_symbols 2-pass import resolver":
         val hir = lowering.lower_module(consumer)
         expect(hir.symbols.lookup("answer").?).to_equal(true)
 
+    it "resolves package sibling names without eagerly registering unused declarations":
+        val log = make_logger()
+        val provider = parse_full_frontend("pub struct Box:\n    value: i64\npub fn answer() -> i64:\n    42\npub fn unused() -> i64:\n    0", "pkg.types", "pkg.types", log)
+        val nested = parse_full_frontend("pub fn nested_only() -> i64:\n    7", "pkg.nested.shadow", "pkg.nested.shadow", log)
+        val consumer = parse_full_frontend("fn pass(box: Box) -> Box:\n    box\nfn main() -> i64:\n    answer()", "pkg.consumer", "pkg.consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["pkg.types"] = provider
+        modules["pkg.nested.shadow"] = nested
+        var lowering = HirLowering.with_filename("pkg.consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("Box").?).to_equal(true)
+        expect(hir.symbols.lookup("answer").?).to_equal(true)
+        expect(hir.symbols.lookup("unused").?).to_equal(false)
+        expect(hir.symbols.lookup("nested_only").?).to_equal(false)
+
     it "named import from module A wins over same-named symbol from module B":
         val log = make_logger()
 
