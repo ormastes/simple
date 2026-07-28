@@ -316,16 +316,20 @@ pub fn rt_time_now_micros(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(micros))
 }
 
-/// Get monotonic time in nanoseconds
+/// Get monotonic time in nanoseconds since an arbitrary process-start baseline.
+///
+/// `Instant`-backed, matching the native C runtime (`CLOCK_MONOTONIC`). The
+/// previous implementation returned epoch nanos from `SystemTime` despite the
+/// name, so an NTP step made measured durations wrong (possibly negative).
+/// Only DIFFERENCES between two readings are meaningful; callers wanting a
+/// wall-clock timestamp must use `rt_time_now_unix_micros`.
 pub fn rt_time_monotonic_ns(_args: &[Value]) -> Result<Value, CompileError> {
+    use std::sync::OnceLock;
     use std::time::Instant;
-    // Use elapsed from a fixed reference; for interpreter stubs, just return epoch nanos
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as i64;
-    Ok(Value::Int(nanos))
+    static BASELINE: OnceLock<Instant> = OnceLock::new();
+    Ok(Value::Int(
+        BASELINE.get_or_init(Instant::now).elapsed().as_nanos() as i64
+    ))
 }
 
 /// Get ISO-8601 timestamp string

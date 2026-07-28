@@ -1744,14 +1744,25 @@ pub fn rt_system_cpu_count(_args: &[Value]) -> Result<Value, CompileError> {
     ))
 }
 
-/// Get monotonic time in milliseconds
+/// Get monotonic time in milliseconds.
+///
+/// Backed by `std::time::Instant`, which is a genuinely monotonic clock: it
+/// never jumps backwards on an NTP step or a manual wall-clock change. The
+/// previous `SystemTime`/`UNIX_EPOCH` implementation was a WALL clock, so any
+/// duration measured across a clock correction was wrong (and could be
+/// negative), corrupting every latency measurement taken through this extern.
+///
+/// `Instant` has no absolute epoch, so the returned value is milliseconds since
+/// a process-start baseline captured on first call. Only DIFFERENCES between
+/// two readings are meaningful — which is all a monotonic clock ever promised.
+/// Callers that need a wall-clock timestamp must use `rt_time_now_ms` /
+/// `rt_time_now_unix_micros` instead.
 pub fn rt_time_now_monotonic_ms(_args: &[Value]) -> Result<Value, CompileError> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    Ok(Value::Int(ms))
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static BASELINE: OnceLock<Instant> = OnceLock::new();
+    let baseline = BASELINE.get_or_init(Instant::now);
+    Ok(Value::Int(baseline.elapsed().as_millis() as i64))
 }
 
 // ========================================================================

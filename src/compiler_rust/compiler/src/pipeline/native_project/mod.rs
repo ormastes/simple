@@ -726,7 +726,10 @@ impl NativeProjectBuilder {
             return Err(collision.clone());
         }
         let imports = if !self.config.no_mangle {
-            if incr_hardening {
+            // Always fingerprinted when the object cache is live: a module's object
+            // bytes depend on OTHER modules' declarations, so the cross-module
+            // digest is a CORRECTNESS input to the cache key, not an opt-in extra.
+            if use_incremental {
                 layout_fp = cross_module_layout_fingerprint(&result);
             }
             if self.config.verbose {
@@ -787,12 +790,18 @@ impl NativeProjectBuilder {
         };
 
         // Global build fingerprint: folded into every per-module object cache key
-        // when the safe-incremental path is active. Any change to opt-level, the
+        // whenever the object cache is live. Any change to opt-level, the
         // entry-closure flag, the target, the linker script, or the closure's
         // cross-module type layout / signatures invalidates the ENTIRE per-module
         // cache. Correctness strictly beats speed: this coarse over-invalidation
         // can only ever cause more rebuilds, never a stale (wrong-binary) reuse.
-        let global_fp: Option<GlobalBuildFingerprint> = if incr_hardening && use_incremental {
+        //
+        // This is deliberately NOT gated on `incr_hardening`. The dependency-blind
+        // content-only key reuses a module object after a dependency it was
+        // compiled against changed, which produces a WRONG BINARY; an env var must
+        // not be able to select that. `incr_hardening` now only controls the
+        // per-build `[native-incremental]` receipt.
+        let global_fp: Option<GlobalBuildFingerprint> = if use_incremental {
             let ls_hash = self
                 .config
                 .linker_script
@@ -842,14 +851,11 @@ impl NativeProjectBuilder {
                         &module_prefix,
                         self.config.opt_level,
                     );
-                    // Safe-incremental path folds in the global build fingerprint so
-                    // any cross-module structural change misses the cache; legacy
-                    // path leaves the content-only key byte-for-byte unchanged.
-                    let hash = if incr_hardening {
-                        hash_one(&(base_hash, global_fp_combined))
-                    } else {
-                        base_hash
-                    };
+                    // Fold in the global build fingerprint so any cross-module
+                    // structural change (a dependency this object was compiled
+                    // against) misses the cache instead of silently reusing an
+                    // object built against the OLD declarations.
+                    let hash = hash_one(&(base_hash, global_fp_combined));
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     if cached_o.exists() {
                         // Cache hit: copy to temp dir
@@ -991,11 +997,7 @@ impl NativeProjectBuilder {
                     );
                     // Must mirror the read-loop key exactly (see above) or a fresh
                     // object would be cached under a key the next build never looks up.
-                    let hash = if incr_hardening {
-                        hash_one(&(base_hash, global_fp_combined))
-                    } else {
-                        base_hash
-                    };
+                    let hash = hash_one(&(base_hash, global_fp_combined));
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
                     let _copy_result = std::fs::copy(obj_path, cached_o);
                 }
@@ -1012,11 +1014,15 @@ impl NativeProjectBuilder {
                 .and_then(|line| GlobalBuildFingerprint::from_manifest_line(&line))
                 .and_then(|prev| gfp.changed_reason(&prev));
             let rebuilt = freshly_compiled.len();
-            match reason {
-                Some(why) => eprintln!(
-                    "[native-incremental] {cached_count} reused / {rebuilt} rebuilt (full rebuild: {why})"
-                ),
-                None => eprintln!("[native-incremental] {cached_count} reused / {rebuilt} rebuilt"),
+            // The receipt itself stays opt-in (`SIMPLE_NATIVE_INCREMENTAL=1`) so
+            // default build output is unchanged; the KEY above is unconditional.
+            if incr_hardening {
+                match reason {
+                    Some(why) => eprintln!(
+                        "[native-incremental] {cached_count} reused / {rebuilt} rebuilt (full rebuild: {why})"
+                    ),
+                    None => eprintln!("[native-incremental] {cached_count} reused / {rebuilt} rebuilt"),
+                }
             }
             let _ = std::fs::write(&manifest_path, gfp.to_manifest_line());
         }
@@ -1343,6 +1349,13 @@ fn compiler_fingerprint() -> u64 {
 /// binaries (e.g. before/after a seed codegen fix) must not collide on the
 /// same cached `.o`, or codegen changes get silently masked by stale cache
 /// hits.
+///
+/// NOTE: this is only the per-module BASE key. It intentionally does not know
+/// about the module's dependencies; callers MUST fold in
+/// `GlobalBuildFingerprint::combined()` (which carries the cross-module layout /
+/// signature digest from `cross_module_layout_fingerprint`) before using the
+/// result as a cache filename. Using this value alone reuses an object after a
+/// dependency changed and ships a wrong binary.
 pub(crate) fn object_cache_key(
     content: &str,
     is_entry: bool,
@@ -1365,13 +1378,17 @@ pub(crate) fn object_cache_key(
     hasher.finish()
 }
 
-/// True when the opt-in safe incremental object-reuse path is active.
+/// True when the per-build `[native-incremental] N reused / M rebuilt` receipt
+/// is printed.
 ///
 /// Gated by `SIMPLE_NATIVE_INCREMENTAL=1` (default off) OR the equivalent
 /// `NativeBuildConfig::incremental_hardening` flag (used by tests to avoid
-/// racing the process-global env var). Default off leaves the legacy
-/// content-only cache key untouched so existing bootstrap/CI flows are
-/// byte-for-byte unchanged until this path has soaked.
+/// racing the process-global env var).
+///
+/// This no longer gates cache-key CORRECTNESS: the dependency-aware key
+/// (cross-module layout/signature digest + target + opt-level + linker script)
+/// is now unconditional, because the legacy content-only key could reuse an
+/// object after a dependency changed and produce a wrong binary.
 pub(crate) fn incremental_hardening_requested(config_flag: bool) -> bool {
     config_flag || std::env::var("SIMPLE_NATIVE_INCREMENTAL").as_deref() == Ok("1")
 }
