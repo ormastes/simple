@@ -1013,6 +1013,7 @@ if (app) app.whenReady().then(() => {
             : undefined,
         backgroundColor: '#0b0d10',
         webPreferences: {
+            sandbox: true,
             nodeIntegration: false,
             contextIsolation: true,
             preload: path.join(__dirname, 'preload.js')

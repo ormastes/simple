@@ -179,6 +179,14 @@ fn _draw_ir_sdn_emit_glyph_run(line: text, glyph_run: DrawIrGlyphRunPayload) -> 
         index = index + 1
     parts.join("")
 
+fn _draw_ir_sdn_emit_advances(line: text, advances: [i32]) -> text:
+    val parts: [text] = [line, " advance_count={advances.len()}"]
+    var index = 0
+    for advance in advances:
+        parts.push(" advance_{index}={advance}")
+        index = index + 1
+    parts.join("")
+
 fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
     val parts: [text] = ["\t\tcommand kind={command.kind} id={_draw_ir_sdn_escape(command.component_id)} x={command.x} y={command.y} width={command.width} height={command.height} color={command.color} text={_draw_ir_sdn_escape(command.text_value)} parent_id={_draw_ir_sdn_escape(command.parent_id)} image_uri={_draw_ir_sdn_escape(command.image_uri)}"]
     parts.push(_draw_ir_sdn_emit_rect("", "border", command.border_rect))
@@ -187,6 +195,7 @@ fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
     parts.push(_draw_ir_sdn_emit_rect("", "clip", command.clip_rect))
     parts.push(_draw_ir_sdn_emit_styles("", "style", command.computed_style))
     parts.push(_draw_ir_sdn_emit_points("", "point", command.points))
+    parts.push(_draw_ir_sdn_emit_advances("", command.advance_widths))
     parts.push(_draw_ir_sdn_emit_glyph_run("", command.glyph_run))
     parts.push(" edge_present={command.edge != nil}")
     if val edge = command.edge:
@@ -317,6 +326,26 @@ fn _draw_ir_sdn_parse_glyph_run(line: text) -> DrawIrGlyphRunPayload:
         return draw_ir_empty_glyph_run_payload()
     draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, true)
 
+fn _draw_ir_sdn_parse_advances(line: text) -> [i32]:
+    val count = _draw_ir_sdn_i32(line, "advance_count")
+    if count <= 0 or count > _DRAW_IR_SDN_MAX_GLYPHS:
+        return []
+    var advances: [i32] = []
+    var index = 0
+    for part in line.split(" "):
+        if index >= count:
+            break
+        val separator = part.find("=")
+        if separator > 0 and part.substring(0, separator) == "advance_{index}":
+            val advance = _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.len()))
+            if advance < 0:
+                return []
+            advances.push(advance)
+            index = index + 1
+    if index != count:
+        return []
+    advances
+
 fn _draw_ir_sdn_parse_edge(line: text) -> DrawEdge?:
     val edge_present = _draw_ir_sdn_field(line, "edge_present")
     if edge_present == "true":
@@ -350,6 +379,7 @@ fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
         height: _draw_ir_sdn_i32(line, "height"),
         color: _draw_ir_sdn_u32(line, "color"),
         text_value: _draw_ir_sdn_field(line, "text"),
+        advance_widths: _draw_ir_sdn_parse_advances(line),
         border_rect: _draw_ir_sdn_parse_rect(line, "border"),
         content_rect: _draw_ir_sdn_parse_rect(line, "content"),
         hit_rect: _draw_ir_sdn_parse_rect(line, "hit"),

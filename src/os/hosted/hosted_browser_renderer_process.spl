@@ -182,6 +182,15 @@ fn _deadline_ms(timeout_ms: i64) -> i64:
         if timeout_ms > 0: timeout_ms else: 2000
     )
 
+val BROWSER_RENDERER_MAX_DEFERRED_COMMANDS: i32 = 64
+
+struct _HostedBrowserDeferredCommand:
+    wire: text
+    operation: text
+    timeout_ms: i64
+    resize_width: i32
+    resize_height: i32
+
 pub class HostedBrowserRendererProcess:
     pid: i64
     generation: i64
@@ -206,11 +215,7 @@ pub class HostedBrowserRendererProcess:
     pending_wire_offset: i64
     pending_wire_reply_to_request_id: i64
     pending_wire_is_command: bool
-    deferred_wire: text
-    deferred_operation: text
-    deferred_timeout_ms: i64
-    deferred_resize_width: i32
-    deferred_resize_height: i32
+    deferred_commands: [_HostedBrowserDeferredCommand]
     pending_scroll_event_id: i64
     pending_scroll_delta_milli_y: i64
     document_url: text
@@ -262,11 +267,7 @@ pub class HostedBrowserRendererProcess:
             pending_wire_offset: 0,
             pending_wire_reply_to_request_id: 0,
             pending_wire_is_command: false,
-            deferred_wire: "",
-            deferred_operation: "",
-            deferred_timeout_ms: 0,
-            deferred_resize_width: 0,
-            deferred_resize_height: 0,
+            deferred_commands: [],
             pending_scroll_event_id: 0,
             pending_scroll_delta_milli_y: 0,
             document_url: "",
@@ -536,7 +537,8 @@ pub class HostedBrowserRendererProcess:
     me _replace_pending_navigation() -> bool:
         if self.command_deadline_ms <= 0:
             return true
-        if (self.deferred_wire != "" or self.network_job_handle > 0 or
+        if (self.deferred_commands.len() > 0 or
+            self.network_job_handle > 0 or
             self.pending_wire == "" or not self.pending_wire_is_command or
             self.pending_wire_offset > 0):
             return false
@@ -564,11 +566,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = 0
         self.pending_wire_is_command = false
-        self.deferred_wire = ""
-        self.deferred_operation = ""
-        self.deferred_timeout_ms = 0
-        self.deferred_resize_width = 0
-        self.deferred_resize_height = 0
+        self.deferred_commands = []
         self.pending_scroll_event_id = 0
         self.pending_scroll_delta_milli_y = 0
         self._cancel_network_job()
@@ -602,11 +600,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = 0
         self.pending_wire_is_command = false
-        self.deferred_wire = ""
-        self.deferred_operation = ""
-        self.deferred_timeout_ms = 0
-        self.deferred_resize_width = 0
-        self.deferred_resize_height = 0
+        self.deferred_commands = []
         self.pending_scroll_event_id = 0
         self.pending_scroll_delta_milli_y = 0
         if self.pid > 0:
@@ -1061,13 +1055,26 @@ pub class HostedBrowserRendererProcess:
             return self._begin_frame_request(
                 request, operation, timeout_ms
             )
-        if (self.pending_operation != "advance" or
-            self.network_job_handle > 0 or self.deferred_wire != "" or
-            not request.ok):
-            return Err(if request.ok: "renderer-busy" else: request.reason)
-        if self.pending_wire != "" and self.pending_wire_is_command:
-            if self.pending_wire_offset > 0:
-                return Err("renderer-busy")
+        if not request.ok:
+            return Err(request.reason)
+        if self.network_job_handle > 0:
+            return Err("renderer-busy")
+        val queueable_pending = (
+            self.pending_operation == "advance" or
+            self.pending_operation == "pointer" or
+            self.pending_operation == "key" or
+            self.pending_operation == "text" or
+            self.pending_operation == "resize" or
+            self.pending_operation == "scroll"
+        )
+        if not queueable_pending:
+            return Err("renderer-busy")
+        if (
+            self.pending_operation == "advance" and
+            self.deferred_commands.len() == 0 and
+            self.pending_wire != "" and self.pending_wire_is_command and
+            self.pending_wire_offset <= 0
+        ):
             self.pending_wire = ""
             self.pending_wire_offset = 0
             self.pending_wire_reply_to_request_id = 0
@@ -1079,18 +1086,26 @@ pub class HostedBrowserRendererProcess:
             return self._begin_frame_request(
                 request, operation, timeout_ms
             )
-        self.deferred_wire = request.wire
-        self.deferred_operation = operation
-        self.deferred_timeout_ms = timeout_ms
-        self.deferred_resize_width = resize_width
-        self.deferred_resize_height = resize_height
+        if self.deferred_commands.len() >= (
+            BROWSER_RENDERER_MAX_DEFERRED_COMMANDS
+        ):
+            return Err("renderer-input-queue-full")
+        self.deferred_commands.push(_HostedBrowserDeferredCommand(
+            wire: request.wire,
+            operation: operation,
+            timeout_ms: timeout_ms,
+            resize_width: resize_width,
+            resize_height: resize_height
+        ))
         Ok(true)
 
     me _activate_deferred_command() -> text:
-        if self.deferred_wire == "":
+        if self.deferred_commands.len() == 0:
             return ""
+        # ponytail: O(n) shift is bounded at 64; use a ring only if this grows.
+        val deferred = self.deferred_commands.remove(0)
         val request = browser_renderer_message_resequence(
-            self.deferred_wire, self.generation, self.next_request_id
+            deferred.wire, self.generation, self.next_request_id
         )
         if not request.ok:
             return request.reason
@@ -1098,15 +1113,10 @@ pub class HostedBrowserRendererProcess:
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = self.next_request_id
         self.pending_wire_is_command = true
-        self.command_deadline_ms = _deadline_ms(self.deferred_timeout_ms)
-        self.pending_operation = self.deferred_operation
-        self.pending_resize_width = self.deferred_resize_width
-        self.pending_resize_height = self.deferred_resize_height
-        self.deferred_wire = ""
-        self.deferred_operation = ""
-        self.deferred_timeout_ms = 0
-        self.deferred_resize_width = 0
-        self.deferred_resize_height = 0
+        self.command_deadline_ms = _deadline_ms(deferred.timeout_ms)
+        self.pending_operation = deferred.operation
+        self.pending_resize_width = deferred.resize_width
+        self.pending_resize_height = deferred.resize_height
         ""
 
     me poll() -> HostedBrowserRendererResult?:

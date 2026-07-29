@@ -357,3 +357,16 @@ visible and cannot be silently skipped into the score.
 7. Establish platform sandboxed renderer.
 8. Fix retained roots and measured performance regressions.
 9. Run conformance, security, platform, soak, and release verification.
+
+## Current bounded behavior
+
+- Attribute selectors add `10` specificity per bracketed selector.
+- Browser and interpreter clocks advance even when no timer is currently due,
+  so later timers use their creation time rather than document epoch.
+- Same-document discrete renderer commands queue FIFO to a hard limit of 64;
+  overflow fails closed and navigation-related operations never accept stale
+  queued input.
+- Resolved font advances remain typed from Draw IR construction through SDN and
+  Engine2D; legacy CSV is read-only compatibility input.
+- Chromium capture denies popups/navigation and all production Chromium launch
+  paths retain the Electron renderer sandbox.

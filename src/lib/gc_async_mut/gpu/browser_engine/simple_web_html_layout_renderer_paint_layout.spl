@@ -983,16 +983,6 @@ fn _html_draw_ir_non_negative(value: i32) -> i32:
         return 0
     value
 
-fn _html_draw_ir_i32_list(values: [i32]) -> text:
-    var out = ""
-    var i = 0
-    while i < values.len():
-        if i > 0:
-            out = out + ","
-        out = out + values[i].to_string()
-        i = i + 1
-    out
-
 fn _html_draw_ir_shadow_layer_count(value: text) -> i32:
     if value == "":
         return 0
@@ -1126,7 +1116,6 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("font-size", "{st.font_size}"),
         draw_ir_style_prop("font-family", st.font_family),
         draw_ir_style_prop("font-identity", st.resolved_font_identity),
-        draw_ir_style_prop("font-advance-widths", _html_draw_ir_i32_list(st.resolved_font_advances)),
         draw_ir_style_prop("font-size-adjust", st.font_size_adjust),
         draw_ir_style_prop("font-palette", st.font_palette),
         draw_ir_style_prop("font-feature-settings", st.font_feature_settings),
@@ -1295,32 +1284,33 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
                 computed_style
             )
         val metrics = resolve_font_metrics_with_language(st.font_family, node.text_trimmed, st.font_size, _html_text_language(nodes, i, st))
-        if metrics.shaping_required:
-            var shaped = draw_ir_text_shaped_font(
+        var resolved = if metrics.shaping_required:
+            draw_ir_text_shaped_font(
                 _html_draw_ir_component_id(node, i), content_x, content_y, node.text_trimmed, st.fg,
                 metrics.family, metrics.identity, metrics.advances, metrics.width,
                 metrics.line_height, st.font_size, metrics.glyph_run
             )
-            if shaped.computed_style.len() > 0:
-                var merged: [DrawIrStyleProp] = []
-                for prop in computed_style:
-                    if (prop.key != "font-family" and prop.key != "font-identity" and
-                        prop.key != "font-advance-widths" and prop.key != "font-size" and
-                        prop.key != "line-height" and prop.key != "font-shaping"):
-                        merged.push(prop)
-                for prop in shaped.computed_style:
-                    merged.push(prop)
-                shaped.computed_style = merged
-            return shaped
-        val command = draw_ir_text_styled(
-            _html_draw_ir_component_id(node, i),
-            content_x,
-            content_y,
-            node.text_trimmed,
-            st.fg,
-            computed_style
-        )
-        return command
+        else:
+            draw_ir_text_resolved_font(
+                _html_draw_ir_component_id(node, i), content_x, content_y, node.text_trimmed, st.fg,
+                metrics.family, metrics.identity, metrics.advances, metrics.width,
+                metrics.line_height, st.font_size
+            )
+        if resolved.computed_style.len() == 0:
+            return draw_ir_text_styled(
+                _html_draw_ir_component_id(node, i), content_x, content_y,
+                node.text_trimmed, st.fg, computed_style
+            )
+        var merged: [DrawIrStyleProp] = []
+        for prop in computed_style:
+            if (prop.key != "font-family" and prop.key != "font-identity" and
+                prop.key != "font-size" and prop.key != "line-height" and
+                prop.key != "font-shaping"):
+                merged.push(prop)
+        for prop in resolved.computed_style:
+            merged.push(prop)
+        resolved.computed_style = merged
+        return resolved
     val command = draw_ir_box_with_style(
         _html_draw_ir_component_id(node, i),
         x,

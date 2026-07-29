@@ -1592,3 +1592,19 @@ implementation in progress / target evidence blocked
   positive delay sleeps directly to its start boundary instead of triggering
   full parse/style/layout work every 16 ms; focused worker evidence covers a
   one-hour delay.
+- CSS attribute selectors now contribute class-level specificity, with a
+  canonical Engine2D pixel fixture proving `[data-tone]` beats a later `div`.
+- JavaScript timers created after document time advances now schedule from the
+  interpreter's current clock; nested callbacks inherit the same drain time.
+- Stop clears the canceled address draft so chrome, body, and `current_url`
+  consistently show the retained page.
+- Same-document pointer/key/text/resize work now uses a bounded 64-command FIFO
+  instead of dropping rapid input while the renderer is busy. Navigation,
+  network, history, and Stop still reject stale input rather than replaying it
+  into a different document.
+- Draw IR carries resolved font advances as bounded typed data. Web paint no
+  longer builds CSV strings, and Engine2D parses computed-style CSV only for
+  legacy external commands.
+- Chromium capture and live-window launch no longer disable the OS sandbox.
+  Capture disables Node integration, isolates context, and rejects popup or
+  staged-page navigation; the live shell explicitly enables renderer sandboxing.

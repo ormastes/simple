@@ -431,3 +431,14 @@ or native TLS behavior.
   AppContainer and the signed macOS helper also remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;
 - existing browser interaction evidence can pass when its artifact is absent.
+
+### Input, text, and Chromium hardening
+
+- The renderer broker owns a bounded FIFO for same-document pointer, key, text,
+  resize, scroll, and animation work. Navigation/network/history/Stop boundaries
+  never enqueue input that could be replayed against another document.
+- `DrawIrCommand.advance_widths` is the canonical resolved-font metric payload.
+  Engine2D accepts computed-style CSV only as a legacy external-input fallback.
+- Chromium capture and the live Electron shell run with renderer sandboxing,
+  Node integration disabled, and context isolation enabled. Capture additionally
+  denies popup and navigation away from its staged document.

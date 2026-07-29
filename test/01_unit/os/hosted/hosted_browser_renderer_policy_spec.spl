@@ -1,6 +1,7 @@
 use std.spec.*
 use std.common.web.browser_renderer_protocol.{
     BrowserRendererNetworkDecodeResult,
+    browser_renderer_action_decode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_navigation_decode,
     browser_renderer_network_response_decode
@@ -424,11 +425,47 @@ describe "hosted browser renderer broker policy":
         broker.state = "active"
         broker.command_deadline_ms = 100
         broker.pending_operation = "navigation"
-        val result = broker.pointer(1, 4, 5, true, 1000)
-        expect(result.ok).to_be(false)
-        expect(result.reason).to_equal("renderer-busy")
+        match broker.begin_pointer(1, 4, 5, true, 1000):
+            Err(reason):
+                expect(reason).to_equal("renderer-busy")
+            Ok(_):
+                expect(false).to_be(true)
         expect(broker.state).to_equal("active")
         expect(broker.pending_operation).to_equal("navigation")
+        expect(broker.deferred_commands.len()).to_equal(0)
+
+    it "preserves immediate pointer press and release in order":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.state = "active"
+        expect(broker.begin_pointer(
+            1, 4, 5, true, 1000
+        ).is_ok()).to_be(true)
+        val pressed_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), broker.pending_wire
+        )
+        expect(browser_renderer_action_decode(
+            pressed_message.message
+        ).pressed).to_be(true)
+
+        expect(broker.begin_pointer(
+            2, 4, 5, false, 1000
+        ).is_ok()).to_be(true)
+        expect(broker.deferred_commands.len()).to_equal(1)
+        broker.pending_wire = ""
+        broker.pending_wire_is_command = false
+        broker.command_deadline_ms = 0
+        broker.pending_operation = ""
+        broker.next_request_id = 3
+        expect(broker._activate_deferred_command()).to_equal("")
+        val released_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), broker.pending_wire
+        )
+        val released = browser_renderer_action_decode(
+            released_message.message
+        )
+        expect(released.event_id).to_equal(2)
+        expect(released.pressed).to_be(false)
+        expect(broker.deferred_commands.len()).to_equal(0)
 
     it "coalesces an unsent animation but defers after it is sent":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
@@ -445,14 +482,9 @@ describe "hosted browser renderer broker policy":
         broker.pending_operation = "advance"
         expect(broker.begin_key(2, 65, true, 1000).is_ok()).to_be(true)
         expect(broker.pending_operation).to_equal("advance")
-        expect(broker.deferred_operation).to_equal("key")
-        expect(broker.deferred_wire).to_start_with("SBR1\tkey")
+        expect(broker.deferred_commands.len()).to_equal(1)
         expect(broker.expected_reply_to_request_id).to_equal(2)
         expect(broker.next_request_id).to_equal(3)
-        val originally_deferred = browser_renderer_decoder_feed(
-            browser_renderer_decoder_new(1), broker.deferred_wire
-        )
-        expect(originally_deferred.message.request_id).to_equal(3)
         broker.next_request_id = 4
         expect(broker._activate_deferred_command()).to_equal("")
         val activated = browser_renderer_decoder_feed(
@@ -472,8 +504,7 @@ describe "hosted browser renderer broker policy":
         broker.next_request_id = 3
         expect(broker.begin_text_input(3, "x", 1000).is_ok()).to_be(true)
         expect(broker.pending_wire).to_equal("network-response")
-        expect(broker.deferred_operation).to_equal("text")
-        expect(broker.deferred_wire).to_start_with("SBR1\ttext")
+        expect(broker.deferred_commands.len()).to_equal(1)
 
     # @req REQ-WEB-BROWSER-018
     it "retains the process handle when native close fails":
