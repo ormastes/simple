@@ -1,17 +1,17 @@
 # Canonical HTML Parsing Contexts
 
-> Proves one canonical tokenizer/tree-builder projection feeds Web semantic
+> This executable system specification proves that the canonical HTML tokenizer/tree builder feeds Web semantics, computed style, layout, `DrawIrComposition`, and Engine2D.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Canonical HTML Parsing Contexts
 
-Proves one canonical tokenizer/tree-builder projection feeds Web semantic
+This executable system specification proves that the canonical HTML tokenizer/tree builder feeds Web semantics, computed style, layout, `DrawIrComposition`, and Engine2D.
 
 ## At a Glance
 
@@ -19,12 +19,174 @@ Proves one canonical tokenizer/tree-builder projection feeds Web semantic
 |-------|-------|
 | Category | Other |
 | Status | Active |
+| Requirements | doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md |
+| Plan | doc/03_plan/sys_test/html_css_spec_traceability.md |
+| Design | N/A |
+| Research | N/A |
 | Source | `test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl` |
 | Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Proves one canonical tokenizer/tree-builder projection feeds Web semantic
-layout, Draw IR, and Engine2D for context-sensitive HTML.
+## Overview
+
+This executable system specification proves that the canonical HTML
+tokenizer/tree builder feeds Web semantics, computed style, layout,
+`DrawIrComposition`, and Engine2D.
+
+It covers context-sensitive tree repair, inert template handling, generated
+document structure, bounded projection, and the safe generic fallback used by
+embedded and media tags that do not yet have dedicated resource execution.
+
+**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+
+**Design:** N/A
+
+**Research:** N/A
+
+## Requirement Traceability
+
+- `REQ-WEB-BROWSER-002` requires deterministic canonical HTML tree semantics.
+- `REQ-WEB-BROWSER-003` requires bounded parsing and projection behavior.
+- `REQ-WEB-BROWSER-004` requires Web output to lower through Draw IR and
+  Engine2D rather than a private painter.
+
+The embedded-media scenario also guards truthful fallback behavior for
+`area`, `audio`, `canvas`, `embed`, `map`, `object`, `picture`, `source`,
+`track`, and `video`.
+
+`iframe` is deliberately excluded because its existing private `srcdoc`
+renderer has a separate capability and security contract.
+
+## Canonical Production Path
+
+`html_tree_builder_build` constructs BeDOM.
+
+The semantic checks use BeDOM paths, tags, node IDs, parent IDs, child order,
+and text content. Source-text presence alone cannot satisfy those checks.
+
+`simple_web_layout_render_html_draw_ir_result` projects the authored document
+to Web semantic nodes, computed styles, layout boxes, and one
+`DrawIrComposition`.
+
+The composition source kind must remain `html_ast`.
+
+`simple_web_layout_render_html_readback_engine2d_result` executes that
+composition through Engine2D's software backend for exact pixel evidence.
+
+No scenario uses the legacy HTML fallback painter or a private font path.
+
+## Tree-Builder Scenarios
+
+The paragraph scenario checks implied paragraph closure before a block sibling.
+
+The foster-parent scenarios check element and text relocation around tables,
+including exact source order and nested text retention.
+
+The textarea scenario distinguishes an exact case-insensitive RCDATA closer
+from a longer prefix that only resembles a closer.
+
+The omitted-structure scenario independently checks generated `html` and
+`body` elements while retaining stable component ancestry.
+
+The template scenario keeps inert descendants in semantic state but excludes
+their scripts, styles, images, layout, Draw IR, and pixels.
+
+The bounded scenario checks stable generated component order and the selected
+projection node cap.
+
+## Embedded and Media Generic Fallback
+
+One BeDOM build supplies all tag and parent assertions for the selected
+embedded-media fixture.
+
+Valid structural parents are retained:
+
+- `area` remains inside `map`;
+- `source` remains inside `picture`;
+- `track` remains inside `video`.
+
+The other selected tags remain children of `body`.
+
+Authored `.fallback` CSS sets `display:block`, a 4 by 4 box, and a blue
+background.
+
+The renderer must not invent `display:none` for these generic elements.
+
+Every selected element must retain the authored background, nonzero geometry,
+and a component command in canonical Draw IR.
+
+External-looking `href`, `src`, `srcset`, `data`, and `poster` attributes are
+semantic attributes only in this fallback profile.
+
+`browser_document_resource_plan` must report zero scripts, zero images, and
+zero warnings while retaining the one authored inline stylesheet.
+
+No selected Draw IR command may have kind `image` or a nonempty `image_uri`.
+
+At least one exact blue pixel must reach the Engine2D readback.
+
+This proves safe generic rendering; it does not claim media activation.
+
+## Syntax
+
+Run this source with the admitted pure-Simple test runtime:
+
+```sh
+bin/release/simple test test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl --mode=interpreter
+```
+
+The generated manual does not claim a runtime pass by itself.
+
+Regenerate the mirrored manual with the repository's pure-Simple SPipe
+document generator and the canonical `doc/06_spec` destination.
+
+Executable `.spl` specifications remain under `test/`, never under
+`doc/06_spec`.
+
+## Examples
+
+For `<p id='paragraph'><div id='after'>`, both elements become `body`
+children and retain separate Draw IR boxes.
+
+For table foster parenting, `FIRST`, the nested `span`, and `LAST` precede the
+table in the repaired body child order.
+
+For template inertness, hostile authored `display:block!important` cannot
+activate the template subtree or its resource attributes.
+
+For embedded media fallback, remote-looking attributes allocate no document
+resource while authored blue boxes remain visible.
+
+## Failure Interpretation
+
+A missing tag, wrong parent, or wrong child order is a canonical tree failure.
+
+A resource discovered under an inert template is a fail-open planning error.
+
+A hidden generic embedded tag is an overbroad suppression error.
+
+A media attribute becoming a Draw IR image is an unauthorized resource escape.
+
+A correct semantic node without the expected layout or component command is a
+Web projection failure.
+
+A correct Draw IR composition without the discriminating pixel is an Engine2D
+execution failure.
+
+## Evidence Boundary
+
+The specification proves the selected deterministic fixtures only.
+
+It does not claim complete WHATWG parsing, media playback, Canvas scripting,
+image candidate selection, image maps, plugin execution, native controls,
+iframe security, or complete HTML/CSS conformance.
+
+The embedded-media fallback is intentionally resource-inactive.
+
+Dedicated capabilities must add their own resource, security, lifecycle,
+layout, Draw IR, and Engine2D evidence before promotion.
 
 ## Scenarios
 
@@ -515,6 +677,129 @@ expect(pixels.contains(0xFFDC2626u32)).to_equal(false)
 
 </details>
 
+#### should preserve resource-safe generic fallback for embedded media tags
+
+- Trace HTML elements through Web semantics and Draw IR
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 3 expected checks
+   - Expected: be_dom_get_tag(node) equals `tags[index]`
+   - Expected: node.parent_id equals `parent.node_id`
+   - Expected: path[path.len() - 2].node_id equals `parent.node_id`
+- Keep external media attributes out of document resource planning
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 4 expected checks
+   - Expected: plan.script_blocks.len() equals `0`
+   - Expected: plan.style_sources.len() equals `1`
+   - Expected: plan.image_sources.len() equals `0`
+   - Expected: plan.warnings.len() equals `0`
+- Preserve authored CSS through canonical Draw IR lowering
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 2 expected checks
+   - Expected: command.kind == "image" is false
+   - Expected: command.image_uri equals ``
+- Execute the generic fallback through Engine2D
+   - GUI capture: after_step (HTML preferred when available)
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 88 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Trace HTML elements through Web semantics and Draw IR")
+val html = (
+    "<style>html,body{margin:0}.fallback{display:block;width:4px;" +
+    "height:4px;background:#2563eb}</style><body id='body'>" +
+    "<map id='map-row' class='fallback'>" +
+    "<area id='area-row' class='fallback' " +
+    "href='https://invalid.example/area'></map>" +
+    "<audio id='audio-row' class='fallback' " +
+    "src='https://invalid.example/audio'></audio>" +
+    "<canvas id='canvas-row' class='fallback'></canvas>" +
+    "<embed id='embed-row' class='fallback' " +
+    "src='https://invalid.example/embed'>" +
+    "<object id='object-row' class='fallback' " +
+    "data='https://invalid.example/object'></object>" +
+    "<picture id='picture-row' class='fallback'>" +
+    "<source id='source-row' class='fallback' " +
+    "srcset='https://invalid.example/picture 1x'></picture>" +
+    "<video id='video-row' class='fallback' " +
+    "src='https://invalid.example/video' " +
+    "poster='https://invalid.example/poster'>" +
+    "<track id='track-row' class='fallback' " +
+    "src='https://invalid.example/track'></video></body>"
+)
+val ids = [
+    "area-row", "audio-row", "canvas-row", "embed-row", "map-row",
+    "object-row", "picture-row", "source-row", "track-row", "video-row"
+]
+val tags = [
+    "area", "audio", "canvas", "embed", "map",
+    "object", "picture", "source", "track", "video"
+]
+val parents = [
+    "map-row", "body", "body", "body", "body",
+    "body", "body", "picture-row", "video-row", "body"
+]
+
+val root = html_tree_builder_build(html)
+var index = 0
+while index < ids.len():
+    val path = be_dom_find_path_to_id(root, ids[index])
+    val parent_path = be_dom_find_path_to_id(root, parents[index])
+    expect(path.len()).to_be_greater_than(1)
+    expect(parent_path.len()).to_be_greater_than(0)
+    val node = path[path.len() - 1]
+    val parent = parent_path[parent_path.len() - 1]
+    expect(be_dom_get_tag(node)).to_equal(tags[index])
+    expect(node.parent_id).to_equal(parent.node_id)
+    expect(path[path.len() - 2].node_id).to_equal(parent.node_id)
+    index = index + 1
+
+step("Keep external media attributes out of document resource planning")
+val plan = browser_document_resource_plan(
+    html, "https://safe.test/document", ""
+)
+expect(plan.script_blocks.len()).to_equal(0)
+expect(plan.style_sources.len()).to_equal(1)
+expect(plan.image_sources.len()).to_equal(0)
+expect(plan.warnings.len()).to_equal(0)
+
+step("Preserve authored CSS through canonical Draw IR lowering")
+val result = simple_web_layout_render_html_draw_ir_result(
+    html, 64, 64
+)
+index = 0
+while index < ids.len():
+    val node_index = _node_index(
+        result.hit_index.nodes, ids[index]
+    )
+    expect(
+        result.hit_index.styles[node_index].display == "none"
+    ).to_equal(false)
+    expect(result.hit_index.styles[node_index].bg).to_equal(
+        0xFF2563EBu32
+    )
+    expect(result.hit_index.boxes.bw[node_index]).to_be_greater_than(0)
+    expect(result.hit_index.boxes.bh[node_index]).to_be_greater_than(0)
+    val command = _command_by_id(result.composition, ids[index])
+    expect(command.kind == "image").to_equal(false)
+    expect(command.image_uri).to_equal("")
+    expect(_source_kind_for(
+        result.composition, ids[index]
+    )).to_equal("html_ast")
+    index = index + 1
+
+step("Execute the generic fallback through Engine2D")
+expect(_pixels(
+    html, 64, 64
+).contains(0xFF2563EBu32)).to_equal(true)
+```
+
+</details>
+
 <details>
 <summary>Advanced: should preserve component order and bounded projection caps</summary>
 
@@ -561,11 +846,17 @@ expect(simple_web_layout_debug_capped_node_count(
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** `doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
+- **Plan:** `doc/03_plan/sys_test/html_css_spec_traceability.md`
 
 
 </details>
