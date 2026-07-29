@@ -52,8 +52,9 @@ using the same contracts.
 - Prior research sidecars: `wm_local_research`, `sound_local_research`,
   `compiler_research`, `domain_research`, and `docs_research`.
 - Merge owner and final high-capability reviewer: root Codex lane.
-- Implementation sidecars: N/A; current production work is one shared WM
-  boundary and must remain serialized in the dirty worktree.
+- Read-only implementation sidecars: `skia_dedent_root`,
+  `wm_minimal_live_closure`, and `wm_lifecycle_leak_next`; root Codex owns
+  edits, merge, and final review.
 
 ## Frozen Shared Names
 - Event record: `WindowEventRecord`
@@ -358,12 +359,20 @@ implementation-in-progress
   delivered as a matching client release. The focused router assertion is
   authored; its full test closure remains behind the recorded renderer
   discovery blocker.
+- phase3-gpos-discovery: Parenthesized the GPOS variation-store multiline
+  condition rejected by the older Phase-3 parser. The focused pure-Simple
+  source-entry closure now builds 11 modules and links successfully without a
+  bootstrap; the capped full WM closure was not rerun.
+- wm-close-minimized-cleanup: Closing a minimized window now removes its stale
+  minimized runtime evidence while recording the close. The dedicated
+  pure-Simple Phase-3 probe builds and runs
+  (`WM CLOSE MINIMIZED CLEANUP PROBE: PASS`).
 
 ## Remaining runtime gates
 
 - Host GLFW: the real backend/window/input/presentation boundary is green;
-  full WM closure and scene capture still stop at the pre-existing Skia
-  shaper dedent.
+  the focused Skia discovery blocker is repaired, but the capped full WM
+  closure and scene capture have not yet been rerun.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the
@@ -375,5 +384,5 @@ implementation-in-progress
   and board PCM evidence remain open.
 - Compiler: the stale Phase 3 binary still fails the isolated runtime-derived
   `i64 as u32` narrowing probe. Current compiler sources contain the cast
-  bridge/truncation fix, but refreshing them is blocked during discovery by
-  the unrelated Skia shaper dedent.
+  bridge/truncation fix; refreshing the compiler remains unattempted under the
+  no-bootstrap constraint.

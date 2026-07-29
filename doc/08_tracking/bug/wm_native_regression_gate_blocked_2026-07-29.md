@@ -10,10 +10,11 @@ src/lib/skia/feature/shaper/ot_layout_shaper.spl
 Unexpected Dedent
 ```
 
-The conditional at that location has now been normalized to the older Phase-3
-grammar. An isolated shaper closure advanced to the same old-parser dedent
-class in `ot_layout_gpos_data.spl`; all three bounded attempts were used. The
-full WM closure has not been retried, and no bootstrap was run.
+The conditional at that location and the unparenthesized multiline GPOS
+variation-store condition have now been normalized to the older Phase-3
+grammar. The focused `ot_layout_gpos_data.spl` source-entry closure builds and
+links successfully with the existing Phase-3 compiler. The capped full WM
+closure has not been retried, and no bootstrap was run.
 
 ## Freestanding aggregate regression
 
@@ -33,13 +34,11 @@ runaway guard, neither command is retried in this session.
 
 ## Host runtime availability
 
-`runtime_glfw.c` compiles and its loader self-check passes, but this host has no
-loadable GLFW library or live display. This proves fail-closed loading only,
-not the required visual/input runtime evidence.
-
-The resize hardening boundary also compiles with strict C warnings. Two bounded
-Xvfb attempts stopped at `rt_glfw_init` because the host has OpenGL but no
-loadable `libglfw.so`; they are not counted as live resize evidence.
+The host initially had no system `libglfw.so`. A retained local GLFW runtime
+under `build/wm_harden/glfw_root` later enabled the focused Xvfb probe, which
+proved non-black presentation plus native key, text, pointer, clipboard, and
+generation-safe teardown. That boundary is green; it is not full WM scene
+evidence.
 
 ## Full hosted native entry
 
@@ -68,11 +67,9 @@ build/aggfix/stage3/simple native-build ... \
   --entry examples/06_io/ui/wm_full_stack_demo.spl
 ```
 
-After normalizing two multiline expressions rejected by that older parser,
-the bounded third attempt reached the unrelated Skia shaper
-`Unexpected Dedent`. The first shaper form is now normalized, while an
-isolated probe exposes a second `ot_layout_gpos_data.spl` dedent. No full-WM
-retry, full bootstrap, or Phase 2 retry was run.
+After normalizing the multiline expressions rejected by that older parser,
+the focused GPOS source-entry build now completes. No full-WM retry, full
+bootstrap, or Phase 2 retry was run after that focused proof.
 The retained diagnostic is:
 
 ```text
