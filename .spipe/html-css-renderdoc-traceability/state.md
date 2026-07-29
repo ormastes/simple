@@ -42,3 +42,23 @@ implementation-in-progress
 - verify: 2026-06-19 `sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs` reports all 43 `WidgetKind` HTML dispatches covered and the 18-case Electron Simple Web layout manifest recorded. The gate remains incomplete because local Simple RenderDoc evidence is missing (`simple_renderdoc_reason=missing-simple-rdoc`) and original Chrome/Vulkan external RenderDoc capture is unavailable without a host-side `.rdc`.
 - docs: 2026-06-21 updated the GUI/web/2D Vulkan RenderDoc guide and UI GUI feature skill to make the top-level workflow macOS-only. Windows and Linux are explicitly deferred and must reuse the same evidence keys when their platform capture gates are added later.
 - docs: 2026-06-25 Linux Vulkan-backed browser lane is now provisioned and verified on an Ubuntu 24.04.3 / Intel RPL-P host (Mesa ANV, Vulkan 1.4.318). Electron `v42.5.0` (`~/electron-vulkan`, `vulkan: enabled_on`) and Chrome `139.0.7258.138` both confirmed rendering through ANGLE→Vulkan; RenderDoc `v1.44` CLI installed (`/opt/renderdoc`, Vulkan-capable). Recorded the full Linux Status/Install/Readiness section in `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md` and a Linux-availability note in `.claude/skills/lib/spipe_ui.md`. **Mandatory Wayland gotcha:** Chromium Vulkan requires `--ozone-platform=x11` (else software fallback). **Open Linux gates (partial AC-5/AC-6):** RenderDoc is installed but no `.rdc` capture produced yet; Chrome GPU-process hooking is blocked by `renderdoc-chrome-gpu-sandbox-localtime64_r` (the `--disable-gpu-sandbox` GPU process crashes with `undefined symbol: localtime64_r`). Electron capture path (`capture-renderdoc.sh`, `--in-process-gpu --no-sandbox`) is wired but `.rdc` evidence still pending.
+- impl: 2026-07-29 commit `28f0e779b0d2` landed the bounded HTML-default
+  tranche for `h1`–`h6`, `sub`, `sup`, valid-context fail-closed
+  `selectedcontent`, and visible inline `slot` fallback. Canonical owners,
+  behavior-first SSpec, and generated manual are present. Independent static
+  review returned PASS and docgen evidence is complete with zero stubs. This
+  is source/spec/manual evidence only; AC-1 and full HTML coverage remain open
+  pending the remaining matrix and qualified execution.
+- impl: 2026-07-29 commit `b17e868199af` landed the bounded CSS Grid foundation
+  for explicit pixel tracks, gaps, placement/span, an implicit row, block
+  control, and over-quota fail-closed behavior. The retained fixture,
+  conformance checker, and pinned manifest truthfully remain `red-not-run`.
+  Independent static review returned PASS and the generated Grid plus refreshed
+  validator manuals are complete with zero stubs. AC-2 remains open: this is
+  not complete Grid or full CSS coverage.
+- verify: 2026-07-29 qualified SSpec execution remains blocked because the
+  deployed pure-Simple wrapper fails its bounded test-ABI admission probe. The
+  one direct artifact attempt segfaulted and was rejected; no Rust-seed or full
+  bootstrap fallback was used. No executable PASS is claimed for either landed
+  tranche. Overall phase remains implementation-in-progress/RED; AC-1, AC-2,
+  AC-3, and AC-6 remain open.

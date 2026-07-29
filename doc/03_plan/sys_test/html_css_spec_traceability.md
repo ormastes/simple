@@ -25,6 +25,21 @@ NFR source:
 The generated 2026-07-29 report is inventory evidence, not executable
 conformance evidence.
 
+## Landed incremental evidence
+
+Two bounded implementation tranches have landed since the inventory audit:
+
+| Commit | Bounded scope | Independent evidence | Evidence boundary |
+|---|---|---|---|
+| `28f0e779b0d2` | HTML defaults and behavior-first SSpec for `h1`–`h6`, `sub`, `sup`, `selectedcontent`, and `slot` | Independent static review PASS; canonical generated manual present and complete with zero stubs | Source/spec/manual evidence only; no qualified runtime execution is claimed |
+| `b17e868199af` | CSS Grid foundation for explicit pixel tracks, gaps, placement, span, implicit row, block control, and over-quota fail-closed behavior; conformance manifest kept truthful | Independent static review PASS; canonical generated Grid manual and refreshed validator manual are complete with zero stubs | Bounded Grid foundation only; manifest remains `red-not-run`; no qualified runtime execution or full Grid/CSS claim |
+
+These commits correct the named source/spec/manual gaps but do not close the
+overall HTML/CSS traceability goal. The deployed pure-Simple wrapper still
+fails its bounded test-ABI admission probe; the one direct artifact attempt
+segfaulted and was not accepted. Until a qualified pure-Simple target binary
+runs the scenarios, both tranches remain execution-evidence-blocked.
+
 ### HTML
 
 | Classification | Count | Meaning |
@@ -86,9 +101,10 @@ an inventory literal, an `@supports` table, or metadata.
 | REQ-002/004/019/021 | HTML Full 12: `html,head,meta,title,body,main,p,div,section,table,textarea,template` | Full by static audit | `test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl`; browser production-hardening spec | tokenizer/tree, BrowserSession semantic tree, HTML layout renderer, DrawIR, Engine2D | exact tag/parent/style/geometry/commands/pixels or hidden absence | canonical manuals exist; qualified execution unavailable | Evidence-blocked |
 | REQ-002/004/019/021 | HTML Partial 80 | Partial | grouped text/tag and bitmap matrices; exact scenario mapping missing | same canonical owners | per-group identity, UA defaults, geometry, DrawIR, pixels | new grouped specs/manuals required | RED |
 | REQ-002/019/021 | HTML unsupported 11: `area,audio,canvas,embed,iframe,map,object,picture,source,track,video` | Unsupported/fail-closed | exact grouped scenario missing | tokenizer/tree/resource fallback | semantic fallback plus no unauthorized native/resource/DrawIR path | spec/manual missing | RED |
-| REQ-002/019/021 | HTML inventory-only 2: `selectedcontent,slot` | Inventory-only | no isolated scenario | tokenizer/tree/template/slot owners | deterministic semantic/fallback behavior | spec/manual missing | FAIL |
-| REQ-002/019/021 | HTML omitted 8: `h1`–`h6`,`sub`,`sup` | Missing from checker | new grouped spec pending | tokenizer/tree/style/layout/DrawIR/Engine2D | UA defaults and exact geometry/pixels | spec/manual missing | FAIL |
+| REQ-002/019/021 | HTML formerly inventory-only 2: `selectedcontent,slot` | Bounded behavior landed in `28f0e779b0d2` | `html_element_traceability_spec.spl`: valid-context fail-closed `selectedcontent` plus visible inline `slot` fallback | tokenizer/tree/template/slot owners | deterministic semantic/fallback behavior, DrawIR, pixels/control | canonical manual complete; independent static PASS; runtime unavailable | Evidence-blocked |
+| REQ-002/019/021 | HTML formerly omitted 8: `h1`–`h6`,`sub`,`sup` | Bounded behavior landed in `28f0e779b0d2` | `html_element_traceability_spec.spl`: headings and inline baseline scenarios | tokenizer/tree/style/layout/DrawIR/Engine2D | UA defaults and exact geometry/pixels | canonical manual complete; independent static PASS; runtime unavailable | Evidence-blocked |
 | REQ-003/004/019/021 | CSS claimed 284 | Functional count unknown | generated-combinations spec has 38 scenarios | declaration/cascade/style/layout/paint/DrawIR/Engine2D | isolated semantic, layout, DrawIR, pixel baseline/control | retained 13 pass/25 fail; manuals stale | FAIL |
+| REQ-003/004/019/021 | CSS Grid bounded foundation | Bounded behavior landed in `b17e868199af` | `test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl` | canonical declaration/style/layout/paint-layout, DrawIR, Engine2D | exact tracks, placement/span/implicit-row geometry and pixels; block and quota controls | canonical manual complete; independent static PASS; manifest `red-not-run`; runtime unavailable | Evidence-blocked |
 | REQ-003/004/019/021 | CSS claimed but unrecognized, at least 38 | False implemented claim | exact isolated scenarios missing | canonical declaration dispatch and downstream owners | valid/invalid/inherited style plus discriminating render | missing | FAIL |
 | REQ-003/004/019/021 | CSS unsupported production 92 | Unsupported backlog | inventory spec is name-only | owners named by lane below | executable fail-closed or full four-oracle chain | manual stale; no behavior PASS | RED |
 | REQ-003/019/021 | CSS speech/aural 23 | Explicit scope exclusion | fail-closed/nonvisual scenario missing | future TTS/accessibility owner | no false visual support claim | missing | RED |
@@ -183,8 +199,10 @@ REQ-019 binds the retained HTML profile fixture row and SHA-256
 `bd8cba62a4ed894e8a5ef3636c7f657ae974ecda1eb4da401d535b5279131e84`,
 including an altered-row negative.
 
-Current expected result: headings, sub/sup, slot, and selectedcontent are RED
-until the named UA-default owners are corrected and qualified execution passes.
+Current expected result: the named UA-default owners, executable source, and
+canonical manual landed in `28f0e779b0d2` and passed independent static review.
+The tranche remains evidence-blocked until qualified execution passes; it does
+not establish full HTML coverage.
 
 ### CSS grid foundation
 
@@ -229,8 +247,11 @@ Frozen block control:
   `[0,17,18,4]`;
 - exact areas 90, 90, 126, and 72.
 
-Current expected result: RED because canonical declaration/layout owners do not
-implement the claimed grid behavior.
+Current expected result: the bounded declaration/layout implementation,
+executable source, truthful pinned manifest, and canonical manual landed in
+`b17e868199af` and passed independent static review. The manifest remains
+`red-not-run`, qualified execution is still blocked, and no complete CSS Grid
+or full CSS support claim is made.
 
 ### Generated-GUI combination gate
 
@@ -356,7 +377,9 @@ Vulkan/RenderDoc gates pass.
 Do not use unqualified `bin/simple`, the Rust seed, or full bootstrap. Current
 stage-2 is admitted for native-build only. Until a qualified target binary can
 execute the specs, status remains evidence-blocked and no executable PASS is
-claimed.
+claimed. The current concrete blocker is the deployed pure-Simple wrapper
+failing its bounded test-ABI admission probe; the one direct artifact attempt
+segfaulted and must not be promoted to evidence or repeated in this tranche.
 
 ## Pass criteria
 

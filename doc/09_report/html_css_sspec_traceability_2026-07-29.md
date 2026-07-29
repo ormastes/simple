@@ -1,7 +1,7 @@
 # HTML/CSS SSpec Traceability
 
 - status: fail
-- reason: inventory-only-false-pass
+- reason: partial-static-pass-runtime-abi-probe-blocked
 - behavioral audit: 2026-07-29
 - canonical plan: doc/03_plan/sys_test/html_css_spec_traceability.md
 - requirements: REQ-WEB-BROWSER-002, REQ-WEB-BROWSER-003, REQ-WEB-BROWSER-004, REQ-WEB-BROWSER-019, REQ-WEB-BROWSER-021
@@ -12,9 +12,28 @@
 - implemented CSS subset spec: test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_generated_html_css_combinations_spec.spl
 - unsupported CSS inventory spec: test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_inventory_traceability_spec.spl
 
+## Landed Incremental Evidence
+
+The following bounded tranches landed after the raw behavioral audit:
+
+| Commit | Landed evidence | Independent result | Claim boundary |
+|---|---|---|---|
+| `28f0e779b0d2` | Canonical HTML owner changes, executable `html_element_traceability_spec.spl`, and its generated manual for `h1`–`h6`, `sub`, `sup`, valid-context fail-closed `selectedcontent`, and visible `slot` fallback | Static review PASS; generated manual complete with zero stubs | No qualified SSpec execution and no full HTML coverage claim |
+| `b17e868199af` | Canonical CSS Grid declaration/style/layout/paint changes, executable `grid_foundation_wpt_spec.spl`, retained fixture/pinned manifest, truthful conformance checker updates, and generated manuals | Static review PASS; generated Grid and refreshed validator manuals complete with zero stubs | Bounded foundation only; retained corpus row remains `red-not-run`; no qualified SSpec execution and no full Grid/CSS claim |
+
+Qualified execution remains blocked because the deployed pure-Simple wrapper
+fails its bounded test-ABI admission probe. The one direct artifact attempt
+segfaulted; its result was rejected, no Rust-seed/full-bootstrap fallback was
+used, and it is not execution evidence for either tranche.
+
+Overall status therefore remains RED/in progress. The pre-landed counts below
+are retained as the audit baseline and have not been recomputed into a full
+HTML or CSS behavioral denominator.
+
 ## Independent Behavioral Audit
 
-The raw checker output below proves only that names occur in broad text roots.
+The raw checker output below proves only that names occurred in broad text
+roots at the audit baseline.
 It does not execute SSpec, validate requirement tags or current manuals, or bind
 names to canonical semantic/layout/DrawIR/Engine2D assertions.
 
