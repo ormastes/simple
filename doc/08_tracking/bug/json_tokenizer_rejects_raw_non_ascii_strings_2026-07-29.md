@@ -1,6 +1,31 @@
 # std.common.json tokenizer rejects raw non-ASCII string content
 
-**Status:** open — found while fixing \uXXXX decoding (same commit adds that fix).
+**Status:** FIXED — `json_tokenize`, `json_skip_whitespace`, and
+`json_string_escapes_are_valid` now walk with 1-unit slices (`s[i:i+1]`)
+and treat an EMPTY slice as the authoritative end-of-input sentinel;
+keyword checks use 4/5-unit slices. Raw UTF-8 string content passes
+through untouched and parse -> serialize -> parse round-trips non-ASCII
+(spec extended with raw content, mixed raw+escape, round-trip, and
+non-ASCII object keys).
+
+Why a sentinel and not pure byte indexing: while fixing this, an engine
+divergence was pinned empirically — under the unit-spec interpreter,
+bracket slicing `s[a:b]` is CHARACTER-indexed (probe: slicing the first
+unit of a 2-char/5-byte string returned the full 2-byte e-acute), while
+under compiled code it is byte-indexed (the bracket-slice survey's
+finding), and `.len()` is byte length in both. So no fixed `len()` bound
+is correct in both lanes; the empty-slice sentinel stops at the real end
+in whichever index space the engine uses. This also corrects the survey's
+"bracket slicing is byte-indexed" note: that holds for compiled code
+only, not the spec-lane interpreter (see
+doc/08_tracking/bug/test_harness_execution_divergence_2026-07-29.md).
+
+`json_number_is_valid` keeps `char_at` on purpose: its input is the
+already-ASCII number token. `json_unescape_string` keeps its
+character-walk: it is index-consistent internally and covered by the
+escape spec. Error-message columns were not audited in this pass (none of
+the touched paths emit column numbers).
+Originally: open — found while fixing \uXXXX decoding.
 **Severity:** any JSON document whose string content contains raw (unescaped)
 non-ASCII UTF-8 fails to parse: `json_parse("\"café\"")` returns nil, while
 `json_parse("\"cafe\"")` parses fine (verified empirically, spec-lane
