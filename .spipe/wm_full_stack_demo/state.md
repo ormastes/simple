@@ -291,6 +291,16 @@ implementation-in-progress
   fail closed before pixel-count overflow/allocation. The GLFW C boundary
   compiles cleanly with strict warnings; live Xvfb execution remains
   unavailable on this host because no `libglfw.so` is installed.
+- render-surface-event-route: Embedded 2D dragging now consumes only a
+  normalized left-button press that the authoritative client router accepted.
+  Titlebar/right-button presses cannot reuse stale client coordinates, a new
+  left press cancels missed-release drag state, and left release terminates
+  capture even outside the panel. Consumed WM/application shortcuts also
+  clear client and embedded-surface capture. The focused system spec exercises
+  a real client-to-titlebar transition and captured move/release; execution
+  remains pending behind the already-recorded pure-Simple source-closure gate.
+  Consumed shortcuts force a new frame without overwriting pin/unpin status
+  with the generic `Key event` label.
 - phase3-skia-discovery: The original `ot_layout_shaper.spl` conditional
   dedent was normalized for the older Phase-3 grammar. An isolated shaper
   entry then advanced to `ot_layout_gpos_data.spl`, where the same parser

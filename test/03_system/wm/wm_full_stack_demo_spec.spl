@@ -20,6 +20,7 @@ use common.ui.taskbar_model.{AppRef}
 use common.ui.wm_full_stack_demo.{
     WM_FULL_STACK_DEMO_APP_ID,
     WM_FULL_STACK_DEMO_IMAGE_URI,
+    WmDemo2dState,
     wm_full_stack_demo_tree,
 }
 use common.ui.widget.{UIEvent}
@@ -199,6 +200,102 @@ describe "WM full stack demo":
         expect(runtime.destroy_window(window)).to_equal(WINDOW_STATUS_OK)
         expect(runtime.events.queued_count()).to_equal(baseline_events)
         expect(runtime.events.text_live_count()).to_equal(baseline_text)
+
+    it "routes embedded 2D dragging only through left client capture":
+        val tree = wm_full_stack_demo_tree("Ready", "Play sound", "")
+        var session = UISession.new(tree)
+        session.dispatch(UIEvent.Resize(480, 480))
+        var compositor = HostCompositor.new_headless(Size.wh(640, 600))
+        compositor.apply_bridge_request(
+            1, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+            "Full Stack WM Demo", 20, 20, 488, 516, "",
+            99, WM_FULL_STACK_DEMO_APP_ID
+        )
+        var router = HostGuiEventRouter.new(1)
+        val rects = compute_layout(tree.root_node(), 0, 0, 480, 480)
+        var surface = WmDemo2dState.new()
+        if val rect = find_rect(rects, "demo-surface-2d"):
+            val x = rect.x + rect.w * 30 / 240
+            val y = rect.y + rect.h * 28 / 90
+            expect(surface.route_widget_pointer(
+                tree.root_node(), 480, 480,
+                WINDOW_EVENT_POINTER_BUTTON, 1, WINDOW_ACTION_PRESS,
+                true, x, y
+            )).to_be(false)
+            expect(surface.dragging).to_be(false)
+
+            step("Reject stale client coordinates after a real titlebar press")
+            val desktop_x = 24 + x
+            val desktop_y = 52 + y
+            expect(router.route(window_event_pointer(
+                1, 20, 20, WINDOW_EVENT_POINTER_MOVE,
+                desktop_x.to_i64() * 1000,
+                desktop_y.to_i64() * 1000, 0, 0
+            ), compositor, session)).to_be(true)
+            router.route(window_event_pointer(
+                1, 21, 21, WINDOW_EVENT_POINTER_MOVE,
+                40_000, 30_000, 0, 0
+            ), compositor, session)
+            val titlebar_routed = router.route(window_event_pointer(
+                1, 22, 22, WINDOW_EVENT_POINTER_BUTTON,
+                40_000, 30_000, WINDOW_ACTION_PRESS, 0
+            ), compositor, session)
+            expect(titlebar_routed).to_be(false)
+            expect(surface.route_widget_pointer(
+                tree.root_node(), 480, 480,
+                WINDOW_EVENT_POINTER_BUTTON, 0, WINDOW_ACTION_PRESS,
+                titlebar_routed,
+                router.last_local_x, router.last_local_y
+            )).to_be(false)
+            expect(surface.dragging).to_be(false)
+            router.route(window_event_pointer(
+                1, 23, 23, WINDOW_EVENT_POINTER_BUTTON,
+                40_000, 30_000, 0, 0
+            ), compositor, session)
+
+            step("Drag through actual client capture and release outside")
+            router.route(window_event_pointer(
+                1, 24, 24, WINDOW_EVENT_POINTER_MOVE,
+                desktop_x.to_i64() * 1000,
+                desktop_y.to_i64() * 1000, 0, 0
+            ), compositor, session)
+            val press_routed = router.route(window_event_pointer(
+                1, 25, 25, WINDOW_EVENT_POINTER_BUTTON,
+                desktop_x.to_i64() * 1000,
+                desktop_y.to_i64() * 1000,
+                WINDOW_ACTION_PRESS, 0
+            ), compositor, session)
+            expect(surface.route_widget_pointer(
+                tree.root_node(), 480, 480,
+                WINDOW_EVENT_POINTER_BUTTON, 0, WINDOW_ACTION_PRESS,
+                press_routed, router.last_local_x, router.last_local_y
+            )).to_be(true)
+            expect(surface.dragging).to_be(true)
+            val outside_y = rect.y + rect.h + 10
+            val move_routed = router.route(window_event_pointer(
+                1, 26, 26, WINDOW_EVENT_POINTER_MOVE,
+                desktop_x.to_i64() * 1000,
+                (52 + outside_y).to_i64() * 1000, 0, 0
+            ), compositor, session)
+            expect(surface.route_widget_pointer(
+                tree.root_node(), 480, 480,
+                WINDOW_EVENT_POINTER_MOVE, 0, 0,
+                move_routed, router.last_local_x, router.last_local_y
+            )).to_be(true)
+            expect(surface.rect_y).to_equal(62)
+            val release_routed = router.route(window_event_pointer(
+                1, 27, 27, WINDOW_EVENT_POINTER_BUTTON,
+                40_000, 30_000, 0, 0
+            ), compositor, session)
+            expect(surface.route_widget_pointer(
+                tree.root_node(), 480, 480,
+                WINDOW_EVENT_POINTER_BUTTON, 0, 0,
+                release_routed,
+                router.last_local_x, router.last_local_y
+            )).to_be(true)
+            expect(surface.dragging).to_be(false)
+        else:
+            expect(false).to_be(true)
 
     it "composes GUI Web and 2D frames and completes WM lifecycle":
         step("Build the shared VBox demo and render its GUI frame")

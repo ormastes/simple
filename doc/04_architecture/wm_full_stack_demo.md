@@ -156,6 +156,12 @@ framebuffer resize events, while GLFW logical pointer coordinates are scaled
 into framebuffer space before the shared WM/client router. A maximized window
 reflows to the resized desktop work area without overwriting `normal_rect`.
 
+Embedded RenderSurface input is subordinate to the same chrome/client routing
+decision. Only accepted left-button client presses may begin a child drag;
+move follows client capture, while left release always cancels the child drag.
+This prevents stale local coordinates from turning titlebar or right-button
+events into child-surface actions.
+
 Pointer capture is cleared when its target is minimized, closed, or released.
 Taskbar pinned entries are keyed by stable `app_id`; running entries are keyed
 by `window_id`. The ordered pin list uses a bounded versioned text record at
