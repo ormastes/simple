@@ -1163,13 +1163,28 @@ raster.shutdown()
 
 #### routes hosted key edges to DOM focus before window shortcuts
 
+- "<script>var stay=document getElementById
+- "stay addEventListener
+- "if
+- "stay addEventListener
+   - Expected: shifted_letter.semantic_target_id equals `stay`
+   - Expected: arrow_down.semantic_target_id equals `stay`
+   - Expected: arrow_up.semantic_target_id equals `stay`
+   - Expected: canceled_tab.semantic_target_id equals `stay`
+- payload session browser dom root
+   - Expected: checkbox_press.semantic_target_id equals `toggle`
+   - Expected: checkbox_release.semantic_target_id equals `toggle`
+   - Expected: space_down.semantic_target_id equals `toggle`
+   - Expected: space_up.semantic_target_id equals `toggle`
+   - Expected: space_down.callback_count equals `0`
+   - Expected: space_up.callback_count equals `1`
 - checkbox session current body html
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 56 lines folded for reproduction.
+Runnable source: 98 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1199,6 +1214,48 @@ expect(input_session.current_body_html()).to_contain(
     "data-up=\"yes\""
 )
 expect(input_session.current_body_html()).to_contain("value=\"w\"")
+
+var payload_session = HostedWebContentSession.create(
+    14,
+    "<button id='stay' data-focused>Stay</button>" +
+    "<button id='next'>Next</button>" +
+    "<script>var stay=document.getElementById('stay');" +
+    "stay.addEventListener('keydown',function(event){" +
+    "document.title=event.key+'|'+event.code+'|'+event.shiftKey+'|'+" +
+    "event.altKey+'|'+event.ctrlKey+'|'+event.metaKey+'|'+event.repeat;" +
+    "if(event.key==='Tab'&&event.shiftKey){event.preventDefault();}});" +
+    "stay.addEventListener('keyup',function(event){" +
+    "document.title=event.type+'|'+event.key+'|'+event.code;});</script>",
+    80, 40
+)
+val shifted_letter = payload_session.dispatch_key_with_shift(
+    35, 65, true, true
+)
+expect(shifted_letter.semantic_target_id).to_equal("stay")
+expect(payload_session.browser.current_title).to_equal(
+    "A|KeyA|true|false|false|false|false"
+)
+val arrow_down = payload_session.dispatch_key_with_shift(
+    36, 37, true, false
+)
+expect(arrow_down.semantic_target_id).to_equal("stay")
+expect(payload_session.browser.current_title).to_equal(
+    "ArrowLeft|ArrowLeft|false|false|false|false|false"
+)
+val arrow_up = payload_session.dispatch_key_with_shift(
+    37, 37, false, false
+)
+expect(arrow_up.semantic_target_id).to_equal("stay")
+expect(payload_session.browser.current_title).to_equal(
+    "keyup|ArrowLeft|ArrowLeft"
+)
+val canceled_tab = payload_session.dispatch_key_with_shift(
+    38, 9, true, true
+)
+expect(canceled_tab.semantic_target_id).to_equal("stay")
+expect(be_dom_focused_id(
+    payload_session.browser.dom_root()
+)).to_equal("stay")
 
 var checkbox_session = HostedWebContentSession.create(
     12,

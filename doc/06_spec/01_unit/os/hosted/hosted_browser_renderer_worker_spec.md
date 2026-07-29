@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 39 | 39 | 0 | 0 |
+| 40 | 40 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1594,6 +1594,69 @@ expect(navigation.method).to_equal("POST")
 
 </details>
 
+#### preserves canonical keyboard payload through the K2 worker path
+
+- "<script>var stay=document getElementById
+- "stay addEventListener
+- "if
+- "stay addEventListener
+- var worker = HostedBrowserRendererWorkerSession create
+   - Expected: be_dom_focused_id(worker.browser.dom_root()) equals `stay`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 42 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<button id='stay' data-focused>Stay</button>" +
+    "<button id='next'>Next</button>" +
+    "<script>var stay=document.getElementById('stay');" +
+    "stay.addEventListener('keydown',function(event){" +
+    "document.title=event.key+'|'+event.code+'|'+event.shiftKey+'|'+" +
+    "event.altKey+'|'+event.ctrlKey+'|'+event.metaKey+'|'+event.repeat;" +
+    "if(event.key==='Tab'&&event.shiftKey){event.preventDefault();}});" +
+    "stay.addEventListener('keyup',function(event){" +
+    "document.title=event.type+'|'+event.key+'|'+event.code;});</script>"
+)
+var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+expect(worker.handle(BrowserRendererMessage(
+    kind: "init", generation: 7, request_id: 2, payload: html
+)).ok).to_be(true)
+
+expect(worker.handle(BrowserRendererMessage(
+    kind: "key", generation: 7, request_id: 3,
+    payload: "K2\t1\t65\t1\t1"
+)).ok).to_be(true)
+expect(worker.browser.current_title).to_equal(
+    "A|KeyA|true|false|false|false|false"
+)
+expect(worker.handle(BrowserRendererMessage(
+    kind: "key", generation: 7, request_id: 4,
+    payload: "K2\t2\t37\t1\t0"
+)).ok).to_be(true)
+expect(worker.browser.current_title).to_equal(
+    "ArrowLeft|ArrowLeft|false|false|false|false|false"
+)
+expect(worker.handle(BrowserRendererMessage(
+    kind: "key", generation: 7, request_id: 5,
+    payload: "K2\t3\t37\t0\t0"
+)).ok).to_be(true)
+expect(worker.browser.current_title).to_equal(
+    "keyup|ArrowLeft|ArrowLeft"
+)
+expect(worker.handle(BrowserRendererMessage(
+    kind: "key", generation: 7, request_id: 6,
+    payload: "K2\t4\t9\t1\t1"
+)).ok).to_be(true)
+expect(be_dom_focused_id(worker.browser.dom_root())).to_equal("stay")
+```
+
+</details>
+
 #### fails closed when a script exceeds the cookie write batch
 
 - var worker = HostedBrowserRendererWorkerSession create
@@ -2545,8 +2608,8 @@ Tests covering hosted browser renderer worker.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 39 |
-| Active scenarios | 39 |
+| Total scenarios | 40 |
+| Active scenarios | 40 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

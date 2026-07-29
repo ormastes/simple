@@ -2238,3 +2238,11 @@ implementation in progress / target evidence blocked
   production poll classifier without mutating the replacement document,
   history, provisional state, or permit. Independent review returned PASS and
   the affected manual regenerated (`1 complete, 0 stubs`).
+- keyboard event tranche (2026-07-29): Hosted and worker K2 input now route raw
+  keys through one typed BrowserSession/BeDOM event path. JavaScript and Simple
+  Script observe canonical `key`, `code`, Shift/Control/Alt/Meta, and repeat
+  values; shifted digits, punctuation, navigation/editing keys, Insert/Delete,
+  F1-F12, modifiers, and unknown keys have explicit mappings. Shift+Tab
+  cancellation preserves focus and dispatch remains stateless. Independent
+  review returned PASS after import and mapping repairs. Three affected manuals
+  regenerated (`3 complete, 0 stubs`); K2 wire format remains unchanged.
