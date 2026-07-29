@@ -30,6 +30,29 @@ impl PromiseState:
             case Rejected(_): true
             case _: false
 
+# Module-level registry backing Promise.new()'s mutable state while the
+# executor runs. Promise<T> itself stays a plain value-type class (state,
+# callbacks); `static fn new` only needs a mutable cell for the duration of
+# the executor call, then freezes the result into the returned instance.
+#
+# resolve()/reject() below are nested named `fn`s that mutate this
+# MODULE-level `var` by index -- not a captured local of the enclosing
+# `new()` call -- because a nested closure can read outer locals but cannot
+# modify them (module-level closures work fine, which is what this uses).
+# Mirrors the pattern in test/01_unit/lib/std/concurrency/promise_spec.spl.
+var _promise_new_state: [PromiseState] = []
+
+# The push-and-reassign must live in its own free function, not inline in
+# `static fn new` alongside the nested `resolve`/`reject` closures that also
+# reference `_promise_new_state` -- doing so in the same function body
+# desyncs the enclosing function's view of the array from the one the
+# nested closure mutates. See
+# doc/08_tracking/bug/promise_new_push_reassign_same_scope_as_nested_closure_2026-07-29.md
+fn _promise_new_push_pending() -> i64:
+    val idx = _promise_new_state.len()
+    _promise_new_state = _promise_new_state.push(PromiseState.Pending)
+    idx
+
 class Promise<T>:
     state: PromiseState
     callbacks: List
@@ -45,21 +68,18 @@ class Promise<T>:
 
 impl Promise<T>:
     static fn new(executor) -> Promise<T>:
-        var promise = Promise(
-            state: PromiseState.Pending,
-            callbacks: []
-        )
+        val idx = _promise_new_push_pending()
 
         fn resolve(value):
-            if promise.state.is_pending():
-                promise.state = PromiseState.Resolved(value)
+            if _promise_new_state[idx].is_pending():
+                _promise_new_state[idx] = PromiseState.Resolved(value)
 
         fn reject(error):
-            if promise.state.is_pending():
-                promise.state = PromiseState.Rejected(error)
+            if _promise_new_state[idx].is_pending():
+                _promise_new_state[idx] = PromiseState.Rejected(error)
 
         executor(resolve, reject)
-        return promise
+        return Promise(state: _promise_new_state[idx], callbacks: [])
 
 # Helper functions for creating promises
 fn make_resolved<T>(v: T) -> Promise<T>:
