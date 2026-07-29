@@ -404,6 +404,75 @@ describe "Production Simple browser user flow":
 
     # @manual: show
     # @capture(html)
+    # @capture(artifact)
+    # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should admit two CSS URL backgrounds and lower both through canonical Draw IR":
+        step("Admit the bounded two URL CSS background profile")
+        var session = BrowserSession.new()
+        session.register_resource(
+            "https://assets.test/front.png", _retained_png_hex(0xFFFF0000u32)
+        )
+        session.register_resource(
+            "https://assets.test/back.png", _retained_png_hex(0xFF0000FFu32)
+        )
+        match session.open_html(
+            "https://example.test/layers",
+            "<style>#layers{width:4px;height:2px;background-color:#00ff00;" +
+            "background-image:url(https://assets.test/front.png),url(https://assets.test/back.png);" +
+            "background-repeat:no-repeat}</style><div id='layers'></div>"
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("two URL background fixture failed to open: {reason}")
+        expect(session.image_resources.len()).to_equal(2)
+
+        step("Render HTML and CSS through canonical Draw IR")
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            session.render_html_document(), 8, 4, session.image_resources
+        )
+        val commands = composition.batches[0].commands
+        expect(_browser_draw_ir_command_index(
+            commands, "layers_background_image_1"
+        )).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(
+            commands, "layers_background_image_0"
+        )).to_be_greater_than(_browser_draw_ir_command_index(
+            commands, "layers_background_image_1"
+        ))
+
+        step("Deny the whole pair when CSP denies image admission")
+        var denied = BrowserSession.new()
+        denied.register_resource(
+            "https://assets.test/front.png", _retained_png_hex(0xFFFF0000u32)
+        )
+        denied.register_resource(
+            "https://assets.test/back.png", _retained_png_hex(0xFF0000FFu32)
+        )
+        match denied.open_html(
+            "https://example.test/layers-denied",
+            "<meta http-equiv='Content-Security-Policy' content=\"img-src 'none'\">" +
+            "<style>#layers{width:4px;height:2px;background-color:#00ff00;" +
+            "background-image:url(https://assets.test/front.png),url(https://assets.test/back.png)}</style>" +
+            "<div id='layers'></div>"
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("CSP two URL background fixture failed to open: {reason}")
+        expect(denied.image_resources.len()).to_equal(0)
+        val denied_commands = simple_web_layout_render_html_draw_ir_with_images(
+            denied.render_html_document(), 8, 4, denied.image_resources
+        ).batches[0].commands
+        expect(_browser_draw_ir_command_index(
+            denied_commands, "layers_background_image_1"
+        )).to_equal(-1)
+        expect(_browser_draw_ir_command_index(
+            denied_commands, "layers_background_image_0"
+        )).to_equal(-1)
+
+    # @manual: show
+    # @capture(html)
     # @capture(protocol)
     # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
     it "should preserve semantic parentage clipping and stacking in canonical Draw IR":

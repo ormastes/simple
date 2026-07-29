@@ -35,6 +35,8 @@ DrawIrComposition -> persistent Engine2dCompositorBackend
 - Broker owns URLs/origins, Fetch/CORS/CSP, cookies, TLS/HSTS, and host access.
 - Static `<img>` and CSS URL backgrounds share bounded broker image policy;
   retained `SBRF5` frames include only composition-referenced resources.
+  Exactly two URL background-image layers reuse this chain and emit back then
+  front typed Draw-IR commands; broader layer syntax remains unsupported.
   Rounded background shape/radius metadata is masked during the sampling pass,
   with aggregate CSS-background work capped at one framebuffer per composition.
 - Post-load JS/Simple Script backgrounds reuse `_start_image_source`; Stop is
@@ -45,6 +47,8 @@ DrawIrComposition -> persistent Engine2dCompositorBackend
   and new windows; Escape restores committed-or-startup URL in both lanes.
 - Deferred resizes coalesce. Unchanged frames serialize nothing; scroll/caret
   reuse raw layout, and CSS animation frames reuse parse/CSS/base style.
+- Visible material hashes collect ordered lines and join once, avoiding
+  quadratic transient text without changing animation or Draw-IR output.
 - Linux/macOS/Windows sandbox failure blocks production startup.
 
 Hot-path evidence: stage counters/timings, frame/input latency, cache reuse,

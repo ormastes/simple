@@ -580,5 +580,15 @@ refresh, bootstrap, or Rust-seed fallback is claimed.
   overflow baselines stay ledgered.
 - Live trusted/invalid-certificate HSTS evidence remains fail-fast until an
   admitted production HTTPS artifact is available. The current hosted-WM
-  wrapper also remains non-qualifying while its preloaded runtime DSO lacks
-  path/hash/build-identity admission.
+  wrapper also remains non-qualifying while its exact-byte runtime admission
+  lacks trusted production build provenance.
+
+## Two-layer CSS and material-witness refinement (2026-07-29)
+
+- `background-image` accepts exactly two URL layers only after both traverse
+  the existing resource policy. Shared scalar background longhands apply to
+  both; missing, denied, malformed, and unsupported pairs emit neither layer.
+- Paint emits the back layer then front layer through existing typed Draw IR
+  and adds the existing border overlay only after the complete set lowers.
+- Visible material witness lines use preallocated indexed lists plus one join;
+  hashes, order, culling, animation scheduling, and composition stay unchanged.

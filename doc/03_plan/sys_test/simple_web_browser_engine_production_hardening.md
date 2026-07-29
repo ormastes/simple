@@ -114,9 +114,11 @@ structured interaction are not production browser evidence.
   `scripts/check/check-linux-hosted-wm-live-window-evidence.shs`. The spec
   hashes the exact native `src/os/hosted/hosted_entry.spl` artifact before
   launch; it does not accept `bin/simple` or silently substitute a worker.
-  This lane remains blocked until the same receipt also admits the loaded
-  runtime provider by path, SHA-256, and build identity. The current wrapper
-  injects an unadmitted bootstrap runtime DSO; see
+  The same receipt now binds the exact loaded runtime bytes by path, SHA-256,
+  content identity, artifact digest, and inherited fd. This lane remains
+  blocked until that provider also has trusted production build provenance;
+  canonical-bootstrap absence still leaves copied-bootstrap identity unknown.
+  See
   `doc/08_tracking/bug/hosted_wm_runtime_dso_unadmitted_security_evidence_2026-07-29.md`.
 - text/HTML/protocol/exec/log/artifact:
   `build/test-artifacts/<spec-relative-path>/`
@@ -365,3 +367,11 @@ scroll, and unchanged steps. The production budget scenarios keep their current
 `fail("NFR-WEB-BROWSER-001..017: ... not implemented")` until one healthy
 pure-Simple target produces changed/unchanged latency, allocation, RSS, and
 10,000-cycle receipts.
+
+Two-layer CSS checks now require both BrowserSession resources, back-to-front
+Draw-IR order, front-over-back Engine2D pixels, and atomic absence for CSP,
+missing-resource, malformed, and more-than-two cases. The material-witness
+unit oracle compares dense visible/offscreen counts, hashes, and Draw-IR command
+counts. Runtime-provider shell self-tests cover explicit hash admission,
+bootstrap-content denial, private staging, and fd-bound launch, but the
+production row remains RED until trusted provider build provenance exists.

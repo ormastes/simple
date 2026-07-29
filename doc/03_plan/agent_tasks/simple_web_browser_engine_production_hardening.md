@@ -249,3 +249,16 @@ Root Codex is merge owner and generated-manual reviewer.
 high-capability read-only review; both returned PASS after two repair cycles.
 The live HTTPS/certificate row, native timing/RSS/GC rows, and the unadmitted
 hosted-WM runtime-provider receipt remain explicit blockers, not exclusions.
+
+## Draw-IR and CSS follow-up tranche (2026-07-29)
+
+- `drawir_webir_refactor`: removed quadratic visible-material witness text
+  copying in the existing HTML-layout owner; no WebIR type was added.
+- `css_multiple_backgrounds`: added the bounded two-URL shared-longhand profile
+  through BrowserSession admission, Style, Draw IR, and Engine2D.
+- `runtime_provider_admission`: hardened explicit DSO admission and fd-bound
+  launch; trusted production build provenance remains RED after the
+  three-cycle cap.
+- Root Codex remains merge/manual owner. `browser_surface_adversary` returned
+  PASS for the rendering lanes; runtime-provider production admission remains
+  FAIL and is not promoted.

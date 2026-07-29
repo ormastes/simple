@@ -557,20 +557,18 @@ fn _css_background_url_safe(url: text) -> bool:
             return false
     true
 
-fn _css_single_background_url_span(
+fn _css_background_url_spans_in_value(
     value: text, value_start: i64
-) -> BrowserCssBackgroundUrlSpan?:
+) -> [BrowserCssBackgroundUrlSpan]:
     val lower = value.lower()
     if (
         lower.contains("gradient(") or lower.contains("image-set(") or
         lower.contains("cross-fade(") or lower.contains("var(")
     ):
-        return nil
+        return []
     var pos = 0
-    var found = ""
-    var found_token_start = 0
-    var found_token_end = 0
-    var url_count = 0
+    var found_spans: [BrowserCssBackgroundUrlSpan] = []
+    var top_level_commas = 0
     while pos < value.len():
         if (
             pos + 1 < value.len() and
@@ -578,12 +576,14 @@ fn _css_single_background_url_span(
         ):
             val close = find_text(value, "*/", pos + 2)
             if close < 0:
-                return nil
+                return []
             pos = close + 2
             continue
         val ch = value.slice(pos, pos + 1)
         if ch == ",":
-            return nil
+            top_level_commas = top_level_commas + 1
+            pos = pos + 1
+            continue
         if ch == "\"" or ch == "'":
             val quote = ch
             pos = pos + 1
@@ -596,7 +596,7 @@ fn _css_single_background_url_span(
                     pos = pos + 1
                     closed_quote = quoted_ch == quote
             if not closed_quote:
-                return nil
+                return []
             continue
         if pos + 4 <= value.len() and lower.slice(pos, pos + 4) == "url(":
             val token_start = pos
@@ -646,27 +646,31 @@ fn _css_single_background_url_span(
                 authored_end = pos
                 valid = pos < value.len()
             if not valid:
-                return nil
-            found = value.slice(authored_start, authored_end).trim()
-            url_count = url_count + 1
-            if url_count > 1:
-                return nil
-            found_token_start = value_start + token_start
-            found_token_end = value_start + pos + 1
+                return []
+            val authored = value.slice(authored_start, authored_end).trim()
+            val authored_lower = authored.lower()
+            if (authored == "" or authored_lower.starts_with("data:") or
+                authored_lower.starts_with("blob:") or
+                not _css_background_url_safe(authored)):
+                return []
+            found_spans.push(BrowserCssBackgroundUrlSpan(
+                authored: authored,
+                token_start: value_start + token_start,
+                token_end: value_start + pos + 1
+            ))
+            if found_spans.len() > 2:
+                return []
             pos = pos + 1
             continue
         pos = pos + 1
-    val found_lower = found.lower()
-    if (url_count != 1 or found == "" or
-        found_lower.starts_with("data:") or
-        found_lower.starts_with("blob:") or
-        not _css_background_url_safe(found)):
-        return nil
-    Some(BrowserCssBackgroundUrlSpan(
-        authored: found,
-        token_start: found_token_start,
-        token_end: found_token_end
-    ))
+    if found_spans.len() == 0 or (
+        found_spans.len() == 1 and top_level_commas != 0
+    ) or (found_spans.len() == 2 and top_level_commas != 1):
+        return []
+    # The browser's declared two-image profile shares the exact existing URL
+    # admission path. More layers stay invisible here, so they cannot be
+    # partially fetched or claimed by the renderer.
+    found_spans
 
 fn _css_append_background_url_span(
     css_text: text, declaration_start: i64, colon: i64,
@@ -680,9 +684,14 @@ fn _css_append_background_url_span(
     ).trim().lower()
     if property != "background" and property != "background-image":
         return out
-    if val Some(span) = _css_single_background_url_span(
+    val candidates = _css_background_url_spans_in_value(
         css_text.slice(colon + 1, declaration_end), colon + 1
-    ):
+    )
+    # The shorthand remains on its existing single-image admission path.
+    # Two-layer shorthand parsing is deliberately not part of this slice.
+    if property == "background" and candidates.len() != 1:
+        return out
+    for span in candidates:
         out.push(span)
     out
 

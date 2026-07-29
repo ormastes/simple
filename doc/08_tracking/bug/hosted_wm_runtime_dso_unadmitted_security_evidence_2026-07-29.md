@@ -1,18 +1,23 @@
-# Hosted WM runtime DSO is absent from security evidence admission
+# Hosted WM runtime DSO lacks trusted production build provenance
 
 Status: open
 
 ## Finding
 
-`scripts/check/check-linux-hosted-wm-live-window-evidence.shs` rejects a Rust
-seed `SIMPLE_BIN` and admits `HOSTED_WM_ARTIFACT` by SHA-256, but defaults
-`SIMPLE_WM_RUNTIME_LIB` to
-`src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so` and injects that
-DSO with `LD_PRELOAD` without recording or admitting its identity.
+`scripts/check/check-linux-hosted-wm-live-window-evidence.shs` now rejects a
+Rust seed `SIMPLE_BIN`, requires an explicit runtime path and SHA-256, rejects
+the canonical/current copied bootstrap content, launches a private admitted
+copy through inherited fd 9, and records the runtime/content/admission
+identities.
 
-The resulting receipt cannot prove that the admitted hosted browser artifact
-ran with the claimed production runtime provider. It must remain blocked
-evidence for REQ-WEB-BROWSER-011/014 and NFR-WEB-BROWSER-011/015.
+One production blocker remains: if the canonical bootstrap DSO is absent, the
+wrapper has no trusted provider build manifest or persistent forbidden
+bootstrap identity. A bootstrap DSO copied from elsewhere can therefore still
+be presented with a caller-supplied matching hash.
+
+The resulting receipt proves the exact launched bytes but not their production
+build provenance. It must remain blocked evidence for REQ-WEB-BROWSER-011/014
+and NFR-WEB-BROWSER-011/015.
 
 ## Owner and fix boundary
 

@@ -170,6 +170,29 @@ use std.spec.*
 
 val EVIDENCE_PATH = "build/linux-hosted-wm-font-event-current/evidence.env"
 
+fn evidence_value(evidence: text, key: text) -> text:
+    val prefix = key + "="
+    var value = ""
+    var found = false
+    for line in evidence.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(prefix):
+            if found or line == prefix:
+                return ""
+            value = line.slice(prefix.len(), line.len())
+            found = true
+    value
+
+fn evidence_lower_sha256(evidence: text, key: text) -> bool:
+    val value = evidence_value(evidence, key)
+    if value.len() != 64:
+        return false
+    var i = 0
+    while i < value.len():
+        if not "0123456789abcdef".contains(value.char_at(i)):
+            return false
+        i += 1
+    true
+
 describe "Linux hosted WM pinned font and correlated events":
     it "shows the pinned Terminal title through the production Engine2D frame":
         step("Load the pinned multilingual font manifest")
@@ -204,6 +227,19 @@ describe "Linux hosted WM pinned font and correlated events":
         expect(evidence).to_contain("linux_hosted_wm_live_window_native_source_manifest_status=pass")
         expect(evidence).to_contain("linux_hosted_wm_live_window_native_source_manifest_identity=native-build-entry-closure:")
         expect(evidence).to_contain("linux_hosted_wm_live_window_native_source_manifest_sha256=")
+        expect(evidence_value(evidence, "linux_hosted_wm_live_window_runtime_provider_status")).to_equal("pass")
+        expect(evidence_value(
+            evidence, "linux_hosted_wm_live_window_runtime_provider_path"
+        ).len()).to_be_greater_than(0)
+        expect(evidence_lower_sha256(evidence, "linux_hosted_wm_live_window_runtime_provider_sha256")).to_be(true)
+        expect(evidence_lower_sha256(
+            evidence,
+            "linux_hosted_wm_live_window_runtime_provider_build_identity"
+        )).to_be(true)
+        expect(evidence_lower_sha256(
+            evidence,
+            "linux_hosted_wm_live_window_runtime_provider_admission_sha256"
+        )).to_be(true)
         expect(evidence).to_contain("linux_hosted_wm_live_window_frame_marker=pass")
         expect(evidence).to_contain("linux_hosted_wm_live_window_framebuffer_status=pass")
         expect(evidence).to_contain("linux_hosted_wm_live_window_live_window_status=pass")
@@ -334,6 +370,12 @@ describe "Linux hosted WM pinned font and correlated events":
         expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_text_receipt=required")
         expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_exact_readback_fields=required")
         expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_capture_checksum=pass")
+        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_bootstrap=rejected")
+        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_bootstrap_content=rejected")
+        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_sha256_mismatch=rejected")
+        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_changed=rejected")
+        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_staged=pass")
+        expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_fd=pass")
 
         step("Reject silent Git-only provenance and stale release defaults")
         val wrapper = file_read("scripts/check/check-linux-hosted-wm-live-window-evidence.shs")
@@ -344,4 +386,13 @@ describe "Linux hosted WM pinned font and correlated events":
         expect(wrapper).to_contain("write_native_source_manifest \"$SOURCE_MANIFEST_AFTER\"")
         expect(wrapper).to_contain("emit fail source-provenance-unavailable")
         expect(wrapper).to_contain("emit unavailable explicit-simple-bin-required")
+        expect(wrapper).to_contain("RUNTIME_LIB=\"${SIMPLE_WM_RUNTIME_LIB:-}\"")
+        expect(wrapper).to_contain("RUNTIME_LIB_EXPECTED_SHA256=\"${SIMPLE_WM_RUNTIME_LIB_SHA256:-}\"")
+        expect(wrapper).to_contain("runtime-provider-bootstrap-forbidden")
+        expect(wrapper).to_contain("runtime-provider-sha256-mismatch")
+        expect(wrapper).to_contain("runtime-provider-changed-during-build")
+        expect(wrapper).to_contain("runtime-provider-changed-before-launch")
+        expect(wrapper).to_contain("runtime_provider_admission_sha256")
+        expect(wrapper).to_contain("env -u LD_PRELOAD -u LD_AUDIT -u LD_DEBUG -u LD_DEBUG_OUTPUT -u LD_LIBRARY_PATH -u LD_ORIGIN_PATH")
+        expect(wrapper).to_contain("LD_PRELOAD=\"$wint_provider_path:/proc/self/fd/9\"")
         expect(wrapper).to_contain("emit fail \"glyph-oracle-calibration-only-$glyph_sha\"")

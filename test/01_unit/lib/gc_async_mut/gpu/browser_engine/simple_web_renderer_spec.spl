@@ -398,6 +398,82 @@ describe "SimpleWebRenderer":
             _draw_ir_command_index(commands, "tile_background_border_overlay")
         )
 
+    it "lowers two URL CSS backgrounds back to front through canonical Draw IR":
+        val html = (
+            "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+            "<div id='layers' style='width:4px;height:2px;background-color:#00ff00;" +
+            "background-image:url(image://front),url(image://back);" +
+            "background-repeat:repeat;background-size:2px 1px;" +
+            "background-position:left top'></div></body></html>"
+        )
+        val front = simpleos_host_gpu_image_resource(
+            "image://front", 2, 1, [0xFFFF0000u32, 0u32])
+        val back = simpleos_host_gpu_image_resource(
+            "image://back", 2, 1, [0xFF0000FFu32, 0xFF0000FFu32])
+        val images = [front, back]
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 8, 4, images
+        ).batches[0].commands
+        val back_draw = _draw_ir_command_by_id(
+            commands, "layers_background_image_1")
+        val front_draw = _draw_ir_command_by_id(
+            commands, "layers_background_image_0")
+        expect(_draw_ir_style_value(back_draw, "background-layer-index")).to_equal("1")
+        expect(_draw_ir_style_value(front_draw, "background-layer-index")).to_equal("0")
+        expect(_draw_ir_command_index(
+            commands, "layers_background_image_1")).to_be_less_than(
+            _draw_ir_command_index(commands, "layers_background_image_0"))
+        expect(_draw_ir_command_index(
+            commands, "layers_background_image_0")).to_be_less_than(
+            _draw_ir_command_index(
+                commands, "layers_background_border_overlay"))
+
+        val pixels = BrowserRenderer.create(8, 4).render_html_to_pixels_with_images(
+            html, images
+        ).pixel_data
+        expect(pixels[0]).to_equal(0xFFFF0000u32)
+        expect(pixels[1]).to_equal(0xFF0000FFu32)
+
+        val rejected = simple_web_layout_render_html_draw_ir_with_images(
+            html.replace(
+                "url(image://front),url(image://back)",
+                "url(image://front),url(image://back),url(image://front)"
+            ), 8, 4, images
+        ).batches[0].commands
+        expect(_draw_ir_command_index(
+            rejected, "layers_background_image_1"
+        )).to_equal(-1)
+        expect(_draw_ir_command_index(
+            rejected, "layers_background_image_0"
+        )).to_equal(-1)
+
+        val missing = simple_web_layout_render_html_draw_ir_with_images(
+            html, 8, 4, [front]
+        ).batches[0].commands
+        expect(_draw_ir_command_index(
+            missing, "layers_background_image_1"
+        )).to_equal(-1)
+        expect(_draw_ir_command_index(
+            missing, "layers_background_image_0"
+        )).to_equal(-1)
+        expect(_draw_ir_command_index(
+            missing, "layers_background_border_overlay"
+        )).to_equal(-1)
+
+        val listed = simple_web_layout_render_html_draw_ir_with_images(
+            html.replace(
+                "background-repeat:repeat",
+                "background-repeat:no-repeat,repeat"
+            ),
+            8, 4, images
+        ).batches[0].commands
+        expect(_draw_ir_command_index(
+            listed, "layers_background_image_1"
+        )).to_equal(-1)
+        expect(_draw_ir_command_index(
+            listed, "layers_background_image_0"
+        )).to_equal(-1)
+
     it "retains the unclipped rounded CSS background shape":
         val html = (
             "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +

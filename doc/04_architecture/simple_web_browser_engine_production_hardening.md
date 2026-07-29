@@ -586,3 +586,10 @@ bootstrap or Rust-seed result is production browser evidence.
 - Adjacent deferred resizes coalesce to the newest dimensions, and each
   animation frame serializes the HTML document once for both animation
   reconciliation and layout/paint.
+- The bounded two-URL background profile stays on the canonical chain:
+  BrowserSession resource policy → existing Style witness → ordered typed
+  Draw-IR CSS-background commands → Engine2D. It introduces no WebIR, Draw-IR
+  kind, renderer, or framebuffer.
+- Visible material provenance retains identical ordered hashes but collects
+  accepted witness lines and joins once, avoiding quadratic transient text on
+  static and animated render paths.

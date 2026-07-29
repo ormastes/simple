@@ -405,6 +405,12 @@ expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_git_dirty_depen
 expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_text_receipt=required")
 expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_exact_readback_fields=required")
 expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_capture_checksum=pass")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_bootstrap=rejected")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_bootstrap_content=rejected")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_sha256_mismatch=rejected")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_changed=rejected")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_staged=pass")
+expect(stdout).to_contain("linux_hosted_wm_live_window_self_test_runtime_fd=pass")
 
 step("Reject silent Git-only provenance and stale release defaults")
 val wrapper = file_read("scripts/check/check-linux-hosted-wm-live-window-evidence.shs")
@@ -415,10 +421,29 @@ expect(wrapper).to_contain("write_native_source_manifest \"$SOURCE_MANIFEST\"")
 expect(wrapper).to_contain("write_native_source_manifest \"$SOURCE_MANIFEST_AFTER\"")
 expect(wrapper).to_contain("emit fail source-provenance-unavailable")
 expect(wrapper).to_contain("emit unavailable explicit-simple-bin-required")
+expect(wrapper).to_contain("RUNTIME_LIB=\"${SIMPLE_WM_RUNTIME_LIB:-}\"")
+expect(wrapper).to_contain("runtime-provider-bootstrap-forbidden")
+expect(wrapper).to_contain("runtime-provider-changed-before-launch")
+expect(wrapper).to_contain("LD_PRELOAD=\"$wint_provider_path:/proc/self/fd/9\"")
 expect(wrapper).to_contain("emit fail \"glyph-oracle-calibration-only-$glyph_sha\"")
 ```
 
 </details>
+
+## Runtime-provider admission
+
+The wrapper no longer defaults to or directly preloads the bootstrap runtime
+DSO. It requires an explicit provider and expected SHA-256, rejects the
+canonical bootstrap path and matching canonical bootstrap content, stages the
+admitted bytes privately, holds them on inherited file descriptor 9 through
+loader startup, sanitizes ambient loader variables, and records provider,
+content-identity, and artifact-bound admission hashes.
+
+This hardening does not yet qualify the live receipt as production evidence
+when the canonical bootstrap DSO is absent: the repository has no trusted
+provider build manifest or persistent forbidden-bootstrap identity. The
+runtime-provider production gate therefore remains RED rather than accepting a
+caller-supplied provider as proven production provenance.
 
 ## Scenario Summary
 

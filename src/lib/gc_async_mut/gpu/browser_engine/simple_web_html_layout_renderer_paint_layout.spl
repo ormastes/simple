@@ -1482,56 +1482,117 @@ fn _html_draw_ir_background_offset(value: i32, free_space: i32) -> i32:
         return (free_space.to_i64() * (-1000 - value).to_i64() / 100).to_i32()
     value
 
+class HtmlDrawIrBackgroundLayer:
+    image_uri: text
+    repeat: text
+    size_w: i32
+    size_h: i32
+    position_x: i32
+    position_y: i32
+    origin: text
+    clip: text
+    attachment: text
+    index: i32
+
+fn _html_draw_ir_two_url_background_layers(st: Style) -> [HtmlDrawIrBackgroundLayer]:
+    val fields = st.bg_layers_raw.split("\n")
+    if fields.len() != 11 or fields[0] != "two-url-v1":
+        return []
+    var layers: [HtmlDrawIrBackgroundLayer] = []
+    var index = 0
+    while index < 2:
+        val repeat = fields[3]
+        val origin = fields[8]
+        val clip = fields[9]
+        val attachment = fields[10]
+        if (fields[index + 1] == "" or
+            (repeat != "repeat" and repeat != "repeat-x" and
+             repeat != "repeat-y" and repeat != "no-repeat") or
+            (origin != "border-box" and origin != "padding-box" and
+             origin != "content-box") or
+            (clip != "border-box" and clip != "padding-box" and
+             clip != "content-box") or
+            (attachment != "scroll" and attachment != "fixed")):
+            return []
+        val size_w = parse_int(fields[4])
+        val size_h = parse_int(fields[5])
+        if size_w < 0 or size_h < 0:
+            return []
+        layers.push(HtmlDrawIrBackgroundLayer(
+            image_uri: fields[index + 1], repeat: repeat, size_w: size_w,
+            size_h: size_h, position_x: parse_int(fields[6]),
+            position_y: parse_int(fields[7]), origin: origin,
+            clip: clip, attachment: attachment, index: index
+        ))
+        index = index + 1
+    layers
+
+fn _html_draw_ir_background_layers(st: Style) -> [HtmlDrawIrBackgroundLayer]:
+    val layered = _html_draw_ir_two_url_background_layers(st)
+    if layered.len() == 2:
+        return layered
+    if st.bg_layers_raw != "" or st.background_image_uri == "" or
+        st.background_attachment == "local":
+        return []
+    [HtmlDrawIrBackgroundLayer(
+        image_uri: st.background_image_uri, repeat: st.background_repeat,
+        size_w: st.background_size_w_px, size_h: st.background_size_h_px,
+        position_x: st.background_position_x_px,
+        position_y: st.background_position_y_px,
+        origin: st.background_origin, clip: st.background_clip,
+        attachment: st.background_attachment, index: -1
+    )]
+
 fn _html_draw_ir_background_image_command(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     i: i32, images: [SimpleOsHostGpuImageResource],
-    ancestor_clip: ClipRect, viewport_width: i32, viewport_height: i32
+    ancestor_clip: ClipRect, viewport_width: i32, viewport_height: i32,
+    layer: HtmlDrawIrBackgroundLayer
 ) -> DrawIrCommand?:
     val st = styles[i]
     if (
-        st.background_image_uri == "" or st.bg_layers_raw != "" or
-        st.background_attachment == "local"
+        layer.image_uri == ""
     ):
         return nil
-    val image_index = _html_draw_ir_image_index(images, st.background_image_uri)
+    val image_index = _html_draw_ir_image_index(images, layer.image_uri)
     if image_index < 0:
         return nil
     val image = images[image_index]
     val (element_origin_x, element_origin_w) = _html_draw_ir_background_edge(
-        st.background_origin, boxes.bx[i], boxes.bw[i],
+        layer.origin, boxes.bx[i], boxes.bw[i],
         st.border_l, st.border_r, st.pad_l, st.pad_r
     )
     val (element_origin_y, element_origin_h) = _html_draw_ir_background_edge(
-        st.background_origin, boxes.by[i], boxes.bh[i],
+        layer.origin, boxes.by[i], boxes.bh[i],
         st.border_t, st.border_b, st.pad_t, st.pad_b
     )
     var origin_x = element_origin_x
     var origin_y = element_origin_y
     var origin_w = element_origin_w
     var origin_h = element_origin_h
-    if st.background_attachment == "fixed":
+    if layer.attachment == "fixed":
         origin_x = 0
         origin_y = 0
         origin_w = viewport_width
         origin_h = viewport_height
     val (clip_x, clip_w) = _html_draw_ir_background_edge(
-        st.background_clip, boxes.bx[i], boxes.bw[i],
+        layer.clip, boxes.bx[i], boxes.bw[i],
         st.border_l, st.border_r, st.pad_l, st.pad_r
     )
     val (clip_y, clip_h) = _html_draw_ir_background_edge(
-        st.background_clip, boxes.by[i], boxes.bh[i],
+        layer.clip, boxes.by[i], boxes.bh[i],
         st.border_t, st.border_b, st.pad_t, st.pad_b
     )
     var clip_inset_l = 0
     var clip_inset_t = 0
     var clip_inset_r = 0
     var clip_inset_b = 0
-    if st.background_clip == "padding-box" or st.background_clip == "content-box":
+    if layer.clip == "padding-box" or layer.clip == "content-box":
         clip_inset_l = st.border_l
         clip_inset_t = st.border_t
         clip_inset_r = st.border_r
         clip_inset_b = st.border_b
-    if st.background_clip == "content-box":
+    if layer.clip == "content-box":
         clip_inset_l = clip_inset_l + st.pad_l
         clip_inset_t = clip_inset_t + st.pad_t
         clip_inset_r = clip_inset_r + st.pad_r
@@ -1541,8 +1602,8 @@ fn _html_draw_ir_background_image_command(
     )
     if clip.x1 <= clip.x0 or clip.y1 <= clip.y0:
         return nil
-    var tile_w = st.background_size_w_px
-    var tile_h = st.background_size_h_px
+    var tile_w = layer.size_w
+    var tile_h = layer.size_h
     if tile_w <= 0 and tile_h <= 0:
         tile_w = image.width
         tile_h = image.height
@@ -1557,13 +1618,20 @@ fn _html_draw_ir_background_image_command(
     if tile_w <= 0 or tile_h <= 0:
         return nil
     val tile_x = origin_x + _html_draw_ir_background_offset(
-        st.background_position_x_px, origin_w - tile_w
+        layer.position_x, origin_w - tile_w
     )
     val tile_y = origin_y + _html_draw_ir_background_offset(
-        st.background_position_y_px, origin_h - tile_h
+        layer.position_y, origin_h - tile_h
     )
     var props = _html_draw_ir_style_props(nodes[i], st)
     props.push(draw_ir_style_prop("image-role", "css-background"))
+    if layer.index >= 0:
+        props.push(draw_ir_style_prop("background-layer-index", "{layer.index}"))
+    var prop_index = 0
+    while prop_index < props.len():
+        if props[prop_index].key == "background-repeat":
+            props[prop_index] = draw_ir_style_prop("background-repeat", layer.repeat)
+        prop_index = prop_index + 1
     props.push(draw_ir_style_prop("background-tile-x", "{tile_x}"))
     props.push(draw_ir_style_prop("background-tile-y", "{tile_y}"))
     props.push(draw_ir_style_prop("background-tile-width", "{tile_w}"))
@@ -1589,9 +1657,10 @@ fn _html_draw_ir_background_image_command(
     props.push(draw_ir_style_prop("background-radius-bl-y",
         "{_html_draw_ir_non_negative(st.border_radius_bl_px - clip_inset_b)}"))
     var command = draw_ir_image_command(
-        _html_draw_ir_component_id(nodes[i], i) + "_background_image",
+        _html_draw_ir_component_id(nodes[i], i) + "_background_image" +
+            if layer.index >= 0: "_{layer.index}" else: "",
         clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0,
-        st.background_image_uri, props
+        layer.image_uri, props
     )
     command.clip_rect = draw_ir_rect_bounds(
         clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
@@ -1835,17 +1904,35 @@ fn _html_draw_ir_commands(
             )
             node_command.parent_id = parent_id
             commands.push(node_command)
-            if val background_command = _html_draw_ir_background_image_command(
-                nodes, styles, boxes, i, images, node_clip, width, height
-            ):
-                var background = background_command
-                background.parent_id = component_id
-                commands.push(background)
-                var border_overlay = _html_draw_ir_background_border_overlay(
-                    nodes, styles, boxes, i, node_clip, vector_fonts
-                )
-                border_overlay.parent_id = component_id
-                commands.push(border_overlay)
+            if styles[i].background_image_uri != "" or styles[i].bg_layers_raw != "":
+                val background_layers = _html_draw_ir_background_layers(styles[i])
+                var backgrounds_ready = background_layers.len() > 0
+                for layer in background_layers:
+                    if _html_draw_ir_image_index(images, layer.image_uri) < 0:
+                        backgrounds_ready = false
+                var background_index = background_layers.len() - 1
+                var lowered_backgrounds: [DrawIrCommand] = []
+                while backgrounds_ready and background_index >= 0:
+                    if val background_command = _html_draw_ir_background_image_command(
+                        nodes, styles, boxes, i, images, node_clip, width, height,
+                        background_layers[background_index]
+                    ):
+                        var background = background_command
+                        background.parent_id = component_id
+                        lowered_backgrounds.push(background)
+                    else:
+                        # A declared pair is atomic: no command survives if either
+                        # layer cannot lower through the canonical typed path.
+                        backgrounds_ready = false
+                    background_index = background_index - 1
+                if backgrounds_ready and lowered_backgrounds.len() > 0:
+                    for background in lowered_backgrounds:
+                        commands.push(background)
+                    var border_overlay = _html_draw_ir_background_border_overlay(
+                        nodes, styles, boxes, i, node_clip, vector_fonts
+                    )
+                    border_overlay.parent_id = component_id
+                    commands.push(border_overlay)
             if val image_command = _html_draw_ir_image_command(
                 nodes, styles, boxes, i, images, node_clip
             ):

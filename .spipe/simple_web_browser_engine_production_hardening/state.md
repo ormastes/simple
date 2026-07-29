@@ -2037,3 +2037,81 @@ implementation in progress / target evidence blocked
   refactor updated architecture, design, plans, manuals, domain research, the
   open bug record, and this state; no workflow/command surface changed, so
   `.codex`/`.agents`/`.claude`/`.gemini` instruction updates are N/A.
+- deployed-runtime revalidation (2026-07-29): The current deployed artifact at
+  `/home/ormastes/dev/pub/simple/bin/release/x86_64-unknown-linux-gnu/simple`
+  has SHA-256
+  `40edbb4989132623fc57d770b7c02fa85760ec0dd02405d5c22e568e0063e41b`
+  and exits zero for `--version`, but prints the explicit Rust bootstrap-seed
+  warning. It is not the required pure-Simple self-hosted CLI and cannot run
+  SSpec, docgen, browser, performance, or release evidence. The prior exit-139
+  artifact identity is superseded, but the production-runtime gate remains
+  blocked for a different, directly observed reason. No target spec was run
+  and no bootstrap was started.
+- next-gap audit tranche (2026-07-29): Three small read-only sidecars rank the
+  existing hosted-WM runtime-provider admission flaw, page Node/native/scheme
+  capability exposure, and WPT multiple-background layers. Canonical owners
+  remain `check-linux-hosted-wm-live-window-evidence.shs`,
+  `HostedBrowserRendererProcess` plus the existing browser-only JavaScript and
+  scheme policy, and the existing HTML CSS/declaration/layout/Draw-IR pipeline.
+  Frozen steps are `Bind platform sandbox evidence to the production renderer
+  binary`, `Reject renderer host capability access`, and `Render HTML and CSS
+  through canonical Draw IR`; existing `_check_security_denial` and
+  `_check_canonical_draw_ir` helpers remain authoritative. No new runtime
+  loader, TLS/sandbox/controller, JS profile, parser, WebIR, Draw IR, renderer,
+  or compositor is permitted. Audit sidecars do not edit or run runtime,
+  bootstrap, seed, or network commands.
+- next-gap selected lane (2026-07-29): The hosted-WM evidence wrapper is a
+  confirmed false-green owner: it defaults to a bootstrap runtime DSO, admits
+  it by size alone, and appends ambient `LD_PRELOAD`. The bounded TDD repair
+  stays in `check-linux-hosted-wm-live-window-evidence.shs` and its existing
+  shell/static tests: require an explicit non-bootstrap runtime provider and
+  expected SHA-256, recheck identity before launch, sanitize loader injection,
+  and emit the admitted provider identity in the receipt. It does not build or
+  alter a runtime, compiler, browser sandbox, loader, or rendering owner.
+- next-gap CSS lane (2026-07-29): Multiple CSS background images are blocked
+  before Draw IR because the shared stylesheet URL scanner admits only one
+  URL and paint lowering rejects `bg_layers_raw`. The bounded TDD slice reuses
+  the existing Style, BrowserImageSource admission, Draw IR CSS-background
+  commands, and Engine2D sampler for exactly two URL layers with existing
+  scalar longhands. It emits the CSS back layer before the front layer and
+  keeps gradients, mixed image types, local attachment, and more than two
+  layers explicitly unsupported. No new parser, WebIR, Draw IR kind, renderer,
+  compositor, framebuffer, or resource owner is allowed.
+- capability audit result (2026-07-29): BrowserSession uses the existing
+  browser-only JavaScript runtime, so Node globals are not the observed gap.
+  A separate hosted-WM path evaluates bridge-owned non-browser HTML in an
+  in-process `HostedWebContentSession`; positive `HostedWindow.owner_port`
+  already identifies that remote provenance. Existing integration tests,
+  however, intentionally define interactive remote host HTML as supported.
+  Routing positive-owner content to the existing external browser renderer or
+  inert output therefore needs an explicit contract migration and is not
+  silently changed in this tranche. REQ-WEB-BROWSER-014 remains RED for this
+  boundary mismatch; no sandbox or host-script false-green is claimed.
+- Draw IR refactor lane (2026-07-29): The shared visible-material witness
+  appends immutable text once per visible command in both Draw-IR and software
+  render paths, causing quadratic copied bytes and transient text allocation.
+  The bounded TDD refactor stays in
+  `_simple_web_visible_material_witness`: collect the existing ordered CPU and
+  solid witness lines, then join each list once. Witness ordering/hash,
+  animation provenance, `DrawIrComposition`, and Engine2D behavior remain
+  unchanged; no WebIR type or parallel rendering path is introduced.
+- next-gap implementation/review (2026-07-29): The bounded two-URL
+  `background-image` profile now admits both resources through the existing
+  BrowserSession policy, lowers the back then front layer through typed Draw
+  IR, blends through Engine2D, rejects shorthand/malformed/missing/denied
+  pairs atomically, and retains the remaining CSS ledger exclusions. The
+  visible-material witness now joins ordered visible CPU/solid lines once
+  instead of repeatedly copying growing text. Root review repaired a partial
+  layer leak and border-overlay regression; independent cycle-2 review
+  returned PASS for CSS, Draw IR ordering, CSP/missing-resource denial,
+  allocation guarding, witness identity, and animation preservation.
+- runtime-provider review limit (2026-07-29): Wrapper hardening now requires
+  explicit hash admission, rejects canonical/current copied bootstrap content,
+  stages privately, binds the launched DSO through inherited fd 9, sanitizes
+  loader variables, cleans its stage, and validates nonempty lower-hex receipt
+  values. After three review/fix cycles one blocker remains: when the canonical
+  bootstrap DSO is absent, no trusted build provenance or pinned forbidden
+  content identity distinguishes an arbitrarily copied bootstrap DSO from a
+  production provider. The wrapper improvements remain useful fail-closed
+  hardening, but this tranche does not promote hosted-WM evidence to production
+  PASS or close the existing runtime-provider bug.

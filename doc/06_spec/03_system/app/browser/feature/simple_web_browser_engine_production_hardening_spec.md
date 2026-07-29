@@ -278,6 +278,25 @@ known unsupported scopes remain in `unsupported_ledger.env`, and
 satisfy the executable REQ-019 placeholder; it remains fail-fast until a real
 pinned run and retained receipt exist.
 
+## Two URL CSS background evidence
+
+REQ-WEB-BROWSER-003/004 cover a bounded multiple-background profile without a
+second web or drawing IR.
+
+1. Admit exactly two `background-image: url(...), url(...)` resources through
+   the existing BrowserSession CSP/HSTS/resource policy.
+2. Apply the existing scalar repeat, size, position, origin, clip, and
+   attachment values to both layers.
+3. Require typed Draw IR to contain the back layer before the front layer and
+   Engine2D pixels to show the front image over the back image.
+4. Require malformed, more-than-two, missing-resource, and CSP-denied pairs to
+   emit neither layer.
+
+Gradients, mixed image types, per-layer longhand lists, local attachment, and
+more than two layers remain explicit unsupported-ledger rows. Executable
+validation remains blocked by the unavailable pure-Simple runtime; no seed or
+bootstrap result is claimed.
+
 ## Secondary address UTF-8 byte-bound evidence
 
 REQ-WEB-BROWSER-009/010 require every browser address editor to enforce the

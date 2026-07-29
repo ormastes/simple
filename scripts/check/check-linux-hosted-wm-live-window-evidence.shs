@@ -10,7 +10,8 @@ ENTRY=src/os/hosted/hosted_entry.spl
 SIMPLE_BIN="${SIMPLE_BIN:-}"
 HOSTED_BIN="${HOSTED_WM_ARTIFACT:-$BUILD_DIR/hosted-wm}"
 WINT_LIB="${SIMPLE_WM_WINIT_LIB:-src/runtime/spl_winit/target/release/libspl_winit.so}"
-RUNTIME_LIB="${SIMPLE_WM_RUNTIME_LIB:-src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so}"
+RUNTIME_LIB="${SIMPLE_WM_RUNTIME_LIB:-}"
+RUNTIME_LIB_EXPECTED_SHA256="${SIMPLE_WM_RUNTIME_LIB_SHA256:-}"
 FONT_ASSET='assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf'
 FONT_ASSET_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
 # Filled from the exact raw RGB crop after the first current-path capture.
@@ -28,6 +29,15 @@ case "${1:-}" in
         exit 2
         ;;
 esac
+
+SELF_TEST_ROOT=""
+BOOTSTRAP_RUNTIME_LIB="$ROOT_DIR/src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so"
+if [ "$SELF_TEST" -eq 1 ]; then
+    SELF_TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/linux-hosted-wm-runtime-self-test.XXXXXX")"
+    BUILD_DIR="$SELF_TEST_ROOT"
+    REPORT_PATH="$BUILD_DIR/report.md"
+    trap 'rm -rf "$SELF_TEST_ROOT"' EXIT INT TERM
+fi
 
 LOG_PATH="$BUILD_DIR/stdout.log"
 ERR_PATH="$BUILD_DIR/stderr.log"
@@ -67,6 +77,92 @@ rm -f "$LOG_PATH" "$ERR_PATH" "$BUILD_LOG" "$SNAPSHOT_LIVE" "$CAPTURE_LIVE" \
 
 sha256_file() {
     sha256sum "$1" | awk '{print $1}'
+}
+
+sha256_text() {
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+}
+
+lower_sha256() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+    return 0
+}
+
+canonical_regular_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    directory="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)" || return 1
+    printf '%s/%s\n' "$directory" "$(basename -- "$1")"
+}
+
+bootstrap_runtime_provider() {
+    case "$1" in
+        */src/compiler_rust/target/bootstrap/*) return 0 ;;
+    esac
+    if [ -f "$BOOTSTRAP_RUNTIME_LIB" ] && [ ! -L "$BOOTSTRAP_RUNTIME_LIB" ]; then
+        [ "$(sha256_file "$1")" = "$(sha256_file "$BOOTSTRAP_RUNTIME_LIB")" ] && return 0
+    fi
+    return 1
+}
+
+admit_runtime_provider() {
+    runtime_provider_status=fail
+    runtime_provider_reason=runtime-provider-explicit-required
+    runtime_provider_source_path=""
+    runtime_provider_path=""
+    runtime_provider_sha256=""
+    [ "$RUNTIME_LIB" != "" ] || return 1
+    lower_sha256 "$RUNTIME_LIB_EXPECTED_SHA256" || {
+        runtime_provider_reason=runtime-provider-sha256-invalid
+        return 1
+    }
+    runtime_provider_source_path="$(canonical_regular_file "$RUNTIME_LIB")" || {
+        runtime_provider_reason=runtime-provider-not-canonical-regular-file
+        return 1
+    }
+    if bootstrap_runtime_provider "$runtime_provider_source_path"; then
+        runtime_provider_reason=runtime-provider-bootstrap-forbidden
+        return 1
+    fi
+    runtime_provider_sha256="$(sha256_file "$runtime_provider_source_path")"
+    if [ "$runtime_provider_sha256" != "$RUNTIME_LIB_EXPECTED_SHA256" ]; then
+        runtime_provider_reason=runtime-provider-sha256-mismatch
+        return 1
+    fi
+    runtime_provider_status=pass
+    runtime_provider_reason=pass
+    runtime_provider_build_identity="$(sha256_text "runtime-provider-content-identity-v1
+path=$runtime_provider_source_path
+sha256=$runtime_provider_sha256")"
+}
+
+runtime_provider_source_still_admitted() {
+    current_runtime_path="$(canonical_regular_file "$RUNTIME_LIB")" || return 1
+    [ "$current_runtime_path" = "$runtime_provider_source_path" ] || return 1
+    [ "$(sha256_file "$current_runtime_path")" = "$runtime_provider_sha256" ] || return 1
+    [ "$runtime_provider_sha256" = "$RUNTIME_LIB_EXPECTED_SHA256" ]
+}
+
+stage_admitted_runtime_provider() {
+    runtime_provider_stage_dir="$(mktemp -d "$BUILD_DIR/runtime-provider-admission.XXXXXX")" || return 1
+    chmod 700 "$runtime_provider_stage_dir" || return 1
+    runtime_provider_path="$runtime_provider_stage_dir/$(basename -- "$runtime_provider_source_path")"
+    cp "$runtime_provider_source_path" "$runtime_provider_path.new" || return 1
+    chmod 500 "$runtime_provider_path.new" || return 1
+    mv "$runtime_provider_path.new" "$runtime_provider_path" || return 1
+    [ "$(sha256_file "$runtime_provider_path")" = "$runtime_provider_sha256" ]
+}
+
+runtime_provider_stage_still_admitted() {
+    [ "$runtime_provider_path" != "" ] && [ -f "$runtime_provider_path" ] && [ ! -L "$runtime_provider_path" ] &&
+        [ "$(sha256_file "$runtime_provider_path")" = "$runtime_provider_sha256" ]
+}
+
+open_admitted_runtime_provider() {
+    [ -d /proc/$$/fd ] || return 1
+    exec 9<"$runtime_provider_path"
+    runtime_provider_fd_path="/proc/$$/fd/9"
+    [ "$(sha256_file "$runtime_provider_fd_path")" = "$runtime_provider_sha256" ]
 }
 
 capture_argb_checksum() {
@@ -165,6 +261,13 @@ emit() {
         echo "linux_hosted_wm_live_window_engine2d_sha256=$engine_sha"
         echo "linux_hosted_wm_live_window_wrapper_sha256=$wrapper_sha"
         echo "linux_hosted_wm_live_window_native_artifact_sha256=$hosted_bin_sha"
+        echo "linux_hosted_wm_live_window_runtime_provider_source_path=$runtime_provider_source_path"
+        echo "linux_hosted_wm_live_window_runtime_provider_path=$runtime_provider_path"
+        echo "linux_hosted_wm_live_window_runtime_provider_sha256=$runtime_provider_sha256"
+        echo "linux_hosted_wm_live_window_runtime_provider_expected_sha256=$RUNTIME_LIB_EXPECTED_SHA256"
+        echo "linux_hosted_wm_live_window_runtime_provider_build_identity=$runtime_provider_build_identity"
+        echo "linux_hosted_wm_live_window_runtime_provider_status=$runtime_provider_status"
+        echo "linux_hosted_wm_live_window_runtime_provider_admission_sha256=$runtime_provider_admission_sha256"
         echo "linux_hosted_wm_live_window_window_marker=$window_marker"
         echo "linux_hosted_wm_live_window_frame_marker=$frame_marker"
         echo "linux_hosted_wm_live_window_font_identity=$font_identity"
@@ -263,6 +366,8 @@ emit() {
         echo "- native source manifest: $SOURCE_MANIFEST_ID (${source_manifest_admitted_sha:--}, status=$source_manifest_status)"
         echo "- pure-Simple compiler SHA-256: ${simple_bin_sha:--}"
         echo "- native artifact SHA-256: ${hosted_bin_sha:--}"
+        echo "- runtime provider: ${runtime_provider_path:--} (${runtime_provider_sha256:--}, status=$runtime_provider_status)"
+        echo "- runtime provider admission: ${runtime_provider_admission_sha256:--}"
         echo "- wrapper SHA-256: ${wrapper_sha:--}"
         echo "- font identity: ${font_identity:--}"
         echo "- glyph crop: $GLYPH_RGB (${glyph_sha:--})"
@@ -359,6 +464,16 @@ engine_sha="$(sha256_file src/os/compositor/compositor_engine2d.spl)"
 simple_bin_sha=""
 wrapper_sha="$(sha256_file "$0")"
 hosted_bin_sha=""
+runtime_provider_path=""
+runtime_provider_source_path=""
+runtime_provider_sha256=""
+runtime_provider_reason="runtime-provider-not-checked"
+runtime_provider_status=fail
+runtime_provider_admission_sha256=""
+runtime_provider_build_identity=""
+runtime_provider_stage_dir=""
+runtime_provider_fd_path=""
+wint_provider_path=""
 
 resolve_source_provenance || {
     emit fail source-provenance-unavailable
@@ -396,6 +511,51 @@ if [ "$SELF_TEST" -eq 1 ]; then
         exit 1
     fi
     rm -rf "$git_fixture"
+    runtime_fixture_dir="$(mktemp -d "$BUILD_DIR/runtime-provider-self-test.XXXXXX")"
+    runtime_fixture="$runtime_fixture_dir/runtime-provider.so"
+    bootstrap_fixture="$runtime_fixture_dir/src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so"
+    bootstrap_copy_fixture="$runtime_fixture_dir/copied-bootstrap-runtime.so"
+    mkdir -p "$(dirname -- "$bootstrap_fixture")"
+    printf 'admitted runtime fixture\n' >"$runtime_fixture"
+    printf 'bootstrap runtime fixture\n' >"$bootstrap_fixture"
+    cp "$bootstrap_fixture" "$bootstrap_copy_fixture"
+    BOOTSTRAP_RUNTIME_LIB="$bootstrap_fixture"
+    RUNTIME_LIB="$runtime_fixture"
+    RUNTIME_LIB_EXPECTED_SHA256="$(sha256_file "$runtime_fixture")"
+    admit_runtime_provider
+    runtime_provider_source_still_admitted
+    stage_admitted_runtime_provider
+    runtime_provider_stage_still_admitted
+    RUNTIME_LIB="$bootstrap_fixture"
+    if admit_runtime_provider; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    RUNTIME_LIB="$bootstrap_copy_fixture"
+    RUNTIME_LIB_EXPECTED_SHA256="$(sha256_file "$bootstrap_copy_fixture")"
+    if admit_runtime_provider; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    RUNTIME_LIB="$runtime_fixture"
+    RUNTIME_LIB_EXPECTED_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+    if admit_runtime_provider; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    RUNTIME_LIB_EXPECTED_SHA256="$(sha256_file "$runtime_fixture")"
+    admit_runtime_provider
+    stage_admitted_runtime_provider
+    printf 'changed\n' >>"$runtime_fixture"
+    if runtime_provider_source_still_admitted; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    runtime_provider_stage_still_admitted
+    open_admitted_runtime_provider
+    [ "$(sha256_file "$runtime_provider_fd_path")" = "$runtime_provider_sha256" ]
+    exec 9<&-
+    rm -rf "$runtime_fixture_dir"
     echo "linux_hosted_wm_live_window_self_test_status=pass"
     echo "linux_hosted_wm_live_window_self_test_source_vcs=$source_vcs"
     echo "linux_hosted_wm_live_window_self_test_source_provenance_status=$source_provenance_status"
@@ -408,6 +568,12 @@ if [ "$SELF_TEST" -eq 1 ]; then
     echo "linux_hosted_wm_live_window_self_test_semantic_receipt=required"
     echo "linux_hosted_wm_live_window_self_test_exact_readback_fields=required"
     echo "linux_hosted_wm_live_window_self_test_capture_checksum=pass"
+    echo "linux_hosted_wm_live_window_self_test_runtime_bootstrap=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_bootstrap_content=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_sha256_mismatch=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_changed=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_staged=pass"
+    echo "linux_hosted_wm_live_window_self_test_runtime_fd=pass"
     exit 0
 fi
 
@@ -423,8 +589,8 @@ for command in jq xdotool import convert sha256sum cargo Xvfb; do
     }
 done
 
-if [ ! -x "$SIMPLE_BIN" ] || [ ! -s "$RUNTIME_LIB" ]; then
-    emit unavailable missing-pure-simple-or-runtime
+if [ ! -x "$SIMPLE_BIN" ]; then
+    emit unavailable missing-pure-simple
     exit 1
 fi
 simple_bin_sha="$(sha256_file "$SIMPLE_BIN")"
@@ -434,6 +600,11 @@ case "$("$SIMPLE_BIN" --version 2>&1 | tr '[:upper:]' '[:lower:]')" in
         exit 1
         ;;
 esac
+
+if ! admit_runtime_provider; then
+    emit fail "$runtime_provider_reason"
+    exit 1
+fi
 
 font_sha="$(sha256_file "$FONT_ASSET" 2>/dev/null || true)"
 if [ "$font_sha" != "$FONT_ASSET_SHA256" ]; then
@@ -447,6 +618,10 @@ if [ ! -s "$WINT_LIB" ] || find src/runtime/spl_winit/src -type f -newer "$WINT_
         exit 1
     }
 fi
+wint_provider_path="$(canonical_regular_file "$WINT_LIB")" || {
+    emit fail winit-provider-not-canonical-regular-file
+    exit 1
+}
 
 write_native_source_manifest "$SOURCE_MANIFEST" || {
     emit fail native-source-manifest-unavailable
@@ -484,6 +659,24 @@ source_manifest_status=pass
     exit 1
 }
 hosted_bin_sha="$(sha256_file "$HOSTED_BIN")"
+if ! runtime_provider_source_still_admitted; then
+    runtime_provider_status=fail
+    runtime_provider_reason=runtime-provider-changed-during-build
+    emit fail "$runtime_provider_reason"
+    exit 1
+fi
+if ! stage_admitted_runtime_provider; then
+    runtime_provider_status=fail
+    runtime_provider_reason=runtime-provider-stage-failed
+    emit fail "$runtime_provider_reason"
+    exit 1
+fi
+runtime_provider_admission_sha256="$(sha256_text "runtime-provider-admission-v1
+hosted_artifact_sha256=$hosted_bin_sha
+runtime_provider_sha256=$runtime_provider_sha256
+runtime_provider_build_identity=$runtime_provider_build_identity
+simple_bin_sha256=$simple_bin_sha
+native_source_manifest_sha256=$source_manifest_admitted_sha")"
 export HOSTED_WM_ARTIFACT="$HOSTED_BIN"
 export HOSTED_WM_ARTIFACT_SHA256="$hosted_bin_sha"
 
@@ -509,16 +702,33 @@ cleanup() {
     fi
     kill "$xvfb_pid" 2>/dev/null || true
     wait "$xvfb_pid" 2>/dev/null || true
+    exec 9<&- 2>/dev/null || true
+    if [ "$runtime_provider_stage_dir" != "" ]; then
+        rm -rf "$runtime_provider_stage_dir"
+    fi
 }
 trap cleanup EXIT INT TERM
 sleep 1
 
 printf '0 idle\n' >"$COMMAND_PATH"
+if ! runtime_provider_stage_still_admitted; then
+    runtime_provider_status=fail
+    runtime_provider_reason=runtime-provider-changed-before-launch
+    emit fail "$runtime_provider_reason"
+    exit 1
+fi
+if ! open_admitted_runtime_provider; then
+    runtime_provider_status=fail
+    runtime_provider_reason=runtime-provider-fd-admission-failed
+    emit fail "$runtime_provider_reason"
+    exit 1
+fi
+env -u LD_PRELOAD -u LD_AUDIT -u LD_DEBUG -u LD_DEBUG_OUTPUT -u LD_LIBRARY_PATH -u LD_ORIGIN_PATH \
 DISPLAY="$x_display" WAYLAND_DISPLAY= WINIT_UNIX_BACKEND=x11 \
 SIMPLE_HOSTED_WM_LIVE_PROOF=1 SIMPLE_WM_EVIDENCE_SNAPSHOT_PATH="$ROOT_DIR/$SNAPSHOT_LIVE" \
 SIMPLE_WM_EVIDENCE_CAPTURE_PATH="$ROOT_DIR/$CAPTURE_LIVE" \
 SIMPLE_WM_EVIDENCE_INPUT_FIFO="$ROOT_DIR/$COMMAND_PATH" \
-LD_PRELOAD="$ROOT_DIR/$WINT_LIB:$ROOT_DIR/$RUNTIME_LIB${LD_PRELOAD:+:$LD_PRELOAD}" \
+LD_PRELOAD="$wint_provider_path:/proc/self/fd/9" \
     "$HOSTED_BIN" >"$LOG_PATH" 2>"$ERR_PATH" &
 wm_pid=$!
 
