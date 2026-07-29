@@ -572,19 +572,123 @@ expensive on these specific two nodes.
    property calls once border/background/font/flex close most of the
    remaining ~18% fallback fraction, or whether coverage alone is enough
    that this no longer matters in practice.
-5. **Now the top priority, per the 2026-07-29 closing measurement above:**
-   investigate the outlier-node cost (9.65s and 1.8s for 2 of a 10-node
-   sample, ~98.5% of sampled wall time, confirmed NOT inside
-   `apply_decls`). Bracket the other 7 `apply_decls` call sites in the
-   node body individually (inline style, important-origin cascade,
-   `selectedcontent`, the two WM-theme-fallback material paths) plus the
-   non-`apply_decls` logic interleaved with them, on nodes that reproduce
-   the outlier, to localize which one is expensive. This is very likely
-   the actual reason no budget value makes this lane green (dispatch/
-   fallback optimization work on the batched call has real, measured
-   wins -- 9.9x per call, 82.4% coverage -- but has not moved the
-   budget-break node count past 38 across three fix stages, because the
-   bottleneck was never primarily there).
+5. ~~Now the top priority, per the 2026-07-29 closing measurement above~~
+   **LOCALIZED 2026-07-29, see "Outlier-node localization" section below:**
+   the outlier-node cost is `FontRenderer.measure_text_advances`'s
+   per-character native glyph-metric FFI calls (~425ms/char), not
+   `apply_decls`, not any of the 7 un-batched call sites, and not
+   interleaved WM-theme/cascade logic. Next fix candidate: a Simple-side
+   glyph-advance cache ahead of the native calls, or a native-backend
+   profiling pass -- not attempted this pass (not a <20-line change).
+
+## Outlier-node localization 2026-07-29: font-metric FFI calls in `measure_text_advances`, not `apply_decls`
+
+Per-call-site bracketing on the two outlier nodes from the closing
+measurement above (10-node sample, nodes 5 and 8), using temporary
+`rt_time_now_micros()` brackets around each of the 7 un-batched
+`apply_decls` call sites and the interleaved logic segments (inherit,
+tag-defaults + presentational, selector-candidate matching, the batched-decl
+accumulation loop, the important-origin cascade, the WM-theme-fallback
+branch, the `selectedcontent` branch, empty-cells, vector-font resolution,
+material admission), plus the existing (already-vetted, default-off)
+`_WM_TRACE` phase receipts inside `resolve_font_metrics_with_language`
+(`src/lib/nogc_sync_mut/text_layout/font_renderer.spl`). All probes were
+temporary, reverted, and diff-verified (`git diff --stat` against the fetch
+base shows zero changes to either instrumented file) before this landing.
+
+**Node identity:** both outlier nodes are `#text` nodes -- node 5:
+`text_len=20 parent=4`; node 8: `text_len=4 parent=7`. Both are the *only*
+`#text` nodes in the original 10-node sample; the other 8 sampled nodes are
+non-text elements that never reach the vector-font branch at all (it is
+gated `if vector_fonts and nd.tag == "#text":`). This reframes the finding:
+nodes 5/8 are not structurally special -- **every `#text` node pays this
+cost when `vector_fonts` is on**, and the 10-node sample happened to
+contain exactly two of them.
+
+**Per-segment result** (two runs, comparable load, ranges shown):
+
+| Segment | Node 5 (20 chars) | Node 8 (4 chars) |
+|---|---|---|
+| inherit | 1.8-3.3ms | 2.1-2.6ms |
+| tag-defaults + presentational | 2.6-4.0ms | 3.0-3.1ms |
+| candidates_raw (1 candidate) | 2.0-3.2ms | 2.4-3.2ms |
+| specificity loop | 7.0-11.7ms | 8.2-11.2ms |
+| sort | 0.5-1.0ms | 0.7-1.0ms |
+| combined_decls accumulation | 1.8-3.5ms | 2.2-3.5ms |
+| **apply_decls (main, batched)** | 17.7-27.4ms | 21.9-30.6ms |
+| inline_normal | ~0.01ms | ~0.01ms |
+| important_cascade (no `!important` on this page) | ~0.003ms | ~0.004ms |
+| inline_important | ~0.003ms | ~0.004ms |
+| selectedcontent | ~0.004ms | ~0.004ms |
+| wm_fallback (attr checks, no match) | 2.5-5.0ms | 3.1-4.9ms |
+| empty_cells | ~0.005ms | ~0.006ms |
+| **vector_fonts (font-metric resolution)** | **9.62-11.99s** | **1.76-2.41s** |
+| material_admission | 6.3-9.0ms | 7.1-10.9ms |
+
+Every other segment is single-digit milliseconds. `vector_fonts` alone is
+99.7-99.9% of the node's total time in every run -- confirming the closing
+measurement's attribution and ruling out hypotheses (b) (a quadratic
+accumulated-state scan -- no segment grows with node count here) and (c)
+(WM-theme decl-table rebuilds -- `wm_fallback` is ms-scale).
+
+**Inside `vector_fonts`**, further bracketed via the existing `_WM_TRACE`
+phase receipts (reused, not duplicated -- `t={rt_time_now_micros()}` added
+to the 5 existing gated print sites plus 4 new tail-of-function checkpoints,
+all in the outer function body, none inside `_resolved_font_metric_cached`
+where a prior probe attempt regressed the WM lane per this file's own
+2026-07-19 warning):
+
+| Phase | Node 5 | Node 8 |
+|---|---|---|
+| `_browser_default_for_family_cached` (font load/lookup) | 1.07s (`from_cache=false`, cold) | 8ms (`from_cache=true`, warm) |
+| cache-lookup (miss both times -- distinct text) | ~1.2ms | ~4.9ms |
+| **`renderer.measure_text_advances(content, font_size)`** | **8.50s** | **1.71s** |
+| `horizontal_line_metric` | 0.5ms | 0.5ms |
+| `clear_ttf` (only when not `from_cache`) | 1.0ms | 0.02ms (skipped) |
+| struct build + cache store | 1.4ms | 1.6ms |
+
+**Named cost center:** `FontRenderer.measure_text_advances`
+(`src/lib/nogc_sync_mut/text_layout/font_renderer.spl:1277`), called once
+per `#text` node from `resolve_font_metrics_with_language`. It loops per
+character calling `get_glyph_advance(cp, font_size)` and, for adjacent
+pairs, `horizontal_kern(prev_cp, cp, font_size)` -- both native FFI
+round-trips into the Rust font backend (`rt_font_glyph_advance`, and the
+kern/line-metric SFFI dispatch in `spl_fonts.spl`). The per-character cost
+is consistent across both nodes regardless of font-cache state
+(`from_cache` true or false): **node 5 = 8.50s / 20 chars = ~425ms/char;
+node 8 = 1.71s / 4 chars = ~428ms/char.** This ~425ms/char constant -- not
+text length, not font-load state -- is what actually drives the 8-12s and
+1.8-2.4s node costs. Font *loading* (the one-time `dlopen` + 17MB-TTF-parse
+this file's own comments already flagged) is real but secondary: ~1.07s on
+the first `#text` node's cache miss, ~8ms on every warm node after it.
+
+Hypothesis (a) (a per-node font-registry/measurement trigger on specific
+tags) is confirmed, and further localized to the per-character native
+glyph-metric calls specifically -- not font loading, which was the leading
+theory in the code's own prior comments.
+
+**Is batching this call site mechanical?** No. Unlike the `apply_decls`
+stage-0 fix, this is not a call-site-count problem (each node already calls
+`measure_text_advances` exactly once), and `_apply_decls_dispatch`-style
+hybrid dispatch does not apply -- this sits three layers below `apply_decls`,
+entirely inside the font backend. The natural next fix is a Simple-side
+glyph-advance cache keyed by `(codepoint, font_size, resolved_family)` ahead
+of the native calls, or a profiling pass into why `rt_font_glyph_advance` /
+the kern and line-metric SFFI dispatch cost ~200ms+ per call individually in
+the Rust backend regardless of `from_cache` state. Both are out of scope for
+this bounded probe (neither is a trivial, <20-line change) -- filed as the
+next fix candidate.
+
+### Next fix candidate (not attempted this pass)
+Add a Simple-side glyph-advance cache keyed by `(codepoint, font_size,
+resolved_family)` ahead of the `get_glyph_advance` / `horizontal_kern`
+native calls in `measure_text_advances`
+(`src/lib/nogc_sync_mut/text_layout/font_renderer.spl:1277`), or determine
+why the individual native calls cost ~200ms+ each regardless of
+`from_cache` state. This is now the real bottleneck for any page with
+`#text` nodes under `vector_fonts` -- not `apply_decls`, which three
+optimization stages have already reduced to single-digit-millisecond-scale
+per node.
 
 ## bracket-slice (`s[i:j]`) survey gap — enumerated 2026-07-29, not fixed
 
