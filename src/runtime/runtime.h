@@ -194,7 +194,13 @@ int64_t  spl_file_size(const char* path);
 
 bool     rt_dir_create(const char* path, bool recursive);
 bool     rt_dir_remove_all(const char* path);
+#if defined(SIMPLE_CORE_C_STANDALONE)
+int64_t  rt_dir_list(const uint8_t* path, uint64_t path_len);
+int8_t   rt_dir_remove(const uint8_t* path, uint64_t path_len,
+                       int8_t recursive);
+#else
 const char** rt_dir_list(const char* path, int64_t* out_count);
+#endif
 void     rt_dir_list_free(const char** entries, int64_t count);
 
 /* ===== File Locking ===== */
@@ -489,6 +495,7 @@ int64_t  rt_char_from_code(int64_t code);
 int64_t  rt_string_split(int64_t value, int64_t delimiter);
 int64_t  rt_string_join(int64_t array, int64_t separator);
 int8_t   rt_contains(int64_t collection, int64_t value);
+int64_t  rt_index_of(int64_t collection, int64_t value);
 int64_t  rt_unwrap_or_self(int64_t value);
 int8_t   rt_is_none(int64_t value);
 int8_t   rt_is_some(int64_t value);
@@ -639,6 +646,7 @@ void     rt_bdd_expect_fail(int64_t msg_ptr, int64_t msg_len);
 void     rt_bdd_expect_eq_rv(int64_t actual, int64_t expected);
 void     rt_bdd_expect_truthy_rv(int64_t value);
 int64_t  rt_bdd_format_results(void);
+int64_t  rt_bdd_executed_count(void);
 void     rt_bdd_clear_state(void);
 
 /* ===== Command-Line Arguments ===== */
@@ -670,7 +678,16 @@ int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uin
 int         rt_file_append(const char* path, const char* content);
 int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
 int         rt_file_delete(const char* path);
+#if defined(SIMPLE_CORE_C_STANDALONE)
+int8_t      rt_file_copy(const uint8_t* src, uint64_t src_len,
+                         const uint8_t* dst, uint64_t dst_len);
+int8_t      rt_file_rename(const uint8_t* src, uint64_t src_len,
+                           const uint8_t* dst, uint64_t dst_len);
+int64_t     rt_file_hash_sha256(const uint8_t* path, uint64_t path_len);
+int8_t      rt_process_exists(int64_t pid);
+#else
 int         rt_file_copy(const char* src, const char* dst);
+#endif
 int64_t     rt_file_size(const char* path);
 int         rt_file_fsync(const char* path);
 int         rt_file_fsync_cached(const char* path);

@@ -9,6 +9,147 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
+## 2026-07-29 scoped SimpleOS Stage 2 result
+
+`SIMPLEOS_STAGE2_FONT: BLOCKED`
+
+The active scope is the ten-spec SimpleOS override in
+`doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`; Stage 3/4 and the
+cross-platform GPU/performance matrix are deferred.
+
+- Runtime and runner gates: PASS. The pure-Simple Stage 2 compiler
+  SHA-256 is
+  `7f9f101472ba081ba89e58137820eb24fc8357f0d050c52c24fb725b6b14e142`.
+  Reproducible Runtime6 archive SHA-256 is
+  `a6d21c8fcf88d1ca788577a799564df022e917762abca1bad7736d3babb52782`;
+  the repeated archive is identical. Its manifest SHA-256 is
+  `6fd885abd620d180981f7a3f17be4328b2ded7dd802b41d4a347e222eff015a7`
+  and reports `status=pass` and `repeated_build_equal=true`. The
+  `rt_string_free` self-check output SHA-256 is
+  `143283b26f5acc4162b35b2294b91df0943f8876294e773248f7b0c38fc5879e`;
+  the coverage self-check receipt/output SHA-256 values are
+  `a757b96d2692f285d0b4703e387129cb6945793896624bdc427c3a78ff7a4180`
+  and
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+  The manifest records unique strong `T` providers in `runtime_native.o` for
+  `rt_dir_list`, `rt_dir_remove`, `rt_file_copy`, `rt_file_hash_sha256`,
+  `rt_file_rename`, and `rt_process_exists`. Runtime6 supersedes
+  Runtime5/Runner5. Accepted Runner8 supersedes Runner6 with binary SHA-256
+  `8096d0897994d7602b23a8eadc6252ed1f7ea00bb811ebfc5a0f3050cf282440`
+  and source SHA-256
+  `093e013427a070f79889dc7dcb710063551533ae6cfc993e474d233f173a4c9e`.
+  Its green receipt SHA-256
+  `6afa15355dd3e1a4c05183b0a9d552c4757a01384b07d092b141510f54be05df`
+  records 1 example / 0 failures / exit 0. Provider receipt SHA-256
+  `b70fa412075a5a0a51593b68c02213ab9ce736115440f2259be0f8b9c2482466`
+  records the runtime capsule at 7 examples / 0 failures / exit 0 and core
+  I/O at 3 examples / 0 failures / exit 0. Historical Runner6 calibration
+  receipt SHA-256
+  `22bf1bf5850c333677621672b023b4106f7378a394545d730a7c24c4c22af93d`
+  remains retained; its deliberate-red and zero-example contracts each
+  passed exactly once.
+- Manuals: 10/10 commands exited zero and each reported
+  `DONE Generated 1 docs (1 complete, 0 stubs)`. The immutable diagnostic tree
+  is
+  `build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-1/`
+  with SHA-256
+  `a0af0d4e2d04625c2d493074b2b53f77be70b34851215e2ca70a9872f7ac7386`.
+  Canonical promotion remains blocked with the executable specs.
+- Assets: all three specs wrapped, then Stage 2 native-build exited 1 before
+  examples. Supporting immutable asset/notice checks passed 59/59, but no
+  runtime PASS is claimed.
+- Shaping: all three specs wrapped, then native-build exited 1 before examples.
+  Static source now includes registered-only Hindi, Arabic, and Urdu exact
+  witnesses, handle-free Draw IR round-trip, and nonempty material checks; no
+  runtime PASS is claimed.
+- Material: the desktop production contract failed during native-build before
+  examples. Source now rejects a valid zero-quad font batch and traces
+  `SharedWmScene -> DrawIrComposition -> Engine2D -> FontRenderer`, but this is
+  not runtime evidence.
+- QEMU: the x86 wrapper contract reached 9/11 examples. Static reduction fixed
+  three test-side placeholder interpolations and earlier stale source/input
+  expectations, but the three-cycle cap forbids another run in this session.
+  RV64 wrapped and then failed during native-build; no x86 or RV64 live guest
+  proof was started.
+
+One native-build blocker remains:
+
+1. The third and final semantics-preserving parser probe advanced Stage 2
+   discovery past the prior
+   `src/lib/skia/feature/shaper/ot_layout_apply.spl:91:1` site and now stops at
+   `src/lib/skia/feature/shaper/ot_layout_gpos_basic.spl:27`. The three-cycle
+   cap is exhausted, so no fourth probe or speculative source edit is
+   authorized.
+
+Runner source now preserves native-build stderr and safely handles ordinary
+multiline matchers while leaving manual/comment/raw-string content unchanged.
+Runtime6 clears the prior six-symbol asset/RV64 link blocker, but supersedes
+Runtime5/Runner5. Runner8 supersedes Runner6 and is source-matched, green, and
+provider-checked against Runtime6; the Runner6 and older Runner4 calibration
+history remains retained. Focused execution remains pending behind the capped
+parser blocker. Therefore 0/10 focused specs are accepted and the scoped done
+mark remains absent.
+
+## 2026-07-29 temporary Stage 2 and capped Stage 3 result
+
+The temporary old-runtime-compatible Stage 2 producer is
+`build/native_probe/memory-dispatch-fix/stage2-goal-rootfix2-simple`
+(SHA-256
+`0b1f741c9272a23c066ec42356949bfca7dca96605f8da4333fe0a8958b380ae`).
+Its incremental receipt is 689 reused / 4 rebuilt, zero failed, 1m18.72s
+wall time, and 304,068 KiB maximum RSS. It was not deployed and is not Stage 4
+evidence.
+
+The final allowed positional Stage 3 cycle passed physical-source parsing and
+entered HIR, then exited 139 after declaring
+`src/compiler/types/_TypeLayout/arch_and_verify.spl`. `/usr/bin/time` recorded
+56.00s and 863,972 KiB maximum RSS. No output artifact exists. The retained log
+is `build/native_probe/memory-dispatch-fix/stage3-goal-rootfix2.log`
+(SHA-256
+`456aa8bdd3b83e1ac6be0f092902491379c1d125ebf755af7091dcb84d260a79`).
+
+That producer used the old runtime's mutating `Dict.set` form to pass the prior
+nil-map crash. Independent P0/P1 review rejected shipping that compatibility
+form because current main requires dictionary rebinding. The current six-file
+source/test diff restores the rebinding, uses physical source keys at
+entry-closure discovery, parse-cache insertion, and alias replay, keeps three
+old-parent-compatible expression forms, and extends the existing dedup contract
+test for those sites. Its source/test binary diff SHA-256 is
+`aa209d0a2b51d523064f21529c32bcdeb17b2999d2d43a308dd55d06e0416901`;
+it is build-unverified because the cap is exhausted. A fresh scoped producer
+window may resume the exact failed command from
+`/tmp/simple-font-sync-20260727`:
+
+```bash
+systemd-run --user --scope --quiet -p MemoryMax=16G -p MemorySwapMax=0 \
+  /usr/bin/time -v -o build/native_probe/memory-dispatch-fix/stage3-goal-rootfix2.time \
+  timeout -k 30s 1800s flock -n build/bootstrap/native_cache.lock \
+  env -u SIMPLE_NATIVE_BUILD_RUST -u SIMPLE_BOOTSTRAP_STAGE4 RUST_LOG=error \
+  SIMPLE_BOOTSTRAP=1 SIMPLE_COMPILER_PHASE_PROFILE=1 \
+  SIMPLE_COMPILER_MEMORY_PROFILE=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_RUNTIME_BUNDLE=all \
+  SIMPLE_NATIVE_ARENA_DECLS=1 \
+  SIMPLE_NATIVE_BUILD_TARGET=x86_64-unknown-linux-gnu \
+  SIMPLE_NATIVE_BUILD_THREADS=1 \
+  SIMPLE_NATIVE_BUILD_CACHE_DIR=build/bootstrap/native_cache \
+  LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+  SIMPLE_RUNTIME_PATH=/home/ormastes/dev/pub/simple/src/compiler_rust/target/bootstrap \
+  SIMPLE_BINARY=build/native_probe/memory-dispatch-fix/stage2-goal-rootfix2-simple \
+  build/native_probe/memory-dispatch-fix/stage2-goal-rootfix2-simple native-build \
+  --target x86_64-unknown-linux-gnu --backend cranelift --threads 1 \
+  --cache-dir build/bootstrap/native_cache --mode one-binary --low-memory \
+  --runtime-path /home/ormastes/dev/pub/simple/src/compiler_rust/target/bootstrap \
+  -o build/native_probe/memory-dispatch-fix/stage3-goal-rootfix2-simple \
+  src/app/cli/bootstrap_main.spl \
+  > build/native_probe/memory-dispatch-fix/stage3-goal-rootfix2.log 2>&1
+```
+
+This session must not rerun it: the three-cycle producer cap is exhausted.
+Without a current Stage 3 and admitted full CLI, AC-3 and every dependent
+runtime/docgen/native gate remain blocked.
+
+`STATUS: FAIL`
+
 ## 2026-07-28 current-overlay incremental Stage 4 result
 
 The SPipe skill and bootstrap rule now require Stage 4 to prefer a provenance-

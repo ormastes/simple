@@ -6,13 +6,20 @@ use std.test_runner.test_result_wrapper.{preprocess_spipe_native_result_file}
 use app.io.mod.{env_get}
 use app.io.process_ops.{process_run}
 
-extern fn rt_string_bytes(value: text) -> [i64]
-
 fn run_bounded(seconds: text, command: text, args: [text]) -> (text, text, i64):
     var timeout_args = ["--kill-after=5s", seconds, command]
     for arg in args:
         timeout_args.push(arg)
     process_run("/usr/bin/timeout", timeout_args)
+
+fn run_bounded_capture_stderr(seconds: text, command: text, args: [text]) -> (text, text, i64):
+    var timeout_args = [
+        "-c", "exec \"$@\" 2>&1", "font-evidence-child",
+        "/usr/bin/timeout", "--kill-after=5s", seconds, command
+    ]
+    for arg in args:
+        timeout_args.push(arg)
+    process_run("/bin/sh", timeout_args)
 
 fn delete_artifact(path: text) -> bool:
     if not file_exists(path):
@@ -71,52 +78,60 @@ fn core_c_provider_valid(archive: text) -> bool:
     ])
 
 fn decimal_text_valid(value: text) -> bool:
-    val bytes = rt_string_bytes(value)
-    if bytes.len() == 0:
+    if value.len() == 0:
         return false
-    for byte in bytes:
-        val code = byte.to_i64()
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
         if code < 48 or code > 57:
             return false
+        index = index + 1
     true
 
 fn decimal_text_is_zero(value: text) -> bool:
     if not decimal_text_valid(value):
         return false
-    for byte in rt_string_bytes(value):
-        if byte.to_i64() != 48:
+    var index: i64 = 0
+    while index < value.len():
+        if value.char_code_at(index) != 48:
             return false
+        index = index + 1
     true
 
 fn decimal_text_lte(left: text, right: text) -> bool:
-    val lhs = rt_string_bytes(left)
-    val rhs = rt_string_bytes(right)
     var lhs_start = 0
     var rhs_start = 0
-    while lhs_start + 1 < lhs.len():
-        if lhs[lhs_start].to_i64() != 48:
+    while lhs_start + 1 < left.len():
+        if left.char_code_at(lhs_start) != 48:
             break
         lhs_start = lhs_start + 1
-    while rhs_start + 1 < rhs.len():
-        if rhs[rhs_start].to_i64() != 48:
+    while rhs_start + 1 < right.len():
+        if right.char_code_at(rhs_start) != 48:
             break
         rhs_start = rhs_start + 1
-    val lhs_len = lhs.len() - lhs_start
-    val rhs_len = rhs.len() - rhs_start
+    val lhs_len = left.len() - lhs_start
+    val rhs_len = right.len() - rhs_start
     if lhs_len != rhs_len:
         return lhs_len < rhs_len
     var offset = 0
     while offset < lhs_len:
-        val lhs_digit = lhs[lhs_start + offset].to_i64()
-        val rhs_digit = rhs[rhs_start + offset].to_i64()
+        val lhs_digit = left.char_code_at(lhs_start + offset)
+        val rhs_digit = right.char_code_at(rhs_start + offset)
         if lhs_digit != rhs_digit:
             return lhs_digit < rhs_digit
         offset = offset + 1
     true
 
+fn font_runner_index_of(haystack: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    if not haystack.contains(needle):
+        return -1
+    haystack.split(needle)[0].len()
+
 fn valid_native_result(stdout: text, code: i64) -> bool:
     val marker = "test-runner: native result wrapper complete"
-    val marker_at = stdout.index_of(marker) ?? -1
+    val marker_at = font_runner_index_of(stdout, marker)
     if marker_at < 0:
         return false
     val after_marker = stdout.substring(marker_at + marker.len())
@@ -141,7 +156,7 @@ fn valid_native_result(stdout: text, code: i64) -> bool:
     if not decimal_text_lte(failures, examples):
         return false
     if code == 0:
-        decimal_text_is_zero(failures) and after_marker.trim() == ""
+        decimal_text_is_zero(failures) and after_marker.trim().len() == 0
     else:
         code == 1 and not decimal_text_is_zero(failures) and after_marker.trim() == "error: test-runner: spec failed"
 
@@ -235,7 +250,7 @@ fn main() -> i64:
         build_env_args.push(arg)
     val build_args_text = build_args.join(" ")
     print "font-evidence-runner: build-command=timeout --kill-after=5s 300s env <pinned-native-env> {compiler} {build_args_text}"
-    val (build_stdout, build_stderr, build_code) = run_bounded("300s", "/usr/bin/env", build_env_args)
+    val (build_stdout, build_stderr, build_code) = run_bounded_capture_stderr("300s", "/usr/bin/env", build_env_args)
     if build_stdout != "":
         print build_stdout
     if build_stderr != "":

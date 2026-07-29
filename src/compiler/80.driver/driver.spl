@@ -74,7 +74,7 @@ use compiler.driver.driver_source_loading.{
     _driver_collect_sources, _driver_collect_sources_via_find,
     _driver_entry_import_dirname, _driver_entry_import_module_paths,
     _driver_resolve_entry_import, _driver_collect_entry_import_source,
-    _driver_canonical_source_path, _driver_unique_physical_sources,
+    _driver_canonical_source_path, _driver_physical_source_key, _driver_unique_physical_sources,
     _driver_module_name_collision,
     DriverTextBucketSet, _driver_text_bucket_set_new, _driver_text_bucket_set_has, _driver_text_bucket_set_add,
     _format_type_infer_error, _format_nll_error, _format_coherence_error, _format_trait_error
@@ -535,7 +535,7 @@ pub class CompilerDriver:
                 # Its imports are identical for every alias, so scanning each
                 # alias grows the closure queue exponentially and can exhaust
                 # memory before parsing begins.
-                val closure_physical_key = _driver_canonical_source_path(closure_src.path)
+                val closure_physical_key = _driver_physical_source_key(closure_src.path)
                 if _driver_text_bucket_set_has(closure_scanned_paths, closure_physical_key):
                     closure_idx = closure_idx + 1
                     continue
@@ -662,7 +662,7 @@ pub class CompilerDriver:
             var parsed_entry_index: Dict<text, i64> = {}
             var parsed_entry_modules: [Module] = []
             for source in unique_entry_sources:
-                val physical_key = _driver_canonical_source_path(source.path)
+                val physical_key = _driver_physical_source_key(source.path)
                 if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
                     dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
                 log_phase("phase2:parse:file:start {source.path} chars={source.content.len()}")
@@ -685,12 +685,12 @@ pub class CompilerDriver:
                 parsed_entry_index[physical_key] = parsed_entry_modules.len()
                 parsed_entry_modules = parsed_entry_modules.push(entry_module)
             for source in entry_sources:
-                val physical_key = _driver_canonical_source_path(source.path)
+                val physical_key = _driver_physical_source_key(source.path)
                 if not parsed_entry_index.contains_key(physical_key):
                     self.ctx.errors.push("internal entry-closure parse cache miss for {source.path}")
                     return (self.ctx, false)
                 val parsed_idx = parsed_entry_index[physical_key]
-                entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]
+                entry_modules = entry_modules.set(source.module_name, parsed_entry_modules[parsed_idx])
             var entry_ctx: CompileContext = self.ctx
             entry_ctx.modules = entry_modules
             # Alias module keys remain in entry_modules for import lookup, but

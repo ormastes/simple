@@ -3,11 +3,27 @@ use std.spec.{describe, it, expect}
 
 val PRODUCER = "scripts/check/build-core-c-bootstrap-runtime-capsule.shs"
 
+fn expect_core_c_io_providers(source: text):
+    val prefix = "CORE_IO_SYMBOLS=\""
+    expect(source).to_contain(prefix)
+    val declared = source.split(prefix)[1].split("\"")[0].split(" ")
+    val expected = ["rt_file_copy", "rt_file_rename", "rt_file_hash_sha256",
+        "rt_process_exists", "rt_dir_list", "rt_dir_remove"]
+    expect(declared).to_equal(expected)
+    expect(source).to_contain("nm_has_text_symbol \"$TMP_DIR/archive.nm.txt\" \"$symbol\"")
+    expect(source).to_contain("nm_has_text_symbol \"$TMP_DIR/runtime_native.nm.txt\" \"$symbol\"")
+    expect(source).to_contain("die \"archive-$symbol-provider-missing\"")
+    expect(source).to_contain("die \"runtime-native-$symbol-provider-missing\"")
+    expect(source).to_contain("require_unique_text_provider \"$symbol\" runtime_native.o")
+    expect(source).to_contain("printf '%s\\n' \"$symbol\"_archive_symbol=T")
+    expect(source).to_contain("printf '%s\\n' \"$symbol\"_provider=runtime_native.o")
+
 describe "direct core-C bootstrap runtime capsule producer":
     it "uses the canonical ordered core-C source graph":
         val source = file_read(PRODUCER)
         for input in [
             "runtime_native.c",
+            "runtime_contracts.c",
             "runtime_framebuffer.c",
             "runtime_directx_core.c",
             "runtime_legacy_core.c",
@@ -52,15 +68,64 @@ describe "direct core-C bootstrap runtime capsule producer":
         expect(source).to_contain("missing-runtime-input")
         expect(source).to_contain("archive-empty")
 
-    it "requires the contract ABI from the canonical runtime-native provider":
+    it "requires the contract ABI from the canonical runtime-contracts provider":
         val producer = file_read(PRODUCER)
-        val runtime = file_read("src/runtime/runtime_native.c")
+        val runtime = file_read("src/runtime/runtime_contracts.c")
         val header = file_read("src/runtime/runtime.h")
         for symbol in ["simple_contract_check", "simple_contract_check_msg"]:
             expect(runtime).to_contain("void {symbol}(")
             expect(header).to_contain("void     {symbol}(")
             expect(producer).to_contain("{symbol}_archive_symbol=T")
-            expect(producer).to_contain("{symbol}_provider=runtime_native.o")
+            expect(producer).to_contain("{symbol}_provider=runtime_contracts.o")
+
+    it "requires the six frozen core I/O providers from runtime-native":
+        expect_core_c_io_providers(file_read(PRODUCER))
+
+    it "guards recursive removal and self-checks core I/O behavior":
+        val runtime = file_read("src/runtime/runtime_native.c")
+        val selfcheck = file_read(
+            "src/runtime/test/rt_string_free_selfcheck.c"
+        )
+        val remove_provider = runtime.split("int8_t rt_dir_remove(")[1]
+            .split("int8_t rt_process_exists(")[0]
+
+        val before_canonical = remove_provider.split("realpath(path")[0]
+        expect(before_canonical).to_contain("lstat(path")
+        expect(before_canonical).to_contain("!S_ISDIR")
+        for guard in [
+            "realpath(path",
+            "realpath(home",
+            "home && !canonical_home",
+            "protected_paths",
+            "components <= 2",
+            "strcmp(canonical, canonical_home)",
+            "rt_dir_remove_all(canonical)"
+        ]:
+            expect(remove_provider).to_contain(guard)
+
+        val windows_scope = remove_provider.split("#if defined(_WIN32)")[1]
+            .split("#else")[0]
+        expect(windows_scope).to_contain("reparse-aware canonical path guards")
+        expect(windows_scope).to_contain("ok = 0")
+        expect(windows_scope.contains("rt_dir_remove_all")).to_equal(false)
+
+        for refusal in [
+            "setenv(\"HOME\", root",
+            "recursive directory remove refuses HOME",
+            "symlink(root, alias)",
+            "recursive directory remove refuses top-level symlink",
+            "symlink refusal leaves target directory intact"
+        ]:
+            expect(selfcheck).to_contain(refusal)
+        for behavior in [
+            "file copy provider succeeds",
+            "file hash provider matches SHA-256 of abc",
+            "directory list provider returns fixture entries",
+            "nonrecursive directory remove succeeds",
+            "recursive directory remove succeeds",
+            "current process exists"
+        ]:
+            expect(selfcheck).to_contain(behavior)
 
     it "attests immutable inputs tools archive provider and self-check":
         val source = file_read(PRODUCER)
@@ -92,6 +157,13 @@ describe "direct core-C bootstrap runtime capsule producer":
             expect(source).to_contain(field)
         expect(source).to_contain("rt_string_free_archive_symbol=T")
         expect(source).to_contain("rt_string_free_provider=runtime_native.o")
+        expect(source).to_contain("require_unique_text_provider()")
+        expect(source).to_contain("require_unique_text_provider rt_string_free runtime_native.o")
+        expect(source).to_contain("(type == \"T\" || type == \"W\") && symbol == expected")
+        expect(source).to_contain("print type, member")
+        expect(source).to_contain("\"T $unique_expected_provider\"")
+        expect(source).to_contain("die \"$unique_reason-provider-count\"")
+        expect(source).to_contain("die \"$unique_reason-provider-not-$unique_expected_reason\"")
         expect(source).to_contain("NF >= 3")
         expect(source).to_contain("rt_string_free_selfcheck=pass")
         expect(source).to_contain("rt_string_free_selfcheck.c")

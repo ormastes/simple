@@ -84,6 +84,7 @@ RUNTIME_STATUS=$(git status --porcelain --untracked-files=all -- "$RUNTIME_DIR")
 
 SOURCE_FILES="
 runtime_native.c
+runtime_contracts.c
 runtime_coverage_core.c
 runtime_framebuffer.c
 runtime_directx_core.c
@@ -247,6 +248,8 @@ REPEAT_ARCHIVE_SHA256=$(hash_file "$REPEAT_ARCHIVE")
     die "archive-nm-failed"
 "$NM_PATH" -g "$OBJECT_DIR/runtime_native.o" >"$TMP_DIR/runtime_native.nm.txt" 2>&1 ||
     die "runtime-native-nm-failed"
+"$NM_PATH" -g "$OBJECT_DIR/runtime_contracts.o" >"$TMP_DIR/runtime_contracts.nm.txt" 2>&1 ||
+    die "runtime-contracts-nm-failed"
 "$NM_PATH" -g "$OBJECT_DIR/runtime_coverage_core.o" >"$TMP_DIR/runtime_coverage_core.nm.txt" 2>&1 ||
     die "runtime-coverage-core-nm-failed"
 
@@ -266,11 +269,18 @@ nm_has_text_symbol "$TMP_DIR/archive.nm.txt" rt_string_free ||
     die "archive-rt-string-free-provider-missing"
 nm_has_text_symbol "$TMP_DIR/runtime_native.nm.txt" rt_string_free ||
     die "runtime-native-rt-string-free-provider-missing"
-for symbol in simple_contract_check simple_contract_check_msg; do
+CORE_IO_SYMBOLS="rt_file_copy rt_file_rename rt_file_hash_sha256 rt_process_exists rt_dir_list rt_dir_remove"
+for symbol in $CORE_IO_SYMBOLS; do
     nm_has_text_symbol "$TMP_DIR/archive.nm.txt" "$symbol" ||
         die "archive-$symbol-provider-missing"
     nm_has_text_symbol "$TMP_DIR/runtime_native.nm.txt" "$symbol" ||
         die "runtime-native-$symbol-provider-missing"
+done
+for symbol in simple_contract_check simple_contract_check_msg; do
+    nm_has_text_symbol "$TMP_DIR/archive.nm.txt" "$symbol" ||
+        die "archive-$symbol-provider-missing"
+    nm_has_text_symbol "$TMP_DIR/runtime_contracts.nm.txt" "$symbol" ||
+        die "runtime-contracts-$symbol-provider-missing"
 done
 for symbol in rt_coverage_enabled rt_coverage_clear rt_coverage_dump_sdn rt_coverage_free_sdn rt_coverage_decision_probe rt_coverage_condition_probe; do
     nm_has_text_symbol "$TMP_DIR/archive.nm.txt" "$symbol" ||
@@ -279,23 +289,36 @@ for symbol in rt_coverage_enabled rt_coverage_clear rt_coverage_dump_sdn rt_cove
         die "runtime-coverage-core-$symbol-provider-missing"
 done
 
-PROVIDER_FILE="$TMP_DIR/rt_string_free.providers.txt"
-: >"$PROVIDER_FILE"
-for object in $OBJECT_DIR/*.o; do
-    "$NM_PATH" -g "$object" 2>/dev/null |
-        awk -v member="$(basename "$object")" '
-            NF >= 3 {
-                type = $(NF - 1)
-                symbol = $NF
-                sub(/^_/, "", symbol)
-                if (type == "T" && symbol == "rt_string_free") print member
-            }
-        ' >>"$PROVIDER_FILE"
+require_unique_text_provider() {
+    unique_symbol=$1
+    unique_expected_provider=$2
+    unique_reason=$(printf '%s' "$unique_symbol" | tr '_' '-')
+    unique_expected_reason=$(printf '%s' "${unique_expected_provider%.o}" | tr '_' '-')
+    unique_provider_file="$TMP_DIR/$unique_symbol.providers.txt"
+    : >"$unique_provider_file"
+    for object in $OBJECT_DIR/*.o; do
+        "$NM_PATH" -g "$object" 2>/dev/null |
+            awk -v member="$(basename "$object")" -v expected="$unique_symbol" '
+                NF >= 3 {
+                    type = $(NF - 1)
+                    symbol = $NF
+                    sub(/^_/, "", symbol)
+                    if ((type == "T" || type == "W") && symbol == expected) {
+                        print type, member
+                    }
+                }
+            ' >>"$unique_provider_file"
+    done
+    [ "$(wc -l <"$unique_provider_file" | tr -d ' ')" = "1" ] ||
+        die "$unique_reason-provider-count"
+    [ "$(sed -n '1p' "$unique_provider_file")" = "T $unique_expected_provider" ] ||
+        die "$unique_reason-provider-not-$unique_expected_reason"
+}
+
+require_unique_text_provider rt_string_free runtime_native.o
+for symbol in $CORE_IO_SYMBOLS; do
+    require_unique_text_provider "$symbol" runtime_native.o
 done
-[ "$(wc -l <"$PROVIDER_FILE" | tr -d ' ')" = "1" ] ||
-    die "rt-string-free-provider-count"
-[ "$(sed -n '1p' "$PROVIDER_FILE")" = "runtime_native.o" ] ||
-    die "rt-string-free-provider-not-runtime-native"
 
 SELF_CHECK_BIN="$TMP_DIR/rt_string_free_selfcheck"
 SELF_CHECK_LOG="$TMP_DIR/rt_string_free_selfcheck.out"
@@ -367,9 +390,13 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "runtime_coverage_core_selfcheck_receipt_sha256=$(hash_file "$TMP_DIR/runtime-coverage-core-selfcheck.receipt")"
     echo "runtime_coverage_core_selfcheck_output_sha256=$(hash_file "$COVERAGE_SELF_CHECK_LOG")"
     echo "simple_contract_check_archive_symbol=T"
-    echo "simple_contract_check_provider=runtime_native.o"
+    echo "simple_contract_check_provider=runtime_contracts.o"
     echo "simple_contract_check_msg_archive_symbol=T"
-    echo "simple_contract_check_msg_provider=runtime_native.o"
+    echo "simple_contract_check_msg_provider=runtime_contracts.o"
+    for symbol in $CORE_IO_SYMBOLS; do
+        printf '%s\n' "$symbol"_archive_symbol=T
+        printf '%s\n' "$symbol"_provider=runtime_native.o
+    done
     echo "producer_script_sha256=$(hash_file scripts/check/build-core-c-bootstrap-runtime-capsule.shs)"
     while IFS= read -r input; do
         key=$(printf '%s' "${input#"$RUNTIME_DIR/"}" | tr '/.' '__')

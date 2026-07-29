@@ -24,10 +24,10 @@ fn _add(record: LayoutGlyphRecord, value: GposDataValue):
     record.y_advance_units = record.y_advance_units + value.y_advance
     record.x_offset_device_pixels = record.x_offset_device_pixels + value.x_place_device_pixels
     record.y_offset_device_pixels = record.y_offset_device_pixels + value.y_place_device_pixels
-    record.x_advance_device_pixels =
-        record.x_advance_device_pixels + value.x_advance_device_pixels
-    record.y_advance_device_pixels =
-        record.y_advance_device_pixels + value.y_advance_device_pixels
+    record.x_advance_device_pixels = (
+        record.x_advance_device_pixels + value.x_advance_device_pixels)
+    record.y_advance_device_pixels = (
+        record.y_advance_device_pixels + value.y_advance_device_pixels)
 fn _value(font: OtFont, base: i64, offset: i64, limit: i64, format: u32,
           context: GposDataContext, budget: GposDataBudget) -> GposDataValue:
     gpos_data_value_adjusted(font, base, offset, limit, format, context, Some(budget))
@@ -151,25 +151,25 @@ fn _cursive(font: OtFont, lookup: GposLookup, sub: i64, limit: i64,
     val entry_anchor = _anchor(font, sub + entry_offset, limit, context, budget)
     if not exit_anchor.valid or not entry_anchor.valid: return false
     records[index].x_advance_units = exit_anchor.x + records[index].x_offset_units
-    records[next.next].x_advance_units =
-        records[next.next].x_advance_units - entry_anchor.x - records[next.next].x_offset_units
-    records[index].x_advance_device_pixels =
-        exit_anchor.x_device_pixels + records[index].x_offset_device_pixels
-    records[next.next].x_advance_device_pixels =
+    records[next.next].x_advance_units = (
+        records[next.next].x_advance_units - entry_anchor.x - records[next.next].x_offset_units)
+    records[index].x_advance_device_pixels = (
+        exit_anchor.x_device_pixels + records[index].x_offset_device_pixels)
+    records[next.next].x_advance_device_pixels = (
         records[next.next].x_advance_device_pixels - entry_anchor.x_device_pixels -
-        records[next.next].x_offset_device_pixels
+        records[next.next].x_offset_device_pixels)
     if (lookup.flag & 1u32) != 0u32:
-        records[index].y_offset_units =
-            records[next.next].y_offset_units + entry_anchor.y - exit_anchor.y
-        records[index].y_offset_device_pixels =
+        records[index].y_offset_units = (
+            records[next.next].y_offset_units + entry_anchor.y - exit_anchor.y)
+        records[index].y_offset_device_pixels = (
             records[next.next].y_offset_device_pixels + entry_anchor.y_device_pixels -
-            exit_anchor.y_device_pixels
+            exit_anchor.y_device_pixels)
     else:
-        records[next.next].y_offset_units =
-            records[index].y_offset_units + exit_anchor.y - entry_anchor.y
-        records[next.next].y_offset_device_pixels =
+        records[next.next].y_offset_units = (
+            records[index].y_offset_units + exit_anchor.y - entry_anchor.y)
+        records[next.next].y_offset_device_pixels = (
             records[index].y_offset_device_pixels + exit_anchor.y_device_pixels -
-            entry_anchor.y_device_pixels
+            entry_anchor.y_device_pixels)
     true
 
 fn _pair(font: OtFont, lookup: GposLookup, sub: i64, limit: i64,
@@ -201,8 +201,8 @@ fn _pair(font: OtFont, lookup: GposLookup, sub: i64, limit: i64,
             val glyph = read_u16_be(font.blob, cursor)
             if glyph as i64 <= previous: return false
             previous = glyph as i64
-            val one = _value(font, sub, cursor + 2, limit, vf1, context, budget)
-            val two = _value(font, sub, cursor + 2 + one.size, limit, vf2, context, budget)
+            val one = _value(font, set, cursor + 2, limit, vf1, context, budget)
+            val two = _value(font, set, cursor + 2 + one.size, limit, vf2, context, budget)
             if not one.valid or not two.valid: return false
             if glyph == records[second.next].glyph_id:
                 _add(records[index], one); _add(records[second.next], two); return true
@@ -257,6 +257,7 @@ fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64,
             if not target.valid: return false
             if target.found:
                 var anchor_offset: i64 = 0
+                var target_anchor_base = target_array
                 if kind == 4u32:
                     if target_array + 2 > limit: return false
                     val count = read_u16_be(font.blob, target_array) as i64
@@ -269,6 +270,7 @@ fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64,
                     val components = read_u16_be(font.blob, ligature) as i64
                     if components < 1 or ligature + 2 + components * classes * 2 > limit: return false
                     if records[candidate].component_clusters.len() != components: return false
+                    target_anchor_base = ligature
                     var component: i64 = -1
                     var component_cluster: i64 = -1
                     var component_index: i64 = 0
@@ -287,9 +289,8 @@ fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64,
                     if target.index >= count or target_array + 2 + count * classes * 2 > limit: return false
                     anchor_offset = read_u16_be(font.blob, target_array + 2 + (target.index * classes + mark_class) * 2) as i64
                 if anchor_offset == 0: return true
-                val target_anchor = _anchor(font,
-                    (if kind == 5u32: target_array + read_u16_be(font.blob, target_array + 2 + target.index * 2) as i64
-                     else: target_array) + anchor_offset, limit, context, budget)
+                val target_anchor = _anchor(
+                    font, target_anchor_base + anchor_offset, limit, context, budget)
                 if not target_anchor.valid: return false
                 var pen_x: i64 = 0
                 var pen_y: i64 = 0
@@ -305,12 +306,12 @@ fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64,
                     between = between + 1
                 records[index].x_offset_units = records[candidate].x_offset_units + target_anchor.x - mark_anchor.x - pen_x
                 records[index].y_offset_units = records[candidate].y_offset_units + target_anchor.y - mark_anchor.y - pen_y
-                records[index].x_offset_device_pixels =
+                records[index].x_offset_device_pixels = (
                     records[candidate].x_offset_device_pixels + target_anchor.x_device_pixels -
-                    mark_anchor.x_device_pixels - pen_x_pixels
-                records[index].y_offset_device_pixels =
+                    mark_anchor.x_device_pixels - pen_x_pixels)
+                records[index].y_offset_device_pixels = (
                     records[candidate].y_offset_device_pixels + target_anchor.y_device_pixels -
-                    mark_anchor.y_device_pixels - pen_y_pixels
+                    mark_anchor.y_device_pixels - pen_y_pixels)
                 return true
             return true
         candidate = candidate - 1
@@ -345,8 +346,8 @@ fn _pair_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64,
         if not gpos_data_take(budget) or cursor + 2 > limit:
             return GposBasicState(valid: false, matched: false, applied: false)
         val glyph = read_u16_be(font.blob, cursor)
-        val one = _value(font, sub, cursor + 2, limit, vf1, context, budget)
-        val two = _value(font, sub, cursor + 2 + one.size, limit, vf2, context, budget)
+        val one = _value(font, set, cursor + 2, limit, vf1, context, budget)
+        val two = _value(font, set, cursor + 2 + one.size, limit, vf2, context, budget)
         if not one.valid or not two.valid: return GposBasicState(valid: false, matched: false, applied: false)
         if glyph == records[second.next].glyph_id: return GposBasicState(valid: true, matched: true, applied: false)
         cursor = cursor + 2 + one.size + two.size
@@ -390,13 +391,13 @@ fn _validate_single(font: OtFont, sub: i64, limit: i64, budget: GposDataBudget,
     if format != 2u32 or sub + 8 > limit: return false
     val count = read_u16_be(font.blob, sub + 6) as i64
     val first = _value(font, sub, sub + 8, limit, value_format, context, budget)
-    if count <= 0 or count != coverage.count or not first.valid or
-        sub + 8 + count * first.size > limit or coverage_start < sub + 8 + count * first.size: return false
+    if (count <= 0 or count != coverage.count or not first.valid or
+        sub + 8 + count * first.size > limit or coverage_start < sub + 8 + count * first.size): return false
     var i: i64 = 0
     while i < count:
-        if not gpos_data_take(budget) or
+        if (not gpos_data_take(budget) or
             not _value(font, sub, sub + 8 + i * first.size, limit,
-                value_format, context, budget).valid: return false
+                value_format, context, budget).valid): return false
         i = i + 1
     true
 fn _validate_cursive(font: OtFont, sub: i64, limit: i64, budget: GposDataBudget,
@@ -451,8 +452,8 @@ fn _validate_pair(font: OtFont, sub: i64, limit: i64, budget: GposDataBudget,
             while p < pairs:
                 if not gpos_data_take(budget) or cursor + 2 > limit: return false
                 val second = read_u16_be(font.blob, cursor) as i64
-                val one = _value(font, sub, cursor + 2, limit, vf1, context, budget)
-                val two = _value(font, sub, cursor + 2 + one.size, limit, vf2, context, budget)
+                val one = _value(font, set, cursor + 2, limit, vf1, context, budget)
+                val two = _value(font, set, cursor + 2 + one.size, limit, vf2, context, budget)
                 if second <= previous or not one.valid or not two.valid: return false
                 previous = second
                 cursor = cursor + 2 + one.size + two.size
@@ -519,8 +520,8 @@ fn _validate_mark(font: OtFont, kind: u32, sub: i64, limit: i64,
         if not gpos_data_take(budget): return false
         val mark_class = read_u16_be(font.blob, marks + 2 + i * 4) as i64
         val anchor = read_u16_be(font.blob, marks + 4 + i * 4) as i64
-        if mark_class >= classes or anchor == 0 or
-            not _anchor(font, marks + anchor, limit, context, budget).valid: return false
+        if (mark_class >= classes or anchor == 0 or
+            not _anchor(font, marks + anchor, limit, context, budget).valid): return false
         i = i + 1
     val target_count = read_u16_be(font.blob, targets) as i64
     if target_count != target_cov.count: return false

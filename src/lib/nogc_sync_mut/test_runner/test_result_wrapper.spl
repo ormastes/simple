@@ -84,22 +84,29 @@ fn spipe_last_index_of(haystack: text, needle: text) -> i64:
         idx = idx - 1
     -1
 
+fn spipe_index_of(haystack: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    if not haystack.contains(needle):
+        return -1
+    haystack.split(needle)[0].len()
+
 fn spipe_rewrite_infix_expect_line(line: text) -> text:
     val trimmed = line.trim()
     if not trimmed.starts_with("expect ") or trimmed.starts_with("expect("):
         return line
-    val matchers: [text] = ["to_equal", "to_not_equal", "to_be", "to_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
+    val matchers: [text] = ["to_equal", "to_not_equal", "to_be", "to_contain", "to_not_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
     var i = 0
     while i < matchers.len():
         val matcher = matchers[i]
         val needle = " " + matcher + " "
-        val split_at = trimmed.index_of(needle) ?? -1
+        val split_at = spipe_index_of(trimmed, needle)
         if split_at >= 0:
             val actual = trimmed.substring(7, split_at).trim()
             val expected = trimmed.substring(split_at + needle.len()).trim()
             if actual.len() == 0 or expected.len() == 0:
                 return line
-            val indent_len = line.index_of(line.trim()) ?? 0
+            val indent_len = spipe_index_of(line, line.trim())
             val indent = line.substring(0, indent_len)
             return indent + "expect(" + actual + ")." + matcher + "(" + expected + ")"
         i = i + 1
@@ -166,11 +173,85 @@ fn spipe_matching_close_paren(value: text, initial_depth: i64) -> i64:
         i = i + 1
     -1
 
+fn spipe_paren_delta(value: text) -> i64:
+    var delta = 0
+    var in_string = false
+    var escaped = false
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+        elif ch == "\"":
+            in_string = true
+        elif ch == "(":
+            delta = delta + 1
+        elif ch == ")":
+            delta = delta - 1
+        i = i + 1
+    delta
+
+fn spipe_join_multiline_method_expects(content: text) -> text:
+    var joined: [text] = []
+    var pending_lines: [text] = []
+    var pending = ""
+    var depth = 0
+    var in_triple_string = false
+    for raw_line in content.split("\n"):
+        val trimmed = raw_line.trim()
+        val triple_parts = raw_line.split("\"\"\"")
+        val has_triple_quote = triple_parts.len() > 1
+        val toggles_triple_string = triple_parts.len() % 2 == 0
+        val unsafe_to_join = has_triple_quote or raw_line.contains("#") or raw_line.contains("r\"")
+        if pending != "":
+            if unsafe_to_join:
+                for pending_line in pending_lines:
+                    joined.push(pending_line)
+                joined.push(raw_line)
+                pending_lines = []
+                pending = ""
+                depth = 0
+                if toggles_triple_string:
+                    in_triple_string = not in_triple_string
+                continue
+            pending_lines.push(raw_line)
+            pending = pending + " " + trimmed
+            depth = depth + spipe_paren_delta(raw_line)
+            if depth <= 0:
+                joined.push(pending)
+                pending_lines = []
+                pending = ""
+            continue
+        if in_triple_string or has_triple_quote:
+            joined.push(raw_line)
+            if toggles_triple_string:
+                in_triple_string = not in_triple_string
+            continue
+        val starts_method_expect = (
+            trimmed.starts_with("expect(") or trimmed.starts_with("expect (")
+        )
+        depth = spipe_paren_delta(raw_line)
+        if starts_method_expect and depth > 0 and not unsafe_to_join:
+            pending = raw_line
+            pending_lines = [raw_line]
+        else:
+            joined.push(raw_line)
+            depth = 0
+    if pending != "":
+        for pending_line in pending_lines:
+            joined.push(pending_line)
+    joined.join("\n")
+
 fn spipe_rewrite_method_expect_line(line: text) -> text:
     val trimmed_start = line.trim()
     if not trimmed_start.starts_with("expect(") and not trimmed_start.starts_with("expect ("):
         return line
-    val indent_len = line.index_of(trimmed_start) ?? 0
+    val indent_len = spipe_index_of(line, trimmed_start)
     val indent = line.substring(0, indent_len)
     val rest_after_expect = trimmed_start.substring(6)
     val after_open_paren = rest_after_expect.trim()
@@ -192,7 +273,7 @@ fn spipe_rewrite_method_expect_line(line: text) -> text:
             return line
         negated = true
         after_neg = next.substring(1)
-    val matcher_end = after_neg.index_of("(") ?? -1
+    val matcher_end = spipe_index_of(after_neg, "(")
     if matcher_end < 0:
         return line
     val matcher = after_neg.substring(0, matcher_end)
@@ -229,6 +310,8 @@ fn spipe_rewrite_method_expect_line(line: text) -> text:
         form = if negated: actual + " > " + arg_str else: actual + " <= " + arg_str
     elif matcher == "to_contain":
         form = if negated: "not ((" + actual + ").contains(" + arg_str + "))" else: "(" + actual + ").contains(" + arg_str + ")"
+    elif matcher == "to_not_contain":
+        form = if negated: "(" + actual + ").contains(" + arg_str + ")" else: "not ((" + actual + ").contains(" + arg_str + "))"
     elif matcher == "to_start_with":
         form = if negated: "not ((" + actual + ").starts_with(" + arg_str + "))" else: "(" + actual + ").starts_with(" + arg_str + ")"
     elif matcher == "to_end_with":
@@ -331,7 +414,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
         return ""
 
     # Split into imports/top-level-defs and body, wrap body in fn main():
-    val lines = content.split("\n")
+    val lines = spipe_join_multiline_method_expects(content).split("\n")
     var import_parts: [text] = []
     var top_level_parts: [text] = []
     var body_parts: [text] = []
@@ -343,6 +426,19 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     var skipping_spec_import = false
 
     for raw_line in lines:
+        val raw_trimmed = raw_line.trim()
+        val raw_triple_parts = raw_line.split("\"\"\"")
+        val raw_has_triple_quote = raw_triple_parts.len() > 1
+        val raw_toggles_triple_string = raw_triple_parts.len() % 2 == 0
+        if in_docstring or raw_trimmed.starts_with("\"\"\""):
+            if in_top_fn:
+                top_level_parts.push(raw_line)
+            else:
+                body_parts.push("    " + raw_line)
+            if raw_has_triple_quote and raw_toggles_triple_string:
+                in_docstring = not in_docstring
+            continue
+
         val infix_line = spipe_rewrite_infix_expect_line(raw_line)
         var line = spipe_rewrite_method_expect_line(infix_line)
         var trimmed = line.trim()
@@ -356,7 +452,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
         if native_result and ((is_expect_line and trimmed.contains(" to_")) or spipe_expect_has_method_suffix(trimmed) or trimmed.starts_with(".to_") or trimmed.starts_with(".not_()")):
             return ""
         if native_result and trimmed.starts_with("expect "):
-            val indent_len = line.index_of(trimmed) ?? 0
+            val indent_len = spipe_index_of(line, trimmed)
             line = line.substring(0, indent_len) + "expect(" + trimmed.substring(7) + ")"
             trimmed = line.trim()
 
@@ -373,33 +469,6 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
             if import_brace_depth <= 0:
                 in_import_block = false
                 import_brace_depth = 0
-            continue
-
-        # Track multi-line docstrings (""")
-        if trimmed.starts_with("\"\"\""):
-            # Toggle docstring state. A line with """ toggles in/out.
-            # If we see """ at start of line and we're NOT in a function body,
-            # treat docstrings at top level as body (they'll go into main).
-            if in_docstring:
-                in_docstring = false
-                if in_top_fn:
-                    top_level_parts.push(line)
-                else:
-                    body_parts.push("    " + line)
-                continue
-            else:
-                in_docstring = true
-                if in_top_fn:
-                    top_level_parts.push(line)
-                else:
-                    body_parts.push("    " + line)
-                continue
-
-        if in_docstring:
-            if in_top_fn:
-                top_level_parts.push(line)
-            else:
-                body_parts.push("    " + line)
             continue
 
         # Import/use statements go before fn main()
@@ -420,7 +489,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
 
         # Top-level declarations (at column 0 only) stay outside main.
         if not in_top_fn:
-            val line_indent = line.index_of(trimmed) ?? 0
+            val line_indent = spipe_index_of(line, trimmed)
             if line_indent == 0:
                 if spipe_is_top_level_start(trimmed):
                     in_top_fn = true
@@ -434,7 +503,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
             if trimmed.len() == 0:
                 top_level_parts.push("")
                 continue
-            val current_indent = line.index_of(trimmed) ?? 0
+            val current_indent = spipe_index_of(line, trimmed)
             if current_indent > top_fn_indent:
                 top_level_parts.push(line)
                 continue

@@ -126,6 +126,49 @@ describe "SimpleOS production desktop render entry":
         expect(src.contains("update_window_content(")).to_be(false)
         expect(src.contains("shell.run()")).to_be(false)
 
+    it "should carry selected font identity through nonempty canonical Engine2D material":
+        step("Trace the production font and event boundary")
+        val gui_entry = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
+        val shell = file_read("src/os/desktop/shell.spl")
+        val scene_draw_ir = file_read("src/lib/common/ui/window_scene_draw_ir.spl")
+        val draw_ir_contract = file_read("src/lib/common/ui/draw_ir.spl")
+        val wm_executor = file_read("src/os/compositor/engine2d_wm_frame_executor.spl")
+        val draw_ir_executor = file_read("src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl")
+        val engine = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        val renderer = file_read("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
+
+        expect(gui_entry).to_contain(
+            "font identity=sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100")
+        expect(shell).to_contain("fn runtime_scene_snapshot() -> SharedWmScene:")
+        expect(scene_draw_ir).to_contain(
+            "draw_ir_text_resolved_font(component_id, x, legacy_y, value, color, metrics.family, metrics.identity")
+        val payload_start = draw_ir_contract.index_of("struct DrawIrGlyphRunPayload:")
+        val payload_end = draw_ir_contract.index_of("struct DrawEdge:")
+        expect(payload_start).to_be_greater_than(0)
+        expect(payload_end).to_be_greater_than(payload_start)
+        val payload = draw_ir_contract.substring(payload_start, payload_end)
+        expect(payload.contains("handle")).to_be(false)
+        expect(payload.contains("atlas")).to_be(false)
+        expect(payload.contains("cache")).to_be(false)
+
+        step("Submit the boundary output to its canonical consumer")
+        val composition = wm_executor.index_of(
+            "val composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene")
+        val submission = wm_executor.index_of(
+            "engine2d_draw_ir_adv_composition_present_with_images(self.engine, composition")
+        expect(composition).to_be_greater_than(0)
+        expect(submission).to_be_greater_than(composition)
+        expect(draw_ir_executor).to_contain(
+            "val font_identity = _engine2d_draw_ir_style_value(command.computed_style, \"font-identity\")")
+        expect(draw_ir_executor).to_contain("font_ready = eng.select_font_identity(font_identity)")
+        expect(engine).to_contain(
+            "fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config)")
+        expect(engine).to_contain("val batch = FontRenderBatch(")
+        expect(engine).to_contain(
+            "if not material_ok or n_quads_total <= 0 or plan.len() == 0:")
+        expect(renderer).to_contain(
+            "me receipt_staged_quads_nonempty() -> bool: self.staged_quads.len() > 0")
+
     it "should route WM Simple Web evidence through the production desktop entry":
         val targets = file_read("src/os/_QemuRunner/runner_targets.spl")
         val scenarios = file_read("src/os/_QemuRunner/scenario_catalog.spl")

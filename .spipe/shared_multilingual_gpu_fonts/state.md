@@ -162,6 +162,33 @@ Provide one configurable, license-audited multilingual font pipeline shared by S
 
 ## Phase
 
+The active delivery is now the scoped
+`SIMPLEOS_STAGE2_FONT` override in
+`doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`. Runtime6 passes with
+archive SHA-256 `a6d21c8fcf88d1ca788577a799564df022e917762abca1bad7736d3babb52782`,
+manifest SHA-256
+`6fd885abd620d180981f7a3f17be4328b2ded7dd802b41d4a347e222eff015a7`,
+and self-check output SHA-256
+`143283b26f5acc4162b35b2294b91df0943f8876294e773248f7b0c38fc5879e`.
+Its six required core-I/O symbols each have one strong `T` provider in
+`runtime_native.o`, clearing the prior asset/RV64 link blocker. Runtime6
+supersedes Runtime5/Runner5. Accepted Runner8 supersedes Runner6 with binary
+SHA-256
+`8096d0897994d7602b23a8eadc6252ed1f7ea00bb811ebfc5a0f3050cf282440`
+and source SHA-256
+`093e013427a070f79889dc7dcb710063551533ae6cfc993e474d233f173a4c9e`.
+Green receipt SHA-256
+`6afa15355dd3e1a4c05183b0a9d552c4757a01384b07d092b141510f54be05df`
+records 1/0 at exit 0; provider receipt SHA-256
+`b70fa412075a5a0a51593b68c02213ab9ce736115440f2259be0f8b9c2482466`
+records the runtime capsule at 7/0 and core I/O at 3/0, both exit 0. Runner6
+calibration remains retained as history. Focused execution remains pending
+and 0/10 specs are accepted. The final parser probe advanced Stage 2
+discovery past `ot_layout_apply.spl:91:1` to
+`ot_layout_gpos_basic.spl:27`, exhausting the three-cycle cap. The scoped
+status is BLOCKED, not PASS; Stage 3/4 and the cross-platform matrix are
+deferred.
+
 REQ-011 canonical routing and REQ-015 runtime configuration are implemented in
 source; canonical execution is pending. Direct `arch/*/wm_entry.spl` demos are
 explicitly compatibility-only and are not release blockers. Self-hosted

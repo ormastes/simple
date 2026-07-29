@@ -1,4 +1,4 @@
-use std.test_runner.test_result_wrapper.{build_interpreter_result_wrapper}
+use std.test_runner.test_result_wrapper.{build_interpreter_result_wrapper, preprocess_spipe_native_result_file}
 use std.io.{file_delete, file_read, file_write, time_now_unix_micros}
 use app.test.font_evidence_runner.{valid_native_result}
 
@@ -24,6 +24,32 @@ describe "interpreter test result wrapper":
         expect(wrapped_path).to_equal("")
         expect(cleanup_path).to_equal("")
 
+    it "lowers multiline method matchers for native wrappers":
+        val source_path = "/tmp/simple_multiline_matcher_{time_now_unix_micros()}_spec.spl"
+        val source = "\"\"\"# Manual\nexpect([9]).to_equal(\n    [9]\n)\n\"\"\"\n\"\"\"one-line docs\"\"\"\ndescribe \"sample\":\n    it \"passes\":\n        expect([1, 2]).to_equal(\n            [1, 2]\n        )\n        expect(\"font\").to_contain(\n            \"font\"\n        )\n        expect(gpos_validate(font, active, [lookup],\n            records)).to_equal(false)\n        expect(\"font\").to_not_contain(\"glyph\")\n        expect(\"font-face\").not_().to_not_contain(\"font\")\n        expect \"layout\" to_not_contain \"glyph\"\n"
+        expect(file_write(source_path, source)).to_be(true)
+
+        val wrapped_path = preprocess_spipe_native_result_file(source_path)
+        val wrapped = file_read(wrapped_path)
+        expect(wrapped_path == "").to_be(false)
+        expect(wrapped).to_contain("expect [1, 2] == [1, 2]")
+        expect(wrapped).to_contain("expect (\"font\").contains(\"font\")")
+        expect(wrapped).to_contain("expect(gpos_validate(font, active, [lookup], records) == false)")
+        expect(wrapped).to_contain("expect not ((\"font\").contains(\"glyph\"))")
+        expect(wrapped).to_contain("expect (\"font-face\").contains(\"font\")")
+        expect(wrapped).to_contain("expect not ((\"layout\").contains(\"glyph\"))")
+        expect(wrapped.contains("to_not_contain")).to_be(false)
+        expect(wrapped).to_contain("expect([9]).to_equal(")
+
+        expect(file_delete(wrapped_path)).to_be(true)
+        expect(file_delete(source_path)).to_be(true)
+
+        val unsafe_path = "/tmp/simple_multiline_matcher_unsafe_{time_now_unix_micros()}_spec.spl"
+        val unsafe = "expect([1, 2]).to_equal( # preserve (\n    [1, 2]\n)\nval untouched = 1\n"
+        expect(file_write(unsafe_path, unsafe)).to_be(true)
+        expect(preprocess_spipe_native_result_file(unsafe_path)).to_equal("")
+        expect(file_delete(unsafe_path)).to_be(true)
+
     it "accepts only coherent native summaries and one completion marker":
         val marker = "test-runner: native result wrapper complete"
         val green = "sample\n1 examples, 0 failures\n{marker}\n"
@@ -42,6 +68,7 @@ describe "interpreter test result wrapper":
 
     it "keeps the focused runner on the fail-closed pure native route":
         val runner = file_read("src/app/test/font_evidence_runner.spl")
+        val runtime = file_read("src/runtime/runtime_native.c")
         expect(runner).to_contain("<pure-simple-compiler> <compiler-sha256> <core-c-runtime-dir> <runtime-sha256> <spec.spl>")
         expect(runner).to_contain("preprocess_spipe_native_result_file(spec)")
         expect(runner).to_contain("use std.test_runner.test_result_wrapper.{preprocess_spipe_native_result_file}")
@@ -53,15 +80,21 @@ describe "interpreter test result wrapper":
         expect(runner).to_contain("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
         expect(runner).to_contain("--runtime-bundle\", \"core-c-bootstrap")
         expect(runner).to_contain("rt_bdd_executed_count")
+        expect(runtime).to_contain("int64_t rt_bdd_executed_count(void)")
         expect(runner).to_contain("test-runner: native result wrapper complete")
-        expect(runner).to_contain("stdout.index_of(marker) ?? -1")
+        expect(runner).to_contain("font_runner_index_of(stdout, marker)")
+        expect(runner.contains(".index_of(")).to_be(false)
         expect(runner).to_contain("after_marker.contains(marker)")
         expect(runner.contains("stdout.split(marker)")).to_be(false)
         expect(runner).to_contain("decimal_text_valid(examples)")
         expect(runner).to_contain("decimal_text_lte(failures, examples)")
         expect(runner.contains("fields[0].to_i64()")).to_be(false)
         expect(runner.contains("fields[2].to_i64()")).to_be(false)
-        expect(runner).to_contain("run_bounded(\"300s\", \"/usr/bin/env\", build_env_args)")
+        expect(runner).to_contain("run_bounded_capture_stderr(\"300s\", \"/usr/bin/env\", build_env_args)")
+        expect(runner).to_contain("run_bounded(\"120s\", \"/usr/bin/env\", run_env_args)")
+        expect(runner).to_contain("\"exec \\\"$@\\\" 2>&1\"")
+        expect(runner).to_contain("process_run(\"/usr/bin/timeout\", timeout_args)")
+        expect(runner).to_contain("process_run(\"/bin/sh\", timeout_args)")
         expect(runner).to_contain("\"LC_ALL=C\",\n        \"SIMPLE_BINARY=\" + compiler,\n        \"SIMPLE_BIN=\" + compiler,\n        \"SIMPLE_RUNTIME_MODE=native\"")
         expect(runner).to_contain("append_forwarded_env(run_env_args, [\n        \"SIMPLE_WEB_FONT_RUN_ID\",\n        \"AETHERIC_HOST_WEB_GUI_SIMPLE_BIN\",\n        \"AETHERIC_HOST_WEB_GUI_PROOF\",\n        \"BUILD_DIR\",\n        \"REPORT_PATH\",\n        \"RV64_DISPLAY_SMOKE_ELF\",\n        \"RV64_WM_FONT_DISK\",\n        \"RV64_WM_FONT_REGION_EXPECTED_SHA256\"")
         expect(runner).to_contain("compiler_sha != expected_compiler_sha")

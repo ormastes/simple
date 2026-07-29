@@ -31,6 +31,82 @@ Primary interfaces are frozen before sidecar work:
 No lane may add `SharedFontRenderer`, `GpuFontEmitter`, another atlas/cache,
 raw `rt_*` shortcuts, a new dependency, or a fake device-success path.
 
+## Active Stage 2 SimpleOS campaign — 2026-07-29
+
+This campaign follows the active override in the system-test plan. Its done
+mark is `SIMPLEOS_STAGE2_FONT: PASS`; the broader cross-platform matrix below
+is deferred.
+
+| Small lane | Owned result | Focused specs |
+|---|---|---|
+| Runner | provenance-recorded Stage 2 compiler, complete core-C capsule, deliberate-red and zero-example calibration | runner fixtures only |
+| Assets | pinned bytes, hashes, licenses, notices, bundle and image staging | manifest, bundle, staging |
+| Shaping | registered-only Hindi, Arabic, and Urdu shaping with handle-free material | shaping acceptance, selected Devanagari, selected Arabic |
+| Material | `SharedWmScene -> DrawIrComposition -> Engine2D -> FontRenderer` identity and nonempty batch | desktop production render contract |
+| QEMU | guest font identity, independent crop, and correlated input/frame receipts | x86 evidence/fullscreen and RV64 input |
+| Manuals | ten scoped manuals with zero stubs | the ten focused specs |
+
+All lanes work in the active isolated font worktree, do not commit or sync, and
+run each acceptance check once with at most three bounded fix cycles. Phase 2
+compiler cleanup, Stage 3/4, hosted desktop, Web-only promotion, Engine3D, and
+the cross-platform GPU/performance matrix are out of scope. A Phase 2 change is
+allowed only when one of the ten focused checks exposes a small direct blocker.
+The primary agent owns merge, independent review, and the done mark.
+
+### Fresh-session TODO/resume handoff after Runtime6
+
+Runtime6 is accepted with archive SHA-256
+`a6d21c8fcf88d1ca788577a799564df022e917762abca1bad7736d3babb52782` and
+safety/alias self-check PASS. Runner6 is accepted with SHA-256
+`5f5245fdfb151c74436ee0c7f0cdd75808dcd7199da5298b738710633d80cb80` and
+build result 33/0 (compiled/failed). Calibration identity
+`22bf1bf5850c333677621672b023b4106f7378a394545d730a7c24c4c22af93d`
+records the deliberate-red and zero-example contracts passing once. Runner6 is
+now superseded as execution authority, but this identity remains historical
+evidence. Runner8 is accepted with SHA-256
+`8096d0897994d7602b23a8eadc6252ed1f7ea00bb811ebfc5a0f3050cf282440`.
+Its green calibration passed 1/0 under receipt identity
+`6afa15355dd3e1a4c05183b0a9d552c4757a01384b07d092b141510f54be05df`;
+the provider contracts passed 7/0 and 3/0 under receipt identity
+`b70fa412075a5a0a51593b68c02213ab9ce736115440f2259be0f8b9c2482466`.
+Do not rebuild or recalibrate the accepted Runtime6/Runner8 pair, resume Stage
+3/4, or run full bootstrap. All ten focused specs remain pending/capped; runner
+or provider-contract acceptance is not focused-spec acceptance. The frontend
+repair is grouping only: add parentheses without extracting helpers, changing
+expressions, or reordering validation, mutation, budget consumption, or
+short-circuiting.
+
+| Parser TODO | Exact current sites | Edit | Owner / reviewer |
+|---|---|---|---|
+| Assignment RHS (2) | `ot_layout_gpos_basic.spl::_add`, lines 27–30: `x_advance_device_pixels`, `y_advance_device_pixels` | `field = (` ... `)` | frontend/parser owner (`/root/frontend_import_audit2`) / `/root` |
+| Assignment RHS (7) | `ot_layout_gpos_basic.spl::_cursive`, lines 154–172: next x advance; index/next x device advance; index/next y offset units and device pixels | `field = (` ... `)` | frontend/parser owner / `/root` |
+| Assignment RHS (2) | `ot_layout_gpos_basic.spl::_mark`, lines 308–313: index x/y offset device pixels | `field = (` ... `)` | frontend/parser owner / `/root` |
+| Inline `if` (2) | `ot_layout_gpos_basic.spl::_validate_single`, lines 393–394 (`count/coverage/first`) and 397–399 (`gpos_data_take`/`_value.valid`) | `if (` ... `):` | frontend/parser owner / `/root` |
+| Inline `if` (1) | `ot_layout_gpos_basic.spl::_validate_mark`, lines 522–523 (`mark_class/anchor`) | `if (` ... `):` | frontend/parser owner / `/root` |
+| Inline `if` (1) | `ot_layout_gpos.spl::_validate_context`, lines 548–549 (`glyph_count/records_offset`) | `if (` ... `):` | frontend/parser owner / `/root` |
+| Inline `if` (1) | `ot_layout_gpos.spl::_validate_chain`, lines 706–708 (`rule_offset/seen_rules/_validate_chain_rule`) | `if (` ... `):` | frontend/parser owner / `/root` |
+
+Total: 16 later frontend sites (11 assignment RHS, 5 inline `if`). The already
+parenthesized `ot_layout_apply.spl` sites at current lines 62, 130, 184, 206,
+and 224 are prior fixes, not part of this TODO and must not be redesigned.
+
+| Resume order | Focused spec gate | Owner / stop rule |
+|---:|---|---|
+| 1 | `simpleos_wm_qemu_evidence_contract_spec.spl` static contract; its last accepted execution was 9/11 and the spec has since changed | fresh QEMU/static owner / stop on its first failure; do not start a guest |
+| 2 | Provider-only canaries: `simpleos_font_bundle_spec.spl`, then `simpleos_font_asset_staging_spec.spl`, then `shared_font_manifest_spec.spl` (raw SFNT parsing only, no shaper) | Runtime6/provider owner / stop the lane on the first repeated missing-provider link |
+| 3 | After all 16 parser edits: `selected_arabic_spec.spl`, then `selected_devanagari_spec.spl`, then `shared_font_shaping_acceptance_spec.spl` | fresh shaper owner / smallest canary first; stop on first parser failure |
+| 4 | `gui_entry_desktop_production_render_contract_spec.spl`; its Engine2D `FontRenderer` closure imports the shaper transitively | material owner / only after order 3 is green |
+| 5 | `simpleos_wm_fullscreen_spec.spl` | x86 QEMU owner / only after order 1 and material are green and exact guest inputs exist |
+| 6 | `rv64_simpleos_wm_font_input_spec.spl` | RV64 QEMU owner / last, with ELF, 128 MiB font disk, report path, QMP/input evidence, and reviewed crop hash present |
+
+Merge owner is `/root`; the final normal/highest-capability reviewer must be
+independent of each lane's edit/evidence producer. Do not rerun the recorded
+10/10 zero-stub docgen batch. If a focused spec changes after its receipt,
+regenerate only that mirror once after the executable spec is green. Do not
+rerun the 59/59 supporting asset checksum unless pinned bytes, hashes, or the
+companion manifest change. An unchanged PASS or unchanged failure is never
+rerun in the fresh session.
+
 ## Work lanes
 
 | Lane | Owner/scope | Writable area | Completion evidence |

@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <limits.h>
 #include <errno.h>
 #include <math.h>
@@ -32,11 +33,13 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #if defined(_WIN32)
+#include <direct.h>
 #include <io.h>
 #include <malloc.h>
 #include <windows.h>
 #endif
 #if !defined(_WIN32)
+#include <dirent.h>
 #include <netdb.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
@@ -2786,6 +2789,20 @@ int8_t rt_contains(int64_t collection, int64_t value) {
     return 0;
 }
 
+int64_t rt_index_of(int64_t collection, int64_t value) {
+    RtCoreArray* array = rt_core_as_array(collection);
+    if (array) {
+        for (int64_t i = 0; i < array->len; i++) {
+            int64_t item = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
+                ? (int64_t)((uint8_t*)array->data)[i]
+                : ((int64_t*)array->data)[i];
+            if (rt_native_eq(item, value)) return i;
+        }
+        return -1;
+    }
+    return rt_string_find(collection, value);
+}
+
 int64_t rt_unwrap_or_self(int64_t value) {
     if (rt_enum_discriminant(value) >= 0) return rt_enum_payload(value);
     return value;
@@ -4530,6 +4547,10 @@ int64_t rt_bdd_format_results(void) {
     return rt_bdd_failed;
 }
 
+int64_t rt_bdd_executed_count(void) {
+    return rt_bdd_passed + rt_bdd_failed;
+}
+
 void rt_bdd_clear_state(void) {
     rt_bdd_passed = 0;
     rt_bdd_failed = 0;
@@ -5710,6 +5731,550 @@ static char* rt_core_text_arg_to_cstr(const uint8_t* ptr, uint64_t len) {
     out[len] = '\0';
     return out;
 }
+
+#if defined(SIMPLE_CORE_C_STANDALONE)
+
+static int rt_core_path_arg_valid(const uint8_t* ptr, uint64_t len) {
+    return ptr && len != 0 && len <= SIZE_MAX - 1 &&
+           memchr(ptr, '\0', (size_t)len) == NULL;
+}
+
+static char* rt_core_path_arg_to_cstr(const uint8_t* ptr, uint64_t len) {
+    if (!rt_core_path_arg_valid(ptr, len)) return NULL;
+    return rt_core_text_arg_to_cstr(ptr, len);
+}
+
+int8_t rt_file_copy(
+    const uint8_t* src_ptr,
+    uint64_t src_len,
+    const uint8_t* dst_ptr,
+    uint64_t dst_len
+) {
+    char* src = rt_core_path_arg_to_cstr(src_ptr, src_len);
+    char* dst = rt_core_path_arg_to_cstr(dst_ptr, dst_len);
+    if (!src || !dst || strcmp(src, dst) == 0) {
+        free(src);
+        free(dst);
+        return 0;
+    }
+
+    FILE* input = fopen(src, "rb");
+    if (!input) {
+        free(src);
+        free(dst);
+        return 0;
+    }
+#if defined(_WIN32)
+    int output_fd = _open(
+        dst,
+        _O_WRONLY | _O_CREAT | _O_BINARY,
+        _S_IREAD | _S_IWRITE
+    );
+    if (output_fd < 0) {
+        fclose(input);
+        free(src);
+        free(dst);
+        return 0;
+    }
+
+    HANDLE src_handle = (HANDLE)_get_osfhandle(_fileno(input));
+    HANDLE dst_handle = (HANDLE)_get_osfhandle(output_fd);
+    BY_HANDLE_FILE_INFORMATION src_info;
+    BY_HANDLE_FILE_INFORMATION dst_info;
+    if (src_handle == INVALID_HANDLE_VALUE ||
+        dst_handle == INVALID_HANDLE_VALUE ||
+        !GetFileInformationByHandle(src_handle, &src_info) ||
+        !GetFileInformationByHandle(dst_handle, &dst_info)) {
+        _close(output_fd);
+        fclose(input);
+        free(src);
+        free(dst);
+        return 0;
+    }
+    if (src_info.dwVolumeSerialNumber == dst_info.dwVolumeSerialNumber &&
+        src_info.nFileIndexHigh == dst_info.nFileIndexHigh &&
+        src_info.nFileIndexLow == dst_info.nFileIndexLow) {
+        _close(output_fd);
+        fclose(input);
+        free(src);
+        free(dst);
+        return 0;
+    }
+    if (_chsize_s(output_fd, 0) != 0 ||
+        _lseek(output_fd, 0, SEEK_SET) == -1L) {
+        _close(output_fd);
+        fclose(input);
+        free(src);
+        free(dst);
+        return 0;
+    }
+    FILE* output = _fdopen(output_fd, "wb");
+#else
+    int output_fd = open(dst, O_WRONLY | O_CREAT, 0666);
+    if (output_fd < 0) {
+        fclose(input);
+        free(src);
+        free(dst);
+        return 0;
+    }
+
+    struct stat src_stat;
+    struct stat dst_stat;
+    if (fstat(fileno(input), &src_stat) != 0 ||
+        fstat(output_fd, &dst_stat) != 0) {
+        close(output_fd);
+        fclose(input);
+        free(src);
+        free(dst);
+        return 0;
+    }
+    if (src_stat.st_dev == dst_stat.st_dev &&
+        src_stat.st_ino == dst_stat.st_ino) {
+        close(output_fd);
+        fclose(input);
+        free(src);
+        free(dst);
+        return 0;
+    }
+    if (ftruncate(output_fd, 0) != 0 ||
+        lseek(output_fd, 0, SEEK_SET) == (off_t)-1) {
+        close(output_fd);
+        fclose(input);
+        free(src);
+        free(dst);
+        return 0;
+    }
+    FILE* output = fdopen(output_fd, "wb");
+#endif
+
+    free(src);
+    free(dst);
+    if (!output) {
+#if defined(_WIN32)
+        _close(output_fd);
+#else
+        close(output_fd);
+#endif
+        fclose(input);
+        return 0;
+    }
+
+    uint8_t buffer[8192];
+    int ok = 1;
+    size_t count;
+    while ((count = fread(buffer, 1, sizeof(buffer), input)) != 0) {
+        if (fwrite(buffer, 1, count, output) != count) {
+            ok = 0;
+            break;
+        }
+    }
+    if (ferror(input)) ok = 0;
+    if (fclose(input) != 0) ok = 0;
+    if (fclose(output) != 0) ok = 0;
+    return (int8_t)ok;
+}
+
+int8_t rt_file_rename(
+    const uint8_t* src_ptr,
+    uint64_t src_len,
+    const uint8_t* dst_ptr,
+    uint64_t dst_len
+) {
+    char* src = rt_core_path_arg_to_cstr(src_ptr, src_len);
+    char* dst = rt_core_path_arg_to_cstr(dst_ptr, dst_len);
+    if (!src || !dst) {
+        free(src);
+        free(dst);
+        return 0;
+    }
+    int ok = rename(src, dst) == 0;
+    free(src);
+    free(dst);
+    return (int8_t)ok;
+}
+
+typedef struct RtCoreSha256 {
+    uint32_t state[8];
+    uint64_t bits;
+    uint8_t block[64];
+    size_t used;
+} RtCoreSha256;
+
+static uint32_t rt_core_sha256_rotr(uint32_t value, uint32_t count) {
+    return (value >> count) | (value << (32U - count));
+}
+
+static void rt_core_sha256_transform(RtCoreSha256* ctx) {
+    static const uint32_t constants[64] = {
+        0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U,
+        0x3956c25bU, 0x59f111f1U, 0x923f82a4U, 0xab1c5ed5U,
+        0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U,
+        0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U,
+        0xe49b69c1U, 0xefbe4786U, 0x0fc19dc6U, 0x240ca1ccU,
+        0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,
+        0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U,
+        0xc6e00bf3U, 0xd5a79147U, 0x06ca6351U, 0x14292967U,
+        0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U,
+        0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U,
+        0xa2bfe8a1U, 0xa81a664bU, 0xc24b8b70U, 0xc76c51a3U,
+        0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,
+        0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U,
+        0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,
+        0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
+        0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U
+    };
+    uint32_t words[64];
+    for (size_t i = 0; i < 16; i++) {
+        size_t offset = i * 4;
+        words[i] = ((uint32_t)ctx->block[offset] << 24) |
+                   ((uint32_t)ctx->block[offset + 1] << 16) |
+                   ((uint32_t)ctx->block[offset + 2] << 8) |
+                   (uint32_t)ctx->block[offset + 3];
+    }
+    for (size_t i = 16; i < 64; i++) {
+        uint32_t s0 = rt_core_sha256_rotr(words[i - 15], 7) ^
+                      rt_core_sha256_rotr(words[i - 15], 18) ^
+                      (words[i - 15] >> 3);
+        uint32_t s1 = rt_core_sha256_rotr(words[i - 2], 17) ^
+                      rt_core_sha256_rotr(words[i - 2], 19) ^
+                      (words[i - 2] >> 10);
+        words[i] = words[i - 16] + s0 + words[i - 7] + s1;
+    }
+
+    uint32_t a = ctx->state[0];
+    uint32_t b = ctx->state[1];
+    uint32_t c = ctx->state[2];
+    uint32_t d = ctx->state[3];
+    uint32_t e = ctx->state[4];
+    uint32_t f = ctx->state[5];
+    uint32_t g = ctx->state[6];
+    uint32_t h = ctx->state[7];
+    for (size_t i = 0; i < 64; i++) {
+        uint32_t sum1 = rt_core_sha256_rotr(e, 6) ^
+                        rt_core_sha256_rotr(e, 11) ^
+                        rt_core_sha256_rotr(e, 25);
+        uint32_t choose = (e & f) ^ ((~e) & g);
+        uint32_t temp1 = h + sum1 + choose + constants[i] + words[i];
+        uint32_t sum0 = rt_core_sha256_rotr(a, 2) ^
+                        rt_core_sha256_rotr(a, 13) ^
+                        rt_core_sha256_rotr(a, 22);
+        uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2 = sum0 + majority;
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1 + temp2;
+    }
+    ctx->state[0] += a;
+    ctx->state[1] += b;
+    ctx->state[2] += c;
+    ctx->state[3] += d;
+    ctx->state[4] += e;
+    ctx->state[5] += f;
+    ctx->state[6] += g;
+    ctx->state[7] += h;
+}
+
+static void rt_core_sha256_update(
+    RtCoreSha256* ctx,
+    const uint8_t* bytes,
+    size_t len
+) {
+    for (size_t i = 0; i < len; i++) {
+        ctx->block[ctx->used++] = bytes[i];
+        if (ctx->used == sizeof(ctx->block)) {
+            rt_core_sha256_transform(ctx);
+            ctx->bits += 512;
+            ctx->used = 0;
+        }
+    }
+}
+
+static void rt_core_sha256_final(RtCoreSha256* ctx, uint8_t digest[32]) {
+    ctx->bits += (uint64_t)ctx->used * 8;
+    ctx->block[ctx->used++] = 0x80;
+    if (ctx->used > 56) {
+        while (ctx->used < sizeof(ctx->block)) ctx->block[ctx->used++] = 0;
+        rt_core_sha256_transform(ctx);
+        ctx->used = 0;
+    }
+    while (ctx->used < 56) ctx->block[ctx->used++] = 0;
+    for (size_t i = 0; i < 8; i++) {
+        ctx->block[63 - i] = (uint8_t)(ctx->bits >> (i * 8));
+    }
+    rt_core_sha256_transform(ctx);
+    for (size_t i = 0; i < 8; i++) {
+        digest[i * 4] = (uint8_t)(ctx->state[i] >> 24);
+        digest[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
+        digest[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
+        digest[i * 4 + 3] = (uint8_t)ctx->state[i];
+    }
+}
+
+int64_t rt_file_hash_sha256(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!rt_core_path_arg_valid(path_ptr, path_len)) {
+        return rt_string_new_uncached(NULL, 0);
+    }
+    char* path = rt_core_path_arg_to_cstr(path_ptr, path_len);
+    if (!path) return rt_core_nil();
+    FILE* file = fopen(path, "rb");
+    free(path);
+    if (!file) return rt_string_new_uncached(NULL, 0);
+
+    RtCoreSha256 ctx = {
+        { 0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+          0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U },
+        0,
+        { 0 },
+        0
+    };
+    uint8_t buffer[8192];
+    size_t count;
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) != 0) {
+        rt_core_sha256_update(&ctx, buffer, count);
+    }
+    int read_failed = ferror(file);
+    int close_failed = fclose(file) != 0;
+    if (read_failed || close_failed) return rt_string_new_uncached(NULL, 0);
+
+    uint8_t digest[32];
+    uint8_t hex[64];
+    static const uint8_t digits[] = "0123456789abcdef";
+    rt_core_sha256_final(&ctx, digest);
+    for (size_t i = 0; i < sizeof(digest); i++) {
+        hex[i * 2] = digits[digest[i] >> 4];
+        hex[i * 2 + 1] = digits[digest[i] & 0x0f];
+    }
+    return rt_string_new(hex, sizeof(hex));
+}
+
+int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!rt_core_path_arg_valid(path_ptr, path_len)) {
+        SplArray* empty = rt_array_new(0);
+        return empty ? (int64_t)(uintptr_t)empty : rt_core_nil();
+    }
+    char* path = rt_core_path_arg_to_cstr(path_ptr, path_len);
+    if (!path) return rt_core_nil();
+    SplArray* result = rt_array_new(8);
+    if (!result) {
+        free(path);
+        return rt_core_nil();
+    }
+
+#if defined(_WIN32)
+    int wide_len = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0
+    );
+    if (wide_len <= 0 || wide_len > INT_MAX - 3) {
+        free(path);
+        return (int64_t)(uintptr_t)result;
+    }
+    wchar_t* pattern = (wchar_t*)malloc(
+        ((size_t)wide_len + 2) * sizeof(wchar_t)
+    );
+    if (!pattern) {
+        free(path);
+        rt_array_free_deep((int64_t)(uintptr_t)result);
+        return rt_core_nil();
+    }
+    if (!MultiByteToWideChar(
+            CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, pattern, wide_len
+        )) {
+        free(pattern);
+        free(path);
+        return (int64_t)(uintptr_t)result;
+    }
+    free(path);
+    size_t end = (size_t)wide_len - 1;
+    if (end != 0 && pattern[end - 1] != L'\\' && pattern[end - 1] != L'/') {
+        pattern[end++] = L'\\';
+    }
+    pattern[end++] = L'*';
+    pattern[end] = L'\0';
+
+    WIN32_FIND_DATAW entry;
+    HANDLE find = FindFirstFileW(pattern, &entry);
+    free(pattern);
+    if (find == INVALID_HANDLE_VALUE) {
+        return (int64_t)(uintptr_t)result;
+    }
+    int allocation_failed = 0;
+    int io_failed = 0;
+    do {
+        if (wcscmp(entry.cFileName, L".") == 0 ||
+            wcscmp(entry.cFileName, L"..") == 0) {
+            continue;
+        }
+        int name_len = WideCharToMultiByte(
+            CP_UTF8, WC_ERR_INVALID_CHARS, entry.cFileName, -1,
+            NULL, 0, NULL, NULL
+        );
+        if (name_len <= 0) {
+            io_failed = 1;
+            break;
+        }
+        uint8_t* name = (uint8_t*)malloc((size_t)name_len);
+        if (!name) {
+            allocation_failed = 1;
+            break;
+        }
+        if (!WideCharToMultiByte(
+                CP_UTF8, WC_ERR_INVALID_CHARS, entry.cFileName, -1,
+                (char*)name, name_len, NULL, NULL
+            )) {
+            free(name);
+            io_failed = 1;
+            break;
+        }
+        int64_t value = rt_string_new_uncached(
+            name, (uint64_t)name_len - 1
+        );
+        free(name);
+        if (value == rt_core_nil() || !rt_array_push(result, value)) {
+            if (value != rt_core_nil()) rt_string_free(value);
+            allocation_failed = 1;
+            break;
+        }
+    } while (FindNextFileW(find, &entry));
+    if (!allocation_failed && !io_failed &&
+        GetLastError() != ERROR_NO_MORE_FILES) {
+        io_failed = 1;
+    }
+    if (!FindClose(find)) io_failed = 1;
+#else
+    DIR* dir = opendir(path);
+    free(path);
+    if (!dir) {
+        return (int64_t)(uintptr_t)result;
+    }
+    int allocation_failed = 0;
+    int io_failed = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent* entry = readdir(dir);
+        if (!entry) {
+            if (errno != 0) io_failed = 1;
+            break;
+        }
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        size_t name_len = strlen(entry->d_name);
+        int64_t value = rt_string_new_uncached(
+            (const uint8_t*)entry->d_name, (uint64_t)name_len
+        );
+        if (value == rt_core_nil() || !rt_array_push(result, value)) {
+            if (value != rt_core_nil()) rt_string_free(value);
+            allocation_failed = 1;
+            break;
+        }
+    }
+    if (closedir(dir) != 0) io_failed = 1;
+#endif
+    if (allocation_failed) {
+        rt_array_free_deep((int64_t)(uintptr_t)result);
+        return rt_core_nil();
+    }
+    if (io_failed) {
+        rt_array_free_deep((int64_t)(uintptr_t)result);
+        SplArray* empty = rt_array_new(0);
+        return empty ? (int64_t)(uintptr_t)empty : rt_core_nil();
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
+int8_t rt_dir_remove(
+    const uint8_t* path_ptr,
+    uint64_t path_len,
+    int8_t recursive
+) {
+    char* path = rt_core_path_arg_to_cstr(path_ptr, path_len);
+    if (!path || !*path) {
+        free(path);
+        return 0;
+    }
+    int ok;
+    if (recursive) {
+#if defined(_WIN32)
+        /* ponytail: enable only with reparse-aware canonical path guards. */
+        ok = 0;
+#else
+        struct stat original;
+        if (lstat(path, &original) != 0 || !S_ISDIR(original.st_mode)) {
+            ok = 0;
+        } else {
+            char* canonical = realpath(path, NULL);
+            const char* home = getenv("HOME");
+            char* canonical_home = home ? realpath(home, NULL) : NULL;
+            static const char* const protected_paths[] = {
+                "/", "/home", "/usr", "/bin", "/sbin", "/etc", "/var",
+                "/tmp", "/opt", "/lib", "/lib64", "/boot", "/dev",
+                "/proc", "/sys", "/root"
+            };
+            int protected = !canonical || (home && !canonical_home);
+            if (!protected) {
+                size_t components = 1;
+                const char* cursor = canonical + 1;
+                while (*cursor) {
+                    while (*cursor == '/') cursor++;
+                    if (!*cursor) break;
+                    components++;
+                    while (*cursor && *cursor != '/') cursor++;
+                }
+                protected = components <= 2;
+                for (size_t i = 0;
+                     !protected &&
+                     i < sizeof(protected_paths) / sizeof(protected_paths[0]);
+                     i++) {
+                    protected = strcmp(canonical, protected_paths[i]) == 0;
+                }
+                if (!protected && canonical_home) {
+                    protected = strcmp(canonical, canonical_home) == 0;
+                }
+            }
+
+            ok = protected ? 0 : (rt_dir_remove_all(canonical) ? 1 : 0);
+            free(canonical_home);
+            free(canonical);
+        }
+#endif
+    } else {
+#if defined(_WIN32)
+        ok = _rmdir(path) == 0;
+#else
+        ok = rmdir(path) == 0;
+#endif
+    }
+    free(path);
+    return (int8_t)ok;
+}
+
+int8_t rt_process_exists(int64_t pid) {
+    if (pid <= 0) return 0;
+#if defined(_WIN32)
+    if ((uint64_t)pid > UINT32_MAX) return 0;
+    HANDLE process = OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid
+    );
+    if (process) {
+        CloseHandle(process);
+        return 1;
+    }
+    return GetLastError() == ERROR_ACCESS_DENIED ? 1 : 0;
+#else
+    pid_t native_pid = (pid_t)pid;
+    if (native_pid <= 0 || (int64_t)native_pid != pid) return 0;
+    if (kill(native_pid, 0) == 0) return 1;
+    return errno == EPERM ? 1 : 0;
+#endif
+}
+
+#endif
 
 int64_t rt_path_join(
     const uint8_t* left,

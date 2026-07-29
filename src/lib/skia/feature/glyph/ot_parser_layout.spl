@@ -312,6 +312,36 @@ fn _nearest_sibling_end(parent: i64, offsets: [i64], current: i64, parent_end: i
             result = parent + offset
     result
 
+fn _layout_lookup_metadata_ends(blob: [u8], lookup_list: i64, records_end: i64,
+                                lookup_offsets: [i64], scope_end: i64) -> [i64]:
+    var ends: [i64] = []
+    for offset in lookup_offsets:
+        val lookup = lookup_list + offset
+        val header_end = _nearest_sibling_end(lookup_list, lookup_offsets, offset, scope_end)
+        if lookup < records_end or lookup + 6 > header_end: return []
+        val flag = read_u16_be(blob, lookup + 2)
+        val subtable_count = read_u16_be(blob, lookup + 4) as i64
+        val metadata_end = lookup + 6 + subtable_count * 2 + (if (flag & 16u32) != 0u32: 2 else: 0)
+        if metadata_end > header_end: return []
+        ends.push(metadata_end)
+    ends
+
+fn _layout_subtable_root_valid(lookup_list: i64, lookup_offsets: [i64],
+                               metadata_ends: [i64], owner: i64,
+                               subtable_offsets: [i64], subtable_offset: i64,
+                               table_end: i64) -> bool:
+    if owner < 0 or owner >= lookup_offsets.len() or metadata_ends.len() != lookup_offsets.len(): return false
+    val lookup = lookup_list + lookup_offsets[owner]
+    val subtable = lookup + subtable_offset
+    val next_root = _nearest_sibling_end(lookup, subtable_offsets, subtable_offset, table_end)
+    if subtable < metadata_ends[owner] or subtable + 2 > next_root: return false
+    var index: i64 = 0
+    while index < lookup_offsets.len():
+        val metadata_start = lookup_list + lookup_offsets[index]
+        if subtable < metadata_ends[index] and subtable + 2 > metadata_start: return false
+        index = index + 1
+    true
+
 fn read_lookup_list(blob: [u8], lookup_list_abs: i64) -> [u32]:
     if lookup_list_abs + 1 >= blob.len() as i64:
         return []
@@ -370,21 +400,17 @@ fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
             return []
         lookup_offsets.push(off)
         i = i + 1
+    val lookup_metadata_ends = _layout_lookup_metadata_ends(
+        blob, lookup_list_abs, lookup_list_metadata_end, lookup_offsets, lookup_list_end)
+    if lookup_metadata_ends.len() != lookup_offsets.len(): return []
     var results: [GsubLookup] = []
     i = 0
     while i < count:
         val off = lookup_offsets[i]
         val lkp_abs = lookup_list_abs + off
-        val lookup_end = _nearest_sibling_end(lookup_list_abs, lookup_offsets, off, lookup_list_end)
-        if lkp_abs < lookup_list_metadata_end or lkp_abs + 6 > lookup_end:
-            return []
         val ltype = read_u16_be(blob, lkp_abs)
         val flag = read_u16_be(blob, lkp_abs + 2)
         val sub_count = read_u16_be(blob, lkp_abs + 4) as i64
-        val lookup_bytes = 6 + sub_count * 2 + (if (flag & 0x0010u32) != 0u32: 2 else: 0)
-        if lkp_abs + lookup_bytes > lookup_end:
-            return []
-        val lookup_metadata_end = lkp_abs + lookup_bytes
         var subs: [u32] = []
         var subtable_offsets: [i64] = []
         var j: i64 = 0
@@ -397,12 +423,13 @@ fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
         var subtable_ends: [u32] = []
         for soff in subtable_offsets:
             val sub_abs = lkp_abs + soff
-            val sub_end = _nearest_sibling_end(lkp_abs, subtable_offsets, soff, lookup_end)
-            if sub_abs < lookup_metadata_end or sub_abs + 2 > sub_end: return []
+            if not _layout_subtable_root_valid(
+                lookup_list_abs, lookup_offsets, lookup_metadata_ends, i,
+                subtable_offsets, soff, end): return []
             subs.push(sub_abs as u32)
-            subtable_ends.push(sub_end as u32)
+            subtable_ends.push(end as u32)
         val mark_filtering_set = if (flag & 16u32) != 0u32: read_u16_be(blob, lkp_abs + 6 + sub_count * 2) as i64 else: -1
-        val lkp = GsubLookup(lookup_index: i, lookup_type: ltype, flag: flag, lookup_offset: lkp_abs as u32, table_start: base as u32, table_end: lookup_end as u32, subtable_offsets: subs, subtable_ends: subtable_ends, mark_filtering_set: mark_filtering_set)
+        val lkp = GsubLookup(lookup_index: i, lookup_type: ltype, flag: flag, lookup_offset: lkp_abs as u32, table_start: base as u32, table_end: end as u32, subtable_offsets: subs, subtable_ends: subtable_ends, mark_filtering_set: mark_filtering_set)
         results.append(lkp)
         i = i + 1
     results
@@ -458,19 +485,17 @@ fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
         if off == 0 or lookup_offsets.contains(off): return []
         lookup_offsets.push(off)
         i = i + 1
+    val lookup_metadata_ends = _layout_lookup_metadata_ends(
+        blob, lookup_list_abs, list_metadata_end, lookup_offsets, lookup_list_end)
+    if lookup_metadata_ends.len() != lookup_offsets.len(): return []
     var results: [GposLookup] = []
     i = 0
     while i < count:
         val off = lookup_offsets[i]
         val lkp_abs = lookup_list_abs + off
-        val lookup_end = _nearest_sibling_end(lookup_list_abs, lookup_offsets, off, lookup_list_end)
-        if lkp_abs < list_metadata_end or lkp_abs + 6 > lookup_end: return []
         val ltype = read_u16_be(blob, lkp_abs)
         val flag = read_u16_be(blob, lkp_abs + 2)
         val sub_count = read_u16_be(blob, lkp_abs + 4) as i64
-        val lookup_bytes = 6 + sub_count * 2 + (if (flag & 16u32) != 0u32: 2 else: 0)
-        if lkp_abs + lookup_bytes > lookup_end: return []
-        val lookup_metadata_end = lkp_abs + lookup_bytes
         var subs: [u32] = []
         var subtable_offsets: [i64] = []
         var j: i64 = 0
@@ -482,13 +507,14 @@ fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
         var subtable_ends: [u32] = []
         for soff in subtable_offsets:
             val sub_abs = lkp_abs + soff
-            val sub_end = _nearest_sibling_end(lkp_abs, subtable_offsets, soff, lookup_end)
-            if sub_abs < lookup_metadata_end or sub_abs + 2 > sub_end: return []
+            if not _layout_subtable_root_valid(
+                lookup_list_abs, lookup_offsets, lookup_metadata_ends, i,
+                subtable_offsets, soff, end): return []
             subs.push(sub_abs as u32)
-            subtable_ends.push(sub_end as u32)
+            subtable_ends.push(end as u32)
         val lkp = GposLookup(lookup_index: i, lookup_type: ltype, flag: flag,
             lookup_offset: lkp_abs as u32, table_start: base as u32,
-            table_end: lookup_end as u32, subtable_offsets: subs, subtable_ends: subtable_ends,
+            table_end: end as u32, subtable_offsets: subs, subtable_ends: subtable_ends,
             mark_filtering_set: if (flag & 16u32) != 0u32: read_u16_be(blob, lkp_abs + 6 + sub_count * 2) as i64 else: -1)
         results.append(lkp)
         i = i + 1
@@ -679,16 +705,14 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
             return invalid
         lookup_offsets.push(offset)
         index = index + 1
+    val lookup_metadata_ends = _layout_lookup_metadata_ends(
+        blob, lookup_list, lookup_records_end, lookup_offsets, lookup_limit)
+    if lookup_metadata_ends.len() != lookup_offsets.len(): return invalid
     for selected in result:
         if selected < 0 or selected >= lookup_count: return invalid
         val offset = lookup_offsets[selected]
         val lookup = lookup_list + offset
-        val lookup_end = _nearest_sibling_end(lookup_list, lookup_offsets, offset, lookup_limit)
-        if lookup + 6 > lookup_end: return invalid
-        val flag = read_u16_be(blob, lookup + 2)
         val subtable_count = read_u16_be(blob, lookup + 4) as i64
-        val lookup_bytes = 6 + subtable_count * 2 + (if (flag & 16u32) != 0u32: 2 else: 0)
-        if lookup + lookup_bytes > lookup_end: return invalid
         var subtable_offsets: [i64] = []
         index = 0
         while index < subtable_count:
@@ -697,9 +721,9 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
             subtable_offsets.push(subtable_offset)
             index = index + 1
         for subtable_offset in subtable_offsets:
-            val subtable = lookup + subtable_offset
-            val subtable_end = _nearest_sibling_end(lookup, subtable_offsets, subtable_offset, lookup_end)
-            if subtable < lookup + lookup_bytes or subtable + 2 > subtable_end: return invalid
+            if not _layout_subtable_root_valid(
+                lookup_list, lookup_offsets, lookup_metadata_ends, selected,
+                subtable_offsets, subtable_offset, limit): return invalid
     # OpenType executes the active lookup union in ascending LookupList order.
     var ordered: [i64] = []
     var activations: [LayoutLookupActivation] = []
