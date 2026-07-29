@@ -396,3 +396,100 @@ describe "text methods regression":
 
     it "to_string() still works":
         expect("hello".to_string()).to_equal("hello")
+
+
+# ============================================================================
+# Test Group 8: Multi-byte / UTF-8 (non-ASCII) — codepoint-safe slicing
+# ============================================================================
+
+describe "text.slice()/text.substring() with multi-byte UTF-8 content":
+    """
+    ## Non-ASCII Coverage
+
+    Every assertion above uses pure-ASCII fixtures, where a byte offset and
+    a character offset are numerically identical -- so this spec could not
+    detect a regression to naive byte-indexed slicing (bug survey
+    2026-07-28: the Rust seed's slice()/substring() were changed to
+    byte-indexed in commit f119f8b7120, while this self-hosted interpreter,
+    src/compiler/10.frontend/core/interpreter/eval_methods.spl, remains
+    character-indexed). These cases pin character-indexed correctness: they
+    go RED if slice()/substring()/char_at() ever start cutting through the
+    middle of a multi-byte UTF-8 codepoint.
+    """
+
+    context "2-byte codepoints (Latin-1 supplement, e.g. e-acute = U+00E9)":
+        it "keeps a 2-byte character whole when isolated":
+            val s = "café"
+            expect(s.slice(3, 4)).to_equal("é")
+            expect(s.substring(3, 4)).to_equal("é")
+            expect(s.char_at(3)).to_equal("é")
+            expect(s.char_code_at(3)).to_equal(233)
+
+        it "keeps a 2-byte character whole inside a longer slice":
+            val s = "café au lait"
+            expect(s.slice(0, 4)).to_equal("café")
+            expect(s.slice(0, 7)).to_equal("café au")
+
+    context "3-byte codepoints (CJK, e.g. 日本語)":
+        it "slices individual CJK characters":
+            val s = "日本語"
+            expect(s.slice(0, 1)).to_equal("日")
+            expect(s.slice(1, 2)).to_equal("本")
+            expect(s.slice(2, 3)).to_equal("語")
+
+        it "slices a CJK range":
+            val s = "日本語"
+            expect(s.slice(1, 3)).to_equal("本語")
+            expect(s.substring(0, 3)).to_equal("日本語")
+
+    context "4-byte codepoints (emoji, e.g. grinning face = U+1F600)":
+        it "keeps an emoji whole when isolated":
+            val s = "abc\u{1F600}def"
+            expect(s.slice(3, 4)).to_equal("😀")
+            expect(s.substring(3, 4)).to_equal("😀")
+            expect(s.char_at(3)).to_equal("😀")
+
+        it "keeps an emoji whole inside a longer slice":
+            val s = "abc\u{1F600}def"
+            expect(s.slice(0, 4)).to_equal("abc😀")
+            expect(s.slice(3, 7)).to_equal("😀def")
+
+    context "codepoint-boundary safety (the byte-split / U+FFFD case)":
+        """
+        The Rust seed's byte-indexed slice()/substring() cannot represent a
+        range that lands inside a multi-byte codepoint's UTF-8 encoding: it
+        substitutes U+FFFD via Rust's `String::from_utf8_lossy` (see
+        src/compiler_rust/compiler/src/interpreter_method/string.rs, the
+        "slice"|"substring" arm). Concretely, for "café" (UTF-8 bytes
+        63 61 66 C3 A9 -- the 'é' is the 2-byte sequence C3 A9), a
+        BYTE-indexed slice(3, 4) takes only byte 0xC3 (the lead byte of
+        'é' without its continuation byte). That lone byte is invalid
+        UTF-8 on its own and collapses to a single U+FFFD replacement
+        character: byte-indexed slice(3, 4) == "\u{FFFD}".
+
+        This self-hosted interpreter is character-indexed, so the *same*
+        call -- slice(3, 4) meaning "the character at position 3" -- can
+        never straddle a codepoint boundary; it always returns the whole
+        character. The assertions below pin that guarantee. If this
+        interpreter is ever converted to byte indexing to match the seed,
+        it MUST special-case codepoint boundaries or it will start
+        silently emitting U+FFFD exactly like the seed does today -- and
+        these assertions will go red, which is the point.
+        """
+        it "never straddles a 2-byte codepoint (café)":
+            val s = "café"
+            # A byte-indexed engine would read byte 3 alone (0xC3, the lead
+            # byte of 'é') and lossy-decode it to U+FFFD. Character-indexed
+            # slicing must instead return the whole codepoint.
+            expect(s.slice(3, 4)).to_equal("é")
+            expect(s.slice(3, 4)).to_not_equal("\u{FFFD}")
+
+        it "never straddles a 3-byte codepoint (CJK)":
+            val s = "a日b"
+            expect(s.slice(1, 2)).to_equal("日")
+            expect(s.slice(1, 2)).to_not_equal("\u{FFFD}")
+
+        it "never straddles a 4-byte codepoint (emoji)":
+            val s = "a😀b"
+            expect(s.slice(1, 2)).to_equal("😀")
+            expect(s.slice(1, 2)).to_not_equal("\u{FFFD}")
