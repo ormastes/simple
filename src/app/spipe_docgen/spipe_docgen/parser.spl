@@ -1721,6 +1721,97 @@ fn collect_scenario_body(lines: [text], start: i64, end_index: i64) -> [text]:
         k = k + 1
     body
 
+fn pending_call_parenthesis_delta(line: text) -> i32:
+    var delta = 0
+    var in_string = false
+    var escaped = false
+    var index = 0
+    while index < line.len():
+        val ch = line[index:index + 1]
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+        elif ch == "\"":
+            in_string = true
+        elif ch == "(":
+            delta = delta + 1
+        elif ch == ")":
+            delta = delta - 1
+        index = index + 1
+    delta
+
+fn literal_pending_call(call: text) -> bool:
+    if not call.starts_with("pending(\""):
+        return false
+    if not call.ends_with("\")"):
+        return false
+    val reason = call.slice(9, call.len() - 2)
+    reason != "" and not reason.contains("\"")
+
+fn scenario_body_is_unconditional_pending(body: [text]) -> bool:
+    val source = strip_leading_docstring(body)
+    var statement_indent = -1
+    for raw_line in source:
+        val line = raw_line.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+        val indent = count_leading_indent(raw_line)
+        if statement_indent < 0 or indent < statement_indent:
+            statement_indent = indent
+    if statement_indent < 0:
+        return false
+
+    var index = 0
+    while index < source.len():
+        val line = source[index].trim()
+        if (
+            line.starts_with("pending(") and
+            count_leading_indent(source[index]) == statement_indent
+        ):
+            var call = ""
+            var depth = 0
+            var call_end = index
+            while call_end < source.len():
+                val part = source[call_end].trim()
+                call = call + part
+                depth = depth + pending_call_parenthesis_delta(part)
+                if depth == 0:
+                    break
+                if depth < 0:
+                    return false
+                call_end = call_end + 1
+            if depth != 0 or not literal_pending_call(call):
+                index = index + 1
+                continue
+            var next = call_end + 1
+            while next < source.len():
+                val next_line = source[next].trim()
+                if next_line == "" or next_line.starts_with("#"):
+                    next = next + 1
+                    continue
+                if (
+                    count_leading_indent(source[next]) == statement_indent and
+                    next_line == "return"
+                ):
+                    return true
+                break
+        index = index + 1
+    false
+
+fn scenario_at_is_unconditional_pending(
+    lines: [text], scenario_index: i64
+) -> bool:
+    val end_index = find_scenario_body_end(
+        lines, scenario_index + 1, count_leading_indent(lines[scenario_index])
+    )
+    scenario_body_is_unconditional_pending(
+        collect_scenario_body(lines, scenario_index + 1, end_index)
+    )
+
 fn extract_test_structure_with_default(content: text, default_visibility: text) -> text:
     val lines = content.split("\n")
     val file_visibility = file_manual_visibility(lines)
@@ -1825,7 +1916,11 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val final_body = add_scenario_metadata_warnings(lines, i, included_body)
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, "folded"))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, " _(slow)_", final_body, visibility, capture))
+            val suffix = if scenario_body_is_unconditional_pending(body):
+                " _(slow, pending)_"
+            else:
+                " _(slow)_"
+            result_parts.push(render_manual_scenario(name, suffix, final_body, visibility, capture))
             i = next_index - 1
 
         # regular it -> check bullet
@@ -1839,7 +1934,13 @@ fn extract_test_structure_with_default(content: text, default_visibility: text) 
             val fallback_visibility = scenario_builtin_manual_visibility(name, "show")
             val visibility = scenario_manual_visibility(lines, i, manual_default(resolved_file_visibility, fallback_visibility))
             val capture = scenario_capture_policy(lines, i)
-            result_parts.push(render_manual_scenario(name, "", final_body, visibility, capture))
+            val suffix = if scenario_body_is_unconditional_pending(body):
+                " _(pending)_"
+            else:
+                ""
+            result_parts.push(render_manual_scenario(
+                name, suffix, final_body, visibility, capture
+            ))
             i = next_index - 1
 
         i = i + 1

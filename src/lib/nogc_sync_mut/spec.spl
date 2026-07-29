@@ -100,6 +100,7 @@ fn _execute_it(name: text, block: fn()):
     # Preserve the shared array identity across nested calls; rebinding here
     # can leave matchers mutating a stale value under global writeback.
     current_test_errors.clear()
+    val pending_before = test_pending
 
     # Run before_each hooks
     for hook in before_hooks:
@@ -115,11 +116,21 @@ fn _execute_it(name: text, block: fn()):
     # Check result via Option pattern
     var passed = test_passed
     var failed = test_failed
-    if current_test_errors.len() == 0:
+    if (
+        current_test_errors.len() == 0 and
+        test_pending > pending_before
+    ):
+        # pending(reason); return marks this example without inflating passes.
+        pass
+    elif current_test_errors.len() == 0:
         passed = passed + 1
         test_passed = passed
         print "{indent}  it {name} ... ok"
     else:
+        # A failing example has one outcome: failure wins over an earlier
+        # pending() call in the same block.
+        if test_pending > pending_before:
+            test_pending = pending_before
         failed = failed + 1
         test_failed = failed
         print "{indent}  it {name} ... FAILED"
@@ -198,8 +209,6 @@ pub fn skip_it(name: text, block: fn()):
         _execute_it(name, block)
 
 pub fn pending(name: text):
-    if not _run_test("skipped"):
-        return
     test_pending = test_pending + 1
     print "    it {name} ... pending"
 

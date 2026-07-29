@@ -290,6 +290,36 @@ describe "spipe docgen scenario body extraction":
         expect(structure).to_contain("#### shows important slow operator flow _(slow)_")
         expect(structure.contains("<summary>Advanced: shows important slow operator flow</summary>")).to_equal(false)
 
+    it "classifies only an unconditional top-level literal pending return":
+        val source = "describe \"Runtime pending\":\n" +
+            "    it \"waits for the unavailable fixture\":\n" +
+            "        expect(\"control\").to_equal(\"control\")\n" +
+            "        pending(\n" +
+            "            \"fixture unavailable\"\n" +
+            "        )\n" +
+            "        return\n" +
+            "    it \"keeps a conditional host gate active\":\n" +
+            "        if host_is_unavailable():\n" +
+            "            pending(\"host unavailable\")\n" +
+            "            return\n" +
+            "        expect(\"active\").to_equal(\"active\")\n" +
+            "    slow_it \"waits for the slow fixture\":\n" +
+            "        pending(\"slow fixture unavailable\")\n" +
+            "        return\n"
+        val structure = extract_test_structure(source)
+        expect(structure).to_contain(
+            "#### waits for the unavailable fixture _(pending)_"
+        )
+        expect(structure).to_contain(
+            "#### keeps a conditional host gate active"
+        )
+        expect(structure.contains(
+            "#### keeps a conditional host gate active _(pending)_"
+        )).to_equal(false)
+        expect(structure).to_contain(
+            "#### waits for the slow fixture _(slow, pending)_"
+        )
+
     it "folds intensive detail scenarios by default but allows manual show override":
         val source = "describe \"Manual visibility\":\n" +
             "    it \"covers protocol matrix lock rows\":\n" +
@@ -672,6 +702,57 @@ describe "spipe docgen scenario body extraction":
                         expect(e).to_equal("")
                     case Ok(path):
                         expect(path).to_contain("/feature/usage/math_blocks_spec.md")
+
+    it "counts an unconditional top-level pending return without hiding active scenarios":
+        val root = "/tmp/spipe_docgen_pending_" +
+            time_now_unix_micros().to_string()
+        val content = "describe \"Runtime pending\":\n" +
+            "    it \"waits for a fixture\":\n" +
+            "        expect(\"control\").to_equal(\"control\")\n" +
+            "        pending(\n" +
+            "            \"fixture unavailable\"\n" +
+            "        )\n" +
+            "        return\n" +
+            "    it \"keeps a conditional gate active\":\n" +
+            "        if host_is_unavailable():\n" +
+            "            pending(\"host unavailable\")\n" +
+            "            return\n" +
+            "        expect(\"active\").to_equal(\"active\")\n" +
+            "    slow_it \"waits for a slow fixture\":\n" +
+            "        pending(\"slow fixture unavailable\")\n" +
+            "        return\n"
+        val doc = SspecDoc(
+            file_path:
+                "test/01_unit/app/tooling/runtime_pending_fixture_spec.spl",
+            raw_content: content,
+            doc_blocks: [],
+            feature_title: "Runtime Pending",
+            feature_ids: [],
+            metadata: FeatureMetadata.empty()
+        )
+        match generate_feature_doc(doc, root):
+            case Err(e):
+                expect(e).to_equal("")
+            case Ok(path):
+                val generated = file_read(path)
+                expect(generated).to_contain(
+                    "#### waits for a fixture _(pending)_"
+                )
+                expect(generated).to_contain("| Active scenarios | 1 |")
+                expect(generated).to_contain("| Pending scenarios | 2 |")
+                expect(generated).to_contain(
+                    "- keeps a conditional gate active"
+                )
+                expect(generated.contains(
+                    "- [pending] keeps a conditional gate active"
+                )).to_equal(false)
+                expect(generated).to_contain(
+                    "- [slow] [pending] waits for a slow fixture"
+                )
+                expect(generated).to_contain(
+                    "#### waits for a slow fixture _(slow, pending)_"
+                )
+        val _cleanup_pending = dir_remove_all(root)
 
     it "parses inline manual docstrings and replaces longer generated files":
         val nonce = time_now_unix_micros().to_string()

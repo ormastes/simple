@@ -5,7 +5,10 @@
 # - Index Module: Category inference, coverage calculation, index page generation
 
 use app.spipe_docgen.common.{SspecDoc, FeatureMetadata, FeatureEntry, DocStats, ValidationResult, native_fs_write_string, native_fs_read_string, native_fs_exists, native_fs_create_dir, spipe_dbg}
-use app.spipe_docgen.parser.{extract_test_structure_with_path, extract_quoted_name}
+use app.spipe_docgen.parser.{
+    extract_test_structure_with_path, extract_quoted_name,
+    scenario_at_is_unconditional_pending
+}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day}
 
@@ -127,16 +130,25 @@ fn count_test_items(content: text) -> (i64, i64, i64):
     var total = 0
     var skipped = 0
     var pending = 0
-    for line in lines:
+    var index = 0
+    while index < lines.len():
+        val line = lines[index]
         val trimmed = line.trim()
         if trimmed.starts_with("it ") and trimmed.contains("\""):
-            total = total + 1
+            if scenario_at_is_unconditional_pending(lines, index):
+                pending = pending + 1
+            else:
+                total = total + 1
         elif trimmed.starts_with("slow_it ") and trimmed.contains("\""):
-            total = total + 1
+            if scenario_at_is_unconditional_pending(lines, index):
+                pending = pending + 1
+            else:
+                total = total + 1
         elif (trimmed.starts_with("skip it ") or trimmed.starts_with("skip_it ")) and trimmed.contains("\""):
             skipped = skipped + 1
         elif trimmed.starts_with("pending ") and trimmed.contains("\""):
             pending = pending + 1
+        index = index + 1
     (total, skipped, pending)
 
 fn count_slow_items(content: text) -> i64:
@@ -151,11 +163,16 @@ fn count_slow_items(content: text) -> i64:
 fn extract_scenario_list(content: text) -> [text]:
     val lines = content.split("\n")
     var scenarios = []
-    for line in lines:
+    var index = 0
+    while index < lines.len():
+        val line = lines[index]
         val trimmed = line.trim()
         if trimmed.starts_with("slow_it ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            scenarios.push("- [slow] {name}")
+            if scenario_at_is_unconditional_pending(lines, index):
+                scenarios.push("- [slow] [pending] {name}")
+            else:
+                scenarios.push("- [slow] {name}")
         elif (trimmed.starts_with("skip it ") or trimmed.starts_with("skip_it ")) and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
             scenarios.push("- [skip] {name}")
@@ -164,7 +181,11 @@ fn extract_scenario_list(content: text) -> [text]:
             scenarios.push("- [pending] {name}")
         elif trimmed.starts_with("it ") and trimmed.contains("\""):
             val name = extract_quoted_name(trimmed)
-            scenarios.push("- {name}")
+            if scenario_at_is_unconditional_pending(lines, index):
+                scenarios.push("- [pending] {name}")
+            else:
+                scenarios.push("- {name}")
+        index = index + 1
     scenarios
 
 fn build_auto_overview(content: text) -> text:

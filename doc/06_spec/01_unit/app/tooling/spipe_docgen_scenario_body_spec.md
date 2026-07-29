@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 59 | 59 | 0 | 0 |
+| 61 | 61 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -625,6 +625,53 @@ expect(structure).to_contain("<summary>Advanced: keeps stress detail folded</sum
 expect(structure).to_contain("#### keeps stress detail folded _(slow)_")
 expect(structure).to_contain("#### shows important slow operator flow _(slow)_")
 expect(structure.contains("<summary>Advanced: shows important slow operator flow</summary>")).to_equal(false)
+```
+
+</details>
+
+#### classifies only an unconditional top-level literal pending return
+
+- "        if host is unavailable
+- "            pending
+- "#### waits for the unavailable fixture
+- "#### keeps a conditional host gate active
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = "describe \"Runtime pending\":\n" +
+    "    it \"waits for the unavailable fixture\":\n" +
+    "        expect(\"control\").to_equal(\"control\")\n" +
+    "        pending(\n" +
+    "            \"fixture unavailable\"\n" +
+    "        )\n" +
+    "        return\n" +
+    "    it \"keeps a conditional host gate active\":\n" +
+    "        if host_is_unavailable():\n" +
+    "            pending(\"host unavailable\")\n" +
+    "            return\n" +
+    "        expect(\"active\").to_equal(\"active\")\n" +
+    "    slow_it \"waits for the slow fixture\":\n" +
+    "        pending(\"slow fixture unavailable\")\n" +
+    "        return\n"
+val structure = extract_test_structure(source)
+expect(structure).to_contain(
+    "#### waits for the unavailable fixture _(pending)_"
+)
+expect(structure).to_contain(
+    "#### keeps a conditional host gate active"
+)
+expect(structure.contains(
+    "#### keeps a conditional host gate active _(pending)_"
+)).to_equal(false)
+expect(structure).to_contain(
+    "#### waits for the slow fixture _(slow, pending)_"
+)
 ```
 
 </details>
@@ -1491,6 +1538,76 @@ match parsed_result:
 
 </details>
 
+#### counts an unconditional top-level pending return without hiding active scenarios
+
+- time now unix micros
+- "        if host is unavailable
+- "            pending
+- metadata: FeatureMetadata empty
+   - Expected: e equals ``
+- "#### waits for a fixture
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 49 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "/tmp/spipe_docgen_pending_" +
+    time_now_unix_micros().to_string()
+val content = "describe \"Runtime pending\":\n" +
+    "    it \"waits for a fixture\":\n" +
+    "        expect(\"control\").to_equal(\"control\")\n" +
+    "        pending(\n" +
+    "            \"fixture unavailable\"\n" +
+    "        )\n" +
+    "        return\n" +
+    "    it \"keeps a conditional gate active\":\n" +
+    "        if host_is_unavailable():\n" +
+    "            pending(\"host unavailable\")\n" +
+    "            return\n" +
+    "        expect(\"active\").to_equal(\"active\")\n" +
+    "    slow_it \"waits for a slow fixture\":\n" +
+    "        pending(\"slow fixture unavailable\")\n" +
+    "        return\n"
+val doc = SspecDoc(
+    file_path:
+        "test/01_unit/app/tooling/runtime_pending_fixture_spec.spl",
+    raw_content: content,
+    doc_blocks: [],
+    feature_title: "Runtime Pending",
+    feature_ids: [],
+    metadata: FeatureMetadata.empty()
+)
+match generate_feature_doc(doc, root):
+    case Err(e):
+        expect(e).to_equal("")
+    case Ok(path):
+        val generated = file_read(path)
+        expect(generated).to_contain(
+            "#### waits for a fixture _(pending)_"
+        )
+        expect(generated).to_contain("| Active scenarios | 1 |")
+        expect(generated).to_contain("| Pending scenarios | 2 |")
+        expect(generated).to_contain(
+            "- keeps a conditional gate active"
+        )
+        expect(generated.contains(
+            "- [pending] keeps a conditional gate active"
+        )).to_equal(false)
+        expect(generated).to_contain(
+            "- [slow] [pending] waits for a slow fixture"
+        )
+        expect(generated).to_contain(
+            "#### waits for a slow fixture _(slow, pending)_"
+        )
+val _cleanup_pending = dir_remove_all(root)
+```
+
+</details>
+
 #### parses inline manual docstrings and replaces longer generated files
 
 - metadata: extract metadata
@@ -1963,8 +2080,8 @@ Tests covering spipe docgen scenario body extraction.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 59 |
-| Active scenarios | 59 |
+| Total scenarios | 61 |
+| Active scenarios | 61 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
