@@ -25,7 +25,7 @@ use std.editor.extensions.manifest.*
 use std.editor.extensions.contract.{extension_id_is_valid, semver_parse,
     semver_range_parse, extension_host_placement_known}
 use std.common.sdn.value.{SdnValue, Span}
-use std.common.sdn.parser.{parse_with_spans}
+use std.common.sdn.parser.{parse_with_spans_and_issues, SdnIssue}
 use std.common.sdn.schema.*
 use std.io_runtime.{file_read}
 
@@ -56,13 +56,14 @@ fn extension_manifest_decode(content: text) -> ExtensionManifestLoad:
             issues: [SdnDecodeIssue(path: "", message: "manifest is empty", line: 0, col: 0)],
             ok: false
         )
-    match parse_with_spans(content):
+    match parse_with_spans_and_issues(content):
         case Ok(r):
             val root = r.0
             val spans = r.1
+            val parser_issues = r.2
             match root.get_path("extension"):
                 case Some(_):
-                    _extension_manifest_decode_v1(root, spans)
+                    _extension_manifest_decode_v1(root, spans, parser_issues)
                 case None:
                     _extension_manifest_decode_legacy(content)
         case Err(e):
@@ -102,7 +103,7 @@ fn _merge_item_issues(issues: SdnDecodeIssues, sub: SdnDecodeIssues, base: text,
     for it in sub.items:
         issues.add(base + "." + idx.to_text() + "." + it.path, it.message)
 
-fn _extension_manifest_decode_v1(root: SdnValue, spans: Dict<text, Span>) -> ExtensionManifestLoad:
+fn _extension_manifest_decode_v1(root: SdnValue, spans: Dict<text, Span>, parser_issues: [SdnIssue]) -> ExtensionManifestLoad:
     val issues = SdnDecodeIssues.new()
     var m = extension_manifest_empty()
 
@@ -172,7 +173,12 @@ fn _extension_manifest_decode_v1(root: SdnValue, spans: Dict<text, Span>) -> Ext
     m.contributes_debug_adapters = _decode_debug_adapters(root, issues)
 
     val located = _locate_with_parents(issues, spans)
-    ExtensionManifestLoad(manifest: m, issues: located, ok: m.name != "")
+    var merged: [SdnDecodeIssue] = []
+    for it in located:
+        merged.push(it)
+    for pi in parser_issues:
+        merged.push(SdnDecodeIssue(path: pi.path, message: pi.message, line: pi.line, col: pi.col))
+    ExtensionManifestLoad(manifest: m, issues: merged, ok: m.name != "")
 
 fn _decode_commands(root: SdnValue, issues: SdnDecodeIssues) -> [ExtensionCommand]:
     var out: [ExtensionCommand] = []

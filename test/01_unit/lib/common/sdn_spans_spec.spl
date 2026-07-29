@@ -23,7 +23,7 @@ Tests for the hardened SDN parser entry points:
 import std.spec
 
 use std.common.sdn.value.{SdnValue, Span}
-use std.common.sdn.parser.{parse, parse_with_spans, parse_with_issues, parse_untrusted, SdnIssue}
+use std.common.sdn.parser.{parse, parse_with_spans, parse_with_issues, parse_with_spans_and_issues, parse_untrusted, SdnIssue}
 
 describe "parse_with_spans":
     """
@@ -135,6 +135,42 @@ describe "parse_with_issues":
                         expect(s).to_equal("b")
                     case _:
                         expect("name").to_equal("present")
+            case Err(_):
+                expect("parse failed").to_equal("should not fail")
+
+describe "parse_with_spans_and_issues":
+    """
+    ## Spans and issues in one pass
+
+    Returns the same value/span map as `parse_with_spans` plus the same
+    issue list as `parse_with_issues`, without parsing twice.
+    """
+
+    it "returns the same value, spans, and issues as the separate calls":
+        val source = "extension:\n  id: demo\n  id: dup\n"
+        match parse_with_spans_and_issues(source):
+            case Ok(r):
+                val v = r.0
+                val spans = r.1
+                val issues = r.2
+                match v.get_path("extension.id"):
+                    case Some(SdnValue.String(s)):
+                        expect(s).to_equal("dup")
+                    case _:
+                        expect("extension.id").to_equal("present")
+                expect(spans.contains_key("extension.id")).to_equal(true)
+                expect(issues.len()).to_equal(1)
+                expect(issues[0].kind).to_equal("duplicate_key")
+                expect(issues[0].path).to_equal("extension.id")
+                expect(issues[0].line).to_equal(3)
+            case Err(_):
+                expect("parse failed").to_equal("should not fail")
+
+    it "returns no issues for a clean document, spans still populated":
+        match parse_with_spans_and_issues("a: 1\nb: 2"):
+            case Ok(r):
+                expect(r.1.contains_key("a")).to_equal(true)
+                expect(r.2.len()).to_equal(0)
             case Err(_):
                 expect("parse failed").to_equal("should not fail")
 
