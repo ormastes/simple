@@ -100,12 +100,22 @@ for b in $BINS; do
   echo "sha256  : $(sha256sum "$real" 2>/dev/null | cut -c1-16)..."
 
   # --- lineage: symbol namespace, NOT strings ---
-  simple_syms=$(nm "$real" 2>/dev/null | grep -c ' T cli__bootstrap_main__' || true)
+  # Count ANY module-qualified Simple symbol (lowercase name containing `__`),
+  # not one hard-coded entry point. Keying on `cli__bootstrap_main__` alone gave
+  # a FALSE "RUST SEED" verdict on 2026-07-29 for a genuinely pure-Simple build
+  # carrying 20,192 unmangled symbols (cli__*, backend__*) that simply used a
+  # different entry name. Rust-mangled symbols start `_ZN`, so they cannot match.
+  simple_syms=$(nm "$real" 2>/dev/null | grep -cE ' T [a-z][A-Za-z0-9_]*__[A-Za-z0-9_]' || true)
+  rust_syms=$(nm "$real" 2>/dev/null | grep -c ' T _ZN' || true)
   cargo_paths=$(strings -a "$real" 2>/dev/null | grep -c 'cargo/registry' || true)
-  if [ "${simple_syms:-0}" -gt 0 ]; then
-    lineage="pure-Simple / self-hosted (or hybrid): $simple_syms unmangled Simple symbols"
+  if [ "${simple_syms:-0}" -gt 0 ] && [ "${rust_syms:-0}" -gt 0 ]; then
+    lineage="HYBRID: $simple_syms Simple symbols + $rust_syms Rust-mangled"
+  elif [ "${simple_syms:-0}" -gt 0 ]; then
+    lineage="pure-Simple / self-hosted: $simple_syms unmangled Simple symbols, $cargo_paths cargo/registry paths"
+  elif [ "${cargo_paths:-0}" -gt 0 ] || [ "${rust_syms:-0}" -gt 0 ]; then
+    lineage="RUST SEED: 0 Simple symbols, $rust_syms Rust-mangled, $cargo_paths cargo/registry paths"
   else
-    lineage="RUST SEED: 0 unmangled Simple symbols, $cargo_paths cargo/registry paths"
+    lineage="UNKNOWN: 0 Simple symbols, 0 Rust-mangled, 0 cargo paths (stripped binary?)"
   fi
   echo "lineage : $lineage"
 
