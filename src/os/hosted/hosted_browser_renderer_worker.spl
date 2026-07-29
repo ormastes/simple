@@ -13,10 +13,16 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_fetch_request_encode,
     browser_renderer_frame_encode_with_state_and_images,
+    browser_renderer_frame_encode_with_state_and_retained_images,
+    browser_renderer_image_resource_revisions,
+    browser_renderer_referenced_image_resources,
     browser_renderer_message_encode,
     browser_renderer_navigation_decode,
     browser_renderer_network_response_decode,
     browser_renderer_resize_decode
+}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResourceRevision
 }
 use common.ui.access.{WinTextActionRequest}
 use std.common.encoding.utf8.{text_without_last_codepoint}
@@ -67,6 +73,7 @@ pub struct HostedBrowserRendererWorkerResult:
     resolved_input_view_start_byte: i64
     resolved_scroll_y: i32
     max_scroll_y: i32
+    image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
 
 fn _worker_result_reject(
     reason: text,
@@ -82,7 +89,8 @@ fn _worker_result_reject(
         hit_index: nil,
         resolved_input_view_start_byte: 0,
         resolved_scroll_y: 0,
-        max_scroll_y: 0
+        max_scroll_y: 0,
+        image_resource_revisions: []
     )
 
 fn _worker_next_animation_ms(
@@ -137,7 +145,10 @@ fn _worker_frame(
     response_request_id: i64,
     overlay: BrowserTextInputOverlay,
     caret_due_ms: i64,
-    scroll_y: i32
+    scroll_y: i32,
+    prior_image_resource_revisions: [
+        SimpleOsHostGpuImageResourceRevision
+    ]
 ) -> HostedBrowserRendererWorkerResult:
     val document_animation_time_ms = _worker_document_animation_time_ms(
         session, animation_time_ms
@@ -157,7 +168,10 @@ fn _worker_frame(
         session.animation_start_time_ms + layout.animation_next_ms
     else:
         -1
-    val encoded = browser_renderer_frame_encode_with_state_and_images(
+    val frame_image_resources = browser_renderer_referenced_image_resources(
+        layout.composition, session.image_resources
+    )
+    val encoded = browser_renderer_frame_encode_with_state_and_retained_images(
         layout.composition,
         message.generation,
         response_request_id,
@@ -176,7 +190,8 @@ fn _worker_frame(
         session.current_url,
         _worker_network_history_neighbor(session.history_back_url()),
         _worker_network_history_neighbor(session.history_forward_url()),
-        session.image_resources
+        frame_image_resources,
+        prior_image_resource_revisions
     )
     if not encoded.ok:
         return _worker_result_reject(
@@ -192,7 +207,11 @@ fn _worker_frame(
         resolved_input_view_start_byte:
             layout.resolved_input_view_start_byte,
         resolved_scroll_y: layout.resolved_scroll_y,
-        max_scroll_y: layout.max_scroll_y
+        max_scroll_y: layout.max_scroll_y,
+        image_resource_revisions:
+            browser_renderer_image_resource_revisions(
+                frame_image_resources
+            )
     )
 
 pub class HostedBrowserRendererWorkerSession:
@@ -213,6 +232,7 @@ pub class HostedBrowserRendererWorkerSession:
     caret_blink_epoch_ms: i64
     pressed_pointer_default_prevented: bool
     scroll_milli_y: i64
+    image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
 
     static fn create(width: i32, height: i32) -> HostedBrowserRendererWorkerSession:
         var browser = BrowserSession.new()
@@ -234,7 +254,8 @@ pub class HostedBrowserRendererWorkerSession:
             input_view_start_byte: 0,
             caret_blink_epoch_ms: 0,
             pressed_pointer_default_prevented: false,
-            scroll_milli_y: 0
+            scroll_milli_y: 0,
+            image_resource_revisions: []
         )
 
     me _target_at(x: i64, y: i64) -> text:
@@ -717,7 +738,8 @@ pub class HostedBrowserRendererWorkerSession:
                 resolved_input_view_start_byte:
                     self.input_view_start_byte,
                 resolved_scroll_y: 0,
-                max_scroll_y: 0
+                max_scroll_y: 0,
+                image_resource_revisions: self.image_resource_revisions
             )
         val overlay = self._text_overlay()
         val caret_due_ms = self._caret_due_ms(overlay)
@@ -726,8 +748,11 @@ pub class HostedBrowserRendererWorkerSession:
             self.browser, message, self.width, self.height,
             self.animation_time_ms, response_id, overlay,
             caret_due_ms,
-            (self.scroll_milli_y / 1000).to_i32()
+            (self.scroll_milli_y / 1000).to_i32(),
+            self.image_resource_revisions
         )
+        if frame.ok:
+            self.image_resource_revisions = frame.image_resource_revisions
         if frame.hit_index != nil:
             self.last_hit_index = frame.hit_index
             val max_scroll_milli_y = frame.max_scroll_y.to_i64() * 1000
@@ -781,7 +806,7 @@ pub fn hosted_browser_renderer_handle_request(
 
     _worker_frame(
         session, message, width, height, next_time_ms, message.request_id,
-        browser_text_input_overlay_empty(), -1
+        browser_text_input_overlay_empty(), -1, 0, []
     )
 
 pub fn hosted_browser_renderer_handle_init(
@@ -816,6 +841,9 @@ pub fn hosted_browser_renderer_handle_init(
         session.animation_start_time_ms + layout.animation_next_ms
     else:
         -1
+    val frame_image_resources = browser_renderer_referenced_image_resources(
+        layout.composition, session.image_resources
+    )
     browser_renderer_frame_encode_with_state_and_images(
         layout.composition,
         message.generation,
@@ -835,7 +863,7 @@ pub fn hosted_browser_renderer_handle_init(
         session.current_url,
         _worker_network_history_neighbor(session.history_back_url()),
         _worker_network_history_neighbor(session.history_forward_url()),
-        session.image_resources
+        frame_image_resources
     )
 
 fn _worker_write(wire: text) -> bool:

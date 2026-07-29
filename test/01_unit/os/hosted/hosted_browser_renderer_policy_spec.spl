@@ -7,7 +7,8 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_navigation_decode,
     browser_renderer_network_response_decode,
-    browser_renderer_network_response_encode
+    browser_renderer_network_response_encode,
+    browser_renderer_referenced_image_resources
 }
 use std.common.image.png_encode.{encode_argb_to_png}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
@@ -51,32 +52,28 @@ fn _external_png_pixels() -> [u32]:
 fn _external_png_bytes() -> [u8]:
     encode_argb_to_png(_external_png_pixels(), 2, 2)
 
-fn _external_png_hex() -> text:
+fn _png_hex(bytes: [u8]) -> text:
     var out = ""
-    for byte in _external_png_bytes():
+    for byte in bytes:
         val piece = byte.to_i64().to_hex()
         out = out + if piece.len() == 1: "0{piece}" else: piece
     out
 
-fn _commit_broker_image_response(
-    session: BrowserSession,
-    original: BrowserRequest,
-    transport_upgrade: BrowserRendererNetworkDecodeResult
-) -> BrowserRequest:
-    match session.commit_network_response(BrowserResponse.create(
-        original.id, "image", original.url,
-        transport_upgrade.status, transport_upgrade.headers, "", ""
-    )):
-        Err(reason): fail(reason)
-        Ok(_): pass_dn("transport upgrade queued the correlated HTTPS request")
-    val upgraded = match session.take_pending_request():
-        nil: fail("Expected the broker-upgraded image request")
-        Some(request): request
-    if upgraded.redirect_count != 20:
-        fail("Broker HSTS transport upgrade spent redirect budget")
+fn _external_png_hex() -> text:
+    _png_hex(_external_png_bytes())
+
+fn _background_png_pixels() -> [u32]:
+    [0x80FF0000u32, 0x00000000u32, 0x00000000u32, 0x80FF0000u32]
+
+fn _background_png_hex() -> text:
+    _png_hex(encode_argb_to_png(_background_png_pixels(), 2, 2))
+
+fn _commit_png_response(
+    session: BrowserSession, request: BrowserRequest, png_hex: text
+):
     val encoded = browser_renderer_network_response_encode(
-        1, 2, upgraded.id, "image", upgraded.url, 200,
-        "Content-Type: image/png", _external_png_hex(), ""
+        1, 2, request.id, "image", request.url, 200,
+        "Content-Type: image/png", png_hex, ""
     )
     if not encoded.ok:
         fail(encoded.reason)
@@ -93,6 +90,28 @@ fn _commit_broker_image_response(
     )):
         Err(reason): fail(reason)
         Ok(_): pass_dn("PNG response decoded and committed")
+
+fn _commit_broker_image_response(
+    session: BrowserSession,
+    original: BrowserRequest,
+    transport_upgrade: BrowserRendererNetworkDecodeResult,
+    png_hex: text = ""
+) -> BrowserRequest:
+    match session.commit_network_response(BrowserResponse.create(
+        original.id, "image", original.url,
+        transport_upgrade.status, transport_upgrade.headers, "", ""
+    )):
+        Err(reason): fail(reason)
+        Ok(_): pass_dn("transport upgrade queued the correlated HTTPS request")
+    val upgraded = match session.take_pending_request():
+        nil: fail("Expected the broker-upgraded image request")
+        Some(request): request
+    if upgraded.redirect_count != 20:
+        fail("Broker HSTS transport upgrade spent redirect budget")
+    _commit_png_response(
+        session, upgraded,
+        if png_hex == "": _external_png_hex() else: png_hex
+    )
     upgraded
 
 fn _render_image_resource_draw_ir(session: BrowserSession) -> [u32]:
@@ -122,6 +141,40 @@ fn _render_image_resource_draw_ir(session: BrowserSession) -> [u32]:
     raster.shutdown()
     if rendered.skipped_command_count != 0:
         fail("Decoded image Draw IR command was skipped")
+    rendered.pixels
+
+fn _render_background_image_pixels(session: BrowserSession) -> [u32]:
+    val composition = simple_web_layout_render_html_draw_ir_with_images(
+        session.render_html_document(), 8, 8, session.image_resources
+    )
+    val frame_images = browser_renderer_referenced_image_resources(
+        composition, session.image_resources
+    )
+    if session.image_resources.len() != 2 or frame_images.len() != 1:
+        fail("Expected SBRF5 to retain only the visible CSS image")
+    val encoded = browser_renderer_frame_encode_with_state_and_images(
+        composition, 1, 3, 3, -1, 0, "", 0, "", "",
+        session.current_url, "", "", frame_images
+    )
+    if not encoded.ok:
+        fail(encoded.reason)
+    if not encoded.wire.contains("SBRF5\t"):
+        fail("Expected SBRF5 CSS image frame")
+    val frame = browser_renderer_frame_decode(
+        browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), encoded.wire
+        ).message,
+        8, 8
+    )
+    if not frame.ok or frame.image_resources.len() != 1:
+        fail("Expected one referenced CSS image after SBRF5 decode")
+    val raster = Engine2dCompositorBackend.create_named(8, 8, "software")
+    val rendered = raster.render_draw_ir_composition_resources(
+        frame.composition, frame.image_resources
+    )
+    raster.shutdown()
+    if rendered.skipped_command_count != 0:
+        fail("Decoded CSS background Draw IR command was skipped")
     rendered.pixels
 
 fn permit(
@@ -1053,6 +1106,174 @@ describe "hosted browser renderer broker policy":
         expect(csp.commit_network_response(BrowserResponse.create(
             csp_document.id, "document", csp_document.url, 200,
             "Content-Security-Policy: img-src 'none'", image_html, ""
+        )).is_ok()).to_be(true)
+        expect(csp.take_pending_request()).to_be_nil()
+        expect(csp.image_resources.len()).to_equal(0)
+        expect(csp.warnings.join("|")).to_contain("CSP blocked image")
+
+    it "loads brokered CSS background images and renders their exact pixels":
+        step("Load inline and linked CSS background images through the broker")
+        val image_url = "http://cdn.secure.test/tile.png"
+        val linked_image_url = "https://assets.test/unused.png"
+        val html = (
+            "<html style='margin:0;padding:0'><head>" +
+            "<link rel='stylesheet' href='https://styles.test/theme.css'>" +
+            "</head><body style='margin:0;padding:0'>" +
+            "<div id='tile' style='width:4px;height:4px;padding:1px;" +
+            "border:1px solid #123456;background-color:#0000ff;" +
+            "background-image:url({image_url});background-repeat:repeat-x;" +
+            "background-size:2px 2px;background-position:1px 0px;" +
+            "background-origin:content-box;background-clip:border-box'>" +
+            "<div style='width:1px;height:1px;margin-left:1px;" +
+            "background:#00ff00'></div></div></body></html>"
+        )
+        val now_ms = rt_time_now_unix_micros() / 1000
+        var entries: [BrowserHstsSnapshotEntry] = []
+        entries.push(BrowserHstsSnapshotEntry(
+            host: "secure.test",
+            received_at_unix_ms: now_ms - 1000,
+            expires_at_unix_ms: now_ms + 60000,
+            include_subdomains: true
+        ))
+        var broker = HostedBrowserRendererProcess.create(1, 8, 8)
+        expect(broker.load_hsts_snapshot(
+            BrowserHstsSnapshot.create(entries), now_ms
+        )).to_equal(1)
+        broker.document_url = "https://source.test/page"
+        broker.document_origin = "https://source.test"
+
+        var session = BrowserSession.new()
+        session.broker_network_policy = true
+        expect(session.open_html(broker.document_url, html).is_ok()).to_be(true)
+        val style = session.take_pending_request().unwrap()
+        expect(style.kind).to_equal("style")
+        expect(session.commit_network_response(BrowserResponse.create(
+            style.id, style.kind, style.url, 200, "Content-Type: text/css",
+            ".unused{background-image:url({linked_image_url})}", ""
+        )).is_ok()).to_be(true)
+
+        session.pending_requests[0].redirect_count = 20
+        val original = session.take_pending_request().unwrap()
+        expect(original.kind).to_equal("image")
+        expect(original.url).to_equal(image_url)
+        val fetch = BrowserRendererNetworkDecodeResult(
+            ok: true,
+            reason: "ok",
+            reply_to_request_id: 1,
+            request_id: original.id,
+            kind: original.kind,
+            url: original.url,
+            method: original.method,
+            headers: original.headers,
+            body: original.body,
+            content_type: original.content_type,
+            credentials: original.credentials,
+            script_cookie_writes: [],
+            status: 0,
+            error: ""
+        )
+        val effective_url = broker._hsts_upgrade_url(fetch.url)
+        val policy = hosted_browser_renderer_request_policy(
+            broker.document_origin, permit(false, ""), fetch, effective_url
+        )
+        expect(policy.ok).to_be(true)
+        expect(broker._queue_hsts_transport_upgrade(
+            fetch, policy, 20
+        )).to_equal("")
+        val transport_upgrade = browser_renderer_network_response_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(1), broker.pending_wire
+            ).message
+        )
+        expect(transport_upgrade.status).to_equal(307)
+        val upgraded = _commit_broker_image_response(
+            session, original, transport_upgrade, _background_png_hex()
+        )
+        expect(upgraded.redirect_count).to_equal(20)
+
+        val linked = session.take_pending_request().unwrap()
+        expect(linked.kind).to_equal("image")
+        expect(linked.url).to_equal(linked_image_url)
+        val linked_fetch = BrowserRendererNetworkDecodeResult(
+            ok: true,
+            reason: "ok",
+            reply_to_request_id: 1,
+            request_id: linked.id,
+            kind: linked.kind,
+            url: linked.url,
+            method: linked.method,
+            headers: linked.headers,
+            body: linked.body,
+            content_type: linked.content_type,
+            credentials: linked.credentials,
+            script_cookie_writes: [],
+            status: 0,
+            error: ""
+        )
+        expect(hosted_browser_renderer_request_policy(
+            broker.document_origin, permit(false, ""), linked_fetch
+        ).ok).to_be(true)
+        _commit_png_response(session, linked, _background_png_hex())
+        expect(session.image_resources.len()).to_equal(2)
+
+        step("Apply background size position repeat origin and clip")
+        step("Render the background image behind element content")
+        val pixels = _render_background_image_pixels(session)
+        expect(pixels.len()).to_equal(64)
+        expect(pixels[1 * 8 + 1]).to_equal(0xFF0000FFu32)
+        expect(pixels[2 * 8 + 1]).to_equal(0xFF80007Fu32)
+        expect(pixels[2 * 8 + 2]).to_equal(0xFF0000FFu32)
+        expect(pixels[2 * 8 + 3]).to_equal(0xFF00FF00u32)
+        expect(pixels[3 * 8 + 1]).to_equal(0xFF0000FFu32)
+        expect(pixels[3 * 8 + 2]).to_equal(0xFF80007Fu32)
+        expect(pixels[4 * 8 + 1]).to_equal(0xFF0000FFu32)
+        expect(pixels[2 * 8 + 7]).to_equal(0xFF123456u32)
+
+        step("Block background images denied by CSP or mixed-content policy")
+        val blocked_html = (
+            "<div style='background-image:url({image_url})'></div>"
+        )
+        var blocked = BrowserSession.new()
+        blocked.broker_network_policy = true
+        expect(blocked.open_html(
+            broker.document_url, blocked_html
+        ).is_ok()).to_be(true)
+        val blocked_request = blocked.take_pending_request().unwrap()
+        val blocked_fetch = BrowserRendererNetworkDecodeResult(
+            ok: true,
+            reason: "ok",
+            reply_to_request_id: 1,
+            request_id: blocked_request.id,
+            kind: blocked_request.kind,
+            url: blocked_request.url,
+            method: blocked_request.method,
+            headers: blocked_request.headers,
+            body: blocked_request.body,
+            content_type: blocked_request.content_type,
+            credentials: blocked_request.credentials,
+            script_cookie_writes: [],
+            status: 0,
+            error: ""
+        )
+        val blocked_policy = hosted_browser_renderer_request_policy(
+            broker.document_origin, permit(false, ""), blocked_fetch
+        )
+        expect(blocked_policy.ok).to_be(false)
+        expect(blocked_policy.reason).to_equal("mixed-content-blocked")
+        expect(blocked.commit_network_response(BrowserResponse.create(
+            blocked_request.id, blocked_request.kind, blocked_request.url,
+            0, "", "", blocked_policy.reason
+        )).is_ok()).to_be(true)
+        expect(blocked.image_resources.len()).to_equal(0)
+
+        var csp = BrowserSession.new()
+        expect(csp.begin_network_navigation(
+            broker.document_url, "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val csp_document = csp.take_pending_request().unwrap()
+        expect(csp.commit_network_response(BrowserResponse.create(
+            csp_document.id, "document", csp_document.url, 200,
+            "Content-Security-Policy: img-src 'none'", blocked_html, ""
         )).is_ok()).to_be(true)
         expect(csp.take_pending_request()).to_be_nil()
         expect(csp.image_resources.len()).to_equal(0)

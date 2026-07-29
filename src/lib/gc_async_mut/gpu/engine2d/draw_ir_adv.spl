@@ -105,6 +105,18 @@ struct Engine2dResolvedDrawIrImage:
     height: i32
     pixels: [u32]
 
+struct Engine2dCssBackgroundPixels:
+    valid: bool
+    pixels: [u32]
+
+struct Engine2dCssBackgroundMetadata:
+    valid: bool
+    repeat: text
+    tile_x: i64
+    tile_y: i64
+    tile_width: i64
+    tile_height: i64
+
 # Named result for the internal render walkers. Positional tuple-member reads
 # are miscompiled on the entry-closure freestanding native path; named fields
 # preserve rendered/skipped counts on every backend.
@@ -570,10 +582,134 @@ fn _engine2d_draw_ir_image_is_opaque(image: Engine2dResolvedDrawIrImage) -> bool
             return false
     true
 
+fn _engine2d_draw_ir_unique_style_value(props: [DrawIrStyleProp], key: text) -> text:
+    var found = ""
+    var count = 0
+    for prop in props:
+        if prop.key == key:
+            found = prop.value
+            count = count + 1
+    if count != 1:
+        return ""
+    found
+
+fn _engine2d_draw_ir_has_css_background_role(props: [DrawIrStyleProp]) -> bool:
+    for prop in props:
+        if prop.key == "image-role" and prop.value == "css-background":
+            return true
+    false
+
+fn _engine2d_draw_ir_canonical_i32(value: text) -> i64:
+    val invalid: i64 = 9223372036854775807
+    if value == "" or value.len() > 11:
+        return invalid
+    val parsed = _engine2d_draw_ir_nth_int(value, 0, invalid)
+    if parsed < -2147483648 or parsed > 2147483647:
+        return invalid
+    if "{parsed}" != value:
+        return invalid
+    parsed
+
+fn _engine2d_draw_ir_positive_mod(value: i64, modulus: i64) -> i64:
+    val remainder = value % modulus
+    if remainder < 0:
+        return remainder + modulus
+    remainder
+
+fn _engine2d_draw_ir_css_background_metadata(
+    command: DrawIrCommand
+) -> Engine2dCssBackgroundMetadata:
+    val invalid: i64 = 9223372036854775807
+    val style = command.computed_style
+    if _engine2d_draw_ir_unique_style_value(
+        style, "image-role") != "css-background":
+        return Engine2dCssBackgroundMetadata(
+            valid: false, repeat: "", tile_x: 0, tile_y: 0,
+            tile_width: 0, tile_height: 0)
+    val repeat = _engine2d_draw_ir_unique_style_value(
+        style, "background-repeat")
+    if (repeat != "no-repeat" and repeat != "repeat-x" and
+        repeat != "repeat-y" and repeat != "repeat"):
+        return Engine2dCssBackgroundMetadata(
+            valid: false, repeat: "", tile_x: 0, tile_y: 0,
+            tile_width: 0, tile_height: 0)
+    val tile_x = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-tile-x"))
+    val tile_y = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-tile-y"))
+    val tile_width = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-tile-width"))
+    val tile_height = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-tile-height"))
+    Engine2dCssBackgroundMetadata(
+        valid: (
+            tile_x != invalid and tile_y != invalid and
+            tile_width != invalid and tile_height != invalid and
+            tile_width > 0 and tile_height > 0),
+        repeat: repeat,
+        tile_x: tile_x,
+        tile_y: tile_y,
+        tile_width: tile_width,
+        tile_height: tile_height
+    )
+
+fn _engine2d_draw_ir_css_background_pixels(
+    command: DrawIrCommand,
+    image: Engine2dResolvedDrawIrImage,
+    sample_origin_x: i64,
+    sample_origin_y: i64,
+    target_pixels: i64
+) -> Engine2dCssBackgroundPixels:
+    var empty: [u32] = []
+    val metadata = _engine2d_draw_ir_css_background_metadata(command)
+    if (not metadata.valid or command.width <= 0 or command.height <= 0 or
+        target_pixels <= 0):
+        return Engine2dCssBackgroundPixels(valid: false, pixels: empty)
+    val work = command.width.to_i64() * command.height.to_i64()
+    if work <= 0 or work > target_pixels or work > 2147483647:
+        return Engine2dCssBackgroundPixels(valid: false, pixels: empty)
+
+    val repeat_x = (
+        metadata.repeat == "repeat-x" or metadata.repeat == "repeat")
+    val repeat_y = (
+        metadata.repeat == "repeat-y" or metadata.repeat == "repeat")
+    val work_i32 = work as i32
+    var pixels: [u32] = [0u32; work_i32]
+    var local_y: i64 = 0
+    while local_y < command.height.to_i64():
+        val relative_y = sample_origin_y + local_y - metadata.tile_y
+        var sample_y = relative_y
+        var y_visible = (
+            relative_y >= 0 and relative_y < metadata.tile_height)
+        if repeat_y:
+            sample_y = _engine2d_draw_ir_positive_mod(
+                relative_y, metadata.tile_height)
+            y_visible = true
+        var local_x: i64 = 0
+        while local_x < command.width.to_i64():
+            val relative_x = sample_origin_x + local_x - metadata.tile_x
+            var sample_x = relative_x
+            var x_visible = (
+                relative_x >= 0 and relative_x < metadata.tile_width)
+            if repeat_x:
+                sample_x = _engine2d_draw_ir_positive_mod(
+                    relative_x, metadata.tile_width)
+                x_visible = true
+            if x_visible and y_visible:
+                val source_x = (
+                    sample_x * image.width.to_i64() / metadata.tile_width)
+                val source_y = (
+                    sample_y * image.height.to_i64() / metadata.tile_height)
+                pixels[local_y * command.width.to_i64() + local_x] = (
+                    image.pixels[source_y * image.width.to_i64() + source_x])
+            local_x = local_x + 1
+        local_y = local_y + 1
+    Engine2dCssBackgroundPixels(valid: pixels.len() == work, pixels: pixels)
+
 fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp]) -> bool:
     for prop in style:
         val key = prop.key
-        val identity = key == "source" or key == "part" or key == "z-index" or key == "focused"
+        val identity = key == "source" or key == "part" or key == "z-index" or key == "focused" or key == "image-role"
         val background = key == "background-color" or key == "background-image" or key == "background-image-source-css" or key == "background-image-capability" or key == "background-image-composite-mode" or key == "background-image-fallback" or key == "background-image-fallback-reason"
         val border = key == "border-radius" or key == "border-top-width" or key == "border-right-width" or key == "border-bottom-width" or key == "border-left-width" or key == "border-top-color" or key == "border-right-color" or key == "border-bottom-color" or key == "border-left-color"
         val shadow = key == "box-shadow" or key == "box-shadow-raw" or key == "box-shadow-layer-count" or key == "box-shadow-blur-radius"
@@ -607,13 +743,23 @@ fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, imag
             return false
         val alpha = (command.color >> 24) & 0xFFu32
         val pixel_work = command.width.to_i64() * command.height.to_i64()
-        return (alpha == 0xFFu32 or (allow_translucent_initializer and alpha > 0u32)) and pixel_work <= width.to_i64() * height.to_i64()
+        val css_background_border_overlay = (
+            _engine2d_draw_ir_unique_style_value(
+                command.computed_style, "image-role") ==
+            "css-background-border-overlay")
+        return (alpha == 0xFFu32 or css_background_border_overlay or
+            (allow_translucent_initializer and alpha > 0u32)) and
+            pixel_work <= width.to_i64() * height.to_i64()
     if command.kind != "image":
         return false
     val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
     if image_index < 0:
         return false
     val image = images[image_index]
+    if (_engine2d_draw_ir_has_css_background_role(
+        command.computed_style) and
+        not _engine2d_draw_ir_css_background_metadata(command).valid):
+        return false
     val exact_size = command.width == image.width and command.height == image.height
     val source_work = image.width.to_i64() * image.height.to_i64()
     val scaled_work = command.width.to_i64() * command.height.to_i64()
@@ -633,7 +779,14 @@ fn _engine2d_draw_ir_fresh_device_initializes_target(command: DrawIrCommand, ima
     if command.kind != "image":
         return false
     val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
-    image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]) and _engine2d_draw_ir_image_is_opaque(images[image_index])
+    if image_index < 0 or not _engine2d_draw_ir_valid_resolved_image(
+        images[image_index]):
+        return false
+    if _engine2d_draw_ir_has_css_background_role(command.computed_style):
+        val metadata = _engine2d_draw_ir_css_background_metadata(command)
+        return (metadata.valid and metadata.repeat == "repeat" and
+            _engine2d_draw_ir_image_is_opaque(images[image_index]))
+    _engine2d_draw_ir_image_is_opaque(images[image_index])
 
 fn _engine2d_draw_ir_fresh_device_reason(composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> text:
     var first_command = true
@@ -1000,14 +1153,35 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
             if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
                 val image = images[image_index]
-                if blend_images and not _engine2d_draw_ir_image_is_opaque(image):
-                    if command.width == image.width and command.height == image.height:
-                        eng.draw_image_blend(x, y, image.width, image.height, image.pixels)
+                if _engine2d_draw_ir_has_css_background_role(command.computed_style):
+                    val css_x = offset_x.to_i64() + command.x.to_i64()
+                    val css_y = offset_y.to_i64() + command.y.to_i64()
+                    var css = Engine2dCssBackgroundPixels(
+                        valid: false, pixels: [])
+                    if (css_x >= -2147483648 and css_x <= 2147483647 and
+                        css_y >= -2147483648 and css_y <= 2147483647):
+                        css = _engine2d_draw_ir_css_background_pixels(
+                            command, image,
+                            command.x.to_i64(), command.y.to_i64(),
+                            eng.width().to_i64() * eng.height().to_i64())
+                    if css.valid:
+                        eng.draw_image_blend(
+                            css_x.to_i32(), css_y.to_i32(),
+                            command.width, command.height, css.pixels)
+                        rendered = rendered + 1
                     else:
-                        eng.draw_image_scaled_blend(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                        skipped = skipped + 1
+                        unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(
+                            unsupported_kinds, "image-css-background")
                 else:
-                    eng.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
-                rendered = rendered + 1
+                    if blend_images and not _engine2d_draw_ir_image_is_opaque(image):
+                        if command.width == image.width and command.height == image.height:
+                            eng.draw_image_blend(x, y, image.width, image.height, image.pixels)
+                        else:
+                            eng.draw_image_scaled_blend(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                    else:
+                        eng.draw_image_scaled(x, y, command.width, command.height, image.width, image.height, image.pixels)
+                    rendered = rendered + 1
             else:
                 skipped = skipped + 1
                 unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)

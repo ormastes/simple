@@ -5,7 +5,10 @@ use std.common.web.browser_renderer_protocol.{
     BrowserTextInputOverlay, browser_text_input_overlay_empty
 }
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
-use common.ui.draw_ir.{DrawIrCommand, draw_ir_image_command, draw_ir_rect_bounds}
+use common.ui.draw_ir.{
+    DrawIrCommand, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
+    draw_ir_rect_bounds, draw_ir_style_prop
+}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.*
 
 fn has_visible_overflow_clip(styles: [Style]) -> bool:
@@ -1099,6 +1102,11 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("align-self", st.align_self),
         draw_ir_style_prop("background-clip", st.background_clip),
         draw_ir_style_prop("background-attachment", st.background_attachment),
+        draw_ir_style_prop("background-repeat", st.background_repeat),
+        draw_ir_style_prop("background-size-width", "{st.background_size_w_px}"),
+        draw_ir_style_prop("background-size-height", "{st.background_size_h_px}"),
+        draw_ir_style_prop("background-position-x", "{st.background_position_x_px}"),
+        draw_ir_style_prop("background-position-y", "{st.background_position_y_px}"),
         draw_ir_style_prop("background-color", "{st.bg}"),
         draw_ir_style_prop("background-image", if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32: "linear-gradient({st.background_gradient_from},{st.background_gradient_to})" else: "none"),
         draw_ir_style_prop("background-layers-raw", st.bg_layers_raw),
@@ -1428,6 +1436,126 @@ fn _html_draw_ir_image_command(
     )
     Some(command)
 
+fn _html_draw_ir_background_edge(
+    edge: text, box_start: i32, box_size: i32, border_start: i32,
+    border_end: i32, padding_start: i32, padding_end: i32
+) -> (i32, i32):
+    if edge == "border-box":
+        return (box_start, box_size)
+    if edge == "content-box":
+        val inset_start = border_start + padding_start
+        return (
+            box_start + inset_start,
+            _html_draw_ir_non_negative(
+                box_size - inset_start - border_end - padding_end
+            )
+        )
+    (
+        box_start + border_start,
+        _html_draw_ir_non_negative(box_size - border_start - border_end)
+    )
+
+fn _html_draw_ir_background_offset(value: i32, free_space: i32) -> i32:
+    if value <= -1000:
+        return (free_space.to_i64() * (-1000 - value).to_i64() / 100).to_i32()
+    value
+
+fn _html_draw_ir_background_image_command(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    i: i32, images: [SimpleOsHostGpuImageResource],
+    ancestor_clip: ClipRect
+) -> DrawIrCommand?:
+    val st = styles[i]
+    if (
+        st.background_image_uri == "" or st.bg_layers_raw != "" or
+        st.background_attachment != "scroll" or
+        st.border_radius_px > 0 or st.border_radius_tl_px > 0 or
+        st.border_radius_tr_px > 0 or st.border_radius_br_px > 0 or
+        st.border_radius_bl_px > 0
+    ):
+        return nil
+    val image_index = _html_draw_ir_image_index(images, st.background_image_uri)
+    if image_index < 0:
+        return nil
+    val image = images[image_index]
+    val (origin_x, origin_w) = _html_draw_ir_background_edge(
+        st.background_origin, boxes.bx[i], boxes.bw[i],
+        st.border_l, st.border_r, st.pad_l, st.pad_r
+    )
+    val (origin_y, origin_h) = _html_draw_ir_background_edge(
+        st.background_origin, boxes.by[i], boxes.bh[i],
+        st.border_t, st.border_b, st.pad_t, st.pad_b
+    )
+    val (clip_x, clip_w) = _html_draw_ir_background_edge(
+        st.background_clip, boxes.bx[i], boxes.bw[i],
+        st.border_l, st.border_r, st.pad_l, st.pad_r
+    )
+    val (clip_y, clip_h) = _html_draw_ir_background_edge(
+        st.background_clip, boxes.by[i], boxes.bh[i],
+        st.border_t, st.border_b, st.pad_t, st.pad_b
+    )
+    val clip = clip_intersect(
+        ancestor_clip, clip_x, clip_y, clip_x + clip_w, clip_y + clip_h
+    )
+    if clip.x1 <= clip.x0 or clip.y1 <= clip.y0:
+        return nil
+    var tile_w = st.background_size_w_px
+    var tile_h = st.background_size_h_px
+    if tile_w <= 0 and tile_h <= 0:
+        tile_w = image.width
+        tile_h = image.height
+    elif tile_w <= 0:
+        tile_w = (
+            tile_h.to_i64() * image.width.to_i64() / image.height.to_i64()
+        ).to_i32()
+    elif tile_h <= 0:
+        tile_h = (
+            tile_w.to_i64() * image.height.to_i64() / image.width.to_i64()
+        ).to_i32()
+    if tile_w <= 0 or tile_h <= 0:
+        return nil
+    val tile_x = origin_x + _html_draw_ir_background_offset(
+        st.background_position_x_px, origin_w - tile_w
+    )
+    val tile_y = origin_y + _html_draw_ir_background_offset(
+        st.background_position_y_px, origin_h - tile_h
+    )
+    var props = _html_draw_ir_style_props(nodes[i], st)
+    props.push(draw_ir_style_prop("image-role", "css-background"))
+    props.push(draw_ir_style_prop("background-tile-x", "{tile_x}"))
+    props.push(draw_ir_style_prop("background-tile-y", "{tile_y}"))
+    props.push(draw_ir_style_prop("background-tile-width", "{tile_w}"))
+    props.push(draw_ir_style_prop("background-tile-height", "{tile_h}"))
+    var command = draw_ir_image_command(
+        _html_draw_ir_component_id(nodes[i], i) + "_background_image",
+        clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0,
+        st.background_image_uri, props
+    )
+    command.clip_rect = draw_ir_rect_bounds(
+        clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
+    )
+    Some(command)
+
+fn _html_draw_ir_background_border_overlay(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
+    width: i32, height: i32, vector_fonts: bool
+) -> DrawIrCommand:
+    var command = _html_draw_ir_command(
+        nodes, styles, boxes, i, width, height, vector_fonts
+    )
+    command.component_id = (
+        _html_draw_ir_component_id(nodes[i], i) + "_background_border_overlay"
+    )
+    command.color = 0u32
+    var props: [DrawIrStyleProp] = [
+        draw_ir_style_prop("image-role", "css-background-border-overlay")
+    ]
+    for prop in command.computed_style:
+        if prop.key.starts_with("border-") or prop.key.starts_with("outline-"):
+            props.push(prop)
+    command.computed_style = props
+    command
+
 fn _html_draw_ir_has_input_text(
     node: HNode, st: Style, box_width: i32
 ) -> bool:
@@ -1588,6 +1716,13 @@ fn _html_draw_ir_commands(
             commands.push(_html_draw_ir_command(
                 nodes, styles, boxes, i, width, height, vector_fonts
             ))
+            if val background_command = _html_draw_ir_background_image_command(
+                nodes, styles, boxes, i, images, paint_clip_at(clip_cache, i)
+            ):
+                commands.push(background_command)
+                commands.push(_html_draw_ir_background_border_overlay(
+                    nodes, styles, boxes, i, width, height, vector_fonts
+                ))
             if val image_command = _html_draw_ir_image_command(
                 nodes, styles, boxes, i, images, paint_clip_at(clip_cache, i)
             ):

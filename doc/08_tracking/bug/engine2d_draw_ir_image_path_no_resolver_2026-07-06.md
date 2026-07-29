@@ -1,7 +1,7 @@
 # Engine2D Draw-IR CSS background-image path has no resolver
 
 - **ID:** engine2d-draw-ir-image-path-no-resolver-2026-07-06
-- **Status:** Partially resolved (`<img>` fixed 2026-07-29; CSS background image open)
+- **Status:** Resolved for bounded `<img>` and static CSS URL backgrounds (2026-07-29)
 - **Area:** ui / gpu / engine2d / browser_engine
 - **Date:** 2026-07-06
 
@@ -13,9 +13,8 @@ The Engine2D advanced Draw-IR executor
 resolved bitmap through the `images: [Engine2dResolvedDrawIrImage]` list
 (`engine2d_draw_ir_adv_batch_with_images` /
 `engine2d_draw_ir_adv_composition_with_images`). The HTML layout renderer path
-now receives bounded decoded external PNG resources for `<img>` through
-BrowserSession and `SBRF5`. CSS `background-image: url(...)` still does not
-populate that list.
+now receives bounded decoded external PNG resources for `<img>` and static CSS
+URL backgrounds through BrowserSession and `SBRF5`.
 
 ## Why the image op is not emitted from HTML today
 
@@ -23,15 +22,25 @@ populate that list.
   `src` against `BrowserSession.image_resources`.
 - BrowserSession fetches the resolved URL through CSP/HSTS/mixed-content policy,
   decodes a bounded PNG, and retains the authored `src` as the Draw-IR key.
-- CSS `background-image: url(...)` still lacks URL discovery and resource
-  binding.
+- Inline and linked CSS URL backgrounds reuse that broker/resource path. Layout
+  emits typed size/position/repeat/origin/clip geometry behind content, and the
+  hosted worker sends only composition-referenced images in `SBRF5`.
 
-## Fix outline (deferred)
+## Fix delivered
 
-1. Discover CSS URL image values during style resolution.
-2. Route them through the existing BrowserSession image broker and resource
-   bounds.
-3. Emit the existing Draw-IR image command as a background paint layer.
+1. Discover bounded CSS URL image values from inline and linked static CSS.
+2. Route them through existing BrowserSession image policy and PNG bounds.
+3. Emit the existing Draw-IR image command as a typed background paint layer.
+4. Prove exact transparent/repeat/position/content/border pixels plus HSTS,
+   mixed-content, CSP, and referenced-resource filtering.
+
+The existing animation scheduler and retained-frame timing remain unchanged.
+
+## Remaining fail-closed follow-ups
+
+- Rounded URL backgrounds need exact rounded clipping evidence.
+- URLs introduced by dynamic JavaScript style mutation need bounded rediscovery
+  and broker-policy evidence.
 
 ## Optional follow-up (design debt)
 

@@ -46,6 +46,7 @@ use common.ui.draw_ir.{
     draw_ir_embedding_config,
     draw_ir_empty_glyph_run_payload,
     draw_ir_glyph_run_payload,
+    draw_ir_image_command,
     draw_ir_no_rect,
     draw_ir_rect_bounds,
     draw_ir_rect,
@@ -55,7 +56,7 @@ use common.ui.draw_ir.{
     draw_ir_text_shaped_font,
     draw_ir_style_prop
 }
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_present_with_images}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_batch_with_images, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_present_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_resolved_draw_ir_image}
 use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_adv.{engine2d_draw_ir_adv_batch_runtime_queue}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{engine2d_host_gpu_runtime_queue_with_backend_handle, engine2d_host_gpu_runtime_reset}
@@ -67,8 +68,220 @@ val RED: u32 = 0xffff0000u32
 val GREEN: u32 = 0xff00ff00u32
 val BLUE: u32 = 0xff0000ffu32
 val YELLOW: u32 = 0xffffff00u32
+val HALF_RED: u32 = 0x80ff0000u32
+val HALF_RED_OVER_BG: u32 = 0xff800000u32
+
+fn _css_background_style(repeat: text, tile_x: text, tile_y: text, tile_width: text, tile_height: text) -> [DrawIrStyleProp]:
+    [
+        draw_ir_style_prop("image-role", "css-background"),
+        draw_ir_style_prop("background-repeat", repeat),
+        draw_ir_style_prop("background-tile-x", tile_x),
+        draw_ir_style_prop("background-tile-y", tile_y),
+        draw_ir_style_prop("background-tile-width", tile_width),
+        draw_ir_style_prop("background-tile-height", tile_height)
+    ]
+
+fn _css_background_result(style: [DrawIrStyleProp], command_x: i32, command_y: i32, command_width: i32, command_height: i32, target_width: i32, target_height: i32):
+    var engine = Engine2D.create_with_backend(target_width, target_height, "cpu")
+    engine.clear(BG)
+    val command = draw_ir_image_command(
+        "css-background", command_x, command_y, command_width, command_height,
+        "image://css-background", style)
+    val batch = draw_ir_batch(
+        "css-background", DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config(
+            "surface", "window", 0, 0, target_width, target_height,
+            0, 1000, false),
+        [command])
+    val image = engine2d_resolved_draw_ir_image(
+        "image://css-background", 2, 2, [RED, GREEN, BLUE, HALF_RED])
+    val result = engine2d_draw_ir_adv_batch_with_images(
+        engine, batch, false, [image])
+    engine.shutdown()
+    result
 
 describe "Engine2D advanced Draw IR executor":
+
+    it "samples canonical CSS background image repeat modes with exact alpha pixels":
+        val no_repeat = _css_background_result(
+            _css_background_style("no-repeat", "1", "1", "2", "2"),
+            0, 0, 4, 3, 4, 3)
+        expect(no_repeat.pixels).to_equal([
+            BG, BG, BG, BG,
+            BG, RED, GREEN, BG,
+            BG, BLUE, HALF_RED_OVER_BG, BG
+        ])
+
+        val repeat_x = _css_background_result(
+            _css_background_style("repeat-x", "1", "1", "2", "2"),
+            0, 0, 4, 3, 4, 3)
+        expect(repeat_x.pixels).to_equal([
+            BG, BG, BG, BG,
+            GREEN, RED, GREEN, RED,
+            HALF_RED_OVER_BG, BLUE, HALF_RED_OVER_BG, BLUE
+        ])
+
+        val repeat_y = _css_background_result(
+            _css_background_style("repeat-y", "1", "1", "2", "2"),
+            0, 0, 4, 3, 4, 3)
+        expect(repeat_y.pixels).to_equal([
+            BG, BLUE, HALF_RED_OVER_BG, BG,
+            BG, RED, GREEN, BG,
+            BG, BLUE, HALF_RED_OVER_BG, BG
+        ])
+
+        val repeat = _css_background_result(
+            _css_background_style("repeat", "1", "1", "2", "2"),
+            0, 0, 4, 3, 4, 3)
+        expect(repeat.pixels).to_equal([
+            HALF_RED_OVER_BG, BLUE, HALF_RED_OVER_BG, BLUE,
+            GREEN, RED, GREEN, RED,
+            HALF_RED_OVER_BG, BLUE, HALF_RED_OVER_BG, BLUE
+        ])
+
+    it "uses positive modulo for a negative CSS background tile offset":
+        val result = _css_background_result(
+            _css_background_style("repeat", "-1", "0", "2", "1"),
+            0, 0, 3, 1, 3, 1)
+        expect(result.rendered_command_count).to_equal(1)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.pixels).to_equal([GREEN, RED, GREEN])
+
+        var embedded_engine = Engine2D.create_with_backend(5, 1, "cpu")
+        embedded_engine.clear(BG)
+        val embedded_command = draw_ir_image_command(
+            "embedded-css-background", 0, 0, 3, 1,
+            "image://css-background",
+            _css_background_style("repeat", "-1", "0", "2", "1"))
+        val embedded_batch = draw_ir_batch(
+            "embedded-css-background", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 2, 0, 3, 1, 0, 1000, true),
+            [embedded_command])
+        val embedded_image = engine2d_resolved_draw_ir_image(
+            "image://css-background", 2, 2,
+            [RED, GREEN, BLUE, HALF_RED])
+        val embedded_result = engine2d_draw_ir_adv_batch_with_images(
+            embedded_engine, embedded_batch, false, [embedded_image])
+        expect(embedded_result.pixels).to_equal([
+            BG, BG, GREEN, RED, GREEN
+        ])
+        embedded_engine.shutdown()
+
+    it "rejects noncanonical duplicate overflow and over-target CSS background work":
+        val noncanonical = _css_background_result(
+            _css_background_style("repeat", "0", "0", "02", "2"),
+            0, 0, 4, 3, 4, 3)
+        expect(noncanonical.rendered_command_count).to_equal(0)
+        expect(noncanonical.skipped_command_count).to_equal(1)
+        expect(noncanonical.pixels).to_equal([BG; 12])
+
+        var duplicate_style = _css_background_style(
+            "repeat", "0", "0", "2", "2")
+        duplicate_style.push(
+            draw_ir_style_prop("background-repeat", "repeat"))
+        val duplicate = _css_background_result(
+            duplicate_style, 0, 0, 4, 3, 4, 3)
+        expect(duplicate.skipped_command_count).to_equal(1)
+
+        val overflow = _css_background_result(
+            _css_background_style(
+                "repeat", "2147483648", "0", "2", "2"),
+            0, 0, 4, 3, 4, 3)
+        expect(overflow.skipped_command_count).to_equal(1)
+
+        val over_target = _css_background_result(
+            _css_background_style("repeat", "0", "0", "2", "2"),
+            0, 0, 5, 5, 4, 4)
+        expect(over_target.rendered_command_count).to_equal(0)
+        expect(over_target.skipped_command_count).to_equal(1)
+        expect(over_target.pixels).to_equal([BG; 16])
+
+    it "admits the canonical CSS background border overlay through fresh-device preflight":
+        var engine = Engine2D.create_with_backend(4, 4, "cpu")
+        val overlay = draw_ir_box_with_style(
+            "css-background-border-overlay", 0, 0, 4, 4, 0u32,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            draw_ir_no_rect(), [
+                draw_ir_style_prop(
+                    "image-role", "css-background-border-overlay"),
+                draw_ir_style_prop("border-top-width", "1"),
+                draw_ir_style_prop("border-right-width", "1"),
+                draw_ir_style_prop("border-bottom-width", "1"),
+                draw_ir_style_prop("border-left-width", "1"),
+                draw_ir_style_prop("border-top-color", "{GREEN}"),
+                draw_ir_style_prop("border-right-color", "{GREEN}"),
+                draw_ir_style_prop("border-bottom-color", "{GREEN}"),
+                draw_ir_style_prop("border-left-color", "{GREEN}")
+            ])
+        val batch = draw_ir_batch(
+            "css-background-border-overlay", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 4, 4, 0, 1000, false),
+            [draw_ir_rect("canvas", 0, 0, 4, 4, BLUE), overlay])
+        val composition = draw_ir_composition(
+            "css-background-border-overlay", "scene", DRAW_IR_BACKEND_CPU,
+            [batch])
+        var images: [Engine2dResolvedDrawIrImage] = []
+        val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(
+            engine, composition, images)
+        expect(result.readback_source).to_equal("cpu_mirror")
+        expect(result.rendered_command_count).to_equal(2)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.pixels[0]).to_equal(GREEN)
+        expect(result.pixels[1 * 4 + 1]).to_equal(BLUE)
+        engine.shutdown()
+
+    it "rejects malformed and gap-producing CSS backgrounds in fresh-device preflight":
+        val image = engine2d_resolved_draw_ir_image(
+            "image://fresh-css-background", 2, 2,
+            [RED, GREEN, BLUE, YELLOW])
+
+        var duplicate_style = _css_background_style(
+            "repeat", "0", "0", "2", "2")
+        duplicate_style.push(
+            draw_ir_style_prop("background-tile-width", "2"))
+        val duplicate_command = draw_ir_image_command(
+            "duplicate-css-background", 0, 0, 4, 4,
+            "image://fresh-css-background", duplicate_style)
+        val duplicate_batch = draw_ir_batch(
+            "duplicate-css-background", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 4, 4, 0, 1000, false),
+            [duplicate_command])
+        val duplicate_composition = draw_ir_composition(
+            "duplicate-css-background", "scene", DRAW_IR_BACKEND_CPU,
+            [duplicate_batch])
+        var duplicate_engine = Engine2D.create_with_backend(4, 4, "cpu")
+        val duplicate_result = (
+            engine2d_draw_ir_adv_fresh_device_composition_with_images(
+                duplicate_engine, duplicate_composition, [image]))
+        expect(duplicate_result.readback_source).to_equal("preflight_rejected")
+        expect(duplicate_result.fallback_reason).to_contain(
+            "fresh-device-command-preflight-required")
+        duplicate_engine.shutdown()
+
+        val no_repeat_command = draw_ir_image_command(
+            "no-repeat-css-background", 0, 0, 4, 4,
+            "image://fresh-css-background",
+            _css_background_style("no-repeat", "0", "0", "1", "1"))
+        val no_repeat_batch = draw_ir_batch(
+            "no-repeat-css-background", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 4, 4, 0, 1000, false),
+            [no_repeat_command])
+        val no_repeat_composition = draw_ir_composition(
+            "no-repeat-css-background", "scene", DRAW_IR_BACKEND_CPU,
+            [no_repeat_batch])
+        var no_repeat_engine = Engine2D.create_with_backend(4, 4, "cpu")
+        val no_repeat_result = (
+            engine2d_draw_ir_adv_fresh_device_composition_with_images(
+                no_repeat_engine, no_repeat_composition, [image]))
+        expect(no_repeat_result.readback_source).to_equal(
+            "preflight_rejected")
+        expect(no_repeat_result.fallback_reason).to_contain(
+            "fresh-device-opaque-full-target-first-command-required")
+        no_repeat_engine.shutdown()
 
     it "clips Draw IR text and restores the enclosing Engine2D route":
         var direct = Engine2D.create_with_backend(24, 16, "cpu")

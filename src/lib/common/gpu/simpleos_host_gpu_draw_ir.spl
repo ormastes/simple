@@ -11,8 +11,7 @@ use std.common.base_encoding.utilities.{text_to_bytes, bytes_to_text}
 use std.common.bytes.{ByteSpan, U32le, U64le}
 use std.common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES, SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES,
-    SIMPLEOS_HOST_GPU_MAX_HEIGHT, SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES, SIMPLEOS_HOST_GPU_MAX_WIDTH,
-    simpleos_host_gpu_readback_checksum
+    SIMPLEOS_HOST_GPU_MAX_HEIGHT, SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES, SIMPLEOS_HOST_GPU_MAX_WIDTH
 }
 
 struct SimpleOsHostGpuDrawIrPayload:
@@ -32,6 +31,7 @@ struct SimpleOsHostGpuImageResource:
     width: i32
     height: i32
     pixels: [u32]
+    pixel_checksum: i64
 
 struct SimpleOsHostGpuImageResourcesPayload:
     ok: bool
@@ -303,8 +303,37 @@ fn simpleos_host_gpu_draw_ir_decode(bytes: [u8], max_payload_bytes: i64, max_com
         return _simpleos_host_gpu_draw_ir_decode_reject("noncanonical-payload")
     SimpleOsHostGpuDrawIrDecode(ok: true, reason: "ok", composition: composition)
 
+fn simpleos_host_gpu_image_revision(
+    width: i32, height: i32, pixels: [u32], count: i64
+) -> i64:
+    if (width <= 0 or height <= 0 or count < 0 or
+        count > pixels.len().to_i64()):
+        return 0
+    var first: i64 = (
+        146959810 * 65599 + width.to_i64() * 4099 + height.to_i64()
+    ) % 2147483629
+    var second: i64 = (
+        109951163 * 131071 + height.to_i64() * 8191 + width.to_i64()
+    ) % 2147483587
+    var i: i64 = 0
+    while i < count:
+        val value = pixels[i].to_i64()
+        first = (first * 65599 + value + i + 1) % 2147483629
+        second = (second * 131071 + value * 3 + i + 1) % 2147483587
+        i = i + 1
+    val revision = first * 2147483647 + second
+    if revision == 0: 1 else: revision
+
 fn simpleos_host_gpu_image_resource(image_uri: text, width: i32, height: i32, pixels: [u32]) -> SimpleOsHostGpuImageResource:
-    SimpleOsHostGpuImageResource(image_uri: image_uri, width: width, height: height, pixels: pixels)
+    SimpleOsHostGpuImageResource(
+        image_uri: image_uri,
+        width: width,
+        height: height,
+        pixels: pixels,
+        pixel_checksum: simpleos_host_gpu_image_revision(
+            width, height, pixels, pixels.len().to_i64()
+        )
+    )
 
 fn simpleos_host_gpu_image_resources_encode(resources: [SimpleOsHostGpuImageResource], max_bytes: i64, max_resources: i64) -> SimpleOsHostGpuImageResourcesPayload:
     if max_bytes < 0 or max_resources < 0:
@@ -510,17 +539,6 @@ fn _simpleos_host_gpu_image_entry_reason(entry: SimpleOsHostGpuImageResourceEntr
 # callers on a plain/legacy session keep using simpleos_host_gpu_image_resources_encode
 # above, whose bytes this function never touches or influences.
 #
-# ponytail: the content-revision key for a full entry is
-# simpleos_host_gpu_readback_checksum (reused from the existing readback
-# path, not a new hash) — a plain additive sum mod 2^31 that is order-
-# insensitive and collision-weak: a genuinely changed image whose pixels
-# happen to sum to the same value would be (mis)treated as unchanged both
-# here (guest decides full-vs-reference by this checksum) and by
-# simpleos_host_gpu_resolve_retained_images below (host's stale-check
-# compares the same checksum, so it would not catch the collision either).
-# Sanctioned for this slice (shared code path, low real-content collision
-# rate, real proof is OVMF-gated); a position-sensitive hash is required
-# before this checksum is trusted as a production content-revision key.
 fn simpleos_host_gpu_image_resources_encode_retained(entries: [SimpleOsHostGpuImageResourceEntry], max_bytes: i64, max_resources: i64) -> SimpleOsHostGpuImageResourcesPayload:
     if max_bytes < 0 or max_resources < 0:
         return _simpleos_host_gpu_image_entries_reject("invalid-limits")
@@ -556,7 +574,10 @@ fn simpleos_host_gpu_image_resources_encode_retained(entries: [SimpleOsHostGpuIm
         if not entry.is_reference:
             for pixel in entry.pixels:
                 pixel_bytes = _simpleos_host_gpu_append_u32le(pixel_bytes, pixel.to_i64())
-            pixel_checksum = simpleos_host_gpu_readback_checksum(entry.pixels, entry.pixels.len().to_i64())
+            pixel_checksum = simpleos_host_gpu_image_revision(
+                entry.width, entry.height, entry.pixels,
+                entry.pixels.len().to_i64()
+            )
             pixel_count = entry.pixels.len().to_i64()
         val uri_len = uri.len()
         val uri_count = uri_len.to_i64()
@@ -660,7 +681,9 @@ fn simpleos_host_gpu_image_resources_decode_retained(bytes: [u8], expected_count
                 val pixel = _simpleos_host_gpu_load_u32le(span, pixel_start + pixel_index * 4)
                 pixels.push(pixel)
                 pixel_index = pixel_index + 1
-            val actual_checksum = simpleos_host_gpu_readback_checksum(pixels, pixel_count)
+            val actual_checksum = simpleos_host_gpu_image_revision(
+                width.to_i32(), height.to_i32(), pixels, pixel_count
+            )
             if actual_checksum != pixel_checksum:
                 return _simpleos_host_gpu_image_entries_decode_reject("pixel-checksum-mismatch")
         entries.push(SimpleOsHostGpuImageResourceEntry(
@@ -709,8 +732,8 @@ fn simpleos_host_gpu_resolve_retained_images(entries: [SimpleOsHostGpuImageResou
             if not found:
                 return _simpleos_host_gpu_retained_reject("unknown-image-resource", retained)
             val cached = next_retained[cached_index]
-            val cached_checksum = simpleos_host_gpu_readback_checksum(cached.pixels, cached.pixels.len().to_i64())
-            if cached_checksum != entry.pixel_checksum or cached.width != entry.width or cached.height != entry.height:
+            if (cached.pixel_checksum != entry.pixel_checksum or
+                cached.width != entry.width or cached.height != entry.height):
                 return _simpleos_host_gpu_retained_reject("stale-image-resource", retained)
             resolved.push(cached)
         else:
@@ -734,6 +757,7 @@ export SimpleOsHostGpuImageResource, SimpleOsHostGpuImageResourcesPayload, Simpl
 export SimpleOsHostGpuImageResourceEntry, SimpleOsHostGpuImageResourceEntryDecode, SimpleOsHostGpuImageResourceRevision
 export simpleos_host_gpu_draw_ir_encode, simpleos_host_gpu_draw_ir_decode
 export simpleos_host_gpu_image_resource, simpleos_host_gpu_image_resources_encode, simpleos_host_gpu_image_resources_decode
+export simpleos_host_gpu_image_revision
 export simpleos_host_gpu_image_resource_coverage_reason
 export simpleos_host_gpu_image_resource_full, simpleos_host_gpu_image_resource_ref
 export simpleos_host_gpu_image_resources_encode_retained, simpleos_host_gpu_image_resources_decode_retained

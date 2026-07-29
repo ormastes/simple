@@ -15,7 +15,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_chrome_encode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_fetch_request_decode,
-    browser_renderer_frame_decode,
+    browser_renderer_frame_decode_with_retained_images,
     browser_renderer_frame_reply_to_request_id,
     browser_renderer_key_encode, browser_renderer_key_with_shift_encode,
     browser_renderer_message_encode,
@@ -239,6 +239,7 @@ pub class HostedBrowserRendererProcess:
     provisional_document_origin: text
     hsts: BrowserSession
     hsts_dirty: bool
+    retained_image_resources: [SimpleOsHostGpuImageResource]
     state: text
 
     static fn create(
@@ -291,6 +292,7 @@ pub class HostedBrowserRendererProcess:
             provisional_document_origin: "",
             hsts: BrowserSession.new_without_runtime(),
             hsts_dirty: false,
+            retained_image_resources: [],
             state: "new"
         )
 
@@ -608,6 +610,7 @@ pub class HostedBrowserRendererProcess:
         self.deferred_commands = []
         self.pending_scroll_event_id = 0
         self.pending_scroll_delta_milli_y = 0
+        self.retained_image_resources = []
         if self.pid > 0:
             if not process_close_piped(self.pid):
                 return false
@@ -1298,8 +1301,9 @@ pub class HostedBrowserRendererProcess:
                 self.pending_resize_height
             else:
                 self.height
-            val frame = browser_renderer_frame_decode(
-                decoded.message, decode_width, decode_height
+            val frame = browser_renderer_frame_decode_with_retained_images(
+                decoded.message, decode_width, decode_height,
+                self.retained_image_resources
             )
             if not frame.ok:
                 return Some(self.fail(frame.reason))
@@ -1352,6 +1356,7 @@ pub class HostedBrowserRendererProcess:
             self.pending_resize_width = 0
             self.pending_resize_height = 0
             self.next_animation_ms = frame.next_animation_ms
+            self.retained_image_resources = frame.image_resources
             self.command_deadline_ms = 0
             self.pending_operation = ""
             val deferred_reason = self._activate_deferred_command()

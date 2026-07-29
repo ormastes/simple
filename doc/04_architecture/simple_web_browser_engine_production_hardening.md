@@ -464,3 +464,20 @@ into the existing `SimpleOsHostGpuImageResource`; `SBRF5` carries those
 resources to the parent, and Engine2D converts them once to its existing
 resolved Draw-IR image material. The resource key stays the authored `src`, so
 layout needs no parallel URL resolver. Older frame versions remain decodable.
+
+## CSS URL background path (2026-07-29)
+
+CSS `url(...)` backgrounds reuse the bounded BrowserSession image owner. Inline
+declarations retain their authored key, linked stylesheets rewrite to a
+canonical resolved key, and both fetch through broker-owned CSP `img-src`,
+HSTS, mixed-content, redirect, and cancellation policy. Layout emits one typed
+background image behind element content with size, position, repeat, origin,
+and clip geometry; the canonical border overlay remains later in paint order.
+The hosted worker filters composition-referenced resources before the additive
+`SBRF5` retained-frame transfer, so unused stylesheet images do not inflate
+each frame. Existing CSS animation invalidation and retained-frame timing remain
+unchanged.
+
+Rounded URL-background clipping and URLs introduced by dynamic JavaScript style
+mutation remain unclaimed follow-ups and must fail closed until they have
+bounded discovery, policy, and exact-pixel evidence.

@@ -1681,3 +1681,32 @@ implementation in progress / target evidence blocked
   placeholder, layout, and static source-shape checks are clean. The pure-Simple
   target compiler blocker still prevents executable specs/docgen, so no runtime
   verification PASS or generated-manual refresh is claimed.
+- css-background-image lane (2026-07-29): Reuse `BrowserImageSource`,
+  `BrowserSession.image_resources`, `SBRF5`, and the canonical Draw-IR image
+  executor. Shared interfaces are `_css_background_image_urls`,
+  `_queue_background_image_sources`,
+  `_html_draw_ir_background_image_command`, and
+  `_render_background_image_pixels`. Manual steps are `Load inline and linked
+  CSS background images through the broker`, `Apply background size position
+  repeat origin and clip`, `Render the background image behind element
+  content`, and `Block background images denied by CSP or mixed-content
+  policy`. Sidecars own disjoint CSS discovery/security, layout/paint,
+  performance, and evidence reviews; merge owner and final reviewer are
+  highest-capability Codex. Any temporary helper must `fail(...)`, never pass.
+- css-background-image implementation: Inline, linked, and imported CSS use
+  declaration-scoped URL discovery/rewrite and the existing image broker;
+  import cascade order, CSP, HSTS, mixed content, repeat/position/size,
+  origin/clip, paint order, and referenced-resource filtering have exact
+  focused checks. Rounded URL backgrounds and dynamically introduced JS URLs
+  remain explicit fail-closed follow-ups; existing CSS/JS animation is kept.
+- css-background-image performance: `SBRF6` reuses retained image resources
+  with mixed full/reference entries and a load-time position-sensitive
+  revision. Stable animation frames do not rescan or base64-serialize retained
+  pixels; changed resources invalidate to full entries, cache misses reject,
+  and close/image-free paths release retained pixels.
+- css-background-image verification: Three bounded adversarial review/fix
+  cycles closed URL rewrite, import order, rounded clipping, preflight,
+  revision collision, mixed-entry, steady-frame scan, and close-failure cleanup
+  blockers. Rendering-source-coupling and direct-env/runtime guards pass.
+  Runtime specs were not rerun because the prior focused pure-Simple target
+  invocation segfaulted (139); no bootstrap or Rust-seed fallback was used.

@@ -152,3 +152,20 @@ does not consume the redirect budget, strict PNG admission, `SBRF5` resource
 round-trip, canonical Draw-IR/Engine2D absolute pixels, and no-HSTS/CSP
 rejection. Runtime execution remains unclaimed while the known target compiler
 blocker prevents the pure-Simple test binary from running.
+
+## CSS URL background evidence (2026-07-29)
+
+The hosted renderer policy scenario uses the frozen flow:
+
+1. `Load inline and linked CSS background images through the broker`
+2. `Apply background size position repeat origin and clip`
+3. `Render the background image behind element content`
+4. `Block background images denied by CSP or mixed-content policy`
+
+It must retain two decoded document images but carry only the visible image in
+the `SBRF5` frame, preserve redirect count `20` across the broker HSTS upgrade,
+and assert exact pixels for transparent PNG-over-color, repeat/position/clip,
+content paint order, and border overlay. The negative controls require a
+mixed-content denial without HSTS and no queued image under `img-src 'none'`.
+Animation remains enabled and unchanged. Rounded URL backgrounds and
+JavaScript-added URLs remain fail-closed follow-ups rather than PASS claims.

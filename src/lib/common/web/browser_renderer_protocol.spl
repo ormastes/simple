@@ -6,11 +6,22 @@ use std.common.jwt.encode.{
     base64url_decode_to_bytes, base64url_encode_bytes
 }
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
-    SimpleOsHostGpuImageResource,
+    SimpleOsHostGpuImageResource, SimpleOsHostGpuImageResourceEntry,
+    SimpleOsHostGpuImageResourceRevision,
     simpleos_host_gpu_draw_ir_decode, simpleos_host_gpu_draw_ir_encode,
     simpleos_host_gpu_image_resource_coverage_reason,
     simpleos_host_gpu_image_resources_decode,
-    simpleos_host_gpu_image_resources_encode
+    simpleos_host_gpu_image_resources_decode_retained,
+    simpleos_host_gpu_image_resources_encode,
+    simpleos_host_gpu_image_resources_encode_retained,
+    simpleos_host_gpu_image_resource_full,
+    simpleos_host_gpu_image_resource_ref,
+    simpleos_host_gpu_resolve_retained_images
+}
+use std.common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES,
+    SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES,
+    SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES
 }
 use std.common.ui.draw_ir.{
     DRAW_IR_BACKEND_AUTO,
@@ -1617,7 +1628,86 @@ fn _browser_renderer_image_pixel_limit_reason(
         total_pixels = total_pixels + pixels
     ""
 
-pub fn browser_renderer_frame_encode_with_state_and_images(
+fn _browser_renderer_image_resource_valid(
+    resource: SimpleOsHostGpuImageResource
+) -> bool:
+    val pixel_count = resource.width.to_i64() * resource.height.to_i64()
+    (resource.image_uri != "" and
+        text_to_bytes(resource.image_uri).len().to_i64() <=
+            SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES and
+        resource.width > 0 and resource.height > 0 and
+        resource.width.to_i64() <= BROWSER_RENDERER_MAX_VIEWPORT and
+        resource.height.to_i64() <= BROWSER_RENDERER_MAX_VIEWPORT and
+        pixel_count > 0 and resource.pixels.len().to_i64() == pixel_count)
+
+pub fn browser_renderer_referenced_image_resources(
+    composition: DrawIrComposition,
+    image_resources: [SimpleOsHostGpuImageResource]
+) -> [SimpleOsHostGpuImageResource]:
+    var selected: [SimpleOsHostGpuImageResource] = []
+    var selected_pixels: i64 = 0
+    var selected_wire_bytes: i64 = 0
+    var command_count: i64 = 0
+    for batch in composition.batches:
+        for command in batch.commands:
+            command_count = command_count + 1
+            if command_count > BROWSER_RENDERER_MAX_COMMANDS:
+                return selected
+            if command.kind != DRAW_IR_COMMAND_IMAGE:
+                continue
+            var already_selected = false
+            for resource in selected:
+                if resource.image_uri == command.image_uri:
+                    already_selected = true
+            if already_selected or selected.len().to_i64() >= (
+                BROWSER_RENDERER_MAX_IMAGE_RESOURCES
+            ):
+                continue
+            for resource in image_resources:
+                if (resource.image_uri == command.image_uri and
+                    _browser_renderer_image_resource_valid(resource)):
+                    val pixel_count = resource.pixels.len().to_i64()
+                    val uri_bytes = text_to_bytes(
+                        resource.image_uri
+                    ).len().to_i64()
+                    val record_bytes = (
+                        SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES +
+                        ((uri_bytes + 7) / 8) * 8 +
+                        ((pixel_count * 4 + 7) / 8) * 8
+                    )
+                    if (selected_pixels <=
+                            BROWSER_RENDERER_MAX_IMAGE_PIXELS - pixel_count and
+                        selected_wire_bytes <=
+                            BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES -
+                                record_bytes):
+                        selected.push(resource)
+                        selected_pixels = selected_pixels + pixel_count
+                        selected_wire_bytes = (
+                            selected_wire_bytes + record_bytes
+                        )
+                    break
+    selected
+
+fn _browser_renderer_revision_for(
+    revisions: [SimpleOsHostGpuImageResourceRevision], image_uri: text
+) -> i64:
+    for revision in revisions:
+        if revision.image_uri == image_uri:
+            return revision.pixel_checksum
+    0
+
+pub fn browser_renderer_image_resource_revisions(
+    image_resources: [SimpleOsHostGpuImageResource]
+) -> [SimpleOsHostGpuImageResourceRevision]:
+    var revisions: [SimpleOsHostGpuImageResourceRevision] = []
+    for resource in image_resources:
+        revisions.push(SimpleOsHostGpuImageResourceRevision(
+            image_uri: resource.image_uri,
+            pixel_checksum: resource.pixel_checksum
+        ))
+    revisions
+
+fn _browser_renderer_frame_encode_with_state_and_images(
     composition: DrawIrComposition,
     generation: i64,
     request_id: i64,
@@ -1631,7 +1721,9 @@ pub fn browser_renderer_frame_encode_with_state_and_images(
     history_current_url: text,
     history_back_url: text,
     history_forward_url: text,
-    image_resources: [SimpleOsHostGpuImageResource]
+    image_resources: [SimpleOsHostGpuImageResource],
+    prior_revisions: [SimpleOsHostGpuImageResourceRevision],
+    retained_wire: bool
 ) -> BrowserRendererEncodeResult:
     val current_len = text_to_bytes(history_current_url).len()
     val back_len = text_to_bytes(history_back_url).len()
@@ -1653,11 +1745,40 @@ pub fn browser_renderer_frame_encode_with_state_and_images(
             solid_material_count.to_i64(), solid_material_sha256)):
         return _browser_renderer_reject_encode("invalid-material-witness")
     val normalized = _browser_renderer_normalize_draw_ir(composition)
-    val image_payload = simpleos_host_gpu_image_resources_encode(
-        image_resources,
-        BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES,
-        BROWSER_RENDERER_MAX_IMAGE_RESOURCES
-    )
+    var retained_entries: [SimpleOsHostGpuImageResourceEntry] = []
+    var has_reference = false
+    if retained_wire:
+        for resource in image_resources:
+            val reference_is_smaller = resource.pixels.len().to_i64() * 4 > (
+                    SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES -
+                    SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES
+                )
+            if (reference_is_smaller and _browser_renderer_revision_for(
+                    prior_revisions, resource.image_uri
+                ) == resource.pixel_checksum):
+                has_reference = true
+                retained_entries.push(simpleos_host_gpu_image_resource_ref(
+                    resource.image_uri, resource.width, resource.height,
+                    resource.pixel_checksum
+                ))
+            else:
+                retained_entries.push(simpleos_host_gpu_image_resource_full(
+                    resource.image_uri, resource.width, resource.height,
+                    resource.pixels
+                ))
+    val use_retained_wire = retained_wire and has_reference
+    val image_payload = if use_retained_wire:
+        simpleos_host_gpu_image_resources_encode_retained(
+            retained_entries,
+            BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES,
+            BROWSER_RENDERER_MAX_IMAGE_RESOURCES
+        )
+    else:
+        simpleos_host_gpu_image_resources_encode(
+            image_resources,
+            BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES,
+            BROWSER_RENDERER_MAX_IMAGE_RESOURCES
+        )
     if not image_payload.ok:
         return _browser_renderer_reject_encode(
             "image-resources-" + image_payload.reason
@@ -1703,8 +1824,9 @@ pub fn browser_renderer_frame_encode_with_state_and_images(
         "-"
     else:
         solid_material_sha256
+    val frame_version = if use_retained_wire: "SBRF6" else: "SBRF5"
     val payload = (
-        "SBRF5\t{reply_to_request_id}\t{cpu_composited_count}\t{cpu_digest}" +
+        "{frame_version}\t{reply_to_request_id}\t{cpu_composited_count}\t{cpu_digest}" +
         "\t{solid_material_count}\t{solid_digest}\t{next_animation_ms}" +
         "\t{diagnostic_payload.len()}\t{current_payload.len()}" +
         "\t{back_payload.len()}\t{forward_payload.len()}" +
@@ -1714,6 +1836,55 @@ pub fn browser_renderer_frame_encode_with_state_and_images(
         forward_payload + encoded_images + bytes_to_text(encoded.bytes)
     )
     browser_renderer_message_encode("frame", generation, request_id, payload)
+
+pub fn browser_renderer_frame_encode_with_state_and_images(
+    composition: DrawIrComposition,
+    generation: i64,
+    request_id: i64,
+    reply_to_request_id: i64,
+    next_animation_ms: i64,
+    cpu_composited_count: i32,
+    cpu_composited_sha256: text,
+    solid_material_count: i32,
+    solid_material_sha256: text,
+    diagnostics: text,
+    history_current_url: text,
+    history_back_url: text,
+    history_forward_url: text,
+    image_resources: [SimpleOsHostGpuImageResource]
+) -> BrowserRendererEncodeResult:
+    _browser_renderer_frame_encode_with_state_and_images(
+        composition, generation, request_id, reply_to_request_id,
+        next_animation_ms, cpu_composited_count, cpu_composited_sha256,
+        solid_material_count, solid_material_sha256, diagnostics,
+        history_current_url, history_back_url, history_forward_url,
+        image_resources, [], false
+    )
+
+pub fn browser_renderer_frame_encode_with_state_and_retained_images(
+    composition: DrawIrComposition,
+    generation: i64,
+    request_id: i64,
+    reply_to_request_id: i64,
+    next_animation_ms: i64,
+    cpu_composited_count: i32,
+    cpu_composited_sha256: text,
+    solid_material_count: i32,
+    solid_material_sha256: text,
+    diagnostics: text,
+    history_current_url: text,
+    history_back_url: text,
+    history_forward_url: text,
+    image_resources: [SimpleOsHostGpuImageResource],
+    prior_revisions: [SimpleOsHostGpuImageResourceRevision]
+) -> BrowserRendererEncodeResult:
+    _browser_renderer_frame_encode_with_state_and_images(
+        composition, generation, request_id, reply_to_request_id,
+        next_animation_ms, cpu_composited_count, cpu_composited_sha256,
+        solid_material_count, solid_material_sha256, diagnostics,
+        history_current_url, history_back_url, history_forward_url,
+        image_resources, prior_revisions, true
+    )
 
 pub fn browser_renderer_frame_reply_to_request_id(
     message: BrowserRendererMessage
@@ -1729,7 +1900,8 @@ pub fn browser_renderer_frame_reply_to_request_id(
     if not ((fields.len() == 7 and fields[0] == "SBRF2") or
         (fields.len() == 8 and fields[0] == "SBRF3") or
         (fields.len() == 11 and fields[0] == "SBRF4") or
-        (fields.len() == 14 and fields[0] == "SBRF5")):
+        (fields.len() == 14 and
+            (fields[0] == "SBRF5" or fields[0] == "SBRF6"))):
         return -1
     val reply_to_request_id = fields[1].to_i64() ?? -1
     if (reply_to_request_id <= 0 or
@@ -1737,7 +1909,12 @@ pub fn browser_renderer_frame_reply_to_request_id(
         return -1
     reply_to_request_id
 
-pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32, height: i32) -> BrowserRendererFrameDecodeResult:
+fn _browser_renderer_frame_decode(
+    message: BrowserRendererMessage,
+    width: i32,
+    height: i32,
+    retained_images: [SimpleOsHostGpuImageResource]
+) -> BrowserRendererFrameDecodeResult:
     if message.kind != "frame":
         return _browser_renderer_frame_reject("wrong-kind")
     val witness_end = _browser_renderer_header_end(message.payload)
@@ -1750,9 +1927,13 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
     val diagnostic_frame = fields.len() == 8 and fields[0] == "SBRF3"
     val state_frame = (
         (fields.len() == 11 and fields[0] == "SBRF4") or
-        (fields.len() == 14 and fields[0] == "SBRF5")
+        (fields.len() == 14 and
+            (fields[0] == "SBRF5" or fields[0] == "SBRF6"))
     )
-    val image_frame = fields.len() == 14 and fields[0] == "SBRF5"
+    val image_frame = fields.len() == 14 and (
+        fields[0] == "SBRF5" or fields[0] == "SBRF6"
+    )
+    val retained_frame = fields.len() == 14 and fields[0] == "SBRF6"
     if not legacy_frame and not diagnostic_frame and not state_frame:
         return _browser_renderer_frame_reject("malformed-material-witness")
     val reply_to_request_id = _browser_renderer_positive_i64(fields[1])
@@ -1881,23 +2062,48 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
                     return _browser_renderer_frame_reject(
                         "invalid-image-resources"
                     )
-                val decoded_images = simpleos_host_gpu_image_resources_decode(
-                    image_bytes,
-                    resource_count,
-                    resource_checksum,
-                    BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES,
-                    BROWSER_RENDERER_MAX_IMAGE_RESOURCES
-                )
-                if not decoded_images.ok:
-                    return _browser_renderer_frame_reject(
-                        "image-resources-" + decoded_images.reason
+                if retained_frame:
+                    val decoded_entries = (
+                        simpleos_host_gpu_image_resources_decode_retained(
+                            image_bytes,
+                            resource_count,
+                            resource_checksum,
+                            BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES,
+                            BROWSER_RENDERER_MAX_IMAGE_RESOURCES
+                        )
                     )
+                    if not decoded_entries.ok:
+                        return _browser_renderer_frame_reject(
+                            "image-resources-" + decoded_entries.reason
+                        )
+                    val resolved = simpleos_host_gpu_resolve_retained_images(
+                        decoded_entries.entries, retained_images
+                    )
+                    if not resolved.ok:
+                        return _browser_renderer_frame_reject(
+                            "image-resources-" + resolved.reason
+                        )
+                    image_resources = resolved.resolved
+                else:
+                    val decoded_images = (
+                        simpleos_host_gpu_image_resources_decode(
+                            image_bytes,
+                            resource_count,
+                            resource_checksum,
+                            BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES,
+                            BROWSER_RENDERER_MAX_IMAGE_RESOURCES
+                        )
+                    )
+                    if not decoded_images.ok:
+                        return _browser_renderer_frame_reject(
+                            "image-resources-" + decoded_images.reason
+                        )
+                    image_resources = decoded_images.resources
                 val pixel_reason = _browser_renderer_image_pixel_limit_reason(
-                    decoded_images.resources
+                    image_resources
                 )
                 if pixel_reason != "":
                     return _browser_renderer_frame_reject(pixel_reason)
-                image_resources = decoded_images.resources
                 draw_ir_start = image_end
     val decoded = simpleos_host_gpu_draw_ir_decode(
         text_to_bytes(_browser_renderer_byte_slice(
@@ -1934,4 +2140,19 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
         solid_material_count: solid_count.to_i32(),
         solid_material_sha256: solid_digest,
         diagnostics: diagnostics
+    )
+
+pub fn browser_renderer_frame_decode(
+    message: BrowserRendererMessage, width: i32, height: i32
+) -> BrowserRendererFrameDecodeResult:
+    _browser_renderer_frame_decode(message, width, height, [])
+
+pub fn browser_renderer_frame_decode_with_retained_images(
+    message: BrowserRendererMessage,
+    width: i32,
+    height: i32,
+    retained_images: [SimpleOsHostGpuImageResource]
+) -> BrowserRendererFrameDecodeResult:
+    _browser_renderer_frame_decode(
+        message, width, height, retained_images
     )

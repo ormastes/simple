@@ -104,6 +104,14 @@ fn _draw_ir_command_by_id(commands: [DrawIrCommand], component_id: text) -> Draw
         idx = idx + 1
     commands[0]
 
+fn _draw_ir_command_index(commands: [DrawIrCommand], component_id: text) -> i32:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return idx
+        idx = idx + 1
+    -1
+
 fn _draw_ir_text_command(commands: [DrawIrCommand], value: text) -> DrawIrCommand:
     for command in commands:
         if command.kind == "text" and command.text_value == value:
@@ -331,6 +339,132 @@ describe "SimpleWebRenderer":
         expect(_count_color(
             rendered.pixel_data, 0xFFFF0000u32
         )).to_equal(8 * 4)
+
+    it "lowers one exact CSS background image with typed tile geometry and border order":
+        val html = (
+            "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+            "<div id='tile' style='width:8px;height:8px;padding:1px;" +
+            "border:1px solid #123456;background-image:url(image://tile);" +
+            "background-repeat:no-repeat;background-size:4px auto;" +
+            "background-position:right bottom;background-origin:content-box;" +
+            "background-clip:padding-box'></div></body></html>"
+        )
+        val image = simpleos_host_gpu_image_resource(
+            "image://tile", 4, 2, [0xFFFF0000u32; 8]
+        )
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 20, 20, [image]
+        ).batches[0].commands
+        val box = _draw_ir_command_by_id(commands, "tile")
+        val draw = _draw_ir_command_by_id(commands, "tile_background_image")
+        val overlay = _draw_ir_command_by_id(
+            commands, "tile_background_border_overlay"
+        )
+        val expected_tile_x = box.x + box.width - 2 - 4
+        val expected_tile_y = box.y + box.height - 2 - 2
+
+        expect(draw.kind).to_equal("image")
+        expect(draw.x).to_equal(box.x + 1)
+        expect(draw.y).to_equal(box.y + 1)
+        expect(draw.width).to_equal(box.width - 2)
+        expect(draw.height).to_equal(box.height - 2)
+        expect(_draw_ir_style_value(draw, "image-role")).to_equal("css-background")
+        expect(_draw_ir_style_value(draw, "background-repeat")).to_equal("no-repeat")
+        expect(_draw_ir_style_value(draw, "background-tile-width")).to_equal("4")
+        expect(_draw_ir_style_value(draw, "background-tile-height")).to_equal("2")
+        expect(_draw_ir_style_value(draw, "background-tile-x")).to_equal("{expected_tile_x}")
+        expect(_draw_ir_style_value(draw, "background-tile-y")).to_equal("{expected_tile_y}")
+        expect(_draw_ir_style_value(overlay, "image-role")).to_equal("css-background-border-overlay")
+        expect(_draw_ir_command_index(commands, "tile")).to_be_less_than(
+            _draw_ir_command_index(commands, "tile_background_image")
+        )
+        expect(_draw_ir_command_index(commands, "tile_background_image")).to_be_less_than(
+            _draw_ir_command_index(commands, "tile_background_border_overlay")
+        )
+
+    it "fails closed for a CSS background image with rounded clipping":
+        val html = (
+            "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+            "<div id='rounded' style='width:8px;height:8px;border-radius:3px;" +
+            "background-image:url(image://tile)'></div></body></html>"
+        )
+        val image = simpleos_host_gpu_image_resource(
+            "image://tile", 2, 2, [0xFFFF0000u32; 4]
+        )
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 20, 20, [image]
+        ).batches[0].commands
+
+        expect(_draw_ir_command_index(commands, "rounded")).to_be_greater_than(-1)
+        expect(_draw_ir_command_index(
+            commands, "rounded_background_image"
+        )).to_equal(-1)
+        expect(_draw_ir_command_index(
+            commands, "rounded_background_border_overlay"
+        )).to_equal(-1)
+
+    it "lowers the common single-layer background shorthand into the image and fallback color":
+        val html = (
+            "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+            "<div id='tile' style='width:8px;height:8px;background:url(image://tile) #0f8 no-repeat'></div>" +
+            "</body></html>"
+        )
+        val image = simpleos_host_gpu_image_resource(
+            "image://tile", 4, 2, [0xFFFF0000u32; 8]
+        )
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 20, 20, [image]
+        ).batches[0].commands
+        val box = _draw_ir_command_by_id(commands, "tile")
+        val draw = _draw_ir_command_by_id(commands, "tile_background_image")
+
+        expect(box.color).to_equal(0xFF00FF88u32)
+        expect(draw.kind).to_equal("image")
+        expect(draw.image_uri).to_equal("image://tile")
+        expect(_draw_ir_style_value(draw, "background-repeat")).to_equal("no-repeat")
+
+    it "lowers positioned sized and boxed background shorthand geometry":
+        val html = (
+            "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+            "<div id='tile' style='width:8px;height:8px;padding:1px;border:1px solid #123456;" +
+            "background:url(image://tile) no-repeat right bottom / 4px 2px content-box padding-box scroll'></div>" +
+            "</body></html>"
+        )
+        val image = simpleos_host_gpu_image_resource(
+            "image://tile", 4, 2, [0xFFFF0000u32; 8]
+        )
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 20, 20, [image]
+        ).batches[0].commands
+        val box = _draw_ir_command_by_id(commands, "tile")
+        val draw = _draw_ir_command_by_id(commands, "tile_background_image")
+        val expected_tile_x = box.x + box.width - 2 - 4
+        val expected_tile_y = box.y + box.height - 2 - 2
+
+        expect(_draw_ir_style_value(box, "background-origin")).to_equal("content-box")
+        expect(_draw_ir_style_value(box, "background-clip")).to_equal("padding-box")
+        expect(_draw_ir_style_value(draw, "background-tile-width")).to_equal("4")
+        expect(_draw_ir_style_value(draw, "background-tile-height")).to_equal("2")
+        expect(_draw_ir_style_value(draw, "background-tile-x")).to_equal("{expected_tile_x}")
+        expect(_draw_ir_style_value(draw, "background-tile-y")).to_equal("{expected_tile_y}")
+
+    it "fails closed for unknown background shorthand tokens":
+        val html = (
+            "<html><body><div id='tile' style='width:8px;height:8px;" +
+            "background:url(image://tile) unsupported'></div></body></html>"
+        )
+        val image = simpleos_host_gpu_image_resource(
+            "image://tile", 4, 2, [0xFFFF0000u32; 8]
+        )
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 20, 20, [image]
+        ).batches[0].commands
+        val box = _draw_ir_command_by_id(commands, "tile")
+
+        expect(_draw_ir_command_index(commands, "tile_background_image")).to_equal(-1)
+        expect(_draw_ir_style_value(box, "background-layers-raw")).to_equal(
+            "url(image://tile) unsupported"
+        )
 
     it "projects a complete WM Web material request with explicit bounded realization":
         val html = "<html><body><section id='card' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"

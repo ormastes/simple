@@ -508,7 +508,7 @@ impl BrowserSession:
             if (source_index >= 0 and
                 source_index < load.image_sources.len() and
                 load.image_sources[source_index].resolved_url == resource_url):
-                image_uri = load.image_sources[source_index].authored_src
+                image_uri = load.image_sources[source_index].resource_key
             if response.error != "":
                 load.append_warning("image load error: {response.error}")
             else:
@@ -647,6 +647,11 @@ impl BrowserSession:
             while load.next_style_idx < style_source_count:
                 val source = load.style_sources[load.next_style_idx]
                 load.next_style_idx = load.next_style_idx + 1
+                if source.kind == "deferred":
+                    # The parent remainder was admitted and budgeted before
+                    # its imports were queued; commit it only after they do.
+                    load.stylesheet_html_chunks.push(source.source)
+                    continue
                 if source.kind == "inline":
                     if not browser_csp_allows(
                         self.content_security_policy, "style-src",
@@ -693,12 +698,6 @@ impl BrowserSession:
                     self.active_load = Some(load)
                     self.pending_requests.push(self._build_request("style", resolved, "GET", "", "", ""))
                     return Ok(true)
-            if not self.runtime_enabled:
-                if load.script_blocks.len() > 0:
-                    load.append_warning("scripts are ignored when BrowserSession runtime is disabled")
-                self._finalize_active_load(load)
-                self.active_load = nil
-                return Ok(true)
             # Persist the accumulated stylesheet chunks back into the active load
             # before delegating to script loading. Method-local unwraps of
             # `self.active_load` only write back on return, so the nested
@@ -710,6 +709,14 @@ impl BrowserSession:
 
     me _advance_script_loading() -> Result<bool, text>:
         if val Some(load) = self.active_load:
+            if not self.runtime_enabled:
+                if load.script_blocks.len() > 0:
+                    load.append_warning(
+                        "scripts are ignored when BrowserSession runtime is disabled"
+                    )
+                self._finalize_active_load(load)
+                self.active_load = nil
+                return Ok(true)
             self._trace_guest("advance scripts next={load.next_script_idx} total={load.script_blocks.len()}")
             var script_block_count = load.script_blocks.len()
             while load.next_script_idx < script_block_count:

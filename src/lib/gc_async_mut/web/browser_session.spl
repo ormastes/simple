@@ -27,6 +27,9 @@ use common.web.browser_renderer_protocol.{BROWSER_RENDERER_MAX_PAYLOAD_BYTES}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResource
 }
+use std.common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES
+}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
@@ -55,7 +58,7 @@ use std.gc_async_mut.web.browser_session_url.{
     normalize_browser_url, normalize_network_navigation_url,
     url_protocol, url_pathname,
     url_origin, url_host, url_search, url_hash,
-    normalize_runtime_request_url, find_text
+    normalize_runtime_request_url, find_text, collapse_url_dot_segments
 }
 use std.gc_async_mut.web.browser_session_storage.{
     storage_object_from_pairs, install_storage_api,
@@ -72,7 +75,8 @@ use std.io.{time_now_unix_micros}
 use std.gc_async_mut.web.browser_session_html.{
     html_to_text, escape_html_text,
     expand_stylesheet_text, insert_stylesheet_sources,
-    _guest_runtime_probe_url, _extract_simple_js_assignment
+    _guest_runtime_probe_url, _extract_simple_js_assignment,
+    _css_background_image_urls, _rewrite_css_background_image_urls
 }
 use std.gc_async_mut.web.browser_session_context.{
     browser_csp_allows, browser_session_is_loopback_http,
@@ -263,6 +267,11 @@ class BrowserStylesheetSource:
     static fn external(source: text) -> BrowserStylesheetSource:
         BrowserStylesheetSource(kind: "external", source: source)
 
+    # Already-admitted parent CSS, scheduled after its @import sources so the
+    # normal source-order cascade is retained without re-counting its budget.
+    static fn deferred(source: text) -> BrowserStylesheetSource:
+        BrowserStylesheetSource(kind: "deferred", source: source)
+
 class BrowserStylesheetExpansion:
     html: text
     sources: [BrowserStylesheetSource]
@@ -321,13 +330,22 @@ class BrowserScriptBlock:
 class BrowserImageSource:
     authored_src: text
     resolved_url: text
+    resource_key: text
 
     static fn create(
         authored_src: text, resolved_url: text
     ) -> BrowserImageSource:
+        BrowserImageSource.create_keyed(
+            authored_src, resolved_url, authored_src
+        )
+
+    static fn create_keyed(
+        authored_src: text, resolved_url: text, resource_key: text
+    ) -> BrowserImageSource:
         BrowserImageSource(
             authored_src: authored_src,
-            resolved_url: resolved_url
+            resolved_url: resolved_url,
+            resource_key: resource_key
         )
 
 class BrowserLoadState:
@@ -368,6 +386,50 @@ class BrowserLoadState:
 
 impl BrowserLoadState:
 
+    me _queue_background_image_sources(
+        css_text: text, base_url: text, resolved_resource_key: bool
+    ):
+        for authored in _css_background_image_urls(css_text):
+            val resolved = collapse_url_dot_segments(
+                resolve_relative_url(base_url, authored)
+            )
+            if not (
+                resolved.starts_with("http://") or
+                resolved.starts_with("https://")
+            ):
+                continue
+            val resource_key = if resolved_resource_key: resolved else: authored
+            if (authored.len() > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES or
+                resolved.len() > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES or
+                resource_key.len() > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES):
+                self.append_warning(
+                    "image URI limit reached; background image ignored"
+                )
+                continue
+            var duplicate = false
+            var key_conflict = false
+            for existing in self.image_sources:
+                if existing.resource_key == resource_key:
+                    if existing.resolved_url == resolved:
+                        duplicate = true
+                    else:
+                        key_conflict = true
+            if key_conflict:
+                self.append_warning(
+                    "image resource key conflict ignored: {resource_key}"
+                )
+                continue
+            if duplicate:
+                continue
+            if self.image_sources.len() >= BROWSER_MAX_IMAGE_RESOURCES:
+                self.append_warning(
+                    "image resource limit reached; additional images ignored"
+                )
+                continue
+            self.image_sources.push(BrowserImageSource.create_keyed(
+                authored, resolved, resource_key
+            ))
+
     me append_warning(warning: text):
         if self.warnings.len() >= BROWSER_WARNING_MAX_ENTRIES:
             return
@@ -391,7 +453,19 @@ impl BrowserLoadState:
             )
             self.next_style_idx = self.style_sources.len()
             return nil
-        val expanded = expand_stylesheet_text(document_url, base_url, css_text)
+        val rewritten_css = _rewrite_css_background_image_urls(
+            css_text, base_url
+        )
+        val expanded = expand_stylesheet_text(
+            document_url, base_url, rewritten_css
+        )
+        val ordered = if expanded.sources.len() > 0 and expanded.html != "":
+            BrowserStylesheetExpansion.create("", insert_stylesheet_sources(
+                expanded.sources, expanded.sources.len(),
+                [BrowserStylesheetSource.deferred(expanded.html)]
+            ))
+        else:
+            expanded
         val html_bytes = expanded.html.len()
         if (html_bytes > BROWSER_RENDERER_MAX_PAYLOAD_BYTES -
             self.stylesheet_html_bytes):
@@ -402,9 +476,10 @@ impl BrowserLoadState:
             return nil
         self.stylesheet_source_bytes = self.stylesheet_source_bytes + source_bytes
         self.stylesheet_html_bytes = self.stylesheet_html_bytes + html_bytes
-        if expanded.html != "":
-            self.stylesheet_html_chunks.push(expanded.html)
-        Some(expanded)
+        if ordered.html != "":
+            self.stylesheet_html_chunks.push(ordered.html)
+        self._queue_background_image_sources(css_text, base_url, true)
+        Some(ordered)
 
     fn stylesheet_html() -> text:
         self.stylesheet_html_chunks.join("")

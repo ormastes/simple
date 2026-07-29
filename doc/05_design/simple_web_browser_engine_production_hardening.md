@@ -396,3 +396,21 @@ visible and cannot be silently skipped into the score.
   applying object-fit, object-position, and ancestor/content clipping.
 - Carry resources in additive `SBRF5`; legacy render/frame APIs delegate with an
   empty resource list.
+
+## CSS URL background rendering (2026-07-29)
+
+- Discover bounded `url(...)` values from inline declarations and admitted
+  linked stylesheets. Inline declarations use the authored URL as their Draw-IR
+  resource key; linked CSS is rewritten to the canonical resolved URL.
+- Reuse the image request, CSP `img-src`, HSTS, mixed-content, PNG decode, and
+  document resource limits already owned by BrowserSession and the broker.
+- Lower only the supported single URL layer into one typed Draw-IR background
+  image carrying size, position, repeat, origin, and clip geometry. Paint it
+  after the element color and before content, then repaint the canonical border
+  overlay.
+- Filter the document image table to composition-referenced resources before
+  additive `SBRF5` encoding. Preserve the existing retained-frame and CSS
+  animation scheduling contracts.
+- Keep rounded URL-background clipping and dynamically introduced JavaScript
+  URLs fail closed until dedicated bounded-policy and exact-pixel coverage
+  exists.

@@ -8,12 +8,17 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_advance_encode,
     browser_renderer_chrome_encode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
-    browser_renderer_frame_decode, browser_renderer_frame_encode,
+    browser_renderer_frame_decode,
+    browser_renderer_frame_decode_with_retained_images,
+    browser_renderer_frame_encode,
     browser_renderer_frame_encode_with_diagnostics,
     browser_renderer_frame_encode_with_state,
     browser_renderer_frame_encode_with_state_and_images,
+    browser_renderer_frame_encode_with_state_and_retained_images,
     browser_renderer_frame_encode_with_witness,
     browser_renderer_frame_reply_to_request_id,
+    browser_renderer_image_resource_revisions,
+    browser_renderer_referenced_image_resources,
     browser_renderer_fetch_request_decode,
     browser_renderer_fetch_request_encode,
     browser_renderer_key_encode, browser_renderer_key_with_shift_encode,
@@ -487,7 +492,7 @@ describe "isolated browser renderer protocol":
         val image_composition = _renderer_protocol_image_fixture(image_uri)
         var image_resources: [SimpleOsHostGpuImageResource] = []
         image_resources.push(simpleos_host_gpu_image_resource(
-            image_uri, 2, 1, [0xffc080feu32, 0x01020304u32]
+            image_uri, 4, 4, [0xffc080feu32; 16]
         ))
         val image_state = browser_renderer_frame_encode_with_state_and_images(
             image_composition,
@@ -522,6 +527,132 @@ describe "isolated browser renderer protocol":
         expect(image_frame.image_resources[0].pixels[0]).to_equal(
             0xffc080feu32
         )
+        val image_revisions = browser_renderer_image_resource_revisions(
+            image_resources
+        )
+        val retained_image_state = (
+            browser_renderer_frame_encode_with_state_and_retained_images(
+                image_composition, 7, 6, 46, 16, 0, "", 0, "",
+                "", "https://example.test/image", "", "",
+                image_resources, image_revisions
+            )
+        )
+        expect(retained_image_state.ok).to_be(true)
+        expect(retained_image_state.wire.contains("SBRF6")).to_be(true)
+        expect(retained_image_state.wire.len()).to_be_less_than(
+            image_state.wire.len()
+        )
+        val retained_image_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), retained_image_state.wire
+        )
+        expect(browser_renderer_frame_decode(
+            retained_image_message.message, 64, 48
+        ).reason).to_equal("image-resources-unknown-image-resource")
+        val retained_image_frame = (
+            browser_renderer_frame_decode_with_retained_images(
+                retained_image_message.message, 64, 48, image_resources
+            )
+        )
+        expect(retained_image_frame.ok).to_be(true)
+        expect(retained_image_frame.image_resources[0].pixels[0]).to_equal(
+            0xffc080feu32
+        )
+        val changed_image_resources = [
+            simpleos_host_gpu_image_resource(
+                image_uri, 4, 4, [0xff010203u32; 16]
+            )
+        ]
+        val changed_image_state = (
+            browser_renderer_frame_encode_with_state_and_retained_images(
+                image_composition, 7, 7, 47, 32, 0, "", 0, "",
+                "", "https://example.test/image", "", "",
+                changed_image_resources, image_revisions
+            )
+        )
+        expect(changed_image_state.ok).to_be(true)
+        expect(changed_image_state.wire.contains("SBRF5")).to_be(true)
+        val changed_image_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), changed_image_state.wire
+            ).message,
+            64,
+            48
+        )
+        expect(changed_image_frame.ok).to_be(true)
+        expect(changed_image_frame.image_resources[0].pixels[0]).to_equal(
+            0xff010203u32
+        )
+        val second_uri = "https://example.test/second.png"
+        var ordered_composition = image_composition
+        var ordered_batches = ordered_composition.batches
+        var ordered_batch = ordered_batches[0]
+        var ordered_commands = ordered_batch.commands
+        ordered_commands.push(draw_ir_image_command(
+            "second-image", 8, 4, 1, 1, second_uri, []
+        ))
+        ordered_commands.push(draw_ir_image_command(
+            "duplicate-hero-image", 10, 4, 2, 1, image_uri, []
+        ))
+        ordered_batch.commands = ordered_commands
+        ordered_batches[0] = ordered_batch
+        ordered_composition.batches = ordered_batches
+        val second_resource = simpleos_host_gpu_image_resource(
+            second_uri, 1, 1, [0xff556677u32]
+        )
+        val unused_resource = simpleos_host_gpu_image_resource(
+            "https://example.test/unused.png", 1, 1, [0xff778899u32]
+        )
+        val mixed_image_state = (
+            browser_renderer_frame_encode_with_state_and_retained_images(
+                ordered_composition, 7, 8, 48, 48, 0, "", 0, "",
+                "", "https://example.test/image", "", "",
+                [image_resources[0], second_resource], image_revisions
+            )
+        )
+        expect(mixed_image_state.ok).to_be(true)
+        expect(mixed_image_state.wire.contains("SBRF6")).to_be(true)
+        val mixed_image_frame = (
+            browser_renderer_frame_decode_with_retained_images(
+                browser_renderer_decoder_feed(
+                    browser_renderer_decoder_new(7), mixed_image_state.wire
+                ).message,
+                64,
+                48,
+                image_resources
+            )
+        )
+        expect(mixed_image_frame.ok).to_be(true)
+        expect(mixed_image_frame.image_resources.len()).to_equal(2)
+        expect(mixed_image_frame.image_resources[1].pixels[0]).to_equal(
+            0xff556677u32
+        )
+        val tiny_revisions = browser_renderer_image_resource_revisions([
+            second_resource
+        ])
+        val tiny_image_state = (
+            browser_renderer_frame_encode_with_state_and_retained_images(
+                _renderer_protocol_image_fixture(second_uri),
+                7, 9, 49, 64, 0, "", 0, "", "", "", "", "",
+                [second_resource], tiny_revisions
+            )
+        )
+        expect(tiny_image_state.ok).to_be(true)
+        expect(tiny_image_state.wire.contains("SBRF5")).to_be(true)
+        val referenced_resources = browser_renderer_referenced_image_resources(
+            ordered_composition,
+            [unused_resource, second_resource, image_resources[0]]
+        )
+        expect(referenced_resources.len()).to_equal(2)
+        expect(referenced_resources[0].image_uri).to_equal(image_uri)
+        expect(referenced_resources[1].image_uri).to_equal(second_uri)
+        val missing_resources = browser_renderer_referenced_image_resources(
+            image_composition, []
+        )
+        expect(missing_resources.len()).to_equal(0)
+        expect(browser_renderer_frame_encode_with_state_and_images(
+            image_composition, 7, 6, 46, -1, 0, "", 0, "",
+            "", "", "", "", missing_resources
+        ).reason).to_equal("image-resources-missing-image-resource")
         val empty_image_state = browser_renderer_frame_encode_with_state_and_images(
             _renderer_protocol_fixture(), 7, 6, 46, -1,
             0, "", 0, "", "", "", "", "", []

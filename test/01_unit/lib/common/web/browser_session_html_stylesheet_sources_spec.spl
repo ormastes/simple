@@ -5,21 +5,81 @@ use std.gc_async_mut.web.browser_session_html.{
     extract_stylesheet_sources,
     extract_css_import_sources,
     strip_css_imports,
-    insert_stylesheet_sources
+    insert_stylesheet_sources,
+    _css_background_image_urls,
+    _rewrite_css_background_image_urls
 }
 
 describe "BrowserSession HTML stylesheet sources":
 
     it "extracts inline and linked stylesheets in source order":
-        val html = "<html><head><style>body { color: red; }</style><link rel=\"preload stylesheet\" href=\"/app.css\"><link rel=\"icon\" href=\"/favicon.ico\"></head></html>"
+        val html = "<html><head><link rel=\"stylesheet\" href=\"/first.css\"><style>body { color: red; }</style><link rel=\"icon\" href=\"/favicon.ico\"><link rel=\"preload stylesheet\" href=\"/last.css\"><style>.last { color: blue; }</style></head></html>"
 
         val sources = extract_stylesheet_sources(html)
 
-        expect(sources.len()).to_equal(2)
-        expect(sources[0].kind).to_equal("inline")
-        expect(sources[0].source).to_equal("body { color: red; }")
-        expect(sources[1].kind).to_equal("external")
-        expect(sources[1].source).to_equal("/app.css")
+        expect(sources.len()).to_equal(4)
+        expect(sources[0].kind).to_equal("external")
+        expect(sources[0].source).to_equal("/first.css")
+        expect(sources[1].kind).to_equal("inline")
+        expect(sources[1].source).to_equal("body { color: red; }")
+        expect(sources[2].kind).to_equal("external")
+        expect(sources[2].source).to_equal("/last.css")
+        expect(sources[3].kind).to_equal("inline")
+        expect(sources[3].source).to_equal(".last { color: blue; }")
+
+    it "discovers only exact single background URLs and rewrites network URLs":
+        val css = ".hero { background: #0f8 url('../img/hero.png') center no-repeat; } .multi { background: url('a.png'), url('b.png'); } .data { background-image: url(data:image/png;base64,abcd); }"
+
+        val urls = _css_background_image_urls(css)
+        val rewritten = _rewrite_css_background_image_urls(
+            css, "https://example.test/assets/css/app.css"
+        )
+
+        expect(urls.len()).to_equal(1)
+        expect(urls[0]).to_equal("../img/hero.png")
+        expect(rewritten).to_contain(
+            "url(\"https://example.test/assets/img/hero.png\")"
+        )
+        expect(rewritten).to_contain("url(data:image/png;base64,abcd)")
+        expect(rewritten).to_contain(
+            "background: url('a.png'), url('b.png')"
+        )
+
+    it "discovers one URL layer inside a background shorthand":
+        val urls = _css_background_image_urls(
+            ".x{background:#0f8 url('hero.png') center no-repeat}"
+        )
+
+        expect(urls).to_equal(["hero.png"])
+
+    it "rewrites only accepted background declaration URL spans":
+        val css = "@import url('theme.css');@font-face{font-family:x;src:url('font.woff2')}.hero{background:url('hero.png') center no-repeat}"
+
+        val rewritten = _rewrite_css_background_image_urls(
+            css, "https://example.test/css/app.css"
+        )
+
+        expect(rewritten).to_equal(
+            "@import url('theme.css');@font-face{font-family:x;src:url('font.woff2')}.hero{background:url(\"https://example.test/css/hero.png\") center no-repeat}"
+        )
+
+    it "leaves unsafe background URLs unchanged and undiscovered":
+        val quote = 34.to_char()
+        val slash = 92.to_char()
+        val control = 10.to_char()
+        val interpolation = 123.to_char() + "host" + 125.to_char()
+        val css = (
+            ".quote{background:url('bad" + quote + "name.png')}" +
+            ".slash{background:url('bad" + slash + "name.png')}" +
+            ".control{background:url('bad" + control + "name.png')}" +
+            ".tag{background:url('</style>.png')}" +
+            ".interpolation{background:url('" + interpolation + ".png')}"
+        )
+
+        expect(_css_background_image_urls(css)).to_equal([])
+        expect(_rewrite_css_background_image_urls(
+            css, "https://example.test/css/app.css"
+        )).to_equal(css)
 
     it "resolves css imports and inserts expanded sources at the requested index":
         val css = "@import url('../base.css');\n@import \"theme.css\";\n.main { display: block; }"

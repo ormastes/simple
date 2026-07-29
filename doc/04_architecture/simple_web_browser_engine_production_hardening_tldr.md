@@ -29,6 +29,8 @@ DrawIrComposition -> persistent Engine2dCompositorBackend
 - Wheel deltas coalesce in one bounded renderer slot; the sandbox worker owns
   clamped scroll, shifted Draw IR/hit testing, and viewport culling.
 - Broker owns URLs/origins, Fetch/CORS/CSP, cookies, TLS/HSTS, and host access.
+- Static `<img>` and CSS URL backgrounds share bounded broker image policy;
+  retained `SBRF5` frames include only composition-referenced resources.
 - Linux/macOS/Windows sandbox failure blocks production startup.
 
 Hot-path evidence: stage counters/timings, frame/input latency, cache reuse,

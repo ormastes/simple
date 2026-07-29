@@ -1,8 +1,8 @@
 use std.spec.*
 
 use std.gc_async_mut.web.browser_session.{
-    BrowserLoadState, BrowserRequest, BrowserResponse, BrowserSession,
-    BrowserStylesheetSource
+    BrowserImageSource, BrowserLoadState, BrowserRequest, BrowserResponse,
+    BrowserSession, BrowserStylesheetSource
 }
 use common.web.browser_renderer_protocol.{BROWSER_RENDERER_MAX_PAYLOAD_BYTES}
 use std.common.image.png_encode.{encode_argb_to_png}
@@ -294,6 +294,100 @@ describe "BrowserSession page loading":
             [0xFFCC3020u32]
         )
 
+    it "resolves stylesheet and inline background images with stable keys":
+        var linked = BrowserSession.new()
+        expect(linked.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document = linked.take_pending_request().unwrap()
+        expect(linked.commit_network_response(BrowserResponse.create(
+            document.id, "document", document.url, 200, "",
+            "<html><head><link rel='stylesheet' href='/css/start.css'></head><body><div class='hero'></div></body></html>",
+            ""
+        )).is_ok()).to_be(true)
+        val first_style = linked.take_pending_request().unwrap()
+        expect(linked.commit_network_response(BrowserResponse.create(
+            first_style.id, "style", first_style.url, 302,
+            "Location: /themes/final.css", "", ""
+        )).is_ok()).to_be(true)
+        val final_style = linked.take_pending_request().unwrap()
+        expect(linked.commit_network_response(BrowserResponse.create(
+            final_style.id, "style", final_style.url, 200, "",
+            ".hero { background-image: url('../img/hero.png'); }", ""
+        )).is_ok()).to_be(true)
+        val linked_image = linked.take_pending_request().unwrap()
+        expect(linked_image.kind).to_equal("image")
+        expect(linked_image.url).to_equal(
+            "https://example.com/img/hero.png"
+        )
+        expect(linked.active_load.unwrap().stylesheet_html()).to_contain(
+            "url(\"https://example.com/img/hero.png\")"
+        )
+        expect(linked.commit_network_response(BrowserResponse.create(
+            linked_image.id, "image", linked_image.url, 200,
+            "Content-Type: image/png",
+            _browser_image_png_hex(0xFF123456u32), ""
+        )).is_ok()).to_be(true)
+        expect(linked.image_resources[0].image_uri).to_equal(
+            "https://example.com/img/hero.png"
+        )
+
+        var inline = BrowserSession.new_without_runtime()
+        expect(inline.begin_network_navigation(
+            "https://example.com/page/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val inline_document = inline.take_pending_request().unwrap()
+        expect(inline.commit_network_response(BrowserResponse.create(
+            inline_document.id, "document", inline_document.url, 200, "",
+            "<html><body><div style=\"background-image:url('hero.png')\"></div></body></html>",
+            ""
+        )).is_ok()).to_be(true)
+        val inline_image = inline.take_pending_request().unwrap()
+        expect(inline_image.url).to_equal(
+            "https://example.com/page/hero.png"
+        )
+        expect(inline.commit_network_response(BrowserResponse.create(
+            inline_image.id, "image", inline_image.url, 200,
+            "Content-Type: image/png",
+            _browser_image_png_hex(0xFF654321u32), ""
+        )).is_ok()).to_be(true)
+        expect(inline.active_load).to_be_nil()
+        expect(inline.image_resources[0].image_uri).to_equal("hero.png")
+
+    it "applies img-src and broker HSTS policy to CSS background images":
+        var blocked = BrowserSession.new()
+        blocked.broker_network_policy = true
+        expect(blocked.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val blocked_document = blocked.take_pending_request().unwrap()
+        expect(blocked.commit_network_response(BrowserResponse.create(
+            blocked_document.id, "document", blocked_document.url, 200,
+            "Content-Security-Policy: img-src 'none'",
+            "<style>.hero{background-image:url(http://cdn.test/p.png)}</style>",
+            ""
+        )).is_ok()).to_be(true)
+        expect(blocked.take_pending_request()).to_be_nil()
+        expect(blocked.warnings.join("|")).to_contain(
+            "CSP blocked image: https://cdn.test/p.png"
+        )
+
+        var allowed = BrowserSession.new()
+        allowed.broker_network_policy = true
+        expect(allowed.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val allowed_document = allowed.take_pending_request().unwrap()
+        expect(allowed.commit_network_response(BrowserResponse.create(
+            allowed_document.id, "document", allowed_document.url, 200,
+            "Content-Security-Policy: img-src https:",
+            "<style>.hero{background-image:url(http://cdn.test/p.png)}</style>",
+            ""
+        )).is_ok()).to_be(true)
+        val hsts_image = allowed.take_pending_request().unwrap()
+        expect(hsts_image.kind).to_equal("image")
+        expect(hsts_image.url).to_equal("http://cdn.test/p.png")
+
     it "blocks images with img-src and rejects non-PNG or noncanonical bodies":
         var blocked = BrowserSession.new()
         expect(blocked.begin_network_navigation(
@@ -417,6 +511,28 @@ describe "BrowserSession page loading":
             "image resource limit reached"
         )
 
+    it "keeps legacy image keys and rejects conflicting keyed sources":
+        val legacy = BrowserImageSource.create(
+            "hero.png", "https://one.test/hero.png"
+        )
+        expect(legacy.resource_key).to_equal("hero.png")
+        var load = BrowserLoadState.create(
+            "https://two.test/index.html", "", -1, false, [], [],
+            [BrowserImageSource.create_keyed(
+                "hero.png", "https://one.test/hero.png", "hero.png"
+            )]
+        )
+
+        load._queue_background_image_sources(
+            "background-image:url(hero.png)",
+            "https://two.test/index.html", false
+        )
+
+        expect(load.image_sources.len()).to_equal(1)
+        expect(load.warnings.join("|")).to_contain(
+            "image resource key conflict ignored: hero.png"
+        )
+
     it "expands stylesheet imports before rendering":
         var session = BrowserSession.new()
         session.register_resource("https://example.com/base.css", "@import '/theme.css'; body { color: red; }")
@@ -431,6 +547,31 @@ describe "BrowserSession page loading":
                 expect(session.current_style_html).to_contain("body { color: red; }")
             Err(e) =>
                 fail("Expected stylesheet imports to expand before rendering: {e}")
+
+    it "commits imported background CSS before its parent remainder":
+        var session = BrowserSession.new()
+        session.register_resource(
+            "https://example.com/base.css",
+            "@import '/theme.css';.hero{background:url('parent.png') no-repeat}"
+        )
+        session.register_resource(
+            "https://example.com/theme.css",
+            ".hero{background:url('child.png') no-repeat}"
+        )
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><head><link rel='stylesheet' href='/base.css'></head><body><div class='hero'></div></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_style_html).to_start_with(
+                    "<style>.hero{background:url(\"https://example.com/child.png\") no-repeat}</style>"
+                )
+                expect(session.current_style_html).to_end_with(
+                    "<style>.hero{background:url(\"https://example.com/parent.png\") no-repeat}</style>"
+                )
+            Err(e) =>
+                fail("Expected import background cascade to preserve source order: {e}")
 
     it "loads external module graphs with named imports":
         var session = BrowserSession.new()

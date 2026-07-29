@@ -11,11 +11,14 @@
 # - extract_css_import_href / trim_css_import_url / insert_stylesheet_sources
 
 use common.web.html_escape.{html_escape_core}
+use common.string_builder.{StringBuilder}
 use std.gc_async_mut.web.browser_session.{BrowserStylesheetSource, BrowserStylesheetExpansion}
 use std.gc_async_mut.web.browser_session_url.{find_text, resolve_relative_url, collapse_url_dot_segments}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     BROWSER_MAX_DOCUMENT_SUBRESOURCES
 }
+
+extern fn rt_text_to_bytes(value: text) -> [u8]
 
 fn extract_title_text(html: text) -> text:
     val start = find_text(html, "<title>", 0)
@@ -304,88 +307,307 @@ fn has_tag_attr(tag_content: text, attr_name: text) -> bool:
         lower.ends_with(padded)
 
 fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
-    val source_count = stylesheet_source_count(html)
-    if source_count == 0:
-        return []
-    var sources: [BrowserStylesheetSource] = [BrowserStylesheetSource.inline(""); source_count]
-    var write_idx = 0
-    var style_pos = 0
+    var sources: [BrowserStylesheetSource] = []
+    val lower = html.lower()
+    var pos = 0
     val html_len = html.len()
-    while style_pos < html_len and write_idx < source_count:
-        val start = find_text(html, "<style", style_pos)
-        if start < 0:
+    while pos < html_len and sources.len() < BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+        val style_start = find_text(lower, "<style", pos)
+        val link_start = find_text(lower, "<link", pos)
+        if style_start < 0 and link_start < 0:
             break
-        val tag_end = find_text(html, ">", start)
+        val take_style = (
+            style_start >= 0 and
+            (link_start < 0 or style_start < link_start)
+        )
+        val start = if take_style: style_start else: link_start
+        val tag_end = find_text(lower, ">", start)
         if tag_end < 0:
             break
-        val close = find_text(html, "</style>", tag_end + 1)
-        if close < 0:
-            break
-        val content = html[tag_end + 1:close].trim()
-        if content != "":
-            sources[write_idx] = BrowserStylesheetSource.inline(content)
-            write_idx = write_idx + 1
-        style_pos = close + 8
-    var link_pos = 0
-    while link_pos < html_len and write_idx < source_count:
-        val start = find_text(html, "<link", link_pos)
-        if start < 0:
-            break
-        val tag_end = find_text(html, ">", start)
-        if tag_end < 0:
-            break
-        val tag_content = html[start:tag_end + 1]
-        val rel_value = extract_attr_value(tag_content, "rel").lower()
-        val href_value = extract_attr_value(tag_content, "href")
-        if href_value != "" and rel_contains_stylesheet(rel_value):
-            sources[write_idx] = BrowserStylesheetSource.external(href_value)
-            write_idx = write_idx + 1
-        link_pos = tag_end + 1
+        if take_style:
+            val close = find_text(lower, "</style>", tag_end + 1)
+            if close < 0:
+                break
+            val content = html[tag_end + 1:close].trim()
+            if content != "":
+                sources.push(BrowserStylesheetSource.inline(content))
+            pos = close + 8
+        else:
+            val tag_content = html[start:tag_end + 1]
+            val rel_value = extract_attr_value(tag_content, "rel").lower()
+            val href_value = extract_attr_value(tag_content, "href")
+            if href_value != "" and rel_contains_stylesheet(rel_value):
+                sources.push(BrowserStylesheetSource.external(href_value))
+            pos = tag_end + 1
     sources
-
-fn stylesheet_source_count(html: text) -> i32:
-    var count = 0
-    var style_pos = 0
-    val html_len = html.len()
-    while style_pos < html_len:
-        val start = find_text(html, "<style", style_pos)
-        if start < 0:
-            break
-        val tag_end = find_text(html, ">", start)
-        if tag_end < 0:
-            break
-        val close = find_text(html, "</style>", tag_end + 1)
-        if close < 0:
-            break
-        val content = html[tag_end + 1:close].trim()
-        if content != "":
-            count = count + 1
-            if count >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
-                return count
-        style_pos = close + 8
-    var link_pos = 0
-    while link_pos < html_len:
-        val start = find_text(html, "<link", link_pos)
-        if start < 0:
-            break
-        val tag_end = find_text(html, ">", start)
-        if tag_end < 0:
-            break
-        val tag_content = html[start:tag_end + 1]
-        val rel_value = extract_attr_value(tag_content, "rel").lower()
-        val href_value = extract_attr_value(tag_content, "href")
-        if href_value != "" and rel_contains_stylesheet(rel_value):
-            count = count + 1
-            if count >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
-                return count
-        link_pos = tag_end + 1
-    count
 
 fn rel_contains_stylesheet(rel_value: text) -> bool:
     for part in rel_value.split(" "):
         if part.trim() == "stylesheet":
             return true
     false
+
+class BrowserCssBackgroundUrlSpan:
+    authored: text
+    token_start: i64
+    token_end: i64
+
+fn _css_background_url_safe(url: text) -> bool:
+    if (
+        url.contains("\"") or url.contains("'") or url.contains("\\") or
+        url.contains("<") or url.contains(">") or
+        url.contains("{") or url.contains("}")
+    ):
+        return false
+    for byte in rt_text_to_bytes(url):
+        if byte < 32u8 or byte == 127u8:
+            return false
+    true
+
+fn _css_single_background_url_span(
+    value: text, value_start: i64
+) -> BrowserCssBackgroundUrlSpan?:
+    val lower = value.lower()
+    if (
+        lower.contains("gradient(") or lower.contains("image-set(") or
+        lower.contains("cross-fade(") or lower.contains("var(")
+    ):
+        return nil
+    var pos = 0
+    var found = ""
+    var found_token_start = 0
+    var found_token_end = 0
+    var url_count = 0
+    while pos < value.len():
+        if (
+            pos + 1 < value.len() and
+            value.slice(pos, pos + 2) == "/*"
+        ):
+            val close = find_text(value, "*/", pos + 2)
+            if close < 0:
+                return nil
+            pos = close + 2
+            continue
+        val ch = value.slice(pos, pos + 1)
+        if ch == ",":
+            return nil
+        if ch == "\"" or ch == "'":
+            val quote = ch
+            pos = pos + 1
+            var closed_quote = false
+            while pos < value.len() and not closed_quote:
+                val quoted_ch = value.slice(pos, pos + 1)
+                if quoted_ch == "\\" and pos + 1 < value.len():
+                    pos = pos + 2
+                else:
+                    pos = pos + 1
+                    closed_quote = quoted_ch == quote
+            if not closed_quote:
+                return nil
+            continue
+        if pos + 4 <= value.len() and lower.slice(pos, pos + 4) == "url(":
+            val token_start = pos
+            pos = pos + 4
+            while pos < value.len() and (
+                value.slice(pos, pos + 1) == " " or
+                value.slice(pos, pos + 1) == "\n" or
+                value.slice(pos, pos + 1) == "\r" or
+                value.slice(pos, pos + 1) == "\t"
+            ):
+                pos = pos + 1
+            var authored_start = pos
+            var authored_end = pos
+            var valid = false
+            if pos < value.len() and (
+                value.slice(pos, pos + 1) == "\"" or
+                value.slice(pos, pos + 1) == "'"
+            ):
+                val quote = value.slice(pos, pos + 1)
+                pos = pos + 1
+                authored_start = pos
+                var closed_quote = false
+                while pos < value.len() and not closed_quote:
+                    val quoted_ch = value.slice(pos, pos + 1)
+                    if quoted_ch == "\\" and pos + 1 < value.len():
+                        pos = pos + 2
+                    else:
+                        if quoted_ch == quote:
+                            authored_end = pos
+                            closed_quote = true
+                        pos = pos + 1
+                while pos < value.len() and (
+                    value.slice(pos, pos + 1) == " " or
+                    value.slice(pos, pos + 1) == "\n" or
+                    value.slice(pos, pos + 1) == "\r" or
+                    value.slice(pos, pos + 1) == "\t"
+                ):
+                    pos = pos + 1
+                valid = closed_quote and pos < value.len() and (
+                    value.slice(pos, pos + 1) == ")"
+                )
+            else:
+                while pos < value.len() and (
+                    value.slice(pos, pos + 1) != ")"
+                ):
+                    pos = pos + 1
+                authored_end = pos
+                valid = pos < value.len()
+            if not valid:
+                return nil
+            found = value.slice(authored_start, authored_end).trim()
+            url_count = url_count + 1
+            if url_count > 1:
+                return nil
+            found_token_start = value_start + token_start
+            found_token_end = value_start + pos + 1
+            pos = pos + 1
+            continue
+        pos = pos + 1
+    val found_lower = found.lower()
+    if (url_count != 1 or found == "" or
+        found_lower.starts_with("data:") or
+        found_lower.starts_with("blob:") or
+        not _css_background_url_safe(found)):
+        return nil
+    Some(BrowserCssBackgroundUrlSpan(
+        authored: found,
+        token_start: found_token_start,
+        token_end: found_token_end
+    ))
+
+fn _css_append_background_url_span(
+    css_text: text, declaration_start: i64, colon: i64,
+    declaration_end: i64, spans: [BrowserCssBackgroundUrlSpan]
+) -> [BrowserCssBackgroundUrlSpan]:
+    var out = spans
+    if colon < declaration_start or colon >= declaration_end:
+        return out
+    val property = css_text.slice(
+        declaration_start, colon
+    ).trim().lower()
+    if property != "background" and property != "background-image":
+        return out
+    if val Some(span) = _css_single_background_url_span(
+        css_text.slice(colon + 1, declaration_end), colon + 1
+    ):
+        out.push(span)
+    out
+
+fn _css_background_image_url_spans(
+    css_text: text
+) -> [BrowserCssBackgroundUrlSpan]:
+    var spans: [BrowserCssBackgroundUrlSpan] = []
+    val has_blocks = css_text.contains("{")
+    var brace_depth = 0
+    var paren_depth = 0
+    var declaration_start = 0
+    var colon = -1
+    var pos = 0
+    while pos < css_text.len():
+        if (
+            pos + 1 < css_text.len() and
+            css_text.slice(pos, pos + 2) == "/*"
+        ):
+            val close = find_text(css_text, "*/", pos + 2)
+            if close < 0:
+                return spans
+            if (
+                colon < 0 and
+                css_text.slice(declaration_start, pos).trim() == ""
+            ):
+                declaration_start = close + 2
+            pos = close + 2
+            continue
+        val ch = css_text.slice(pos, pos + 1)
+        if ch == "\"" or ch == "'":
+            val quote = ch
+            pos = pos + 1
+            var closed_quote = false
+            while pos < css_text.len() and not closed_quote:
+                val quoted_ch = css_text.slice(pos, pos + 1)
+                if quoted_ch == "\\" and pos + 1 < css_text.len():
+                    pos = pos + 2
+                else:
+                    pos = pos + 1
+                    if quoted_ch == quote:
+                        closed_quote = true
+            if not closed_quote:
+                return spans
+            continue
+        val declarations_active = not has_blocks or brace_depth > 0
+        if ch == "(" and declarations_active:
+            paren_depth = paren_depth + 1
+        elif ch == ")" and declarations_active and paren_depth > 0:
+            paren_depth = paren_depth - 1
+        elif ch == "{" and paren_depth == 0:
+            brace_depth = brace_depth + 1
+            declaration_start = pos + 1
+            colon = -1
+        elif ch == "}" and paren_depth == 0:
+            if declarations_active:
+                spans = _css_append_background_url_span(
+                    css_text, declaration_start, colon, pos, spans
+                )
+            if brace_depth > 0:
+                brace_depth = brace_depth - 1
+            declaration_start = pos + 1
+            colon = -1
+        elif declarations_active and paren_depth == 0 and ch == ";":
+            spans = _css_append_background_url_span(
+                css_text, declaration_start, colon, pos, spans
+            )
+            declaration_start = pos + 1
+            colon = -1
+        elif (
+            declarations_active and paren_depth == 0 and
+            ch == ":" and colon < 0
+        ):
+            colon = pos
+        pos = pos + 1
+    if not has_blocks:
+        spans = _css_append_background_url_span(
+            css_text, declaration_start, colon, css_text.len(), spans
+        )
+    spans
+
+fn _css_background_image_urls(css_text: text) -> [text]:
+    var urls: [text] = []
+    for span in _css_background_image_url_spans(css_text):
+        var duplicate = false
+        for existing in urls:
+            if existing == span.authored:
+                duplicate = true
+        if not duplicate:
+            urls.push(span.authored)
+    urls
+
+fn _css_network_url(url: text) -> bool:
+    url.starts_with("http://") or url.starts_with("https://")
+
+fn _rewrite_css_background_image_urls(
+    css_text: text, base_url: text
+) -> text:
+    val spans = _css_background_image_url_spans(css_text)
+    if spans.len() == 0:
+        return css_text
+    val out = StringBuilder.new()
+    var copy_start = 0
+    for span in spans:
+        out.push(css_text.slice(copy_start, span.token_start))
+        val resolved = collapse_url_dot_segments(
+            resolve_relative_url(base_url, span.authored)
+        )
+        if (
+            _css_network_url(resolved) and
+            _css_background_url_safe(resolved)
+        ):
+            out.push("url(\"{resolved}\")")
+        else:
+            out.push(css_text.slice(span.token_start, span.token_end))
+        copy_start = span.token_end
+    if copy_start < css_text.len():
+        out.push(css_text.slice(copy_start, css_text.len()))
+    out.build()
 
 fn expand_stylesheet_text(document_url: text, base_url: text, css_text: text) -> BrowserStylesheetExpansion:
     val imports = extract_css_import_sources(base_url, css_text)

@@ -48,3 +48,18 @@ transitions under sanitizers and retain minimized reproducers.
 - https://web-platform-tests.org/test-suite-design.html
 - https://chromium.googlesource.com/external/github.com/tc39/test262/+/refs/heads/master/README.md
 - https://google.github.io/oss-fuzz/
+## 2026-07-29 CSS URL background follow-up
+
+The current CSS Backgrounds Level 3 contract keeps a single-image implementation
+honest only when it preserves the full ordering model: background color below
+the image, border above it; `background-origin` defines the positioning area,
+`background-clip` defines the painting area, percentage positions apply to the
+difference between container and image size, and `repeat-x`/`repeat-y` repeat
+on one axis only. The implementation therefore uses one canonical image command
+with explicit positioning/tile metadata and performs bounded pixel sampling in
+Engine2D rather than expanding a small tile into thousands of Draw-IR commands.
+
+Sources:
+
+- https://www.w3.org/TR/css-backgrounds-3/
+- https://drafts.csswg.org/css-values-5/#position
