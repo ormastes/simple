@@ -26,13 +26,22 @@ types (`Stack`, `Mailbox`) alongside the lexer, single then combined, with
 `SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1` — again **zero erased-receiver binds
 detected, zero theft, for either candidate alone or combined.** Across all
 seven attempts in this doc, `self.indent_stack.pop()` has never once been
-observed to bind to anything but `rt_array_pop`. **The causal link therefore
-remains INFERRED, not just unconfirmed for lack of a full build, but now
-explicitly flagged as uncertain at the mechanism level** — it is possible
-this crash is not an instance of the erased-receiver-bind class this fix
-targets at all, and only a completed full-CLI build (or an equivalent
-debug-instrumented run against the real closure) can settle it. See
-"2026-07-29 follow-up" below for full detail on each attempt and recommended
+observed to bind to anything but `rt_array_pop`. An eighth attempt tested a
+second, unrelated candidate mechanism from sibling lanes the same day (the
+default-engine LIST MISCOMPILE family — `.push()`-triggered reallocation
+leaving a stale backing pointer read by a later call), adapted from "local
+across loop iterations" to "struct field across separate method calls" to
+match `indent_stack`'s real usage shape, tested at up to 444 pushes across 12
+alternating push/pop bursts, with a struct layout mirroring `CoreLexer`'s 15
+fields — **also negative, both seeds, byte-identical output, no
+corruption.** **The causal link therefore remains INFERRED. Ten real
+build-and-run experiments across two structurally distinct candidate root
+causes have now failed to reproduce the crash** — not just unconfirmed for
+lack of a full build, but with both leading hypotheses tested and found
+wanting at the scales/shapes triable outside the real CLI closure. Only a
+completed full-CLI build (or an equivalent debug-instrumented run against the
+real closure) can settle it now. See "2026-07-29 follow-up" below for full
+detail on each attempt and recommended
 next steps.
 **Component:** `src/compiler/10.frontend/core/lexer_struct.spl` (`CoreLexer.scan_token`),
 runtime `rt_array_pop` / `spl_array_pop`,
@@ -588,3 +597,76 @@ capable of reporting exactly which symbol `self.indent_stack.pop()` binds to
 inside that real closure at the moment of the crash (e.g. via
 `SIMPLE_DEBUG_ERASED_RECEIVER_BIND` on a completed, not just attempted, full
 build).
+
+**Retry 8 (alternative candidate mechanism from sibling lanes — default-engine
+LIST MISCOMPILE family, `reference_native_list_rebind_and_spill_miscompiles`,
+`base58_decode_reversed_polarity_rootcause_2026-07-29.md` /
+`sha256_bytes_engine_divergence_rootcause_2026-07-29.md`: `.push()`-triggered
+reallocation in one call leaving a stale/garbage backing pointer read by a
+LATER call, adapted here from "local across loop iterations" to "struct field
+across separate method calls"): tried three ways, DECISIVE NEGATIVE RESULT
+again, reported per the same "report the negative" instruction.**
+
+`lexer_struct.spl`'s `indent_stack: [i64]` field is born non-empty (`[0]`,
+line 172 in `make_core_lexer`, ruling out the sibling bugs' "born `[]` then
+rebound" trigger), but is `.push()`-grown across many separate `scan_token`
+calls (indent increases, line 1041) and read/popped across many *later*,
+separate calls (dedents and the EOF pop at lines 1048-1054 / 1067-1072) —
+structurally the right shape for a stale-backing-pointer-after-realloc bug if
+one exists at the struct-field level rather than the local-variable level the
+sibling lanes found.
+
+Built a `struct Ring` with an `[i64]` field, threaded through separate calls
+via the exact copy-and-reassign pattern `core_lexer_next_token` itself uses
+(`var next = r; next.method(); return next` / `(next, v)`), with a
+push-method and a separate pop-method, driven from `fn main()` with enough
+volume and alternation to force multiple reallocations:
+
+1. **Basic**: single struct field (`stack: [i64]`), one push burst of 20,
+   then 25 separate pop calls. Patched seed, real linked executable
+   (`--target x86_64-unknown-linux-gnu --backend cranelift`, no `--source`
+   needed once the target was explicit — same workaround as retry 6):
+   clean run, exit 0, all values correct (20 down to 1, then `-1` for the
+   depleted stack — no corruption).
+2. **Aggressive alternation**: 12 bursts of 37 pushes interleaved with 5 pops
+   each (444 total pushes, crossing many likely growth-doubling boundaries:
+   4/8/16/32/64/128/256/512), then 500 more pops past empty (mirrors
+   `scan_token`'s repeated at-EOF pop-until-`len()<=1` pattern exactly).
+   Patched seed: clean, exit 0, all 562 output lines correct. **Unpatched
+   seed, identical recipe: byte-identical output** (diff empty apart from my
+   own appended exit-code label) — no divergence between seeds either.
+   `objdump -r` confirmed the fixture's push/pop calls really do route
+   through `rt_array_push`/`rt_array_pop` (not inlined/optimized away), so
+   this is a faithful exercise of the real runtime path.
+3. **Structurally closer to `CoreLexer`**: rebuilt the struct with 11 sibling
+   fields in the same relative order as the real struct (two other array
+   fields before `indent_stack`, scalar/text fields around it, one more array
+   field after — `CoreLexer` has 15 total fields; a single-field struct
+   can't expose an offset-computation bug the real struct's layout might),
+   with the pop-method also mutating sibling fields on the same call
+   (`pending_dedents`, `line`) matching `scan_token`'s real EOF-pop branch
+   shape. Same 444-push/alternating-pop drive. **Both seeds again produced
+   byte-identical output, exit 0, no corruption.**
+
+**Combined with retry 7's census, this is now ten real build-and-run
+reproduction experiments across two structurally distinct candidate root
+causes (erased-receiver-bind theft, and struct-field realloc-then-stale-read),
+none of which has reproduced the original crash.** Neither mechanism has been
+observed to affect `.pop()`/`.push()` on a struct-field array threaded across
+separate method calls in the way the real `CoreLexer`/`scan_token` code is
+structured, at the scales and shapes tested (up to 444 pushes across 12
+alternating bursts, up to 500 trailing pops, 1-12 sibling struct fields, both
+seeds). This does not clear either hypothesis for the real, much larger CLI
+closure — only for these specific adapted fixtures.
+
+**Per instruction, the crash-mechanism hunt now needs the debug-instrumented
+full-closure run — documented here as the only remaining path that hasn't
+been tried and that these ten negative experiments have not been able to
+substitute for.** Concretely: either (a) get a completed full-CLI build (the
+tier (b) infrastructure blockers above must be cleared first) and re-run the
+original `lex` repro directly, ideally under `gdb`/`SIMPLE_DEBUG_ERASED_RECEIVER_BIND`
+simultaneously to catch whichever mechanism is live at the actual crash
+moment, or (b) instrument `rt_array_pop`/`spl_array_pop` themselves (or the
+allocator) to log receiver-pointer provenance and reallocation events, then
+run that instrumented build specifically against the real closure. Both
+require tier (b) to be unblocked first; neither was attempted this pass.
