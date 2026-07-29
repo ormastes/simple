@@ -16,16 +16,27 @@ Provide executable SSpec traceability for current HTML elements, CSS properties,
 - AC-4: Simple2D-backed Vulkan readback evidence passes on the local host.
 - AC-5: RenderDoc CLI is installed and registered for Vulkan capture.
 - AC-6: Chrome-on-Vulkan RenderDoc capture either produces Vulkan IO-level evidence or records a concrete host/environment blocker with non-repeated attempts and next required external action.
-- AC-7: The top-level GUI/web/2D Vulkan RenderDoc runbook is macOS-only for now, records MoltenVK readiness separately from Chrome/Electron ANGLE Vulkan and RenderDoc readiness, and defers Windows/Linux capture gates until separate runbooks are added.
+- AC-7: Platform runbooks keep macOS/MoltenVK evidence separate from
+  Chrome/Electron ANGLE Vulkan/RenderDoc evidence. The provisioned Linux lane
+  remains active with its concrete capture blocker; Windows remains deferred
+  until a separate runbook is added.
 
 ## Scope Exclusions
 Do not detach or rebind host GPUs to `vfio-pci` without explicit privileged operator approval.
 
 ## Phase
-dev-done
+implementation-in-progress
 
 ## Log
-- dev: Created state file with 6 acceptance criteria (type: feature).
+- dev: Created state file with 7 acceptance criteria (type: feature).
+- audit: 2026-07-29 independent behavioral review invalidated the inventory-only
+  HTML/CSS PASS. HTML is currently 12 Full, 80 Partial, 11 unsupported,
+  2 inventory-only, with 8 standard elements omitted by the checker inventory.
+  The CSS 284 count is self-satisfying text inventory, at least 38 claimed
+  properties are absent from canonical declaration owners, and retained
+  generated-combination evidence is 13 pass / 25 fail. Created the missing
+  behavior-first system-test and agent plans. AC-1, AC-2, AC-3, and AC-6 remain
+  open; no qualified target-runtime PASS is claimed.
 - dev: Added macOS/MoltenVK portability probe to the plan. macOS evidence can supplement the investigation, but only original RenderDoc+Chrome Vulkan `.rdc` evidence closes the remaining Linux gate.
 - impl: Added `scripts/check/check-gui-renderdoc-feature-coverage-status.shs` as a non-launching restart audit for HTML/CSS traceability, WidgetKind HTML renderer dispatch, Electron layout manifest scope, production GUI/web parity evidence, and the active RenderDoc gates.
 - verify: 2026-06-19 `sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs` reports all 43 `WidgetKind` HTML dispatches covered and the 18-case Electron Simple Web layout manifest recorded. The gate remains incomplete because local Simple RenderDoc evidence is missing (`simple_renderdoc_reason=missing-simple-rdoc`) and original Chrome/Vulkan external RenderDoc capture is unavailable without a host-side `.rdc`.

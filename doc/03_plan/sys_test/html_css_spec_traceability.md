@@ -1,0 +1,370 @@
+# HTML/CSS SSpec Traceability Test Plan
+
+Status: RED / implementation and executable evidence required
+
+## Requirements
+
+- REQ-WEB-BROWSER-002: canonical HTML tokenizer/tree/semantics and safe fallback
+- REQ-WEB-BROWSER-003: selected CSS cascade/layout/rendering profile
+- REQ-WEB-BROWSER-004: Web semantic/layout to DrawIrComposition to Engine2D
+- REQ-WEB-BROWSER-019: pinned conformance/corpus accounting
+- REQ-WEB-BROWSER-021: executable SSpec and current mirrored manuals
+- NFR-WEB-BROWSER-012: every claimed pinned test passes; unsupported rows remain visible
+- NFR-WEB-BROWSER-017: stop after three verification/fix cycles
+
+Requirements source:
+
+`doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
+
+NFR source:
+
+`doc/02_requirements/nfr/simple_web_browser_engine_production_hardening.md`
+
+## Current authoritative audit
+
+The generated 2026-07-29 report is inventory evidence, not executable
+conformance evidence.
+
+### HTML
+
+| Classification | Count | Meaning |
+|---|---:|---|
+| Full | 12 | Direct semantic/tree plus applicable layout/DrawIR/Engine2D or hidden/fail-closed evidence |
+| Partial | 80 | Tag appears in text/grouped render coverage but lacks isolated end-to-end proof |
+| Unsupported/fail-closed | 11 | Embedded/media/native semantics are not implemented |
+| Inventory-only | 2 | Name/fixture occurrence without isolated behavior |
+| Missing from checker inventory | 8 | `h1`–`h6`, `sub`, `sup` |
+
+Full rows currently identified:
+
+`html, head, meta, title, body, main, p, div, section, table, textarea, template`
+
+Unsupported/fail-closed rows:
+
+`area, audio, canvas, embed, iframe, map, object, picture, source, track, video`
+
+Inventory-only rows:
+
+`selectedcontent, slot`
+
+The checker’s published `105/105` denominator is therefore incomplete and
+cannot remain a PASS claim.
+
+### CSS
+
+- Published implemented count: 284.
+- Functional count: not proven.
+- Existing generated-combination scenarios: 38 source scenarios; retained
+  evidence records 13 passing and 25 failing.
+- At least 38 claimed properties are not recognized by canonical renderer
+  declaration owners.
+- Only 42 behavioral cases exist for the 284 claimed names.
+- Several claimed properties are metadata-only and have no layout/raster
+  consumer.
+- Invalid declarations and CSS-wide keywords do not have one correct
+  cross-stage cascade owner.
+- Actual modern CSS system specs under
+  `test/03_system/feature/web_platform/css/` are excluded from the current
+  checker roots.
+
+Unsupported inventory partition:
+
+| Class | Count | Policy |
+|---|---:|---|
+| Production visual/layout/interaction | 92 | RED implementation backlog |
+| Speech/aural-only | 23 | Explicitly unsupported outside a TTS/accessibility owner |
+| Deprecated compatibility | 1 | `glyph-orientation-vertical`; possible audited alias only |
+| False scrape/nonproperty | 1 | Remove `property-name` from property inventory |
+
+No unsupported name counts as implemented merely because it occurs in prose,
+an inventory literal, an `@supports` table, or metadata.
+
+## Current traceability matrix
+
+| REQ/NFR | Row/group | Support | Executable spec/scenario | Production owners | Required oracle | Manual/result | Status |
+|---|---|---|---|---|---|---|---|
+| REQ-002/004/019/021 | HTML Full 12: `html,head,meta,title,body,main,p,div,section,table,textarea,template` | Full by static audit | `test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl`; browser production-hardening spec | tokenizer/tree, BrowserSession semantic tree, HTML layout renderer, DrawIR, Engine2D | exact tag/parent/style/geometry/commands/pixels or hidden absence | canonical manuals exist; qualified execution unavailable | Evidence-blocked |
+| REQ-002/004/019/021 | HTML Partial 80 | Partial | grouped text/tag and bitmap matrices; exact scenario mapping missing | same canonical owners | per-group identity, UA defaults, geometry, DrawIR, pixels | new grouped specs/manuals required | RED |
+| REQ-002/019/021 | HTML unsupported 11: `area,audio,canvas,embed,iframe,map,object,picture,source,track,video` | Unsupported/fail-closed | exact grouped scenario missing | tokenizer/tree/resource fallback | semantic fallback plus no unauthorized native/resource/DrawIR path | spec/manual missing | RED |
+| REQ-002/019/021 | HTML inventory-only 2: `selectedcontent,slot` | Inventory-only | no isolated scenario | tokenizer/tree/template/slot owners | deterministic semantic/fallback behavior | spec/manual missing | FAIL |
+| REQ-002/019/021 | HTML omitted 8: `h1`–`h6`,`sub`,`sup` | Missing from checker | new grouped spec pending | tokenizer/tree/style/layout/DrawIR/Engine2D | UA defaults and exact geometry/pixels | spec/manual missing | FAIL |
+| REQ-003/004/019/021 | CSS claimed 284 | Functional count unknown | generated-combinations spec has 38 scenarios | declaration/cascade/style/layout/paint/DrawIR/Engine2D | isolated semantic, layout, DrawIR, pixel baseline/control | retained 13 pass/25 fail; manuals stale | FAIL |
+| REQ-003/004/019/021 | CSS claimed but unrecognized, at least 38 | False implemented claim | exact isolated scenarios missing | canonical declaration dispatch and downstream owners | valid/invalid/inherited style plus discriminating render | missing | FAIL |
+| REQ-003/004/019/021 | CSS unsupported production 92 | Unsupported backlog | inventory spec is name-only | owners named by lane below | executable fail-closed or full four-oracle chain | manual stale; no behavior PASS | RED |
+| REQ-003/019/021 | CSS speech/aural 23 | Explicit scope exclusion | fail-closed/nonvisual scenario missing | future TTS/accessibility owner | no false visual support claim | missing | RED |
+| REQ-003/019/021 | Deprecated `glyph-orientation-vertical` | Unsupported/alias candidate | missing | declaration alias owner if selected | audited equality with `text-orientation` | missing | RED |
+| REQ-003/019/021 | False `property-name` scrape | Nonproperty | checker regression scenario missing | traceability checker | excluded from CSS denominator | missing | FAIL |
+| AC-3 / REQ-004/019/021 | Generated-GUI HTML/CSS combinations | Partial/failing | `simple_web_generated_html_css_combinations_spec.spl`: `renders generated GUI semantic panels with flex, padding, border, and text styles` plus 37 related scenarios | GUI HTML producer, canonical Web semantic/style/layout, DrawIR, Engine2D | producer HTML identity, semantic parent/style, exact geometry/commands/pixels, block control | canonical manual stale; retained aggregate 13 pass/25 fail | FAIL |
+| NFR-012/017 | Aggregate execution/manual evidence | Evidence-blocked | manifest traceability spec is stale | checker/runner/docgen | qualified SHA, executed/pass/fail, source/manual hashes, zero stubs | absent | FAIL |
+
+Every named group expands to one matrix record per element/property before
+behavioral PASS. Group rows are explicit backlog accounting, not completion.
+
+## Traceability matrix schema
+
+Every claimed HTML element or CSS property row must contain:
+
+| Field | Required evidence |
+|---|---|
+| REQ | One or more REQ-WEB-BROWSER IDs |
+| Name | Exact element/property |
+| Support status | Full, Partial, Unsupported/fail-closed, Missing |
+| Executable spec | Canonical `test/..._spec.spl` path |
+| Scenario | Exact `it "should ..."` description |
+| `@req` | Present in executable source |
+| Production path | Canonical parser/style/layout/DrawIR/Engine2D owners |
+| Semantic oracle | DOM/tag/attribute/computed-style identity |
+| Layout/DrawIR oracle | Stable ID, parentage, geometry, clip, order, style |
+| Engine2D oracle | Exact discriminating pixels/count/checksum when visible |
+| Negative/control | Baseline, invalid, fallback, or unsupported behavior |
+| Runner evidence | Qualified binary path and SHA-256 |
+| Result | Executed/pass/fail counts |
+| Manual | Canonical mirrored `doc/06_spec/...md`, source hash, zero stubs |
+| Upstream pin | WHATWG/W3C URL, retrieval date, retained content hash |
+| Corpus pin | WPT/corpus row ID, revision/hash, retained evidence path |
+| Status/blocker | Explicit; no inferred PASS |
+
+Name presence alone satisfies none of the behavior columns.
+
+## Frozen displayed steps
+
+- `Verify executable HTML and CSS traceability`
+- `Trace HTML elements through Web semantics and Draw IR`
+- `Trace implemented CSS properties through canonical rendering`
+- `Classify unsupported CSS properties without false implementation claims`
+
+## Implementation-ready first tranche
+
+### HTML omitted and inventory-only elements
+
+Spec:
+
+`test/03_system/feature/web_platform/html/html_element_traceability_spec.spl`
+
+Scenarios:
+
+- `should retain h1 through h6 as block headings in source order`
+- `should keep sub and sup in inline flow with distinct baselines`
+- `should fail closed for selectedcontent and render slot fallback inline`
+
+Helpers:
+
+- `_expect_semantic_identity`
+- `_expect_exact_draw_ir_geometry`
+- `_render_pixels`
+- `_node_index`, `_command`, `_style`, `_count_color`
+
+Production owners:
+
+- `src/lib/gc_async_mut/gpu/browser_engine/html_tokenizer.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/html_tree_builder.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_style.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl`;
+- `src/os/compositor/compositor_engine2d.spl`.
+
+Frozen oracles:
+
+- 16px medium, half-up heading defaults `(font, margin)`:
+  h1 `(32,21)`, h2 `(24,20)`, h3 `(19,19)`, h4 `(16,21)`,
+  h5 `(13,22)`, h6 `(11,26)`;
+- each isolated heading geometry is `[0, margin, 96, font]`, with exact
+  independently computed background area and matching DrawIR geometry;
+- inline control `[0,8,8,16]`, sub `[8,12,7,13]`,
+  sup `[15,4,7,13]`, line-height normal and ±4 baseline offsets;
+- selectedcontent is tested only in valid select/button structure as an
+  explicitly unsupported fail-closed row with zero unique red glyph pixels;
+- slot control geometry `[0,32,104,16]`, inline fallback text, computed
+  foreground `4286331629`, and matching unique purple glyph pixels.
+
+REQ-019 binds the retained HTML profile fixture row and SHA-256
+`bd8cba62a4ed894e8a5ef3636c7f657ae974ecda1eb4da401d535b5279131e84`,
+including an altered-row negative.
+
+Current expected result: headings, sub/sup, slot, and selectedcontent are RED
+until the named UA-default owners are corrected and qualified execution passes.
+
+### CSS grid foundation
+
+Spec:
+
+`test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl`
+
+Scenarios:
+
+- `should lower explicit tracks placement span and an implicit row`
+- `should keep the equivalent block control in vertical flow`
+
+Helpers:
+
+- `_grid_command_index`
+- `_grid_style`
+- `_grid_color_count`
+- `_grid_items`
+- `_grid_common_css`
+
+Production owners:
+
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_style.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl`;
+- `src/os/compositor/compositor_engine2d.spl`.
+
+Frozen grid fixture:
+
+- viewport 32×24; grid width 18;
+- columns 6 and 10 with 2 gap; rows 5 and 7 with 2 gap;
+- command geometry: grid `[0,0,18,20]`, A `[0,0,6,5]`,
+  B `[8,0,10,5]`, C span `[0,7,18,7]`, D implicit `[8,16,10,4]`;
+- exact Engine2D areas: red 30, green 50, blue 126, magenta 40.
+
+Frozen block control:
+
+- control `[0,0,18,21]`;
+- children `[0,0,18,5]`, `[0,5,18,5]`, `[0,10,18,7]`,
+  `[0,17,18,4]`;
+- exact areas 90, 90, 126, and 72.
+
+Current expected result: RED because canonical declaration/layout owners do not
+implement the claimed grid behavior.
+
+### Generated-GUI combination gate
+
+Existing source:
+
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_generated_html_css_combinations_spec.spl`
+
+The first scenario freezes semantic panel HTML with flex, padding, border, and
+text styles. The lane must add producer identity and canonical
+semantic/layout/DrawIR/Engine2D assertions rather than treating its current
+pixel helper or property-name occurrence as traceability. All 38 scenarios map
+to canonical manual scenarios and qualified execution receipts before AC-3 can
+pass.
+
+## Executable SSpec lanes
+
+### Traceability truth gate
+
+Update the checker and its system SSpec so PASS requires:
+
+- the plan exists;
+- every matrix row maps to an executable scenario and canonical manual;
+- current source/manual hashes align;
+- changed specs report zero stubs;
+- executed/pass/fail counts and qualified binary SHA are present;
+- applicable semantic/layout/DrawIR/Engine2D oracles are declared;
+- unsupported rows have executable fail-closed/ignored behavior.
+
+The checker must not read its own inventory spec or this plan as proof that a
+name has executable behavior.
+
+### HTML grouped behavior
+
+Add canonical specs under:
+
+`test/03_system/feature/web_platform/html/`
+
+Disjoint groups:
+
+1. document metadata/inert/resource fallback;
+2. sectioning/grouping/text/ruby/edit/list/table;
+3. forms and interactive elements;
+4. embedded/media fail-closed behavior;
+5. UA default display and geometry.
+
+Each visible group proves semantic identity, stable parentage, layout geometry,
+DrawIR commands/style/clip, and exact Engine2D pixels. Hidden/inert groups prove
+absence from layout/DrawIR/pixels. Fixtures must not force `display` or geometry
+that masks UA-default bugs.
+
+### Implemented CSS behavior
+
+Reclassify every one of the 284 names from source and executable behavior,
+never from the inventory literal.
+
+Highest RED groups:
+
+1. unrecognized claimed properties, including grid/table/list/multicol/blend;
+2. invalid declaration and CSS-wide cascade winner semantics;
+3. metadata-only properties without layout/raster consumers;
+4. transition/animation/transform/flex/alignment/logical longhands with no
+   authored declaration coverage;
+5. isolated baseline-vs-property DrawIR/Engine2D evidence replacing coincidental
+   grouped pixels.
+
+The active `scrollbar-width`/CSS-wide cascade patch is quarantined and must not
+be mixed into new parallel edits.
+
+### Unsupported CSS behavior
+
+Production order:
+
+1. grid foundation;
+2. scroll margin/padding/snap and anchoring;
+3. fragmentation/multicol and page-break aliases;
+4. border-image;
+5. counters;
+6. shapes;
+7. motion path;
+8. typography/layout: `hanging-punctuation`, `hyphenate-character`,
+   `text-box`, `text-box-edge`, `text-box-trim`.
+
+Masking/compositing/filtering, perspective, arbitrary image orientation, and
+view transitions remain unsupported until the canonical shared DrawIR and
+Engine2D capability exists. Computed-style-only tests cannot promote them.
+
+Speech/aural properties remain explicit nonvisual/TTS exclusions.
+
+Exact primary owners are the canonical renderer declaration/style, layout, and
+paint-layout modules, `simple_web_render_session.spl` for retained scroll or
+animation state, the hosted renderer worker for queued browser input, and the
+existing Engine2D compositor used by Web-platform SSpecs. Each RED spec freezes
+numeric fixture geometry and pixel/color controls before source implementation.
+
+## RenderDoc acceptance scope
+
+This plan owns state AC-1, AC-2, and AC-3: HTML/CSS traceability and generated
+combination behavior.
+
+AC-4 through AC-7 remain governed by:
+
+- `doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
+- `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`
+- `scripts/check/check-gui-renderdoc-feature-coverage-status.shs`
+- `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl`
+
+The aggregate feature cannot complete until both this plan and those
+Vulkan/RenderDoc gates pass.
+
+## Manual policy
+
+- Executable `.spl` remains under `test/`; none under `doc/06_spec`.
+- Regenerate only canonical mirrors after changed specs settle.
+- Delete stale duplicate mirrors under `doc/06_spec/test/...` only after the
+  canonical manual is generated and independently reviewed.
+- Primary behavior steps remain visible; setup/checkers may be folded only when
+  complete executable source remains available.
+- Manuals retain scope and claim-boundary prose, requirement/plan/design links,
+  source hash, runner evidence, and zero-stub status.
+
+## Execution constraints
+
+Do not use unqualified `bin/simple`, the Rust seed, or full bootstrap. Current
+stage-2 is admitted for native-build only. Until a qualified target binary can
+execute the specs, status remains evidence-blocked and no executable PASS is
+claimed.
+
+## Pass criteria
+
+- no inventory-only PASS rows;
+- every claimed row has an executable scenario and current manual;
+- all applicable canonical-oracle columns are proven;
+- all selected scenarios execute and pass on a qualified binary;
+- unsupported rows remain explicit;
+- source/manual/report counts and hashes agree;
+- `find doc/06_spec -name '*_spec.spl'` returns zero;
+- independent highest-capability review returns PASS.

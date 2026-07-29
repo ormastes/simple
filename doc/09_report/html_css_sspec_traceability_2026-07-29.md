@@ -1,12 +1,39 @@
 # HTML/CSS SSpec Traceability
 
-- status: pass
-- reason: pass
-- WHATWG HTML elements: 105/105
-- W3C CSS property-like entries: 394 >= 390
-- implemented Simple Web CSS properties: 284
+- status: fail
+- reason: inventory-only-false-pass
+- behavioral audit: 2026-07-29
+- canonical plan: doc/03_plan/sys_test/html_css_spec_traceability.md
+- requirements: REQ-WEB-BROWSER-002, REQ-WEB-BROWSER-003, REQ-WEB-BROWSER-004, REQ-WEB-BROWSER-019, REQ-WEB-BROWSER-021
+- execution status: evidence-blocked; no qualified target-runtime result
+- raw checker HTML claim: 105/105; audited denominator is at least 113 and 8 are omitted
+- raw checker W3C CSS property-like entries: 394 >= 390
+- raw checker implemented CSS name claim: 284; functional count is unknown
 - implemented CSS subset spec: test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_generated_html_css_combinations_spec.spl
 - unsupported CSS inventory spec: test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_inventory_traceability_spec.spl
+
+## Independent Behavioral Audit
+
+The raw checker output below proves only that names occur in broad text roots.
+It does not execute SSpec, validate requirement tags or current manuals, or bind
+names to canonical semantic/layout/DrawIR/Engine2D assertions.
+
+- HTML Full: 12
+- HTML Partial: 80
+- HTML unsupported/fail-closed: 11
+- HTML inventory-only: 2
+- HTML elements omitted by checker inventory: 8 (`h1`–`h6`, `sub`, `sup`)
+- CSS functionally proven count: unknown
+- Claimed CSS properties absent from canonical declaration owners: at least 38
+- Existing generated-combination source scenarios: 38
+- Retained executed evidence: 13 pass / 25 fail
+- Unsupported CSS: 92 production-relevant, 23 speech/aural-only,
+  1 deprecated compatibility, 1 false nonproperty scrape
+- Canonical manuals: stale and count-inconsistent
+- Legacy duplicate manuals: stale
+
+The raw `html_css_sspec_traceability_status=pass` value is retained below as
+inventory evidence only and must not be promoted to behavioral PASS.
 
 ## Raw Evidence
 - html_css_sspec_traceability_status=pass
