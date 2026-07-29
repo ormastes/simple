@@ -30,6 +30,22 @@ describe "Vulkan Engine2D readback execution mode":
         expect(source).to_contain("rect_present_readback.source != \"host_cache_after_device_present\"")
         expect(source.index_of("val clear_readback = engine.read_pixels_with_source()")).to_be_less_than(source.index_of("engine.present()"))
 
+    it "uses the transfer completion wait without a second device-idle readback wait":
+        val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        val helpers = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl")
+        val buffer = file_read("src/compiler_rust/runtime/src/vulkan/buffer.rs")
+        val device = file_read("src/compiler_rust/runtime/src/vulkan/device.rs")
+
+        expect(buffer.count("self.device.submit_transfer_command(cmd)?")).to_equal(2)
+        val transfer_submit = device.index_of("/// Submit and wait for a transfer command buffer")
+        val transfer_wait = device.index_of(".queue_wait_idle(*queue)")
+        val compute_begin = device.index_of("/// Begin a compute command buffer")
+        expect(transfer_submit).to_be_less_than(transfer_wait)
+        expect(transfer_wait).to_be_less_than(compute_begin)
+        expect(backend).to_contain("vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)")
+        expect(backend.contains("vulkan_sffi_wait_idle")).to_equal(false)
+        expect(helpers.contains("val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)\n            vulkan_sffi_wait_idle()")).to_equal(false)
+
     # @req REQ-004 REQ-006
     it "keeps the Windows producer on the same exact device-readback contract":
         val wrapper = file_read("scripts/check/check-vulkan-engine2d-readback.ps1")

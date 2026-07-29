@@ -344,6 +344,7 @@ class MetalBackend:
     # Persistent identity of the retained MTLDevice for this backend lifetime.
     # Device readbacks and material receipts must both use this owner field.
     device_identity: i64
+    last_image_blend_target: text
 
     static fn create() -> MetalBackend:
         val backend = make_metal_backend()
@@ -368,6 +369,7 @@ fn make_metal_backend() -> MetalBackend:
         clip_enabled: false,
         gpu_only: false,
         device_identity: 0,
+        last_image_blend_target: "",
         dirty: false,
         initialized: false,
         gpu_frame_complete: false,
@@ -696,13 +698,45 @@ impl RenderBackend for MetalBackend:
         else:
             self.gpu_frame_complete = false
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.last_image_blend_target = ""
         if self.gpu_only:
+            val exact_pixels = w.to_i64() * h.to_i64()
+            val native_ready = (
+                self.initialized and self.gpu_frame_complete and
+                not self._gpu_only_mask_emulation_active() and
+                self.d_framebuffer != 0 and
+                self.session.pipe_image_composite != 0 and
+                x >= 0 and y >= 0 and w > 0 and h > 0 and
+                x.to_i64() + w.to_i64() <= self.w.to_i64() and
+                y.to_i64() + h.to_i64() <= self.h.to_i64() and
+                pixels.len().to_i64() == exact_pixels)
+            if native_ready:
+                val was_complete = self.gpu_frame_complete
+                val native_completed = self.draw_image_blend_checked(
+                    x, y, w, h, pixels, 1000)
+                if native_completed:
+                    self.last_image_blend_target = "metal"
+                    return
+                # A submitted command that did not complete is not a CPU
+                # fallback case. Preserve the completion-unknown state and its
+                # error instead of mutating the mirror or claiming proof.
+                if not self.initialized:
+                    self.last_image_blend_target = "completion_unknown"
+                    return
+                # No command was submitted, so the device framebuffer is still
+                # complete and may be used as the explicit fallback snapshot.
+                self.gpu_frame_complete = was_complete
+            # Native dispatch was unavailable before submission (including
+            # clipped/invalid native geometry), so retain the existing explicit
+            # CPU snapshot/raster/upload fallback.
             if not self._begin_gpu_only_cpu_composite():
                 self.gpu_frame_complete = false
                 return
             self.mirror.draw_image_blend(x, y, w, h, pixels)
             self.gpu_frame_complete = self._commit_gpu_only_cpu_composite()
+            self.last_image_blend_target = if self.gpu_frame_complete: "cpu" else: "fallback_failed"
             return
+        self.last_image_blend_target = "cpu_mirror"
         emu_draw_image_blend(self, x, y, w, h, pixels)
     me set_clip(x: i32, y: i32, w: i32, h: i32):
         # Keep the software fallback lane in lockstep even in GPU-only mode.
@@ -767,10 +801,9 @@ impl RenderBackend for MetalBackend:
                     self.device_identity)
                 return readback
         if self.gpu_only:
-            var empty: [u32] = []
-            val source = readback_source_label(ReadbackSource.DeviceReadback)
-            return engine2d_readback_with_identity(
-                empty, source, self.d_framebuffer, self.device_identity)
+            if not self.initialized:
+                return engine2d_readback([], "completion_unknown")
+            return engine2d_readback([], "readback_failed")
         val mirror_pixels = self.mirror.read_pixels()
         val source = readback_source_label(ReadbackSource.CpuMirror)
         val readback = engine2d_readback(mirror_pixels, source)
