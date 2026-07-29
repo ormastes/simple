@@ -17973,7 +17973,7 @@ RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
 
 /* Forward decls: these live in sibling TUs / later in this file. Without
  * them the implicit declaration returns `int` and TRUNCATES the value. */
-extern RuntimeValue rt_value_float(RuntimeValue f_raw);  /* rt_extras.c */
+extern RuntimeValue rt_value_float(double value);  /* rt_extras.c */
 /* rt_time_now() used to be declared extern here as living in rt_extras.c,
  * but that file is never linked for x86_64 (llvm_native_link.spl:1980-2029),
  * so it bound to auto_stubs.c's weak nil stub. Replaced by the local
@@ -18079,7 +18079,7 @@ RuntimeValue rt_text_validate_utf8(RuntimeValue value)
 /* rt_string_to_float: parse a text as f64, nil when the whole string is not
  * a single number.
  * Hosted reference: src/runtime/runtime_native.c:2624 (strtod + "must have
- * consumed everything but trailing whitespace" + rt_value_float(bits)).
+ * consumed everything but trailing whitespace" + rt_value_float(value)).
  * There was NO freestanding definition, so it bound to the weak
  * nil-returning stub -- every CSS/layout float parse yielded nil, which the
  * Simple-side `?: 0.0` fallbacks turned into 0, so all parsed lengths,
@@ -18190,9 +18190,7 @@ RuntimeValue rt_string_to_float(RuntimeValue value)
     }
     if (neg) result = -result;
 
-    int64_t bits = 0;
-    __builtin_memcpy(&bits, &result, sizeof(bits));
-    return rt_value_float((RuntimeValue)bits);
+    return rt_value_float(result);
 }
 
 /* rt_u32s_from_raw: build a [u32] from `count` little-endian u32 words at a

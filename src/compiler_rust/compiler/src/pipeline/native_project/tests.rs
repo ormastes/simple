@@ -5775,7 +5775,11 @@ int main(void) {
     if (rt_value_bool(1) != 11) return 11;
     if (rt_value_bool(0) != 19) return 12;
     if (rt_value_nil() != 3) return 13;
-    if (rt_value_float(0x123456789LL) != ((0x123456789LL & ~7LL) | 2LL)) return 14;
+    uint64_t precise_bits = UINT64_C(0x3fb999999999999d);
+    double precise_value = 0.0;
+    memcpy(&precise_value, &precise_bits, sizeof(precise_value));
+    uint64_t precise_tagged = (uint64_t)rt_value_float(precise_value);
+    if (precise_tagged != ((precise_bits & ~UINT64_C(7)) | UINT64_C(2))) return 14;
 
     uint8_t* p = (uint8_t*)rt_alloc(4);
     if (!p) return 20;

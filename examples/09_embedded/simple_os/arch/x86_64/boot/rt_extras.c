@@ -127,9 +127,10 @@ RuntimeValue rt_value_int(RuntimeValue i) {
     return ENCODE_INT(i);
 }
 
-RuntimeValue rt_value_float(RuntimeValue f_raw) {
-    /* f_raw is a raw double bit-cast to i64 */
-    return (RuntimeValue)(((uint64_t)f_raw & ~TAG_MASK) | TAG_FLOAT);
+RuntimeValue rt_value_float(double value) {
+    RuntimeValue raw_bits = 0;
+    __builtin_memcpy(&raw_bits, &value, sizeof(raw_bits));
+    return (RuntimeValue)(((uint64_t)raw_bits & ~TAG_MASK) | TAG_FLOAT);
 }
 
 RuntimeValue rt_value_bool(RuntimeValue b) {
@@ -145,14 +146,9 @@ RuntimeValue rt_value_as_int(RuntimeValue v) {
     return 0;
 }
 
-RuntimeValue rt_value_as_float(RuntimeValue v) {
-    if (IS_FLOAT(v)) {
-        double f = DECODE_FLOAT(v);
-        RuntimeValue r;
-        __builtin_memcpy(&r, &f, 8);
-        return r;
-    }
-    return 0;
+double rt_value_as_float(RuntimeValue v) {
+    if (IS_FLOAT(v)) return DECODE_FLOAT(v);
+    return 0.0;
 }
 
 RuntimeValue rt_value_as_bool(RuntimeValue v) {

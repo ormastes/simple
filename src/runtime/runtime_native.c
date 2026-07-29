@@ -1583,13 +1583,15 @@ int64_t rt_value_as_int(int64_t value) {
     return value >> 3;
 }
 
-/* Box an f64 (passed as its raw i64 bit pattern) into the tagged RuntimeValue
+/* Box an f64 into the tagged RuntimeValue
  * representation. Floats are HEAP-BOXED (lossless): the old inline TAG_FLOAT
  * form kept only (bits & ~7), zeroing the low 3 mantissa bits, so a container/Any
  * float lost precision. We allocate an RtCoreFloat leaf holding the full double
  * and return a TAG_HEAP pointer. Scalar/arithmetic f64 held in native registers
  * never reaches here -- only values that enter the tagged representation box. */
-int64_t rt_value_float(int64_t raw_bits) {
+int64_t rt_value_float(double value) {
+    int64_t raw_bits = 0;
+    memcpy(&raw_bits, &value, sizeof(raw_bits));
     RtCoreFloat* f = (RtCoreFloat*)malloc(sizeof(RtCoreFloat));
     if (!f) {
         /* OOM: fall back to the legacy lossy inline form rather than crash. */
@@ -2640,9 +2642,7 @@ int64_t rt_string_to_float(int64_t value) {
     }
     if (end != finish) return rt_core_nil();
 
-    int64_t bits = 0;
-    memcpy(&bits, &parsed, sizeof(bits));
-    return rt_value_float(bits);
+    return rt_value_float(parsed);
 }
 
 int64_t rt_string_split(int64_t value, int64_t delimiter) {

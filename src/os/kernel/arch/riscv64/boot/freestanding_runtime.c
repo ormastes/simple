@@ -127,6 +127,15 @@ void *rt_memset(void *dst, signed char val, spl_i64 n) {
     return dst;
 }
 
+double spl_bits_to_f64(spl_i64 bits) {
+    union {
+        spl_u64 bits;
+        double value;
+    } converted;
+    converted.bits = (spl_u64)bits;
+    return converted.value;
+}
+
 static spl_i64 rt_special(spl_u64 payload) {
     return (spl_i64)((payload << 3) | RT_VALUE_TAG_SPECIAL);
 }

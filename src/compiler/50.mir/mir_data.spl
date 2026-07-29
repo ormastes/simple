@@ -687,23 +687,49 @@ fn bootstrap_fn_ret_hir_type_lookup(name: text) -> HirType?:
     nil
 
 # Canonical callable return shape accumulated across flat closure modules.
-# Values are module-qualified aggregate layout keys or "__runtime_array__".
+# Values are module-qualified aggregate layout keys, "__runtime_array__", or
+# "__optional_payload__:<canonical aggregate layout key>".
 var _bootstrap_fn_ret_shapes: Dict<text, text> = {}
 var _bootstrap_fn_ret_shape_ambig: Dict<text, bool> = {}
+# Includes functions with no aggregate shape. Otherwise an empty first
+# declaration and aggregate second declaration of the same bare name would
+# incorrectly expose the second declaration's shape.
+var _bootstrap_fn_ret_shape_seen: Dict<text, bool> = {}
+
+fn bootstrap_fn_ret_shape_reset():
+    _bootstrap_fn_ret_shapes = {}
+    _bootstrap_fn_ret_shape_ambig = {}
+    _bootstrap_fn_ret_shape_seen = {}
 
 fn bootstrap_fn_ret_shape_register(name: text, shape: text):
-    if shape == "" or _bootstrap_fn_ret_shape_ambig.contains_key(name):
+    if _bootstrap_fn_ret_shape_ambig.contains_key(name):
         return
-    if _bootstrap_fn_ret_shapes.contains_key(name):
-        if _bootstrap_fn_ret_shapes[name] != shape:
-            _bootstrap_fn_ret_shape_ambig[name] = true
-            _bootstrap_fn_ret_shapes = _bootstrap_fn_ret_shapes.remove(name)
+    if _bootstrap_fn_ret_shape_seen.contains_key(name):
+        _bootstrap_fn_ret_shape_ambig[name] = true
+        _bootstrap_fn_ret_shapes = _bootstrap_fn_ret_shapes.remove(name)
         return
-    _bootstrap_fn_ret_shapes[name] = shape
+    _bootstrap_fn_ret_shape_seen[name] = true
+    if shape != "":
+        _bootstrap_fn_ret_shapes[name] = shape
 
 fn bootstrap_fn_ret_shape_lookup(name: text) -> text?:
+    if _bootstrap_fn_ret_shape_ambig.contains_key(name):
+        return nil
     if _bootstrap_fn_ret_shapes.contains_key(name):
         return Some(_bootstrap_fn_ret_shapes[name])
+    nil
+
+fn bootstrap_optional_payload_shape(layout_key: text) -> text:
+    if layout_key == "":
+        return ""
+    "__optional_payload__:{layout_key}"
+
+fn bootstrap_optional_payload_layout(shape: text) -> text?:
+    val prefix = "__optional_payload__:"
+    if shape.starts_with(prefix):
+        val layout_key = shape.substring(prefix.len())
+        if layout_key != "":
+            return Some(layout_key)
     nil
 
 # Companion PARAM-type registry (same ambiguity set as returns): without it a
@@ -735,5 +761,6 @@ export mir_operand_copy, mir_operand_const_int
 export MirBuilder
 export bootstrap_fn_ret_types_reset, bootstrap_fn_ret_type_register, bootstrap_fn_ret_type_lookup
 export bootstrap_fn_ret_hir_type_register, bootstrap_fn_ret_hir_type_lookup
-export bootstrap_fn_ret_shape_register, bootstrap_fn_ret_shape_lookup
+export bootstrap_fn_ret_shape_reset, bootstrap_fn_ret_shape_register, bootstrap_fn_ret_shape_lookup
+export bootstrap_optional_payload_shape, bootstrap_optional_payload_layout
 export bootstrap_fn_param_hir_types_register, bootstrap_fn_param_hir_types_lookup

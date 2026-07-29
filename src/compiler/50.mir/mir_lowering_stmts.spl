@@ -587,6 +587,9 @@ impl MirLowering:
                                     self.mark_runtime_value_local(local.id)
                                 if self.option_value_locals.contains(init_local.id):
                                     self.option_value_locals[local.id] = true
+                                val option_payload_struct = self.option_payload_struct_syms.get(init_local.id)
+                                if option_payload_struct != nil:
+                                    self.option_payload_struct_syms[local.id] = option_payload_struct ?? ""
                                 if self.nil_locals.contains(init_local.id):
                                     self.nil_locals[local.id] = true
                                 val found_init_hir_type = self.find_local_hir_type(init_local.id)
@@ -742,6 +745,12 @@ impl MirLowering:
                                     self.runtime_dict_locals[local.id] = true
                                 if has_init and self.is_runtime_value_local(init_local.id):
                                     self.mark_runtime_value_local(local.id)
+                                if has_init and self.option_value_locals.contains(init_local.id):
+                                    self.option_value_locals[local.id] = true
+                                if has_init:
+                                    val option_payload_struct = self.option_payload_struct_syms.get(init_local.id)
+                                    if option_payload_struct != nil:
+                                        self.option_payload_struct_syms[local.id] = option_payload_struct ?? ""
                                 if has_init and self.nil_locals.contains(init_local.id):
                                     self.nil_locals[local.id] = true
                                 if has_init:
@@ -867,6 +876,7 @@ impl MirLowering:
                 self.builder = b
                 self.unmark_runtime_value_local(local.id)
                 self.option_value_locals = self.option_value_locals.remove(local.id)
+                self.option_payload_struct_syms = self.option_payload_struct_syms.remove(local.id)
                 self.nil_locals = self.nil_locals.remove(local.id)
                 self.runtime_array_locals = self.runtime_array_locals.remove(local.id)
                 self.runtime_dict_locals = self.runtime_dict_locals.remove(local.id)
@@ -892,6 +902,12 @@ impl MirLowering:
                     self.option_value_locals[local.id] = true
                 else:
                     self.option_value_locals = self.option_value_locals.remove(local.id)
+                val option_payload_struct = self.option_payload_struct_syms.get(assigned_value.id)
+                if option_payload_struct != nil:
+                    self.option_payload_struct_syms[local.id] = option_payload_struct ?? ""
+                    self.struct_value_syms = self.struct_value_syms.remove(local.id)
+                else:
+                    self.option_payload_struct_syms = self.option_payload_struct_syms.remove(local.id)
                 if self.runtime_array_locals.contains(assigned_value.id):
                     self.runtime_array_locals[local.id] = true
                 else:
@@ -1343,13 +1359,15 @@ impl MirLowering:
         self.coverage_emit_decision_probe(coverage_decision_id, cond_local, cond.span)
 
         # `if val v = option.?:` is parser-desugared to a raw binding followed
-        # by `v != nil`. Float payload bits must stay in that raw i64 binding
-        # until the sentinel comparison has run, then become a real f32/f64
-        # only while lowering the present branch.
+        # by `v != nil`. Payload bits must stay in that raw i64 binding until
+        # the sentinel comparison has run. Decode floats and attach aggregate
+        # field-layout provenance only while lowering the present branch.
         var if_val_symbol_id = -1
         var if_val_raw_local = LocalId(id: 0)
         var if_val_payload_type = MirType.i64()
-        var has_if_val_float_binding = false
+        var if_val_payload_hir_type: HirType? = nil
+        var if_val_aggregate_name = ""
+        var has_if_val_payload_binding = false
         match cond.kind:
             case HirExprKind.Binary(HirBinOp.NotEq, left, right):
                 var right_is_nil = false
@@ -1367,13 +1385,44 @@ impl MirLowering:
                                 if val found_candidate_type = candidate_type:
                                     match found_candidate_type.kind:
                                         case MirTypeKind.I64:
+                                            val registered_aggregate_name = self.option_payload_struct_syms.get(candidate.id)
+                                            if registered_aggregate_name != nil:
+                                                if_val_symbol_id = symbol.id
+                                                if_val_raw_local = candidate
+                                                if_val_aggregate_name = registered_aggregate_name ?? ""
+                                                has_if_val_payload_binding = if_val_aggregate_name != ""
                                             if val semantic_type = self.find_local_hir_type(candidate.id):
                                                 match semantic_type.kind:
                                                     case HirTypeKind.Float(_):
                                                         if_val_symbol_id = symbol.id
                                                         if_val_raw_local = candidate
                                                         if_val_payload_type = self.lower_type(semantic_type)
-                                                        has_if_val_float_binding = true
+                                                        if_val_payload_hir_type = Some(semantic_type)
+                                                        has_if_val_payload_binding = true
+                                                    case HirTypeKind.Optional(inner_type):
+                                                        val aggregate_name = self.option_payload_aggregate_name(left, candidate)
+                                                        var supported_payload = aggregate_name != ""
+                                                        match inner_type.kind:
+                                                            case HirTypeKind.Float(_):
+                                                                supported_payload = true
+                                                            case _:
+                                                                ()
+                                                        if supported_payload:
+                                                            if_val_symbol_id = symbol.id
+                                                            if_val_raw_local = candidate
+                                                            if_val_payload_type = self.lower_type(inner_type)
+                                                            if_val_payload_hir_type = Some(inner_type)
+                                                            if_val_aggregate_name = aggregate_name
+                                                            has_if_val_payload_binding = true
+                                                    case HirTypeKind.Named(_, _):
+                                                        val aggregate_name = self.option_payload_aggregate_name(left, candidate)
+                                                        if aggregate_name != "":
+                                                            if_val_symbol_id = symbol.id
+                                                            if_val_raw_local = candidate
+                                                            if_val_payload_type = self.lower_type(semantic_type)
+                                                            if_val_payload_hir_type = Some(semantic_type)
+                                                            if_val_aggregate_name = aggregate_name
+                                                            has_if_val_payload_binding = true
                                                     case _:
                                                         ()
                                         case _:
@@ -1401,11 +1450,16 @@ impl MirLowering:
         var b2 = self.builder
         b2.switch_to_block(then_block)
         self.builder = b2
-        if has_if_val_float_binding:
-            val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
+        if has_if_val_payload_binding:
+            val unwrapped_if_val = self.option_payload_or_self(if_val_raw_local)
+            val decoded_if_val = self.enum_payload_value(unwrapped_if_val, if_val_payload_type)
+            if if_val_aggregate_name != "":
+                self.struct_value_syms[decoded_if_val.id] = if_val_aggregate_name
+            if val payload_hir_type = if_val_payload_hir_type:
+                self.remember_local_hir_type(decoded_if_val.id, payload_hir_type)
             self.bind_local(if_val_symbol_id, decoded_if_val)
         val then_result = self.lower_block_expected(then_, expected_type)
-        if has_if_val_float_binding:
+        if has_if_val_payload_binding:
             self.bind_local(if_val_symbol_id, if_val_raw_local)
         var b3 = self.builder
         var result_defined = false

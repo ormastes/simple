@@ -1139,7 +1139,7 @@ impl MirLowering:
         nil
 
     me result_variant_payload_type(scrutinee: HirExpr, variant: text) -> HirType?:
-        """Recover the selected payload from an instantiated Result type."""
+        """Recover the selected payload from an instantiated Result or Option type."""
         val scrutinee_type = self.enum_match_expr_type(scrutinee)
         if scrutinee_type != nil:
             val found_type = scrutinee_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
@@ -1149,6 +1149,9 @@ impl MirLowering:
                         return Some(ok_type)
                     if variant == "Err":
                         return Some(err_type)
+                case HirTypeKind.Optional(inner_type):
+                    if variant == "Some":
+                        return Some(inner_type)
                 case _: ()
         nil
 
@@ -1157,6 +1160,10 @@ impl MirLowering:
         rt_enum_discriminant(e) compared to each variant's index; binds a single
         i64 payload via rt_enum_payload(e). Mirrors emit_if_chain_dispatch."""
         val scrut_local = self.lower_expr(scrutinee)
+        var scrut_option_payload_name = ""
+        val registered_option_payload = self.option_payload_struct_syms.get(scrut_local.id)
+        if registered_option_payload != nil:
+            scrut_option_payload_name = registered_option_payload ?? ""
         var bd = self.builder
         val disc_func = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_discriminant"),
@@ -1285,8 +1292,11 @@ impl MirLowering:
                         if val found_bind_symbol = bind_symbol:
                             payload_hir_type = found_bind_symbol.type_
                     var bound_payload = pl
+                    var payload_aggregate_name = scrut_option_payload_name
                     if payload_hir_type != nil:
                         val found_payload_type = payload_hir_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
+                        if payload_aggregate_name == "":
+                            payload_aggregate_name = self.aggregate_name_for_hir_type(found_payload_type)
                         bound_payload = self.enum_payload_value(pl, self.lower_type(found_payload_type))
                     self.local_map[bind_syms[0].id] = bound_payload
                     # 033d79338a1 switched identifier resolution to find_local
@@ -1339,6 +1349,12 @@ impl MirLowering:
                         if val text_local = text_res:
                             self.local_map[bind_syms[0].id] = text_local
                             self.bind_local(bind_syms[0].id, text_local)
+                    elif payload_aggregate_name != "":
+                        # Generic Option variants share the source name
+                        # `Option::Some`; use the instantiated Optional(inner)
+                        # type instead of the global variant-name cache so
+                        # Some(Box) cannot overwrite Some(Label)'s layout.
+                        self.struct_value_syms[bound_payload.id] = payload_aggregate_name
                     elif payload_struct != nil and payload_struct != "":
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
             elif bind_syms.len() >= 1:
@@ -1495,6 +1511,7 @@ impl MirLowering:
             match base_type.kind:
                 case HirTypeKind.Optional(inner):
                     val base_local = self.lower_expr(base)
+                    val payload_aggregate_name = self.option_payload_aggregate_name(base, base_local)
 
                     # Determine the physical lane FIRST via rt_enum_discriminant
                     # (-1 = not a registered boxed enum = flat raw payload; see
@@ -1627,6 +1644,9 @@ impl MirLowering:
                                 payload_local = self.decode_runtime_value(raw_payload_local, self.lower_type(inner))
                             else:
                                 payload_local = self.enum_payload_value(raw_payload_local, self.lower_type(inner))
+                    if payload_aggregate_name != "":
+                        self.struct_value_syms[payload_local.id] = payload_aggregate_name
+                        self.remember_local_hir_type(payload_local.id, inner)
                     return payload_local
                 case _: ()
         val res_local = self.lower_expr(base)

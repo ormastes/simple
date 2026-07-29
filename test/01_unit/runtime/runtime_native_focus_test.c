@@ -368,10 +368,18 @@ int main(void) {
                         (int64_t)(uintptr_t)wide_right));
     SplArray* float_left = rt_array_new(1);
     SplArray* float_right = rt_array_new(1);
-    assert(rt_array_push(float_left, rt_value_float(0)));
-    assert(rt_array_push(float_right, rt_value_float(INT64_MIN)));
+    assert(rt_array_push(float_left, rt_value_float(0.0)));
+    assert(rt_array_push(float_right, rt_value_float(-0.0)));
     assert(rt_native_eq((int64_t)(uintptr_t)float_left,
                         (int64_t)(uintptr_t)float_right));
+    uint64_t precise_bits = UINT64_C(0x3fb999999999999d);
+    double precise_value = 0.0;
+    memcpy(&precise_value, &precise_bits, sizeof(precise_value));
+    double precise_roundtrip = rt_value_as_float(rt_value_float(precise_value));
+    uint64_t precise_roundtrip_bits = 0;
+    memcpy(&precise_roundtrip_bits, &precise_roundtrip,
+           sizeof(precise_roundtrip_bits));
+    assert(precise_roundtrip_bits == precise_bits);
     int64_t enum_left = rt_enum_new(7, 3, rt_value_int(42));
     int64_t enum_right = rt_enum_new(9, 3, rt_value_int(42));
     int64_t enum_same = rt_enum_new(7, 3, rt_value_int(42));

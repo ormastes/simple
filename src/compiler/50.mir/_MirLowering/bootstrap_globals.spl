@@ -102,6 +102,39 @@ fn bootstrap_hir_accumulator_name(module: HirModule, func: HirFunction) -> text:
         return name
     "{bootstrap_mir_logical_module_name(module.name)}.{name}"
 
+fn bootstrap_return_shape_call_name(symbols: SymbolTable, func: HirFunction) -> text:
+    val function_symbol = symbols.get_symbol_raw(func.symbol.id)
+    if function_symbol != nil:
+        return function_symbol.name
+    func.name
+
+fn bootstrap_composite_layout_key(symbol: Symbol) -> text:
+    val defining_module = symbol.defining_module ?? ""
+    if defining_module != "":
+        return "{defining_module}::{symbol.name}"
+    symbol.name
+
+fn bootstrap_return_shape(symbols: SymbolTable, return_type: HirType) -> text:
+    match return_type.kind:
+        case HirTypeKind.Named(return_symbol_id, _):
+            val return_symbol = symbols.get_symbol_raw(return_symbol_id.id)
+            if return_symbol != nil:
+                return bootstrap_composite_layout_key(return_symbol)
+        case HirTypeKind.Optional(inner_type):
+            match inner_type.kind:
+                case HirTypeKind.Named(payload_symbol_id, _):
+                    val payload_symbol = symbols.get_symbol_raw(payload_symbol_id.id)
+                    if payload_symbol != nil:
+                        match payload_symbol.kind:
+                            case Struct | Class:
+                                return bootstrap_optional_payload_shape(bootstrap_composite_layout_key(payload_symbol))
+                            case _: ()
+                case _: ()
+        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+            return "__runtime_array__"
+        case _: ()
+    ""
+
 var _bootstrap_mir_functions: [MirFunction] = []
 var _bootstrap_mir_function_names: [text] = []
 var _bootstrap_mir_function_modules: [i64] = []
@@ -131,18 +164,22 @@ fn bootstrap_register_function_value_module(module: HirModule):
             _bootstrap_function_value_names.push("{module_name}.{function_name}")
 
 fn bootstrap_register_fn_ret_types_module(module: HirModule):
-    """Pre-register Str-returning functions' return types under every call-site
-    spelling (bare, symbol, module-qualified) BEFORE any module lowers.
+    """Pre-register callable return metadata BEFORE any module lowers.
 
     The per-module registration inside the lowering loops fires too late for
     the entry module's cross-module calls: the entry lowers FIRST
     (driver_bootstrap line ~128) while helper modules register during the
     extras loop afterwards — so `LB() + RB()` in an entry fn saw i64-typed
     dests and lowered to INTEGER ADDITION of two char* pointers (SIGSEGV in
-    strlen; W96/W97, native_call_return_type_loss 2026-07-23). Str-only, same
-    rationale as the in-loop registration."""
+    strlen; W96/W97, native_call_return_type_loss 2026-07-23). Aggregate
+    shapes use the provider symbol table and the same bare-name ambiguity
+    registry as the normal MIR prepass; Str retains its ABI-type aliases."""
     val module_name = bootstrap_mir_logical_module_name(module.name)
     for func in module.functions.values():
+        bootstrap_fn_ret_shape_register(
+            bootstrap_return_shape_call_name(module.symbols, func),
+            bootstrap_return_shape(module.symbols, func.return_type)
+        )
         match func.return_type.kind:
             case HirTypeKind.Str:
                 val str_ty = MirType(kind: MirTypeKind.Tuple([
@@ -303,6 +340,10 @@ fn bootstrap_register_flat_function_values():
         for func in functions:
             val function_name = bootstrap_flat_function_symbol_name(symbols, func)
             _bootstrap_function_value_names.push(function_name)
+            bootstrap_fn_ret_shape_register(
+                bootstrap_return_shape_call_name(symbols, func),
+                bootstrap_return_shape(symbols, func.return_type)
+            )
             if not func.is_method:
                 _bootstrap_function_value_names.push("{module_name}.{function_name}")
                 # Cross-module declared HIR return types (name-keyed; see

@@ -424,25 +424,26 @@ impl MirLowering:
                 val bits = b.emit_bitcast(mir_operand_copy(promoted), MirType.i64())
                 val box_fn = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_value_float"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.f64()], return_type: MirType.i64(), is_variadic: false)))
                 ))
-                val boxed_opt = b.emit_call(box_fn, [mir_operand_copy(bits)], MirType.i64())
+                val boxed_opt = b.emit_call(box_fn, [mir_operand_copy(promoted)], MirType.i64())
                 boxed_opt ?? bits
             case MirTypeKind.F64:
                 # Heap-box the f64 losslessly: rt_value_float allocates an
                 # RtCoreFloat holding the full double and returns a TAG_HEAP ptr.
                 # The old inline `(bits & ~7) | TAG_FLOAT` dropped the low 3
                 # mantissa bits, so a container/Any float lost precision
-                # ([0.1][0] != 0.1). Passing the raw i64 bits matches the C
-                # `rt_value_float(int64_t raw_bits)` ABI; the mirror unbox is
-                # decode_runtime_value's F64 arm (rt_value_as_float). A heap alloc
-                # cannot be const-folded, so this now materializes at runtime.
+                # ([0.1][0] != 0.1). Every runtime lane accepts the scalar
+                # through the same platform f64 ABI; heap-boxing providers
+                # preserve its bits before tagging. The mirror unbox is
+                # decode_runtime_value's F64 arm (rt_value_as_float). A heap
+                # allocation cannot be const-folded.
                 val bits = b.emit_bitcast(mir_operand_copy(local), MirType.i64())
                 val box_fn = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_value_float"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.f64()], return_type: MirType.i64(), is_variadic: false)))
                 ))
-                val boxed_opt = b.emit_call(box_fn, [mir_operand_copy(bits)], MirType.i64())
+                val boxed_opt = b.emit_call(box_fn, [mir_operand_copy(local)], MirType.i64())
                 boxed_opt ?? bits
             case _:
                 local
@@ -936,7 +937,11 @@ impl MirLowering:
             val return_shape = bootstrap_fn_ret_shape_lookup(call_symbol.name)
             if return_shape != nil:
                 val shape = return_shape ?? ""
-                if shape == "__runtime_array__":
+                val optional_payload_layout = bootstrap_optional_payload_layout(shape)
+                if optional_payload_layout != nil:
+                    self.option_payload_struct_syms[local.id] = optional_payload_layout ?? ""
+                    self.struct_value_syms = self.struct_value_syms.remove(local.id)
+                elif shape == "__runtime_array__":
                     self.runtime_array_locals[local.id] = true
                 elif shape != "":
                     self.struct_value_syms[local.id] = shape
@@ -2432,27 +2437,7 @@ impl MirLowering:
                 # same way ExistsCheck does; the right (default) operand's
                 # own fresh construction is checked as an additional
                 # fallback once right_local exists, below.
-                var result_struct_name = ""
-                if val nc_inner_type = self.option_inner_hir_type_for_local(left, left_local):
-                    match nc_inner_type.kind:
-                        case HirTypeKind.Named(nc_struct_symbol, _):
-                            val nc_type_symbol = self.symbols.get_symbol_raw(nc_struct_symbol.id)
-                            if nc_type_symbol != nil:
-                                match nc_type_symbol.kind:
-                                    case Struct:
-                                        result_struct_name = nc_type_symbol.name
-                                    case _: ()
-                        case _: ()
-                if result_struct_name == "":
-                    # Same "raw migration form" fallback as ExistsCheck: a
-                    # struct pointer bound straight to `T?` without ever
-                    # calling ensure_option_handle leaves left_local with no
-                    # local_hir_types/option_value_locals entry, but struct
-                    # construction itself always registers struct_value_syms
-                    # on the raw pointer.
-                    val nc_fallback_sym = self.struct_value_syms.get(left_local.id)
-                    if nc_fallback_sym != nil:
-                        result_struct_name = nc_fallback_sym ?? ""
+                var result_struct_name = self.option_payload_aggregate_name(left, left_local)
                 var b_nc = self.builder
                 val is_some_func = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_is_some"),
@@ -2563,36 +2548,7 @@ impl MirLowering:
                 # can be attached to result_local once, mirroring how
                 # lower_result_unwrap/emit_resolved_direct_call register
                 # struct_value_syms for their own freshly-produced locals.
-                var result_struct_name = ""
-                if val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local):
-                    match exists_inner_type.kind:
-                        case HirTypeKind.Named(exists_struct_symbol, _):
-                            val exists_type_symbol = self.symbols.get_symbol_raw(exists_struct_symbol.id)
-                            if exists_type_symbol != nil:
-                                match exists_type_symbol.kind:
-                                    case Struct:
-                                        result_struct_name = exists_type_symbol.name
-                                    case _: ()
-                        case _: ()
-                if result_struct_name == "":
-                    # Struct-typed Option locals may use the "raw migration
-                    # form" (see `.unwrap()`'s own doc comment a few hundred
-                    # lines up): a plain struct pointer assigned straight to
-                    # a `T?` binding without ever going through
-                    # ensure_option_handle's canonical enum-id-1 wrap (the
-                    # pointer's own non-nil-ness already distinguishes
-                    # Some/None for rt_is_some/rt_unwrap_or_self, so the
-                    # wrap is skippable). That leaves base_local with no
-                    # local_hir_types/option_value_locals entry for the
-                    # lookup above to find -- but struct construction itself
-                    # always registers struct_value_syms on the raw pointer,
-                    # so fall back to that direct, already-reliable source
-                    # (same fallback resolve_field_index/
-                    # resolve_base_struct_name use for the identical
-                    # no-HIR-type-info situation).
-                    val fallback_struct_sym = self.struct_value_syms.get(base_local.id)
-                    if fallback_struct_sym != nil:
-                        result_struct_name = fallback_struct_sym ?? ""
+                var result_struct_name = self.option_payload_aggregate_name(base, base_local)
                 var b_ec = self.builder
                 val is_some_func = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_is_some"),

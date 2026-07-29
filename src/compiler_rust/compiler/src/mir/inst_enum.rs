@@ -889,7 +889,8 @@ pub enum MirInst {
     BoxInt { dest: VReg, value: VReg },
 
     /// Box a native float as RuntimeValue for SFFI calls.
-    /// RuntimeValue layout: (bits >> 3) << 3 | TAG_FLOAT, where TAG_FLOAT = 2.
+    /// Native backends route through the runtime provider so 64-bit lanes can
+    /// retain all mantissa bits in the canonical heap-boxed representation.
     BoxFloat { dest: VReg, value: VReg },
 
     /// Unbox a RuntimeValue to native integer.
@@ -897,6 +898,6 @@ pub enum MirInst {
     UnboxInt { dest: VReg, value: VReg },
 
     /// Unbox a RuntimeValue to native float.
-    /// Extracts: (value >> 3) << 3 as f64 bits
+    /// The runtime provider accepts both heap-boxed and legacy inline floats.
     UnboxFloat { dest: VReg, value: VReg },
 }
