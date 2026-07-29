@@ -4217,12 +4217,12 @@ pub fn rt_vulkan_dispatch_fn(args: &[Value]) -> Result<Value, CompileError> {
             s_type: 46,
             p_next: ptr::null(),
             src_access_mask: 0x40,   // VK_ACCESS_SHADER_WRITE_BIT
-            dst_access_mask: 0x2000, // VK_ACCESS_HOST_READ_BIT
+            dst_access_mask: 0x2060, // SHADER_READ | SHADER_WRITE | HOST_READ
         };
         (s.fns.cmd_pipeline_barrier)(
             cmd,
             0x800,  // VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
-            0x4000, // VK_PIPELINE_STAGE_HOST_BIT
+            0x4800, // COMPUTE_SHADER | HOST
             0,
             1,
             &memory_barrier,

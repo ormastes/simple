@@ -49,6 +49,7 @@ extern fn rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool
 extern fn rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool
 extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
 extern fn rt_vulkan_end_compute(cmd: i64) -> bool
+extern fn rt_vulkan_discard_command(cmd: i64) -> bool
 extern fn rt_vulkan_submit_and_wait(cmd: i64) -> bool
 extern fn rt_vulkan_wait_idle() -> bool
 extern fn rt_vulkan_get_last_error() -> text
@@ -187,30 +188,14 @@ fn make_rect_pc(x: i64, y: i64, w: i64, h: i64, color: i64) -> [u8]:
     buf
 
 # ---------------------------------------------------------------------------
-# Dispatch helper
-#
-# NOTE: The FFI's begin_compute/end_compute/submit_and_wait wraps a single
-# command buffer recording.  Each call to this helper records and submits
-# one dispatch.  With 1 clear + 100 rects per frame that is 101 submits/frame.
-# This is a known FFI-level limitation versus the C reference which batches
-# all dispatches into a single command buffer per frame (vkCmdFillBuffer +
-# 100 vkCmdDispatch).  The measured timing therefore includes 101x
-# submit_and_wait overhead per frame, which will be higher than the C
-# reference's 2.61 ms/frame.  A future rt_vulkan_begin_batch / end_batch API
-# would resolve this.
+# Dispatch encoder. The caller owns one command buffer for the whole frame.
 # ---------------------------------------------------------------------------
 
-fn dispatch_compute(pipe: i64, ds: i64, pc_bytes: [u8], gx: i64, gy: i64):
-    val cmd = rt_vulkan_begin_compute()
-    if cmd == 0:
-        print("WARN: begin_compute returned 0: " + rt_vulkan_get_last_error())
-        return
-    rt_vulkan_bind_pipeline(cmd, pipe)
-    rt_vulkan_bind_descriptors(cmd, ds)
-    rt_vulkan_push_constants(cmd, pipe, pc_bytes)
-    rt_vulkan_dispatch(cmd, gx, gy, 1)
-    rt_vulkan_end_compute(cmd)
-    rt_vulkan_submit_and_wait(cmd)
+fn encode_compute(cmd: i64, pipe: i64, ds: i64, pc_bytes: [u8], gx: i64, gy: i64) -> bool:
+    (rt_vulkan_bind_pipeline(cmd, pipe) and
+        rt_vulkan_bind_descriptors(cmd, ds) and
+        rt_vulkan_push_constants(cmd, pipe, pc_bytes) and
+        rt_vulkan_dispatch(cmd, gx, gy, 1))
 
 # ---------------------------------------------------------------------------
 # Deterministic color table (same as bench_3d_render.spl)
@@ -231,12 +216,16 @@ fn fill_color(idx: i64) -> i64:
 # and bench_3d_render.spl scene_fill_1080p)
 # ---------------------------------------------------------------------------
 
-fn scene_fill_1080p(pipe_clear: i64, pipe_rect: i64, ds_clear: i64, ds_rect: i64):
+fn scene_fill_1080p(pipe_clear: i64, pipe_rect: i64, ds_clear: i64, ds_rect: i64) -> bool:
+    val cmd = rt_vulkan_begin_compute()
+    if cmd == 0:
+        return false
+
     # --- clear ---
     # Dispatch 1D: ceil(1920*1080 / 256) = 8100 workgroups
     val clear_gx = (FB_PIX + 255) / 256
     val clear_pc = make_clear_pc(0xFF111111)
-    dispatch_compute(pipe_clear, ds_clear, clear_pc, clear_gx, 1)
+    var ready = encode_compute(cmd, pipe_clear, ds_clear, clear_pc, clear_gx, 1)
 
     # --- 100 deterministic rects ---
     var i = 0
@@ -250,13 +239,28 @@ fn scene_fill_1080p(pipe_clear: i64, pipe_rect: i64, ds_clear: i64, ds_rect: i64
         if ry < 0: ry = 0
         if rx + rw > FB_W: rw = FB_W - rx
         if ry + rh > FB_H: rh = FB_H - ry
-        if rw > 0 and rh > 0:
+        if ready and rw > 0 and rh > 0:
             # Dispatch 2D: ceil(rw/16) × ceil(rh/16) workgroups
             val gx = (rw + 15) / 16
             val gy = (rh + 15) / 16
             val rect_pc = make_rect_pc(rx, ry, rw, rh, fill_color(col))
-            dispatch_compute(pipe_rect, ds_rect, rect_pc, gx, gy)
+            ready = encode_compute(cmd, pipe_rect, ds_rect, rect_pc, gx, gy)
         i = i + 1
+    if not ready or not rt_vulkan_end_compute(cmd):
+        rt_vulkan_discard_command(cmd)
+        return false
+    rt_vulkan_submit_and_wait(cmd)
+
+fn cleanup_scene(d_fb: i64, shader_clear: i64, shader_rect: i64,
+                 pipe_clear: i64, pipe_rect: i64,
+                 ds_clear: i64, ds_rect: i64):
+    rt_vulkan_destroy_descriptor_set(ds_rect)
+    rt_vulkan_destroy_descriptor_set(ds_clear)
+    rt_vulkan_destroy_pipeline(pipe_rect)
+    rt_vulkan_destroy_pipeline(pipe_clear)
+    rt_vulkan_destroy_shader(shader_rect)
+    rt_vulkan_destroy_shader(shader_clear)
+    rt_vulkan_free_buffer(d_fb)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -385,7 +389,11 @@ fn main():
     print("Warmup: " + WARMUP_FRAMES.to_string() + " frames...")
     var wi = 0
     while wi < WARMUP_FRAMES:
-        scene_fill_1080p(pipe_clear, pipe_rect, ds_clear, ds_rect)
+        if not scene_fill_1080p(pipe_clear, pipe_rect, ds_clear, ds_rect):
+            print("FAIL: batched warmup dispatch: " + rt_vulkan_get_last_error())
+            cleanup_scene(d_fb, shader_clear, shader_rect, pipe_clear, pipe_rect, ds_clear, ds_rect)
+            rt_vulkan_shutdown()
+            return
         wi = wi + 1
     rt_vulkan_wait_idle()
     print("Warmup done.")
@@ -396,7 +404,11 @@ fn main():
     val t0_ns = rt_time_now_nanos()
     var fi = 0
     while fi < TIMED_FRAMES:
-        scene_fill_1080p(pipe_clear, pipe_rect, ds_clear, ds_rect)
+        if not scene_fill_1080p(pipe_clear, pipe_rect, ds_clear, ds_rect):
+            print("FAIL: batched timed dispatch: " + rt_vulkan_get_last_error())
+            cleanup_scene(d_fb, shader_clear, shader_rect, pipe_clear, pipe_rect, ds_clear, ds_rect)
+            rt_vulkan_shutdown()
+            return
         fi = fi + 1
     rt_vulkan_wait_idle()
     val t1_ns = rt_time_now_nanos()
@@ -421,16 +433,11 @@ fn main():
         + " frames=" + TIMED_FRAMES.to_string()
         + " avg_us=" + avg_us.to_string()
         + " rects_per_frame=" + NUM_RECTS.to_string()
+        + " compute_submits_per_frame=1"
         + " fb=" + FB_W.to_string() + "x" + FB_H.to_string())
 
     # --- Cleanup ---
-    rt_vulkan_destroy_descriptor_set(ds_rect)
-    rt_vulkan_destroy_descriptor_set(ds_clear)
-    rt_vulkan_destroy_pipeline(pipe_rect)
-    rt_vulkan_destroy_pipeline(pipe_clear)
-    rt_vulkan_destroy_shader(shader_rect)
-    rt_vulkan_destroy_shader(shader_clear)
-    rt_vulkan_free_buffer(d_fb)
+    cleanup_scene(d_fb, shader_clear, shader_rect, pipe_clear, pipe_rect, ds_clear, ds_rect)
     rt_vulkan_shutdown()
     print("")
     print("Done.")

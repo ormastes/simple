@@ -334,6 +334,21 @@ mod raw_guard_tests {
 
 // ──────────────────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "vulkan")]
+fn dispatch_memory_barrier() -> (
+    vk::PipelineStageFlags,
+    vk::AccessFlags,
+    vk::PipelineStageFlags,
+    vk::AccessFlags,
+) {
+    (
+        vk::PipelineStageFlags::COMPUTE_SHADER,
+        vk::AccessFlags::SHADER_WRITE,
+        vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::HOST,
+        vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::HOST_READ,
+    )
+}
+
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> i64 {
@@ -345,6 +360,19 @@ pub extern "C" fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> i64 {
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     unsafe {
         device.handle().cmd_dispatch(vk_cmd, x as u32, y as u32, z as u32);
+        let (src_stage, src_access, dst_stage, dst_access) = dispatch_memory_barrier();
+        let barrier = vk::MemoryBarrier::default()
+            .src_access_mask(src_access)
+            .dst_access_mask(dst_access);
+        device.handle().cmd_pipeline_barrier(
+            vk_cmd,
+            src_stage,
+            dst_stage,
+            vk::DependencyFlags::empty(),
+            &[barrier],
+            &[],
+            &[],
+        );
     }
     1
 }
@@ -353,6 +381,24 @@ pub extern "C" fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> i64 {
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_dispatch(_cmd: i64, _x: i64, _y: i64, _z: i64) -> i64 {
     0
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod dispatch_barrier_tests {
+    use super::dispatch_memory_barrier;
+    use ash::vk;
+
+    #[test]
+    fn dispatch_barrier_orders_compute_writes_before_compute_and_host_reads() {
+        let (src_stage, src_access, dst_stage, dst_access) = dispatch_memory_barrier();
+        assert_eq!(src_stage, vk::PipelineStageFlags::COMPUTE_SHADER);
+        assert_eq!(src_access, vk::AccessFlags::SHADER_WRITE);
+        assert!(dst_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+        assert!(dst_stage.contains(vk::PipelineStageFlags::HOST));
+        assert!(dst_access.contains(vk::AccessFlags::SHADER_READ));
+        assert!(dst_access.contains(vk::AccessFlags::SHADER_WRITE));
+        assert!(dst_access.contains(vk::AccessFlags::HOST_READ));
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
