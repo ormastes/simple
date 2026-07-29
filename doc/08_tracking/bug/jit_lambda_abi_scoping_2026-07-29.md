@@ -293,3 +293,36 @@ close).
 - `/tmp/jit_lambda_scoping/probes/{no_lambda,lambda_map,lambda_direct_call}.spl` — probe sources
 - `/tmp/jit_lambda_scoping/out_{no_lambda,lambda_map,lambda_direct}.log` — captured run output
 - `/tmp/jit_lambda_scoping/run_summary.log` — exit codes for the three runs
+
+## Blocker discovered 2026-07-29 — `rt_closure_new` not declared as a runtime import
+
+A partial lambda-ABI lane wired `compile_closure_create`
+(`codegen/instr/closures_structs.rs`) to call the HeapHeader-carrying
+constructor `rt_closure_new`, and added a jit.rs guard hook. On rebuild, every
+lambda probe still **demoted** — but now with a hard panic instead of clean
+demotion:
+
+```
+missing runtime fn 'rt_closure_new' in main
+  location=compiler/src/codegen/instr/helpers.rs:396:28
+```
+
+Root cause: `resolve_runtime_func` (`codegen/instr/helpers.rs:391`) looks the
+name up in `ctx.func_ids` then `ctx.runtime_funcs`, and panics on miss. The
+lambda codegen *emits a call* to `rt_closure_new` but the symbol is **never
+declared** in the runtime-import table that populates `ctx.runtime_funcs`. So
+the second table the lambda fix must update is that runtime-import declaration
+list (same place the other `rt_*` closure/collection runtime fns are declared),
+not just `compile_closure_create` + the jit.rs guard.
+
+**Required for the next lambda lane (three edits, not two):**
+1. `compile_closure_create` → call `rt_closure_new` (HeapHeader ctor). [done in salvage]
+2. jit.rs guard → stop blanket-demoting `ClosureCreate`. [done in salvage]
+3. **Declare `rt_closure_new` in the runtime-import table** so
+   `resolve_runtime_func` resolves it. [MISSING — this is the blocker]
+
+Until all three land together, the correct resting state is the reverted
+origin version (blanket `ClosureCreate` guard → lambdas run correct-via-demotion
+on the interpreter, no panic). The partial 3-of-3-minus-one work is snapshotted
+at `/tmp/salvage_0729/{closures_structs.rs.lane,jit.rs.lane}` — do NOT land it as
+is; it panics.
