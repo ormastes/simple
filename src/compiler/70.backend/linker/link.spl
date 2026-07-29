@@ -21,6 +21,11 @@ use compiler.backend.linker.obj_taker.*
 use compiler.backend.linker.lazy_instantiator.*
 use compiler.backend.linker.smf_reader.*
 use compiler.backend.linker.mold.*
+use compiler.backend.linker.lib_smf.{u32_to_bytes}
+use compiler.backend.linker.msvc.{is_lld_link_available, is_msvc_available}
+use std.common.target.{TargetOS}
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, shell}
+use std.platform.{is_windows}
 
 fn _linker_remove_text(items: [text], value: text) -> [text]:
     var kept: [text] = []
@@ -455,13 +460,13 @@ impl Linker:
         buf.push(0x00)
         # Symbol count
         val sym_count = self.symbols.len()
-        for b in u32_to_bytes(sym_count):
+        for b in u32_to_bytes(sym_count as u32):
             buf.push(b)
         # Write symbol table entries
         for sym_key in self.symbols.keys():
             val sym_name: text = sym_key
             val name_bytes: [u8] = sym_name.to_bytes()
-            for b in u32_to_bytes(name_bytes.len()):
+            for b in u32_to_bytes(name_bytes.len() as u32):
                 buf.push(b)
             for b in name_bytes:
                 buf.push(b)
@@ -570,9 +575,6 @@ impl BackendSystemLinker:
 
 fn auto_detect_linker() -> BackendSystemLinker:
     """Auto-detect best available linker for current platform."""
-    use std.platform.{is_windows, is_unix}
-    use std.common.target.TargetOS
-
     val os = TargetOS.host()
 
     match os:
@@ -587,7 +589,6 @@ fn auto_detect_linker() -> BackendSystemLinker:
 
         case TargetOS.Windows:
             # Prefer lld-link > MSVC link.exe
-            use compiler.backend.linker.msvc.{is_lld_link_available, is_msvc_available}
             if is_lld_link_available():
                 BackendSystemLinker.LldLink
             elif is_msvc_available():
@@ -612,11 +613,6 @@ fn auto_detect_linker() -> BackendSystemLinker:
 
 fn command_exists(cmd: text) -> bool:
     """Check if command exists in PATH."""
-    use app.io.shell
-
-    # Platform-specific command check
-    use std.platform.is_windows
-
     if is_windows():
         val result = shell("where {cmd} 2>nul")
         result.exit_code == 0
