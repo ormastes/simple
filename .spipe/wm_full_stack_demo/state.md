@@ -435,6 +435,21 @@ implementation-in-progress
   A bounded live run then faults in `rt_to_string()` before the post-input
   capture. The next host gate is compositor pixel population/native string
   conversion; the corrected GLFW raw copier itself is independently green.
+- host-native-id-render-boundary: Operational WM numeric IDs now use the
+  existing raw-i64 text formatter instead of the generic tagged
+  `rt_to_string()` path in the demo, content admission, MDI scene projection,
+  child cleanup, taskbar projection, and Web fallback. External GUI/pixel
+  frames also no longer load/hash the Simple Web theme merely to calculate an
+  unused fallback revision. The focused Phase-3 first-frame probe advanced
+  from two reproducible `rt_to_string()` faults to exact nonzero pixel
+  `0xff112233`; its second assertion exposed a row/column test-pattern mistake,
+  which is corrected but intentionally not rerun after the three-cycle cap.
+- host-live-after-id-boundary: The rebuilt full demo still creates the exact
+  titled X11 window but faults before a two-second capture. No live non-black
+  or semantic-input claim is made. The focused compositor result narrows the
+  remaining defect to the richer GUI/demo path rather than raw framebuffer
+  allocation, external-frame admission, base compositor paint, or GLFW's
+  packed-pixel copier.
 
 ## Remaining runtime gates
 
@@ -443,9 +458,10 @@ implementation-in-progress
   now passes the canonical widget lookup, pure-Simple font provider, initial
   GUI-frame admission, scalar pointer-router, and stable-ID widget mutation
   probes. Packed ARGB presentation and title conversion are now independently
-  green. The full demo maps under its exact title, but its framebuffer remains
-  black and the current live run faults in `rt_to_string()` before post-input
-  evidence; non-black presentation and semantic input remain RED.
+  green. The focused native compositor now admits an external pixel frame and
+  reaches an exact nonzero framebuffer sample without the earlier string
+  faults. The full GUI demo still faults after mapping its exact title and
+  before capture; non-black live presentation and semantic input remain RED.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the

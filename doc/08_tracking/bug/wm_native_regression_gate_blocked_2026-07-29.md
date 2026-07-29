@@ -168,3 +168,25 @@ capture. The next target is compositor pixel population/native string
 conversion, not the independently green GLFW raw copier. This checkpoint does
 not claim a non-black full-WM frame, semantic input mutation, or clean
 outer-window close evidence.
+
+The next bounded native probe found two pre-paint uses of the generic tagged
+formatter:
+
+```text
+SharedMdiRenderWindow.id interpolation -> rt_to_string()
+external frame -> unused Simple Web revision -> theme manifest -> rt_to_string()
+```
+
+Operational numeric window-ID projections now reuse
+`rt_raw_i64_to_string()`, which already exists in both native runtimes. The
+external-content branch now skips the unused Simple Web revision entirely.
+The third focused probe reached the compositor buffer and matched exact pixel
+`0xff112233`; return 6 was a probe error because its input split colors by row
+while it sampled by column. The pattern is corrected to split by column, but
+the probe was not rerun after the repository's three-cycle cap.
+
+One rebuilt full-demo live attempt still mapped the exact titled X11 window
+and then faulted before the two-second capture. Therefore the remaining
+blocker is in the richer GUI/demo route. This checkpoint proves neither the
+final corrected probe assertion nor a live non-black GUI frame, semantic input
+mutation, or clean close.
