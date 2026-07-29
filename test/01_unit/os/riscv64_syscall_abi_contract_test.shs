@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/build/os"
+: >"$tmp/build/os/fat32-riscv64.img"
+
+(
+    cd "$tmp"
+    riscv64-unknown-elf-gcc -c -march=rv64gc -mabi=lp64d -mcmodel=medany \
+        -ffreestanding -nostdlib \
+        -DSIMPLE_BOOT_MINIMAL=1 -DSIMPLE_RUNTIME_NO_ENTRY=1 \
+        -DSIMPLE_RUNTIME_NO_WEAK_HEAP=1 \
+        "$root/src/os/kernel/arch/riscv64/boot/freestanding_runtime.c" \
+        -o runtime.o
+)
+
+riscv64-unknown-elf-nm -g --defined-only "$tmp/runtime.o" |
+    awk '$3 == "rt_riscv64_syscall" { print $2, $3 }' >"$tmp/symbol"
+printf '%s\n' 'T rt_riscv64_syscall' >"$tmp/expected-symbol"
+diff -u "$tmp/expected-symbol" "$tmp/symbol"
+
+riscv64-unknown-elf-objdump -d -M no-aliases "$tmp/runtime.o" |
+    awk '
+        /<rt_riscv64_syscall>:/ { body = 1; next }
+        body && /<[A-Za-z0-9_]+>:/ { exit }
+        body && /^[[:space:]]*[0-9a-f]+:/ {
+            if (NF >= 4) {
+                print $3 "\t" $4
+            } else {
+                print $3
+            }
+        }
+    ' >"$tmp/instructions"
+cat >"$tmp/expected-instructions" <<'EOF'
+c.mv	a7,a0
+c.mv	a0,a1
+c.mv	a1,a2
+c.mv	a2,a3
+c.mv	a3,a4
+c.mv	a4,a5
+c.mv	a5,a6
+ecall
+c.jr	ra
+EOF
+diff -u "$tmp/expected-instructions" "$tmp/instructions"
+
+grep -Fq "extern fn rt_riscv64_syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64)" \
+    "$root/src/os/userlib/syscall_raw.spl"
+grep -Fq "rt_riscv64_syscall(id, arg0, arg1, arg2, arg3, arg4, arg5)" \
+    "$root/src/os/userlib/syscall_raw.spl"
+grep -Fq "fn syscall6(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64)" \
+    "$root/src/os/userlib/syscall_raw.spl"
+grep -Fq "_syscall6(id, arg0, arg1, arg2, arg3, arg4, 0)" \
+    "$root/src/os/userlib/syscall_raw.spl"
+grep -Fq "syscall6(13, path_ptr, path_len, argv_ptr, envp_ptr, argv_table, envp_table)" \
+    "$root/src/os/userlib/process.spl"
+! grep -Fq "arg5: u64 = 0" "$root/src/os/userlib/syscall_raw.spl"
+! sed -n '/@cfg(riscv64)/,/@cfg(riscv32)/p' \
+    "$root/src/os/userlib/syscall_raw.spl" | grep -Fq "asm volatile"
+
+echo "PASS: RV64 syscall ABI contract"

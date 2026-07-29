@@ -21,14 +21,21 @@ the unused reserved-name `process.spawn` wrapper is removed, and the DMA
 direction match uses Stage2-compatible syntax. The focused RV64 display ABI
 contract passes and independent P0/P1 review accepts those changes.
 
-Three retained diagnostic builds advanced from the former SBI/unsafe-asm
-failure through `process.spawn` and DMA parsing to the current blocker:
-`src/os/tools/pkg/pkg_repository.spl:158` declares an uninitialized
-`Result<text, text>`. Attempt 6 exited `1` without an ELF; the exact resume is
-tracked in
-`doc/08_tracking/bug/stage2_rv64_desktop_pkg_repository_result_initializer_2026-07-29.md`.
-The three-cycle cap is exhausted, so RV64 crop/QEMU evidence, the exact-ten
-run, and manual publication remain pending.
+The package `Result` initializer is resolved: attempt 7 advanced to the network
+source and attempt 8 advanced to the driver-error source. Attempt 9 parsed
+those repairs but Stage2 then terminated with
+`runtime error: field access on nil receiver`: retained wrapper exit `132`,
+signal `4`, elapsed `34.59s`, maximum RSS `486380 KiB`, cache file count `0`,
+and no RV64 ELF. Disassembly maps the `0x43c8ad` nil trap to `Config.set`;
+caller `0x8a40e0` is `CompilerDriver.parse_all_impl` line 693, which
+incorrectly assigned the `Dict.set` result and poisoned `entry_modules`. The
+one-line bracket mutation plus flipped existing source-contract assertions
+landed post-run and remain build-unverified. The post-run RV64 `syscall6` fix
+is also source-only and still requires fresh-session verification. The
+exhausted window and exact resume are tracked in
+`doc/08_tracking/bug/stage2_rv64_desktop_stage2_nil_receiver_2026-07-29.md`.
+RV64 crop/QEMU evidence, the exact-ten run, and manual publication remain
+pending.
 
 ## Current active delivery scope — SimpleOS Stage 2 (supersedes)
 

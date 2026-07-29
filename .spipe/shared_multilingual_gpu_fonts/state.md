@@ -1515,3 +1515,19 @@ pixels, and performance evidence remain release-blocking.
   Attempts 4–6 are retained; the exact resume is tracked in
   `doc/08_tracking/bug/stage2_rv64_desktop_pkg_repository_result_initializer_2026-07-29.md`.
   The scoped status remains BLOCKED and 0/10 specs are accepted.
+- rv64-stage2-desktop-nil-receiver-window-2026-07-29: Supersedes only the
+  current blocker above. The package initializer is resolved; attempts 7 and 8
+  advanced through the network and driver-error parser blockers. Attempt 9
+  parsed those repairs, then Stage2 terminated with
+  `runtime error: field access on nil receiver` (wrapper exit `132`, signal
+  `4`, elapsed `34.59s`, maximum RSS `486380 KiB`, cache file count `0`).
+  No RV64 ELF exists. Disassembly maps the `0x43c8ad` nil trap to `Config.set`;
+  caller `0x8a40e0` is `CompilerDriver.parse_all_impl` line 693, which
+  incorrectly assigned the `Dict.set` result and poisoned `entry_modules`.
+  A one-line bracket mutation plus flipped existing source-contract assertions
+  landed post-run and remain build-unverified. The RV64 `syscall6` repair also
+  landed after this run and needs fresh-session verification. Attempts 7–9 are
+  exhausted; exact resume is in
+  `doc/08_tracking/bug/stage2_rv64_desktop_stage2_nil_receiver_2026-07-29.md`.
+  Crop/QEMU, exact-ten, and manual evidence remain absent; the scoped status
+  remains BLOCKED and 0/10 specs are accepted.

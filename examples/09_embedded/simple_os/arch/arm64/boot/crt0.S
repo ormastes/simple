@@ -499,7 +499,7 @@ _lower_el_aarch64_sync_handler:
     cmp     x9, #0x15              /* EC=0x15: SVC from AArch64 */
     b.ne    _fault_handler
 
-    mrs     x6, elr_el1
+    mov     x6, x5                 /* syscall arg5 */
     mov     x5, x4                 /* syscall arg4 */
     mov     x4, x3                 /* syscall arg3 */
     mov     x3, x2                 /* syscall arg2 */

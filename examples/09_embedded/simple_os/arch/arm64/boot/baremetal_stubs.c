@@ -1041,10 +1041,11 @@ int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
     return -38;
 }
 
-int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
-                                       uint64_t a2, uint64_t a3, uint64_t a4)
+static int64_t arm64_syscall6_dispatch(uint64_t id, uint64_t a0, uint64_t a1,
+                                      uint64_t a2, uint64_t a3, uint64_t a4,
+                                      uint64_t a5)
 {
-    (void)a3; (void)a4;
+    (void)a3; (void)a4; (void)a5;
     switch (id) {
         case 0:  /* Exit */
             for (;;) __asm__ volatile("wfe");
@@ -1067,6 +1068,12 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         default:
             return -38; /* ENOSYS */
     }
+}
+
+int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
+                                      uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    return arm64_syscall6_dispatch(id, a0, a1, a2, a3, a4, 0);
 }
 
 int64_t syscall(uint64_t id, uint64_t a0, uint64_t a1,
@@ -3752,7 +3759,7 @@ RuntimeValue rt_arm64_user_as_map_page(RuntimeValue root_val, RuntimeValue virt_
 RuntimeValue rt_arm64_user_as_translate(RuntimeValue root_val, RuntimeValue virt_val);
 uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
                                   uint64_t a2, uint64_t a3, uint64_t a4,
-                                  uint64_t elr, uint64_t esr);
+                                  uint64_t a5);
 RuntimeValue rt_arm64_enter_recorded_user_live(void);
 
 static Arm64UserAsArena *arm64_user_as_find(uint64_t root)
@@ -4031,10 +4038,8 @@ RuntimeValue rt_arm64_probe_recorded_user_handoff(void)
 
 uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
                                   uint64_t a2, uint64_t a3, uint64_t a4,
-                                  uint64_t elr, uint64_t esr)
+                                  uint64_t a5)
 {
-    (void)elr;
-    (void)esr;
     if (id == 0) {
         serial_puts("[arm64-user] svc exit ok code=");
         serial_put_dec((int64_t)a0);
@@ -4043,7 +4048,7 @@ uint64_t rt_arm64_handle_user_svc(uint64_t id, uint64_t a0, uint64_t a1,
         serial_puts("\r\n");
         return a0;
     }
-    return (uint64_t)userlib__syscall_raw__syscall(id, a0, a1, a2, a3, a4);
+    return (uint64_t)arm64_syscall6_dispatch(id, a0, a1, a2, a3, a4, a5);
 }
 
 RuntimeValue rt_arm64_enter_recorded_user_live(void)

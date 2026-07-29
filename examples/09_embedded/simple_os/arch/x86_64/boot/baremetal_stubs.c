@@ -93,7 +93,7 @@ static inline void io_wait(void)
   *
   * Register convention matches the x86_64 System V SYSCALL ABI:
   *   rax = syscall number
- *   rdi, rsi, rdx, r10, r8 = args 0..4  (r10 for arg3, NOT rcx — rcx
+ *   rdi, rsi, rdx, r10, r8, r9 = args 0..5  (r10 for arg3, NOT rcx — rcx
  *     holds the caller's saved RIP post-SYSCALL)
  *   rax = int64_t return value
  */
@@ -112,10 +112,10 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                             uint64_t a3, uint64_t a4, uint64_t a5);
 
 int64_t rt_x86_syscall(uint64_t id, uint64_t a0, uint64_t a1, uint64_t a2,
-                       uint64_t a3, uint64_t a4) {
+                       uint64_t a3, uint64_t a4, uint64_t a5) {
     /* Kernel-internal callers already run at CPL0; bypass LSTAR so the
      * hardware entry path can be exclusively and safely user-origin. */
-    return rt_syscall_dispatch(id, a0, a1, a2, a3, a4, 0);
+    return rt_syscall_dispatch(id, a0, a1, a2, a3, a4, a5);
 }
 
 #else

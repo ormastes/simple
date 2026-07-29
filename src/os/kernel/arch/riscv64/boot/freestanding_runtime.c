@@ -66,6 +66,26 @@ __asm__(
 );
 #endif
 
+#if defined(__riscv) && defined(__riscv_xlen) && (__riscv_xlen == 64)
+__asm__(
+    ".section .text,\"ax\",@progbits\n"
+    ".p2align 2\n"
+    ".globl rt_riscv64_syscall\n"
+    ".type rt_riscv64_syscall,@function\n"
+    "rt_riscv64_syscall:\n"
+    "mv a7, a0\n"
+    "mv a0, a1\n"
+    "mv a1, a2\n"
+    "mv a2, a3\n"
+    "mv a3, a4\n"
+    "mv a4, a5\n"
+    "mv a5, a6\n"
+    "ecall\n"
+    "ret\n"
+    ".size rt_riscv64_syscall, .-rt_riscv64_syscall\n"
+);
+#endif
+
 extern spl_i64 kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(spl_i64 size) __attribute__((weak));
 
 static spl_u64 g_freestanding_heap_next = 0x87000000ULL;
