@@ -105,4 +105,19 @@ common.ui.widget_draw_ir._emit_widget()
   <- gui_session_content_frame()
 ```
 
-The nil-receiver fault in `_emit_widget()` is the current first-frame gate.
+Disassembly proved the `_emit_widget()` fault was the known aggregate
+`Option<T>` payload defect: `find_rect() -> WidgetRect?` returned a raw
+`WidgetRect`, `rt_is_some` accepted it, and `rt_enum_payload` produced tagged
+nil. The renderer now uses scalar `find_rect_index()` lookups and direct array
+reads for main and scroll paths, and no longer returns an optional scroll batch.
+
+The exact demo-tree native probe moved beyond `_emit_widget()` into selected
+font loading. A no-mangle pure-Simple `core_sha256.spl` provider resolves
+`rt_file_hash_sha256`, but that archive depends on `fs_copy_cstr` from
+`core_fs.spl`. With the latter still stubbed, the third capped run calls
+`free(0x3)` from the SHA provider.
+
+The next bounded resume is to build and link matching no-mangle
+`core_fs.spl` plus `core_sha256.spl` providers, then rerun
+`probe_widget_draw_ir_native.spl`. A C hash shim or skipped font validation
+would not be valid evidence.

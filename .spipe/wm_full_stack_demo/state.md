@@ -389,13 +389,26 @@ implementation-in-progress
   resize/profile route and reached
   `widget_tree_to_draw_ir_with_theme()`. It now fails closed in
   `common.ui.widget_draw_ir._emit_widget()` before the first capturable frame.
+- widget-draw-ir-native-safe: Disassembly proved `find_rect() ->
+  WidgetRect?` returned a raw aggregate that native Option unwrapping converted
+  to tagged nil. Layout now exposes a scalar `find_rect_index()`, and the
+  canonical widget Draw-IR main/scroll paths read the matching array element
+  directly; scroll batch construction no longer returns an aggregate Option.
+  The exact demo-tree probe moved past `_emit_widget()` into font loading.
+- phase3-font-provider-chain: A no-mangle pure-Simple
+  `core_sha256.spl` archive defines `rt_file_hash_sha256`, but its
+  `fs_copy_cstr` dependency remains a generated stub under the narrow
+  core-C bundle. The third capped probe faults in `free(0x3)` from that hash
+  provider. Resume by linking the matching no-mangle `core_fs.spl` provider
+  with the retained SHA provider before retrying the same probe; do not add a
+  C hash shim or skip font validation.
 
 ## Remaining runtime gates
 
 - Host GLFW: the real backend/window/input/presentation boundary is green;
   the full Phase-3 closure and static provider link are green. Live execution
-  now reaches canonical GUI widget-to-Draw-IR lowering, where `_emit_widget()`
-  faults on a nil receiver before the first scene capture.
+  now passes the repaired canonical widget lookup boundary. The first scene
+  remains blocked by the incomplete pure-Simple font file/hash provider chain.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the
