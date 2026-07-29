@@ -165,11 +165,58 @@ impl HeapHeader {
 
 use super::core::RuntimeValue;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 const MIN_VALID_HEAP_ADDR: usize = 4096;
 
 static HEAP_ALLOCATION_REGISTRY: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+
+// ---------------------------------------------------------------------------
+// Byte-level accounting (header bytes only).
+//
+// `rt_heap_registry_count()` counts objects, which says nothing about memory:
+// an empty dict and a 100k-element array count as 1 each. `HeapHeader.size`
+// is written by every allocation site, so the register/unregister choke
+// points can account header bytes exactly with no per-site changes.
+//
+// Known limit (tracked as a follow-up lane, not silently ignored): container
+// BACKING buffers (Vec capacity, string bytes) are separate allocations not
+// covered by `size`; aux-byte accounting needs per-collection wiring.
+// ---------------------------------------------------------------------------
+const HEAP_KIND_SLOTS: usize = 32;
+
+static HEAP_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+static HEAP_PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
+static HEAP_TOTAL_ALLOCS: AtomicU64 = AtomicU64::new(0);
+static HEAP_TOTAL_FREES: AtomicU64 = AtomicU64::new(0);
+static HEAP_KIND_LIVE_COUNT: [AtomicU64; HEAP_KIND_SLOTS] = [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS];
+static HEAP_KIND_LIVE_BYTES: [AtomicU64; HEAP_KIND_SLOTS] = [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS];
+
+#[inline]
+fn note_heap_alloc(kind: u8, bytes: u64) {
+    HEAP_TOTAL_ALLOCS.fetch_add(1, Ordering::Relaxed);
+    let live = HEAP_LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    HEAP_PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
+    if let Some(slot) = HEAP_KIND_LIVE_COUNT.get(kind as usize) {
+        slot.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Some(slot) = HEAP_KIND_LIVE_BYTES.get(kind as usize) {
+        slot.fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
+#[inline]
+fn note_heap_free(kind: u8, bytes: u64) {
+    HEAP_TOTAL_FREES.fetch_add(1, Ordering::Relaxed);
+    HEAP_LIVE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+    if let Some(slot) = HEAP_KIND_LIVE_COUNT.get(kind as usize) {
+        slot.fetch_sub(1, Ordering::Relaxed);
+    }
+    if let Some(slot) = HEAP_KIND_LIVE_BYTES.get(kind as usize) {
+        slot.fetch_sub(bytes, Ordering::Relaxed);
+    }
+}
 
 fn heap_allocation_registry() -> &'static Mutex<HashSet<usize>> {
     HEAP_ALLOCATION_REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
@@ -178,18 +225,31 @@ fn heap_allocation_registry() -> &'static Mutex<HashSet<usize>> {
 #[inline]
 pub fn register_heap_ptr(ptr: *mut HeapHeader) {
     if !ptr.is_null() {
-        let _ = heap_allocation_registry()
+        let inserted = heap_allocation_registry()
             .lock()
-            .map(|mut registry| registry.insert(ptr as usize));
+            .map(|mut registry| registry.insert(ptr as usize))
+            .unwrap_or(false);
+        if inserted {
+            // Caller just allocated the object; header is valid by contract.
+            let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
+            note_heap_alloc(kind, bytes);
+        }
     }
 }
 
 #[inline]
 pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
     if !ptr.is_null() {
-        let _ = heap_allocation_registry()
+        let removed = heap_allocation_registry()
             .lock()
-            .map(|mut registry| registry.remove(&(ptr as usize)));
+            .map(|mut registry| registry.remove(&(ptr as usize)))
+            .unwrap_or(false);
+        if removed {
+            // Presence in the registry means not yet freed (the erasing call
+            // is the one allowed to free), so this read is not use-after-free.
+            let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
+            note_heap_free(kind, bytes);
+        }
     }
 }
 
@@ -205,10 +265,15 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
     if ptr.is_null() {
         return false;
     }
-    heap_allocation_registry()
+    let removed = heap_allocation_registry()
         .lock()
         .map(|mut registry| registry.remove(&(ptr as usize)))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if removed {
+        let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
+        note_heap_free(kind, bytes);
+    }
+    removed
 }
 
 #[inline]
@@ -235,6 +300,57 @@ pub fn clear_heap_allocation_registry() {
     if let Some(registry) = HEAP_ALLOCATION_REGISTRY.get() {
         let _ = registry.lock().map(|mut registry| registry.clear());
     }
+    HEAP_LIVE_BYTES.store(0, Ordering::Relaxed);
+    HEAP_TOTAL_ALLOCS.store(0, Ordering::Relaxed);
+    HEAP_TOTAL_FREES.store(0, Ordering::Relaxed);
+    // Peak intentionally survives a clear: it answers "how big did this
+    // process get", which a bulk reset must not erase.
+    for slot in HEAP_KIND_LIVE_COUNT.iter().chain(HEAP_KIND_LIVE_BYTES.iter()) {
+        slot.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Live heap HEADER bytes currently registered (excludes container backing
+/// buffers — see the accounting comment above).
+#[no_mangle]
+pub extern "C" fn rt_heap_live_bytes() -> i64 {
+    HEAP_LIVE_BYTES.load(Ordering::Relaxed) as i64
+}
+
+/// High-water mark of `rt_heap_live_bytes` for this process.
+#[no_mangle]
+pub extern "C" fn rt_heap_peak_bytes() -> i64 {
+    HEAP_PEAK_BYTES.load(Ordering::Relaxed) as i64
+}
+
+/// Total registered allocations since process start (monotonic).
+#[no_mangle]
+pub extern "C" fn rt_heap_alloc_count() -> i64 {
+    HEAP_TOTAL_ALLOCS.load(Ordering::Relaxed) as i64
+}
+
+/// Total unregistered (freed) allocations since process start (monotonic).
+#[no_mangle]
+pub extern "C" fn rt_heap_free_count() -> i64 {
+    HEAP_TOTAL_FREES.load(Ordering::Relaxed) as i64
+}
+
+/// Live object count for one `HeapObjectType` tag (0 for out-of-range kinds).
+#[no_mangle]
+pub extern "C" fn rt_heap_live_count_by_kind(kind: i64) -> i64 {
+    HEAP_KIND_LIVE_COUNT
+        .get(kind as usize)
+        .map(|slot| slot.load(Ordering::Relaxed) as i64)
+        .unwrap_or(0)
+}
+
+/// Live header bytes for one `HeapObjectType` tag (0 for out-of-range kinds).
+#[no_mangle]
+pub extern "C" fn rt_heap_live_bytes_by_kind(kind: i64) -> i64 {
+    HEAP_KIND_LIVE_BYTES
+        .get(kind as usize)
+        .map(|slot| slot.load(Ordering::Relaxed) as i64)
+        .unwrap_or(0)
 }
 
 /// Validate heap object type, returns None if invalid

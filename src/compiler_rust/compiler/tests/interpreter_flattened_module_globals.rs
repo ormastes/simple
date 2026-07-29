@@ -725,3 +725,84 @@ fn real_vmm_sparse_init_preserves_active_root() {
 
     assert_eq!(evaluate_loaded(&main_path), 0);
 }
+
+// --- Lambda frame-lifecycle protocol (stage-4 stale-global class) ---
+// Lambdas historically bypassed publish/refresh/sync, and selective capture
+// (CowEnv::from_map) dropped imported-global owner metadata. Each test below
+// fails without exec_lambda routing through the function-frame protocol.
+
+#[test]
+fn selective_lambda_capture_preserves_imported_global_owner_on_write() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var values: [i32] = []\n\nfn count() -> i32:\n    return values.len()\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{values, count}\n\nfn main() -> i32:\n    val f = \\x: values.push(x)\n    f(1)\n    f(2)\n    return count()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 2);
+}
+
+#[test]
+fn lambda_sees_global_written_after_capture() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nfn set_two():\n    value = 2\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{set_two, read, value}\n\nfn main() -> i32:\n    val f = \\x: value + x\n    set_two()\n    return f(10)\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 12);
+}
+
+#[test]
+fn deeper_global_write_inside_lambda_survives_lambda_return() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nfn set_two():\n    value = 2\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{set_two, read}\n\nfn main() -> i32:\n    val f = \\x: set_two()\n    f(0)\n    return read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 2);
+}
+
+#[test]
+fn lambda_parameter_shadowing_global_stays_local() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{read, value}\n\nfn main() -> i32:\n    val f = \\value: value + 1\n    val r = f(41)\n    return r * 10 + read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 420);
+}

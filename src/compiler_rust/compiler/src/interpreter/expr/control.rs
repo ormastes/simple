@@ -30,20 +30,36 @@ pub(super) fn eval_control_expr(
             move_mode,
         } => {
             let names: Vec<String> = params.iter().map(|LambdaParam { name, .. }| name.clone()).collect();
+            if std::env::var("SIMPLE_DEBUG_LAMBDA_SYNC").is_ok() {
+                eprintln!(
+                    "[lambda-capture] cur_mod={:?} bindings_by_owner={:?} capture_all={} env_bindings={:?} free={:?}",
+                    crate::interpreter::CURRENT_EXEC_MODULE.with(|c| c.borrow().clone()),
+                    crate::interpreter::MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|c| c
+                        .borrow()
+                        .iter()
+                        .map(|(o, m)| (o.to_string(), m.keys().cloned().collect::<Vec<_>>()))
+                        .collect::<Vec<_>>()),
+                    capture_all,
+                    env.global_bindings()
+                        .map(|(k, (o, s))| (k.clone(), o.to_string(), s.clone()))
+                        .collect::<Vec<_>>(),
+                    collect_free_vars(body),
+                );
+            }
             // For move closures, we capture by value (clone the environment)
             // For regular closures, we share the environment reference
             // In the interpreter, both behave the same since we clone env anyway
             let captured_env = if *capture_all {
                 Arc::new(env.clone())
             } else {
-                // Selective capture: only copy variables referenced in the lambda body
+                // Selective capture: only copy variables referenced in the lambda
+                // body. Must preserve global-binding metadata — a plain
+                // name->value map demotes imported global aliases to locals,
+                // which loses their defining owner and recreates the stage-4
+                // stale-arena-index class of bug on lambda global writes.
                 let used = collect_free_vars(body);
-                let filtered: HashMap<String, Value> = env
-                    .iter()
-                    .filter(|(k, _)| used.contains(k.as_str()))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                Arc::new(CowEnv::from_map(filtered))
+                let used: HashSet<String> = used.iter().map(|s| s.to_string()).collect();
+                Arc::new(env.project_preserving_bindings(&used))
             };
             Ok(Some(Value::Lambda {
                 params: names,
@@ -78,6 +94,10 @@ pub(super) fn eval_control_expr(
             } = branch_result
             {
                 let mut block_env = Env::clone(&*captured_env);
+                // Dirty-only write-back: copying every shared key would replay
+                // the closure's stale captured snapshot over values a deeper
+                // call wrote after capture.
+                block_env.clear_dirty();
                 let mut block = simple_parser::ast::Block {
                     statements: nodes,
                     ..Default::default()
@@ -85,12 +105,9 @@ pub(super) fn eval_control_expr(
                 let (flow, last_val) = exec_block_fn(&block, &mut block_env, functions, classes, enums, impl_methods)?;
                 // Write back mutations from block_env to the outer env.
                 // This ensures that me-method self-updates inside if-expression
-                // branches propagate correctly.
-                for (key, value) in &block_env {
-                    if env.contains_key(key) {
-                        env.insert(key.clone(), value.clone());
-                    }
-                }
+                // branches propagate correctly. Dirty-only + refresh channel:
+                // see copy_back_block_writes.
+                crate::interpreter::block_exec::copy_back_block_writes(&block_env, env);
                 match flow {
                     // A `return` inside an if/match EXPRESSION arm must propagate out of the
                     // function, not become the expression's value. Reuse the `?`-operator

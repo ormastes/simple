@@ -1255,9 +1255,45 @@ pub fn load_module_with_imports_for_target(
     visited: &mut HashSet<PathBuf>,
     target_arch: simple_common::target::TargetArch,
 ) -> Result<Module, CompileError> {
-    let module = load_module_with_imports_internal(path, visited, None, true, target_arch)?;
+    let mut module = load_module_with_imports_internal(path, visited, None, true, target_arch)?;
+    append_root_import_binding_markers(&mut module, path);
     warn_duplicate_private_signatures(&module);
     Ok(module)
+}
+
+/// Emit import-binding markers for the ROOT module's own `use` statements.
+///
+/// `strip_flattened_import_nodes` emits markers only while flattening
+/// *imported* modules; the entry module's `use state.{values}` never got one,
+/// so entry-frame envs carried imported globals with NO owner binding. A
+/// lambda (or any frame) writing such an alias then had no owner to sync to
+/// and the write silently missed the defining module's global store — the
+/// stage-4 stale-global class. Root-defined functions register under the
+/// `"<entry>"` owner sentinel (see interpreter_eval), so the markers use that
+/// importer key.
+fn append_root_import_binding_markers(module: &mut Module, path: &Path) {
+    let mut markers = Vec::new();
+    for item in &module.items {
+        match item {
+            Node::UseStmt(use_stmt) => {
+                append_flattened_import_binding_markers(&mut markers, use_stmt, path, "<entry>");
+            }
+            Node::MultiUse(multi_use) => {
+                for (module_path, target) in &multi_use.imports {
+                    let temp_use = UseStmt {
+                        span: multi_use.span,
+                        path: module_path.clone(),
+                        target: target.clone(),
+                        is_type_only: multi_use.is_type_only,
+                        is_lazy: false,
+                    };
+                    append_flattened_import_binding_markers(&mut markers, &temp_use, path, "<entry>");
+                }
+            }
+            _ => {}
+        }
+    }
+    module.items.splice(0..0, markers);
 }
 
 /// Diagnostic: warn when two or more co-compiled top-level free functions share a

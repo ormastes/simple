@@ -291,6 +291,10 @@ pub struct CowEnv {
     forwarded_globals: HashMap<(Arc<str>, String), Value>,
     /// Local global name to defining module/name, including imported aliases.
     global_bindings: HashMap<String, (Arc<str>, String)>,
+    /// Names written through this frame since the last `clear_dirty()`.
+    /// Distinguishes actual frame writes from values merely present in a
+    /// cloned environment, so block/closure write-back can be dirty-only.
+    dirty_names: HashSet<String>,
 }
 
 impl CowEnv {
@@ -305,6 +309,7 @@ impl CowEnv {
             refreshed_globals: HashSet::new(),
             forwarded_globals: HashMap::new(),
             global_bindings: HashMap::new(),
+            dirty_names: HashSet::new(),
         }
     }
 
@@ -326,6 +331,7 @@ impl CowEnv {
     pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
         self.tombstones.remove(&key);
         self.refreshed_globals.remove(&key);
+        self.dirty_names.insert(key.clone());
         self.overlay.insert(key, value)
     }
 
@@ -363,6 +369,7 @@ impl CowEnv {
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
         if self.overlay.contains_key(key) {
             self.refreshed_globals.remove(key);
+            self.dirty_names.insert(key.to_string());
             return self.overlay.get_mut(key);
         }
         if self.tombstones.contains(key) {
@@ -375,6 +382,7 @@ impl CowEnv {
         if let Some(v) = promoted {
             self.overlay.insert(key.to_string(), v);
             self.refreshed_globals.remove(key);
+            self.dirty_names.insert(key.to_string());
             return self.overlay.get_mut(key);
         }
         None
@@ -510,6 +518,14 @@ impl CowEnv {
         self.refreshed_globals.contains(name)
     }
 
+    /// Overlay entries that were refreshed from the global store (callee
+    /// sync), as opposed to written by this frame.
+    pub fn refreshed_global_entries(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.overlay
+            .iter()
+            .filter(|(name, _)| self.refreshed_globals.contains(name.as_str()))
+    }
+
     pub fn forward_globals<I: IntoIterator<Item = (String, Value)>>(&mut self, owner: Arc<str>, iter: I) {
         for (name, value) in iter {
             self.forwarded_globals.insert((Arc::clone(&owner), name), value);
@@ -532,6 +548,43 @@ impl CowEnv {
 
     pub fn global_bindings(&self) -> impl Iterator<Item = (&String, &(Arc<str>, String))> {
         self.global_bindings.iter()
+    }
+
+    /// Names written through this frame since the last `clear_dirty()`.
+    pub fn dirty_names(&self) -> impl Iterator<Item = &String> {
+        self.dirty_names.iter()
+    }
+
+    /// Reset dirty tracking; call right after cloning an env into a frame so
+    /// only writes made by that frame count as dirty.
+    pub fn clear_dirty(&mut self) {
+        self.dirty_names.clear();
+    }
+
+    /// Project a subset of names into a fresh env, preserving global-binding
+    /// and refreshed-global metadata. Selective lambda capture MUST use this
+    /// instead of a plain name->value map: `from_map` demotes an imported
+    /// global alias to a local-looking value, losing its defining owner —
+    /// the exact metadata-loss path behind the stage-4 stale-arena reads.
+    pub fn project_preserving_bindings(&self, names: &HashSet<String>) -> CowEnv {
+        let mut env = CowEnv::new();
+        for (k, v) in self.iter() {
+            if names.contains(k.as_str()) {
+                env.overlay.insert(k.clone(), v.clone());
+            }
+        }
+        for (local_name, (owner, source_name)) in &self.global_bindings {
+            if names.contains(local_name.as_str()) {
+                env.global_bindings
+                    .insert(local_name.clone(), (Arc::clone(owner), source_name.clone()));
+            }
+        }
+        for name in &self.refreshed_globals {
+            if names.contains(name.as_str()) && env.overlay.contains_key(name.as_str()) {
+                env.refreshed_globals.insert(name.clone());
+            }
+        }
+        env
     }
 
     pub fn refresh_bound_global(&mut self, owner: &Arc<str>, source_name: &str, value: Value) -> bool {
@@ -558,6 +611,7 @@ impl CowEnv {
             refreshed_globals: HashSet::new(),
             forwarded_globals: HashMap::new(),
             global_bindings: HashMap::new(),
+            dirty_names: HashSet::new(),
         }
     }
 
@@ -572,6 +626,7 @@ impl CowEnv {
             refreshed_globals: HashSet::new(),
             forwarded_globals: HashMap::new(),
             global_bindings: HashMap::new(),
+            dirty_names: HashSet::new(),
         }
     }
 
@@ -605,6 +660,7 @@ impl CowEnv {
         self.refreshed_globals.clear();
         self.forwarded_globals.clear();
         self.global_bindings.clear();
+        self.dirty_names.clear();
         if let Some(ref base) = self.base {
             // Tombstone all base keys
             self.tombstones = base.keys().cloned().collect();
@@ -615,6 +671,7 @@ impl CowEnv {
     /// If the key exists in base but not overlay, copy it to overlay first.
     pub fn entry(&mut self, key: String) -> std::collections::hash_map::Entry<'_, String, Value> {
         self.refreshed_globals.remove(&key);
+        self.dirty_names.insert(key.clone());
         // If key is in base but not in overlay, promote it
         if !self.overlay.contains_key(&key) && !self.tombstones.contains(&key) {
             if let Some(ref base) = self.base {
@@ -645,6 +702,7 @@ impl Clone for CowEnv {
             refreshed_globals: self.refreshed_globals.clone(),
             forwarded_globals: self.forwarded_globals.clone(),
             global_bindings: self.global_bindings.clone(),
+            dirty_names: self.dirty_names.clone(),
         }
     }
 }

@@ -156,6 +156,34 @@ pub(crate) fn exec_block(
     Ok(Control::Next)
 }
 
+/// Dirty-only write-back from a cloned block env to its outer env.
+/// Three channels, kept distinct on purpose:
+/// - names the block actually wrote -> plain caller-visible writes;
+/// - names a callee refreshed from the global store -> refresh (NOT writes,
+///   or they would be re-published upward as this frame's own mutations);
+/// - forwarded owner-qualified updates -> forwarded onward.
+/// Copying every shared key instead (the old behavior) replays the clone's
+/// stale snapshot over values a deeper call wrote after the clone was taken.
+pub(crate) fn copy_back_block_writes(block_env: &Env, env: &mut Env) {
+    let dirty: Vec<String> = block_env.dirty_names().cloned().collect();
+    for key in dirty {
+        if env.contains_key(&key) && !block_env.is_refreshed_global(&key) {
+            if let Some(value) = block_env.get(&key) {
+                env.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let refreshed: Vec<(String, Value)> = block_env
+        .refreshed_global_entries()
+        .filter(|(name, _)| env.contains_key(name.as_str()) && !env.is_local(name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    env.refresh_globals(refreshed);
+    for ((owner, name), value) in block_env.forwarded_globals() {
+        env.forward_globals(std::sync::Arc::clone(owner), [(name.clone(), value.clone())]);
+    }
+}
+
 pub(crate) fn exec_unsafe_block(
     nodes: &[Node],
     env: &mut Env,
@@ -165,16 +193,15 @@ pub(crate) fn exec_unsafe_block(
     impl_methods: &ImplMethods,
 ) -> Result<(Control, Option<Value>), CompileError> {
     let mut block_env = env.clone();
+    // Dirty-only write-back (see interpreter/expr/control.rs if-closure path):
+    // copying every shared key replays stale cloned values over newer writes.
+    block_env.clear_dirty();
     let block = Block {
         statements: nodes.to_vec(),
         ..Default::default()
     };
     let result = exec_block_fn(&block, &mut block_env, functions, classes, enums, impl_methods)?;
-    for (key, value) in &block_env {
-        if env.contains_key(key) {
-            env.insert(key.clone(), value.clone());
-        }
-    }
+    copy_back_block_writes(&block_env, env);
     Ok(result)
 }
 
