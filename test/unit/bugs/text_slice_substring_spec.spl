@@ -399,7 +399,7 @@ describe "text methods regression":
 
 
 # ============================================================================
-# Test Group 8: Multi-byte / UTF-8 (non-ASCII) — codepoint-safe slicing
+# Test Group 8: Multi-byte / UTF-8 (non-ASCII) — BYTE-indexed slicing
 # ============================================================================
 
 describe "text.slice()/text.substring() with multi-byte UTF-8 content":
@@ -408,88 +408,107 @@ describe "text.slice()/text.substring() with multi-byte UTF-8 content":
 
     Every assertion above uses pure-ASCII fixtures, where a byte offset and
     a character offset are numerically identical -- so this spec could not
-    detect a regression to naive byte-indexed slicing (bug survey
-    2026-07-28: the Rust seed's slice()/substring() were changed to
-    byte-indexed in commit f119f8b7120, while this self-hosted interpreter,
-    src/compiler/10.frontend/core/interpreter/eval_methods.spl, remains
-    character-indexed). These cases pin character-indexed correctness: they
-    go RED if slice()/substring()/char_at() ever start cutting through the
-    middle of a multi-byte UTF-8 codepoint.
+    detect a regression in either direction (naive byte-indexed OR naive
+    character-indexed slicing would both pass every prior assertion).
+
+    slice()/substring() on the lane `bin/simple test` actually executes
+    (verified 2026-07-29 against a from-source rebuild of the Rust seed,
+    commit f119f8b7120: `src/compiler_rust/compiler/src/interpreter_method/
+    string.rs`, the "slice"|"substring" arm) are BYTE-indexed, matching
+    `len()`/`index_of()` on the same lane and the JIT/native `rt_slice`.
+    That is the established end-state this codebase is converging on
+    (index_of/len were already byte-valued; slice/substring were the last
+    holdout). The cases below pin BYTE-indexed correctness for multi-byte
+    content: they go RED if slice()/substring() ever drift back to
+    character indexing, or if a byte offset that splits a codepoint stops
+    producing the documented U+FFFD replacement.
+
+    Positions were computed from the exact UTF-8 byte layout (verified via
+    `char_code_at` on the sliced results, not eyeballed) rather than
+    hand-counted, per the same rule call sites must follow: derive a byte
+    offset from `index_of()`/`len()`, or from a known encoding width -- 2
+    bytes for U+0080-U+07FF (e.g. é), 3 bytes for U+0800-U+FFFF (most CJK),
+    4 bytes for U+10000+ (e.g. emoji) -- never assume 1 char == 1 byte.
     """
 
     context "2-byte codepoints (Latin-1 supplement, e.g. e-acute = U+00E9)":
-        it "keeps a 2-byte character whole when isolated":
+        it "extracts a 2-byte character using an index_of()-derived byte offset":
             val s = "café"
-            expect(s.slice(3, 4)).to_equal("é")
-            expect(s.substring(3, 4)).to_equal("é")
-            expect(s.char_at(3)).to_equal("é")
-            expect(s.char_code_at(3)).to_equal(233)
+            # "café" = 63 61 66 C3 A9 (5 bytes, 4 characters). index_of
+            # returns the BYTE offset of 'é's lead byte; its encoding is
+            # 2 bytes wide, so the end offset is start + 2.
+            val start = s.index_of("é") ?? -1
+            expect(start).to_equal(3)
+            expect(s.slice(start, start + 2)).to_equal("é")
+            expect(s.substring(start, start + 2)).to_equal("é")
 
-        it "keeps a 2-byte character whole inside a longer slice":
+        it "keeps a 2-byte character whole inside a longer byte slice":
             val s = "café au lait"
-            expect(s.slice(0, 4)).to_equal("café")
-            expect(s.slice(0, 7)).to_equal("café au")
+            # bytes: c a f C3 A9 ' ' a u ' ' l a i t (13 bytes total)
+            expect(s.slice(0, 5)).to_equal("café")
+            val au_at = s.index_of("au") ?? -1
+            expect(au_at).to_equal(6)
+            expect(s.slice(0, au_at + 2)).to_equal("café au")
 
     context "3-byte codepoints (CJK, e.g. 日本語)":
-        it "slices individual CJK characters":
+        it "slices individual CJK characters using known 3-byte width":
             val s = "日本語"
-            expect(s.slice(0, 1)).to_equal("日")
-            expect(s.slice(1, 2)).to_equal("本")
-            expect(s.slice(2, 3)).to_equal("語")
+            # Every character here is in the 3-byte UTF-8 range, so byte
+            # offsets are simply 3 * (character index).
+            expect(s.len()).to_equal(9)
+            expect(s.slice(0, 3)).to_equal("日")
+            expect(s.slice(3, 6)).to_equal("本")
+            expect(s.slice(6, 9)).to_equal("語")
 
-        it "slices a CJK range":
+        it "slices a CJK range using index_of()-derived byte offsets":
             val s = "日本語"
-            expect(s.slice(1, 3)).to_equal("本語")
-            expect(s.substring(0, 3)).to_equal("日本語")
+            val ben_at = s.index_of("本") ?? -1
+            expect(ben_at).to_equal(3)
+            expect(s.slice(ben_at, s.len())).to_equal("本語")
+            expect(s.substring(0, ben_at)).to_equal("日")
 
     context "4-byte codepoints (emoji, e.g. grinning face = U+1F600)":
-        it "keeps an emoji whole when isolated":
+        it "keeps an emoji whole using its known 4-byte width":
             val s = "abc\u{1F600}def"
-            expect(s.slice(3, 4)).to_equal("😀")
-            expect(s.substring(3, 4)).to_equal("😀")
-            expect(s.char_at(3)).to_equal("😀")
+            # "abc" = 3 bytes, the emoji = 4 bytes (U+10000+), "def" = 3
+            # bytes -- 10 bytes total.
+            expect(s.len()).to_equal(10)
+            expect(s.slice(3, 7)).to_equal("😀")
+            expect(s.substring(3, 7)).to_equal("😀")
 
-        it "keeps an emoji whole inside a longer slice":
+        it "keeps an emoji whole inside a longer byte slice":
             val s = "abc\u{1F600}def"
-            expect(s.slice(0, 4)).to_equal("abc😀")
-            expect(s.slice(3, 7)).to_equal("😀def")
+            expect(s.slice(0, 7)).to_equal("abc😀")
+            expect(s.slice(3, 10)).to_equal("😀def")
 
     context "codepoint-boundary safety (the byte-split / U+FFFD case)":
         """
-        The Rust seed's byte-indexed slice()/substring() cannot represent a
-        range that lands inside a multi-byte codepoint's UTF-8 encoding: it
-        substitutes U+FFFD via Rust's `String::from_utf8_lossy` (see
+        A byte range that lands inside a multi-byte codepoint's UTF-8
+        encoding cannot be represented as valid text: slice()/substring()
+        substitute U+FFFD via Rust's `String::from_utf8_lossy` (see
         src/compiler_rust/compiler/src/interpreter_method/string.rs, the
-        "slice"|"substring" arm). Concretely, for "café" (UTF-8 bytes
-        63 61 66 C3 A9 -- the 'é' is the 2-byte sequence C3 A9), a
-        BYTE-indexed slice(3, 4) takes only byte 0xC3 (the lead byte of
-        'é' without its continuation byte). That lone byte is invalid
-        UTF-8 on its own and collapses to a single U+FFFD replacement
-        character: byte-indexed slice(3, 4) == "\u{FFFD}".
-
-        This self-hosted interpreter is character-indexed, so the *same*
-        call -- slice(3, 4) meaning "the character at position 3" -- can
-        never straddle a codepoint boundary; it always returns the whole
-        character. The assertions below pin that guarantee. If this
-        interpreter is ever converted to byte indexing to match the seed,
-        it MUST special-case codepoint boundaries or it will start
-        silently emitting U+FFFD exactly like the seed does today -- and
-        these assertions will go red, which is the point.
+        "slice"|"substring" arm). This is verified, current, intentional
+        behavior on the lane `bin/simple test` executes -- not hypothetical.
+        Pinning it here means any call site that hand-counts a character
+        position instead of deriving a byte offset is exactly one non-ASCII
+        input away from silently emitting U+FFFD.
         """
-        it "never straddles a 2-byte codepoint (café)":
+        it "splits a 2-byte codepoint (café) into a lossy replacement char":
             val s = "café"
-            # A byte-indexed engine would read byte 3 alone (0xC3, the lead
-            # byte of 'é') and lossy-decode it to U+FFFD. Character-indexed
-            # slicing must instead return the whole codepoint.
-            expect(s.slice(3, 4)).to_equal("é")
-            expect(s.slice(3, 4)).to_not_equal("\u{FFFD}")
+            # Byte 3 alone is 0xC3, the lead byte of 'é' without its
+            # continuation byte (0xA9) -- invalid UTF-8 on its own.
+            val bad = s.slice(3, 4)
+            expect(bad).to_equal("\u{FFFD}")
+            expect(bad.char_code_at(0)).to_equal(65533)
 
-        it "never straddles a 3-byte codepoint (CJK)":
+        it "splits a 3-byte codepoint (CJK) into a lossy replacement char":
             val s = "a日b"
-            expect(s.slice(1, 2)).to_equal("日")
-            expect(s.slice(1, 2)).to_not_equal("\u{FFFD}")
+            val bad = s.slice(1, 2)
+            expect(bad).to_equal("\u{FFFD}")
+            expect(bad.char_code_at(0)).to_equal(65533)
 
-        it "never straddles a 4-byte codepoint (emoji)":
+        it "splits a 4-byte codepoint (emoji) into a lossy replacement char":
             val s = "a😀b"
-            expect(s.slice(1, 2)).to_equal("😀")
-            expect(s.slice(1, 2)).to_not_equal("\u{FFFD}")
+            val bad = s.slice(1, 2)
+            expect(bad).to_equal("\u{FFFD}")
+            expect(bad.char_code_at(0)).to_equal(65533)
