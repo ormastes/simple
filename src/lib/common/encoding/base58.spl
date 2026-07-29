@@ -67,8 +67,25 @@ fn _b58_alpha_index_ord(char_ord: i64) -> i64:
         return 44 + (char_ord - 109)
     -1
 
-fn _b58_list_all_zero(lst: list) -> bool:
-    """Return true if all elements in list are zero."""
+fn _b58_list_all_zero(lst: [i64]) -> bool:
+    """Return true if all elements in list are zero.
+    reason: positional base58 encode all-digits-consumed check"""
+    # `lst: [i64]`, not the untyped `list` type -- a `list`-typed function
+    # PARAMETER is a third, independently-proven trigger for the campaign's
+    # `<<3` tag-box miscompile (see
+    # doc/08_tracking/bug/sha256_bytes_engine_divergence_rootcause_2026-07-29.md):
+    # under the default engine, reading `lst[i]` inside a callee whose
+    # parameter is declared `list` applies a spurious left-shift-by-3
+    # BEFORE this function even runs, for EVERY caller shape tested
+    # (a genuine untyped `list` argument built via `.push()`, and a typed
+    # `[i64]` argument alike) -- e.g. element value 32 reads back as
+    # `(32<<3)&0xFF == 0`. That silently made this exact function return
+    # `true` ("all zero") for `[32]`, so `base58_encode([32])` returned ""
+    # instead of "Z" -- a real, previously-undetected, silent-corruption
+    # security bug (confirmed against an independent python3 base58
+    # encoder), not hypothetical. Typing the parameter concretely as
+    # `[i64]` (matching every real caller) avoids the trigger entirely
+    # (proved safe in isolation for the `[i64]`-typed-parameter shape).
     var i = 0
     while i < lst.len():
         if (lst[i] & 0xFF) != 0:
@@ -76,18 +93,31 @@ fn _b58_list_all_zero(lst: list) -> bool:
         i = i + 1
     true
 
-fn _b58_u8arr_to_list(bytes: [u8]) -> list:
-    """Convert [u8] to untyped list for sha256_bytes interface.
+fn _b58_u8arr_to_list(bytes: [u8]) -> [i64]:
+    """Convert [u8] to an [i64] byte-value array for sha256_bytes.
     reason: positional base58 sha256 bridge"""
-    var l = []
+    # Was `-> list` (untyped). Retyped to `[i64]` for the same reason as
+    # `_b58_list_all_zero` above -- eliminates the untyped `list` type from
+    # this file entirely rather than relying on any one crossing direction
+    # happening to test safe.
+    var l: [i64] = []
     var i = 0
     while i < bytes.len():
         l.push(bytes[i].to_i64() & 0xFF)
         i = i + 1
     l
 
-fn _b58_list_get_byte(l: list, i: i64) -> i64:
-    """Get element i from untyped list as i64 byte value."""
+fn _b58_list_get_byte(l: [i64], i: i64) -> i64:
+    """Get element i from an [i64] byte array as an i64 byte value.
+    reason: positional base58check checksum byte extraction"""
+    # Was `l: list` (untyped). This was the exact site of the pass-8
+    # sha256/base58check engine divergence: `_b58_double_sha256_first4`
+    # calls this with `h2` (sha256_bytes's `[i64]` return value); reading
+    # `l[i]` here under a `list`-typed parameter applied the same spurious
+    # `<<3` shift under the default engine, giving a WRONG checksum (and
+    # thus a wrong Base58Check address) while the interpreter was correct
+    # -- see the root-cause doc referenced above. `[i64]` matches the only
+    # real argument type and avoids the trigger.
     l[i] & 0xFF
 
 # ============================================================================
@@ -114,8 +144,10 @@ fn base58_encode(input: [u8]) -> text:
         else:
             counting = false
 
-    # Copy input to an untyped list for in-place indexed assignment
-    var work = []
+    # Copy input to an [i64] array for in-place indexed assignment (was an
+    # untyped `list` -- retyped to match `_b58_list_all_zero`'s now-`[i64]`
+    # parameter; see that function's docstring for why).
+    var work: [i64] = []
     var j = 0
     while j < n:
         work.push(input[j].to_i64() & 0xFF)
