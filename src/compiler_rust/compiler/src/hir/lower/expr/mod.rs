@@ -872,7 +872,10 @@ impl Lowerer {
                         }));
                     }
                 }
-                "is_some" if self.enum_has_variant_for_builtin_method(receiver.ty, "Some") => {
+                "is_some"
+                    if matches!(receiver.ty, TypeId::ANY | TypeId::NIL)
+                        || self.enum_has_variant_for_builtin_method(receiver.ty, "Some") =>
+                {
                     return Ok(Some(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_some".to_string(),
@@ -881,7 +884,10 @@ impl Lowerer {
                         ty: TypeId::BOOL,
                     }));
                 }
-                "is_none" if self.enum_has_variant_for_builtin_method(receiver.ty, "None") => {
+                "is_none"
+                    if matches!(receiver.ty, TypeId::ANY | TypeId::NIL)
+                        || self.enum_has_variant_for_builtin_method(receiver.ty, "None") =>
+                {
                     return Ok(Some(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -890,7 +896,10 @@ impl Lowerer {
                         ty: TypeId::BOOL,
                     }));
                 }
-                "is_ok" if self.enum_has_variant_for_builtin_method(receiver.ty, "Ok") => {
+                "is_ok"
+                    if matches!(receiver.ty, TypeId::ANY | TypeId::NIL)
+                        || self.enum_has_variant_for_builtin_method(receiver.ty, "Ok") =>
+                {
                     return Ok(Some(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_enum_check_discriminant".to_string(),
@@ -905,7 +914,10 @@ impl Lowerer {
                         ty: TypeId::BOOL,
                     }));
                 }
-                "is_err" if self.enum_has_variant_for_builtin_method(receiver.ty, "Err") => {
+                "is_err"
+                    if matches!(receiver.ty, TypeId::ANY | TypeId::NIL)
+                        || self.enum_has_variant_for_builtin_method(receiver.ty, "Err") =>
+                {
                     return Ok(Some(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_enum_check_discriminant".to_string(),
