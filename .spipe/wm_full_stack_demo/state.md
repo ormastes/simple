@@ -324,6 +324,22 @@ implementation-in-progress
   the old artifact emitted no dynamic scanout/readiness, content provenance,
   correlated input/frame, or HDA init/IRQ markers. This is a real QEMU
   boot/display baseline, not evidence for the current source or HDA service.
+- wm-dynamic-window-id: The live demo now retains the compositor-generated
+  window ID and replaces it after pinned-taskbar reopen. GUI/child frames,
+  event routing, lifecycle shortcuts, and cleanup all target that live ID
+  instead of stale window `1`. The scenario asserts a newer reopened ID and
+  maximize/restore through it; live execution remains behind the recorded
+  renderer discovery blocker.
+- simpleos-action-truth: The shared SimpleOS action applier now rejects every
+  non-create action for a nonexistent surface before owner lookup or no-op
+  dispatch. The focused unit scenario covers destroy, focus, resize, move,
+  title, minimize, maximize, restore, and tree update. The Phase 3 compiler has
+  no test command, so these authored assertions remain pending a test runner.
+- sdl2-web-primary-click: The SDL2 Web input bridge now consumes the runtime's
+  normalized `0=left` value, arms click state only for a primary-button down,
+  and cannot turn a right-button press into a later left click. Its isolated
+  production-helper Phase 3 entry probe builds and runs
+  (`WEB UI PRIMARY BUTTON PROBE: PASS`).
 
 ## Remaining runtime gates
 

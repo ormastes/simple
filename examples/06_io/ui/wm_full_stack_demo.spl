@@ -114,12 +114,17 @@ fn main() -> i64:
         "Full Stack WM Demo", 20, 20, 488, 516, "",
         99, WM_FULL_STACK_DEMO_APP_ID
     )
-    if not compositor.require_external_content_frame(1):
+    if compositor.windows.len() != 1:
+        glfw.destroy_window(host_window)
+        glfw.terminate()
+        return 4
+    var demo_window_id = compositor.windows[0].id
+    if not compositor.require_external_content_frame(demo_window_id):
         glfw.destroy_window(host_window)
         glfw.terminate()
         return 4
 
-    var router = HostGuiEventRouter.new(1)
+    var router = HostGuiEventRouter.new(demo_window_id)
     var surface_2d = WmDemo2dState.new()
     var sound = SoundEngine.create(
         SoundEngineConfig.platform("linux", "linux")
@@ -161,13 +166,15 @@ fn main() -> i64:
                     last_height = content_height
                 content_revision = content_revision + 1
                 val gui_frame = gui_session_content_frame(
-                    session, "1", "", 0, 0,
+                    session, demo_window_id.to_text(), "", 0, 0,
                     content_width, content_height,
                     compositor.render_revision,
                     content_revision,
                     [image]
                 )
-                if not compositor.set_external_content_frame(1, gui_frame):
+                if not compositor.set_external_content_frame(
+                    demo_window_id, gui_frame
+                ):
                     print "wm-demo:error:gui-frame-rejected"
                     running = false
 
@@ -177,7 +184,8 @@ fn main() -> i64:
                 )
                 if val rect_2d = find_rect(rects, "demo-surface-2d"):
                     val frame_2d = pixel_surface_content_frame(
-                        "demo-2d", "1", rect_2d.x, rect_2d.y,
+                        "demo-2d", demo_window_id.to_text(), rect_2d.x,
+                        rect_2d.y,
                         rect_2d.w, rect_2d.h,
                         surface_2d.pixels(rect_2d.w, rect_2d.h),
                         compositor.render_revision, content_revision
@@ -188,7 +196,7 @@ fn main() -> i64:
                         rect_web.w, rect_web.h, "software"
                     )
                     val web_frame = simple_web_child_content_frame_cached(
-                        web_cache, "demo-web", "1",
+                        web_cache, "demo-web", demo_window_id.to_text(),
                         rect_web.x, rect_web.y,
                         compositor.render_revision, content_revision,
                         default_theme_id(), "Embedded Web",
@@ -279,19 +287,19 @@ fn main() -> i64:
                             compositor = host_compositor_cycle_focus(compositor)
                             consumed_shortcut = true
                         elif wm_shortcut == WINDOW_WM_SHORTCUT_CLOSE:
-                            compositor.destroy_window(1)
+                            compositor.destroy_window(demo_window_id)
                             consumed_shortcut = true
                         elif wm_shortcut == WINDOW_WM_SHORTCUT_MINIMIZE:
                             compositor.apply_bridge_request(
-                                0, 0, COMP_MINIMIZE.to_i64(), 1,
+                                0, 0, COMP_MINIMIZE.to_i64(), demo_window_id,
                                 "", 0, 0, 0, 0, "", 0, ""
                             )
                             consumed_shortcut = true
                         elif wm_shortcut == WINDOW_WM_SHORTCUT_TOGGLE_MAXIMIZE:
                             if compositor.windows.len() > 0 and compositor.windows[0].maximized:
-                                compositor.restore_window(1)
+                                compositor.restore_window(demo_window_id)
                             else:
-                                compositor.maximize_window(1)
+                                compositor.maximize_window(demo_window_id)
                             consumed_shortcut = true
                         elif ctrl and key == 80:
                             if pinned:
@@ -406,8 +414,11 @@ fn main() -> i64:
                     "Full Stack WM Demo", 20, 20, 488, 516, "",
                     99, WM_FULL_STACK_DEMO_APP_ID
                 )
-                if compositor.require_external_content_frame(1):
-                    router = HostGuiEventRouter.new(1)
+                if compositor.windows.len() == 1:
+                    demo_window_id = compositor.windows[0].id
+                if (compositor.windows.len() == 1 and
+                    compositor.require_external_content_frame(demo_window_id)):
+                    router = HostGuiEventRouter.new(demo_window_id)
                     last_width = 0
                     last_height = 0
                     needs_render = true
@@ -443,7 +454,7 @@ fn main() -> i64:
                 rt_sleep_ms(8)
 
     if compositor.windows.len() > 0:
-        compositor.destroy_window(1)
+        compositor.destroy_window(demo_window_id)
     router.client_pointer_captured = false
     surface_2d.pointer("up", 0, 0)
     ui_click_pcm_release(click_pcm_addr)
