@@ -150,23 +150,28 @@ fn safetychecker_check_block(self: SafetyChecker, block: HirBlock):
 
 fn safetychecker_check_stmt(self: SafetyChecker, stmt: HirStmt):
     """Check a statement for safety violations."""
+    # NOTE: HirStmtKind's real variants are `Expr`, `Let` (covers both `val`
+    # and `var` -- see compiler/hir/hir_definitions.spl:690-695), `Assign`
+    # (target, op, value -- op is embedded, there is no separate `AssignOp`
+    # variant), `Block`, and `AsmAssert`. This match previously matched on
+    # `Val`/`Var`/`AssignOp`, none of which exist as HirStmtKind variants, so
+    # those arms were permanently dead and every `val`/`var` initializer
+    # (and every compound-assignment target/value) silently skipped the
+    # safety walk -- e.g. `val p = rt_alloc(16)` outside `unsafe:` never
+    # reached the Call check at all.
     match stmt.kind:
         case Expr(expr):
             safetychecker_check_expr(self, expr)
 
-        case Val(_, _, init):
+        case Let(_, _, init):
             safetychecker_check_expr(self, init)
 
-        case Var(_, _, init):
-            safetychecker_check_expr(self, init)
-
-        case Assign(target, value):
+        case Assign(target, _, value):
             safetychecker_check_expr(self, target)
             safetychecker_check_expr(self, value)
 
-        case AssignOp(_, target, value):
-            safetychecker_check_expr(self, target)
-            safetychecker_check_expr(self, value)
+        case Block(block):
+            safetychecker_check_block(self, block)
 
         case _:
             pass
