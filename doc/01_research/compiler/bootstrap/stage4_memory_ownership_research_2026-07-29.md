@@ -99,11 +99,27 @@ Debug probe: `SIMPLE_DEBUG_LAMBDA_SYNC=1` prints `[lambda-capture]` /
   tiers 20 → 50 → 100 → 250 → full closure, seed vs pure-Simple on identical
   sources.
 
+## Stage-3 SIGABRT root cause (2026-07-29, lane L7)
+
+First cranelift bootstrap after the lane landings: Stage 2 PASSED, Stage 3
+aborted with `failed to set environment variable "SIMPLE_BOOTSTRAP_EXPR_404_S"
+to "\0"` — Rust `env::set_var` panics on NUL bytes in values. The bootstrap
+env mirror (`SIMPLE_BOOTSTRAP=1`, off when `SIMPLE_NATIVE_ARENA_DECLS=1`)
+copies AST/lexer text fields into env vars; a source string containing a
+literal NUL poisons the write. Readers are env-first/array-fallback with the
+arrays authoritative, so SKIPPING NUL-bearing writes is semantics-preserving.
+Fix landed 455ed8321730: `env_value_nul_free` char-walk guard (never
+`.contains` — C-string truncation on NUL haystacks, lexer_struct ~723) on
+`expr_text_set`/`expr_text_list_set`, `core_token_text_save`/
+`core_token_suffix_save` (also covers previously-unguarded raw-string paths),
+and `LEX_SOURCE`/`LEX_PATH`/`lex_state_set`.
+
 ## Open items
 
 - Retry 12 must run AFTER the lambda/block fixes deploy, with byte + OS
   sampling; success requires zero stale/OOB diagnostics, not just a memory
-  ceiling.
-- vmm ExecutionLimit red (above) — root-cause before trusting Retry 12.
-- Test-harness thread-local isolation (serialize or reset per test).
+  ceiling. Rerun in flight post-NUL-fix.
+- ~~vmm ExecutionLimit red~~ FIXED (lane L1, 89a3fd511edf): MMIO-journal ×
+  per-page quadratic, 34.6M → 19,016 ops.
+- ~~Test-harness thread-local isolation~~ FIXED (lane L2, 941e0b646dd).
 - Plan: `doc/03_plan/compiler/bootstrap/stage4_memory_parallel_agent_plan_2026-07-29.md`.

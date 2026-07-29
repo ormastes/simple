@@ -39,9 +39,22 @@ Done this session (all cargo-verified, suite 27 pass / 2 pre-existing fails):
   lint PARSE001-on-spec false positive bug doc.
 - L6 LANDED 5eef43f775e — arena generation counter + stale-ID diagnostics
   (SIMPLE_AST_GEN_CHECK=1), spec 5/5.
-- L7 IN FLIGHT — full bootstrap (dynload) running with SIMPLE_AST_GEN_CHECK=1
-  + SIMPLE_MEM_SNAPSHOT=1 + 10s max-RSS sampler; multifile parse-memory guard
-  requires the bootstrap-produced provenance candidate, will run after.
+- L7 IN FLIGHT — first cranelift run: Stage 2 PASSED, Stage 3 SIGABRT =
+  Rust env::set_var panic on NUL byte in bootstrap env-mirror value
+  (SIMPLE_BOOTSTRAP_EXPR_404_S = "\0"). Fix LANDED 455ed8321730: char-walk
+  env_value_nul_free guards on expr_text_set/expr_text_list_set (nodes.spl),
+  core_token_text_save/suffix_save + raw-string paths (lexer_struct.spl),
+  LEX_SOURCE/LEX_PATH/lex_state_set (lexer.spl). Mirror is a cache over
+  authoritative arrays (env-first/array-fallback readers) so skips are
+  semantics-preserving. Bootstrap rerun in flight with SIMPLE_AST_GEN_CHECK=1
+  + SIMPLE_MEM_SNAPSHOT=1 + RSS sampler; multifile provenance guard after.
+- Regression sweep (all lanes, post-land): 36/0, 1/0 vmm, 7/0 memory, 1/0 aux,
+  4/0 ctor, 5/5 arena spec, 2/2 gate spec, gate PASS peak_rss_kb=71048.
+- INCIDENT: a stale parallel-session WC had silently reverted L3's
+  collections.rs/dict.rs (deletions-only diff vs origin) — restored from
+  origin blobs; origin was never damaged. Also `jj workspace update-stale`
+  clobbered the (uncommitted) NUL-fix edits; replayed them mechanically from
+  the agent transcript's Edit records. Verify-after-reconcile rule held.
 
 ## Resolved (were "known pre-existing reds")
 Both suite reds fixed by L2 (see above); bug doc updated by commit message.
