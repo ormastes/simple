@@ -2,9 +2,10 @@
 //!
 //! Functions for querying and configuring memory limits for runner threads.
 
+use super::mem_guard;
 use crate::error::CompileError;
 use crate::value::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -45,6 +46,135 @@ fn hosted_free_take(ptr: usize) -> Option<usize> {
 /// Current hosted rt_alloc live bytes (counter-based, exact).
 pub fn hosted_live_alloc_bytes() -> usize {
     HOSTED_LIVE_BYTES.load(Ordering::Relaxed)
+}
+
+// ============================================================================
+// HARDEN mode (SIMPLE_MEM_HARDEN=1): quarantine + poison-on-free
+// ============================================================================
+//
+// Zig-GPA-style debug allocator for the hosted rt_alloc/rt_free path (plan
+// M2 §3). Off by default — `harden_enabled()` is a cached `OnceLock<bool>`
+// read, mirroring `simple_runtime::value::heap`'s `ATTR_ENABLED` pattern, so
+// the off path costs one bool check before the existing free.
+//
+// On free: poison the block (0xDE bytes, distinct from GC white/gray/black
+// flag bits) and defer the real `dealloc` through a bounded FIFO ring
+// (capacity by BOTH slot count and byte budget) instead of freeing
+// immediately, so a read-after-free from a stale pointer reads poison
+// instead of silently working — and `rt_mem_harden_check()` can detect a
+// *write*-after-free by finding a quarantined block whose bytes no longer
+// match the poison pattern.
+
+const HARDEN_POISON_BYTE: u8 = 0xDE;
+/// Ring capacity by slot count (plan: "e.g. 256 slots").
+const QUARANTINE_MAX_SLOTS: usize = 256;
+/// Ring capacity by bytes (plan: "1MB cap") — bounds one huge free from
+/// starving the ring, independent of the slot-count cap.
+const QUARANTINE_MAX_BYTES: usize = 1024 * 1024;
+
+static HARDEN_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// Cached `SIMPLE_MEM_HARDEN=1` gate — read once, never per-alloc.
+fn harden_enabled() -> bool {
+    *HARDEN_ENABLED.get_or_init(|| std::env::var("SIMPLE_MEM_HARDEN").map(|v| v == "1").unwrap_or(false))
+}
+
+/// Programmatic enable, for tests only (the M3 `--mem-infra=harden` CLI path
+/// is a separate milestone). Mirrors
+/// `simple_runtime::value::heap::mem_attr_enable`'s `OnceLock::set` shape —
+/// must run before the first `rt_free` call to win the race, later calls are
+/// no-ops.
+#[cfg(test)]
+fn mem_harden_enable() {
+    let _ = HARDEN_ENABLED.set(true);
+}
+
+struct QuarantineEntry {
+    ptr: usize,
+    size: usize,
+}
+
+#[derive(Default)]
+struct QuarantineState {
+    ring: VecDeque<QuarantineEntry>,
+    bytes: usize,
+}
+
+static QUARANTINE: OnceLock<Mutex<QuarantineState>> = OnceLock::new();
+
+fn quarantine() -> &'static Mutex<QuarantineState> {
+    QUARANTINE.get_or_init(|| Mutex::new(QuarantineState::default()))
+}
+
+/// True if `ptr` currently sits in the quarantine ring (freed, not yet
+/// really deallocated) — used to give double-free-of-a-quarantined-block the
+/// same refusal as any other double free.
+fn quarantine_contains(ptr: usize) -> bool {
+    quarantine()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .ring
+        .iter()
+        .any(|e| e.ptr == ptr)
+}
+
+/// Poison `size` bytes at `ptr` and push onto the quarantine ring, evicting
+/// (and genuinely deallocating, `Layout::from_size_align(size, 8)` — the
+/// same alignment `rt_alloc` always uses) the oldest entries once either cap
+/// is exceeded. `ptr`/`size` must be a just-removed `hosted_alloc_sizes`
+/// entry (i.e. `rt_alloc` produced it and it has not already been freed).
+fn harden_quarantine_free(ptr: usize, size: usize) {
+    unsafe {
+        std::ptr::write_bytes(ptr as *mut u8, HARDEN_POISON_BYTE, size);
+    }
+    let mut q = quarantine().lock().unwrap_or_else(|e| e.into_inner());
+    q.ring.push_back(QuarantineEntry { ptr, size });
+    q.bytes += size;
+    while q.ring.len() > QUARANTINE_MAX_SLOTS || q.bytes > QUARANTINE_MAX_BYTES {
+        let Some(evicted) = q.ring.pop_front() else { break };
+        q.bytes -= evicted.size;
+        if let Ok(layout) = std::alloc::Layout::from_size_align(evicted.size, 8) {
+            unsafe {
+                std::alloc::dealloc(evicted.ptr as *mut u8, layout);
+            }
+        }
+    }
+}
+
+/// Write-after-free detector: scan every quarantined block for bytes that no
+/// longer match the poison pattern. Returns the count of tampered blocks (0
+/// = clean). Always 0 when harden is off.
+///
+/// Callable from Simple as: `rt_mem_harden_check() -> i64`
+pub fn rt_mem_harden_check(_args: &[Value]) -> Result<Value, CompileError> {
+    if !harden_enabled() {
+        return Ok(Value::Int(0));
+    }
+    let q = quarantine().lock().unwrap_or_else(|e| e.into_inner());
+    let mut tampered = 0i64;
+    for entry in q.ring.iter() {
+        let bytes = unsafe { std::slice::from_raw_parts(entry.ptr as *const u8, entry.size) };
+        if bytes.iter().any(|&b| b != HARDEN_POISON_BYTE) {
+            tampered += 1;
+        }
+    }
+    Ok(Value::Int(tampered))
+}
+
+// ============================================================================
+// GUARD mode (SIMPLE_MEM_GUARD_RATE=N): sampled guard-paged slots
+// ============================================================================
+//
+// Thin extern surface over `mem_guard` — the mmap/mprotect mechanics live
+// there (plan M2 §1-2); this module only owns the rt_alloc/rt_free hook
+// points and the stats extern.
+
+/// Sampled-allocation count so far (extern `rt_mem_guard_stats`). 0 whenever
+/// `SIMPLE_MEM_GUARD_RATE` is unset — the zero-overhead-off default.
+///
+/// Callable from Simple as: `rt_mem_guard_stats() -> i64`
+pub fn rt_mem_guard_stats(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(mem_guard::guard_sampled_count()))
 }
 
 // ============================================================================
@@ -129,6 +259,28 @@ pub fn memory_usage(_args: &[Value]) -> Result<Value, CompileError> {
 /// Return the hosted runtime's live heap-registry entry count.
 pub fn rt_heap_registry_count(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_registry_count()))
+}
+
+/// Live header bytes for one `HeapObjectType` tag (0 for out-of-range kinds).
+///
+/// Callable from Simple as: `rt_heap_live_bytes_by_kind(kind: i64) -> i64`
+pub fn rt_heap_live_bytes_by_kind(args: &[Value]) -> Result<Value, CompileError> {
+    let kind = match args.first() {
+        Some(Value::Int(k)) => *k,
+        _ => return Ok(Value::Int(0)),
+    };
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes_by_kind(kind)))
+}
+
+/// Live object count for one `HeapObjectType` tag (0 for out-of-range kinds).
+///
+/// Callable from Simple as: `rt_heap_live_count_by_kind(kind: i64) -> i64`
+pub fn rt_heap_live_count_by_kind(args: &[Value]) -> Result<Value, CompileError> {
+    let kind = match args.first() {
+        Some(Value::Int(k)) => *k,
+        _ => return Ok(Value::Int(0)),
+    };
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_count_by_kind(kind)))
 }
 
 /// Dispatch a hosted-runtime transient parser-array scope operation.
@@ -407,6 +559,15 @@ pub fn rt_alloc(args: &[Value]) -> Result<Value, CompileError> {
     if size == 0 {
         return Ok(Value::Int(0));
     }
+    // GUARD mode: 1-in-N sampled allocations land on their own guard-paged
+    // mmap slot instead of the normal allocator. Falls through to the
+    // normal path on mmap/mprotect failure rather than failing the alloc.
+    if mem_guard::mem_guard_should_sample(size) {
+        let owner = simple_runtime::value::heap::current_owner_id();
+        if let Some(ptr) = mem_guard::guard_alloc_sampled(size, owner) {
+            return Ok(Value::Int(ptr as i64));
+        }
+    }
     let layout =
         std::alloc::Layout::from_size_align(size, 8).map_err(|_| CompileError::runtime("rt_alloc: invalid size"))?;
     unsafe {
@@ -435,10 +596,24 @@ pub fn rt_free(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Nil);
     }
     let ptr = ptr_val as usize;
+    // GUARD mode: sampled pointers never went through hosted_alloc_sizes —
+    // mprotect(PROT_NONE) the slot (UAF trap) instead of deallocating.
+    // A double free here is refused by guard_free_sampled itself.
+    if mem_guard::guard_is_slot(ptr) {
+        mem_guard::guard_free_sampled(ptr);
+        return Ok(Value::Nil);
+    }
     let Some(size) = hosted_free_take(ptr) else {
-        // Double free or foreign pointer — refuse (do not touch the allocator).
+        // Double free (including of an already-quarantined block) or a
+        // foreign pointer — refuse (do not touch the allocator).
         return Ok(Value::Nil);
     };
+    // HARDEN mode: poison + defer the real free through the quarantine ring
+    // instead of deallocating now.
+    if harden_enabled() {
+        harden_quarantine_free(ptr, size);
+        return Ok(Value::Nil);
+    }
     // Layout mirrors rt_alloc (align 8); size came from the metadata map.
     let layout = std::alloc::Layout::from_size_align(size, 8)
         .map_err(|_| CompileError::runtime("rt_free: corrupt allocation metadata"))?;
@@ -698,5 +873,69 @@ mod tests {
         assert_ne!(features & MEM_PROFILE_FEATURE_HOSTED_ALLOC_METADATA, 0);
         #[cfg(target_os = "linux")]
         assert_ne!(features & MEM_PROFILE_FEATURE_REAL_MEMORY_USAGE, 0);
+    }
+
+    // ========================================================================
+    // HARDEN mode (SIMPLE_MEM_HARDEN=1): quarantine + poison-on-free (M2 §3)
+    // ========================================================================
+
+    #[test]
+    fn harden_quarantine_catches_write_after_free() {
+        mem_harden_enable();
+        let ptr = alloc(64);
+        assert_ne!(ptr, 0);
+        assert!(!quarantine_contains(ptr as usize), "not quarantined before free");
+
+        rt_free(&[Value::Int(ptr)]).unwrap();
+        // Freed pointer must be gone from the live map (same observable
+        // contract as the non-harden path) but the block itself is NOT
+        // really deallocated yet — it sits in the quarantine ring.
+        assert!(!map_contains(ptr), "freed pointer must leave the live metadata map");
+        assert!(quarantine_contains(ptr as usize), "freed block must enter the quarantine ring");
+
+        // Read-after-free: the block is poisoned (0xDE), not garbage/reused.
+        let byte = unsafe { std::ptr::read(ptr as *const u8) };
+        assert_eq!(byte, HARDEN_POISON_BYTE, "quarantined block must read as poison before tampering");
+        assert_eq!(rt_mem_harden_check(&[]).unwrap().as_int().unwrap(), 0, "untouched quarantine must report clean");
+
+        // Write-after-free: tamper one byte through the stale pointer.
+        unsafe {
+            std::ptr::write(ptr as *mut u8, 0x41);
+        }
+        let tampered = rt_mem_harden_check(&[]).unwrap().as_int().unwrap();
+        assert!(tampered >= 1, "rt_mem_harden_check must report >=1 tampered block, got {tampered}");
+
+        // Double free of a quarantined (not really-freed) block must still
+        // be refused, not touch the allocator.
+        assert!(rt_free(&[Value::Int(ptr)]).is_ok());
+    }
+
+    #[test]
+    fn harden_quarantine_reuse_impossible_before_eviction() {
+        mem_harden_enable();
+        let ptr = alloc(32);
+        rt_free(&[Value::Int(ptr)]).unwrap();
+        // A fresh allocation of the same size must not reuse the still-quarantined
+        // block's address — the real `dealloc` for it has not happened yet, so
+        // the system allocator cannot have handed the address back out.
+        let ptr2 = alloc(32);
+        assert_ne!(ptr, 0);
+        assert_ne!(ptr2, 0);
+        assert_ne!(ptr, ptr2, "quarantined block's address must not be reused before ring eviction");
+        rt_free(&[Value::Int(ptr2)]).unwrap();
+    }
+
+    // ========================================================================
+    // GUARD mode (SIMPLE_MEM_GUARD_RATE=N): sampled guard-paged slots (M2 §1-2)
+    // ========================================================================
+
+    #[test]
+    fn rt_mem_guard_stats_extern_returns_a_count() {
+        // Off by default (no env set in this process): count is a
+        // non-negative counter, and calling the extern never panics/errors.
+        // (mem_guard's own unit tests cover the sampled-alloc bookkeeping in
+        // detail; this just exercises the extern wiring end to end.)
+        let count = rt_mem_guard_stats(&[]).unwrap().as_int().unwrap();
+        assert!(count >= 0);
     }
 }

@@ -77,6 +77,7 @@ pub mod gpu;
 pub mod gpu_rocm;
 pub mod simd;
 pub mod diagram;
+pub mod mem_guard;
 pub mod memory;
 pub mod cli;
 pub mod cargo;
@@ -299,11 +300,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("memory_usage", memory::memory_usage);
     insert_simple!("memory_usage_percent", memory::memory_usage_percent);
     insert_simple!("rt_heap_registry_count", memory::rt_heap_registry_count);
+    insert_simple!("rt_heap_live_bytes_by_kind", memory::rt_heap_live_bytes_by_kind);
+    insert_simple!("rt_heap_live_count_by_kind", memory::rt_heap_live_count_by_kind);
     insert_simple!("rt_mem_profile_abi_version", memory::rt_mem_profile_abi_version);
     insert_simple!("rt_mem_profile_features", memory::rt_mem_profile_features);
     insert_simple!("rt_mem_attr_enabled", memory::rt_mem_attr_enabled);
     insert_simple!("rt_mem_attr_set_owner", memory::rt_mem_attr_set_owner);
     insert_simple!("rt_mem_attr_report", memory::rt_mem_attr_report);
+    insert_simple!("rt_mem_harden_check", memory::rt_mem_harden_check);
+    insert_simple!("rt_mem_guard_stats", memory::rt_mem_guard_stats);
     insert_simple!(
         "rt_transient_array_scope_begin",
         memory::rt_transient_array_scope_begin

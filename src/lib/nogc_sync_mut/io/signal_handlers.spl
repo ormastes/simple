@@ -24,8 +24,9 @@ use std.nogc_sync_mut.io.signal_stubs.{rt_signal_handler_available, rt_signal_ha
 
 val SIGHUP = 1    # Hangup (terminal closed)
 val SIGINT = 2    # Interrupt (Ctrl+C)
-val SIGTERM = 15  # Termination request
 val SIGKILL = 9   # Kill (cannot be caught)
+val SIGUSR2 = 12  # User-defined signal 2 (e.g. live memory-dump trigger)
+val SIGTERM = 15  # Termination request
 
 # ============================================================================
 # Global Cleanup Handler Reference
@@ -34,6 +35,11 @@ val SIGKILL = 9   # Kill (cannot be caught)
 # NOTE: This needs to be set by the test runner before installing handlers
 var _global_cleanup_handler: fn() = default_cleanup_handler
 var _signal_handlers_installed: bool = false
+
+# User-suppliable SIGUSR2 handler (e.g. mem.dump.install_mem_dump_on_usr2).
+# Unlike the cleanup handler, SIGUSR2 handling never exits the process.
+var _sigusr2_handler: fn() = default_cleanup_handler
+var _sigusr2_handler_installed: bool = false
 
 fn default_cleanup_handler():
     ()
@@ -79,6 +85,34 @@ fn install_signal_handlers(cleanup_handler: fn()) -> bool:
     val hup_installed = rt_signal_handler_install(SIGHUP, on_sighup)
     val installed = int_installed and term_installed and hup_installed
     _signal_handlers_installed = installed
+    installed
+
+fn install_sigusr2_handler(handler: fn()) -> bool:
+    """
+    Install a SIGUSR2 handler with a user-suppliable callback.
+
+    Unlike install_signal_handlers, this does NOT terminate the process --
+    SIGUSR2 is meant for live in-process triggers (e.g. dumping a memory
+    snapshot to a well-known path) while the program keeps running.
+
+    Args:
+        handler: Function to call when SIGUSR2 is received
+
+    Returns: true if the handler installed, false if SFFI not available
+
+    Usage:
+        install_sigusr2_handler(fn(): dump_snapshot())
+    """
+    if not rt_signal_handler_available():
+        return false
+
+    _sigusr2_handler = handler
+
+    if _sigusr2_handler_installed:
+        return true
+
+    val installed = rt_signal_handler_install(SIGUSR2, on_sigusr2)
+    _sigusr2_handler_installed = installed
     installed
 
 # ============================================================================
@@ -129,6 +163,16 @@ fn on_sighup():
 
     # Exit with standard SIGHUP code
     exit(129)
+
+fn on_sigusr2():
+    """
+    Handle SIGUSR2 (user-defined signal, e.g. live memory-dump trigger).
+
+    Does NOT exit the process -- runs the registered handler and returns
+    control to the interrupted program.
+    """
+    val handler = _sigusr2_handler
+    handler()
 
 fn on_normal_exit():
     """
@@ -201,6 +245,8 @@ fn signal_name(signal: i64) -> text:
         return "SIGTERM"
     elif signal == SIGKILL:
         return "SIGKILL"
+    elif signal == SIGUSR2:
+        return "SIGUSR2"
     else:
         return "UNKNOWN"
 

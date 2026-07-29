@@ -1,0 +1,117 @@
+# GenArena<T> — generational-index arena (slotmap) for stdlib memory infra
+#
+# Vale-style generational references: a slot is (value, generation). A
+# GenHandle carries the generation it was minted with, so a handle that
+# outlives a free()/reuse of its slot is detected as stale instead of
+# silently reading whatever now lives there (use-after-free/ABA class of
+# bug, caught without GC).
+#
+# Storage layout (struct-of-arrays):
+#   slots:     [T]     — current value at each slot index
+#   gens:      [i64]   — current generation at each slot index
+#   free_list: [i64]   — slot indices available for reuse
+#   live:      [bool]  — whether slots[idx] currently holds a live value
+#
+# Stale-handle diagnostics: set SIMPLE_GEN_ARENA_CHECK=1 to print one line
+# per rejected stale access (idx/have/want generation). The env var is read
+# once, lazily, into a module-level flag — never at module-load time (that
+# has hung the interpreter for other stdlib modules, see log.spl) and never
+# per call.
+
+extern fn rt_env_get(key: text) -> text
+
+var _GEN_ARENA_CHECK_READ: bool = false
+var _GEN_ARENA_CHECK: bool = false
+
+fn _gen_arena_check_enabled() -> bool:
+    if not _GEN_ARENA_CHECK_READ:
+        _GEN_ARENA_CHECK_READ = true
+        _GEN_ARENA_CHECK = rt_env_get("SIMPLE_GEN_ARENA_CHECK") == "1"
+    _GEN_ARENA_CHECK
+
+fn _report_stale(idx: i64, have: i64, want: i64):
+    if _gen_arena_check_enabled():
+        print "gen-arena: stale handle idx=" + idx.to_str() + " have=" + have.to_str() + " want=" + want.to_str()
+
+struct GenHandle:
+    """Opaque reference to a GenArena slot: (index, generation-at-alloc)."""
+    idx: i64
+    generation: i64
+
+class GenArena<T>:
+    """Generational-index arena. Reused slots bump their generation so
+    stale handles are rejected instead of aliasing the new occupant."""
+    slots: [T]
+    gens: [i64]
+    free_list: [i64]
+    live: [bool]
+    live_count: i64
+
+impl GenArena<T>:
+    static fn new() -> GenArena<T>:
+        GenArena(
+            slots: [],
+            gens: [],
+            free_list: [],
+            live: [],
+            live_count: 0
+        )
+
+    me alloc(value: T) -> GenHandle:
+        """Store value in a free (or new) slot and return its handle."""
+        if self.free_list.len() > 0:
+            val idx = self.free_list[self.free_list.len() - 1]
+            self.free_list.pop()
+            self.slots[idx] = value
+            self.live[idx] = true
+            self.live_count = self.live_count + 1
+            return GenHandle(idx: idx, generation: self.gens[idx])
+        val idx = self.slots.len()
+        self.slots.push(value)
+        self.gens.push(1)
+        self.live.push(true)
+        self.live_count = self.live_count + 1
+        GenHandle(idx: idx, generation: 1)
+
+    fn get(h: GenHandle) -> T?:
+        """Return the value for h, or nil if the handle is out of range,
+        free, or stale (generation mismatch)."""
+        if h.idx < 0 or h.idx >= self.slots.len():
+            return nil
+        val stored_gen = self.gens[h.idx]
+        if not self.live[h.idx] or stored_gen != h.generation:
+            _report_stale(h.idx, stored_gen, h.generation)
+            return nil
+        self.slots[h.idx]
+
+    me set(h: GenHandle, value: T) -> bool:
+        """Overwrite the value for h. Returns false if the handle is
+        out of range, free, or stale."""
+        if h.idx < 0 or h.idx >= self.slots.len():
+            return false
+        val stored_gen = self.gens[h.idx]
+        if not self.live[h.idx] or stored_gen != h.generation:
+            _report_stale(h.idx, stored_gen, h.generation)
+            return false
+        self.slots[h.idx] = value
+        true
+
+    me free(h: GenHandle) -> bool:
+        """Release the slot for h, bumping its generation so any copy of
+        h still outstanding becomes stale. Returns false if the handle
+        is out of range, already free, or already stale."""
+        if h.idx < 0 or h.idx >= self.slots.len():
+            return false
+        val stored_gen = self.gens[h.idx]
+        if not self.live[h.idx] or stored_gen != h.generation:
+            _report_stale(h.idx, stored_gen, h.generation)
+            return false
+        self.live[h.idx] = false
+        self.gens[h.idx] = stored_gen + 1
+        self.free_list.push(h.idx)
+        self.live_count = self.live_count - 1
+        true
+
+    fn len() -> i64:
+        """Number of live (allocated, not-yet-freed) slots."""
+        self.live_count
