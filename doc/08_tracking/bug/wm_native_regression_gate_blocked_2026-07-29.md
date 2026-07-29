@@ -369,3 +369,25 @@ Per the three-cycle cap, no raw coordinate stack or live GLFW rebuild was
 attempted in this turn. The next convergent lane is one of those three
 compiler-entry lowering failures, after which the source-fixed scalar-spill
 compiler can rerun the unchanged WM oracle.
+
+Those three failures were source defects and are now repaired:
+
+```text
+GlobalFlags: declare and parse --mem-infra / --mem-infra-strict
+SdnBackend: emit direct scalar SdnValue.Null
+coverage threshold: compare typed text with ""
+```
+
+The first cached rebuild cleared the GlobalFlags and coverage errors, then
+showed that Stage-2 cannot resolve even the valid `SdnValue.null()` static enum
+helper; the direct `SdnValue.Null` variant cleared it. Two subsequent
+cache-preserving builds compiled the full compiler closure and reached link.
+Both then failed because this Stage-2 native-build driver selects the
+intentionally minimal `core-c-bootstrap` runtime lane even when the bundle
+option is omitted. The closure needs hosted/compiler primitives including
+`rt_index_of`, `rt_cranelift_*`, `rt_file_stat`, and coverage/process helpers.
+No stub fallback was allowed.
+
+The WM remains blocked on producing a source-current pure-Simple compiler
+artifact, but the blocker has moved from HIR/MIR source compilation to the
+runtime-provider/link contract. No layout-specific workaround was added.

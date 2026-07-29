@@ -552,6 +552,19 @@ implementation-in-progress
   bootstrap. It failed closed on `GlobalFlags.mem_infra_requested`,
   `SdnValue.empty`, and `ANY.is_empty` HIR/MIR lowering errors before producing
   a compiler executable. No live demo rebuild was justified.
+- phase3-compiler-refresh-source-unblock: Parallel small-model audits showed
+  all three compiler-entry failures were real source defects. `GlobalFlags`
+  now declares and parses the already-consumed `--mem-infra` and
+  `--mem-infra-strict` values; the SDN no-op backend emits the direct scalar
+  `SdnValue.Null` variant; and coverage threshold parsing uses the typed empty
+  text comparison instead of invalid `.is_empty` field syntax. The first
+  cached rebuild cleared two failures and exposed Stage-2 enum static-helper
+  resolution, fixed by the direct variant. The next two builds compiled the
+  full closure and reached link. Both failed because the Stage-2 native-build
+  driver still selected the intentionally minimal `core-c-bootstrap` lane,
+  leaving compiler/host runtime symbols such as `rt_index_of`,
+  `rt_cranelift_*`, and `rt_file_stat` unresolved. The source fixes are kept;
+  no compiler executable or WM rerun is claimed.
 
 ## Remaining runtime gates
 
@@ -583,5 +596,6 @@ implementation-in-progress
 - Compiler: the stale Phase 3 binary still fails the isolated runtime-derived
   `i64 as u32` narrowing probe. Current compiler sources contain the cast
   bridge/truncation and cross-block scalar reload fixes. A scoped pure-Simple
-  Stage-2-to-compiler refresh (not a bootstrap) now fails on three unrelated
-  compiler-entry HIR/MIR errors listed above.
+  Stage-2-to-compiler refresh (not a bootstrap) now compiles the full closure
+  after the three source fixes, but its driver cannot link that closure through
+  the minimal `core-c-bootstrap` runtime lane.
