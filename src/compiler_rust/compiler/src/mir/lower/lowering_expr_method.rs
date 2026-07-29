@@ -2,7 +2,7 @@
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use super::lowering_di::builtin_type_name;
-use crate::hir::{DispatchMode, HirExpr, HirType, TypeId};
+use crate::hir::{BinOp, DispatchMode, HirExpr, HirType, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
@@ -567,6 +567,407 @@ impl<'a> MirLowerer<'a> {
                     dest,
                     addr: temp_addr,
                     ty: value_ty,
+                });
+                dest
+            });
+        }
+
+        // === JIT method-dispatch audit batch (jit_method_dispatch_audit_2026-07-29) ===
+        // `arr.sum()` on an Array<T>: the interpreter
+        // (interpreter_method/collections.rs "sum") only accumulates Int
+        // elements (ignoring anything that isn't `Value::Int`) and always
+        // returns an Int — never a Float, even when the array holds floats.
+        // `rt_array_sum` (runtime/src/value/collections.rs) mixes floats in
+        // and can return a Float when the array holds any float element — a
+        // known, documented divergence from the interpreter for MIXED
+        // int/float arrays only; for a pure-Int array (the overwhelmingly
+        // common case) both agree exactly. `rt_array_sum` already returns a
+        // TAG-BOXED int (`RuntimeValue::from_int`), matching what `d[k]`/
+        // `.get(k)` return for an Int value, so reuse the same tag-boxing-
+        // safe unbox helper `unbox_dict_read_result` (lowering_expr_struct.rs)
+        // `get_or` introduced.
+        if method == "sum" && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
+            let receiver_reg = self.lower_expr(receiver)?;
+            let raw_result = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_sum"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            })?;
+            return self.unbox_dict_read_result(raw_result, TypeId::I64);
+        }
+
+        // `arr.max()` / `arr.min()` on an Array<T>: mirrors the interpreter's
+        // "max"/"min" (interpreter_method/collections.rs) exactly —
+        // element-wise compare (Int/Float/Str), Nil for an empty array.
+        // `rt_array_max`/`rt_array_min` already return the TAG-BOXED stored
+        // element (or NIL), same shape as `rt_array_first`/`rt_array_last`/
+        // `d[k]` — reuse the same unbox helper, typed by the array's element
+        // type (ANY when unknown), matching the `"first" | "last" | "get" |
+        // "max" | "min"` table entry in hir/lower/expr/mod.rs.
+        if (method == "max" || method == "min")
+            && args.is_empty()
+            && self.receiver_is_array(receiver, receiver_local_ty)
+        {
+            let element_ty = self
+                .type_registry
+                .and_then(|tr| {
+                    tr.get(receiver.ty)
+                        .or_else(|| receiver_local_ty.and_then(|ty| tr.get(ty)))
+                })
+                .and_then(|ty| match ty {
+                    HirType::Array { element, .. } => Some(*element),
+                    _ => None,
+                })
+                .unwrap_or(TypeId::ANY);
+            let receiver_reg = self.lower_expr(receiver)?;
+            let runtime_fn = if method == "max" { "rt_array_max" } else { "rt_array_min" };
+            let raw_result = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name(runtime_fn),
+                    args: vec![receiver_reg],
+                });
+                dest
+            })?;
+            return self.unbox_dict_read_result(raw_result, element_ty);
+        }
+
+        // `arr.take(n)` / `arr.skip(n)` / `arr.drop(n)` on an Array<T>:
+        // mirrors the interpreter's "take" / "skip"|"drop"
+        // (interpreter_method/collections.rs) — both clamp to [0, len] and
+        // return a NEW array, never mutate the receiver. `rt_array_take`/
+        // `rt_array_drop` take a RAW (non-tag-boxed) i64 count — same
+        // convention as `rt_array_extend_i64`'s count argument just below —
+        // and return a fresh array pointer, which needs no unboxing (arrays
+        // are already valid RuntimeValue pointers, matching `"slice" |
+        // "filter" | "map"` in hir/lower/expr/mod.rs). Known divergence,
+        // documented not fixed: for a NEGATIVE `n`, the interpreter's
+        // `eval_arg_usize` casts `i64 as usize`, wrapping to a huge value (so
+        // `take(-1)` behaves like "take all" and `skip(-1)` like "skip
+        // nothing"), while `rt_array_take`/`rt_array_drop` clamp negative `n`
+        // to 0 (so `take(-1)` returns empty and `skip(-1)` returns
+        // everything) — the exact opposite. Non-negative `n` (the
+        // overwhelmingly common case) matches exactly.
+        if matches!(method, "take" | "skip" | "drop")
+            && args.len() == 1
+            && self.receiver_is_array(receiver, receiver_local_ty)
+        {
+            let receiver_reg = self.lower_expr(receiver)?;
+            let n_reg = self.lower_expr(&args[0])?;
+            let runtime_fn = if method == "take" { "rt_array_take" } else { "rt_array_drop" };
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name(runtime_fn),
+                    args: vec![receiver_reg, n_reg],
+                });
+                dest
+            });
+        }
+
+        // `d.entries()` on a Dict<K, V>: mirrors the interpreter's
+        // "entries"|"items" (interpreter_method/collections.rs) — an array
+        // of (key, value) tuples. `rt_dict_entries` (runtime/src/value/
+        // dict.rs) already exists and already had a linker manifest entry
+        // (common/src/runtime_symbols.rs, "for-in iteration over
+        // dicts/arrays") but was never declared in the codegen SFFI table
+        // (codegen/runtime_sffi.rs) or wired to a dispatch arm, so it fell
+        // through to `rt_method_not_found`. Returns a fresh array pointer —
+        // no unboxing needed, matching the existing `"items" | "entries" =>
+        // Some(TypeId::ANY)` table entry in hir/lower/expr/mod.rs. Known
+        // divergence, documented not fixed: the interpreter's `entries`
+        // iterates in canonical sorted-by-key order
+        // (`dict_entries_sorted`); `rt_dict_entries` returns raw hashmap
+        // order (the SAME already-known `dict.keys()`/`dict.values()`
+        // ordering gap the audit doc calls out separately) — the result SET
+        // matches, the SEQUENCE does not.
+        if method == "entries" && args.is_empty() && self.receiver_is_dict(receiver, receiver_local_ty) {
+            let receiver_reg = self.lower_expr(receiver)?;
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_dict_entries"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            });
+        }
+
+        // `s.count(needle)` on a String: the interpreter
+        // (interpreter_method/string.rs "count") is
+        // `s.matches(&needle).count()` — the count of NON-OVERLAPPING
+        // occurrences of `needle` in `s`. There is no `rt_string_count`
+        // runtime symbol (confirmed absent from runtime/src/value/
+        // collections.rs and codegen/runtime_sffi.rs) and the task brief for
+        // this batch forbids adding new runtime Rust, so this expands over
+        // TWO existing runtime calls: `rt_string_split` (whose byte-split
+        // kernel, runtime/src/value/byte_kernels.rs
+        // `scalar_byte_split_ranges`, performs the SAME non-overlapping
+        // left-to-right scan Rust's `str::matches` does) and `rt_array_len`.
+        // `split(s, needle).len() - 1` equals the non-overlapping match
+        // count for any NON-EMPTY needle. Known divergence, documented not
+        // fixed: for an EMPTY needle (`s.count("")`), the interpreter's
+        // `matches("").count()` is `len+1` (chars + 1 boundary matches) but
+        // `scalar_byte_split_ranges` for an empty delimiter yields one range
+        // per char boundary INCLUDING the trailing one (`len+1` ranges), so
+        // this expansion computes `len+1 - 1 = len` — off by one from the
+        // interpreter for the empty-needle case only. Non-empty-needle
+        // callers (the overwhelmingly common case and the one this fix
+        // targets) match exactly.
+        if method == "count" && args.len() == 1 && receiver_local_ty.unwrap_or(receiver.ty) == TypeId::STRING {
+            let receiver_reg = self.lower_expr(receiver)?;
+            let needle_reg = self.lower_expr(&args[0])?;
+            return self.with_func(|func, current_block| {
+                let parts = func.new_vreg();
+                let len_raw = func.new_vreg();
+                let one = func.new_vreg();
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(parts),
+                    target: crate::mir::effects::CallTarget::from_name("rt_string_split"),
+                    args: vec![receiver_reg, needle_reg],
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(len_raw),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_len"),
+                    args: vec![parts],
+                });
+                block.instructions.push(MirInst::ConstInt { dest: one, value: 1 });
+                block.instructions.push(MirInst::BinOp {
+                    dest,
+                    op: BinOp::Sub,
+                    left: len_raw,
+                    right: one,
+                });
+                dest
+            });
+        }
+
+        // `arr.insert(idx, item)` on an Array<T>: the interpreter
+        // (interpreter_method/collections.rs "insert") — `idx <= len` ->
+        // insert `item` at `idx` (idx == len means append); `idx > len` ->
+        // return an UNCHANGED COPY of the receiver (no error, no
+        // truncation). Always returns a brand-new array (never mutates the
+        // receiver) — same non-mutating shape as `concat`/`merge` just
+        // below. There is no `rt_array_insert` runtime symbol (confirmed
+        // absent from runtime/src/value/collections.rs and
+        // codegen/runtime_sffi.rs — the entry in method_registry/builtins.rs
+        // is aspirational metadata only, not wired to codegen) and the task
+        // brief forbids adding new runtime Rust for this lane, so this
+        // expands over EXISTING runtime calls: `rt_slice` (splits the
+        // receiver into its `0..idx` and `idx..len` halves), `rt_array_new`
+        // + `rt_array_push` (wraps the inserted item as a 1-element array so
+        // it can be spliced back in), and `rt_array_concat` (recombines the
+        // three pieces). Follows the SAME then/else-branch/merge-block shape
+        // `Dict.get_or` uses above (task: dict_get_or_jit_not_found) for the
+        // `idx <= len` test.
+        if method == "insert" && args.len() == 2 && self.receiver_is_array(receiver, receiver_local_ty) {
+            use crate::mir::effects::LocalKind;
+            use crate::mir::function::MirLocal;
+
+            let receiver_reg = self.lower_expr(receiver)?;
+            let idx_reg = self.lower_expr(&args[0])?;
+            let item_reg_raw = self.lower_expr(&args[1])?;
+
+            // Box the inserted item exactly like `.push()` does — array
+            // elements are stored TAG-BOXED, and `rt_array_push` (used to
+            // build the 1-element splice array below) stores by that
+            // convention.
+            let item_ty = args[1].ty;
+            let needs_item_int_boxing = matches!(
+                item_ty,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::BOOL
+            );
+            let needs_item_float_boxing = matches!(item_ty, TypeId::F32 | TypeId::F64);
+            let item_reg = if needs_item_int_boxing || needs_item_float_boxing {
+                let use_float = needs_item_float_boxing;
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    if use_float {
+                        block.instructions.push(MirInst::BoxFloat {
+                            dest: boxed,
+                            value: item_reg_raw,
+                        });
+                    } else {
+                        block.instructions.push(MirInst::BoxInt {
+                            dest: boxed,
+                            value: item_reg_raw,
+                        });
+                    }
+                    boxed
+                })?
+            } else {
+                item_reg_raw
+            };
+
+            let len_reg = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_len"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            })?;
+
+            // cond = idx <= len (i8, Branch-ready — see codegen/instr/core.rs
+            // `IntCC::SignedLessThanOrEqual` -> `icmp` returning i8).
+            let cond_reg = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::BinOp {
+                    dest,
+                    op: BinOp::LtEq,
+                    left: idx_reg,
+                    right: len_reg,
+                });
+                dest
+            })?;
+
+            // Merge-value temp local, same pattern as `Dict.get_or` above.
+            let temp_local_index = self.with_func(|func, _| {
+                let index = func.params.len() + func.locals.len();
+                func.locals.push(MirLocal {
+                    name: format!("$array_insert_merge_{}", index),
+                    ty: receiver.ty,
+                    kind: LocalKind::Local,
+                    is_ghost: false,
+                });
+                index
+            })?;
+            let temp_addr = self.with_func(|func, current_block| {
+                let addr = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::LocalAddr {
+                    dest: addr,
+                    local_index: temp_local_index,
+                });
+                addr
+            })?;
+
+            let (then_id, else_id, merge_id) = self.with_func(|func, current_block| {
+                let then_id = func.new_block();
+                let else_id = func.new_block();
+                let merge_id = func.new_block();
+                let block = func.block_mut(current_block).unwrap();
+                block.terminator = crate::mir::Terminator::Branch {
+                    cond: cond_reg,
+                    then_block: then_id,
+                    else_block: else_id,
+                };
+                (then_id, else_id, merge_id)
+            })?;
+
+            // then: idx <= len — splice: slice(0,idx) ++ [item] ++ slice(idx,len).
+            self.set_current_block(then_id)?;
+            let inserted = self.with_func(|func, current_block| {
+                let zero = func.new_vreg();
+                let one = func.new_vreg();
+                let left = func.new_vreg();
+                let right = func.new_vreg();
+                let item_arr = func.new_vreg();
+                let pushed = func.new_vreg();
+                let spliced = func.new_vreg();
+                let result = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ConstInt { dest: zero, value: 0 });
+                block.instructions.push(MirInst::ConstInt { dest: one, value: 1 });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(left),
+                    target: crate::mir::effects::CallTarget::from_name("rt_slice"),
+                    args: vec![receiver_reg, zero, idx_reg, one],
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(right),
+                    target: crate::mir::effects::CallTarget::from_name("rt_slice"),
+                    args: vec![receiver_reg, idx_reg, len_reg, one],
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(item_arr),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_new"),
+                    args: vec![one],
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(pushed),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_push"),
+                    args: vec![item_arr, item_reg],
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(spliced),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_concat"),
+                    args: vec![left, item_arr],
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(result),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_concat"),
+                    args: vec![spliced, right],
+                });
+                let _ = pushed;
+                result
+            })?;
+            self.with_func(|func, current_block| {
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Store {
+                    addr: temp_addr,
+                    value: inserted,
+                    ty: receiver.ty,
+                });
+            })?;
+            self.finalize_block_jump(merge_id)?;
+
+            // else: idx > len — unchanged copy of the receiver.
+            self.set_current_block(else_id)?;
+            let copied = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_copy"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            })?;
+            self.with_func(|func, current_block| {
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Store {
+                    addr: temp_addr,
+                    value: copied,
+                    ty: receiver.ty,
+                });
+            })?;
+            self.finalize_block_jump(merge_id)?;
+
+            // merge: load the result.
+            self.set_current_block(merge_id)?;
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Load {
+                    dest,
+                    addr: temp_addr,
+                    ty: receiver.ty,
                 });
                 dest
             });

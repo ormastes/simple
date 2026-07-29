@@ -980,6 +980,15 @@ impl Lowerer {
                 ),
                 // find/rfind return -1 if not found, position if found (raw i64 from rt_string_find)
                 "find" | "index_of" | "find_str" | "rfind" | "last_index_of" => Some(TypeId::I64),
+                // `s.count(needle)` (interpreter_method/string.rs "count") is
+                // `s.matches(&needle).count()`, a raw i64 — same "raw i64
+                // needs BoxInt before generic print/use" gap class as
+                // `index_of` above. The MIR lowering (lowering_expr_method.rs,
+                // task: jit_method_dispatch_audit_2026-07-29) expands this to
+                // `split(needle).len() - 1` (no `rt_string_count` runtime
+                // symbol exists); see that file for the documented
+                // empty-needle edge-case divergence.
+                "count" => Some(TypeId::I64),
                 // `.bytes()` returns UTF-8 bytes as an array of ints (see
                 // interpreter_method/string.rs `"bytes" => Vec<Value::Int>`,
                 // and the native runtime's `rt_string_bytes`, which pushes
@@ -1065,9 +1074,23 @@ impl Lowerer {
                 // BoxInt and picks static dispatch, which codegen already
                 // routes to `rt_index_of`.
                 "index_of" => Some(TypeId::I64),
+                // `arr.sum()` (interpreter_method/collections.rs "sum") only
+                // accumulates Int elements and always returns an Int — same
+                // "raw i64 needs BoxInt" gap class as `index_of` above. The
+                // MIR lowering (lowering_expr_method.rs, task:
+                // jit_method_dispatch_audit_2026-07-29) unboxes
+                // `rt_array_sum`'s tag-boxed result to match this type.
+                "sum" => Some(TypeId::I64),
                 "join" => Some(TypeId::STRING),
                 "slice" | "filter" | "map" => Some(receiver.ty), // Returns same array type
-                "first" | "last" | "get" => {
+                // `arr.take(n)` / `arr.skip(n)` / `arr.drop(n)` all return a
+                // NEW array of the same element type, clamped to [0, len] —
+                // same shape as `slice`/`filter`/`map` above. `arr.insert(i,
+                // v)` also always returns a new array (or an unchanged copy
+                // when `i` is out of range) — see the MIR expansion in
+                // lowering_expr_method.rs.
+                "take" | "skip" | "drop" | "insert" => Some(receiver.ty),
+                "first" | "last" | "get" | "max" | "min" => {
                     // Returns element type (or Option<element>)
                     if let Some(HirType::Array { element, .. }) = self.module.types.get(receiver.ty) {
                         Some(*element)
