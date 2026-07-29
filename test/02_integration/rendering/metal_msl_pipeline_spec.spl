@@ -22,6 +22,66 @@ use std.io_runtime.{file_read}
 
 describe "Metal MSL compile + GPU dispatch":
 
+    it "keeps mandatory session pipelines mapped to one MSL entry point":
+        val msl = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl"
+        )
+        val session = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/metal_session.spl"
+        )
+        val mandatory = [
+            "kernel_clear",
+            "kernel_draw_rect_filled",
+            "kernel_draw_rect_outline",
+            "kernel_draw_line",
+            "kernel_draw_circle",
+            "kernel_draw_circle_filled",
+            "kernel_draw_rounded_rect",
+            "kernel_draw_rounded_rect_outline",
+            "kernel_draw_triangle_filled",
+            "kernel_draw_gradient_rect",
+            "kernel_blit_image",
+            "kernel_composite_image"
+        ]
+        for name in mandatory:
+            val binding = "metal_sffi_create_compute_pipeline(self.device, self.shader_lib, \"" + name + "\")"
+            expect(session.split(binding).len()).to_equal(2)
+            expect(msl.split("kernel void " + name + "(").len()).to_equal(2)
+            val kernel = msl.substring(msl.index_of("kernel void " + name + "("), msl.len())
+            val signature = kernel.substring(0, kernel.index_of(") {"))
+            expect(signature).to_contain("[[buffer(0)]]")
+            expect(signature).to_contain("[[buffer(1)]]")
+            expect(signature).to_contain("[[buffer(4)]]")
+            expect(signature).to_contain("[[thread_position_in_grid]]")
+            if name == "kernel_blit_image" or name == "kernel_composite_image":
+                expect(signature).to_contain("device const uint* src")
+                expect(signature).to_contain("[[buffer(2)]]")
+
+        val optional = [
+            "kernel_glass_snapshot",
+            "kernel_glass_material",
+            "kernel_indexed_fill",
+            "kernel_glyph_atlas_blit"
+        ]
+        for name in optional:
+            expect(msl.split("kernel void " + name + "(").len()).to_equal(2)
+            expect(session.split("\"" + name + "\"").len()).to_equal(2)
+            val kernel = msl.substring(msl.index_of("kernel void " + name + "("), msl.len())
+            val signature = kernel.substring(0, kernel.index_of(") {"))
+            expect(signature).to_contain("[[buffer(0)]]")
+            expect(signature).to_contain("[[buffer(1)]]")
+            expect(signature).to_contain("[[buffer(2)]]")
+            expect(signature).to_contain("[[thread_position_in_grid]]")
+
+        val gate = session.substring(
+            session.index_of("if self.pipe_clear"),
+            session.index_of("self.last_error = 7")
+        )
+        expect(gate.contains("pipe_glass")).to_equal(false)
+        expect(gate.contains("pipe_indexed_fill")).to_equal(false)
+        expect(gate.contains("pipe_glyph_atlas_blit")).to_equal(false)
+        expect(gate.contains("pipe_font_atlas_composite")).to_equal(false)
+
     it "keeps a successful device-glass receipt separate from CPU mirror execution":
         # This is deliberately host-neutral: the receipt may only describe the
         # completed Metal snapshot/material dispatch. CPU mirror rasterization
