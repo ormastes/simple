@@ -30,7 +30,7 @@ export STAGE2_PROVENANCE_PATH=<canonical-stage2-provenance.env>
 export STAGE2_PROVENANCE_SHA=<sha256>
 export STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-1
 export STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-1
-sh scripts/check/build-stage2-font-scoped-tools.shs write
+bash scripts/check/build-stage2-font-scoped-tools.shs write
 ```
 
 `scripts/check/build-stage2-font-scoped-tools.shs` reuses the canonical core-C

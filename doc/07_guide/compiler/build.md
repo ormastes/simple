@@ -248,7 +248,7 @@ STAGE2_PROVENANCE_PATH=<canonical-stage2-provenance.env> \
 STAGE2_PROVENANCE_SHA=<sha256> \
 STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-1 \
 STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-1 \
-sh scripts/check/build-stage2-font-scoped-tools.shs write
+bash scripts/check/build-stage2-font-scoped-tools.shs write
 ```
 
 The wrapper builds and canonically verifies a fresh core-C capsule, then uses
@@ -258,7 +258,7 @@ caches, exact command/environment/stream/exit/time and source/tool/runtime
 hashes, validates Runtime6 providers including `rt_file_create_excl`, and runs
 green, deliberate-red, zero-example, and zero-stub docgen calibration exactly
 once. A later independent
-audit runs `sh scripts/check/build-stage2-font-scoped-tools.shs check
+audit runs `bash scripts/check/build-stage2-font-scoped-tools.shs check
 <attempt-root>`; do not rerun a green writer. This exception is only
 `SIMPLEOS_STAGE2_FONT` evidence: Stage 3/4, full bootstrap, general `run`/`test`
 qualification, and release remain outside it.
