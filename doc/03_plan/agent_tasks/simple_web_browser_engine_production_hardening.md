@@ -235,3 +235,17 @@ the production frame hot path merely to maintain counters.
   artifacts, and final reviewer.
 - At most three verify/fix cycles per lane; identical green commands are not
   rerun.
+
+## Remaining-production tranche (2026-07-29)
+
+Three guided sidecars completed disjoint TDD lanes under the frozen owners:
+
+1. broker HSTS provenance in `HostedBrowserRendererProcess`;
+2. SimpleScript navigation/close reclamation in `SimpleScriptExecutor`;
+3. empty atomic inline baseline layout in the canonical HTML line formatter.
+
+Root Codex is merge owner and generated-manual reviewer.
+`browser_surface_adversary` and `ordered_meta_csp` performed the final
+high-capability read-only review; both returned PASS after two repair cycles.
+The live HTTPS/certificate row, native timing/RSS/GC rows, and the unadmitted
+hosted-WM runtime-provider receipt remain explicit blockers, not exclusions.

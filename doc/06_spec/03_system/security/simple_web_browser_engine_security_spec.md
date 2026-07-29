@@ -8,26 +8,42 @@ broker-owned HSTS state rather than a renderer-local or secondary-window store.
 1. `Navigate through verified HTTPS` loads one persisted include-subdomains
    policy into the existing hosted renderer registry and requires an HTTP
    subdomain URL to upgrade to HTTPS.
-2. `Share secondary-window HSTS through the existing registry` admits a policy
-   learned by a secondary broker, requires an HTTPS upgrade, and requires the
-   shared state to become dirty.
-3. `Persist shared HSTS before every browser window closes` saves that exact
-   shared snapshot through `BrowserProfileStore`, clears dirty state only after
-   success, reloads it into a fresh registry, and requires the secondary policy
-   to upgrade after restart. A closed profile must reject the save, preserve
-   dirty state, and still permit bounded registry resource reclamation; the
-   hosted owner reports/retries that persistence failure instead of leaking a
-   secondary renderer.
+2. `Share secondary-window HSTS through the existing registry` copies that
+   preloaded snapshot to a secondary broker. Generic response finalization,
+   including an ordinary synthetic `https:` response carrying STS, must leave
+   both owners clean and must not upgrade the synthetic host.
+3. `Persist shared HSTS before every browser window closes` saves the clean
+   preloaded snapshot through `BrowserProfileStore`, reloads it into a fresh
+   registry, and requires the original include-subdomains policy to upgrade
+   after restart. Registry admission and renderer cleanup must leave that clean
+   state unchanged.
 
 The scenario was authored before implementation. Pre-fix RED is structural:
 `HostedBrowserRendererRegistry` had no HSTS owner or snapshot API, secondary
 renderers started empty, and `hosted_entry` persisted only the primary
-renderer. The failed-save branch admits a real sandbox renderer with the exact
-hashed `HOSTED_WM_ARTIFACT`, then requires `remove_window` to reclaim it while
-the shared snapshot remains dirty. The unhealthy pure-Simple runtime prevents
-executing that RED; no bootstrap or seed fallback is used. Live
+renderer. The cleanup branch admits a real sandbox renderer with the exact
+hashed `HOSTED_WM_ARTIFACT`, then requires `remove_window` to reclaim it without
+changing clean HSTS state. The unhealthy pure-Simple runtime prevents executing
+that RED; no bootstrap or seed fallback is used. Live
 `advance_window`, retry timing, and wall-clock expiry remain part of the
 blocked production artifact gate.
+
+## HSTS transport provenance
+
+`Navigate through verified HTTPS` now has one broker admission point: generic
+response finalization never learns `Strict-Transport-Security`. Static
+implementation inspection places admission only in the existing completed
+platform HTTPS-job branch, after the runtime returns authenticated TLS bytes.
+A mock, plaintext response, synthetic `https:` response, failed handshake, or
+failed TLS read therefore cannot seed HSTS.
+
+The executable negative oracle verifies that generic finalization retains an
+empty HSTS snapshot and leaves an `http:` URL unchanged. The separate explicit
+RED row remains blocked until an admitted production artifact demonstrates
+trusted learning, dirty-to-saved-to-clean persistence, save-failure retry, and
+invalid-certificate/no-response denial. Current executable evidence does not
+reach the completed platform HTTPS job. No second TLS implementation, sandbox,
+or browser controller is introduced.
 
 Source: `test/03_system/security/simple_web_browser_engine_security_spec.spl`
 

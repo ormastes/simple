@@ -438,8 +438,10 @@ or native TLS behavior.
   content type, POST is URL-encoded, credentials are `include`, and no
   renderer-defined headers survive. Existing chrome permits cannot be replaced.
   HSTS upgrades remain broker-generated redirects rather than accepting an
-  HTTP/HTTPS split directly, and their authenticated marker preserves the
-  document redirect budget on both sides of the IPC boundary. The broker
+  HTTP/HTTPS split directly. HSTS policy can be learned only inside the
+  error-free completed platform HTTPS job branch; generic, cached, mock, HTTP,
+  parse-error, and failed-TLS paths cannot supply an authentication boolean or
+  seed policy. The broker
   derives resource mode from the broker's committed origin instead of the
   renderer's kind, and authorizes only bounded simple CORS requests until
   preflight uses the public-only broker transport. Redirects receive one exact
@@ -468,11 +470,20 @@ or native TLS behavior.
   encoded only when its discrete command slot is idle, and applied by the
   sandbox worker to one viewport-preserving layout shared by Draw IR paint and
   hit testing. Offscreen Draw IR nodes are culled before the protocol budget;
-  document commit resets scroll, while resize reclamps it. Parent-owned cookie
-  state remains incomplete. Windows
-  AppContainer and the signed macOS helper also remain open.
+  document commit resets scroll, while resize reclamps it. Parent-owned cookies
+  now enforce Secure, HttpOnly, SameSite, expiry, and schemeful-site
+  partitioning through BrowserSession and redirect hops. Windows AppContainer
+  and the signed macOS helper remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;
 - existing browser interaction evidence can pass when its artifact is absent.
+
+The persistent SimpleScript executor resets its compatibility runner to the new
+document and event loop and clears callback bodies, timers, animation-frame
+work, and document-scoped console entries on navigation and close. The inline
+formatter now supports empty atomic inline-block baseline alignment through the
+parent strut and resolved positive pixel margin edges. Non-empty/overflow
+baselines and negative/percentage vertical-margin cases remain in the visible
+unsupported ledger.
 
 ### Input, text, and Chromium hardening
 

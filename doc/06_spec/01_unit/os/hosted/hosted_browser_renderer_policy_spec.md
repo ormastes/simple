@@ -8,9 +8,10 @@
 
 - Issue and consume one bounded canonical HTTP(S) navigation permit.
 - Load persisted HSTS and rewrite trusted navigation and redirect targets.
-- Learn HSTS from authenticated HTTPS before status or CORS exposure, while
-  ignoring STS delivered over plaintext HTTP or synthetic HTTPS responses
-  without transport-authentication provenance.
+- Static implementation places HSTS admission in the completed platform
+  HTTPS-job branch before CORS response filtering. Unit evidence proves only
+  that generic finalization, plaintext HTTP, and synthetic HTTPS responses
+  cannot seed it; live trusted/invalid-certificate job evidence remains blocked.
 - Bound response bodies before Wasm hex expansion.
 - Preserve renderer readiness, Stop, Reload, input, animation, and network
   request ordering.

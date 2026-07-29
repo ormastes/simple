@@ -688,17 +688,8 @@ pub class HostedBrowserRendererProcess:
     me _finalize_network(
         kind: text,
         request: FetchRequest,
-        response: FetchResponse,
-        authenticated_https: bool
+        response: FetchResponse
     ) -> HostedBrowserNetworkResult:
-        if authenticated_https and request.url.scheme == "https":
-            val hsts_header = hosted_browser_response_header_value(
-                response.headers, "strict-transport-security"
-            )
-            if (hsts_header != "" and self.hsts._apply_hsts_header(
-                hsts_header, request.url.to_text()
-            )):
-                self.hsts_dirty = true
         match self.network.finalize_single_hop(request, response):
             Err(error):
                 _network_result(0, "", "", error.message)
@@ -769,7 +760,7 @@ pub class HostedBrowserRendererProcess:
                             ))
                         Ok(response):
                             return Some(self._finalize_network(
-                                fetch.kind, prepared.request, response, false
+                                fetch.kind, prepared.request, response
                             ))
                 val url = prepared.request.url
                 val port = if url.port > 0:
@@ -1046,9 +1037,20 @@ pub class HostedBrowserRendererProcess:
                             0, "", "", parse_error.message
                         )
                     Ok(parsed):
+                        # Only the runtime HTTPS job reaches this branch after
+                        # its authenticated platform-TLS handshake succeeds.
+                        # Generic/mock response finalization cannot seed HSTS.
+                        if request.url.scheme == "https":
+                            val hsts_header = hosted_browser_response_header_value(
+                                parsed.headers, "strict-transport-security"
+                            )
+                            if (hsts_header != "" and
+                                self.hsts._apply_hsts_header(
+                                    hsts_header, request.url.to_text()
+                                )):
+                                self.hsts_dirty = true
                         response = self._finalize_network(
-                            fetch.kind, request, parsed,
-                            request.url.scheme == "https"
+                            fetch.kind, request, parsed
                         )
         self._write_network_response(
             fetch, policy, response, redirect_count

@@ -563,3 +563,22 @@ refresh, bootstrap, or Rust-seed fallback is claimed.
 - A deferred resize replaces an adjacent queued resize (and identical
   dimensions are ignored). Render paths compute `render_html_document()` once
   per frame and reuse it for animation reconciliation and layout.
+
+## HSTS provenance, script reclamation, and empty atomic baselines (2026-07-29)
+
+- `_finalize_network` never accepts transport-authentication input. Only the
+  successful parsed completion of the existing platform HTTPS job may apply a
+  Strict-Transport-Security header. Generic/mock/plain/error paths finalize
+  content without changing HSTS state.
+- `SimpleScriptExecutor.reset()` creates the next document event loop, rebinds
+  the existing runner to the new DOM/loop/console owners, and clears callback
+  IDs, callback source bodies, timers, rAF work, and document console entries.
+- Inline line layout computes a shared baseline from signed parent-strut
+  leading and supported empty atomic margin boxes, then shifts complete layout
+  subtrees before Draw IR. The supported slice resolves positive pixel margins;
+  unsupported negative/percentage margins, non-empty last-line baselines, and
+  overflow baselines stay ledgered.
+- Live trusted/invalid-certificate HSTS evidence remains fail-fast until an
+  admitted production HTTPS artifact is available. The current hosted-WM
+  wrapper also remains non-qualifying while its preloaded runtime DSO lacks
+  path/hash/build-identity admission.

@@ -49,6 +49,34 @@ existing `EventLoop`, and re-enters the constrained BrowserSession evaluator
 when due. Execution remains blocked by the unhealthy deployed pure-Simple
 runtime; no bootstrap or Rust-seed fallback is used.
 
+### Retained Simple Script close and navigation reclamation
+
+REQ-WEB-BROWSER-006/018 require document-owned Simple Script state to stop
+retaining an old document after navigation or close.
+
+1. Open retained Simple Script state and bind one document owner. Document
+   reset binds the compatibility `ScriptRunner` to that live DOM and event loop.
+2. Require callback identity 41 and its retained body to exist, then advance
+   the browser clock to prove that retained callback work occurs. Clock
+   advancement does not perform the runner binding.
+3. Add one bounded console entry, then navigate to a fresh document.
+4. Require the runner DOM and event loop to be the replacement document's
+   current owners, with no registered callbacks, retained callback bodies,
+   pending timer/rAF work, or retained console entries.
+5. Register a fresh callback on the replacement document, schedule one timer
+   and one rAF callback, tick the first rAF callback, schedule another rAF
+   callback, and add one fresh console entry. Require callback count, callback
+   registry, timer queue, rAF queue, and console to all be nonempty.
+6. Close the page and reclaim browser resources.
+7. Require the runner DOM/event loop to remain synchronized with the empty
+   close document and empty event loop; callback count, timer and rAF queues,
+   both old and fresh callback identities, retained callback bodies, and the
+   document console are empty.
+
+Console output is document-scoped: navigation and close clear it. This is a
+functional ownership oracle, not timing, RSS, or GC-pause evidence. Runtime
+execution remains blocked by the unhealthy deployed pure-Simple target.
+
 ### Immediate Simple Script stylesheet finalization
 
 The separate immediate-style scenario proves that a load-time `style_html`

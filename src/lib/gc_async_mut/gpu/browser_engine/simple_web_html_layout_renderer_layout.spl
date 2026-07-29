@@ -31,6 +31,74 @@ fn offset_layout_subtree(child_index: HtmlChildIndex, node_index: i32, dx: i32, 
         child = child_index.next_sibling[child]
     PositionOffsetResult(bx: out_bx, by: out_by)
 
+class InlineLineAlignment:
+    bx: [i32]
+    by: [i32]
+    height: i32
+
+fn inline_line_strut_baseline_offset(st: Style) -> i32:
+    val half_leading = (style_line_h(st) - st.font_size) / 2
+    half_leading + style_baseline_offset(st)
+
+fn inline_line_baseline_ascent(child_index: HtmlChildIndex, node_index: i32, st: Style, margin_t: i32, margin_b: i32, bh: [i32]) -> i32:
+    if st.display == "inline-block" and child_index.child_count[node_index] == 0:
+        return margin_t + bh[node_index] + margin_b
+    inline_line_strut_baseline_offset(st)
+
+fn inline_line_baseline_offset(child_index: HtmlChildIndex, node_index: i32, st: Style, margin_b: i32, bh: [i32]) -> i32:
+    if st.display == "inline-block" and child_index.child_count[node_index] == 0:
+        return bh[node_index] + margin_b
+    inline_line_strut_baseline_offset(st)
+
+fn inline_line_baseline_descent(st: Style) -> i32:
+    style_line_h(st) - inline_line_strut_baseline_offset(st)
+
+fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32]) -> InlineLineAlignment:
+    var out_bx = bx
+    var out_by = by
+    if nodes.len() == 0:
+        return InlineLineAlignment(
+            bx: out_bx, by: out_by, height: line_height
+        )
+    var ascent = inline_line_strut_baseline_offset(line_style)
+    var descent = inline_line_baseline_descent(line_style)
+    var baseline_i = 0
+    while baseline_i < nodes.len():
+        val node_index = nodes[baseline_i]
+        val node_style = styles[node_index]
+        val node_ascent = inline_line_baseline_ascent(
+            child_index, node_index, node_style,
+            margin_ts[baseline_i], margin_bs[baseline_i], bh
+        )
+        val node_descent = if (
+            node_style.display == "inline-block" and
+            child_index.child_count[node_index] == 0
+        ): 0 else: inline_line_baseline_descent(node_style)
+        if node_ascent > ascent:
+            ascent = node_ascent
+        if node_descent > descent:
+            descent = node_descent
+        baseline_i = baseline_i + 1
+    var resolved_height = ascent + descent
+    if line_height > resolved_height:
+        resolved_height = line_height
+    baseline_i = 0
+    while baseline_i < nodes.len():
+        val node_index = nodes[baseline_i]
+        val node_baseline_offset = inline_line_baseline_offset(
+            child_index, node_index, styles[node_index],
+            margin_bs[baseline_i], bh
+        )
+        val shift_y = line_y + ascent - node_baseline_offset - out_by[node_index]
+        if shift_y != 0:
+            val shifted = offset_layout_subtree(
+                child_index, node_index, 0, shift_y, out_bx, out_by
+            )
+            out_bx = shifted.bx
+            out_by = shifted.by
+        baseline_i = baseline_i + 1
+    InlineLineAlignment(bx: out_bx, by: out_by, height: resolved_height)
+
 fn relative_layout_result(child_index: HtmlChildIndex, node_index: i32, st: Style, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], height: i32) -> LayoutResult:
     if st.position_relative and (st.left_px != 0 or st.top_px != 0):
         val shifted = offset_layout_subtree(child_index, node_index, st.left_px, st.top_px, bx, by)
@@ -1310,6 +1378,9 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     var in_inline_run = false
     var inline_x = 0
     var inline_line_h = 0
+    var inline_baseline_nodes: [i32] = []
+    var inline_baseline_margin_ts: [i32] = []
+    var inline_baseline_margin_bs: [i32] = []
     var c = child_index.first_child[i]
     while c >= 0:
         val cst = styles[c]
@@ -1346,10 +1417,21 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     out_by[c] = cy
                     out_bw[c] = 0
                     out_bh[c] = inline_line_h
-                    cy = cy + inline_line_h
+                    val aligned = align_inline_line_baselines(
+                        child_index, st, inline_baseline_nodes,
+                        inline_baseline_margin_ts, inline_baseline_margin_bs,
+                        styles, cy,
+                        inline_line_h, out_bx, out_by, out_bh
+                    )
+                    out_bx = aligned.bx
+                    out_by = aligned.by
+                    cy = cy + aligned.height
                     in_inline_run = false
                     inline_x = 0
                     inline_line_h = 0
+                    inline_baseline_nodes = []
+                    inline_baseline_margin_ts = []
+                    inline_baseline_margin_bs = []
                     prev_margin_b = 0
                     child_count = child_count + 1
                     c = child_index.next_sibling[c]
@@ -1403,9 +1485,20 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     inline_block and inline_x > 0 and
                     inline_x + inline_outer_w > iw
                 ):
-                    cy = cy + inline_line_h
+                    val aligned = align_inline_line_baselines(
+                        child_index, st, inline_baseline_nodes,
+                        inline_baseline_margin_ts, inline_baseline_margin_bs,
+                        styles, cy,
+                        inline_line_h, out_bx, out_by, out_bh
+                    )
+                    out_bx = aligned.bx
+                    out_by = aligned.by
+                    cy = cy + aligned.height
                     inline_x = 0
                     inline_line_h = style_line_h(cst)
+                    inline_baseline_nodes = []
+                    inline_baseline_margin_ts = []
+                    inline_baseline_margin_bs = []
                 val child = layout_with_style(nodes, styles, child_index, c, ix + inline_x + inline_margin_l, cy, inline_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_inline_style)
                 out_bx = child.bx
                 out_by = child.by
@@ -1433,6 +1526,19 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     inline_contribution_h = inline_contribution_h + 3
                 if inline_contribution_h > inline_line_h:
                     inline_line_h = inline_contribution_h
+                if cst.vertical_align == "baseline" and (
+                    cst.display == "inline" or
+                    child_index.child_count[c] == 0
+                ):
+                    inline_baseline_nodes = inline_baseline_nodes.push(c)
+                    # Baseline math consumes resolved pixels, never the Style
+                    # vh/negative sentinel encoding.
+                    inline_baseline_margin_ts = inline_baseline_margin_ts.push(
+                        resolve_vertical_margin_px(cst.margin_t, viewport_h)
+                    )
+                    inline_baseline_margin_bs = inline_baseline_margin_bs.push(
+                        resolve_vertical_margin_px(cst.margin_b, viewport_h)
+                    )
                 inline_x = (
                     inline_x + inline_margin_l + out_bw[c] +
                     inline_margin_r
@@ -1442,10 +1548,21 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 c = child_index.next_sibling[c]
                 continue
             if in_inline_run:
-                cy = cy + inline_line_h
+                val aligned = align_inline_line_baselines(
+                    child_index, st, inline_baseline_nodes,
+                    inline_baseline_margin_ts, inline_baseline_margin_bs,
+                    styles, cy,
+                    inline_line_h, out_bx, out_by, out_bh
+                )
+                out_bx = aligned.bx
+                out_by = aligned.by
+                cy = cy + aligned.height
                 in_inline_run = false
                 inline_x = 0
                 inline_line_h = 0
+                inline_baseline_nodes = []
+                inline_baseline_margin_ts = []
+                inline_baseline_margin_bs = []
             if child_count > 0:
                 cy = cy + st.gap_px
             val resolved_cst_margin_t = resolve_vertical_margin_px(cst.margin_t, viewport_h)
@@ -1503,7 +1620,15 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         c = child_index.next_sibling[c]
     if child_count > 0:
         if in_inline_run:
-            cy = cy + inline_line_h
+            val aligned = align_inline_line_baselines(
+                child_index, st, inline_baseline_nodes,
+                inline_baseline_margin_ts, inline_baseline_margin_bs,
+                styles, cy,
+                inline_line_h, out_bx, out_by, out_bh
+            )
+            out_bx = aligned.bx
+            out_by = aligned.by
+            cy = cy + aligned.height
         cy = cy + prev_margin_b
     var h = (cy - y) + st.pad_b + st.border_b
     val explicit_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y

@@ -1980,3 +1980,60 @@ implementation in progress / target evidence blocked
   executable SSpec, docgen, and live animation execution remain blocked by the
   recorded deployed pure-Simple exit-139 ABI artifact; no bootstrap or Rust
   seed was used.
+- remaining-production audit tranche (2026-07-29): Three small read-only
+  sidecars rank the next executable gaps: HTTPS/sandbox/capability evidence,
+  the remaining bounded WPT CSS ledger, and native lifecycle/performance
+  evidence. Canonical owners are frozen before fan-out. Security stays in
+  `HostedBrowserRendererProcess`, its existing platform sandbox policy,
+  `BrowserSession`, `FetchEngine`, the canonical TLS/origin services, and the
+  parent broker; CSS stays in the existing HTML style/layout producer and
+  `DrawIrComposition`; lifecycle stays in `SimpleWebRenderSession`,
+  `BrowserSession.close()`, and the hosted renderer registry. No second TLS
+  stack, sandbox, browser controller, DOM, parser, WebIR, Draw IR, renderer,
+  compositor, cache, profiler, or GC owner is permitted. Frozen manual steps
+  are `Navigate through verified HTTPS`, `Reject renderer host capability
+  access`, `Bind platform sandbox evidence to the production renderer binary`,
+  `Render HTML and CSS through canonical Draw IR`,
+  `Reuse parsed layout work across unchanged animation frames`, and
+  `Close the page and reclaim browser resources`. Existing
+  `_check_security_denial`, `_check_canonical_draw_ir`, `_check_budget_row`,
+  and `_check_resource_reclaimed` helpers remain authoritative; unfinished
+  product rows retain explicit `fail(...)`. The merge owner and generated
+  manual reviewer are root Codex, followed by an independent high-capability
+  read-only review. No runtime execution or bootstrap is authorized during the
+  audit.
+- remaining-production audit result (2026-07-29): The next TDD tranche fixes
+  three independently confirmed root defects. First, the hosted broker removes
+  its caller-supplied `authenticated_https` decision and permits HSTS learning
+  only on the existing completed platform-HTTPS job path; mocks, plaintext,
+  invalid/failed TLS, and ordinary response finalization cannot learn policy.
+  Second, `SimpleScriptExecutor.reset()` releases the old `ScriptRunner` DOM,
+  event loop, and bounded console material so navigation/close cannot retain
+  the prior document through the persistent executor. Third, the canonical
+  inline-run formatter aligns empty atomic inline-blocks by their bottom margin
+  edge and offsets the complete existing layout subtree before Draw IR.
+  Security evidence also records that the current hosted-WM wrapper injects an
+  unhashed bootstrap runtime DSO and therefore remains blocked rather than
+  qualifying as production proof; repairing that evidence wrapper is a later
+  owner lane, not a browser-core shortcut. Current primary sources are RFC
+  6797, RFC 9525, CSS 2 inline-block baseline rules, and CSS Inline Layout
+  baseline alignment. The three implementation sidecars use the already frozen
+  owners and manual steps, write modern SSpec RED oracles before product edits,
+  and do not run the unavailable runtime or any bootstrap.
+- remaining-production implementation and review (2026-07-29): The broker no
+  longer accepts caller-supplied HTTPS authentication and learns HSTS only
+  inside the successful platform HTTPS job completion. SimpleScript reset
+  releases old DOM/event-loop/console/callback-source ownership on navigation
+  and close. The canonical inline formatter aligns the supported empty atomic
+  inline-block slice using signed parent-strut leading, resolved positive pixel
+  margin edges, and complete-subtree offsets before Draw IR. Modern SSpec and
+  mirrored manuals assert generic HSTS denial, preloaded persistence,
+  callback-body/queue/console reclamation, computed style, line geometry, and
+  Draw IR. Two adversarial reviewers rejected early false-green HSTS persistence
+  and baseline math; after two repair cycles both returned PASS. Live trusted
+  and invalid-certificate HTTPS, negative/percentage and non-empty/overflow
+  baseline cases, native performance/RSS/GC, Windows/macOS sandbox rows, and
+  the unadmitted hosted-WM runtime DSO remain explicit blockers. Documentation
+  refactor updated architecture, design, plans, manuals, domain research, the
+  open bug record, and this state; no workflow/command surface changed, so
+  `.codex`/`.agents`/`.claude`/`.gemini` instruction updates are N/A.

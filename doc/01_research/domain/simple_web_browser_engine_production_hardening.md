@@ -63,3 +63,24 @@ Sources:
 
 - https://www.w3.org/TR/css-backgrounds-3/
 - https://drafts.csswg.org/css-values-5/#position
+
+## 2026-07-29 HSTS provenance and inline baseline follow-up
+
+RFC 6797 permits learning an HSTS policy only from an error-free response over
+secure transport; an `https:` URL spelling is not transport authentication.
+RFC 9525 separately requires the application to verify the complete
+certificate path and the service identity. The browser broker must therefore
+derive HSTS admission from its completed platform-TLS job, never from a
+caller-supplied boolean or a mock response.
+
+CSS 2 and the current CSS Inline Layout draft define an empty atomic
+inline-block's baseline at its bottom margin edge. Baseline alignment can be
+added at the existing inline-run layout owner by shifting the complete atomic
+subtree; it does not require a second inline formatter or Draw-IR adjustment.
+
+Sources:
+
+- https://www.rfc-editor.org/rfc/rfc6797.html
+- https://www.rfc-editor.org/rfc/rfc9525.html
+- https://drafts.csswg.org/css2/#inline-block
+- https://drafts.csswg.org/css-inline/#baseline-alignment

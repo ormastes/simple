@@ -114,6 +114,10 @@ structured interaction are not production browser evidence.
   `scripts/check/check-linux-hosted-wm-live-window-evidence.shs`. The spec
   hashes the exact native `src/os/hosted/hosted_entry.spl` artifact before
   launch; it does not accept `bin/simple` or silently substitute a worker.
+  This lane remains blocked until the same receipt also admits the loaded
+  runtime provider by path, SHA-256, and build identity. The current wrapper
+  injects an unadmitted bootstrap runtime DSO; see
+  `doc/08_tracking/bug/hosted_wm_runtime_dso_unadmitted_security_evidence_2026-07-29.md`.
 - text/HTML/protocol/exec/log/artifact:
   `build/test-artifacts/<spec-relative-path>/`
 - GUI images:

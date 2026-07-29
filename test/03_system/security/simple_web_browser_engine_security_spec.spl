@@ -185,7 +185,7 @@ describe "Production Simple browser security envelope":
     # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-014
     # @manual: show
     # @capture(protocol)
-    it "should share and persist HSTS learned by secondary browser windows":
+    it "should persist shared preloaded HSTS without trusting generic responses":
         step("Navigate through verified HTTPS")
         val now_ms: i64 = 100000
         val artifact = _production_browser_artifact()
@@ -211,7 +211,7 @@ describe "Production Simple browser security envelope":
         expect(secondary.load_hsts_snapshot(
             registry.hsts_snapshot(now_ms), now_ms
         )).to_equal(1)
-        val learned = secondary._finalize_network(
+        val untrusted = secondary._finalize_network(
             "document",
             FetchRequest(
                 url: Url.parse_or_opaque(
@@ -227,60 +227,95 @@ describe "Production Simple browser security envelope":
                 status: 200,
                 headers: "Strict-Transport-Security: max-age=60",
                 body: []
-            ),
-            true
+            )
         )
-        expect(learned.error).to_equal("")
-        expect(secondary.hsts_dirty).to_be(true)
-        expect(registry.accept_renderer_hsts_snapshot(
-            secondary.hsts_snapshot(now_ms + 1000), now_ms + 1000
-        )).to_equal(2)
+        expect(untrusted.error).to_equal("")
+        expect(secondary.hsts_dirty).to_be(false)
+        expect(secondary.hsts_snapshot(
+            now_ms + 1000
+        ).entries.len()).to_equal(1)
         expect(registry.hsts_upgrade_url(
             "http://secondary.test/account"
-        )).to_equal("https://secondary.test/account")
-        expect(registry.hsts_dirty()).to_be(true)
-        expect(registry.hsts_revision()).to_equal(1)
+        )).to_equal("http://secondary.test/account")
+        expect(registry.hsts_dirty()).to_be(false)
+        expect(registry.hsts_revision()).to_equal(0)
 
         step("Persist shared HSTS before every browser window closes")
-        val profile_result = BrowserProfileStore.memory()
-        var profile = profile_result.unwrap()
-        expect(profile.save_hsts(
+        var profile = match BrowserProfileStore.memory():
+            Err(error):
+                fail("memory profile creation failed: {error.message()}")
+            Ok(opened):
+                opened
+        match profile.save_hsts(
             registry.hsts_snapshot(now_ms + 1000), now_ms + 1000
-        ).is_ok()).to_be(true)
-        registry.mark_hsts_saved()
+        ):
+            Err(error):
+                fail("HSTS save failed: {error.message()}")
+            Ok(_):
+                pass_dn("preloaded HSTS snapshot persisted")
         expect(registry.hsts_dirty()).to_be(false)
-        val persisted_result = profile.load_hsts(now_ms + 2000)
-        val persisted = persisted_result.unwrap()
+        val persisted = match profile.load_hsts(now_ms + 2000):
+            Err(error):
+                fail("HSTS reload failed: {error.message()}")
+            Ok(snapshot):
+                snapshot
         var restarted = HostedBrowserRendererRegistry.create(
             artifact, "https://example.com/"
         )
         expect(restarted.load_hsts_snapshot(
             persisted, now_ms + 2000
-        )).to_equal(2)
+        )).to_equal(1)
         expect(restarted.hsts_upgrade_url(
-            "http://secondary.test/account"
-        )).to_equal("https://secondary.test/account")
-        val profile_close = profile.close()
-        expect(profile_close.is_ok()).to_be(true)
-        expect(restarted.accept_renderer_hsts_snapshot(
-            persisted, now_ms + 2000
-        )).to_equal(2)
+            "http://sub.preload.test/account"
+        )).to_equal("https://sub.preload.test/account")
+        match profile.close():
+            Err(error):
+                fail("memory profile close failed: {error.message()}")
+            Ok(_):
+                pass_dn("memory profile closed")
+        expect(restarted.hsts_dirty()).to_be(false)
+        expect(restarted.hsts_revision()).to_equal(0)
         expect(restarted.ensure(
             84, "<div>secondary</div>", 64, 48, 0, now_ms + 2000
         )).to_equal("none")
         expect(restarted.contains(84)).to_be(true)
-        val failed_profile_result = BrowserProfileStore.memory()
-        var failed_profile = failed_profile_result.unwrap()
-        val failed_profile_close = failed_profile.close()
-        expect(failed_profile_close.is_ok()).to_be(true)
-        val failed_save = failed_profile.save_hsts(
-            restarted.hsts_snapshot(now_ms + 2000), now_ms + 2000
-        )
-        expect(failed_save.is_err()).to_be(true)
-        expect(restarted.hsts_dirty()).to_be(true)
         expect(restarted.remove_window(84)).to_be(true)
         expect(restarted.contains(84)).to_be(false)
+        expect(restarted.hsts_dirty()).to_be(false)
         expect(restarted.close()).to_be(true)
+
+    # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-014
+    # @manual: show
+    # @capture(protocol)
+    it "should learn HSTS only from the completed platform HTTPS job":
+        _two_origin_https_fixture()
+        step("Reject generic mock and ordinary HTTPS finalization")
+        var broker = HostedBrowserRendererProcess.create(43, 64, 48)
+        val mock = broker._finalize_network(
+            "document",
+            FetchRequest(
+                url: Url.parse_or_opaque("https://mock.test/"),
+                method: "GET", headers: "", body: [],
+                mode: RequestMode.Navigate, credentials: "include"
+            ),
+            FetchResponse(
+                status: 200,
+                headers: "Strict-Transport-Security: max-age=60", body: []
+            )
+        )
+        expect(mock.status).to_equal(200)
+        expect(mock.error).to_equal("")
+        expect(broker.hsts_dirty).to_be(false)
+        expect(broker._hsts_upgrade_url(
+            "http://mock.test/next"
+        )).to_equal("http://mock.test/next")
+
+        step("Reject failed TLS without response or policy state")
+        expect(broker.hsts_snapshot(100000).entries.len()).to_equal(0)
+        fail(
+            "REQ-WEB-BROWSER-011: trusted HTTPS learn/save/clean and " +
+            "invalid TLS failure/retry evidence not implemented"
+        )
 
     # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012
     # @manual: show
