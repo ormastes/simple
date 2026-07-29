@@ -1,7 +1,7 @@
 # Engine2D Draw-IR CSS background-image path has no resolver
 
 - **ID:** engine2d-draw-ir-image-path-no-resolver-2026-07-06
-- **Status:** Resolved for bounded `<img>` and static CSS URL backgrounds (2026-07-29)
+- **Status:** Resolved for bounded `<img>` and static/dynamic CSS URL backgrounds (2026-07-29)
 - **Area:** ui / gpu / engine2d / browser_engine
 - **Date:** 2026-07-06
 
@@ -36,11 +36,16 @@ URL backgrounds through BrowserSession and `SBRF5`.
 
 The existing animation scheduler and retained-frame timing remain unchanged.
 
-## Remaining fail-closed follow-ups
+## Dynamic follow-up delivered
 
-- Rounded URL backgrounds need exact rounded clipping evidence.
-- URLs introduced by dynamic JavaScript style mutation need bounded rediscovery
-  and broker-policy evidence.
+Post-load JavaScript and Simple Script reconciliation rediscovers new background
+URLs and reuses `_start_image_source`. CSP/HSTS/mixed-content, deduplication,
+response generation, bounded PNG decode, retained resources, and Draw-IR
+resolution stay on the static image path. Commit invalidates rendering without
+restarting animation time; stopped or superseded loads reject late responses.
+
+Pure-Simple runtime execution remains compiler-blocked, so focused source and
+host evidence is not recorded as a browser runtime PASS.
 
 ## Optional follow-up (design debt)
 

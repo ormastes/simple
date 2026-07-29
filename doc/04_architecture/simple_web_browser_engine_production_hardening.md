@@ -478,6 +478,34 @@ The hosted worker filters composition-referenced resources before the additive
 each frame. Existing CSS animation invalidation and retained-frame timing remain
 unchanged.
 
-Rounded URL-background clipping and URLs introduced by dynamic JavaScript style
-mutation remain unclaimed follow-ups and must fail closed until they have
-bounded discovery, policy, and exact-pixel evidence.
+Multiple image layers and fixed/local background attachment remain fail-closed
+until they have bounded lowering and exact-pixel evidence.
+
+## Post-load browser boundary hardening (2026-07-29)
+
+Post-load DOM reconciliation rediscovers inline and stylesheet background URLs
+and routes each new `BrowserImageSource` through the same
+`_start_image_source` owner used during document load. That preserves existing
+CSP, HSTS, mixed-content, redirect, PNG, resource-budget, and
+generation-cancellation boundaries; JavaScript and Simple Script gain no
+parallel fetch or decoder path. A completed fetch updates retained images and
+normal rendering invalidation without resetting document animation time.
+
+The JS engines retain their bounded timer arrays but remove completed and
+canceled entries in place. Due-task selection remains a bounded linear scan;
+the old per-callback queue reconstruction and second retained list are gone.
+
+Stop remains parent-owned. If a renderer command has been partially written,
+the broker records `stop_after_write`, finishes that frame atomically, then
+cancels navigation/network state and emits Stop within the refreshed deadline.
+The worker drains complete messages already in its bounded decoder before
+reading again, so a coalesced Stop cannot stall behind an empty read.
+
+URL authority keeps bracketed IPv6 syntax, while socket/TLS receives the
+validated bare literal from `_browser_transport_host`. The Linux final
+renderer seccomp filter also denies `get_robust_list`, closing same-UID robust
+futex-list disclosure without adding an app-local syscall facade.
+
+Only focused host C containment/TLS evidence is currently executable. The
+pure-Simple target remains blocked by the recorded compiler failure; no
+bootstrap or Rust-seed result is production browser evidence.

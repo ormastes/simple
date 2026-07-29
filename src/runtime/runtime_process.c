@@ -2188,6 +2188,9 @@ static bool browser_renderer_apply_seccomp(void) {
 #ifdef __NR_ptrace
         BROWSER_RENDERER_DENY_SYSCALL(__NR_ptrace),
 #endif
+#ifdef __NR_get_robust_list
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_get_robust_list),
+#endif
 #ifdef __NR_process_vm_readv
         BROWSER_RENDERER_DENY_SYSCALL(__NR_process_vm_readv),
 #endif

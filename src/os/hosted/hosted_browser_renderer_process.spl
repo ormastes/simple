@@ -78,6 +78,21 @@ extern fn rt_browser_http_job_take_error(handle: i64) -> text
 extern fn rt_browser_http_job_cancel(handle: i64) -> bool
 extern fn rt_browser_http_job_free(handle: i64) -> bool
 
+pub fn _browser_transport_host(host: text) -> text:
+    if (host.len() < 4 or not host.starts_with("[") or
+        not host.ends_with("]")):
+        return host
+    val parsed = Url.parse("https://{host}/")
+    if not parsed.?:
+        return host
+    if parsed!.host != host:
+        return host
+    val inner = host.slice(1, host.len() - 1)
+    if (not inner.contains(":") or inner.contains("[") or
+        inner.contains("]")):
+        return host
+    inner
+
 fn _hosted_browser_canonical_history_url(raw: text) -> text:
     if (raw == "" or raw != raw.trim() or raw.contains("\0") or
         raw.contains("\r") or raw.contains("\n") or
@@ -220,6 +235,7 @@ pub class HostedBrowserRendererProcess:
     pending_wire_offset: i64
     pending_wire_reply_to_request_id: i64
     pending_wire_is_command: bool
+    stop_after_write: bool
     deferred_commands: [_HostedBrowserDeferredCommand]
     pending_scroll_event_id: i64
     pending_scroll_delta_milli_y: i64
@@ -273,6 +289,7 @@ pub class HostedBrowserRendererProcess:
             pending_wire_offset: 0,
             pending_wire_reply_to_request_id: 0,
             pending_wire_is_command: false,
+            stop_after_write: false,
             deferred_commands: [],
             pending_scroll_event_id: 0,
             pending_scroll_delta_milli_y: 0,
@@ -590,6 +607,22 @@ pub class HostedBrowserRendererProcess:
         self.provisional_document_origin = ""
         true
 
+    me _begin_stop_after_write() -> text:
+        if not self.stop_after_write or self.pending_wire != "":
+            return ""
+        val remaining_ms = (
+            self.command_deadline_ms - rt_time_now_monotonic_ms()
+        )
+        self.stop_after_write = false
+        if not self._cancel_pending_for_stop():
+            return "renderer-busy"
+        match self._begin_navigation_command(
+            "stop", "", "", "", "", "", "stop",
+            if remaining_ms > 0: remaining_ms else: 1
+        ):
+            Err(reason): reason
+            Ok(_): ""
+
     me close() -> bool:
         self._cancel_network_job()
         self.command_deadline_ms = 0
@@ -607,6 +640,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = 0
         self.pending_wire_is_command = false
+        self.stop_after_write = false
         self.deferred_commands = []
         self.pending_scroll_event_id = 0
         self.pending_scroll_delta_milli_y = 0
@@ -772,7 +806,7 @@ pub class HostedBrowserRendererProcess:
                     589824
                 val handle = rt_browser_http_job_start_public_limited(
                     url.scheme,
-                    url.host,
+                    _browser_transport_host(url.host),
                     port,
                     rt_text_to_bytes(build_request_bytes(prepared.request)),
                     remaining_ms,
@@ -1166,6 +1200,9 @@ pub class HostedBrowserRendererProcess:
             val reason = self._flush_pending_wire_once()
             if reason != "":
                 return Some(self.fail(reason))
+            val stop_reason = self._begin_stop_after_write()
+            if stop_reason != "":
+                return Some(self.fail(stop_reason))
             return nil
         if self.network_job_handle > 0:
             val reason = self._poll_network_job()
@@ -1658,8 +1695,12 @@ pub class HostedBrowserRendererProcess:
         if self.state != "active":
             return Err("invalid-renderer-state")
         if self.command_deadline_ms > 0:
-            if self.pending_operation == "stop":
+            if self.pending_operation == "stop" or self.stop_after_write:
                 return Ok(false)
+            if self.pending_wire != "" and self.pending_wire_offset > 0:
+                self.command_deadline_ms = _deadline_ms(timeout_ms)
+                self.stop_after_write = true
+                return Ok(true)
             if not self._cancel_pending_for_stop():
                 return Err("renderer-busy")
         else:

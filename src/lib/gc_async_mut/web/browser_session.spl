@@ -169,6 +169,7 @@ class BrowserRequest:
     credentials: text
     is_top_level_navigation: bool
     script_cookie_writes: [text]
+    image_resource_key: text
 
     static fn create(id: text, kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
         BrowserRequest(
@@ -184,7 +185,8 @@ class BrowserRequest:
             site_for_cookies_url: "",
             credentials: "include",
             is_top_level_navigation: kind == "document",
-            script_cookie_writes: []
+            script_cookie_writes: [],
+            image_resource_key: ""
         )
 
 class BrowserResponse:
@@ -1003,6 +1005,7 @@ fn _browser_dom_style_snapshot(runtime: JsRuntime, object_id: i64) -> text:
 class BrowserDomSyncResult:
     root: BeDomNode
     changed: bool
+    image_source_changed: bool
 
 impl BrowserRuntimeState:
 
@@ -1208,6 +1211,7 @@ impl BrowserRuntimeState:
     me sync_dom(root: BeDomNode) -> BrowserDomSyncResult:
         var changes: Dict<i64, i32> = {}
         var mutation_bytes: i64 = 0
+        var image_source_changed = false
         val document_bytes = be_dom_serialize_children(root).len()
         var index = 0
         while index < self.dom_element_ids.len():
@@ -1248,6 +1252,11 @@ impl BrowserRuntimeState:
                 ):
                     changes[self.dom_node_ids[index]] = index
                     mutation_bytes = mutation_bytes + element_bytes
+                    if (
+                        next_style != self.dom_style_snapshots[index] and
+                        next_style.lower().contains("url(")
+                    ):
+                        image_source_changed = true
             index = index + 1
         val changed = changes.keys().len() > 0
         val next_root = if changed:
@@ -1256,7 +1265,8 @@ impl BrowserRuntimeState:
             root
         BrowserDomSyncResult(
             root: next_root,
-            changed: changed
+            changed: changed,
+            image_source_changed: image_source_changed
         )
 
 fn _browser_session_inline_fetch_url(html: text) -> text?:
@@ -1388,6 +1398,7 @@ class BrowserSession:
     module_eval_stack: [text]
     wasm_modules: [BrowserWasmModuleRecord]
     image_resources: [SimpleOsHostGpuImageResource]
+    admitted_image_sources: [BrowserImageSource]
     home_url: text
     favorite_links: [Pair<text, text>]
     address_draft: text
@@ -1457,6 +1468,7 @@ class BrowserSession:
             module_eval_stack: [],
             wasm_modules: [],
             image_resources: [],
+            admitted_image_sources: [],
             home_url: "about:blank",
             favorite_links: [],
             address_draft: "",
@@ -1650,6 +1662,7 @@ impl BrowserSession:
         self.pending_requests = []
         self.pending_request_head = 0
         self.inflight_requests = []
+        self._prune_admitted_image_sources_to_resources()
         self.subresource_request_count = 0
         self.pending_space_activation_target = ""
         self.pending_content_security_policy = ""
@@ -1680,6 +1693,7 @@ impl BrowserSession:
         self.pending_requests = []
         self.pending_request_head = 0
         self.inflight_requests = []
+        self._prune_admitted_image_sources_to_resources()
         self.active_load = nil
         self.pending_content_security_policy = ""
         self._cancel_runtime_fetches("navigation-canceled")
@@ -2093,7 +2107,7 @@ impl BrowserSession:
         found
 
     me _commit_subresource_error(
-        response: BrowserResponse, message: text
+        response: BrowserResponse, message: text, image_resource_key: text = ""
     ) -> Result<bool, text>:
         val failed = BrowserResponse.create(
             request_id: response.request_id,
@@ -2113,7 +2127,11 @@ impl BrowserSession:
         if response.kind == "wasm":
             return self._commit_wasm_response(failed)
         if response.kind == "image":
-            return self._commit_image_response(failed, response.url)
+            val resource_key = if image_resource_key != "":
+                image_resource_key
+            else:
+                response.url
+            return self._commit_image_response(failed, resource_key)
         Err("not a subresource response: {response.kind}")
 
     me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
@@ -2130,6 +2148,9 @@ impl BrowserSession:
                         normalize_browser_url(response.url)):
                         return Err("response URL mismatch")
             return Err("unknown or canceled request: {response.request_id}")
+        var response_image_key = ""
+        if val Some(request) = inflight:
+            response_image_key = request.image_resource_key
         if not browser_resource_size_allowed(response.body.len()):
             val limit_error = "response body exceeds 50 MiB resource limit"
             if response.kind == "fetch":
@@ -2150,13 +2171,14 @@ impl BrowserSession:
             val location = browser_header_location(response.headers)
             if location == "":
                 return self._commit_subresource_error(
-                    response, "HTTP {response.status} redirect missing Location"
+                    response, "HTTP {response.status} redirect missing Location",
+                    response_image_key
                 )
             val target = normalize_runtime_request_url(response.url, location)
             val normalized_target = normalize_network_navigation_url(target)
             if val Err(e) = normalized_target:
                 return self._commit_subresource_error(
-                    response, "redirect blocked: {e}"
+                    response, "redirect blocked: {e}", response_image_key
                 )
             var next_url = target
             if val Ok(valid_url) = normalized_target:
@@ -2166,7 +2188,8 @@ impl BrowserSession:
                next_url.starts_with("http://") and
                not browser_session_is_loopback_http(next_url):
                 return self._commit_subresource_error(
-                    response, "redirect blocked HTTPS downgrade"
+                    response, "redirect blocked HTTPS downgrade",
+                    response_image_key
                 )
             val csp_directive = if response.kind == "style":
                 "style-src"
@@ -2179,7 +2202,8 @@ impl BrowserSession:
                 self.document_url, next_url, false
             ):
                 return self._commit_subresource_error(
-                    response, "CSP blocked redirect: {next_url}"
+                    response, "CSP blocked redirect: {next_url}",
+                    response_image_key
                 )
             var redirect_count = 0
             var redirect_origin_url = response.url
@@ -2199,7 +2223,7 @@ impl BrowserSession:
                 redirect_is_top_level = original.is_top_level_navigation
             if redirect_count >= 20 and not transport_upgrade:
                 return self._commit_subresource_error(
-                    response, "redirect limit exceeded"
+                    response, "redirect limit exceeded", response_image_key
                 )
             var next_request = self._build_request(
                 response.kind, next_url, "GET", "", "",
@@ -2212,6 +2236,7 @@ impl BrowserSession:
             next_request.site_for_cookies_url = redirect_site_url
             next_request.credentials = redirect_credentials
             next_request.is_top_level_navigation = redirect_is_top_level
+            next_request.image_resource_key = response_image_key
             next_request.headers = self._headers_with_session_cookie(
                 next_request.headers, next_request.url, next_request.method,
                 redirect_site_url, redirect_is_top_level,
@@ -2222,7 +2247,7 @@ impl BrowserSession:
         if is_active_subresource and response.error == "" and
            not browser_status_is_success(response.status):
             return self._commit_subresource_error(
-                response, "HTTP {response.status}"
+                response, "HTTP {response.status}", response_image_key
             )
         if response.kind == "document":
             if not self.is_loading or normalize_browser_url(response.url) != self.pending_url:
@@ -2316,10 +2341,11 @@ impl BrowserSession:
         if response.kind == "wasm":
             return self._commit_wasm_response(response)
         if response.kind == "image":
-            var resource_url = response.url
-            if val Some(request) = inflight:
-                resource_url = request.redirect_origin_url
-            return self._commit_image_response(response, resource_url)
+            val resource_key = if response_image_key != "":
+                response_image_key
+            else:
+                response.url
+            return self._commit_image_response(response, resource_key)
         if response.kind == "module":
             if val Some(request) = inflight:
                 if request.redirect_origin_url != response.url:

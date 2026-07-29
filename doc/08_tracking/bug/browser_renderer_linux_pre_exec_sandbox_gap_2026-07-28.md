@@ -50,3 +50,9 @@ focused C gate proves a normal process cannot call stage two and reach READY
 without stage one, while the broker-spawned marker path still completes both
 stages. This closes artifact/link omission as an admission bypass; it does not
 replace the still-pending installed-artifact ready/frame evidence.
+
+The final stage-two seccomp policy now also denies `get_robust_list`, preventing
+a hostile site renderer from disclosing the same-UID broker's robust futex-list
+address. The focused host C containment gate passes. Installed pure-Simple
+READY/frame evidence remains compiler-blocked and no bootstrap/seed substitute
+is accepted.

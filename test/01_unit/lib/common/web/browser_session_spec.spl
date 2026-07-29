@@ -388,6 +388,214 @@ describe "BrowserSession page loading":
         expect(hsts_image.kind).to_equal("image")
         expect(hsts_image.url).to_equal("http://cdn.test/p.png")
 
+    it "loads a JavaScript-introduced background once without restarting animations":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.com/page/index.html",
+            "<html><body style='margin:0'><div id='stage' style='width:2px;height:2px'></div></body></html>"
+        ).is_ok()).to_be(true)
+        session.advance_time(40)
+        val animation_start = session.animation_start_time_ms
+
+        expect(session.eval_script(
+            "document.getElementById('stage').style.backgroundImage = \"url('dynamic.png')\""
+        ).is_ok()).to_be(true)
+        val image = session.take_pending_request().unwrap()
+        expect(image.kind).to_equal("image")
+        expect(image.url).to_equal(
+            "https://example.com/page/dynamic.png"
+        )
+        expect(image.image_resource_key).to_equal("dynamic.png")
+        val reconcile_epoch = session.css_animation_reconcile_epoch_ms
+        expect(session.commit_network_response(BrowserResponse.create(
+            image.id, "image", image.url, 200,
+            "Content-Type: image/png",
+            _browser_image_png_hex(0xFF2468ACu32), ""
+        )).is_ok()).to_be(true)
+        expect(session.image_resources[0].image_uri).to_equal("dynamic.png")
+        expect(session.image_resources[0].pixels).to_equal([0xFF2468ACu32])
+        expect(session.render(4, 4).pixels).to_contain(0xFF2468ACu32)
+        expect(session.animation_start_time_ms).to_equal(animation_start)
+        expect(session.css_animation_reconcile_epoch_ms).to_equal(
+            reconcile_epoch
+        )
+
+        expect(session.eval_script(
+            "document.getElementById('stage').style.backgroundImage = \"url('dynamic.png')\""
+        ).is_ok()).to_be(true)
+        expect(session.take_pending_request()).to_be_nil()
+
+    it "loads a Simple Script-introduced background after script execution":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.com/page/index.html",
+            "<html><body><script type='text/simple'>body_html '<div style=\"background-image:url(simple.png)\"></div>'</script></body></html>"
+        ).is_ok()).to_be(true)
+
+        val image = session.take_pending_request().unwrap()
+        expect(image.kind).to_equal("image")
+        expect(image.url).to_equal(
+            "https://example.com/page/simple.png"
+        )
+        expect(image.image_resource_key).to_equal("simple.png")
+        expect(session.commit_network_response(BrowserResponse.create(
+            image.id, "image", image.url, 200,
+            "Content-Type: image/png",
+            _browser_image_png_hex(0xFF13579Bu32), ""
+        )).is_ok()).to_be(true)
+        expect(session.image_resources[0].image_uri).to_equal("simple.png")
+
+    it "allows a failed dynamic image response to retry":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.com/index.html",
+            "<html><body><div id='stage'></div></body></html>"
+        ).is_ok()).to_be(true)
+        expect(session.eval_script(
+            "document.getElementById('stage').style.backgroundImage = 'url(retry.png)'"
+        ).is_ok()).to_be(true)
+        val failed = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            failed.id, "image", failed.url, 503, "", "", ""
+        )).is_ok()).to_be(true)
+        expect(session.admitted_image_sources.len()).to_equal(0)
+
+        expect(session.eval_script(
+            "document.getElementById('stage').style.backgroundImage = 'none'"
+        ).is_ok()).to_be(true)
+        expect(session.eval_script(
+            "document.getElementById('stage').style.backgroundImage = 'url(retry.png)'"
+        ).is_ok()).to_be(true)
+        val retry = session.take_pending_request().unwrap()
+        expect(retry.image_resource_key).to_equal("retry.png")
+
+    it "reuses prefetched class backgrounds without a second request":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.com/index.html",
+            "<style>.hot{background-image:url(class.png)}</style><body><div id='stage'></div></body>"
+        ).is_ok()).to_be(true)
+        val image = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            image.id, "image", image.url, 200,
+            "Content-Type: image/png",
+            _browser_image_png_hex(0xFF102030u32), ""
+        )).is_ok()).to_be(true)
+        session.advance_time(25)
+        val animation_start = session.animation_start_time_ms
+
+        expect(session.eval_script(
+            "document.getElementById('stage').className = 'hot'"
+        ).is_ok()).to_be(true)
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.image_resources.len()).to_equal(1)
+        expect(session.animation_start_time_ms).to_equal(animation_start)
+
+    it "blocks dynamic backgrounds with CSP and rejects their late stopped response":
+        var blocked = BrowserSession.new()
+        expect(blocked.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document = blocked.take_pending_request().unwrap()
+        expect(blocked.commit_network_response(BrowserResponse.create(
+            document.id, "document", document.url, 200,
+            "Content-Security-Policy: img-src 'none'",
+            "<html><body><div id='stage'></div></body></html>", ""
+        )).is_ok()).to_be(true)
+        expect(blocked.eval_script(
+            "document.getElementById('stage').style.backgroundImage = 'url(blocked.png)'"
+        ).is_ok()).to_be(true)
+        expect(blocked.take_pending_request()).to_be_nil()
+        expect(blocked.warnings.join("|")).to_contain(
+            "CSP blocked image"
+        )
+
+        var bounded = BrowserSession.new()
+        expect(bounded.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val bounded_document = bounded.take_pending_request().unwrap()
+        expect(bounded.commit_network_response(BrowserResponse.create(
+            bounded_document.id, "document", bounded_document.url, 200,
+            "Content-Security-Policy: img-src 'self'",
+            "<html><body><div id='stage'></div></body></html>", ""
+        )).is_ok()).to_be(true)
+        var denied_index = 0
+        while denied_index < 64:
+            expect(bounded.eval_script(
+                "document.getElementById('stage').style.backgroundImage = " +
+                "'url(https://cdn{denied_index}.test/blocked.png)'"
+            ).is_ok()).to_be(true)
+            expect(bounded.take_pending_request()).to_be_nil()
+            denied_index = denied_index + 1
+        expect(bounded.eval_script(
+            "document.getElementById('stage').style.backgroundImage = " +
+            "'url(allowed.png)'"
+        ).is_ok()).to_be(true)
+        val allowed = bounded.take_pending_request().unwrap()
+        expect(allowed.url).to_equal(
+            "https://example.com/allowed.png"
+        )
+
+        var stopped = BrowserSession.new()
+        expect(stopped.open_html(
+            "https://example.com/index.html",
+            "<html><body><div id='stage'></div></body></html>"
+        ).is_ok()).to_be(true)
+        expect(stopped.eval_script(
+            "document.getElementById('stage').style.backgroundImage = 'url(late.png)'"
+        ).is_ok()).to_be(true)
+        val late = stopped.take_pending_request().unwrap()
+        stopped.stop_loading()
+        expect(stopped.commit_network_response(BrowserResponse.create(
+            late.id, "image", late.url, 200,
+            "Content-Type: image/png",
+            _browser_image_png_hex(0xFFFFFFFFu32), ""
+        )).is_err()).to_be(true)
+        expect(stopped.image_resources.len()).to_equal(0)
+        expect(stopped.admitted_image_sources.len()).to_equal(0)
+        expect(stopped.eval_script(
+            "document.getElementById('stage').style.backgroundImage = 'none'"
+        ).is_ok()).to_be(true)
+        expect(stopped.eval_script(
+            "document.getElementById('stage').style.backgroundImage = 'url(late.png)'"
+        ).is_ok()).to_be(true)
+        val stopped_retry = stopped.take_pending_request().unwrap()
+        expect(stopped_retry.image_resource_key).to_equal("late.png")
+
+        var navigated = BrowserSession.new()
+        expect(navigated.open_html(
+            "https://example.com/index.html",
+            "<html><body><div id='stage'></div></body></html>"
+        ).is_ok()).to_be(true)
+        expect(navigated.eval_script(
+            "document.getElementById('stage').style.backgroundImage = 'url(old.png)'"
+        ).is_ok()).to_be(true)
+        val old_image = navigated.take_pending_request().unwrap()
+        expect(navigated.begin_network_navigation(
+            "https://example.com/next.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val replacement = navigated.take_pending_request().unwrap()
+        expect(navigated.commit_network_response(BrowserResponse.create(
+            replacement.id, "document", replacement.url, 0,
+            "", "", "offline"
+        )).is_err()).to_be(true)
+        expect(navigated.commit_network_response(BrowserResponse.create(
+            old_image.id, "image", old_image.url, 200,
+            "Content-Type: image/png",
+            _browser_image_png_hex(0xFFFFFFFFu32), ""
+        )).is_err()).to_be(true)
+        expect(navigated.image_resources.len()).to_equal(0)
+        expect(navigated.admitted_image_sources.len()).to_equal(0)
+        expect(navigated.eval_script(
+            "document.getElementById('stage').style.backgroundImage = 'none'"
+        ).is_ok()).to_be(true)
+        expect(navigated.eval_script(
+            "document.getElementById('stage').style.backgroundImage = 'url(old.png)'"
+        ).is_ok()).to_be(true)
+        val navigation_retry = navigated.take_pending_request().unwrap()
+        expect(navigation_retry.image_resource_key).to_equal("old.png")
+
     it "blocks images with img-src and rejects non-PNG or noncanonical bodies":
         var blocked = BrowserSession.new()
         expect(blocked.begin_network_navigation(

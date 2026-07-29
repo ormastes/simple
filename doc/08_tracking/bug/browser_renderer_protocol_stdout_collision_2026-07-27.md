@@ -21,3 +21,12 @@ Evidence:
 - the Linux containment test enters Landlock/seccomp, writes noise to stdout
   and stderr, and receives only `sandbox-ok` through the protocol socket;
 - `runtime_process.c` compiles for MinGW with `-Wall -Wextra -Werror`.
+
+## Buffered Stop update (2026-07-29)
+
+The broker now defers Stop when a command is partially written:
+`stop_after_write` completes that frame, cancels provisional navigation/network
+state, and emits one Stop. The worker drains complete messages already retained
+by its bounded decoder, including Stop coalesced behind a preceding command,
+before blocking for input. Pure-Simple runtime evidence remains
+compiler-blocked; no bootstrap or seed result is claimed.

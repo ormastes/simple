@@ -13,6 +13,8 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_fetch_request_decode,
     browser_renderer_frame_decode,
+    browser_renderer_message_encode,
+    browser_renderer_navigation_decode,
     browser_renderer_navigation_encode,
     browser_renderer_network_response_encode,
     browser_renderer_resize_encode,
@@ -171,6 +173,37 @@ describe "hosted browser renderer worker":
             "hosted-entry", BROWSER_RENDERER_WORKER_ARG,
             "7", "64", "48", "tail"
         ])).to_equal(64)
+
+    it "drains a coalesced Stop already buffered behind a command":
+        val init = browser_renderer_message_encode(
+            "init", 7, 2, "<p>pending navigation</p>"
+        )
+        val stop = browser_renderer_navigation_encode(
+            7, 3, "stop", "", "", "", "", ""
+        )
+        val first = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), init.wire + stop.wire
+        )
+        expect(first.status).to_equal("message")
+        expect(first.decoder.buffer_len).to_be_greater_than(0)
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(first.message).ok).to_be(true)
+
+        val second = browser_renderer_decoder_feed(first.decoder, "")
+        expect(second.status).to_equal("message")
+        expect(browser_renderer_navigation_decode(
+            second.message
+        ).action).to_equal("stop")
+        expect(worker.handle(second.message).ok).to_be(true)
+        expect(second.decoder.buffer_len).to_equal(0)
+
+        val source = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_worker.spl"
+        ) ?? ""
+        expect(source).to_contain("if decoder.buffer_len > 0:")
+        expect(source).to_contain(
+            "browser_renderer_decoder_feed(decoder, \"\")"
+        )
 
     it "renders HTML CSS Simple Script JavaScript and CSS animation into bounded DrawIR":
         val script_first = _render(SCRIPT_ANIMATION_HTML, 0)

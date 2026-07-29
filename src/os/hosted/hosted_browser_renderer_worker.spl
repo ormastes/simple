@@ -904,32 +904,46 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
         val chunk = rt_browser_renderer_read_stdin_some(_WORKER_READ_BYTES)
         if chunk == "":
             return if decoder.buffer_len == 0: 0 else: 72
-        val decoded = browser_renderer_decoder_feed(decoder, chunk)
-        decoder = decoded.decoder
-        if decoded.status == "violation":
-            return 73
-        if decoded.status == "message":
-            if decoded.message.kind == "test_crash_after_ready":
-                if not session.initialized or
-                    decoded.message.request_id != session.expected_request_id:
+        var decoded = browser_renderer_decoder_feed(decoder, chunk)
+        var drain_buffer = true
+        var drained_messages: i64 = 0
+        while drain_buffer:
+            decoder = decoded.decoder
+            if decoded.status == "violation":
+                return 73
+            if decoded.status != "message":
+                drain_buffer = false
+            else:
+                drained_messages = drained_messages + 1
+                if drained_messages > _WORKER_READ_BYTES:
                     return 74
-                return 75
-            if decoded.message.kind == "test_hang_after_ready":
-                if not session.initialized or
-                    decoded.message.request_id != session.expected_request_id:
-                    return 74
-                val acknowledged = browser_renderer_message_encode(
-                    "test_hang_ready", decoded.message.generation,
-                    decoded.message.request_id, ""
-                )
-                if not acknowledged.ok or not _worker_write(acknowledged.wire):
-                    return 74
-                while true:
-                    val ignored = rt_browser_renderer_read_stdin_some(
-                        _WORKER_READ_BYTES
+                if decoded.message.kind == "test_crash_after_ready":
+                    if not session.initialized or
+                        decoded.message.request_id != session.expected_request_id:
+                        return 74
+                    return 75
+                if decoded.message.kind == "test_hang_after_ready":
+                    if not session.initialized or
+                        decoded.message.request_id != session.expected_request_id:
+                        return 74
+                    val acknowledged = browser_renderer_message_encode(
+                        "test_hang_ready", decoded.message.generation,
+                        decoded.message.request_id, ""
                     )
-                    if ignored == "":
-                        return 76
-            val frame = session.handle(decoded.message)
-            if not frame.ok or not _worker_write(frame.wire):
-                return 74
+                    if not acknowledged.ok or not _worker_write(
+                        acknowledged.wire
+                    ):
+                        return 74
+                    while true:
+                        val ignored = rt_browser_renderer_read_stdin_some(
+                            _WORKER_READ_BYTES
+                        )
+                        if ignored == "":
+                            return 76
+                val frame = session.handle(decoded.message)
+                if not frame.ok or not _worker_write(frame.wire):
+                    return 74
+                if decoder.buffer_len > 0:
+                    decoded = browser_renderer_decoder_feed(decoder, "")
+                else:
+                    drain_buffer = false

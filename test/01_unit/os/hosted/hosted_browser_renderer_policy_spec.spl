@@ -41,10 +41,22 @@ use os.hosted.hosted_browser_renderer_policy.{
 }
 use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererProcess,
+    _browser_transport_host,
     hosted_browser_network_response_limit_reason
 }
 
 extern fn rt_time_now_unix_micros() -> i64
+
+describe "hosted browser renderer transport host":
+    it "unwraps only a canonical IPv6 address for socket and TLS":
+        expect(_browser_transport_host(
+            "[2606:4700:4700::1111]"
+        )).to_equal("2606:4700:4700::1111")
+        expect(_browser_transport_host("example.com")).to_equal("example.com")
+        expect(_browser_transport_host("192.0.2.1")).to_equal("192.0.2.1")
+        expect(_browser_transport_host("[not:v6]")).to_equal("[not:v6]")
+        expect(_browser_transport_host("[[::1]]")).to_equal("[[::1]]")
+        expect(_browser_transport_host("[::1")).to_equal("[::1")
 
 fn _external_png_pixels() -> [u32]:
     [0xFFCC3020u32, 0xFF112233u32, 0xFF445566u32, 0xFF778899u32]
@@ -397,6 +409,61 @@ describe "hosted browser renderer broker policy":
                 expect(false).to_be(true)
             Ok(started):
                 expect(started).to_be(false)
+
+    it "defers Stop until a partially written navigation command is complete":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.state = "active"
+        broker.command_deadline_ms = 9000000000000
+        broker.pending_operation = "navigation"
+        broker.pending_wire = "partially-written-navigation"
+        broker.pending_wire_offset = 1
+        broker.pending_wire_reply_to_request_id = 2
+        broker.pending_wire_is_command = true
+        broker.navigation_permit = permit(
+            true, "https://example.test/pending"
+        )
+        broker.pending_history_action = "push"
+        broker.pending_document_commit_url = (
+            "https://example.test/pending"
+        )
+        broker.provisional_document_origin = "https://example.test"
+        broker.network_job_fetch = Some(request(
+            "document", "https://example.test/pending"
+        ))
+        broker.network_job_redirect_count = 3
+
+        val scheduled = broker.begin_stop(1000)
+        expect(scheduled.is_ok()).to_be(true)
+        expect(scheduled.unwrap()).to_be(true)
+        expect(broker.stop_after_write).to_be(true)
+        expect(broker.pending_operation).to_equal("navigation")
+        val repeated = broker.begin_stop(1000)
+        expect(repeated.is_ok()).to_be(true)
+        expect(repeated.unwrap()).to_be(false)
+
+        # Simulate the bounded writer completing the stale command.
+        broker.expected_reply_to_request_id = 2
+        broker.next_request_id = 3
+        broker.pending_wire = ""
+        broker.pending_wire_offset = 0
+        broker.pending_wire_reply_to_request_id = 0
+        broker.pending_wire_is_command = false
+        expect(broker._begin_stop_after_write()).to_equal("")
+
+        expect(broker.stop_after_write).to_be(false)
+        expect(broker.pending_operation).to_equal("stop")
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), broker.pending_wire
+        )
+        expect(browser_renderer_navigation_decode(
+            decoded.message
+        ).action).to_equal("stop")
+        expect(broker.navigation_permit.active).to_be(false)
+        expect(broker.pending_history_action).to_equal("")
+        expect(broker.pending_document_commit_url).to_equal("")
+        expect(broker.provisional_document_origin).to_equal("")
+        expect(broker.network_job_fetch).to_be_nil()
+        expect(broker.network_job_redirect_count).to_equal(0)
 
     it "authorizes Reload and replaces its current history entry":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)

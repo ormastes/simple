@@ -23,7 +23,8 @@ use std.common.gpu.simpleos_host_gpu_protocol.{
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_dispatch_event_to_id, be_dom_find_by_tag, be_dom_find_path_to_id,
-    be_dom_focused_route_id, be_dom_get_attr, be_dom_has_attr,
+    be_dom_focused_route_id, be_dom_get_attr, be_dom_get_text_content,
+    be_dom_has_attr,
     be_dom_route_identity,
     be_dom_serialize_children,
     be_dom_serialize_html, be_dom_set_children,
@@ -580,6 +581,44 @@ impl BrowserSession:
             runtime.interpreter = interpreter
             state.runtime = runtime
             self.runtime_state = Some(state)
+
+    me _append_dynamic_image_warning(
+        load: BrowserLoadState?, warning: text
+    ):
+        if val Some(active) = load:
+            active.append_warning(warning)
+        else:
+            self._append_warning(warning)
+
+    me _reconcile_dynamic_image_sources(load: BrowserLoadState?):
+        val admitted_count = self.admitted_image_sources.len()
+        var known_sources: [BrowserImageSource] = []
+        for source in self.admitted_image_sources:
+            known_sources.push(source)
+        var discovered = BrowserLoadState.create(
+            self.document_url, "", -1, false, [], [],
+            known_sources
+        )
+        _queue_inline_style_background_images(
+            self.current_dom, discovered, self.document_url, 0
+        )
+        for style_node in be_dom_find_by_tag(self.current_dom, "style"):
+            discovered._queue_background_image_sources(
+                be_dom_get_text_content(style_node),
+                self.document_url,
+                false
+            )
+        for warning in discovered.warnings:
+            self._append_dynamic_image_warning(load, warning)
+
+        var source_index = admitted_count
+        while source_index < discovered.image_sources.len():
+            val started = self._start_image_source(
+                discovered.image_sources[source_index]
+            )
+            if val Err(warning) = started:
+                self._append_dynamic_image_warning(load, warning)
+            source_index = source_index + 1
 
     me dispatch_dom_event(target_id: text, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
         val target_route_id = _browser_session_dom_route_id(
@@ -1267,6 +1306,7 @@ impl BrowserSession:
         self.module_eval_stack = []
         self.wasm_modules = []
         self.image_resources = []
+        self.admitted_image_sources = []
         self.pending_space_activation_target = ""
         self.text_selection_target_id = ""
         self.text_selection_anchor_byte = 0
@@ -1639,6 +1679,17 @@ impl BrowserSession:
             self._mark_css_animation_reconcile(
                 body_changed
             )
+            if (
+                self.active_load == nil and not self.is_loading and
+                (
+                    (
+                        (body_changed or bridge_changed) and
+                        self.current_body_html.lower().contains("url(")
+                    ) or
+                    dom_sync.image_source_changed
+                )
+            ):
+                self._reconcile_dynamic_image_sources(nil)
         self.session_storage = storage_pairs_from_object(state, state.session_storage_id)
         self.local_storage = storage_pairs_from_object(state, state.local_storage_id)
         self._persist_storage_for_url(active_document_url)

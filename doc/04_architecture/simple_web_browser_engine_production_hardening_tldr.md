@@ -31,10 +31,15 @@ DrawIrComposition -> persistent Engine2dCompositorBackend
 - Broker owns URLs/origins, Fetch/CORS/CSP, cookies, TLS/HSTS, and host access.
 - Static `<img>` and CSS URL backgrounds share bounded broker image policy;
   retained `SBRF5` frames include only composition-referenced resources.
+- Post-load JS/Simple Script backgrounds reuse `_start_image_source`; Stop is
+  deferred across partial IPC, buffered messages drain in place, IPv6 TLS gets
+  a validated bare host, and final seccomp denies `get_robust_list`.
 - Linux/macOS/Windows sandbox failure blocks production startup.
 
 Hot-path evidence: stage counters/timings, frame/input latency, cache reuse,
 Engine2D/font create/shutdown counts, memtrack/heap/RSS, 10,000-cycle soak.
+Current executable evidence is host C only; pure-Simple runtime evidence remains
+compiler-blocked and no bootstrap/seed substitute is accepted.
 
 Next files:
 

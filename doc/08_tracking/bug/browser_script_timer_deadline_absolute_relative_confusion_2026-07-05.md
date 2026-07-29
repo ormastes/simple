@@ -31,3 +31,11 @@ clock remained advanced. Both runtime creation paths now seed
 `timer_current_time_ms` from `BrowserSession.monotonic_time_ms`; the integration
 scenario covers a runtime created at 1000ms and a 500ms timeout due only at
 1500ms. Execution remains blocked by the tracked target compiler failure.
+
+## Queue-retention update (2026-07-29)
+
+Both active JS interpreter variants now remove completed one-shot timers and
+canceled handles directly from their bounded pending arrays; intervals replace
+their selected slot in place. Due selection remains a bounded linear scan, but
+draining no longer reconstructs a second queue per callback. Focused source
+coverage was updated; pure-Simple runtime evidence remains compiler-blocked.

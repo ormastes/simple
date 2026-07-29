@@ -411,6 +411,31 @@ visible and cannot be silently skipped into the score.
 - Filter the document image table to composition-referenced resources before
   additive `SBRF5` encoding. Preserve the existing retained-frame and CSS
   animation scheduling contracts.
-- Keep rounded URL-background clipping and dynamically introduced JavaScript
-  URLs fail closed until dedicated bounded-policy and exact-pixel coverage
-  exists.
+- Keep multiple image layers and fixed/local background attachment fail closed
+  until dedicated bounded-policy and exact-pixel coverage exists.
+
+## Post-load resource, timer, transport, and sandbox design (2026-07-29)
+
+- After script reconciliation mutates the DOM, collect newly visible background
+  URL sources and pass them to `_start_image_source`. The request carries its
+  authored `image_resource_key`; response commit stores pixels under that key
+  so Draw IR resolves the same resource without another resolver.
+- Reuse `admitted_image_sources` for deduplication. Stop or navigation
+  generation cancellation rejects late responses before image state changes.
+  Successful commit invalidates rendering but preserves animation epochs.
+- Timer drain performs the existing bounded due-task scan, updates an interval
+  slot in place, and removes a completed one-shot slot in place. `clearTimer`
+  removes its matching slot directly; no queue copy or tombstone set is added.
+- `begin_stop` sets `stop_after_write` only after bytes of the current command
+  have left the broker. `_begin_stop_after_write` runs when `pending_wire`
+  empties, clears provisional navigation/network state, and sends one Stop. The
+  worker feeds its existing decoder an empty chunk while messages remain.
+- `_browser_transport_host` unwraps only a canonical bracketed IPv6 literal;
+  URL/history/origin stay bracketed. DNS names, IPv4, and malformed brackets
+  pass through unchanged.
+- Final Linux renderer seccomp includes `get_robust_list`; stage-one admission
+  and stage-two ownership remain unchanged.
+
+Focused host C containment/TLS checks pass. Pure-Simple runtime/spec execution
+remains blocked by the recorded compiler defect, so no runtime PASS, manual
+refresh, bootstrap, or Rust-seed fallback is claimed.

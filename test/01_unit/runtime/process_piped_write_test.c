@@ -127,6 +127,16 @@ static int sandbox_probe(int argc, char** argv) {
     if (fork() >= 0 || errno != EPERM) return 17;
     errno = 0;
     if (kill(getpid(), 0) >= 0 || errno != EPERM) return 18;
+#if defined(SYS_get_robust_list)
+    void* robust_head = NULL;
+    size_t robust_len = 0;
+    errno = 0;
+    if (syscall(
+            SYS_get_robust_list, getppid(), &robust_head, &robust_len) >= 0 ||
+        errno != EPERM) {
+        return 42;
+    }
+#endif
     char* exec_args[] = {(char*)"true", NULL};
     char* exec_env[] = {NULL};
     errno = 0;

@@ -1710,3 +1710,48 @@ implementation in progress / target evidence blocked
   blockers. Rendering-source-coupling and direct-env/runtime guards pass.
   Runtime specs were not rerun because the prior focused pure-Simple target
   invocation segfaulted (139); no bootstrap or Rust-seed fallback was used.
+- post-load hardening cooperative plan (2026-07-29): Four disjoint sidecars
+  own dynamic image admission, GC timer queue removal, deferred Stop IPC, and
+  IPv6 HTTPS transport-host normalization. Shared interfaces are
+  `BrowserRequest.image_resource_key`,
+  `_reconcile_dynamic_image_sources`, `_start_image_source`,
+  `stop_after_write`, and `_browser_transport_host`; existing timer
+  `pending_timers.remove(...)` is reused. Frozen manual steps are
+  `Introduce a background image from JavaScript after load`,
+  `Fetch the image through the existing broker policy`,
+  `Render the image without resetting animation time`,
+  `Cancel a late image response after Stop or navigation`,
+  `Drain due GC timers without rebuilding the queue`,
+  `Deliver Stop after a partial renderer write`, and
+  `Connect IPv6 HTTPS with a bare transport host`. Focused helpers must fail
+  explicitly; no placeholder passes are permitted. Merge owner, generated
+  manual reviewer, and final adversarial reviewer are highest-capability Codex.
+- runtime boundary decision: `runtime_need` is denial of Linux
+  `get_robust_list` against the same-UID browser broker after hostile page code
+  enters the final site-renderer sandbox. `facade_checked`: this is a seccomp
+  policy syscall rule owned by `runtime_process.c`, not an app/library
+  capability facade. `chosen_path`: `runtime-owned-change`, adding the syscall
+  to the existing final deny filter. `rejected_shortcuts`: no worker-local raw
+  syscall shim, Yama assumption, fixture bypass, or parallel sandbox. Frozen
+  step: `Deny broker robust-list disclosure from the site renderer`.
+- post-load hardening implementation: JavaScript and Simple Script DOM/style
+  mutations now reconcile bounded background URLs through request-carried
+  resource keys and the existing CSP/HSTS/mixed-content/PNG/Draw-IR path.
+  Exact focused evidence reaches rendered pixels without resetting animation
+  epochs; redirects retain keys, denied URLs do not consume admission slots,
+  failed/canceled requests can retry, and loaded resources survive Stop or a
+  failed provisional navigation.
+- post-load hardening performance/controls/HTTPS: GC browser timer drain and
+  clear mutate the bounded queue in place instead of rebuilding it per
+  callback. Stop requested during a partial renderer write is delivered after
+  that write, with coalesced worker messages drained and stale replies ignored.
+  Canonical URL and HTTP Host keep IPv6 brackets while socket/TLS transport gets
+  the validated bare literal.
+- post-load hardening security/evidence: The final Linux site-renderer seccomp
+  filter denies `get_robust_list`, and the host-native sandbox probe passed with
+  exact `EPERM`. Three bounded adversarial passes converged to CLEAR after
+  fixing canceled and CSP-denied image admission poisoning. Rendering coupling,
+  direct-env/runtime working+staged, reverse-apply, conflict, and placeholder
+  gates pass; generated-spec layout remains zero. Pure-Simple executable specs
+  remain blocked by the recorded target compiler crash, so no runtime PASS or
+  bootstrap/seed fallback is claimed.

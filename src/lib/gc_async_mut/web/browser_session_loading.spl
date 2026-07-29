@@ -11,7 +11,7 @@
 
 use std.js.types.pair.{Pair}
 use std.js.types.js_types.{JsValue}
-use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord, BrowserHstsPolicy, BrowserHstsSnapshot, BrowserHstsSnapshotEntry, BROWSER_MAX_IMAGE_RESOURCES, BROWSER_MAX_IMAGE_PIXELS, browser_header_value, browser_history_push_bounded}
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserImageSource, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord, BrowserHstsPolicy, BrowserHstsSnapshot, BrowserHstsSnapshotEntry, BROWSER_MAX_IMAGE_RESOURCES, BROWSER_MAX_IMAGE_PIXELS, browser_header_value, browser_history_push_bounded}
 use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
 use std.gc_async_mut.web.browser_session_url.{
     network_navigation_hostname_valid, normalize_network_navigation_url,
@@ -499,144 +499,156 @@ impl BrowserSession:
             return self._execute_module_source(pending.root_url, source, load)
         self._advance_script_loading()
 
-    me _commit_image_response(
-        response: BrowserResponse, resource_url: text
+    me _store_image_response(
+        response: BrowserResponse, image_uri: text
+    ) -> text:
+        if response.error != "":
+            return "image load error: {response.error}"
+        self._apply_response_headers(response.headers, response.url)
+        if not _image_content_type_is_png(response.headers):
+            return "image load error: unsupported content type"
+        val encoded = _image_hex_bytes(response.body)
+        if val Err(reason) = encoded:
+            return "image load error: {reason}"
+        val bytes = encoded.unwrap()
+        if not _image_png_signature_valid(bytes):
+            return "image load error: invalid PNG signature"
+
+        var retained: [SimpleOsHostGpuImageResource] = []
+        var retained_pixels: i64 = 0
+        for existing in self.image_resources:
+            if existing.image_uri != image_uri:
+                retained.push(existing)
+                retained_pixels = retained_pixels + existing.pixels.len()
+        val remaining_pixels = BROWSER_MAX_IMAGE_PIXELS - retained_pixels
+        val decoded = decode_png_to_argb_bounded(bytes, remaining_pixels)
+        if val Err(reason) = decoded:
+            return "image load error: {reason}"
+        val image = decoded.unwrap()
+        val pixel_count = image.width.to_i64() * image.height.to_i64()
+        if (image.width <= 0 or image.height <= 0 or
+            pixel_count != image.pixels.len() or
+            pixel_count > BROWSER_MAX_IMAGE_PIXELS):
+            return "image load error: image dimensions exceed limit"
+        if retained.len() >= BROWSER_MAX_IMAGE_RESOURCES:
+            return "image resource limit reached; additional images ignored"
+        if retained_pixels > BROWSER_MAX_IMAGE_PIXELS - pixel_count:
+            return "image pixel limit reached; additional images ignored"
+        retained.push(simpleos_host_gpu_image_resource(
+            image_uri, image.width, image.height, image.pixels
+        ))
+        val encoded_resources = simpleos_host_gpu_image_resources_encode(
+            retained,
+            BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES,
+            BROWSER_RENDERER_MAX_IMAGE_RESOURCES
+        )
+        if not encoded_resources.ok:
+            return "image load error: " + encoded_resources.reason
+        self.image_resources = retained
+        ""
+
+    me _remove_failed_image_source(image_uri: text):
+        for resource in self.image_resources:
+            if resource.image_uri == image_uri:
+                return
+        var retained: [BrowserImageSource] = []
+        for source in self.admitted_image_sources:
+            if source.resource_key != image_uri:
+                retained.push(source)
+        self.admitted_image_sources = retained
+
+    me _prune_admitted_image_sources_to_resources():
+        var retained: [BrowserImageSource] = []
+        for source in self.admitted_image_sources:
+            var loaded = false
+            for resource in self.image_resources:
+                if resource.image_uri == source.resource_key:
+                    loaded = true
+            if loaded:
+                retained.push(source)
+        self.admitted_image_sources = retained
+
+    me _start_image_source(
+        source: BrowserImageSource
     ) -> Result<bool, text>:
+        for existing in self.admitted_image_sources:
+            if existing.resource_key == source.resource_key:
+                if existing.resolved_url == source.resolved_url:
+                    return Ok(false)
+                return Err(
+                    "image resource key conflict ignored: {source.resource_key}"
+                )
+        if self.admitted_image_sources.len() >= BROWSER_MAX_IMAGE_RESOURCES:
+            return Err(
+                "image resource limit reached; additional images ignored"
+            )
+
+        val broker_hsts_candidate = self._broker_hsts_candidate(
+            source.resolved_url
+        )
+        val csp_target_url = if broker_hsts_candidate:
+            _image_hsts_csp_url(source.resolved_url)
+        else:
+            source.resolved_url
+        if not browser_csp_allows(
+            self.content_security_policy, "img-src",
+            self.document_url, csp_target_url, false
+        ):
+            return Err("CSP blocked image: {csp_target_url}")
+        self.admitted_image_sources.push(source)
+        if val Some(override_body) = pair_value(
+            self.resource_overrides, source.resolved_url
+        ):
+            val warning = self._store_image_response(
+                BrowserResponse.create(
+                    request_id: "",
+                    kind: "image",
+                    url: source.resolved_url,
+                    status: 200,
+                    headers: "Content-Type: image/png",
+                    body: override_body,
+                    error: ""
+                ),
+                source.resource_key
+            )
+            if warning != "":
+                self._remove_failed_image_source(source.resource_key)
+                return Err(warning)
+            return Ok(false)
+        val request = self._build_request(
+            "image", source.resolved_url, "GET", "", "", ""
+        )
+        request.image_resource_key = source.resource_key
+        self.pending_requests.push(request)
+        Ok(true)
+
+    me _commit_image_response(
+        response: BrowserResponse, image_uri: text
+    ) -> Result<bool, text>:
+        val warning = self._store_image_response(response, image_uri)
+        if warning != "":
+            self._remove_failed_image_source(image_uri)
         if val Some(load) = self.active_load:
-            var image_uri = resource_url
-            val source_index = load.next_image_idx - 1
-            if (source_index >= 0 and
-                source_index < load.image_sources.len() and
-                load.image_sources[source_index].resolved_url == resource_url):
-                image_uri = load.image_sources[source_index].resource_key
-            if response.error != "":
-                load.append_warning("image load error: {response.error}")
-            else:
-                self._apply_response_headers(response.headers, response.url)
-                if not _image_content_type_is_png(response.headers):
-                    load.append_warning(
-                        "image load error: unsupported content type"
-                    )
-                else:
-                    match _image_hex_bytes(response.body):
-                        Err(reason):
-                            load.append_warning("image load error: {reason}")
-                        Ok(bytes):
-                            if not _image_png_signature_valid(bytes):
-                                load.append_warning(
-                                    "image load error: invalid PNG signature"
-                                )
-                            else:
-                                var retained: [SimpleOsHostGpuImageResource] = []
-                                var retained_pixels: i64 = 0
-                                for existing in self.image_resources:
-                                    if existing.image_uri != image_uri:
-                                        retained.push(existing)
-                                        retained_pixels = (
-                                            retained_pixels +
-                                            existing.pixels.len()
-                                        )
-                                val remaining_pixels = (
-                                    BROWSER_MAX_IMAGE_PIXELS - retained_pixels
-                                )
-                                match decode_png_to_argb_bounded(
-                                    bytes, remaining_pixels
-                                ):
-                                    Err(reason):
-                                        load.append_warning(
-                                            "image load error: {reason}"
-                                        )
-                                    Ok(image):
-                                        val pixel_count = (
-                                            image.width.to_i64() *
-                                            image.height.to_i64()
-                                        )
-                                        if (image.width <= 0 or image.height <= 0 or
-                                            pixel_count != image.pixels.len() or
-                                            pixel_count > BROWSER_MAX_IMAGE_PIXELS):
-                                            load.append_warning(
-                                                "image load error: image dimensions exceed limit"
-                                            )
-                                        elif retained.len() >= BROWSER_MAX_IMAGE_RESOURCES:
-                                            load.append_warning(
-                                                "image resource limit reached; additional images ignored"
-                                            )
-                                        elif (retained_pixels >
-                                            BROWSER_MAX_IMAGE_PIXELS -
-                                            pixel_count):
-                                            load.append_warning(
-                                                "image pixel limit reached; additional images ignored"
-                                            )
-                                        else:
-                                            retained.push(
-                                                simpleos_host_gpu_image_resource(
-                                                    image_uri,
-                                                    image.width,
-                                                    image.height,
-                                                    image.pixels
-                                                )
-                                            )
-                                            val encoded_resources = (
-                                                simpleos_host_gpu_image_resources_encode(
-                                                    retained,
-                                                    BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES,
-                                                    BROWSER_RENDERER_MAX_IMAGE_RESOURCES
-                                                )
-                                            )
-                                            if not encoded_resources.ok:
-                                                load.append_warning(
-                                                    "image load error: " +
-                                                    encoded_resources.reason
-                                                )
-                                            else:
-                                                self.image_resources = retained
+            if warning != "":
+                load.append_warning(warning)
             self.active_load = Some(load)
             return self._advance_image_loading()
-        Err("no active image load")
+        if warning != "":
+            self._append_warning(warning)
+        Ok(true)
 
     me _advance_image_loading() -> Result<bool, text>:
         if val Some(load) = self.active_load:
             while load.next_image_idx < load.image_sources.len():
                 val source = load.image_sources[load.next_image_idx]
                 load.next_image_idx = load.next_image_idx + 1
-                val broker_hsts_candidate = self._broker_hsts_candidate(
-                    source.resolved_url
-                )
-                val csp_target_url = if broker_hsts_candidate:
-                    _image_hsts_csp_url(source.resolved_url)
-                else:
-                    source.resolved_url
-                if not browser_csp_allows(
-                    self.content_security_policy, "img-src",
-                    load.document_url, csp_target_url, false
-                ):
-                    load.append_warning(
-                        "CSP blocked image: {csp_target_url}"
-                    )
-                    continue
-                if val Some(override_body) = pair_value(
-                    self.resource_overrides, source.resolved_url
-                ):
-                    self.active_load = Some(load)
-                    return self._commit_image_response(
-                        BrowserResponse.create(
-                            request_id: "",
-                            kind: "image",
-                            url: source.resolved_url,
-                            status: 200,
-                            headers: "Content-Type: image/png",
-                            body: override_body,
-                            error: ""
-                        ),
-                        source.resolved_url
-                    )
-                self.active_load = Some(load)
-                self.pending_requests.push(
-                    self._build_request(
-                        "image", source.resolved_url, "GET", "", "", ""
-                    )
-                )
-                return Ok(true)
+                match self._start_image_source(source):
+                    Err(warning):
+                        load.append_warning(warning)
+                    Ok(started):
+                        if started:
+                            self.active_load = Some(load)
+                            return Ok(true)
             self.active_load = Some(load)
         self._advance_script_loading()
 
@@ -814,6 +826,7 @@ impl BrowserSession:
                     else:
                         self.pending_requests.push(self._build_request("script", resolved, "GET", "", "", ""))
                     return Ok(true)
+            self._reconcile_dynamic_image_sources(Some(load))
             self._finalize_active_load(load)
             self.active_load = nil
             self._trace_guest("scripts complete")

@@ -167,5 +167,33 @@ the `SBRF5` frame, preserve redirect count `20` across the broker HSTS upgrade,
 and assert exact pixels for transparent PNG-over-color, repeat/position/clip,
 content paint order, and border overlay. The negative controls require a
 mixed-content denial without HSTS and no queued image under `img-src 'none'`.
-Animation remains enabled and unchanged. Rounded URL backgrounds and
-JavaScript-added URLs remain fail-closed follow-ups rather than PASS claims.
+Animation remains enabled and unchanged. Multiple image layers and fixed/local
+background attachment remain fail-closed follow-ups rather than PASS claims.
+
+## Post-load hardening evidence (2026-07-29)
+
+Frozen scenario steps:
+
+1. `Introduce a background image from JavaScript after load`
+2. `Fetch the image through the existing broker policy`
+3. `Render the image without resetting animation time`
+4. `Cancel a late image response after Stop or navigation`
+5. `Drain due GC timers without rebuilding the queue`
+6. `Deliver Stop after a partial renderer write`
+7. `Connect IPv6 HTTPS with a bare transport host`
+8. `Deny broker robust-list disclosure from the site renderer`
+
+Coverage must prove JavaScript and Simple Script additions use
+`_start_image_source`, CSP denial queues no request, prefetched resources do
+not refetch, late responses cannot mutate stopped/navigated state, and commit
+does not change animation epochs. Timer checks require direct removal/update
+rather than queue reconstruction. Broker/worker checks require idempotent
+deferred Stop and draining a coalesced buffered frame. Transport checks keep
+`[::1]` as URL authority but pass `::1` to socket/TLS, while malformed forms
+remain unchanged. Native containment must observe `get_robust_list` denial
+after final sandbox entry.
+
+Current evidence is limited to focused host C containment/TLS PASS.
+Pure-Simple scenarios and manual generation remain compiler-blocked. Signal
+exit 139, source inspection, bootstrap output, and Rust-seed execution cannot
+satisfy the runtime gate.

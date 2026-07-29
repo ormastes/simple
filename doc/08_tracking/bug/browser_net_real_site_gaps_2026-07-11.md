@@ -28,6 +28,13 @@ before creating or dispatching the redirected request. H1 skips its own DNS
 lookup for TLS because the authenticated TLS runtime owns resolution and socket
 creation; this removes a discarded duplicate lookup.
 
+Bracketed IPv6 HTTPS authority is now normalized only at transport:
+`_browser_transport_host("[::1]")` returns bare `::1` for socket/TLS, while
+URL, origin, history, and Host authority retain brackets. Malformed brackets,
+DNS names, and IPv4 pass through unchanged. Focused host C TLS evidence passes;
+the pure-Simple browser remains compiler-blocked, so this is not a live browser
+HTTPS PASS.
+
 This session hardened `src/lib/gc_async_mut/gpu/browser_engine/net/**` against
 real sites and fixed several real defects in pure Simple (see the "Fixed this
 session" note at the bottom). The three items below need a Rust seed change

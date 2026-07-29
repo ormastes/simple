@@ -180,6 +180,24 @@ has activated the stage-one Landlock/seccomp marker. Calling the stage-two
 sandbox entry without that marker fails closed before applying worker limits;
 `test/01_unit/runtime/run_process_piped_write_test.shs` covers both paths.
 
+### Post-load and transport invariants
+
+- Dynamic JavaScript/Simple Script background URLs re-enter the existing
+  `_start_image_source` broker path; never fetch or decode them in the renderer.
+- Do not rebuild the JS timer queue while draining. Select within the bounded
+  list, reschedule intervals in place, and remove completed/canceled slots.
+- A partially written renderer command is atomic. Record `stop_after_write`,
+  finish it, then cancel state and send Stop; drain complete frames already in
+  the worker decoder before another read.
+- Keep bracketed IPv6 in URLs and origins. Pass only the validated bare literal
+  returned by `_browser_transport_host` to socket/TLS.
+- Final Linux renderer seccomp denies `get_robust_list` with the existing
+  cross-process inspection syscalls.
+
+Host C containment/TLS checks are supporting evidence. Until the pure-Simple
+target runs the affected scenarios, do not claim a browser runtime PASS or
+substitute bootstrap/Rust-seed execution.
+
 ## Milestone History
 
 | Milestone | Gate | Status |
