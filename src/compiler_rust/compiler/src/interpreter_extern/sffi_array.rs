@@ -4,15 +4,14 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
-use crate::value_bridge::runtime_to_value;
 use simple_runtime::value::RuntimeValue;
 
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
-    rt_array_clear, rt_array_concat, rt_array_extend_i64, rt_array_free, rt_array_get, rt_array_len, rt_array_new,
-    rt_array_pop, rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set,
-    rt_typed_bytes_u8_push, rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set,
-    rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
+    rt_array_clear, rt_array_extend_i64, rt_array_free, rt_array_get, rt_array_len, rt_array_new, rt_array_pop,
+    rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set, rt_typed_bytes_u8_push,
+    rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set, rt_typed_words_u32_unchecked,
+    rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
 };
 
 fn interpreter_byte_at(value: &Value) -> i64 {
@@ -112,16 +111,6 @@ pub fn rt_array_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
             ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
         )
     })?;
-
-    if let (Value::Int(left_raw), Value::Int(right_raw)) = (left, right) {
-        let result = rt_array_concat(
-            RuntimeValue::from_raw(*left_raw as u64),
-            RuntimeValue::from_raw(*right_raw as u64),
-        );
-        let value = runtime_to_value(result);
-        rt_array_free(result);
-        return Ok(value);
-    }
 
     let mut items = match left {
         Value::Array(values) | Value::FrozenArray(values) => values.as_ref().clone(),
