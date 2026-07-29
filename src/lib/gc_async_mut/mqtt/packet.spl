@@ -1,6 +1,8 @@
 # MQTT Packet Encoding/Decoding Module
 # Functions for encoding and decoding MQTT packet components
 
+use std.common.encoding.utf8.{utf8_decode_all, text_from_codepoints}
+
 # =============================================================================
 # Encoding/Decoding Utilities
 # =============================================================================
@@ -59,10 +61,21 @@ fn mqtt_encode_string(text: text):
 
     var result = [high_byte, low_byte]
 
+    # Byte-indexed via .bytes(), not single-index `text[i].ord()`. `length`
+    # is a BYTE count (.length() == .len() on this engine) but plain
+    # single-index text access is CHARACTER-indexed (confirmed: "café"[3]
+    # is the whole 2-byte "é", .ord()=233, not a byte) -- for any actual
+    # multi-byte UTF-8 string (this function's own stated purpose per its
+    # docstring), `i` ran out of characters to index well before reaching
+    # `length` bytes, corrupting or crash-failing the encode. Emitting raw
+    # bytes here (not codepoints) is also required for MQTT wire
+    # correctness: the 2-byte length prefix above already committed to a
+    # BYTE count, so the payload must be that many wire bytes, not that
+    # many codepoints re-widened.
+    val text_bytes = text.bytes()
     var i = 0
     while i < length:
-        val char_code = text[i].ord()
-        result.push(char_code)
+        result.push(text_bytes[i])
         i = i + 1
 
     result
@@ -82,14 +95,23 @@ fn mqtt_decode_string(bytes, offset):
     if offset + 2 + length > bytes.length():
         return nil
 
-    var chars = []
+    # Collect the raw wire bytes and UTF-8-decode them as a whole, not
+    # `byte_val.chr()` per byte. `.chr()` treats each raw byte as its own
+    # Unicode codepoint -- correct only for ASCII (<128) bytes. For the
+    # UTF-8 continuation/lead bytes any multi-byte character produces
+    # (>=128), that reconstructs mojibake: encoding "café"'s wire bytes
+    # [195, 169] back via chr(195)+chr(169) gives "Ã©" (two separate
+    # Latin-1 characters), not "é" (one 2-byte UTF-8 character,
+    # codepoint 233). This is the decode-side counterpart to the
+    # single-index/`.len()` mismatch fixed in mqtt_encode_string above --
+    # same root bug (byte vs. codepoint confusion), opposite direction.
+    var raw_bytes: [i64] = []
     var i = 0
     while i < length:
-        val byte_val = bytes[offset + 2 + i]
-        chars.push(byte_val.chr())
+        raw_bytes.push(bytes[offset + 2 + i])
         i = i + 1
 
-    val result = chars.join("")
+    val result = text_from_codepoints(utf8_decode_all(raw_bytes))
     (result, 2 + length)
 
 fn mqtt_encode_binary(data):

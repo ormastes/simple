@@ -30,7 +30,29 @@ mod std.common.encoding.toml
 # ============================================================================
 
 fn _toml_char_at(s: text, i: i64) -> i64:
-    s[i].ord()
+    # Byte value at BYTE offset `i`, matching every caller's `.length()`
+    # (byte-length) loop bound. Was `s[i].ord()` -- plain single-index text
+    # access is CHARACTER-indexed on this engine (confirmed: `"café"[3]`
+    # returns the whole 2-byte "é" as one character, .ord()=233, the
+    # Unicode codepoint) while `.length()` returns bytes, so a loop like
+    # `while i < s.length(): ... _toml_char_at(s, i) ...` silently walked
+    # `i` in the wrong space the moment any multi-byte character appeared
+    # anywhere in the document -- confirmed via toml_parse() returning 0
+    # entries for a 2-entry document where entry 1's value contained "café"
+    # (whole document lost, not just that entry). All 4 callers below only
+    # ever compare this against ASCII thresholds (digit/alpha/ws/key-char),
+    # so a raw byte value is exactly as correct as a codepoint would be for
+    # the ASCII range and additionally correct for the >=0x80 case (every
+    # UTF-8 continuation/lead byte is > 122, so it always classifies as
+    # "not digit/alpha/ws", which is what a byte-oriented scanner should
+    # do -- treat it as ordinary non-special content).
+    # NOTE (perf): `.bytes()` reallocates the whole string's byte array on
+    # every call; this function is on toml.spl's hot per-character scan
+    # path (46 call sites). Fine for typical KB-sized config files: not
+    # re-optimized in this pass (would need threading a pre-computed byte
+    # array through every caller, a larger refactor) -- flagging as a
+    # known follow-up, not silently absorbed.
+    s.bytes()[i]
 
 fn _toml_is_digit(c: i64) -> bool:
     c >= 48 and c <= 57
@@ -102,10 +124,15 @@ fn _toml_parse_string(s: text, pos: i64) -> [text]:
                 result = result + "\\"
                 i = next_i + 1
             else:
-                result = result + s[next_i]
+                # Byte-indexed 1-byte slice, not single-index `s[next_i]` --
+                # `i`/`next_i` are byte offsets (see _toml_char_at above);
+                # single-index text access is character-indexed and would
+                # fetch the wrong character (or go out of bounds) once `i`
+                # is a byte position past the first multi-byte character.
+                result = result + s[next_i:next_i + 1]
                 i = next_i + 1
         else:
-            result = result + s[i]
+            result = result + s[i:i + 1]
             i = i + 1
     if not done:
         var r: [text] = []
@@ -129,7 +156,7 @@ fn _toml_parse_key(s: text, pos: i64) -> [text]:
     var i = pos
     var key = ""
     while (i < slen and _toml_is_key_char(_toml_char_at(s, i))):
-        key = key + s[i]
+        key = key + s[i:i + 1]
         i = i + 1
     if key.length() == 0:
         var r: [text] = []
@@ -183,7 +210,7 @@ fn _toml_parse_int_text(s: text, pos: i64) -> [text]:
             r.push(i.to_string())
             return r
         n = n * 10 + digit
-        num = num + s[i]
+        num = num + s[i:i + 1]
         i = i + 1
     var r: [text] = []
     r.push("ok")
@@ -629,7 +656,7 @@ fn toml_encode(entries: [[text]]) -> text:
                 elif c == 9:
                     enc = enc + "\\t"
                 else:
-                    enc = enc + raw[j]
+                    enc = enc + raw[j:j + 1]
                 j = j + 1
             enc = enc + "\""
             out = out + key + " = " + enc + "\n"

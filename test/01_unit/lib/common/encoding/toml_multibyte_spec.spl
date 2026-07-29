@@ -1,0 +1,44 @@
+use std.common.encoding.toml.{toml_parse, toml_get, toml_encode}
+
+# Multi-byte regression coverage for src/lib/common/encoding/toml.spl.
+# TOML config files legitimately carry arbitrary UTF-8 string values.
+#
+# _toml_char_at(s, i) returned `s[i].ord()` -- plain single-index text
+# access is CHARACTER-indexed on this engine (confirmed: "café"[3] returns
+# the whole 2-byte "é", not a byte) while every caller's loop bound is
+# `.length()`, which is BYTE length. Plus 4 more sites (main string-value
+# loop, key-parsing loop, int-parsing loop, toml_encode's re-escape loop)
+# independently did the same single-index append. Concrete pre-fix
+# failure: toml_parse() of a 2-entry document where entry 1's value
+# contained "café" returned 0 entries -- the WHOLE document was lost, not
+# just that entry, because the corrupted cursor never found subsequent
+# keys either.
+
+describe "toml_parse / toml_encode multi-byte":
+    it "café/中文/日本語/em-dash/emoji values all parse correctly in one document":
+        val doc = "a = \"café\"\nb = \"中文\"\nc = \"日本語\"\nd = \"a—b\"\ne = \"😀smile\"\nf = 42\ng = \"tail\"\n"
+        val entries = toml_parse(doc)
+        expect(entries.len()).to_equal(7)
+        expect(toml_get(entries, "a")).to_equal("café")
+        expect(toml_get(entries, "b")).to_equal("中文")
+        expect(toml_get(entries, "c")).to_equal("日本語")
+        expect(toml_get(entries, "d")).to_equal("a—b")
+        expect(toml_get(entries, "e")).to_equal("😀smile")
+        expect(toml_get(entries, "f")).to_equal("42")
+        expect(toml_get(entries, "g")).to_equal("tail")
+
+    it "round-trips through toml_encode and back":
+        val doc = "a = \"café\"\ne = \"😀smile\"\n"
+        val entries = toml_parse(doc)
+        val encoded = toml_encode(entries)
+        val roundtrip = toml_parse(encoded)
+        expect(roundtrip.len()).to_equal(2)
+        expect(toml_get(roundtrip, "a")).to_equal("café")
+        expect(toml_get(roundtrip, "e")).to_equal("😀smile")
+
+    it "pure ASCII is unaffected (regression guard)":
+        val doc = "name = \"ascii\"\nother = \"plain\"\n"
+        val entries = toml_parse(doc)
+        expect(entries.len()).to_equal(2)
+        expect(toml_get(entries, "name")).to_equal("ascii")
+        expect(toml_get(entries, "other")).to_equal("plain")
