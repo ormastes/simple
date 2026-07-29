@@ -957,7 +957,17 @@ impl Lowerer {
                 // silently misdecoded as 0.0 (bug
                 // jit_string_length_var_control_flow_wrong_value_2026-07-17.md).
                 "len" | "length" => Some(TypeId::I64),
-                "starts_with" | "ends_with" | "contains" => Some(TypeId::BOOL),
+                // `s.is_empty()` (interpreter_method/string.rs "is_empty")
+                // returns a raw i64 0/1 from `rt_is_empty`/equivalent — same
+                // "raw i64 needs BoxInt/BoxBool before generic print/use" gap
+                // class as `"length"` above. This table had `is_empty` for
+                // arrays/dicts (below) but NOT for strings, so `s.is_empty()`
+                // fell through to generic dynamic dispatch typed TypeId::ANY,
+                // which skipped the bool-boxing step at the print()/call-arg
+                // lowering site — printing the raw untagged int (`0`) instead
+                // of `false`, and misdecoding the truthy case as `nil`
+                // (bug jit_bool_result_type_gap_2026-07-29, lane BOOLRESULT).
+                "starts_with" | "ends_with" | "contains" | "is_empty" => Some(TypeId::BOOL),
                 "concat" | "slice" | "replace" | "trim" | "trim_start" | "trim_end" => {
                     Some(TypeId::STRING)
                 }
