@@ -7,7 +7,7 @@ use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
-use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, GpuAtomicOpKind}
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, MirUnaryOp, GpuAtomicOpKind}
 use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, MirConstValue, LocalKind, MirTypeDef, MirTypeDefKind, MirFieldDef}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -121,7 +121,41 @@ fn cuda_bitcast_function(id: i64, name: text, source_type: MirType, dest_type: M
         [block], true
     )
 
+fn cuda_neg_function(id: i64, name: text, ty: MirType) -> MirFunction:
+    val block = MirBlock(
+        id: BlockId.entry(), label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.UnaryOp(
+            LocalId(id: 1), MirUnaryOp.Neg, MirOperand.copy(LocalId(id: 0))
+        ), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+    cuda_function(
+        id, name, [ty], MirType.unit(),
+        [cuda_arg(0, 0, "value", ty), cuda_temp(1, ty)],
+        [block], true
+    )
+
 describe "CUDA backend intensive MIR contract":
+    it "lowers unsigned negation with legal modulo-width PTX":
+        val ptx = compile_supported_cuda([
+            cuda_neg_function(43, "cuda_neg_u32", cuda_u32()),
+            cuda_neg_function(44, "cuda_neg_u64", cuda_u64())
+        ])
+
+        expect(ptx).to_contain("sub.u32 %r1, 0, %r0;")
+        expect(ptx).to_contain("sub.u64 %r1, 0, %r0;")
+        expect(ptx.contains("neg.u32")).to_equal(false)
+        expect(ptx.contains("neg.u64")).to_equal(false)
+
+        val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v ptxas >/dev/null 2>&1"])
+        if available == 0:
+            val ptx_path = "/tmp/simple_cuda_unsigned_neg.ptx"
+            val cubin_path = "/tmp/simple_cuda_unsigned_neg.cubin"
+            expect(rt_file_write_text(ptx_path, ptx)).to_equal(true)
+            val (_as_out, as_err, as_code) = rt_process_run("ptxas", ["-arch=sm_86", ptx_path, "-o", cubin_path])
+            expect(as_code).to_equal(0)
+            expect(as_err).to_equal("")
+
     it "emits width-correct CUDA bitcasts and assembles them":
         val ptx = compile_supported_cuda([
             cuda_bitcast_function(34, "cuda_f32_to_u32", cuda_f32(), cuda_u32(), cuda_u32()),
