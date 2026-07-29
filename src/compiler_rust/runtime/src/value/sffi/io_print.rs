@@ -480,7 +480,27 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
             };
             unsafe { String::from_utf8_lossy((*s).as_bytes()).into_owned() }
         }
-        HeapObjectType::Array => format!("<array@{ptr:p}>"),
+        HeapObjectType::Array => {
+            // Match the interpreter's `Value::Array` display format exactly
+            // (see `to_display_string` in
+            // src/compiler_rust/compiler/src/value_impl.rs): `[elem, elem, ...]`
+            // with `, ` separators and each element rendered via the same
+            // recursive display rule (strings unquoted). `rt_array_len`/
+            // `rt_array_get` already normalize the byte-packed / u64-packed /
+            // boxed representations to a single tagged `RuntimeValue` per
+            // element, so no separate packing logic is needed here.
+            let len = crate::value::collections::rt_array_len(v);
+            if len <= 0 {
+                "[]".to_string()
+            } else {
+                let mut parts = Vec::with_capacity(len as usize);
+                for i in 0..len {
+                    let elem = crate::value::collections::rt_array_get(v, i);
+                    parts.push(value_to_display_string(elem));
+                }
+                format!("[{}]", parts.join(", "))
+            }
+        }
         HeapObjectType::Dict => format!("<dict@{ptr:p}>"),
         HeapObjectType::Tuple => format!("<tuple@{ptr:p}>"),
         HeapObjectType::Object => format!("<object@{ptr:p}>"),
