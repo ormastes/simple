@@ -453,7 +453,24 @@ impl<'a> MirLowerer<'a> {
                     )));
                 }
 
-                if is_enum && !arg_regs.is_empty() {
+                // A dotted callee whose head is a known enum but whose tail is
+                // positively NOT a declared variant, and IS a real registered
+                // function (`impl Enum:` static or enum-body `static fn`,
+                // both registered into `global_types`/`available_functions`
+                // identically — see doc/08_tracking/bug/
+                // enum_impl_static_fn_scoping_2026-07-29.md), must not be
+                // fabricated into an EnumUnit/EnumWith value: it must fall
+                // through to the normal `MirInst::Call` path below so the
+                // real function actually runs. Real variant constructors
+                // (`enum_declares_variant == Some(true)`) and unresolved
+                // heads (`None`, kept permissive) are unaffected — they
+                // still fabricate exactly as before.
+                let is_declared_static_fn = is_enum
+                    && self.enum_declares_variant(enum_name, variant_name) == Some(false)
+                    && (self.global_types.contains_key(name.as_str())
+                        || self.available_functions.contains(name.as_str()));
+
+                if is_enum && !is_declared_static_fn && !arg_regs.is_empty() {
                     // Single-arg variants store the argument directly as the
                     // enum payload. Primitive payloads still need runtime
                     // boxing, the same as multi-arg payload array entries.
@@ -569,7 +586,7 @@ impl<'a> MirLowerer<'a> {
                         dest
                     });
                 }
-                if is_enum {
+                if is_enum && !is_declared_static_fn {
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
