@@ -3,7 +3,9 @@ use std.spec.{describe, it, expect}
 
 val SURFACE = "src/compiler/20.hir/hir_lowering/module_surface.spl"
 val LOWERING = "src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl"
-val DRIVER = "src/compiler/80.driver/driver.spl"
+val ORCHESTRATION = "src/compiler/80.driver/driver_orchestration.spl"
+val SOURCE_PARSING = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
+val HIR_LOWERING = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
 val PRODUCER = "scripts/bootstrap/bootstrap-from-scratch.sh"
 val RUNTIME = "src/runtime/runtime_native.c"
 val RUNTIME_CHECK = "src/runtime/test/rt_transient_heap_scope_selfcheck.c"
@@ -22,7 +24,7 @@ describe "Stage4 streaming surface ownership":
         expect(lowering).to_contain("keys = imported_mod.type_aliases.keys()")
 
     it "requires every experimental admission condition":
-        val driver = file_read(DRIVER)
+        val driver = file_read(ORCHESTRATION)
         val producer = file_read(PRODUCER)
         expect(driver).to_contain("ctx.options.mode == CompileMode.Aot")
         expect(driver).to_contain("ctx.options.low_memory")
@@ -37,7 +39,7 @@ describe "Stage4 streaming surface ownership":
         expect(producer).to_contain("Stage 4 emitted stale flat-AST index diagnostics")
 
     it "promotes only the retained surface before reclaiming the rich module":
-        val driver = file_read(DRIVER)
+        val driver = file_read(SOURCE_PARSING)
         val start = driver.index_of("me add_streaming_module_surface")
         val end = driver.index_of("me parse_all_streaming_surfaces_impl")
         val body = driver.substring(start, end)
@@ -46,7 +48,7 @@ describe "Stage4 streaming surface ownership":
         val pause = body.index_of("rt_transient_array_scope_pause()")
         val add = body.index_of("builder.add_parsed(")
         val promote = body.index_of("module_surface_promote(")
-        val reclaim = body.index_of("driver_end_transient_parse_scope()")
+        val reclaim = body.last_index_of("driver_end_transient_parse_scope()")
         expect(begin).to_be_greater_than(0)
         expect(parse).to_be_greater_than(begin)
         expect(pause).to_be_greater_than(parse)
@@ -71,7 +73,7 @@ describe "Stage4 streaming surface ownership":
         expect(rust_memory).to_contain("RT_TRANSIENT_RAW_OWNED_BIT")
 
     it "reclaims each reparsed AST after persistent HIR lowering":
-        val driver = file_read(DRIVER)
+        val driver = file_read(HIR_LOWERING)
         val start = driver.index_of("me lower_streaming_surface_source")
         val end = driver.index_of("me lower_and_check_streaming_surfaces_impl")
         val body = driver.substring(start, end)
@@ -81,7 +83,7 @@ describe "Stage4 streaming surface ownership":
         val lower = body.index_of("lowering.lower_parser_module_unstub(module)")
         val promote = body.index_of("rt_transient_heap_promote(hir_module)")
         val diagnostic_promote = body.index_of("rt_transient_heap_promote(lowering.errors)")
-        val reclaim = body.index_of("driver_end_transient_parse_scope()")
+        val reclaim = body.last_index_of("driver_end_transient_parse_scope()")
         expect(parse).to_be_greater_than(begin)
         expect(pause).to_be_greater_than(parse)
         expect(lower).to_be_greater_than(pause)
@@ -91,9 +93,9 @@ describe "Stage4 streaming surface ownership":
         expect(body.contains("rt_transient_heap_promote(lowering)")).to_equal(false)
 
     it "clears parser roots before ending a transient scope":
-        val driver = file_read(DRIVER)
+        val driver = file_read(SOURCE_PARSING)
         val start = driver.index_of("fn driver_end_transient_parse_scope")
-        val end = driver.index_of("pub class CompilerDriver")
+        val end = driver.index_of("impl CompilerDriver:")
         val body = driver.substring(start, end)
         val lexer_clear = body.index_of("lexer_release_parse_source_globals()")
         val ast_clear = body.index_of("ast_reset()")
