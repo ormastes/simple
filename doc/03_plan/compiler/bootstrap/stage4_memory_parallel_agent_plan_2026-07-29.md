@@ -72,6 +72,31 @@ Own: run artifacts only (no source). Full Stage-4 with L5 sampler attached,
 `SIMPLE_BOOTSTRAP_STAGE4=1`. Admission = zero stale/OOB diagnostics AND
 byte-residue gates, not RSS ceiling alone.
 
+## Lane status (final, 2026-07-29)
+
+- L1 LANDED 89a3fd511edf (MMIO-journal × per-page quadratic, 34.6M→19k ops)
+- L2 LANDED 941e0b646dd (RECURSION_DEPTH underflow + shared op budget; both
+  suite reds; 36/0)
+- L3+L4 LANDED 3e4cd8fc7e3 (aux buffer bytes; hosted memory truth)
+- L5 LANDED 76e43b18741 (memstat sampler + RSS gate, 2/2)
+- L6 LANDED 5eef43f775e (arena generation diagnostics, 5/5); hardened later
+  by SIMPLE_AST_GEN_HARDEN (a9e61476da97, 4/4)
+- L7 IN PROGRESS — run history:
+  - Run 1 (llvm): stage2 fails — seed built without LLVM feature; switched
+    to cranelift (environmental, not a lane defect).
+  - Run 2 (cranelift): stage2 PASS; stage3 SIGABRT = env::set_var NUL panic
+    in the bootstrap env mirror. Root-caused + fixed 455ed8321730
+    (env_value_nul_free guards; mirror is a cache over authoritative arrays).
+  - Run 3 (cranelift, post-NUL-fix): stage2 PASS; NUL abort GONE; stage3 now
+    exit 132 SIGILL, stage3-native-build.log tail: "runtime error: field
+    access on nil receiver". CAVEAT: this run compiled the LIVE working copy
+    while parallel agents were mid-edit in src/compiler — attribution
+    unreliable. Rerun required from a consistent tree (all lane edits now
+    landed at a9e61476da97).
+  - Admission criteria unchanged: zero stale-generation/OOB diagnostics +
+    byte gates. Successor plan for the M-milestones:
+    doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md.
+
 ## Sequencing
 
 ```
