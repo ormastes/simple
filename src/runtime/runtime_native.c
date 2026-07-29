@@ -2434,10 +2434,11 @@ int64_t rt_to_string(int64_t value) {
     /* Aggregate dispatch: only registered heap objects with a recognized
      * kind are handled; anything else (including a raw i64 that merely
      * aliases the HEAP tag bits) falls through to the existing scalar/opaque
-     * paths below, exactly as before -- rt_core_as_array/as_dict/as_enum all
-     * gate on registry membership (a pure pointer compare) before ever
-     * dereferencing, so this cannot mis-decode a non-heap value. */
-    RtCoreArray* agg_array = rt_core_as_array(value);
+     * paths below, exactly as before -- rt_core_as_registered_array,
+     * rt_core_as_dict, and rt_core_as_enum all gate on registry membership
+     * (a pure pointer compare) before ever dereferencing, so this cannot
+     * mis-decode a non-heap value. */
+    RtCoreArray* agg_array = rt_core_as_registered_array(value);
     if (agg_array) {
         return rt_core_format_array_like(agg_array, (agg_array->flags & RT_CORE_ARRAY_FLAG_TUPLE) != 0);
     }
