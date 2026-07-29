@@ -21,7 +21,7 @@ use std.gc_async_mut.web.browser_session.{
     BrowserRequest, BrowserResponse, BrowserSession
 }
 use os.hosted.hosted_browser_renderer_policy.{
-    HostedBrowserNavigationPermit,
+    HostedBrowserNavigationPermit, HostedBrowserRequestPolicy,
     hosted_browser_cors_response_headers,
     hosted_browser_hsts_upgrade_valid,
     hosted_browser_remove_http_only_set_cookie,
@@ -510,6 +510,51 @@ describe "hosted browser renderer broker policy":
         expect(policy.ok).to_be(false)
         expect(policy.reason).to_equal("unauthorized-document-request")
 
+    it "authorizes only canonical renderer link and supported form shapes":
+        var initial = HostedBrowserRendererProcess.create(1, 640, 480)
+        expect(initial.authorize_renderer_navigation(request(
+            "document", "https://destination.test/"
+        ))).to_be(false)
+
+        var link = HostedBrowserRendererProcess.create(1, 640, 480)
+        link.document_url = "https://source.test/page"
+        link.document_origin = "https://source.test"
+        expect(link.authorize_renderer_navigation(request(
+            "document", "https://destination.test/"
+        ))).to_be(true)
+        expect(link.navigation_permit.url).to_equal(
+            "https://destination.test/"
+        )
+
+        var forged = HostedBrowserRendererProcess.create(1, 640, 480)
+        forged.document_url = "https://source.test/page"
+        forged.document_origin = "https://source.test"
+        expect(forged.authorize_renderer_navigation(request(
+            "document", "https://destination.test/", "GET",
+            "X-Renderer: forged"
+        ))).to_be(false)
+        expect(forged.authorize_renderer_navigation(request(
+            "document", "https://destination.test/", "GET",
+            "", "body"
+        ))).to_be(false)
+        expect(forged.authorize_renderer_navigation(request(
+            "document", "https://destination.test/", "POST",
+            "", "name=value", "text/plain"
+        ))).to_be(false)
+
+        var parent = HostedBrowserRendererProcess.create(1, 640, 480)
+        parent.document_url = "https://source.test/page"
+        parent.document_origin = "https://source.test"
+        expect(parent.authorize_navigation(
+            "https://allowed.test/", "GET", "", "", ""
+        )).to_be(true)
+        expect(parent.authorize_renderer_navigation(request(
+            "document", "https://attacker.test/"
+        ))).to_be(false)
+        expect(parent.navigation_permit.url).to_equal(
+            "https://allowed.test/"
+        )
+
     it "accepts exactly one matching parent navigation shape":
         val policy = hosted_browser_renderer_request_policy(
             "",
@@ -923,6 +968,90 @@ describe "hosted browser renderer broker policy":
         expect(response.headers).to_contain(
             "X-Simple-Broker-Transport-Upgrade: 1"
         )
+
+        var renderer_document = HostedBrowserRendererProcess.create(
+            2, 640, 480
+        )
+        expect(renderer_document.load_hsts_snapshot(
+            BrowserHstsSnapshot.create(entries), now_ms
+        )).to_equal(1)
+        renderer_document.document_url = "https://source.test/page"
+        renderer_document.document_origin = "https://source.test"
+        val renderer_request = request(
+            "document", "http://secure.test/page"
+        )
+        expect(renderer_document.authorize_renderer_navigation(
+            renderer_request
+        )).to_be(true)
+        expect(renderer_document._queue_hsts_transport_upgrade(
+            renderer_request,
+            HostedBrowserRequestPolicy(
+                ok: true,
+                reason: "ok",
+                mode: RequestMode.Navigate,
+                credentials: "include",
+                canonical_url: "https://secure.test/page",
+                sanitized_headers: "",
+                consumes_navigation: true
+            ),
+            -1
+        )).to_equal("")
+        expect(renderer_document.navigation_permit.url).to_equal(
+            "https://secure.test/page"
+        )
+        expect(renderer_document.navigation_permit.redirect_count).to_equal(
+            0
+        )
+
+        var document = BrowserSession.new()
+        document.broker_network_policy = true
+        expect(document.begin_network_navigation(
+            "http://secure.test/form", "POST", "", "name=value",
+            "application/x-www-form-urlencoded"
+        ).is_ok()).to_be(true)
+        document.pending_requests[0].redirect_count = 20
+        match document.take_pending_request():
+            nil:
+                fail("Expected broker-bound document request")
+            Some(original):
+                expect(document.commit_network_response(
+                    BrowserResponse.create(
+                        original.id, "document", original.url, 307,
+                        "Location: https://secure.test/form\r\n" +
+                        "X-Simple-Broker-Transport-Upgrade: 1",
+                        "", ""
+                    )
+                ).is_ok()).to_be(true)
+        match document.take_pending_request():
+            nil:
+                fail("Expected upgraded document request")
+            Some(next):
+                expect(next.url).to_equal("https://secure.test/form")
+                expect(next.redirect_count).to_equal(20)
+                expect(next.method).to_equal("POST")
+                expect(next.body).to_equal("name=value")
+                expect(next.site_for_cookies_url).to_equal(
+                    "http://secure.test/form"
+                )
+                expect(next.credentials).to_equal("include")
+
+        var unmarked = BrowserSession.new()
+        unmarked.broker_network_policy = true
+        expect(unmarked.begin_network_navigation(
+            "http://secure.test/limit", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        unmarked.pending_requests[0].redirect_count = 20
+        match unmarked.take_pending_request():
+            nil:
+                fail("Expected limited document request")
+            Some(original):
+                expect(unmarked.commit_network_response(
+                    BrowserResponse.create(
+                        original.id, "document", original.url, 307,
+                        "Location: https://secure.test/limit", "", ""
+                    )
+                ).is_err()).to_be(true)
+        expect(unmarked.has_pending_requests()).to_be(false)
 
         for kind in ["style", "script", "module", "wasm", "fetch"]:
             var session = BrowserSession.new()

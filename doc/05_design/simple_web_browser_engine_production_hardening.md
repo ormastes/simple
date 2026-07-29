@@ -194,6 +194,8 @@ Address behavior:
 
 - `set_value` edits `address_draft`;
 - `submit` normalizes and navigates;
+- pressing any non-address chrome control ends address editing before its
+  action, allowing the next committed frame to refresh the visible URL;
 - invalid input returns `invalid_url` without state mutation.
 
 Favorite click toggles current committed URL. Snapshot revision increments and

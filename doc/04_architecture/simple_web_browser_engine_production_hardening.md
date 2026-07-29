@@ -387,8 +387,15 @@ or native TLS behavior.
   rejects `SameOrigin` mode before cache or transport when the request target
   differs from the committed requester origin, and every cache hit is
   revalidated against the current CORS response policy. The renderer broker
-  now rejects every document request unless it
-  exactly consumes one parent-issued canonical URL/method/header/body permit,
+  now requires chrome-issued document requests to exactly consume one
+  parent-issued canonical URL/method/header/body permit. Renderer-originated
+  links and supported forms receive a separate one-shot permit only after a
+  parent-owned committed/provisional origin exists: GET carries no body or
+  content type, POST is URL-encoded, credentials are `include`, and no
+  renderer-defined headers survive. Existing chrome permits cannot be replaced.
+  HSTS upgrades remain broker-generated redirects rather than accepting an
+  HTTP/HTTPS split directly, and their authenticated marker preserves the
+  document redirect budget on both sides of the IPC boundary. The broker
   derives resource mode from the broker's committed origin instead of the
   renderer's kind, and authorizes only bounded simple CORS requests until
   preflight uses the public-only broker transport. Redirects receive one exact

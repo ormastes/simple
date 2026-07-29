@@ -1566,3 +1566,18 @@ implementation in progress / target evidence blocked
   rollback-based worker regression now proves a
   rejected target preserves history, interaction state, scroll, and request
   correlation before a same-ID corrected retry.
+- Renderer-originated link and supported form document requests now receive a
+  broker-validated one-shot navigation permit only after a parent-owned active
+  document origin exists. The boundary accepts exact empty-body GET or
+  URL-encoded POST shapes with `include` credentials, rejects added renderer
+  headers, preserves any active chrome permit, and routes HSTS through the
+  broker redirect path. A focused worker regression drives pointer down/up on
+  a submit button, decodes the resulting POST, and proves normal exact permit
+  policy accepts it.
+- Secondary hosted browser chrome now clears stale address-editing state when
+  a non-address control is pressed, so Back/Forward/Home/Reload/Stop/Favorite
+  can refresh the visible URL on the next committed frame.
+- Authenticated broker HSTS document upgrades now preserve the renderer's
+  redirect count as well as the parent permit count; unmarked redirects still
+  enforce the normal limit. Focused coverage proves POST body/method/site and
+  credential state survive a marked upgrade at the redirect ceiling.

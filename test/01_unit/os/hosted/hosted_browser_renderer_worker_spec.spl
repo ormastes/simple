@@ -20,6 +20,12 @@ use os.hosted.hosted_browser_renderer_worker.{
     hosted_browser_renderer_handle_request,
     hosted_browser_renderer_worker_main
 }
+use os.hosted.hosted_browser_renderer_policy.{
+    hosted_browser_renderer_request_policy
+}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess
+}
 
 extern fn rt_file_read_text(path: text) -> text
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_id}
@@ -513,6 +519,57 @@ describe "hosted browser renderer worker":
         expect(
             worker.browser.take_pending_script_cookie_writes().len()
         ).to_equal(0)
+
+    it "brokers a clicked form submission as a validated document navigation":
+        val html = (
+            "<style>html,body{margin:0}button{width:40px;height:20px}</style>" +
+            "<form action='/go' method='post'>" +
+            "<button id='go' type='submit'>Go</button></form>"
+        )
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: html
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "https://source.test/page", html
+        ).is_ok()).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "0"
+        )).ok).to_be(true)
+        expect(simple_web_layout_hit_test_index(
+            worker.last_hit_index.unwrap(), 5, 5
+        )).to_equal("id:go")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t1\t5\t5\t1"
+        )).ok).to_be(true)
+        val clicked = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 5,
+            payload: "P1\t2\t5\t5\t0"
+        ))
+        val message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), clicked.wire
+        )
+        val navigation = browser_renderer_fetch_request_decode(
+            message.message
+        )
+        expect(navigation.kind).to_equal("document")
+        expect(navigation.url).to_equal("https://source.test/go")
+        expect(navigation.method).to_equal("POST")
+        expect(navigation.credentials).to_equal("include")
+
+        var broker = HostedBrowserRendererProcess.create(7, 80, 40)
+        broker.document_url = "https://source.test/page"
+        broker.document_origin = "https://source.test"
+        expect(broker.authorize_renderer_navigation(navigation)).to_be(true)
+        val policy = hosted_browser_renderer_request_policy(
+            broker.document_origin,
+            broker.navigation_permit,
+            navigation,
+            navigation.url
+        )
+        expect(policy.ok).to_be(true)
+        expect(policy.consumes_navigation).to_be(true)
 
     it "fails closed when a script exceeds the cookie write batch":
         var worker = HostedBrowserRendererWorkerSession.create(64, 48)

@@ -347,6 +347,42 @@ pub class HostedBrowserRendererProcess:
         self.provisional_document_origin = ""
         true
 
+    me authorize_renderer_navigation(
+        request: BrowserRendererNetworkDecodeResult
+    ) -> bool:
+        if (self.navigation_permit.active or request.kind != "document" or
+            request.credentials != "include" or
+            self._requester_origin() == ""):
+            return false
+        val method = request.method.to_upper()
+        if method == "GET":
+            if (request.body != "" or request.content_type != ""):
+                return false
+        elif method == "POST":
+            if request.content_type != "application/x-www-form-urlencoded":
+                return false
+        else:
+            return false
+        val expected_headers = match hosted_browser_sanitize_fetch_headers(
+            "", request.content_type
+        ):
+            Err(_):
+                return false
+            Ok(value):
+                value
+        val actual_headers = match hosted_browser_sanitize_fetch_headers(
+            request.headers, request.content_type
+        ):
+            Err(_):
+                return false
+            Ok(value):
+                value
+        if actual_headers != expected_headers:
+            return false
+        self.authorize_navigation(
+            request.url, method, "", request.body, request.content_type
+        )
+
     me set_home_url(url: text) -> bool:
         val canonical_url = hosted_browser_canonical_http_url(url)
         if canonical_url == "":
@@ -1147,7 +1183,36 @@ pub class HostedBrowserRendererProcess:
                     fetch.script_cookie_writes
                 ):
                     return Some(self.fail("invalid-script-cookie-write"))
+                var renderer_navigation = false
+                if (fetch.kind == "document" and
+                    not self.navigation_permit.active):
+                    if not self.authorize_renderer_navigation(fetch):
+                        return Some(self.fail(
+                            "unauthorized-document-request"
+                        ))
+                    renderer_navigation = true
                 val effective_url = self._hsts_upgrade_url(fetch.url)
+                val request_url = hosted_browser_canonical_http_url(
+                    fetch.url
+                )
+                if (renderer_navigation and request_url != effective_url):
+                    val transport_policy = HostedBrowserRequestPolicy(
+                        ok: true,
+                        reason: "ok",
+                        mode: RequestMode.Navigate,
+                        credentials: "include",
+                        canonical_url: effective_url,
+                        sanitized_headers: self.navigation_permit.headers,
+                        consumes_navigation: true
+                    )
+                    val reason = self._queue_hsts_transport_upgrade(
+                        fetch,
+                        transport_policy,
+                        -1
+                    )
+                    if reason != "":
+                        return Some(self.fail(reason))
+                    return nil
                 val policy = hosted_browser_renderer_request_policy(
                     self._requester_origin(),
                     self.navigation_permit,
@@ -1176,7 +1241,6 @@ pub class HostedBrowserRendererProcess:
                     self.navigation_permit = (
                         hosted_browser_empty_navigation_permit()
                     )
-                val request_url = hosted_browser_canonical_http_url(fetch.url)
                 if (fetch.kind != "document" and
                     policy.canonical_url != request_url):
                     val reason = self._queue_hsts_transport_upgrade(
