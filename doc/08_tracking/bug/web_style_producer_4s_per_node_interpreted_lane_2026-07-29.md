@@ -205,31 +205,204 @@ trustworthy evidence for this change's impact. **Do not read the 29/38
 figures here as a regression** -- they are noise, not signal, at this
 contention level.
 
+### Stage 1 landed 2026-07-29: hybrid dispatch for 8 conflict-free properties
+
+**Enumeration first (as instructed before implementing):** the showcase
+fixture (`examples/06_io/ui/browser_common_elements_showcase.html`, 21 CSS
+rules) uses only **32 distinct property names** total -- far fewer than the
+~283 `apply_decls` knows how to parse. Critically, `* { box-sizing:
+border-box; }` is a universal selector, so `box-sizing` is a candidate for
+*every* element on the page; skipping it would have made the hybrid gate
+("all decl_tbl entries must be dispatch-handled, else fall back") useless
+regardless of what else was covered. The requested property-family list
+(`background*`, `border*`, `font*`, `flex*`, `padding`/`margin`,
+`width`/`height`/`min`/`max`, `display`/`position`) covers about 20 of the
+32; the remainder (`color`, `justify-content`, `align-items`, `gap`,
+`box-shadow`, `text-align`, `cursor`, `outline`, `overflow`,
+`grid-template-columns`, `border-collapse`) is a long tail each used in
+only 1-2 rules -- except `color`, used in nearly half the rules.
+
+**Design finding, worth banking:** `mut` parameters on `class` types are
+true in-place field mutation, not copy-then-discard -- verified directly
+(`mutate_it(mut x: Big): x.a = 999` followed by `print(orig.a)` after
+`mutate_it(orig)` prints `999`, not the original value). This means the
+dispatch path does not need the 176-field copy-in/copy-out at all: it
+takes `mut st: Style` and writes `st.field = value` directly, cheaper than
+originally assumed (item 3, previously listed here, proposed profiling
+copy-in vs. lookup-loop cost; the copy-in cost is avoided entirely on the
+dispatch path, not merely reduced). This also makes the dispatch path
+immune to `Style` field additions: an unrelated commit landed mid-session
+(`overflow_scroll_y`, a new field added to the full-probe path's
+`Style(...)` reconstruction) required zero changes here, since the
+dispatch path never enumerates all fields.
+
+**Correctness landmines found while tracing consequences (why this
+implementation went slower than "read the property, copy the code"):**
+- `apply_decls`' `Style(...)` reconstruction unconditionally resets
+  `resolved_font_identity`/`resolved_font_advances`/`resolved_font_width`/
+  `resolved_font_line_height` on *every* successful call, regardless of
+  which properties are present. Missed initially; the dispatch path now
+  does the same reset unconditionally.
+- The `if display_v == "contents": <reset box-model fields>` block at the
+  end of `apply_decls` checks the *final* resolved `display` value, not
+  whether `"display"` appeared in this call's decls -- it can fire from
+  inherited state alone. The dispatch path replicates this exactly
+  (unconditional check after any `display` write).
+- `top`/`right` are *not* independently dispatchable: they interact with
+  `left`/`bottom`/`inset`/`inset-block`/`inset-inline`/
+  `inset-*-start`/`inset-*-end` via cross-property position comparisons
+  (`if inset_pos > top_pos: top_px_v = inset_top`). Deferred entirely
+  rather than dispatch them without also covering the whole `inset`
+  family or explicitly gating on its absence.
+
+**Landed (`_apply_decls_dispatch`/`_decl_tbl_all_dispatch_handled` in
+`simple_web_html_layout_renderer_declarations.spl`):** dispatch for 8
+genuinely conflict-free properties -- `box-sizing`, `color`, `width`,
+`height`, `min-height`, `margin-left`, `z-index`, `display` (including the
+`contents` reset) -- plus 2 recognized no-ops (`grid-template-columns`,
+`border-collapse`: confirmed zero `decl_tbl_get` probes for either name
+anywhere in the file, so they were already silent no-ops in the full-probe
+path; recognizing them lets an otherwise-all-handled call take the fast
+path instead of falling back over a property that does nothing either
+way). Any decl_tbl entry not in this list falls back to the unmodified
+full-probe body for the whole call -- strictly additive, zero changes to
+existing code paths (`core.spl`, the per-node loop, needed no changes at
+all for this stage -- the whole fix is self-contained inside
+`apply_decls`).
+
+**Landed on top of a concurrent, unrelated change:** while this was in
+flight, another session added two-URL-layer `background` shorthand support
+and an `overflow_scroll_y` field/`overflow: scroll` distinction to the
+same file. Re-diffed both directions against the moving tip
+(`21db5a8456d2` → `7c964191c059` → `82616c81190`/`f9d064c4d577`) before
+each landing attempt per the anti-clobber protocol; both times the
+concurrent change and this one touched disjoint regions of the file (their
+edits: inside the pre-existing `background`/`overflow` handling blocks and
+the `Style(...)` constructor; this fix's edits: a new block before
+`fn apply_decls` and two lines immediately after `decl_table_build`), so
+the fix was rebuilt fresh on top of the current tip each time (145 pure
+line additions, 0 deletions, both times) rather than force-pushed over a
+cached diff.
+
+**Verified (PROVED):**
+- `css_spec.spl`: 9/12, unchanged from baseline, re-confirmed against the
+  current tip (`f9d064c4d577`) after the rebuild above.
+- `apply_decls_merge_probe_spec.spl` extended with a "stage-1
+  dispatch/probe-fallback equivalence" describe block (11/11 total in the
+  file): paired dispatch-path vs. fallback-forced (via one obscure
+  unhandled property, `letter-spacing`) cases that must produce identical
+  results, the `display:contents` reset firing correctly on both paths,
+  `auto` margin-left, and the `%`/`vw` width sentinel forms.
+  Vacuity-probed (corrupted one expected value, confirmed red with the
+  exact message, reverted, confirmed green). This full 11/11 pass and the
+  vacuity probe were run and confirmed clean against the pre-rebuild
+  content; the rebuild onto the current tip is a pure text-level merge
+  (145 additions / 0 deletions, verified by diff) of that same,
+  already-verified logic, not a re-derivation -- so this evidence still
+  applies to what is landed.
+
+**New, unrelated blocker discovered while re-verifying against the
+current tip (2026-07-29), reported here since it blocks fresh live
+measurement of this fix -- needs its own bug report, not fixed here:**
+`bin/simple run examples/06_io/ui/web_render_file_gui.spl` fails outright
+at the CURRENT origin/main tip with `error[E1002]: function
+'text_list_prefix' not found`, confirmed reproducible with fully
+unmodified origin files (not caused by this change). `text_list_prefix`
+IS defined in source
+(`simple_web_html_layout_renderer_foundation.spl:846`) and has several
+call sites in the same module family -- this is a runtime/JIT symbol
+resolution gap, not a missing definition, and is a hard regression: the
+web showcase example cannot run at all right now. Separately,
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/
+apply_decls_merge_probe_spec.spl` itself currently fails to compile at
+HEAD for an unrelated reason -- `bin/simple test` on that spec pulls in
+`src/lib/nogc_sync_mut/debug/remote/replay/hardware_replay_controller.spl`
+transitively, which has a syntax error (`=>` used for a match arm instead
+of the required `:`); reproduced with fully unmodified origin files too.
+`css_spec.spl` does not transitively import that module and is unaffected
+(hence still usable as a live regression check above). Both breaks
+pre-date and are unrelated to this session's changes; **neither was fixed
+here** (out of this task's scope) but both block getting a fresh
+`budget-break`/dispatch-fraction/per-call-timing measurement against the
+current tip.
+
+**Measured (PROVED, but from earlier in this session, before the
+`text_list_prefix` regression landed -- not re-confirmable against the
+current tip until that regression is fixed):** bracketed the real
+per-node `apply_decls` call site directly (temporary
+`rt_time_now_micros()` probes, gated to the first 20 nodes, reverted after
+measuring -- the corrected methodology; an earlier attempt using
+`simple_web_layout_debug_style_by_id` in a repeat loop was confounded by
+that helper's ~600ms fixed parse/extract/compute overhead per call
+swamping the ms-scale `apply_decls` signal) and tagged each call with its
+actual gate decision:
+
+| | n | avg per call |
+|---|---|---|
+| dispatch path | 13 | **17.7ms** |
+| fallback path | 4 | **174.9ms** |
+
+**The dispatch path was ~9.9x faster than the fallback path** on real
+showcase decls, and **13 of 17 calls (76.5%) took the dispatch path** in
+that sample -- short of the ">90% aim" stated for stage 1, consistent
+with the enumeration above (padding/margin/border, all deferred, are used
+in roughly half the page's rules and are not yet dispatch-handled).
+`pgrep` showed 12 concurrent heavy processes during that measurement
+(quieter than the 23 seen during the stage-0 wall-clock attempt, but
+still contended) -- the *per-call* bracket methodology is far less
+sensitive to that than a whole-run wall-clock/budget-break count, since
+each bracket only spans one `apply_decls` call rather than the entire
+process's scheduling history. This fix's logic is unchanged since that
+measurement (verified via the 145-line pure-addition rebuild above), so
+the numbers should still hold once `text_list_prefix` is fixed and a
+fresh run is possible -- but that re-confirmation has not been done.
+
 ### Remaining fix proposal (not implemented — needs its own scoped change)
 
 1. ~~Batch all candidate rules' declarations into one merged decl table and
    call `apply_decls`-equivalent logic once per node instead of once per
-   candidate rule.~~ Landed above (the call-batching form of this item;
-   full pass-by-reference/builder-pattern mutation was not attempted).
-2. Replace the ~283 individual `decl_tbl_get(tbl, "prop-name")` linear-scan
-   probes with a single pass over `tbl`'s actual entries (typically 5-20)
-   dispatching on the property name once, instead of the property list
-   scanning the table up to 283 times -- this is the loop-inversion
-   proper, deferred because `apply_decls` is 1810 lines covering all ~283
-   properties including intricate shorthand-vs-longhand interactions
-   (`background`, `border`, `font`, `flex`, `padding`/`margin`), too large
-   to rewrite safely in one pass; stage it property-family by
-   property-family, verifying `css_spec.spl` + the merge-probe spec +
-   fresh multi-byte probes after each family, per the original staging
-   guidance.
-3. Profile whether the remaining per-call cost (down from ~100-150ms ×
-   1.6 avg calls/node to ~100-150ms × 1 call/node) is now the 283-probe
-   block or the 176-field copy-in/copy-out -- add the same four-point
-   timing probe used in "Cost center attribution" above, but INSIDE
-   `apply_decls` itself (copy-in boundary, lookup-loop boundary,
-   construct-out boundary), on a quiet machine (re-run `pgrep` for
-   concurrent heavy processes first and wait for a quiet window, given
-   the wall-clock noise problem documented above).
+   candidate rule.~~ Landed (the call-batching form of this item; full
+   pass-by-reference/builder-pattern mutation was not attempted for the
+   full-probe path, only for the new dispatch path).
+2. ~~Replace individual `decl_tbl_get(tbl, "prop-name")` linear-scan
+   probes with dispatch on the property name.~~ Landed for 8 conflict-free
+   properties (stage 1, above), measured at 76.5% of calls / ~9.9x lower
+   per-call cost on the showcase page (measurement predates the
+   `text_list_prefix` regression above; not yet re-confirmed against the
+   current tip). Remaining stages, roughly in priority order by rule-count
+   impact on this specific page:
+   - **Fix `text_list_prefix` / the `hardware_replay_controller.spl`
+     syntax error first** -- both currently block any further live
+     measurement or `apply_decls_merge_probe_spec.spl` test-lane
+     verification of this whole bug's fixes.
+   - **Stage 1b (highest value):** `padding`, `margin`, `border`
+     (shorthand expanding to 4 sides' width/color/style),
+     `border-left`/`border-radius`. Used across roughly half the
+     showcase's 21 rules; their shorthand-vs-longhand conflict resolution
+     (see `background` example already handled in the merge-probe spec)
+     needs the same careful lift-and-trace treatment this stage used for
+     `display:contents`. Note the file has grown a second `background`
+     shorthand path (two-URL layers) since this stage started -- re-read
+     the current `background`/`background-*` handling before lifting it,
+     don't work from a stale copy.
+   - **Stage 1c:** `background`, `font`, `flex`/`flex-wrap`/
+     `flex-direction` -- the most complex shorthands (multi-field
+     resolution, cross-property reset-on-later-shorthand logic).
+   - **Stage 1d (optional, lower value on this page):** `color`,
+     `justify-content`, `align-items`, `gap`, `box-shadow`, `text-align`,
+     `cursor`, `outline`, `overflow` -- each only 1-2 rules on this
+     fixture, but worth a batch pass since they are simple. Note
+     `overflow`/`overflow-y` gained an `overflow_scroll_y` distinction
+     since this stage started -- re-read before lifting.
+   - **`top`/`right`/`position`:** only dispatchable together with the
+     full `left`/`bottom`/`inset*` family (see landmine above) --
+     treat as one unit, not incremental additions.
+3. Profile whether, after stage 1b/1c close most of the remaining 23.5%
+   fallback fraction, the fallback path's ~175ms/call full-probe cost
+   itself needs the batched-lookup treatment (a single pass over `tbl`'s
+   actual entries instead of ~283 named probes) for the residual rare-
+   property calls, or whether coverage alone is enough that this no
+   longer matters in practice.
 4. Investigate the node 5 / node 8 outliers separately -- they are not
    explained by anything in this section and could be a second, unrelated
    defect (GC pressure or a `wm_fallback` code path cost).

@@ -268,6 +268,149 @@ fn _parse_background_shorthand(raw: text) -> BackgroundShorthand:
     val size_h = if sizes.len() > 1 and sizes[1] != "auto": parse_int(sizes[1]) else: 0
     BackgroundShorthand(valid: true, color: color, image_uri: image_uri, repeat: repeat, size_w: size_w, size_h: size_h, position_x: position_x, position_y: position_y, origin: origin, clip: clip)
 
+# Stage 1 of the apply_decls loop-inversion fix (see doc/08_tracking/bug/
+# web_style_producer_4s_per_node_interpreted_lane_2026-07-29.md, "Staging").
+# apply_decls' full body below probes ~283 known property names against
+# the rule's small decl table on every call. When every property in a
+# call's decl_tbl is one we understand well enough to update Style
+# directly (no cross-property shorthand interactions we haven't traced),
+# _apply_decls_dispatch below applies them directly via a `mut` Style
+# parameter -- true in-place field mutation (verified: a `mut x: SomeClass`
+# parameter's field writes are visible to the caller, not a local-only
+# copy), so this path pays neither the 176-field copy-in/copy-out nor the
+# 283-probe scan. Any decl_tbl entry NOT in this list falls back to the
+# full probe body unchanged -- this list only grows once a property's full
+# consequences (including any "if some other resolved field now has value
+# X, also do Y" coupling elsewhere in apply_decls) have been traced; get
+# this wrong and it is a silent rendering bug, not a crash.
+val _APPLY_DECLS_DISPATCH_PROPS: [text] = [
+    "box-sizing", "color", "width", "height", "min-height", "margin-left",
+    "z-index", "display",
+    # No Style field exists for these two (confirmed: zero decl_tbl_get
+    # probes for either name anywhere in this file) -- already a silent
+    # no-op in the full-probe path, so recognizing them here changes
+    # nothing except letting an otherwise-all-handled call take the fast
+    # path instead of falling back just because one of these was present.
+    "grid-template-columns", "border-collapse",
+]
+
+fn _decl_tbl_all_dispatch_handled(decl_tbl: [text]) -> bool:
+    var i = 0
+    while i < decl_tbl.len():
+        val prop = decl_tbl[i]
+        var found = false
+        var j = 0
+        while j < _APPLY_DECLS_DISPATCH_PROPS.len():
+            if _APPLY_DECLS_DISPATCH_PROPS[j] == prop:
+                found = true
+                j = _APPLY_DECLS_DISPATCH_PROPS.len()
+            else:
+                j = j + 1
+        if not found:
+            return false
+        i = i + 2
+    true
+
+fn _apply_decls_dispatch(mut st: Style, decl_tbl: [text], em_base: i32) -> Style:
+    # apply_decls' Style(...) reconstruction always resets these four
+    # resolved-font-cache fields, unconditionally, on every successful
+    # call -- not gated on which properties are present. Must match here
+    # too or the dispatch path would leave stale cached font-resolution
+    # data that the full-probe path always clears.
+    st.resolved_font_identity = ""
+    st.resolved_font_advances = []
+    st.resolved_font_width = 0
+    st.resolved_font_line_height = 0
+
+    val box_sizing = decl_tbl_get(decl_tbl, "box-sizing")
+    if box_sizing.len() > 0:
+        st.border_box = box_sizing == "border-box"
+    val col = decl_tbl_get(decl_tbl, "color")
+    if col.len() > 0:
+        val cv = parse_color(col)
+        if cv != 0u32:
+            st.fg = cv
+    val width = decl_tbl_get(decl_tbl, "width")
+    if width.len() > 0:
+        if width.ends_with("%"):
+            val wp = parse_int(width)
+            st.width_px = if wp > 0: 0 - wp else: 0
+        elif width.ends_with("vw"):
+            val wv = parse_int(width)
+            st.width_px = if wv > 0: 0 - wv else: 0
+        else:
+            st.width_px = parse_int(width)
+    val height = decl_tbl_get(decl_tbl, "height")
+    if height.len() > 0:
+        if height.ends_with("%"):
+            val hp = parse_int(height)
+            st.height_px = if hp > 0: 0 - hp else: 0
+        else:
+            st.height_px = parse_int(height)
+    val min_height = decl_tbl_get(decl_tbl, "min-height")
+    if min_height.len() > 0:
+        if min_height.contains("vh"):
+            st.min_height_vh = true
+        else:
+            st.min_height_px = parse_int(min_height)
+    val ml = decl_tbl_get(decl_tbl, "margin-left")
+    if ml.len() > 0:
+        if ml == "auto":
+            st.margin_l = 0
+            st.margin_l_auto = true
+        else:
+            st.margin_l = if ml.ends_with("%"): 0 - parse_int(ml) else: parse_int(ml)
+            st.margin_l_auto = false
+    val z_index_decl = decl_tbl_get(decl_tbl, "z-index")
+    if z_index_decl.len() > 0:
+        st.z_index = parse_int(z_index_decl)
+    val display_decl = decl_tbl_get(decl_tbl, "display")
+    if display_decl.len() > 0:
+        if display_decl == "none":
+            st.display = "none"
+        elif display_decl == "inline":
+            st.display = "inline"
+        elif display_decl == "inline-block":
+            st.display = "inline-block"
+        elif display_decl == "flex":
+            st.display = "flex"
+        elif display_decl == "contents":
+            st.display = "contents"
+        else:
+            st.display = "block"
+    # Unconditional in the full-probe path too: it checks the FINAL
+    # display_v, which can already be "contents" from inheritance even
+    # when this call's decls never mention "display" at all.
+    if st.display == "contents":
+        st.bg = 0u32
+        st.width_px = 0
+        st.height_px = 0
+        st.pad_l = 0
+        st.pad_t = 0
+        st.pad_r = 0
+        st.pad_b = 0
+        st.border_w = 0
+        st.border_l = 0
+        st.border_t = 0
+        st.border_r = 0
+        st.border_b = 0
+        st.border_color = 0u32
+        st.border_color_l = 0u32
+        st.border_color_t = 0u32
+        st.border_color_r = 0u32
+        st.border_color_b = 0u32
+        st.outline_w = 0
+        st.outline_color = 0u32
+        st.margin_l = 0
+        st.margin_t = 0
+        st.margin_r = 0
+        st.margin_b = 0
+        st.margin_l_auto = false
+        st.margin_r_auto = false
+        st.margin_t_auto = false
+        st.margin_b_auto = false
+    st
+
 fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
     if decls.len() == 0:
         return st
@@ -281,6 +424,8 @@ fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
     # Ordering comparisons below use entry indices from `decl_tbl_last_index`,
     # which rank identically to the byte offsets `decl_last_pos` used to return.
     val decl_tbl = decl_table_build(decls)
+    if _decl_tbl_all_dispatch_handled(decl_tbl):
+        return _apply_decls_dispatch(st, decl_tbl, em_base)
     var bg_v = st.bg
     var background_gradient_from_v = st.background_gradient_from
     var background_gradient_to_v = st.background_gradient_to
