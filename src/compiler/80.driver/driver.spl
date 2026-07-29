@@ -48,7 +48,7 @@ use compiler.semantics.visibility_integration.{check_module_visibility}
 use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
 # Dormant unsafe-boundary checker, wired warn-only / opt-in (2026-07-28, see
 # doc/08_tracking/bug/safety_checker_pass_never_invoked_2026-07-27.md).
-use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module}
+use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module, safetychecker_check_transfer_module}
 use driver_types.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics, LoweringError}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName, module_surface_promote, module_surface_source_matches, module_surfaces_from_modules}
@@ -1563,6 +1563,12 @@ pub fn run_safety_warn_pass(ctx: CompileContext, hir_modules: Dict<text, HirModu
         val m = hir_modules[name]
         val checker = SafetyChecker.create()
         val serrors = safetychecker_check_module(checker, m)
+        # E1049 (transfer-share, lane G8, 2026-07-29): own top-level walk,
+        # invoked on the SAME checker instance right after check_module so it
+        # can read the class_symbol_ids that call already populated -- see
+        # the block comment above safetychecker_check_transfer_module in
+        # 35.semantics/safety_checker.spl.
+        val transfer_errors = safetychecker_check_transfer_module(checker, m)
         var s_idx = 0
         while s_idx < serrors.len():
             match serrors[s_idx]:
@@ -1607,4 +1613,23 @@ pub fn run_safety_warn_pass(ctx: CompileContext, hir_modules: Dict<text, HirModu
                         case SafetyPassSeverity.Deny:
                             ctx.add_error(msg)
             s_idx = s_idx + 1
+        # E1049 (transfer-share, lane G8): transfer_errors only ever contains
+        # `Other(message, span)` entries (see safety_transfer_walk_expr) --
+        # same generic routing as the `Other` arm above.
+        var t_idx = 0
+        while t_idx < transfer_errors.len():
+            match transfer_errors[t_idx]:
+                case Other(message, span):
+                    val msg = "[safety other] {name}: {message} at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case _:
+                    pass
+            t_idx = t_idx + 1
     out

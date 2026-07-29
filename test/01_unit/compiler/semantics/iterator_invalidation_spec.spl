@@ -1,0 +1,115 @@
+#!/usr/bin/env simple
+# E1048 iterator-invalidation (lane G7).
+#
+# Rust's borrow checker rejects mutating a collection while iterating it.
+# Simple silently allows `for x in xs:` with `xs.push(...)` / `xs = ...` /
+# `xs[i] = ...` in the body. This is a semantic (typed-HIR) SafetyChecker
+# rule, structured exactly like E1047 (param-mutability-semantic,
+# param_mutability_semantic_spec.spl): tracks the currently-iterated
+# collection by HIR SYMBOL ID (not name) on a stack (so nested loops each
+# get their own entry without losing an outer loop's), and flags
+# reassignment, index-assign, and known-mutating method calls (including
+# the collection-desugar `xs = xs + [..]` -> `xs.merge([..])` rewrite,
+# `10.frontend/desugar/collection_desugar.spl`'s `try_rewrite_assign`
+# Pattern B) against that binding inside the loop body.
+#
+# Does NOT flag: mutation of a different collection, mutation after the
+# loop, or iterating an expression that isn't a plain binding (e.g. a
+# range or call result) -- those have no stable collection identity to
+# track and are intentionally skipped.
+#
+# HARNESS LANDMINE (same as param_mutability_semantic_spec.spl and
+# enum_match_unknown_variant_diagnostic_spec.spl's header): the
+# parse_full_frontend -> HirLowering -> SafetyChecker pipeline is inlined
+# in every `it` block below rather than factored into a shared helper fn
+# -- module-level helper fns have been observed to read back EMPTY error
+# lists from a lowering/checker object created inside them, even though
+# inline code in the `it` block sees the real list.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module}
+
+fn count_e1048(errors: [SafetyError]) -> i64:
+    var n = 0
+    for e in errors:
+        match e:
+            case Other(message, _):
+                if message.starts_with("E1048"):
+                    n = n + 1
+            case _:
+                pass
+    n
+
+describe "E1048 iterator-invalidation":
+    it "fires when the iterated collection is pushed to inside the loop body":
+        val src = "fn walk() -> i64:\n" +
+            "    var xs: [i64] = [1, 2, 3]\n" +
+            "    for x in xs:\n" +
+            "        xs.push(x)\n" +
+            "    0\n"
+        val parsed = parse_full_frontend(src, "testdata/e1048_push.spl", "e1048_push", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/e1048_push.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_e1048(errors)).to_equal(1)
+
+    it "fires when the iterated collection is reassigned inside the loop body":
+        val src = "fn walk() -> i64:\n" +
+            "    var xs: [i64] = [1, 2, 3]\n" +
+            "    for x in xs:\n" +
+            "        xs = [9]\n" +
+            "    0\n"
+        val parsed = parse_full_frontend(src, "testdata/e1048_reassign.spl", "e1048_reassign", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/e1048_reassign.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_e1048(errors)).to_equal(1)
+
+    it "is silent when a DIFFERENT collection is mutated inside the loop body":
+        val src = "fn walk() -> i64:\n" +
+            "    var xs: [i64] = [1, 2, 3]\n" +
+            "    var ys: [i64] = [4, 5]\n" +
+            "    for x in xs:\n" +
+            "        ys.push(x)\n" +
+            "    0\n"
+        val parsed = parse_full_frontend(src, "testdata/e1048_other_collection.spl", "e1048_other_collection", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/e1048_other_collection.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_e1048(errors)).to_equal(0)
+
+    it "is silent when the collection is mutated AFTER the loop ends":
+        val src = "fn walk() -> i64:\n" +
+            "    var xs: [i64] = [1, 2, 3]\n" +
+            "    for x in xs:\n" +
+            "        val y = x\n" +
+            "    xs.push(9)\n" +
+            "    0\n"
+        val parsed = parse_full_frontend(src, "testdata/e1048_after_loop.spl", "e1048_after_loop", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/e1048_after_loop.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_e1048(errors)).to_equal(0)
+
+    it "fires on the outer loop's collection when mutated from a nested inner loop":
+        val src = "fn walk() -> i64:\n" +
+            "    var xs: [i64] = [1, 2, 3]\n" +
+            "    var ys: [i64] = [4, 5]\n" +
+            "    for x in xs:\n" +
+            "        for y in ys:\n" +
+            "            xs.push(y)\n" +
+            "    0\n"
+        val parsed = parse_full_frontend(src, "testdata/e1048_nested.spl", "e1048_nested", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/e1048_nested.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val checker = SafetyChecker.create()
+        val errors = safetychecker_check_module(checker, hir)
+        expect(count_e1048(errors)).to_equal(1)
