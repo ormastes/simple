@@ -1,22 +1,40 @@
 # Extension Runtime — isolation & security primitives for the extension
-# kernel host (lane L6): canonical path containment, default-deny permission
-# enforcement, and crash-loop containment for dispatched commands.
+# kernel host (lane L6/F3): canonical path containment, default-deny
+# permission enforcement, and crash-loop containment for dispatched commands.
 #
 # Path handling is POSIX-style ('/'), matching the rest of the extension
 # kernel (see editor/core/path_text.spl, editor/extensions/roots.spl).
 #
-# Symlink-resolution gap (filed limitation, NOT faked): path_canonicalize
-# does LEXICAL normalization only ('.'/'..' collapse, repeated-separator
-# collapse). Checked src/lib/nogc_sync_mut/fs/path.spl and
-# src/lib/nogc_sync_mut/platform.spl — neither exposes a readlink/realpath
-# FFI reachable from this tier, so there is no way to resolve a symlink here
-# without adding a new extern. A malicious symlink placed inside an
-# otherwise-contained extension directory can therefore still point outside
-# the sandboxed root; path_contained_in only proves the *lexical* path stays
-# under the root, not that every path component is symlink-free. Follow-up:
-# add an `rt_realpath` extern + wire it in here once one exists.
+# Symlink resolution (lane F3, 2026-07-29): path_canonicalize resolves real
+# symlink chains for paths that EXIST on disk, via the already-existing
+# `rt_path_absolute` runtime symbol (same symbol used by
+# src/app/io/cli_ops.spl's `_cli_resolve_symlink` — see that file's comment:
+# "rt_path_absolute is std::fs::canonicalize: it resolves symlink chains and
+# makes the path absolute IN-PROCESS"). No new extern was added: rt_path_absolute
+# already exists and is wired on every engine —
+# src/runtime/runtime_native.c:rt_path_absolute (native, calls libc realpath()),
+# src/compiler_rust/.../interpreter_extern/file_io.rs:rt_file_canonicalize
+# (interpreter, calls std::fs::canonicalize) — so this needed no bootstrap
+# rebuild. For a path that does NOT exist (containment pre-checks routinely
+# canonicalize a not-yet-created target), rt_path_absolute's own fallback does
+# NOT lexically collapse '..' segments, so path_canonicalize falls back to the
+# original LEXICAL normalizer ('.'/'..' collapse, repeated-separator collapse)
+# for that case, unchanged from before.
+#
+# Residual limitation (filed, not faked): on Windows, the native runtime's
+# rt_path_absolute fallback uses `_fullpath`, which does not resolve
+# symlinks/junctions the way POSIX `realpath()` does — this module's symlink
+# resolution is therefore POSIX-real, Windows-lexical-only. There is also an
+# inherent TOCTOU window between the existence check and use of the resolved
+# path (same class of gap every realpath()-based sandboxing check has); this
+# module is a *containment check*, not an atomic open, so that is an accepted
+# limitation of this rung of hardening.
 
 use std.editor.extensions.manifest.{ExtensionPermissions}
+
+extern fn rt_path_absolute(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_exists(path: text) -> bool
 
 # ---- path containment -------------------------------------------------------
 
@@ -31,13 +49,25 @@ fn _path_pop_last(items: [text]) -> [text]:
         i = i + 1
     out
 
+# Canonicalize `path` for containment purposes: if it exists on disk, resolve
+# it via the real OS resolver (`rt_path_absolute`, symlink-aware — see module
+# doc comment); otherwise fall back to pure LEXICAL normalization so
+# containment pre-checks against not-yet-created targets keep working.
+fn path_canonicalize(path: text) -> text:
+    if rt_file_exists(path) or rt_dir_exists(path):
+        val resolved = rt_path_absolute(path) ?? ""
+        if resolved != "":
+            return resolved
+    _path_canonicalize_lexical(path)
+
 # Lexically normalize a '/'-separated path: drop empty/'.' segments, resolve
 # '..' against the preceding segment when there is one to resolve against,
 # collapse repeated separators. Absolute paths stay absolute; '..' above an
 # absolute root is dropped (same as most OS path resolvers); '..' above a
 # relative path's own root is kept as a leading '..' (nothing to resolve it
-# against here). No symlink resolution — see module doc comment.
-fn path_canonicalize(path: text) -> text:
+# against here). No symlink resolution — used only as the not-on-disk
+# fallback for path_canonicalize (see module doc comment).
+fn _path_canonicalize_lexical(path: text) -> text:
     val absolute = path_is_absolute(path)
     val raw_segments = path.split("/")
     var stack: [text] = []

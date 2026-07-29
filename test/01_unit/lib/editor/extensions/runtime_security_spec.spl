@@ -1,11 +1,19 @@
 # Extension runtime isolation & security (lane L6): canonical path
 # containment, default-deny permission enforcement, and crash-loop
 # containment wired at the ExtensionHost.dispatch_command seam.
+#
+# Lane F3 (2026-07-29) added the symlink-escape + nonexistent-path-fallback
+# cases below, exercising the real (non-lexical) symlink resolution that
+# path_canonicalize now performs for on-disk paths.
 
 use std.spec
 use std.editor.extensions.host.*
 use std.editor.extensions.manifest.*
 use std.editor.extensions.runtime.*
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_package_create_symlink(target: text, link_path: text) -> i32
 
 # ---- fixtures ----------------------------------------------------------------
 
@@ -267,3 +275,36 @@ describe "extension runtime: runtime-policy helper outputs (regression pin)":
         expect(external.allow_external_process).to_equal(true)
         expect(external.allowed_roots.len()).to_equal(1)
         expect(external.allowed_roots[0]).to_equal("root/c")
+
+describe "extension runtime: real symlink resolution (lane F3)":
+
+    it "detects a symlink placed inside a sandboxed root that points outside it":
+        val root = "/tmp/l6f3_symlink_root"
+        val outside = "/tmp/l6f3_symlink_outside"
+        rt_dir_remove_all(root)
+        rt_dir_remove_all(outside)
+        val root_ok = rt_dir_create_all(root)
+        val outside_ok = rt_dir_create_all(outside)
+        if not (root_ok and outside_ok):
+            print("SKIP: could not create temp dirs for symlink-escape test")
+            expect(true).to_equal(true)
+        else:
+            val link_path = root + "/escape"
+            val symlink_status = rt_package_create_symlink(outside, link_path)
+            if symlink_status != 0:
+                print("SKIP: symlink creation unavailable on this platform/sandbox (status=" + symlink_status.to_text() + ") -- path_canonicalize's real-resolution branch is untested by this case here")
+                expect(true).to_equal(true)
+            else:
+                # A purely LEXICAL check would see "root/escape" as contained
+                # in "root"; real resolution must see through the symlink to
+                # its true (outside-root) target and reject it.
+                val resolved = path_canonicalize(link_path)
+                expect(resolved).to_equal(path_canonicalize(outside))
+                expect(path_contained_in(link_path, root)).to_equal(false)
+                expect(path_contained_in(resolved, root)).to_equal(false)
+            rt_dir_remove_all(root)
+            rt_dir_remove_all(outside)
+
+    it "still applies pure lexical normalization to a path that does not exist on disk":
+        expect(path_canonicalize("/l6f3-definitely-nonexistent-root/./a/../b")).to_equal("/l6f3-definitely-nonexistent-root/b")
+        expect(path_canonicalize("l6f3-nonexistent-relative/../../etc")).to_equal("../etc")
