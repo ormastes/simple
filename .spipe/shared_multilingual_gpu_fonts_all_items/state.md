@@ -118,8 +118,9 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
 - dev-remake-2026-07-29: Replaced stale hard-coded 42-manual/46-command
   acceptance counts with a current-tree inventory requirement, preserved the
   frozen shared owners and fail-fast helper policy, and assigned six bounded
-  parallel audit lanes before implementation. Current pushed checkpoint is
-  `502b70b5460`; temporary Stage 2 successor3
+  parallel audit lanes before implementation. Current pushed handoff HEAD is
+  `90cef240c91c4ec31ffd1aebbb95520d4cebec86`; successor3 was built from source
+  checkpoint `502b70b54602bc451ca11f10d8935723bbad5018`. Temporary Stage 2 successor3
   `dd7e747ad1e22bb71d46c5737d20d2d250146af70fdd3c621f66d7ab57ca26cf`
   is diagnostic only. The Option admission smoke exhausted its three-cycle cap
   and must not be repeated in this session.
@@ -131,6 +132,15 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   routing is source-complete except the still-blocked REQ-011 compatibility
   bitmap row; no speculative product edit is assigned before admitted runtime
   evidence. Unavailable host/device rows remain blocked.
+- option-admission-static-handoff-2026-07-29: Six read-only compiler lanes made
+  the first `.?`/changed MIR `ExistsCheck` arm the shared static candidate for
+  both successor3-driven smoke-compilation SIGILLs; the exact first executed
+  violation remains unproven. The tracked blocker freezes three required
+  invariants: presence-before-unwrap with raw payload-or-nil result, never
+  decode the outer Option handle as its payload, and decode optional-struct
+  `if val` independently of an I64-only MIR-type gate. One fresh A/B/C
+  ExistsCheck/if-val/field diagnostic batch distinguishes the first repair
+  owner; this turn ran no fourth smoke, build, or source fix.
 - dev: Remade the goal around all selected requirements and NFRs with twelve testable acceptance criteria, six parallel lanes, frozen shared interfaces, and explicit unavailable-host policy.
 - verify: At HEAD `7a161abfabb` plus the current working changes, no fresh Stage 4 CLI is admitted. The frozen B4+C13+D5+E4 inventory is 26 executable sources, 18 present mirrors, eight missing mirrors, 12 stale mirrors, six same-revision but unverified mirrors, and zero retained docgen logs; no requirement is marked pass. Static scans found no prohibited placeholder pass, and `doc/06_spec` contains no executable `_spec.spl`.
 - bootstrap: `e331a5700ab`, integrated as `7a161abfabb`, fixed impl-method accumulation and added direct 0+2/1+2 regression coverage. The final cycle-3 Stage 4 check advanced `compiler.spl` from count 0 to count 15 and localized the remaining nil receiver after `driver:errors-read:done`, inside the error collector. A typed-index collector fix and direct recovered/fatal error regression now exist in the working tree but are bootstrap-unverified. The three-check cap is reached, no further retry is permitted this session, and the full CLI is absent.
