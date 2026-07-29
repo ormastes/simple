@@ -108,9 +108,11 @@ The reusable feature wiki is
 `doc/00_llm_process/feature_expert/nvme_firmware/skill.md`. Specs must name the
 target profile, independent `NVME_RV32_*` build mode, transport, media, and
 evidence class; a target ID alone is not a complete test configuration.
-Before running NVMe SSpec/docgen, check the full-CLI admission row in
-`doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`; a Rust
-seed, stale binary, or bootstrap receipt cannot satisfy that gate.
+Before running NVMe SSpec/docgen, check the admission record in
+`doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`.
+The current-source Phase 2 artifact is admitted for the exact 5-scenario native
+SSpec and zero-stub standalone docgen; a Rust seed, stale deployed full CLI, or
+bootstrap receipt cannot satisfy that gate.
 For RV32 IDs `3`/`4`, catalog presence is not runtime dispatch: require evidence
 from the selected build mode and transport runner before naming the profile as
 exercised.
@@ -123,7 +125,8 @@ The RV32 `.nandram` lane proves scalar digital prevention/recovery policy; only
 | `emu/` | Host/device memcpy seam, RAM NAND and emulator data path | Hardware MMIO, host queue DMA, PCIe or physical NAND |
 | `fw_rv32` + QEMU | Real RV32 ELF, external mailbox command sequence, guest PRP buffers, and scalar RAM-NAND recovery | AXI, queue DMA engine, IRQ, PCIe, or board transport |
 | RV32 + GHDL AXI | Synthesizable H1 AXI model evidence | PCIe enumeration, MSI/PERST, OpenSSD silicon |
-| KV260 FPGA | H1 FPGA-model evidence when the host protocol and transcript are real | OpenSSD/physical-NAND or PCIe acceptance |
+| KV260/K26 GHDL | Emulation qualification through firmware-in-loop AXI and the synthesizable K26 top | KV260 silicon, OpenSSD/physical-NAND, or PCIe acceptance |
+| KV260 FPGA | Physical FPGA-model evidence when the board protocol and transcript are real; currently postponed | OpenSSD/physical-NAND or PCIe acceptance |
 | Cosmos+ OpenSSD | Vendor/H2 target contract only when the board gate runs | Any claim from QEMU, GHDL, or internal selftest |
 
 For `rv32_nvme_host_axi_mmio`, a passing transport spec must show actual

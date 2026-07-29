@@ -15,7 +15,7 @@ QEMU, GHDL, or internal self-test result to physical NVMe/NAND acceptance.
   `doc/07_guide/hardware/nvme_firmware/nvme_firmware_and_emulator_guide.md`
 - Cosmos+ ARM/NFC/PCIe/FSBL guide:
   `doc/07_guide/hardware/cosmos_openssd_production_firmware.md`
-- Open physical gates:
+- Completion status and postponed physical gates:
   `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`
 
 ## Configuration Map
@@ -29,7 +29,7 @@ The canonical target profile catalog is
 | 1 | `TARGET_OPENSSD_2CH8WAY` | Cosmos+ profile; `available=false`, H2 board gate postponed |
 | 2 | `TARGET_OPENSSD_8CH8WAY` | Cosmos+ profile; `available=false`, H2 board gate postponed |
 | 3 | `TARGET_RV32_QEMU_RAM_NAND` | Real RV32 ELF and firmware parity; no AXI/IRQ |
-| 4 | `TARGET_RV32_KV260_AXI_RAM_NAND` | AXI firmware-in-loop GHDL PASS; `available=false`, physical bundle open |
+| 4 | `TARGET_RV32_KV260_AXI_RAM_NAND` | Emulation-qualified: firmware-in-loop and synthesizable K26-top GHDL PASS; physical board postponed |
 
 Unknown IDs return `TARGET_INVALID`. New targets extend this selector and add
 an evidence adapter; they do not fork command, FTL, or recovery logic.
@@ -56,8 +56,10 @@ physical persistence evidence. `src/lib/hardware/nand_emu/` owns the richer
 per-cell threshold model used by host simulation.
 
 Cosmos+ binds the production firmware to dual Cortex-A9, NFC, PCIe, GIC, MMU,
-L1/SCU/PL310, and a pinned FSBL/Bootgen package. Host/QEMU contracts pass; the
-identified-board BT-001..BT-006 campaign remains mandatory.
+L1/SCU/PL310, and a pinned FSBL/Bootgen package. Host/QEMU contracts pass. The
+BT-001..BT-006 campaign is postponed until identified Cosmos+ hardware and lab
+fixtures exist; it is future physical qualification, not a blocker for the
+completed KV260/K26 emulation scope.
 
 ## Acceptance Commands
 
@@ -75,10 +77,12 @@ gate with `--post-bootstrap`. Physical Cosmos+ evidence is accepted only by
 `--board-evidence DIR`; missing board/runtime/trace data is POSTPONED or FAIL,
 never a simulator fallback.
 
-Bootstrap admission status is not inferred from a build receipt. Read
-`doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`; until its
-Stage 4/full-CLI row passes, keep SSpec/docgen blocked and never substitute the
-Rust seed.
+Bootstrap admission status is not inferred from a build receipt. The
+current-source Phase 2 artifact recorded in
+`doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`
+passes the exact 5-scenario native SSpec and standalone docgen with zero stubs.
+Use that admitted artifact for this scope; never substitute the Rust seed or
+the stale deployed full CLI.
 
 The board campaign uses `cosmos-board-campaign-v1`. It retains inventory,
 commands, tools, artifact hashes, the original v3 package manifest, six BT raw
