@@ -1,4 +1,5 @@
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.*
+use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
 
 class Rules:
     group_parts: [[[text]]]
@@ -8,15 +9,71 @@ class Rules:
 
 # Named transport for the three parallel rule-scan arrays. Returning these as
 # an anonymous [[text]] loses the inner RuntimeArray identity in native code.
+enum CssWrapperKind:
+    Media
+    Supports
+    Layer
+    Unsupported
+
 class CssRuleScan:
     selectors: [text]
     declarations: [text]
-    wrappers: [text]
+    wrapper_starts: [i32]
+    wrapper_counts: [i32]
+    wrapper_kinds: [CssWrapperKind]
+    wrapper_preludes: [text]
 
 val CSS_SCAN_CANDIDATE_CAP: i32 = 6000
-val CSS_VAR_FALLBACK_DEPTH_CAP: i32 = 16
-val CSS_SELECTOR_GROUP_CAP: i32 = 256
+val CSS_VAR_SUBSTITUTION_BUDGET: i32 = 1024
+val CSS_SELECTOR_GROUP_CAP: i32 = 16
 val CSS_SELECTOR_PART_CAP: i32 = 256
+
+enum CssVarResolution:
+    Resolved(value: text)
+    Invalid
+    Cycle
+    DepthExceeded
+    BudgetExceeded
+
+class CssVarResolutionState:
+    remaining: i32
+    active_names: [text]
+    prop_names: [text]
+    prop_values: [text]
+    prop_count: i32
+    memo_names: [text]
+    memo_values: [text]
+    memo_count: i32
+
+    static fn new(props: text) -> CssVarResolutionState:
+        var names: [text] = [""; 200]
+        var values: [text] = [""; 200]
+        var prop_count = 0
+        var pos: i64 = 0
+        var guard = 0
+        while pos < props.len() and guard < names.len():
+            guard = guard + 1
+            val nl = find_from(props, "\n", pos)
+            val line_end = if nl < 0: props.len() else: nl
+            val line = props.substring(pos, line_end).trim()
+            val colon = line.index_of(":")
+            if colon > 0:
+                names[prop_count] = line.substring(0, colon).trim()
+                values[prop_count] = line.substring(
+                    colon + 1, line.len()
+                ).trim()
+                prop_count = prop_count + 1
+            pos = if nl < 0: props.len() else: nl + 1
+        CssVarResolutionState(
+            remaining: CSS_VAR_SUBSTITUTION_BUDGET,
+            active_names: [""; 33],
+            prop_names: names,
+            prop_values: values,
+            prop_count: prop_count,
+            memo_names: [""; 200],
+            memo_values: [""; 200],
+            memo_count: 0
+        )
 
 class RuleBuckets:
     id_keys: [text]
@@ -46,6 +103,30 @@ fn _cb_chars_between(cb: [i64], from: i32, to: i32) -> i32:
         i = i + 1
     n
 
+fn _css_root_prefix_is_preamble(prefix: text) -> bool:
+    var remaining = prefix.trim()
+    var guard = 0
+    while remaining.len() > 0 and guard < 32:
+        guard = guard + 1
+        if remaining.starts_with("/*"):
+            val comment_close = find_from(remaining, "*/", 2)
+            if comment_close < 0:
+                return false
+            remaining = remaining.substring(
+                comment_close + 2, remaining.len()
+            ).trim()
+        elif remaining.starts_with("@"):
+            val semicolon = find_from(remaining, ";", 1)
+            val brace = find_from(remaining, "{", 1)
+            if semicolon < 0 or (brace >= 0 and brace < semicolon):
+                return false
+            remaining = remaining.substring(
+                semicolon + 1, remaining.len()
+            ).trim()
+        else:
+            return false
+    remaining.len() == 0
+
 fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
     # Collect --name: value pairs from :root { } blocks.
     # Returns a compact string of "--name:value\n" entries.
@@ -74,6 +155,17 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
         val rp = find_from(css, ":root", pos)
         if rp < 0:
             break
+        var selector_start = rp
+        while selector_start > 0:
+            val previous = css.char_at(selector_start - 1)
+            if previous == "{" or previous == "}" or previous == ",":
+                break
+            selector_start = selector_start - 1
+        if not _css_root_prefix_is_preamble(
+            css.substring(selector_start, rp)
+        ):
+            pos = rp + 5
+            continue
         val brace = find_from(css, "{", rp + 5)
         if brace < 0:
             break
@@ -129,30 +221,16 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
         return ""
     text_list_prefix(base_entries, base_entry_i).join("") + text_list_prefix(variant_entries, variant_entry_i).join("")
 
-fn _css_resolve_vars(css: text, props: text, fallback_depth: i32 = 0) -> text:
-    if props.len() == 0 or css.index_of("var(") < 0:
-        return css
-    var names: [text] = [""; 200]
-    var values: [text] = [""; 200]
-    var prop_count = 0
-    val props_len = props.len()
-    var pp: i64 = 0
-    var pg = 0
-    while pp < props_len and pg < 200:
-        pg = pg + 1
-        val nl = find_from(props, "\n", pp)
-        var line_end = nl
-        if line_end < 0:
-            line_end = props_len
-        val line = props.substring(pp, line_end).trim()
-        val lc = line.index_of(":")
-        if lc > 0 and prop_count < names.len():
-            names[prop_count] = line.substring(0, lc).trim()
-            values[prop_count] = line.substring(lc + 1, line.len()).trim()
-            prop_count = prop_count + 1
-        pp = if nl >= 0: nl + 1 else: props_len
-    if prop_count == 0:
-        return css
+fn _css_resolve_vars(
+    css: text, state: CssVarResolutionState, resolution_depth: i32,
+    active_count: i32, nested: bool
+) -> CssVarResolution:
+    if resolution_depth > 32:
+        return CssVarResolution.DepthExceeded
+    if css.index_of("var(") < 0:
+        return CssVarResolution.Resolved(value: css)
+    if state.remaining <= 0:
+        return CssVarResolution.BudgetExceeded
     var chunks: [text] = [""; 801]
     var chunk_count = 0
     var resolved_len = 0
@@ -164,6 +242,9 @@ fn _css_resolve_vars(css: text, props: text, fallback_depth: i32 = 0) -> text:
         val open = find_from(css, "var(", scan)
         if open < 0:
             break
+        if state.remaining <= 0:
+            return CssVarResolution.BudgetExceeded
+        state.remaining = state.remaining - 1
         # Match the closing paren by depth: var() args may nest more var()/
         # calc() parens, so the first ")" is not necessarily the close.
         var depth = 1
@@ -175,10 +256,10 @@ fn _css_resolve_vars(css: text, props: text, fallback_depth: i32 = 0) -> text:
                 depth = depth - 1
             k = k + 1
         if depth != 0:
-            break
+            return CssVarResolution.Invalid
         val close = k - 1
         if chunk_count + 2 >= chunks.len():
-            break
+            return CssVarResolution.BudgetExceeded
         # Split "--name, fallback" at the first TOP-LEVEL comma; the fallback
         # itself may be another var() and is resolved recursively per spec.
         val inner = css.substring(open + 4, close)
@@ -197,43 +278,128 @@ fn _css_resolve_vars(css: text, props: text, fallback_depth: i32 = 0) -> text:
                 break
             m = m + 1
         val prop_name = (if comma >= 0: inner.substring(0, comma) else: inner).trim()
+        val valid_var_name = (
+            prop_name.len() > 2 and prop_name.starts_with("--")
+        )
         # CSS declarations are last-wins. Search backwards so a matching
         # :root variant (or a later base declaration) overrides an earlier
         # custom property instead of being silently ignored.
         var prop_idx = -1
-        var prop_scan = prop_count - 1
+        var prop_scan = state.prop_count - 1
         while prop_scan >= 0:
-            if names[prop_scan] == prop_name:
+            if state.prop_names[prop_scan] == prop_name:
                 prop_idx = prop_scan
                 break
             prop_scan = prop_scan - 1
         val prefix = css.substring(scan, open)
         chunks[chunk_count] = prefix
         chunk_count = chunk_count + 1
-        var replacement = ""
-        if prop_idx >= 0:
-            replacement = values[prop_idx]
+        var replacement = CssVarResolution.Invalid
+        if not valid_var_name:
+            replacement = CssVarResolution.Invalid
+        elif prop_idx >= 0:
+            var cycle = false
+            var active_scan = 0
+            while active_scan < active_count:
+                if state.active_names[active_scan] == prop_name:
+                    cycle = true
+                    break
+                active_scan = active_scan + 1
+            if cycle:
+                replacement = CssVarResolution.Cycle
+            else:
+                var memo_index = -1
+                var memo_scan = 0
+                while memo_scan < state.memo_count:
+                    if state.memo_names[memo_scan] == prop_name:
+                        memo_index = memo_scan
+                        break
+                    memo_scan = memo_scan + 1
+                if memo_index >= 0:
+                    replacement = CssVarResolution.Resolved(
+                        value: state.memo_values[memo_index]
+                    )
+                else:
+                    if active_count >= state.active_names.len():
+                        return CssVarResolution.DepthExceeded
+                    state.active_names[active_count] = prop_name
+                    replacement = _css_resolve_vars(
+                        state.prop_values[prop_idx], state,
+                        resolution_depth + 1,
+                        active_count + 1, true
+                    )
+                    match replacement:
+                        CssVarResolution.Resolved(resolved_value):
+                            if state.memo_count < state.memo_names.len():
+                                state.memo_names[state.memo_count] = prop_name
+                                state.memo_values[state.memo_count] = (
+                                    resolved_value
+                                )
+                                state.memo_count = state.memo_count + 1
+                        _:
+                            pass
         elif comma >= 0:
             val fallback = inner.substring(comma + 1, inner_len).trim()
-            replacement = if fallback_depth >= CSS_VAR_FALLBACK_DEPTH_CAP:
-                css.substring(open, close + 1)
-            else:
-                _css_resolve_vars(fallback, props, fallback_depth + 1)
+            replacement = _css_resolve_vars(
+                fallback, state, resolution_depth + 1,
+                active_count, true
+            )
         else:
-            replacement = css.substring(open, close + 1)
-        if resolved_len + prefix.len() + replacement.len() > SIMPLE_WEB_MAX_HTML_BYTES:
-            return css
-        resolved_len = resolved_len + prefix.len() + replacement.len()
-        chunks[chunk_count] = replacement
+            replacement = CssVarResolution.Invalid
+        var should_use_fallback = false
+        match replacement:
+            CssVarResolution.Invalid:
+                should_use_fallback = valid_var_name
+            CssVarResolution.Cycle:
+                should_use_fallback = not nested
+            CssVarResolution.DepthExceeded:
+                should_use_fallback = not nested
+            _:
+                pass
+        if should_use_fallback and comma >= 0:
+            val fallback = inner.substring(comma + 1, inner_len).trim()
+            replacement = _css_resolve_vars(
+                fallback, state, resolution_depth + 1,
+                active_count, true
+            )
+        var replacement_text = ""
+        match replacement:
+            CssVarResolution.Resolved(resolved_value):
+                replacement_text = resolved_value
+            CssVarResolution.Invalid:
+                if nested:
+                    return CssVarResolution.Invalid
+            CssVarResolution.Cycle:
+                if nested:
+                    return CssVarResolution.Cycle
+            CssVarResolution.DepthExceeded:
+                if nested:
+                    return CssVarResolution.DepthExceeded
+            CssVarResolution.BudgetExceeded:
+                if nested:
+                    return CssVarResolution.BudgetExceeded
+        if (
+            resolved_len + prefix.len() + replacement_text.len() >
+            SIMPLE_WEB_MAX_HTML_BYTES
+        ):
+            return CssVarResolution.Invalid
+        resolved_len = (
+            resolved_len + prefix.len() + replacement_text.len()
+        )
+        chunks[chunk_count] = replacement_text
         chunk_count = chunk_count + 1
         scan = close + 1
+    if scan < css_len and vg >= 400:
+        return CssVarResolution.BudgetExceeded
     if scan < css_len and chunk_count < chunks.len():
         val suffix = css.substring(scan, css_len)
         if resolved_len + suffix.len() > SIMPLE_WEB_MAX_HTML_BYTES:
-            return css
+            return CssVarResolution.Invalid
         chunks[chunk_count] = suffix
         chunk_count = chunk_count + 1
-    text_list_prefix(chunks, chunk_count).join("")
+    CssVarResolution.Resolved(
+        value: text_list_prefix(chunks, chunk_count).join("")
+    )
 
 # Evaluate one comma-group of a @media prelude: every parenthesized term must
 # pass. Width terms compare against the viewport; any unknown feature term
@@ -314,7 +480,10 @@ fn _css_scan_rules_simple(css: text, requested_rule_cap: i32) -> CssRuleScan:
     else:
         requested_rule_cap
     if rule_cap == 0:
-        return CssRuleScan(selectors: [], declarations: [], wrappers: [])
+        return CssRuleScan(
+            selectors: [], declarations: [], wrapper_starts: [],
+            wrapper_counts: [], wrapper_kinds: [], wrapper_preludes: []
+        )
     val structural_cap = rule_cap * 2 + 64
     var cutoff = css.len()
     var excessive_structure = false
@@ -340,13 +509,19 @@ fn _css_scan_rules_simple(css: text, requested_rule_cap: i32) -> CssRuleScan:
     val parts = bounded_css.split("{")
     val np = parts.len()
     if np <= 1:
-        return CssRuleScan(selectors: [], declarations: [], wrappers: [])
+        return CssRuleScan(
+            selectors: [], declarations: [], wrapper_starts: [],
+            wrapper_counts: [], wrapper_kinds: [], wrapper_preludes: []
+        )
     var cap = np - 1
     if cap > rule_cap:
         cap = rule_cap
     var sels: [text] = [""; cap]
     var decls: [text] = [""; cap]
-    var wraps: [text] = [""; cap]
+    var wrapper_starts: [i32] = [0; cap]
+    var wrapper_counts: [i32] = [0; cap]
+    var wrapper_kinds: [CssWrapperKind] = []
+    var wrapper_preludes: [text] = []
     var out = 0
     var sel_pending: text = parts[0]
     var k = 1
@@ -361,18 +536,55 @@ fn _css_scan_rules_simple(css: text, requested_rule_cap: i32) -> CssRuleScan:
         val nsubs = subs.len()
         # `subs[0]` is the just-opened block's body up to its first "}". If the
         # block is a leaf rule (opener not an @-wrapper) with a non-empty
-        # selector, emit it. Its wrapper prelude is the nearest enclosing
-        # @-ancestor, if any (depth-1 child of a depth-0 @-wrapper).
-        val is_wrapper = opener.starts_with("@")
+        # selector, emit it. Preserve every enclosing @-ancestor so an inner
+        # @layer cannot escape a false outer @supports/@media condition.
+        val is_wrapper = opener.lower().starts_with("@")
         if (not is_wrapper) and opener.len() > 0 and out < cap:
-            var wrapper = ""
-            if depth >= 2 and (depth - 2) < stack.len():
-                val parent: text = stack[depth - 2]
-                if parent.starts_with("@"):
-                    wrapper = parent
+            wrapper_starts[out] = wrapper_kinds.len()
+            var wrapper_count = 0
+            var wrapper_depth = 0
+            var wrapper_overflow = depth - 1 > 32
+            while (
+                wrapper_depth < depth - 1 and
+                wrapper_depth < stack.len() and
+                wrapper_count < 32 and not wrapper_overflow
+            ):
+                val ancestor: text = stack[wrapper_depth]
+                if ancestor.lower().starts_with("@"):
+                    val lower_ancestor = ancestor.trim().lower()
+                    var kind = CssWrapperKind.Unsupported
+                    if (
+                        lower_ancestor == "@media" or
+                        lower_ancestor.starts_with("@media ") or
+                        lower_ancestor.starts_with("@media\t") or
+                        lower_ancestor.starts_with("@media\n")
+                    ):
+                        kind = CssWrapperKind.Media
+                    elif (
+                        lower_ancestor == "@supports" or
+                        lower_ancestor.starts_with("@supports ") or
+                        lower_ancestor.starts_with("@supports\t") or
+                        lower_ancestor.starts_with("@supports\n")
+                    ):
+                        kind = CssWrapperKind.Supports
+                    elif (
+                        lower_ancestor == "@layer" or
+                        lower_ancestor.starts_with("@layer ") or
+                        lower_ancestor.starts_with("@layer\t") or
+                        lower_ancestor.starts_with("@layer\n")
+                    ):
+                        kind = CssWrapperKind.Layer
+                    wrapper_kinds.push(kind)
+                    wrapper_preludes.push(ancestor)
+                    wrapper_count = wrapper_count + 1
+                wrapper_depth = wrapper_depth + 1
+            if wrapper_overflow:
+                wrapper_kinds.push(CssWrapperKind.Unsupported)
+                wrapper_preludes.push("@unsupported-overflow")
+                wrapper_count = wrapper_count + 1
             sels[out] = opener
             decls[out] = subs[0].trim()
-            wraps[out] = wrapper
+            wrapper_counts[out] = wrapper_count
             out = out + 1
         # Each "}" in `seg` closes one open block; pop that many.
         var closes = nsubs - 1
@@ -385,7 +597,10 @@ fn _css_scan_rules_simple(css: text, requested_rule_cap: i32) -> CssRuleScan:
     CssRuleScan(
         selectors: text_list_prefix(sels, out),
         declarations: text_list_prefix(decls, out),
-        wrappers: text_list_prefix(wraps, out)
+        wrapper_starts: wrapper_starts,
+        wrapper_counts: wrapper_counts,
+        wrapper_kinds: wrapper_kinds,
+        wrapper_preludes: wrapper_preludes
     )
 
 fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Rules:
@@ -523,7 +738,15 @@ fn _extract_css_vw_with_rule_limit(
         if close < 0:
             break
         val css_raw = html.substring(open + 1, close)
-        val css = _css_resolve_vars(css_raw, custom_props, 0)
+        val css_var_state = CssVarResolutionState.new(custom_props)
+        val css_resolution = _css_resolve_vars(
+            css_raw, css_var_state, 0, 0, false
+        )
+        val css = match css_resolution:
+            CssVarResolution.Resolved(resolved_css):
+                resolved_css
+            _:
+                css_raw
         # Rule-boundary scan: split the sheet ONCE on "{"/"}" natively rather
         # than walking it a character at a time in interpreted Simple (which
         # cost seconds-to-minutes on a realistic theme sheet). See
@@ -535,11 +758,10 @@ fn _extract_css_vw_with_rule_limit(
         )
         val b_sel_text: [text] = bounds.selectors
         val b_decl_text: [text] = bounds.declarations
-        val b_wrapper: [text] = bounds.wrappers
         val candidate_count = b_sel_text.len()
         total_candidates = total_candidates + candidate_count
         if trace_stages:
-            print "[layout-trace] css_scan candidates={candidate_count} declarations={b_decl_text.len()} wrappers={b_wrapper.len()}"
+            print "[layout-trace] css_scan candidates={candidate_count} declarations={b_decl_text.len()} wrappers={bounds.wrapper_kinds.len()}"
             var trace_rule_i = 0
             while trace_rule_i < candidate_count:
                 print "[layout-trace] css_scan rule={trace_rule_i} selector={b_sel_text[trace_rule_i]} decl_len={b_decl_text[trace_rule_i].len()}"
@@ -555,14 +777,32 @@ fn _extract_css_vw_with_rule_limit(
         var out_i = 0
         var bi = 0
         while bi < candidate_count and out_i < remaining_rules:
-            val wrapper_prelude: text = b_wrapper[bi]
             var include = true
-            if wrapper_prelude.len() > 0 and wrapper_prelude.lower().starts_with("@media"):
-                # @media wrappers apply only when their condition holds for
-                # the viewport; other @-wrappers (@layer, @supports) keep
-                # emitting their children unconditionally (wrapper_prelude
-                # not starting with "@media" falls through with include=true).
-                include = _media_prelude_applies(wrapper_prelude, viewport_w)
+            val wrapper_start = bounds.wrapper_starts[bi]
+            val wrapper_end = (
+                wrapper_start + bounds.wrapper_counts[bi]
+            )
+            var wrapper_i = wrapper_start
+            while wrapper_i < wrapper_end and include:
+                val wrapper_prelude = (
+                    bounds.wrapper_preludes[wrapper_i].trim()
+                )
+                match bounds.wrapper_kinds[wrapper_i]:
+                    CssWrapperKind.Media:
+                        include = _media_prelude_applies(
+                            wrapper_prelude, viewport_w
+                        )
+                    CssWrapperKind.Supports:
+                        include = eval_supports_query(
+                            wrapper_prelude.substring(
+                                9, wrapper_prelude.len()
+                            ).trim()
+                        )
+                    CssWrapperKind.Layer:
+                        include = true
+                    CssWrapperKind.Unsupported:
+                        include = false
+                wrapper_i = wrapper_i + 1
             if include:
                 val sel: text = b_sel_text[bi]
                 val decl: text = b_decl_text[bi]
@@ -708,38 +948,15 @@ fn base_selector_matches(base: text, tag: text, cls: text, class_words: [text], 
         return t == tag and class_has_all(class_words, want)
     base == tag
 
-# does a single simple selector match this node? (rightmost token only)
-# Extract the pseudo-class name from a selector part (returns "" if none).
-# e.g. "div:not(.x)" -> "not", ".card:first-child" -> "first-child"
-fn _pseudo_name(sel: text) -> text:
-    val colon = text_index_of(sel, ":")
-    if colon < 0:
-        return ""
-    val after = sel.substring(colon + 1, sel.len())
-    val paren = text_index_of(after, "(")
-    if paren >= 0:
-        return after.substring(0, paren)
-    # strip trailing non-identifier chars (e.g. nothing after plain pseudo)
-    after
-
-# Extract the argument inside a functional pseudo (returns "" if not functional).
-# e.g. "div:not(.x, #y)" -> ".x, #y"
-fn _pseudo_arg(sel: text) -> text:
-    val colon = text_index_of(sel, ":")
-    if colon < 0:
-        return ""
-    val after = sel.substring(colon + 1, sel.len())
-    val paren_open = text_index_of(after, "(")
-    if paren_open < 0:
-        return ""
-    val paren_close = text_index_of(after, ")")
-    if paren_close <= paren_open:
-        return ""
-    after.substring(paren_open + 1, paren_close).trim()
-
 # Check :not(), :is(), :where() pseudo-class against this element's base properties.
 # Returns true if the selector pseudo condition is satisfied.
-fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_words: [text], id: text, attrs: text) -> bool:
+fn _pseudo_list_matches(
+    pseudo: text, arg: text, tag: text, cls: text,
+    class_words: [text], id: text, attrs: text,
+    recursion_depth: i32 = 0
+) -> bool:
+    if recursion_depth > 32:
+        return false
     # Split arg on commas (not inside parens) to get individual options
     var options: [text] = [""; 16]
     var opt_count = 0
@@ -751,17 +968,30 @@ fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_wor
         val ch = arg.char_at(i)
         if ch == "(":
             depth = depth + 1
+            if depth > 32:
+                return false
         elif ch == ")":
-            if depth > 0:
-                depth = depth - 1
+            depth = depth - 1
+            if depth < 0:
+                return false
         elif ch == "," and depth == 0:
-            if opt_count < 16:
-                options[opt_count] = arg.substring(option_start, i).trim()
-                opt_count = opt_count + 1
+            if opt_count >= 16:
+                return false
+            val option = arg.substring(option_start, i).trim()
+            if option.len() == 0:
+                return false
+            options[opt_count] = option
+            opt_count = opt_count + 1
             option_start = i + 1
         i = i + 1
+    if depth != 0:
+        return false
     val tail = arg.substring(option_start, arg_len).trim()
-    if tail.len() > 0 and opt_count < 16:
+    if tail.len() == 0:
+        return false
+    if tail.len() > 0 and opt_count >= 16:
+        return false
+    if tail.len() > 0:
         options[opt_count] = tail
         opt_count = opt_count + 1
     if pseudo == "not":
@@ -769,7 +999,12 @@ fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_wor
         var j = 0
         while j < opt_count:
             val opt = options[j]
-            if opt.len() > 0 and simple_match(opt, tag, cls, class_words, id, attrs):
+            if (
+                opt.len() > 0 and simple_match(
+                    opt, tag, cls, class_words, id, attrs,
+                    recursion_depth
+                )
+            ):
                 return false
             j = j + 1
         return true
@@ -778,7 +1013,12 @@ fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_wor
         var j = 0
         while j < opt_count:
             val opt = options[j]
-            if opt.len() > 0 and simple_match(opt, tag, cls, class_words, id, attrs):
+            if (
+                opt.len() > 0 and simple_match(
+                    opt, tag, cls, class_words, id, attrs,
+                    recursion_depth
+                )
+            ):
                 return true
             j = j + 1
         return false
@@ -786,32 +1026,17 @@ fn _pseudo_list_matches(pseudo: text, arg: text, tag: text, cls: text, class_wor
     # for unknown structural pseudos (handled in full context).
     false
 
-fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, attrs: text) -> bool:
-    if sel.len() == 0:
+fn simple_match(
+    sel: text, tag: text, cls: text, class_words: [text],
+    id: text, attrs: text, recursion_depth: i32 = 0
+) -> bool:
+    if sel.len() == 0 or recursion_depth > 32:
         return false
     # Pseudo-element selectors (::before, ::after, ::selection, ...) target
     # boxes this engine does not render; they must never match the host
     # element (previously "body::before" applied its decls to <body> itself).
     if text_index_of(sel, "::") >= 0:
         return false
-    # :root matches only the root element; honor its attribute filter so
-    # theme-variant blocks like :root[data-wm-transparency=off] apply only
-    # when the <html> tag actually carries that attribute. Previously the
-    # empty base before ":" matched EVERY element, so every variant applied
-    # at once (dark transparency-off backgrounds leaked into light themes).
-    if sel.starts_with(":root"):
-        if tag != "html":
-            return false
-        val root_rest = sel.substring(5, sel.len())
-        if root_rest.len() == 0:
-            return true
-        if root_rest.starts_with("["):
-            val root_close = text_index_of(root_rest, "]")
-            if root_close > 0:
-                val suffix = root_rest.substring(root_close + 1, root_rest.len()).trim()
-                return suffix.len() == 0 and attr_selector_matches(attrs, root_rest.substring(1, root_close))
-            return false
-        return true
     # Split off the base (before the first colon at depth 0)
     var base = sel
     val colon = text_index_of(base, ":")
@@ -832,20 +1057,68 @@ fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, 
     # Now check pseudo-classes (at the current element level, no node-position context)
     if colon < 0:
         return true
-    val pseudo = _pseudo_name(sel)
-    val arg = _pseudo_arg(sel)
-    if pseudo == "not" or pseudo == "is" or pseudo == "where":
-        return _pseudo_list_matches(pseudo, arg, tag, cls, class_words, id, attrs)
-    # Interaction/UA-state pseudo-classes can never be satisfied by a static
-    # render: this engine has no pointer, focus, or form state. Previously they
-    # fell through to the structural pass-through below and matched EVERY
-    # element, so `.widget-button:disabled { opacity: 0.4 }` washed all accent
-    # buttons toward white and `:hover` transforms/opacities applied at rest.
-    if _is_interaction_state_pseudo(pseudo, attrs):
-        return false
-    # Position-based pseudos (first-child, last-child, only-child, nth-child, empty, has)
-    # require full node context — return true here (base matched); the full context check
-    # in simple_match_with_ctx will apply the real constraint.
+    var pseudo_pos = colon
+    var pseudo_count = 0
+    while pseudo_pos < sel.len():
+        pseudo_count = pseudo_count + 1
+        if pseudo_count > 32 or sel.char_at(pseudo_pos) != ":":
+            return false
+        val name_start = pseudo_pos + 1
+        var name_end = name_start
+        while (
+            name_end < sel.len() and sel.char_at(name_end) != ":" and
+            sel.char_at(name_end) != "(" and sel.char_at(name_end) != "["
+        ):
+            name_end = name_end + 1
+        val pseudo = sel.substring(name_start, name_end)
+        if pseudo.len() == 0:
+            return false
+        var arg = ""
+        if name_end < sel.len() and sel.char_at(name_end) == "(":
+            var functional_depth = 1
+            var close = name_end + 1
+            while close < sel.len() and functional_depth > 0:
+                val ch = sel.char_at(close)
+                if ch == "(":
+                    functional_depth = functional_depth + 1
+                    if functional_depth > 32:
+                        return false
+                elif ch == ")":
+                    functional_depth = functional_depth - 1
+                close = close + 1
+            if functional_depth != 0:
+                return false
+            arg = sel.substring(name_end + 1, close - 1).trim()
+            pseudo_pos = close
+        else:
+            pseudo_pos = name_end
+            if (
+                pseudo == "root" and pseudo_pos < sel.len() and
+                sel.char_at(pseudo_pos) == "["
+            ):
+                val attr_close = find_from(sel, "]", pseudo_pos + 1)
+                if attr_close < 0 or not attr_selector_matches(
+                    attrs, sel.substring(pseudo_pos + 1, attr_close)
+                ):
+                    return false
+                pseudo_pos = attr_close + 1
+        if pseudo == "not" or pseudo == "is" or pseudo == "where":
+            if not _pseudo_list_matches(
+                pseudo, arg, tag, cls, class_words, id, attrs,
+                recursion_depth + 1
+            ):
+                return false
+        elif _is_interaction_state_pseudo(pseudo, attrs):
+            return false
+        elif pseudo == "root":
+            if tag != "html":
+                return false
+        elif (
+            pseudo != "empty" and pseudo != "first-child" and
+            pseudo != "last-child" and pseudo != "only-child" and
+            pseudo != "nth-child" and pseudo != "has"
+        ):
+            return false
     true
 
 # Interaction/UA-state pseudo-classes a static renderer must treat as
@@ -988,56 +1261,120 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
     val colon = text_index_of(sel, ":")
     if colon < 0:
         return true
-    val pseudo = _pseudo_name(sel)
-    val arg = _pseudo_arg(sel)
-    if pseudo == "not" or pseudo == "is" or pseudo == "where":
-        # Already handled in simple_match; return true here.
-        return true
-    if pseudo == "empty":
-        return _node_is_empty(ctx, idx)
-    if pseudo == "first-child":
-        return _child_position(ctx, idx) == 1
-    if pseudo == "last-child":
-        val pos = _child_position(ctx, idx)
-        val total = _sibling_count(ctx, idx)
-        return pos == total
-    if pseudo == "only-child":
-        return _sibling_count(ctx, idx) == 1
-    if pseudo == "nth-child":
-        val pos = _child_position(ctx, idx)
-        return _nth_child_matches(arg, pos)
-    if pseudo == "has":
-        # split arg on commas (depth-aware) to get :has(opt1, opt2, ...)
-        var opts: [text] = [""; 8]
-        var opt_count = 0
-        var depth = 0
-        var i = 0
-        val arg_len = arg.len()
-        var option_start = 0
-        while i < arg_len:
-            val ch = arg.char_at(i)
-            if ch == "(":
-                depth = depth + 1
-            elif ch == ")":
-                if depth > 0:
+    var pseudo_pos = colon
+    var pseudo_count = 0
+    while pseudo_pos < sel.len():
+        pseudo_count = pseudo_count + 1
+        if pseudo_count > 32 or sel.char_at(pseudo_pos) != ":":
+            return false
+        val name_start = pseudo_pos + 1
+        var name_end = name_start
+        while (
+            name_end < sel.len() and sel.char_at(name_end) != ":" and
+            sel.char_at(name_end) != "(" and sel.char_at(name_end) != "["
+        ):
+            name_end = name_end + 1
+        val pseudo = sel.substring(name_start, name_end)
+        if pseudo.len() == 0:
+            return false
+        var arg = ""
+        if name_end < sel.len() and sel.char_at(name_end) == "(":
+            var functional_depth = 1
+            var close = name_end + 1
+            while close < sel.len() and functional_depth > 0:
+                val ch = sel.char_at(close)
+                if ch == "(":
+                    functional_depth = functional_depth + 1
+                    if functional_depth > 32:
+                        return false
+                elif ch == ")":
+                    functional_depth = functional_depth - 1
+                close = close + 1
+            if functional_depth != 0:
+                return false
+            arg = sel.substring(name_end + 1, close - 1).trim()
+            pseudo_pos = close
+        else:
+            pseudo_pos = name_end
+            if (
+                pseudo == "root" and pseudo_pos < sel.len() and
+                sel.char_at(pseudo_pos) == "["
+            ):
+                val attr_close = find_from(sel, "]", pseudo_pos + 1)
+                if attr_close < 0:
+                    return false
+                pseudo_pos = attr_close + 1
+        if pseudo == "empty":
+            if not _node_is_empty(ctx, idx):
+                return false
+        elif pseudo == "first-child":
+            if _child_position(ctx, idx) != 1:
+                return false
+        elif pseudo == "last-child":
+            if _child_position(ctx, idx) != _sibling_count(ctx, idx):
+                return false
+        elif pseudo == "only-child":
+            if _sibling_count(ctx, idx) != 1:
+                return false
+        elif pseudo == "nth-child":
+            if not _nth_child_matches(arg, _child_position(ctx, idx)):
+                return false
+        elif pseudo == "has":
+            var opts: [text] = [""; 16]
+            var opt_count = 0
+            var depth = 0
+            var i = 0
+            var option_start = 0
+            while i < arg.len():
+                val ch = arg.char_at(i)
+                if ch == "(":
+                    depth = depth + 1
+                    if depth > 32:
+                        return false
+                elif ch == ")":
                     depth = depth - 1
-            elif ch == "," and depth == 0:
-                if opt_count < 8:
-                    opts[opt_count] = arg.substring(option_start, i).trim()
+                    if depth < 0:
+                        return false
+                elif ch == "," and depth == 0:
+                    if opt_count >= opts.len():
+                        return false
+                    val option = arg.substring(option_start, i).trim()
+                    if option.len() == 0:
+                        return false
+                    opts[opt_count] = option
                     opt_count = opt_count + 1
-                option_start = i + 1
-            i = i + 1
-        val tail = arg.substring(option_start, arg_len).trim()
-        if tail.len() > 0 and opt_count < 8:
-            opts[opt_count] = tail
-            opt_count = opt_count + 1
-        var j = 0
-        while j < opt_count:
-            if _has_option_matches(nodes, ctx, idx, opts[j]):
-                return true
-            j = j + 1
-        return false
-    # Unknown pseudo — pass through (non-positional, already base-matched)
+                    option_start = i + 1
+                i = i + 1
+            if depth != 0:
+                return false
+            val tail = arg.substring(option_start, arg.len()).trim()
+            if tail.len() == 0 or opt_count >= opts.len():
+                return false
+            if tail.len() > 0:
+                opts[opt_count] = tail
+                opt_count = opt_count + 1
+            var matched = false
+            var j = 0
+            while j < opt_count and not matched:
+                matched = _has_option_matches(
+                    nodes, ctx, idx, opts[j]
+                )
+                j = j + 1
+            if not matched:
+                return false
+        elif (
+            pseudo == "not" or pseudo == "is" or pseudo == "where" or
+            pseudo == "root" or pseudo == "hover" or pseudo == "active" or
+            pseudo == "focus" or pseudo == "focus-visible" or
+            pseudo == "focus-within" or pseudo == "visited" or
+            pseudo == "target" or pseudo == "checked" or
+            pseudo == "placeholder-shown" or pseudo == "autofill" or
+            pseudo == "disabled"
+        ):
+            # Base matching already handled these state/list pseudos.
+            var already_checked = true
+        else:
+            return false
     true
 
 # Full-context simple match: base match + pseudo-class positional check.
@@ -1052,19 +1389,31 @@ fn split_selector_groups(sel: text) -> [text]:
     val sel_len = sel.len()
     var group_count = 0
     var group_start = 0
-    while i < sel_len and group_count < CSS_SELECTOR_GROUP_CAP:
+    while i < sel_len:
         val ch = sel.char_at(i)
         if ch == "(":
             depth = depth + 1
+            if depth > 32:
+                return []
         elif ch == ")":
-            if depth > 0:
-                depth = depth - 1
+            depth = depth - 1
+            if depth < 0:
+                return []
         elif ch == "," and depth == 0:
+            if sel.substring(group_start, i).trim().len() == 0:
+                return []
             group_count = group_count + 1
+            if group_count >= CSS_SELECTOR_GROUP_CAP:
+                return []
             group_start = i + 1
         i = i + 1
-    if group_count < CSS_SELECTOR_GROUP_CAP and sel.substring(group_start, sel_len).trim().len() > 0:
-        group_count = group_count + 1
+    if depth != 0:
+        return []
+    if sel.substring(group_start, sel_len).trim().len() == 0:
+        return []
+    group_count = group_count + 1
+    if group_count == 0 or group_count > CSS_SELECTOR_GROUP_CAP:
+        return []
     var groups: [text] = [""; group_count]
     depth = 0
     i = 0
@@ -1621,11 +1970,88 @@ fn selector_group_matches_node_parts(nodes: [HNode], ctx: SelectorContext, idx: 
 # CSS specificity helpers
 # ---------------------------------------------------------------------------
 
-fn _part_specificity(part: text) -> i32:
+fn _part_specificity(
+    part: text, recursion_depth: i32 = 0
+) -> i32:
+    if recursion_depth > 32:
+        return -1000000
     var base = part
     val colon = text_index_of(base, ":")
+    var pseudo_specificity = 0
     if colon >= 0:
         base = base.substring(0, colon)
+        var pseudo_pos = colon
+        var pseudo_count = 0
+        while pseudo_pos < part.len():
+            pseudo_count = pseudo_count + 1
+            if pseudo_count > 32 or part.char_at(pseudo_pos) != ":":
+                return -1000000
+            val name_start = pseudo_pos + 1
+            var name_end = name_start
+            while (
+                name_end < part.len() and
+                part.char_at(name_end) != ":" and
+                part.char_at(name_end) != "(" and
+                part.char_at(name_end) != "["
+            ):
+                name_end = name_end + 1
+            val pseudo_name = part.substring(name_start, name_end)
+            if pseudo_name.len() == 0:
+                return -1000000
+            if name_end < part.len() and part.char_at(name_end) == "(":
+                var functional_depth = 1
+                var close = name_end + 1
+                while close < part.len() and functional_depth > 0:
+                    val ch = part.char_at(close)
+                    if ch == "(":
+                        functional_depth = functional_depth + 1
+                        if functional_depth > 32:
+                            return -1000000
+                    elif ch == ")":
+                        functional_depth = functional_depth - 1
+                    close = close + 1
+                if functional_depth != 0:
+                    return -1000000
+                val inner = part.substring(name_end + 1, close - 1)
+                if (
+                    pseudo_name == "is" or pseudo_name == "not" or
+                    pseudo_name == "has"
+                ):
+                    val options = split_selector_groups(inner)
+                    if options.len() == 0:
+                        return -1000000
+                    var max_option_specificity = 0
+                    for option in options:
+                        val option_specificity = _group_specificity(
+                            selector_group_parts(option),
+                            recursion_depth + 1
+                        )
+                        if option_specificity < 0:
+                            return -1000000
+                        if option_specificity > max_option_specificity:
+                            max_option_specificity = option_specificity
+                    pseudo_specificity = (
+                        pseudo_specificity + max_option_specificity
+                    )
+                elif pseudo_name == "nth-child":
+                    pseudo_specificity = pseudo_specificity + 10
+                elif pseudo_name != "where":
+                    return -1000000
+                pseudo_pos = close
+            else:
+                pseudo_specificity = pseudo_specificity + 10
+                pseudo_pos = name_end
+                if (
+                    pseudo_name == "root" and pseudo_pos < part.len() and
+                    part.char_at(pseudo_pos) == "["
+                ):
+                    val attr_close = find_from(
+                        part, "]", pseudo_pos + 1
+                    )
+                    if attr_close < 0:
+                        return -1000000
+                    pseudo_specificity = pseudo_specificity + 10
+                    pseudo_pos = attr_close + 1
     var attribute_specificity = 0
     var attribute_scan = 0
     while attribute_scan < base.len():
@@ -1640,14 +2066,16 @@ fn _part_specificity(part: text) -> i32:
     val attr_bracket = text_index_of(base, "[")
     if attr_bracket >= 0:
         base = base.substring(0, attr_bracket).trim()
+    var base_specificity = attribute_specificity
     if base.len() == 0 or base == "*":
-        return attribute_specificity
-    if base.char_at(0) == "#":
+        base_specificity = attribute_specificity
+    elif base.char_at(0) == "#":
         val dot = find_from(base, ".", 1)
         if dot >= 0:
-            return 110 + attribute_specificity
-        return 100 + attribute_specificity
-    if base.char_at(0) == ".":
+            base_specificity = 110 + attribute_specificity
+        else:
+            base_specificity = 100 + attribute_specificity
+    elif base.char_at(0) == ".":
         var class_count = 1
         var i = 1
         val base_len = base.len()
@@ -1655,15 +2083,16 @@ fn _part_specificity(part: text) -> i32:
             if base.char_at(i) == ".":
                 class_count = class_count + 1
             i = i + 1
-        return class_count * 10 + attribute_specificity
-    val hash = text_index_of(base, "#")
-    if hash > 0:
+        base_specificity = class_count * 10 + attribute_specificity
+    elif text_index_of(base, "#") > 0:
+        val hash = text_index_of(base, "#")
         val dot = find_from(base, ".", hash + 1)
         if dot >= 0:
-            return 111 + attribute_specificity
-        return 101 + attribute_specificity
-    val dot = text_index_of(base, ".")
-    if dot >= 0:
+            base_specificity = 111 + attribute_specificity
+        else:
+            base_specificity = 101 + attribute_specificity
+    elif text_index_of(base, ".") >= 0:
+        val dot = text_index_of(base, ".")
         var class_count2 = 1
         var j = dot + 1
         val base_len2 = base.len()
@@ -1671,17 +2100,28 @@ fn _part_specificity(part: text) -> i32:
             if base.char_at(j) == ".":
                 class_count2 = class_count2 + 1
             j = j + 1
-        return 1 + class_count2 * 10 + attribute_specificity
-    1 + attribute_specificity
+        base_specificity = 1 + class_count2 * 10 + attribute_specificity
+    else:
+        base_specificity = 1 + attribute_specificity
+    base_specificity + pseudo_specificity
 
-fn _group_specificity(parts: [text]) -> i32:
+fn _group_specificity(
+    parts: [text], recursion_depth: i32 = 0
+) -> i32:
+    if recursion_depth > 32:
+        return -1000000
     var total = 0
     var i = 0
     val part_count = parts.len()
     while i < part_count:
         val p = parts[i]
         if p.len() > 0 and p != ">":
-            total = total + _part_specificity(p)
+            val part_specificity = _part_specificity(
+                p, recursion_depth
+            )
+            if part_specificity < 0:
+                return -1000000
+            total = total + part_specificity
         i = i + 1
     total
 

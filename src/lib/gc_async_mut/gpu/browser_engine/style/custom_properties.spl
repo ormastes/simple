@@ -21,6 +21,32 @@ pub class Pair:
     static fn create(first: text, second: text) -> Pair:
         Pair(first: first, second: second)
 
+val CUSTOM_PROPERTY_RESOLUTION_DEPTH_CAP: i32 = 32
+val CUSTOM_PROPERTY_SUBSTITUTION_BUDGET: i32 = 1024
+
+enum CustomPropertyResolution:
+    Resolved(value: text)
+    Invalid
+    Cycle
+    DepthExceeded
+    BudgetExceeded
+
+class CustomPropertyResolutionState:
+    remaining: i32
+    active_names: [text]
+    memo_names: [text]
+    memo_values: [text]
+    memo_count: i32
+
+    static fn new() -> CustomPropertyResolutionState:
+        CustomPropertyResolutionState(
+            remaining: CUSTOM_PROPERTY_SUBSTITUTION_BUDGET,
+            active_names: [""; 33],
+            memo_names: [""; 200],
+            memo_values: [""; 200],
+            memo_count: 0
+        )
+
 pub class CustomPropertyStore:
     properties: [CustomProperty]
     logger: Logger
@@ -59,44 +85,155 @@ pub class CustomPropertyStore:
                 return prop.value
         return nil
 
-    fn _get_property_or_empty(node_id: i64, name: text) -> text:
-        for prop in self.properties:
-            if prop.node_id == node_id and prop.name == name:
-                return prop.value
-        ""
-
-    fn resolve_var(value: text, node_id: i64) -> CSSValue:
-        """Resolve a var(--name, fallback) reference to a concrete CSSValue."""
+    fn _resolve_var_state(
+        value: text, node_id: i64, depth: i32,
+        active_count: i32, state: CustomPropertyResolutionState,
+        resolving_property: bool
+    ) -> CustomPropertyResolution:
+        if depth > CUSTOM_PROPERTY_RESOLUTION_DEPTH_CAP:
+            return CustomPropertyResolution.DepthExceeded
         if not has_var_reference(value):
-            return CSSValue.Keyword(v: value)
+            return CustomPropertyResolution.Resolved(value: value)
+        if state.remaining <= 0:
+            return CustomPropertyResolution.BudgetExceeded
+        state.remaining = state.remaining - 1
 
         val parsed = parse_var_function(value)
         val var_name = parsed.first
         val fallback = parsed.second
+        val var_start = value.index_of("var(")
+        var close_depth = 1
+        var close_scan = var_start + 4
+        while close_scan < value.len() and close_depth > 0:
+            val ch = value.char_at(close_scan)
+            if ch == "(":
+                close_depth = close_depth + 1
+            elif ch == ")":
+                close_depth = close_depth - 1
+            close_scan = close_scan + 1
+        if close_depth != 0:
+            return CustomPropertyResolution.Invalid
+        val prefix = value.substring(0, var_start)
+        val suffix = value.substring(close_scan, value.len())
+        var replacement = CustomPropertyResolution.Invalid
+        var found = false
+        var prop_val = ""
+        if is_custom_property(var_name):
+            for prop in self.properties:
+                if prop.node_id == node_id and prop.name == var_name:
+                    prop_val = prop.value
+                    found = true
+        if found:
+            var cycle = false
+            var active_scan = 0
+            while active_scan < active_count:
+                if state.active_names[active_scan] == var_name:
+                    cycle = true
+                    break
+                active_scan = active_scan + 1
+            if cycle:
+                replacement = CustomPropertyResolution.Cycle
+            else:
+                var memo_index = -1
+                var memo_scan = 0
+                while memo_scan < state.memo_count:
+                    if state.memo_names[memo_scan] == var_name:
+                        memo_index = memo_scan
+                        break
+                    memo_scan = memo_scan + 1
+                if memo_index >= 0:
+                    replacement = CustomPropertyResolution.Resolved(
+                        value: state.memo_values[memo_index]
+                    )
+                elif has_var_reference(prop_val):
+                    if active_count >= state.active_names.len():
+                        return CustomPropertyResolution.DepthExceeded
+                    state.active_names[active_count] = var_name
+                    replacement = self._resolve_var_state(
+                        prop_val, node_id, depth + 1,
+                        active_count + 1, state, true
+                    )
+                else:
+                    replacement = CustomPropertyResolution.Resolved(
+                        value: prop_val
+                    )
+                match replacement:
+                    CustomPropertyResolution.Resolved(resolved_value):
+                        if state.memo_count < state.memo_names.len():
+                            state.memo_names[state.memo_count] = var_name
+                            state.memo_values[state.memo_count] = resolved_value
+                            state.memo_count = state.memo_count + 1
+                    _:
+                        pass
 
-        val prop_val = self._get_property_or_empty(node_id, var_name)
-        if prop_val.len() > 0:
-            if has_var_reference(prop_val):
-                return self.resolve_var(prop_val, node_id)
-            return CSSValue.Keyword(v: prop_val)
+        var should_use_fallback = false
+        match replacement:
+            CustomPropertyResolution.Invalid:
+                should_use_fallback = is_custom_property(var_name)
+            CustomPropertyResolution.Cycle:
+                should_use_fallback = not resolving_property
+            CustomPropertyResolution.DepthExceeded:
+                should_use_fallback = not resolving_property
+            _:
+                pass
+        if should_use_fallback and fallback.len() > 0:
+            replacement = self._resolve_var_state(
+                fallback, node_id, depth + 1, active_count, state,
+                resolving_property
+            )
 
-        if fallback.len() > 0:
-            if has_var_reference(fallback):
-                return self.resolve_var(fallback, node_id)
-            return CSSValue.Keyword(v: fallback)
+        match replacement:
+            CustomPropertyResolution.Resolved(resolved_value):
+                val combined = prefix + resolved_value + suffix
+                if has_var_reference(combined):
+                    return self._resolve_var_state(
+                        combined, node_id, depth, active_count, state,
+                        resolving_property
+                    )
+                CustomPropertyResolution.Resolved(value: combined)
+            CustomPropertyResolution.Invalid:
+                self.logger.warn(
+                    "unresolved custom property: {var_name} on node {node_id}"
+                )
+                CustomPropertyResolution.Invalid
+            CustomPropertyResolution.Cycle:
+                CustomPropertyResolution.Cycle
+            CustomPropertyResolution.DepthExceeded:
+                CustomPropertyResolution.DepthExceeded
+            CustomPropertyResolution.BudgetExceeded:
+                CustomPropertyResolution.BudgetExceeded
 
-        self.logger.warn("unresolved custom property: {var_name} on node {node_id}")
-        CSSValue.Initial
+    fn resolve_var(value: text, node_id: i64) -> CSSValue:
+        val resolved = self._resolve_var_state(
+            value, node_id, 0, 0, CustomPropertyResolutionState.new(),
+            false
+        )
+        match resolved:
+            CustomPropertyResolution.Resolved(resolved_value):
+                CSSValue.Keyword(v: resolved_value)
+            _:
+                CSSValue.Initial
 
     fn resolve_all_vars(declarations: [CSSDeclaration], node_id: i64) -> [CSSDeclaration]:
         """Resolve all var() references in a list of declarations."""
         var result: [CSSDeclaration] = []
+        val state = CustomPropertyResolutionState.new()
         for decl in declarations:
             match decl.value:
                 CSSValue.Keyword(v):
                     if has_var_reference(v):
-                        val resolved = self.resolve_var(v, node_id)
-                        result.push(CSSDeclaration(property: decl.property, value: resolved, important: decl.important))
+                        val resolved = self._resolve_var_state(
+                            v, node_id, 0, 0, state, false
+                        )
+                        val css_value = match resolved:
+                            CustomPropertyResolution.Resolved(resolved_value):
+                                CSSValue.Keyword(v: resolved_value)
+                            _:
+                                CSSValue.Initial
+                        result.push(CSSDeclaration(
+                            property: decl.property, value: css_value,
+                            important: decl.important
+                        ))
                     else:
                         result.push(decl)
                 _:
@@ -154,10 +291,25 @@ pub fn parse_var_function(value: text) -> Pair:
             paren_depth = paren_depth - 1
         if paren_depth > 0:
             content_end = content_end + 1
+    if paren_depth != 0:
+        return Pair.create("", "")
 
     val content = value.substring(content_start, content_end).trim()
 
-    val comma_pos = content.index_of(",")
+    var comma_pos = -1
+    var comma_depth = 0
+    var comma_scan = 0
+    while comma_scan < content.len():
+        val ch = content.char_at(comma_scan)
+        if ch == "(":
+            comma_depth = comma_depth + 1
+        elif ch == ")":
+            if comma_depth > 0:
+                comma_depth = comma_depth - 1
+        elif ch == "," and comma_depth == 0:
+            comma_pos = comma_scan
+            break
+        comma_scan = comma_scan + 1
     if comma_pos < 0:
         return Pair.create(content.trim(), "")
 
