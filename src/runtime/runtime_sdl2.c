@@ -14,7 +14,15 @@
 
 #include "runtime.h"
 
-#include <SDL.h>
+#if defined(__has_include)
+#  if __has_include(<SDL2/SDL.h>)
+#    include <SDL2/SDL.h>
+#  else
+#    include <SDL.h>
+#  endif
+#else
+#  include <SDL.h>
+#endif
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +41,14 @@ static int       g_quit_requested = 0;
 /* Performance counter frequency for nanosecond conversion */
 static uint64_t  g_perf_freq = 0;
 
+/* One main-thread SDL2 queue device is enough for the current SoundEngine slice. */
+static SDL_AudioDeviceID g_audio_device = 0;
+static uint32_t g_audio_generation = 0;
+static int64_t g_audio_handle = 0;
+static int64_t g_audio_last_closed_handle = 0;
+static int64_t g_audio_submitted_frames = 0;
+static int g_audio_owns_subsystem = 0;
+
 /* ================================================================
  * Initialization
  * ================================================================ */
@@ -50,10 +66,131 @@ int64_t rt_sdl2_init(void) {
 }
 
 void rt_sdl2_quit(void) {
+    if (g_audio_handle != 0) {
+        rt_audio_sdl2_close(g_audio_handle);
+    }
     SDL_StopTextInput();
     SDL_Quit();
     g_quit_requested = 0;
     g_last_event_valid = 0;
+}
+
+/* ================================================================
+ * SDL2 queued audio
+ * ================================================================ */
+
+int64_t rt_audio_sdl2_init(void) {
+    SDL_AudioSpec desired;
+    SDL_AudioSpec obtained;
+
+    if (g_audio_handle != 0) return g_audio_handle;
+
+    g_audio_owns_subsystem = SDL_WasInit(SDL_INIT_AUDIO) == 0;
+    if (g_audio_owns_subsystem && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        g_audio_owns_subsystem = 0;
+        return 0;
+    }
+
+    SDL_zero(desired);
+    desired.freq = 48000;
+    desired.format = AUDIO_F32SYS;
+    desired.channels = 2;
+    desired.samples = 1024;
+    desired.callback = NULL;
+    g_audio_device = SDL_OpenAudioDevice(
+        NULL, 0, &desired, &obtained, 0
+    );
+    if (g_audio_device == 0) {
+        if (g_audio_owns_subsystem) SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        g_audio_owns_subsystem = 0;
+        return 0;
+    }
+
+    g_audio_generation++;
+    if (g_audio_generation == 0 || g_audio_generation > 0x7fffffffu) {
+        g_audio_generation = 1;
+    }
+    g_audio_handle = (int64_t)(((uint64_t)g_audio_generation << 32) | 1u);
+    g_audio_submitted_frames = 0;
+    SDL_PauseAudioDevice(g_audio_device, 0);
+    return g_audio_handle;
+}
+
+int64_t rt_audio_sdl2_queue_pcm_f64_raw(
+    int64_t handle,
+    int64_t samples_addr,
+    int64_t sample_count,
+    int64_t channels,
+    int64_t sample_rate
+) {
+    const double* input;
+    float* output;
+    int64_t frames;
+    size_t byte_count;
+
+    if (handle == 0 || handle != g_audio_handle || g_audio_device == 0) return 0;
+    if (samples_addr == 0 || sample_count <= 0) return 0;
+    if (channels != 2 || sample_rate != 48000 || sample_count % channels != 0) return 0;
+    if ((uint64_t)sample_count > SIZE_MAX / sizeof(float)) return 0;
+    if ((uint64_t)sample_count > UINT32_MAX / sizeof(float)) return 0;
+    frames = sample_count / channels;
+    if (frames > INT64_MAX - g_audio_submitted_frames) return 0;
+
+    byte_count = (size_t)sample_count * sizeof(float);
+    output = (float*)malloc(byte_count);
+    if (!output) return 0;
+    input = (const double*)(uintptr_t)samples_addr;
+    for (int64_t i = 0; i < sample_count; i++) {
+        double sample = input[i];
+        if (sample > 1.0) sample = 1.0;
+        if (sample < -1.0) sample = -1.0;
+        output[i] = (float)sample;
+    }
+    if (SDL_QueueAudio(g_audio_device, output, (uint32_t)byte_count) != 0) {
+        free(output);
+        return 0;
+    }
+    free(output);
+
+    g_audio_submitted_frames += frames;
+    return frames;
+}
+
+int64_t rt_audio_sdl2_submitted_frames(int64_t handle) {
+    return handle != 0 && handle == g_audio_handle
+        ? g_audio_submitted_frames : 0;
+}
+
+int64_t rt_audio_sdl2_queued_bytes(int64_t handle) {
+    if (handle == 0 || handle != g_audio_handle || g_audio_device == 0) return 0;
+    return (int64_t)SDL_GetQueuedAudioSize(g_audio_device);
+}
+
+int64_t rt_audio_sdl2_underrun_count(int64_t handle) {
+    if (handle == 0 || handle != g_audio_handle) return 0;
+    /* SDL2's queue API does not expose hardware underrun accounting. */
+    return -1;
+}
+
+int64_t rt_audio_sdl2_live_device_count(void) {
+    return g_audio_handle != 0 && g_audio_device != 0 ? 1 : 0;
+}
+
+int64_t rt_audio_sdl2_close(int64_t handle) {
+    if (g_audio_handle == 0 &&
+        handle != 0 &&
+        handle == g_audio_last_closed_handle) return 1;
+    if (handle == 0 || handle != g_audio_handle || g_audio_device == 0) return 0;
+
+    SDL_ClearQueuedAudio(g_audio_device);
+    SDL_CloseAudioDevice(g_audio_device);
+    g_audio_device = 0;
+    g_audio_last_closed_handle = handle;
+    g_audio_handle = 0;
+    g_audio_submitted_frames = 0;
+    if (g_audio_owns_subsystem) SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    g_audio_owns_subsystem = 0;
+    return 1;
 }
 
 /* ================================================================

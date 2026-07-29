@@ -7,7 +7,8 @@
 
 use std.common.engine.audio.sound_contract.{
     SoundBackendCapability, SoundCommand, SoundCodecResult, SoundParallelEvidence,
-    sound_capability, sound_no_audio_capability, sound_backend_status_valid,
+    sound_capability, sound_no_audio_capability, sound_sdl2_capability,
+    sound_backend_status_valid,
     sound_command_2d, sound_command_3d, sound_decode_design_vector,
     sound_parallel_plan
 }
@@ -17,6 +18,10 @@ use std.nogc_sync_mut.io.audio_sffi.{
     audio_init,
     audio_is_playing,
     audio_live_playback_count,
+    audio_sdl2_close,
+    audio_sdl2_init,
+    audio_sdl2_live_device_count,
+    audio_sdl2_queue_pcm_f64_raw,
     audio_shutdown,
     audio_stop,
 }
@@ -40,6 +45,9 @@ impl SoundEngineConfig:
     static fn platform(platform: text, host: text) -> SoundEngineConfig:
         SoundEngineConfig(platform: platform, host: host, prefer_no_audio: false)
 
+    static fn sdl2(host: text) -> SoundEngineConfig:
+        SoundEngineConfig(platform: "sdl2", host: host, prefer_no_audio: false)
+
 class SoundEngine:
     capability: SoundBackendCapability
     command_log: [SoundCommand]
@@ -54,6 +62,8 @@ class SoundEngine:
 impl SoundEngine:
     static fn create(config: SoundEngineConfig) -> SoundEngine:
         var cap = sound_capability(config.platform, config.host)
+        if config.platform == "sdl2":
+            cap = sound_sdl2_capability(config.host)
         if config.prefer_no_audio:
             cap = sound_no_audio_capability()
         SoundEngine(
@@ -69,11 +79,14 @@ impl SoundEngine:
         )
 
     me start_device() -> bool:
-        if self.capability.backend == "no-audio":
+        if self.capability.status != "native":
             return false
         if self.device_started:
             return true
-        val device = audio_init()
+        val device = if self.capability.backend == "sdl2":
+            audio_sdl2_init()
+        else:
+            audio_init()
         self.device_started = device.is_valid
         self.device_handle = device.handle
         self.device_started
@@ -88,10 +101,18 @@ impl SoundEngine:
         if not self.device_started:
             ui_click_pcm_release(pcm_addr)
             return false
-        val playback_handle = ui_click_pcm_play(pcm_addr)
+        var playback_handle: i64 = 0
+        if self.capability.backend == "sdl2":
+            val device = AudioEngine(handle: self.device_handle, is_valid: true)
+            playback_handle = audio_sdl2_queue_pcm_f64_raw(
+                device, pcm_addr, UI_CLICK_PCM_FRAME_COUNT * 2
+            )
+        else:
+            playback_handle = ui_click_pcm_play(pcm_addr)
         ui_click_pcm_release(pcm_addr)
         if playback_handle > 0:
-            self.playback_handles.push(playback_handle)
+            if self.capability.backend != "sdl2":
+                self.playback_handles.push(playback_handle)
             return true
         self.underrun_count = self.underrun_count + 1
         false
@@ -99,6 +120,8 @@ impl SoundEngine:
     fn active_audio_handle_count() -> i64:
         if not self.device_started:
             return 0
+        if self.capability.backend == "sdl2":
+            return audio_sdl2_live_device_count()
         audio_live_playback_count()
 
     me play_2d(entity_id: text, clip_id: text, x_milli: i64, listener_x_milli: i64) -> SoundCommand:
@@ -125,7 +148,10 @@ impl SoundEngine:
                 handle: self.device_handle,
                 is_valid: true
             )
-            audio_shutdown(device)
+            if self.capability.backend == "sdl2":
+                audio_sdl2_close(device)
+            else:
+                audio_shutdown(device)
             self.device_started = false
             self.device_handle = 0
         self.command_log = []

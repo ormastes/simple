@@ -53,6 +53,12 @@ No boolean init result may be used as the only platform evidence.
 ## Device Boundary
 The native bridge may use miniaudio for Linux, BSD, macOS, Android, and iOS. Simple OS uses the OS audio service/driver contracts. The public Simple layer depends on capability records and backend traits, not direct `rt_audio_*` calls.
 
+SDL2 is also a real host device boundary. It owns one generation-counted,
+main-thread queue device with an exact 48-kHz stereo `f32` format. SoundEngine
+submits its existing scalar-owned `f64` click buffer; the C boundary clamps,
+converts, and queues an owned copy. SDL2 does not expose hardware underrun
+counts through this API, so that query returns `-1` rather than invented data.
+
 ## Mixer And Parallelism
 Background workers may decode, resample, and prepare buffers. The mixer consumes a deterministic queue:
 

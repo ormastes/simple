@@ -807,6 +807,18 @@ int64_t  rt_audio_is_playing(int64_t playback_handle);
 int64_t  rt_audio_live_source_count(void);
 int64_t  rt_audio_live_playback_count(void);
 
+/* ===== Audio (SDL2 queued-device backend) ===== */
+
+int64_t  rt_audio_sdl2_init(void);
+int64_t  rt_audio_sdl2_queue_pcm_f64_raw(int64_t handle, int64_t samples_addr,
+                                         int64_t sample_count, int64_t channels,
+                                         int64_t sample_rate);
+int64_t  rt_audio_sdl2_submitted_frames(int64_t handle);
+int64_t  rt_audio_sdl2_queued_bytes(int64_t handle);
+int64_t  rt_audio_sdl2_underrun_count(int64_t handle);
+int64_t  rt_audio_sdl2_live_device_count(void);
+int64_t  rt_audio_sdl2_close(int64_t handle);
+
 /* ===== Audio spatial (3D positioning) ===== */
 
 void     rt_audio_set_sound_position(int64_t playback_handle, double x, double y, double z);

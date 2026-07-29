@@ -274,11 +274,28 @@ implementation-in-progress
   archive completed on its third bounded attempt with the older compiler's
   known re-export warnings; a file-scoped production check hit the existing
   60-second CLI-driver timeout and was stopped without bootstrap or retry.
+- host-sdl2-audio: SoundEngine can now select an SDL2 queued device without
+  changing its deterministic click PCM producer. The boundary uses a positive
+  generation handle, rejects stale handles and format mismatches, clamps
+  `f64` to exact 48-kHz stereo `f32`, records submitted frames, closes
+  idempotently, and reports underrun counting as unsupported (`-1`). The live
+  dummy-audio probe passes with strict C warnings enabled. The current native
+  compiler still requires the host runtime object to be supplied explicitly;
+  demand-selected host provider compilation remains an open compiler lane.
 - phase3-skia-discovery: The original `ot_layout_shaper.spl` conditional
   dedent was normalized for the older Phase-3 grammar. An isolated shaper
   entry then advanced to `ot_layout_gpos_data.spl`, where the same parser
-  still reports a function-end dedent after two bounded attempts. The full WM
-  closure was not retried and no bootstrap was run.
+  still reports a function-end dedent after the mandatory three bounded
+  attempts. The full WM closure was not retried and no bootstrap was run.
+- qemu-external-runtime: The canonical QEMU gate ran without a kernel build,
+  using the validated external ELF
+  `f783a111a63ea781e447d6396cc33bf8be9f0723675479bec13a85ed9a33e4c9`.
+  Serial evidence reached GRUB, `[BOOT64] call _start`, BGA 1024x768x32
+  programming, PS/2 mouse initialization, and the legacy glass desktop.
+  The run correctly failed `dynamic-scanout-or-desktop-readiness-missing`:
+  the old artifact emitted no dynamic scanout/readiness, content provenance,
+  correlated input/frame, or HDA init/IRQ markers. This is a real QEMU
+  boot/display baseline, not evidence for the current source or HDA service.
 
 ## Remaining runtime gates
 
@@ -291,9 +308,9 @@ implementation-in-progress
   canonical desktop entry, but none has current live guest evidence.
 - UNO Q: Debian host validation and the QRB2210 SimpleOS port remain open; the
   STM32U585 lane is not desktop evidence.
-- Audio: the scalar click/miniaudio host boundary is green, but the larger
-  `SoundEngine` receiver probe remains RED and no QEMU or board PCM device
-  evidence exists.
+- Audio: scalar click playback is green through miniaudio and the focused
+  SDL2 queued-device probe. The shared live WM scenario, SDL3, QEMU HDA PCM,
+  and board PCM evidence remain open.
 - Compiler: the stale Phase 3 binary still fails the isolated runtime-derived
   `i64 as u32` narrowing probe. Current compiler sources contain the cast
   bridge/truncation fix, but refreshing them is blocked during discovery by

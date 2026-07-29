@@ -12,8 +12,8 @@ Unexpected Dedent
 
 The conditional at that location has now been normalized to the older Phase-3
 grammar. An isolated shaper closure advanced to the same old-parser dedent
-class in `ot_layout_gpos_data.spl`; two bounded attempts were used. The full WM
-closure has not been retried, and no bootstrap was run.
+class in `ot_layout_gpos_data.spl`; all three bounded attempts were used. The
+full WM closure has not been retried, and no bootstrap was run.
 
 ## Freestanding aggregate regression
 
