@@ -2269,3 +2269,13 @@ implementation in progress / target evidence blocked
   evidence are recorded in
   `doc/09_report/js_event_dispatch_vm_growth_2026-07-29.md`; no unsafe
   Event-only reuse was accepted.
+- open CSP lifecycle/evidence blocker (2026-07-29): The uncommitted broker CSP
+  patch passed source review for authenticated header+meta intersection,
+  comma/newline policy lists, pre-cookie/network admission, redirects,
+  committed error documents, 304 preservation, directive fallback, and bounded
+  history. Its third/final review found that site-swap evidence still copies
+  state directly instead of driving Registry `advance_window` /
+  `_begin_site_swap`, so the patch was not committed. The exact missing
+  production-path evidence plus separate BrowserSession CSP history growth,
+  budget, and cleanup defects are recorded in
+  `doc/09_report/browser_csp_state_lifecycle_2026-07-29.md`.
