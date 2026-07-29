@@ -233,6 +233,7 @@ pub fn register_heap_ptr(ptr: *mut HeapHeader) {
             // Caller just allocated the object; header is valid by contract.
             let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
             note_heap_alloc(kind, bytes);
+            note_attr_alloc(ptr as usize, bytes);
         }
     }
 }
@@ -249,6 +250,7 @@ pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
             // is the one allowed to free), so this read is not use-after-free.
             let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
             note_heap_free(kind, bytes);
+            note_attr_free(ptr as usize, bytes);
         }
     }
 }
@@ -272,6 +274,7 @@ pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
     if removed {
         let (kind, bytes) = unsafe { ((*ptr).object_type as u8, (*ptr).size as u64) };
         note_heap_free(kind, bytes);
+        note_attr_free(ptr as usize, bytes);
     }
     removed
 }
@@ -532,4 +535,171 @@ pub extern "C" fn rt_heap_aux_live_bytes_by_kind(kind: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_heap_array_capacity_bytes() -> i64 {
     AUX_KIND_LIVE_BYTES[HeapObjectType::Array as usize].load(Ordering::Relaxed) as i64
+}
+
+// ---------------------------------------------------------------------------
+// Per-owner allocation attribution (plan M1).
+// Gated: SIMPLE_MEM_ATTR=1 or mem_attr_enable(); OFF by default, and the off
+// path is a single cached-bool check — no lock, no map, no TL write.
+// ---------------------------------------------------------------------------
+
+static ATTR_ENABLED: OnceLock<bool> = OnceLock::new();
+
+#[inline]
+fn mem_attr_enabled() -> bool {
+    *ATTR_ENABLED
+        .get_or_init(|| std::env::var("SIMPLE_MEM_ATTR").map(|v| v == "1").unwrap_or(false))
+}
+
+/// Programmatic enable (CLI/--mem-infra path, and tests). Must run before the
+/// first allocation to win the OnceLock; later calls are no-ops.
+pub fn mem_attr_enable() {
+    let _ = ATTR_ENABLED.set(true);
+}
+
+#[derive(Default)]
+struct AttrState {
+    ids: std::collections::HashMap<String, u32>,
+    names: Vec<String>,
+    live: Vec<i64>,
+    peak: Vec<i64>,
+    allocs: Vec<u64>,
+    by_ptr: std::collections::HashMap<usize, u32>,
+}
+
+static ATTR_STATE: OnceLock<Mutex<AttrState>> = OnceLock::new();
+
+thread_local! {
+    static ATTR_CURRENT_OWNER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+fn attr_state() -> &'static Mutex<AttrState> {
+    ATTR_STATE.get_or_init(|| {
+        let mut s = AttrState::default();
+        s.ids.insert("<unattributed>".to_string(), 0);
+        s.names.push("<unattributed>".to_string());
+        s.live.push(0);
+        s.peak.push(0);
+        s.allocs.push(0);
+        Mutex::new(s)
+    })
+}
+
+/// Set the attribution owner for subsequent allocations on this thread.
+/// Callers (interpreter module switch, .spl via rt_mem_attr_set_owner) may
+/// call unconditionally — the disabled path returns immediately.
+pub fn set_current_owner(name: &str) {
+    if !mem_attr_enabled() {
+        return;
+    }
+    let name = if name.is_empty() { "<entry>" } else { name };
+    let id = {
+        let Ok(mut s) = attr_state().lock() else { return };
+        if let Some(&id) = s.ids.get(name) {
+            id
+        } else {
+            let id = s.names.len() as u32;
+            s.ids.insert(name.to_string(), id);
+            s.names.push(name.to_string());
+            s.live.push(0);
+            s.peak.push(0);
+            s.allocs.push(0);
+            id
+        }
+    };
+    ATTR_CURRENT_OWNER.with(|c| c.set(id));
+}
+
+#[inline]
+fn note_attr_alloc(ptr: usize, bytes: u64) {
+    if !mem_attr_enabled() {
+        return;
+    }
+    let owner = ATTR_CURRENT_OWNER.with(|c| c.get()) as usize;
+    if let Ok(mut s) = attr_state().lock() {
+        if owner < s.live.len() {
+            s.by_ptr.insert(ptr, owner as u32);
+            s.live[owner] += bytes as i64;
+            s.peak[owner] = s.peak[owner].max(s.live[owner]);
+            s.allocs[owner] += 1;
+        }
+    }
+}
+
+#[inline]
+fn note_attr_free(ptr: usize, bytes: u64) {
+    if !mem_attr_enabled() {
+        return;
+    }
+    if let Ok(mut s) = attr_state().lock() {
+        if let Some(owner) = s.by_ptr.remove(&ptr) {
+            let owner = owner as usize;
+            if owner < s.live.len() {
+                s.live[owner] -= bytes as i64;
+            }
+        }
+    }
+}
+
+/// Top-`n` owners by live bytes as "name\tlive\tpeak\tallocs" rows.
+pub fn owner_report(n: usize) -> String {
+    let Ok(s) = attr_state().lock() else {
+        return String::new();
+    };
+    let mut idx: Vec<usize> = (0..s.names.len()).collect();
+    idx.sort_by_key(|&i| -s.live[i]);
+    idx.iter()
+        .take(n)
+        .map(|&i| format!("{}\t{}\t{}\t{}", s.names[i], s.live[i], s.peak[i], s.allocs[i]))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[no_mangle]
+pub extern "C" fn rt_mem_attr_enabled() -> i64 {
+    mem_attr_enabled() as i64
+}
+
+/// # Safety
+/// `name` must be a valid NUL-terminated C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn rt_mem_attr_set_owner(name: *const std::ffi::c_char) {
+    if name.is_null() || !mem_attr_enabled() {
+        return;
+    }
+    if let Ok(name) = std::ffi::CStr::from_ptr(name).to_str() {
+        set_current_owner(name);
+    }
+}
+
+/// Print the top-`n` owner report to stdout (stable extern surface for .spl
+/// until the mem CLI grows a structured channel).
+#[no_mangle]
+pub extern "C" fn rt_mem_attr_report_print(n: i64) {
+    println!("{}", owner_report(n.max(0) as usize));
+}
+
+#[cfg(test)]
+mod attr_tests {
+    use super::*;
+
+    #[test]
+    fn owner_attribution_orders_by_live_bytes_and_frees_settle() {
+        mem_attr_enable();
+        set_current_owner("attr_test_mod_a");
+        note_attr_alloc(0xA110C, 10_000_000);
+        set_current_owner("attr_test_mod_b");
+        note_attr_alloc(0xB110C, 1_000_000);
+
+        let report = owner_report(16);
+        let a = report.find("attr_test_mod_a").expect("mod_a in report");
+        let b = report.find("attr_test_mod_b").expect("mod_b in report");
+        assert!(a < b, "10MB owner must rank above 1MB owner:\n{report}");
+
+        note_attr_free(0xA110C, 10_000_000);
+        let s = attr_state().lock().unwrap();
+        let id = s.ids["attr_test_mod_a"] as usize;
+        assert_eq!(s.live[id], 0, "live returns to zero after free");
+        assert_eq!(s.peak[id], 10_000_000, "peak survives the free");
+    }
 }

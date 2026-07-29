@@ -117,6 +117,32 @@ implemented by rt_alloc, the GC, every stdlib arena/slotmap, and pools — so
 attr/harden/genarena reports are uniform across all four models. Captured in
 `feature_backend_memory_infra_toggle.md` (tier × allocator-model section).
 
+## 3c. GPU (CUDA/HIP) memory profiling + debugging (web, 2026-07)
+
+Simple's gc_async_mut gpu/cuda/torch tier allocates device memory through
+SFFI wrappers — one more choke point, same trait applies (owner-tagged
+device-alloc/free events). External tools:
+
+- **NVIDIA compute-sanitizer** (cuda toolkit): memcheck (OOB/misaligned +
+  device leak check), racecheck (shared-mem races), initcheck (uninit device
+  reads), synccheck. Works on ANY CUDA binary — ours included, zero
+  integration. **ADOPT-as-docs** + `--mem-infra=gpu-sanitize` wrapper that
+  execs through it (config-gated, off by default; it costs GPU memory + time).
+- **PyTorch memory snapshot / memory_viz**: records every device alloc with
+  stack + timeline, interactive web viewer, open snapshot format. The best
+  UX in the space. **ADAPT-IDEA**: our device-alloc trace dumps in a
+  memory_viz-compatible snapshot so we inherit their viewer for free.
+- **CUPTI / NVML**: activity-record API for memory ops; NVML for device-level
+  truth (the smaps_rollup analog). Feed `simple mem gpu` device rows. LOW.
+- **cudaMallocAsync pools**: cuMemPoolGetAttribute exposes
+  reserved/used/high-water per pool — free per-pool metering if the cuda
+  tier allocates via pools. **ADOPT** (pool stats = arena metering on device).
+- **ROCm/HIP**: rocprof (API/activity traces incl. memory), rocgdb
+  (device-side watchpoints), omnitrace/rocprofiler-sdk timelines,
+  AMD_LOG_MASK runtime logging. Same wrapper strategy, HIP lane.
+- Device-side guard/canary sampling (GWP-ASan analog on GPU) exists nowhere
+  mainstream — compute-sanitizer covers the class; do NOT hand-roll.
+
 ## 4. Recommendations (ranked, value per cost)
 
 1. **Per-owner allocation attribution** (filed) — LOW cost, kills gap #1 for

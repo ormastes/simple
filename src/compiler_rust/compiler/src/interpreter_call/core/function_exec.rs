@@ -557,6 +557,11 @@ pub(crate) fn execute_function_body(
         }
         saved
     });
+    if simple_runtime::value::heap::rt_mem_attr_enabled() != 0 {
+        if let Some(owner) = &func_owner_module {
+            simple_runtime::value::heap::set_current_owner(owner.as_ref());
+        }
+    }
 
     // Check if this is an immutable fn method (has self but not is_me_method)
     // Save and set IN_IMMUTABLE_FN_METHOD flag in single borrow
@@ -605,6 +610,11 @@ pub(crate) fn execute_function_body(
     }
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
+    if simple_runtime::value::heap::rt_mem_attr_enabled() != 0 {
+        if let Some(owner) = &saved_exec_module {
+            simple_runtime::value::heap::set_current_owner(owner.as_ref());
+        }
+    }
     CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = saved_exec_module);
 
     // Generator function: collect yields and return GeneratorValue
@@ -1348,6 +1358,9 @@ mod tests {
             cell.borrow_mut().insert(function_key, Arc::clone(&owner));
         });
         CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = Some(Arc::clone(&owner)));
+        if simple_runtime::value::heap::rt_mem_attr_enabled() != 0 {
+            simple_runtime::value::heap::set_current_owner(owner.as_ref());
+        }
         MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
         MODULE_GLOBALS_BY_OWNER.with(|cell| {
             cell.borrow_mut().insert(

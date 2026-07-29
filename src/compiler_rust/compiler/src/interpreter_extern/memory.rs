@@ -59,6 +59,8 @@ pub const MEM_PROFILE_FEATURE_HEADER_BYTES: i64 = 1 << 0;
 pub const MEM_PROFILE_FEATURE_HOSTED_ALLOC_METADATA: i64 = 1 << 1;
 /// bit2: memory_usage() reports real process RSS (not a stub).
 pub const MEM_PROFILE_FEATURE_REAL_MEMORY_USAGE: i64 = 1 << 2;
+/// bit3: per-owner allocation attribution (SIMPLE_MEM_ATTR=1, plan M1).
+pub const MEM_PROFILE_FEATURE_OWNER_ATTRIBUTION: i64 = 1 << 3;
 
 /// Memory-profiling ABI version.
 ///
@@ -76,7 +78,39 @@ pub fn rt_mem_profile_features(_args: &[Value]) -> Result<Value, CompileError> {
     if process_rss_bytes().is_some() {
         features |= MEM_PROFILE_FEATURE_REAL_MEMORY_USAGE;
     }
+    if simple_runtime::value::heap::rt_mem_attr_enabled() != 0 {
+        features |= MEM_PROFILE_FEATURE_OWNER_ATTRIBUTION;
+    }
     Ok(Value::Int(features))
+}
+
+/// Whether per-owner allocation attribution is on (SIMPLE_MEM_ATTR=1).
+///
+/// Callable from Simple as: `rt_mem_attr_enabled() -> i64`
+pub fn rt_mem_attr_enabled(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::heap::rt_mem_attr_enabled()))
+}
+
+/// Set the attribution owner label for subsequent allocations on this thread.
+/// No-op when attribution is off.
+///
+/// Callable from Simple as: `rt_mem_attr_set_owner(name: text)`
+pub fn rt_mem_attr_set_owner(args: &[Value]) -> Result<Value, CompileError> {
+    if let Some(Value::Str(name)) = args.first() {
+        simple_runtime::value::heap::set_current_owner(name.as_ref());
+    }
+    Ok(Value::Nil)
+}
+
+/// Top-n per-owner report as "name\tlive\tpeak\tallocs" rows.
+///
+/// Callable from Simple as: `rt_mem_attr_report(n: i64) -> text`
+pub fn rt_mem_attr_report(args: &[Value]) -> Result<Value, CompileError> {
+    let n = match args.first() {
+        Some(Value::Int(n)) => (*n).max(0) as usize,
+        _ => 16,
+    };
+    Ok(Value::Str(simple_runtime::value::heap::owner_report(n).into()))
 }
 
 /// Get current memory usage in bytes

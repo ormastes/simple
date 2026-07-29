@@ -5,10 +5,17 @@ Successor to the stage4 lanes plan (L1-L7 complete). Research:
 Features: `doc/02_requirements/runtime/memory_analysis/feature_per_owner_allocation_attribution.md`,
 `feature_backend_memory_infra_toggle.md`.
 
-Cross-cutting requirement (all phases): every mechanism covers the four
-allocator models — malloc-backed nogc, GC tier, index-based arenas/slotmaps,
-static pools — via one instrumentation trait (alloc/free/owner/bytes). A
-malloc-only implementation is an incomplete lane, not a done lane.
+Cross-cutting requirements (all phases):
+1. **Allocator-model coverage** — every mechanism covers the four models
+   (malloc-backed nogc, GC tier, index-based arenas/slotmaps, static pools)
+   via one instrumentation trait (alloc/free/owner/bytes). A malloc-only
+   implementation is an incomplete lane, not a done lane.
+2. **Zero-overhead-when-off (HARD RULE).** Any mechanism that adds runtime
+   overhead MUST be config/flag-gated and OFF by default: env or
+   `--mem-infra` row, checked once at startup (a cached bool, not a per-alloc
+   env read). Each lane's exit criteria include a measured before/after run
+   with the feature off showing no regression. Debug-tier-default features
+   (harden, genarena) must still be individually disableable.
 
 ## M1 — attribution (backend-agnostic, LOW)
 Per-owner byte accounting at the heap-registry choke point keyed on
@@ -46,6 +53,28 @@ normally and traps under strict.
 `std.mem.gen_arena`: Vale-style generational handles as a library; checks
 default-on in debug tier, compiled out in release. Migrate one ECS store as
 proof. Exit: stale-handle fixture traps in debug, zero-cost release.
+
+## M7 — GPU lane (CUDA/HIP, MED)
+Device-alloc choke point in the gpu/cuda tier SFFI wrappers implements the
+same trait (owner-tagged device alloc/free, per-pool stats via
+cudaMallocAsync pools / cuMemPoolGetAttribute; NVML device truth).
+`--mem-infra=gpu-sanitize` wrapper execs the program under NVIDIA
+compute-sanitizer (memcheck/racecheck/initcheck) or ROCm equivalents; trace
+mode dumps a PyTorch-memory_viz-compatible snapshot so their interactive
+viewer works on our traces. All rows config-gated, off by default. Exit:
+seeded device leak + OOB fixtures caught; snapshot opens in memory_viz;
+zero overhead with the gate off.
+
+## M8 — `simple mem` CLI (interactive interface, MED)
+One entry point for ALL of the above, per
+`doc/02_requirements/runtime/memory_analysis/feature_simple_mem_cli.md`:
+`simple mem top|snapshot|diff|trace|gpu|gate` — Simple-TUI interactive top
+(live per-owner/per-kind bytes), snapshot diff between two capture files,
+trace record + query (data stays in files; CLI is the query surface),
+device rows from M7. Speaks to a live process via the existing MCP/socket
+plumbing or post-mortem via profile files. Exit: `simple mem trace prog.spl`
+then `simple mem top --profile <file>` shows the M1 fixture's owners; TUI
+interactive under plain terminal.
 
 ## WATCH (not scheduled)
 LLVM PGHO feed-back once the allocator grows partitioning hooks; HWASan/MTE
