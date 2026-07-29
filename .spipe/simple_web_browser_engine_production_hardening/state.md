@@ -2229,3 +2229,12 @@ implementation in progress / target evidence blocked
   generator pins CPython 3.12.3 source data, cardinalities, and digest; PSF-2.0
   attribution and license treatment are bundled. Independent review returned
   PASS and the affected SSpec manual regenerated (`1 complete, 0 stubs`).
+- navigation supersession tranche (2026-07-29): Hosted renderer Navigate,
+  Home, Back, Forward, and Reload now validate permits and encode sanitized
+  replacement commands before canceling a fully-sent slow navigation. Partial
+  IPC frames still fail busy without corrupting framing; valid replacements
+  reuse canonical stop cleanup to free network/deferred/animation/provisional
+  state. Encoded stale SBRQ4 fetch and SBRF5 frame replies are rejected by the
+  production poll classifier without mutating the replacement document,
+  history, provisional state, or permit. Independent review returned PASS and
+  the affected manual regenerated (`1 complete, 0 stubs`).

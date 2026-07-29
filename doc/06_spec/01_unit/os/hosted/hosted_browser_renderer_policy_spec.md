@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 46 | 46 | 0 | 0 |
+| 49 | 49 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -350,6 +350,321 @@ match broker.begin_stop(1000):
         expect(false).to_be(true)
     Ok(started):
         expect(started).to_be(false)
+```
+
+</details>
+
+#### replaces a fully sent slow navigation before stale completion
+
+- var broker = HostedBrowserRendererProcess create
+   - Expected: broker.deferred_commands.len() equals `1`
+   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.network_job_redirect_count equals `0`
+   - Expected: broker.deferred_commands.len() equals `0`
+   - Expected: broker.next_animation_ms equals `-1`
+   - Expected: broker.pending_document_commit_url equals ``
+   - Expected: broker.provisional_document_origin equals ``
+- browser renderer decoder new
+   - Expected: navigation.action equals `open`
+   - Expected: navigation.url equals `https://example.test/new`
+   - Expected: broker.pending_wire_reply_to_request_id equals `3`
+- browser renderer decoder new
+- Err
+- fail
+- Ok
+   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.pending_document_commit_url equals ``
+- draw ir composition
+- browser renderer decoder new
+- Err
+- fail
+- Ok
+   - Expected: broker.pending_history_action equals `push`
+   - Expected: broker.pending_document_commit_url equals ``
+   - Expected: broker.provisional_document_origin equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 146 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.state = "active"
+broker.document_url = "https://example.test/current"
+broker.document_origin = "https://example.test"
+broker.site_lock = "https://example.test"
+broker.history_urls = ["https://example.test/current"]
+broker.history_index = 0
+broker.history_current_url = "https://example.test/current"
+broker.history_back_url = "https://example.test/back"
+broker.history_forward_url = "https://example.test/forward"
+expect(broker.begin_advance(16, 1000).is_ok()).to_be(true)
+broker.pending_wire = ""
+broker.pending_wire_is_command = false
+broker.expected_reply_to_request_id = 2
+broker.next_request_id = 3
+broker.pending_operation = "advance"
+expect(broker.begin_pointer(
+    7, 4, 5, true, 1000
+).is_ok()).to_be(true)
+expect(broker.deferred_commands.len()).to_equal(1)
+broker.pending_operation = "navigation"
+broker.network_job_handle = 424242
+broker.network_job_fetch = Some(request(
+    "document", "https://example.test/slow"
+))
+broker.network_job_policy = Some(HostedBrowserRequestPolicy(
+    ok: true,
+    reason: "ok",
+    mode: RequestMode.Navigate,
+    credentials: "include",
+    canonical_url: "https://example.test/slow",
+    sanitized_headers: "",
+    consumes_navigation: true
+))
+broker.network_job_request = Some(fetch_request(
+    "https://example.test/slow", RequestMode.Navigate
+))
+broker.network_job_redirect_count = 3
+broker.next_animation_ms = 16
+broker.navigation_permit = permit(
+    true, "https://example.test/slow"
+)
+broker.pending_history_action = "push"
+broker.pending_document_commit_url = (
+    "https://example.test/slow"
+)
+broker.provisional_document_origin = "https://example.test"
+broker.stop_after_write = true
+
+val replaced = broker.begin_navigate(
+    "https://example.test/new", "GET", "", "", "", 1000
+)
+
+expect(replaced.is_ok()).to_be(true)
+expect(broker.network_job_handle).to_equal(0)
+expect(broker.network_job_fetch).to_be_nil()
+expect(broker.network_job_policy).to_be_nil()
+expect(broker.network_job_request).to_be_nil()
+expect(broker.network_job_redirect_count).to_equal(0)
+expect(broker.deferred_commands.len()).to_equal(0)
+expect(broker.next_animation_ms).to_equal(-1)
+expect(broker.stop_after_write).to_be(false)
+expect(broker.pending_document_commit_url).to_equal("")
+expect(broker.provisional_document_origin).to_equal("")
+expect(broker.navigation_permit.url).to_equal(
+    "https://example.test/new"
+)
+val replacement = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(1), broker.pending_wire
+)
+val navigation = browser_renderer_navigation_decode(
+    replacement.message
+)
+expect(navigation.action).to_equal("open")
+expect(navigation.url).to_equal("https://example.test/new")
+expect(broker.pending_wire_reply_to_request_id).to_equal(3)
+broker.expected_reply_to_request_id = (
+    broker.pending_wire_reply_to_request_id
+)
+val old_wire = browser_renderer_fetch_request_encode(
+    1, 50, 2, "stale-fetch", "document",
+    "https://example.test/slow", "GET", "", "", "",
+    "include", [], "https://example.test"
+)
+expect(old_wire.ok).to_be(true)
+val old_message = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(1), old_wire.wire
+)
+val old_fetch = browser_renderer_fetch_request_decode(
+    old_message.message
+)
+match broker._poll_renderer_reply(
+    old_fetch.reply_to_request_id, "stale-renderer-request"
+):
+    Err(reason):
+        fail(reason)
+    Ok(current):
+        expect(current).to_be(false)
+expect(broker.network_job_handle).to_equal(0)
+expect(broker.pending_document_commit_url).to_equal("")
+expect(broker.navigation_permit.url).to_equal(
+    "https://example.test/new"
+)
+val stale_frame_wire = (
+    browser_renderer_frame_encode_with_state_and_images(
+        draw_ir_composition("", "", "", []),
+        1, 51, 2, -1, 0, "", 0, "", "",
+        "https://attacker.test/stale",
+        "https://attacker.test/back",
+        "https://attacker.test/forward",
+        []
+    )
+)
+expect(stale_frame_wire.ok).to_be(true)
+val stale_frame = browser_renderer_frame_decode(
+    browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(1), stale_frame_wire.wire
+    ).message,
+    640, 480
+)
+expect(stale_frame.ok).to_be(true)
+match broker._poll_renderer_reply(
+    stale_frame.reply_to_request_id, "stale-renderer-frame"
+):
+    Err(reason):
+        fail(reason)
+    Ok(current):
+        expect(current).to_be(false)
+expect(broker.document_url).to_equal(
+    "https://example.test/current"
+)
+expect(broker.pending_history_action).to_equal("push")
+expect(broker.history_current_url).to_equal(
+    "https://example.test/current"
+)
+expect(broker.history_back_url).to_equal(
+    "https://example.test/back"
+)
+expect(broker.history_forward_url).to_equal(
+    "https://example.test/forward"
+)
+expect(broker.pending_document_commit_url).to_equal("")
+expect(broker.provisional_document_origin).to_equal("")
+expect(broker.navigation_permit.url).to_equal(
+    "https://example.test/new"
+)
+```
+
+</details>
+
+#### preserves a slow navigation when its replacement is invalid
+
+- var broker = HostedBrowserRendererProcess create
+- "javascript:alert
+   - Expected: rejected.unwrap_err() equals `invalid-navigation`
+   - Expected: broker.network_job_handle equals `424243`
+   - Expected: broker.network_job_redirect_count equals `4`
+   - Expected: broker.next_animation_ms equals `32`
+   - Expected: broker.pending_operation equals `navigation`
+   - Expected: broker.pending_history_action equals `push`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 58 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.state = "active"
+broker.document_url = "https://example.test/current"
+broker.document_origin = "https://example.test"
+broker.command_deadline_ms = 9000000000000
+broker.pending_operation = "navigation"
+broker.expected_reply_to_request_id = 2
+broker.next_request_id = 3
+broker.network_job_handle = 424243
+broker.network_job_fetch = Some(request(
+    "document", "https://example.test/slow"
+))
+broker.network_job_policy = Some(HostedBrowserRequestPolicy(
+    ok: true,
+    reason: "ok",
+    mode: RequestMode.Navigate,
+    credentials: "include",
+    canonical_url: "https://example.test/slow",
+    sanitized_headers: "",
+    consumes_navigation: true
+))
+broker.network_job_request = Some(fetch_request(
+    "https://example.test/slow", RequestMode.Navigate
+))
+broker.network_job_redirect_count = 4
+broker.next_animation_ms = 32
+broker.navigation_permit = permit(
+    true, "https://example.test/slow"
+)
+broker.pending_history_action = "push"
+broker.pending_document_commit_url = (
+    "https://example.test/slow"
+)
+broker.provisional_document_origin = "https://example.test"
+
+val rejected = broker.begin_navigate(
+    "javascript:alert(1)", "GET", "", "", "", 1000
+)
+
+expect(rejected.is_err()).to_be(true)
+expect(rejected.unwrap_err()).to_equal("invalid-navigation")
+expect(broker.network_job_handle).to_equal(424243)
+expect(broker.network_job_fetch.is_some()).to_be(true)
+expect(broker.network_job_policy.is_some()).to_be(true)
+expect(broker.network_job_request.is_some()).to_be(true)
+expect(broker.network_job_redirect_count).to_equal(4)
+expect(broker.next_animation_ms).to_equal(32)
+expect(broker.pending_operation).to_equal("navigation")
+expect(broker.pending_history_action).to_equal("push")
+expect(broker.pending_document_commit_url).to_equal(
+    "https://example.test/slow"
+)
+expect(broker.provisional_document_origin).to_equal(
+    "https://example.test"
+)
+expect(broker.navigation_permit.url).to_equal(
+    "https://example.test/slow"
+)
+```
+
+</details>
+
+#### preserves a partially written navigation frame
+
+- var broker = HostedBrowserRendererProcess create
+   - Expected: replacement.unwrap_err() equals `renderer-busy`
+   - Expected: broker.pending_wire_offset equals `1`
+   - Expected: broker.pending_wire_reply_to_request_id equals `2`
+   - Expected: broker.pending_operation equals `navigation`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.state = "active"
+broker.command_deadline_ms = 9000000000000
+broker.pending_operation = "navigation"
+broker.pending_wire = "partially-written-navigation"
+broker.pending_wire_offset = 1
+broker.pending_wire_reply_to_request_id = 2
+broker.pending_wire_is_command = true
+broker.navigation_permit = permit(
+    true, "https://example.test/slow"
+)
+
+val replacement = broker.begin_navigate(
+    "https://example.test/new", "GET", "", "", "", 1000
+)
+
+expect(replacement.is_err()).to_be(true)
+expect(replacement.unwrap_err()).to_equal("renderer-busy")
+expect(broker.pending_wire).to_equal(
+    "partially-written-navigation"
+)
+expect(broker.pending_wire_offset).to_equal(1)
+expect(broker.pending_wire_reply_to_request_id).to_equal(2)
+expect(broker.pending_operation).to_equal("navigation")
+expect(broker.navigation_permit.url).to_equal(
+    "https://example.test/slow"
+)
 ```
 
 </details>
@@ -2631,8 +2946,8 @@ Tests covering hosted browser renderer transport host, hosted browser renderer b
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 46 |
-| Active scenarios | 46 |
+| Total scenarios | 49 |
+| Active scenarios | 49 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
