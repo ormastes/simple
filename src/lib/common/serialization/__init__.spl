@@ -353,31 +353,44 @@ pub fn serialize_text_list_bytes(items):
     out
 
 pub fn escape_string(value):
+    # `value[i:i+1]` is byte-indexed: accumulating one raw byte at a time
+    # (the old `result = result + ch`) shreds multi-byte UTF-8 characters
+    # into separate U+FFFD replacement characters. The escaped bytes are
+    # all single ASCII bytes, so byte-stepping to find them is safe; copy
+    # whole runs via the slice expression between them instead of
+    # rebuilding byte-by-byte.
     var result = ""
+    var seg_start = 0
     var i = 0
     while i < value.len():
         val ch = value[i:i + 1]
         if ch == "\n":
-            result = result + "\\n"
+            result = result + value[seg_start:i] + "\\n"
+            seg_start = i + 1
         elif ch == "\t":
-            result = result + "\\t"
+            result = result + value[seg_start:i] + "\\t"
+            seg_start = i + 1
         elif ch == "\r":
-            result = result + "\\r"
+            result = result + value[seg_start:i] + "\\r"
+            seg_start = i + 1
         elif ch == "\\":
-            result = result + "\\\\"
+            result = result + value[seg_start:i] + "\\\\"
+            seg_start = i + 1
         elif ch == "\"":
-            result = result + "\\\""
-        else:
-            result = result + ch
+            result = result + value[seg_start:i] + "\\\""
+            seg_start = i + 1
         i = i + 1
-    result
+    result + value[seg_start:value.len()]
 
 pub fn unescape_string(value):
+    # See escape_string above for why byte-by-byte accumulation is unsafe.
     var result = ""
+    var seg_start = 0
     var i = 0
     while i < value.len():
         val ch = value[i:i + 1]
         if ch == "\\" and i + 1 < value.len():
+            result = result + value[seg_start:i]
             val next = value[i + 1:i + 2]
             if next == "n":
                 result = result + "\n"
@@ -392,10 +405,10 @@ pub fn unescape_string(value):
             else:
                 result = result + "\\" + next
             i = i + 2
+            seg_start = i
         else:
-            result = result + ch
             i = i + 1
-    result
+    result + value[seg_start:value.len()]
 
 pub fn quote_string(value): "\"" + escape_string(value) + "\""
 
