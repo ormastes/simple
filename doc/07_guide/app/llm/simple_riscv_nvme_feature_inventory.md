@@ -107,8 +107,8 @@ the default build remains the internal recovery self-test image.
 same command/recovery sequence. QEMU `virt` has no custom endpoint, so do not
 claim AXI/DMA/IRQ, PCIe enumeration, MSI/PERST, KV260 board acceptance,
 physical NAND, or OpenSSD silicon from that result. The corrected Retry 15
-Stage 2 pure-Simple compiler builds the restored RAM-NAND firmware, but its
-bootstrap-only CLI cannot run SSpec/docgen. Its source-matched 89,668-byte ELF
+Stage 2 compiler builds the restored RAM-NAND firmware. Its source-matched
+89,668-byte ELF
 passes the behavioral core, full AXI RAM with 847 `.nandram` reads and 461
 writes, and clean plus garbage-filled synthesizable BRAM; each 229-byte
 observation capture matches its own live UART stream.
@@ -117,8 +117,8 @@ Current bootstrap admission is tracked in
 `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`. Retry 15
 admitted Stage 2, found and fixed a Rust runtime NUL panic at the environment
 boundary, then reached the bounded Stage 3 timeout without another diagnostic.
-Stage 2 is sufficient for RV32 native-build and GHDL but not `run`/`test`; no
-replacement full CLI is admitted yet. The corrected Stage 2 runner attempt
+The old Stage 2 was sufficient for RV32 native-build and GHDL but not the exact
+native SSpec. The corrected Stage 2 runner attempt
 still failed in nine unrelated closure modules, and a minimal interpreter-hook
 runner failed closed because standalone mode intentionally lacks that hook.
 The direct native-spec crash was a Rust LLVM ABI-lowering defect: direct and
@@ -134,10 +134,15 @@ standalone build. The resulting docgen parses all five canonical NVMe scenarios
 and reports zero stubs; its shorter generated page is not retained over the
 richer existing manual. A subsequent Stage 3 refresh had already reached its
 full 90-minute cap at 1,849,336 KiB peak RSS with no diagnostic or binary.
-Exact evidence and the remaining pure-Simple admission gate are tracked in
+The current-source Phase 2 artifact was then relinked with the rebuilt LLVM
+native-all authority. Its machine code expands process calls to
+`(cmd_ptr, cmd_len, args)`; the exact NVMe SSpec passes 5 examples with 0
+failures, and standalone docgen parses all five scenarios with zero stubs.
+Exact hashes, metrics, and the boundary from the stale global full CLI are
+tracked in
 `doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`.
-Do not use the explicit Rust bootstrap handler or a stale deployed binary as
-release SSpec/docgen evidence.
+Use that admitted Phase 2 pair, not the stale deployed binary, as NVMe
+SSpec/docgen evidence.
 
 The current endpoint-wired K26 top also passes full SimpleOS boot with both
 zeroed and garbage-filled DDR. That rehearsal uses a tied-off endpoint and does
