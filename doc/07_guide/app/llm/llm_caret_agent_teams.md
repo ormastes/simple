@@ -38,6 +38,21 @@ SPipe docs or SSpec helpers. Capability discovery is intentionally bounded:
 caller-supplied manifests, while installs and live registry lookup remain
 separate verified lanes.
 
+## Session supervision status
+
+For Codex session summaries, rank rollouts by embedded start time; bulk resume
+or compaction can make filesystem modification times misleading. Present four
+independent facts:
+
+1. process/open-file state;
+2. turn state from the latest `task_started`/`task_complete` lifecycle event;
+3. latest explicit thread-goal status;
+4. summarized objective and current/latest assigned task.
+
+Do not label an open rollout as an active turn, or a completed turn as a
+completed goal. Shorten session IDs and omit credentials and unrelated prompt
+content from operator-facing output.
+
 This surface does not execute plugin installs, query a live MCP registry, watch VCS state continuously, persist team supervision, or provide a live chat bus. Callers pass capabilities, manifests, file paths, and team mailbox/transcript entries explicitly, then hand the resulting prompt/argv to existing provider wrappers.
 
 Default verification:

@@ -759,6 +759,14 @@ dirty files into the feature just because they are present in the shared
 checkout. Preserve other-agent work, report it separately, and commit only the
 intentional lane unless the user requests a combined integration.
 
+When auditing Codex sessions before lane ownership or completion decisions,
+order rollouts by embedded start time rather than modification time. Treat a
+live process/open rollout, an unmatched `task_started`, a `task_complete`, and
+the latest explicit thread-goal status as separate facts. Never infer goal
+completion from a completed turn; require the goal status itself to be
+`complete`. Summarize objectives without exposing credentials or unrelated
+prompt content.
+
 For scenario-oriented work, the SPipe loop also includes generated manual
 review. After SSpec `.spl` scenarios are written or changed, generate the
 mirrored `doc/06_spec/...` document and read it as a scenario manual. Update

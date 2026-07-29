@@ -96,6 +96,15 @@ worktree and active session scope. If another session owns a dirty file or a
 different feature lane, do not fold that work into your change unless the user
 explicitly asks for a combined commit.
 
+When reporting recent Codex sessions, order rollouts by their embedded/session
+start timestamp, not filesystem modification time: resume and compaction may
+touch old rollout files in bulk. Report execution state and goal state
+separately. A live process or open rollout file does not prove an active turn;
+the latest lifecycle event must be `task_started` without a matching
+`task_complete`. Likewise, a completed turn does not complete its thread goal:
+only the latest explicit goal status does. Summarize objectives and never echo
+credentials or unrelated prompt content.
+
 When asked to "find similar" or "go the found", inspect active process/session
 IDs and continue only the requested lane. Treat all unrelated dirty files as
 other-agent work: preserve them, avoid reverting them, and mention them

@@ -27,6 +27,22 @@ For sync, commit only the lane you intentionally own, then use `jj git fetch`
 and `jj rebase -d main@origin`. If the file count drops after rebase, stop
 before setting the bookmark or pushing.
 
+### Codex session and goal status
+
+Use rollout start timestamps for "recent" ordering; file modification times can
+be rewritten by resume or compaction. Keep these states distinct:
+
+- **Process:** a Codex process or rollout file is open.
+- **Turn:** the latest lifecycle event is an unmatched `task_started` (active)
+  or `task_complete` (finished).
+- **Goal:** the latest explicit thread-goal status is `active`, `complete`, or
+  `blocked`.
+
+An open file is not proof of active work, and a finished turn is not proof that
+the thread goal is complete. Report the short session ID, turn state, goal
+state, summarized objective, and latest task without reproducing secrets or
+unrelated prompts.
+
 ---
 
 ## Phase 1: Research
