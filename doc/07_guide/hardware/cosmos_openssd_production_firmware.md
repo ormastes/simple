@@ -319,17 +319,18 @@ Do not represent these host/ARM results as physical persistence or board proof.
 
 Do not execute the fourteen-scenario SSpec with a stale binary. Retry 15 admitted
 a pure-Simple Stage 2 bootstrap compiler and used it to build the restored
-88,220-byte RV32 RAM-NAND firmware. Stage 2 is sufficient for native-build/GHDL
+89,668-byte RV32 RAM-NAND firmware. The source-matched gate passes behavioral
+GHDL, full AXI RAM with 847 reads/461 writes in the exact 256-byte region, and
+clean plus garbage-filled synthesizable BRAM; each observation capture matches
+its own live UART stream. Stage 2 is sufficient for native-build/GHDL
 but intentionally lacks `run`/`test`; Stage 3 reached its bounded timeout after
 the Rust environment boundary was fixed to reject embedded NULs. Final SSpec
 and generated-manual evidence therefore still require a current full CLI.
 
 Before production can move from **BLOCKED/FAIL**, complete:
 
-1. One bounded source-matched NAND AXI/exact-BRAM GHDL run against the restored
-   `entry.spl` path.
-2. One current pure-Simple SSpec run/docgen when a current runner is available.
-3. Execute and retain the BT-001..BT-006 board campaign with the pinned package.
+1. One current pure-Simple SSpec run/docgen when a current runner is available.
+2. Execute and retain the BT-001..BT-006 board campaign with the pinned package.
    REQ-012 and NFR-011 remain board-only.
 
 After the runner blocker is solved, execute the consolidated host gate:

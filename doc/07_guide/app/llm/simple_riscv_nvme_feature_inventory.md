@@ -108,9 +108,10 @@ same command/recovery sequence. QEMU `virt` has no custom endpoint, so do not
 claim AXI/DMA/IRQ, PCIe enumeration, MSI/PERST, KV260 board acceptance,
 physical NAND, or OpenSSD silicon from that result. The corrected Retry 15
 Stage 2 pure-Simple compiler builds the restored RAM-NAND firmware, but its
-bootstrap-only CLI cannot run SSpec/docgen. The restored 88,220-byte ELF compile
-is current evidence; the combined AXI/exact-BRAM rerun remains a separate open
-gate.
+bootstrap-only CLI cannot run SSpec/docgen. Its source-matched 89,668-byte ELF
+passes the behavioral core, full AXI RAM with 847 `.nandram` reads and 461
+writes, and clean plus garbage-filled synthesizable BRAM; each 229-byte
+observation capture matches its own live UART stream.
 
 Current bootstrap admission is tracked in
 `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`. Retry 15

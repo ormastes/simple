@@ -124,10 +124,11 @@ line, the live evidence marker
 `NAND EVIDENCE D1 U1 F5 C3 T1 M1 Q3 X2 S1 PASS`, and the final firmware marker from
 the USER4 JTAG transcript. The prior 226-byte KV260 capture predates the
 independent-SECDED and alternate-slot remap fix and is not evidence for the
-current image. A recorded corrected revision passed AXI RAM with 847 `.nandram`
-reads and 460 writes plus exact-BRAM GHDL with clean/garbage fill; those counts
-are historical after later `entry.spl` changes. The prior 229-byte KV260 USER4
-capture is likewise not a source-matched current bundle; rebuild and retain fresh
+current image. The source-matched Retry 15 Stage 2 build produced an 89,668-byte
+ELF and passed AXI RAM with 847 `.nandram` reads and 461 writes plus exact-BRAM
+GHDL with clean/garbage fill; each 229-byte observation capture matched its own
+live UART stream. The prior 229-byte KV260 USER4 capture is still not a
+source-matched current physical bundle; rebuild and retain fresh
 ELF/bitstream/transcript hashes before claiming board evidence. This bounded
 model verifies controller policy;
 it does not model analog threshold distributions or host-driven NVMe MMIO.

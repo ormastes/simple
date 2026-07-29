@@ -78,20 +78,49 @@ ghdl_run() {
     NVME_RV32_SIMPLE_BIN="$SIMPLE_BINARY" sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
     evidence="$ROOT/build/test-artifacts/nvme_rv32_source_matched"
     mkdir -p "$evidence"
+    command -v jj >/dev/null 2>&1 || fail "jj is required for source revision binding"
+    revision=$(jj log -r @ --no-graph -T 'commit_id') ||
+        fail "cannot resolve source revision"
+    [ -n "$revision" ] || fail "empty source revision"
     {
+        printf 'source_manifest_version=2\n'
+        printf 'revision=%s\n' "$revision"
         printf 'compiler=%s\ncompiler_real=%s\n' "$SIMPLE_BINARY" "$SELF_HOSTED_REAL"
         printf '%s\n' "$SELF_HOSTED_VERSION"
-        sha256sum "$SELF_HOSTED_REAL" "$ENTRY" "$LOGIC" "$ROOT/build/nvme_fw_rv32.elf"
+        sha256sum "$SELF_HOSTED_REAL" "$ROOT/build/nvme_fw_rv32.elf"
+        for source in "$ROOT"/examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic*.spl; do
+            [ "$(basename "$source")" = "logic_check.spl" ] || sha256sum "$source"
+        done
+        sha256sum "$ENTRY" \
+            "$ROOT/examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs" \
+            "$0" \
+            "$ROOT/scripts/check/lib/require-self-hosted.shs" \
+            "$ROOT/scripts/fpga/ghdl_rv32_nvme_fw.shs" \
+            "$ROOT/scripts/fpga/ghdl_rv32_nvme_axi_ram.shs" \
+            "$ROOT/scripts/fpga/ghdl_rv32_k26_ddr_boot.shs" \
+            "$ROOT/scripts/fpga/ghdl_rv32_nvme_bram_soc.shs"
+        find "$ROOT/examples/09_embedded/fpga_riscv/rtl" -maxdepth 1 -type f \
+            \( -name '*.vhd' -o -name '*.ld' \) -print |
+            LC_ALL=C sort |
+            while IFS= read -r source; do sha256sum "$source"; done
     } >"$evidence/manifest.txt"
     if ! FW_ELF="$ROOT/build/nvme_fw_rv32.elf" sh scripts/fpga/ghdl_rv32_nvme_fw.shs >"$evidence/exact-bram.log" 2>&1; then
         cat "$evidence/exact-bram.log"
         fail "exact-BRAM GHDL run failed"
     fi
     cat "$evidence/exact-bram.log"
-    sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
-    sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs
-    GARBAGE_FILL=1 sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs
-    check_markers "$ROOT/build/ghdl/rv32_nvme_bram_soc/sim.log"
+    FW_ELF="$ROOT/build/nvme_fw_rv32.elf" sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
+    FW_ELF="$ROOT/build/nvme_fw_rv32.elf" sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs
+    GARBAGE_FILL=1 FW_ELF="$ROOT/build/nvme_fw_rv32.elf" \
+        sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs
+    check_markers "$ROOT/build/test-artifacts/nvme_rv32_bram_soc/clean/sim.log"
+    check_markers "$ROOT/build/test-artifacts/nvme_rv32_bram_soc/garbage/sim.log"
+    sha256sum \
+        "$evidence/exact-bram.log" \
+        "$ROOT/build/ghdl/rv32_k26_ddr_boot_garbage/sim.log" \
+        "$ROOT/build/test-artifacts/nvme_rv32_bram_soc/clean/sim.log" \
+        "$ROOT/build/test-artifacts/nvme_rv32_bram_soc/garbage/sim.log" \
+        >>"$evidence/manifest.txt"
     echo "STATUS: PASS rv32-nvme-nand-recovery ghdl"
 }
 
