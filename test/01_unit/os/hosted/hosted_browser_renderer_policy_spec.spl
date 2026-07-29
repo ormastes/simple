@@ -1,3 +1,27 @@
+"""
+# Hosted browser renderer policy
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+**Plan:** doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md
+**Design:** doc/05_design/simple_web_browser_engine_production_hardening.md
+**Research:** doc/01_research/local/simple_web_browser_engine_production_hardening.md
+
+## Overview
+
+Treats decoded renderer protocol messages as untrusted input at the hosted
+browser broker. The scenarios cover navigation permits, origin and CSP
+admission, cookie ownership, HSTS, redirects, resource limits, lifecycle, and
+site-swap state without granting the renderer direct network authority.
+
+## Examples
+
+The primary adversarial flow decodes SBRQ4 requests through the production
+dispatcher and proves rejected cookie or navigation side effects occur before
+trusted broker state changes. Explicit controls retain the parent-authorized
+initial document load and route top-level HTTPS-to-HTTP navigation through the
+navigation policy rather than subresource mixed-content policy.
+"""
+
 use std.spec.*
 use std.common.ui.draw_ir.{draw_ir_composition}
 use std.common.web.browser_renderer_protocol.{
@@ -20,7 +44,8 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin, Url}
 use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
-    build_request_bytes
+    MockResponseRegistry, build_request_bytes, observed_mock_request,
+    set_mock_registry
 }
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{
     BrowserLogLevel, Logger
@@ -51,6 +76,7 @@ use os.hosted.hosted_browser_renderer_process.{
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_text_to_bytes(value: text) -> [u8]
 
 describe "hosted browser renderer transport host":
     it "unwraps only a canonical IPv6 address for socket and TLS":
@@ -263,6 +289,32 @@ fn request(
         initiator_origin: initiator_origin
     )
 
+fn decoded_request(
+    generation: i64,
+    request_id: text,
+    kind: text,
+    url: text,
+    credentials: text = "include",
+    script_cookie_writes: [text] = [],
+    initiator_origin: text = "",
+    headers: text = ""
+) -> BrowserRendererNetworkDecodeResult:
+    val encoded = browser_renderer_fetch_request_encode(
+        generation, 2, 1, request_id, kind, url, "GET", headers, "", "",
+        credentials, script_cookie_writes, initiator_origin
+    )
+    if not encoded.ok:
+        fail(encoded.reason)
+    val decoded = browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(generation), encoded.wire
+    )
+    if decoded.status != "message":
+        fail(decoded.decoder.error)
+    val fetch = browser_renderer_fetch_request_decode(decoded.message)
+    if not fetch.ok:
+        fail(fetch.reason)
+    fetch
+
 fn fetch_request(url: text, mode: RequestMode) -> FetchRequest:
     FetchRequest(
         method: "GET", url: Url.parse_or_opaque(url), headers: "", body: [],
@@ -277,6 +329,476 @@ fn sts_response(status: i64) -> FetchResponse:
     )
 
 describe "hosted browser renderer broker policy":
+
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
+    it "admits decoded renderer side effects only through trusted CSP state":
+        """
+        Renderer SBRQ4 messages are attacker-controlled input. The broker must
+        reject cookie and navigation side effects before they mutate trusted
+        state, while retaining the one parent-authorized initial document load.
+        """
+        var mocks = MockResponseRegistry.create()
+        mocks.register("https://bootstrap.test/", 200, "bootstrap")
+        mocks.register("http://destination.test/", 200, "destination")
+        set_mock_registry(mocks)
+
+        step("Reject an opaque sandbox document that forges a cookie write")
+        var opaque = HostedBrowserRendererProcess.create(7, 640, 480)
+        opaque.document_url = "https://source.test/"
+        opaque.document_origin = "https://source.test"
+        opaque.document_csp_policy = (
+            "sandbox allow-scripts allow-forms allow-top-navigation; " +
+            "default-src *"
+        )
+        opaque.document_csp_ready = true
+        opaque.navigation_permit = permit(
+            true, "https://source.test/next"
+        )
+        opaque.expected_reply_to_request_id = 1
+        match opaque._dispatch_renderer_fetch(decoded_request(
+            7, "opaque-cookie", "document",
+            "https://source.test/next", "include",
+            ["sid=forged; Path=/"], "null"
+        )):
+            nil:
+                fail("Opaque sandbox cookie forgery reached transport")
+            Some(result):
+                expect(result.reason).to_equal(
+                    "invalid-renderer-initiator"
+                )
+        expect(observed_mock_request(
+            "https://source.test/next"
+        )).to_be_nil()
+
+        step("Reject missing and invalid CSP before cookie mutation")
+        var cookie_broker = HostedBrowserRendererProcess.create(
+            7, 640, 480
+        )
+        cookie_broker.document_url = "https://source.test/"
+        cookie_broker.document_origin = "https://source.test"
+        cookie_broker.expected_reply_to_request_id = 1
+        expect(cookie_broker._dispatch_renderer_fetch(decoded_request(
+            7, "missing-csp-cookie", "fetch",
+            "https://source.test/data", "include",
+            ["missing=forged; Path=/"], "https://source.test"
+        ))).to_be_nil()
+        val source_origin = Origin(
+            scheme: "https", host: "source.test", port: 443
+        )
+        expect(cookie_broker.network.cookie_store.get_header_for_origin(
+            source_origin, "/", Some(source_origin), "GET", false,
+            rt_time_now_unix_micros() / 1000000
+        )).to_equal("")
+        cookie_broker.pending_wire = ""
+        cookie_broker.pending_wire_offset = 0
+        cookie_broker.pending_wire_reply_to_request_id = 0
+        cookie_broker.pending_wire_is_command = false
+        cookie_broker.document_csp_ready = true
+        cookie_broker.document_csp_policy = "x".repeat(65537)
+        expect(cookie_broker._dispatch_renderer_fetch(decoded_request(
+            7, "invalid-csp-cookie", "fetch",
+            "https://source.test/data", "include",
+            ["invalid=forged; Path=/"], "https://source.test"
+        ))).to_be_nil()
+        expect(cookie_broker.network.cookie_store.get_header_for_origin(
+            source_origin, "/", Some(source_origin), "GET", false,
+            rt_time_now_unix_micros() / 1000000
+        )).to_equal("")
+
+        step("Reject base-policy errors before forged cookie writes")
+        var malformed = HostedBrowserRendererProcess.create(7, 640, 480)
+        malformed.document_url = "https://source.test/"
+        malformed.document_origin = "https://source.test"
+        malformed.expected_reply_to_request_id = 1
+        match malformed._dispatch_renderer_fetch(decoded_request(
+            7, "base-policy-cookie", "fetch",
+            "https://source.test/data", "include",
+            ["base=forged; Path=/"], "https://source.test",
+            "Cookie: renderer-forged"
+        )):
+            nil:
+                fail("Base-policy rejection reached cookie mutation")
+            Some(result):
+                expect(result.reason).to_equal(
+                    "forbidden-request-header"
+                )
+
+        step("Reject renderer navigation when active CSP is unavailable")
+        var navigation = HostedBrowserRendererProcess.create(7, 640, 480)
+        navigation.document_url = "https://source.test/"
+        navigation.document_origin = "https://source.test"
+        navigation.expected_reply_to_request_id = 1
+        match navigation._dispatch_renderer_fetch(decoded_request(
+            7, "missing-csp-navigation", "document",
+            "https://destination.test/", "include", [],
+            "https://source.test"
+        )):
+            nil:
+                fail("Renderer navigation bypassed missing CSP")
+            Some(result):
+                expect(result.reason).to_equal(
+                    "csp-policy-unavailable"
+                )
+
+        step("Allow only the parent-authorized initial document bootstrap")
+        var bootstrap = HostedBrowserRendererProcess.create(7, 640, 480)
+        bootstrap.navigation_permit = permit(
+            true, "https://bootstrap.test/"
+        )
+        bootstrap.expected_reply_to_request_id = 1
+        expect(bootstrap._dispatch_renderer_fetch(decoded_request(
+            7, "trusted-bootstrap", "document",
+            "https://bootstrap.test/"
+        ))).to_be_nil()
+        expect(observed_mock_request(
+            "https://bootstrap.test/"
+        ).?).to_be(true)
+
+        step("Route an opaque HTTPS to HTTP document through navigation policy")
+        var downgrade = HostedBrowserRendererProcess.create(7, 640, 480)
+        downgrade.document_url = "https://source.test/"
+        downgrade.document_origin = "https://source.test"
+        downgrade.document_csp_policy = (
+            "sandbox allow-scripts allow-forms allow-top-navigation; " +
+            "default-src *"
+        )
+        downgrade.document_csp_ready = true
+        downgrade.navigation_permit = permit(
+            true, "http://destination.test/"
+        )
+        downgrade.expected_reply_to_request_id = 1
+        expect(downgrade._dispatch_renderer_fetch(decoded_request(
+            7, "document-downgrade", "document",
+            "http://destination.test/", "include", [], "null"
+        ))).to_be_nil()
+        expect(observed_mock_request(
+            "http://destination.test/"
+        ).?).to_be(true)
+        set_mock_registry(MockResponseRegistry.create())
+
+    # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-014
+    it "blocks forged renderer requests with committed CSP before transport":
+        var mocks = MockResponseRegistry.create()
+        for url in [
+            "https://app.test/private",
+            "https://images.test/beacon",
+            "https://app.test/data",
+            "https://images.test/pixel.png"
+        ]:
+            mocks.register(url, 200, "observed")
+        set_mock_registry(mocks)
+        var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+        val document_url = "https://app.test/index"
+        val document_request = request(
+            "document", document_url, "GET", "", "", "",
+            "include", [], ""
+        )
+        val document_policy = HostedBrowserRequestPolicy(
+            ok: true, reason: "ok", mode: RequestMode.Navigate,
+            credentials: "include", canonical_url: document_url,
+            sanitized_headers: "", consumes_navigation: true
+        )
+        val document_response = broker._finalize_network(
+            "document",
+            FetchRequest(
+                url: Url.parse_or_opaque(document_url),
+                method: "GET", headers: "", body: [],
+                mode: RequestMode.Navigate, credentials: "include"
+            ),
+            FetchResponse(
+                status: 200,
+                headers: (
+                    "Content-Security-Policy: sandbox; " +
+                    "default-src 'none'; img-src 'none'"
+                ),
+                body: rt_text_to_bytes(
+                    "<meta http-equiv='content-security-policy' " +
+                    "content=\"connect-src 'none'\">"
+                )
+            )
+        )
+        expect(broker._record_document_response(
+            document_request, document_policy, document_response, 0
+        ).is_ok()).to_be(true)
+        broker.pending_history_action = "push"
+        broker._commit_document_url(document_url)
+        expect(broker.document_csp_ready).to_be(true)
+        expect(broker.document_csp_policy).to_contain(
+            "connect-src 'none'"
+        )
+        expect(broker._renderer_initiator_valid(request(
+            "fetch", "https://app.test/private", "GET", "", "", "",
+            "include", [], "https://app.test"
+        ))).to_be(false)
+        expect(broker.authorize_renderer_navigation(request(
+            "document", "https://app.test/next", "GET", "", "", "",
+            "include", [], "https://app.test"
+        ))).to_be(false)
+        expect(broker._renderer_initiator_valid(request(
+            "fetch", "https://app.test/private", "GET", "", "", "",
+            "omit", ["session=forged"], "null"
+        ))).to_be(false)
+        broker.navigation_permit = permit(
+            true, "https://app.test/next"
+        )
+        expect(broker._renderer_initiator_valid(request(
+            "document", "https://app.test/next", "GET", "", "", "",
+            "include", ["session=forged"], "null"
+        ))).to_be(false)
+        broker.navigation_permit = permit(false, "")
+
+        step("Treat a sandboxed document as an opaque network origin")
+        broker.document_csp_policy = "sandbox; connect-src *"
+        val opaque_fetch = broker._renderer_request_policy(
+            request(
+                "fetch", "https://app.test/private", "GET", "", "", "",
+                "omit", [], "null"
+            ),
+            "https://app.test/private"
+        )
+        expect(opaque_fetch.ok).to_be(true)
+        expect(opaque_fetch.mode).to_equal(RequestMode.Cors)
+        expect(opaque_fetch.sanitized_headers).to_equal("Origin: null")
+
+        step("Apply a pending sandbox before the first frame commit")
+        broker.document_csp_policy = ""
+        broker.pending_document_csp_policy = "sandbox"
+        broker.pending_document_csp_ready = true
+        broker.provisional_document_origin = "https://app.test"
+        expect(broker.authorize_renderer_navigation(request(
+            "document", "https://app.test/next", "GET", "", "", "",
+            "include", [], "null"
+        ))).to_be(false)
+        broker.document_csp_policy = (
+            "sandbox; default-src 'none'; img-src 'none'; " +
+            "connect-src 'none'"
+        )
+        broker.pending_document_csp_policy = ""
+        broker.pending_document_csp_ready = false
+        broker.provisional_document_origin = ""
+
+        step("Tighten rather than discard committed CSP on 304")
+        val not_modified = broker._finalize_network(
+            "document",
+            FetchRequest(
+                url: Url.parse_or_opaque(document_url),
+                method: "GET", headers: "", body: [],
+                mode: RequestMode.Navigate, credentials: "include"
+            ),
+            FetchResponse(
+                status: 304,
+                headers: "Content-Security-Policy: connect-src 'self'",
+                body: []
+            )
+        )
+        expect(broker._record_document_response(
+            document_request, document_policy, not_modified, 0
+        ).is_ok()).to_be(true)
+        broker.pending_history_action = "replace"
+        broker._commit_document_url(document_url)
+        expect(broker.document_csp_policy).to_contain(
+            "connect-src 'none'"
+        )
+        expect(broker.document_csp_policy).to_contain(
+            "connect-src 'self'"
+        )
+
+        step("Reject a same-origin forged fetch")
+        broker.expected_reply_to_request_id = 1
+        val blocked_fetch_wire = browser_renderer_fetch_request_encode(
+            7, 2, 1, "forged-fetch", "fetch",
+            "https://app.test/private", "GET", "", "", "",
+            "omit", [], "null"
+        )
+        expect(blocked_fetch_wire.ok).to_be(true)
+        val blocked_fetch_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), blocked_fetch_wire.wire
+        )
+        expect(blocked_fetch_message.status).to_equal("message")
+        val blocked_fetch_request = browser_renderer_fetch_request_decode(
+            blocked_fetch_message.message
+        )
+        val blocked_fetch = broker._renderer_request_policy(
+            blocked_fetch_request,
+            "https://app.test/private"
+        )
+        expect(blocked_fetch.ok).to_be(false)
+        expect(blocked_fetch.reason).to_equal("csp-connect-src-blocked")
+        expect(broker._dispatch_renderer_fetch(
+            blocked_fetch_request
+        )).to_be_nil()
+        expect(observed_mock_request(
+            "https://app.test/private"
+        )).to_be_nil()
+        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.pending_wire != "").to_be(true)
+        broker.pending_wire = ""
+        broker.pending_wire_offset = 0
+        broker.pending_wire_reply_to_request_id = 0
+        broker.pending_wire_is_command = false
+
+        step("Reject a cross-origin forged image beacon")
+        val blocked_image_wire = browser_renderer_fetch_request_encode(
+            7, 3, 1, "forged-image", "image",
+            "https://images.test/beacon", "GET", "", "", "",
+            "omit", [], "null"
+        )
+        expect(blocked_image_wire.ok).to_be(true)
+        val blocked_image_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), blocked_image_wire.wire
+        )
+        expect(blocked_image_message.status).to_equal("message")
+        val blocked_image_request = browser_renderer_fetch_request_decode(
+            blocked_image_message.message
+        )
+        val blocked_image = broker._renderer_request_policy(
+            blocked_image_request,
+            "https://images.test/beacon"
+        )
+        expect(blocked_image.ok).to_be(false)
+        expect(blocked_image.reason).to_equal("csp-img-src-blocked")
+        expect(broker._dispatch_renderer_fetch(
+            blocked_image_request
+        )).to_be_nil()
+        expect(observed_mock_request(
+            "https://images.test/beacon"
+        )).to_be_nil()
+        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.pending_wire != "").to_be(true)
+        broker.pending_wire = ""
+        broker.pending_wire_offset = 0
+        broker.pending_wire_reply_to_request_id = 0
+        broker.pending_wire_is_command = false
+
+        step("Fail closed when committed policy state is missing")
+        broker.document_csp_ready = false
+        val missing = broker._renderer_request_policy(
+            request(
+                "fetch", "https://app.test/private", "GET", "", "", "",
+                "omit", [], "https://app.test"
+            ),
+            "https://app.test/private"
+        )
+        expect(missing.ok).to_be(false)
+        expect(missing.reason).to_equal("csp-policy-unavailable")
+        expect(broker.network_job_handle).to_equal(0)
+
+        step("Fail closed when committed policy state is invalid")
+        broker.document_csp_ready = true
+        broker.document_csp_policy = "x".repeat(65537)
+        val invalid = broker._renderer_request_policy(
+            request(
+                "fetch", "https://app.test/private", "GET", "", "", "",
+                "omit", [], "https://app.test"
+            ),
+            "https://app.test/private"
+        )
+        expect(invalid.ok).to_be(false)
+        expect(invalid.reason).to_equal("csp-policy-unavailable")
+        expect(observed_mock_request(
+            "https://app.test/private"
+        )).to_be_nil()
+
+        step("Allow only an explicitly admitted control")
+        broker.document_csp_ready = true
+        broker.document_csp_policy = (
+            "default-src 'none'; connect-src 'self'; " +
+            "img-src https://images.test/"
+        )
+        val allowed_fetch_wire = browser_renderer_fetch_request_encode(
+            7, 4, 1, "allowed-fetch", "fetch",
+            "https://app.test/data", "GET", "", "", "",
+            "omit", [], "https://app.test"
+        )
+        expect(allowed_fetch_wire.ok).to_be(true)
+        val allowed_fetch_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), allowed_fetch_wire.wire
+        )
+        val allowed_fetch_request = browser_renderer_fetch_request_decode(
+            allowed_fetch_message.message
+        )
+        expect(broker._dispatch_renderer_fetch(
+            allowed_fetch_request
+        )).to_be_nil()
+        expect(observed_mock_request(
+            "https://app.test/data"
+        ).?).to_be(true)
+        broker.pending_wire = ""
+        broker.pending_wire_offset = 0
+        broker.pending_wire_reply_to_request_id = 0
+        broker.pending_wire_is_command = false
+
+        val allowed_image_wire = browser_renderer_fetch_request_encode(
+            7, 5, 1, "allowed-image", "image",
+            "https://images.test/pixel.png", "GET", "", "", "",
+            "omit", [], "https://app.test"
+        )
+        expect(allowed_image_wire.ok).to_be(true)
+        val allowed_image_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), allowed_image_wire.wire
+        )
+        val allowed_image_request = browser_renderer_fetch_request_decode(
+            allowed_image_message.message
+        )
+        expect(broker._dispatch_renderer_fetch(
+            allowed_image_request
+        )).to_be_nil()
+        expect(observed_mock_request(
+            "https://images.test/pixel.png"
+        ).?).to_be(true)
+        expect(broker.network_job_handle).to_equal(0)
+
+        step("Stage target history CSP and URL before resource dispatch")
+        val original_history_csp = broker.history_csp_policies[0]
+        broker.history_urls.push("https://next.test/page")
+        broker.history_csp_policies.push(
+            "default-src 'none'; connect-src 'self'"
+        )
+        broker.history_csp_ready.push(true)
+        broker.pending_history_target_url = "https://next.test/page"
+        broker.provisional_document_origin = "https://next.test"
+        broker._stage_history_document_csp(1)
+        expect(broker.pending_document_csp_ready).to_be(true)
+        expect(broker._renderer_request_policy(
+            request(
+                "fetch", "https://next.test/data", "GET", "", "", "",
+                "omit", [], "https://next.test"
+            ),
+            "https://next.test/data"
+        ).ok).to_be(true)
+        expect(broker._renderer_request_policy(
+            request(
+                "fetch", "https://app.test/private", "GET", "", "", "",
+                "omit", [], "null"
+            ),
+            "https://app.test/private"
+        ).reason).to_equal("csp-connect-src-blocked")
+        broker.history_urls = [document_url]
+        broker.history_csp_policies = [original_history_csp]
+        broker.history_csp_ready = [true]
+        broker.pending_history_target_url = ""
+
+        step("Restore the broker CSP ledger with history")
+        broker._restore_history_document(0)
+        expect(broker.document_csp_ready).to_be(true)
+        expect(broker.document_csp_policy).to_contain(
+            "connect-src 'none'"
+        )
+
+        step("Preserve the CSP ledger across production site swaps")
+        val registry_source = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_registry.spl"
+        ) ?? ""
+        expect(registry_source).to_contain(
+            "replacement.history_csp_policies = history_csp_policies"
+        )
+        expect(registry_source).to_contain(
+            "replacement.document_csp_policy = document_csp_policy"
+        )
+        expect(registry_source).to_contain(
+            "replacement.pending_document_csp_policy ="
+        )
+        set_mock_registry(MockResponseRegistry.create())
 
     it "issues only bounded canonical http navigation permits":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
@@ -1049,6 +1571,8 @@ describe "hosted browser renderer broker policy":
         var link = HostedBrowserRendererProcess.create(1, 640, 480)
         link.document_url = "https://source.test/page"
         link.document_origin = "https://source.test"
+        link.document_csp_policy = "default-src *"
+        link.document_csp_ready = true
         expect(link.authorize_renderer_navigation(request(
             "document", "https://destination.test/"
         ))).to_be(true)
@@ -1059,6 +1583,8 @@ describe "hosted browser renderer broker policy":
         var forged = HostedBrowserRendererProcess.create(1, 640, 480)
         forged.document_url = "https://source.test/page"
         forged.document_origin = "https://source.test"
+        forged.document_csp_policy = "default-src *"
+        forged.document_csp_ready = true
         expect(forged.authorize_renderer_navigation(request(
             "document", "https://destination.test/", "GET",
             "X-Renderer: forged"
@@ -1075,6 +1601,8 @@ describe "hosted browser renderer broker policy":
         var parent = HostedBrowserRendererProcess.create(1, 640, 480)
         parent.document_url = "https://source.test/page"
         parent.document_origin = "https://source.test"
+        parent.document_csp_policy = "default-src *"
+        parent.document_csp_ready = true
         expect(parent.authorize_navigation(
             "https://allowed.test/", "GET", "", "", ""
         )).to_be(true)
@@ -1831,6 +2359,8 @@ describe "hosted browser renderer broker policy":
         )).to_equal(1)
         renderer_document.document_url = "https://source.test/page"
         renderer_document.document_origin = "https://source.test"
+        renderer_document.document_csp_policy = "default-src *"
+        renderer_document.document_csp_ready = true
         val renderer_request = request(
             "document", "http://secure.test/page"
         )

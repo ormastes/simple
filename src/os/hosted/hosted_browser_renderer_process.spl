@@ -41,7 +41,15 @@ use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
 }
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
 use std.gc_async_mut.web.browser_session.{
-    BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserSession
+    BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserSession,
+    browser_header_content_security_policy
+}
+use std.gc_async_mut.web.browser_session_context.{
+    browser_csp_allows, browser_csp_header_sandbox,
+    browser_csp_policy_valid
+}
+use std.gc_async_mut.web.browser_session_html.{
+    browser_document_csp_policy
 }
 use std.nogc_sync_mut.io.process_ops.{
     browser_renderer_spawn_sandboxed,
@@ -95,6 +103,28 @@ fn _hosted_browser_canonical_history_url(raw: text) -> text:
     if hosted_browser_canonical_http_url(transport) != transport:
         return ""
     raw
+
+fn _hosted_browser_csp_directive(kind: text) -> text:
+    if kind == "fetch":
+        return "connect-src"
+    if kind == "image":
+        return "img-src"
+    if kind == "style":
+        return "style-src"
+    if kind == "script" or kind == "module" or kind == "wasm":
+        return "script-src"
+    ""
+
+fn _hosted_browser_policy_reject(reason: text) -> HostedBrowserRequestPolicy:
+    HostedBrowserRequestPolicy(
+        ok: false,
+        reason: reason,
+        mode: RequestMode.SameOrigin,
+        credentials: "omit",
+        canonical_url: "",
+        sanitized_headers: "",
+        consumes_navigation: false
+    )
 
 pub struct HostedBrowserRendererResult:
     ok: bool
@@ -242,6 +272,8 @@ pub class HostedBrowserRendererProcess:
     site_swap_site: text
     navigation_permit: HostedBrowserNavigationPermit
     history_urls: [text]
+    history_csp_policies: [text]
+    history_csp_ready: [bool]
     history_index: i64
     pending_history_index: i64
     pending_history_target_url: text
@@ -252,6 +284,10 @@ pub class HostedBrowserRendererProcess:
     pending_history_action: text
     pending_document_commit_url: text
     provisional_document_origin: text
+    document_csp_policy: text
+    document_csp_ready: bool
+    pending_document_csp_policy: text
+    pending_document_csp_ready: bool
     hsts: BrowserSession
     hsts_dirty: bool
     retained_image_resources: [SimpleOsHostGpuImageResource]
@@ -299,6 +335,8 @@ pub class HostedBrowserRendererProcess:
             site_swap_site: "",
             navigation_permit: hosted_browser_empty_navigation_permit(),
             history_urls: [],
+            history_csp_policies: [],
+            history_csp_ready: [],
             history_index: -1,
             pending_history_index: -1,
             pending_history_target_url: "",
@@ -309,6 +347,10 @@ pub class HostedBrowserRendererProcess:
             pending_history_action: "",
             pending_document_commit_url: "",
             provisional_document_origin: "",
+            document_csp_policy: "",
+            document_csp_ready: false,
+            pending_document_csp_policy: "",
+            pending_document_csp_ready: false,
             hsts: BrowserSession.new_without_runtime(),
             hsts_dirty: false,
             retained_image_resources: [],
@@ -394,20 +436,48 @@ pub class HostedBrowserRendererProcess:
                 self.pending_history_action = ""
                 self.pending_document_commit_url = ""
                 self.provisional_document_origin = ""
+                self._clear_pending_document_csp()
                 return false
             Some(permit):
                 self.navigation_permit = permit
         self.pending_history_action = "push"
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
+        self._clear_pending_document_csp()
         true
+
+    me _clear_pending_document_csp():
+        self.pending_document_csp_policy = ""
+        self.pending_document_csp_ready = false
+
+    fn _active_document_csp_policy() -> text:
+        if self.provisional_document_origin != "":
+            return self.pending_document_csp_policy
+        self.document_csp_policy
+
+    fn _active_document_csp_ready() -> bool:
+        if self.provisional_document_origin != "":
+            return self.pending_document_csp_ready
+        self.document_csp_ready
+
+    fn _active_document_csp_valid() -> bool:
+        self._active_document_csp_ready() and
+            browser_csp_policy_valid(self._active_document_csp_policy())
 
     me authorize_renderer_navigation(
         request: BrowserRendererNetworkDecodeResult
     ) -> bool:
         if (self.navigation_permit.active or request.kind != "document" or
             request.credentials != "include" or
-            self._requester_origin() == ""):
+            self._requester_origin() == "" or
+            not self._active_document_csp_valid()):
+            return false
+        val sandbox = browser_csp_header_sandbox(
+            self._active_document_csp_policy()
+        )
+        if (sandbox.active and
+            (not sandbox.allow_forms or
+                not sandbox.allow_top_navigation)):
             return false
         val method = request.method.to_upper()
         if method == "GET":
@@ -449,27 +519,59 @@ pub class HostedBrowserRendererProcess:
         self.document_url = url
         self.document_origin = hosted_browser_network_origin(url)
         self.provisional_document_origin = ""
+        self.document_csp_policy = self.pending_document_csp_policy
+        self.document_csp_ready = self.pending_document_csp_ready
+        self.pending_document_csp_policy = ""
+        self.pending_document_csp_ready = false
         if self.pending_history_action == "push":
             var next_history: [text] = []
+            var next_csp: [text] = []
+            var next_csp_ready: [bool] = []
             var index: i64 = 0
             while (index <= self.history_index and
                 index < self.history_urls.len()):
                 next_history.push(self.history_urls[index])
+                if (index < self.history_csp_policies.len() and
+                    index < self.history_csp_ready.len()):
+                    next_csp.push(self.history_csp_policies[index])
+                    next_csp_ready.push(self.history_csp_ready[index])
+                else:
+                    next_csp.push("")
+                    next_csp_ready.push(false)
                 index = index + 1
             next_history.push(url)
+            next_csp.push(self.document_csp_policy)
+            next_csp_ready.push(self.document_csp_ready)
             if next_history.len() > 64:
                 var bounded: [text] = []
+                var bounded_csp: [text] = []
+                var bounded_csp_ready: [bool] = []
                 index = next_history.len() - 64
                 while index < next_history.len():
                     bounded.push(next_history[index])
+                    bounded_csp.push(next_csp[index])
+                    bounded_csp_ready.push(next_csp_ready[index])
                     index = index + 1
                 next_history = bounded
+                next_csp = bounded_csp
+                next_csp_ready = bounded_csp_ready
             self.history_urls = next_history
+            self.history_csp_policies = next_csp
+            self.history_csp_ready = next_csp_ready
             self.history_index = self.history_urls.len() - 1
         elif (self.pending_history_action == "replace" and
             self.history_index >= 0 and
             self.history_index < self.history_urls.len()):
+            while self.history_csp_policies.len() < self.history_urls.len():
+                self.history_csp_policies.push("")
+                self.history_csp_ready.push(false)
             self.history_urls[self.history_index] = url
+            self.history_csp_policies[self.history_index] = (
+                self.document_csp_policy
+            )
+            self.history_csp_ready[self.history_index] = (
+                self.document_csp_ready
+            )
         self.pending_history_action = ""
         self._sync_history_neighbors_from_ledger()
 
@@ -557,6 +659,33 @@ pub class HostedBrowserRendererProcess:
         self.history_back_url = back_url
         self.history_forward_url = forward_url
 
+    me _restore_history_document(index: i64):
+        self.document_url = self.history_urls[index]
+        self.document_origin = hosted_browser_network_origin(
+            self.document_url
+        )
+        self.document_csp_policy = ""
+        self.document_csp_ready = false
+        if (index < self.history_csp_policies.len() and
+            index < self.history_csp_ready.len()):
+            self.document_csp_policy = self.history_csp_policies[index]
+            self.document_csp_ready = self.history_csp_ready[index]
+        self.provisional_document_origin = ""
+        self._sync_history_neighbors_from_ledger()
+
+    me _stage_history_document_csp(index: i64):
+        self.pending_document_csp_policy = ""
+        self.pending_document_csp_ready = false
+        if (index >= 0 and
+            index < self.history_csp_policies.len() and
+            index < self.history_csp_ready.len()):
+            self.pending_document_csp_policy = (
+                self.history_csp_policies[index]
+            )
+            self.pending_document_csp_ready = (
+                self.history_csp_ready[index]
+            )
+
     me _cancel_network_job():
         val handle = self.network_job_handle
         self.network_job_handle = 0
@@ -569,24 +698,41 @@ pub class HostedBrowserRendererProcess:
             val _ = rt_browser_http_job_free(handle)
 
     fn _requester_origin() -> text:
-        if (self.pending_document_commit_url != "" and
-            self.provisional_document_origin != ""):
+        if self.provisional_document_origin != "":
             return self.provisional_document_origin
         self.document_origin
 
     fn _active_renderer_document_url() -> text:
         if self.pending_document_commit_url != "":
             return self.pending_document_commit_url
+        if self.pending_history_target_url != "":
+            return self.pending_history_target_url
         self.document_url
 
     fn _renderer_initiator_valid(
         fetch: BrowserRendererNetworkDecodeResult
     ) -> bool:
+        val csp_ready = self._active_document_csp_ready()
+        val sandbox = browser_csp_header_sandbox(
+            self._active_document_csp_policy()
+        )
+        if (csp_ready and sandbox.active and
+            (not sandbox.allow_scripts or
+                not sandbox.allow_same_origin) and
+            fetch.script_cookie_writes.len() > 0):
+            return false
         if fetch.kind == "document" and self.navigation_permit.active:
             return (
                 fetch.initiator_origin == "" or
                 fetch.initiator_origin == "null" or
                 fetch.initiator_origin == self._requester_origin()
+            )
+        if (csp_ready and sandbox.active and
+            not sandbox.allow_same_origin):
+            return (
+                fetch.initiator_origin == "null" and
+                fetch.credentials == "omit" and
+                fetch.script_cookie_writes.len() == 0
             )
         if fetch.initiator_origin == "null":
             return (
@@ -596,6 +742,66 @@ pub class HostedBrowserRendererProcess:
         fetch.initiator_origin != "" and (
             fetch.initiator_origin == self._requester_origin()
         )
+
+    fn _renderer_request_policy(
+        fetch: BrowserRendererNetworkDecodeResult,
+        effective_url: text
+    ) -> HostedBrowserRequestPolicy:
+        val csp_policy = self._active_document_csp_policy()
+        val csp_ready = self._active_document_csp_ready()
+        val sandbox = browser_csp_header_sandbox(csp_policy)
+        val requester_origin = self._requester_origin()
+        val policy_origin = if (
+            csp_ready and sandbox.active and
+            not sandbox.allow_same_origin
+        ):
+            "null"
+        else:
+            requester_origin
+        if (fetch.kind != "document" and
+            policy_origin == "null" and
+            requester_origin.starts_with("https://") and
+            effective_url.starts_with("http://")):
+            return _hosted_browser_policy_reject(
+                "mixed-content-blocked"
+            )
+        val trusted_initial_bootstrap = (
+            fetch.kind == "document" and
+            self.document_url == "" and
+            self.navigation_permit.active
+        )
+        if (fetch.kind == "document" and
+            not trusted_initial_bootstrap and
+            not self._active_document_csp_valid()):
+            return _hosted_browser_policy_reject(
+                "csp-policy-unavailable"
+            )
+        val policy = hosted_browser_renderer_request_policy(
+            policy_origin,
+            self.navigation_permit,
+            fetch,
+            effective_url
+        )
+        if not policy.ok or fetch.kind == "document":
+            return policy
+        val directive = _hosted_browser_csp_directive(fetch.kind)
+        if directive == "":
+            return _hosted_browser_policy_reject("csp-policy-unavailable")
+        val document_url = self._active_renderer_document_url()
+        if (not csp_ready or document_url == "" or
+            not browser_csp_policy_valid(csp_policy)):
+            return _hosted_browser_policy_reject(
+                "csp-policy-unavailable"
+            )
+        if not browser_csp_allows(
+            csp_policy, directive,
+            if sandbox.allow_same_origin: document_url else: "about:blank",
+            policy.canonical_url, false
+        ):
+            return _hosted_browser_policy_reject(
+                "csp-{directive}-blocked"
+            )
+        policy
 
     fn _poll_renderer_reply(
         reply_to_request_id: i64, future_reason: text
@@ -667,6 +873,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_history_action = ""
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
+        self._clear_pending_document_csp()
         true
 
     me _begin_stop_after_write() -> text:
@@ -702,6 +909,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_history_action = ""
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
+        self._clear_pending_document_csp()
         self.site_lock = ""
         self.site_swap_pending = false
         self.site_swap_site = ""
@@ -723,12 +931,17 @@ pub class HostedBrowserRendererProcess:
             Logger.new("browser-renderer-broker", LogLevel.Error)
         )
         self.history_urls = []
+        self.history_csp_policies = []
+        self.history_csp_ready = []
         self.history_index = -1
         self.history_current_url = ""
         self.history_back_url = ""
         self.history_forward_url = ""
         self.document_url = ""
         self.document_origin = ""
+        self.document_csp_policy = ""
+        self.document_csp_ready = false
+        self._clear_pending_document_csp()
         self.home_url = ""
         if self.state != "failed":
             self.state = "closed"
@@ -902,6 +1115,33 @@ pub class HostedBrowserRendererProcess:
             self.provisional_document_origin = hosted_browser_network_origin(
                 policy.canonical_url
             )
+            val header_csp = browser_header_content_security_policy(
+                response.headers
+            )
+            if (response.status == 304 and
+                policy.canonical_url == self.document_url and
+                self.document_csp_ready):
+                self.pending_document_csp_policy = (
+                    self.document_csp_policy
+                )
+                if header_csp != "":
+                    self.pending_document_csp_policy = (
+                        self.pending_document_csp_policy + "\n" +
+                        header_csp
+                    )
+            elif response.status == 304:
+                self.pending_document_csp_policy = ""
+            else:
+                self.pending_document_csp_policy = (
+                    browser_document_csp_policy(
+                        response.body, policy.canonical_url, header_csp
+                    )
+                )
+            self.pending_document_csp_ready = browser_csp_policy_valid(
+                self.pending_document_csp_policy
+            ) and (response.status != 304 or
+                policy.canonical_url == self.document_url and
+                self.document_csp_ready)
             return Ok(response.headers)
         val location = hosted_browser_response_header_value(
             response.headers, "location"
@@ -1265,6 +1505,103 @@ pub class HostedBrowserRendererProcess:
         self.pending_resize_height = deferred.resize_height
         ""
 
+    me _dispatch_renderer_fetch(
+        fetch: BrowserRendererNetworkDecodeResult
+    ) -> HostedBrowserRendererResult?:
+        if not fetch.ok:
+            return Some(self.fail(fetch.reason))
+        match self._poll_renderer_reply(
+            fetch.reply_to_request_id, "stale-renderer-request"
+        ):
+            Err(reason):
+                return Some(self.fail(reason))
+            Ok(current):
+                if not current:
+                    return nil
+        if not self._renderer_initiator_valid(fetch):
+            return Some(self.fail("invalid-renderer-initiator"))
+        var renderer_navigation = false
+        if (fetch.kind == "document" and
+            not self.navigation_permit.active):
+            if not self._active_document_csp_valid():
+                return Some(self.fail("csp-policy-unavailable"))
+            if not self.authorize_renderer_navigation(fetch):
+                return Some(self.fail("unauthorized-document-request"))
+            renderer_navigation = true
+        val effective_url = self._hsts_upgrade_url(fetch.url)
+        val request_url = hosted_browser_canonical_http_url(fetch.url)
+        if renderer_navigation and request_url != effective_url:
+            val transport_policy = HostedBrowserRequestPolicy(
+                ok: true,
+                reason: "ok",
+                mode: RequestMode.Navigate,
+                credentials: "include",
+                canonical_url: effective_url,
+                sanitized_headers: self.navigation_permit.headers,
+                consumes_navigation: true
+            )
+            val reason = self._queue_hsts_transport_upgrade(
+                fetch, transport_policy, -1
+            )
+            if reason != "":
+                if reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
+                    return Some(_renderer_result(
+                        false, reason, _empty_composition()
+                    ))
+                return Some(self.fail(reason))
+            return nil
+        val policy = self._renderer_request_policy(fetch, effective_url)
+        if not policy.ok:
+            if (policy.reason == "mixed-content-blocked" or
+                policy.reason == "cross-origin-preflight-unavailable" or
+                policy.reason.starts_with("csp-")):
+                val reason = self._write_network_response(
+                    fetch,
+                    policy,
+                    _network_result(0, "", "", policy.reason),
+                    0
+                )
+                if reason != "":
+                    return Some(self.fail(reason))
+                return nil
+            return Some(self.fail(policy.reason))
+        if not self._apply_script_cookie_writes(
+            fetch.script_cookie_writes
+        ):
+            return Some(self.fail("invalid-script-cookie-write"))
+        if (fetch.kind == "document" and
+            self._document_site_swap_required(policy.canonical_url)):
+            return Some(_renderer_result(
+                false,
+                HOSTED_BROWSER_SITE_SWAP_REQUIRED,
+                _empty_composition()
+            ))
+        var redirect_count: i64 = 0
+        if policy.consumes_navigation:
+            redirect_count = self.navigation_permit.redirect_count
+            self.navigation_permit = hosted_browser_empty_navigation_permit()
+        if (fetch.kind != "document" and
+            policy.canonical_url != request_url):
+            val reason = self._queue_hsts_transport_upgrade(
+                fetch, policy, redirect_count
+            )
+            if reason != "":
+                return Some(self.fail(reason))
+            return nil
+        if val Some(response) = self._start_network_job(
+            fetch, policy, redirect_count
+        ):
+            val reason = self._write_network_response(
+                fetch, policy, response, redirect_count
+            )
+            if reason != "":
+                if reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
+                    return Some(_renderer_result(
+                        false, reason, _empty_composition()
+                    ))
+                return Some(self.fail(reason))
+        nil
+
     me poll() -> HostedBrowserRendererResult?:
         if self.command_deadline_ms <= 0:
             return nil
@@ -1332,114 +1669,7 @@ pub class HostedBrowserRendererProcess:
                 val fetch = browser_renderer_fetch_request_decode(
                     decoded.message
                 )
-                if not fetch.ok:
-                    return Some(self.fail(fetch.reason))
-                match self._poll_renderer_reply(
-                    fetch.reply_to_request_id, "stale-renderer-request"
-                ):
-                    Err(reason):
-                        return Some(self.fail(reason))
-                    Ok(current):
-                        if not current:
-                            return nil
-                if not self._renderer_initiator_valid(fetch):
-                    return Some(self.fail("invalid-renderer-initiator"))
-                if not self._apply_script_cookie_writes(
-                    fetch.script_cookie_writes
-                ):
-                    return Some(self.fail("invalid-script-cookie-write"))
-                var renderer_navigation = false
-                if (fetch.kind == "document" and
-                    not self.navigation_permit.active):
-                    if not self.authorize_renderer_navigation(fetch):
-                        return Some(self.fail(
-                            "unauthorized-document-request"
-                        ))
-                    renderer_navigation = true
-                val effective_url = self._hsts_upgrade_url(fetch.url)
-                val request_url = hosted_browser_canonical_http_url(
-                    fetch.url
-                )
-                if (renderer_navigation and request_url != effective_url):
-                    val transport_policy = HostedBrowserRequestPolicy(
-                        ok: true,
-                        reason: "ok",
-                        mode: RequestMode.Navigate,
-                        credentials: "include",
-                        canonical_url: effective_url,
-                        sanitized_headers: self.navigation_permit.headers,
-                        consumes_navigation: true
-                    )
-                    val reason = self._queue_hsts_transport_upgrade(
-                        fetch,
-                        transport_policy,
-                        -1
-                    )
-                    if reason != "":
-                        if reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
-                            return Some(_renderer_result(
-                                false, reason, _empty_composition()
-                            ))
-                        return Some(self.fail(reason))
-                    return nil
-                val policy = hosted_browser_renderer_request_policy(
-                    self._requester_origin(),
-                    self.navigation_permit,
-                    fetch,
-                    effective_url
-                )
-                if not policy.ok:
-                    if (policy.reason == "mixed-content-blocked" or
-                        policy.reason ==
-                            "cross-origin-preflight-unavailable"):
-                        val reason = self._write_network_response(
-                            fetch,
-                            policy,
-                            _network_result(
-                                0, "", "", policy.reason
-                            ),
-                            0
-                        )
-                        if reason != "":
-                            return Some(self.fail(reason))
-                        return nil
-                    return Some(self.fail(policy.reason))
-                if (fetch.kind == "document" and
-                    self._document_site_swap_required(
-                        policy.canonical_url
-                    )):
-                    return Some(_renderer_result(
-                        false,
-                        HOSTED_BROWSER_SITE_SWAP_REQUIRED,
-                        _empty_composition()
-                    ))
-                var redirect_count: i64 = 0
-                if policy.consumes_navigation:
-                    redirect_count = self.navigation_permit.redirect_count
-                    self.navigation_permit = (
-                        hosted_browser_empty_navigation_permit()
-                    )
-                if (fetch.kind != "document" and
-                    policy.canonical_url != request_url):
-                    val reason = self._queue_hsts_transport_upgrade(
-                        fetch, policy, redirect_count
-                    )
-                    if reason != "":
-                        return Some(self.fail(reason))
-                    return nil
-                if val Some(response) = self._start_network_job(
-                    fetch, policy, redirect_count
-                ):
-                    val reason = self._write_network_response(
-                        fetch, policy, response, redirect_count
-                    )
-                    if reason != "":
-                        if reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
-                            return Some(_renderer_result(
-                                false, reason, _empty_composition()
-                            ))
-                        return Some(self.fail(reason))
-                return nil
+                return self._dispatch_renderer_fetch(fetch)
             val frame_reply_to_request_id = (
                 browser_renderer_frame_reply_to_request_id(decoded.message)
             )
@@ -1495,12 +1725,7 @@ pub class HostedBrowserRendererProcess:
                 self.provisional_document_origin = ""
             if self.pending_history_index >= 0:
                 self.history_index = self.pending_history_index
-                self.document_url = self.history_urls[self.history_index]
-                self.document_origin = hosted_browser_network_origin(
-                    self.document_url
-                )
-                self.provisional_document_origin = ""
-                self._sync_history_neighbors_from_ledger()
+                self._restore_history_document(self.history_index)
             if (frame.history_state_present and has_trusted_document and
                 not unchanged_history_state):
                 self._apply_frame_history_state(
@@ -1717,6 +1942,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_history_action = "push"
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
+        self._clear_pending_document_csp()
         val started = self._begin_navigation_command(
             command, "open", "navigation", timeout_ms
         )
@@ -1749,6 +1975,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_history_action = "push"
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
+        self._clear_pending_document_csp()
         val started = self._begin_navigation_command(
             command, "home", "navigation", timeout_ms
         )
@@ -1781,6 +2008,7 @@ pub class HostedBrowserRendererProcess:
         self.provisional_document_origin = hosted_browser_network_origin(
             target_url
         )
+        self._stage_history_document_csp(self.pending_history_index)
         val started = self._begin_navigation_command(
             command, "back", "history", timeout_ms
         )
@@ -1788,6 +2016,7 @@ pub class HostedBrowserRendererProcess:
             self.pending_history_index = -1
             self.pending_history_target_url = ""
             self.provisional_document_origin = ""
+            self._clear_pending_document_csp()
         started
 
     me begin_go_forward(timeout_ms: i64) -> Result<bool, text>:
@@ -1815,6 +2044,7 @@ pub class HostedBrowserRendererProcess:
         self.provisional_document_origin = hosted_browser_network_origin(
             target_url
         )
+        self._stage_history_document_csp(self.pending_history_index)
         val started = self._begin_navigation_command(
             command, "forward", "history", timeout_ms
         )
@@ -1822,6 +2052,7 @@ pub class HostedBrowserRendererProcess:
             self.pending_history_index = -1
             self.pending_history_target_url = ""
             self.provisional_document_origin = ""
+            self._clear_pending_document_csp()
         started
 
     me begin_reload(timeout_ms: i64) -> Result<bool, text>:
@@ -1848,6 +2079,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_history_action = "replace"
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
+        self._clear_pending_document_csp()
         val started = self._begin_navigation_command(
             command, "reload", "history", timeout_ms
         )
@@ -1873,6 +2105,7 @@ pub class HostedBrowserRendererProcess:
             self.pending_history_action = ""
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
+        self._clear_pending_document_csp()
         self._begin_navigation_command(
             browser_renderer_navigation_encode(
                 self.generation, self.next_request_id,
