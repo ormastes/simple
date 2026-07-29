@@ -600,14 +600,23 @@ fn decl_export_names(names: [text], span_id: i64) -> i64:
     decl_imports[idx] = names
     idx
 
-fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64], variant_payload_types: [i64], span_id: i64) -> i64:
-    """`variant_payload_types` is parallel to `variant_names`: one type-tag
-    per variant (-1 = no payload). EPC1 lane (bug
-    enum_variant_payload_types_discarded_at_parse_2026-07-29): captures only
-    the FIRST payload field's type per variant -- a multi-field variant like
-    `Pair(a: i64, b: text)` loses `b`'s type here (single-payload-only;
-    documented limit, matches decl_field_types' existing per-decl shape
-    rather than adding a new per-variant-multi-type arena)."""
+fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64], variant_payload_types_flat: [i64], variant_payload_counts: [i64], span_id: i64) -> i64:
+    """EPA1 (bug enum_payload_multi_arity, extends EPC1's single-payload
+    capture to full arity): `variant_payload_counts` is parallel to
+    `variant_names` -- one entry per variant giving how many payload fields
+    that variant declared (0 = no payload). `variant_payload_types_flat` is
+    the concatenation, in variant order then field order, of every payload
+    field's type tag across ALL variants -- e.g. for
+    `Pair(a: i64, b: text)` followed by `Solo(x: bool)` the flat list is
+    `[i64_tag, text_tag, bool_tag]` and counts are `[2, 1]`. A reader
+    recovers variant N's types by summing counts[0..N] for the start offset
+    and slicing `counts[N]` entries. Reuses two existing per-decl arena
+    slots rather than adding a new one: `decl_field_types` (already used by
+    structs for one-tag-per-field) carries the flat type list, and
+    `decl_field_bits` (unused by enum decls -- structs use it for bitfield
+    widths) carries the per-variant counts. Superseded EPC1's
+    single-payload-only `variant_payload_types: [i64]` (one tag per
+    variant, extra fields discarded)."""
     val idx = decl_alloc(DECL_ENUM, span_id)
     if not ast_decl_prefer_arena():
         ast_decl_direct_set(ast_decl_tag_key(idx), "8")
@@ -616,12 +625,14 @@ fn decl_enum_def(name: text, variant_names: [text], variant_discriminants: [i64]
         ast_decl_text_set(idx, "FIELD_NAMES", ast_text_list_join(variant_names))
         ast_decl_direct_set(ast_decl_field_names_key(idx), ast_text_list_join(variant_names))
         ast_decl_text_set(idx, "FIELD_DEFAULTS", ast_i64_list_join(variant_discriminants))
-        ast_decl_text_set(idx, "FIELD_TYPES", ast_i64_list_join(variant_payload_types))
-        ast_decl_direct_set(ast_decl_field_types_key(idx), ast_i64_list_join(variant_payload_types))
+        ast_decl_text_set(idx, "FIELD_TYPES", ast_i64_list_join(variant_payload_types_flat))
+        ast_decl_direct_set(ast_decl_field_types_key(idx), ast_i64_list_join(variant_payload_types_flat))
+        ast_decl_text_set(idx, "FIELD_BITS", ast_i64_list_join(variant_payload_counts))
     decl_name[idx] = name
     decl_field_names[idx] = variant_names
     decl_field_defaults[idx] = variant_discriminants
-    decl_field_types[idx] = variant_payload_types
+    decl_field_types[idx] = variant_payload_types_flat
+    decl_field_bits[idx] = variant_payload_counts
     idx
 
 fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i64:

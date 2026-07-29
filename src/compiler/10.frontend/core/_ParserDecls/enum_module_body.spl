@@ -90,7 +90,12 @@ fn parse_enum_decl() -> i64:
 
     var variant_names: [text] = []
     var variant_discriminants: [i64] = []
-    var variant_payload_types: [i64] = []
+    # EPA1 (bug enum_payload_multi_arity, extends EPC1): flat, in-order
+    # concatenation of every variant's payload field types, plus a parallel
+    # per-variant count so the bridge can slice the flat list back apart.
+    # See decl_enum_def's docstring in _Ast/decl_nodes.spl.
+    var variant_payload_types_flat: [i64] = []
+    var variant_payload_counts: [i64] = []
     var parse_enum_method_ids: [i64] = []
 
     for i in 0..1000:
@@ -139,12 +144,11 @@ fn parse_enum_decl() -> i64:
             continue
         parser_expect(6)
         # Handle enum variant data: Variant(field: type, ...)
-        # EPC1 (bug enum_variant_payload_types_discarded_at_parse_2026-07-29):
-        # capture the FIRST field's type tag so the variant is not fully
-        # payload-blind downstream; a second/third field in the same variant
-        # (e.g. `Pair(a: i64, b: text)`) still has its type discarded here --
-        # single-payload-only, documented limit (see decl_enum_def docstring).
-        var variant_payload_type: i64 = -1
+        # EPA1 (bug enum_payload_multi_arity, extends EPC1): capture EVERY
+        # field's type tag for this variant, in order, into
+        # variant_field_types; the count is recorded below so the flat
+        # cross-variant list stays sliceable.
+        var variant_field_types: [i64] = []
         if par_kind_get() == 140:
             parser_advance()
             for j in 0..100:
@@ -158,15 +162,13 @@ fn parse_enum_decl() -> i64:
                     if par_kind_get() == 161:
                         parser_advance()
                         val fld_type = parser_parse_type()
-                        if variant_payload_type < 0:
-                            variant_payload_type = fld_type
+                        variant_field_types.push(fld_type)
                         # Handle optional ? after type
                         if par_kind_get() == 130:
                             parser_advance()
                 elif par_kind_get() == 144:
                     val bracket_type = parser_parse_type()
-                    if variant_payload_type < 0:
-                        variant_payload_type = bracket_type
+                    variant_field_types.push(bracket_type)
                 else:
                     parser_advance()
                 if par_kind_get() == 160:
@@ -178,7 +180,11 @@ fn parse_enum_decl() -> i64:
             discriminant = parse_expr()
         variant_names.push(vname)
         variant_discriminants.push(discriminant)
-        variant_payload_types.push(variant_payload_type)
+        variant_payload_counts.push(variant_field_types.len())
+        var vft_i = 0
+        while vft_i < variant_field_types.len():
+            variant_payload_types_flat.push(variant_field_types[vft_i])
+            vft_i = vft_i + 1
         # G42: pipe-separated variants on the same line (e.g. `Escape | F1 | F2`).
         # Pure separator, no semantic change -- loop back to the top and parse
         # the next variant name immediately (no newline/dedent between them).
@@ -193,7 +199,7 @@ fn parse_enum_decl() -> i64:
             continue
         parser_skip_newlines_and_semicolons()
 
-    val enum_d = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types, 0)
+    val enum_d = decl_enum_def(enum_name, variant_names, variant_discriminants, variant_payload_types_flat, variant_payload_counts, 0)
     if parse_enum_method_ids.len() > 0:
         val enum_impl = decl_impl_block(enum_name, parse_enum_method_ids, 0)
         module_add_decl(enum_impl)

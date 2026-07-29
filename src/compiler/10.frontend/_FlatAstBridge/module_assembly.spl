@@ -376,18 +376,21 @@ fn flat_ast_to_module(path: text) -> Module:
             val e_name = decl_get_name(idx)
             # Recover variant NAMES from the flat AST (stored in the FIELD_NAMES
             # slot by decl_enum_def), optional discriminant expression ids from
-            # FIELD_DEFAULTS, and (EPC1, bug
-            # enum_variant_payload_types_discarded_at_parse_2026-07-29) each
-            # variant's first payload type tag from FIELD_TYPES (same
-            # decl_field_types slot structs use). -1 (no type tag captured,
-            # either no payload or a discarded 2nd+ field -- see
-            # decl_enum_def's docstring) means `kind: Tuple([])`, unchanged
-            # from before this lane.
+            # FIELD_DEFAULTS, and (EPA1, bug enum_payload_multi_arity, extends
+            # EPC1) each variant's FULL payload type list: FIELD_TYPES holds
+            # the flat, in-order concatenation of every variant's payload
+            # field types across the whole enum, and FIELD_BITS (reused --
+            # unused by enum decls otherwise; structs use it for bitfield
+            # widths) holds the per-variant field COUNT. Walk a running
+            # offset into the flat list, slicing out each variant's own
+            # `count` entries. A count of 0 means `kind: Tuple([])`.
             var e_variants: [Variant] = []
             val e_names = decl_get_fields(idx)
             val e_discriminants = decl_get_field_defaults(idx)
-            val e_payload_types = decl_get_field_types(idx)
+            val e_payload_types_flat = decl_get_field_types(idx)
+            val e_payload_counts = decl_get_field_bits(idx)
             var e_vi = 0
+            var e_type_offset = 0
             while e_vi < e_names.len():
                 var e_discriminant_id: i64 = -1
                 if e_vi < e_discriminants.len():
@@ -396,12 +399,16 @@ fn flat_ast_to_module(path: text) -> Module:
                 var e_discriminant = Expr(kind: ExprKind.NilLit, span: span)
                 if e_has_discriminant:
                     e_discriminant = convert_flat_expr(e_discriminant_id)
-                var e_payload_tag: i64 = -1
-                if e_vi < e_payload_types.len():
-                    e_payload_tag = e_payload_types[e_vi]
-                var e_kind = VariantKind.Tuple([])
-                if e_payload_tag >= 0:
-                    e_kind = VariantKind.Tuple([convert_flat_type(e_payload_tag)])
+                var e_payload_count: i64 = 0
+                if e_vi < e_payload_counts.len():
+                    e_payload_count = e_payload_counts[e_vi]
+                var e_variant_types: [Type] = []
+                var e_ti = 0
+                while e_ti < e_payload_count and e_type_offset < e_payload_types_flat.len():
+                    e_variant_types.push(convert_flat_type(e_payload_types_flat[e_type_offset]))
+                    e_type_offset = e_type_offset + 1
+                    e_ti = e_ti + 1
+                val e_kind = VariantKind.Tuple(e_variant_types)
                 e_variants.push(Variant(
                     name: e_names[e_vi],
                     kind: e_kind,
@@ -698,8 +705,11 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     # copied out of the flat AST, then promote that retained graph before the
     # arena is cleared.
     val transient_scope = if streaming_scope: rt_transient_array_scope_begin() else: false
+    print "ZZZTRACE: before parse_module_body"
     parse_module_body()
+    print "ZZZTRACE: after parse_module_body, before desugar_collections"
     desugar_collections(0, 0)
+    print "ZZZTRACE: after desugar_collections"
     if parser_has_errors():
         val errors = parser_get_errors()
         var ei = 0
