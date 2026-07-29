@@ -7,6 +7,11 @@ use std.editor.extensions.api.*
 use std.editor.extensions.manifest.*
 use std.editor.extensions.manifest_sdn.{extension_manifest_load}
 use std.editor.extensions.registry.{CommandRegistry, EventListenerRegistry, LanguageIndex}
+use std.editor.extensions.runtime.{
+    ExtensionCrashState, path_contained_in,
+    runtime_check_permission, runtime_crash_is_disabled,
+    runtime_crash_record, runtime_crash_reenable
+}
 use std.editor.extensions.builtin.index.{builtin_manifest_providers}
 use std.editor.extensions.builtin.spl_language.*
 use std.editor.extensions.builtin.md_language.*
@@ -46,6 +51,7 @@ class ExtensionHost:
     invocation_queue: [ExtensionCommandInvocation]
     runtime_policy: ExtensionRuntimePolicy
     runtime_dispatch_log: [ExtensionRuntimeDispatchRecord]
+    crash_state: [ExtensionCrashState]
     commands: CommandRegistry
     listeners: EventListenerRegistry
     lifetimes: [ExtensionLifetimeEntry]
@@ -122,6 +128,7 @@ impl ExtensionHost:
             invocation_queue: [],
             runtime_policy: extension_runtime_policy_default(),
             runtime_dispatch_log: [],
+            crash_state: [],
             commands: CommandRegistry.new(),
             listeners: EventListenerRegistry.new(),
             lifetimes: []
@@ -232,6 +239,13 @@ impl ExtensionHost:
 
     # Lazy activation + real dispatch: "onCommand:<id>" activates the owning
     # extension, then the registered typed handler executes.
+    #
+    # L6 hooks (runtime.spl): a "worker"-placed extension must hold the
+    # process_spawn permission to dispatch at all (default-deny; the other
+    # five permissions are declared+checked via runtime_check_permission but
+    # not wired into any dispatch seam yet); an extension that has failed its
+    # last 3 consecutive dispatches is short-circuited with a fixed error
+    # instead of running its handler again (crash-loop containment).
     me dispatch_command(command_id: text, payload: text) -> Result<text, text>:
         me.activate_command(command_id)
         if not me.commands.has(command_id):
@@ -240,7 +254,27 @@ impl ExtensionHost:
         val entry = me.find_extension(owner)
         if entry.manifest.name != "" and not entry.active:
             return Err("extension not active: " + owner)
-        me.commands.run(command_id, payload)
+        if runtime_crash_is_disabled(me.crash_state, owner):
+            return Err("extension disabled after repeated failures: " + owner)
+        if entry.manifest.host == "worker":
+            match runtime_check_permission(entry.manifest.permissions, "process_spawn"):
+                case Err(reason):
+                    return Err(reason)
+                case Ok(_):
+                    pass_do_nothing
+        val result = me.commands.run(command_id, payload)
+        var dispatch_ok = false
+        match result:
+            case Ok(_):
+                dispatch_ok = true
+            case Err(_):
+                dispatch_ok = false
+        me.crash_state = runtime_crash_record(me.crash_state, owner, dispatch_ok)
+        result
+
+    # Clear crash-loop state for `name` so its next dispatch runs normally.
+    me runtime_reenable(name: text):
+        me.crash_state = runtime_crash_reenable(me.crash_state, name)
 
     # Register a typed event listener, owned by the extension's lifetime.
     me on_event(extension_name: text, event: text, handler_fn: fn(text)) -> Disposable:
@@ -417,7 +451,7 @@ impl ExtensionHost:
         if me.runtime_policy.allowed_roots.len() == 0:
             return false
         for root in me.runtime_policy.allowed_roots:
-            if root != "" and path.starts_with(root):
+            if root != "" and path_contained_in(path, root):
                 return true
         false
 
