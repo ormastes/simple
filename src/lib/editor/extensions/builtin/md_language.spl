@@ -4,21 +4,27 @@
 
 use std.editor.extensions.manifest.{ExtensionManifest, ExtensionCommand, ExtensionLanguage,
     ExtensionDebugAdapterManifest, ExtensionTheme, ExtensionKeybinding, extension_manifest_basic}
+use std.editor.view.md_editing.{md_assist_toggle_task}
 
 fn md_language_id() -> text:
     "markdown"
 
 fn md_language_manifest() -> ExtensionManifest:
-    extension_manifest_basic(
+    var m = extension_manifest_basic(
         "markdown-language", "1.0.0", "",
-        ["onLanguage:markdown"],
+        ["onLanguage:markdown", "onCommand:markdown.toggle_bold", "onCommand:markdown.toggle_task"],
         [
             ExtensionCommand(id: "md.preview", title: "Markdown: Open Preview", category: "Markdown"),
-            ExtensionCommand(id: "md.toggleBold", title: "Markdown: Toggle Bold", category: "Markdown"),
+            ExtensionCommand(id: "markdown.toggle_bold", title: "Markdown: Toggle Bold", category: "Markdown"),
+            ExtensionCommand(id: "markdown.toggle_task", title: "Markdown: Toggle Task", category: "Markdown"),
             ExtensionCommand(id: "md.toggleItalic", title: "Markdown: Toggle Italic", category: "Markdown")
         ],
         [ExtensionLanguage(id: "markdown", extensions: [".md", ".markdown"])]
     )
+    m.schema_version = "simple.ide.extension/1"
+    m.display_name = "Markdown Language"
+    m.engine = ">=1.0.0"
+    m
 
 struct MdDiagnostic:
     line: i64
@@ -129,3 +135,129 @@ fn _md_language_find_prev_char(line: text, needle: text, start: i64) -> i64:
             return i
         i = i - 1
     -1
+
+# ---- markdown.toggle_bold ---------------------------------------------------
+
+fn _md_is_word_char(ch: text) -> bool:
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(ch)
+
+# Local digit parser: avoids Option<i64> `?? ` hazards (payload-3 == nil).
+fn _md_parse_i64(value: text) -> i64:
+    var negative = false
+    var i = 0
+    if value.starts_with("-"):
+        negative = true
+        i = 1
+    var out = 0
+    val digits = "0123456789"
+    while i < value.len():
+        val ch = value.char_at(i)
+        if not digits.contains(ch):
+            return if negative then 0 - out else: out
+        var d = 0
+        while d < 10:
+            if digits.char_at(d) == ch:
+                out = out * 10 + d
+            d = d + 1
+        i = i + 1
+    if negative then 0 - out else: out
+
+# Toggle `**` around the selection (sel_start..sel_end on this line) or the
+# word at `col`. No selection => sel_start/sel_end are -1.
+fn md_toggle_bold_line(line: text, col: i64, sel_start: i64, sel_end: i64) -> text:
+    val n = line.len()
+    var start = sel_start
+    var end = sel_end
+    if start < 0 or end <= start:
+        var c = col
+        if c > n:
+            c = n
+        if c > 0 and (c >= n or not _md_is_word_char(line.char_at(c))):
+            if _md_is_word_char(line.char_at(c - 1)):
+                c = c - 1
+        if c < n and _md_is_word_char(line.char_at(c)):
+            start = c
+            while start > 0 and _md_is_word_char(line.char_at(start - 1)):
+                start = start - 1
+            end = c + 1
+            while end < n and _md_is_word_char(line.char_at(end)):
+                end = end + 1
+        else:
+            return line.slice(0, c) + "****" + line.slice(c, n)
+    if start < 0:
+        start = 0
+    if end > n:
+        end = n
+    val segment = line.slice(start, end)
+    if segment.len() >= 4 and segment.starts_with("**") and segment.ends_with("**"):
+        return line.slice(0, start) + segment.slice(2, segment.len() - 2) + line.slice(end, n)
+    if start >= 2 and end + 2 <= n:
+        if line.slice(start - 2, start) == "**" and line.slice(end, end + 2) == "**":
+            return line.slice(0, start - 2) + segment + line.slice(end + 2, n)
+    line.slice(0, start) + "**" + segment + "**" + line.slice(end, n)
+
+# ---- typed kernel handlers (registered via ExtensionHost.register_command_handler)
+
+# Payload: "<col>|<sel_start>|<sel_end>|<line text>" (line text may contain '|').
+# Result: the new line text.
+fn md_toggle_bold_handler(payload: text) -> Result<text, text>:
+    val p1 = _md_language_find_char(payload, "|", 0)
+    if p1 < 0:
+        return Err("markdown.toggle_bold payload: missing col")
+    val p2 = _md_language_find_char(payload, "|", p1 + 1)
+    if p2 < 0:
+        return Err("markdown.toggle_bold payload: missing sel_start")
+    val p3 = _md_language_find_char(payload, "|", p2 + 1)
+    if p3 < 0:
+        return Err("markdown.toggle_bold payload: missing sel_end")
+    val col = _md_parse_i64(payload.slice(0, p1))
+    val sel_start = _md_parse_i64(payload.slice(p1 + 1, p2))
+    val sel_end = _md_parse_i64(payload.slice(p2 + 1, p3))
+    val line = payload.slice(p3 + 1, payload.len())
+    Ok(md_toggle_bold_line(line, col, sel_start, sel_end))
+
+# Payload: the task line text. Result: the toggled line (unchanged when the
+# line is not a task).
+fn md_toggle_task_handler(payload: text) -> Result<text, text>:
+    Ok(md_assist_toggle_task(payload))
+
+# Payload: full document content. Result: one diagnostic per line as
+# "<line>|<col>|<severity>|<message>" ("" when clean).
+fn md_language_diagnose_handler(payload: text) -> Result<text, text>:
+    val diagnostics = md_language_diagnose(payload)
+    var out = ""
+    for d in diagnostics:
+        if out != "":
+            out = out + "\n"
+        out = out + d.line.to_text() + "|" + d.col.to_text() + "|" + d.severity + "|" + d.message
+    Ok(out)
+
+# Payload: "<line>|<col>\n<content>". Result: completion labels, one per line.
+fn md_language_complete_handler(payload: text) -> Result<text, text>:
+    val header_end = _md_language_find_char(payload, "\n", 0)
+    val header = if header_end >= 0 then payload.slice(0, header_end) else: payload
+    val content = if header_end >= 0 then payload.slice(header_end + 1, payload.len()) else: ""
+    val sep = _md_language_find_char(header, "|", 0)
+    if sep < 0:
+        return Err("markdown.provide_completions payload: missing line|col header")
+    val line = _md_parse_i64(header.slice(0, sep))
+    val col = _md_parse_i64(header.slice(sep + 1, header.len()))
+    val completions = md_language_complete(content, line, col)
+    var out = ""
+    for c in completions:
+        if out != "":
+            out = out + "\n"
+        out = out + c.label
+    Ok(out)
+
+# Payload: "<line>|<col>\n<content>". Result: hover text ("" when none).
+fn md_language_hover_handler(payload: text) -> Result<text, text>:
+    val header_end = _md_language_find_char(payload, "\n", 0)
+    val header = if header_end >= 0 then payload.slice(0, header_end) else: payload
+    val content = if header_end >= 0 then payload.slice(header_end + 1, payload.len()) else: ""
+    val sep = _md_language_find_char(header, "|", 0)
+    if sep < 0:
+        return Err("markdown.provide_hover payload: missing line|col header")
+    val line = _md_parse_i64(header.slice(0, sep))
+    val col = _md_parse_i64(header.slice(sep + 1, header.len()))
+    Ok(md_language_hover(content, line, col))
