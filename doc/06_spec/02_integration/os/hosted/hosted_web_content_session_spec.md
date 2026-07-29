@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -963,6 +963,46 @@ expect(session.current_body_html()).to_contain("value=\"Ada\"")
 
 </details>
 
+#### routes committed text to focus established on pointer down
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    11,
+    "<style>body{margin:0}input{display:block;margin:0;padding:0;" +
+    "border:0;width:40px;height:20px}</style>" +
+    "<input id='first' value=''><input id='second' value=''>" +
+    "<input id='blocked' value='' onmousedown='prevent-default'>",
+    80, 80
+)
+val _ = session.dispatch_pointer_at(1, 5, 5, true)
+val _ = session.dispatch_pointer_at(2, 5, 5, false)
+expect(session.last_target_id).to_equal("first")
+
+val down = session.dispatch_pointer_at(3, 5, 25, true)
+expect(down.semantic_target_id).to_equal("second")
+expect(be_dom_focused_id(session.browser.dom_root())).to_equal("second")
+expect(session.last_target_id).to_equal("second")
+
+val committed = session.dispatch_text(4, "X")
+expect(committed.semantic_target_id).to_equal("second")
+expect(session.current_body_html()).to_contain(
+    "id=\"second\" value=\"X\""
+)
+
+val canceled = session.dispatch_pointer_at(5, 5, 45, true)
+expect(canceled.semantic_target_id).to_equal("blocked")
+expect(be_dom_focused_id(session.browser.dom_root())).to_equal("second")
+expect(session.last_target_id).to_equal("second")
+```
+
+</details>
+
 #### counts only an executed input listener as an application callback
 
 <details>
@@ -1861,8 +1901,8 @@ Tests covering hosted Web content session.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
