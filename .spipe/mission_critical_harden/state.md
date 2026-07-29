@@ -5,6 +5,21 @@ Goal set: spipe dev skill, harden simple with the parallel simple harden plan
 (mission-critical robustness vs Rust/Ferrocene; first merge batch started with
 parallel agents 2026-07-28).
 
+## GOAL STATUS (2026-07-29): ALL ACCEPTANCE CRITERIA MET — AC-1..AC-11 landed and pushed
+
+Batches 1, 2, 2.5, D, and the user-approved Batch-3 items (PR2, PE, SE1/SE2)
+are all on origin/main, each lane orchestrator-verified before push. Remaining
+work is explicitly OUT of the goal's acceptance criteria:
+- Two USER decisions (do not implement without them): `iso` move semantics
+  (audit doc § C3-NEW has options + recommendation) and the parallel session's
+  `feat(ui)` conflict root.
+- Batch-3 deferred lanes now unblocked and ready on request: G2/E1047 (SF1
+  landed, ownership conflict gone), Miri-mode (SF3 landed), SBOM, editions,
+  registry unification; G7 queues behind G2; G8 behind contract lock.
+- Runtime/seed work filed, not in .spl scope: signal-capture externs (DS7),
+  `rt_process_spawn_piped` in interpreter_sffi (DS6), self-hosted redeploy to
+  make `run`/single-file `test` exercise PE end-to-end.
+
 ## Task Type
 code-quality / compiler-hardening
 
