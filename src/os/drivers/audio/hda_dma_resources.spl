@@ -1,0 +1,127 @@
+# Freestanding-safe HDA DMA ownership.
+#
+# The returned scalar address owns four runtime DMA handles.  No aggregate
+# crosses the native boundary.
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64) -> i64
+extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
+extern fn rt_dma_free(handle: i64)
+extern fn rt_dma_virt_of(handle: i64) -> i64
+extern fn rt_dma_phys_of(handle: i64) -> i64
+
+val HDA_DMA_CORB: i64 = 0
+val HDA_DMA_RIRB: i64 = 1
+val HDA_DMA_BDL: i64 = 2
+val HDA_DMA_PCM: i64 = 3
+val HDA_DMA_RESOURCE_COUNT: i64 = 4
+
+fn hda_dma_resource_size(kind: i64) -> i64:
+    if kind == HDA_DMA_CORB:
+        return 1024
+    if kind == HDA_DMA_RIRB:
+        return 2048
+    if kind == HDA_DMA_BDL:
+        return 64
+    if kind == HDA_DMA_PCM:
+        return 16384
+    0
+
+fn _hda_dma_direction(kind: i64) -> i32:
+    if kind == HDA_DMA_RIRB:
+        return 1
+    0
+
+fn hda_dma_resource_handle(resources: i64, kind: i64) -> i64:
+    if resources == 0 or kind < 0 or kind >= HDA_DMA_RESOURCE_COUNT:
+        return -1
+    rt_ptr_read_i64(resources, kind * 8)
+
+fn hda_dma_resource_virt(resources: i64, kind: i64) -> i64:
+    val handle = hda_dma_resource_handle(resources, kind)
+    if handle < 0:
+        return 0
+    rt_dma_virt_of(handle)
+
+fn hda_dma_resource_phys(resources: i64, kind: i64) -> i64:
+    val handle = hda_dma_resource_handle(resources, kind)
+    if handle < 0:
+        return 0
+    rt_dma_phys_of(handle)
+
+fn hda_dma_resources_destroy(resources: i64):
+    if resources == 0:
+        return
+    var kind: i64 = 0
+    while kind < HDA_DMA_RESOURCE_COUNT:
+        val handle = hda_dma_resource_handle(resources, kind)
+        if handle >= 0:
+            rt_dma_free(handle)
+            rt_ptr_write_i64(resources, kind * 8, -1)
+        kind = kind + 1
+    rt_free(resources)
+
+fn hda_dma_resources_create() -> i64:
+    val resources = rt_alloc(HDA_DMA_RESOURCE_COUNT * 8)
+    if resources == 0:
+        return 0
+    var kind: i64 = 0
+    while kind < HDA_DMA_RESOURCE_COUNT:
+        rt_ptr_write_i64(resources, kind * 8, -1)
+        kind = kind + 1
+    kind = 0
+    while kind < HDA_DMA_RESOURCE_COUNT:
+        val handle = rt_dma_alloc(
+            hda_dma_resource_size(kind),
+            _hda_dma_direction(kind)
+        )
+        if handle < 0:
+            hda_dma_resources_destroy(resources)
+            return 0
+        rt_ptr_write_i64(resources, kind * 8, handle)
+        val virt = rt_dma_virt_of(handle)
+        val phys = rt_dma_phys_of(handle)
+        if (virt == 0 or phys == 0 or
+            (virt & 127) != 0 or (phys & 127) != 0):
+            hda_dma_resources_destroy(resources)
+            return 0
+        kind = kind + 1
+    resources
+
+fn hda_dma_prepare_silent_stream(resources: i64) -> bool:
+    val bdl_virt = hda_dma_resource_virt(resources, HDA_DMA_BDL)
+    val pcm_virt = hda_dma_resource_virt(resources, HDA_DMA_PCM)
+    val pcm_phys = hda_dma_resource_phys(resources, HDA_DMA_PCM)
+    if bdl_virt == 0 or pcm_virt == 0 or pcm_phys == 0:
+        return false
+
+    var offset: i64 = 0
+    while offset < hda_dma_resource_size(HDA_DMA_PCM):
+        rt_ptr_write_i64(pcm_virt, offset, 0)
+        offset = offset + 8
+
+    val period_bytes: i64 = 4096
+    var period: i64 = 0
+    while period < 4:
+        val entry_offset = period * 16
+        rt_ptr_write_i64(
+            bdl_virt,
+            entry_offset,
+            pcm_phys + period * period_bytes
+        )
+        # BDL +8: u32 length, then u32 flags; flag bit0 requests IOC.
+        rt_ptr_write_i64(
+            bdl_virt,
+            entry_offset + 8,
+            (1 << 32) | period_bytes
+        )
+        period = period + 1
+    true
+
+export HDA_DMA_CORB, HDA_DMA_RIRB, HDA_DMA_BDL, HDA_DMA_PCM
+export HDA_DMA_RESOURCE_COUNT, hda_dma_resource_size
+export hda_dma_resources_create, hda_dma_resources_destroy
+export hda_dma_resource_handle, hda_dma_resource_virt, hda_dma_resource_phys
+export hda_dma_prepare_silent_stream

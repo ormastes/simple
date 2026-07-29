@@ -1,0 +1,300 @@
+# Feature: wm-full-stack-demo
+
+## Raw Request
+`$sp_dev impl wm, event, audio harden plan specially wm`
+
+## Task Type
+feature
+
+## Refined Goal
+Deliver the first honest Linux/GLFW Simple WM vertical slice: normalized
+window events route through WM chrome and GUI clients; GUI, Web, and Simple 2D
+content reach the compositor through `WmContentFrame`; lifecycle/taskbar
+mutations persist and release handles; button audio produces deterministic PCM.
+Keep SDL2/SDL3, QEMU HDA, and QRB2210 as explicit fail-closed follow-on gates
+using the same contracts.
+
+## Acceptance Criteria
+- AC-1: A bounded FIFO preserves normalized key, text, pointer, wheel, focus,
+  and resize events separately, with generation handles and overflow evidence.
+- AC-2: Unsupported window operations return explicit capability status, never
+  fabricated success.
+- AC-3: GUI, Web, and pixel-surface producers submit validated
+  `WmContentFrame` values through one explicit content-kind/handle boundary.
+- AC-4: The Linux GLFW lane shows a real non-black desktop frame and routes at
+  least one native mouse, key, and committed-text event.
+- AC-5: The demo visibly contains VBox, text, image, editable text field,
+  button, scroll region, embedded Simple 2D, embedded Simple Web, and status.
+- AC-6: Button click, typing and Ctrl shortcuts, 2D drag, titlebar drag,
+  scrolling, minimize/restore, exact maximize/restore, pin/unpin, and close
+  advance semantic state and render revisions.
+- AC-7: Pin/unpin operates on stable `app_id` values and persists; closing the
+  last window removes only the running taskbar item.
+- AC-8: Button activation advances a deterministic non-silent mixed-PCM frame
+  count; device backends remain separate from the mixer.
+- AC-9: Closing all windows returns window, event, content, pixel, and audio
+  handle counts to their measured baseline and cancels pointer capture.
+- AC-10: Isolated native regressions cover trait dispatch, aggregate by-value
+  calls/globals/returns, Option/Result aggregate payloads, arrays in returned
+  structs, nested returns, entry closure, and strong/weak symbol selection.
+- AC-11: SDL3, SDL2, QEMU HDA DMA/IRQ, and QRB2210 SimpleOS rows reuse the same
+  contracts and stay failing or unsupported until runtime evidence exists.
+- AC-12: Executable runtime evidence plus current generated manuals is the
+  release gate; source inspection and scenario prose are not proof.
+
+## Scope Exclusions
+- macOS-style visual polish, animation, accessibility, browser-engine expansion,
+  GPU acceleration, and multi-monitor behavior.
+- Treating the STM32U585 MCU port as an UNO Q desktop result.
+- Claiming SDL, QEMU, HDA, or QRB2210 completion from host/headless evidence.
+
+## Cooperative Review
+- Prior research sidecars: `wm_local_research`, `sound_local_research`,
+  `compiler_research`, `domain_research`, and `docs_research`.
+- Merge owner and final high-capability reviewer: root Codex lane.
+- Implementation sidecars: N/A; current production work is one shared WM
+  boundary and must remain serialized in the dirty worktree.
+
+## Frozen Shared Names
+- Event record: `WindowEventRecord`
+- Event queue: `WindowEventLoop`
+- Window facade: `SimpleWindow`
+- Content interchange: `WmContentFrame`
+- Content origins: `gui`, `simple_web`, `pixel_surface`
+- System scenario helper: `step("...")`
+- Evidence helpers: `capture_wm_state`, `capture_frame`, `capture_pcm`
+- Fail-fast placeholder: `expect(false).to_be(true)`
+
+## Phase
+implementation-in-progress
+
+## Log
+- dev: Refined the broad request into 12 fail-closed acceptance criteria.
+- research: Saved local/domain research, selected requirements, architecture,
+  detail design, GUI design, system-test plan, and agent task plan.
+- spec: Added normalized event/window unit specs and a red host content-frame
+  admission truth test.
+- impl: Added scalar normalized events, bounded event/text storage, explicit
+  capabilities, deterministic headless window handles, and pixel-frame origin.
+- compiler: Extended the isolated native aggregate/trait regression fixture.
+- impl: Generalized host frame admission to validated GUI/Web/pixel origins and
+  added nested child-frame ownership.
+- impl: Replaced SimpleOS `WindowSurface.session: any` with explicit content
+  kind plus scalar generation handle; GUI and Web now dispatch to their own
+  WmContentFrame producers.
+- impl: Added RenderSurface coordinate translation, stable app_id pin/unpin
+  persistence, explicit unsupported headless operations, and close-time content
+  count cleanup.
+- audio: Replaced raw miniaudio pointers with synchronized generation handles,
+  idempotent teardown, natural-completion reaping, and live-handle counters.
+- glfw: Added a dynamically loaded Linux GLFW runtime, normalized callback
+  queue, retained presentation path, explicit unavailable statuses, Simple
+  facade, C self-check, and Linux-host native-runtime compilation wiring.
+- compiler: The expanded native regression reaches a real compiler failure
+  (`fld_base_sym not found`); the full Simple closure is separately blocked by
+  the pre-existing Skia shaper dedent error. Both are recorded without retry.
+- evidence: Added the RED runtime-evidence manual; no source-only pass is
+  accepted.
+- impl: Added the live GLFW demo entry, one authoritative host event router,
+  desktop-to-client coordinate translation, separate committed text, button
+  action consumption, and event-driven GUI/Web/2D frame regeneration.
+- audio: Added deterministic 48-kHz stereo UI-click PCM, a direct owned-PCM
+  miniaudio path, live playback cleanup, and a C runtime check that starts PCM
+  playback and returns handles to baseline.
+- audio-hardening: `SoundEngine` now retains the device handle instead of
+  reinitializing during teardown, and UI-click synthesis owns one local PCM
+  buffer instead of crossing aggregate-return boundaries. An isolated Phase 3
+  native probe still exits through an impossible `play_ui_click` success
+  branch with `device_started=false`. A smaller class-receiver plus local-buffer
+  compiler control passes, so the remaining failure is inside the larger
+  SoundEngine method/return lowering rather than every receiver read. The
+  failing sound probe and passing compiler control are retained; the
+  three-cycle sound cap was reached.
+- gate: Self-hosted production evidence, real GLFW presentation, WM client
+  routing, and mixed PCM remain open; no release claim is permitted yet.
+- native: Per user direction, stopped the Rust-seed entry build and used
+  `build/aggfix/stage3/simple` directly with a preserved native cache. Two
+  old-parser line-break incompatibilities in `host_compositor_core.spl` were
+  normalized; the third bounded attempt reached the pre-existing Skia shaper
+  dedent blocker. No bootstrap or Phase 2 retry was run.
+- wm: Added the canonical scalar Normal/Minimized/Maximized/Closing/Closed
+  transition owner and wired SimpleOS minimize/restore/focus/capture lifecycle
+  through it. The aggregate-fix Phase 3 compiler built and ran the direct
+  lifecycle probe (`WM WINDOW STATE PROBE: PASS`); the full compositor T0 check
+  remained diagnostic-only and timed out in the pre-existing compiler closure.
+- wm-events: Extended the SimpleOS generation-handled GUI registry with
+  retained focused-widget state, removed the `update_tree` mutation that
+  immediately converted GUI content back to Web, and routed client-local
+  pointer events through a locally reconstructed session. Scalar GUI capture
+  survives out-of-bounds movement until release and is canceled by
+  minimize/close; no large session aggregate is stored in the compositor.
+  Added focused physical-key and separate committed-text dispatch plus a
+  scalar desktop clipboard seam for Ctrl+A/C/X/V across reconstructed
+  sessions. The shared InputBackend path now feeds printable key/text events
+  instead of fabricating Ctrl+Alt shell shortcuts.
+- event-native: Replaced `[WindowEventRecord]` queue storage with a packed
+  sixteen-word scalar ring and a status-based `poll_scalar()` boundary. The
+  isolated Phase 3 native FIFO/text/overflow/generation probe passes.
+- qemu-input: The raw PS/2 route now retains modifier state, decodes the MVP
+  Set-1 printable/special-key subset, routes focused GUI key then committed
+  text, and owns Alt+Tab/F4 plus Ctrl+M/Ctrl+Shift+M. Its isolated Phase 3
+  decoder probe passes with no `char_from_code` weak stub.
+- host-events: The GLFW demo now drains the normalized queue only through
+  `poll_scalar()` and routes scalar fields into `HostGuiEventRouter`. GLFW
+  callback ingestion now also writes the flat scalar ring directly; aggregate
+  event construction remains compatibility-only. The expanded Phase 3 scalar
+  enqueue/poll probe passes. A canonical capture/text routing spec was added
+  but cannot execute until Skia discovery is repaired.
+- taskbar-pin: SimpleOS now keeps an ordered stable-app-id pin authority,
+  handles idempotent pin/unpin runtime commands, launches through the retained
+  display name, keeps running-window entries after unpin, and fail-closed
+  loads/saves `/SYS/TASKBAR.PIN` through the shared VFS. The bounded wire
+  codec builds and runs with the aggregate-fix Phase 3 compiler; live reboot
+  persistence remains a runtime gate.
+- host-taskbar-pin: The GLFW demo now seeds `HostCompositor` from the persisted
+  stable-`app_id` runtime through scalar accessors. Successful Ctrl+P changes
+  both persistence and the rendered canonical `TaskbarModel`; failed saves no
+  longer fabricate a visible state change. Native-pixel taskbar hit testing
+  now follows the same pinned-then-running 56-pixel slots as the rendered
+  shared taskbar and restores/focuses an existing window through its pinned
+  app slot. An idle pinned slot now emits a one-shot stable `app_id` only on
+  release-inside; drag-away cancels it. The live GLFW demo keeps the desktop
+  alive after internal close, consumes that id, and recreates the same app;
+  live closure evidence remains blocked by Skia discovery.
+  The focused Phase 3 compositor probe is present, but its entry closure
+  reaches the unchanged Skia shaper dedent during discovery, so this row
+  remains runtime-blocked.
+- wm-pixels: Implemented the previously dead `PIXEL_SURFACE` content kind with
+  generation handles, a bounded raw-memory registry behind one scalar address,
+  revision updates, close-time release, scalar SimpleOS backend writes, and
+  `WmContentFrame` emission in the high-level shell. Phase 3 probes reproduce
+  aggregate-held array corruption and pass the replacement raw store. The
+  store now blits directly into bounded pitched ARGB32 scanout memory through
+  the exact-width pure `simple-core` store; its Phase 3 archive-linked probe
+  passes without an aggregate or trait boundary. Full compositor execution
+  remains behind the Skia discovery blocker, and scalar trait dispatch is
+  still a separate runtime gate.
+- audio-raw: Added an array-free deterministic stereo click generator and a
+  scalar raw-PCM miniaudio entry. The generator/checksum passes an isolated
+  Phase 3 native probe, the C backend passes fail-closed coverage, and a real
+  host miniaudio smoke opened a device, created a playback handle, observed
+  one live voice, then returned to zero with idempotent stop/shutdown. The
+  demo uses this path.
+- host-glfw: The dynamically loaded GLFW/OpenGL backend now has real live
+  evidence under Xvfb: two non-black ARGB presentations, native X11 key,
+  committed-text, pointer-motion and button events, clipboard round-trip,
+  generation-safe idempotent teardown, and a zero live-window count. Each
+  window retains one OpenGL texture and one grow-only CPU staging buffer; the
+  two-frame probe proves exactly one buffer growth. The live path now accepts
+  the authoritative raw framebuffer address/count directly, and the full demo
+  uses that scalar ABI instead of rebuilding/passing `[u32]`. This is the
+  runtime boundary probe, not yet the full WM scene.
+- wm-capture: Host GUI pointer-button events now consume their own normalized
+  coordinates, and captured drags continue with current client-local
+  coordinates after leaving the client bounds. A missing/minimized capture
+  owner cancels capture instead of replaying stale coordinates. The focused
+  Phase 3 probe remains blocked by the known Skia discovery dedent; the Phase 2
+  compiler additionally cannot parse the current scalar window-event module.
+  Three bounded compiler attempts were exhausted without bootstrap.
+- audio-demo: The GLFW demo remains on the verified scalar raw-PCM click path;
+  the aggregate `SoundEngine.play_ui_click()` receiver stays RED in Phase 3 and
+  is not promoted into the live demo.
+- wm-shortcuts: Added one scalar normalized shortcut classifier and made the
+  GLFW demo consume Alt+Tab, Alt+F4, Ctrl+M, and Ctrl+Shift+M before GUI
+  routing; Ctrl+C and key releases remain client events. The isolated Phase 3
+  archive-linked probe passes through the pure `simple-core` runtime without a
+  full bootstrap.
+- wm-close-baseline: The GLFW demo now requires external-frame IDs, parent and
+  child frames, native content-cache IDs/objects, host windows, queued events,
+  text-arena entries, and audio playback handles all to return to baseline
+  after close. The shared scenario asserts the compositor-owned subset.
+- wm-restore-state: Host restore now matches the canonical state machine:
+  restoring a minimized maximized window first returns to its maximized
+  geometry, and only the next restore returns to the exact saved normal
+  rectangle. Maximize now ends above the 56-pixel taskbar instead of
+  overlapping it by eight pixels, and restore clears stale focus on sibling
+  windows. The isolated Phase 3 lifecycle probe is present but discovery still
+  stops at the unchanged Skia shaper dedent; no bootstrap was attempted.
+- wm-interaction-cancel: Host minimize, maximize, and close now share one
+  target-scoped cancellation path for chrome drag, resize, and armed
+  release-inside actions. Minimize cancels only after the target is actually
+  minimized, so an unauthorized request cannot disrupt an active interaction.
+- wm-focus-cycle: Host Alt+Tab focus cycling now matches SimpleOS by skipping
+  minimized windows instead of implicitly restoring them. It wraps across
+  visible z-order and leaves an all-minimized desktop unfocused.
+- wm-resize-capture: The shared pointer reducer now mutates geometry only while
+  `resizing` is captured; resize-grip hover is recomputed on every move and
+  moving away before press clears the candidate. Normalized button events also
+  update compositor coordinates before chrome hit testing, so a button event
+  never reuses stale pointer state.
+- wm-missed-release: A new normalized left press cancels stale client and WM
+  drag/resize capture before applying its coordinates, then recomputes the
+  current hover target. A missed prior release can no longer move or resize an
+  old window before the new press is routed.
+- wm-taskbar-geometry: Host Draw IR, direct pixel rendering, pinned/running hit
+  testing, tray reservation, and launcher release checks now share 56-pixel
+  taskbar slots. The prior 44/56 split could draw a second launcher at a
+  different location from its clickable region.
+- wm-taskbar-active: Draw IR, backend, and raw pixel taskbar executors now
+  resolve each running `window_id` against the authoritative scene: minimized,
+  focused, and inactive windows receive distinct theme colors. `WindowRef`
+  stays unchanged, avoiding a parallel focus authority.
+- host-pointer-buttons: The normalized host router now records left, middle,
+  and right button state in the compositor. Only left reaches the current
+  widget reducer because that reducer does not yet distinguish button values;
+  the focused spec proves right-click creates no false primary-click event.
+- hda-pci-runtime: The authoritative x86 bundle already owned scalar PCI
+  enumeration/field/BAR providers; memory+bus-master enable was the only
+  missing HDA extern and is now real. Flagged MMIO BAR0 values are normalized,
+  and raw-pointer providers now back the DMA resource table. A pure-Simple
+  config-port replacement still exits 139 under Phase 3 and remains tracked as
+  an optional boundary migration, not a QEMU HDA blocker.
+- hda-stream-irq: The x86 desktop now starts a scalar-owned HDA service that
+  prepares a four-period silent BDL/PCM ring, selects the GCAP output stream,
+  enables its INTCTL bit, installs a level/active-low Q35 I/O-APIC route and IRQ
+  handler before RUN, assigns stream tag 1, consumes the hardware RIRB response
+  slot, and requires four IOC completions in the canonical QEMU WM gate.
+  Controller/RIRB and I/O-APIC sequencing pass isolated Phase-3 native probes.
+  The expanded DMA probe remains RED on the Phase-3 EOF/dedent parser defect after the
+  mandatory three-cycle cap; no bootstrap or live QEMU run was attempted.
+- uno-q-target: A Phase-3-green scalar contract now makes QRB2210 the only UNO
+  Q desktop target and returns explicit `port-unavailable` for display,
+  normalized window events, and audio until its AArch64 port exists.
+  STM32U585 returns `unsupported-mcu` and cannot satisfy a WM claim. The new
+  fail-closed checker exits 1 with `qrb2210-simpleos-port-unavailable`; no board
+  was connected over ADB.
+- host-sdl2-boundary: The SDL2 runtime now skips unsupported native events
+  while preserving later supported events, exposes retained committed UTF-8
+  text, and provides real wait, size-limit, minimize/maximize/restore,
+  decoration, always-on-top, focus, flags, fullscreen-status, and error calls.
+  The Simple wrapper reports an actual zero/one snapshot count instead of the
+  requested maximum, maps window subevents, and no longer fabricates the
+  corresponding state queries. A dummy-video native probe passes with ignored
+  event + text + Ctrl+A ordering and real window operations. The Phase-3
+  archive completed on its third bounded attempt with the older compiler's
+  known re-export warnings; a file-scoped production check hit the existing
+  60-second CLI-driver timeout and was stopped without bootstrap or retry.
+- phase3-skia-discovery: The original `ot_layout_shaper.spl` conditional
+  dedent was normalized for the older Phase-3 grammar. An isolated shaper
+  entry then advanced to `ot_layout_gpos_data.spl`, where the same parser
+  still reports a function-end dedent after two bounded attempts. The full WM
+  closure was not retried and no bootstrap was run.
+
+## Remaining runtime gates
+
+- Host GLFW: the real backend/window/input/presentation boundary is green;
+  full WM closure and scene capture still stop at the pre-existing Skia
+  shaper dedent.
+- SDL2: its focused native event/window boundary probe is green; the shared
+  live WM scenario has not run. SDL3 remains unimplemented.
+- QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the
+  canonical desktop entry, but none has current live guest evidence.
+- UNO Q: Debian host validation and the QRB2210 SimpleOS port remain open; the
+  STM32U585 lane is not desktop evidence.
+- Audio: the scalar click/miniaudio host boundary is green, but the larger
+  `SoundEngine` receiver probe remains RED and no QEMU or board PCM device
+  evidence exists.
+- Compiler: the stale Phase 3 binary still fails the isolated runtime-derived
+  `i64 as u32` narrowing probe. Current compiler sources contain the cast
+  bridge/truncation fix, but refreshing them is blocked during discovery by
+  the unrelated Skia shaper dedent.

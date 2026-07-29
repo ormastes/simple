@@ -34,6 +34,13 @@ The capsule owns cross-cutting status, deterministic command ordering, and harde
 5. `nogc_sync_mut/gpu/engine3d` or `engine/audio`: 3D listener/entity adapter.
 6. `os/drivers/audio` and `os/game/platform`: Simple OS capability and driver evidence.
 
+The current x86 SimpleOS adapter is
+`src/os/services/audio/audio_service.spl`. It keeps only scalar hardware state
+across boot/IRQ boundaries, prepares a four-period BDL over a 16-KiB PCM ring,
+programs the Q35 I/O-APIC INTx redirection entry before setting RUN, and counts
+IOC completions. This is device plumbing, not a second mixer; SoundEngine PCM
+refill remains above it.
+
 ## Backend Status Contract
 Every target reports one of:
 - `native`: real target backend available and selected.
@@ -81,6 +88,7 @@ Required counters:
 - inline fallback count;
 - codec corrupt-input rejects;
 - teardown cleanup count.
+- SimpleOS HDA IRQ and completed-period counts.
 
 ## Architecture Risks
 - Runtime effects declarations currently exceed sampled `runtime_audio.c` implementation evidence; implementation must reconcile declarations and C symbols.

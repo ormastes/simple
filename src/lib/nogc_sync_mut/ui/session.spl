@@ -193,6 +193,18 @@ impl UISession:
         """Get the ID of the currently focused widget."""
         return self.state.focused_id
 
+    me take_pending_action() -> text:
+        """Return and clear the first button action emitted by input."""
+        # ponytail: O(widgets) is enough for current UI trees; add an action
+        # queue only when profiling shows this scan in a hot path.
+        for id in self.state.tree.root_node().collect_ids():
+            if id != "":
+                val node = WidgetNode(id: id)
+                if node.get_prop("ui_action_pending") == "true":
+                    node.set_prop("ui_action_pending", "false")
+                    return node.get_prop("action")
+        ""
+
     fn recent_changes(count: i32) -> [text]:
         """Get human-readable descriptions of recent lifecycle events."""
         return self.changelog.recent_descriptions(count)
@@ -438,6 +450,32 @@ impl UISession:
                     self._apply_profiles(self.profile_resolver.orientation())
             _:
                 pass_dn
+
+    me dispatch_key_with_modifiers(
+        key: text, ctrl: bool, shift: bool, alt: bool, super_key: bool
+    ) -> text:
+        """Route physical key commands before committed text."""
+        if ctrl:
+            if key == "a" or key == "A":
+                val node = self.state.tree.find_widget(self.state.focused_id)
+                if node != nil:
+                    val value = node.get_prop("value")
+                    node.set_prop("selection_start", "0")
+                    node.set_prop("selection_end", value.len().to_text())
+                    node.set_prop("caret", value.len().to_text())
+                self.dispatch(UIEvent.Action("editor.edit.select_all"))
+                return "select_all"
+            if key == "c" or key == "C":
+                self.dispatch(UIEvent.Copy)
+                return "copy"
+            if key == "x" or key == "X":
+                self.dispatch(UIEvent.Cut)
+                return "cut"
+            if key == "v" or key == "V":
+                self.dispatch(UIEvent.Paste)
+                return "paste"
+        self.dispatch(UIEvent.KeyPress(key))
+        "key"
 
     me dispatch_semantic_command(command: SemanticUiCommand) -> SemanticUiDispatchResult:
         """Dispatch a shared semantic UI command through the existing event pipeline."""
@@ -821,6 +859,9 @@ impl UISession:
         val value = node.get_prop("value")
         self.clipboard.cut("text/plain", value)
         node.set_prop("value", "")
+        node.set_prop("caret", "0")
+        node.set_prop("selection_start", "0")
+        node.set_prop("selection_end", "0")
         return value
 
     me _clipboard_paste_focused() -> text:
@@ -836,6 +877,9 @@ impl UISession:
         if entry == nil:
             return ""
         node.set_prop("value", entry.data)
+        node.set_prop("caret", entry.data.len().to_text())
+        node.set_prop("selection_start", entry.data.len().to_text())
+        node.set_prop("selection_end", entry.data.len().to_text())
         return entry.data
 
     me _clipboard_paste_history_focused(index: i32) -> text:
@@ -851,6 +895,9 @@ impl UISession:
         if entry == nil:
             return ""
         node.set_prop("value", entry.data)
+        node.set_prop("caret", entry.data.len().to_text())
+        node.set_prop("selection_start", entry.data.len().to_text())
+        node.set_prop("selection_end", entry.data.len().to_text())
         return entry.data
 
     me open_surface_gated(id: text, tree: UITree, required_cap: Capability) -> Result<SurfaceHandle, text>:

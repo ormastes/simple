@@ -96,6 +96,9 @@ fn widget_dispatch_click(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, lay
     if not hit.found:
         return ""
     val kind = _kind_of(hit.id)
+    if kind == "button":
+        val node = WidgetNode(id: hit.id)
+        node.set_prop("ui_action_pending", "true")
     if kind == "checkbox":
         val node = WidgetNode(id: hit.id)
         var next = "true"
@@ -150,6 +153,115 @@ fn widget_dispatch_scroll(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, dy
     node.set_prop("scroll_offset", "{offset}")
     target
 
+fn _scroll_max_offset(
+    node: WidgetNode, rects: [WidgetRect], scroll_y: i32, scroll_h: i32
+) -> i32:
+    var content_bottom = scroll_y
+    for id in node.collect_ids():
+        if id != node.id:
+            match find_rect(rects, id):
+                case Some(rect):
+                    if rect.y + rect.h > content_bottom:
+                        content_bottom = rect.y + rect.h
+                case _:
+                    pass
+    val maximum = (content_bottom - scroll_y) - scroll_h
+    if maximum > 0: maximum else: 0
+
+fn widget_scrollbar_pointer_down(
+    root: WidgetNode, w: i32, h: i32, px: i32, py: i32
+) -> text:
+    val target = widget_scroll_hit(root, w, h, px, py)
+    if target == "":
+        return ""
+    val rects = compute_layout(root, 0, 0, w, h)
+    val node = WidgetNode(id: target)
+    match find_rect(rects, target):
+        case Some(rect):
+            if px < rect.x + rect.w - 12:
+                return ""
+            val maximum = _scroll_max_offset(
+                node, rects, rect.y, rect.h
+            )
+            var thumb_h = if maximum > 0:
+                rect.h * rect.h / (rect.h + maximum)
+            else:
+                rect.h
+            if thumb_h < 12:
+                thumb_h = 12
+            val travel = rect.h - thumb_h
+            val offset = _prop_int_of(node, "scroll_offset")
+            val thumb_y = if maximum > 0:
+                rect.y + offset * travel / maximum
+            else:
+                rect.y
+            if py >= thumb_y and py < thumb_y + thumb_h:
+                node.set_prop("ui_scrollbar_dragging", "true")
+                node.set_prop("ui_scrollbar_drag_origin_y", "{py}")
+                node.set_prop(
+                    "ui_scrollbar_drag_origin_offset", "{offset}"
+                )
+            elif py < thumb_y:
+                var next = offset - rect.h
+                if next < 0:
+                    next = 0
+                node.set_prop("scroll_offset", "{next}")
+            else:
+                var next = offset + rect.h
+                if next > maximum:
+                    next = maximum
+                node.set_prop("scroll_offset", "{next}")
+            return target
+        case _:
+            return ""
+
+fn widget_scrollbar_pointer_move(
+    root: WidgetNode, w: i32, h: i32, py: i32
+) -> text:
+    val rects = compute_layout(root, 0, 0, w, h)
+    for id in root.collect_ids():
+        if id != "":
+            val node = WidgetNode(id: id)
+            if (node.kind_name() == "scroll" and
+                node.get_prop("ui_scrollbar_dragging") == "true"):
+                match find_rect(rects, id):
+                    case Some(rect):
+                        val maximum = _scroll_max_offset(
+                            node, rects, rect.y, rect.h
+                        )
+                        var thumb_h = if maximum > 0:
+                            rect.h * rect.h / (rect.h + maximum)
+                        else:
+                            rect.h
+                        if thumb_h < 12:
+                            thumb_h = 12
+                        val travel = rect.h - thumb_h
+                        if travel > 0:
+                            val origin_y = _prop_int_of(
+                                node, "ui_scrollbar_drag_origin_y"
+                            )
+                            val origin_offset = _prop_int_of(
+                                node, "ui_scrollbar_drag_origin_offset"
+                            )
+                            var next = origin_offset +
+                                (py - origin_y) * maximum / travel
+                            if next < 0:
+                                next = 0
+                            if next > maximum:
+                                next = maximum
+                            node.set_prop("scroll_offset", "{next}")
+                        return id
+                    case _:
+                        pass
+    ""
+
+fn widget_scrollbar_pointer_up(root: WidgetNode):
+    for id in root.collect_ids():
+        if id != "":
+            val node = WidgetNode(id: id)
+            if node.kind_name() == "scroll":
+                node.set_prop("ui_scrollbar_dragging", "false")
+
 # Number of Unicode characters in `s`. Counts via the char-based `char_at`,
 # which returns "" once the index passes the last character. Byte-based
 # `slice`/`len` cannot be used to split on a caret that counts characters.
@@ -200,6 +312,10 @@ fn widget_dispatch_key(focused_id: text, key: text):
     if focused_id == "":
         return
     val kind = _kind_of(focused_id)
+    if kind == "button":
+        if key == "enter" or key == " " or key == "space":
+            WidgetNode(id: focused_id).set_prop("ui_action_pending", "true")
+        return
     if kind != "input" and kind != "textfield":
         return
     val node = WidgetNode(id: focused_id)
@@ -283,4 +399,6 @@ fn widget_dispatch_composition_commit(focused_id: text, committed: text):
 export HitResult, widget_hit_test, widget_scroll_hit
 export widget_set_pressed, widget_clear_pressed, widget_dispatch_hover
 export widget_dispatch_click, widget_dispatch_scroll, widget_dispatch_key
+export widget_scrollbar_pointer_down, widget_scrollbar_pointer_move
+export widget_scrollbar_pointer_up
 export widget_dispatch_composition_update, widget_dispatch_composition_commit

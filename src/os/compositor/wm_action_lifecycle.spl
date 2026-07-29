@@ -3,6 +3,9 @@ use os.services.wm.wm_action.{WmAction, wm_action_none}
 use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 export use common.ui.window_scene_draw_ir.{wm_taskbar_item_width, wm_taskbar_dock_width, wm_taskbar_item_x}
 
+val WM_WORK_AREA_TOP: i32 = 48
+val WM_WORK_AREA_BOTTOM: i32 = 56
+
 class WmLifecycleWindowState:
     id: i64
     owner_port: i64
@@ -193,7 +196,8 @@ fn wm_lifecycle_hit_taskbar(windows: [WmLifecycleWindowState], screen_width: i32
 fn wm_lifecycle_pointer_move(windows: [WmLifecycleWindowState], next_window_id: i64, desktop_width: i32, desktop_height: i32, interaction: WmPointerInteractionState, x: i32, y: i32) -> WmLifecyclePointerResult:
     var out_windows = windows
     var out_interaction = interaction
-    if out_interaction.resize_window_id != 0:
+    if (out_interaction.resizing and
+        out_interaction.resize_window_id != 0):
         val idx = wm_lifecycle_find_window_index(out_windows, out_interaction.resize_window_id)
         if idx >= 0:
             var nw = out_interaction.resize_start_w + (x - out_interaction.resize_start_x)
@@ -205,7 +209,7 @@ fn wm_lifecycle_pointer_move(windows: [WmLifecycleWindowState], next_window_id: 
             val resized = apply_wm_action_to_lifecycle_windows(out_windows, next_window_id, desktop_width, desktop_height, wm_resize_action(out_interaction.resize_window_id, nw, nh))
             out_windows = resized.windows
         return WmLifecyclePointerResult(windows: out_windows, next_window_id: next_window_id, interaction: out_interaction)
-    if out_interaction.drag_window_id != 0:
+    if out_interaction.dragging and out_interaction.drag_window_id != 0:
         val idx = wm_lifecycle_find_window_index(out_windows, out_interaction.drag_window_id)
         if idx >= 0:
             var nx = x - out_interaction.drag_offset_x
@@ -217,6 +221,11 @@ fn wm_lifecycle_pointer_move(windows: [WmLifecycleWindowState], next_window_id: 
             val moved = apply_wm_action_to_lifecycle_windows(out_windows, next_window_id, desktop_width, desktop_height, wm_move_action(out_interaction.drag_window_id, nx, ny))
             out_windows = moved.windows
         return WmLifecyclePointerResult(windows: out_windows, next_window_id: next_window_id, interaction: out_interaction)
+    out_interaction.resize_window_id = 0
+    out_interaction.resize_start_x = 0
+    out_interaction.resize_start_y = 0
+    out_interaction.resize_start_w = 0
+    out_interaction.resize_start_h = 0
     var i = 0
     while i < out_windows.len():
         val win = out_windows[i]
@@ -285,9 +294,9 @@ fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_
         win.minimized = false
         win.focused = true
         win.x = 0
-        win.y = 48
+        win.y = WM_WORK_AREA_TOP
         win.w = desktop_width
-        win.h = desktop_height - 96
+        win.h = desktop_height - WM_WORK_AREA_TOP - WM_WORK_AREA_BOTTOM
         out_windows[i] = win
         return WmLifecycleApplyResult(windows: wm_lifecycle_focus_window(out_windows, action.window_id.to_i64()), next_window_id: next_id, window_id: action.window_id.to_i64(), applied: true)
     elif action.kind == "restore":

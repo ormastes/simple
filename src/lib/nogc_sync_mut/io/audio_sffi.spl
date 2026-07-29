@@ -3,8 +3,8 @@
 # SFFI bindings for the miniaudio-based C runtime (runtime_audio.c).
 # Provides engine init/shutdown, sound loading, playback control, and volume.
 #
-# The C side uses a static global ma_engine. Sound handles and playback handles
-# are ma_sound* pointers cast to i64.
+# The C side uses a static global ma_engine. Sound and playback ownership stays
+# behind generation-counted integer handles.
 
 # ============================================================================
 # Tier 1: Extern Declarations (Raw SFFI)
@@ -21,6 +21,15 @@ extern fn rt_audio_unload_sound(handle: i64)
 # --- Playback ---
 extern fn rt_audio_play(sound_handle: i64) -> i64
 extern fn rt_audio_play_looped(sound_handle: i64) -> i64
+extern fn rt_audio_play_pcm_f32(
+    samples: [f32], channels: i64, sample_rate: i64
+) -> i64
+extern fn rt_audio_play_pcm_f64_raw(
+    samples_addr: i64,
+    sample_count: i64,
+    channels: i64,
+    sample_rate: i64
+) -> i64
 extern fn rt_audio_stop(playback_handle: i64)
 extern fn rt_audio_pause(playback_handle: i64)
 extern fn rt_audio_resume(playback_handle: i64)
@@ -32,6 +41,8 @@ extern fn rt_audio_get_master_volume() -> f64
 
 # --- Query ---
 extern fn rt_audio_is_playing(playback_handle: i64) -> i64
+extern fn rt_audio_live_source_count() -> i64
+extern fn rt_audio_live_playback_count() -> i64
 
 # --- Spatial audio (3D positioning) ---
 extern fn rt_audio_set_sound_position(handle: i64, x: f64, y: f64, z: f64)
@@ -106,6 +117,19 @@ fn audio_play_looped(source: AudioSource) -> AudioPlayback:
     val h = rt_audio_play_looped(source.handle)
     AudioPlayback(handle: h, is_valid: h > 0)
 
+fn audio_play_pcm_f32(samples: [f32]) -> AudioPlayback:
+    """Play owned 48-kHz stereo PCM through the active miniaudio device."""
+    val h = rt_audio_play_pcm_f32(samples, 2, 48000)
+    AudioPlayback(handle: h, is_valid: h > 0)
+
+fn audio_play_pcm_f64_raw_handle(
+    samples_addr: i64, sample_count: i64
+) -> i64:
+    """Array-free 48-kHz stereo PCM device boundary."""
+    rt_audio_play_pcm_f64_raw(
+        samples_addr, sample_count, 2, 48000
+    )
+
 fn audio_stop(playback: AudioPlayback):
     if playback.is_valid:
         rt_audio_stop(playback.handle)
@@ -132,6 +156,12 @@ fn audio_is_playing(playback: AudioPlayback) -> bool:
     if not playback.is_valid:
         return false
     rt_audio_is_playing(playback.handle) != 0
+
+fn audio_live_source_count() -> i64:
+    rt_audio_live_source_count()
+
+fn audio_live_playback_count() -> i64:
+    rt_audio_live_playback_count()
 
 # --- Spatial wrappers ---
 
@@ -188,8 +218,11 @@ fn audio_capture_stop() -> i64:
     rt_audio_capture_stop()
 
 export rt_audio_init, rt_audio_shutdown, rt_audio_load_sound, rt_audio_unload_sound
-export rt_audio_play, rt_audio_play_looped, rt_audio_stop, rt_audio_pause, rt_audio_resume
+export rt_audio_play, rt_audio_play_looped, rt_audio_play_pcm_f32
+export rt_audio_play_pcm_f64_raw
+export rt_audio_stop, rt_audio_pause, rt_audio_resume
 export rt_audio_set_volume, rt_audio_set_master_volume, rt_audio_get_master_volume, rt_audio_is_playing
+export rt_audio_live_source_count, rt_audio_live_playback_count
 export rt_audio_set_sound_position, rt_audio_set_spatialization_enabled
 export rt_audio_set_listener_position, rt_audio_set_listener_direction, rt_audio_set_listener_world_up
 export rt_audio_set_sound_min_distance, rt_audio_set_sound_max_distance
@@ -198,8 +231,11 @@ export rt_audio_add_reverb, rt_audio_add_delay, rt_audio_remove_effect, rt_audio
 export rt_audio_capture_start, rt_audio_capture_is_active, rt_audio_capture_frame_count, rt_audio_capture_stop
 export AudioEngine, AudioSource, AudioPlayback, AudioCapture
 export audio_init, audio_shutdown, audio_load_sound, audio_unload_sound
-export audio_play, audio_play_looped, audio_stop, audio_pause, audio_resume
+export audio_play, audio_play_looped, audio_play_pcm_f32
+export audio_play_pcm_f64_raw_handle
+export audio_stop, audio_pause, audio_resume
 export audio_set_volume, audio_set_master_volume, audio_get_master_volume, audio_is_playing
+export audio_live_source_count, audio_live_playback_count
 export audio_set_sound_position, audio_set_spatialization_enabled
 export audio_set_listener_position, audio_set_listener_direction, audio_set_listener_world_up
 export audio_set_sound_min_distance, audio_set_sound_max_distance

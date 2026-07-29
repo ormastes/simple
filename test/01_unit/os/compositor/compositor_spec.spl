@@ -4,7 +4,12 @@
 # destroy_window, focus_window, and Z-order management.
 
 use std.spec
-use os.compositor.compositor.{Compositor, WindowSurface}
+use os.compositor.compositor.{Compositor, WindowSurface, WM_CONTENT_KIND_EMPTY}
+use common.ui.wm_window_state.{
+    WM_WINDOW_STATE_NORMAL,
+    WM_WINDOW_STATE_MINIMIZED,
+    WM_WINDOW_STATE_MAXIMIZED
+}
 use os.compositor.cursor.{CursorState}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.host_compositor_entry.{HeadlessHostCompositorBackend}
@@ -24,7 +29,8 @@ describe "WindowSurface":
             width: 640,
             height: 480,
             visible: true,
-            session: nil,
+            content_kind: WM_CONTENT_KIND_EMPTY,
+            content_handle: 0,
             content_html: "<p>runtime</p>",
             content_revision: 2,
             dirty: false,
@@ -47,7 +53,8 @@ describe "WindowSurface":
             title: "My App",
             x: 0, y: 0,
             width: 800, height: 600,
-            visible: true, session: nil, dirty: true,
+            visible: true, content_kind: WM_CONTENT_KIND_EMPTY,
+            content_handle: 0, dirty: true,
             content_html: "", content_revision: 1,
             owner_port: 0,
             process_id: 0,
@@ -61,7 +68,8 @@ describe "WindowSurface":
             title: "Dirty",
             x: 0, y: 0,
             width: 100, height: 100,
-            visible: true, session: nil, dirty: true,
+            visible: true, content_kind: WM_CONTENT_KIND_EMPTY,
+            content_handle: 0, dirty: true,
             content_html: "", content_revision: 1,
             owner_port: 0,
             process_id: 0,
@@ -166,6 +174,53 @@ describe "Compositor maximize and restore":
         expect(comp.surfaces[0].width).to_equal(420)
         expect(comp.surfaces[0].height).to_equal(280)
         expect(comp.surfaces[0].maximized).to_equal(false)
+
+    it "restores a minimized maximized window before restoring its normal rectangle":
+        var comp = _make_test_compositor()
+        val id = comp.create_window("Console", 31, 47, 360, 240)
+        comp.maximize_window(id.to_u64())
+        comp.dragging = true
+        comp.drag_window_id = id
+        comp.gui_pointer_capture_window_id = id
+
+        comp.minimize_window(id.to_u64())
+        expect(comp.surfaces[0].visible).to_be(false)
+        expect(comp.surfaces[0].maximized).to_be(true)
+        expect(comp.surfaces[0].state).to_equal(WM_WINDOW_STATE_MINIMIZED)
+        expect(comp.dragging).to_be(false)
+        expect(comp.gui_pointer_capture_window_id).to_equal(0)
+
+        comp.restore_window(id.to_u64())
+        expect(comp.surfaces[0].visible).to_be(true)
+        expect(comp.surfaces[0].maximized).to_be(true)
+        expect(comp.surfaces[0].state).to_equal(WM_WINDOW_STATE_MAXIMIZED)
+        expect(comp.surfaces[0].x).to_equal(0)
+        expect(comp.surfaces[0].y).to_equal(44)
+
+        comp.restore_window(id.to_u64())
+        expect(comp.surfaces[0].maximized).to_be(false)
+        expect(comp.surfaces[0].state).to_equal(WM_WINDOW_STATE_NORMAL)
+        expect(comp.surfaces[0].x).to_equal(31)
+        expect(comp.surfaces[0].y).to_equal(47)
+        expect(comp.surfaces[0].width).to_equal(360)
+        expect(comp.surfaces[0].height).to_equal(240)
+
+    it "never focuses hidden windows and clears capture when its target closes":
+        var comp = _make_test_compositor()
+        val first = comp.create_window("First", 0, 0, 200, 120)
+        val second = comp.create_window("Second", 20, 20, 200, 120)
+        comp.minimize_window(second.to_u64())
+        expect(comp.surfaces[comp.focused_idx].id).to_equal(first)
+
+        comp.focus_window(second)
+        comp.cycle_focus()
+        expect(comp.surfaces[comp.focused_idx].id).to_equal(first)
+
+        comp.dragging = true
+        comp.drag_window_id = first
+        comp.destroy_window(first)
+        expect(comp.dragging).to_be(false)
+        expect(comp.focused_idx).to_equal(-1)
 
 # ============================================================================
 # Window Identity Metadata

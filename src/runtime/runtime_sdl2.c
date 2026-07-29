@@ -199,37 +199,60 @@ bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
  *   9 = text input (SDL_TEXTINPUT)
  */
 
-int64_t rt_sdl2_poll_event(void) {
-    if (SDL_PollEvent(&g_last_event)) {
-        g_last_event_valid = 1;
+static int64_t rt_sdl2_event_code(void) {
+    switch (g_last_event.type) {
+        case SDL_QUIT:
+            g_quit_requested = 1;
+            return 1;
+        case SDL_KEYDOWN:
+            return 2;
+        case SDL_KEYUP:
+            return 3;
+        case SDL_MOUSEMOTION:
+            return 4;
+        case SDL_MOUSEBUTTONDOWN:
+            return 5;
+        case SDL_MOUSEBUTTONUP:
+            return 6;
+        case SDL_MOUSEWHEEL:
+            return 7;
+        case SDL_WINDOWEVENT:
+            return 8;
+        case SDL_TEXTINPUT:
+            return 9;
+        default:
+            return 0;
+    }
+}
 
-        switch (g_last_event.type) {
-            case SDL_QUIT:
-                g_quit_requested = 1;
-                return 1;
-            case SDL_KEYDOWN:
-                return 2;
-            case SDL_KEYUP:
-                return 3;
-            case SDL_MOUSEMOTION:
-                return 4;
-            case SDL_MOUSEBUTTONDOWN:
-                return 5;
-            case SDL_MOUSEBUTTONUP:
-                return 6;
-            case SDL_MOUSEWHEEL:
-                return 7;
-            case SDL_WINDOWEVENT:
-                return 8;
-            case SDL_TEXTINPUT:
-                return 9;
-            default:
-                /* Unknown event type — return a generic code */
-                return 99;
-        }
+int64_t rt_sdl2_poll_event(void) {
+    while (SDL_PollEvent(&g_last_event)) {
+        int64_t code;
+        g_last_event_valid = 1;
+        code = rt_sdl2_event_code();
+        if (code != 0) return code;
     }
     g_last_event_valid = 0;
     return 0;
+}
+
+int64_t rt_sdl2_wait_event(int64_t timeout_ms) {
+    int timeout = timeout_ms < 0 ? -1 :
+                  timeout_ms > INT_MAX ? INT_MAX : (int)timeout_ms;
+    for (;;) {
+        int received = timeout < 0
+            ? SDL_WaitEvent(&g_last_event)
+            : SDL_WaitEventTimeout(&g_last_event, timeout);
+        int64_t code;
+        if (!received) {
+            g_last_event_valid = 0;
+            return 0;
+        }
+        g_last_event_valid = 1;
+        code = rt_sdl2_event_code();
+        if (code != 0) return code;
+        timeout = 0;
+    }
 }
 
 int64_t rt_sdl2_event_key_code(void) {
@@ -436,6 +459,14 @@ void rt_sdl2_set_window_fullscreen(int64_t handle, int64_t fullscreen) {
     SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 }
 
+int64_t rt_sdl2_set_window_fullscreen_checked(int64_t handle, int64_t fullscreen) {
+    if (handle == 0) return 0;
+    return SDL_SetWindowFullscreen(
+        (SDL_Window*)(uintptr_t)handle,
+        fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0
+    ) == 0;
+}
+
 void rt_sdl2_set_window_size(int64_t handle, int64_t width, int64_t height) {
     if (handle == 0) return;
     SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
@@ -474,6 +505,78 @@ void rt_sdl2_hide_window(int64_t handle) {
     if (handle == 0) return;
     SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
     SDL_HideWindow(win);
+}
+
+int64_t rt_sdl2_set_window_minimum_size(int64_t handle, int64_t width, int64_t height) {
+    if (handle == 0 || width <= 0 || height <= 0 ||
+        width > INT_MAX || height > INT_MAX) return 0;
+    SDL_SetWindowMinimumSize((SDL_Window*)(uintptr_t)handle, (int)width, (int)height);
+    return 1;
+}
+
+int64_t rt_sdl2_set_window_maximum_size(int64_t handle, int64_t width, int64_t height) {
+    if (handle == 0 || width <= 0 || height <= 0 ||
+        width > INT_MAX || height > INT_MAX) return 0;
+    SDL_SetWindowMaximumSize((SDL_Window*)(uintptr_t)handle, (int)width, (int)height);
+    return 1;
+}
+
+int64_t rt_sdl2_minimize_window(int64_t handle) {
+    if (handle == 0) return 0;
+    SDL_MinimizeWindow((SDL_Window*)(uintptr_t)handle);
+    return 1;
+}
+
+int64_t rt_sdl2_maximize_window(int64_t handle) {
+    if (handle == 0) return 0;
+    SDL_MaximizeWindow((SDL_Window*)(uintptr_t)handle);
+    return 1;
+}
+
+int64_t rt_sdl2_restore_window(int64_t handle) {
+    if (handle == 0) return 0;
+    SDL_RestoreWindow((SDL_Window*)(uintptr_t)handle);
+    return 1;
+}
+
+int64_t rt_sdl2_set_window_bordered(int64_t handle, int64_t bordered) {
+    if (handle == 0) return 0;
+    SDL_SetWindowBordered(
+        (SDL_Window*)(uintptr_t)handle,
+        bordered ? SDL_TRUE : SDL_FALSE
+    );
+    return 1;
+}
+
+int64_t rt_sdl2_set_window_always_on_top(int64_t handle, int64_t on_top) {
+    if (handle == 0) return 0;
+#if SDL_VERSION_ATLEAST(2, 0, 16)
+    SDL_SetWindowAlwaysOnTop(
+        (SDL_Window*)(uintptr_t)handle,
+        on_top ? SDL_TRUE : SDL_FALSE
+    );
+    return 1;
+#else
+    (void)on_top;
+    return 0;
+#endif
+}
+
+int64_t rt_sdl2_focus_window(int64_t handle) {
+    SDL_Window* win;
+    if (handle == 0) return 0;
+    win = (SDL_Window*)(uintptr_t)handle;
+    SDL_RaiseWindow(win);
+    return (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS) != 0;
+}
+
+int64_t rt_sdl2_window_flags(int64_t handle) {
+    if (handle == 0) return 0;
+    return (int64_t)SDL_GetWindowFlags((SDL_Window*)(uintptr_t)handle);
+}
+
+const char* rt_sdl2_last_error(void) {
+    return SDL_GetError();
 }
 
 void rt_sdl2_set_cursor_visible(int64_t visible) {

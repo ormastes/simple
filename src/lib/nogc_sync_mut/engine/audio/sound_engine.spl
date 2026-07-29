@@ -1,15 +1,31 @@
 # codex-impl
 # SoundEngine facade foundation.
 #
-# This module exposes the selected platform/no-audio/codec/mixer contracts
-# through the existing mutable engine audio package without touching native
-# device I/O yet.
+# The engine always produces deterministic 48-kHz stereo PCM. A started
+# miniaudio backend consumes the same buffer; no-audio mode retains it as the
+# capture/evidence lane.
 
 use std.common.engine.audio.sound_contract.{
     SoundBackendCapability, SoundCommand, SoundCodecResult, SoundParallelEvidence,
     sound_capability, sound_no_audio_capability, sound_backend_status_valid,
     sound_command_2d, sound_command_3d, sound_decode_design_vector,
     sound_parallel_plan
+}
+use std.nogc_sync_mut.io.audio_sffi.{
+    AudioEngine,
+    AudioPlayback,
+    audio_init,
+    audio_is_playing,
+    audio_live_playback_count,
+    audio_shutdown,
+    audio_stop,
+}
+use std.nogc_sync_mut.engine.audio.ui_click_pcm_raw.{
+    UI_CLICK_PCM_FRAME_COUNT,
+    ui_click_pcm_create,
+    ui_click_pcm_checksum,
+    ui_click_pcm_play,
+    ui_click_pcm_release,
 }
 
 struct SoundEngineConfig:
@@ -28,13 +44,62 @@ class SoundEngine:
     capability: SoundBackendCapability
     command_log: [SoundCommand]
     teardown_count: i64
+    device_started: bool
+    device_handle: i64
+    playback_handles: [i64]
+    mixed_pcm_frames: i64
+    mixed_pcm_checksum: u64
+    underrun_count: i64
 
 impl SoundEngine:
     static fn create(config: SoundEngineConfig) -> SoundEngine:
         var cap = sound_capability(config.platform, config.host)
         if config.prefer_no_audio:
             cap = sound_no_audio_capability()
-        SoundEngine(capability: cap, command_log: [], teardown_count: 0)
+        SoundEngine(
+            capability: cap,
+            command_log: [],
+            teardown_count: 0,
+            device_started: false,
+            device_handle: 0,
+            playback_handles: [],
+            mixed_pcm_frames: 0,
+            mixed_pcm_checksum: 0u64,
+            underrun_count: 0
+        )
+
+    me start_device() -> bool:
+        if self.capability.backend == "no-audio":
+            return false
+        if self.device_started:
+            return true
+        val device = audio_init()
+        self.device_started = device.is_valid
+        self.device_handle = device.handle
+        self.device_started
+
+    me play_ui_click() -> bool:
+        val pcm_addr = ui_click_pcm_create()
+        if pcm_addr == 0:
+            self.underrun_count = self.underrun_count + 1
+            return false
+        self.mixed_pcm_frames = self.mixed_pcm_frames + UI_CLICK_PCM_FRAME_COUNT
+        self.mixed_pcm_checksum = ui_click_pcm_checksum(pcm_addr)
+        if not self.device_started:
+            ui_click_pcm_release(pcm_addr)
+            return false
+        val playback_handle = ui_click_pcm_play(pcm_addr)
+        ui_click_pcm_release(pcm_addr)
+        if playback_handle > 0:
+            self.playback_handles.push(playback_handle)
+            return true
+        self.underrun_count = self.underrun_count + 1
+        false
+
+    fn active_audio_handle_count() -> i64:
+        if not self.device_started:
+            return 0
+        audio_live_playback_count()
 
     me play_2d(entity_id: text, clip_id: text, x_milli: i64, listener_x_milli: i64) -> SoundCommand:
         val cmd = sound_command_2d(entity_id, clip_id, x_milli, listener_x_milli)
@@ -50,6 +115,19 @@ impl SoundEngine:
         self.command_log.len()
 
     me teardown():
+        for handle in self.playback_handles:
+            val playback = AudioPlayback(handle: handle, is_valid: true)
+            if audio_is_playing(playback):
+                audio_stop(playback)
+        self.playback_handles = []
+        if self.device_started:
+            val device = AudioEngine(
+                handle: self.device_handle,
+                is_valid: true
+            )
+            audio_shutdown(device)
+            self.device_started = false
+            self.device_handle = 0
         self.command_log = []
         self.teardown_count = self.teardown_count + 1
 

@@ -31,9 +31,11 @@ extern fn rt_sdl2_present_rgba(window_handle: i64, pixels: [i64], width: i64, he
 #   4=mousemotion, 5=mousedown, 6=mouseup, 7=mousewheel,
 #   8=windowevent, 9=textinput
 extern fn rt_sdl2_poll_event() -> i64
+extern fn rt_sdl2_wait_event(timeout_ms: i64) -> i64
 extern fn rt_sdl2_event_key_code() -> i64
 extern fn rt_sdl2_event_key_sym() -> i64
 extern fn rt_sdl2_event_key_mod() -> i64
+extern fn rt_sdl2_event_text() -> text
 extern fn rt_sdl2_event_mouse_x() -> i64
 extern fn rt_sdl2_event_mouse_y() -> i64
 extern fn rt_sdl2_event_mouse_button() -> i64
@@ -64,12 +66,23 @@ extern fn rt_sdl2_event_window_data2() -> i64
 # --- Window Properties ---
 extern fn rt_sdl2_set_window_resizable(handle: i64, resizable: i64)
 extern fn rt_sdl2_set_window_fullscreen(handle: i64, fullscreen: i64)
+extern fn rt_sdl2_set_window_fullscreen_checked(handle: i64, fullscreen: i64) -> i64
 extern fn rt_sdl2_set_window_size(handle: i64, width: i64, height: i64)
 extern fn rt_sdl2_set_window_position(handle: i64, x: i64, y: i64)
 extern fn rt_sdl2_get_window_position_x(handle: i64) -> i64
 extern fn rt_sdl2_get_window_position_y(handle: i64) -> i64
 extern fn rt_sdl2_show_window(handle: i64)
 extern fn rt_sdl2_hide_window(handle: i64)
+extern fn rt_sdl2_set_window_minimum_size(handle: i64, width: i64, height: i64) -> i64
+extern fn rt_sdl2_set_window_maximum_size(handle: i64, width: i64, height: i64) -> i64
+extern fn rt_sdl2_minimize_window(handle: i64) -> i64
+extern fn rt_sdl2_maximize_window(handle: i64) -> i64
+extern fn rt_sdl2_restore_window(handle: i64) -> i64
+extern fn rt_sdl2_set_window_bordered(handle: i64, bordered: i64) -> i64
+extern fn rt_sdl2_set_window_always_on_top(handle: i64, on_top: i64) -> i64
+extern fn rt_sdl2_focus_window(handle: i64) -> i64
+extern fn rt_sdl2_window_flags(handle: i64) -> i64
+extern fn rt_sdl2_last_error() -> text
 
 # --- Cursor ---
 extern fn rt_sdl2_set_cursor_visible(visible: i64)
@@ -107,18 +120,18 @@ struct EventBatch:
     event_loop: EventLoop
 
 fn window_poll_events(event_loop: EventLoop, max_events: i64) -> EventBatch:
-    if not event_loop.is_valid:
+    if not event_loop.is_valid or max_events <= 0:
         EventBatch(handle: 0, count: 0, event_loop: event_loop)
     else:
         val handle = rt_sdl2_poll_event()
-        EventBatch(handle: handle, count: max_events, event_loop: event_loop)
+        EventBatch(handle: handle, count: if handle == 0: 0 else: 1, event_loop: event_loop)
 
 fn window_wait_events(event_loop: EventLoop, timeout_ms: i64) -> EventBatch:
     if not event_loop.is_valid:
         EventBatch(handle: 0, count: 0, event_loop: event_loop)
     else:
-        val handle = rt_sdl2_poll_event()
-        EventBatch(handle: handle, count: 100, event_loop: event_loop)
+        val handle = rt_sdl2_wait_event(timeout_ms)
+        EventBatch(handle: handle, count: if handle == 0: 0 else: 1, event_loop: event_loop)
 
 # --- Window Configuration ---
 
@@ -179,7 +192,17 @@ fn window_create_with_config(event_loop: EventLoop, config: WindowConfig) -> Win
             if not config.resizable:
                 rt_sdl2_set_window_resizable(handle, 0)
             if config.fullscreen:
-                rt_sdl2_set_window_fullscreen(handle, 1)
+                rt_sdl2_set_window_fullscreen_checked(handle, 1)
+            if config.maximized:
+                rt_sdl2_maximize_window(handle)
+            if config.min_width > 0 and config.min_height > 0:
+                rt_sdl2_set_window_minimum_size(handle, config.min_width, config.min_height)
+            if config.max_width > 0 and config.max_height > 0:
+                rt_sdl2_set_window_maximum_size(handle, config.max_width, config.max_height)
+            if not config.decorations:
+                rt_sdl2_set_window_bordered(handle, 0)
+            if config.always_on_top:
+                rt_sdl2_set_window_always_on_top(handle, 1)
             if not config.visible:
                 rt_sdl2_hide_window(handle)
         Window(handle: handle, event_loop: event_loop, is_valid: handle > 0)
@@ -243,14 +266,13 @@ fn window_set_min_size(window: Window, size: Size) -> bool:
     if not window.is_valid:
         false
     else:
-        # SDL2 supports SDL_SetWindowMinimumSize but we keep it simple
-        true
+        rt_sdl2_set_window_minimum_size(window.handle, size.width, size.height) != 0
 
 fn window_set_max_size(window: Window, size: Size) -> bool:
     if not window.is_valid:
         false
     else:
-        true
+        rt_sdl2_set_window_maximum_size(window.handle, size.width, size.height) != 0
 
 # --- Window State ---
 
@@ -272,7 +294,7 @@ fn window_set_visible(window: Window, visible: bool) -> bool:
         true
 
 fn window_is_visible(window: Window) -> bool:
-    window.is_valid
+    window.is_valid and (rt_sdl2_window_flags(window.handle) & 4) != 0
 
 fn window_set_resizable(window: Window, resizable: bool) -> bool:
     if not window.is_valid:
@@ -285,45 +307,49 @@ fn window_set_minimized(window: Window, minimized: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        # SDL2: SDL_MinimizeWindow / SDL_RestoreWindow
-        true
+        if minimized:
+            rt_sdl2_minimize_window(window.handle) != 0
+        else:
+            rt_sdl2_restore_window(window.handle) != 0
 
 fn window_set_maximized(window: Window, maximized: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        true
+        if maximized:
+            rt_sdl2_maximize_window(window.handle) != 0
+        else:
+            rt_sdl2_restore_window(window.handle) != 0
 
 fn window_is_maximized(window: Window) -> bool:
-    false
+    window.is_valid and (rt_sdl2_window_flags(window.handle) & 128) != 0
 
 fn window_set_fullscreen(window: Window, fullscreen: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        rt_sdl2_set_window_fullscreen(window.handle, if fullscreen: 1 else: 0)
-        true
+        rt_sdl2_set_window_fullscreen_checked(window.handle, if fullscreen: 1 else: 0) != 0
 
 fn window_is_fullscreen(window: Window) -> bool:
-    false
+    window.is_valid and (rt_sdl2_window_flags(window.handle) & 4097) != 0
 
 fn window_set_decorations(window: Window, decorations: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        true
+        rt_sdl2_set_window_bordered(window.handle, if decorations: 1 else: 0) != 0
 
 fn window_set_always_on_top(window: Window, on_top: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        true
+        rt_sdl2_set_window_always_on_top(window.handle, if on_top: 1 else: 0) != 0
 
 fn window_focus(window: Window) -> bool:
     if not window.is_valid:
         false
     else:
-        true
+        rt_sdl2_focus_window(window.handle) != 0
 
 fn window_request_redraw(window: Window) -> bool:
     # SDL2 does not have a redraw request concept; rendering is immediate
@@ -424,7 +450,25 @@ fn event_parse_type(type_code: i64) -> EventType:
     elif type_code == 7:
         EventType.MouseWheel
     elif type_code == 8:
-        EventType.WindowResized
+        val window_event = rt_sdl2_event_window_event_id()
+        if window_event == 4:
+            EventType.WindowMoved
+        elif window_event == 5 or window_event == 6:
+            EventType.WindowResized
+        elif window_event == 10:
+            EventType.CursorEntered
+        elif window_event == 11:
+            EventType.CursorLeft
+        elif window_event == 12:
+            EventType.WindowFocused
+        elif window_event == 13:
+            EventType.WindowUnfocused
+        elif window_event == 14:
+            EventType.WindowCloseRequested
+        else:
+            EventType.Unknown
+    elif type_code == 9:
+        EventType.ReceivedCharacter
     else:
         EventType.Unknown
 
@@ -475,7 +519,10 @@ fn event_keyboard_input(event: Event) -> KeyboardEvent:
         KeyboardEvent(scancode: scancode, virtual_key: vkey, state: state, modifiers: mods)
 
 fn event_received_character(event: Event) -> text:
-    ""
+    if event.is_valid and event.handle == 9:
+        rt_sdl2_event_text()
+    else:
+        ""
 
 # --- Mouse Event Detail Wrappers ---
 
@@ -649,7 +696,7 @@ fn window_clipboard_has_text() -> bool:
 # --- Utilities ---
 
 fn window_last_error() -> text:
-    ""
+    rt_sdl2_last_error()
 
 # ============================================================================
 # SDL2-specific helpers for InputManager compatibility
@@ -743,7 +790,7 @@ export rt_sdl2_init, rt_sdl2_quit
 export rt_sdl2_create_window, rt_sdl2_destroy_window
 export rt_sdl2_get_window_width, rt_sdl2_get_window_height, rt_sdl2_set_window_title
 export rt_sdl2_present_rgba
-export rt_sdl2_poll_event, rt_sdl2_event_key_code, rt_sdl2_event_key_sym, rt_sdl2_event_key_mod
+export rt_sdl2_poll_event, rt_sdl2_wait_event, rt_sdl2_event_key_code, rt_sdl2_event_key_sym, rt_sdl2_event_key_mod, rt_sdl2_event_text
 export rt_sdl2_event_mouse_x, rt_sdl2_event_mouse_y, rt_sdl2_event_mouse_button
 export rt_sdl2_event_wheel_x, rt_sdl2_event_wheel_y
 export rt_sdl2_is_key_pressed, rt_sdl2_get_mouse_x, rt_sdl2_get_mouse_y

@@ -10,6 +10,14 @@
 use common.ui.widget.{WidgetNode, UITree, UIState, UIEvent}
 use nogc_sync_mut.ui.session.{UISession, new_session}
 use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem}
+use common.ui.taskbar_pin_wire.{
+    TASKBAR_PIN_WIRE_HEADER,
+    taskbar_pin_wire_app_id,
+    taskbar_pin_wire_display_name,
+    taskbar_pin_wire_icon,
+    taskbar_pin_wire_line,
+    taskbar_pin_wire_line_valid,
+}
 use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, WM_CHROME_KIND_TITLED, shared_wm_background_color}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_id}
 use common.ui.wm_runtime_dispatch.{WmRuntimeDispatchCommand, WmRuntimeShellState, wm_runtime_shell_state_empty}
@@ -17,7 +25,19 @@ use common.ui.builder.{
     column, row, panel, text_widget, button, label, statusbar,
     build_tree, build_tree_with_title, with_height, with_width, with_flex
 }
-use os.compositor.compositor.{Compositor, WindowSurface}
+use os.compositor.compositor.{
+    Compositor,
+    WindowSurface,
+    WM_CONTENT_KIND_GUI_SESSION,
+    WM_CONTENT_KIND_WEB_DOCUMENT,
+    WM_CONTENT_KIND_PIXEL_SURFACE,
+}
+use os.compositor.pixel_content_store.{
+    pixel_content_store_length,
+    pixel_content_store_color,
+}
+use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
+use std.gc_async_mut.ui.gui_content_renderer.{gui_session_content_frame}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_revision_with_theme}
 use os.compositor.wm_action_applier.{apply_wm_action_to_compositor, wm_action_with_app_id, wm_lifecycle_owner_allows_source}
 use os.compositor.app_content.{app_state_new}
@@ -49,6 +69,8 @@ use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command, simpleos_wm_apply_pointer}
 use os.desktop.wm_pointer_decode.{wm_pointer_button_from_code, wm_pointer_kind_from_code}
 use os.kernel.boot.cpu.{port_inb}
+use os.services.vfs.vfs_init.{g_vfs_read_file_text}
+use os.services.vfs.vfs_write_ops.{g_vfs_write_file_text}
 use os.desktop.shell_types.{
     EditorResidentLaunch, _build_editor_resident_launch,
     _fallback_app_id_for_name,
@@ -59,6 +81,8 @@ use os.desktop.shell_types.{
 }
 
 extern fn serial_println(msg: text)
+
+val TASKBAR_PIN_LAYOUT_PATH: text = "/SYS/TASKBAR.PIN"
 
 # Level gate for the WM event-loop trace receipts. DEFAULT OFF — flip to true to
 # re-arm the loop-step/render-step/pointer-dispatch bisection from the
@@ -253,6 +277,12 @@ class DesktopShell:
     launcher_id: u64
     clock_text: text
     shortcuts: [KeyboardShortcut]
+    pinned_app_ids: [text]
+    pinned_display_names: [text]
+    pinned_icons: [text]
+    pinned_layout_loaded: bool
+    pinned_layout_persisted: bool
+    pinned_layout_error_count: i64
     baremetal_apps: [text]
     launcher_initialized: bool
     selected_process_idx: i64
@@ -295,6 +325,20 @@ impl DesktopShell:
             launcher_id: 0,
             clock_text: "00:00",
             shortcuts: _default_shortcuts(),
+            pinned_app_ids: [
+                APP_ID_HELLO_WORLD,
+                APP_ID_SHELL,
+                APP_ID_SIMPLE_BROWSER
+            ],
+            pinned_display_names: [
+                "Hello World",
+                "Terminal",
+                "Simple Browser"
+            ],
+            pinned_icons: ["H", "T", "W"],
+            pinned_layout_loaded: false,
+            pinned_layout_persisted: false,
+            pinned_layout_error_count: 0,
             baremetal_apps: [],
             launcher_initialized: false,
             selected_process_idx: 0,
@@ -315,6 +359,116 @@ impl DesktopShell:
         baremetal shells leave it on so dead tasks are reaped each frame.
         """
         self.task_reaper_enabled = enabled
+
+    me pin_app(app_id: text, display_name: text, icon: text) -> bool:
+        val stored_name = if display_name != "": display_name else: app_id
+        val stored_icon = if icon != "": icon else: "app"
+        if taskbar_pin_wire_line(app_id, stored_name, stored_icon) == "":
+            return false
+        var i = 0
+        while i < self.pinned_app_ids.len():
+            if self.pinned_app_ids[i] == app_id:
+                return true
+            i = i + 1
+        self.pinned_app_ids.push(app_id)
+        self.pinned_display_names.push(stored_name)
+        self.pinned_icons.push(stored_icon)
+        self.save_pinned_layout()
+        true
+
+    me unpin_app(app_id: text) -> bool:
+        if app_id == "":
+            return false
+        var ids: [text] = []
+        var names: [text] = []
+        var icons: [text] = []
+        var removed = false
+        var i = 0
+        while i < self.pinned_app_ids.len():
+            if self.pinned_app_ids[i] == app_id:
+                removed = true
+            else:
+                ids.push(self.pinned_app_ids[i])
+                names.push(self.pinned_display_names[i])
+                icons.push(self.pinned_icons[i])
+            i = i + 1
+        self.pinned_app_ids = ids
+        self.pinned_display_names = names
+        self.pinned_icons = icons
+        if removed:
+            self.save_pinned_layout()
+        removed
+
+    fn pinned_app_count() -> i64:
+        self.pinned_app_ids.len()
+
+    fn pinned_display_name(app_id: text) -> text:
+        var i = 0
+        while i < self.pinned_app_ids.len():
+            if self.pinned_app_ids[i] == app_id:
+                return self.pinned_display_names[i]
+            i = i + 1
+        ""
+
+    me save_pinned_layout() -> bool:
+        var content = TASKBAR_PIN_WIRE_HEADER + "\n"
+        var i = 0
+        while i < self.pinned_app_ids.len():
+            val line = taskbar_pin_wire_line(
+                self.pinned_app_ids[i],
+                self.pinned_display_names[i],
+                self.pinned_icons[i]
+            )
+            if line == "":
+                self.pinned_layout_persisted = false
+                self.pinned_layout_error_count = self.pinned_layout_error_count + 1
+                return false
+            content = content + line + "\n"
+            i = i + 1
+        val wrote = g_vfs_write_file_text(
+            TASKBAR_PIN_LAYOUT_PATH, content
+        )
+        self.pinned_layout_persisted = wrote
+        if not wrote:
+            self.pinned_layout_error_count = self.pinned_layout_error_count + 1
+        wrote
+
+    me load_pinned_layout() -> bool:
+        val content = g_vfs_read_file_text(TASKBAR_PIN_LAYOUT_PATH)
+        self.pinned_layout_loaded = true
+        if content == "":
+            return false
+        val lines = content.replace("\r\n", "\n").split("\n")
+        if lines.len() == 0 or lines[0] != TASKBAR_PIN_WIRE_HEADER:
+            self.pinned_layout_error_count = self.pinned_layout_error_count + 1
+            return false
+        var ids: [text] = []
+        var names: [text] = []
+        var icons: [text] = []
+        var line_index = 1
+        while line_index < lines.len():
+            val line = lines[line_index]
+            if line != "":
+                if not taskbar_pin_wire_line_valid(line) or ids.len() >= 64:
+                    self.pinned_layout_error_count = self.pinned_layout_error_count + 1
+                    return false
+                val app_id = taskbar_pin_wire_app_id(line)
+                var duplicate = false
+                for existing in ids:
+                    if existing == app_id:
+                        duplicate = true
+                if duplicate:
+                    self.pinned_layout_error_count = self.pinned_layout_error_count + 1
+                    return false
+                ids.push(app_id)
+                names.push(taskbar_pin_wire_display_name(line))
+                icons.push(taskbar_pin_wire_icon(line))
+            line_index = line_index + 1
+        self.pinned_app_ids = ids
+        self.pinned_display_names = names
+        self.pinned_icons = icons
+        self.pinned_layout_persisted = true
+        true
 
     me register_materialized_window(window_id: WindowId, pid: u64, app_id: text):
         self.compositor.set_window_identity(window_id.value.to_i32(), pid.to_i64(), app_id)
@@ -337,6 +491,8 @@ impl DesktopShell:
             _sync_launcher_registry_with_manifests()
             self.launcher_initialized = true
             log_info("[desktop] " + "[shell] init: launcher initialized")
+        if not self.pinned_layout_loaded:
+            self.load_pinned_layout()
         log_info("[desktop] " + "[shell] init: skipping taskbar (builder DSL unavailable in baremetal)")
         log_info("[desktop] " + "[shell] init: desktop shell initialized")
 
@@ -351,6 +507,8 @@ impl DesktopShell:
             launcher_init()
             self.launcher_initialized = true
             log_info("[desktop] " + "[shell] init: canonical baremetal launcher initialized")
+        if not self.pinned_layout_loaded:
+            self.load_pinned_layout()
         log_info("[desktop] " + "[shell] init: desktop shell initialized")
 
     me update_taskbar():
@@ -1055,29 +1213,74 @@ impl DesktopShell:
                 val content_w = surface.width - 8
                 val content_h = surface.height - 36
                 if content_w > 0 and content_h > 0:
-                    val installed_theme_id = active_wm_theme_id()
-                    val content_theme_id = if installed_theme_id != "":
-                        installed_theme_id
-                    else:
-                        default_theme_id()
-                    var cache = WebRenderPixelArtifactCache.create(content_w, content_h, "software")
-                    var cache_index = -1
-                    var cache_scan = 0
-                    while cache_scan < self.baremetal_web_cache_ids.len():
-                        if self.baremetal_web_cache_ids[cache_scan] == surface.id as i64:
-                            cache_index = cache_scan
-                        cache_scan = cache_scan + 1
-                    if cache_index >= 0:
-                        cache = self.baremetal_web_caches[cache_index]
-                    if cache.width != content_w or cache.height != content_h:
-                        cache = WebRenderPixelArtifactCache.create(content_w, content_h, "software")
-                    val content_revision = simple_web_content_revision_with_theme(content_theme_id, surface.title, surface.content_html, content_w, content_h, 0)
-                    frames = frames.push(simple_web_content_frame_cached(cache, "{surface.id}", scene_revision, content_revision, content_theme_id, surface.title, surface.content_html, content_w, content_h, 0))
-                    if cache_index >= 0:
-                        self.baremetal_web_caches[cache_index] = cache
-                    else:
-                        self.baremetal_web_cache_ids.push(surface.id as i64)
-                        self.baremetal_web_caches.push(cache)
+                    if surface.content_kind == WM_CONTENT_KIND_GUI_SESSION:
+                        val registry_index = self.compositor.gui_content_index(
+                            surface.content_handle
+                        )
+                        if registry_index >= 0:
+                            var session = UISession.new(
+                                self.compositor.gui_content_trees[registry_index]
+                            )
+                            val focused_id = self.compositor.gui_content_focused_ids[registry_index]
+                            if focused_id != "":
+                                session.dispatch(UIEvent.FocusEvent(
+                                    focused_id, "focus"
+                                ))
+                            frames.push(gui_session_content_frame(
+                                session, surface.id.to_text(), "", 0, 0,
+                                content_w, content_h, scene_revision,
+                                surface.content_revision, []
+                            ))
+                    elif surface.content_kind == WM_CONTENT_KIND_WEB_DOCUMENT:
+                        val installed_theme_id = active_wm_theme_id()
+                        val content_theme_id = if installed_theme_id != "":
+                            installed_theme_id
+                        else:
+                            default_theme_id()
+                        var cache = WebRenderPixelArtifactCache.create(content_w, content_h, "software")
+                        var cache_index = -1
+                        var cache_scan = 0
+                        while cache_scan < self.baremetal_web_cache_ids.len():
+                            if self.baremetal_web_cache_ids[cache_scan] == surface.id as i64:
+                                cache_index = cache_scan
+                            cache_scan = cache_scan + 1
+                        if cache_index >= 0:
+                            cache = self.baremetal_web_caches[cache_index]
+                        if cache.width != content_w or cache.height != content_h:
+                            cache = WebRenderPixelArtifactCache.create(content_w, content_h, "software")
+                        val content_revision = simple_web_content_revision_with_theme(content_theme_id, surface.title, surface.content_html, content_w, content_h, 0)
+                        frames.push(simple_web_content_frame_cached(cache, "{surface.id}", scene_revision, content_revision, content_theme_id, surface.title, surface.content_html, content_w, content_h, 0))
+                        if cache_index >= 0:
+                            self.baremetal_web_caches[cache_index] = cache
+                        else:
+                            self.baremetal_web_cache_ids.push(surface.id as i64)
+                            self.baremetal_web_caches.push(cache)
+                    elif surface.content_kind == WM_CONTENT_KIND_PIXEL_SURFACE:
+                        val length = pixel_content_store_length(
+                            self.compositor.pixel_content_registry_addr,
+                            surface.content_handle
+                        )
+                        if length == content_w * content_h:
+                            var pixels: [u32] = []
+                            var pixel: i64 = 0
+                            while pixel < length:
+                                pixels.push(pixel_content_store_color(
+                                    self.compositor.pixel_content_registry_addr,
+                                    surface.content_handle,
+                                    pixel
+                                ))
+                                pixel = pixel + 1
+                            frames.push(pixel_surface_content_frame(
+                                surface.id.to_text(),
+                                "",
+                                0,
+                                0,
+                                content_w,
+                                content_h,
+                                pixels,
+                                scene_revision,
+                                surface.content_revision
+                            ))
         frames
 
     fn runtime_scene_snapshot() -> SharedWmScene:
@@ -1112,10 +1315,14 @@ impl DesktopShell:
 
     fn runtime_taskbar_model() -> TaskbarModel:
         var pinned: [AppRef] = []
-        for shortcut in self.shortcuts:
-            if shortcut.action.starts_with("launch_"):
-                val app_name = shortcut.action.slice(7, shortcut.action.len())
-                pinned = pinned.push(AppRef(app_id: app_name, display_name: app_name, icon: "app"))
+        var pinned_index = 0
+        while pinned_index < self.pinned_app_ids.len():
+            pinned.push(AppRef(
+                app_id: self.pinned_app_ids[pinned_index],
+                display_name: self.pinned_display_names[pinned_index],
+                icon: self.pinned_icons[pinned_index]
+            ))
+            pinned_index = pinned_index + 1
         var running: [WindowRef] = []
         for surface in self.compositor.surfaces:
             running = running.push(WindowRef(
@@ -1132,7 +1339,16 @@ impl DesktopShell:
 
     me apply_wm_runtime_command_to_live_shell(command: WmRuntimeDispatchCommand):
         if command.kind == "launcher_launch":
-            self.launch_app(command.app_id)
+            val display_name = self.pinned_display_name(command.app_id)
+            self.launch_app(
+                if display_name != "": display_name else: command.app_id
+            )
+            return
+        if command.kind == "pin_app":
+            self.pin_app(command.app_id, command.app_id, "app")
+            return
+        if command.kind == "unpin_app":
+            self.unpin_app(command.app_id)
             return
         if command.kind == "window_focus":
             val window_id = command.window_id.to_i64()
@@ -1239,7 +1455,14 @@ impl DesktopShell:
         val button: text = wm_pointer_button_from_code(button_code)
         val kind: text = wm_pointer_kind_from_code(kind_code)
         self.handle_wm_pointer_event_loop_step(x, y, button, kind)
-        if target_window_id > 0 and self.wm.initialized:
+        var routed_compositor = self.compositor
+        val gui_handled = routed_compositor.dispatch_gui_pointer_event(
+            target_window_id, x, y, button, kind
+        )
+        self.compositor = routed_compositor
+        if (not gui_handled and target_window_id > 0 and
+            self.wm.initialized and
+            self.compositor.window_owner_port(target_window_id.to_u64()) > 0):
             val window_id = WindowId(value: target_window_id as u64)
             if kind == "down":
                 self.wm.send_focus_changed(window_id.value, true)

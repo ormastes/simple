@@ -51,6 +51,13 @@ Host input
 
 - Simple owns: GUI AST, state, layout policy, event ids, dirty regions, IR
   schemas, cache invalidation, and CPU oracle behavior.
+- WM lifecycle uses the scalar `common.ui.wm_window_state` owner; minimized,
+  closing, and closed windows reject input, and restore preserves whether the
+  minimized window was Normal or Maximized.
+- SimpleOS GUI handles retain tree/focus state; local sessions are reconstructed
+  at dispatch/render boundaries, with capture released on up/minimize/close.
+- Normalized key events classify press-only WM shortcuts before widget routing;
+  releases and unreserved Ctrl bindings remain client events.
 - Web material provenance is captured from loop-local computed style before
   the freestanding `[Style]` boundary; animated material receipts fail closed.
 - Plugin owns: capability probe, cost model, batch preparation, GPU/CPU
@@ -269,6 +276,24 @@ MCP, Render, Test API — all thin. GUI policy stays in Simple.
   compositions lift through `sgtti_snapshot_from_draw_ir_batch` /
   `sgtti_snapshot_from_draw_ir_composition` before Engine2D pixel readback.
   New specs use `std.spec`; `std.spipe` is compatibility only.
+
+Host pin state has one persistence owner (`HostTaskbarRuntime`) and is projected
+by stable `app_id` through scalar accessors into the compositor's shared
+`TaskbarModel`. Idle pinned slots emit a release-inside scalar launch request;
+the application runtime, not compositor chrome, owns creation. The host demo
+keeps its desktop alive after close and consumes that request to reopen.
+
+Host maximize respects the 48/56-pixel work-area insets; restore preserves a
+pre-minimize maximized state before returning to the exact normal rectangle.
+Minimize/maximize/close cancel target-scoped chrome interactions.
+Alt+Tab skips minimized windows; taskbar activation restores them.
+Resize requires explicit pointer capture; button events never reuse stale
+chrome coordinates.
+New presses clear stale capture before hit testing.
+Middle/right buttons reach compositor state but not the primary-only widget
+reducer.
+Host taskbar draw and hit lanes share 56-pixel slots.
+Running taskbar colors derive focus/minimize state from the shared scene.
 
 ## GUI Sanity Apps
 

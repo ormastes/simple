@@ -12,7 +12,7 @@ use common.ui.window_scene.{
     shared_wm_scene_register_motion_background_source,
     shared_wm_scene_resolve_background
 }
-use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_checksum, wm_content_frame_web_provenance_valid}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_checksum, wm_content_frame_origin_valid, wm_content_frame_web_provenance_valid}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DrawIrComposition}
 use common.ui.window_scene_draw_ir.{
     SharedWmPixelBufferBackend,
@@ -24,12 +24,13 @@ use common.ui.window_scene_draw_ir.{
     shared_wm_scene_render_taskbar_context_to_backend,
     shared_wm_scene_render_taskbar_context_to_pixel_buffer,
     shared_wm_scene_render_desktop_chrome,
+    shared_wm_taskbar_object_rect,
     shared_wm_top_content_frame_index,
     shared_wm_scene_window_content_rect_with_titlebar,
     shared_wm_browser_content_extra_height,
     shared_wm_browser_toolbar_control_at
 }
-use common.ui.taskbar_model.{WindowRef, TrayItem, TaskbarModel}
+use common.ui.taskbar_model.{AppRef, WindowRef, TrayItem, TaskbarModel}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.dirty_rect.{DirtyRegion}
@@ -41,7 +42,7 @@ use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_render_snapshot, active_wm_theme_id, WmChromeColors}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use common.color.convert.{int_to_hex}
-use os.compositor.wm_action_lifecycle.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
+use os.compositor.wm_action_lifecycle.{WM_WORK_AREA_TOP, WM_WORK_AREA_BOTTOM, WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_action.{WmAction}
 use common.window_protocol.compositor_methods.{COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 
@@ -51,6 +52,7 @@ extern fn rt_time_now_unix_micros() -> i64
 
 val HOST_WM_IDLE_SLEEP_MS: i32 = 16
 val HOST_EXTERNAL_WEB_FRAME_MAX_COUNT: i64 = 4
+val HOST_EXTERNAL_CHILD_FRAME_MAX_COUNT: i64 = 32
 val HOST_EXTERNAL_WEB_FRAME_MAX_PIXELS: i64 = 16777216
 
 # When true, render_frame_engine2d() rejects the canonical Draw IR lane so the
@@ -527,6 +529,7 @@ class HostCompositor:
     windows: [HostedWindow]
     next_window_id: i64
     app_processes: [HostWmAppProcess]
+    pinned_apps: [AppRef]
     dragging: bool
     drag_window_id: i64
     drag_offset_x: i32
@@ -560,6 +563,8 @@ class HostCompositor:
     # mouse-up if the release hit-test still resolves to the same target.
     armed_chrome_target: text
     armed_chrome_window_id: i64
+    armed_chrome_app_id: text
+    pending_taskbar_launch_app_id: text
     # Cache for the CSS/GUI-web chrome render lane (see render_frame). The key
     # is host_chrome_scene_fingerprint(); the pixels are the last full-scene
     # chrome rasterization. Empty key means "no cached chrome yet".
@@ -579,6 +584,7 @@ class HostCompositor:
     # closed at the existing content-frame gate.
     external_web_window_ids: [i64]
     external_web_frames: [WmContentFrame]
+    external_child_frames: [WmContentFrame]
     # Scene background this compositor resolves at render time (color/image/
     # motion, see common.ui.window_scene.BackgroundSpec). Defaults to a plain
     # color matching the historical hardcoded compositor_bg fill so a
@@ -609,6 +615,7 @@ class HostCompositor:
             windows: [],
             next_window_id: 1,
             app_processes: [],
+            pinned_apps: [],
             dragging: false,
             drag_window_id: 0,
             drag_offset_x: 0,
@@ -626,11 +633,14 @@ class HostCompositor:
             scroll_offsets: {},
             armed_chrome_target: "",
             armed_chrome_window_id: 0,
+            armed_chrome_app_id: "",
+            pending_taskbar_launch_app_id: "",
             _chrome_cache_key: "",
             _chrome_cache_pixels: [],
             content_caches: {},
             external_web_window_ids: [],
             external_web_frames: [],
+            external_child_frames: [],
             background: shared_wm_background_color(wm_chrome_theme().compositor_bg),
             render_revision: 0,
             dirty: DirtyRegion.new(),
@@ -671,8 +681,19 @@ class HostCompositor:
 
     me _drop_window_render_state(window_id: i64):
         self._drop_external_web_frame(window_id)
+        self._drop_external_child_frames_for_parent(window_id.to_text())
         self.scroll_offsets.remove(window_id)
         self.content_caches.remove(window_id)
+        self._cancel_window_interaction(window_id)
+        var native_index = 0
+        while native_index < self.native_cache_window_ids.len():
+            if self.native_cache_window_ids[native_index] == window_id:
+                self.native_cache_window_ids.remove(native_index)
+                self.native_content_caches.remove(native_index)
+                return
+            native_index = native_index + 1
+
+    me _cancel_window_interaction(window_id: i64):
         if self.drag_window_id == window_id:
             self.dragging = false
             self.drag_window_id = 0
@@ -682,13 +703,24 @@ class HostCompositor:
         if self.armed_chrome_window_id == window_id:
             self.armed_chrome_target = ""
             self.armed_chrome_window_id = 0
-        var native_index = 0
-        while native_index < self.native_cache_window_ids.len():
-            if self.native_cache_window_ids[native_index] == window_id:
-                self.native_cache_window_ids.remove(native_index)
-                self.native_content_caches.remove(native_index)
-                return
-            native_index = native_index + 1
+            self.armed_chrome_app_id = ""
+
+    me _drop_external_child_frames_for_parent(parent_id: text):
+        var removed_parent_ids: [text] = [parent_id]
+        var scan_parent = 0
+        while scan_parent < removed_parent_ids.len():
+            val removed_parent = removed_parent_ids[scan_parent]
+            var kept: [WmContentFrame] = []
+            var i = 0
+            while i < self.external_child_frames.len():
+                val child = self.external_child_frames[i]
+                if child.parent_window_id == removed_parent:
+                    removed_parent_ids.push(child.window_id)
+                else:
+                    kept.push(child)
+                i = i + 1
+            self.external_child_frames = kept
+            scan_parent = scan_parent + 1
 
     me require_external_web_frame(window_id: i64) -> bool:
         if window_id <= 0 or self._find_window_index(window_id) < 0:
@@ -696,8 +728,7 @@ class HostCompositor:
         val frame_index = self._external_web_frame_index(window_id)
         if frame_index >= 0:
             return true
-        elif self.external_web_window_ids.len() <
-            HOST_EXTERNAL_WEB_FRAME_MAX_COUNT:
+        elif self.external_web_window_ids.len() < HOST_EXTERNAL_WEB_FRAME_MAX_COUNT:
             self.external_web_window_ids.push(window_id)
             self.external_web_frames.push(
                 _host_empty_external_web_frame()
@@ -707,11 +738,15 @@ class HostCompositor:
         self.dirty.add_full_screen(self.width, self.height)
         true
 
+    # Canonical names for the shared GUI/Web/pixel top-frame boundary.
+    # Keep the historical Web names as compatibility aliases.
+    me require_external_content_frame(window_id: i64) -> bool:
+        self.require_external_web_frame(window_id)
+
     me invalidate_external_web_frame(window_id: i64):
         val frame_index = self._external_web_frame_index(window_id)
         if frame_index >= 0:
-            self.external_web_frames[frame_index] =
-                _host_empty_external_web_frame()
+            self.external_web_frames[frame_index] = _host_empty_external_web_frame()
             self.dirty.add_full_screen(self.width, self.height)
 
     me release_external_web_frame(window_id: i64):
@@ -733,7 +768,7 @@ class HostCompositor:
         if (frame.width != expected_width or
             frame.height != expected_height or
             frame.window_id != window_id.to_text() or
-            frame.origin_kind != WM_CONTENT_ORIGIN_SIMPLE_WEB or
+            not wm_content_frame_origin_valid(frame.origin_kind) or
             frame.content_revision <= 0 or
             frame.width <= 0 or frame.height <= 0 or
             frame.width > 4096 or frame.height > 4096 or
@@ -757,6 +792,69 @@ class HostCompositor:
         self.external_web_frames[frame_index] = frame
         self.dirty.add_full_screen(self.width, self.height)
         true
+
+    me set_external_content_frame(
+        window_id: i64,
+        frame: WmContentFrame
+    ) -> bool:
+        self.set_external_web_frame(window_id, frame)
+
+    me set_external_child_frame(frame: WmContentFrame) -> bool:
+        if (frame.window_id == "" or frame.parent_window_id == "" or
+            not wm_content_frame_origin_valid(frame.origin_kind) or
+            frame.content_revision <= 0 or frame.width <= 0 or frame.height <= 0 or
+            frame.width > 4096 or frame.height > 4096 or
+            frame.pixels.len() != frame.width.to_i64() * frame.height.to_i64() or
+            frame.checksum == 0u64 or
+            frame.checksum != wm_content_frame_checksum(frame.pixels) or
+            not wm_content_frame_web_provenance_valid(frame)):
+            return false
+        var parent_found = false
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].id.to_text() == frame.parent_window_id:
+                parent_found = true
+            i = i + 1
+        i = 0
+        while i < self.external_child_frames.len():
+            if self.external_child_frames[i].window_id == frame.parent_window_id:
+                parent_found = true
+            i = i + 1
+        if not parent_found:
+            return false
+        var replace_index = -1
+        var aggregate_pixels = frame.pixels.len()
+        i = 0
+        while i < self.external_child_frames.len():
+            val child = self.external_child_frames[i]
+            if child.window_id == frame.window_id:
+                replace_index = i
+            else:
+                aggregate_pixels = aggregate_pixels + child.pixels.len()
+            i = i + 1
+        i = 0
+        while i < self.external_web_frames.len():
+            aggregate_pixels = aggregate_pixels + self.external_web_frames[i].pixels.len()
+            i = i + 1
+        if aggregate_pixels > HOST_EXTERNAL_WEB_FRAME_MAX_PIXELS:
+            return false
+        if replace_index >= 0:
+            self.external_child_frames[replace_index] = frame
+        elif self.external_child_frames.len() < HOST_EXTERNAL_CHILD_FRAME_MAX_COUNT:
+            self.external_child_frames.push(frame)
+        else:
+            return false
+        self.dirty.add_full_screen(self.width, self.height)
+        true
+
+    me release_external_child_frame(frame_id: text):
+        self._drop_external_child_frames_for_parent(frame_id)
+        var kept: [WmContentFrame] = []
+        for frame in self.external_child_frames:
+            if frame.window_id != frame_id:
+                kept.push(frame)
+        self.external_child_frames = kept
+        self.dirty.add_full_screen(self.width, self.height)
 
     static fn new_headless(size: Size) -> HostCompositor:
         val concrete = HeadlessHostCompositorBackend.new(size.width as i32, size.height as i32)
@@ -825,14 +923,67 @@ class HostCompositor:
                 running.push(WindowRef(window_id: window.id.to_text(), app_id: window.app_id, title: window.title, minimized: window.minimized))
             wi = wi + 1
 
+        var pinned: [AppRef] = []
+        var pinned_index = 0
+        while pinned_index < self.pinned_apps.len():
+            pinned.push(AppRef(
+                app_id: self.pinned_apps[pinned_index].app_id,
+                display_name: self.pinned_apps[pinned_index].display_name,
+                icon: self.pinned_apps[pinned_index].icon
+            ))
+            pinned_index = pinned_index + 1
+
         val process_label = "{active_process_count}/{self.app_processes.len()} active"
         TaskbarModel(
-            # HostCompositor has no pinned-launcher registry. Processes are not
-            # launchers, so presenting them as pinned would synthesize authority.
-            pinned: [],
+            pinned: pinned,
             running: running,
             tray: [TrayItem(item_id: "host-processes", label: process_label, icon: "process")]
         )
+
+    me pin_taskbar_app(app_id: text, display_name: text, icon: text) -> bool:
+        if app_id == "":
+            return false
+        var i = 0
+        while i < self.pinned_apps.len():
+            if self.pinned_apps[i].app_id == app_id:
+                return true
+            i = i + 1
+        self.pinned_apps.push(AppRef(
+            app_id: app_id,
+            display_name: display_name,
+            icon: icon
+        ))
+        self.dirty.add_full_screen(self.width, self.height)
+        true
+
+    me unpin_taskbar_app(app_id: text) -> bool:
+        if app_id == "":
+            return false
+        var kept: [AppRef] = []
+        var removed = false
+        var i = 0
+        while i < self.pinned_apps.len():
+            if self.pinned_apps[i].app_id == app_id:
+                removed = true
+            else:
+                kept.push(AppRef(
+                    app_id: self.pinned_apps[i].app_id,
+                    display_name: self.pinned_apps[i].display_name,
+                    icon: self.pinned_apps[i].icon
+                ))
+            i = i + 1
+        if removed:
+            self.pinned_apps = kept
+            self.dirty.add_full_screen(self.width, self.height)
+        removed
+
+    fn taskbar_app_is_pinned(app_id: text) -> bool:
+        var i = 0
+        while i < self.pinned_apps.len():
+            if self.pinned_apps[i].app_id == app_id:
+                return true
+            i = i + 1
+        false
 
     # Receiver-built production evidence JSON for the compositor sub-object.
     # The evidence writer previously received the whole HostCompositor by
@@ -1102,8 +1253,14 @@ class HostCompositor:
                     if not self.native_pixel_lane:
                         self.content_caches.set(win.id, cache)
             i = i + 1
+        i = 0
+        while i < self.external_child_frames.len():
+            var child = self.external_child_frames[i]
+            child.scene_revision = self.render_revision
+            content_frames.push(child)
+            i = i + 1
         val revision = WmSceneRevision(scene_revision: self.render_revision, input_revision: self.render_revision, taskbar_revision: self.render_revision)
-        val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 44)
+        val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 56)
         val render_input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: frame_time)
         SharedWmTaskbarRenderInput(render: render_input, taskbar: self.taskbar_model(), clock_label: host_taskbar_clock_label(frame_time))
 
@@ -1249,6 +1406,7 @@ class HostCompositor:
         val i = self._find_window_index(window_id)
         if i < 0:
             return
+        self._cancel_window_interaction(window_id)
         val prior_windows = self.windows
         var win = self.windows[i]
         if not win.maximized:
@@ -1257,9 +1415,9 @@ class HostCompositor:
             win.restore_w = win.w
             win.restore_h = win.h
         win.x = 0
-        win.y = 48
+        win.y = WM_WORK_AREA_TOP
         win.w = self.width
-        win.h = self.height - 96
+        win.h = self.height - WM_WORK_AREA_TOP - WM_WORK_AREA_BOTTOM
         win.minimized = false
         win.maximized = true
         self.windows[i] = win
@@ -1277,15 +1435,25 @@ class HostCompositor:
             return
         val prior_windows = self.windows
         var win = self.windows[i]
-        if win.maximized and win.restore_w > 0 and win.restore_h > 0:
+        val restoring_minimized = win.minimized
+        if (not restoring_minimized and win.maximized and
+            win.restore_w > 0 and win.restore_h > 0):
             win.x = win.restore_x
             win.y = win.restore_y
             win.w = win.restore_w
             win.h = win.restore_h
         win.minimized = false
-        win.maximized = false
+        if not restoring_minimized:
+            win.maximized = false
         win.focused = true
         self.windows[i] = win
+        var j = 0
+        while j < self.windows.len():
+            if j != i:
+                var other = self.windows[j]
+                other.focused = false
+                self.windows[j] = other
+            j = j + 1
         self._mark_geometry_damage(prior_windows)
 
     me apply_wm_action(action: WmAction):
@@ -1307,6 +1475,13 @@ class HostCompositor:
                     self.windows[i] = iw
                 j = j + 1
             i = i + 1
+        if action.kind == "minimize":
+            val minimized_index = self._find_window_index(
+                action.window_id.to_i64()
+            )
+            if (minimized_index >= 0 and
+                self.windows[minimized_index].minimized):
+                self._cancel_window_interaction(action.window_id.to_i64())
         self._mark_geometry_damage(prior_windows)
 
     fn _find_window_index(window_id: i64) -> i32:
@@ -1337,8 +1512,7 @@ class HostCompositor:
                     prior.app_id != win.app_id):
                     val external_index = self._external_web_frame_index(win.id)
                     if external_index >= 0:
-                        self.external_web_frames[external_index] =
-                            _host_empty_external_web_frame()
+                        self.external_web_frames[external_index] = _host_empty_external_web_frame()
                 if prior.x != win.x or prior.y != win.y or prior.w != win.w or prior.h != win.h or prior.minimized != win.minimized or prior.focused != win.focused or prior.content != win.content or prior.title != win.title:
                     self.dirty.add_rect(prior.x, prior.y, prior.w, prior.h)
                     self.dirty.add_rect(win.x, win.y, win.w, win.h)
@@ -1357,7 +1531,78 @@ class HostCompositor:
     me focus_window(window_id: i64):
         self.apply_wm_action(wm_focus_action(window_id))
 
+    fn _hit_shared_taskbar(x: i32, y: i32) -> i64:
+        val model = self.taskbar_model()
+        val metrics = WmRenderMetrics(
+            scale_milli: 1000,
+            top_lane_height: 44,
+            titlebar_height: 28,
+            taskbar_height: 56,
+            min_hit_target: 56
+        )
+        val slot_width = metrics.min_hit_target
+        val object_limit = self.width - (
+            model.tray.len() as i32 + 1
+        ) * slot_width
+        var object_index = 0
+        var pinned_index = 0
+        while pinned_index < model.pinned.len():
+            val rect = shared_wm_taskbar_object_rect(
+                metrics, self.width, self.height, object_index
+            )
+            if (rect.x + rect.width <= object_limit and
+                x >= rect.x and x < rect.x + rect.width and
+                y >= rect.y and y < rect.y + rect.height):
+                var window_index = self.windows.len() - 1
+                while window_index >= 0:
+                    if (self.windows[window_index].app_id ==
+                        model.pinned[pinned_index].app_id):
+                        return self.windows[window_index].id
+                    window_index = window_index - 1
+                return 0
+            object_index = object_index + 1
+            pinned_index = pinned_index + 1
+        var running_index = 0
+        while running_index < model.running.len():
+            val rect = shared_wm_taskbar_object_rect(
+                metrics, self.width, self.height, object_index
+            )
+            if (rect.x + rect.width <= object_limit and
+                x >= rect.x and x < rect.x + rect.width and
+                y >= rect.y and y < rect.y + rect.height):
+                return model.running[running_index].window_id.to_i64()
+            object_index = object_index + 1
+            running_index = running_index + 1
+        0
+
+    fn _hit_shared_pinned_app(x: i32, y: i32) -> text:
+        val model = self.taskbar_model()
+        val metrics = WmRenderMetrics(
+            scale_milli: 1000,
+            top_lane_height: 44,
+            titlebar_height: 28,
+            taskbar_height: 56,
+            min_hit_target: 56
+        )
+        val slot_width = metrics.min_hit_target
+        val object_limit = self.width - (
+            model.tray.len() as i32 + 1
+        ) * slot_width
+        var pinned_index = 0
+        while pinned_index < model.pinned.len():
+            val rect = shared_wm_taskbar_object_rect(
+                metrics, self.width, self.height, pinned_index as i32
+            )
+            if (rect.x + rect.width <= object_limit and
+                x >= rect.x and x < rect.x + rect.width and
+                y >= rect.y and y < rect.y + rect.height):
+                return model.pinned[pinned_index].app_id
+            pinned_index = pinned_index + 1
+        ""
+
     fn hit_taskbar(x: i32, y: i32) -> i64:
+        if self.native_pixel_lane:
+            return self._hit_shared_taskbar(x, y)
         wm_lifecycle_hit_taskbar(host_windows_to_lifecycle_state(self.windows), self.width, self.height, x, y)
 
     me pointer_move(x: i32, y: i32):
@@ -1386,6 +1631,16 @@ class HostCompositor:
     me handle_mouse_move(x: i32, y: i32):
         self.pointer_move(x, y)
 
+    me cancel_pointer_interaction():
+        self.dragging = false
+        self.drag_window_id = 0
+        self.resizing = false
+        self.resize_window_id = 0
+        self.resize_start_x = 0
+        self.resize_start_y = 0
+        self.resize_start_w = 0
+        self.resize_start_h = 0
+
     me handle_left_button(down: bool):
         val prior_windows = self.windows
         val out = host_compositor_left_button_at(self, down, self.pointer_x, self.pointer_y)
@@ -1403,12 +1658,21 @@ class HostCompositor:
         self.resize_start_h = out.resize_start_h
         self.armed_chrome_target = out.armed_chrome_target
         self.armed_chrome_window_id = out.armed_chrome_window_id
+        self.armed_chrome_app_id = out.armed_chrome_app_id
+        self.pending_taskbar_launch_app_id = (
+            out.pending_taskbar_launch_app_id
+        )
         # host_compositor_left_button_at runs focus/destroy on a byval copy
         # of `self` (see class doc above re: stage3 free-function-by-value
         # codegen), so any damage it marked internally lives on that copy's
         # `dirty` and is never copied back here. Recompute the diff fresh
         # against the true receiver instead of trying to propagate it.
         self._mark_geometry_damage(prior_windows)
+
+    me take_pending_taskbar_launch_app_id() -> text:
+        val app_id = self.pending_taskbar_launch_app_id
+        self.pending_taskbar_launch_app_id = ""
+        app_id
 
     # Generic pointer-button entry point (0=left, 1=middle, 2=right). Left
     # keeps its full chrome semantics (drag/resize/close/taskbar/focus);
@@ -1795,6 +2059,7 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
         # missed (defensive; the release path below always clears its own arm).
         out.armed_chrome_target = ""
         out.armed_chrome_window_id = 0
+        out.armed_chrome_app_id = ""
         # Taskbar click: a press inside the bottom dock band that lands on a
         # window's taskbar item is a chrome ACTION (focus + restore-if-
         # minimized). Arm it on down; it fires only on a release whose
@@ -1807,6 +2072,12 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
             out.armed_chrome_target = "taskbar"
             out.armed_chrome_window_id = tb_id
             return out
+        if out.native_pixel_lane:
+            val pinned_app_id = out._hit_shared_pinned_app(x, y)
+            if pinned_app_id != "":
+                out.armed_chrome_target = "taskbar-launch"
+                out.armed_chrome_app_id = pinned_app_id
+                return out
         var hit_idx = -1
         var i = 0
         while i < out.windows.len():
@@ -1824,7 +2095,7 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
             # Window-body focus and titlebar drag-arming are unchanged
             # (not converted to release-based semantics).
             out.focus_window(hit.id)
-            if y >= hit.y and y < hit.y + 24:
+            if y >= hit.y and y < hit.y + 28:
                 out.dragging = true
                 out.drag_window_id = hit.id
                 out.drag_offset_x = x - hit.x
@@ -1840,6 +2111,10 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
             val tb_id2 = out.hit_taskbar(x, y)
             if tb_id2 == out.armed_chrome_window_id:
                 out.focus_window(tb_id2)
+        elif out.armed_chrome_target == "taskbar-launch":
+            val launch_app_id = out._hit_shared_pinned_app(x, y)
+            if launch_app_id == out.armed_chrome_app_id:
+                out.pending_taskbar_launch_app_id = launch_app_id
         elif out.armed_chrome_target == "close":
             val close_target = host_compositor_close_release_target(
                 out, 0, false
@@ -1848,6 +2123,7 @@ fn host_compositor_left_button_at(comp: HostCompositor, down: bool, x: i32, y: i
                 out.destroy_window(close_target)
         out.armed_chrome_target = ""
         out.armed_chrome_window_id = 0
+        out.armed_chrome_app_id = ""
     val interaction = wm_lifecycle_left_button(WmPointerInteractionState(dragging: out.dragging, drag_window_id: out.drag_window_id, drag_offset_x: out.drag_offset_x, drag_offset_y: out.drag_offset_y, resizing: out.resizing, resize_window_id: out.resize_window_id, resize_start_x: out.resize_start_x, resize_start_y: out.resize_start_y, resize_start_w: out.resize_start_w, resize_start_h: out.resize_start_h), down)
     out.dragging = interaction.dragging
     out.drag_window_id = interaction.drag_window_id
@@ -1871,10 +2147,13 @@ fn host_compositor_cycle_focus(comp: HostCompositor) -> HostCompositor:
         if out.windows[i].focused:
             focused_idx = i
         i = i + 1
-    var next_idx = focused_idx + 1
-    if next_idx >= out.windows.len():
-        next_idx = 0
-    out.focus_window(out.windows[next_idx].id)
+    var step = 1
+    while step <= out.windows.len():
+        val next_idx = (focused_idx + step) % out.windows.len()
+        if not out.windows[next_idx].minimized:
+            out.focus_window(out.windows[next_idx].id)
+            return out
+        step = step + 1
     out
 
 fn host_compositor_focused_window_id(comp: HostCompositor) -> i64:
@@ -1883,8 +2162,6 @@ fn host_compositor_focused_window_id(comp: HostCompositor) -> i64:
         if comp.windows[i].focused:
             return comp.windows[i].id
         i = i + 1
-    if comp.windows.len() > 0:
-        return comp.windows[comp.windows.len() - 1].id
     0
 
 fn host_compositor_minimize_focused(comp: HostCompositor) -> HostCompositor:

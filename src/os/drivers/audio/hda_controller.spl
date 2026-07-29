@@ -62,6 +62,35 @@ fn hda_build_corb_entry(codec_addr: i64, node_id: i64, verb: i64, payload: i64) 
     """Pack a CORB command entry: (codec_addr:4)(node_id:8)(verb:12)(payload:8)."""
     (((codec_addr << 28) | (node_id << 20) | (verb << 8) | payload) as u32)
 
+fn hda_output_stream_id_at(bar0: i64) -> i64:
+    ((mmio_read16((bar0 + HDA_REG_GCAP) as u64) >> 8) & 0x0Fu16).to_i64()
+
+fn hda_ack_irq_at(bar0: i64) -> i64:
+    val intsts = mmio_read32((bar0 + HDA_REG_INTSTS) as u64)
+    if intsts == 0u32:
+        return 0
+    var stream_bit: i64 = 0
+    var fired: i64 = 0
+    while stream_bit < 30:
+        if ((intsts as i64) & (1 << stream_bit)) != 0:
+            fired = fired + 1
+        stream_bit = stream_bit + 1
+    mmio_write32((bar0 + HDA_REG_INTSTS) as u64, intsts)
+    fired
+
+fn hda_stop_stream_at(bar0: i64, stream_id: i64):
+    if stream_id < 0 or stream_id >= 30:
+        return
+    val off = HDA_SD0_BASE + stream_id * HDA_SD_STRIDE
+    val ctl_addr = (bar0 + off + HDA_SD_CTL) as u64
+    mmio_write32(ctl_addr, mmio_read32(ctl_addr) & 0xFFFFFFFDu32)
+    val intctl_addr = (bar0 + HDA_REG_INTCTL) as u64
+    mmio_write32(
+        intctl_addr,
+        mmio_read32(intctl_addr) &
+            ((1u32 << stream_id.to_u32()) ^ 0xFFFFFFFFu32)
+    )
+
 # ============================================================================
 # HdaRingBuffer — DMA ring buffer descriptor
 # ============================================================================
@@ -460,8 +489,19 @@ impl HdaController:
         if not responded:
             return "hda_probe TIMEOUT waiting for RIRB response"
 
-        val resp = mmio_read32(self.rirb.base_addr as u64 + ((self.rirb.write_pos as u64) * 8u64))
-        self.rirb.advance_write()
+        val raw_wp = self.read16(HDA_REG_RIRBWP)
+        # Hardware reports the last DMA-written response slot. The in-memory
+        # test model retains the reset bit and seeds slot zero; real HDA clears
+        # that bit and normally reports slot one for the first response.
+        val response_index = if (raw_wp & 0x8000u16) != 0u16:
+            0
+        else:
+            (raw_wp & 0x00FFu16).to_i64()
+        val resp = mmio_read32(
+            self.rirb.base_addr as u64 +
+                (response_index as u64) * 8u64
+        )
+        self.rirb.write_pos = response_index
         self.codec_vendor_id = ((resp as i64) >> 16) & 0xFFFF
         self.codec_device_id = (resp as i64) & 0xFFFF
         self.codec_count = 1
@@ -488,12 +528,18 @@ impl HdaController:
         """Program one stream descriptor's buffer descriptor list pointer,
         cyclic buffer length, last valid index, and format — everything
         that must be set before the RUN bit (start_stream) is raised."""
+        if stream_id < 0 or stream_id >= 30 or bdl_addr == 0:
+            return "hda_stream_cfg invalid"
         val off = self.stream_offset(stream_id)
         self.write32(off + HDA_SD_BDPL, (bdl_addr as u32))
         self.write32(off + HDA_SD_BDPU, ((bdl_addr >> 32) as u32))
         self.write32(off + HDA_SD_CBL, (self.timer.bytes_per_buffer() as u32))
         self.write16(off + HDA_SD_LVI, ((self.timer.periods_per_buffer - 1) as u16))
         self.write16(off + HDA_SD_FMT, format_bits)
+        self.write32(
+            HDA_REG_INTCTL,
+            self.read32(HDA_REG_INTCTL) | (1u32 << stream_id.to_u32())
+        )
         "hda_stream_cfg id=" + stream_id.to_text() +
             " bdl=0x" + bdl_addr.to_text() +
             " cbl=" + self.timer.bytes_per_buffer().to_text() +
@@ -502,19 +548,32 @@ impl HdaController:
     me start_stream(stream_id: i64) -> text:
         """Set RUN + IOCE (interrupt on completion) on the stream
         descriptor's control byte and account for it locally."""
+        if stream_id < 0 or stream_id >= 30:
+            return "hda_stream_start invalid"
         val off = self.stream_offset(stream_id)
         val ctl = self.read32(off + HDA_SD_CTL)
-        self.write32(off + HDA_SD_CTL, ctl | 0x06u32)  # RUN | IOCE
-        self.stream_count = self.stream_count + 1
+        self.write32(
+            off + HDA_SD_CTL,
+            ctl | 0x00100006u32
+        )  # stream tag 1 | RUN | IOCE
+        if (ctl & 0x02u32) == 0u32:
+            self.stream_count = self.stream_count + 1
         "hda_stream_start id=" + stream_id.to_text() +
             " active=" + self.stream_count.to_text()
 
     me stop_stream(stream_id: i64) -> text:
         """Clear RUN on the stream descriptor's control byte."""
+        if stream_id < 0 or stream_id >= 30:
+            return "hda_stream_stop invalid"
         val off = self.stream_offset(stream_id)
         val ctl = self.read32(off + HDA_SD_CTL)
         self.write32(off + HDA_SD_CTL, ctl & (0xFFFFFFFDu32))  # ~RUN
-        if self.stream_count > 0:
+        self.write32(
+            HDA_REG_INTCTL,
+            self.read32(HDA_REG_INTCTL) &
+                ((1u32 << stream_id.to_u32()) ^ 0xFFFFFFFFu32)
+        )
+        if (ctl & 0x02u32) != 0u32 and self.stream_count > 0:
             self.stream_count = self.stream_count - 1
         "hda_stream_stop id=" + stream_id.to_text() +
             " active=" + self.stream_count.to_text()
@@ -527,17 +586,13 @@ impl HdaController:
         """Read INTSTS, tick the period timer once per set stream bit
         (period-complete IRQ), then acknowledge by writing the same value
         back (registers here are RW1C: writing a 1 clears that bit)."""
-        val intsts = self.read32(HDA_REG_INTSTS)
-        if intsts == 0u32:
+        val fired = hda_ack_irq_at(self.bar0_addr)
+        if fired == 0:
             return "hda_irq spurious"
-        var stream_bit: i64 = 0
-        var fired: i64 = 0
-        while stream_bit < 30:
-            if ((intsts as i64) & (1 << stream_bit)) != 0:
-                self.timer.tick()
-                fired = fired + 1
-            stream_bit = stream_bit + 1
-        self.write32(HDA_REG_INTSTS, intsts)  # RW1C acknowledge
+        var completed: i64 = 0
+        while completed < fired:
+            self.timer.tick()
+            completed = completed + 1
         self.irq_count = self.irq_count + 1
         "hda_irq ok streams_fired=" + fired.to_text() +
             " total_irqs=" + self.irq_count.to_text() +
@@ -584,3 +639,5 @@ impl HdaController:
             " accel=" + self.cpu_accel +
             " | " + self.timer.stats() +
             " | " + self.mixer.stats()
+
+export hda_output_stream_id_at, hda_ack_irq_at, hda_stop_stream_at

@@ -3,7 +3,11 @@
 
 use std.spec.{describe, it, expect}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
-use os.compositor.compositor.{Compositor}
+use os.compositor.compositor.{
+    Compositor,
+    WM_CONTENT_KIND_GUI_SESSION,
+    WM_CONTENT_KIND_WEB_DOCUMENT
+}
 use os.compositor.wm_action_applier.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_compositor, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_action_is_shared_lifecycle, wm_action_remote_tree, wm_action_web_window_request, wm_action_with_app_id, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_motion_contract, wm_lifecycle_motion_phase, wm_lifecycle_motion_summary, wm_lifecycle_pointer_move, wm_move_action, wm_resize_action, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_world.{WmAction}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
@@ -60,12 +64,10 @@ describe "shared WM action applier":
         assert_true(result.applied)
         expect(compositor.surfaces.len()).to_equal(1)
         expect(compositor.surfaces[0].title).to_equal("Simple Browser")
-        expect(compositor.surfaces[0].session.target).to_equal("simple_web")
-        expect(compositor.surfaces[0].session.surface_id).to_equal("web_window_{result.window_id}")
-        expect(compositor.surfaces[0].session.viewport_w).to_equal(96)
-        expect(compositor.surfaces[0].session.viewport_h).to_equal(72)
-        assert_true(compositor.surfaces[0].session.wants_pixels)
-        expect(compositor.surfaces[0].session.body_html).to_contain("https://example.test")
+        expect(compositor.surfaces[0].content_kind).to_equal(
+            WM_CONTENT_KIND_WEB_DOCUMENT
+        )
+        expect(compositor.surfaces[0].content_handle).to_equal(0)
         expect(compositor.surfaces[0].content_html).to_contain("https://example.test")
         expect(compositor.surfaces[0].content_revision).to_equal(2)
 
@@ -110,9 +112,18 @@ describe "shared WM action applier":
         val updated = apply_wm_action_to_compositor(compositor, _action("update_tree", created.window_id))
         compositor = updated.compositor
         assert_true(updated.applied)
-        expect(compositor.surfaces[0].session.root_id).to_equal("remote_{created.window_id}")
-        expect(compositor.surfaces[0].content_html).to_equal("tree")
-        expect(compositor.surfaces[0].content_revision).to_equal(2)
+        expect(compositor.surfaces[0].content_kind).to_equal(
+            WM_CONTENT_KIND_GUI_SESSION
+        )
+        expect(compositor.surfaces[0].content_handle).to_be_greater_than(0)
+        expect(compositor.surfaces[0].content_html).to_equal("")
+        expect(compositor.surfaces[0].content_revision).to_equal(3)
+        if val tree = compositor.gui_content_tree(
+            compositor.surfaces[0].content_handle
+        ):
+            expect(tree.root_id).to_equal("remote_{created.window_id}")
+        else:
+            expect("missing GUI tree").to_equal("present GUI tree")
 
         val tree = wm_action_remote_tree(44, "payload")
         expect(tree.root_id).to_equal("remote_44")
@@ -232,7 +243,7 @@ describe "shared WM action applier":
         expect(windows[0].x).to_equal(0)
         expect(windows[0].y).to_equal(48)
         expect(windows[0].w).to_equal(640)
-        expect(windows[0].h).to_equal(384)
+        expect(windows[0].h).to_equal(376)
 
         result = apply_wm_action_to_lifecycle_windows(windows, result.next_window_id, 640, 480, wm_destroy_action(1))
         expect(result.windows.len()).to_equal(0)

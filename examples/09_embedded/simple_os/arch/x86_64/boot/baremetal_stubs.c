@@ -732,6 +732,19 @@ RuntimeValue rt_alloc(RuntimeValue sz)
     return (RuntimeValue)(uintptr_t)p;
 }
 
+int64_t rt_ptr_read_i64(int64_t addr, int64_t offset)
+{
+    if (addr == 0) return 0;
+    return *(volatile int64_t *)(uintptr_t)(addr + offset);
+}
+
+int64_t rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value)
+{
+    if (addr == 0) return 0;
+    *(volatile int64_t *)(uintptr_t)(addr + offset) = value;
+    return value;
+}
+
 RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
 {
     size_t bytes = (size_t)sz;
@@ -8462,6 +8475,24 @@ int64_t rt_pci_read_bar0(int64_t index)
         | 0x10;
     outl(0xCF8, pci_addr);
     return (int64_t)inl(0xCFC);
+}
+
+int64_t rt_pci_enable_memory_bus_master(int64_t index)
+{
+    if (_pci_cache_count < 0) _pci_scan();
+    if (index < 0 || index >= _pci_cache_count) return 0;
+    int i = (int)index;
+    uint32_t pci_addr = 0x80000000
+        | ((uint32_t)_pci_cache[i].bus << 16)
+        | ((uint32_t)_pci_cache[i].dev << 11)
+        | ((uint32_t)_pci_cache[i].func << 8)
+        | 0x04;
+    outl(0xCF8, pci_addr);
+    uint32_t command_status = inl(0xCFC);
+    outl(0xCF8, pci_addr);
+    outl(0xCFC, command_status | 0x00000006u);
+    outl(0xCF8, pci_addr);
+    return (inl(0xCFC) & 0x00000006u) == 0x00000006u ? 1 : 0;
 }
 
 static void _serial_init(void)

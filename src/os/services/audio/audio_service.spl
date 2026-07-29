@@ -1,0 +1,171 @@
+# SimpleOS x86 HDA service ownership.
+#
+# Hardware state that survives boot is scalar-only. The aggregate controller
+# exists only as a local bring-up helper and never crosses the freestanding
+# service/IRQ boundary.
+
+use os.drivers.audio.hda_pci_binding.{
+    hda_pci_find_index,
+    hda_pci_bar0,
+    hda_pci_irq,
+    hda_pci_enable,
+}
+use os.drivers.audio.hda_dma_resources.{
+    HDA_DMA_CORB,
+    HDA_DMA_RIRB,
+    HDA_DMA_BDL,
+    hda_dma_resources_create,
+    hda_dma_resources_destroy,
+    hda_dma_resource_phys,
+    hda_dma_prepare_silent_stream,
+}
+use os.drivers.audio.hda_controller.{
+    HdaController,
+    hda_output_stream_id_at,
+    hda_ack_irq_at,
+    hda_stop_stream_at,
+}
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
+use os.kernel.arch.x86_64.console.{serial_println}
+use os.kernel.interrupts.idt.{idt_register_handler}
+use os.kernel.interrupts.ioapic.{ioapic_route_intx, ioapic_mask_intx}
+use os.kernel.types.task_types.{TaskContext}
+
+val SIMPLEOS_HDA_OK: i64 = 0
+val SIMPLEOS_HDA_NO_DEVICE: i64 = -1
+val SIMPLEOS_HDA_ENABLE_FAILED: i64 = -2
+val SIMPLEOS_HDA_DMA_FAILED: i64 = -3
+val SIMPLEOS_HDA_DMA_PREPARE_FAILED: i64 = -4
+val SIMPLEOS_HDA_INIT_FAILED: i64 = -5
+val SIMPLEOS_HDA_STREAM_FAILED: i64 = -6
+val SIMPLEOS_HDA_IRQ_ROUTE_FAILED: i64 = -7
+
+var g_simpleos_hda_started: bool = false
+var g_simpleos_hda_bar0: i64 = 0
+var g_simpleos_hda_irq: i64 = 0
+var g_simpleos_hda_irq_vector: i64 = 0
+var g_simpleos_hda_stream_id: i64 = -1
+var g_simpleos_hda_resources: i64 = 0
+var g_simpleos_hda_irq_count: i64 = 0
+var g_simpleos_hda_period_count: i64 = 0
+var g_simpleos_hda_repeated_irq_receipt: bool = false
+
+fn _simpleos_hda_irq_handler(ctx: TaskContext):
+    val fired = hda_ack_irq_at(g_simpleos_hda_bar0)
+    if fired > 0:
+        g_simpleos_hda_irq_count = g_simpleos_hda_irq_count + 1
+        g_simpleos_hda_period_count = g_simpleos_hda_period_count + fired
+        if (g_simpleos_hda_irq_count >= 4 and
+            not g_simpleos_hda_repeated_irq_receipt):
+            serial_println(
+                "[hda-irq] active irqs={g_simpleos_hda_irq_count} periods={g_simpleos_hda_period_count}"
+            )
+            g_simpleos_hda_repeated_irq_receipt = true
+    X86Interrupt.send_eoi(g_simpleos_hda_irq_vector.to_u64())
+
+fn simpleos_hda_start() -> i64:
+    if g_simpleos_hda_started:
+        return SIMPLEOS_HDA_OK
+
+    val index = hda_pci_find_index()
+    if index < 0:
+        return SIMPLEOS_HDA_NO_DEVICE
+    if not hda_pci_enable(index):
+        return SIMPLEOS_HDA_ENABLE_FAILED
+
+    val resources = hda_dma_resources_create()
+    if resources == 0:
+        return SIMPLEOS_HDA_DMA_FAILED
+    if not hda_dma_prepare_silent_stream(resources):
+        hda_dma_resources_destroy(resources)
+        return SIMPLEOS_HDA_DMA_PREPARE_FAILED
+
+    val bar0 = hda_pci_bar0(index)
+    val irq = hda_pci_irq(index)
+    var controller = HdaController.create(
+        bar0,
+        irq,
+        hda_dma_resource_phys(resources, HDA_DMA_CORB),
+        hda_dma_resource_phys(resources, HDA_DMA_RIRB)
+    )
+    controller.initialize()
+    if not controller.initialized:
+        hda_dma_resources_destroy(resources)
+        return SIMPLEOS_HDA_INIT_FAILED
+
+    val stream_id = hda_output_stream_id_at(bar0)
+    val bdl = hda_dma_resource_phys(resources, HDA_DMA_BDL)
+    val configured = controller.configure_stream(stream_id, bdl, 0x0011u16)
+    if configured.starts_with("hda_stream_cfg invalid"):
+        hda_dma_resources_destroy(resources)
+        return SIMPLEOS_HDA_STREAM_FAILED
+
+    g_simpleos_hda_bar0 = bar0
+    g_simpleos_hda_irq = irq
+    g_simpleos_hda_irq_vector = irq + 0x20
+    g_simpleos_hda_stream_id = stream_id
+    g_simpleos_hda_resources = resources
+    g_simpleos_hda_irq_count = 0
+    g_simpleos_hda_period_count = 0
+    g_simpleos_hda_repeated_irq_receipt = false
+    idt_register_handler(
+        g_simpleos_hda_irq_vector.to_u32(),
+        _simpleos_hda_irq_handler
+    )
+    if not ioapic_route_intx(irq, g_simpleos_hda_irq_vector):
+        X86Interrupt.unregister_handler(g_simpleos_hda_irq_vector.to_u64())
+        hda_dma_resources_destroy(resources)
+        g_simpleos_hda_bar0 = 0
+        g_simpleos_hda_irq = 0
+        g_simpleos_hda_irq_vector = 0
+        g_simpleos_hda_stream_id = -1
+        g_simpleos_hda_resources = 0
+        return SIMPLEOS_HDA_IRQ_ROUTE_FAILED
+    controller.start_stream(stream_id)
+    if controller.stream_count != 1:
+        ioapic_mask_intx(irq)
+        X86Interrupt.unregister_handler(g_simpleos_hda_irq_vector.to_u64())
+        hda_dma_resources_destroy(resources)
+        g_simpleos_hda_bar0 = 0
+        g_simpleos_hda_irq = 0
+        g_simpleos_hda_irq_vector = 0
+        g_simpleos_hda_stream_id = -1
+        g_simpleos_hda_resources = 0
+        return SIMPLEOS_HDA_STREAM_FAILED
+    X86Interrupt.enable()
+    g_simpleos_hda_started = true
+    SIMPLEOS_HDA_OK
+
+fn simpleos_hda_stop():
+    if not g_simpleos_hda_started:
+        return
+    hda_stop_stream_at(g_simpleos_hda_bar0, g_simpleos_hda_stream_id)
+    ioapic_mask_intx(g_simpleos_hda_irq)
+    X86Interrupt.unregister_handler(g_simpleos_hda_irq_vector.to_u64())
+    hda_dma_resources_destroy(g_simpleos_hda_resources)
+    g_simpleos_hda_started = false
+    g_simpleos_hda_bar0 = 0
+    g_simpleos_hda_irq = 0
+    g_simpleos_hda_irq_vector = 0
+    g_simpleos_hda_stream_id = -1
+    g_simpleos_hda_resources = 0
+
+fn simpleos_hda_started() -> bool:
+    g_simpleos_hda_started
+
+fn simpleos_hda_irq_count() -> i64:
+    g_simpleos_hda_irq_count
+
+fn simpleos_hda_period_count() -> i64:
+    g_simpleos_hda_period_count
+
+fn simpleos_hda_stream_id() -> i64:
+    g_simpleos_hda_stream_id
+
+export SIMPLEOS_HDA_OK, SIMPLEOS_HDA_NO_DEVICE
+export SIMPLEOS_HDA_ENABLE_FAILED, SIMPLEOS_HDA_DMA_FAILED
+export SIMPLEOS_HDA_DMA_PREPARE_FAILED, SIMPLEOS_HDA_INIT_FAILED
+export SIMPLEOS_HDA_STREAM_FAILED, SIMPLEOS_HDA_IRQ_ROUTE_FAILED
+export simpleos_hda_start, simpleos_hda_stop, simpleos_hda_started
+export simpleos_hda_irq_count, simpleos_hda_period_count
+export simpleos_hda_stream_id

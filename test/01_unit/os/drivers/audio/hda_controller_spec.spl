@@ -15,7 +15,10 @@
 
 use std.spec.{describe, it, expect}
 use os.kernel.boot.mmio.{mmio_reset_for_test, mmio_write16, mmio_write32, mmio_read32}
-use os.drivers.audio.hda_controller.{HdaController}
+use os.drivers.audio.hda_controller.{
+    HdaController,
+    hda_output_stream_id_at,
+}
 
 val BAR0: i64 = 0x1000
 val CORB_DMA: i64 = 0x200000
@@ -84,18 +87,32 @@ describe "HdaController stream lifecycle":
         var ctl = HdaController.create(BAR0, 11, CORB_DMA, RIRB_DMA)
         ctl.initialize()
 
-        ctl.configure_stream(0, 0x300000, 0x0011u16)
+        mmio_write16((BAR0 + 0x00) as u64, 0x0200u16)
+        val stream_id = hda_output_stream_id_at(BAR0)
+        expect(stream_id).to_equal(2)
+        ctl.configure_stream(stream_id, 0x300000, 0x0011u16)
         expect(ctl.stream_count).to_equal(0)
+        expect(
+            mmio_read32((BAR0 + 0x20) as u64) & (1u32 << 2)
+        ).to_equal(1u32 << 2)
 
-        ctl.start_stream(0)
+        ctl.start_stream(stream_id)
         expect(ctl.stream_count).to_equal(1)
-        val ctl_after_start = mmio_read32((BAR0 + 0x80) as u64)
+        ctl.start_stream(stream_id)
+        expect(ctl.stream_count).to_equal(1)
+        val ctl_after_start = mmio_read32((BAR0 + 0xC0) as u64)
         expect((ctl_after_start & 0x02u32)).to_equal(0x02u32)  # RUN bit set
+        expect((ctl_after_start & 0x00F00000u32)).to_equal(
+            0x00100000u32
+        )
 
-        ctl.stop_stream(0)
+        ctl.stop_stream(stream_id)
         expect(ctl.stream_count).to_equal(0)
-        val ctl_after_stop = mmio_read32((BAR0 + 0x80) as u64)
+        val ctl_after_stop = mmio_read32((BAR0 + 0xC0) as u64)
         expect((ctl_after_stop & 0x02u32)).to_equal(0u32)  # RUN bit cleared
+        expect(
+            mmio_read32((BAR0 + 0x20) as u64) & (1u32 << 2)
+        ).to_equal(0u32)
 
 describe "HdaController.handle_irq":
 

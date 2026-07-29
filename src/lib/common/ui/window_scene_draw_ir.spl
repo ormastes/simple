@@ -40,6 +40,7 @@ use common.ui.window_scene.{
     WM_CHROME_KIND_BORDERLESS,
     WM_CONTENT_ORIGIN_SIMPLE_WEB,
     WM_CONTENT_ORIGIN_GUI,
+    WM_CONTENT_ORIGIN_PIXEL_SURFACE,
     wm_content_frame_checksum,
     wm_content_frame_web_provenance_valid,
     shared_wm_scene_chrome,
@@ -361,7 +362,9 @@ class SharedWmPixelBufferBackend:
                 self._px_fill_rect(address_x, toolbar_y + 4, address_w, 36, 0xFFFFFFFFu32)
                 self._px_text_fit(address_x + 4, toolbar_y + 14, window.title, 0xFF111111u32, 0xFFFFFFFFu32, if address_w > 8: (address_w - 8) / 8 else: 0)
 
-    me _px_render_taskbar_model(taskbar: TaskbarModel, width: i32, height: i32, theme: WmChromeColors, metrics: WmRenderMetrics, clock_label: text):
+    me _px_render_taskbar_model(scene: SharedWmScene, taskbar: TaskbarModel, theme: WmChromeColors, metrics: WmRenderMetrics, clock_label: text):
+        val width = scene.width
+        val height = scene.height
         val taskbar_h = if metrics.taskbar_height > 0: metrics.taskbar_height else: 56
         val taskbar_y = height - taskbar_h
         val slot_w = if metrics.min_hit_target > 0: metrics.min_hit_target else: 44
@@ -382,7 +385,14 @@ class SharedWmPixelBufferBackend:
             val window = taskbar.running[ri]
             val rect = shared_wm_taskbar_object_rect(metrics, width, height, object_index)
             if rect.x >= 0 and rect.x + rect.width <= object_limit:
-                val color = if window.minimized: theme.host_window_body else: theme.title_focused
+                val color = if window.minimized:
+                    theme.host_window_body
+                elif _shared_wm_taskbar_window_focused(
+                    scene, window.window_id
+                ):
+                    theme.title_focused
+                else:
+                    theme.title_unfocused
                 self._px_fill_rect(rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, color)
                 self._px_text_fit(rect.x + 6, rect.y + 14, window.title, theme.text_primary, color, if rect.width > 12: (rect.width - 12) / 8 else: 0)
             object_index = object_index + 1
@@ -452,7 +462,7 @@ class SharedWmPixelBufferBackend:
     me render_taskbar_context(input: SharedWmTaskbarRenderInput) -> SharedWmSceneRenderStats:
         val content_pixel_count = self._px_render_context_content(input.render)
         val scene = input.render.scene
-        self._px_render_taskbar_model(input.taskbar, scene.width, scene.height, wm_chrome_theme(), input.render.metrics, input.clock_label)
+        self._px_render_taskbar_model(scene, input.taskbar, wm_chrome_theme(), input.render.metrics, input.clock_label)
         SharedWmSceneRenderStats(content_pixel_count: content_pixel_count)
 
 # Indexed, fail-closed top-level frame match (same contract as
@@ -920,7 +930,14 @@ fn _wm_draw_ir_taskbar_objects_batch(scene: SharedWmScene, taskbar: TaskbarModel
     for window in taskbar.running:
         val rect = shared_wm_taskbar_object_rect(metrics, scene.width, scene.height, object_index)
         if rect.x >= 0 and rect.x + rect.width <= object_limit:
-            val color = if window.minimized: theme.host_window_body else: theme.title_focused
+            val color = if window.minimized:
+                theme.host_window_body
+            elif _shared_wm_taskbar_window_focused(
+                scene, window.window_id
+            ):
+                theme.title_focused
+            else:
+                theme.title_unfocused
             commands.push(draw_ir_rect("taskbar-running-{window.window_id}", rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, color))
             commands.push(_wm_draw_ir_text("taskbar-running-label-{window.window_id}", rect.x + 6, rect.y + 14, rect.y + 4, rect.height - 8, window.title, theme.text_primary, "und"))
         object_index = object_index + 1
@@ -1306,7 +1323,22 @@ fn shared_wm_scene_render_taskbar(backend: CompositorBackend, windows: [SharedWm
         _draw_shared_wm_backend_text_fit(backend, ix + 8, dock_y + 14, win.title, theme.text_primary, item_color, if item_w > 16: (item_w - 16) / 8 else: 0)
         i = i + 1
 
-fn shared_wm_scene_render_taskbar_model(backend: CompositorBackend, taskbar: TaskbarModel, width: i32, height: i32, theme: WmChromeColors, metrics: WmRenderMetrics, clock_label: text):
+fn _shared_wm_taskbar_window_focused(
+    scene: SharedWmScene, window_id: text
+) -> bool:
+    var i = 0
+    while i < scene.windows.len():
+        if scene.windows[i].window_id == window_id:
+            return (
+                scene.windows[i].focused and
+                not scene.windows[i].minimized
+            )
+        i = i + 1
+    false
+
+fn shared_wm_scene_render_taskbar_model(backend: CompositorBackend, scene: SharedWmScene, taskbar: TaskbarModel, theme: WmChromeColors, metrics: WmRenderMetrics, clock_label: text):
+    val width = scene.width
+    val height = scene.height
     val taskbar_h = if metrics.taskbar_height > 0: metrics.taskbar_height else: 56
     val taskbar_y = height - taskbar_h
     # Desktop chrome owns the single taskbar background/accent pass. This
@@ -1324,7 +1356,14 @@ fn shared_wm_scene_render_taskbar_model(backend: CompositorBackend, taskbar: Tas
     for window in taskbar.running:
         val rect = shared_wm_taskbar_object_rect(metrics, width, height, object_index)
         if rect.x >= 0 and rect.x + rect.width <= object_limit:
-            val color = if window.minimized: theme.host_window_body else: theme.title_focused
+            val color = if window.minimized:
+                theme.host_window_body
+            elif _shared_wm_taskbar_window_focused(
+                scene, window.window_id
+            ):
+                theme.title_focused
+            else:
+                theme.title_unfocused
             backend.fill_rect(rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, color)
             _draw_shared_wm_backend_text_fit(backend, rect.x + 6, rect.y + 14, window.title, theme.text_primary, color, if rect.width > 12: (rect.width - 12) / 8 else: 0)
         object_index = object_index + 1
@@ -1441,7 +1480,7 @@ fn _shared_wm_scene_window_content_pixel_count(window: SharedWmWindow) -> i64:
 # fail-closed-validated content sources; anything else is rejected the same
 # way an unknown background kind is rejected (loud, no silent fallback).
 fn _wm_content_frame_origin_valid(origin_kind: text) -> bool:
-    origin_kind == WM_CONTENT_ORIGIN_SIMPLE_WEB or origin_kind == WM_CONTENT_ORIGIN_GUI
+    origin_kind == WM_CONTENT_ORIGIN_SIMPLE_WEB or origin_kind == WM_CONTENT_ORIGIN_GUI or origin_kind == WM_CONTENT_ORIGIN_PIXEL_SURFACE
 
 fn shared_wm_nested_content_frame_valid(frame: WmContentFrame, scene_revision: i64) -> bool:
     scene_revision > 0 and _wm_content_frame_origin_valid(frame.origin_kind) and frame.scene_revision == scene_revision and frame.content_revision > 0 and frame.width > 0 and frame.height > 0 and frame.pixels.len().to_i64() == frame.width.to_i64() * frame.height.to_i64() and frame.checksum > 0u64 and frame.checksum == wm_content_frame_checksum(frame.pixels)
@@ -1626,7 +1665,7 @@ fn shared_wm_scene_render_context_to_backend(backend: CompositorBackend, input: 
 fn shared_wm_scene_render_taskbar_context_to_backend(backend: CompositorBackend, input: SharedWmTaskbarRenderInput) -> SharedWmSceneRenderStats:
     val stats = _shared_wm_scene_render_context_content_to_backend(backend, input.render)
     val scene = input.render.scene
-    shared_wm_scene_render_taskbar_model(backend, input.taskbar, scene.width, scene.height, wm_chrome_theme(), input.render.metrics, input.clock_label)
+    shared_wm_scene_render_taskbar_model(backend, scene, input.taskbar, wm_chrome_theme(), input.render.metrics, input.clock_label)
     stats
 
 fn shared_wm_scene_render_taskbar_context_to_pixel_buffer(backend: SharedWmPixelBufferBackend, input: SharedWmTaskbarRenderInput) -> SharedWmSceneRenderStats:

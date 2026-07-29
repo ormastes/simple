@@ -9,6 +9,7 @@ CORE="$ROOT_DIR/src/os/compositor/engine2d_baremetal_core.spl"
 COMPAT="$ROOT_DIR/scripts/check/check-simpleos-x86-64-wm-render-event-evidence.shs"
 CANONICAL="$ROOT_DIR/scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
 X86_STUBS="$ROOT_DIR/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+HDA_SERVICE="$ROOT_DIR/src/os/services/audio/audio_service.spl"
 
 fail() {
     echo "simpleos_x86_64_wm_qemu_preflight_status=fail"
@@ -21,6 +22,7 @@ fail() {
 [ -x "$COMPAT" ] || fail "x86-compat-wrapper-missing-or-not-executable"
 [ -x "$CANONICAL" ] || fail "canonical-wrapper-missing-or-not-executable"
 [ -f "$X86_STUBS" ] || fail "x86-simd-runtime-source-missing"
+[ -f "$HDA_SERVICE" ] || fail "hda-service-missing"
 [ -x "$(command -v clang 2>/dev/null || true)" ] || fail "clang-not-on-PATH"
 
 theme_line="$(grep -n 'val theme_snapshot = install_generated_simpleos_wm_theme()' "$ENTRY" | head -n 1 | cut -d: -f1)"
@@ -37,6 +39,17 @@ grep -q 'baremetal_simd_fill_chunks' "$ENTRY" || fail "desktop-simd-chunk-receip
 grep -q '\[engine2d-simd\] arch=x86_64 isa=sse2 enabled=1' "$ENTRY" || fail "desktop-sse2-receipt-marker-missing"
 grep -q 'extern fn rt_gui_fill4' "$CORE" || fail "engine2d-core-fill-owner-missing"
 grep -q 'rt_gui_simd_fill_enabled' "$CORE" || fail "engine2d-core-simd-dispatch-receipt-missing"
+grep -q 'simpleos_hda_start()' "$ENTRY" || fail "hda-service-not-started-by-desktop"
+grep -q 'hda_dma_prepare_silent_stream(resources)' "$HDA_SERVICE" || fail "hda-bdl-pcm-prepare-missing"
+grep -q 'idt_register_handler(' "$HDA_SERVICE" || fail "hda-irq-handler-registration-missing"
+grep -q 'ioapic_route_intx(irq, g_simpleos_hda_irq_vector)' "$HDA_SERVICE" || fail "hda-ioapic-route-missing"
+grep -q 'controller.start_stream(stream_id)' "$HDA_SERVICE" || fail "hda-stream-start-missing"
+grep -q '^int64_t rt_pci_device_count(void)' "$X86_STUBS" || fail "hda-pci-count-provider-missing"
+grep -q '^int64_t rt_pci_get_field(int64_t index, int64_t field)' "$X86_STUBS" || fail "hda-pci-field-provider-missing"
+grep -q '^int64_t rt_pci_read_bar0(int64_t index)' "$X86_STUBS" || fail "hda-pci-bar-provider-missing"
+grep -q '^int64_t rt_pci_enable_memory_bus_master(int64_t index)' "$X86_STUBS" || fail "hda-pci-enable-provider-missing"
+grep -q '^int64_t rt_ptr_read_i64(int64_t addr, int64_t offset)' "$X86_STUBS" || fail "hda-dma-pointer-read-provider-missing"
+grep -q '^int64_t rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value)' "$X86_STUBS" || fail "hda-dma-pointer-write-provider-missing"
 
 grep -q 'check-simpleos-wm-fullscreen-evidence.shs' "$COMPAT" || fail "x86-wrapper-not-delegated"
 if grep -Eq '(^|[[:space:]])ENTRY=.*arch/x86_64/wm_entry\.spl' "$COMPAT"; then
@@ -48,6 +61,9 @@ grep -q 'pmemsave' "$CANONICAL" || fail "canonical-wrapper-framebuffer-readback-
 grep -q 'scancode=87 kind=press' "$CANONICAL" || fail "canonical-wrapper-f11-press-receipt-missing"
 grep -q 'scancode=215 kind=release' "$CANONICAL" || fail "canonical-wrapper-f11-release-receipt-missing"
 grep -q 'wait_release_receipt' "$CANONICAL" || fail "canonical-wrapper-release-correlation-missing"
+grep -q -- '-device intel-hda' "$CANONICAL" || fail "canonical-wrapper-hda-device-missing"
+grep -q -- '-device hda-output' "$CANONICAL" || fail "canonical-wrapper-hda-output-missing"
+grep -q 'guest-hda-repeated-irq-missing' "$CANONICAL" || fail "canonical-wrapper-hda-irq-gate-missing"
 grep -q 'pending_fullscreen_release_sequence' "$ROOT_DIR/src/os/compositor/compositor.spl" || fail "canonical-guest-f11-release-state-missing"
 grep -q 'scancode=215 kind=release' "$ROOT_DIR/src/os/desktop/shell.spl" || fail "canonical-guest-f11-release-receipt-missing"
 
@@ -77,6 +93,9 @@ grep -q '^rt_gui_simd_fill_enabled:' "$ASM" || fail "x86-simd-enabled-symbol-mis
 grep -q '^rt_gui_simd_fill_hits:' "$ASM" || fail "x86-simd-hits-symbol-missing"
 grep -q '^rt_gui_simd_fill_chunks:' "$ASM" || fail "x86-simd-chunks-symbol-missing"
 grep -q '^rt_gui_simd_fill_tail_pixels:' "$ASM" || fail "x86-simd-tail-symbol-missing"
+grep -q '^rt_pci_enable_memory_bus_master:' "$ASM" || fail "hda-pci-enable-assembly-symbol-missing"
+grep -q '^rt_ptr_read_i64:' "$ASM" || fail "hda-dma-pointer-read-assembly-symbol-missing"
+grep -q '^rt_ptr_write_i64:' "$ASM" || fail "hda-dma-pointer-write-assembly-symbol-missing"
 printf '%s\n' "simpleos_x86_64_wm_qemu_preflight_status=pass"
 printf '%s\n' "simpleos_x86_64_wm_qemu_preflight_entry=examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"
 printf '%s\n' "simpleos_x86_64_wm_qemu_preflight_theme_before_executor=true"

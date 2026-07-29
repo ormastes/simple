@@ -650,6 +650,17 @@ This is a containment/default-selection view, distinct from the data-flow
 "Target Stack" pipeline earlier in this document — both describe the same
 system from different axes and must agree on components.
 
+WM lifecycle adapters share the scalar
+`src/lib/common/ui/wm_window_state.spl` transition owner. Hidden, Closing, and
+Closed windows reject input; minimize retains the prior Normal/Maximized state,
+and minimize/close cancel pointer capture before focus moves to the next visible
+window. SimpleOS GUI content handles retain tree and focused-widget state;
+render and client-local pointer dispatch reconstruct a local `UISession`
+without storing a large session aggregate in the freestanding compositor.
+The scalar `common.io.window_shortcut` classifier runs before focused-widget
+dispatch, so Alt+Tab, Alt+F4, Ctrl+M, and Ctrl+Shift+M have exactly one WM
+consumer while key releases and unreserved Ctrl bindings continue to clients.
+
 Current gaps versus this target (see `00_ui_architecture.md` for full
 status table and evidence paths):
 
@@ -736,6 +747,41 @@ the pixel oracle. Draw IR batches/compositions can be lifted with
 pre-raster node tree before pixel readback. Draw IR Protocol v2 inspection
 depends on SGTTI. Improvement plan:
 `doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md`.
+
+## Host taskbar pin projection
+
+`HostTaskbarRuntime` remains the persistence owner. The GLFW WM demo reads its
+ordered launchers through scalar index accessors, projects them into
+`HostCompositor`, and updates both owners after a successful Ctrl+P operation.
+The compositor copies those stable `app_id` entries into the same
+`TaskbarModel` already consumed by the shared Draw IR and pixel renderers.
+This keeps persistence out of the compositor and aggregate registry values out
+of the live freestanding boundary. An idle pinned slot emits a one-shot scalar
+launch `app_id` only after release-inside; drag-away cancels it. The application
+runtime remains the process/window creation owner. The live demo keeps the
+desktop loop active after internal close and recreates its window only after
+consuming the matching stable `app_id`.
+
+Host maximize uses a 48-pixel top inset and 56-pixel taskbar inset. Restoring a
+minimized maximized window removes minimization without discarding maximized
+state; a subsequent restore returns to the exact saved normal rectangle.
+Minimize, maximize, and close cancel chrome drag/resize/release arms for their
+target before another pointer event can mutate stale state.
+Alt+Tab cycles only visible non-minimized windows, matching the SimpleOS
+compositor; taskbar activation remains the explicit minimized-window restore
+path.
+Resize grip hover is only a candidate. Geometry changes require left-button
+capture, moving away clears the candidate, and button coordinates are applied
+to compositor chrome before hit testing.
+A new press first cancels stale drag/resize/client capture from any missed
+release, then recomputes hover at the press coordinates.
+Middle and right buttons are retained at the compositor boundary but are not
+sent to widgets until the shared reducer distinguishes button values; this
+prevents either button from becoming a fabricated primary click.
+Shared host taskbar objects use one 56-pixel slot width in Draw IR, direct
+pixels, tray reservation, and pointer hit testing.
+Running taskbar active state is derived from the authoritative scene by
+`window_id`; `TaskbarModel` does not duplicate focus ownership.
 
 ## GUI Sanity Apps (pure-Simple lane, macOS)
 

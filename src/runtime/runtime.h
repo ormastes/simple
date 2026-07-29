@@ -796,6 +796,7 @@ int64_t  rt_audio_load_sound(const char* path);
 void     rt_audio_unload_sound(int64_t handle);
 int64_t  rt_audio_play(int64_t sound_handle);
 int64_t  rt_audio_play_looped(int64_t sound_handle);
+int64_t  rt_audio_play_pcm_f32(SplArray* samples, int64_t channels, int64_t sample_rate);
 void     rt_audio_stop(int64_t playback_handle);
 void     rt_audio_pause(int64_t playback_handle);
 void     rt_audio_resume(int64_t playback_handle);
@@ -803,6 +804,8 @@ void     rt_audio_set_volume(int64_t playback_handle, double volume);
 void     rt_audio_set_master_volume(double volume);
 double   rt_audio_get_master_volume(void);
 int64_t  rt_audio_is_playing(int64_t playback_handle);
+int64_t  rt_audio_live_source_count(void);
+int64_t  rt_audio_live_playback_count(void);
 
 /* ===== Audio spatial (3D positioning) ===== */
 
@@ -863,6 +866,7 @@ bool     rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
 
 /* Event polling (returns event type code: 0=none, 1=quit, 2=keydown, etc.) */
 int64_t  rt_sdl2_poll_event(void);
+int64_t  rt_sdl2_wait_event(int64_t timeout_ms);
 int64_t  rt_sdl2_event_key_code(void);
 int64_t  rt_sdl2_event_key_sym(void);
 int64_t  rt_sdl2_event_key_mod(void);
@@ -920,12 +924,23 @@ int64_t  rt_sdl2_event_window_data2(void);
 /* Window properties */
 void     rt_sdl2_set_window_resizable(int64_t handle, int64_t resizable);
 void     rt_sdl2_set_window_fullscreen(int64_t handle, int64_t fullscreen);
+int64_t  rt_sdl2_set_window_fullscreen_checked(int64_t handle, int64_t fullscreen);
 void     rt_sdl2_set_window_size(int64_t handle, int64_t width, int64_t height);
 void     rt_sdl2_set_window_position(int64_t handle, int64_t x, int64_t y);
 int64_t  rt_sdl2_get_window_position_x(int64_t handle);
 int64_t  rt_sdl2_get_window_position_y(int64_t handle);
 void     rt_sdl2_show_window(int64_t handle);
 void     rt_sdl2_hide_window(int64_t handle);
+int64_t  rt_sdl2_set_window_minimum_size(int64_t handle, int64_t width, int64_t height);
+int64_t  rt_sdl2_set_window_maximum_size(int64_t handle, int64_t width, int64_t height);
+int64_t  rt_sdl2_minimize_window(int64_t handle);
+int64_t  rt_sdl2_maximize_window(int64_t handle);
+int64_t  rt_sdl2_restore_window(int64_t handle);
+int64_t  rt_sdl2_set_window_bordered(int64_t handle, int64_t bordered);
+int64_t  rt_sdl2_set_window_always_on_top(int64_t handle, int64_t on_top);
+int64_t  rt_sdl2_focus_window(int64_t handle);
+int64_t  rt_sdl2_window_flags(int64_t handle);
+const char* rt_sdl2_last_error(void);
 
 /* Cursor */
 void     rt_sdl2_set_cursor_visible(int64_t visible);
@@ -936,6 +951,45 @@ void     rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y);
 const char* rt_sdl2_clipboard_get(void);
 bool     rt_sdl2_clipboard_set(const char* text);
 bool     rt_sdl2_clipboard_has_text(void);
+
+/* ===== GLFW Windowing Runtime ===== */
+int64_t rt_glfw_init(void);
+void rt_glfw_terminate(void);
+int64_t rt_glfw_create_window(const char* title, int64_t width, int64_t height);
+int64_t rt_glfw_destroy_window(int64_t handle);
+int64_t rt_glfw_present_argb(int64_t handle, SplArray* pixels, int64_t width, int64_t height);
+int64_t rt_glfw_present_argb_words_raw(int64_t handle, int64_t pixels_addr, int64_t pixel_count, int64_t width, int64_t height);
+int64_t rt_glfw_poll_event(void);
+int64_t rt_glfw_event_window(void);
+int64_t rt_glfw_event_sequence(void);
+int64_t rt_glfw_event_timestamp_ns(void);
+int64_t rt_glfw_event_key(void);
+int64_t rt_glfw_event_scancode(void);
+int64_t rt_glfw_event_action(void);
+int64_t rt_glfw_event_modifiers(void);
+int64_t rt_glfw_event_x_milli(void);
+int64_t rt_glfw_event_y_milli(void);
+int64_t rt_glfw_event_dx_milli(void);
+int64_t rt_glfw_event_dy_milli(void);
+int64_t rt_glfw_event_width(void);
+int64_t rt_glfw_event_height(void);
+const char* rt_glfw_event_text(void);
+int64_t rt_glfw_dropped_event_count(void);
+int64_t rt_glfw_queued_event_count(void);
+int64_t rt_glfw_live_window_count(void);
+int64_t rt_glfw_should_close(int64_t handle);
+int64_t rt_glfw_set_visible(int64_t handle, int64_t visible);
+int64_t rt_glfw_focus(int64_t handle);
+int64_t rt_glfw_minimize(int64_t handle);
+int64_t rt_glfw_maximize(int64_t handle);
+int64_t rt_glfw_restore(int64_t handle);
+int64_t rt_glfw_framebuffer_width(int64_t handle);
+int64_t rt_glfw_framebuffer_height(int64_t handle);
+int64_t rt_glfw_content_scale_milli(int64_t handle);
+int64_t rt_glfw_frame_sequence(int64_t handle);
+int64_t rt_glfw_buffer_growth_count(int64_t handle);
+const char* rt_glfw_clipboard_get(int64_t handle);
+int64_t rt_glfw_clipboard_set(int64_t handle, const char* text);
 
 /* Display info */
 int64_t  rt_sdl2_get_num_displays(void);
