@@ -3154,7 +3154,10 @@ int64_t rt_string_find(int64_t value, int64_t needle) {
 int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* n = rt_core_as_string(needle);
-    if (!s || !n || start < 0) return -1;
+    if (!s || !n) return -1;
+    /* Negative start clamps to 0 (the two-arg index_of contract; matches the
+     * Rust runtime crate and simple_core impls). */
+    if (start < 0) start = 0;
     if (n->len == 0) return start <= (int64_t)s->len ? start : (int64_t)s->len;
     if (start >= (int64_t)s->len || n->len > s->len) return -1;
     for (uint64_t i = (uint64_t)start; i + n->len <= s->len; i++) {

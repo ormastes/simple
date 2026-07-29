@@ -2314,9 +2314,9 @@ pub extern "C" fn text_dot_from_char_code(code: i64) -> RuntimeValue {
 
 #[no_mangle]
 pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, start: i64) -> i64 {
-    if start < 0 {
-        return -1;
-    }
+    // Negative start clamps to 0 (the two-arg index_of contract; matches the
+    // C native runtime and simple_core impls).
+    let start = start.max(0);
     let hay_len = rt_string_len(haystack);
     let needle_len = rt_string_len(needle);
     if needle_len < 0 || hay_len < 0 {

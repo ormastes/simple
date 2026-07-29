@@ -1307,8 +1307,15 @@ fn test_text_find_respects_start_and_empty_needle() {
     assert_eq!(rt_text_find(haystack, needle, 0), 7);
     assert_eq!(rt_text_find(haystack, needle, 8), 14);
     assert_eq!(rt_text_find(haystack, needle, 30), -1);
+    // Negative start clamps to 0 (two-arg index_of contract), not -1.
+    assert_eq!(rt_text_find(haystack, needle, -5), 7);
+    // Needle at exactly start.
+    assert_eq!(rt_text_find(haystack, needle, 7), 7);
+    assert_eq!(rt_text_find(haystack, needle, 14), 14);
     let empty = rt_string_new("".as_ptr(), 0);
     assert_eq!(rt_text_find(haystack, empty, 5), 5);
+    // Empty needle past the end returns len (min(start, len)).
+    assert_eq!(rt_text_find(haystack, empty, 99), 20);
 }
 
 #[test]

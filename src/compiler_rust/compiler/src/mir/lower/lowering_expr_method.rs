@@ -1583,6 +1583,35 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        // Two-arg string `index_of(needle, start)`: byte-offset search from
+        // `start` via the existing `rt_text_find(value, needle, start)`
+        // runtime primitive (present in all three runtimes, previously
+        // uncalled). This arity had NO lowering anywhere: the call fell
+        // through to a static `str.index_of` symbol -> rt_function_not_found
+        // at runtime, which printed an error but returned the tagged
+        // SPECIAL_ERROR sentinel (27) with exit code 0 — a silent fail-open.
+        // Semantics match one-arg `index_of` exactly: byte-indexed, raw i64
+        // result, -1 for not-found; start < 0 clamps to 0, start past the end
+        // returns -1 (empty needle returns min(start, len)). Gated off arrays
+        // so `[T].index_of(v)` above is untouched; the receiver and needle
+        // are tagged string handles like the one-arg `rt_index_of` route, and
+        // `start` stays a raw i64 as `rt_text_find` expects.
+        if method == "index_of"
+            && args.len() == 2
+            && !self.receiver_is_array(receiver, receiver_local_ty)
+        {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_text_find"),
+                    args: vec![receiver_reg, arg_regs[0], arg_regs[1]],
+                });
+                dest
+            });
+        }
+
         if is_array_append_method && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
             // rt_array_push returns bool (success), NOT the array. The value of
             // the `arr.push(x)` expression must be the (in-place mutated) array

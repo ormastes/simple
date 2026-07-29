@@ -528,6 +528,17 @@ fn cg_method_call_expr(idx: i64) -> text:
             val arg_c = cg_expr(call_args[0])
             return "spl_str_ends_with(" + recv_c + ", " + arg_c + ")"
     if method_name == "index_of":
+        # Two-arg `index_of(needle, start)`: byte-offset search. Previously
+        # the `len() > 0` guard matched a two-arg call too and SILENTLY
+        # dropped the start argument. Composed as a statement-expression
+        # (already idiomatic in this lane — see the array/dict literals)
+        # that clamps start into [0, len] and offset-adds, which reproduces
+        # rt_text_find's contract exactly: start < 0 -> 0; non-empty needle
+        # past the end -> -1; empty needle -> min(start, len).
+        if call_args.len() >= 2:
+            val arg_c = cg_expr(call_args[0])
+            val arg2_c = cg_expr(call_args[1])
+            return "({ const char* __io_s = (" + recv_c + "); int64_t __io_st = (int64_t)(" + arg2_c + "); int64_t __io_len = (int64_t)strlen(__io_s); if (__io_st < 0) __io_st = 0; if (__io_st > __io_len) __io_st = __io_len; int64_t __io_f = spl_str_index_of(__io_s + __io_st, (" + arg_c + ")); __io_f < 0 ? (int64_t)-1 : __io_f + __io_st; })"
         if call_args.len() > 0:
             val arg_c = cg_expr(call_args[0])
             return "spl_str_index_of(" + recv_c + ", " + arg_c + ")"

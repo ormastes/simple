@@ -1888,6 +1888,56 @@ impl MirLowering:
                         if self.local_is_runtime_array(contains_recv_probe):
                             contains_recv_is_array = true
                     case _: ()
+        # Two-arg text `index_of(needle, start)`: byte-offset search lowered
+        # to the existing `rt_text_find(value, needle, start)` runtime
+        # primitive (tagged-value ABI, present in runtime_native.c, the Rust
+        # runtime crate, and simple_core/core_string.spl). This arity
+        # previously had NO lowering, so the call fell through to a static
+        # symbol -> rt_function_not_found at runtime, which printed an error
+        # but returned the tagged SPECIAL_ERROR sentinel (27) with exit 0 —
+        # a silent fail-open. Contract matches one-arg index_of exactly:
+        # byte-indexed raw i64 result, -1 for not-found; start < 0 clamps to
+        # 0; start past the end returns -1 (empty needle: min(start, len)).
+        # Receiver/needle go through ensure_tagged_str (same rationale as the
+        # trim/find arm below); start stays a raw i64 as rt_text_find expects.
+        # Array receivers are excluded with the same type + runtime-local
+        # probe as `contains` above so a (nonexistent) two-arg array
+        # index_of still fails LOUDLY on the ordinary Unresolved path
+        # instead of silently returning -1 from a string search.
+        if method == "index_of" and args.len() == 2 and resolution_is_unresolved and not predicate_has_custom_owner:
+            var tf_recv_is_array = false
+            if val tf_recv_ty = receiver.type_:
+                match tf_recv_ty.kind:
+                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        tf_recv_is_array = true
+                    case _: ()
+            if not tf_recv_is_array:
+                match receiver.kind:
+                    case Var(_) | NamedVar(_, _):
+                        val tf_recv_probe = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
+                        if self.local_is_runtime_array(tf_recv_probe):
+                            tf_recv_is_array = true
+                    case _: ()
+            if not tf_recv_is_array:
+                val tf_recv_raw = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
+                val tf_recv = self.ensure_tagged_str(tf_recv_raw)
+                val tf_needle_raw = self.lower_expr(args[0].value)
+                val tf_needle = self.ensure_tagged_str(tf_needle_raw)
+                val tf_start = self.lower_expr(args[1].value)
+                var tf_ops: [MirOperand] = []
+                tf_ops = tf_ops.push(mir_operand_copy(tf_recv))
+                tf_ops = tf_ops.push(mir_operand_copy(tf_needle))
+                tf_ops = tf_ops.push(mir_operand_copy(tf_start))
+                val tf_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_text_find"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_tf = self.builder
+                val tf_res = b_tf.emit_call(tf_op, tf_ops, MirType.i64())
+                self.builder = b_tf
+                if val tf_local = tf_res:
+                    return tf_local
+                return tf_recv
         # to_upper / parse_f64 use the same erased-receiver fallback family as
         # trim/lower/to_lower. parse_f64 must keep the existing nullable tagged
         # rt_string_to_float ABI so zero remains distinct from parse failure.

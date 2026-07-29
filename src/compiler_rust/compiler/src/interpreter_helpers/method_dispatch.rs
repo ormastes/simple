@@ -95,10 +95,31 @@ pub(crate) fn call_method_on_value(
                 ));
             }
             "index_of" => {
+                // Byte-indexed, with optional two-arg `index_of(needle,
+                // start)` byte-offset form, mirroring `rt_text_find` exactly
+                // (start < 0 clamps to 0; empty needle returns
+                // min(start, len); start past the end returns -1). The
+                // previous code returned `s[..idx].chars().count()` — a
+                // CHARACTER index, silently divergent on multi-byte text from
+                // every other index_of path in either engine — and ignored a
+                // second argument entirely. This fallthrough-free path must
+                // implement both arities inline: past the match the function
+                // ends in METHOD_NOT_FOUND, not the full string-method path.
                 if let Some(Value::Str(needle)) = _args.first() {
-                    if let Some(idx) = s.find(needle.as_str()) {
-                        return Ok(Value::Int(s[..idx].chars().count() as i64));
+                    let start_raw = _args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
+                    let start = start_raw.max(0) as usize;
+                    let bytes = s.as_bytes();
+                    let nb = needle.as_bytes();
+                    if nb.is_empty() {
+                        return Ok(Value::Int(start.min(bytes.len()) as i64));
                     }
+                    if start >= bytes.len() {
+                        return Ok(Value::Int(-1));
+                    }
+                    return Ok(match bytes[start..].windows(nb.len()).position(|w| w == nb) {
+                        Some(idx) => Value::Int((start + idx) as i64),
+                        None => Value::Int(-1),
+                    });
                 }
                 return Ok(Value::Int(-1));
             }

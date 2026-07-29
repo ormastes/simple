@@ -43,6 +43,31 @@ if let Value::Str(ref s) = recv_val {
         }
         "find_str" | "find" | "index_of" => {
             let needle = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            // Two-arg `index_of(needle, start)`: byte-offset search from
+            // `start`, mirroring `rt_text_find` exactly so the interpreter and
+            // the compiled lane agree: start < 0 clamps to 0; empty needle
+            // returns min(start, len); start past the end returns -1;
+            // byte-indexed result, -1 for not-found. Scoped to `index_of`
+            // only — `find`/`find_str` keep their one-arg contract (extra
+            // args were and remain ignored) because the compiled lane lowers
+            // only two-arg `index_of`, and a wider interpreter would silently
+            // diverge from it.
+            if method == "index_of" && args.len() >= 2 {
+                let start_raw = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods)?;
+                let start = start_raw.max(0) as usize;
+                let bytes = s.as_bytes();
+                let nb = needle.as_bytes();
+                if nb.is_empty() {
+                    return Ok(Value::Int(start.min(bytes.len()) as i64));
+                }
+                if start >= bytes.len() {
+                    return Ok(Value::Int(-1));
+                }
+                return Ok(match bytes[start..].windows(nb.len()).position(|w| w == nb) {
+                    Some(idx) => Value::Int((start + idx) as i64),
+                    None => Value::Int(-1),
+                });
+            }
             return Ok(match s.find(&needle) {
                 Some(idx) => Value::Int(idx as i64),
                 None => Value::Int(-1),
