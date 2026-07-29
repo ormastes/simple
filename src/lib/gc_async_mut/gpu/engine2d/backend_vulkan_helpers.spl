@@ -127,8 +127,138 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
 
 impl VulkanBackend:
 
+    me _clear_pending_compute_state():
+        self.pending_compute_command = 0
+        self.pending_compute_pipelines = []
+        self.pending_compute_descriptors = []
+
+    me _release_pending_compute_descriptors() -> bool:
+        var released = true
+        var i: i64 = 0
+        while i < self.pending_compute_descriptors.len():
+            if not vulkan_sffi_destroy_descriptor_set(self.pending_compute_descriptors[i]):
+                vulkan_sffi_quarantine_dependencies(
+                    self.pending_compute_descriptors[i], 0, 0, 0)
+                released = false
+            i = i + 1
+        released
+
+    me _quarantine_pending_compute_descriptors():
+        var i: i64 = 0
+        while i < self.pending_compute_descriptors.len():
+            vulkan_sffi_quarantine_dependencies(
+                self.pending_compute_descriptors[i], 0, 0, 0)
+            i = i + 1
+
+    me _flush_pending_compute() -> i64:
+        """Submit one Engine-managed primitive batch and release dependencies."""
+        val cmd = self.pending_compute_command
+        if cmd <= 0:
+            return 1
+        if not vulkan_sffi_end_compute(cmd):
+            val discarded = vulkan_sffi_discard_command(cmd)
+            if not discarded:
+                val first_desc = if self.pending_compute_descriptors.len() > 0:
+                    self.pending_compute_descriptors[0]
+                else:
+                    0
+                vulkan_sffi_quarantine_unsubmitted_command(cmd, first_desc, 0)
+                var i: i64 = 1
+                while i < self.pending_compute_descriptors.len():
+                    vulkan_sffi_quarantine_dependencies(
+                        self.pending_compute_descriptors[i], 0, 0, 0)
+                    i = i + 1
+                self._clear_pending_compute_state()
+                return -1
+            self._release_pending_compute_descriptors()
+            self._clear_pending_compute_state()
+            return 0
+
+        val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+        if fence < 0:
+            if not vulkan_sffi_wait_idle():
+                self._quarantine_pending_compute_descriptors()
+                self._clear_pending_compute_state()
+                return -1
+            self._release_pending_compute_descriptors()
+            self._clear_pending_compute_state()
+            return VK_DISPATCH_COMPLETED_INELIGIBLE
+        if fence == 0:
+            self._release_pending_compute_descriptors()
+            self._clear_pending_compute_state()
+            return 0
+
+        val completion_waited = vulkan_sffi_wait_fence(fence, 0)
+        if not completion_waited and not vulkan_sffi_wait_idle():
+            self._quarantine_pending_compute_descriptors()
+            self._clear_pending_compute_state()
+            return -1
+        val fence_destroyed = vulkan_sffi_destroy_fence(fence)
+        val descriptors_released = self._release_pending_compute_descriptors()
+        self._clear_pending_compute_state()
+        if completion_waited and fence_destroyed and descriptors_released:
+            1
+        else:
+            VK_DISPATCH_COMPLETED_INELIGIBLE
+
+    me _enqueue_framebuffer_compute(pipe: i64, push_data: [u8],
+                                    gx: i64, gy: i64, gz: i64) -> i64:
+        if (self.d_framebuffer <= 0 or pipe <= 0 or push_data.len() == 0 or
+            gx <= 0 or gy <= 0 or gz <= 0):
+            return 0
+        if self.pending_compute_command <= 0:
+            if (not vulkan_sffi_reap_dependency_quarantine() or
+                not vulkan_sffi_fence_submission_supported()):
+                return 0
+            self.pending_compute_command = vulkan_sffi_begin_compute()
+            if self.pending_compute_command <= 0:
+                return 0
+
+        var desc: i64 = 0
+        var i: i64 = 0
+        while i < self.pending_compute_pipelines.len():
+            if self.pending_compute_pipelines[i] == pipe:
+                desc = self.pending_compute_descriptors[i]
+            i = i + 1
+        if desc <= 0:
+            desc = vulkan_sffi_create_descriptor_set(pipe)
+            if desc <= 0 or not vulkan_sffi_bind_buffer(
+                    desc, 0, self.d_framebuffer):
+                if desc > 0:
+                    if not vulkan_sffi_destroy_descriptor_set(desc):
+                        vulkan_sffi_quarantine_dependencies(
+                            desc, 0, 0, 0)
+                val flushed = self._flush_pending_compute()
+                return if flushed < 0: -1 else: 0
+            self.pending_compute_pipelines.push(pipe)
+            self.pending_compute_descriptors.push(desc)
+        val cmd = self.pending_compute_command
+        val ready = (
+            vulkan_sffi_bind_pipeline(cmd, pipe) and
+            vulkan_sffi_bind_descriptors(cmd, desc) and
+            vulkan_sffi_push_constants(cmd, pipe, push_data) and
+            vulkan_sffi_dispatch(cmd, gx, gy, gz))
+        if not ready:
+            val flushed = self._flush_pending_compute()
+            return if flushed < 0: -1 else: 0
+        1
+
+    me _flush_for_host_fallback(reason: text) -> bool:
+        val status = self._flush_pending_compute()
+        if status == 1:
+            return true
+        self.mark_cpu_fallback(reason)
+        if status < 0:
+            self.completion_unknown = true
+            return false
+        status == VK_DISPATCH_COMPLETED_INELIGIBLE
+
     me _dispatch_framebuffer_checked(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
-        val dispatched = vulkan_dispatch_framebuffer_compute_checked(self.d_framebuffer, pipe, push_data, gx, gy, gz)
+        val dispatched = if self.frame_batching_enabled:
+            self._enqueue_framebuffer_compute(pipe, push_data, gx, gy, gz)
+        else:
+            vulkan_dispatch_framebuffer_compute_checked(
+                self.d_framebuffer, pipe, push_data, gx, gy, gz)
         if dispatched > 0:
             self.dirty = true
         else:
@@ -149,6 +279,11 @@ impl VulkanBackend:
         for low-frequency text draws (UI labels, debug overlays).
         """
         if not self.initialized:
+            return
+        val pending_status = self._flush_pending_compute()
+        if pending_status <= 0:
+            if pending_status < 0:
+                self.completion_unknown = true
             return
         # Ensure host buffer is current
         if self.dirty:

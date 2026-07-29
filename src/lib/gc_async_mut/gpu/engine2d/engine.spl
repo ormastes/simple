@@ -464,6 +464,7 @@ class Engine2D with DrawIrRenderTarget:
         var vulkan = VulkanBackend.create()
         if not vulkan.init_with_session(width, height, parent.session):
             return Err(if vulkan.last_error == "": "shared-vulkan-surface-init-failed" else: vulkan.last_error)
+        vulkan.enable_frame_batching()
         var child = Engine2D(
             backend: vulkan, capability: backend_capability_default(),
             baremetal_backend: nil, virtio_gpu_backend: nil,
@@ -517,6 +518,7 @@ class Engine2D with DrawIrRenderTarget:
         if requested_backend == "vulkan":
             var vulkan = VulkanBackend.create()
             if vulkan.init(width, height):
+                vulkan.enable_frame_batching()
                 return Ok(Engine2D(
                     backend: vulkan, capability: backend_capability_default(),
                     baremetal_backend: nil, virtio_gpu_backend: nil,
@@ -637,6 +639,7 @@ class Engine2D with DrawIrRenderTarget:
         """Create canonical Vulkan without retaining unrelated backend factories."""
         var vulkan = VulkanBackend.create()
         if vulkan.init(width, height):
+            vulkan.enable_frame_batching()
             return Ok(Engine2D(
                 backend: vulkan, capability: backend_capability_default(),
                 baremetal_backend: nil, virtio_gpu_backend: nil,
@@ -2486,6 +2489,11 @@ class Engine2D with DrawIrRenderTarget:
             self.backend = cuda
             return pixels
         elif val Some(vulkan) = self.vulkan_backend:
+            val pending_status = vulkan._flush_pending_compute()
+            if pending_status < 0:
+                vulkan.mark_completion_unknown()
+            elif pending_status != 1:
+                vulkan.mark_cpu_fallback("primitive-batch-read-flush-ineligible")
             val pixels = vulkan.read_pixels()
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
@@ -2506,6 +2514,11 @@ class Engine2D with DrawIrRenderTarget:
             self.backend = cuda
             readback
         elif val Some(vulkan) = self.vulkan_backend:
+            val pending_status = vulkan._flush_pending_compute()
+            if pending_status < 0:
+                vulkan.mark_completion_unknown()
+            elif pending_status != 1:
+                vulkan.mark_cpu_fallback("primitive-batch-read-flush-ineligible")
             val readback = vulkan.read_pixels_with_source()
             self.vulkan_backend = Some(vulkan)
             self.backend = vulkan

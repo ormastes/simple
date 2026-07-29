@@ -12,8 +12,8 @@
 #   - SPIR-V compute shaders for validated kernels; descriptor-compatible
 #     no-op SPIR-V placeholders for unsupported kernels.
 #   - Push constants carry per-primitive parameters
-#   - Each draw call: begin_compute -> bind_pipeline -> bind_descriptors ->
-#     push_constants -> dispatch -> end_compute -> submit_and_wait
+#   - Engine-managed frames record primitive dispatches into one command buffer
+#     and submit at present/readback or before an incompatible operation.
 #
 # Usage:
 #   use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
@@ -41,7 +41,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_rect_blend, emu_draw_image_blend,
     emu_draw_image_scaled, emu_draw_image_scaled_blend,
     emu_draw_triangle_outline,
-    emu_draw_blur_rect, emu_draw_shadow_rect,
+    emu_draw_blur_rect,
     emu_draw_image_transform,
     emu_draw_rect_blend_mode
 }
@@ -210,6 +210,10 @@ class VulkanBackend:
     clip_enabled: bool
     initialized: bool
     dirty: bool                  # True when GPU has changes not yet copied to host
+    frame_batching_enabled: bool
+    pending_compute_command: i64
+    pending_compute_pipelines: [i64]
+    pending_compute_descriptors: [i64]
     cpu_fallback_used: bool      # Sticky conservative provenance for this backend lifetime
     cpu_fallback_reason: text    # First transition reason; empty while device-only
     completion_unknown: bool    # True when dependent Vulkan work may still be in flight
@@ -264,6 +268,10 @@ class VulkanBackend:
             clip_enabled: false,
             initialized: false,
             dirty: false,
+            frame_batching_enabled: false,
+            pending_compute_command: 0,
+            pending_compute_pipelines: [],
+            pending_compute_descriptors: [],
             cpu_fallback_used: false,
             cpu_fallback_reason: "",
             completion_unknown: false,
@@ -373,6 +381,9 @@ impl RenderBackend for VulkanBackend:
         self.clip_enabled = false
         self.initialized = true
         self.dirty = false
+        self.pending_compute_command = 0
+        self.pending_compute_pipelines = []
+        self.pending_compute_descriptors = []
         self.cpu_fallback_used = false
         self.cpu_fallback_reason = ""
         true
@@ -386,10 +397,16 @@ impl RenderBackend for VulkanBackend:
     me mark_completion_unknown():
         self.completion_unknown = true
 
+    me enable_frame_batching():
+        self.frame_batching_enabled = true
+
     me _mark_readback_length_failed():
         self.last_error = "Vulkan framebuffer readback byte count mismatch"
 
     me shutdown():
+        val pending_status = self._flush_pending_compute()
+        if pending_status < 0:
+            self.completion_unknown = true
         if self.completion_unknown:
             if not vulkan_sffi_recover_dependency_quarantine():
                 # Preserve every potentially in-flight resource. The runtime
@@ -467,7 +484,7 @@ impl RenderBackend for VulkanBackend:
         val total = _i64(self.w) * _i64(self.h)
         val workgroups = (total + 255) / 256
         val pc = _pack_clear_pc(color, self.w, self.h)
-        val dispatched = vulkan_dispatch_framebuffer_compute_checked(self.d_framebuffer, self.pipe_clear, pc, workgroups, 1, 1)
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1)
         if dispatched > 0:
             self.dirty = true
         else:
@@ -499,7 +516,7 @@ impl RenderBackend for VulkanBackend:
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
-        val dispatched = vulkan_dispatch_framebuffer_compute_checked(self.d_framebuffer, self.pipe_rect_filled, pc, gx, gy, 1)
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_rect_filled, pc, gx, gy, 1)
         if dispatched > 0:
             self.dirty = true
         else:
@@ -617,6 +634,14 @@ impl RenderBackend for VulkanBackend:
                 right > clip_right or bottom > clip_bottom):
                 return 0
 
+        val pending_status = self._flush_pending_compute()
+        if pending_status <= 0:
+            if pending_status < 0:
+                self.completion_unknown = true
+            return pending_status
+        if pending_status == VK_DISPATCH_COMPLETED_INELIGIBLE:
+            self.mark_cpu_fallback("primitive-batch-cleanup-ineligible")
+
         val src_size = pixel_count * 4
         val d_src = vulkan_sffi_alloc_buffer(src_size, 0x80)
         if d_src <= 0:
@@ -673,6 +698,11 @@ impl RenderBackend for VulkanBackend:
         if native_status < 0:
             self.mark_cpu_fallback("image-copy-completion-unknown")
             self.completion_unknown = true
+            return
+        val pending_status = self._flush_pending_compute()
+        if pending_status <= 0:
+            if pending_status < 0:
+                self.completion_unknown = true
             return
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
@@ -735,6 +765,11 @@ impl RenderBackend for VulkanBackend:
 
     me present():
         if self.completion_unknown:
+            return
+        val pending_status = self._flush_pending_compute()
+        if pending_status <= 0:
+            if pending_status < 0:
+                self.completion_unknown = true
             return
         # Copy GPU storage buffer to host memory
         if self.dirty:
@@ -859,6 +894,13 @@ impl RenderBackend for VulkanBackend:
 
     me draw_rect_blend(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
+        if color_a(color) == 255:
+            self.draw_rect_filled(x, y, w, h, color)
+            return
+        if color_a(color) == 0:
+            return
+        if not self._flush_for_host_fallback("rect-blend-host-readback"):
+            return
         emu_draw_rect_blend(self, x, y, w, h, color)
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
@@ -869,6 +911,8 @@ impl RenderBackend for VulkanBackend:
         if native_status < 0:
             self.mark_cpu_fallback("image-blend-completion-unknown")
             self.completion_unknown = true
+            return
+        if not self._flush_for_host_fallback("image-blend-host-readback"):
             return
         self.mark_cpu_fallback("image-blend-host-fallback")
         emu_draw_image_blend(self, x, y, w, h, pixels)
@@ -898,6 +942,9 @@ impl RenderBackend for VulkanBackend:
             self.mark_cpu_fallback("scaled-image-blend-completion-unknown")
             self.completion_unknown = true
             return
+        if not self._flush_for_host_fallback(
+                "scaled-image-blend-host-readback"):
+            return
         self.mark_cpu_fallback("scaled-image-blend-host-fallback")
         emu_draw_image_scaled_blend(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
 
@@ -907,11 +954,23 @@ impl RenderBackend for VulkanBackend:
 
     me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
         if self.completion_unknown: return
+        if not self._flush_for_host_fallback("blur-host-readback"):
+            return
         emu_draw_blur_rect(self, x, y, w, h, radius)
 
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
         if self.completion_unknown: return
-        emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
+        if w <= 0 or h <= 0:
+            return
+        val sx = x + offset_x
+        val sy = y + offset_y
+        val sw = w + 2 * blur_r
+        val sh = h + 2 * blur_r
+        self.draw_rect_filled(
+            sx - blur_r, sy - blur_r, sw, sh, color)
+        if blur_r > 0:
+            self.draw_blur_rect(
+                sx - blur_r, sy - blur_r, sw, sh, blur_r)
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
         if self.completion_unknown: return
@@ -919,6 +978,8 @@ impl RenderBackend for VulkanBackend:
 
     me draw_rect_blend_mode(x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
         if self.completion_unknown: return
+        if not self._flush_for_host_fallback("blend-mode-host-readback"):
+            return
         emu_draw_rect_blend_mode(self, x, y, w, h, color, mode)
 
 impl Engine2DExtended for VulkanBackend:

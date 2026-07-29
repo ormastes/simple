@@ -2039,6 +2039,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_shutdown", gpu::rt_vulkan_shutdown_fn);
     insert_simple!("rt_vulkan_submit_and_wait", gpu::rt_vulkan_submit_and_wait_fn);
     insert_simple!(
+        "rt_vulkan_accepted_compute_submit_count",
+        gpu::rt_vulkan_accepted_compute_submit_count_fn
+    );
+    insert_simple!(
         "rt_vulkan_fence_submission_supported",
         gpu::rt_vulkan_fence_submission_supported_fn
     );

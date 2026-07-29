@@ -2900,6 +2900,7 @@ mod vulkan_dlopen {
         pub descriptor_sets: Vec<Option<DescriptorSetEntry>>,
         pub command_buffers: Vec<Option<CommandBufferEntry>>,
         pub quarantined_commands: Vec<(u64, VkCommandBuffer)>,
+        pub accepted_compute_submit_count: i64,
         pub live_fences: Vec<u64>,
         pub last_error: String,
         pub selected_device_index: usize,
@@ -3123,6 +3124,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             descriptor_sets: Vec::new(),
             command_buffers: Vec::new(),
             quarantined_commands: Vec::new(),
+            accepted_compute_submit_count: 0,
             live_fences: Vec::new(),
             last_error: String::new(),
             selected_device_index: 0,
@@ -4283,13 +4285,12 @@ pub fn rt_vulkan_submit_and_wait_fn(args: &[Value]) -> Result<Value, CompileErro
         signal_semaphore_count: 0,
         p_signal_semaphores: ptr::null(),
     };
-    let ok = unsafe {
-        let r = (s.fns.queue_submit)(s.queue, 1, &submit_info, 0);
-        if r == VK_SUCCESS {
-            (s.fns.queue_wait_idle)(s.queue)
-        } else {
-            r
-        }
+    let submitted = unsafe { (s.fns.queue_submit)(s.queue, 1, &submit_info, 0) };
+    let ok = if submitted == VK_SUCCESS {
+        s.accepted_compute_submit_count += 1;
+        unsafe { (s.fns.queue_wait_idle)(s.queue) }
+    } else {
+        submitted
     };
     // Free the command buffer (one-shot semantics)
     if let Some(e) = s.command_buffers[ch - 1].take() {
@@ -4350,6 +4351,7 @@ pub fn rt_vulkan_submit_and_wait_fence_fn(args: &[Value]) -> Result<Value, Compi
         }
         return Ok(Value::Int(0));
     }
+    s.accepted_compute_submit_count += 1;
     if unsafe { (s.fns.wait_for_fences)(s.device, 1, &fence, 1, u64::MAX) } != VK_SUCCESS {
         s.command_buffers[ch - 1].take();
         s.quarantined_commands.push((fence, cmd));
@@ -4360,6 +4362,15 @@ pub fn rt_vulkan_submit_and_wait_fence_fn(args: &[Value]) -> Result<Value, Compi
     }
     s.live_fences.push(fence);
     Ok(Value::Int(fence as i64))
+}
+
+pub fn rt_vulkan_accepted_compute_submit_count_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    let guard = vulkan_dlopen::VK_STATE.lock().unwrap();
+    Ok(Value::Int(
+        guard
+            .as_ref()
+            .map_or(0, |state| state.accepted_compute_submit_count),
+    ))
 }
 
 pub fn rt_vulkan_wait_fence_fn(args: &[Value]) -> Result<Value, CompileError> {

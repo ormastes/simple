@@ -90,6 +90,7 @@ pub(super) struct VulkanState {
     pub shader_spirv: HashMap<i64, Vec<u8>>,
     pub fences: HashMap<i64, Fence>,
     pub quarantined_compute: Vec<(Fence, vk::CommandBuffer)>,
+    pub accepted_compute_submit_count: i64,
     pub quarantined_graphics: Vec<(Fence, vk::CommandBuffer)>,
     pub strings: HashMap<String, CString>,
     pub semaphores: HashMap<i64, Semaphore>,
@@ -103,6 +104,7 @@ pub(super) struct VulkanState {
     pub descriptor_pools: HashMap<i64, Arc<DescriptorPool>>,
     pub descriptor_set_layouts: HashMap<i64, Arc<DescriptorSetLayout>>,
     pub descriptor_sets: HashMap<i64, Arc<DescriptorSet>>,
+    pub descriptor_set_owners: HashMap<i64, (i64, i64)>,
     pub active_compute_layout: Option<vk::PipelineLayout>,
     pub semaphore_pool: Option<SemaphorePool>,
     pub window_manager: Option<WindowManager>,
@@ -123,6 +125,7 @@ impl VulkanState {
             shader_spirv: HashMap::new(),
             fences: HashMap::new(),
             quarantined_compute: Vec::new(),
+            accepted_compute_submit_count: 0,
             quarantined_graphics: Vec::new(),
             strings: HashMap::new(),
             semaphores: HashMap::new(),
@@ -136,6 +139,7 @@ impl VulkanState {
             descriptor_pools: HashMap::new(),
             descriptor_set_layouts: HashMap::new(),
             descriptor_sets: HashMap::new(),
+            descriptor_set_owners: HashMap::new(),
             active_compute_layout: None,
             semaphore_pool: None,
             window_manager: None,
@@ -267,6 +271,7 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
         state.clean_quarantined_graphics();
     }
     state.descriptor_sets.clear();
+    state.descriptor_set_owners.clear();
     state.active_compute_layout = None;
     state.descriptor_pools.clear();
     state.descriptor_set_layouts.clear();

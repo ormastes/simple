@@ -58,6 +58,7 @@ pub extern "C" fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64 {
     state.descriptor_set_layouts.insert(layout_h, layout);
     state.descriptor_pools.insert(pool_h, pool);
     state.descriptor_sets.insert(h, ds);
+    state.descriptor_set_owners.insert(h, (layout_h, pool_h));
     h
 }
 
@@ -105,6 +106,10 @@ pub extern "C" fn rt_vulkan_bind_buffer(_desc_set: i64, _binding: i64, _buf: i64
 pub extern "C" fn rt_vulkan_destroy_descriptor_set(desc_set: i64) -> i64 {
     let mut state = STATE.lock();
     if state.descriptor_sets.remove(&desc_set).is_some() {
+        if let Some((layout, pool)) = state.descriptor_set_owners.remove(&desc_set) {
+            state.descriptor_pools.remove(&pool);
+            state.descriptor_set_layouts.remove(&layout);
+        }
         1
     } else {
         0
@@ -493,14 +498,17 @@ pub extern "C" fn rt_vulkan_discard_graphics_command(_cmd: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_submit_and_wait(cmd: i64) -> i64 {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
         Err(_) => return 0,
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     match device.submit_compute_command(vk_cmd) {
-        Ok(()) => 1,
+        Ok(()) => {
+            state.accepted_compute_submit_count += 1;
+            1
+        }
         Err(e) => {
             tracing::error!("submit_and_wait: {e}");
             0
@@ -553,6 +561,7 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     match device.submit_compute_command_with_fence(vk_cmd, &fence) {
         Ok(()) => {
+            state.accepted_compute_submit_count += 1;
             let handle = alloc_handle();
             state.fences.insert(handle, fence);
             handle
@@ -562,6 +571,7 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
             0
         }
         Err(FencedSubmitError::CompletionUnknown(e)) => {
+            state.accepted_compute_submit_count += 1;
             state.set_error(format!("submit_and_wait_fence completion unknown: {e}"));
             // A wait error can leave the command in flight. Keep the fence alive so
             // its native handle cannot be destroyed while the queue may still use it.
@@ -575,6 +585,18 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_submit_and_wait_fence(_cmd: i64) -> i64 {
     0
+}
+
+#[no_mangle]
+pub extern "C" fn rt_vulkan_accepted_compute_submit_count() -> i64 {
+    #[cfg(feature = "vulkan")]
+    {
+        return STATE.lock().accepted_compute_submit_count;
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        0
+    }
 }
 
 #[no_mangle]

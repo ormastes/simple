@@ -1,0 +1,30 @@
+"""Vulkan pending-batch flush evidence for host fallback."""
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_accepted_compute_submit_count}
+
+describe "Vulkan Engine2D batch to host fallback":
+    it "submits pending primitives before masked host readback":
+        val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
+        if result.is_ok():
+            var engine = result.unwrap()
+            val before = vulkan_sffi_accepted_compute_submit_count()
+            engine.clear(0xFF0000FFu32)
+            var mask = [0u8; 16 * 16]
+            mask[0] = 1u8
+            engine.set_mask(mask, 16, 16)
+            engine.draw_image_blend(
+                0, 0, 2, 2, [0xFFFF0000u32; 4])
+            val readback = engine.read_pixels_with_source()
+
+            expect(
+                vulkan_sffi_accepted_compute_submit_count() - before
+            ).to_equal(1)
+            expect(readback.pixels[0]).to_equal(0xFFFF0000u32)
+            expect(readback.pixels[1]).to_equal(0xFF0000FFu32)
+            expect(readback.source).to_equal("cpu_fallback")
+            engine.shutdown()
+        else:
+            expect(result.unwrap_err().fallback_reason).to_not_equal("")
