@@ -195,16 +195,30 @@ fn nth_child_common_formula_matches(formula: text, nth: i32) -> bool:
     false
 
 fn nth_child_remove_ws(value: text) -> text:
+    # char_at() is character-indexed while slice()/len() are byte-indexed
+    # on the deployed seed; mixing char_at(i) with a byte-length loop
+    # bound silently stops matching once i exceeds the character count on
+    # non-ASCII input, and byte-by-byte reconstruction via `out = out +
+    # ch` shreds multi-byte content into U+FFFD fragments regardless.
+    # Whitespace bytes are all single ASCII bytes, so byte-stepping to
+    # find them is safe; copy whole runs via slice() between them. This
+    # also drops the O(i) per-call cost char_at() pays walking from the
+    # string start, so the scan is truly O(n) instead of O(n^2).
     var out = ""
+    var seg_start = 0
     var idx = 0
-    while idx < value.len():
-        val ch = value.char_at(idx)
-        if ch != " " and ch != "\t" and ch != "\n" and ch != "\r":
-            out = out + ch
+    val len = value.len()
+    while idx < len:
+        val ch = value.slice(idx, idx + 1)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            out = out + value.slice(seg_start, idx)
+            seg_start = idx + 1
         idx = idx + 1
-    out
+    out + value.slice(seg_start, len)
 
 fn selector_class_chain_matches(selector: text, node: BeDomNode) -> bool:
+    # See nth_child_remove_ws above for why slice(i, i+1) (not char_at(i))
+    # is required here.
     val trimmed = selector.trim()
     if not trimmed.starts_with("."):
         return false
@@ -212,7 +226,7 @@ fn selector_class_chain_matches(selector: text, node: BeDomNode) -> bool:
     var segment_start = 1
     var idx = 1
     while idx <= trimmed.len():
-        if idx == trimmed.len() or trimmed.char_at(idx) == ".":
+        if idx == trimmed.len() or trimmed.slice(idx, idx + 1) == ".":
             val cls = trimmed.slice(segment_start, idx).trim()
             if cls.len() == 0 or not sb_has_class(node, cls):
                 return false
@@ -269,8 +283,11 @@ fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling
     sb_attr_value_matches(be_dom_get_attr(node, key), op, expected, insensitive)
 
 fn sb_attr_operator(body: text, eq_pos: i32) -> text:
+    # eq_pos comes from sb_find(), which returns a BYTE offset; char_at()
+    # is character-indexed, so it must not be used against a byte offset
+    # (see nth_child_remove_ws above).
     if eq_pos > 0:
-        val marker = body.char_at(eq_pos - 1)
+        val marker = body.slice(eq_pos - 1, eq_pos)
         if marker == "^" or marker == "$" or marker == "*" or marker == "~" or marker == "|":
             return marker + "="
     "="

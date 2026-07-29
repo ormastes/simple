@@ -174,49 +174,57 @@ pub fn sb_find(s: text, target: text, start: i64) -> i64:
     999999999
 
 pub fn sb_split_char(s: text, delimiter: text) -> [text]:
+    # char_at() is character-indexed while slice()/len() are byte-indexed
+    # on the deployed seed; mixing char_at(i) with a byte-length loop
+    # bound silently stops matching once i exceeds the character count on
+    # non-ASCII input. Byte-slicing per character also cost an O(i) walk
+    # per call under char_at() (it decodes from the string start each
+    # time), turning this whole selector-splitting pass quadratic; using
+    # slice(i, i+1) for detection plus one bulk slice(seg_start, idx) per
+    # segment (instead of a StringBuilder filled one byte at a time) makes
+    # both the correctness and the asymptotic cost right.
     var parts: [text] = []
-    val sb = StringBuilder.new()
+    var seg_start = 0
     var idx = 0
-    while idx < s.len() and parts.len() < 256:
-        val ch = s.char_at(idx)
+    val len = s.len()
+    while idx < len and parts.len() < 256:
+        val ch = s.slice(idx, idx + 1)
         if ch == delimiter:
-            parts.push(sb.to_text())
-            sb.clear()
-        else:
-            sb.push(ch)
+            parts.push(s.slice(seg_start, idx))
+            seg_start = idx + 1
         idx = idx + 1
-    if not sb.is_empty():
-        parts.push(sb.to_text())
+    if seg_start < len:
+        parts.push(s.slice(seg_start, len))
     parts
 
 pub fn sb_split_selector_list(s: text) -> [text]:
+    # See sb_split_char above.
     var parts: [text] = []
-    val sb = StringBuilder.new()
+    var seg_start = 0
     var idx = 0
     var paren_depth = 0
-    while idx < s.len() and parts.len() < 256:
-        val ch = s.char_at(idx)
+    val len = s.len()
+    while idx < len and parts.len() < 256:
+        val ch = s.slice(idx, idx + 1)
         if ch == "(":
             paren_depth = paren_depth + 1
-            sb.push(ch)
         elif ch == ")" and paren_depth > 0:
             paren_depth = paren_depth - 1
-            sb.push(ch)
         elif ch == "," and paren_depth == 0:
-            parts.push(sb.to_text())
-            sb.clear()
-        else:
-            sb.push(ch)
+            parts.push(s.slice(seg_start, idx))
+            seg_start = idx + 1
         idx = idx + 1
-    if not sb.is_empty():
-        parts.push(sb.to_text())
+    if seg_start < len:
+        parts.push(s.slice(seg_start, len))
     parts
 
 pub fn sb_find_top_level_child_combinator(s: text) -> i64:
+    # See sb_split_char above.
     var idx = 0
     var paren_depth = 0
-    while idx < s.len():
-        val ch = s.char_at(idx)
+    val len = s.len()
+    while idx < len:
+        val ch = s.slice(idx, idx + 1)
         if ch == "(":
             paren_depth = paren_depth + 1
         elif ch == ")" and paren_depth > 0:
@@ -227,27 +235,28 @@ pub fn sb_find_top_level_child_combinator(s: text) -> i64:
     999999999
 
 pub fn sb_split_ws(s: text) -> [text]:
+    # See sb_split_char above.
     var parts: [text] = []
-    val sb = StringBuilder.new()
+    var seg_start = 0
     var idx = 0
-    while idx < s.len():
-        val ch = s.char_at(idx)
+    val len = s.len()
+    while idx < len:
+        val ch = s.slice(idx, idx + 1)
         if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
-            if not sb.is_empty():
-                parts.push(sb.to_text())
-                sb.clear()
-        else:
-            sb.push(ch)
+            if idx > seg_start:
+                parts.push(s.slice(seg_start, idx))
+            seg_start = idx + 1
         idx = idx + 1
-    if not sb.is_empty():
-        parts.push(sb.to_text())
+    if idx > seg_start:
+        parts.push(s.slice(seg_start, idx))
     parts
 
 pub fn sb_skip_ws_comments(s: text, start: i64) -> i64:
+    # See sb_split_char above.
     var pos = start
     val slen = s.len()
     while pos < slen:
-        val ch = s.char_at(pos)
+        val ch = s.slice(pos, pos + 1)
         if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
             pos = pos + 1
             continue
@@ -298,10 +307,14 @@ pub fn sb_parse_int(s: text) -> i32:
     result
 
 pub fn find_matching_brace(text_val: text, open: i32) -> i32:
+    # See sb_split_char above: char_at()'s character-indexing mismatches
+    # slice()/len()'s byte-indexing, so brace matching through non-ASCII
+    # CSS content (e.g. content: "café") would silently stop early.
     var depth = 0
     var pos = open
-    while pos < text_val.len():
-        val ch = text_val.char_at(pos)
+    val len = text_val.len()
+    while pos < len:
+        val ch = text_val.slice(pos, pos + 1)
         if ch == "{":
             depth = depth + 1
         elif ch == "}":
