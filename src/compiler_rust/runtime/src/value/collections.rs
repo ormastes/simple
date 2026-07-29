@@ -2185,7 +2185,10 @@ pub extern "C" fn rt_text_cmp_any(string1: RuntimeValue, string2: RuntimeValue) 
 #[no_mangle]
 pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> RuntimeValue {
     let len = rt_string_len(string);
-    if len < 0 || index < 0 || index >= len {
+    if len < 0 || index >= len {
+        // `index >= len` is a permissive fast reject: the byte length
+        // upper-bounds the character count, and chars().nth enforces the
+        // real character bound below.
         return RuntimeValue::NIL;
     }
 
@@ -2198,7 +2201,21 @@ pub extern "C" fn rt_string_char_at(string: RuntimeValue, index: i64) -> Runtime
         let bytes = std::slice::from_raw_parts(data, len as usize);
         // Find the character at the given index (UTF-8 aware)
         let s = std::str::from_utf8_unchecked(bytes);
-        if let Some(c) = s.chars().nth(index as usize) {
+        // Negative index counts from the end in CHARACTERS (Python-style),
+        // matching the tree-walking interpreter and the documented
+        // negative-indexing family rule. Previously any negative index
+        // returned NIL, so `v[-2]` was nil under the default engine while
+        // the interpreter returned the character.
+        let idx = if index < 0 {
+            let adjusted = s.chars().count() as i64 + index;
+            if adjusted < 0 {
+                return RuntimeValue::NIL;
+            }
+            adjusted as usize
+        } else {
+            index as usize
+        };
+        if let Some(c) = s.chars().nth(idx) {
             let mut buf = [0u8; 4];
             let char_str = c.encode_utf8(&mut buf);
             rt_string_new(char_str.as_ptr(), char_str.len() as u64)

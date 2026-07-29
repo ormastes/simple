@@ -582,6 +582,16 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     // selfhost_bootstrap_unresolved_symbols_2026-06-24.md.
     let entry_main = functions.get("main").cloned();
 
+    // A direct top-level `main()` statement counts as the program's entry
+    // invocation: the default (JIT/native) engine runs `main` exactly once
+    // for such scripts (and uses that call's value as the exit code), while
+    // this interpreter used to run the top-level call AND the automatic
+    // entry call below — every direct-execution probe printed its output
+    // twice (the "Also observed" double-print in
+    // doc/08_tracking/bug/test_harness_execution_divergence_2026-07-29.md).
+    // Holds the value of the last direct top-level `main()` call.
+    let mut top_level_main_result: Option<Value> = None;
+
     // Second pass: apply decorators and register other items
     for item in items {
         match item {
@@ -1276,6 +1286,16 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 return Ok(0);
             }
             Node::Expression(expr) => {
+                // See `top_level_main_result` above: a direct `main()`
+                // statement is the entry invocation; remember its value so
+                // the automatic entry call is suppressed and the exit code
+                // still comes from `main` (matching the default engine's
+                // run-once behavior).
+                let is_top_level_main_call = matches!(
+                    expr,
+                    Expr::Call { callee, .. }
+                        if matches!(callee.as_ref(), Expr::Identifier(name) if name == "main")
+                );
                 if let Expr::FunctionalUpdate { target, method, args } = expr {
                     if let Some((name, new_value)) = handle_functional_update(
                         target,
@@ -1292,7 +1312,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     }
                 }
                 // Handle method calls on objects - need to persist mutations to self
-                let (_, update) = handle_method_call_with_self_update(
+                let (expr_value, update) = handle_method_call_with_self_update(
                     expr,
                     &mut env,
                     &mut functions,
@@ -1300,6 +1320,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     &enums,
                     &impl_methods,
                 )?;
+                if is_top_level_main_call {
+                    top_level_main_result = Some(expr_value);
+                }
                 if let Some((name, new_self)) = update {
                     env.insert(name, new_self);
                 }
@@ -1722,6 +1745,20 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     // `main` cannot clobber it; fall back to the flat map for programs whose entry
     // file defines no `main` of its own.
     let main_to_run = entry_main.clone().or_else(|| functions.get("main").cloned());
+    if let Some(result) = top_level_main_result {
+        // The module's own top-level `main()` statement already ran as the
+        // entry invocation (see `top_level_main_result` above); calling
+        // `main` again here double-executed every such script. The exit
+        // code comes from that call's value, mapped exactly like the
+        // automatic entry call below (unit/nil -> 0), matching the default
+        // engine's run-once, value-propagating behavior.
+        let result = await_value(result)?;
+        return match &result {
+            Value::Tuple(t) if t.is_empty() => Ok(0),
+            Value::Nil => Ok(0),
+            _ => result.as_int().map(|v| v as i32),
+        };
+    }
     if let Some(main_func) = main_to_run {
         let result = exec_function(
             &main_func,

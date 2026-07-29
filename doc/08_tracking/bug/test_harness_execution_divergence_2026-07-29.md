@@ -17,8 +17,51 @@ byte-identical to native output when printed). Probes byte-identical across
 engines after the fix (glob true, "日本語"[3:6]=="本",
 "caféZdef"[-3:]=="def"); regression spec
 `test/01_unit/bugs/text_bracket_slice_byte_index_spec.spl` runs under the
-forced-interpret test lane. The double-print quirk below and the
-`v[-2]`-on-default-engine gap remain open, separate issues.
+forced-interpret test lane.
+
+**Adjacent divergences, close-out pass (2026-07-29, same session):**
+
+- **`v[-2]` single-index — FIXED (JIT lane).** Text single-indexing is
+  CHARACTER-indexed (family rule: `s[i]`/`char_at`/`char_code_at` keep
+  character semantics; slices/len/index_of are byte-indexed), and the
+  reference doc documents negative indexing for the sequence family. The
+  JIT lane's `rt_string_char_at` (Rust runtime crate) returned NIL for any
+  negative index, so `"aé🙂z"[-2]` was nil under the default engine while
+  the interpreter returned "🙂". Negative indices now resolve against the
+  character count, Python-style. DECISION: interp semantics were correct;
+  native was fixed.
+
+- **Interpreter double-print of module-level `main()` — FIXED.** The
+  interpreter executed a top-level `main()` statement AND then
+  unconditionally auto-called `main` as the entry point; the default
+  engine runs such scripts once (proved by a 3-probe matrix: auto-call
+  exists in both engines, top-level statements run in both, but the
+  default engine suppresses the auto-call when the script itself calls
+  `main()`). The interpreter now records a direct top-level `main()` call
+  and suppresses the automatic entry call.
+
+- **Negative-step text slices (`s[::-1]`) — DEFERRED, decision needed.**
+  The reference doc documents `[::-1]` for LISTS only; for text the
+  engines disagree: native `rt_slice` returns "" for any negative stride
+  (its string loop only iterates forward), while the interpreter
+  byte-steps Python-style (which corrupts multi-byte text in either unit).
+  PROPOSAL (least surprising): make a negative-step TEXT slice an ERROR in
+  both engines and point users at `.reversed()` (character-aware); byte
+  reversal is never meaningful for UTF-8 and silent "" is astonishing.
+  Not changed unilaterally — flagged for decision.
+
+- **`rt_string_char_at` three-way unit divergence — DEFERRED, decision
+  needed.** The Rust runtime impl is CHARACTER-indexed; the C
+  `runtime_native.c` impl and the pure-Simple
+  `simple_core/core_string.spl` impl return the single BYTE at the index
+  (the .spl one explicitly documents the divergence, without rationale).
+  So AOT-linked and self-hosted binaries disagree with the JIT lane and
+  the interpreter on `s[i]`/`char_at` for multi-byte text TODAY. Aligning
+  them to character semantics is the family-consistent fix but needs a
+  self-hosted impact pass first: self-hosted internals were built against
+  byte-at behavior, and codepoint-seeking makes every `s[i]` walk O(n^2)
+  (lexer-shaped risk; see the char_code_at O(i) family). Flagged, not
+  changed.
 
 Historical report below (pre-fix):
 
