@@ -121,7 +121,7 @@ class VulkanBackend:
         for block in func.blocks:
             for inst in block.instructions:
                 match inst.kind:
-                    case GpuGlobalId(_, _) | GpuLocalId(_, _) | GpuBlockId(_, _) | GpuBarrier(_) | GpuMemFence(_) | GpuSharedAlloc(_, _, _) | GpuAtomicOp(_, _, _, _) | GpuAtomicCas(_, _, _, _):
+                    case GpuGlobalId(_, _) | GpuLocalId(_, _) | GpuBlockId(_, _) | GpuBlockDim(_, _) | GpuGridDim(_, _) | GpuBarrier(_) | GpuMemFence(_) | GpuSharedAlloc(_, _, _) | GpuAtomicOp(_, _, _, _) | GpuAtomicCas(_, _, _, _):
                         return true
                     case _:
                         ()
@@ -153,9 +153,13 @@ class VulkanBackend:
         val global_invocation_id = builder.alloc_id()
         val local_invocation_id = builder.alloc_id()
         val workgroup_id = builder.alloc_id()
+        val uses_grid_dim = self.function_uses_grid_dim(func)
+        val num_workgroups = if uses_grid_dim: builder.alloc_id() else: 0
         val func_id = builder.alloc_id()
 
-        val interface_ids = [global_invocation_id, local_invocation_id, workgroup_id]
+        var interface_ids = [global_invocation_id, local_invocation_id, workgroup_id]
+        if uses_grid_dim:
+            interface_ids = interface_ids.push(num_workgroups)
         builder.emit_entry_point(func.name, func_id, interface_ids)
 
         # Default workgroup size (can be overridden)
@@ -165,6 +169,8 @@ class VulkanBackend:
         builder.emit_decorate_builtin(global_invocation_id, SpirvBuiltin.GlobalInvocationId)
         builder.emit_decorate_builtin(local_invocation_id, SpirvBuiltin.LocalInvocationId)
         builder.emit_decorate_builtin(workgroup_id, SpirvBuiltin.WorkgroupId)
+        if uses_grid_dim:
+            builder.emit_decorate_builtin(num_workgroups, SpirvBuiltin.NumWorkgroups)
 
         # Decorations section complete
         builder.emit_comment("--- End Decorations ---")
@@ -195,11 +201,18 @@ class VulkanBackend:
                     case BinOp(_, _, left, right):
                         self.predeclare_operand_constant(builder, left, u32_type, i64_type)
                         self.predeclare_operand_constant(builder, right, u32_type, i64_type)
+                    case GpuBlockDim(dest, dim):
+                        if dim >= 0 and dim <= 2:
+                            val type_id = self.local_int_type_id(func, dest.id, u32_type, i64_type)
+                            if type_id != 0:
+                                self.emit_int_constant(builder, type_id, workgroup_size[dim], i64_type)
                     case _:
                         ()
         builder.emit("{builder.id_str(global_invocation_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("{builder.id_str(local_invocation_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("{builder.id_str(workgroup_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
+        if uses_grid_dim:
+            builder.emit("{builder.id_str(num_workgroups)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("")
 
         # Emit function
@@ -214,7 +227,7 @@ class VulkanBackend:
                 builder.emit_label()
 
             for inst in block.instructions:
-                val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id, scope_workgroup, scope_subgroup, scope_device, semantics_workgroup, semantics_device), value_ids, func)
+                val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id, num_workgroups, scope_workgroup, scope_subgroup, scope_device, semantics_workgroup, semantics_device), value_ids, func, workgroup_size)
                 match result:
                     case Ok(_):
                         ()
@@ -236,9 +249,10 @@ class VulkanBackend:
     fn compile_instruction(
         builder: SpirvBuilder,
         inst: MirInst,
-        types: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64),  # scalar/vector types, builtin variables, barrier constants
+        types: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64),  # scalar/vector types, builtin variables, barrier constants
         mut value_ids: Dict<i64, i64>,
-        func: MirFunction
+        func: MirFunction,
+        workgroup_size: [i64]
     ) -> Result<(), CompileError>:
         """Compile a single MIR instruction to SPIR-V."""
         val _destruct_1 = types
@@ -251,11 +265,12 @@ class VulkanBackend:
         val global_id_var = _destruct_1[6]
         val local_id_var = _destruct_1[7]
         val workgroup_id_var = _destruct_1[8]
-        val scope_workgroup = _destruct_1[9]
-        val scope_subgroup = _destruct_1[10]
-        val scope_device = _destruct_1[11]
-        val semantics_workgroup = _destruct_1[12]
-        val semantics_device = _destruct_1[13]
+        val num_workgroups_var = _destruct_1[9]
+        val scope_workgroup = _destruct_1[10]
+        val scope_subgroup = _destruct_1[11]
+        val scope_device = _destruct_1[12]
+        val semantics_workgroup = _destruct_1[13]
+        val semantics_device = _destruct_1[14]
 
         match inst.kind:
             case Const(dest, Int(value), ty):
@@ -349,6 +364,24 @@ class VulkanBackend:
                 val component = builder.emit_composite_extract(u32_type, loaded, [dim])
                 value_ids[dest.id] = if dest_type == u32_type: component else: builder.emit_uconvert(i64_type, component)
 
+            case GpuBlockDim(dest, dim):
+                if dim < 0 or dim > 2:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan block dimension must be 0, 1, or 2"))
+                val dest_type = self.local_int_type_id(func, dest.id, u32_type, i64_type)
+                if dest_type == 0:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan block dimension destination must be U32 or I64"))
+                value_ids[dest.id] = self.emit_int_constant(builder, dest_type, workgroup_size[dim], i64_type)
+
+            case GpuGridDim(dest, dim):
+                if dim < 0 or dim > 2:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan grid dimension must be 0, 1, or 2"))
+                val dest_type = self.local_int_type_id(func, dest.id, u32_type, i64_type)
+                if dest_type == 0:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan grid dimension destination must be U32 or I64"))
+                val loaded = builder.emit_load(uvec3_type, num_workgroups_var)
+                val component = builder.emit_composite_extract(u32_type, loaded, [dim])
+                value_ids[dest.id] = if dest_type == u32_type: component else: builder.emit_uconvert(i64_type, component)
+
             case GpuBarrier(scope):
                 match scope:
                     case Workgroup:
@@ -416,6 +449,16 @@ class VulkanBackend:
                     return true
                 case _:
                     ()
+        false
+
+    fn function_uses_grid_dim(func: MirFunction) -> bool:
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case GpuGridDim(_, _):
+                        return true
+                    case _:
+                        ()
         false
 
     fn int_type_id(ty: MirType, u32_type: i64, i64_type: i64) -> i64:
