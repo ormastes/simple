@@ -7,13 +7,21 @@ real work
 **Status:** MITIGATED (2026-07-29) — `pop`/`push`/`append` added to
 `is_bare_builtin_collection_method`; validated byte-identical-archive on an
 unaffected fixture (PROVED); full self-hosted binary re-run of the original
-`lex` repro was **not achieved** this pass — first attempt misdiagnosed as a
-"pre-existing hang" (this was a monitoring error, corrected same day: see
-"CORRECTION" in the tier (b) section below), second attempt hit a real,
-pre-existing, unrelated broken-import defect in
-`src/lib/common/json/{validation,utilities}.spl` that blocks discovery of the
-full CLI entry closure regardless of seed. See "2026-07-29 follow-up" below
-for exactly which validation tier was reached and why.
+`lex` repro was **not achieved** this pass across three attempts, each
+blocked by a distinct, precisely-diagnosed cause: (1) a monitoring error on
+this session's part — mistook a `native_build_worker` child steadily at
+~99% CPU for a hang because only the blocked *parent* was checked (corrected
+same day, see "CORRECTION" below); (2) a real pre-existing broken-import
+defect in `src/lib/common/json/{validation,utilities,path_ops,array_ops,object_ops,parser}.spl`
+(fixed upstream same day, commit `ab1ea6fc1a6`); (3) a real, still-open
+`native_build_worker` timeout — the interpreted worker's default 7200s
+(2 CPU-hour) budget for loading the full compiler+LLVM import graph is
+insufficient for the whole CLI entry closure (tool's own diagnostic message,
+`--timeout`/`--source`/in-process-backend are its suggested remedies; not
+attempted this pass, out of scope — compiler-tooling infra, not this fix).
+The causal link between this fix and the original segfault's disappearance
+therefore remains **INFERRED**, not PROVED end-to-end. See "2026-07-29
+follow-up" below for full detail on each attempt.
 **Component:** `src/compiler/10.frontend/core/lexer_struct.spl` (`CoreLexer.scan_token`),
 runtime `rt_array_pop` / `spl_array_pop`,
 `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
@@ -310,26 +318,73 @@ src/app/cli/main.spl` closure that transitively reaches these two files,
 **regardless of seed** — confirmed present at the same origin/main tip this
 session's fix was built from, so it predates this change.
 
-**This means: tier (b) is still NOT ACHIEVED, but for a different and now
-correctly-diagnosed reason than first reported** (a real pre-existing import
-bug blocking discovery, not a hang, and not this session's fix). A clean
-negative-control comparison (same recipe, OLD seed, full log preserved) was
-not completed in this pass — the earlier control run's buffered stdout was
-lost when its process was killed under the (incorrect) hang diagnosis before
-this correction was made, and time in this pass ran out before it could be
-cleanly re-run. That specific comparison is left as the remaining INFERRED
-gap; the import-bug diagnosis itself is PROVED by direct source inspection
-and does not depend on which seed is used, since the imports are wrong
-regardless of who compiles them.
+The json import bug was fixed upstream same-day as commit `ab1ea6fc1a6`
+(repairs `use lib.json.*` spellings plus defunct `mod json.<name>` lines in
+`path_ops`/`array_ops`/`object_ops`/`parser` that imported nothing — all 11
+modules in `src/lib/common/json` now compile individually under the seed).
+
+**Retry 3 (fresh worktree at the tip including `ab1ea6fc1a6`, correct
+worker-child monitoring throughout): NOT ACHIEVED, third distinct real
+blocker found, PROVED via the tool's own diagnostic — a worker timeout
+budget, not a hang and not a source bug.**
+
+Re-ran `native-build --entry src/app/cli/main.spl --entry-closure --threads 8`
+with the patched seed against a fresh checkout at the tip containing both
+fixes. Monitored correctly this time: sampled the `native_build_worker` child
+PID's `/proc/<pid>/stat` field 14 (utime) twice, 55s apart, in bounded
+polling loops. Utime grew steadily by ~2600-3000 ticks (~26-30 CPU-seconds)
+per 55s sample for the entire run — genuine, sustained ~98% single-core work,
+not a stall — for **7200 seconds**, at which point the worker was killed by
+the tool's own internal timeout and printed:
+
+    [TIMEOUT: Process killed after 7200s]
+    error: native-build worker timed out after 7200s before producing a binary.
+      The interpreted worker loads the whole compiler + LLVM import graph before any
+      codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget. Raise
+      --timeout, shrink --source, or use the in-process backend for cross-target builds.
+
+Confirmed (PROVED, `native-build --help`): `--timeout <secs>` exists,
+**default 7200** — this run hit exactly that default, not an arbitrary hang.
+This is a **real, pre-existing infrastructure limit**: the interpreted
+`native_build_worker.spl` path takes longer than 2 CPU-hours just to load the
+full compiler+LLVM import graph for the whole CLI entry closure, before any
+codegen starts. It is unrelated to the array-pop/push fix (the bottleneck is
+described by the tool itself as import-graph loading, not codegen) and
+unrelated to the json-import bug (that was already fixed and did not
+resurface in this run's log). Per instruction, this is reported precisely and
+this pass **stops here** rather than raising `--timeout` and re-running for
+potentially several more hours, or silently shrinking `--source` in a way
+that could mask the real CLI closure. Reported for whoever picks this up
+next: the tool's own suggested remedies are `--timeout <bigger>`, a narrower
+`--source`, or the in-process (non-worker-subprocess) backend for
+cross-target builds.
+
+**Because of this, the old-seed negative control for the full-CLI rebuild was
+not run** — it would deterministically hit the same 7200s wall (the timeout
+is a property of closure size versus the interpreted worker's fixed budget,
+not of which seed compiles it), so spending another ~2 CPU-hours to
+reconfirm that was judged not worth it this pass. This is stated as the
+remaining gap rather than silently skipped.
+
+**This means: tier (b) is still NOT ACHIEVED**, now for a third,
+precisely-diagnosed and PROVED reason (worker timeout budget, not a hang,
+not a source defect). Three real blockers were found and reported in
+sequence this pass: (1) a monitoring error on my part (corrected same day),
+(2) a real pre-existing json-import bug (fixed upstream same day, commit
+`ab1ea6fc1a6`), (3) this worker-timeout infrastructure limit (unfixed,
+out of scope for this session — a compiler-tooling change, not an array-pop
+fix).
 
 Net effect: **the original `lex`-segfault repro was not re-run against a
-freshly built self-hosted binary this pass**, first blocked by a monitoring
-error, then by an unrelated pre-existing import bug once monitoring was
-corrected. The causal link between "adding `pop`/`push` to the allowlist" and
-"the observed `spl_array_pop` segfault disappearing" is **INFERRED** (from
-the tier (a) proof of no collateral damage, the doc-confirmed `push` victim
-status, and the code-level absence of `pop`/`push` from the pre-fix
-allowlist) but **not PROVED** by an end-to-end before/after `lex` run. This
-fix is landed as a well-evidenced, zero-collateral-risk mitigation consistent
-with the established pattern for this bug class, not as
-a fully closed-loop verified fix.
+freshly built self-hosted binary this pass**, blocked in turn by a monitoring
+error, then a real import bug, then a real worker-timeout budget. The causal
+link between "adding `pop`/`push` to the allowlist" and "the observed
+`spl_array_pop` segfault disappearing" remains **INFERRED** (from the tier
+(a) proof of no collateral damage, the doc-confirmed `push` victim status,
+and the code-level absence of `pop`/`push` from the pre-fix allowlist) but
+**not PROVED** by an end-to-end before/after `lex` run — that would require
+either a much longer `--timeout` budget or a narrower closure that still
+includes the real crash site, neither attempted this pass. This fix is
+landed as a well-evidenced, zero-collateral-risk mitigation consistent with
+the established pattern for this bug class, not as a fully closed-loop
+verified fix.
