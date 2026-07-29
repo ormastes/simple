@@ -534,17 +534,32 @@ impl NativeProjectBuilder {
         let canonical_path = safe_canonicalize(path);
         let mut best: Option<PathBuf> = None;
         let mut best_depth = 0usize;
+        let mut valid_dirs: Vec<PathBuf> = Vec::new();
         for dir in &self.source_dirs {
             let canonical_dir = safe_canonicalize(dir);
             if !canonical_dir.is_dir() {
                 continue;
             }
+            valid_dirs.push(canonical_dir.clone());
             if canonical_path.starts_with(&canonical_dir) {
                 let depth = canonical_dir.components().count();
                 if depth > best_depth {
                     best_depth = depth;
                     best = Some(canonical_dir);
                 }
+            }
+        }
+        // Multiple sibling `--source` roots (e.g. `src/app` + `src/compiler`) must not
+        // each relativize a file against itself: that discards the very segment
+        // (`app` vs `compiler`) that distinguishes them, so `src/app/__init__.spl`
+        // and `src/compiler/__init__.spl` both sanitize to the same `__init__`
+        // module name. When more than one configured source dir is real, relativize
+        // against their common ancestor instead, so that distinguishing segment
+        // survives. Single-root configurations are unaffected (valid_dirs.len() <= 1
+        // always keeps the prior per-file "deepest match" behavior).
+        if best.is_some() && valid_dirs.len() > 1 {
+            if let Some(ancestor) = common_ancestor_of_dirs(&valid_dirs) {
+                return ancestor;
             }
         }
         best.unwrap_or_else(|| self.source_root.clone())
@@ -1587,15 +1602,24 @@ pub(crate) fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Find the best source root for a given file from a list of source directories.
 /// Returns the most specific (deepest) source dir that contains the file,
 /// or falls back to the fallback root.
+///
+/// When more than one configured source dir is a real directory, this mirrors
+/// `NativeProjectBuilder::effective_source_root_for`: it relativizes against the
+/// *common ancestor* of all the valid source dirs rather than the single deepest
+/// match, so sibling `--source` roots (e.g. `src/app` + `src/compiler`) keep the
+/// segment that distinguishes them instead of both collapsing to the same
+/// sanitized module name. Single-root configurations are unaffected.
 pub(crate) fn source_root_for_file(file_path: &Path, source_dirs: &[PathBuf], fallback: &Path) -> PathBuf {
     let canonical_path = safe_canonicalize(file_path);
     let mut best: Option<PathBuf> = None;
     let mut best_depth = 0usize;
+    let mut valid_dirs: Vec<PathBuf> = Vec::new();
     for dir in source_dirs {
         let canonical_dir = safe_canonicalize(dir);
         if !canonical_dir.is_dir() {
             continue;
         }
+        valid_dirs.push(canonical_dir.clone());
         if canonical_path.starts_with(&canonical_dir) {
             let depth = canonical_dir.components().count();
             if depth > best_depth {
@@ -1604,5 +1628,35 @@ pub(crate) fn source_root_for_file(file_path: &Path, source_dirs: &[PathBuf], fa
             }
         }
     }
+    if best.is_some() && valid_dirs.len() > 1 {
+        if let Some(ancestor) = common_ancestor_of_dirs(&valid_dirs) {
+            return ancestor;
+        }
+    }
     best.unwrap_or_else(|| fallback.to_path_buf())
+}
+
+/// Longest common path-component ancestor of `dirs`, or `None` if `dirs` is
+/// empty or the paths share no component (e.g. different filesystem roots on
+/// Windows). Used to relativize a file against the shared root of several
+/// sibling `--source` directories instead of the one directory that happens to
+/// contain it, which would otherwise discard the segment that makes sibling
+/// roots distinguishable (see `effective_source_root_for` / `source_root_for_file`).
+fn common_ancestor_of_dirs(dirs: &[PathBuf]) -> Option<PathBuf> {
+    let mut iter = dirs.iter();
+    let first = iter.next()?;
+    let mut common: Vec<std::path::Component> = first.components().collect();
+    for dir in iter {
+        let comps: Vec<std::path::Component> = dir.components().collect();
+        let shared = common.iter().zip(comps.iter()).take_while(|(a, b)| a == b).count();
+        common.truncate(shared);
+        if common.is_empty() {
+            return None;
+        }
+    }
+    if common.is_empty() {
+        None
+    } else {
+        Some(common.into_iter().collect())
+    }
 }

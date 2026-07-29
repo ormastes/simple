@@ -820,6 +820,79 @@ fn test_native_build_rejects_module_prefix_collision_before_codegen() {
     );
 }
 
+/// Regression test: two sibling `--source` roots (e.g. `src/app` and
+/// `src/compiler`) must NOT collapse same-named files (`__init__.spl` in each)
+/// to the same sanitized module name. Before the fix, `effective_source_root_for`
+/// picked the deepest matching source dir as the relativization root, which for a
+/// directly-configured root IS the file's own dir -- discarding the very segment
+/// (`app` vs `compiler`) that distinguishes the two roots. A single combined root
+/// (`src`) covering both subdirectories must keep working exactly as before.
+#[test]
+fn test_multi_root_sibling_dirs_do_not_collide_on_module_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src = project_root.join("src");
+    let app_dir = src.join("app");
+    let compiler_dir = src.join("compiler");
+    std::fs::create_dir_all(&app_dir).unwrap();
+    std::fs::create_dir_all(&compiler_dir).unwrap();
+    let app_init = app_dir.join("__init__.spl");
+    let compiler_init = compiler_dir.join("__init__.spl");
+    std::fs::write(&app_init, "fn main():\n    pass\n").unwrap();
+    std::fs::write(&compiler_init, "fn helper() -> i64:\n    return 1\n").unwrap();
+
+    // Single combined root: unaffected by this fix (only one valid source dir).
+    let single_root_builder =
+        NativeProjectBuilder::new(project_root.clone(), project_root.join("out")).source_dir(src.clone());
+    assert_eq!(single_root_builder.effective_source_root_for(&app_init), src);
+    assert_eq!(single_root_builder.effective_source_root_for(&compiler_init), src);
+    assert_eq!(
+        module_prefix_from_path(&app_init, &single_root_builder.effective_source_root_for(&app_init)),
+        "app____init__"
+    );
+    assert_eq!(
+        module_prefix_from_path(
+            &compiler_init,
+            &single_root_builder.effective_source_root_for(&compiler_init)
+        ),
+        "compiler____init__"
+    );
+
+    // Two sibling directory roots: must resolve to the shared `src` ancestor so
+    // the `app`/`compiler` segment survives instead of both roots stripping their
+    // own name and colliding on `__init__`.
+    let multi_root_builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("out2"))
+        .source_dir(app_dir.clone())
+        .source_dir(compiler_dir.clone());
+    let app_root = multi_root_builder.effective_source_root_for(&app_init);
+    let compiler_root = multi_root_builder.effective_source_root_for(&compiler_init);
+    assert_eq!(app_root, src, "multi-root naming must use the shared ancestor");
+    assert_eq!(compiler_root, src, "multi-root naming must use the shared ancestor");
+    let app_prefix = module_prefix_from_path(&app_init, &app_root);
+    let compiler_prefix = module_prefix_from_path(&compiler_init, &compiler_root);
+    assert_ne!(app_prefix, compiler_prefix, "sibling roots must not collide after sanitization");
+    assert_eq!(app_prefix, "app____init__");
+    assert_eq!(compiler_prefix, "compiler____init__");
+
+    // The actual native-build entry point must succeed end-to-end (this is the
+    // guard at build() time, not just the naming helper in isolation).
+    let result = NativeProjectBuilder::new(project_root.clone(), project_root.join("out.a"))
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            entry_closure: false,
+            no_mangle: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(app_dir)
+        .source_dir(compiler_dir)
+        .build();
+    assert!(
+        result.is_ok(),
+        "multi-root build must no longer collide on module prefix: {:?}",
+        result.err()
+    );
+}
+
 #[test]
 fn test_explicit_source_files_do_not_become_empty_module_roots() {
     let temp = tempfile::tempdir().unwrap();
@@ -4672,8 +4745,17 @@ fn test_re_exports_include_glob_imported_facade_symbols() {
     ];
     let source_dirs = vec![lib_root.clone(), os_root.clone(), src_root.join("app")];
     let result = super::imports::build_import_map(&file_sources, &source_dirs, &src_root);
-    let expected = format!("{}__log_info", module_prefix_from_path(&logger_path, &lib_root));
-    let facade_prefix = module_prefix_from_path(&facade_path, &os_root);
+    // `lib`, `os`, and `app` are three sibling `--source` roots here (all direct
+    // children of `src_root`), so `source_root_for_file` now relativizes against
+    // their shared ancestor (`src_root`) rather than each root's own directory --
+    // this keeps the `lib`/`os` segment that distinguishes them instead of
+    // discarding it (see the multi-root sibling collision fix). Compute the
+    // expected prefixes the same way `build_import_map` actually does, instead of
+    // hard-coding `lib_root`/`os_root` as the relativization root.
+    let logger_root = source_root_for_file(&logger_path, &source_dirs, &src_root);
+    let facade_root = source_root_for_file(&facade_path, &source_dirs, &src_root);
+    let expected = format!("{}__log_info", module_prefix_from_path(&logger_path, &logger_root));
+    let facade_prefix = module_prefix_from_path(&facade_path, &facade_root);
 
     let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer_path).unwrap())
         .parse()
