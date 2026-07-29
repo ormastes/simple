@@ -111,6 +111,7 @@ an inventory literal, an `@supports` table, or metadata.
 | REQ-002/019/021 | HTML formerly omitted 8: `h1`–`h6`,`sub`,`sup` | Bounded behavior landed in `28f0e779b0d2` | `html_element_traceability_spec.spl`: headings and inline baseline scenarios | tokenizer/tree/style/layout/DrawIR/Engine2D | UA defaults and exact geometry/pixels | canonical manual complete; independent static PASS; runtime unavailable | Evidence-blocked |
 | REQ-003/004/019/021 | CSS claimed 284 | Functional count unknown | generated-combinations spec has 38 scenarios | declaration/cascade/style/layout/paint/DrawIR/Engine2D | isolated semantic, layout, DrawIR, pixel baseline/control | retained 13 pass/25 fail; manuals stale | FAIL |
 | REQ-003/004/019/021 | CSS Grid bounded foundation | Bounded behavior landed in `b17e868199af` | `test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl` | canonical declaration/style/layout/paint-layout, DrawIR, Engine2D | exact tracks, placement/span/implicit-row geometry and pixels; block and quota controls | canonical manual complete; independent static PASS; manifest `red-not-run`; runtime unavailable | Evidence-blocked |
+| REQ-003/004/005/006/007/017/021 | CSS/JavaScript animation frame trace | Bounded initial/intermediate/completed and pause/resume trace implemented | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl`: `should trace JavaScript pause and resume through deterministic Draw IR frames` | BrowserSession monotonic clock/DOM bridge, CSS animation instances, canonical HTML layout/DrawIR, Engine2D | exact stage geometry, Draw IR color transitions/holds, scheduler state, exact in-rectangle pixels, and zero matching-color pixels outside it | canonical generated manual complete with zero stubs; qualified Stage2 discovery is blocked by a pre-existing parse error in `browser_session.spl:1287` | Evidence-blocked |
 | REQ-003/004/019/021 | CSS claimed but unrecognized, at least 38 | False implemented claim | exact isolated scenarios missing | canonical declaration dispatch and downstream owners | valid/invalid/inherited style plus discriminating render | missing | FAIL |
 | REQ-003/004/019/021 | CSS unsupported production 92 | Unsupported backlog | inventory spec is name-only | owners named by lane below | executable fail-closed or full four-oracle chain | manual stale; no behavior PASS | RED |
 | REQ-003/019/021 | CSS speech/aural 23 | Explicit scope exclusion | fail-closed/nonvisual scenario missing | future TTS/accessibility owner | no false visual support claim | missing | RED |
@@ -258,6 +259,32 @@ executable source, truthful pinned manifest, and canonical manual landed in
 `b17e868199af` and passed independent static review. The manifest remains
 `red-not-run`, qualified execution is still blocked, and no complete CSS Grid
 or full CSS support claim is made.
+
+### CSS/JavaScript animation Draw IR trace
+
+Existing source:
+
+`test/02_integration/rendering/browser_session_script_css_animation_spec.spl`
+
+Scenario:
+
+- `should trace JavaScript pause and resume through deterministic Draw IR frames`
+
+Frozen displayed step:
+
+- `Trace CSS animation through deterministic Draw IR frames`
+
+The scenario uses BrowserSession's monotonic clock and JavaScript DOM bridge,
+then lowers the selected animation instances into the canonical
+`DrawIrComposition`. Initial red, an interpolated frame, paused/resumed color
+holds, and the forwards-filled blue completion each require the exact 32×24
+Draw IR command and 768 matching Engine2D pixels with no skipped commands.
+
+Current expected result: executable source and the canonical generated manual
+are complete with zero stubs. Qualified runtime evidence remains blocked
+because the available pure-Simple Stage2 compiler fails discovery on the
+pre-existing `src/lib/gc_async_mut/web/browser_session.spl:1287` parse error;
+no bootstrap or Rust-seed fallback is permitted.
 
 ### Generated-GUI combination gate
 

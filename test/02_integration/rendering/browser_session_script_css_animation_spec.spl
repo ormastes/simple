@@ -1,12 +1,52 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-021
+"""# BrowserSession Script and CSS Animation Rendering
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+**Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
+**Design:** doc/05_design/simple_web_browser_engine_production_hardening.md
+**Research:** doc/01_research/local/simple_web_browser_engine_production_hardening.md
+
+Requirement trace: REQ-WEB-BROWSER-003, REQ-WEB-BROWSER-004,
+REQ-WEB-BROWSER-005, REQ-WEB-BROWSER-006, REQ-WEB-BROWSER-007,
+REQ-WEB-BROWSER-017, and REQ-WEB-BROWSER-021.
+
+## Overview
+
+BrowserSession owns the deterministic CSS/JavaScript animation clock and the
+selected animation instances. The trace scenario proves that its initial,
+intermediate, paused, resumed, and completed states lower through the canonical
+DrawIrComposition and that Engine2D paints the exact command color area.
+
+## Examples
+
+The displayed trace advances the browser clock, pauses and resumes through the
+JavaScript DOM bridge, then checks the resulting Draw IR command and the pixels
+rendered from that exact composition.
+"""
+
 use std.spec.*
 
+use common.ui.draw_ir.{DrawIrCommand}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images
+}
 use std.js.engine.interpreter.{
     JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS,
     JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
 }
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+class BrowserAnimationDrawIrTrace:
+    command: DrawIrCommand
+    next_ms: i64
+    rect_pixel_count: i64
+    outside_color_count: i64
+    skipped_command_count: i32
+    source_kind: text
 
 fn _count_color(pixels: [u32], color: u32) -> i64:
     var count: i64 = 0
@@ -25,7 +65,121 @@ fn _pixels_equal(left: [u32], right: [u32]) -> bool:
         index = index + 1
     true
 
+fn _count_animation_rect_color(
+    pixels: [u32], surface_width: i32,
+    command: DrawIrCommand, inside: bool
+) -> i64:
+    var count: i64 = 0
+    var index = 0
+    while index < pixels.len():
+        val x = index % surface_width
+        val y = index / surface_width
+        val in_rect = (
+            x >= command.x and x < command.x + command.width and
+            y >= command.y and y < command.y + command.height
+        )
+        if in_rect == inside and pixels[index] == command.color:
+            count = count + 1
+        index = index + 1
+    count
+
+fn _browser_animation_draw_ir_trace(
+    session: BrowserSession, width: i32, height: i32
+) -> BrowserAnimationDrawIrTrace:
+    val html = session.render_html_document()
+    session.prepare_css_animation_instances_with_html(width, html)
+    val result = (
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images(
+            html, width, height,
+            session.monotonic_time_ms - session.animation_start_time_ms,
+            session.css_animation_instances, session.image_resources
+        )
+    )
+    var stage = result.composition.batches[0].commands[0]
+    for command in result.composition.batches[0].commands:
+        if command.component_id == "stage":
+            stage = command
+    val raster = Engine2dCompositorBackend.create_named(
+        width, height, "software"
+    )
+    val rendered = raster.render_draw_ir_composition_resources(
+        result.composition, session.image_resources
+    )
+    raster.shutdown()
+    BrowserAnimationDrawIrTrace(
+        command: stage,
+        next_ms: result.animation_next_ms,
+        rect_pixel_count: _count_animation_rect_color(
+            rendered.pixels, width, stage, true
+        ),
+        outside_color_count: _count_animation_rect_color(
+            rendered.pixels, width, stage, false
+        ),
+        skipped_command_count: rendered.skipped_command_count,
+        source_kind: result.composition.batches[0].source.source_kind
+    )
+
+fn _expect_browser_animation_draw_ir_frame(
+    trace: BrowserAnimationDrawIrTrace
+):
+    expect(trace.source_kind).to_equal("html_ast")
+    expect(trace.command.component_id).to_equal("stage")
+    expect(trace.command.width).to_equal(32)
+    expect(trace.command.height).to_equal(24)
+    expect(trace.rect_pixel_count).to_equal(32 * 24)
+    expect(trace.outside_color_count).to_equal(0)
+    expect(trace.skipped_command_count).to_equal(0)
+
 describe "BrowserSession script CSS animation rendering":
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should trace JavaScript pause and resume through deterministic Draw IR frames":
+        step("Trace CSS animation through deterministic Draw IR frames")
+        val html = "<!DOCTYPE html><html><head><style>@keyframes Pulse { from { background-color: #ef4444; } to { background-color: #2563eb; } } #stage { width: 32px; height: 24px; background-color: #ef4444; } .running { animation: Pulse 2000ms linear forwards; } .paused { animation-play-state: paused; }</style></head><body><div id='stage' class='running'></div></body></html>"
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/animation-draw-ir-trace", html
+        ).is_ok()).to_equal(true)
+
+        val initial = _browser_animation_draw_ir_trace(session, 64, 48)
+        _expect_browser_animation_draw_ir_frame(initial)
+        expect(initial.command.color).to_equal(0xFFEF4444u32)
+        expect(initial.next_ms).to_equal(16)
+
+        expect(session.advance_time(500)).to_equal(0)
+        val intermediate = _browser_animation_draw_ir_trace(session, 64, 48)
+        _expect_browser_animation_draw_ir_frame(intermediate)
+        expect(intermediate.command.color == initial.command.color).to_equal(false)
+        expect(intermediate.command.color == 0xFF2563EBu32).to_equal(false)
+
+        expect(session.eval_script(
+            "document.getElementById('stage').className = 'running paused'"
+        ).is_ok()).to_equal(true)
+        val paused = _browser_animation_draw_ir_trace(session, 64, 48)
+        _expect_browser_animation_draw_ir_frame(paused)
+        expect(paused.command.color).to_equal(intermediate.command.color)
+        expect(paused.next_ms).to_equal(-1)
+
+        expect(session.advance_time(1000)).to_equal(0)
+        val still_paused = _browser_animation_draw_ir_trace(session, 64, 48)
+        _expect_browser_animation_draw_ir_frame(still_paused)
+        expect(still_paused.command.color).to_equal(paused.command.color)
+
+        expect(session.eval_script(
+            "document.getElementById('stage').className = 'running'"
+        ).is_ok()).to_equal(true)
+        val resumed = _browser_animation_draw_ir_trace(session, 64, 48)
+        _expect_browser_animation_draw_ir_frame(resumed)
+        expect(resumed.command.color).to_equal(paused.command.color)
+        expect(resumed.next_ms).to_equal(1016)
+
+        expect(session.advance_time(2500)).to_equal(0)
+        val completed = _browser_animation_draw_ir_trace(session, 64, 48)
+        _expect_browser_animation_draw_ir_frame(completed)
+        expect(completed.command.color).to_equal(0xFF2563EBu32)
+        expect(completed.next_ms).to_equal(-1)
 
     it "tracks only DOM-observable animation frame mutations":
         var session = BrowserSession.new()
