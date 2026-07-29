@@ -153,3 +153,95 @@ or wire the frontend-level stripper's block detection into a shared helper
 so the two grammars can't drift further apart (the frontend one currently
 requires zero space and single-line; the parser one tolerates whitespace and
 spans lines).
+
+## Completion: legacy scanner cluster deleted (2026-07-29, SCRUB lane)
+
+Lane `legacy-scanner-deletion` finished the follow-up recorded above.
+Independently re-verified deadness (repo-wide grep of `src/`, `test/`,
+`scripts/` for each symbol's call syntax, excluding its own definition and
+comments) before deleting anything.
+
+**Deleted:**
+- `src/compiler/10.frontend/core/lexer_scanners.spl` — entire file (808
+  lines). All six functions (`lex_scan_number`, `lex_scan_string`,
+  `lex_scan_ident`, `lex_skip_spaces`, `lex_handle_indentation`,
+  `lex_scan_token`) had zero external callers.
+- `lexer.spl`: `lex_at_end`, `lex_peek`, `lex_peek_next`, `lex_peek_at`,
+  `lex_advance`, `lex_match_char`, `lex_make_token`, `lex_make_simple`,
+  `lex_scan_token_local` (plus its guard comment and the file-header note
+  about the lexer_scanners.spl split) — zero external callers, and zero
+  callers left in-file once `lex_scan_token_local` was removed.
+- The `use compiler.core.lexer_scanners.{...}` import lines in `lexer.spl`.
+- `src/compiler/10.frontend/core/__init__.spl`: `mod lexer_scanners` and its
+  `export lex_scan_number, ...` / `export lex_skip_spaces, ...` re-export
+  block. No `FILE.md` manifest in that directory references the file.
+
+**Kept (verified NOT dead, contrary to the original follow-up note's
+aggregate phrasing):**
+- `lex_pos_get`/`lex_pos_set`, `lex_line_get`/`lex_line_set`,
+  `lex_col_get`/`lex_col_set` — still imported (via
+  `use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, ...}`) by
+  `_ParserDecls/enum_module_body.spl:26`, which is off-limits this lane
+  (EPA1 active there per the campaign's hard rules). The import is unused
+  (no call-syntax use found in that file), but deleting the definitions
+  while unable to edit that file's import list would have broken
+  compilation. Also still (separately) imported-but-unused by
+  `_ParserPrimary/primary_expr.spl:47`, `_ParserPrimary/asm_match_suffix.spl:46`,
+  and `_ParserDecls/bitfield_aop_arch_decls.spl:51` — left alone since the
+  definitions must stay regardless. Follow-up: once EPA1 finishes and
+  enum_module_body.spl is editable, drop the dead import there (and the
+  three other dead imports) and retry deleting these six functions.
+- `lex_state_get`/`lex_state_set` — genuinely live: `lex_init_with_path`
+  calls `lex_state_set` directly (for `"pos"`, `"line"`, `"indent_stack"`,
+  `"indent_count"`, etc.) on every `lex_init`/`lex_tokenize_all`. The
+  original follow-up note's phrasing bundled these with the dead pos/line/
+  col wrappers; that was imprecise — corrected here.
+- `lex_indent_stack_len/top/push/pop`, `lex_indent_count_get/set`,
+  `lex_pending_dedents_get/set`, `lex_round_paren_depth_get/set`,
+  `lex_paren_depth_get/set`, `lex_at_line_start_get/set`,
+  `lex_cur_kind_get_slot`, `lex_cur_kind_set`, `lex_cur_suffix_set` — NEW
+  finding, not previously flagged by LEX1: `lex_cur_kind_set`/
+  `lex_cur_suffix_set` are genuinely live (called from `lex_next()`,
+  `lex_init_with_path`, `lex_snapshot_restore`), but the indent/dedent/
+  paren-depth/line-start accessor group had, after the deletions above,
+  zero remaining external callers — they were only reachable from the
+  now-deleted `lex_scan_token_local`/`lexer_scanners.spl` cluster.
+  `lex_indent_stack_len/top/push/pop` are also re-exported at module level
+  (`__init__.spl`). Left in place in this pass to keep the diff scoped to
+  what this lane's regression battery covers; recorded here as a follow-up
+  candidate for a future SCRUB lane (would also require trimming the
+  `__init__.spl` export line).
+
+**Specs updated (3, not 2 — a third structural check was found during
+independent verification):**
+- `test/01_unit/compiler/lexer/lexer_spec.spl` — "keeps lexer scanner
+  dispatch helpers available" repointed from `lexer_scanners.spl` text
+  matches to `lexer_struct.spl`'s live `CoreLexer` methods (`me
+  scan_number()`, `me scan_string()`, `me scan_ident()`, `me
+  skip_spaces()`, `me handle_indentation()`, `me scan_token()`).
+- `test/01_unit/compiler/lexer/lexer_comprehensive_spec.spl` — same
+  repointing for its "defines scanning paths..." example.
+- `test/01_unit/compiler/lexer/lexer_import_debug_spec.spl` — NOT
+  mentioned by the original follow-up note, but its "documents the current
+  lexer import surface" example asserted
+  `lexer.to_contain("use compiler.core.lexer_scanners.{lex_scan_number")`,
+  which the import-line deletion above made false. Removed that assertion
+  line; the example's other two assertions (frontend token facade,
+  `lexer_struct` import) still stand.
+
+**Regressions (foreground, `bin/simple test --no-session-daemon`, seed
+binary `bin/release/x86_64-unknown-linux-gnu/simple` — bootstrap-seed
+warning printed on every run, per binary-identity caveat):**
+- `lexer_position_unification_spec.spl`: `Results: 4 total, 4 passed, 0 failed`
+- `lexer_spec.spl`: `Results: 2 total, 2 passed, 0 failed`
+- `lexer_comprehensive_spec.spl`: `Results: 2 total, 2 passed, 0 failed`
+- `lexer_import_debug_spec.spl`: `Results: 3 total, 3 passed, 0 failed`
+- `parser_unsafe_block_spec.spl`: `Results: 3 total, 3 passed, 0 failed`
+- `type_alias_capture_spec.spl`: `Results: 4 total, 4 passed, 0 failed`
+- `iso_parse_pipeline_spec.spl`: `Results: 3 total, 3 passed, 0 failed`
+- `enum_match_unknown_variant_diagnostic_spec.spl`: `Results: 3 total, 3 passed, 0 failed`
+- `test/feature/usage/capability_system_spec.spl`: `Results: 40 total, 40 passed, 0 failed`
+
+All nine specs green. No defects found; the only surprises were the two
+items moved to "Kept" above (both corrections to the original follow-up
+note's scope, not regressions caused by this lane).

@@ -7,9 +7,13 @@
 # Design: All state in module-level vars. Functions modify state.
 # Works when compiled to C; NOT in the interpreter (closure bug).
 #
-# Split into modules:
-#   lexer_scanners.spl — all scanning functions (number, string, ident,
-#                        whitespace, indentation, main token scanner)
+# The live tokenizer is CoreLexer (lexer_struct.spl) via lex_next() below,
+# reached through its own scan_number/scan_string/scan_ident/scan_token
+# struct methods. A pre-CoreLexer free-function scanner module
+# (lexer_scanners.spl) and its exclusive-use primitives were deleted
+# 2026-07-29 (SCRUB legacy-scanner-deletion) after LEX1 (2026-07-29)
+# confirmed the whole cluster had zero live callers; see
+# doc/08_tracking/bug/lexer_position_unification_2026-07-29.md.
 
 val _NL = "\n"
 use compiler.core.tokens.{keyword_lookup}
@@ -34,9 +38,6 @@ extern fn rt_env_set(key: text, value: text) -> bool
 fn lexer_array_len<T>(array: [T]) -> i64:
     return array.len()
 
-# Import from split scanner module
-use compiler.core.lexer_scanners.{lex_scan_number, lex_scan_string, lex_scan_ident}
-use compiler.core.lexer_scanners.{lex_skip_spaces, lex_handle_indentation, lex_scan_token}
 export use compiler.frontend.lexer_types.{TokenKind}
 
 # Light wrapper struct to satisfy callers expecting a Lexer value.
@@ -566,199 +567,20 @@ fn lex_indent_stack_pop() -> i64:
     lex_indent_count_set(lex_indent_count_get() - 1)
     value
 
-fn lex_at_end() -> bool:
-    lex_pos_get() >= lex_source_len()
-
-fn lex_peek() -> text:
-    val pos = lex_pos_get()
-    lex_source_char_at(pos)
-
-fn lex_peek_next() -> text:
-    val next_pos: i64 = lex_pos_get() + 1
-    lex_source_char_at(next_pos)
-
-fn lex_peek_at(offset: i64) -> text:
-    val target: i64 = lex_pos_get() + offset
-    lex_source_char_at(target)
-
-fn lex_advance() -> text:
-    val pos = lex_pos_get()
-    if pos >= lex_source_len():
-        return ""
-    val c: text = lex_source_char_at(pos)
-    lex_pos_set(pos + 1)
-    if c == _NL:
-        lex_line_set(lex_line_get() + 1)
-        lex_col_set(1)
-        lex_at_line_start_set(true)
-    else:
-        lex_col_set(lex_col_get() + 1)
-    c
-
-fn lex_match_char(expected: text) -> bool:
-    val pos = lex_pos_get()
-    if pos >= lex_source_len():
-        return false
-    if lex_source_char_at(pos) != expected:
-        return false
-    lex_pos_set(pos + 1)
-    lex_col_set(lex_col_get() + 1)
-    true
-
 # ===== Token Construction =====
-
-fn lex_make_token(kind: i64, token_text: text, start_line: i64, start_col: i64):
-    lex_cur_kind_set(kind)
-    lex_cur_text_set(token_text)
-    lex_cur_line_set(start_line)
-    lex_cur_col_set(start_col)
-
-fn lex_make_simple(kind: i64, token_text: text):
-    lex_make_token(kind, token_text, lex_line_get(), lex_col_get())
-
-# INVARIANT (LEX1 audit, 2026-07-29): this function and everything it
-# calls (lex_skip_spaces/lex_handle_indentation/lex_scan_string/
-# lex_scan_number/lex_scan_ident in lexer_scanners.spl) drive the token
-# stream entirely through the legacy lex_pos_get/lex_pos_set/lex_line_get/
-# lex_col_get free-function state -- the dead slot CoreLexer.next_token()
-# never writes back to (see "Live position accessors" note below). It is
-# harmless today only because lex_scan_token_local has ZERO callers
-# outside its own self-recursion (confirmed by repo-wide search); the live
-# parse path calls lex_next() -> CoreLexer.next_token(), never this
-# function. Do not wire this back in without first migrating it (and
-# lexer_scanners.spl) onto the live CoreLexer position -- see
+#
+# lex_at_end/lex_peek/lex_peek_next/lex_peek_at/lex_advance/lex_match_char/
+# lex_make_token/lex_make_simple/lex_scan_token_local (the pre-CoreLexer
+# free-function scanner primitives, backed by the legacy lex_pos_get/set,
+# lex_line_get/set, lex_col_get/set slot) and lexer_scanners.spl (the
+# free-function lex_scan_number/lex_scan_string/lex_scan_ident/
+# lex_skip_spaces/lex_handle_indentation/lex_scan_token dispatcher) were
+# deleted 2026-07-29 (SCRUB legacy-scanner-deletion): confirmed
+# zero live callers (LEX1 audit, re-verified independently before
+# deletion). The live tokenizer is CoreLexer.next_token()
+# (lexer_struct.spl) via lex_next() below, using its own
+# scan_number/scan_string/scan_ident/scan_token struct methods. See
 # doc/08_tracking/bug/lexer_position_unification_2026-07-29.md.
-fn lex_scan_token_local():
-    if lex_at_end():
-        val slen: i64 = lex_indent_stack_len()
-        if slen > 1:
-            lex_indent_stack_pop()
-            lex_pending_dedents_set(slen - 2)
-            lex_make_token(182, "", lex_line_get(), lex_col_get())
-            return
-        lex_make_token(190, "", lex_line_get(), lex_col_get())
-        return
-
-    if lex_at_line_start_get():
-        if lex_round_paren_depth_get() > 0:
-            lex_at_line_start_set(false)
-            lex_skip_spaces()
-            lex_scan_token_local()
-            return
-        lex_cur_kind_set(0)
-        lex_handle_indentation()
-        if lex_cur_kind_get_slot() != 0:
-            return
-        lex_scan_token_local()
-        return
-
-    lex_skip_spaces()
-
-    if lex_at_end():
-        val slen: i64 = lex_indent_stack_len()
-        if slen > 1:
-            lex_indent_stack_pop()
-            lex_pending_dedents_set(slen - 2)
-            lex_make_token(182, "", lex_line_get(), lex_col_get())
-            return
-        lex_make_token(190, "", lex_line_get(), lex_col_get())
-        return
-
-    val start_line: i64 = lex_line_get()
-    val start_col: i64 = lex_col_get()
-    val c: text = lex_peek()
-
-    if c == _NL:
-        lex_advance()
-        lex_at_line_start_set(true)
-        if lex_round_paren_depth_get() > 0:
-            lex_scan_token_local()
-            return
-        lex_make_token(180, _NL, start_line, start_col)
-        return
-
-    if c == "#":
-        for i in 0..100000:
-            val cc: text = lex_peek()
-            val done: bool = cc == _NL or cc == ""
-            if done:
-                break
-            lex_advance()
-        lex_scan_token_local()
-        return
-
-    val is_dquote: bool = c == "\""
-    val is_squote: bool = c == "'"
-    if is_dquote:
-        lex_scan_string()
-        return
-    if is_squote:
-        val after_quote: text = lex_peek_next()
-        val is_label: bool = is_alpha(after_quote) or after_quote == "_"
-        if is_label:
-            lex_advance()
-            val label_start: i64 = lex_pos_get()
-            for li in 0..1000:
-                val lc: text = lex_peek()
-                if is_ident_char(lc):
-                    lex_advance()
-                else:
-                    break
-            val label_name: text = lex_source_slice(label_start, lex_pos_get())
-            lex_make_token(192, label_name, start_line, start_col)
-            return
-        lex_scan_string()
-        return
-
-    if is_digit(c):
-        lex_scan_number()
-        return
-
-    val starts_ident: bool = is_alpha(c) or c == "_"
-    if starts_ident:
-        lex_scan_ident()
-        return
-
-    lex_advance()
-    if c == "=":
-        if lex_match_char("="):
-            lex_make_token(80, "==", start_line, start_col)
-        elif lex_match_char(">"):
-            lex_make_token(168, "=>", start_line, start_col)
-        else:
-            lex_make_token(100, "=", start_line, start_col)
-        return
-
-    if c == "!":
-        if lex_match_char("="):
-            lex_make_token(81, "!=", start_line, start_col)
-        else:
-            lex_make_token(57, "!", start_line, start_col)
-        return
-
-    if c == "<":
-        if lex_match_char("<"):
-            lex_make_token(66, "<<", start_line, start_col)
-        elif lex_match_char("="):
-            lex_make_token(84, "<=", start_line, start_col)
-        else:
-            lex_make_token(82, "<", start_line, start_col)
-        return
-
-    if c == ">":
-        if lex_match_char(">"):
-            lex_make_token(67, ">>", start_line, start_col)
-        elif lex_match_char("="):
-            lex_make_token(85, ">=", start_line, start_col)
-        else:
-            lex_make_token(83, ">", start_line, start_col)
-        return
-
-    if c == "\\":
-        lex_make_token(220, "\\", start_line, start_col)
-        return
-
-    lex_make_token(191, c, start_line, start_col)
 
 # ===== Public API =====
 

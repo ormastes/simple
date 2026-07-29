@@ -1,11 +1,39 @@
 # `SymbolTable.get_symbol(SymbolId(id: 0))` returns nil for a validly-registered symbol
 
-**Status:** open
+**Status:** fixed 2026-07-29 (lane SYM0 get-symbol-id-zero-nil)
 **Found:** 2026-07-29 (lane RIS1, `resolve_import_symbols_spec.spl` repair)
 **Area:** HIR symbol table (`src/compiler/20.hir/hir_types.spl`, `get_symbol`
 around line 332)
 **Severity:** medium — silently drops metadata (e.g. `defining_module`) for
 whichever symbol happens to be the first one registered in a table
+
+## Resolution (lane SYM0, 2026-07-29)
+
+**Not an id-0/sentinel collision.** Isolated probe proved `get_symbol`'s
+`match id: case SymbolId(raw): ... case _: nil` — a naked struct-constructor
+pattern matched directly against the `SymbolId?` (Option-wrapped) parameter —
+falls through to the wildcard arm for **every** id (0 *and* 1 both
+reproduced it in the minimal probe), not just 0. id 0 only looked special
+because it happened to be the first symbol pre-registered by the 2-pass
+import resolver in the reported repro. `SymbolId.is_valid()` was already
+correct (0 is a valid id). The real, general-case-safe idiom
+(`case Some(SymbolId(raw)): ... case nil: ...`, used everywhere else in the
+codebase, e.g. `hir_symbol_table_all_functions_spec.spl`) fixed it. See the
+new bug this uncovers: `doc/08_tracking/bug/naked_struct_pattern_vs_option_always_wildcard_2026-07-29.md`
+— the general defect class (bare `case Ctor(x):` against an `Option<Ctor>`
+value silently mismatches, regardless of payload) may affect other call
+sites; not swept here (out of lane scope).
+
+Fix: `src/compiler/20.hir/hir_types.spl` `get_symbol`, one-line match-arm
+change (`case SymbolId(raw):` -> `case Some(SymbolId(raw)):`).
+
+Verified: `test/01_unit/compiler/hir/resolve_import_symbols_spec.spl`'s
+"named import from module A wins over same-named symbol from module B" now
+passes (was the victory-condition example for this lane); new spec
+`test/01_unit/compiler/hir/symbol_table_id_zero_spec.spl` (3/3) pins the
+first-registered-symbol-retrievable invariant down. Regressions checked
+green: `symbol_table_all_functions_spec` (2/2), `hir_symbol_table_all_functions_spec`
+(1/1), `me_field_resolution_spec` (4/4), `capability_system_spec` (40/40).
 
 ## Finding
 
