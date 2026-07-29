@@ -375,12 +375,18 @@ fn flat_ast_to_module(path: text) -> Module:
         elif tag_text == "8":
             val e_name = decl_get_name(idx)
             # Recover variant NAMES from the flat AST (stored in the FIELD_NAMES
-            # slot by decl_enum_def) and optional discriminant expression ids
-            # from FIELD_DEFAULTS. Payload types are not stored in the flat AST,
-            # so kind is Tuple([]).
+            # slot by decl_enum_def), optional discriminant expression ids from
+            # FIELD_DEFAULTS, and (EPC1, bug
+            # enum_variant_payload_types_discarded_at_parse_2026-07-29) each
+            # variant's first payload type tag from FIELD_TYPES (same
+            # decl_field_types slot structs use). -1 (no type tag captured,
+            # either no payload or a discarded 2nd+ field -- see
+            # decl_enum_def's docstring) means `kind: Tuple([])`, unchanged
+            # from before this lane.
             var e_variants: [Variant] = []
             val e_names = decl_get_fields(idx)
             val e_discriminants = decl_get_field_defaults(idx)
+            val e_payload_types = decl_get_field_types(idx)
             var e_vi = 0
             while e_vi < e_names.len():
                 var e_discriminant_id: i64 = -1
@@ -390,9 +396,15 @@ fn flat_ast_to_module(path: text) -> Module:
                 var e_discriminant = Expr(kind: ExprKind.NilLit, span: span)
                 if e_has_discriminant:
                     e_discriminant = convert_flat_expr(e_discriminant_id)
+                var e_payload_tag: i64 = -1
+                if e_vi < e_payload_types.len():
+                    e_payload_tag = e_payload_types[e_vi]
+                var e_kind = VariantKind.Tuple([])
+                if e_payload_tag >= 0:
+                    e_kind = VariantKind.Tuple([convert_flat_type(e_payload_tag)])
                 e_variants.push(Variant(
                     name: e_names[e_vi],
-                    kind: VariantKind.Tuple([]),
+                    kind: e_kind,
                     has_discriminant: e_has_discriminant,
                     discriminant: e_discriminant,
                     span: span

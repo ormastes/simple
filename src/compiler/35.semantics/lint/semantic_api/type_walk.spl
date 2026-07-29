@@ -28,32 +28,32 @@
 
 use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
 use compiler.core.types.{newunit_find}
+use compiler.semantics.lint.semantic_api.alias_registry.{alias_registry_resolve}
 
 fn semantic_api_is_newunit(name: text) -> bool:
     """True when `name` is a parser-registered `newunit` domain type."""
     newunit_find(name) >= 0
 
 # ---------------------------------------------------------------------------
-# ALIAS RESOLUTION — FAIL-OPEN HOOK (coverage gap, reported)
+# ALIAS RESOLUTION HOOK (lane ALS1 — closed; was FAIL-OPEN)
 # ---------------------------------------------------------------------------
-# The 35.semantics layer has NO type-alias metadata to consult:
-#   - compiler.core.types has registries for named types (structs/classes),
-#     dict/result/tuple/array-generic encodings, and newunits — but NO alias
-#     table (`grep alias src/compiler/10.frontend/core/types.spl` -> empty).
-#   - The core parser records no `type X = Y` alias declarations into the
-#     decl arena, so an alias of a primitive is indistinguishable from an
-#     unresolved named type at this layer.
-# Consequence: an alias like `type Fd = i64` used as `fn read(fd: Fd)` is NOT
-# flagged — this hook FAILS OPEN (returns "" = no resolution) rather than
-# guessing. When alias metadata lands, implement this hook body and the whole
-# recursive walk picks it up automatically (leaf classification recurses into
-# the resolved text). Do NOT claim alias coverage until then.
+# Was: "no alias registry exists" — `type Fd = i64` used as `fn read(fd:
+# Fd)` was never flagged, always returning "" here. Lane TAL1 (commit
+# 5df3b3f5b40, bug type_alias_declarations_discarded_at_parse_2026-07-29)
+# fixed the upstream gap that made this unbuildable: `type X = Y` is now
+# captured into module.type_aliases: Dict<text, TypeAlias>. Lane ALS1 built
+# the registry that answers this hook — see alias_registry.spl for the Type
+# -> text rendering, the registry's populate/resolve API, and the cycle
+# guard (a mutual or self alias cycle bails instead of hanging; this
+# recursive walk's own `resolved != name` check below only ever catches the
+# trivial immediate-self-alias case, not longer cycles).
 fn semantic_api_resolve_alias(name: text) -> text:
-    """Resolve `name` to its aliased type text, or "" when unknown.
-
-    FAIL-OPEN: no alias registry exists at this layer yet (see block comment).
+    """Resolve `name` to its (fully-chased, one-hop-per-call-here) aliased
+    type text, or "" when `name` is not a known alias or a cycle was
+    detected. Backed by alias_registry (lane ALS1); "" is genuinely
+    fail-open only for names the registry never saw.
     """
-    ""
+    alias_registry_resolve(name)
 
 # ---------------------------------------------------------------------------
 # top-level text splitting (nesting-aware)
