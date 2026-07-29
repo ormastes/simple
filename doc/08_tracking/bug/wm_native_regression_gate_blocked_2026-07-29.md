@@ -124,13 +124,33 @@ fail-closed revision rule. Its next native fault was a corrupted nested
 router now performs the small scalar hit-test inline, and the focused native
 pointer-capture probe exits cleanly.
 
-The rebuilt full demo advances past that router boundary but still exits 139
-before GLFW exposes a capturable window:
+The next backtrace appeared to enter `WidgetStore.set_prop()` from `spl_main`,
+even though the demo has no source call to that method. Disassembly resolved
+the mismatch: every chained `tree.find_widget(...).set_prop(...)` returned an
+aggregate `WidgetNode?`, then compiled the call as:
 
 ```text
-common.ui.widget_store.WidgetStore.set_prop()
-  <- spl_main()
+UITree.find_widget()
+  -> WidgetStore.set_prop()  # wrong receiver/method
 ```
 
-This is the next bounded native regression target. The current checkpoint does
-not claim a live full-WM frame or native input evidence.
+The demo now constructs `WidgetNode(id: ...)` directly for its five stable
+controls. The exact demo-tree native probe passes property mutation/readback
+and Draw-IR generation, while rebuilt `spl_main` references only
+`WidgetNode.set_prop()`.
+
+A direct no-timeout run remains alive and maps a real 640x600 X11 window. The
+native title is corrupt (`RTS\x01`), explaining why name-based capture polling
+reported no window. Capturing by the mapped X11 ID succeeds, but both the
+initial image and the image after native pointer plus Ctrl+A injection are
+entirely black:
+
+```text
+colors=1 mean=0 min=0 max=0 changed_pixels=0
+sha256=0b56d6bd870958ec99fb98026aa09e576e046046c5815efe02d39c9f8d393cc1
+```
+
+The next bounded target is the raw compositor pixel-buffer/presentation
+boundary, plus the independent native title-text ABI. This checkpoint does not
+claim a non-black full-WM frame, semantic input mutation, or clean outer-window
+close evidence.

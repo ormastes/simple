@@ -406,19 +406,32 @@ implementation-in-progress
 - host-router-native-safe: The focused native pointer-routing probe exposed a
   corrupted nested compositor receiver after the aggregate target result was
   removed. The live GUI router now performs its small scalar client hit-test
-  inline; its Phase-3 pointer-capture probe exits cleanly. The rebuilt full
-  demo advances past this route but still faults before a capturable window in
-  `WidgetStore.set_prop()` from `spl_main()`. The live gate stopped after the
-  bounded retry.
+  inline; its Phase-3 pointer-capture probe exits cleanly.
+- phase3-widget-mutation-dispatch: Disassembly proved each chained
+  `tree.find_widget(...).set_prop(...)` compiled as
+  `WidgetStore.set_prop()` on the aggregate `WidgetNode?` result. The demo now
+  uses direct stable-ID `WidgetNode` handles. The exact demo-tree probe passes
+  native mutation, property readback, and canonical Draw-IR generation, and
+  the rebuilt `spl_main` calls only `WidgetNode.set_prop()`.
+- host-mapped-frame: The no-timeout full demo remains alive and maps a real
+  640x600 X11/GLFW window. Its title crosses the native boundary as corrupt
+  `RTS\x01`, so earlier name-based capture polling was invalid. Direct window-ID
+  captures before and after native pointer plus Ctrl+A input are both
+  640x600, but fail closed as one-color black images (mean/min/max zero,
+  changed pixels zero, SHA-256
+  `0b56d6bd870958ec99fb98026aa09e576e046046c5815efe02d39c9f8d393cc1`).
+  The next host gate is the raw compositor-buffer/presentation boundary, not
+  widget mutation.
 
 ## Remaining runtime gates
 
 - Host GLFW: the real backend/window/input/presentation boundary is green;
   the full Phase-3 closure and static provider link are green. Live execution
   now passes the canonical widget lookup, pure-Simple font provider, initial
-  GUI-frame admission, and focused scalar pointer-router probes. The first
-  capturable full-demo frame remains blocked by the native
-  `WidgetStore.set_prop()` fault reached from `spl_main()`.
+  GUI-frame admission, scalar pointer-router, and stable-ID widget mutation
+  probes. The full demo maps a real 640x600 host window, but its title is
+  corrupt and its captured framebuffer remains all black before and after
+  native input; non-black presentation and semantic input evidence remain RED.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the
