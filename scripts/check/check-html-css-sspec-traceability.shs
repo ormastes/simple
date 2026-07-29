@@ -9,62 +9,50 @@ BUILD_DIR="${BUILD_DIR:-build/html_css_sspec_traceability}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/html_css_sspec_traceability_$(date -u +%F).md}"
 OUT_ENV="$BUILD_DIR/evidence.env"
 
+python3 - "$ROOT_DIR" "$BUILD_DIR" "$REPORT_PATH" "$OUT_ENV" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).resolve()
+for label, raw in (
+    ("BUILD_DIR", sys.argv[2]),
+    ("REPORT_PATH", sys.argv[3]),
+    ("OUT_ENV", sys.argv[4]),
+):
+    path = Path(raw)
+    resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise SystemExit(f"error: {label} must resolve inside the repository")
+PY
+
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-tmp_env="$OUT_ENV.tmp"
+tmp_env="$(mktemp "$BUILD_DIR/evidence.env.tmp.XXXXXX")"
+trap 'rm -f "$tmp_env"' EXIT HUP INT TERM
 
 set +e
 HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE="${HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE:-$BUILD_DIR/behavior.env}" \
 HTML_CSS_SSPEC_FETCH="${HTML_CSS_SSPEC_FETCH:-1}" \
-HTML_CSS_SSPEC_OUTPUT_DIR="$BUILD_DIR" \
+HTML_CSS_SSPEC_HTML_INVENTORY_PATH="${HTML_CSS_SSPEC_HTML_INVENTORY_PATH:-}" \
+HTML_CSS_SSPEC_CSS_INVENTORY_PATH="${HTML_CSS_SSPEC_CSS_INVENTORY_PATH:-}" \
 python3 - <<'PY' >"$tmp_env"
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.request import Request, urlopen
-import hashlib
 import os
 import re
-import subprocess
 import sys
 
 ROOT = Path.cwd()
 HTML_URL = "https://html.spec.whatwg.org/multipage/indices.html"
 CSS_URL = "https://www.w3.org/TR/CSS/"
 
-HTML_TEST_ROOTS = [
-    "test/01_unit/lib/common/web",
-    "test/01_unit/lib/gc_async_mut/gpu/browser_engine",
-    "test/01_unit/app/ui",
-    "test/02_integration/rendering",
-    "test/03_system/gui",
-    "test/03_system/feature/web_platform/html",
-]
-
-CSS_TEST_ROOTS = [
-    "test/01_unit/lib/gc_async_mut/gpu/browser_engine",
-    "test/01_unit/app/ui",
-    "test/02_integration/rendering",
-    "test/03_system/gui",
-    "test/03_system/feature/web_platform/css",
-]
-
-TRACE_DOC = ROOT / "doc/03_plan/sys_test/html_css_spec_traceability.md"
 BEHAVIOR_EVIDENCE = Path(os.environ["HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE"])
 FETCH_INVENTORY = os.environ["HTML_CSS_SSPEC_FETCH"] != "0"
-OUTPUT_DIR = Path(os.environ["HTML_CSS_SSPEC_OUTPUT_DIR"])
+HTML_INVENTORY_PATH = os.environ["HTML_CSS_SSPEC_HTML_INVENTORY_PATH"]
+CSS_INVENTORY_PATH = os.environ["HTML_CSS_SSPEC_CSS_INVENTORY_PATH"]
+DECLARATION_SOURCE = ROOT / "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl"
 
-HTML_BEHAVIOR_ROOT = "test/03_system/feature/web_platform/html/"
-CSS_BEHAVIOR_ROOT = "test/03_system/feature/web_platform/css/"
-FROZEN_STEPS = {
-    'step("Verify executable HTML and CSS traceability")',
-    'step("Trace HTML elements through Web semantics and Draw IR")',
-    'step("Trace implemented CSS properties through canonical rendering")',
-    'step("Classify unsupported CSS properties without false implementation claims")',
-}
-MATRIX_HEADER = [
-    "kind", "name", "req", "support", "spec", "scenario", "manual",
-    "source_sha256", "semantic_oracle", "layout_draw_ir_oracle",
-    "engine2d_oracle", "negative_control",
-]
 BEHAVIOR_KEYS = [
     "runner_path", "runner_sha256", "source_revision", "matrix_path",
     "matrix_sha256",
@@ -146,59 +134,14 @@ def css_properties(source: str) -> list[str]:
         name = match.group(1)
         if CSS_NAME_RE.match(name):
             props.add(name)
+    # W3C prose placeholder, not a CSS property.
+    props.discard("property-name")
     return sorted(props)
-
-
-def read_roots(roots: list[str]) -> str:
-    parts = []
-    for root in roots:
-        base = ROOT / root
-        if not base.exists():
-            continue
-        for path in base.rglob("*"):
-            if path.suffix == ".spl":
-                parts.append(f"\nFILE:{path.relative_to(ROOT)}\n")
-                parts.append(path.read_text(encoding="utf-8", errors="ignore"))
-    return "".join(parts)
-
-
-def read_text(path: str) -> str:
-    file_path = ROOT / path
-    if not file_path.exists():
-        return ""
-    return file_path.read_text(encoding="utf-8", errors="ignore")
-
-
-def text_has_html_tag(blob: str, tag: str) -> bool:
-    esc = re.escape(tag)
-    return re.search(rf"<{esc}(\s|>|/)|['\"]{esc}['\"]|\b{esc}\b", blob, re.I) is not None
-
-
-def text_has_css_property(blob: str, prop: str) -> bool:
-    esc = re.escape(prop)
-    return re.search(rf"(^|[^a-zA-Z-]){esc}\s*:|['\"]{esc}['\"]|\b{esc}\b", blob, re.I | re.M) is not None
-
-
-def text_has_css_inventory_property(blob: str, prop: str) -> bool:
-    esc = re.escape(prop)
-    return re.search(rf"(?<![a-zA-Z0-9_-]){esc}(?![a-zA-Z0-9_-])", blob, re.I) is not None
 
 
 def emit(key: str, value) -> None:
     text = "" if value is None else str(value)
     print(f"{key}={text.replace(chr(10), ' ')}")
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def valid_sha256(value: str) -> bool:
-    return re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
 def read_env(path: Path) -> dict[str, str]:
@@ -215,200 +158,26 @@ def read_env(path: Path) -> dict[str, str]:
 
 def repo_path(value: str) -> Path | None:
     path = Path(value)
-    if path.is_absolute() or ".." in path.parts:
+    if path.is_absolute():
         return None
-    resolved = ROOT / path
+    resolved = (ROOT / path).resolve()
     try:
-        resolved.relative_to(ROOT)
+        resolved.relative_to(ROOT.resolve())
     except ValueError:
         return None
     return resolved
 
 
-def canonical_manual(spec: str) -> str:
-    if not spec.startswith("test/") or not spec.endswith(".spl"):
-        return ""
-    return "doc/06_spec/" + spec[len("test/"):-len(".spl")] + ".md"
+def inventory_source(path_text: str, url: str) -> str:
+    if not path_text:
+        return fetch(url)
+    path = repo_path(path_text)
+    if path is None or not path.is_file():
+        raise ValueError("invalid-inventory-path")
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
-def qualified_runner(path_text: str, expected_sha: str) -> bool:
-    path = Path(path_text)
-    if not path.is_absolute():
-        path = ROOT / path
-    try:
-        relative = path.resolve().relative_to(ROOT.resolve()).as_posix()
-    except ValueError:
-        return False
-    if re.fullmatch(r"bin/release/[^/]+/simple", relative) is None:
-        return False
-    if not path.is_file() or not os.access(path, os.X_OK):
-        return False
-    if not valid_sha256(expected_sha) or sha256_file(path) != expected_sha:
-        return False
-    for seed in (
-        ROOT / "src/compiler_rust/target/bootstrap/simple",
-        ROOT / "bin/simple",
-    ):
-        if seed.is_file() and sha256_file(seed) == expected_sha:
-            return False
-    return True
-
-
-def oracle_bound(value: str, source: str) -> bool:
-    return value.startswith("n/a:") or value in source
-
-
-def scenario_body(source: str, scenario: str) -> str:
-    lines = source.splitlines()
-    marker = f'    it "{scenario}":'
-    for index, line in enumerate(lines):
-        if line != marker:
-            continue
-        end = index + 1
-        while end < len(lines) and not lines[end].startswith("    it \""):
-            end += 1
-        return "\n".join(lines[index:end])
-    return ""
-
-
-def validate_matrix(path: Path, html: list[str], css: list[str]):
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    if not lines or lines[0].split("\t") != MATRIX_HEADER:
-        return False, "invalid-matrix-header", []
-
-    seen = set()
-    specs = set()
-    manuals = set()
-    scenarios = set()
-    rows = []
-    for line in lines[1:]:
-        if not line.strip():
-            continue
-        fields = line.split("\t")
-        if len(fields) != len(MATRIX_HEADER):
-            return False, "invalid-matrix-row", []
-        row = dict(zip(MATRIX_HEADER, fields))
-        key = (row["kind"], row["name"])
-        if key in seen or row["kind"] not in {"html", "css"}:
-            return False, "invalid-matrix-name", []
-        seen.add(key)
-        if row["support"] not in {"full", "unsupported-fail-closed", "excluded-nonproperty"}:
-            return False, "invalid-matrix-support", []
-        if not row["req"].startswith("REQ-WEB-BROWSER-"):
-            return False, "missing-matrix-requirement", []
-        if not row["scenario"].startswith("should "):
-            return False, "nonbehavioral-matrix-scenario", []
-        required_root = HTML_BEHAVIOR_ROOT if row["kind"] == "html" else CSS_BEHAVIOR_ROOT
-        if not row["spec"].startswith(required_root):
-            return False, "noncanonical-matrix-spec", []
-        if row["manual"] != canonical_manual(row["spec"]):
-            return False, "noncanonical-matrix-manual", []
-        spec_path = repo_path(row["spec"])
-        manual_path = repo_path(row["manual"])
-        if spec_path is None or manual_path is None or not spec_path.is_file() or not manual_path.is_file():
-            return False, "missing-matrix-artifact", []
-        source_sha = sha256_file(spec_path)
-        if row["source_sha256"] != source_sha:
-            return False, "stale-matrix-source-hash", []
-        source = spec_path.read_text(encoding="utf-8", errors="replace")
-        manual = manual_path.read_text(encoding="utf-8", errors="replace")
-        body = scenario_body(source, row["scenario"])
-        req_pattern = rf"(?m)^\s*# @req(?: .*)?\b{re.escape(row['req'])}\b"
-        if not body or re.search(req_pattern, body) is None:
-            return False, "missing-executable-matrix-binding", []
-        if not any(step in body for step in FROZEN_STEPS):
-            return False, "missing-frozen-step", []
-        if row["scenario"] not in manual or f"Source SHA-256: `{source_sha}`" not in manual:
-            return False, "stale-matrix-manual", []
-        oracles = [
-            row["semantic_oracle"], row["layout_draw_ir_oracle"],
-            row["engine2d_oracle"], row["negative_control"],
-        ]
-        if any(not value or not oracle_bound(value, body) for value in oracles):
-            return False, "missing-behavior-oracle", []
-        if row["support"] == "full" and any(value.startswith("n/a:") for value in oracles):
-            return False, "full-row-missing-behavior-oracle", []
-        if row["support"] != "full" and row["negative_control"].startswith("n/a:"):
-            return False, "missing-negative-control", []
-        specs.add(row["spec"])
-        manuals.add(row["manual"])
-        scenarios.add((row["spec"], row["scenario"]))
-        rows.append(row)
-
-    expected = {("html", name) for name in html} | {("css", name) for name in css}
-    if seen != expected:
-        return False, "incomplete-matrix-inventory", []
-    return True, "pass", rows
-
-
-def current_source_revision() -> str:
-    result = subprocess.run(
-        ["jj", "log", "--no-graph", "-r", "@", "-T", "commit_id"],
-        cwd=ROOT, text=True, capture_output=True, timeout=30,
-    )
-    revision = result.stdout.strip()
-    if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40,64}", revision) is None:
-        return ""
-    return revision
-
-
-def result_marker(row: dict[str, str], revision: str) -> str:
-    identity = f"{row['kind']}:{row['name']}"
-    scenario_sha = hashlib.sha256(
-        f"{row['spec']}\0{row['scenario']}".encode("utf-8")
-    ).hexdigest()
-    return (
-        f"HTML_CSS_TRACEABILITY_RESULT id={identity} status=pass "
-        f"scenario_sha256={scenario_sha} source_sha256={row['source_sha256']} "
-        f"revision={revision}"
-    )
-
-
-def fresh_runner_results(runner_text: str, rows: list[dict[str, str]], revision: str):
-    runner = Path(runner_text)
-    if not runner.is_absolute():
-        runner = ROOT / runner
-    specs = sorted({row["spec"] for row in rows})
-    scenarios = {(row["spec"], row["scenario"]) for row in rows}
-    output_parts = []
-    environment = os.environ.copy()
-    environment["SIMPLE_NO_STUB_FALLBACK"] = "1"
-
-    for spec in specs:
-        try:
-            result = subprocess.run(
-                [str(runner), "test", spec, "--mode=native"],
-                cwd=ROOT, env=environment, text=True, capture_output=True,
-                timeout=600,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return False, f"runner-execution-failed:{type(exc).__name__}", {}, ""
-        combined = result.stdout + result.stderr
-        output_parts.append(
-            f"COMMAND spec={spec} exit={result.returncode}\n{combined}"
-        )
-        if result.returncode != 0:
-            return False, "runner-scenario-failure", {}, "\n".join(output_parts)
-        for row in rows:
-            if row["spec"] == spec and result_marker(row, revision) not in combined:
-                return False, "missing-runner-row-result", {}, "\n".join(output_parts)
-
-    execution_log = "\n".join(output_parts)
-    if "rust bootstrap seed" in execution_log.lower():
-        return False, "seed-runner-rejected", {}, execution_log
-    counts = {
-        "executed_count": str(len(scenarios)),
-        "passed_count": str(len(scenarios)),
-        "failed_count": "0",
-        "empty_count": "0" if scenarios else "1",
-        "stub_count": "0",
-        "spec_count": str(len(specs)),
-        "manual_count": str(len({row["manual"] for row in rows})),
-    }
-    return True, "pass", counts, execution_log
-
-
-def validate_behavior(html: list[str], css: list[str]) -> tuple[bool, str, dict[str, str]]:
+def validate_behavior() -> tuple[bool, str, dict[str, str]]:
     raw = read_env(BEHAVIOR_EVIDENCE)
     values = {key: raw.get(f"html_css_behavior_{key}", "") for key in BEHAVIOR_KEYS}
     values.update({
@@ -427,9 +196,9 @@ def validate_behavior(html: list[str], css: list[str]) -> tuple[bool, str, dict[
         return False, "missing-behavior-evidence", values
     if any(values[key] == "" for key in BEHAVIOR_KEYS):
         return False, "incomplete-behavior-evidence", values
-    # No repository-owned receipt currently proves a full target CLI is both
-    # pure-Simple and bound to this exact jj revision. Fail closed until that
-    # existing bootstrap/release workflow emits a reviewed admission format.
+    # Caller-authored path/SHA/revision/matrix fields are not provenance.
+    # Remain closed until an independently owned build workflow publishes a
+    # reviewed admission format.
     return False, "trusted-runner-admission-unavailable", values
 
 
@@ -438,10 +207,14 @@ def main() -> int:
     inventory_reason = "pass"
     html = []
     css = []
-    if FETCH_INVENTORY:
+    local_inventory = bool(HTML_INVENTORY_PATH or CSS_INVENTORY_PATH)
+    if local_inventory and not (HTML_INVENTORY_PATH and CSS_INVENTORY_PATH):
+        inventory_status = "evidence-blocked"
+        inventory_reason = "incomplete-local-inventory"
+    elif FETCH_INVENTORY or local_inventory:
         try:
-            html = html_tags(fetch(HTML_URL))
-            css = css_properties(fetch(CSS_URL))
+            html = html_tags(inventory_source(HTML_INVENTORY_PATH, HTML_URL))
+            css = css_properties(inventory_source(CSS_INVENTORY_PATH, CSS_URL))
         except Exception as exc:
             inventory_status = "evidence-blocked"
             inventory_reason = f"inventory-fetch-failed:{type(exc).__name__}"
@@ -449,24 +222,11 @@ def main() -> int:
         inventory_status = "evidence-blocked"
         inventory_reason = "inventory-fetch-disabled"
 
-    html_blob = read_roots(HTML_TEST_ROOTS)
-    css_blob = read_roots(CSS_TEST_ROOTS)
-    inventory_blob = read_text(CSS_INVENTORY_SPEC)
-
-    missing_html = [tag for tag in html if not text_has_html_tag(html_blob, tag)]
-
-    indexed_implemented_css = [prop for prop in css if prop in CSS_SUPPORTED]
-    unsupported_css = [prop for prop in css if prop not in CSS_SUPPORTED]
-    missing_implemented_css_assignment = []
-    missing_unsupported_css_assignment = []
-    for prop in css:
-        if prop in CSS_SUPPORTED:
-            if not text_has_css_property(css_blob, prop):
-                missing_implemented_css_assignment.append(prop)
-        else:
-            if not text_has_css_inventory_property(inventory_blob, prop):
-                missing_unsupported_css_assignment.append(prop)
-    missing_css_assignment = missing_implemented_css_assignment + missing_unsupported_css_assignment
+    declaration_source = DECLARATION_SOURCE.read_text(encoding="utf-8", errors="replace")
+    recognized_css = set(re.findall(
+        r'decl_tbl_get\(decl_tbl, "([a-z-]+)"\)', declaration_source
+    ))
+    claimed_unrecognized_css = sorted(CSS_SUPPORTED - recognized_css)
 
     if inventory_status == "pass" and len(html) != 113:
         inventory_status = "fail"
@@ -474,25 +234,10 @@ def main() -> int:
     elif inventory_status == "pass" and len(css) < 390:
         inventory_status = "fail"
         inventory_reason = "unexpected-css-property-count"
-    elif inventory_status == "pass" and missing_html:
-        inventory_status = "fail"
-        inventory_reason = "html-tags-missing-inventory-assignment"
-    elif inventory_status == "pass" and missing_css_assignment:
-        inventory_status = "fail"
-        inventory_reason = "css-properties-missing-inventory-assignment"
 
-    behavior_valid, behavior_reason, behavior = validate_behavior(html, css)
-    status = "pass"
-    reason = "pass"
-    if not behavior_valid:
-        status = "evidence-blocked"
-        reason = behavior_reason
-    elif inventory_status != "pass":
-        status = "evidence-blocked"
-        reason = inventory_reason
-    elif not TRACE_DOC.is_file():
-        status = "evidence-blocked"
-        reason = "missing-traceability-plan"
+    behavior_valid, behavior_reason, behavior = validate_behavior()
+    status = "evidence-blocked"
+    reason = behavior_reason
 
     emit("html_css_sspec_traceability_status", status)
     emit("html_css_sspec_traceability_reason", reason)
@@ -504,19 +249,20 @@ def main() -> int:
     emit("html_css_sspec_traceability_css_url", CSS_URL)
     emit("html_css_sspec_traceability_html_tag_count", len(html))
     emit("html_css_sspec_traceability_required_html_tag_count", 113)
-    emit("html_css_sspec_traceability_html_tag_missing", ",".join(missing_html))
+    emit("html_css_sspec_traceability_html_tag_missing", "")
     emit("html_css_sspec_traceability_css_property_count", len(css))
     emit("html_css_sspec_traceability_required_css_property_min_count", 390)
-    emit("html_css_sspec_traceability_css_property_missing_count", len(missing_css_assignment))
-    emit("html_css_sspec_traceability_css_property_missing", ",".join(missing_css_assignment[:120]))
-    emit("html_css_sspec_traceability_implemented_css_property_count", len(CSS_SUPPORTED))
-    emit("html_css_sspec_traceability_implemented_css_property_indexed_count", len(indexed_implemented_css))
-    emit("html_css_sspec_traceability_implemented_css_property_missing_count", len(missing_implemented_css_assignment))
-    emit("html_css_sspec_traceability_implemented_css_property_missing", ",".join(missing_implemented_css_assignment[:120]))
-    emit("html_css_sspec_traceability_unsupported_css_property_count", len(unsupported_css))
-    emit("html_css_sspec_traceability_unsupported_css_properties", ",".join(unsupported_css))
-    emit("html_css_sspec_traceability_unsupported_css_property_missing_count", len(missing_unsupported_css_assignment))
-    emit("html_css_sspec_traceability_unsupported_css_property_missing", ",".join(missing_unsupported_css_assignment[:120]))
+    emit("html_css_sspec_traceability_css_property_missing_count", "")
+    emit("html_css_sspec_traceability_css_property_missing", "")
+    emit("html_css_sspec_traceability_implemented_css_property_count", 0)
+    emit("html_css_sspec_traceability_implemented_css_property_indexed_count", 0)
+    emit("html_css_sspec_traceability_implemented_css_property_missing_count", "")
+    emit("html_css_sspec_traceability_implemented_css_property_missing", "")
+    emit("html_css_sspec_traceability_claimed_unrecognized_css_properties", ",".join(claimed_unrecognized_css))
+    emit("html_css_sspec_traceability_unsupported_css_property_count", 0)
+    emit("html_css_sspec_traceability_unsupported_css_properties", "")
+    emit("html_css_sspec_traceability_unsupported_css_property_missing_count", "")
+    emit("html_css_sspec_traceability_unsupported_css_property_missing", "")
     emit("html_css_sspec_traceability_implemented_css_subset_spec", CSS_IMPLEMENTED_SPEC)
     emit("html_css_sspec_traceability_unsupported_css_inventory_spec", CSS_INVENTORY_SPEC)
     emit("html_css_sspec_traceability_runner_path", behavior.get("runner_path", ""))
@@ -534,7 +280,7 @@ def main() -> int:
     emit("html_css_sspec_traceability_spec_count", behavior.get("spec_count", ""))
     emit("html_css_sspec_traceability_manual_count", behavior.get("manual_count", ""))
     emit("html_css_sspec_traceability_receipt_sha256", behavior.get("receipt_sha256", ""))
-    return 0 if status == "pass" else 1
+    return 1
 
 
 try:
@@ -553,6 +299,7 @@ code=$?
 set -e
 
 mv "$tmp_env" "$OUT_ENV"
+trap - EXIT HUP INT TERM
 
 status="$(sed -n 's/^html_css_sspec_traceability_status=//p' "$OUT_ENV" | tail -n 1)"
 reason="$(sed -n 's/^html_css_sspec_traceability_reason=//p' "$OUT_ENV" | tail -n 1)"
@@ -583,12 +330,4 @@ inventory_css_spec="$(sed -n 's/^html_css_sspec_traceability_unsupported_css_inv
 } >"$REPORT_PATH"
 
 cat "$OUT_ENV"
-
-if [ "$status" = "pass" ]; then
-    echo "PASS: executable HTML/CSS SSpec traceability html_tags=$html_count css_properties=$css_count"
-    echo "PASS: implemented CSS subset spec=$implemented_css_spec"
-    echo "PASS: unsupported CSS inventory spec=$inventory_css_spec"
-    exit 0
-fi
-
 exit "$code"

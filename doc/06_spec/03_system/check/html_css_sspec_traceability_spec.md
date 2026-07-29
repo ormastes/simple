@@ -1,17 +1,17 @@
 # HTML/CSS executable SSpec traceability gate
 
-> Proves the traceability checker cannot promote inventory text or unbound execution counts to behavioral HTML/CSS evidence.
+> Proves the traceability checker cannot promote repository text, standards inventory, or caller-authored provenance into behavioral HTML/CSS evidence.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # HTML/CSS executable SSpec traceability gate
 
-Proves the traceability checker cannot promote inventory text or unbound execution counts to behavioral HTML/CSS evidence.
+Proves the traceability checker cannot promote repository text, standards inventory, or caller-authored provenance into behavioral HTML/CSS evidence.
 
 ## At a Glance
 
@@ -29,232 +29,153 @@ Proves the traceability checker cannot promote inventory text or unbound executi
 
 ## Overview
 
-Proves the traceability checker cannot promote inventory text or unbound
-execution counts to behavioral HTML/CSS evidence.
+Proves the traceability checker cannot promote repository text, standards
+inventory, or caller-authored provenance into behavioral HTML/CSS evidence.
 
 **Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
 **Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
 **NFR:** doc/02_requirements/nfr/simple_web_browser_engine_production_hardening.md
 **Design:** doc/05_design/simple_web_browser_engine_production_hardening.md
-**Architecture:** doc/04_architecture/simple_web_browser_engine_production_hardening.md
 **Research:** doc/01_research/local/simple_web_browser_engine_production_hardening.md
 **Domain Research:** doc/01_research/domain/simple_web_browser_engine_production_hardening.md
 
-## Claim boundary
+## Evidence model
 
-This specification validates the evidence gate.
+`inventory` means a standards name was parsed.
 
-It does not claim complete HTML support.
+`source-diagnostic` means a claimed name lacks a canonical declaration lookup.
 
-It does not claim complete CSS support.
+`scenario` means an executable SSpec describes intended behavior.
 
-It does not claim that inventory occurrence is rendering.
+`manual` means generated documentation mirrors a scenario.
 
-It does not claim that a source-only scenario has executed.
+`qualified-execution` means an independently admitted runner executed the
+scenario against its bound source.
 
-It does not claim that a generated manual is current without a source binding.
+Only the last class can populate behavioral implementation counts.
 
-It does not accept the deployed release wrapper as a qualified runner.
+The current repository has no independently owned admission format for this
+gate.
 
-It does not accept a Rust seed as a pure-Simple target runtime.
+## Diagnostic fields
 
-It does not accept Stage 2 or Stage 3 compiler-only artifacts as test runners.
+| Field | Meaning |
+|---|---|
+| `inventory_status` | Standards collection state |
+| `inventory_reason` | Standards collection failure |
+| `html_tag_count` | Parsed HTML denominator |
+| `css_property_count` | Parsed CSS denominator |
+| `claimed_unrecognized_css_properties` | Source-audit diagnostic |
+| `implemented_css_property_count` | Qualified behavioral count |
+| `implemented_css_property_indexed_count` | Qualified indexed count |
+| `unsupported_css_property_count` | Qualified fail-closed count |
+| `executed_count` | Qualified executed scenarios |
+| `failed_count` | Qualified failed scenarios |
+| `receipt_sha256` | Independently admitted receipt digest |
 
-It does not fabricate runner admission or execution receipts.
-
-Behavioral status remains `evidence-blocked`.
-
-The current blocker is `trusted-runner-admission-unavailable`.
-
-## Trust model
-
-Inventory names are diagnostic inputs.
-
-Executable SSpec scenarios are behavior definitions.
-
-Scenario assertions are not execution receipts.
-
-Generated manuals are review surfaces, not execution receipts.
-
-Runner path text is not runner provenance.
-
-An environment-provided SHA is not independent trust.
-
-A current jj revision string is not proof that a runner was built from it.
-
-A matrix hash proves integrity only after its producer is admitted.
-
-Counts supplied by an evidence file are untrusted.
-
-PASS requires an existing reviewed bootstrap or release admission contract.
-
-No new PKI is introduced by this checker.
-
-Until trusted admission exists, complete self-authored evidence fails closed.
-
-## Evidence classes
-
-`inventory` means a standardized name was discovered.
-
-`assigned` means a canonical executable scenario names the row.
-
-`semantic` means DOM or computed-style identity is asserted.
-
-`layout` means stable geometry, parentage, order, or clipping is asserted.
-
-`DrawIR` means canonical composition commands or styles are asserted.
-
-`Engine2D` means exact discriminating pixels, counts, or checksums are asserted.
-
-`negative` means fallback, invalid, unsupported, or baseline behavior is asserted.
-
-`executed` means a qualified runner reported the exact scenario result.
-
-`documented` means the canonical mirrored manual matches the executable source.
-
-Only the complete applicable chain can support behavioral PASS.
-
-## Frozen manual steps
-
-- `Verify executable HTML and CSS traceability`
-
-- `Trace HTML elements through Web semantics and Draw IR`
-
-- `Trace implemented CSS properties through canonical rendering`
-
-- `Classify unsupported CSS properties without false implementation claims`
-
-The first step belongs to this aggregate truth gate.
-
-The remaining steps belong to behavior specifications.
-
-Frozen spelling prevents generated manuals from drifting into parallel vocabularies.
+Inventory and source-diagnostic fields may be nonempty while behavioral fields
+remain zero.
 
 ## Failure discrimination
 
-`missing-behavior-evidence` means no provenance input exists.
+`missing-behavior-evidence` means no caller evidence file exists.
 
-`incomplete-behavior-evidence` means required provenance fields are absent.
+`incomplete-behavior-evidence` means one or more legacy provenance fields are
+absent.
 
-`trusted-runner-admission-unavailable` means all self-authored fields remain untrusted.
+`trusted-runner-admission-unavailable` means all legacy fields are present but
+no independent admission format exists.
 
-`inventory-fetch-disabled` means offline inventory collection was requested.
+`inventory-fetch-disabled` means neither network collection nor a complete
+local fixture pair was selected.
 
-`inventory-fetch-failed:*` means the standards inventory could not be refreshed.
+`incomplete-local-inventory` means only one local fixture path was supplied.
 
-Inventory failure and runner-admission failure remain separate evidence rows.
+`inventory-fetch-failed:ValueError` includes an absent path or a path resolving
+outside the repository.
 
-An empty executed count is not converted into a failed scenario count.
+These reasons never become PASS aliases.
 
-A failed behavioral gate is not converted into unsupported HTML or CSS.
+## Syntax
 
-A forged receipt never becomes PASS because its internal hashes agree.
+Offline regression runs set both local inventory paths and disable fetch:
+
+`HTML_CSS_SSPEC_FETCH=0 HTML_CSS_SSPEC_HTML_INVENTORY_PATH=<repo-path> HTML_CSS_SSPEC_CSS_INVENTORY_PATH=<repo-path>`.
+
+Production output stays under the repository through `BUILD_DIR`.
 
 ## Examples
 
-Example: no behavior evidence file exists.
+Example: no behavior evidence exists.
 
-Expected result: `evidence-blocked`, reason `missing-behavior-evidence`.
+Expected result: `missing-behavior-evidence`.
 
-Example: an evidence file contains only passed and failed counts.
+Example: a caller supplies path, SHA, revision, and matrix fields.
 
-Expected result: `evidence-blocked`, reason `incomplete-behavior-evidence`.
+Expected result: `trusted-runner-admission-unavailable`.
 
-Example: the canonical wrapper path, its actual SHA, the current jj revision,
-and a matrix SHA are supplied by the caller.
+Example: local CSS contains `color`, `caption-side`, and `property-name`.
 
-Expected result: `evidence-blocked`, reason
+Expected result: denominator `2`; `property-name` is excluded.
+
+Example: the CSS fixture is a repository symlink to `/etc/passwd`.
+
+Expected result: exit nonzero; the target is not read.
+
+Example: `BUILD_DIR` resolves below `/tmp`.
+
+Expected result: exit nonzero before the directory is created.
+
+## Claim boundary
+
+This specification validates the closed evidence gate.
+
+It does not claim complete HTML or CSS support.
+
+It does not accept path, ELF identity, SHA-256, help output, revision, matrix,
+inventory occurrence, or a generated manual as independently qualified
+execution provenance.
+
+Until an independently owned build workflow publishes a reviewed admission
+format, complete caller-authored evidence remains
 `trusted-runner-admission-unavailable`.
 
-Example: modern HTML and CSS system roots exist.
+The checker may emit standards and source-audit diagnostics. Those fields do
+not populate implemented or unsupported behavioral counts.
 
-Expected result: they are discovered but do not become proof by occurrence.
+Offline fixtures must resolve inside the repository. The output directory must
+also resolve inside the repository.
 
-Example: an old manual contains a scenario name.
+No network access, bootstrap, seed, or target runtime is used by these
+scenarios.
 
-Expected result: no behavioral PASS is inferred.
+## Frozen manual step
 
-## Current evidence state
-
-The behavior-first plan exists.
-
-Modern HTML and CSS system-test roots exist.
-
-The checker emits inventory and behavioral fields separately.
-
-The checker reports zero executed scenarios without trusted admission.
-
-The checker emits no receipt digest without trusted admission.
-
-Canonical manuals still require qualified generation and review.
-
-No target runtime was executed while authoring this contract.
-
-No bootstrap was performed while authoring this contract.
-
-No execution PASS is recorded by this manual.
+- `Verify executable HTML and CSS traceability`
 
 ## Acceptance
 
-- Missing qualified execution evidence remains evidence-blocked.
-- A claimed PASS without its runner, matrix, hashes, and current manuals fails.
-- Inventory counts remain diagnostic and cannot become behavioral PASS.
-- Complete caller-authored provenance around the canonical wrapper still fails.
-- Executed, passed, failed, empty, and stub counts remain explicit.
-- Receipt hashes remain empty until trusted execution can produce them.
-- Standards inventory roots include modern HTML and CSS system specifications.
-- The generated manual preserves this trust boundary and failure vocabulary.
+- Complete caller-authored provenance cannot unlock PASS.
+- Executed and implemented counts remain zero while admission is unavailable.
+- `property-name` is excluded before the CSS denominator is counted.
+- The source diagnostic includes `caption-side` but not recognized `color`.
+- Offline fixture and output paths cannot escape the repository.
 
 ## Scenarios
 
 ### HTML/CSS executable SSpec traceability
 
-#### should remain evidence-blocked when no qualified execution receipt exists
+#### should keep complete caller-authored provenance evidence-blocked
 
 - Verify executable HTML and CSS traceability
-   - Expected: code equals `0`
-- Reject inventory occurrence as behavioral evidence
+   - Expected: code equals `1`
    - Expected: _traceability_value(evidence, "html_css_sspec_traceability_status") equals `evidence-blocked`
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_reason") equals `missing-behavior-evidence`
+   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_reason") equals `trusted-runner-admission-unavailable`
    - Expected: _traceability_value(evidence, "html_css_sspec_traceability_behavior_evidence_valid") equals `false`
    - Expected: _traceability_value(evidence, "html_css_sspec_traceability_executed_count") equals `0`
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_failed_count") equals `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Verify executable HTML and CSS traceability")
-val command = "rm -rf build/test-html-css-sspec-missing && BUILD_DIR=build/test-html-css-sspec-missing REPORT_PATH=build/test-html-css-sspec-missing/report.md HTML_CSS_SSPEC_FETCH=0 HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE=build/test-html-css-sspec-missing/missing.env sh scripts/check/check-html-css-sspec-traceability.shs || true"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-step("Reject inventory occurrence as behavioral evidence")
-val evidence = file_read("build/test-html-css-sspec-missing/evidence.env") ?? ""
-expect(_traceability_value(evidence, "html_css_sspec_traceability_status")).to_equal("evidence-blocked")
-expect(_traceability_value(evidence, "html_css_sspec_traceability_reason")).to_equal("missing-behavior-evidence")
-expect(_traceability_value(evidence, "html_css_sspec_traceability_behavior_evidence_valid")).to_equal("false")
-expect(_traceability_value(evidence, "html_css_sspec_traceability_executed_count")).to_equal("0")
-expect(_traceability_value(evidence, "html_css_sspec_traceability_failed_count")).to_equal("0")
-```
-
-</details>
-
-#### should reject unbound PASS counts without current artifacts and runner provenance
-
-- Write a forged counts-only PASS receipt
-   - Expected: code equals `0`
-- Require matrix, source, manual, runner, and receipt hashes
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_status") equals `evidence-blocked`
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_reason") equals `incomplete-behavior-evidence`
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_behavior_evidence_valid") equals `false`
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_runner_sha256") equals ``
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_matrix_sha256") equals ``
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_stub_count") equals ``
+   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_implemented_css_property_count") equals `0`
+   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_unsupported_css_property_count") equals `0`
+   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_receipt_sha256") equals ``
 
 
 <details>
@@ -264,81 +185,82 @@ Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Write a forged counts-only PASS receipt")
-val command = "rm -rf build/test-html-css-sspec-forged && mkdir -p build/test-html-css-sspec-forged && printf '%s\\n' 'html_css_behavior_status=pass' 'html_css_behavior_executed_count=394' 'html_css_behavior_passed_count=394' 'html_css_behavior_failed_count=0' > build/test-html-css-sspec-forged/forged.env && BUILD_DIR=build/test-html-css-sspec-forged/out REPORT_PATH=build/test-html-css-sspec-forged/report.md HTML_CSS_SSPEC_FETCH=0 HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE=build/test-html-css-sspec-forged/forged.env sh scripts/check/check-html-css-sspec-traceability.shs || true"
+step("Verify executable HTML and CSS traceability")
+val command = "rm -rf build/test-html-css-sspec-closed && mkdir -p build/test-html-css-sspec-closed && printf '%s\\n' 'html_css_behavior_runner_path=bin/release/x86_64-unknown-linux-gnu/simple' 'html_css_behavior_runner_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'html_css_behavior_source_revision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' 'html_css_behavior_matrix_path=build/self-authored.tsv' 'html_css_behavior_matrix_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' > build/test-html-css-sspec-closed/forged.env && BUILD_DIR=build/test-html-css-sspec-closed/out REPORT_PATH=build/test-html-css-sspec-closed/report.md HTML_CSS_SSPEC_FETCH=0 HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE=build/test-html-css-sspec-closed/forged.env sh scripts/check/check-html-css-sspec-traceability.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
+expect(code).to_equal(1)
 
-step("Require matrix, source, manual, runner, and receipt hashes")
-val evidence = file_read("build/test-html-css-sspec-forged/out/evidence.env") ?? ""
-expect(_traceability_value(evidence, "html_css_sspec_traceability_status")).to_equal("evidence-blocked")
-expect(_traceability_value(evidence, "html_css_sspec_traceability_reason")).to_equal("incomplete-behavior-evidence")
-expect(_traceability_value(evidence, "html_css_sspec_traceability_behavior_evidence_valid")).to_equal("false")
-expect(_traceability_value(evidence, "html_css_sspec_traceability_runner_sha256")).to_equal("")
-expect(_traceability_value(evidence, "html_css_sspec_traceability_matrix_sha256")).to_equal("")
-expect(_traceability_value(evidence, "html_css_sspec_traceability_stub_count")).to_equal("")
-```
-
-</details>
-
-#### should reject complete forged provenance around the canonical executable path
-
-- Write every accepted provenance input around the canonical release wrapper
-   - Expected: code equals `0`
-- Reject complete self-authored evidence without trusted release admission
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_status") equals `evidence-blocked`
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_reason") equals `trusted-runner-admission-unavailable`
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_behavior_evidence_valid") equals `false`
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_executed_count") equals `0`
-   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_receipt_sha256") equals ``
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Write every accepted provenance input around the canonical release wrapper")
-val command = "rm -rf build/test-html-css-sspec-complete-forgery && mkdir -p build/test-html-css-sspec-complete-forgery && printf '%s\\n' 'kind\\tname\\treq\\tsupport\\tspec\\tscenario\\tmanual\\tsource_sha256\\tsemantic_oracle\\tlayout_draw_ir_oracle\\tengine2d_oracle\\tnegative_control' > build/test-html-css-sspec-complete-forgery/matrix.tsv && runner_sha=$(sha256sum bin/release/simple | cut -d' ' -f1) && matrix_sha=$(sha256sum build/test-html-css-sspec-complete-forgery/matrix.tsv | cut -d' ' -f1) && revision=$(jj log --no-graph -r @ -T commit_id) && printf '%s\\n' 'html_css_behavior_runner_path=bin/release/simple' \"html_css_behavior_runner_sha256=$runner_sha\" \"html_css_behavior_source_revision=$revision\" 'html_css_behavior_matrix_path=build/test-html-css-sspec-complete-forgery/matrix.tsv' \"html_css_behavior_matrix_sha256=$matrix_sha\" > build/test-html-css-sspec-complete-forgery/forged.env && BUILD_DIR=build/test-html-css-sspec-complete-forgery/out REPORT_PATH=build/test-html-css-sspec-complete-forgery/report.md HTML_CSS_SSPEC_FETCH=0 HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE=build/test-html-css-sspec-complete-forgery/forged.env sh scripts/check/check-html-css-sspec-traceability.shs || true"
-val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
-
-step("Reject complete self-authored evidence without trusted release admission")
-val evidence = file_read("build/test-html-css-sspec-complete-forgery/out/evidence.env") ?? ""
+val evidence = file_read("build/test-html-css-sspec-closed/out/evidence.env") ?? ""
 expect(_traceability_value(evidence, "html_css_sspec_traceability_status")).to_equal("evidence-blocked")
 expect(_traceability_value(evidence, "html_css_sspec_traceability_reason")).to_equal("trusted-runner-admission-unavailable")
 expect(_traceability_value(evidence, "html_css_sspec_traceability_behavior_evidence_valid")).to_equal("false")
 expect(_traceability_value(evidence, "html_css_sspec_traceability_executed_count")).to_equal("0")
+expect(_traceability_value(evidence, "html_css_sspec_traceability_implemented_css_property_count")).to_equal("0")
+expect(_traceability_value(evidence, "html_css_sspec_traceability_unsupported_css_property_count")).to_equal("0")
 expect(_traceability_value(evidence, "html_css_sspec_traceability_receipt_sha256")).to_equal("")
 ```
 
 </details>
 
-#### should expose modern HTML and CSS system roots without treating them as proof
+#### should keep offline inventory diagnostics separate and inside the repository
 
 - Verify executable HTML and CSS traceability
-- Keep behavior proof separate from inventory discovery
+   - Expected: code equals `1`
+   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_css_property_count") equals `2`
+   - Expected: unrecognized contains `caption-side`
+   - Expected: unrecognized does not contain `color`
+   - Expected: unrecognized does not contain `property-name`
+   - Expected: _traceability_value(evidence, "html_css_sspec_traceability_implemented_css_property_indexed_count") equals `0`
+   - Expected: fixture_escape_code equals `1`
+   - Expected: _traceability_value(fixture_escape_evidence, "html_css_sspec_traceability_inventory_reason") equals `inventory-fetch-failed:ValueError`
+   - Expected: escape_code equals `1`
+   - Expected: _escape_stderr contains `BUILD_DIR must resolve inside the repository`
+   - Expected: report_escape_code equals `1`
+   - Expected: report_escape_stderr contains `REPORT_PATH must resolve inside the repository`
+   - Expected: output_symlink_code equals `1`
+   - Expected: output_symlink_stderr contains `OUT_ENV must resolve inside the repository`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify executable HTML and CSS traceability")
-val source = file_read("scripts/check/check-html-css-sspec-traceability.shs") ?? ""
-expect(source).to_contain("test/03_system/feature/web_platform/html")
-expect(source).to_contain("test/03_system/feature/web_platform/css")
+val command = "rm -rf build/test-html-css-sspec-local-inventory && mkdir -p build/test-html-css-sspec-local-inventory && printf '%s\\n' '<code id=elements-3:the-div-element><a href=x>div</a></code>' > build/test-html-css-sspec-local-inventory/html.html && printf '%s\\n' '<code>color</code><code>caption-side</code><code>property-name</code>' > build/test-html-css-sspec-local-inventory/css.html && BUILD_DIR=build/test-html-css-sspec-local-inventory/out REPORT_PATH=build/test-html-css-sspec-local-inventory/report.md HTML_CSS_SSPEC_FETCH=0 HTML_CSS_SSPEC_HTML_INVENTORY_PATH=build/test-html-css-sspec-local-inventory/html.html HTML_CSS_SSPEC_CSS_INVENTORY_PATH=build/test-html-css-sspec-local-inventory/css.html HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE=build/test-html-css-sspec-local-inventory/missing.env sh scripts/check/check-html-css-sspec-traceability.shs"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(1)
 
-step("Keep behavior proof separate from inventory discovery")
-expect(source).to_contain("HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE")
-expect(source).to_contain("missing-behavior-evidence")
-expect(source).to_contain("incomplete-behavior-evidence")
-expect(source).to_contain("matrix_sha256")
+val evidence = file_read("build/test-html-css-sspec-local-inventory/out/evidence.env") ?? ""
+val unrecognized = _traceability_value(evidence, "html_css_sspec_traceability_claimed_unrecognized_css_properties")
+expect(_traceability_value(evidence, "html_css_sspec_traceability_css_property_count")).to_equal("2")
+expect(unrecognized.contains("caption-side")).to_equal(true)
+expect(unrecognized.contains("color")).to_equal(false)
+expect(unrecognized.contains("property-name")).to_equal(false)
+expect(_traceability_value(evidence, "html_css_sspec_traceability_implemented_css_property_indexed_count")).to_equal("0")
+
+val fixture_escape_command = "ln -sf /etc/passwd build/test-html-css-sspec-local-inventory/outside.css && BUILD_DIR=build/test-html-css-sspec-local-inventory/symlink-out REPORT_PATH=build/test-html-css-sspec-local-inventory/symlink-report.md HTML_CSS_SSPEC_FETCH=0 HTML_CSS_SSPEC_HTML_INVENTORY_PATH=build/test-html-css-sspec-local-inventory/html.html HTML_CSS_SSPEC_CSS_INVENTORY_PATH=build/test-html-css-sspec-local-inventory/outside.css sh scripts/check/check-html-css-sspec-traceability.shs"
+val (_fixture_escape_stdout, _fixture_escape_stderr, fixture_escape_code) = process_run("/bin/sh", ["-c", fixture_escape_command])
+expect(fixture_escape_code).to_equal(1)
+val fixture_escape_evidence = file_read("build/test-html-css-sspec-local-inventory/symlink-out/evidence.env") ?? ""
+expect(_traceability_value(fixture_escape_evidence, "html_css_sspec_traceability_inventory_reason")).to_equal("inventory-fetch-failed:ValueError")
+
+val escape_command = "BUILD_DIR=/tmp/simple-html-css-output-escape-test REPORT_PATH=build/test-html-css-sspec-local-inventory/escape-report.md HTML_CSS_SSPEC_FETCH=0 sh scripts/check/check-html-css-sspec-traceability.shs"
+val (_escape_stdout, _escape_stderr, escape_code) = process_run("/bin/sh", ["-c", escape_command])
+expect(escape_code).to_equal(1)
+expect(_escape_stderr.contains("BUILD_DIR must resolve inside the repository")).to_equal(true)
+
+val report_escape_command = "BUILD_DIR=build/test-html-css-sspec-local-inventory/report-escape REPORT_PATH=/tmp/simple-html-css-report-escape-test.md HTML_CSS_SSPEC_FETCH=0 sh scripts/check/check-html-css-sspec-traceability.shs"
+val (_report_escape_stdout, report_escape_stderr, report_escape_code) = process_run("/bin/sh", ["-c", report_escape_command])
+expect(report_escape_code).to_equal(1)
+expect(report_escape_stderr.contains("REPORT_PATH must resolve inside the repository")).to_equal(true)
+
+val output_symlink_command = "mkdir -p build/test-html-css-sspec-local-inventory/output-symlink && ln -sf /tmp/simple-html-css-evidence-symlink-target-spec build/test-html-css-sspec-local-inventory/output-symlink/evidence.env && BUILD_DIR=build/test-html-css-sspec-local-inventory/output-symlink REPORT_PATH=build/test-html-css-sspec-local-inventory/output-symlink-report.md HTML_CSS_SSPEC_FETCH=0 sh scripts/check/check-html-css-sspec-traceability.shs; checker_code=$?; if [ -e /tmp/simple-html-css-evidence-symlink-target-spec ]; then exit 9; fi; exit $checker_code"
+val (_output_symlink_stdout, output_symlink_stderr, output_symlink_code) = process_run("/bin/sh", ["-c", output_symlink_command])
+expect(output_symlink_code).to_equal(1)
+expect(output_symlink_stderr.contains("OUT_ENV must resolve inside the repository")).to_equal(true)
 ```
 
 </details>
@@ -347,8 +269,8 @@ expect(source).to_contain("matrix_sha256")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
