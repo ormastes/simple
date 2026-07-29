@@ -1105,28 +1105,48 @@ expect(
 
 #### clicks only after a matching hosted pointer press and release
 
+- Trace HTML elements through Web semantics and Draw IR
 - var comp = HostCompositor new headless
 - 1, 0, COMP CREATE WINDOW to i64
 - target unwrap
 - target unwrap
 - target unwrap
 - target unwrap
+- session browser dom root
+- session browser dom root
+- fail
+- form path[form path len
+- input path[input path len
+- form path[form path len
+- form path[form path len
+   - Expected: count_color(before, 0xFF2563EBu32) equals `0`
 - 17, target unwrap
    - Expected: release_only.reason equals `pointer-release-without-press`
    - Expected: release_only.mutation_revision equals `0`
 - session current body html
 - 18, target unwrap
-   - Expected: abandoned_press.reason equals `pointer-pressed`
+   - Expected: abandoned_press.reason equals ``
+   - Expected: abandoned_press.callback_count equals `1`
+   - Expected: be_dom_focused_id(session.browser.dom_root()) equals `accept`
    - Expected: missed_release.reason equals `no-semantic-target`
 - session current body html
 - 20, target unwrap
    - Expected: press.reason equals `pointer-pressed`
+   - Expected: press.callback_count equals `0`
+   - Expected: be_dom_focused_id(session.browser.dom_root()) equals `accept`
 - 21, target unwrap
    - Expected: receipt.event_id equals `21`
    - Expected: receipt.wm_target_id equals `target.unwrap().window_id`
    - Expected: receipt.semantic_target_id equals `accept`
-   - Expected: receipt.callback_count equals `0`
+   - Expected: receipt.callback_count equals `2`
    - Expected: receipt.mutation_revision equals `2`
+- session browser current style html + session current body html
+- target unwrap
+- form index to i64
+   - Expected: input_command_found is true
+   - Expected: input_command_parent equals `preferences`
+   - Expected: input_command_geometry equals `[0, 0, 40, 28]`
+   - Expected: count_color(after, 0xFFEF4444u32) equals `0`
 - comp = host compositor update window content
    - Expected: frame.len() equals `240 * 180`
 - raster shutdown
@@ -1135,14 +1155,27 @@ expect(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 144 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Trace HTML elements through Web semantics and Draw IR")
+val css_open = "{"
+val css_close = "}"
+val form_html = (
+    "<style>html,body,form" + css_open + "margin:0" + css_close +
+    "input" + css_open + "display:block;width:40px;height:28px;" +
+    "background-color:#ef4444" + css_close + "input[checked]" +
+    css_open + "background-color:#2563eb" + css_close +
+    "</style><form id='preferences'><input id='accept' type='checkbox' " +
+    "onfocus='set-attr:data-focused=yes' " +
+    "oninput='set-attr:data-input=yes' " +
+    "onclick='set-attr:data-clicked=yes'></form>"
+)
 var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
 comp.apply_bridge_request(
     1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Form", 20, 48, 180, 100,
-    "<style>input{display:block;width:40px;height:28px;background-color:#ef4444}input[checked]{background-color:#2563eb}</style><input id='accept' type='checkbox'>",
+    form_html,
     1, "hosted-web-event"
 )
 val target = comp.content_target(40, 90)
@@ -1154,7 +1187,29 @@ var session = HostedWebContentSession.create(
     target.unwrap().width,
     target.unwrap().height
 )
+val form_path = be_dom_find_path_to_id(
+    session.browser.dom_root(), "preferences"
+)
+val input_path = be_dom_find_path_to_id(
+    session.browser.dom_root(), "accept"
+)
+if form_path.len() == 0 or input_path.len() < 2:
+    fail("missing canonical form/input semantic path")
+expect(be_dom_get_tag(
+    form_path[form_path.len() - 1]
+)).to_equal("form")
+expect(be_dom_get_tag(
+    input_path[input_path.len() - 1]
+)).to_equal("input")
+expect(input_path[input_path.len() - 1].parent_id).to_equal(
+    form_path[form_path.len() - 1].node_id
+)
+expect(input_path[input_path.len() - 2].node_id).to_equal(
+    form_path[form_path.len() - 1].node_id
+)
 val before = session.render_to_pixels()
+expect(count_color(before, 0xFFEF4444u32)).to_be_greater_than(0)
+expect(count_color(before, 0xFF2563EBu32)).to_equal(0)
 val release_only = session.dispatch_pointer_at(
     17, target.unwrap().local_x, target.unwrap().local_y, false
 )
@@ -1167,7 +1222,12 @@ expect(
 val abandoned_press = session.dispatch_pointer_at(
     18, target.unwrap().local_x, target.unwrap().local_y, true
 )
-expect(abandoned_press.reason).to_equal("pointer-pressed")
+expect(abandoned_press.reason).to_equal("")
+expect(abandoned_press.callback_count).to_equal(1)
+expect(be_dom_focused_id(session.browser.dom_root())).to_equal("accept")
+expect(session.current_body_html()).to_contain(
+    "data-focused=\"yes\""
+)
 val missed_release = session.dispatch_pointer_at(19, 1000, 1000, false)
 expect(missed_release.reason).to_equal("no-semantic-target")
 expect(
@@ -1178,6 +1238,8 @@ val press = session.dispatch_pointer_at(
     20, target.unwrap().local_x, target.unwrap().local_y, true
 )
 expect(press.reason).to_equal("pointer-pressed")
+expect(press.callback_count).to_equal(0)
+expect(be_dom_focused_id(session.browser.dom_root())).to_equal("accept")
 val receipt = session.dispatch_pointer_at(
     21, target.unwrap().local_x, target.unwrap().local_y, false
 )
@@ -1185,10 +1247,54 @@ val receipt = session.dispatch_pointer_at(
 expect(receipt.event_id).to_equal(21)
 expect(receipt.wm_target_id).to_equal(target.unwrap().window_id)
 expect(receipt.semantic_target_id).to_equal("accept")
-expect(receipt.callback_count).to_equal(0)
+expect(receipt.callback_count).to_equal(2)
 expect(receipt.mutation_revision).to_equal(2)
 expect(session.current_body_html()).to_contain("checked=\"checked\"")
-expect(checksum(session.render_to_pixels()) == checksum(before)).to_be(false)
+expect(session.current_body_html()).to_contain("data-input=\"yes\"")
+expect(session.current_body_html()).to_contain("data-clicked=\"yes\"")
+
+val layout = simple_web_layout_render_html_draw_ir_result_at_time(
+    session.browser.current_style_html + session.current_body_html(),
+    target.unwrap().width, target.unwrap().height, 0
+)
+var form_index = -1
+var input_index = -1
+var node_index = 0
+for node in layout.hit_index.nodes:
+    if node.id_attr == "preferences":
+        form_index = node_index
+    if node.id_attr == "accept":
+        input_index = node_index
+    node_index = node_index + 1
+expect(form_index).to_be_greater_than(-1)
+expect(input_index).to_be_greater_than(-1)
+expect(layout.hit_index.nodes[input_index].parent).to_equal(
+    form_index.to_i64()
+)
+expect([
+    layout.hit_index.boxes.bx[input_index],
+    layout.hit_index.boxes.by[input_index],
+    layout.hit_index.boxes.bw[input_index],
+    layout.hit_index.boxes.bh[input_index]
+]).to_equal([0, 0, 40, 28])
+var input_command_found = false
+var input_command_parent = ""
+var input_command_geometry = [0, 0, 0, 0]
+for batch in layout.composition.batches:
+    for command in batch.commands:
+        if command.component_id == "accept":
+            input_command_found = true
+            input_command_parent = command.parent_id
+            input_command_geometry = [
+                command.x, command.y, command.width, command.height
+            ]
+expect(input_command_found).to_equal(true)
+expect(input_command_parent).to_equal("preferences")
+expect(input_command_geometry).to_equal([0, 0, 40, 28])
+val after = session.render_to_pixels()
+expect(checksum(after) == checksum(before)).to_be(false)
+expect(count_color(after, 0xFF2563EBu32)).to_be_greater_than(0)
+expect(count_color(after, 0xFFEF4444u32)).to_equal(0)
 
 comp = host_compositor_update_window_content(comp, target.unwrap().window_id, session.current_body_html())
 val raster = Engine2dCompositorBackend.create_named(240, 180, "software")
