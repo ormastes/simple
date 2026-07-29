@@ -1,0 +1,78 @@
+use common.ui.builder.{build_tree, column, label}
+use nogc_sync_mut.ui.session.{UISession}
+use os.compositor.compositor.{Compositor}
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.host_compositor_entry.{
+    HeadlessHostCompositorBackend,
+    headless_host_compositor_pixels,
+}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_render_request_with_active_theme,
+}
+use os.compositor.web_render_surface.{
+    compositor_render_request_artifact,
+}
+use std.gc_async_mut.ui.gui_content_renderer.{
+    gui_session_content_frame,
+}
+
+fn main() -> i64:
+    val headless = HeadlessHostCompositorBackend.new(160, 240)
+    val backend: CompositorBackend = headless
+    var compositor = Compositor.with_backends(
+        backend, nil, 160, 240
+    )
+    val gui_baseline = compositor.gui_content_count()
+    val pixel_baseline = compositor.pixel_content_count()
+    val tree = build_tree(column(
+        "gui-root", [label("gui-label", "GUI")]
+    ))
+    val gui = compositor.create_window_with_tree(
+        "GUI", 0, 10, 52, 80, tree
+    )
+    val web = compositor.create_window("Web", 52, 10, 52, 80)
+    compositor.update_window_content(
+        web.to_u64(), "<p>Web</p>"
+    )
+    val pixel = compositor.create_window("Pixel", 104, 10, 52, 80)
+    val pixel_handle = compositor.create_pixel_content(
+        44, 44, 0xff102030u32
+    )
+    if pixel_handle <= 0 or not compositor.attach_window_pixel_content(
+        pixel.to_u64(), pixel_handle
+    ):
+        return 1
+    compositor.render_all()
+
+    val pixels = headless_host_compositor_pixels(headless)
+    if pixels.len() != 160 * 240:
+        return 2
+    var session = UISession.new(tree)
+    val gui_frame = gui_session_content_frame(
+        session, gui.value.to_text(), "", 0, 0,
+        44, 44, 1, 1, []
+    )
+    if gui_frame.pixels.len() != 44 * 44:
+        return 3
+    if pixels[42 * 160 + 4] != gui_frame.pixels[0]:
+        return 4
+    val web_artifact = compositor_render_request_artifact(
+        simple_web_content_render_request_with_active_theme(
+            "Web", "<p>Web</p>", 44, 44
+        ).with_pixel_output()
+    )
+    if web_artifact.pixels.len() != 44 * 44:
+        return 5
+    if pixels[42 * 160 + 56] != web_artifact.pixels[0]:
+        return 6
+    if pixels[42 * 160 + 108] != 0xff102030u32:
+        return 7
+
+    compositor.destroy_window(gui.value.to_i32())
+    compositor.destroy_window(web)
+    compositor.destroy_window(pixel)
+    if compositor.gui_content_count() != gui_baseline:
+        return 8
+    if compositor.pixel_content_count() != pixel_baseline:
+        return 9
+    0

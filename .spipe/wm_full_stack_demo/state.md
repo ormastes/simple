@@ -627,6 +627,15 @@ implementation-in-progress
   closure compiled but did not link because the selected core runtime capsule
   intentionally excludes SQLite, so live host persistence remains a runtime
   gate rather than inferred evidence.
+- wm-content-kind-render-gate: Current source no longer routes every body
+  through Simple Web. SimpleOS baremetal emits GUI, Web, and pixel
+  `WmContentFrame` values through the shared Engine2D executor; the legacy
+  `Compositor.render_all()` compatibility path also has three explicit
+  branches. A focused headless probe now checks all three rendered bodies and
+  post-close handle baselines. Its no-stub Stage-2 closure compiles but the
+  admitted core capsule lacks required Web/GPU/SQLite symbols; `simple-core`
+  is absent and the bounded Cranelift attempt produced no artifact. Runtime
+  evidence remains red.
 
 ## Remaining runtime gates
 
