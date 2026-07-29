@@ -10,9 +10,10 @@ use std.nogc_sync_mut.text_layout.font_rasterizer.{
     rasterize_ttf_index,
     rasterize_vector,
     rasterize_bitmap,
-    blit_glyph
+    blit_glyph,
+    rt_font_glyph_advance
 }
-use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands}
+use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_width}
 use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances}
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
@@ -1155,6 +1156,73 @@ class FontRenderer:
         self.cache = cache
         glyph
 
+    # -----------------------------------------------------------------------
+    # Metrics-only glyph advance — measurement needs no pixels
+    # -----------------------------------------------------------------------
+    # `measure_text_advances`/`measure_text_width` only ever read `.advance`,
+    # but calling `get_glyph` above to get it always rasterizes a full alpha
+    # bitmap first. For outline/vector glyphs that rasterization cost scales
+    # with the pixel-buffer area (~font_size^2), which is why a single 100px
+    # glyph could cost hundreds of milliseconds and a run of them tens of
+    # seconds. This mirrors get_glyph's backend-priority order but calls only
+    # the metrics half of each backend and never the pixel-render half, and
+    # it never writes to `self.cache` -- caching an advance-only entry with
+    # no pixels would make a later real render of the same glyph draw blank.
+    #
+    # The selected/registered outline blob backend (the one exercised by the
+    # web renderer's pinned Bungee-style fonts) is handled directly here:
+    # `sfnt_measure_glyph_into` computes width/height/advance/bearing purely
+    # from the `hmtx`/`glyf` tables -- it never touches pixel coverage. Only
+    # `sfnt_render_glyph_into` does the O(width*height) coverage scan, and
+    # this path never calls it. Every other backend either has a genuine
+    # metrics-only extern (`rt_font_glyph_advance` for the legacy rt_font_load
+    # handle path) or a closed-form advance formula identical to what its
+    # rasterizer would have computed (vector/bitmap fallbacks); the one
+    # backend with no metrics-only entry point (the SFFI spl_fonts dylib,
+    # whose `rt_fonts_glyph_metric` only reads a handle produced by a prior
+    # rasterize call) falls back to the full get_glyph call unchanged.
+    me get_glyph_advance(codepoint: i32, font_size: i32) -> i32:
+        if codepoint < 0 or codepoint > 1114111 or font_size <= 0 or font_size > 512:
+            return 0
+        var cache = self.cache
+        val active_rasterizer = self.ttf_rasterizer
+        if active_rasterizer != nil:
+            cache.sync_face_identity(active_rasterizer.cache_identity_generation(), active_rasterizer.cache_identity())
+        val cached = cache.lookup(codepoint, font_size)
+        self.cache = cache
+        if cached != nil:
+            return cached.advance
+
+        val rast_has_glyph = active_rasterizer != nil and active_rasterizer.has_glyph(codepoint.to_i64())
+        if rast_has_glyph:
+            if self.selected_outline_blob.len() > 0:
+                var direct_meta: [i64] = [0; 20]
+                sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta)
+                if direct_meta[7] == 310031:
+                    val direct_width = direct_meta[0] as i32
+                    val direct_advance_raw = direct_meta[2] as i32
+                    return if direct_advance_raw > 0: direct_advance_raw else: direct_width + 1
+            # SFFI dylib backend (or a measure failure on the selected blob):
+            # no metrics-only entry point exists, fall back unchanged.
+            return self.get_glyph(codepoint, font_size).advance
+
+        if self.has_ttf():
+            return rt_font_glyph_advance(self.ttf_handle, codepoint.to_i64(), font_size.to_f64()).to_i32()
+        if self.use_vector:
+            val vector_cmds = vf_glyph_commands(codepoint)
+            if vector_cmds.len() > 0:
+                val glyph_w = vf_glyph_width(codepoint)
+                val pixel_w = glyph_w * font_size / 24
+                return pixel_w + 1
+            if self.use_bitmap:
+                val scale = if font_size > 16: font_size / 16 else: 1
+                return 8 * scale
+            return 0
+        if self.use_bitmap:
+            val scale = if font_size > 16: font_size / 16 else: 1
+            return 8 * scale
+        0
+
     # Same single-aggregate-return shape as get_glyph above (was
     # `glyph_index_with_cache(...) -> (CachedGlyph, GlyphCache)`).
     me get_glyph_index(face_id: i64, face_generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
@@ -1186,9 +1254,9 @@ class FontRenderer:
             val cp = content.char_code_at(ci)
             if prev_cp >= 0:
                 total_w = total_w + self.horizontal_kern(prev_cp, cp, font_size)
-            val glyph = self.get_glyph(cp, font_size)
-            if glyph.advance > 0:
-                total_w = total_w + glyph.advance
+            val glyph_advance = self.get_glyph_advance(cp, font_size)
+            if glyph_advance > 0:
+                total_w = total_w + glyph_advance
             else:
                 # Fallback: approximate
                 total_w = total_w + font_size * 55 / 100
@@ -1207,8 +1275,7 @@ class FontRenderer:
             if prev_cp >= 0:
                 val previous = advances.len() - 1
                 advances[previous] = advances[previous] + self.horizontal_kern(prev_cp, cp, font_size)
-            val glyph = self.get_glyph(cp, font_size)
-            val glyph_advance = glyph.advance
+            val glyph_advance = self.get_glyph_advance(cp, font_size)
             val advance = if glyph_advance > 0: glyph_advance else: font_size * 55 / 100
             advances = advances.push(advance)
             prev_cp = cp
