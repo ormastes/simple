@@ -2,7 +2,9 @@
 
 use super::collections::{rt_array_new, rt_array_push};
 use super::core::RuntimeValue;
-use super::heap::{get_typed_ptr, get_typed_ptr_mut, unregister_heap_ptr, HeapHeader, HeapObjectType};
+use super::heap::{
+    get_typed_ptr, get_typed_ptr_mut, note_aux_alloc, note_aux_free, unregister_heap_ptr, HeapHeader, HeapObjectType,
+};
 
 /// Get typed pointer from heap object with validation, returning early if invalid
 macro_rules! as_typed_ptr {
@@ -47,6 +49,9 @@ unsafe fn dict_alloc_slots(capacity: u64) -> *mut RuntimeValue {
     if data.is_null() {
         return std::ptr::null_mut();
     }
+    // Aux-byte accounting (lane L3): slot storage is a separate allocation
+    // not covered by header-byte counters.
+    note_aux_alloc(HeapObjectType::Dict as u8, size as u64);
     // Initialize all key-value slots to NIL (NIL is not 0!)
     for i in 0..(capacity as usize * 2) {
         *data.add(i) = RuntimeValue::NIL;
@@ -60,6 +65,7 @@ unsafe fn dict_free_slots(data: *mut RuntimeValue, capacity: u64) {
     }
     let size = capacity as usize * 2 * std::mem::size_of::<RuntimeValue>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+    note_aux_free(HeapObjectType::Dict as u8, size as u64);
     std::alloc::dealloc(data as *mut u8, layout);
 }
 

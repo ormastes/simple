@@ -4,15 +4,90 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+// ============================================================================
+// Hosted allocation metadata (rt_alloc / rt_free truth)
+// ============================================================================
+
+/// Size metadata for hosted `rt_alloc` allocations, keyed by pointer address.
+/// Lets hosted `rt_free` reconstruct the layout and actually free, and keeps a
+/// live-byte counter maintainable. Double-free stays refused: a pointer absent
+/// from this map is never passed to the allocator.
+static HOSTED_ALLOC_SIZES: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
+
+/// Live bytes currently held by hosted `rt_alloc` allocations.
+static HOSTED_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+fn hosted_alloc_sizes() -> &'static Mutex<HashMap<usize, usize>> {
+    HOSTED_ALLOC_SIZES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record a successful hosted allocation.
+fn hosted_alloc_record(ptr: usize, size: usize) {
+    let mut map = hosted_alloc_sizes().lock().unwrap_or_else(|e| e.into_inner());
+    map.insert(ptr, size);
+    HOSTED_LIVE_BYTES.fetch_add(size, Ordering::Relaxed);
+}
+
+/// Take (remove) the recorded size for a hosted allocation.
+/// Returns `None` for unknown pointers (double free / foreign pointer) —
+/// callers must refuse to free in that case.
+fn hosted_free_take(ptr: usize) -> Option<usize> {
+    let mut map = hosted_alloc_sizes().lock().unwrap_or_else(|e| e.into_inner());
+    let size = map.remove(&ptr)?;
+    HOSTED_LIVE_BYTES.fetch_sub(size, Ordering::Relaxed);
+    Some(size)
+}
+
+/// Current hosted rt_alloc live bytes (counter-based, exact).
+pub fn hosted_live_alloc_bytes() -> usize {
+    HOSTED_LIVE_BYTES.load(Ordering::Relaxed)
+}
+
+// ============================================================================
+// Memory-profiling capability surface
+// ============================================================================
+
+/// ABI version of the hosted memory-profiling surface.
+pub const MEM_PROFILE_ABI_VERSION: i64 = 1;
+/// bit0: exact heap-registry HEADER byte counters (rt_heap_live_bytes etc.).
+pub const MEM_PROFILE_FEATURE_HEADER_BYTES: i64 = 1 << 0;
+/// bit1: hosted rt_alloc size metadata (rt_free really frees, live bytes tracked).
+pub const MEM_PROFILE_FEATURE_HOSTED_ALLOC_METADATA: i64 = 1 << 1;
+/// bit2: memory_usage() reports real process RSS (not a stub).
+pub const MEM_PROFILE_FEATURE_REAL_MEMORY_USAGE: i64 = 1 << 2;
+
+/// Memory-profiling ABI version.
+///
+/// Callable from Simple as: `rt_mem_profile_abi_version() -> i64`
+pub fn rt_mem_profile_abi_version(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(MEM_PROFILE_ABI_VERSION))
+}
+
+/// Memory-profiling feature bitmask.
+///
+/// Callable from Simple as: `rt_mem_profile_features() -> i64`
+/// bit0 = header-bytes, bit1 = hosted-alloc-metadata, bit2 = real-memory-usage.
+pub fn rt_mem_profile_features(_args: &[Value]) -> Result<Value, CompileError> {
+    let mut features = MEM_PROFILE_FEATURE_HEADER_BYTES | MEM_PROFILE_FEATURE_HOSTED_ALLOC_METADATA;
+    if process_rss_bytes().is_some() {
+        features |= MEM_PROFILE_FEATURE_REAL_MEMORY_USAGE;
+    }
+    Ok(Value::Int(features))
+}
 
 /// Get current memory usage in bytes
 ///
 /// Callable from Simple as: `memory_usage()`
 ///
 /// # Returns
-/// * Current memory usage in bytes as an integer
+/// * Real process RSS on Linux (/proc/self/statm); elsewhere a counter-based
+///   value (heap-registry header bytes + hosted rt_alloc live bytes). Never a
+///   hardcoded 0.
 pub fn memory_usage(_args: &[Value]) -> Result<Value, CompileError> {
-    // Get memory usage from the global memory tracker if available
     let usage = get_current_memory_usage();
     Ok(Value::Int(usage as i64))
 }
@@ -158,11 +233,31 @@ pub fn spl_i64_is_zero(args: &[Value]) -> Result<Value, CompileError> {
 
 // Internal helper functions
 
+/// Real process resident-set size on Linux, from /proc/self/statm
+/// (field 1 = resident pages) * page size. `None` off-Linux or on parse failure.
+#[cfg(target_os = "linux")]
+fn process_rss_bytes() -> Option<usize> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let rss_pages: usize = statm.split_whitespace().nth(1)?.parse().ok()?;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return None;
+    }
+    Some(rss_pages * page_size as usize)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_rss_bytes() -> Option<usize> {
+    None
+}
+
 fn get_current_memory_usage() -> usize {
-    // Try to get from thread-local GC runtime if available
-    // For now, return 0 as we don't have direct access to the allocator from here
-    // In a full implementation, this would query the thread-local allocator
-    0
+    // Prefer OS truth (real RSS). Fall back to exact counters we do maintain:
+    // heap-registry header bytes + hosted rt_alloc live bytes.
+    process_rss_bytes().unwrap_or_else(|| {
+        let heap_header_bytes = simple_runtime::value::heap::rt_heap_live_bytes().max(0) as usize;
+        heap_header_bytes + hosted_live_alloc_bytes()
+    })
 }
 
 fn get_current_memory_limit() -> usize {
@@ -285,6 +380,7 @@ pub fn rt_alloc(args: &[Value]) -> Result<Value, CompileError> {
         if ptr.is_null() {
             return Ok(Value::Int(0));
         }
+        hosted_alloc_record(ptr as usize, size);
         Ok(Value::Int(ptr as usize as i64))
     }
 }
@@ -292,6 +388,10 @@ pub fn rt_alloc(args: &[Value]) -> Result<Value, CompileError> {
 /// Free memory allocated by rt_alloc. No-op for null pointers.
 ///
 /// Callable from Simple as: `rt_free(ptr: i64)`
+///
+/// The allocation size is looked up from the hosted metadata map, so the
+/// memory is genuinely deallocated. Unknown pointers (double free or a
+/// pointer rt_alloc never produced) are refused: nothing is freed.
 pub fn rt_free(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_free requires 1 argument (ptr)"));
@@ -300,9 +400,17 @@ pub fn rt_free(args: &[Value]) -> Result<Value, CompileError> {
     if ptr_val == 0 {
         return Ok(Value::Nil);
     }
-    // Note: We don't know the original size, so we can't properly dealloc.
-    // For the interpreter (short-lived compiler process), this is acceptable.
-    // The memory will be freed when the process exits.
+    let ptr = ptr_val as usize;
+    let Some(size) = hosted_free_take(ptr) else {
+        // Double free or foreign pointer — refuse (do not touch the allocator).
+        return Ok(Value::Nil);
+    };
+    // Layout mirrors rt_alloc (align 8); size came from the metadata map.
+    let layout = std::alloc::Layout::from_size_align(size, 8)
+        .map_err(|_| CompileError::runtime("rt_free: corrupt allocation metadata"))?;
+    unsafe {
+        std::alloc::dealloc(ptr as *mut u8, layout);
+    }
     Ok(Value::Nil)
 }
 
@@ -464,5 +572,97 @@ pub fn sys_realloc(args: &[Value]) -> Result<Value, CompileError> {
         }
 
         Ok(Value::Int(new_ptr as i64))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alloc(size: i64) -> i64 {
+        rt_alloc(&[Value::Int(size)]).unwrap().as_int().unwrap()
+    }
+
+    fn map_contains(ptr: i64) -> bool {
+        hosted_alloc_sizes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&(ptr as usize))
+    }
+
+    #[test]
+    fn rt_alloc_records_size_metadata() {
+        let ptr = alloc(64);
+        assert_ne!(ptr, 0, "rt_alloc(64) must not fail");
+        assert!(map_contains(ptr), "allocation must be recorded in the metadata map");
+        let recorded = hosted_alloc_sizes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(ptr as usize))
+            .copied();
+        assert_eq!(recorded, Some(64));
+        assert!(hosted_live_alloc_bytes() >= 64);
+        rt_free(&[Value::Int(ptr)]).unwrap();
+    }
+
+    #[test]
+    fn rt_free_releases_and_double_free_is_refused() {
+        let ptr = alloc(128);
+        assert_ne!(ptr, 0);
+        let live_before_free = hosted_live_alloc_bytes();
+
+        rt_free(&[Value::Int(ptr)]).unwrap();
+        assert!(!map_contains(ptr), "freed pointer must leave the metadata map");
+        // Counter drops by exactly this allocation's size relative to the
+        // pre-free snapshot (other tests only add, never remove, our entry).
+        assert!(hosted_live_alloc_bytes() <= live_before_free - 128);
+
+        // Double free: pointer no longer in the map -> must be refused, not crash.
+        let result = rt_free(&[Value::Int(ptr)]);
+        assert!(result.is_ok(), "double free must be refused gracefully");
+        assert!(!map_contains(ptr));
+    }
+
+    #[test]
+    fn rt_free_refuses_foreign_pointer() {
+        // A pointer rt_alloc never produced must not reach the allocator.
+        let bogus = 0xDEAD_B000_i64;
+        assert!(!map_contains(bogus));
+        assert!(rt_free(&[Value::Int(bogus)]).is_ok());
+    }
+
+    #[test]
+    fn rt_free_null_is_noop() {
+        assert!(rt_free(&[Value::Int(0)]).is_ok());
+    }
+
+    #[test]
+    fn memory_usage_is_positive() {
+        // Hold a live hosted allocation so even the counter fallback is > 0.
+        let ptr = alloc(4096);
+        let usage = memory_usage(&[]).unwrap().as_int().unwrap();
+        assert!(usage > 0, "memory_usage() must not report 0, got {usage}");
+        rt_free(&[Value::Int(ptr)]).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn memory_usage_reports_real_rss_on_linux() {
+        let rss = process_rss_bytes().expect("statm RSS must parse on Linux");
+        // Any live Rust test process is at least 1 MiB resident.
+        assert!(rss > 1024 * 1024, "implausible RSS: {rss}");
+        let usage = memory_usage(&[]).unwrap().as_int().unwrap() as usize;
+        assert!(usage > 1024 * 1024);
+    }
+
+    #[test]
+    fn mem_profile_capability_externs() {
+        let version = rt_mem_profile_abi_version(&[]).unwrap().as_int().unwrap();
+        assert_eq!(version, 1);
+        let features = rt_mem_profile_features(&[]).unwrap().as_int().unwrap();
+        assert_ne!(features & MEM_PROFILE_FEATURE_HEADER_BYTES, 0);
+        assert_ne!(features & MEM_PROFILE_FEATURE_HOSTED_ALLOC_METADATA, 0);
+        #[cfg(target_os = "linux")]
+        assert_ne!(features & MEM_PROFILE_FEATURE_REAL_MEMORY_USAGE, 0);
     }
 }

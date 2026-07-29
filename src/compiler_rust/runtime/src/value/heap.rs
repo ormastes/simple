@@ -473,3 +473,63 @@ impl From<HeapObjectType> for ValueKind {
         }
     }
 }
+
+// ============================================================================
+// Aux-byte accounting (container BACKING buffers) — lane L3, append-only.
+//
+// The header-byte counters above cover `HeapHeader.size` only. Containers
+// keep their element storage in SEPARATE allocations (`RuntimeArray.data`,
+// `RuntimeDict.data`); collection modules call these hooks at their buffer
+// alloc/realloc/free sites so those bytes are visible too. Strings and
+// tuples store data INLINE after the header (covered by `size`), so they
+// need no aux wiring. Hot-path contract: relaxed atomics only, no locks,
+// no allocation.
+// ============================================================================
+
+static AUX_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+static AUX_KIND_LIVE_BYTES: [AtomicU64; HEAP_KIND_SLOTS] = [const { AtomicU64::new(0) }; HEAP_KIND_SLOTS];
+
+/// Record `bytes` of newly allocated container backing storage for `kind`
+/// (a `HeapObjectType` tag). Called on create and on the grown size of a
+/// realloc (pair with `note_aux_free` of the old size).
+#[inline]
+pub fn note_aux_alloc(kind: u8, bytes: u64) {
+    AUX_LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    if let Some(slot) = AUX_KIND_LIVE_BYTES.get(kind as usize) {
+        slot.fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
+/// Record `bytes` of released container backing storage for `kind`.
+#[inline]
+pub fn note_aux_free(kind: u8, bytes: u64) {
+    AUX_LIVE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+    if let Some(slot) = AUX_KIND_LIVE_BYTES.get(kind as usize) {
+        slot.fetch_sub(bytes, Ordering::Relaxed);
+    }
+}
+
+/// Live container backing-buffer bytes across all kinds (excludes header
+/// bytes — see `rt_heap_live_bytes` for those).
+#[no_mangle]
+pub extern "C" fn rt_heap_aux_live_bytes() -> i64 {
+    AUX_LIVE_BYTES.load(Ordering::Relaxed) as i64
+}
+
+/// Live backing-buffer bytes for one `HeapObjectType` tag (0 for
+/// out-of-range kinds).
+#[no_mangle]
+pub extern "C" fn rt_heap_aux_live_bytes_by_kind(kind: i64) -> i64 {
+    AUX_KIND_LIVE_BYTES
+        .get(kind as usize)
+        .map(|slot| slot.load(Ordering::Relaxed) as i64)
+        .unwrap_or(0)
+}
+
+/// Total live array element-buffer CAPACITY bytes. Arrays never shrink their
+/// backing buffer, so capacity-vs-length drift (e.g. `clear()` keeping a big
+/// buffer) shows up here while object counts stay flat.
+#[no_mangle]
+pub extern "C" fn rt_heap_array_capacity_bytes() -> i64 {
+    AUX_KIND_LIVE_BYTES[HeapObjectType::Array as usize].load(Ordering::Relaxed) as i64
+}

@@ -224,3 +224,19 @@ uint8_t* rt_memcpy(uint8_t* dst, const uint8_t* src, int64_t n) {
 uint8_t* copy_mem(uint8_t* dst, const uint8_t* src, int64_t n) {
     return rt_memcpy(dst, src, n);
 }
+
+/*
+ * Memory-profiling capability surface.
+ * Mirrors src/compiler_rust/compiler/src/interpreter_extern/memory.rs.
+ * Feature bits: bit0 = header-bytes counters, bit1 = hosted-alloc-metadata,
+ * bit2 = real-memory-usage. The C runtime frees via libc directly (no hosted
+ * metadata map) and implements none of the profiling counters here, so the
+ * feature mask is 0; only the ABI version is shared.
+ */
+int64_t rt_mem_profile_abi_version(void) {
+    return 1;
+}
+
+int64_t rt_mem_profile_features(void) {
+    return 0;
+}

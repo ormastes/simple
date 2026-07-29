@@ -13,7 +13,8 @@ use super::byte_kernels::{
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
 use super::heap::{
-    gc_flags, get_typed_ptr, get_typed_ptr_mut, register_heap_ptr, unregister_heap_ptr, unregister_heap_ptr_checked,
+    gc_flags, get_typed_ptr, get_typed_ptr_mut, note_aux_alloc, note_aux_free, register_heap_ptr, unregister_heap_ptr,
+    unregister_heap_ptr_checked,
     HeapHeader, HeapObjectType,
 };
 use super::objects::{rt_closure_func_ptr, RuntimeClosure, RuntimeEnum, RuntimeObject};
@@ -410,6 +411,17 @@ fn byte_array_data_layout(capacity: u64) -> std::alloc::Layout {
     std::alloc::Layout::from_size_align(cap, 1).expect("valid byte array data layout")
 }
 
+/// Aux-byte accounting for an array element-buffer replacement (grow path).
+/// `old_data` is the PRE-swap buffer pointer: null means no old buffer bytes
+/// were ever accounted, so only the new size is added. Relaxed atomics only.
+#[inline]
+fn note_array_data_swap(old_data: *mut RuntimeValue, old_bytes: usize, new_bytes: usize) {
+    if !old_data.is_null() {
+        note_aux_free(HeapObjectType::Array as u8, old_bytes as u64);
+    }
+    note_aux_alloc(HeapObjectType::Array as u8, new_bytes as u64);
+}
+
 /// A heap-allocated tuple (fixed-size array)
 #[repr(C)]
 pub struct RuntimeTuple {
@@ -458,6 +470,7 @@ pub extern "C" fn rt_array_new(capacity: u64) -> RuntimeValue {
             std::alloc::dealloc(ptr as *mut u8, header_layout);
             return RuntimeValue::NIL;
         }
+        note_aux_alloc(HeapObjectType::Array as u8, data_layout.size() as u64);
 
         (*ptr).header = HeapHeader::new(HeapObjectType::Array, header_size as u32);
         (*ptr).len = 0;
@@ -489,6 +502,7 @@ fn rt_array_new_uninit(capacity: u64) -> RuntimeValue {
             std::alloc::dealloc(ptr as *mut u8, header_layout);
             return RuntimeValue::NIL;
         }
+        note_aux_alloc(HeapObjectType::Array as u8, data_layout.size() as u64);
 
         (*ptr).header = HeapHeader::new(HeapObjectType::Array, header_size as u32);
         (*ptr).len = 0;
@@ -529,6 +543,7 @@ pub extern "C" fn rt_byte_array_new(capacity: u64) -> RuntimeValue {
             std::alloc::dealloc(ptr as *mut u8, header_layout);
             return RuntimeValue::NIL;
         }
+        note_aux_alloc(HeapObjectType::Array as u8, data_layout.size() as u64);
 
         (*ptr).header = HeapHeader::new(HeapObjectType::Array, header_size as u32);
         (*ptr).header.gc_flags |= gc_flags::BYTE_PACKED;
@@ -993,6 +1008,7 @@ pub extern "C" fn rt_typed_bytes_u8_push(array: RuntimeValue, value: i64) -> boo
             if new_size > old_bytes {
                 std::ptr::write_bytes((new_data as *mut u8).add(old_bytes), 0, new_size - old_bytes);
             }
+            note_array_data_swap((*arr).data, old_layout.size(), new_size);
             (*arr).data = new_data;
             (*arr).capacity = new_cap;
         }
@@ -1032,6 +1048,7 @@ pub extern "C" fn rt_typed_words_u32_push(array: RuntimeValue, value: i64) -> bo
             if new_size > old_len_bytes {
                 std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_size - old_len_bytes);
             }
+            note_array_data_swap((*arr).data, old_layout.size(), new_size);
             (*arr).data = new_data;
             (*arr).capacity = new_cap;
         }
@@ -1067,6 +1084,7 @@ pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bo
             if new_size > old_len_bytes {
                 std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_size - old_len_bytes);
             }
+            note_array_data_swap((*arr).data, old_layout.size(), new_size);
             (*arr).data = new_data;
             (*arr).capacity = new_cap;
         }
@@ -1228,6 +1246,7 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
                 if new_tail_bytes > 0 {
                     std::ptr::write_bytes((new_data as *mut u8).add(old_cap as usize), 0, new_tail_bytes);
                 }
+                note_array_data_swap((*arr).data, old_layout.size(), new_size);
                 (*arr).data = new_data;
                 (*arr).capacity = new_cap;
             }
@@ -1254,6 +1273,7 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
                 if new_size > old_len_bytes {
                     std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_size - old_len_bytes);
                 }
+                note_array_data_swap((*arr).data, old_layout.size(), new_size);
                 (*arr).data = new_data;
                 (*arr).capacity = new_cap;
             }
@@ -1282,6 +1302,7 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
             if new_tail_bytes > 0 {
                 std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_tail_bytes);
             }
+            note_array_data_swap((*arr).data, old_layout.size(), new_size);
             (*arr).data = new_data;
             (*arr).capacity = new_cap;
         }
@@ -1335,6 +1356,7 @@ pub extern "C" fn rt_array_extend_i64(dst: RuntimeValue, src: RuntimeValue, coun
                 if new_tail_bytes > 0 {
                     std::ptr::write_bytes((new_data as *mut u8).add(old_cap as usize), 0, new_tail_bytes);
                 }
+                note_array_data_swap((*dst_arr).data, old_layout.size(), new_size);
                 (*dst_arr).data = new_data;
                 (*dst_arr).capacity = new_cap;
             }
@@ -1366,6 +1388,7 @@ pub extern "C" fn rt_array_extend_i64(dst: RuntimeValue, src: RuntimeValue, coun
             if new_tail_bytes > 0 {
                 std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_tail_bytes);
             }
+            note_array_data_swap((*dst_arr).data, old_layout.size(), new_size);
             (*dst_arr).data = new_data;
             (*dst_arr).capacity = new_cap;
         }
@@ -1677,6 +1700,7 @@ pub extern "C" fn rt_array_free(array: RuntimeValue) {
             } else {
                 array_data_layout((*ptr).capacity)
             };
+            note_aux_free(HeapObjectType::Array as u8, data_layout.size() as u64);
             std::alloc::dealloc((*ptr).data as *mut u8, data_layout);
             (*ptr).data = std::ptr::null_mut();
         }
@@ -3973,5 +3997,49 @@ mod string_free_contract_tests {
         }
         let refreed = (1..N).step_by(2).filter(|&i| rt_string_free(v[i]) == 1).count();
         assert_eq!(refreed, N / 2, "every survivor still found and freed");
+    }
+}
+
+/// Lane-L3 aux-byte accounting: array backing-buffer capacity bytes must rise
+/// on create/grow and fall on free. The counters are process-global and other
+/// tests allocate concurrently, so assertions use a delta large enough (1 MiB)
+/// to dominate unrelated churn instead of exact equality.
+#[cfg(test)]
+mod aux_byte_accounting_tests {
+    use super::{rt_array_free, rt_array_new, rt_array_push_grow};
+    use crate::value::core::RuntimeValue;
+    use crate::value::heap::{rt_heap_array_capacity_bytes, rt_heap_aux_live_bytes, rt_heap_aux_live_bytes_by_kind, HeapObjectType};
+
+    #[test]
+    fn aux_counters_rise_on_array_growth_and_fall_on_free() {
+        const SLOTS: i64 = 1 << 17; // 128K RuntimeValue slots = 1 MiB capacity
+        const BYTES: i64 = SLOTS * 8;
+
+        let before = rt_heap_array_capacity_bytes();
+        let arr = rt_array_new(4);
+        assert!(!arr.is_nil(), "array allocation succeeded");
+        for i in 0..SLOTS {
+            assert!(rt_array_push_grow(arr, RuntimeValue::from_int(i)));
+        }
+        let grown = rt_heap_array_capacity_bytes();
+        assert!(
+            grown >= before + BYTES,
+            "growth must raise array capacity bytes: before={before} grown={grown}"
+        );
+        assert!(
+            rt_heap_aux_live_bytes_by_kind(HeapObjectType::Array as i64) >= before + BYTES,
+            "by-kind view must see the same growth"
+        );
+        assert!(
+            rt_heap_aux_live_bytes() >= before + BYTES,
+            "all-kind aux total must include array backing bytes"
+        );
+
+        rt_array_free(arr);
+        let freed = rt_heap_array_capacity_bytes();
+        assert!(
+            freed <= grown - BYTES,
+            "free must return capacity bytes: grown={grown} freed={freed}"
+        );
     }
 }

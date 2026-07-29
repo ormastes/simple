@@ -299,6 +299,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("memory_usage", memory::memory_usage);
     insert_simple!("memory_usage_percent", memory::memory_usage_percent);
     insert_simple!("rt_heap_registry_count", memory::rt_heap_registry_count);
+    insert_simple!("rt_mem_profile_abi_version", memory::rt_mem_profile_abi_version);
+    insert_simple!("rt_mem_profile_features", memory::rt_mem_profile_features);
     insert_simple!(
         "rt_transient_array_scope_begin",
         memory::rt_transient_array_scope_begin
