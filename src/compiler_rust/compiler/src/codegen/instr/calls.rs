@@ -2390,6 +2390,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // Print/IO (text → ptr, len)
         "rt_print_str" | "rt_println_str" | "rt_eprint_str" | "rt_eprintln_str" => Some(&[0]),
 
+        // Memory-attribution owner tag (heap.rs::rt_mem_attr_set_owner takes
+        // (name_ptr, name_len); see matching RUNTIME_FUNCS entry in
+        // codegen/runtime_sffi.rs).
+        "rt_mem_attr_set_owner" => Some(&[0]),
+
         // Environment variables
         "rt_env_get" | "rt_env_get_i64" | "rt_get_env" | "rt_env_exists" | "rt_env_remove" => Some(&[0]),
         "rt_env_set" | "rt_set_env" => Some(&[0, 1]),

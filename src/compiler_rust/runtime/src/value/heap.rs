@@ -661,13 +661,18 @@ pub extern "C" fn rt_mem_attr_enabled() -> i64 {
 }
 
 /// # Safety
-/// `name` must be a valid NUL-terminated C string or null.
+/// `name_ptr` must point at `name_len` valid UTF-8 bytes, or be null (in which
+/// case the call is a no-op). This matches the calling convention native
+/// codegen uses for `text` extern parameters — a raw (ptr, len) byte-span
+/// pair, not a NUL-terminated C string — the same convention used by
+/// `rt_file_exists`/`rt_env_get`/etc. in `sffi/`.
 #[no_mangle]
-pub unsafe extern "C" fn rt_mem_attr_set_owner(name: *const std::ffi::c_char) {
-    if name.is_null() || !mem_attr_enabled() {
+pub unsafe extern "C" fn rt_mem_attr_set_owner(name_ptr: *const u8, name_len: u64) {
+    if name_ptr.is_null() || !mem_attr_enabled() {
         return;
     }
-    if let Ok(name) = std::ffi::CStr::from_ptr(name).to_str() {
+    let bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
+    if let Ok(name) = std::str::from_utf8(bytes) {
         set_current_owner(name);
     }
 }

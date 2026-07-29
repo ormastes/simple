@@ -1687,6 +1687,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // File I/O Metadata Operations
     // =========================================================================
+    // Memory-attribution owner tag (heap.rs). name_ptr/name_len -> void; see
+    // text_arg_indices() in codegen/instr/calls.rs for the matching text-arg
+    // expansion entry that turns the Simple-level `text` argument into this
+    // (ptr, len) pair.
+    RuntimeFuncSpec::new("rt_mem_attr_set_owner", &[I64, I64], &[]),
     RuntimeFuncSpec::new("rt_file_exists", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_file_is_regular_no_follow", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_dir_exists", &[I64, I64], &[I8]),  // path_ptr, path_len -> bool

@@ -1,7 +1,20 @@
 # Bug: `rt_mem_attr_set_owner` owner name dropped under JIT/native engine
 
 **Found:** 2026-07-29, while writing `test/03_system/check/mem_attr_report_spec.spl`
-**Status:** Open, not yet fixed (out of scope for the spec-writing task that found it)
+**Status:** RESOLVED same day.
+
+## Resolution
+
+Root cause: the extern was declared `*const c_char` (NUL-terminated C string),
+but native codegen passes `text` extern arguments as a raw `(ptr, len)`
+byte-span pair — the same convention `rt_file_exists`/`rt_env_get` use — so
+`CStr::from_ptr` read an empty/garbage string. Fix: signature changed to
+`(name_ptr: *const u8, name_len: u64)` decoded via `from_raw_parts` +
+`from_utf8` (heap.rs), plus the matching `text_arg_indices` entry in
+`codegen/instr/calls.rs` and `RuntimeFuncSpec` row in `codegen/runtime_sffi.rs`.
+The interpreter wrapper (`interpreter_extern/memory.rs`) calls
+`set_current_owner` directly and was never affected. Verified: JIT probe shows
+the owner row with real byte counts; interpreter unchanged; spec 2/2.
 
 ## Summary
 
