@@ -345,11 +345,27 @@ class CudaBackend:
 
             case UnaryOp(dest, op, operand):
                 pointer_spaces.remove(dest.id)
+                val dest_mir_ty = self.operand_mir_type(func, MirOperand.copy(dest))?
+                val operand_mir_ty = self.operand_mir_type(func, operand)?
+                if dest_mir_ty.kind != operand_mir_ty.kind:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA unary destination and operand types must match"))
                 match op:
-                    case Neg | Not: ()
+                    case Neg:
+                        match dest_mir_ty.kind:
+                            case I16 | I32 | I64 | U16 | U32 | U64 | F32 | F64: ()
+                            case _:
+                                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA negation requires a 16-bit, 32-bit, or 64-bit integer or F32/F64 operand"))
+                    case Not:
+                        if dest_mir_ty.kind != MirTypeKind.Bool:
+                            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA logical Not requires a Bool operand"))
+                    case BitNot:
+                        match dest_mir_ty.kind:
+                            case I16 | I32 | I64 | U16 | U32 | U64: ()
+                            case _:
+                                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA BitNot requires a 16-bit, 32-bit, or 64-bit integer operand"))
                     case _:
                         return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support unary operation: {op}"))
-                self.compile_unaryop(builder, dest, op, operand, self.local_primitive_type(func, dest)?)
+                self.compile_unaryop(builder, dest, op, operand, self.mir_type_to_primitive(dest_mir_ty))
 
             case Load(dest, ptr):
                 pointer_spaces.remove(dest.id)
@@ -678,6 +694,8 @@ class CudaBackend:
                 builder.emit_neg(dest_reg, ty, src_reg)
             case Not:
                 builder.emit_line("not.pred {dest_reg}, {src_reg};")
+            case BitNot:
+                builder.emit_bitnot(dest_reg, ty, src_reg)
             case _:
                 builder.emit_comment("Unsupported unaryop: {op}")
 

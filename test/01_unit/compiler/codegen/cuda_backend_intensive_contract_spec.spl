@@ -15,8 +15,12 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn cuda_i32() -> MirType: MirType(kind: MirTypeKind.I32)
 fn cuda_i64() -> MirType: MirType(kind: MirTypeKind.I64)
+fn cuda_i16() -> MirType: MirType(kind: MirTypeKind.I16)
+fn cuda_i8() -> MirType: MirType(kind: MirTypeKind.I8)
 fn cuda_u32() -> MirType: MirType(kind: MirTypeKind.U32)
 fn cuda_u64() -> MirType: MirType(kind: MirTypeKind.U64)
+fn cuda_u16() -> MirType: MirType(kind: MirTypeKind.U16)
+fn cuda_u8() -> MirType: MirType(kind: MirTypeKind.U8)
 fn cuda_f32() -> MirType: MirType(kind: MirTypeKind.F32)
 fn cuda_f64() -> MirType: MirType(kind: MirTypeKind.F64)
 fn cuda_bool() -> MirType: MirType(kind: MirTypeKind.Bool)
@@ -121,21 +125,76 @@ fn cuda_bitcast_function(id: i64, name: text, source_type: MirType, dest_type: M
         [block], true
     )
 
-fn cuda_neg_function(id: i64, name: text, ty: MirType) -> MirFunction:
+fn cuda_unary_function(id: i64, name: text, op: MirUnaryOp, source_type: MirType, dest_type: MirType) -> MirFunction:
     val block = MirBlock(
         id: BlockId.entry(), label: Some("entry"),
         instructions: [MirInst(kind: MirInstKind.UnaryOp(
-            LocalId(id: 1), MirUnaryOp.Neg, MirOperand.copy(LocalId(id: 0))
+            LocalId(id: 1), op, MirOperand.copy(LocalId(id: 0))
         ), span: nil)],
         terminator: MirTerminator.Ret(nil)
     )
     cuda_function(
-        id, name, [ty], MirType.unit(),
-        [cuda_arg(0, 0, "value", ty), cuda_temp(1, ty)],
+        id, name, [source_type], MirType.unit(),
+        [cuda_arg(0, 0, "value", source_type), cuda_temp(1, dest_type)],
         [block], true
     )
 
+fn cuda_neg_function(id: i64, name: text, ty: MirType) -> MirFunction:
+    cuda_unary_function(id, name, MirUnaryOp.Neg, ty, ty)
+
 describe "CUDA backend intensive MIR contract":
+    it "lowers validated logical and bitwise CUDA unary operations":
+        val ptx = compile_supported_cuda([
+            cuda_neg_function(45, "cuda_neg_u16", cuda_u16()),
+            cuda_unary_function(46, "cuda_not_bool", MirUnaryOp.Not, cuda_bool(), cuda_bool()),
+            cuda_unary_function(47, "cuda_bitnot_i16", MirUnaryOp.BitNot, cuda_i16(), cuda_i16()),
+            cuda_unary_function(48, "cuda_bitnot_u16", MirUnaryOp.BitNot, cuda_u16(), cuda_u16()),
+            cuda_unary_function(49, "cuda_bitnot_i32", MirUnaryOp.BitNot, cuda_i32(), cuda_i32()),
+            cuda_unary_function(50, "cuda_bitnot_u32", MirUnaryOp.BitNot, cuda_u32(), cuda_u32()),
+            cuda_unary_function(51, "cuda_bitnot_i64", MirUnaryOp.BitNot, cuda_i64(), cuda_i64()),
+            cuda_unary_function(52, "cuda_bitnot_u64", MirUnaryOp.BitNot, cuda_u64(), cuda_u64())
+        ])
+
+        expect(ptx).to_contain("sub.u16 %r1, 0, %r0;")
+        expect(ptx).to_contain("not.pred %r1, %r0;")
+        expect(ptx).to_contain("not.b16 %r1, %r0;")
+        expect(ptx).to_contain("not.b32 %r1, %r0;")
+        expect(ptx).to_contain("not.b64 %r1, %r0;")
+
+        val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v ptxas >/dev/null 2>&1"])
+        if available == 0:
+            val ptx_path = "/tmp/simple_cuda_unary.ptx"
+            val cubin_path = "/tmp/simple_cuda_unary.cubin"
+            expect(rt_file_write_text(ptx_path, ptx)).to_equal(true)
+            val (_as_out, as_err, as_code) = rt_process_run("ptxas", ["-arch=sm_86", ptx_path, "-o", cubin_path])
+            expect(as_code).to_equal(0)
+            expect(as_err).to_equal("")
+
+    it "rejects malformed and unsupported CUDA unary operations":
+        val mismatch = cuda_unary_function(
+            53, "cuda_bad_unary_mismatch", MirUnaryOp.Neg, cuda_u32(), cuda_i32()
+        )
+        assert_backend_error_contains(mismatch, "destination and operand types must match")
+
+        val integer_not = cuda_unary_function(
+            54, "cuda_bad_integer_not", MirUnaryOp.Not, cuda_u32(), cuda_u32()
+        )
+        assert_backend_error_contains(integer_not, "logical Not requires a Bool operand")
+
+        val float_bitnot = cuda_unary_function(
+            55, "cuda_bad_float_bitnot", MirUnaryOp.BitNot, cuda_f32(), cuda_f32()
+        )
+        assert_backend_error_contains(float_bitnot, "BitNot requires a 16-bit, 32-bit, or 64-bit integer operand")
+
+        val narrow_signed = cuda_neg_function(56, "cuda_bad_i8_neg", cuda_i8())
+        assert_backend_error_contains(narrow_signed, "negation requires a 16-bit, 32-bit, or 64-bit integer")
+
+        val narrow_unsigned = cuda_neg_function(57, "cuda_bad_u8_neg", cuda_u8())
+        assert_backend_error_contains(narrow_unsigned, "negation requires a 16-bit, 32-bit, or 64-bit integer")
+
+        val pointer_neg = cuda_neg_function(58, "cuda_bad_pointer_neg", cuda_ptr())
+        assert_backend_error_contains(pointer_neg, "negation requires a 16-bit, 32-bit, or 64-bit integer")
+
     it "lowers unsigned negation with legal modulo-width PTX":
         val ptx = compile_supported_cuda([
             cuda_neg_function(43, "cuda_neg_u32", cuda_u32()),
@@ -342,7 +401,7 @@ describe "CUDA backend intensive MIR contract":
         val fn_ = cuda_function(1, "cuda_control", [cuda_bool()], MirType.unit(), [cuda_arg(0, 0, "cond", cuda_bool())], blocks, true)
         val ptx = compile_supported_cuda([fn_])
         expect(ptx).to_contain("ld.param.u8")
-        expect(ptx).to_contain("setp.ne.u8 %r0")
+        expect(ptx).to_contain("setp.ne.u16 %r0")
         expect(ptx).to_contain("@%r0 bra BB1;")
         expect(ptx).to_contain("bra BB3;")
         expect(ptx).to_contain("bra BB1;")
