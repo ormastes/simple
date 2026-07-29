@@ -104,9 +104,12 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         expect(output).to_contain("WorkgroupId")
         expect(output).to_contain("OpReturn")
 
-    it "assembles and validates the supported subset when SPIR-V Tools are installed":
+    it "assembles and validates invocation IDs and a workgroup barrier when SPIR-V Tools are installed":
         val output = compile_supported_vulkan(
-            [vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(0), 0))],
+            [
+                vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(0), 0)),
+                vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup))
+            ],
             MirTerminator.Ret(nil)
         )
         val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v spirv-as >/dev/null 2>&1 && command -v spirv-val >/dev/null 2>&1"])
@@ -128,9 +131,26 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         val error = reject_unsupported_vulkan([vulkan_inst(constant)], MirTerminator.Ret(nil))
         assert_backend_error_contains(error, "constant lowering")
 
-    it "rejects barriers and memory fences instead of unresolved scope IDs":
-        val barrier_error = reject_unsupported_vulkan([vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup))], MirTerminator.Ret(nil))
-        assert_backend_error_contains(barrier_error, "barrier lowering")
+    it "emits valid workgroup and subgroup control barrier constants":
+        val workgroup = compile_supported_vulkan(
+            [vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup))],
+            MirTerminator.Ret(nil)
+        )
+        expect(workgroup).to_contain("= OpConstant %2 2")
+        expect(workgroup).to_contain("= OpConstant %2 264")
+        expect(workgroup).to_contain("OpControlBarrier %10 %10 %12")
+
+        val subgroup = compile_supported_vulkan(
+            [vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Subgroup))],
+            MirTerminator.Ret(nil)
+        )
+        expect(subgroup).to_contain("= OpConstant %2 3")
+        expect(subgroup).to_contain("= OpConstant %2 2376")
+        expect(subgroup).to_contain("OpControlBarrier %11 %11 %13")
+
+    it "rejects impossible device-wide barriers and unresolved memory fences":
+        val barrier_error = reject_unsupported_vulkan([vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Device))], MirTerminator.Ret(nil))
+        assert_backend_error_contains(barrier_error, "cannot synchronize all workgroups")
         val fence_error = reject_unsupported_vulkan([vulkan_inst(MirInstKind.GpuMemFence(GpuMemoryScope.Device))], MirTerminator.Ret(nil))
         assert_backend_error_contains(fence_error, "memory fence lowering")
 

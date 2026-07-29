@@ -7,7 +7,7 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.backend.backend_api.*
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
-use compiler.backend.gpu_codegen_types.{GpuCodegen, GpuBarrierScope}
+use compiler.backend.gpu_codegen_types.{GpuCodegen, GpuBarrierScope as CodegenBarrierScope}
 use compiler.backend.gpu_backend_metadata.{gpu_backend_supports_target}
 use compiler.backend.vulkan_type_mapper.*
 use compiler.backend.vulkan.spirv_builder.{SpirvBuilder}
@@ -30,6 +30,7 @@ class VulkanBackend:
     Supported subset:
     - Compute entry-point generation
     - Global, local, and workgroup invocation IDs
+    - Workgroup and subgroup control barriers
     - Void return and unreachable terminators
 
     All other MIR operations fail with a typed Vulkan backend error. This is
@@ -168,6 +169,10 @@ class VulkanBackend:
         builder.emit("{builder.id_str(uvec3_type)} = OpTypeVector {builder.id_str(u32_type)} 3")
         builder.emit("{builder.id_str(uvec3_input_ptr)} = OpTypePointer Input {builder.id_str(uvec3_type)}")
         builder.emit("{builder.id_str(func_type)} = OpTypeFunction {builder.id_str(void_type)}")
+        val scope_workgroup = builder.emit_const_int(u32_type, 2)
+        val scope_subgroup = builder.emit_const_int(u32_type, 3)
+        val semantics_workgroup = builder.emit_const_int(u32_type, 264)
+        val semantics_subgroup = builder.emit_const_int(u32_type, 2376)
         builder.emit("{builder.id_str(global_invocation_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("{builder.id_str(local_invocation_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("{builder.id_str(workgroup_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
@@ -185,7 +190,7 @@ class VulkanBackend:
                 builder.emit_label()
 
             for inst in block.instructions:
-                val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id))
+                val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id, scope_workgroup, scope_subgroup, semantics_workgroup, semantics_subgroup))
                 match result:
                     case Ok(_):
                         ()
@@ -207,7 +212,7 @@ class VulkanBackend:
     fn compile_instruction(
         builder: SpirvBuilder,
         inst: MirInst,
-        types: (i64, i64, i64, i64, i64, i64, i64, i64, i64)  # (i32, u32, i64, f32, bool, uvec3, global_id, local_id, workgroup_id)
+        types: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)  # scalar/vector types, builtin variables, barrier constants
     ) -> Result<(), CompileError>:
         """Compile a single MIR instruction to SPIR-V."""
         val _destruct_1 = types
@@ -220,6 +225,10 @@ class VulkanBackend:
         val global_id_var = _destruct_1[6]
         val local_id_var = _destruct_1[7]
         val workgroup_id_var = _destruct_1[8]
+        val scope_workgroup = _destruct_1[9]
+        val scope_subgroup = _destruct_1[10]
+        val semantics_workgroup = _destruct_1[11]
+        val semantics_subgroup = _destruct_1[12]
 
         match inst.kind:
             case Const(dest, value, ty):
@@ -261,7 +270,24 @@ class VulkanBackend:
                 builder.emit_comment("workgroup_id[{dim}] -> _l{dest.id}")
 
             case GpuBarrier(scope):
-                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V barrier lowering is not implemented"))
+                match scope:
+                    case Workgroup:
+                        builder.emit_control_barrier(
+                            builder.id_str(scope_workgroup),
+                            builder.id_str(scope_workgroup),
+                            builder.id_str(semantics_workgroup)
+                        )
+                    case Subgroup:
+                        builder.emit_control_barrier(
+                            builder.id_str(scope_subgroup),
+                            builder.id_str(scope_subgroup),
+                            builder.id_str(semantics_subgroup)
+                        )
+                    case Device:
+                        return Err(compileerror_backend_error(
+                            BackendKind.Vulkan,
+                            "Vulkan cannot synchronize all workgroups inside one dispatch"
+                        ))
 
             case GpuMemFence(scope):
                 return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V memory fence lowering is not implemented"))
@@ -378,7 +404,7 @@ impl GpuCodegen for VulkanBackend:
     fn compile_gpu_instruction(inst: MirInst) -> text:
         panic("Vulkan compile_gpu_instruction cannot propagate CompileError; use compile_kernel")
 
-    fn compile_barrier(scope: GpuBarrierScope) -> text:
+    fn compile_barrier(scope: CodegenBarrierScope) -> text:
         panic("Vulkan compile_barrier cannot propagate CompileError; use compile_kernel")
 
     fn compile_atomic(op: GpuAtomicOpKind, dest: LocalId, ptr: MirOperand, value: MirOperand) -> text:
