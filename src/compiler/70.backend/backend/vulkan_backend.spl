@@ -210,6 +210,8 @@ class VulkanBackend:
         val scope_device = builder.emit_const_int(u32_type, 1)
         val semantics_workgroup = builder.emit_const_int(u32_type, 264)
         val semantics_device = builder.emit_const_int(u32_type, 2376)
+        val uses_atomic_cas = self.function_uses_atomic_cas(func)
+        val semantics_workgroup_unequal = if uses_atomic_cas: builder.emit_const_int(u32_type, 258) else: 0
         var value_ids: Dict<i64, i64> = {}
         var pointer_ids: Dict<i64, i64> = {}
         var live_shared_array_ids: Dict<i64, i64> = {}
@@ -230,6 +232,11 @@ class VulkanBackend:
                             self.predeclare_operand_constant(builder, index, u32_type, i64_type)
                     case Store(_, value):
                         self.predeclare_operand_constant(builder, value, u32_type, i64_type)
+                    case GpuAtomicOp(_, _, _, value):
+                        self.predeclare_operand_constant(builder, value, u32_type, i64_type)
+                    case GpuAtomicCas(_, _, expected, desired):
+                        self.predeclare_operand_constant(builder, expected, u32_type, i64_type)
+                        self.predeclare_operand_constant(builder, desired, u32_type, i64_type)
                     case GpuBlockDim(dest, dim):
                         if dim >= 0 and dim <= 2:
                             val type_id = self.local_int_type_id(func, dest.id, u32_type, i64_type)
@@ -285,7 +292,7 @@ class VulkanBackend:
                 builder.emit_label()
 
             for inst in block.instructions:
-                val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id, num_workgroups, scope_workgroup, scope_subgroup, scope_device, semantics_workgroup, semantics_device), value_ids, shared_array_ids, live_shared_array_ids, shared_array_sizes, pointer_ids, index_upper_bounds, func, workgroup_size, shared_elem_ptr_type)
+                val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id, num_workgroups, scope_workgroup, scope_subgroup, scope_device, semantics_workgroup, semantics_device, semantics_workgroup_unequal), value_ids, shared_array_ids, live_shared_array_ids, shared_array_sizes, pointer_ids, index_upper_bounds, func, workgroup_size, shared_elem_ptr_type)
                 match result:
                     case Ok(_):
                         ()
@@ -307,7 +314,7 @@ class VulkanBackend:
     fn compile_instruction(
         builder: SpirvBuilder,
         inst: MirInst,
-        types: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64),  # scalar/vector types, builtin variables, barrier constants
+        types: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64),  # scalar/vector types, builtin variables, barrier constants
         mut value_ids: Dict<i64, i64>,
         mut shared_array_ids: Dict<i64, i64>,
         mut live_shared_array_ids: Dict<i64, i64>,
@@ -335,6 +342,7 @@ class VulkanBackend:
         val scope_device = _destruct_1[12]
         val semantics_workgroup = _destruct_1[13]
         val semantics_device = _destruct_1[14]
+        val semantics_workgroup_unequal = _destruct_1[15]
 
         match inst.kind:
             case Const(dest, Int(value), ty):
@@ -538,10 +546,51 @@ class VulkanBackend:
                 live_shared_array_ids[dest.id] = shared_array_ids[dest.id]
 
             case GpuAtomicOp(dest, op, ptr, value):
-                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V atomic operation lowering is not implemented: {op}"))
+                index_upper_bounds.remove(dest.id)
+                if op == GpuAtomicOpKind.CompareExchange:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan compare-exchange requires GpuAtomicCas"))
+                val ptr_id = self.shared_pointer_operand_id(ptr, pointer_ids)
+                if ptr_id == 0 or self.local_int_type_id(func, dest.id, u32_type, i64_type) != u32_type:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan atomic operation requires a lowered shared U32 pointer and U32 destination"))
+                val value_result = self.resolve_int_operand(builder, value, u32_type, value_ids, func, u32_type, i64_type)
+                if value_result.is_err():
+                    return Err(value_result.unwrap_err())
+                val value_id = value_result.unwrap()
+                match op:
+                    case Add:
+                        value_ids[dest.id] = builder.emit_atomic_iadd(u32_type, ptr_id, scope_workgroup, semantics_workgroup, value_id)
+                    case Sub:
+                        value_ids[dest.id] = builder.emit_atomic_isub(u32_type, ptr_id, scope_workgroup, semantics_workgroup, value_id)
+                    case And:
+                        value_ids[dest.id] = builder.emit_atomic_and(u32_type, ptr_id, scope_workgroup, semantics_workgroup, value_id)
+                    case Or:
+                        value_ids[dest.id] = builder.emit_atomic_or(u32_type, ptr_id, scope_workgroup, semantics_workgroup, value_id)
+                    case Xor:
+                        value_ids[dest.id] = builder.emit_atomic_xor(u32_type, ptr_id, scope_workgroup, semantics_workgroup, value_id)
+                    case Min:
+                        value_ids[dest.id] = builder.emit_atomic_umin(u32_type, ptr_id, scope_workgroup, semantics_workgroup, value_id)
+                    case Max:
+                        value_ids[dest.id] = builder.emit_atomic_umax(u32_type, ptr_id, scope_workgroup, semantics_workgroup, value_id)
+                    case Exchange:
+                        value_ids[dest.id] = builder.emit_atomic_exchange(u32_type, ptr_id, scope_workgroup, semantics_workgroup, value_id)
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan atomic operation is not implemented: {op}"))
 
             case GpuAtomicCas(dest, ptr, expected, desired):
-                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V atomic compare-exchange lowering is not implemented"))
+                index_upper_bounds.remove(dest.id)
+                val ptr_id = self.shared_pointer_operand_id(ptr, pointer_ids)
+                if ptr_id == 0 or self.local_int_type_id(func, dest.id, u32_type, i64_type) != u32_type:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan atomic compare-exchange requires a lowered shared U32 pointer and U32 destination"))
+                val expected_result = self.resolve_int_operand(builder, expected, u32_type, value_ids, func, u32_type, i64_type)
+                if expected_result.is_err():
+                    return Err(expected_result.unwrap_err())
+                val desired_result = self.resolve_int_operand(builder, desired, u32_type, value_ids, func, u32_type, i64_type)
+                if desired_result.is_err():
+                    return Err(desired_result.unwrap_err())
+                value_ids[dest.id] = builder.emit_atomic_compare_exchange(
+                    u32_type, ptr_id, scope_workgroup, semantics_workgroup,
+                    semantics_workgroup_unequal, desired_result.unwrap(), expected_result.unwrap()
+                )
 
             case Nop:
                 ()
@@ -588,6 +637,16 @@ class VulkanBackend:
             for inst in block.instructions:
                 match inst.kind:
                     case GpuSharedAlloc(_, _, _):
+                        return true
+                    case _:
+                        ()
+        false
+
+    fn function_uses_atomic_cas(func: MirFunction) -> bool:
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case GpuAtomicCas(_, _, _, _):
                         return true
                     case _:
                         ()

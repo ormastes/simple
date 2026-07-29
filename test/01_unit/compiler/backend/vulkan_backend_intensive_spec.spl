@@ -585,13 +585,83 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         )
         assert_backend_error_contains(bad_store, "type or range does not match")
 
-    it "rejects atomic operations and compare-exchange until operands and semantics are lowered":
-        val atomic = MirInstKind.GpuAtomicOp(vulkan_local(2), GpuAtomicOpKind.Add, vulkan_operand(0), vulkan_operand(1))
-        val atomic_error = reject_unsupported_vulkan([vulkan_inst(atomic)], MirTerminator.Ret(nil))
-        assert_backend_error_contains(atomic_error, "atomic operation lowering")
-        val cas = MirInstKind.GpuAtomicCas(vulkan_local(3), vulkan_operand(0), vulkan_operand(1), vulkan_operand(2))
-        val cas_error = reject_unsupported_vulkan([vulkan_inst(cas)], MirTerminator.Ret(nil))
-        assert_backend_error_contains(cas_error, "atomic compare-exchange lowering")
+    it "lowers the complete U32 Workgroup atomic set with legal semantics":
+        val output = compile_supported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 256)),
+                vulkan_inst(MirInstKind.GpuLocalId(vulkan_local(1), 0)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(2), vulkan_operand(0), [vulkan_operand(1)])),
+                vulkan_inst(MirInstKind.Store(vulkan_operand(2), vulkan_u32_operand(0))),
+                vulkan_inst(MirInstKind.GpuAtomicOp(vulkan_local(3), GpuAtomicOpKind.Add, vulkan_operand(2), vulkan_u32_operand(1))),
+                vulkan_inst(MirInstKind.GpuAtomicOp(vulkan_local(4), GpuAtomicOpKind.Sub, vulkan_operand(2), vulkan_u32_operand(2))),
+                vulkan_inst(MirInstKind.GpuAtomicOp(vulkan_local(5), GpuAtomicOpKind.And, vulkan_operand(2), vulkan_u32_operand(0))),
+                vulkan_inst(MirInstKind.GpuAtomicOp(vulkan_local(6), GpuAtomicOpKind.Or, vulkan_operand(2), vulkan_u32_operand(4))),
+                vulkan_inst(MirInstKind.GpuAtomicOp(vulkan_local(7), GpuAtomicOpKind.Xor, vulkan_operand(2), vulkan_u32_operand(8))),
+                vulkan_inst(MirInstKind.GpuAtomicOp(vulkan_local(8), GpuAtomicOpKind.Min, vulkan_operand(2), vulkan_u32_operand(3))),
+                vulkan_inst(MirInstKind.GpuAtomicOp(vulkan_local(9), GpuAtomicOpKind.Max, vulkan_operand(2), vulkan_u32_operand(7))),
+                vulkan_inst(MirInstKind.GpuAtomicOp(vulkan_local(10), GpuAtomicOpKind.Exchange, vulkan_operand(2), vulkan_u32_operand(9))),
+                vulkan_inst(MirInstKind.GpuAtomicCas(vulkan_local(11), vulkan_operand(2), vulkan_u32_operand(8), vulkan_u32_operand(6))),
+                vulkan_inst(MirInstKind.BinOp(vulkan_local(12), MirBinOp.Add, vulkan_operand(3), vulkan_operand(11)))
+            ],
+            MirTerminator.Ret(nil),
+            [
+                vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_u32()),
+                vulkan_temp(2, vulkan_ptr_u32()), vulkan_temp(3, vulkan_u32()),
+                vulkan_temp(4, vulkan_u32()), vulkan_temp(5, vulkan_u32()),
+                vulkan_temp(6, vulkan_u32()), vulkan_temp(7, vulkan_u32()),
+                vulkan_temp(8, vulkan_u32()), vulkan_temp(9, vulkan_u32()),
+                vulkan_temp(10, vulkan_u32()), vulkan_temp(11, vulkan_u32()),
+                vulkan_temp(12, vulkan_u32())
+            ]
+        )
+        expect(output).to_contain("%16 = OpConstant %2 258")
+        expect(output).to_contain("%31 = OpAtomicIAdd %2 %30 %11 %14 %13")
+        expect(output).to_contain("%32 = OpAtomicISub %2 %30 %11 %14 %11")
+        expect(output).to_contain("%33 = OpAtomicAnd %2 %30 %11 %14 %18")
+        expect(output).to_contain("%34 = OpAtomicOr %2 %30 %11 %14 %19")
+        expect(output).to_contain("%35 = OpAtomicXor %2 %30 %11 %14 %20")
+        expect(output).to_contain("%36 = OpAtomicUMin %2 %30 %11 %14 %12")
+        expect(output).to_contain("%37 = OpAtomicUMax %2 %30 %11 %14 %21")
+        expect(output).to_contain("%38 = OpAtomicExchange %2 %30 %11 %14 %22")
+        expect(output).to_contain("%39 = OpAtomicCompareExchange %2 %30 %11 %14 %16 %23 %20")
+        expect(output).to_contain("%40 = OpIAdd %2 %31 %39")
+        assert_spirv_valid_if_available(output, "simple_vulkan_shared_atomics")
+
+    it "rejects malformed Vulkan shared atomics":
+        val generic_cas = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 1)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(1), vulkan_operand(0), [vulkan_u32_operand(0)])),
+                vulkan_inst(MirInstKind.GpuAtomicOp(vulkan_local(2), GpuAtomicOpKind.CompareExchange, vulkan_operand(1), vulkan_u32_operand(1)))
+            ],
+            MirTerminator.Ret(nil),
+            [
+                vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32()),
+                vulkan_temp(2, vulkan_u32())
+            ]
+        )
+        assert_backend_error_contains(generic_cas, "requires GpuAtomicCas")
+
+        val bad_pointer = reject_unsupported_vulkan_with_locals(
+            [vulkan_inst(MirInstKind.GpuAtomicOp(vulkan_local(1), GpuAtomicOpKind.Add, vulkan_operand(0), vulkan_u32_operand(1)))],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_u32())]
+        )
+        assert_backend_error_contains(bad_pointer, "lowered shared U32 pointer")
+
+        val bad_dest = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 1)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(1), vulkan_operand(0), [vulkan_u32_operand(0)])),
+                vulkan_inst(MirInstKind.GpuAtomicCas(vulkan_local(2), vulkan_operand(1), vulkan_u32_operand(0), vulkan_u32_operand(1)))
+            ],
+            MirTerminator.Ret(nil),
+            [
+                vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32()),
+                vulkan_temp(2, vulkan_i64())
+            ]
+        )
+        assert_backend_error_contains(bad_dest, "U32 pointer and U32 destination")
 
     it "propagates typed instruction errors through compile_module":
         val bad = vulkan_function_with_locals(
