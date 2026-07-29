@@ -113,6 +113,16 @@ bool rt_dir_create(const char* path, bool recursive) {
 #define RT_VALUE_HEAP_FLOAT 0x464C5431U
 #define RT_CORE_ARRAY_FLAG_BYTES 0x08U
 #define RT_CORE_ARRAY_FLAG_U64_PACKED 0x10U
+/* Internal-only marker distinguishing a tuple from a plain array. Both share
+ * the exact same RtCoreArray representation (rt_tuple_new is literally
+ * rt_array_new -- see rt_tuple_new below) and the SAME RT_VALUE_HEAP_ARRAY
+ * kind byte, so nothing at runtime could tell them apart before this bit was
+ * added: rt_to_string had no way to choose "(a, b)" (tuple) vs "[a, b]"
+ * (array) formatting for a boxed-ANY aggregate. This flag never crosses the
+ * C ABI boundary (no compiler-emitted call reads or writes it directly) and
+ * does not collide with RT_CORE_ARRAY_FLAG_BYTES/U64_PACKED above, so it is
+ * safe to set purely internally in rt_tuple_new. */
+#define RT_CORE_ARRAY_FLAG_TUPLE 0x01U
 #define RT_CORE_ARRAY_MAX_CAP 100000000LL
 #define RT_HOST_GPU_LANE_HOST 1
 #define RT_HOST_GPU_LANE_GPU 2
@@ -1794,6 +1804,12 @@ static void rt_core_write_bytes(FILE* stream, const uint8_t* ptr, uint64_t len) 
     fwrite(ptr, 1, (size_t)len, stream);
 }
 
+/* Defined further below in this file (after the aggregate formatters it
+ * dispatches to); forward-declared here so the direct-print path below can
+ * delegate tuple/array/dict/Option/Result formatting to the SAME dispatch
+ * rt_to_string uses, instead of duplicating it. */
+int64_t rt_to_string(int64_t value);
+
 static void rt_core_print_value_to(FILE* stream, int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (s) {
@@ -1820,6 +1836,18 @@ static void rt_core_print_value_to(FILE* stream, int64_t value) {
                 fprintf(stream, "<special:%llu>", (unsigned long long)rt_core_special_payload(value));
                 return;
         }
+    }
+
+    /* Aggregates (tuple/array/dict/Option/Result) and any other value rt_to_string
+     * recognizes: delegate so this direct-print path matches rt_to_string's
+     * output exactly. rt_to_string itself falls back to the same
+     * "<value:0x..>" marker for anything neither path recognizes, so this
+     * subsumes the old inline fprintf without changing that fallback's text. */
+    int64_t formatted = rt_to_string(value);
+    RtCoreString* fs = rt_core_as_string(formatted);
+    if (fs) {
+        rt_core_write_bytes(stream, (const uint8_t*)fs->data, fs->len);
+        return;
     }
 
     fprintf(stream, "<value:0x%llx>", (unsigned long long)(uint64_t)value);
@@ -2390,9 +2418,42 @@ int64_t rt_len(int64_t value) {
  * arm can share the one correct f64 renderer. */
 int64_t rt_raw_f64_to_string(double v);
 
+/* Aggregate formatters for rt_to_string (Batch B / bugs #3 #4 #5 #6, see
+ * doc/08_tracking/bug/pure_simple_fix_plan_2026-07-29.md). Each returns a
+ * fresh rt_string_new handle. Defined below (after rt_to_string) since they
+ * recurse into it; forward-declared here so rt_to_string's dispatch can call
+ * them. */
+static int64_t rt_core_format_array_like(RtCoreArray* array, int is_tuple);
+static int64_t rt_core_format_dict(RtCoreDict* dict);
+static int64_t rt_core_format_enum(RtCoreEnum* e);
+
 int64_t rt_to_string(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (s) return value;
+
+    /* Aggregate dispatch: only registered heap objects with a recognized
+     * kind are handled; anything else (including a raw i64 that merely
+     * aliases the HEAP tag bits) falls through to the existing scalar/opaque
+     * paths below, exactly as before -- rt_core_as_array/as_dict/as_enum all
+     * gate on registry membership (a pure pointer compare) before ever
+     * dereferencing, so this cannot mis-decode a non-heap value. */
+    RtCoreArray* agg_array = rt_core_as_array(value);
+    if (agg_array) {
+        return rt_core_format_array_like(agg_array, (agg_array->flags & RT_CORE_ARRAY_FLAG_TUPLE) != 0);
+    }
+    RtCoreDict* agg_dict = rt_core_as_dict(value);
+    if (agg_dict) {
+        return rt_core_format_dict(agg_dict);
+    }
+    RtCoreEnum* agg_enum = rt_core_as_enum(value);
+    if (agg_enum) {
+        /* rt_core_format_enum returns rt_core_nil() for a custom user enum
+         * (no name metadata reaches the runtime -- see its comment); fall
+         * through to the opaque <value:0x..> marker below rather than
+         * return nil as if that were the formatted text. */
+        int64_t enum_str = rt_core_format_enum(agg_enum);
+        if (enum_str != rt_core_nil()) return enum_str;
+    }
 
     char buf[64];
     if (rt_core_is_int(value)) {
@@ -2427,6 +2488,157 @@ int64_t rt_to_string(int64_t value) {
     }
     int len = snprintf(buf, sizeof(buf), "<value:0x%llx>", (unsigned long long)(uint64_t)value);
     return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+}
+
+/* rt_core_format_array_like -- shared tuple/array renderer.
+ *
+ * Tuples and plain arrays are the exact same RtCoreArray representation
+ * (rt_tuple_new is literally rt_array_new, see above), disambiguated only by
+ * RT_CORE_ARRAY_FLAG_TUPLE (set at construction in rt_tuple_new). Oracle
+ * (SIMPLE_EXECUTION_MODE=interpreter): tuple -> "(a, b, c)", empty tuple ->
+ * "()", single-element tuple -> "(5)" (NO trailing comma -- verified via
+ * `print (5,)`); array -> "[a, b, c]", empty array -> "[]" (verified via
+ * `print [3,1,2].sorted()` -> "[1, 2, 3]"). Elements recurse through
+ * rt_to_string so nested aggregates format correctly.
+ *
+ * Only the plain tagged-ANY element layout (flags without BYTES/U64_PACKED)
+ * is recursed through rt_to_string, since only that layout stores actual
+ * tagged/boxed values; BYTES stores raw uint8 bytes and U64_PACKED stores
+ * raw (untagged) i64 words -- both are internal storage optimizations for
+ * specific typed arrays, not ANY-typed element sequences, so each is
+ * rendered as a plain decimal integer per element instead. */
+static int64_t rt_core_format_array_like(RtCoreArray* array, int is_tuple) {
+    int64_t sb = rt_string_builder_new();
+    if (!sb) return rt_string_new((const uint8_t*)(is_tuple ? "()" : "[]"), 2);
+    rt_string_builder_push(sb, rt_string_new((const uint8_t*)(is_tuple ? "(" : "["), 1));
+    int64_t sep = rt_string_new((const uint8_t*)", ", 2);
+    for (int64_t i = 0; i < array->len; i++) {
+        if (i > 0) rt_string_builder_push(sb, sep);
+        char raw_buf[32];
+        int64_t elem_str;
+        if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+            int rl = snprintf(raw_buf, sizeof(raw_buf), "%d", (int)((uint8_t*)array->data)[i]);
+            elem_str = rt_string_new((const uint8_t*)raw_buf, rl > 0 ? (uint64_t)rl : 0);
+        } else if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+            int rl = snprintf(raw_buf, sizeof(raw_buf), "%lld", (long long)((int64_t*)array->data)[i]);
+            elem_str = rt_string_new((const uint8_t*)raw_buf, rl > 0 ? (uint64_t)rl : 0);
+        } else {
+            elem_str = rt_to_string(((int64_t*)array->data)[i]);
+        }
+        rt_string_builder_push(sb, elem_str);
+    }
+    rt_string_builder_push(sb, rt_string_new((const uint8_t*)(is_tuple ? ")" : "]"), 1));
+    return rt_string_builder_finish(sb);
+}
+
+/* rt_core_format_dict -- Oracle (interpreter): "{k: v, ...}", entries sorted
+ * ascending by their RENDERED key string (byte-wise, not numeric -- verified:
+ * a Dict<i64,text> with keys 1, 10, 2 prints "{1: x, 10: y, 2: z}", the same
+ * order "1" < "10" < "2" sorts as plain strings), bare/unquoted keys and
+ * values (verified: {"a": "hello"} prints "{a: hello}", no quotes anywhere),
+ * empty dict -> "{}". Keys/values recurse through rt_to_string. */
+typedef struct RtCoreDictSortEntry {
+    int64_t key_str;   /* rendered key, tagged rt_string handle */
+    int64_t value;     /* raw tagged value, rendered lazily during emit */
+} RtCoreDictSortEntry;
+
+static int rt_core_dict_sort_entry_less(int64_t a_str, int64_t b_str) {
+    RtCoreString* a = rt_core_as_string(a_str);
+    RtCoreString* b = rt_core_as_string(b_str);
+    if (!a || !b) return 0;
+    uint64_t min_len = a->len < b->len ? a->len : b->len;
+    int cmp = min_len > 0 ? memcmp(a->data, b->data, (size_t)min_len) : 0;
+    if (cmp != 0) return cmp < 0;
+    return a->len < b->len;
+}
+
+static int64_t rt_core_format_dict(RtCoreDict* dict) {
+    int64_t n = dict->len;
+    if (n <= 0) return rt_string_new((const uint8_t*)"{}", 2);
+    RtCoreDictSortEntry* entries = (RtCoreDictSortEntry*)malloc((size_t)n * sizeof(RtCoreDictSortEntry));
+    if (!entries) return rt_string_new((const uint8_t*)"{}", 2);
+    int64_t out_i = 0;
+    for (int64_t i = 0; i < dict->cap && out_i < n; i++) {
+        if (dict->entries[i].occupied != 1) continue;
+        entries[out_i].key_str = rt_to_string(dict->entries[i].key);
+        entries[out_i].value = dict->entries[i].value;
+        out_i++;
+    }
+    /* Insertion sort: dict print sizes are small in practice and this keeps
+     * the comparator a plain function (no qsort_r portability concerns). */
+    for (int64_t i = 1; i < out_i; i++) {
+        RtCoreDictSortEntry cur = entries[i];
+        int64_t j = i - 1;
+        while (j >= 0 && rt_core_dict_sort_entry_less(cur.key_str, entries[j].key_str)) {
+            entries[j + 1] = entries[j];
+            j--;
+        }
+        entries[j + 1] = cur;
+    }
+    int64_t sb = rt_string_builder_new();
+    if (!sb) {
+        free(entries);
+        return rt_string_new((const uint8_t*)"{}", 2);
+    }
+    rt_string_builder_push(sb, rt_string_new((const uint8_t*)"{", 1));
+    int64_t sep = rt_string_new((const uint8_t*)", ", 2);
+    int64_t colon = rt_string_new((const uint8_t*)": ", 2);
+    for (int64_t i = 0; i < out_i; i++) {
+        if (i > 0) rt_string_builder_push(sb, sep);
+        rt_string_builder_push(sb, entries[i].key_str);
+        rt_string_builder_push(sb, colon);
+        rt_string_builder_push(sb, rt_to_string(entries[i].value));
+    }
+    free(entries);
+    rt_string_builder_push(sb, rt_string_new((const uint8_t*)"}", 1));
+    return rt_string_builder_finish(sb);
+}
+
+/* rt_core_format_enum -- Option/Result formatting ONLY.
+ *
+ * IMPORTANT LIMITATION (see report to parent): enum_id 0 and 1 are reserved
+ * compiler constants for Result and Option respectively (see rt_enum_new's
+ * comment above), so those two are safe to name here. Every OTHER enum_id is
+ * a per-declared-type numeric identity assigned by the compiler's
+ * enum_runtime_id_index (switch_operators_calls.spl) -- but that name table
+ * (enum type name, variant names) is never emitted into the runtime binary
+ * as data, so the C runtime has no way to recover "Color"/"Green" etc. for a
+ * user-defined enum. Fabricating a plausible-looking but wrong name would be
+ * worse than the existing opaque fallback, so custom enums intentionally
+ * fall through to rt_to_string's <value:0x..> fallback unchanged. Oracle
+ * verified via SIMPLE_EXECUTION_MODE=interpreter: Option::Some(3) ->
+ * "Option::Some(3)", None -> "Option::None", Result Ok(7) -> "Result::Ok(7)",
+ * Err("bad") -> "Result::Err(bad)". Returns rt_core_nil() to signal "not
+ * handled, fall through" (nil is never a real formatted string result). */
+static int64_t rt_core_format_enum(RtCoreEnum* e) {
+    int64_t id = (int64_t)e->enum_id;
+    int64_t disc = (int64_t)e->discriminant;
+    if (id == 1) {
+        /* Option: discriminant 0 = Some(payload), 1 = None (see
+         * ensure_option_handle in switch_operators_calls.spl). */
+        if (disc == 1) return rt_string_new((const uint8_t*)"Option::None", 12);
+        int64_t sb = rt_string_builder_new();
+        rt_string_builder_push(sb, rt_string_new((const uint8_t*)"Option::Some(", 13));
+        rt_string_builder_push(sb, rt_to_string(e->payload));
+        rt_string_builder_push(sb, rt_string_new((const uint8_t*)")", 1));
+        return rt_string_builder_finish(sb);
+    }
+    if (id == 0) {
+        /* Result: discriminant 0 = Ok(payload), 1 = Err(payload) (see
+         * lower_try_expr's docstring in switch_operators_calls.spl). */
+        int64_t sb = rt_string_builder_new();
+        if (disc == 1) {
+            rt_string_builder_push(sb, rt_string_new((const uint8_t*)"Result::Err(", 12));
+        } else {
+            rt_string_builder_push(sb, rt_string_new((const uint8_t*)"Result::Ok(", 11));
+        }
+        rt_string_builder_push(sb, rt_to_string(e->payload));
+        rt_string_builder_push(sb, rt_string_new((const uint8_t*)")", 1));
+        return rt_string_builder_finish(sb);
+    }
+    /* Custom user enum: no name metadata reaches the runtime -- fall through
+     * (caller must treat rt_core_nil() as "not handled"). */
+    return rt_core_nil();
 }
 
 int64_t rt_raw_u64_to_string(int64_t raw) {
@@ -4758,6 +4970,9 @@ int64_t rt_tuple_new(int64_t len) {
     RtCoreArray* array = rt_core_array_ptr(tuple);
     if (!array) return rt_core_nil();
     array->len = len < 0 ? 0 : len;
+    /* Mark so rt_to_string can format this as "(a, b)" instead of the plain
+     * array's "[a, b]" -- see RT_CORE_ARRAY_FLAG_TUPLE above. */
+    array->flags |= RT_CORE_ARRAY_FLAG_TUPLE;
     return (int64_t)(uintptr_t)tuple;
 }
 
