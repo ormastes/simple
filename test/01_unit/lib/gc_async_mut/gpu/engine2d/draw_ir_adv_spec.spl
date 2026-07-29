@@ -78,7 +78,19 @@ fn _css_background_style(repeat: text, tile_x: text, tile_y: text, tile_width: t
         draw_ir_style_prop("background-tile-x", tile_x),
         draw_ir_style_prop("background-tile-y", tile_y),
         draw_ir_style_prop("background-tile-width", tile_width),
-        draw_ir_style_prop("background-tile-height", tile_height)
+        draw_ir_style_prop("background-tile-height", tile_height),
+        draw_ir_style_prop("background-shape-x", "0"),
+        draw_ir_style_prop("background-shape-y", "0"),
+        draw_ir_style_prop("background-shape-width", "2147483647"),
+        draw_ir_style_prop("background-shape-height", "2147483647"),
+        draw_ir_style_prop("background-radius-tl-x", "0"),
+        draw_ir_style_prop("background-radius-tl-y", "0"),
+        draw_ir_style_prop("background-radius-tr-x", "0"),
+        draw_ir_style_prop("background-radius-tr-y", "0"),
+        draw_ir_style_prop("background-radius-br-x", "0"),
+        draw_ir_style_prop("background-radius-br-y", "0"),
+        draw_ir_style_prop("background-radius-bl-x", "0"),
+        draw_ir_style_prop("background-radius-bl-y", "0")
     ]
 
 fn _css_background_result(style: [DrawIrStyleProp], command_x: i32, command_y: i32, command_width: i32, command_height: i32, target_width: i32, target_height: i32):
@@ -168,6 +180,93 @@ describe "Engine2D advanced Draw IR executor":
         ])
         embedded_engine.shutdown()
 
+    it "masks a clipped CSS background against its unclipped rounded shape":
+        var engine = Engine2D.create_with_backend(10, 8, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_image_command(
+            "rounded-css-background", 2, 0, 8, 8,
+            "image://rounded-css-background", [
+                draw_ir_style_prop("image-role", "css-background"),
+                draw_ir_style_prop("background-repeat", "repeat"),
+                draw_ir_style_prop("background-tile-x", "0"),
+                draw_ir_style_prop("background-tile-y", "0"),
+                draw_ir_style_prop("background-tile-width", "1"),
+                draw_ir_style_prop("background-tile-height", "1"),
+                draw_ir_style_prop("background-shape-x", "0"),
+                draw_ir_style_prop("background-shape-y", "0"),
+                draw_ir_style_prop("background-shape-width", "12"),
+                draw_ir_style_prop("background-shape-height", "8"),
+                draw_ir_style_prop("background-radius-tl-x", "4"),
+                draw_ir_style_prop("background-radius-tl-y", "4"),
+                draw_ir_style_prop("background-radius-tr-x", "0"),
+                draw_ir_style_prop("background-radius-tr-y", "0"),
+                draw_ir_style_prop("background-radius-br-x", "0"),
+                draw_ir_style_prop("background-radius-br-y", "0"),
+                draw_ir_style_prop("background-radius-bl-x", "0"),
+                draw_ir_style_prop("background-radius-bl-y", "0")
+            ])
+        val batch = draw_ir_batch(
+            "rounded-css-background", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 10, 8, 0, 1000, false),
+            [command])
+        val image = engine2d_resolved_draw_ir_image(
+            "image://rounded-css-background", 1, 1, [RED])
+        val result = engine2d_draw_ir_adv_batch_with_images(
+            engine, batch, false, [image])
+        expect(result.rendered_command_count).to_equal(1)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.pixels[0]).to_equal(BG)
+        expect(result.pixels[1]).to_equal(BG)
+        expect(result.pixels[2]).to_equal(RED)
+        expect(result.pixels[2 + 7 * 10]).to_equal(RED)
+        engine.shutdown()
+
+    it "bounds aggregate CSS work without charging a missing image":
+        var engine = Engine2D.create_with_backend(4, 2, "cpu")
+        engine.clear(BG)
+        val first = draw_ir_image_command(
+            "first-css-background", 0, 0, 3, 2,
+            "image://missing-css-background",
+            _css_background_style("repeat", "0", "0", "1", "1"))
+        val second = draw_ir_image_command(
+            "second-css-background", 1, 0, 3, 2,
+            "image://aggregate-css-background",
+            _css_background_style("repeat", "0", "0", "1", "1"))
+        val third = draw_ir_image_command(
+            "third-css-background", 0, 0, 3, 2,
+            "image://aggregate-css-background",
+            _css_background_style("repeat", "0", "0", "1", "1"))
+        val first_batch = draw_ir_batch(
+            "first-css-background", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 4, 2, 0, 1000, false),
+            [first])
+        val second_batch = draw_ir_batch(
+            "second-css-background", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 4, 2, 1, 1000, false),
+            [second])
+        val third_batch = draw_ir_batch(
+            "third-css-background", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 4, 2, 2, 1000, false),
+            [third])
+        val composition = draw_ir_composition(
+            "aggregate-css-background", "scene", DRAW_IR_BACKEND_CPU,
+            [first_batch, second_batch, third_batch])
+        val image = engine2d_resolved_draw_ir_image(
+            "image://aggregate-css-background", 1, 1, [RED])
+        val result = engine2d_draw_ir_adv_composition_with_images(
+            engine, composition, false, [image])
+        expect(result.rendered_command_count).to_equal(1)
+        expect(result.skipped_command_count).to_equal(2)
+        expect(result.pixels).to_equal([
+            BG, RED, RED, RED,
+            BG, RED, RED, RED
+        ])
+        engine.shutdown()
+
     it "rejects noncanonical duplicate overflow and over-target CSS background work":
         val noncanonical = _css_background_result(
             _css_background_style("repeat", "0", "0", "02", "2"),
@@ -179,7 +278,7 @@ describe "Engine2D advanced Draw IR executor":
         var duplicate_style = _css_background_style(
             "repeat", "0", "0", "2", "2")
         duplicate_style.push(
-            draw_ir_style_prop("background-repeat", "repeat"))
+            draw_ir_style_prop("background-shape-width", "2147483647"))
         val duplicate = _css_background_result(
             duplicate_style, 0, 0, 4, 3, 4, 3)
         expect(duplicate.skipped_command_count).to_equal(1)

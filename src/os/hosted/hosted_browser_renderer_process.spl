@@ -58,7 +58,8 @@ use os.hosted.hosted_browser_renderer_policy.{
     hosted_browser_renderer_request_policy,
     hosted_browser_replace_response_header,
     hosted_browser_response_header_value,
-    hosted_browser_sanitize_fetch_headers
+    hosted_browser_sanitize_fetch_headers,
+    hosted_browser_transport_host
 }
 
 extern fn rt_sleep_ms(milliseconds: i64)
@@ -77,21 +78,6 @@ extern fn rt_browser_http_job_take_response(handle: i64) -> [u8]
 extern fn rt_browser_http_job_take_error(handle: i64) -> text
 extern fn rt_browser_http_job_cancel(handle: i64) -> bool
 extern fn rt_browser_http_job_free(handle: i64) -> bool
-
-pub fn _browser_transport_host(host: text) -> text:
-    if (host.len() < 4 or not host.starts_with("[") or
-        not host.ends_with("]")):
-        return host
-    val parsed = Url.parse("https://{host}/")
-    if not parsed.?:
-        return host
-    if parsed!.host != host:
-        return host
-    val inner = host.slice(1, host.len() - 1)
-    if (not inner.contains(":") or inner.contains("[") or
-        inner.contains("]")):
-        return host
-    inner
 
 fn _hosted_browser_canonical_history_url(raw: text) -> text:
     if (raw == "" or raw != raw.trim() or raw.contains("\0") or
@@ -806,7 +792,7 @@ pub class HostedBrowserRendererProcess:
                     589824
                 val handle = rt_browser_http_job_start_public_limited(
                     url.scheme,
-                    _browser_transport_host(url.host),
+                    hosted_browser_transport_host(url.host),
                     port,
                     rt_text_to_bytes(build_request_bytes(prepared.request)),
                     remaining_ms,
@@ -1132,6 +1118,23 @@ pub class HostedBrowserRendererProcess:
             return self._begin_frame_request(
                 request, operation, timeout_ms
             )
+        if operation == "resize" and self.deferred_commands.len() > 0:
+            val newest_index = self.deferred_commands.len() - 1
+            val newest = self.deferred_commands[newest_index]
+            if newest.operation == "resize":
+                if (newest.resize_width == resize_width and
+                    newest.resize_height == resize_height):
+                    return Ok(false)
+                self.deferred_commands[newest_index] = (
+                    _HostedBrowserDeferredCommand(
+                        wire: request.wire,
+                        operation: operation,
+                        timeout_ms: timeout_ms,
+                        resize_width: resize_width,
+                        resize_height: resize_height
+                    )
+                )
+                return Ok(true)
         if self.deferred_commands.len() >= (
             BROWSER_RENDERER_MAX_DEFERRED_COMMANDS
         ):

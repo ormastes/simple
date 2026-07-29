@@ -1755,3 +1755,46 @@ implementation in progress / target evidence blocked
   gates pass; generated-spec layout remains zero. Pure-Simple executable specs
   remain blocked by the recorded target compiler crash, so no runtime PASS or
   bootstrap/seed fallback is claimed.
+- secondary-fidelity cooperative plan (2026-07-29): Small disjoint sidecars
+  cover rounded CSS image clipping plus zero-opacity subtree suppression,
+  secondary-window bookmark/address state, and in-process IPv6 transport-host
+  identity. Shared interfaces are `hosted_browser_transport_host`,
+  `content_paint_hidden_by_ancestor`, and registry `set_bookmark_snapshot` with
+  `bookmark_revision`/`applied_bookmark_revision`; rounded-image interfaces are
+  the `background-shape-*`/`background-radius-*-{x,y}` metadata and
+  `_engine2d_draw_ir_css_background_inside_clip`. Frozen manual steps are
+  `Render a repeated CSS background inside rounded corners`,
+  `Hide an entire zero-opacity subtree`,
+  `Synchronize Favorite state across secondary windows`,
+  `Restore the committed or startup URL when secondary address editing is
+  canceled`, and `Connect in-process IPv6 HTTP and HTTPS with a bare transport
+  host`. Focused helpers must fail explicitly. Merge owner and final reviewer
+  are highest-capability Codex; no full bootstrap is permitted, and the smallest
+  sufficient pure-Simple Phase 2/3 path is allowed only if executable evidence
+  becomes essential.
+- bounded-frame follow-up: The Draw-IR executor owns one aggregate
+  `css_background_pixel_work_remaining` budget per frame, capped to framebuffer
+  pixels, in addition to the existing per-command check. The worker computes
+  document HTML once per frame and reuses it through
+  `prepare_css_animation_instances_with_html`; deferred `resize` replaces the
+  newest queued resize while preserving discrete input order. Frozen steps are
+  `Bound aggregate CSS background pixel work to one framebuffer`,
+  `Reuse one document serialization on a mutating animation frame`, and
+  `Coalesce a live resize storm to the latest dimensions`.
+- secondary-fidelity implementation: Rounded CSS images retain unclipped clip
+  bounds plus effective per-axis corner radii and mask in the existing sampling
+  pass. The composition threads one framebuffer-sized remaining-work budget
+  through direct, delta, and offscreen paths; missing or inadmissible images do
+  not consume it. Zero-opacity subtrees skip paint/Draw IR while retaining CSS
+  hit testing. Bookmark snapshots converge by host revision across primary,
+  existing secondary, and new windows; secondary Escape restores committed or
+  startup URL. Both hosted HTTP owners share IPv6 transport normalization,
+  resize storms coalesce, and animation reconciliation/layout reuse one HTML
+  serialization.
+- secondary-fidelity verification: Highest-capability adversarial review is
+  CLEAR after separating paint opacity from semantic hit testing.
+  Rendering-source coupling, direct-env/runtime working+staged,
+  reverse-apply/whitespace, added-conflict, placeholder, and generated-spec
+  layout gates pass. Lightweight LSP diagnostics were unavailable; the bounded
+  direct pure-Simple check reproduced the recorded compiler crash (exit 139).
+  Per user direction, verification stopped without bootstrap or Rust seed.

@@ -37,26 +37,49 @@ use os.hosted.hosted_browser_renderer_policy.{
     hosted_browser_hsts_upgrade_valid,
     hosted_browser_remove_response_header,
     hosted_browser_renderer_request_policy,
-    hosted_browser_replace_response_header
+    hosted_browser_replace_response_header,
+    hosted_browser_transport_host
 }
 use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererProcess,
-    _browser_transport_host,
     hosted_browser_network_response_limit_reason
 }
 
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_read_text(path: text) -> text
 
 describe "hosted browser renderer transport host":
     it "unwraps only a canonical IPv6 address for socket and TLS":
-        expect(_browser_transport_host(
+        expect(hosted_browser_transport_host(
             "[2606:4700:4700::1111]"
         )).to_equal("2606:4700:4700::1111")
-        expect(_browser_transport_host("example.com")).to_equal("example.com")
-        expect(_browser_transport_host("192.0.2.1")).to_equal("192.0.2.1")
-        expect(_browser_transport_host("[not:v6]")).to_equal("[not:v6]")
-        expect(_browser_transport_host("[[::1]]")).to_equal("[[::1]]")
-        expect(_browser_transport_host("[::1")).to_equal("[::1")
+        expect(hosted_browser_transport_host(
+            "example.com"
+        )).to_equal("example.com")
+        expect(hosted_browser_transport_host(
+            "192.0.2.1"
+        )).to_equal("192.0.2.1")
+        expect(hosted_browser_transport_host(
+            "[not:v6]"
+        )).to_equal("[not:v6]")
+        expect(hosted_browser_transport_host(
+            "[[::1]]"
+        )).to_equal("[[::1]]")
+        expect(hosted_browser_transport_host("[::1")).to_equal("[::1")
+
+    it "normalizes every hosted browser transport boundary":
+        val renderer = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_process.spl"
+        ) ?? ""
+        val content = rt_file_read_text(
+            "src/os/hosted/hosted_web_content_session.spl"
+        ) ?? ""
+        expect(renderer).to_contain(
+            "hosted_browser_transport_host(url.host)"
+        )
+        expect(content).to_contain(
+            "hosted_browser_transport_host(url.host)"
+        )
 
 fn _external_png_pixels() -> [u32]:
     [0xFFCC3020u32, 0xFF112233u32, 0xFF445566u32, 0xFF778899u32]
@@ -700,6 +723,35 @@ describe "hosted browser renderer broker policy":
         expect(activated.message.kind).to_equal("key")
         expect(activated.message.request_id).to_equal(4)
         expect(broker.pending_wire_reply_to_request_id).to_equal(4)
+
+    it "coalesces a resize storm to the latest deferred dimensions":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.state = "active"
+        expect(broker.begin_pointer(
+            1, 4, 5, true, 1000
+        ).is_ok()).to_be(true)
+        var i: i32 = 1
+        while i <= 100:
+            expect(broker.begin_resize(
+                700 + i, 500 + i, 1000
+            ).is_ok()).to_be(true)
+            i = i + 1
+        match broker.begin_resize(800, 600, 1000):
+            Err(_):
+                expect(false).to_be(true)
+            Ok(started):
+                expect(started).to_be(false)
+        expect(broker.deferred_commands.len()).to_equal(1)
+
+        broker.pending_wire = ""
+        broker.pending_wire_is_command = false
+        broker.command_deadline_ms = 0
+        broker.pending_operation = ""
+        broker.next_request_id = 3
+        expect(broker._activate_deferred_command()).to_equal("")
+        expect(broker.pending_operation).to_equal("resize")
+        expect(broker.pending_resize_width).to_equal(800)
+        expect(broker.pending_resize_height).to_equal(600)
 
     it "does not erase an animation network response to queue input":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)

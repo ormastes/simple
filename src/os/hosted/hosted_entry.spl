@@ -383,6 +383,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var browser_pressed_control = ""
     var browser_profile: BrowserProfileStore? = nil
     var browser_bookmarks = BrowserBookmarkSnapshot.create([])
+    var browser_bookmark_revision: i64 = 0
+    var browser_bookmark_applied_revision: i64 = 0
     var browser_resource_close_failed = false
     var browser_hsts_save_retry_at_micros: i64 = 0
     if browser_profile_window_id > 0:
@@ -403,6 +405,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                     rt_time_now_unix_micros() / 1000
                                 )
                                 browser_bookmarks = bookmarks
+                                browser_bookmark_revision = 1
                                 browser_profile = Some(profile)
                     Err(error):
                         var failed_profile = profile
@@ -454,6 +457,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         )
                         if val Err(reason) = bookmark_restore:
                             print "[hosted-wm] browser-bookmark-restore-failed reason={reason}"
+                        else:
+                            browser_bookmark_applied_revision = (
+                                browser_bookmark_revision
+                            )
                         browser_animation_origin_micros = (
                             rt_time_now_micros()
                         )
@@ -540,14 +547,12 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var text_events: i64 = 0
     var window_move_events: i64 = 0
     var semantic_event_id: i64 = 0
-    var web_sessions = (
-        HostedWebContentRegistry.create_with_default_bookmark_store()
-    )
+    var web_sessions = HostedWebContentRegistry.create()
     var browser_renderers = HostedBrowserRendererRegistry.create(
         executable, HOSTED_BROWSER_HOME_URL
     )
-    if web_sessions.profile_failure_reason != "":
-        print "[hosted-wm] secondary-browser-profile-disabled reason={web_sessions.profile_failure_reason}"
+    if browser_bookmark_revision > 0:
+        browser_renderers.set_bookmark_snapshot(browser_bookmarks)
     # Motion-background cadence seam (plan item B): the loop stays dirty-gated
     # (GUI-5a) — a due motion frame is just one more dirty *trigger*, evaluated
     # by the pure shared_wm_motion_dirty_due predicate on the loop's existing
@@ -660,6 +665,24 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         browser_raster.shutdown()
                         browser_raster_active = false
                     print "[hosted-wm] browser-renderer-failed reason={browser_result.reason}"
+            if (browser_renderer_ready and
+                browser_bookmark_applied_revision <
+                    browser_bookmark_revision and
+                browser_renderer.command_deadline_ms <= 0 and
+                browser_renderer.network_job_handle <= 0):
+                match browser_renderer.begin_bookmark_snapshot(
+                    browser_bookmarks, 2000
+                ):
+                    Err(reason):
+                        if reason != "renderer-busy":
+                            browser_bookmark_applied_revision = (
+                                browser_bookmark_revision
+                            )
+                            print "[hosted-wm] browser-bookmark-sync-failed reason={reason}"
+                    Ok(_):
+                        browser_bookmark_applied_revision = (
+                            browser_bookmark_revision
+                        )
             var desired_browser_width = browser_content_width
             var desired_browser_height = browser_content_height
             for window in comp.windows:
@@ -912,8 +935,19 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                 var profile = browser_profile.unwrap()
                                 match profile.toggle_bookmark(url, url):
                                     Ok(_):
-                                        callback_count = 1
-                                        action_reason = ""
+                                        match profile.load_bookmarks():
+                                            Err(error):
+                                                action_reason = error.message()
+                                            Ok(bookmarks):
+                                                browser_bookmarks = bookmarks
+                                                browser_bookmark_revision = (
+                                                    browser_bookmark_revision + 1
+                                                )
+                                                browser_renderers.set_bookmark_snapshot(
+                                                    bookmarks
+                                                )
+                                                callback_count = 1
+                                                action_reason = ""
                                     Err(error):
                                         action_reason = error.message()
                                 browser_profile = Some(profile)
@@ -957,14 +991,14 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                             Err(error):
                                                 action_reason = error.message()
                                             Ok(bookmarks):
-                                                match browser_renderer.begin_bookmark_snapshot(
-                                                    bookmarks, 2000
-                                                ):
-                                                    Err(reason):
-                                                        action_reason = reason
-                                                    Ok(_):
-                                                        browser_bookmarks = bookmarks
-                                                        callback_count = 1
+                                                browser_bookmarks = bookmarks
+                                                browser_bookmark_revision = (
+                                                    browser_bookmark_revision + 1
+                                                )
+                                                browser_renderers.set_bookmark_snapshot(
+                                                    bookmarks
+                                                )
+                                                callback_count = 1
                                     Err(error):
                                         action_reason = error.message()
                                 browser_profile = Some(profile)

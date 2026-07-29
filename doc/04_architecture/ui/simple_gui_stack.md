@@ -281,6 +281,12 @@ readback pixels plus CPU/GPU fallback metadata. Resolved IMAGE commands may use
 destination dimensions distinct from their source and lower through the same
 checked Vulkan blit with CPU-matching nearest-neighbor sampling; non-opaque
 scaled work uses the existing checked src-over mode after opaque initialization.
+CSS background IMAGE commands use one canonical style-metadata contract:
+`image-role=css-background`, tile/repeat fields, clip-shape bounds, and per-axis
+corner radii. The HTML/CSS producer owns geometry; Engine2D validates the
+metadata and applies the rounded clip during its existing sampling pass rather
+than adding a parallel mask renderer. One composition-wide framebuffer-sized
+pixel-work budget bounds all CSS background sampling.
 SimpleOS x86_64, AArch64, and
 RV64 canonical boot-desktop source frames enter through
 `src/os/compositor/engine2d_wm_frame_executor.spl`; invalid

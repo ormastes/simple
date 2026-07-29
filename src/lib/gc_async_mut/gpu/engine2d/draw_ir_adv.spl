@@ -116,6 +116,18 @@ struct Engine2dCssBackgroundMetadata:
     tile_y: i64
     tile_width: i64
     tile_height: i64
+    shape_x: i64
+    shape_y: i64
+    shape_width: i64
+    shape_height: i64
+    radius_tl_x: i64
+    radius_tl_y: i64
+    radius_tr_x: i64
+    radius_tr_y: i64
+    radius_br_x: i64
+    radius_br_y: i64
+    radius_bl_x: i64
+    radius_bl_y: i64
 
 # Named result for the internal render walkers. Positional tuple-member reads
 # are miscompiled on the entry-closure freestanding native path; named fields
@@ -133,6 +145,7 @@ struct Engine2dDrawIrRenderOutcome:
     glass_execution_target: text
     glass_backend_handle: i64
     glass_device_identity: i64
+    css_background_pixel_work_remaining: i64
 
 struct Engine2dDrawIrBoxOutcome:
     engine: Engine2D
@@ -155,7 +168,8 @@ fn _engine2d_draw_ir_render_outcome(
     metal_device_glass_receipts: [Engine2dMetalGlassReceipt] = [],
     glass_execution_target: text = "",
     glass_backend_handle: i64 = 0,
-    glass_device_identity: i64 = 0
+    glass_device_identity: i64 = 0,
+    css_background_pixel_work_remaining: i64 = -1
 ) -> Engine2dDrawIrRenderOutcome:
     Engine2dDrawIrRenderOutcome(
         engine: engine,
@@ -172,7 +186,9 @@ fn _engine2d_draw_ir_render_outcome(
         metal_device_glass_receipts: metal_device_glass_receipts,
         glass_execution_target: glass_execution_target,
         glass_backend_handle: glass_backend_handle,
-        glass_device_identity: glass_device_identity
+        glass_device_identity: glass_device_identity,
+        css_background_pixel_work_remaining:
+            css_background_pixel_work_remaining
     )
 
 fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
@@ -625,14 +641,24 @@ fn _engine2d_draw_ir_css_background_metadata(
         style, "image-role") != "css-background":
         return Engine2dCssBackgroundMetadata(
             valid: false, repeat: "", tile_x: 0, tile_y: 0,
-            tile_width: 0, tile_height: 0)
+            tile_width: 0, tile_height: 0, shape_x: 0, shape_y: 0,
+            shape_width: 0, shape_height: 0,
+            radius_tl_x: 0, radius_tl_y: 0,
+            radius_tr_x: 0, radius_tr_y: 0,
+            radius_br_x: 0, radius_br_y: 0,
+            radius_bl_x: 0, radius_bl_y: 0)
     val repeat = _engine2d_draw_ir_unique_style_value(
         style, "background-repeat")
     if (repeat != "no-repeat" and repeat != "repeat-x" and
         repeat != "repeat-y" and repeat != "repeat"):
         return Engine2dCssBackgroundMetadata(
             valid: false, repeat: "", tile_x: 0, tile_y: 0,
-            tile_width: 0, tile_height: 0)
+            tile_width: 0, tile_height: 0, shape_x: 0, shape_y: 0,
+            shape_width: 0, shape_height: 0,
+            radius_tl_x: 0, radius_tl_y: 0,
+            radius_tr_x: 0, radius_tr_y: 0,
+            radius_br_x: 0, radius_br_y: 0,
+            radius_bl_x: 0, radius_bl_y: 0)
     val tile_x = _engine2d_draw_ir_canonical_i32(
         _engine2d_draw_ir_unique_style_value(style, "background-tile-x"))
     val tile_y = _engine2d_draw_ir_canonical_i32(
@@ -641,17 +667,120 @@ fn _engine2d_draw_ir_css_background_metadata(
         _engine2d_draw_ir_unique_style_value(style, "background-tile-width"))
     val tile_height = _engine2d_draw_ir_canonical_i32(
         _engine2d_draw_ir_unique_style_value(style, "background-tile-height"))
+    val shape_x = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-shape-x"))
+    val shape_y = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-shape-y"))
+    val shape_width = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-shape-width"))
+    val shape_height = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-shape-height"))
+    val radius_tl_x = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-radius-tl-x"))
+    val radius_tl_y = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-radius-tl-y"))
+    val radius_tr_x = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-radius-tr-x"))
+    val radius_tr_y = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-radius-tr-y"))
+    val radius_br_x = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-radius-br-x"))
+    val radius_br_y = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-radius-br-y"))
+    val radius_bl_x = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-radius-bl-x"))
+    val radius_bl_y = _engine2d_draw_ir_canonical_i32(
+        _engine2d_draw_ir_unique_style_value(style, "background-radius-bl-y"))
+    val command_right = command.x.to_i64() + command.width.to_i64()
+    val command_bottom = command.y.to_i64() + command.height.to_i64()
+    val shape_right = if shape_x != invalid and shape_width != invalid:
+        shape_x + shape_width
+    else:
+        invalid
+    val shape_bottom = if shape_y != invalid and shape_height != invalid:
+        shape_y + shape_height
+    else:
+        invalid
     Engine2dCssBackgroundMetadata(
         valid: (
             tile_x != invalid and tile_y != invalid and
             tile_width != invalid and tile_height != invalid and
-            tile_width > 0 and tile_height > 0),
+            shape_x != invalid and shape_y != invalid and
+            shape_width != invalid and shape_height != invalid and
+            radius_tl_x != invalid and radius_tl_y != invalid and
+            radius_tr_x != invalid and radius_tr_y != invalid and
+            radius_br_x != invalid and radius_br_y != invalid and
+            radius_bl_x != invalid and radius_bl_y != invalid and
+            tile_width > 0 and tile_height > 0 and
+            shape_width > 0 and shape_height > 0 and
+            radius_tl_x >= 0 and radius_tl_y >= 0 and
+            radius_tr_x >= 0 and radius_tr_y >= 0 and
+            radius_br_x >= 0 and radius_br_y >= 0 and
+            radius_bl_x >= 0 and radius_bl_y >= 0 and
+            command.x.to_i64() >= shape_x and command.y.to_i64() >= shape_y and
+            command_right <= shape_right and command_bottom <= shape_bottom),
         repeat: repeat,
         tile_x: tile_x,
         tile_y: tile_y,
         tile_width: tile_width,
-        tile_height: tile_height
+        tile_height: tile_height,
+        shape_x: shape_x,
+        shape_y: shape_y,
+        shape_width: shape_width,
+        shape_height: shape_height,
+        radius_tl_x: radius_tl_x,
+        radius_tl_y: radius_tl_y,
+        radius_tr_x: radius_tr_x,
+        radius_tr_y: radius_tr_y,
+        radius_br_x: radius_br_x,
+        radius_br_y: radius_br_y,
+        radius_bl_x: radius_bl_x,
+        radius_bl_y: radius_bl_y
     )
+
+fn _engine2d_draw_ir_inside_corner(
+    dx: i64, dy: i64, radius_x: i64, radius_y: i64
+) -> bool:
+    val nx = dx.to_f64() / radius_x.to_f64()
+    val ny = dy.to_f64() / radius_y.to_f64()
+    nx * nx + ny * ny <= 1.0
+
+fn _engine2d_draw_ir_css_background_inside_clip(
+    metadata: Engine2dCssBackgroundMetadata, px: i64, py: i64
+) -> bool:
+    val max_radius_x = metadata.shape_width / 2
+    val max_radius_y = metadata.shape_height / 2
+    val tlx = if metadata.radius_tl_x < max_radius_x: metadata.radius_tl_x else: max_radius_x
+    val tly = if metadata.radius_tl_y < max_radius_y: metadata.radius_tl_y else: max_radius_y
+    val trx = if metadata.radius_tr_x < max_radius_x: metadata.radius_tr_x else: max_radius_x
+    val try = if metadata.radius_tr_y < max_radius_y: metadata.radius_tr_y else: max_radius_y
+    val brx = if metadata.radius_br_x < max_radius_x: metadata.radius_br_x else: max_radius_x
+    val bry = if metadata.radius_br_y < max_radius_y: metadata.radius_br_y else: max_radius_y
+    val blx = if metadata.radius_bl_x < max_radius_x: metadata.radius_bl_x else: max_radius_x
+    val bly = if metadata.radius_bl_y < max_radius_y: metadata.radius_bl_y else: max_radius_y
+    if (tlx > 0 and tly > 0 and px < metadata.shape_x + tlx and
+        py < metadata.shape_y + tly):
+        val dx = metadata.shape_x + tlx - 1 - px
+        val dy = metadata.shape_y + tly - 1 - py
+        return _engine2d_draw_ir_inside_corner(dx, dy, tlx, tly)
+    if (trx > 0 and try > 0 and
+        px >= metadata.shape_x + metadata.shape_width - trx and
+        py < metadata.shape_y + try):
+        val dx = px - (metadata.shape_x + metadata.shape_width - trx)
+        val dy = metadata.shape_y + try - 1 - py
+        return _engine2d_draw_ir_inside_corner(dx, dy, trx, try)
+    if (blx > 0 and bly > 0 and px < metadata.shape_x + blx and
+        py >= metadata.shape_y + metadata.shape_height - bly):
+        val dx = metadata.shape_x + blx - 1 - px
+        val dy = py - (metadata.shape_y + metadata.shape_height - bly)
+        return _engine2d_draw_ir_inside_corner(dx, dy, blx, bly)
+    if (brx > 0 and bry > 0 and
+        px >= metadata.shape_x + metadata.shape_width - brx and
+        py >= metadata.shape_y + metadata.shape_height - bry):
+        val dx = px - (metadata.shape_x + metadata.shape_width - brx)
+        val dy = py - (metadata.shape_y + metadata.shape_height - bry)
+        return _engine2d_draw_ir_inside_corner(dx, dy, brx, bry)
+    true
 
 fn _engine2d_draw_ir_css_background_pixels(
     command: DrawIrCommand,
@@ -695,7 +824,10 @@ fn _engine2d_draw_ir_css_background_pixels(
                 sample_x = _engine2d_draw_ir_positive_mod(
                     relative_x, metadata.tile_width)
                 x_visible = true
-            if x_visible and y_visible:
+            if (x_visible and y_visible and
+                _engine2d_draw_ir_css_background_inside_clip(
+                    metadata, sample_origin_x + local_x,
+                    sample_origin_y + local_y)):
                 val source_x = (
                     sample_x * image.width.to_i64() / metadata.tile_width)
                 val source_y = (
@@ -988,7 +1120,7 @@ fn _engine2d_embed_offscreen_acquire(owner: Engine2D, w: i32, h: i32) -> Result<
 # offset_x/offset_y are 0 since the surface origin IS the batch origin).
 # Engine2D is value-copied across this free-function boundary (see
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
-fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     var rendered = 0
     var skipped = 0
@@ -1001,6 +1133,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
     var glass_execution_target = ""
     var glass_backend_handle: i64 = 0
     var glass_device_identity: i64 = 0
+    var css_background_pixel_work_remaining = css_background_pixel_work_budget
     for command in commands:
         # A nil display-list element must be skipped before any field access.
         # Keep the explicit comparison: freestanding codegen has miscompiled
@@ -1154,16 +1287,27 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
             if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
                 val image = images[image_index]
                 if _engine2d_draw_ir_has_css_background_role(command.computed_style):
+                    val metadata = _engine2d_draw_ir_css_background_metadata(
+                        command)
+                    val css_work = (
+                        command.width.to_i64() * command.height.to_i64())
                     val css_x = offset_x.to_i64() + command.x.to_i64()
                     val css_y = offset_y.to_i64() + command.y.to_i64()
+                    var css_background_budget_admitted = false
+                    if (metadata.valid and css_work > 0 and
+                        css_work <= css_background_pixel_work_remaining and
+                        css_x >= -2147483648 and css_x <= 2147483647 and
+                        css_y >= -2147483648 and css_y <= 2147483647):
+                        css_background_pixel_work_remaining = (
+                            css_background_pixel_work_remaining - css_work)
+                        css_background_budget_admitted = true
                     var css = Engine2dCssBackgroundPixels(
                         valid: false, pixels: [])
-                    if (css_x >= -2147483648 and css_x <= 2147483647 and
-                        css_y >= -2147483648 and css_y <= 2147483647):
+                    if css_background_budget_admitted:
                         css = _engine2d_draw_ir_css_background_pixels(
                             command, image,
                             command.x.to_i64(), command.y.to_i64(),
-                            eng.width().to_i64() * eng.height().to_i64())
+                            command.width.to_i64() * command.height.to_i64())
                     if css.valid:
                         eng.draw_image_blend(
                             css_x.to_i32(), css_y.to_i32(),
@@ -1208,7 +1352,8 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
         metal_device_glass_receipts,
         glass_execution_target,
         glass_backend_handle,
-        glass_device_identity
+        glass_device_identity,
+        css_background_pixel_work_remaining
     )
 
 fn _engine2d_draw_ir_command_samples_parent(command: DrawIrCommand) -> bool:
@@ -1326,7 +1471,7 @@ fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
 # today's exact direct translate+clip behavior — this is the load-bearing
 # backward-compatibility path: no regression for callers that never opted
 # into a real embedded surface.
-fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     # Preserve the nested Draw IR struct layout across the native
     # free-function boundary. Native inference has historically treated an
@@ -1438,7 +1583,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 delta.draw_image(0, 0, delta_width, delta_height, seed)
                 val inner = _engine2d_draw_ir_render_commands(
                     delta, batch.commands, parent_padding, parent_padding, images, true,
-                    batch.backend_target == "metal", draw_ir_no_rect())
+                    batch.backend_target == "metal", draw_ir_no_rect(),
+                    css_background_pixel_work_budget)
                 delta = inner.engine
                 val child_readback = delta.read_pixels_with_source()
                 val child_core = _engine2d_draw_ir_parent_region_pixels(
@@ -1456,7 +1602,9 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                 if not composited:
                     return _engine2d_draw_ir_render_outcome(
                         eng, 0, batch.commands.len().to_i32(),
-                        "parent-material-delta-composite-not-proven", 0)
+                        "parent-material-delta-composite-not-proven", 0,
+                        0, 0, 0, [], "", 0, 0,
+                        inner.css_background_pixel_work_remaining)
                 return _engine2d_draw_ir_render_outcome(
                     eng, inner.rendered, inner.skipped,
                     inner.unsupported_kinds,
@@ -1467,7 +1615,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                     inner.metal_device_glass_receipts,
                     inner.glass_execution_target,
                     inner.glass_backend_handle,
-                    inner.glass_device_identity)
+                    inner.glass_device_identity,
+                    inner.css_background_pixel_work_remaining)
     if not use_embedded_surface:
         val apply_clip = embedding.clip and not fills_target_exactly
         if apply_clip:
@@ -1481,7 +1630,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                     embedding.x, embedding.y, embedding.width, embedding.height
                 )
             else:
-                draw_ir_no_rect())
+                draw_ir_no_rect(),
+            css_background_pixel_work_budget)
         eng = direct.engine
         if apply_clip:
             eng.clear_clip()
@@ -1497,7 +1647,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             direct.metal_device_glass_receipts,
             direct.glass_execution_target,
             direct.glass_backend_handle,
-            direct.glass_device_identity
+            direct.glass_device_identity,
+            direct.css_background_pixel_work_remaining
         )
 
     # Seed-JIT compatibility (hot path): a mutable `Engine2D? = nil` binding
@@ -1545,7 +1696,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         )
     val inner = _engine2d_draw_ir_render_commands(
         offscreen, commands, 0, 0, images, true,
-        batch.backend_target == "metal", draw_ir_no_rect())
+        batch.backend_target == "metal", draw_ir_no_rect(),
+        css_background_pixel_work_budget)
     offscreen = inner.engine
     val child = offscreen.read_pixels_with_source()
     val composited = eng.draw_ir_composite_readback(
@@ -1566,7 +1718,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             0,
             commands.len().to_i32(),
             "embedded-device-composite-not-proven",
-            0
+            0, 0, 0, 0, [], "", 0, 0,
+            inner.css_background_pixel_work_remaining
         )
     _engine2d_draw_ir_render_outcome(
         eng,
@@ -1582,7 +1735,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         0,
         inner.metal_device_glass_requested_count,
         inner.metal_device_glass_requested_count,
-        _engine2d_draw_ir_unfulfilled_metal_receipts(batch)
+        _engine2d_draw_ir_unfulfilled_metal_receipts(batch),
+        "", 0, 0, inner.css_background_pixel_work_remaining
     )
 
 fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
@@ -1591,7 +1745,9 @@ fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_availabl
 
 fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
-    val outcome = _engine2d_draw_ir_render_batch_embedded(engine, batch, images, 0, false)
+    val outcome = _engine2d_draw_ir_render_batch_embedded(
+        engine, batch, images, 0, false,
+        engine.width().to_i64() * engine.height().to_i64())
     val eng = outcome.engine
     var unsupported_kinds = outcome.unsupported_kinds
     if unsupported_kinds == "":
@@ -1673,6 +1829,8 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     var glass_execution_target = ""
     var glass_backend_handle: i64 = 0
     var glass_device_identity: i64 = 0
+    var css_background_pixel_work_remaining = (
+        eng.width().to_i64() * eng.height().to_i64())
     # NOTE(layer ordering): batches composite in array order, not re-sorted by
     # embedding.layer. Every real producer (e.g. window_scene_draw_ir.spl)
     # already emits batches desktop-first/chrome-next/windows-by-ascending-
@@ -1682,7 +1840,12 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     # accounting) for no behavior change against any current producer, so it
     # is left as a documented limitation rather than done speculatively.
     for batch in composition.batches:
-        val outcome = _engine2d_draw_ir_render_batch_embedded(eng, batch, images, 0, allow_parent_image)
+        val outcome = _engine2d_draw_ir_render_batch_embedded(
+            eng, batch, images, 0, allow_parent_image,
+            css_background_pixel_work_remaining)
+        if outcome.css_background_pixel_work_remaining >= 0:
+            css_background_pixel_work_remaining = (
+                outcome.css_background_pixel_work_remaining)
         eng = outcome.engine
         rendered = rendered + outcome.rendered
         skipped = skipped + outcome.skipped

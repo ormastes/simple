@@ -92,7 +92,10 @@ Host input
   URI-only image commands fail closed until resolved-image input is supplied;
   the advanced path renders caller-provided resolved ARGB buffers, including
   Vulkan nearest-neighbor COPY and checked transparent src-over after opaque
-  initialization, but does not decode PNG, JPEG, or WebP bytes.
+  initialization, but does not decode PNG, JPEG, or WebP bytes. CSS-background
+  images carry canonical tile, clip-shape, and corner-radius metadata; rounded
+  masking stays in the sampling pass and all such work shares one
+  framebuffer-sized composition budget.
 - Engine2D split contract: `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl`.
 - No-GC Draw IR runtime queue owner:
   `src/lib/nogc_async_mut/gpu/engine2d/draw_ir_runtime_queue.spl`.

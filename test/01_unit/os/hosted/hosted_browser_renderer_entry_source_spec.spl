@@ -225,8 +225,11 @@ describe "hosted browser renderer entry isolation":
             "web_window.id != browser_profile_window_id"
         )
         expect(entry).to_contain(
-            "HostedWebContentRegistry.create_with_default_bookmark_store()"
+            "var web_sessions = HostedWebContentRegistry.create()"
         )
+        expect(entry.contains(
+            "HostedWebContentRegistry.create_with_default_bookmark_store()"
+        )).to_be(false)
         expect(entry).to_contain(
             "web_window.app_id == \"browser\""
         )
@@ -296,6 +299,70 @@ describe "hosted browser renderer entry isolation":
         expect(entry.contains(
             "fn _add_browser_bookmark("
         )).to_be(false)
+
+    it "converges parent-owned bookmarks across idle and busy renderers":
+        val entry = executable_source_lines(
+            rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+        )
+        val registry = executable_source_lines(
+            rt_file_read_text(
+                "src/os/hosted/hosted_browser_renderer_registry.spl"
+            ) ?? ""
+        )
+        expect(entry).to_contain(
+            "var browser_bookmark_revision: i64 = 0"
+        )
+        expect(entry).to_contain(
+            "browser_bookmark_applied_revision <"
+        )
+        expect(entry).to_contain(
+            "browser_renderer.network_job_handle <= 0"
+        )
+        expect(entry.split(
+            "browser_renderers.set_bookmark_snapshot("
+        ).len()).to_equal(4)
+        expect(registry).to_contain(
+            "bookmark_snapshot: BrowserBookmarkSnapshot"
+        )
+        expect(registry).to_contain("bookmark_revision: i64")
+        expect(registry).to_contain(
+            "me set_bookmark_snapshot(snapshot: BrowserBookmarkSnapshot):"
+        )
+        val pending = registry.find(
+            "entry.bookmark_revision < self.bookmark_revision"
+        )
+        val begin = registry.find(
+            "entry.renderer.begin_bookmark_snapshot(", pending
+        )
+        val applied = registry.find(
+            "entry.bookmark_revision = self.bookmark_revision", begin
+        )
+        val hidden = registry.find("if not visible:", applied)
+        expect(pending).to_be_greater_than(-1)
+        expect(begin).to_be_greater_than(pending)
+        expect(applied).to_be_greater_than(begin)
+        expect(hidden).to_be_greater_than(applied)
+
+    it "restores the startup address when Escape has no committed URL":
+        val registry = executable_source_lines(
+            rt_file_read_text(
+                "src/os/hosted/hosted_browser_renderer_registry.spl"
+            ) ?? ""
+        )
+        expect(registry).to_contain(
+            "entry.address_draft = if entry.renderer.document_url != \"\":"
+        )
+        expect(registry).to_contain("else:\n                    entry.startup_html")
+        val committed = registry.find(
+            "if not entry.address_editing and entry.renderer.document_url != \"\":"
+        )
+        val release = registry.find(
+            "entry.startup_html = \"\"", committed
+        )
+        val init = registry.find("entry.renderer.begin_init(")
+        expect(committed).to_be_greater_than(-1)
+        expect(release).to_be_greater_than(committed)
+        expect(init).to_be_greater_than(release)
 
     it "keeps title commands and page input on their production owner routes":
         val entry = executable_source_lines(

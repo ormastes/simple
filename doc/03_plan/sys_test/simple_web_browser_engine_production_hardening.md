@@ -197,3 +197,24 @@ Current evidence is limited to focused host C containment/TLS PASS.
 Pure-Simple scenarios and manual generation remain compiler-blocked. Signal
 exit 139, source inspection, bootstrap output, and Rust-seed execution cannot
 satisfy the runtime gate.
+
+## Convergence evidence (2026-07-29)
+
+Focused checks must retain:
+
+1. exact rounded-corner background pixels, no second mask allocation, and
+   fail-closed behavior after aggregate CSS-background command area consumes
+   one framebuffer;
+2. no Draw IR for an `opacity: 0` element or descendant; fractional subtree
+   opacity stays an explicitly documented incomplete case;
+3. one persisted bookmark toggle becoming the same revisioned snapshot in the
+   primary renderer, an existing secondary renderer, and a newly admitted one;
+4. address edit then Escape restoring `about:network` before a commit and the
+   committed HTTPS URL afterward, in both primary and secondary lanes;
+5. bracketed IPv6 retained in URL/origin/history while both HTTP job owners pass
+   the same bare validated literal to socket/TLS;
+6. a resize burst retaining only the newest deferred dimensions, and one
+   document serialization per animation frame.
+
+These remain focused source/unit/pixel gates until the pure-Simple target can
+run; full bootstrap and Rust-seed output are not substitutes.

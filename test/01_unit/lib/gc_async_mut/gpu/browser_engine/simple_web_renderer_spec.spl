@@ -44,6 +44,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_with_images,
     simple_web_layout_render_html_draw_ir_result,
     simple_web_layout_render_html_software_pixels,
+    simple_web_layout_hit_test_target_at_time,
     simple_web_layout_uses_legacy_widget_chrome,
     simple_web_layout_debug_layout_by_id,
     simple_web_layout_debug_style_by_id}
@@ -382,11 +383,12 @@ describe "SimpleWebRenderer":
             _draw_ir_command_index(commands, "tile_background_border_overlay")
         )
 
-    it "fails closed for a CSS background image with rounded clipping":
+    it "retains the unclipped rounded CSS background shape":
         val html = (
             "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
-            "<div id='rounded' style='width:8px;height:8px;border-radius:3px;" +
-            "background-image:url(image://tile)'></div></body></html>"
+            "<div style='width:8px;height:8px;overflow:hidden'>" +
+            "<div id='rounded' style='width:12px;height:8px;border-radius:4px;" +
+            "background-image:url(image://tile)'></div></div></body></html>"
         )
         val image = simpleos_host_gpu_image_resource(
             "image://tile", 2, 2, [0xFFFF0000u32; 4]
@@ -396,12 +398,41 @@ describe "SimpleWebRenderer":
         ).batches[0].commands
 
         expect(_draw_ir_command_index(commands, "rounded")).to_be_greater_than(-1)
-        expect(_draw_ir_command_index(
-            commands, "rounded_background_image"
-        )).to_equal(-1)
+        val background = _draw_ir_command_by_id(
+            commands, "rounded_background_image")
+        expect(background.width).to_equal(8)
+        expect(_draw_ir_style_value(
+            background, "background-shape-width")).to_equal("12")
+        expect(_draw_ir_style_value(
+            background, "background-radius-tl-x")).to_equal("4")
         expect(_draw_ir_command_index(
             commands, "rounded_background_border_overlay"
-        )).to_equal(-1)
+        )).to_be_greater_than(-1)
+
+    it "subtracts content clip insets from each CSS background radius axis":
+        val html = (
+            "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+            "<div id='inset' style='width:8px;height:8px;border-radius:10px;" +
+            "border-left:2px solid;border-top:3px solid;border-right:4px solid;" +
+            "border-bottom:1px solid;padding:1px 2px 4px 5px;" +
+            "background-clip:content-box;background-image:url(image://tile)'>" +
+            "</div></body></html>"
+        )
+        val image = simpleos_host_gpu_image_resource(
+            "image://tile", 1, 1, [0xFFFF0000u32])
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 32, 32, [image]).batches[0].commands
+        val background = _draw_ir_command_by_id(
+            commands, "inset_background_image")
+
+        expect(_draw_ir_style_value(
+            background, "background-radius-tl-x")).to_equal("3")
+        expect(_draw_ir_style_value(
+            background, "background-radius-tl-y")).to_equal("6")
+        expect(_draw_ir_style_value(
+            background, "background-radius-br-x")).to_equal("4")
+        expect(_draw_ir_style_value(
+            background, "background-radius-br-y")).to_equal("5")
 
     it "lowers the common single-layer background shorthand into the image and fallback color":
         val html = (
@@ -1189,6 +1220,30 @@ describe "SimpleWebRenderer":
         expect(_count_color(pixels, 0xFF8BA4EAu32)).to_equal(240)
         expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(128)
         expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+
+    it "suppresses an opacity zero element and its entire subtree":
+        val html = (
+            "<html style='margin:0;padding:0;background:#fff'>" +
+            "<body style='margin:0;padding:0'>" +
+            "<section id='hidden' style='opacity:0;background:#ef4444;" +
+            "border:2px solid #1d4ed8;width:16px;height:16px'>" +
+            "<div id='child' style='background:#22c55e;width:8px;height:8px'>" +
+            "hidden text</div></section></body></html>"
+        )
+        val pixels = simple_web_render_html_to_pixels(html, 32, 32)
+        expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+        expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
+        expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
+        val commands = simple_web_layout_render_html_draw_ir(
+            html, 32, 32).batches[0].commands
+        expect(_draw_ir_command_index(commands, "hidden")).to_equal(-1)
+        expect(_draw_ir_command_index(commands, "child")).to_equal(-1)
+        val target = simple_web_layout_hit_test_target_at_time(
+            "<html style='margin:0'><body style='margin:0'>" +
+            "<button id='invisible-button' style='opacity:0;width:16px;" +
+            "height:16px'>click</button></body></html>",
+            32, 32, 4, 4, 0)
+        expect(target).to_equal("id:invisible-button")
 
     it "matches Chrome background shorthand fallback and declaration order":
         val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc}.shell{background:url(hero.png) #dbeafe no-repeat;padding:4px;width:88px;height:56px}.rgb{background:rgb(34,197,94) no-repeat;width:20px;height:10px}.later-bg{background-color:#ef4444;background:#1d4ed8;width:18px;height:8px;margin-top:4px}.later-bg-color{background:#f59e0b;background-color:#334155;width:16px;height:8px;margin-top:4px}</style></head><body><section class='shell'><div class='rgb'></div><div class='later-bg'></div><div class='later-bg-color'></div></section></body></html>"

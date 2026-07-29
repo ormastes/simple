@@ -439,3 +439,27 @@ visible and cannot be silently skipped into the score.
 Focused host C containment/TLS checks pass. Pure-Simple runtime/spec execution
 remains blocked by the recorded compiler defect, so no runtime PASS, manual
 refresh, bootstrap, or Rust-seed fallback is claimed.
+
+## Frame, chrome, and shared-profile convergence (2026-07-29)
+
+- A CSS background command carries `background-shape-{x,y,width,height}` and
+  `background-radius-{tl,tr,br,bl}-{x,y}` beside its tile metadata. Engine2D validates
+  unique canonical integers, tests the rounded shape in the sampling loop, and
+  charges successful command area against a single `framebuffer width * height`
+  composition budget.
+- `content_paint_hidden_by_ancestor` rejects a zero-opacity node and descendants of
+  any zero-opacity ancestor during paint emission. Fractional opacity remains unsupported until one
+  bounded offscreen group can be composited once.
+- Bookmark persistence is read once through `BrowserProfileStore`. A host
+  snapshot revision is applied independently to the primary renderer and
+  `HostedBrowserRendererRegistry`; new entries start at revision zero and
+  receive the current snapshot on their first idle turn.
+- Escape ends address editing and restores `document_url` when committed,
+  otherwise the startup address retained by that window. Enter clears editing
+  only after `begin_navigate` succeeds; frame commit later replaces the draft.
+- Both in-process and sandbox HTTP jobs call
+  `hosted_browser_transport_host`; only a parsed bracketed IPv6 literal is
+  unwrapped for socket/TLS, while canonical URL state is unchanged.
+- A deferred resize replaces an adjacent queued resize (and identical
+  dimensions are ignored). Render paths compute `render_html_document()` once
+  per frame and reuse it for animation reconciliation and layout.

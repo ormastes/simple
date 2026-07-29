@@ -198,6 +198,22 @@ Host C containment/TLS checks are supporting evidence. Until the pure-Simple
 target runs the affected scenarios, do not claim a browser runtime PASS or
 substitute bootstrap/Rust-seed execution.
 
+### Current frame and chrome invariants
+
+- CSS background Draw IR includes canonical clip-shape bounds and per-axis radii.
+  Engine2D masks while sampling and caps aggregate background pixel work at one
+  framebuffer per composition.
+- `opacity: 0` removes the whole subtree from layout/paint. Do not emulate
+  fractional opacity per primitive; add it only with bounded group compositing.
+- Bookmark mutations publish one snapshot/revision to primary, secondary, and
+  newly opened browser renderers.
+- Escape restores the committed URL, or the window's startup address before the
+  first commit. Keep this identical in primary and registry lanes.
+- Both HTTP job owners use `hosted_browser_transport_host`; URLs retain brackets
+  while socket/TLS receives a validated bare IPv6 literal.
+- Coalesce adjacent deferred resizes to the newest size. Serialize the document
+  once per animation frame and reuse it for animation reconciliation and render.
+
 ## Milestone History
 
 | Milestone | Gate | Status |

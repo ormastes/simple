@@ -472,7 +472,12 @@ declarations retain their authored key, linked stylesheets rewrite to a
 canonical resolved key, and both fetch through broker-owned CSP `img-src`,
 HSTS, mixed-content, redirect, and cancellation policy. Layout emits one typed
 background image behind element content with size, position, repeat, origin,
-and clip geometry; the canonical border overlay remains later in paint order.
+and clip geometry; rounded clips add canonical shape bounds and per-axis corner
+radii to that command. Engine2D applies the rounded mask inside the existing
+image sampling pass, so it allocates no second mask buffer. Across one
+composition, accepted CSS-background sampling is charged against one
+framebuffer-sized pixel-work budget; later commands fail closed when exhausted.
+The canonical border overlay remains later in paint order.
 The hosted worker filters composition-referenced resources before the additive
 `SBRF5` retained-frame transfer, so unused stylesheet images do not inflate
 each frame. Existing CSS animation invalidation and retained-frame timing remain
@@ -509,3 +514,22 @@ futex-list disclosure without adding an app-local syscall facade.
 Only focused host C containment/TLS evidence is currently executable. The
 pure-Simple target remains blocked by the recorded compiler failure; no
 bootstrap or Rust-seed result is production browser evidence.
+
+## Shared-state and frame-work convergence (2026-07-29)
+
+- `opacity: 0` suppresses the element and its entire descendant subtree before
+  paint/Draw-IR emission. Fractional opacity remains incomplete until bounded group
+  compositing can apply one alpha to a subtree without double blending.
+- `BrowserProfileStore` remains the sole bookmark persistence owner. The host
+  publishes one immutable snapshot plus monotonic revision to the primary
+  renderer and keyed secondary registry; existing and newly admitted windows
+  consume the newest revision when idle.
+- Address editing is window-local. Escape restores the renderer's committed
+  URL, or the entry's startup address before the first network commit; primary
+  and secondary windows follow the same rule.
+- Bracket removal for a validated IPv6 literal is owned by
+  `hosted_browser_transport_host` and shared by in-process and sandbox-renderer
+  HTTP/TLS paths. URL, origin, and history owners retain bracketed authority.
+- Adjacent deferred resizes coalesce to the newest dimensions, and each
+  animation frame serializes the HTML document once for both animation
+  reconciliation and layout/paint.
