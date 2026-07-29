@@ -484,6 +484,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_array_clear" => value::rt_array_clear as *const () as usize,
         "rt_transient_array_scope_begin" => value::rt_transient_array_scope_begin as *const () as usize,
         "rt_transient_array_scope_pause" => value::rt_transient_array_scope_pause as *const () as usize,
+        "rt_transient_heap_promote" => value::rt_transient_heap_promote as *const () as usize,
         "rt_transient_array_scope_end" => value::rt_transient_array_scope_end as *const () as usize,
         "rt_array_all" => simple_runtime::rt_array_all as *const () as usize,
         "rt_array_any" => simple_runtime::rt_array_any as *const () as usize,

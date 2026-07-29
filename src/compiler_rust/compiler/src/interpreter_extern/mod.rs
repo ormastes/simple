@@ -317,6 +317,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_transient_array_scope_pause",
         memory::rt_transient_array_scope_pause
     );
+    insert_simple!("rt_transient_heap_promote", memory::rt_transient_heap_promote);
     insert_simple!(
         "rt_transient_array_scope_end",
         memory::rt_transient_array_scope_end
@@ -2621,10 +2622,11 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_registers_transient_array_scope_hooks() {
+    fn dispatch_registers_transient_heap_scope_hooks() {
         for name in [
             "rt_transient_array_scope_begin",
             "rt_transient_array_scope_pause",
+            "rt_transient_heap_promote",
             "rt_transient_array_scope_end",
         ] {
             assert!(EXTERN_DISPATCH.contains_key(name));

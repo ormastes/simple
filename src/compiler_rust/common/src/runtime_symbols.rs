@@ -129,6 +129,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_array_free",
     "rt_transient_array_scope_begin",
     "rt_transient_array_scope_pause",
+    "rt_transient_heap_promote",
     "rt_transient_array_scope_end",
     "rt_byte_array_new",
     "rt_byte_array_new_len",
@@ -379,6 +380,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_heap_registry_count",
     "rt_transient_array_scope_begin",
     "rt_transient_array_scope_pause",
+    "rt_transient_heap_promote",
     "rt_transient_array_scope_end",
     // Array operations
     "rt_array_new",
@@ -2125,6 +2127,7 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_heap_registry_count"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_transient_array_scope_begin"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_transient_array_scope_pause"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_transient_heap_promote"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_transient_array_scope_end"));
         assert_eq!(symbol_tier_of("rt_heap_registry_count"), RuntimeSymbolTier::Sys);
         assert_eq!(
@@ -2164,6 +2167,10 @@ mod tests {
         );
         assert_eq!(
             symbol_class_of("rt_transient_array_scope_pause"),
+            RuntimeSymbolClass::CoreRequired
+        );
+        assert_eq!(
+            symbol_class_of("rt_transient_heap_promote"),
             RuntimeSymbolClass::CoreRequired
         );
         assert_eq!(

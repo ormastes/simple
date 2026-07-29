@@ -292,6 +292,26 @@ pub fn rt_transient_array_scope_pause(_args: &[Value]) -> Result<Value, CompileE
     Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_pause()))
 }
 
+pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(value) = args.first() else {
+        return Ok(Value::Bool(false));
+    };
+    let promoted = match value {
+        // Raw runtime handles cross the interpreter boundary as integer carriers.
+        Value::Int(raw) => {
+            simple_runtime::value::rt_transient_heap_promote(simple_runtime::value::RuntimeValue::from_raw(*raw as u64))
+        }
+        Value::UInt { value, .. } => {
+            simple_runtime::value::rt_transient_heap_promote(simple_runtime::value::RuntimeValue::from_raw(*value))
+        }
+        Value::Nil => false,
+        // Interpreter composites are Arc/owned Rust values, not allocations in
+        // the runtime transient scope, so they are already retained.
+        _ => true,
+    };
+    Ok(Value::Bool(promoted))
+}
+
 pub fn rt_transient_array_scope_end(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_end()))
 }
@@ -873,6 +893,21 @@ mod tests {
         assert_ne!(features & MEM_PROFILE_FEATURE_HOSTED_ALLOC_METADATA, 0);
         #[cfg(target_os = "linux")]
         assert_ne!(features & MEM_PROFILE_FEATURE_REAL_MEMORY_USAGE, 0);
+    }
+
+    #[test]
+    fn transient_heap_promote_accepts_interpreter_owned_graphs() {
+        let graph = Value::Array(std::sync::Arc::new(vec![Value::Int(1)]));
+        assert!(matches!(rt_transient_heap_promote(&[graph]), Ok(Value::Bool(true))));
+        assert!(matches!(
+            rt_transient_heap_promote(&[Value::Int(0)]),
+            Ok(Value::Bool(false))
+        ));
+        assert!(matches!(
+            rt_transient_heap_promote(&[Value::UInt { value: 0, width: 64 }]),
+            Ok(Value::Bool(false))
+        ));
+        assert!(matches!(rt_transient_heap_promote(&[]), Ok(Value::Bool(false))));
     }
 
     // ========================================================================
