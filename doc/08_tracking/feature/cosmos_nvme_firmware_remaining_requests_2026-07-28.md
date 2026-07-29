@@ -1,12 +1,14 @@
 # Cosmos NVMe Firmware Remaining Requests
 
-## FR-COSMOS-001 - Admit and execute the production SSpec
+## FR-COSMOS-001 - Admit and execute the KV260/K26 emulation SSpec
 
-- **Status:** Requested; blocked by the self-hosted compiler/runtime lane.
+- **Status:** Complete for the user-approved KV260/K26 emulation scope. The
+  current-source Phase 2 runtime passes the exact 5-scenario native SSpec and
+  standalone docgen reports zero stubs.
 - **Priority:** P0.
-- **Acceptance:** A source-matched pure-Simple runtime passes the essential
-  tooling gate, executes the Cosmos and simulation SSpecs, and generates both
-  manuals with zero stubs.
+- **Acceptance:** A current-source pure-Simple runtime executes the 5-scenario
+  RV32 NAND SSpec against the K26 GHDL paths and standalone docgen reports zero
+  stubs. Physical Cosmos+ acceptance is isolated under FR-COSMOS-003.
 
 ## FR-NVME-FW-TARGETS-0001 - Make firmware target configuration explicit
 
@@ -33,7 +35,8 @@
 
 - **Status:** POSTPONED until the identified Cosmos+ board, destructive NAND
   reservation, power fixture, PCIe host, UART/JTAG, and thermal setup exist.
-- **Priority:** P0 production gate.
+- **Priority:** Future physical-production qualification; it does not block the
+  completed KV260/K26 emulation scope.
 - **Acceptance:** BT-001..BT-006 all PASS with raw evidence and independent
   review. The retained campaign must pass
   `check-nvme-firmware-remaining-gates.shs --board-evidence DIR`, which binds

@@ -12,7 +12,7 @@ operation and recovery behavior lives in
 | `1` | `TARGET_OPENSSD_2CH8WAY` | Cosmos+ PCIe/NFC + physical NAND | Profile present; H2 board gate postponed |
 | `2` | `TARGET_OPENSSD_8CH8WAY` | Cosmos+ PCIe/NFC + physical NAND | Profile present; H2 board gate postponed |
 | `3` | `TARGET_RV32_QEMU_RAM_NAND` | RV32 ELF + GDB host mailbox + guest PRP RAM + 256-byte `.nandram` | H1 firmware-command parity PASS; no AXI/IRQ |
-| `4` | `TARGET_RV32_KV260_AXI_RAM_NAND` | AXI host endpoint + queue DMA + firmware mailbox + RAM NAND | H1 firmware-in-loop and current-top GHDL boot PASS; board evidence open |
+| `4` | `TARGET_RV32_KV260_AXI_RAM_NAND` | AXI host endpoint + queue DMA + firmware mailbox + RAM NAND | Emulation-qualified: firmware-in-loop and synthesizable K26-top GHDL PASS; physical board postponed |
 
 Unknown IDs return `TARGET_INVALID`; they never fall back to the simulator.
 The canonical profile catalog is
@@ -49,7 +49,7 @@ the expected ELF and its target runner pass.
 | SMP/GIC | Not claimed | Four-hart source/host checks only; no admitted RV32 SMP ELF | CPU1/GIC/cache host contracts pass; physical SMP gate open |
 | MMU/cache | Not used by direct firmware | Direct M-mode firmware; no MMU claim | MMU W^X, L1, SCU and PL310 host/QEMU contracts pass |
 | FSBL/boot | `-bios none`; not FSBL evidence | KV260 PS init/JTAG flow; tiny BRAM needs no FSBL | Pinned FSBL/Bootgen package exists; physical handoff gate open |
-| Physical acceptance | None | No retained source-matched current bundle; host-issued physical NVMe sequence open | NFC/PCIe/persistence BT-001..BT-006 open |
+| Physical acceptance | None | POSTPONED; not required for the emulation-qualified boundary | POSTPONED: NFC/PCIe/persistence BT-001..BT-006 |
 
 The Cosmos+ ARM, NFC, PCIe, SMP/GIC, cache/MMU, and FSBL implementation and
 acceptance commands are documented in
@@ -146,7 +146,9 @@ SSpec/docgen evidence.
 
 The current endpoint-wired K26 top also passes full SimpleOS boot with both
 zeroed and garbage-filled DDR. That rehearsal uses a tied-off endpoint and does
-not replace the firmware-in-loop DMA/IRQ gate or physical board evidence.
+not replace physical board evidence. The user-approved completed scope is the
+firmware-in-loop and synthesizable K26-top GHDL evidence; physical KV260 and
+Cosmos+ campaigns are explicitly postponed until the hardware exists.
 
 ## Primary Files
 
