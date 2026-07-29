@@ -376,13 +376,22 @@ fn _s_find(s: text, n: text) -> i64:
 fn _scan_string_value(rest: text) -> text:
     """Scan a JSON string body until the first unescaped closing quote,
     decoding the standard escapes (\\, \", \n, \r, \t, \/). Caller passes
-    the substring AFTER the opening quote; the closing quote terminates."""
+    the substring AFTER the opening quote; the closing quote terminates.
+
+    substring() is byte-indexed: accumulating one raw byte at a time (the
+    old `out = out + ch`) shreds multi-byte UTF-8 characters in the JSON
+    string into separate U+FFFD replacement characters. Escape/quote
+    markers are always single ASCII bytes, so byte-stepping to find them is
+    safe; copy whole runs via substring() between them instead of
+    rebuilding byte-by-byte."""
     var out = ""
+    var seg_start = 0
     var i = 0
     val length = rest.len()
     while i < length:
         val ch = rest.substring(i, i + 1)
         if ch == "\\":
+            out = out + rest.substring(seg_start, i)
             if i + 1 >= length:
                 return out
             val next = rest.substring(i + 1, i + 2)
@@ -418,12 +427,12 @@ fn _scan_string_value(rest: text) -> text:
             else:
                 out = out + next
             i = i + 2
+            seg_start = i
         elif ch == "\"":
-            return out
+            return out + rest.substring(seg_start, i)
         else:
-            out = out + ch
             i = i + 1
-    out
+    out + rest.substring(seg_start, length)
 
 fn _hex_digit(ch: text) -> i64:
     if ch == "0": return 0
