@@ -1,0 +1,82 @@
+# Menu contribution registry: context-gated filtering and deterministic
+# (order then command_id) sorting.
+
+use std.spec
+use std.editor.extensions.menus.*
+use std.editor.extensions.api.{ContextKeys, WhenPredicate}
+
+describe "MenuRegistry items_for":
+
+    it "returns only items contributed to the requested menu":
+        val reg = MenuRegistry.new()
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "editor/context", command_id: "a.run",
+            title: "Run A", when: None, order: 10))
+        reg.register("ext-b", MenuItemDescriptor(menu_id: "editor/title", command_id: "b.run",
+            title: "Run B", when: None, order: 10))
+        val items = reg.items_for("editor/context", ContextKeys.new())
+        expect(items.len()).to_equal(1)
+        expect(items[0].command_id).to_equal("a.run")
+
+    it "sorts matching items by order ascending":
+        val reg = MenuRegistry.new()
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "third",
+            title: "Third", when: None, order: 30))
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "first",
+            title: "First", when: None, order: 10))
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "second",
+            title: "Second", when: None, order: 20))
+        val items = reg.items_for("m", ContextKeys.new())
+        expect(items.len()).to_equal(3)
+        expect(items[0].command_id).to_equal("first")
+        expect(items[1].command_id).to_equal("second")
+        expect(items[2].command_id).to_equal("third")
+
+    it "ties on order break by command_id, bytewise ascending":
+        val reg = MenuRegistry.new()
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "z.item",
+            title: "Z", when: None, order: 5))
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "a.item",
+            title: "A", when: None, order: 5))
+        val items = reg.items_for("m", ContextKeys.new())
+        expect(items[0].command_id).to_equal("a.item")
+        expect(items[1].command_id).to_equal("z.item")
+
+    it "filters out items whose when predicate does not match the context":
+        val reg = MenuRegistry.new()
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "shown",
+            title: "Shown", when: Some(WhenPredicate.Truthy(key: "editorFocus")), order: 0))
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "hidden",
+            title: "Hidden", when: Some(WhenPredicate.Equals(key: "lang", value: "python")), order: 0))
+        val ctx = ContextKeys.new()
+        ctx.set("editorFocus", "true")
+        ctx.set("lang", "simple")
+        val items = reg.items_for("m", ctx)
+        expect(items.len()).to_equal(1)
+        expect(items[0].command_id).to_equal("shown")
+
+    it "an item with no when predicate always matches":
+        val reg = MenuRegistry.new()
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "always",
+            title: "Always", when: None, order: 0))
+        val items = reg.items_for("m", ContextKeys.new())
+        expect(items.len()).to_equal(1)
+
+    it "dispose removes one registration, dispose_owner removes all of an owner's":
+        val reg = MenuRegistry.new()
+        val d = reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "one",
+            title: "One", when: None, order: 0))
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "two",
+            title: "Two", when: None, order: 0))
+        reg.register("ext-b", MenuItemDescriptor(menu_id: "m", command_id: "three",
+            title: "Three", when: None, order: 0))
+        expect(reg.dispose(d.id)).to_equal(true)
+        expect(reg.count()).to_equal(2)
+        expect(reg.dispose_owner("ext-a")).to_equal(1)
+        expect(reg.count()).to_equal(1)
+        expect(reg.items_for("m", ContextKeys.new())[0].command_id).to_equal("three")
+
+    it "an unknown menu_id returns an empty list":
+        val reg = MenuRegistry.new()
+        reg.register("ext-a", MenuItemDescriptor(menu_id: "m", command_id: "one",
+            title: "One", when: None, order: 0))
+        expect(reg.items_for("no/such/menu", ContextKeys.new()).len()).to_equal(0)

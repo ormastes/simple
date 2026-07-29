@@ -1,0 +1,93 @@
+# Settings registry: descriptor registration, default merging, values
+# overlay, unknown-key diagnostics, and SDN round-trip of the values file.
+
+use std.spec
+use std.editor.extensions.settings.*
+use std.io_runtime.{dir_create_all}
+
+fn settings_spec_tmp_root() -> text:
+    val root = "build/test/editor_settings_registry"
+    dir_create_all(root)
+    root
+
+fn settings_spec_bool_descriptor() -> SettingDescriptor:
+    SettingDescriptor(key: "editor.wordWrap", kind: "bool", default: "false",
+        description: "Wrap long lines", enum_values: [])
+
+fn settings_spec_enum_descriptor() -> SettingDescriptor:
+    SettingDescriptor(key: "editor.lineEnding", kind: "enum", default: "lf",
+        description: "Line ending style", enum_values: ["lf", "crlf"])
+
+describe "SettingsRegistry registration + effective value":
+
+    it "get_effective returns the registered default with no overlay entry":
+        val reg = SettingsRegistry.new()
+        reg.register("ext-a", settings_spec_bool_descriptor())
+        expect(reg.get_effective("editor.wordWrap")).to_equal("false")
+
+    it "set_value overlays the default, reset restores it":
+        val reg = SettingsRegistry.new()
+        reg.register("ext-a", settings_spec_bool_descriptor())
+        expect(reg.set_value("editor.wordWrap", "true")).to_equal(true)
+        expect(reg.get_effective("editor.wordWrap")).to_equal("true")
+        expect(reg.reset("editor.wordWrap")).to_equal(true)
+        expect(reg.get_effective("editor.wordWrap")).to_equal("false")
+
+    it "duplicate key: first registration wins, conflict recorded":
+        val reg = SettingsRegistry.new()
+        val d1 = reg.register("ext-a", settings_spec_bool_descriptor())
+        val d2 = reg.register("ext-b", SettingDescriptor(key: "editor.wordWrap",
+            kind: "bool", default: "true", description: "other", enum_values: []))
+        expect(d1.kind).to_equal("setting")
+        expect(d2.kind).to_equal("setting-conflict")
+        expect(reg.count()).to_equal(1)
+        expect(reg.conflict_count()).to_equal(1)
+        expect(reg.get_effective("editor.wordWrap")).to_equal("false")
+
+    it "unknown key: get_effective and set_value both record a diagnostic":
+        val reg = SettingsRegistry.new()
+        expect(reg.get_effective("no.such.key")).to_equal("")
+        expect(reg.set_value("no.such.key", "x")).to_equal(false)
+        expect(reg.diagnostic_count()).to_equal(2)
+
+    it "dispose_owner removes an owner's descriptors, keeps others":
+        val reg = SettingsRegistry.new()
+        reg.register("ext-a", settings_spec_bool_descriptor())
+        reg.register("ext-b", settings_spec_enum_descriptor())
+        expect(reg.dispose_owner("ext-a")).to_equal(1)
+        expect(reg.has("editor.wordWrap")).to_equal(false)
+        expect(reg.has("editor.lineEnding")).to_equal(true)
+
+    it "setting_keys preserves stable insertion order":
+        val reg = SettingsRegistry.new()
+        reg.register("ext-a", settings_spec_bool_descriptor())
+        reg.register("ext-a", settings_spec_enum_descriptor())
+        val keys = reg.setting_keys()
+        expect(keys.len()).to_equal(2)
+        expect(keys[0]).to_equal("editor.wordWrap")
+        expect(keys[1]).to_equal("editor.lineEnding")
+
+describe "SettingsRegistry SDN values round-trip":
+
+    it "save_values then load_values into a fresh registry reproduces the overlay":
+        val path = settings_spec_tmp_root() + "/settings.sdn"
+        val writer = SettingsRegistry.new()
+        writer.register("ext-a", settings_spec_bool_descriptor())
+        writer.register("ext-a", settings_spec_enum_descriptor())
+        writer.set_value("editor.wordWrap", "true")
+        writer.set_value("editor.lineEnding", "crlf")
+        expect(writer.save_values(path)).to_equal(true)
+
+        val reader = SettingsRegistry.new()
+        reader.register("ext-a", settings_spec_bool_descriptor())
+        reader.register("ext-a", settings_spec_enum_descriptor())
+        expect(reader.load_values(path)).to_equal(true)
+        expect(reader.get_effective("editor.wordWrap")).to_equal("true")
+        expect(reader.get_effective("editor.lineEnding")).to_equal("crlf")
+
+    it "load_values on a missing file returns false and leaves the overlay untouched":
+        val reg = SettingsRegistry.new()
+        reg.register("ext-a", settings_spec_bool_descriptor())
+        reg.set_value("editor.wordWrap", "true")
+        expect(reg.load_values(settings_spec_tmp_root() + "/does_not_exist.sdn")).to_equal(false)
+        expect(reg.get_effective("editor.wordWrap")).to_equal("true")
