@@ -8,6 +8,7 @@
 # This is a separate validation pass that runs after HIR lowering.
 
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
 use compiler.common.diagnostics.span.{Span}
 
 # ============================================================================
@@ -30,11 +31,32 @@ enum SafetyError:
 # Safety Context
 # ============================================================================
 
+# E1047 (param-mutability-semantic, lane G2): semantic mirror of lint
+# W-MC-REF-001 (35.semantics/lint/const_ref_default.spl), enforced from typed
+# HIR instead of source text so it can't be fooled by formatting and can see
+# through symbol-based aliasing/shadowing the text lint can't. Tracks, per
+# current function, the non-`mut` params eligible to be flagged and whether
+# each one's type is a `class` (reference type) -- s19
+# (class_free_fn_mutation_dropped_native) protects class-param field/index
+# mutation-through-reference by design, so only VALUE-type (struct/primitive)
+# params are flagged for index-assign / known-mutating-method mutation.
+# Reassignment of the parameter BINDING itself (`p = ...`) is flagged
+# regardless of type -- rebinding the local never reaches the caller through
+# either a class or a struct param, so it is always either a bug or a missing
+# `mut`, exactly like the lint's `_crd_mutates` reassignment rule.
+struct SafetyParamTrack:
+    symbol_id: i64
+    name: text
+    is_class_type: bool
+
+
 struct SafetyContext:
     """Tracks whether we're currently in an unsafe context."""
     in_unsafe: bool
     errors: [SafetyError]
     extern_fns: [text]      # module-local `extern fn` names (FFI rule)
+    class_symbol_ids: [i64] # module-local `class` symbol ids (E1047 s19 gate)
+    params: [SafetyParamTrack]  # current function's trackable non-mut params
 
 
 # ============================================================================
@@ -42,7 +64,7 @@ struct SafetyContext:
 # ============================================================================
 
 fn safetycontext_new() -> SafetyContext:
-        SafetyContext(in_unsafe: false, errors: [], extern_fns: [])
+        SafetyContext(in_unsafe: false, errors: [], extern_fns: [], class_symbol_ids: [], params: [])
 
 
 # Raw-pointer runtime primitive families (see src/lib/nogc_sync_mut/ptr/raw.spl
@@ -73,6 +95,95 @@ fn safetychecker_flag_callee(self: SafetyChecker, callee_name: text, span: Span)
         self.context.errors = self.context.errors.push(SafetyError.RawPointerOutsideUnsafe(span))
     elif safety_is_extern_fn(self, callee_name):
         self.context.errors = self.context.errors.push(SafetyError.UnsafeFfiOutsideUnsafe(span))
+
+
+# ============================================================================
+# E1047: param-mutability-semantic (lane G2)
+# ============================================================================
+
+# Same known-mutating method-name list as the lint (const_ref_default.spl's
+# `_crd_mutating_methods`) -- kept in sync deliberately; upgrade path is a
+# shared per-method mutation-effect table, not implemented here.
+fn safety_mutating_methods() -> [text]:
+    ["push", "pop", "insert", "remove", "clear", "sort"]
+
+
+fn safety_lookup_param(self: SafetyChecker, symbol_id: i64) -> SafetyParamTrack?:
+    for pt in self.context.params:
+        if pt.symbol_id == symbol_id:
+            return pt
+    nil
+
+
+# `target = value` can reach HIR two ways (hir_lowering/statements.spl):
+# most paths route it straight to `HirStmtKind.Assign`, but the flat-parser
+# fast path lowers it as `StmtKind.Expr` wrapping `ExprKind.Assign` and only
+# rewrites THAT into `HirStmtKind.Assign` on its own early-return branch --
+# a different frontend entry point (as used by `parse_full_frontend` here)
+# can still hand SafetyChecker a plain `HirStmtKind.Expr` whose `.kind` is
+# `HirExprKind.Assign` (same shape as HirStmtKind.Assign: target, op,
+# value). Catch that shape here so E1047 doesn't silently miss it.
+fn safetychecker_flag_expr_stmt_assign(self: SafetyChecker, expr: HirExpr):
+    match expr.kind:
+        case Assign(target, _, value):
+            safetychecker_flag_param_assign(self, target)
+        case _:
+            pass
+
+
+# Reassignment of the parameter BINDING (`p = ...`, including compound
+# assignment -- the op is folded into HirStmtKind.Assign already). Flagged
+# for both class- and struct-typed params: rebinding the local never reaches
+# the caller through either kind of param, so it is not s19-protected.
+fn safetychecker_flag_param_assign(self: SafetyChecker, target: HirExpr):
+    match target.kind:
+        case NamedVar(symbol, name):
+            match safety_lookup_param(self, symbol.id):
+                case Some(_found):
+                    val msg = "E1047: parameter '{name}' is mutated but not declared mut"
+                    self.context.errors = self.context.errors.push(SafetyError.Other(msg, target.span))
+                case nil:
+                    pass
+
+        # `p[i] = ...` / `p[i] += ...` -- index-assign is s19-gated: only
+        # flag when `p` is a non-class (VALUE-type) param.
+        case Index(base, _):
+            match base.kind:
+                case NamedVar(bsymbol, bname):
+                    match safety_lookup_param(self, bsymbol.id):
+                        case Some(found):
+                            if not found.is_class_type:
+                                val msg = "E1047: parameter '{bname}' is mutated but not declared mut"
+                                self.context.errors = self.context.errors.push(SafetyError.Other(msg, target.span))
+                        case nil:
+                            pass
+                case _:
+                    pass
+
+        case _:
+            pass
+
+
+# Known-mutating method call (`p.push(..)` etc.) on a non-`mut` param.
+# s19-gated: only flag when `p` is a non-class (VALUE-type) param.
+fn safetychecker_flag_param_method_call(self: SafetyChecker, receiver: HirExpr, method: text, span: Span):
+    var is_mutating = false
+    for m in safety_mutating_methods():
+        if m == method:
+            is_mutating = true
+    if not is_mutating:
+        return
+    match receiver.kind:
+        case NamedVar(symbol, name):
+            match safety_lookup_param(self, symbol.id):
+                case Some(found):
+                    if not found.is_class_type:
+                        val msg = "E1047: parameter '{name}' is mutated but not declared mut"
+                        self.context.errors = self.context.errors.push(SafetyError.Other(msg, span))
+                case nil:
+                    pass
+        case _:
+            pass
 
 
 # ============================================================================
@@ -113,29 +224,83 @@ fn safetychecker_check_module(self: SafetyChecker, module: HirModule) -> [Safety
         if ext_func.is_extern:
             self.context.extern_fns = self.context.extern_fns.push(ext_func.name)
 
+    # Collect module-local `class` symbol ids (E1047 s19 gate): a param typed
+    # Named(sym, _) whose sym is in this set is a reference type and must NOT
+    # be flagged for index-assign / mutating-method mutation.
+    for _for_item_cls in module.classes:
+        val cls_ = _for_item_cls[1]
+        self.context.class_symbol_ids = self.context.class_symbol_ids.push(cls_.symbol.id)
+
     # Check all functions
     for _for_item_0 in module.functions:
         val name = _for_item_0[0]
         val func = _for_item_0[1]
         safetychecker_check_function(self, func)
 
-    # Check all methods in classes
+    # Check all methods in classes.
+    #
+    # `HirClass.methods` is `Dict<text, SymbolId>` (method name -> symbol),
+    # NOT a body list -- iterating a Dict in this language yields (key,
+    # value) tuples (same shape as the `module.functions` iteration just
+    # above), so the old `for method in class_.methods:
+    # safetychecker_check_function(self, method)` passed a raw tuple where a
+    # `HirFunction` was expected and crashed the first time any spec defined
+    # a class with a method body (E1047 lane G2, 2026-07-29): "semantic:
+    # undefined field: unknown property or method 'params' on Tuple". Route
+    # through the symbol instead and look the real body up in
+    # `module.functions` (`Dict<SymbolId, HirFunction>`). NOTE: a class's
+    # inline-method bodies are lowered in `declaration_lowering.spl:
+    # lower_class` but only `hir_fn.symbol` is kept in `methods` -- the
+    # `HirFunction` itself is never merged into `module.functions` for
+    # class-embedded methods (unlike impl methods below, via
+    # `lowered_impl_functions`), so `contains_key` is expected to miss and
+    # skip here until that gap is closed upstream; this fix's job is only to
+    # stop the crash and check what IS reachable.
     for _for_item_1 in module.classes:
-        val name = _for_item_1[0]
         val class_ = _for_item_1[1]
-        for method in class_.methods:
-            safetychecker_check_function(self, method)
+        for _for_item_cm in class_.methods:
+            val method_symbol = _for_item_cm[1]
+            if module.functions.contains_key(method_symbol):
+                safetychecker_check_function(self, module.functions[method_symbol])
 
-    # Check all methods in impls
+    # Check all methods in impls. Same Dict<text, SymbolId> shape as classes
+    # above, but impl method bodies ARE merged into `module.functions` (via
+    # `self.lowered_impl_functions` in module_lowering.spl), so this path
+    # now actually walks real bodies instead of being permanently dead.
     for impl_ in module.impls:
-        for method in impl_.methods:
-            safetychecker_check_function(self, method)
+        for _for_item_im in impl_.methods:
+            val method_symbol = _for_item_im[1]
+            if module.functions.contains_key(method_symbol):
+                safetychecker_check_function(self, module.functions[method_symbol])
 
     self.context.errors
 
 
+fn safetychecker_build_param_tracks(self: SafetyChecker, params: [HirParam]) -> [SafetyParamTrack]:
+    """Build the E1047-trackable param list for one function: non-`mut`,
+    non-receiver (`self`/`me`) params, tagged with whether their type is a
+    module-local `class` (s19-protected, reference semantics)."""
+    var out: [SafetyParamTrack] = []
+    for p in params:
+        if p.is_mutable:
+            continue
+        if p.name == "self" or p.name == "me":
+            continue
+        var is_class = false
+        match p.type_.kind:
+            case Named(tsym, _):
+                for csym_id in self.context.class_symbol_ids:
+                    if csym_id == tsym.id:
+                        is_class = true
+            case _:
+                pass
+        out.push(SafetyParamTrack(symbol_id: p.symbol.id, name: p.name, is_class_type: is_class))
+    out
+
+
 fn safetychecker_check_function(self: SafetyChecker, func: HirFunction):
     """Check a function body for safety violations."""
+    self.context.params = safetychecker_build_param_tracks(self, func.params)
     safetychecker_check_block(self, func.body)
 
 
@@ -162,6 +327,7 @@ fn safetychecker_check_stmt(self: SafetyChecker, stmt: HirStmt):
     match stmt.kind:
         case Expr(expr):
             safetychecker_check_expr(self, expr)
+            safetychecker_flag_expr_stmt_assign(self, expr)
 
         case Let(_, _, init):
             safetychecker_check_expr(self, init)
@@ -169,6 +335,7 @@ fn safetychecker_check_stmt(self: SafetyChecker, stmt: HirStmt):
         case Assign(target, _, value):
             safetychecker_check_expr(self, target)
             safetychecker_check_expr(self, value)
+            safetychecker_flag_param_assign(self, target)
 
         case Block(block):
             safetychecker_check_block(self, block)
@@ -260,7 +427,8 @@ fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
             safetychecker_check_expr(self, callee)
             safetychecker_check_args(self, args)
 
-        case MethodCall(receiver, _, args, _):
+        case MethodCall(receiver, method_name, args, _):
+            safetychecker_flag_param_method_call(self, receiver, method_name, expr.span)
             safetychecker_check_expr(self, receiver)
             safetychecker_check_args(self, args)
 
