@@ -5,6 +5,8 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
 use app.io.mod.{env_get as app_env_get, home as app_home}
+use std.common.sdn.parser.{parse as sdn_parse}
+use std.common.sdn.schema.{SdnDecodeIssues, sdn_get_text, sdn_get_text_array}
 
 fn file_exists(path: text) -> bool:
     rt_file_exists(path)
@@ -58,192 +60,223 @@ fn plugin_manifest_path() -> text:
         return ".simple/plugins/manifest.sdn"
     home_dir + "/.simple/plugins/manifest.sdn"
 
-fn parse_functions_line(line: text) -> [text]:
-    val start = line.find("[")
-    val end = line.rfind("]")
-    if start < 0 or end <= start:
-        return []
-    val inner = line.substring(start + 1, end).trim()
-    if inner == "":
-        return []
-    val parts = inner.split(",")
-    var functions: [text] = []
-    for part in parts:
-        val function_name = strip_quotes(part.trim())
-        if function_name != "":
-            functions.push(function_name)
-    functions
+# ---- SDN-backed manifest decoder -------------------------------------------
+#
+# On-disk shape is a "plugins:" block holding a bullet ("-") list of entries,
+# e.g.:
+#   plugins:
+#       -
+#           name: regex
+#           library: /tmp/libsimple_regex_ffi.so
+#           version: "0.1.0"
+#           functions: [rt_regex_new, rt_regex_destroy]
+#           classes:
+#               Cls:
+#                   constructor: rt_cls_new
+#                   destructor: rt_cls_free
+#                   methods:
+#                       run:
+#                           symbol: rt_cls_run
+#                           params: [a, b]
+#                           return: i64
+#
+# The bullet-list-of-blocks shape is not itself valid generic SDN (the parser
+# in std.common.sdn.parser only turns `[a, b]`/`{k: v}` brackets into arrays;
+# a bare "-" line has no `key:`/`key=` separator and is silently skipped, so
+# feeding this text to `parse()` unmodified merges every entry's fields into
+# one dict). Only that bullet-splitting step is bespoke here; every FIELD is
+# decoded through the real SDN parser + schema.spl getters below, not by hand.
 
-fn strip_quotes(value: text) -> text:
-    var result = value.trim()
-    if result.starts_with("\"") and result.ends_with("\"") and result.len() >= 2:
-        result = result.substring(1, result.len() - 1)
-    result
+# Indentation (leading spaces) of a raw line.
+fn _plugin_manifest_indent(raw_line: text) -> i64:
+    raw_line.len() - raw_line.trim_start().len()
 
-fn flush_current_plugin(entries: [PluginEntry], current_name: text, current_library: text, current_version: text, current_functions: [text], current_classes: [PluginClassEntry]) -> [PluginEntry]:
-    if current_name == "":
-        return entries
-    var updated = entries
-    updated.push(plugin_entry_new_with_classes(name: current_name, library: current_library, version: current_version, functions: current_functions, classes: current_classes))
-    updated
+# Split manifest text into per-entry SDN block-mapping bodies: the dedented
+# lines following each top-level "-" bullet. Each returned block is valid
+# standalone SDN (`std.common.sdn.parser.parse`) block-mapping text.
+fn _plugin_manifest_entry_blocks(content: text) -> [text]:
+    val lines = content.split("\n")
+    var bullet_indent: i64 = -1
+    for raw_line in lines:
+        if raw_line.trim() == "-":
+            bullet_indent = _plugin_manifest_indent(raw_line)
+    var blocks: [text] = []
+    if bullet_indent < 0:
+        return blocks
+    var i = 0
+    while i < lines.len():
+        val raw_line = lines[i]
+        if raw_line.trim() == "-" and _plugin_manifest_indent(raw_line) == bullet_indent:
+            var body_lines: [text] = []
+            i = i + 1
+            while i < lines.len():
+                val body_line = lines[i]
+                if body_line.trim() == "":
+                    body_lines.push("")
+                    i = i + 1
+                else:
+                    if _plugin_manifest_indent(body_line) <= bullet_indent:
+                        break
+                    body_lines.push(body_line)
+                    i = i + 1
+            blocks.push(body_lines.join("\n"))
+        else:
+            i = i + 1
+    blocks
 
-fn parse_method_params_line(line: text) -> [text]:
-    val start = line.find("[")
-    val end = line.rfind("]")
-    if start < 0 or end <= start:
-        return []
-    val inner = line.substring(start + 1, end).trim()
-    if inner == "":
-        return []
-    val parts = inner.split(",")
-    var params: [text] = []
-    for part in parts:
-        val param = strip_quotes(part.trim())
-        if param != "":
-            params.push(param)
-    params
+# NOTE: classes/methods key order is NOT read from `SdnValue.Dict.keys()` --
+# under this runtime Dict key iteration order is not guaranteed to match
+# insertion order (see doc/07_guide/language/dict_native_pitfalls.md family of
+# defects), and the on-disk manifest order must be preserved (existing
+# consumers, e.g. multi-method/multi-class fixtures, assert positional
+# order). So `classes:`/`methods:` are split from the SOURCE TEXT in file
+# order (`_plugin_manifest_named_blocks`), and only the per-entity SCALAR
+# fields (constructor/destructor/symbol/params/return) go through
+# `sdn_parse` + schema.spl getters.
+
+# Split an indented block of `key:\n  <nested lines>` entries (no "-" bullets)
+# into (key, nested_body_text) pairs, preserving source order. Used for the
+# "classes:" (class name -> body) and "methods:" (method name -> body)
+# shapes.
+fn _plugin_manifest_named_blocks(body: text) -> [(text, text)]:
+    val lines = body.split("\n")
+    var out: [(text, text)] = []
+    var i = 0
+    while i < lines.len() and lines[i].trim() == "":
+        i = i + 1
+    if i >= lines.len():
+        return out
+    val base_indent = _plugin_manifest_indent(lines[i])
+    var running = true
+    while running and i < lines.len():
+        val line = lines[i]
+        if line.trim() == "":
+            i = i + 1
+        else:
+            val ind = _plugin_manifest_indent(line)
+            if ind < base_indent:
+                running = false
+            elif ind == base_indent and line.trim().ends_with(":"):
+                val key_line = line.trim()
+                val name = key_line.substring(0, key_line.len() - 1).trim()
+                var child_lines: [text] = []
+                i = i + 1
+                while i < lines.len():
+                    val cline = lines[i]
+                    if cline.trim() == "":
+                        child_lines.push("")
+                        i = i + 1
+                    else:
+                        if _plugin_manifest_indent(cline) <= base_indent:
+                            break
+                        child_lines.push(cline)
+                        i = i + 1
+                out.push((name, child_lines.join("\n")))
+            else:
+                i = i + 1
+    out
+
+# Locate a single top-level `<key>:` line's nested body within `body`, or ""
+# when absent (no such key, or its value is empty/inline).
+fn _plugin_manifest_extract_named_block(body: text, key: text) -> text:
+    val target = key + ":"
+    val lines = body.split("\n")
+    var i = 0
+    while i < lines.len() and lines[i].trim() == "":
+        i = i + 1
+    if i >= lines.len():
+        return ""
+    val base_indent = _plugin_manifest_indent(lines[i])
+    var running = true
+    while running and i < lines.len():
+        val line = lines[i]
+        if line.trim() == "":
+            i = i + 1
+        else:
+            val ind = _plugin_manifest_indent(line)
+            if ind < base_indent:
+                running = false
+            elif ind == base_indent and line.trim() == target:
+                var child_lines: [text] = []
+                i = i + 1
+                while i < lines.len():
+                    val cline = lines[i]
+                    if cline.trim() == "":
+                        child_lines.push("")
+                        i = i + 1
+                    else:
+                        if _plugin_manifest_indent(cline) <= base_indent:
+                            break
+                        child_lines.push(cline)
+                        i = i + 1
+                return child_lines.join("\n")
+            else:
+                i = i + 1
+    ""
+
+fn _plugin_manifest_decode_method(method_name: text, body: text) -> PluginMethodEntry:
+    val issues = SdnDecodeIssues.new()
+    match sdn_parse(body):
+        case Ok(v):
+            val symbol = sdn_get_text(v, "symbol", issues) ?? ""
+            val params = sdn_get_text_array(v, "params", issues) ?? []
+            val return_type = sdn_get_text(v, "return", issues) ?? ""
+            PluginMethodEntry(name: method_name, symbol: symbol, params: params, return_type: return_type)
+        case Err(_):
+            PluginMethodEntry(name: method_name, symbol: "", params: [], return_type: "")
+
+fn _plugin_manifest_decode_methods(class_body: text) -> [PluginMethodEntry]:
+    var methods: [PluginMethodEntry] = []
+    val methods_block = _plugin_manifest_extract_named_block(class_body, "methods")
+    if methods_block == "":
+        return methods
+    for pair in _plugin_manifest_named_blocks(methods_block):
+        methods.push(_plugin_manifest_decode_method(pair.0, pair.1))
+    methods
+
+fn _plugin_manifest_decode_class(class_name: text, body: text) -> PluginClassEntry:
+    val issues = SdnDecodeIssues.new()
+    var constructor_symbol = ""
+    var destructor_symbol = ""
+    match sdn_parse(body):
+        case Ok(v):
+            constructor_symbol = sdn_get_text(v, "constructor", issues) ?? ""
+            destructor_symbol = sdn_get_text(v, "destructor", issues) ?? ""
+        case Err(_):
+            true
+    val methods = _plugin_manifest_decode_methods(body)
+    PluginClassEntry(name: class_name, constructor_symbol: constructor_symbol, destructor_symbol: destructor_symbol, methods: methods)
+
+fn _plugin_manifest_decode_classes(entry_body: text) -> [PluginClassEntry]:
+    var classes: [PluginClassEntry] = []
+    val classes_block = _plugin_manifest_extract_named_block(entry_body, "classes")
+    if classes_block == "":
+        return classes
+    for pair in _plugin_manifest_named_blocks(classes_block):
+        classes.push(_plugin_manifest_decode_class(pair.0, pair.1))
+    classes
+
+fn _plugin_manifest_decode_entry(body: text) -> PluginEntry:
+    val issues = SdnDecodeIssues.new()
+    match sdn_parse(body):
+        case Ok(v):
+            val name = sdn_get_text(v, "name", issues) ?? ""
+            val library = sdn_get_text(v, "library", issues) ?? ""
+            val version = sdn_get_text(v, "version", issues) ?? ""
+            val functions = sdn_get_text_array(v, "functions", issues) ?? []
+            val classes = _plugin_manifest_decode_classes(body)
+            plugin_entry_new_with_classes(name: name, library: library, version: version, functions: functions, classes: classes)
+        case Err(_):
+            plugin_entry_new_with_classes(name: "", library: "", version: "", functions: [], classes: [])
 
 fn parse_plugin_manifest_text(content: text) -> [PluginEntry]:
     if content.trim() == "":
         return []
-
-    val lines = content.split("\n")
     var entries: [PluginEntry] = []
-    var current_name = ""
-    var current_library = ""
-    var current_version = ""
-    var current_functions: [text] = []
-    var current_classes: [PluginClassEntry] = []
-    var in_plugin = false
-
-    # Class parsing state
-    var in_classes_block = false
-    var class_name = ""
-    var class_constructor = ""
-    var class_destructor = ""
-    var class_methods: [PluginMethodEntry] = []
-    var in_methods_block = false
-    var method_name = ""
-    var method_symbol = ""
-    var method_params: [text] = []
-    var method_return_type = ""
-
-    for raw_line in lines:
-        val line = raw_line.trim()
-        if line == "" or line.starts_with("#") or line == "plugins:":
-            continue
-
-        val indent = raw_line.len() - raw_line.trim_start().len()
-
-        if line == "-":
-            # Flush in-progress method
-            if method_name != "":
-                class_methods.push(PluginMethodEntry(name: method_name, symbol: method_symbol, params: method_params, return_type: method_return_type))
-                method_name = ""
-                method_symbol = ""
-                method_params = []
-                method_return_type = ""
-            # Flush in-progress class
-            if class_name != "":
-                current_classes.push(PluginClassEntry(name: class_name, constructor_symbol: class_constructor, destructor_symbol: class_destructor, methods: class_methods))
-                class_name = ""
-                class_constructor = ""
-                class_destructor = ""
-                class_methods = []
-            in_classes_block = false
-            in_methods_block = false
-
-            if in_plugin:
-                entries = flush_current_plugin(entries: entries, current_name: current_name, current_library: current_library, current_version: current_version, current_functions: current_functions, current_classes: current_classes)
-            in_plugin = true
-            current_name = ""
-            current_library = ""
-            current_version = ""
-            current_functions = []
-            current_classes = []
-            continue
-
-        # Inside methods block - method properties (deeply indented)
-        if in_methods_block and indent >= 20:
-            if line.starts_with("symbol:"):
-                method_symbol = strip_quotes(line.substring(7).trim())
-                continue
-            if line.starts_with("params:"):
-                method_params = parse_method_params_line(line)
-                continue
-            if line.starts_with("return:"):
-                method_return_type = strip_quotes(line.substring(7).trim())
-                continue
-
-        # Inside methods block - new method name
-        if in_methods_block and indent >= 16 and line.ends_with(":") and not line.starts_with("symbol:") and not line.starts_with("params:") and not line.starts_with("return:"):
-            if method_name != "":
-                class_methods.push(PluginMethodEntry(name: method_name, symbol: method_symbol, params: method_params, return_type: method_return_type))
-            method_name = line.substring(0, line.len() - 1).trim()
-            method_symbol = ""
-            method_params = []
-            method_return_type = ""
-            continue
-
-        # Inside classes block - class properties
-        if in_classes_block and indent >= 12:
-            if line.starts_with("constructor:"):
-                class_constructor = strip_quotes(line.substring(12).trim())
-                continue
-            if line.starts_with("destructor:"):
-                class_destructor = strip_quotes(line.substring(11).trim())
-                continue
-            if line == "methods:":
-                in_methods_block = true
-                continue
-
-        # Inside classes block - new class name
-        if in_classes_block and indent >= 8 and line.ends_with(":") and not line.starts_with("constructor:") and not line.starts_with("destructor:") and not line.starts_with("methods:"):
-            if method_name != "":
-                class_methods.push(PluginMethodEntry(name: method_name, symbol: method_symbol, params: method_params, return_type: method_return_type))
-                method_name = ""
-                method_symbol = ""
-                method_params = []
-                method_return_type = ""
-            if class_name != "":
-                current_classes.push(PluginClassEntry(name: class_name, constructor_symbol: class_constructor, destructor_symbol: class_destructor, methods: class_methods))
-            class_name = line.substring(0, line.len() - 1).trim()
-            class_constructor = ""
-            class_destructor = ""
-            class_methods = []
-            in_methods_block = false
-            continue
-
-        if line == "classes:":
-            in_classes_block = true
-            in_methods_block = false
-            continue
-
-        # Top-level entry fields
-        if line.starts_with("name:"):
-            in_classes_block = false
-            in_methods_block = false
-            current_name = strip_quotes(line.substring(5).trim())
-        elif line.starts_with("library:"):
-            in_classes_block = false
-            in_methods_block = false
-            current_library = strip_quotes(line.substring(8).trim())
-        elif line.starts_with("version:"):
-            in_classes_block = false
-            in_methods_block = false
-            current_version = strip_quotes(line.substring(8).trim())
-        elif line.starts_with("functions:"):
-            in_classes_block = false
-            in_methods_block = false
-            current_functions = parse_functions_line(line)
-
-    # Final flush
-    if method_name != "":
-        class_methods.push(PluginMethodEntry(name: method_name, symbol: method_symbol, params: method_params, return_type: method_return_type))
-    if class_name != "":
-        current_classes.push(PluginClassEntry(name: class_name, constructor_symbol: class_constructor, destructor_symbol: class_destructor, methods: class_methods))
-    if in_plugin:
-        entries = flush_current_plugin(entries: entries, current_name: current_name, current_library: current_library, current_version: current_version, current_functions: current_functions, current_classes: current_classes)
+    for block in _plugin_manifest_entry_blocks(content):
+        val entry = _plugin_manifest_decode_entry(block)
+        if entry.name != "":
+            entries.push(entry)
     entries
 
 fn load_plugin_manifest(path: text) -> [PluginEntry]:

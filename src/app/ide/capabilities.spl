@@ -3,6 +3,21 @@
 # This is product-level metadata only: each capability points at the existing
 # implementation owner so the IDE can expose app/plugin support without forking
 # renderers, document models, spreadsheets, slide decks, dashboards, or DB code.
+#
+# `state` is capability TRUTH, not aspiration. The static `ide_capabilities()`
+# list stays cheap (`state: "declared"` for every row, no kernel calls). Call
+# `ide_capabilities_live()` (or `ide_capability_live_state()` for one entry) to
+# recompute `state` against the real extension kernel:
+#   declared    -> static entry only (this list), no builtin backs it yet.
+#   indexed     -> a builtin manifest (builtin_manifest_providers()) declares
+#                  a matching language/command for one of `compatible_with`.
+#   activatable -> extension_host_with_builtins() has that extension active.
+#   bound       -> a real CommandRegistry handler was registered for the
+#                  probed command id (feature_check) and is reachable.
+
+use std.editor.extensions.manifest.{ExtensionManifest}
+use std.editor.extensions.builtin.index.{builtin_manifest_providers}
+use std.editor.extensions.host.{ExtensionHost, extension_host_with_builtins}
 
 struct IdeCapability:
     id: text
@@ -11,6 +26,7 @@ struct IdeCapability:
     owner_module: text
     compatible_with: [text]
     feature_check: text
+    state: text
 
 fn ide_capability_new(id: text, label: text, plugin_kind: text, owner_module: text, compatible_with: [text], feature_check: text) -> IdeCapability:
     IdeCapability(
@@ -19,7 +35,8 @@ fn ide_capability_new(id: text, label: text, plugin_kind: text, owner_module: te
         plugin_kind: plugin_kind,
         owner_module: owner_module,
         compatible_with: compatible_with,
-        feature_check: feature_check
+        feature_check: feature_check,
+        state: "declared"
     )
 
 fn ide_capabilities() -> [IdeCapability]:
@@ -146,3 +163,92 @@ fn ide_capability_valid_count() -> i64:
         if ide_capability_valid(cap):
             count = count + 1
     count
+
+# ---- live capability truth (kernel-backed) --------------------------------
+
+# Trivial command probe: proves a command id CAN be bound through the real
+# CommandRegistry without depending on any particular extension's own logic.
+fn _ide_capability_probe_handler(payload: text) -> Result<text, text>:
+    Ok(payload)
+
+# True when `tag` identifies `manifest` via a contributed language id/file
+# extension, or the manifest's own name. Substring match on language id lets
+# related tags (e.g. "sdn" / "sdn-graph") line up without a hardcoded table.
+fn _ide_manifest_matches_tag(manifest: ExtensionManifest, tag: text) -> bool:
+    if tag == "":
+        return false
+    for lang in manifest.contributes_languages:
+        if lang.id == tag or lang.id.contains(tag) or tag.contains(lang.id):
+            return true
+        for ext in lang.extensions:
+            if ext.contains(tag):
+                return true
+    manifest.name.contains(tag)
+
+fn _ide_capability_manifest_for(compatible_with: [text], manifests: [ExtensionManifest]) -> ExtensionManifest?:
+    for tag in compatible_with:
+        for m in manifests:
+            if _ide_manifest_matches_tag(m, tag):
+                return Some(m)
+    None
+
+fn _ide_capability_first_command_id(manifest: ExtensionManifest) -> text:
+    if manifest.contributes_commands.len() == 0:
+        return ""
+    manifest.contributes_commands[0].id
+
+# Synthetic probe token for capabilities with no builtin manifest yet, so
+# `feature_check` always names the id that was (unsuccessfully) probed.
+fn _ide_capability_smoke_token(id: text) -> text:
+    id.replace("-", ".") + ".smoke"
+
+fn _ide_capability_with_live_state(cap: IdeCapability, host: ExtensionHost, manifests: [ExtensionManifest]) -> IdeCapability:
+    match _ide_capability_manifest_for(cap.compatible_with, manifests):
+        case Some(m):
+            val command_id = _ide_capability_first_command_id(m)
+            var state = "indexed"
+            var checked = if command_id != "": command_id else: m.name
+            if command_id != "" and host.is_active(m.name):
+                state = "activatable"
+                host.register_command_handler(m.name, command_id, "capability truth probe: " + cap.id, _ide_capability_probe_handler)
+                if host.command_handler_registered(command_id):
+                    state = "bound"
+            IdeCapability(
+                id: cap.id,
+                label: cap.label,
+                plugin_kind: cap.plugin_kind,
+                owner_module: cap.owner_module,
+                compatible_with: cap.compatible_with,
+                feature_check: checked,
+                state: state
+            )
+        case None:
+            IdeCapability(
+                id: cap.id,
+                label: cap.label,
+                plugin_kind: cap.plugin_kind,
+                owner_module: cap.owner_module,
+                compatible_with: cap.compatible_with,
+                feature_check: _ide_capability_smoke_token(cap.id),
+                state: "declared"
+            )
+
+# Recompute `state`/`feature_check` for one capability entry against a fresh
+# extension host. Intended for probing a SINGLE (possibly fabricated)
+# capability id in tests; `ide_capabilities_live()` shares one host instead.
+fn ide_capability_live_state(cap: IdeCapability) -> IdeCapability:
+    val host = extension_host_with_builtins()
+    val manifests = builtin_manifest_providers()
+    _ide_capability_with_live_state(cap, host, manifests)
+
+# Live variant of ide_capabilities(): recomputes `state` and `feature_check`
+# against the real extension kernel. Not cheap (builds an ExtensionHost) --
+# call this from reports/specs, not hot paths. ide_capabilities() itself stays
+# static so callers that only need id/label/owner metadata pay nothing extra.
+fn ide_capabilities_live() -> [IdeCapability]:
+    val host = extension_host_with_builtins()
+    val manifests = builtin_manifest_providers()
+    var out: [IdeCapability] = []
+    for cap in ide_capabilities():
+        out.push(_ide_capability_with_live_state(cap, host, manifests))
+    out

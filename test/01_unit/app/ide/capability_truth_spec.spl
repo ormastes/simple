@@ -1,0 +1,127 @@
+# Capability truth spec (IDE extension kernel campaign, lane L7).
+#
+# Proves `app.ide.capabilities` computes `state` against the REAL extension
+# kernel rather than declaring it: a capability backed by a builtin manifest
+# (markdown) reaches "bound" through actual CommandRegistry registration, a
+# fabricated capability id that no builtin backs stays at "declared", and the
+# plugin registry's SDN-backed decoder (`app.plugin.registry`) reproduces the
+# same PluginEntry shape the old hand-rolled parser produced.
+
+use std.spec.{describe, it, expect}
+use app.ide.capabilities.{ide_capability_new, ide_capabilities_live, ide_capability_live_state}
+use app.ide.feature_report.{ide_capability_truth_report}
+use app.plugin.registry.{parse_plugin_manifest_text, plugin_manifest_to_text, plugin_entry_new, plugin_entry_new_with_classes}
+
+describe "capability truth: live state against the real extension kernel":
+
+    it "the markdown capability reaches 'bound' via the real kernel":
+        var markdown_state = ""
+        var markdown_check = ""
+        for cap in ide_capabilities_live():
+            if cap.id == "markdown":
+                markdown_state = cap.state
+                markdown_check = cap.feature_check
+        expect(markdown_state).to_equal("bound")
+        expect(markdown_check).to_equal("md.preview")
+
+    it "a fabricated capability id with no builtin backing stays 'declared'":
+        val fake = ide_capability_new(
+            "totally-made-up-capability",
+            "Not Real",
+            "nonexistent-kind",
+            "std.nowhere.nothing",
+            ["zzz-no-such-tag", "another-fake-tag"],
+            ""
+        )
+        val live = ide_capability_live_state(fake)
+        expect(live.state).to_equal("declared")
+        expect(live.feature_check).to_equal("totally.made.up.capability.smoke")
+
+    it "every live capability has a non-empty probed feature_check id":
+        var all_non_empty = true
+        for cap in ide_capabilities_live():
+            if cap.feature_check == "":
+                all_non_empty = false
+        expect(all_non_empty).to_equal(true)
+
+    it "a capability with no matching builtin manifest stays below 'bound'":
+        var sheets_state = ""
+        for cap in ide_capabilities_live():
+            if cap.id == "sheets":
+                sheets_state = cap.state
+        expect(sheets_state).to_equal("declared")
+
+    it "the feature_report capability-truth render shows the higher and lower states":
+        val report = ide_capability_truth_report().join("\n")
+        expect(report).to_contain("capability-truth:")
+        expect(report).to_contain("markdown: state=bound check=md.preview")
+        expect(report).to_contain("sheets: state=declared")
+
+describe "plugin registry: SDN-backed decoder matches the documented on-disk shape":
+
+    it "decodes name/library/version/functions the same way the old parser did":
+        val entries = parse_plugin_manifest_text(
+            "plugins:\n" +
+            "    -\n" +
+            "        name: regex\n" +
+            "        library: /tmp/libsimple_regex_ffi.so\n" +
+            "        version: \"0.1.0\"\n" +
+            "        functions: [rt_regex_new, rt_regex_destroy]\n"
+        )
+        expect(entries.len()).to_equal(1)
+        expect(entries[0].name).to_equal("regex")
+        expect(entries[0].library).to_equal("/tmp/libsimple_regex_ffi.so")
+        expect(entries[0].version).to_equal("0.1.0")
+        expect(entries[0].functions.len()).to_equal(2)
+        expect(entries[0].functions[0]).to_equal("rt_regex_new")
+        expect(entries[0].functions[1]).to_equal("rt_regex_destroy")
+
+    it "decodes nested classes/methods the same way the old parser did (golden fixture)":
+        val entries = parse_plugin_manifest_text(
+            "plugins:\n" +
+            "    -\n" +
+            "        name: regex\n" +
+            "        library: /tmp/libsimple_regex_ffi.so\n" +
+            "        version: \"0.1.0\"\n" +
+            "        functions: [rt_regex_new, rt_regex_destroy]\n" +
+            "    -\n" +
+            "        name: shapes\n" +
+            "        library: /tmp/libsimple_shapes_ffi.so\n" +
+            "        version: \"0.3.0\"\n" +
+            "        functions: [rt_shape_area]\n" +
+            "        classes:\n" +
+            "            Circle:\n" +
+            "                constructor: rt_circle_new\n" +
+            "                destructor: rt_circle_free\n" +
+            "                methods:\n" +
+            "                    area:\n" +
+            "                        symbol: rt_circle_area\n" +
+            "                        params: [radius]\n" +
+            "                        return: f64\n"
+        )
+        expect(entries.len()).to_equal(2)
+        expect(entries[1].name).to_equal("shapes")
+        expect(entries[1].classes.len()).to_equal(1)
+        expect(entries[1].classes[0].name).to_equal("Circle")
+        expect(entries[1].classes[0].constructor_symbol).to_equal("rt_circle_new")
+        expect(entries[1].classes[0].destructor_symbol).to_equal("rt_circle_free")
+        expect(entries[1].classes[0].methods.len()).to_equal(1)
+        expect(entries[1].classes[0].methods[0].name).to_equal("area")
+        expect(entries[1].classes[0].methods[0].symbol).to_equal("rt_circle_area")
+        expect(entries[1].classes[0].methods[0].params.len()).to_equal(1)
+        expect(entries[1].classes[0].methods[0].params[0]).to_equal("radius")
+        expect(entries[1].classes[0].methods[0].return_type).to_equal("f64")
+
+    it "round-trips a constructed manifest through render + the SDN decoder unchanged":
+        val original = [
+            plugin_entry_new("http", "/tmp/libsimple_http_ffi.so", "0.2.0", ["rt_http_get", "rt_http_post"]),
+            plugin_entry_new_with_classes("widgets", "/tmp/libsimple_widgets.so", "1.0.0", [], [])
+        ]
+        val rendered = plugin_manifest_to_text(original)
+        val parsed = parse_plugin_manifest_text(rendered)
+        expect(parsed.len()).to_equal(original.len())
+        expect(parsed[0].name).to_equal(original[0].name)
+        expect(parsed[0].library).to_equal(original[0].library)
+        expect(parsed[0].version).to_equal(original[0].version)
+        expect(parsed[0].functions.len()).to_equal(original[0].functions.len())
+        expect(parsed[1].name).to_equal(original[1].name)
