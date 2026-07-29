@@ -62,6 +62,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_live_smoke_proof_va
 - The proof must include a regular single-link PNG screenshot artifact plus
   viewport, bitmap-byte, checksum, nontransparent-pixel, and distinct-color
   rows so DOM-only evidence cannot stand in for a rendered capture.
+- Screenshot validation must bound compressed and inflated allocations while
+  retaining enough capacity for a UHD 8K RGBA capture.
 - The validator and wrapper must emit normalized proof-source and screenshot
   artifact reason/status rows so downstream GUI gates can distinguish valid
   live artifacts from missing, aliased, malformed, or substituted files.
@@ -87,7 +89,7 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const png=Buffer.from(\"89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6360000002000100ffff03000006000557bfab860000000049454e44ae426082\",\"hex\");const screenshot=process.argv[1]+\".png\";fs.writeFileSync(screenshot,png);const p={target:\"electron\",surface_id:\"main\",proof_source:\"src/app/ui.electron/bridge.js:electronLiveSmokeProofScript\",browser_engine:\"chromium\",electron_user_agent:\"Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\",electron_process_version:\"42.5.0\",chrome_process_version:\"142.0.0.0\",width:1280,height:720,body_html_length:64,css_length:12,app_element_present:true,body_text_length:23,body_text_sample:\"Hello World from Web!\",performance_now_available:true,performance_now_delta_ms:1.25,animation_frame_available:true,animation_frame_count:2,css_animation_probe:true,event_dispatch_available:true,event_dispatch_count:1,event_dispatch_type:\"simple-electron-live-smoke-event\",event_dispatch_detail:\"live-smoke-input\",event_dispatch_error:\"\",event_dispatch_to_paint_ms:1.5,screenshot_path:screenshot,screenshot_width:1280,screenshot_height:720,screenshot_png_size_bytes:png.length,screenshot_bitmap_byte_count:3686400,screenshot_pixel_checksum:12345,screenshot_nontransparent_pixel_count:4096,screenshot_distinct_color_count:3,screenshot_error:\"\",blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+    "node -e 'const fs=require(\"fs\"),zlib=require(\"zlib\");function crc32(b){let c=0xffffffff;for(const v of b){c^=v;for(let i=0;i<8;i++)c=(c>>>1)^(c&1?0xedb88320:0)}return(c^0xffffffff)>>>0}function chunk(t,d){const n=Buffer.from(t),b=Buffer.alloc(d.length+12);b.writeUInt32BE(d.length,0);n.copy(b,4);d.copy(b,8);b.writeUInt32BE(crc32(Buffer.concat([n,d])),d.length+8);return b}const h=Buffer.alloc(13);h.writeUInt32BE(1280,0);h.writeUInt32BE(720,4);h[8]=8;h[9]=6;const raw=Buffer.alloc((1280*4+1)*720),colors=new Set();let checksum=0,nonTransparent=0;for(let y=0;y<720;y++)for(let x=0;x<1280;x++){const o=y*(1280*4+1)+1+x*4,r=x<640?255:0,b=x<640?0:255,a=255,i=(y*1280+x)*4;raw[o]=r;raw[o+2]=b;raw[o+3]=a;checksum=(checksum+((r+1)*3)+5+((b+1)*7)+((a+1)*11)+i)>>>0;nonTransparent++;colors.add(r+\",0,\"+b+\",\"+a)}const png=Buffer.concat([Buffer.from(\"89504e470d0a1a0a\",\"hex\"),chunk(\"IHDR\",h),chunk(\"IDAT\",zlib.deflateSync(raw)),chunk(\"IEND\",Buffer.alloc(0))]);const screenshot=process.argv[1]+\".png\";fs.writeFileSync(screenshot,png);const p={target:\"electron\",surface_id:\"main\",proof_source:\"src/app/ui.electron/bridge.js:electronLiveSmokeProofScript\",browser_engine:\"chromium\",electron_user_agent:\"Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\",electron_process_version:\"42.5.0\",chrome_process_version:\"142.0.0.0\",width:1280,height:720,body_html_length:64,css_length:12,app_element_present:true,body_text_length:23,body_text_sample:\"Hello World from Web!\",performance_now_available:true,performance_now_delta_ms:1.25,animation_frame_available:true,animation_frame_count:2,css_animation_probe:true,event_dispatch_available:true,event_dispatch_count:1,event_dispatch_type:\"simple-electron-live-smoke-event\",event_dispatch_detail:\"live-smoke-input\",event_dispatch_error:\"\",event_dispatch_to_paint_ms:1.5,screenshot_path:screenshot,screenshot_width:1280,screenshot_height:720,screenshot_png_size_bytes:png.length,screenshot_bitmap_byte_count:3686400,screenshot_pixel_checksum:checksum,screenshot_nontransparent_pixel_count:nonTransparent,screenshot_distinct_color_count:colors.size,screenshot_error:\"\",blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
 
 describe "Electron live smoke proof validator":
 
@@ -134,8 +136,8 @@ describe "Electron live smoke proof validator":
         expect(evidence).to_contain("electron_live_smoke_event_dispatch_to_paint_ms=1.5")
         expect(evidence).to_contain("electron_live_smoke_screenshot_path=" + root + "/proof.json.png")
         expect(evidence).to_contain("electron_live_smoke_screenshot_file_status=pass")
-        expect(evidence).to_contain("electron_live_smoke_screenshot_size_bytes=75")
-        expect(evidence).to_contain("electron_live_smoke_screenshot_actual_size_bytes=75")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_size_bytes=")
+        expect(evidence).to_contain("electron_live_smoke_screenshot_actual_size_bytes=")
         expect(evidence).to_contain("electron_live_smoke_screenshot_file_reason=pass")
         expect(evidence).to_contain("electron_live_smoke_screenshot_artifact_status=pass")
         expect(evidence).to_contain("electron_live_smoke_screenshot_width=1280")
@@ -435,7 +437,11 @@ describe "Electron live smoke proof validator":
             _proof_command(root + "/blank.json", "p.screenshot_nontransparent_pixel_count=0") +
             " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/blank.json 1280 720 > " + root + "/blank.env; " +
             _proof_command(root + "/colors.json", "p.screenshot_distinct_color_count=1") +
-            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/colors.json 1280 720 > " + root + "/colors.env"
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/colors.json 1280 720 > " + root + "/colors.env; " +
+            _proof_command(root + "/forged-header.json", "const forged=Buffer.from(png);forged.writeUInt32BE(1,16);forged.writeUInt32BE(1,20);fs.writeFileSync(screenshot,forged)") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/forged-header.json 1280 720 > " + root + "/forged-header.env; " +
+            _proof_command(root + "/forged-count.json", "p.screenshot_nontransparent_pixel_count=nonTransparent-1") +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/forged-count.json 1280 720 > " + root + "/forged-count.env"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(1)
 
@@ -444,6 +450,8 @@ describe "Electron live smoke proof validator":
         val width = file_read(root + "/width.env")
         val blank = file_read(root + "/blank.env")
         val colors = file_read(root + "/colors.env")
+        val forged_header = file_read(root + "/forged-header.env")
+        val forged_count = file_read(root + "/forged-count.env")
         step("Confirm Electron live smoke needs a bound nonblank screenshot artifact")
         expect(missing).to_contain("electron_live_smoke_validation_reason=screenshot-artifact-missing")
         expect(missing).to_contain("electron_live_smoke_screenshot_file_status=missing")
@@ -451,7 +459,7 @@ describe "Electron live smoke proof validator":
         expect(missing).to_contain("electron_live_smoke_screenshot_artifact_status=fail")
         expect(size).to_contain("electron_live_smoke_validation_reason=screenshot-artifact-size-mismatch")
         expect(size).to_contain("electron_live_smoke_screenshot_size_bytes=999")
-        expect(size).to_contain("electron_live_smoke_screenshot_actual_size_bytes=75")
+        expect(size).to_contain("electron_live_smoke_screenshot_actual_size_bytes=")
         expect(size).to_contain("electron_live_smoke_screenshot_file_reason=size-mismatch")
         expect(size).to_contain("electron_live_smoke_screenshot_artifact_status=fail")
         expect(width).to_contain("electron_live_smoke_validation_reason=screenshot-dimensions-mismatch")
@@ -460,6 +468,33 @@ describe "Electron live smoke proof validator":
         expect(blank).to_contain("electron_live_smoke_screenshot_nontransparent_pixel_count=0")
         expect(colors).to_contain("electron_live_smoke_validation_reason=screenshot-distinct-colors-missing")
         expect(colors).to_contain("electron_live_smoke_screenshot_distinct_color_count=1")
+        expect(forged_header).to_contain("electron_live_smoke_validation_status=fail")
+        expect(forged_header).to_contain("electron_live_smoke_validation_reason=screenshot-artifact-invalid-payload")
+        expect(forged_header).to_contain("electron_live_smoke_screenshot_file_status=invalid-payload")
+        expect(forged_count).to_contain("electron_live_smoke_validation_status=fail")
+        expect(forged_count).to_contain("electron_live_smoke_validation_reason=screenshot-artifact-nontransparent-count-mismatch")
+
+    it "rejects oversized screenshot dimensions and sparse artifacts before allocation":
+        val root = "build/test-electron-live-smoke-validator-screenshot-bounds"
+        val huge_png = "const hh=Buffer.alloc(13);hh.writeUInt32BE(50000,0);hh.writeUInt32BE(50000,4);hh[8]=8;hh[9]=6;const hp=Buffer.concat([Buffer.from(\"89504e470d0a1a0a\",\"hex\"),chunk(\"IHDR\",hh),chunk(\"IDAT\",zlib.deflateSync(Buffer.from([0]))),chunk(\"IEND\",Buffer.alloc(0))]);fs.writeFileSync(screenshot,hp);p.width=50000;p.height=50000;p.screenshot_width=50000;p.screenshot_height=50000;p.screenshot_png_size_bytes=hp.length"
+        val sparse_png = "fs.truncateSync(screenshot,167772161);p.screenshot_png_size_bytes=167772161"
+        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
+            _proof_command(root + "/dimensions.json", huge_png) +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/dimensions.json 50000 50000 > " + root + "/dimensions.env; " +
+            _proof_command(root + "/sparse.json", sparse_png) +
+            " && node scripts/check/validate-electron-live-smoke-proof.js " + root + "/sparse.json 1280 720 > " + root + "/sparse.env"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+
+        val dimensions = file_read(root + "/dimensions.env")
+        val sparse = file_read(root + "/sparse.env")
+        step("Confirm screenshot allocation ceilings fail closed before read or inflate")
+        expect(dimensions).to_contain(
+            "electron_live_smoke_validation_reason=screenshot-artifact-invalid-payload"
+        )
+        expect(sparse).to_contain(
+            "electron_live_smoke_validation_reason=screenshot-artifact-too-large"
+        )
 
     it "rejects string booleans for DOM performance animation CSS and tolerance proof":
         val root = "build/test-electron-live-smoke-validator-string-booleans"

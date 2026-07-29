@@ -25,6 +25,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_serialize_children,
     be_dom_serialize_html, be_dom_set_children,
     be_dom_submit_form_owner_id, be_dom_keyboard_activation_event_for_target,
+    be_dom_reset_form_owner_id,
     be_dom_checked_radio_id_for_target, be_dom_form_owner_id,
     be_dom_default_submitter_id, be_dom_form_allows_direct_implicit_submit,
     be_dom_input_blocks_implicit_submission, be_dom_next_focus_route_id
@@ -34,6 +35,9 @@ use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
 }
 use std.gc_async_mut.gpu.browser_engine.script.script_host.{
     script_host_apply_action_to_id
+}
+use std.gc_async_mut.gpu.browser_engine.script.form_api.{
+    form_capture_defaults, form_reset
 }
 use std.js.types.js_types.{JsValue}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage, browser_history_push_bounded}
@@ -284,7 +288,8 @@ fn _browser_session_event_control(action: text) -> bool:
 
 fn _browser_session_focus_default(action: text) -> bool:
     action == "focus-element" or action == "button-activate" or
-        action == "input-checkbox-toggle" or action == "input-radio-select"
+        action == "input-checkbox-toggle" or action == "input-radio-select" or
+        action == "form-reset"
 
 fn _browser_session_dom_route_id(root: BeDomNode, target_id: text) -> text:
     val path = be_dom_find_path_to_id(root, target_id)
@@ -350,9 +355,9 @@ impl BrowserSession:
             self.ui_access_revision + 1
 
     me _replace_current_body_children(body_html: text):
-        val replacement = html_tree_builder_build(
+        val replacement = form_capture_defaults(html_tree_builder_build(
             "<html><body>" + body_html + "</body></html>"
-        )
+        ))
         val replacement_bodies = be_dom_find_by_tag(replacement, "body")
         val current_bodies = be_dom_find_by_tag(self.current_dom, "body")
         if replacement_bodies.len() == 0 or current_bodies.len() == 0:
@@ -384,6 +389,21 @@ impl BrowserSession:
                 if val Err(e) = started:
                     self._append_warning("form navigation blocked: {e}")
         submit_dispatch
+
+    me _reset_dom_form(form_id: text):
+        val reset_dispatch = self.dispatch_dom_event(
+            form_id, "reset", true, true
+        )
+        if reset_dispatch.event.default_prevented:
+            return
+        val form_path = be_dom_find_path_to_id(self.current_dom, form_id)
+        if form_path.len() == 0:
+            return
+        self.current_dom = _browser_session_replace_dom_path(
+            form_path, form_reset(form_path[form_path.len() - 1])
+        )
+        self._advance_ui_access_revision()
+        self._sync_runtime_body_from_dom()
 
     me _ensure_dom_text_selection(
         target_id: text, target: BeDomNode
@@ -646,6 +666,13 @@ impl BrowserSession:
                     val _ = self._submit_dom_form(
                         form_id, dispatch.target_route_id
                     )
+            elif event_type == "click" and
+                 dispatch.default_action == "form-reset":
+                val form_id = be_dom_reset_form_owner_id(
+                    self.current_dom, dispatch.target_route_id
+                )
+                if form_id != "":
+                    self._reset_dom_form(form_id)
         self._sync_body_html_from_dom()
         dispatch
 
@@ -1271,7 +1298,7 @@ impl BrowserSession:
         self.current_body_html = body_html
         self.current_style_html = ""
         self.source_html = own_text(html)
-        self.current_dom = final_parse.doc
+        self.current_dom = form_capture_defaults(final_parse.doc)
         self._advance_ui_access_revision()
         if val Some(state) = self.runtime_state:
             state.bind_dom(self.current_dom)

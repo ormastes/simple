@@ -19,7 +19,15 @@ JS Equivalent → Simple Function:
 #![allow(REQC001)]
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_get_attr, be_dom_get_tag, be_dom_get_text_content}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_attr, be_dom_get_tag, be_dom_get_text_content, be_dom_has_attr
+}
+
+val _FORM_DEFAULT_CAPTURED = "\u0000simple-form-default"
+val _FORM_DEFAULT_VALUE = "\u0000simple-form-default-value"
+val _FORM_DEFAULT_VALUE_PRESENT = "\u0000simple-form-default-value-present"
+val _FORM_DEFAULT_CHECKED = "\u0000simple-form-default-checked"
+val _FORM_DEFAULT_SELECTED = "\u0000simple-form-default-selected"
 
 # =========================================================================
 # Value Access
@@ -109,21 +117,60 @@ pub fn form_submit(node: BeDomNode) -> BeDomNode:
         next.set_attr("data-submitted", "true")
     next
 
-pub fn form_reset(node: BeDomNode) -> BeDomNode:
-    """Reset form fields to their default values.
-
-    Clears the 'value' attribute on all input children.
-    """
+pub fn form_capture_defaults(node: BeDomNode) -> BeDomNode:
+    """Capture parsed form-control defaults in engine-private attributes."""
     var next = node
-    var i = 0
-    while i < next.children.len():
-        var child = next.children[i]
-        val tag = be_dom_get_tag(child)
-        if tag == "input" or tag == "textarea" or tag == "select":
-            child.remove_attr("value")
-            child.remove_attr("checked")
-        next.children[i] = child
-        i = i + 1
+    if not be_dom_has_attr(next, _FORM_DEFAULT_CAPTURED):
+        if next.tag_name == "input":
+            next.set_attr(_FORM_DEFAULT_CAPTURED, "1")
+            next.set_attr(_FORM_DEFAULT_VALUE, be_dom_get_attr(next, "value"))
+            if be_dom_has_attr(next, "value"):
+                next.set_attr(_FORM_DEFAULT_VALUE_PRESENT, "1")
+            if be_dom_has_attr(next, "checked"):
+                next.set_attr(_FORM_DEFAULT_CHECKED, "1")
+        elif next.tag_name == "textarea":
+            next.set_attr(_FORM_DEFAULT_CAPTURED, "1")
+            next.set_attr(
+                _FORM_DEFAULT_VALUE, be_dom_get_text_content(next)
+            )
+        elif next.tag_name == "option":
+            next.set_attr(_FORM_DEFAULT_CAPTURED, "1")
+            if be_dom_has_attr(next, "selected"):
+                next.set_attr(_FORM_DEFAULT_SELECTED, "1")
+    var children: [BeDomNode] = []
+    for child in next.children:
+        children.push(form_capture_defaults(child))
+    next.children = children
+    next
+
+pub fn form_reset(node: BeDomNode) -> BeDomNode:
+    """Recursively restore form controls to their parsed defaults."""
+    var next = node
+    if next.tag_name == "input":
+        if be_dom_has_attr(next, _FORM_DEFAULT_VALUE_PRESENT):
+            next.set_attr(
+                "value", be_dom_get_attr(next, _FORM_DEFAULT_VALUE)
+            )
+        else:
+            next.remove_attr("value")
+        val input_type = be_dom_get_attr(next, "type").lower()
+        if input_type == "checkbox" or input_type == "radio":
+            if be_dom_has_attr(next, _FORM_DEFAULT_CHECKED):
+                next.set_attr("checked", "checked")
+            else:
+                next.remove_attr("checked")
+    elif next.tag_name == "textarea":
+        val value = be_dom_get_attr(next, _FORM_DEFAULT_VALUE)
+        next.children = if value == "": [] else: [BeDomNode.text(value)]
+    elif next.tag_name == "option":
+        if be_dom_has_attr(next, _FORM_DEFAULT_SELECTED):
+            next.set_attr("selected", "selected")
+        else:
+            next.remove_attr("selected")
+    var children: [BeDomNode] = []
+    for child in next.children:
+        children.push(form_reset(child))
+    next.children = children
     next
 
 pub fn form_validate(node: BeDomNode) -> bool:

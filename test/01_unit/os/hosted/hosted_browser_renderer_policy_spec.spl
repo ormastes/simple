@@ -25,7 +25,6 @@ use os.hosted.hosted_browser_renderer_policy.{
     HostedBrowserNavigationPermit, HostedBrowserRequestPolicy,
     hosted_browser_cors_response_headers,
     hosted_browser_hsts_upgrade_valid,
-    hosted_browser_remove_http_only_set_cookie,
     hosted_browser_remove_response_header,
     hosted_browser_renderer_request_policy,
     hosted_browser_replace_response_header
@@ -781,23 +780,7 @@ describe "hosted browser renderer broker policy":
             rt_time_now_unix_micros() / 1000000
         ).contains("fresh=yes")).to_be(false)
 
-    it "removes only HttpOnly cookie response lines":
-        val filtered = hosted_browser_remove_http_only_set_cookie(
-            "X-First: 1\r\n" +
-            "Set-Cookie: public=yes; Path=/; SameSite=Lax\r\n" +
-            "set-cookie: secret=token; Secure;  HTTPONLY  ; Path=/\r\n" +
-            "Set-Cookie: named=yes; HttpOnly=not-an-attribute\r\n" +
-            "Set-Cookie2: legacy=secret\r\n" +
-            "X-Last: 2"
-        )
-        expect(filtered).to_equal(
-            "X-First: 1\r\n" +
-            "Set-Cookie: public=yes; Path=/; SameSite=Lax\r\n" +
-            "Set-Cookie: named=yes; HttpOnly=not-an-attribute\r\n" +
-            "X-Last: 2"
-        )
-
-    it "keeps HttpOnly cookies in the broker transport only":
+    it "keeps all cookies in the broker transport only":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.document_url = "https://secure.test/app"
         broker.document_origin = "https://secure.test"
@@ -840,9 +823,9 @@ describe "hosted browser renderer broker policy":
             decoded.message
         )
         expect(response.ok).to_be(true)
-        expect(response.headers).to_contain("Set-Cookie: public=yes")
+        expect(response.headers.lower().contains("set-cookie")).to_be(false)
+        expect(response.headers.contains("public=yes")).to_be(false)
         expect(response.headers.contains("secret=token")).to_be(false)
-        expect(response.headers.lower().contains("httponly")).to_be(false)
 
         match broker.network.prepare_single_hop(
             transport, broker.document_url, false

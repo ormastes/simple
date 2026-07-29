@@ -9,6 +9,7 @@ use std.common.web.browser_renderer_protocol.{
     BrowserRendererEncodeResult, BrowserRendererMessage,
     BrowserTextInputOverlay, browser_text_input_overlay_empty,
     browser_renderer_action_decode,
+    browser_renderer_bookmark_snapshot_decode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_fetch_request_encode,
     browser_renderer_frame_encode_with_state,
@@ -31,8 +32,12 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations
 }
 use std.gc_async_mut.web.browser_session.{
-    BrowserResponse, BrowserSession
+    BrowserBookmarkSnapshot, BrowserResponse, BrowserSession
 }
+use std.gc_async_mut.web.browser_session_url.{
+    normalize_network_navigation_url
+}
+use std.js.types.pair.{Pair}
 
 fn _worker_network_history_neighbor(url: text) -> text:
     if url.starts_with("http://") or url.starts_with("https://"):
@@ -553,6 +558,36 @@ pub class HostedBrowserRendererWorkerSession:
             self.scroll_milli_y = 0
         ""
 
+    me _dispatch_bookmark_snapshot(
+        message: BrowserRendererMessage
+    ) -> text:
+        val decoded = browser_renderer_bookmark_snapshot_decode(message)
+        if not decoded.ok:
+            return decoded.reason
+        var entries: [Pair<text, text>] = []
+        var seen_urls: [text] = []
+        var index = 0
+        while index < decoded.urls.len():
+            val raw_url = decoded.urls[index]
+            match normalize_network_navigation_url(raw_url):
+                Err(_):
+                    return "invalid-bookmark-snapshot"
+                Ok(url):
+                    if url != raw_url:
+                        return "invalid-bookmark-snapshot"
+                    for seen_url in seen_urls:
+                        if seen_url == url:
+                            return "invalid-bookmark-snapshot"
+                    seen_urls.push(url)
+                    entries.push(Pair(
+                        first: url, second: decoded.titles[index]
+                    ))
+            index = index + 1
+        val snapshot = BrowserBookmarkSnapshot.create(entries)
+        if self.browser.load_bookmark_snapshot(snapshot) != entries.len():
+            return "invalid-bookmark-snapshot"
+        ""
+
     me handle(message: BrowserRendererMessage) -> HostedBrowserRendererWorkerResult:
         if message.request_id != self.expected_request_id:
             return _worker_result_reject(
@@ -605,6 +640,8 @@ pub class HostedBrowserRendererWorkerSession:
                 reason = self._dispatch_chrome(message)
             elif message.kind == "navigation":
                 reason = self._dispatch_navigation(message)
+            elif message.kind == "bookmark-snapshot":
+                reason = self._dispatch_bookmark_snapshot(message)
             elif message.kind == "resize":
                 val resize = browser_renderer_resize_decode(message)
                 if not resize.ok:

@@ -26,6 +26,7 @@ val BROWSER_RENDERER_MAX_URL_ENCODED_BYTES: i64 = 10924
 pub val BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES: i64 = 65536
 pub val BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES: i64 = 524288
 pub val BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES: i64 = 4096
+pub val BROWSER_RENDERER_MAX_BOOKMARKS: i64 = 256
 val BROWSER_RENDERER_MAX_STYLE_PROPS: i64 = 160
 val BROWSER_RENDERER_MAX_STYLE_KEY_BYTES: i64 = 128
 val BROWSER_RENDERER_MAX_STYLE_VALUE_BYTES: i64 = 65536
@@ -118,6 +119,12 @@ pub struct BrowserRendererNavigationDecodeResult:
     body: text
     content_type: text
 
+pub struct BrowserRendererBookmarkSnapshotDecodeResult:
+    ok: bool
+    reason: text
+    urls: [text]
+    titles: [text]
+
 pub struct BrowserRendererResizeDecodeResult:
     ok: bool
     reason: text
@@ -150,6 +157,7 @@ fn _browser_renderer_kind_valid(kind: text) -> bool:
     (kind == "init" or kind == "advance" or kind == "pointer" or
         kind == "scroll" or kind == "text" or kind == "key" or
         kind == "chrome" or kind == "navigation" or kind == "resize" or
+        kind == "bookmark-snapshot" or
         kind == "network_response" or
         kind == "shutdown" or kind == "ready" or kind == "fetch_request" or
         kind == "frame" or kind == "dispatch_result" or kind == "state" or
@@ -685,6 +693,91 @@ pub fn browser_renderer_navigation_decode(
         return _browser_renderer_navigation_reject("invalid-navigation")
     _browser_renderer_navigation_result(
         action, url, method, headers, body, content_type
+    )
+
+fn _browser_renderer_bookmark_snapshot_reject(
+    reason: text
+) -> BrowserRendererBookmarkSnapshotDecodeResult:
+    BrowserRendererBookmarkSnapshotDecodeResult(
+        ok: false, reason: reason, urls: [], titles: []
+    )
+
+pub fn browser_renderer_bookmark_snapshot_encode(
+    generation: i64,
+    request_id: i64,
+    urls: [text],
+    titles: [text]
+) -> BrowserRendererEncodeResult:
+    if (urls.len() != titles.len() or
+        urls.len().to_i64() > BROWSER_RENDERER_MAX_BOOKMARKS):
+        return _browser_renderer_reject_encode(
+            "invalid-bookmark-snapshot"
+        )
+    var lines: [text] = ["SBB1\t{urls.len()}"]
+    var index = 0
+    while index < urls.len():
+        val url = urls[index]
+        val title = titles[index]
+        if (url == "" or url.len() > 2048 or title.len() > 512 or
+            url.contains("\0") or title.contains("\0")):
+            return _browser_renderer_reject_encode(
+                "invalid-bookmark-snapshot"
+            )
+        lines.push(
+            "u:" + base64_encode(url) + "\tt:" + base64_encode(title)
+        )
+        index = index + 1
+    browser_renderer_message_encode(
+        "bookmark-snapshot", generation, request_id, lines.join("\n")
+    )
+
+pub fn browser_renderer_bookmark_snapshot_decode(
+    message: BrowserRendererMessage
+) -> BrowserRendererBookmarkSnapshotDecodeResult:
+    if message.kind != "bookmark-snapshot":
+        return _browser_renderer_bookmark_snapshot_reject("wrong-kind")
+    val lines = message.payload.split("\n")
+    if lines.len() == 0:
+        return _browser_renderer_bookmark_snapshot_reject(
+            "malformed-bookmark-snapshot"
+        )
+    val header = lines[0].split("\t")
+    if header.len() != 2 or header[0] != "SBB1":
+        return _browser_renderer_bookmark_snapshot_reject(
+            "malformed-bookmark-snapshot"
+        )
+    val count = header[1].to_i64() ?? -1
+    if (count < 0 or count > BROWSER_RENDERER_MAX_BOOKMARKS or
+        str(count) != header[1] or lines.len().to_i64() != count + 1):
+        return _browser_renderer_bookmark_snapshot_reject(
+            "malformed-bookmark-snapshot"
+        )
+    var urls: [text] = []
+    var titles: [text] = []
+    var index: i64 = 0
+    while index < count:
+        val fields = lines[index + 1].split("\t")
+        if (fields.len() != 2 or not fields[0].starts_with("u:") or
+            not fields[1].starts_with("t:")):
+            return _browser_renderer_bookmark_snapshot_reject(
+                "malformed-bookmark-snapshot"
+            )
+        val encoded_url = fields[0].slice(2, fields[0].len())
+        val encoded_title = fields[1].slice(2, fields[1].len())
+        val url = base64_decode(encoded_url)
+        val title = base64_decode(encoded_title)
+        if (base64_encode(url) != encoded_url or
+            base64_encode(title) != encoded_title or
+            url == "" or url.len() > 2048 or title.len() > 512 or
+            url.contains("\0") or title.contains("\0")):
+            return _browser_renderer_bookmark_snapshot_reject(
+                "invalid-bookmark-snapshot"
+            )
+        urls.push(url)
+        titles.push(title)
+        index = index + 1
+    BrowserRendererBookmarkSnapshotDecodeResult(
+        ok: true, reason: "ok", urls: urls, titles: titles
     )
 
 pub fn browser_renderer_resize_encode(

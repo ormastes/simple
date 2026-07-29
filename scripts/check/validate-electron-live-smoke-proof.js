@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 const fs = require('fs');
+const zlib = require('zlib');
+
+// UHD 8K RGBA scanlines occupy 132,714,720 bytes. Keep enough headroom for
+// PNG/zlib framing while bounding every screenshot-controlled allocation.
+const MAX_SCREENSHOT_COMPRESSED_BYTES = 160 * 1024 * 1024;
+const MAX_SCREENSHOT_INFLATED_BYTES = 160 * 1024 * 1024;
 
 function clean(value) {
   if (value === undefined || value === null) return '';
@@ -75,7 +81,19 @@ function proofSourceArtifact(marker) {
   return { status: 'pass', size: actualSize, actualSize };
 }
 
-function pngArtifact(filePath, expectedSize) {
+function pngCrc32(bytes) {
+  if (typeof zlib.crc32 === 'function') return zlib.crc32(bytes) >>> 0;
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngArtifact(filePath, expectedSize, expectedWidth, expectedHeight) {
   if (typeof filePath !== 'string' || filePath.length === 0) {
     return { status: 'missing', size: '', actualSize: '' };
   }
@@ -90,21 +108,166 @@ function pngArtifact(filePath, expectedSize) {
   const actualSize = String(stat.size);
   if (stat.nlink > 1) return { status: 'hardlink', size: actualSize, actualSize };
   if (stat.size <= 8) return { status: 'empty', size: actualSize, actualSize };
+  if (stat.size > MAX_SCREENSHOT_COMPRESSED_BYTES) {
+    return { status: 'too-large', size: actualSize, actualSize };
+  }
   const expectedSizeText = jsonIntegerTextOrBlank(expectedSize);
   if (expectedSizeText && expectedSizeText !== actualSize) {
     return { status: 'size-mismatch', size: expectedSizeText, actualSize };
   }
-  let header;
+  const largestExpectedPayload = (expectedWidth * 4 + 1) * expectedHeight;
+  if (
+    !Number.isSafeInteger(largestExpectedPayload) ||
+    largestExpectedPayload < 1 ||
+    largestExpectedPayload > MAX_SCREENSHOT_INFLATED_BYTES
+  ) {
+    return { status: 'invalid-payload', size: actualSize, actualSize };
+  }
+  let bytes;
   try {
-    header = fs.readFileSync(filePath).subarray(0, 8);
+    bytes = fs.readFileSync(filePath);
   } catch (_err) {
     return { status: 'missing', size: '', actualSize: '' };
   }
   const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  if (header.length !== pngSignature.length || !header.equals(pngSignature)) {
+  if (bytes.length < 8 || !bytes.subarray(0, 8).equals(pngSignature)) {
     return { status: 'not-png', size: actualSize, actualSize };
   }
-  return { status: 'pass', size: actualSize, actualSize };
+  try {
+    let position = 8;
+    let width = 0;
+    let height = 0;
+    let bytesPerPixel = 0;
+    let sawHeader = false;
+    let sawData = false;
+    let dataClosed = false;
+    let sawEnd = false;
+    const imageData = [];
+    let imageDataBytes = 0;
+    while (position < bytes.length) {
+      if (bytes.length - position < 12) throw new Error('truncated chunk');
+      const length = bytes.readUInt32BE(position);
+      const end = position + 12 + length;
+      if (end > bytes.length) throw new Error('chunk out of bounds');
+      const typeBytes = bytes.subarray(position + 4, position + 8);
+      const type = typeBytes.toString('ascii');
+      const data = bytes.subarray(position + 8, position + 8 + length);
+      if (
+        (typeBytes[0] & 0x20) === 0 &&
+        pngCrc32(Buffer.concat([typeBytes, data])) !== bytes.readUInt32BE(position + 8 + length)
+      ) {
+        throw new Error('critical chunk crc mismatch');
+      }
+      if (!sawHeader && type !== 'IHDR') throw new Error('IHDR must be first');
+      if (type === 'IHDR') {
+        if (sawHeader || length !== 13) throw new Error('invalid IHDR');
+        width = data.readUInt32BE(0);
+        height = data.readUInt32BE(4);
+        if (width !== expectedWidth || height !== expectedHeight) {
+          return { status: 'dimensions-mismatch', size: actualSize, actualSize };
+        }
+        if (
+          width < 1 || height < 1 || data[8] !== 8 ||
+          (data[9] !== 2 && data[9] !== 6) ||
+          data[10] !== 0 || data[11] !== 0 || data[12] !== 0
+        ) {
+          throw new Error('unsupported IHDR');
+        }
+        bytesPerPixel = data[9] === 6 ? 4 : 3;
+        sawHeader = true;
+      } else if (type === 'IDAT') {
+        if (!sawHeader || dataClosed || sawEnd) throw new Error('invalid IDAT order');
+        if (length > MAX_SCREENSHOT_COMPRESSED_BYTES - imageDataBytes) {
+          throw new Error('compressed PNG too large');
+        }
+        imageDataBytes += length;
+        imageData.push(data);
+        if (length > 0) sawData = true;
+      } else if (type === 'IEND') {
+        if (!sawData || length !== 0 || end !== bytes.length) throw new Error('invalid IEND');
+        sawEnd = true;
+      } else {
+        if (sawData) dataClosed = true;
+        if ((typeBytes[0] & 0x20) === 0 && type !== 'PLTE') throw new Error('unknown critical chunk');
+        if (type === 'PLTE' && sawData) throw new Error('invalid PLTE order');
+      }
+      position = end;
+      if (sawEnd) break;
+    }
+    if (!sawHeader || !sawData || !sawEnd || position !== bytes.length) {
+      throw new Error('incomplete PNG');
+    }
+    const stride = width * bytesPerPixel;
+    const expectedInflatedSize = (stride + 1) * height;
+    if (
+      !Number.isSafeInteger(expectedInflatedSize) ||
+      expectedInflatedSize < 1 ||
+      expectedInflatedSize > MAX_SCREENSHOT_INFLATED_BYTES
+    ) {
+      throw new Error('inflated PNG too large');
+    }
+    const inflated = zlib.inflateSync(Buffer.concat(imageData), {
+      maxOutputLength: expectedInflatedSize + 1,
+    });
+    if (inflated.length !== expectedInflatedSize) throw new Error('pixel payload size mismatch');
+    let checksum = 0;
+    let nonTransparent = 0;
+    const distinct = new Set();
+    let previous = Buffer.alloc(stride);
+    for (let row = 0; row < height; row += 1) {
+      const start = row * (stride + 1);
+      const filter = inflated[start];
+      if (filter > 4) throw new Error('invalid row filter');
+      const current = inflated.subarray(start + 1, start + 1 + stride);
+      for (let offset = 0; offset < stride; offset += 1) {
+        const left = offset >= bytesPerPixel ? current[offset - bytesPerPixel] : 0;
+        const above = previous[offset];
+        const upperLeft = offset >= bytesPerPixel ? previous[offset - bytesPerPixel] : 0;
+        if (filter === 1) current[offset] = (current[offset] + left) & 255;
+        else if (filter === 2) current[offset] = (current[offset] + above) & 255;
+        else if (filter === 3) current[offset] = (current[offset] + ((left + above) >> 1)) & 255;
+        else if (filter === 4) {
+          const estimate = left + above - upperLeft;
+          const leftDistance = Math.abs(estimate - left);
+          const aboveDistance = Math.abs(estimate - above);
+          const upperLeftDistance = Math.abs(estimate - upperLeft);
+          const paeth = leftDistance <= aboveDistance && leftDistance <= upperLeftDistance
+            ? left
+            : aboveDistance <= upperLeftDistance ? above : upperLeft;
+          current[offset] = (current[offset] + paeth) & 255;
+        }
+      }
+      for (let pixel = 0; pixel < width; pixel += 1) {
+        const offset = pixel * bytesPerPixel;
+        const red = current[offset];
+        const green = current[offset + 1];
+        const blue = current[offset + 2];
+        const alpha = bytesPerPixel === 4 ? current[offset + 3] : 255;
+        const bitmapIndex = (row * width + pixel) * 4;
+        checksum = (
+          checksum +
+          ((red + 1) * 3) +
+          ((green + 1) * 5) +
+          ((blue + 1) * 7) +
+          ((alpha + 1) * 11) +
+          bitmapIndex
+        ) >>> 0;
+        if (alpha !== 0) nonTransparent += 1;
+        if (distinct.size < 4096) distinct.add(`${red},${green},${blue},${alpha}`);
+      }
+      previous = current;
+    }
+    return {
+      status: 'pass',
+      size: actualSize,
+      actualSize,
+      checksum,
+      nonTransparent,
+      distinctColorCount: distinct.size,
+    };
+  } catch (_err) {
+    return { status: 'invalid-payload', size: actualSize, actualSize };
+  }
 }
 
 function artifactStatus(artifact) {
@@ -173,7 +336,12 @@ const expectedWidth = expectedWidthText === null ? NaN : Number(expectedWidthTex
 const expectedHeight = expectedHeightText === null ? NaN : Number(expectedHeightText);
 const expectedProofSource = 'src/app/ui.electron/bridge.js:electronLiveSmokeProofScript';
 const proofSource = proofSourceArtifact(expectedProofSource);
-const screenshotArtifact = pngArtifact(proof.screenshot_path, proof.screenshot_png_size_bytes);
+const screenshotArtifact = pngArtifact(
+  proof.screenshot_path,
+  proof.screenshot_png_size_bytes,
+  expectedWidth,
+  expectedHeight
+);
 const proofSourceArtifactStatus = artifactStatus(proofSource);
 const screenshotArtifactStatus = artifactStatus(screenshotArtifact);
 const userAgent = textSample(proof.electron_user_agent);
@@ -254,6 +422,12 @@ if (proof.target !== 'electron') {
   reason = 'screenshot-nontransparent-pixels-missing';
 } else if (!integerNumberAtLeast(proof.screenshot_distinct_color_count, 2)) {
   reason = 'screenshot-distinct-colors-missing';
+} else if (proof.screenshot_pixel_checksum !== screenshotArtifact.checksum) {
+  reason = 'screenshot-artifact-pixel-checksum-mismatch';
+} else if (proof.screenshot_nontransparent_pixel_count !== screenshotArtifact.nonTransparent) {
+  reason = 'screenshot-artifact-nontransparent-count-mismatch';
+} else if (proof.screenshot_distinct_color_count !== screenshotArtifact.distinctColorCount) {
+  reason = 'screenshot-artifact-distinct-color-count-mismatch';
 }
 
 emit('electron_live_smoke_validation_status', reason === 'pass' ? 'pass' : 'fail');

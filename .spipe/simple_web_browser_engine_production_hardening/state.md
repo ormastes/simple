@@ -1608,3 +1608,28 @@ implementation in progress / target evidence blocked
 - Chromium capture and live-window launch no longer disable the OS sandbox.
   Capture disables Node integration, isolates context, and rejects popup or
   staged-page navigation; the live shell explicitly enables renderer sandboxing.
+- Broker responses now remove every `Set-Cookie`/`Set-Cookie2` header before
+  renderer IPC. The parent jar still stores and attaches both ordinary and
+  HttpOnly cookies; a future `document.cookie` read must remain origin-bound
+  and broker-mediated rather than restoring response headers.
+- Primary hosted renderer startup and successful Favorite toggles now send one
+  validated, duplicate-free bookmark snapshot from the parent profile store.
+  The protocol caps snapshots at 256 entries and the sandbox worker never reads
+  profile files. A busy renderer rejects Favorite before persistence changes,
+  so the database cannot diverge from the displayed snapshot.
+- Native form reset now restores parsed input, textarea, checkbox/radio, and
+  option defaults after one cancelable bubbling `reset` event. Defaults use
+  engine-private attributes excluded from author serialization, and explicit
+  `form=` ownership shares the normal form-owner resolver.
+- Default font caching now keys finite built-in aliases by their resolved font
+  path. Custom `@font-face` material remains transient, preventing attacker
+  family aliases from pinning duplicate process-lifetime TTF renderers.
+- Electron live-smoke validation now parses bounded PNG chunks, validates CRC
+  and zlib scanlines, unfilters pixels, and exactly matches checksum, opacity,
+  and distinct-color evidence. Compressed and inflated artifacts are capped at
+  160 MiB (enough for UHD 8K RGBA); forged dimensions, payloads, or pixel counts
+  fail before unbounded read/allocation.
+- Remaining production blocker: external `<img src>` resources are not fetched
+  or painted. The next lane must route bounded image requests through CSP
+  `img-src`, broker HSTS/mixed-content policy, binary image decoding, and the
+  canonical layout/Draw IR path; protocol-only admission is not sufficient.

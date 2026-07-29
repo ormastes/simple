@@ -3,7 +3,8 @@ use std.spec.*
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_event_identity, be_dom_find_by_tag, be_dom_get_attr
+    be_dom_event_identity, be_dom_find_by_tag, be_dom_find_path_to_id,
+    be_dom_get_attr, be_dom_get_text_content, be_dom_has_attr
 }
 
 fn _count_dom_input_color(pixels: [u32], color: u32) -> i64:
@@ -12,6 +13,16 @@ fn _count_dom_input_color(pixels: [u32], color: u32) -> i64:
         if pixel == color:
             count = count + 1
     count
+
+fn _dom_input_pixels_equal(left: [u32], right: [u32]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
 
 describe "BrowserSession live DOM input":
 
@@ -113,6 +124,67 @@ describe "BrowserSession live DOM input":
             "data-submitted=\"true\""
         )).to_equal(false)
         expect(session.has_pending_requests()).to_equal(false)
+
+    it "resets nested controls to parsed defaults unless reset is canceled":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/reset",
+            "<html><head><style>input,textarea,select,button{display:block;width:96px;height:22px}input[checked]{background-color:#2563eb}</style></head><body><form id='profile' onreset='set-attr:data-reset=yes'><div><input id='name' value='seed'><textarea id='notes'>memo</textarea><input id='flag' type='checkbox' checked><select id='choice'><option id='one' value='one' selected>One</option><option id='two' value='two'>Two</option></select><button id='restore' type='reset'>Reset</button></div></form><form id='blocked' onreset='prevent-default'><input id='kept' value='safe'><input id='blocked-reset' type='reset' value='Reset'></form></body></html>"
+        )
+        val initial = session.render_to_pixels(128, 180).pixel_data
+
+        expect(session.set_dom_text_input("name", "changed").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input("notes", "changed").is_ok()).to_equal(true)
+        val _ = session.dispatch_dom_event("flag", "click", true, true)
+        expect(session.set_dom_select_value("choice", "two").is_ok()).to_equal(true)
+        val callbacks_before_reset = session.dom_callback_count
+        val reset = session.dispatch_dom_event(
+            "restore", "click", true, true
+        )
+
+        expect(reset.default_action).to_equal("form-reset")
+        expect(session.dom_callback_count).to_equal(
+            callbacks_before_reset + 1
+        )
+        val name = be_dom_find_path_to_id(session.dom_root(), "name")
+        val notes = be_dom_find_path_to_id(session.dom_root(), "notes")
+        val flag = be_dom_find_path_to_id(session.dom_root(), "flag")
+        val one = be_dom_find_path_to_id(session.dom_root(), "one")
+        val two = be_dom_find_path_to_id(session.dom_root(), "two")
+        val profile = be_dom_find_path_to_id(session.dom_root(), "profile")
+        expect(be_dom_get_attr(name[name.len() - 1], "value")).to_equal("seed")
+        expect(be_dom_get_text_content(notes[notes.len() - 1])).to_equal("memo")
+        expect(be_dom_has_attr(flag[flag.len() - 1], "checked")).to_equal(true)
+        expect(be_dom_has_attr(one[one.len() - 1], "selected")).to_equal(true)
+        expect(be_dom_has_attr(two[two.len() - 1], "selected")).to_equal(false)
+        expect(be_dom_get_attr(
+            profile[profile.len() - 1], "data-reset"
+        )).to_equal("yes")
+        session.clear_dom_focus()
+        expect(_dom_input_pixels_equal(
+            initial, session.render_to_pixels(128, 180).pixel_data
+        )).to_equal(true)
+
+        expect(session.set_dom_text_input("kept", "changed").is_ok()).to_equal(true)
+        session.clear_dom_focus()
+        val prevented_before = session.render_to_pixels(128, 180).pixel_data
+        val callbacks_before_prevented = session.dom_callback_count
+        val prevented = session.dispatch_dom_event(
+            "blocked-reset", "click", true, true
+        )
+        expect(prevented.default_action).to_equal("form-reset")
+        expect(session.dom_callback_count).to_equal(
+            callbacks_before_prevented + 1
+        )
+        val kept = be_dom_find_path_to_id(session.dom_root(), "kept")
+        expect(be_dom_get_attr(
+            kept[kept.len() - 1], "value"
+        )).to_equal("changed")
+        session.clear_dom_focus()
+        expect(_dom_input_pixels_equal(
+            prevented_before,
+            session.render_to_pixels(128, 180).pixel_data
+        )).to_equal(true)
 
     it "queues an uncanceled POST form with live DOM values":
         var session = BrowserSession.new()

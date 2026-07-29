@@ -442,3 +442,16 @@ or native TLS behavior.
 - Chromium capture and the live Electron shell run with renderer sandboxing,
   Node integration disabled, and context isolation enabled. Capture additionally
   denies popup and navigation away from its staged document.
+- The parent profile owner sends at most 256 validated bookmarks through a
+  typed snapshot message after renderer readiness and successful Favorite
+  commits. The sandbox worker has no profile-file authority.
+- The network broker owns transport cookies and removes all Set-Cookie response
+  headers before renderer IPC. Script-visible cookie reads must use a separate
+  origin-bound broker operation.
+- Parsed form defaults are engine-private DOM state excluded from serialization;
+  reset dispatches once before the shared form-owner subtree is restored.
+- Process-lifetime default-font cache identity is the resolved finite built-in
+  font path. Author-provided font faces are document/transient material.
+- External images remain an open architecture lane: CSP `img-src`, HSTS and
+  mixed-content decisions stay in the broker; decoded bounded pixels then enter
+  layout and Draw IR through the existing image owner.

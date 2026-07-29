@@ -53,6 +53,7 @@ use std.common.web.browser_renderer_protocol.{
 use std.gc_async_mut.web.browser_session_url.{
     normalize_network_navigation_url
 }
+use std.gc_async_mut.web.browser_session.{BrowserBookmarkSnapshot}
 use std.common.encoding.utf8.{text_without_last_codepoint}
 use os.hosted.hosted_browser_renderer_worker.{hosted_browser_renderer_worker_main}
 use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
@@ -381,6 +382,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var browser_address_replace_on_text = false
     var browser_pressed_control = ""
     var browser_profile: BrowserProfileStore? = nil
+    var browser_bookmarks = BrowserBookmarkSnapshot.create([])
     var browser_resource_close_failed = false
     var browser_hsts_save_retry_at_micros: i64 = 0
     if browser_profile_window_id > 0:
@@ -390,11 +392,18 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     rt_time_now_unix_micros() / 1000
                 ):
                     Ok(hsts):
-                        val _ = browser_renderer.load_hsts_snapshot(
-                            hsts,
-                            rt_time_now_unix_micros() / 1000
-                        )
-                        browser_profile = Some(profile)
+                        match profile.load_bookmarks():
+                            Err(error):
+                                var failed_profile = profile
+                                val _ = failed_profile.close()
+                                print "[hosted-wm] browser-profile-disabled reason={error.message()}"
+                            Ok(bookmarks):
+                                val _ = browser_renderer.load_hsts_snapshot(
+                                    hsts,
+                                    rt_time_now_unix_micros() / 1000
+                                )
+                                browser_bookmarks = bookmarks
+                                browser_profile = Some(profile)
                     Err(error):
                         var failed_profile = profile
                         val _ = failed_profile.close()
@@ -440,6 +449,11 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         browser_profile_window_id, frame
                     )
                     if browser_renderer_ready:
+                        val bookmark_restore = browser_renderer.begin_bookmark_snapshot(
+                            browser_bookmarks, 2000
+                        )
+                        if val Err(reason) = bookmark_restore:
+                            print "[hosted-wm] browser-bookmark-restore-failed reason={reason}"
                         browser_animation_origin_micros = (
                             rt_time_now_micros()
                         )
@@ -928,6 +942,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                 action_reason = "no-network-document"
                             elif browser_profile == nil:
                                 action_reason = "profile-unavailable"
+                            elif (browser_renderer.command_deadline_ms > 0 or
+                                  browser_renderer.network_job_handle > 0):
+                                action_reason = "renderer-busy"
                             else:
                                 var profile = browser_profile.unwrap()
                                 match profile.toggle_bookmark(
@@ -935,7 +952,18 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                     browser_renderer.document_url
                                 ):
                                     Ok(_):
-                                        callback_count = 1
+                                        match profile.load_bookmarks():
+                                            Err(error):
+                                                action_reason = error.message()
+                                            Ok(bookmarks):
+                                                match browser_renderer.begin_bookmark_snapshot(
+                                                    bookmarks, 2000
+                                                ):
+                                                    Err(reason):
+                                                        action_reason = reason
+                                                    Ok(_):
+                                                        browser_bookmarks = bookmarks
+                                                        callback_count = 1
                                     Err(error):
                                         action_reason = error.message()
                                 browser_profile = Some(profile)

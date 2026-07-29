@@ -10,6 +10,7 @@ use std.common.web.browser_renderer_protocol.{
     BrowserRendererDecoder, BrowserRendererEncodeResult,
     BrowserRendererNetworkDecodeResult,
     browser_renderer_advance_encode,
+    browser_renderer_bookmark_snapshot_encode,
     browser_renderer_chrome_encode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_fetch_request_decode,
@@ -36,7 +37,7 @@ use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
 }
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
 use std.gc_async_mut.web.browser_session.{
-    BrowserHstsSnapshot, BrowserSession
+    BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserSession
 }
 use std.nogc_sync_mut.io.process_ops.{
     browser_renderer_spawn_sandboxed,
@@ -51,7 +52,6 @@ use os.hosted.hosted_browser_renderer_policy.{
     hosted_browser_empty_navigation_permit,
     hosted_browser_hsts_upgrade_valid,
     hosted_browser_network_origin,
-    hosted_browser_remove_http_only_set_cookie,
     hosted_browser_remove_response_header,
     hosted_browser_redirect_status,
     hosted_browser_renderer_request_policy,
@@ -864,8 +864,11 @@ pub class HostedBrowserRendererProcess:
                     return reason
                 Ok(headers):
                     response_headers = headers
-        response_headers = hosted_browser_remove_http_only_set_cookie(
-            response_headers
+        response_headers = hosted_browser_remove_response_header(
+            response_headers, "set-cookie"
+        )
+        response_headers = hosted_browser_remove_response_header(
+            response_headers, "set-cookie2"
         )
         if hosted_browser_redirect_status(response.status):
             val location = hosted_browser_response_header_value(
@@ -1064,6 +1067,7 @@ pub class HostedBrowserRendererProcess:
             self.pending_operation == "pointer" or
             self.pending_operation == "key" or
             self.pending_operation == "text" or
+            self.pending_operation == "bookmark-snapshot" or
             self.pending_operation == "resize" or
             self.pending_operation == "scroll"
         )
@@ -1470,6 +1474,25 @@ pub class HostedBrowserRendererProcess:
             self.pending_resize_width = 0
             self.pending_resize_height = 0
         started
+
+    me begin_bookmark_snapshot(
+        snapshot: BrowserBookmarkSnapshot,
+        timeout_ms: i64
+    ) -> Result<bool, text>:
+        if self.state != "active":
+            return Err("invalid-renderer-state")
+        var urls: [text] = []
+        var titles: [text] = []
+        for entry in snapshot.entries:
+            urls.push(entry.first)
+            titles.push(entry.second)
+        self._begin_after_animation(
+            browser_renderer_bookmark_snapshot_encode(
+                self.generation, self.next_request_id, urls, titles
+            ),
+            "bookmark-snapshot",
+            timeout_ms
+        )
 
     me _begin_navigation_command(
         action: text,

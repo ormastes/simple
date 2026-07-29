@@ -5,6 +5,8 @@ use std.common.ui.draw_ir.{DrawIrCommand}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_WORKER_ARG,
     BrowserRendererMessage,
+    browser_renderer_bookmark_snapshot_decode,
+    browser_renderer_bookmark_snapshot_encode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_fetch_request_decode,
     browser_renderer_frame_decode,
@@ -28,12 +30,16 @@ use os.hosted.hosted_browser_renderer_process.{
 }
 
 extern fn rt_file_read_text(path: text) -> text
+use common.ui.access.{WinTextActionRequest, ui_access_find_nodes}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_id}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_hit_test_index
 }
-use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session.{
+    BrowserBookmarkSnapshot, BrowserSession
+}
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.js.types.pair.{Pair}
 
 extern fn rt_bytes_to_text(bytes: [u8]) -> text
 
@@ -62,6 +68,74 @@ fn _worker_command_index(
     -1
 
 describe "hosted browser renderer worker":
+
+    it "restores bounded bookmarks into a fresh external renderer":
+        val saved_url = "https://restart.test/saved"
+        val snapshot = BrowserBookmarkSnapshot.create([
+            Pair(first: saved_url, second: "Saved bookmark")
+        ])
+        var process = HostedBrowserRendererProcess.create(19, 64, 48)
+        process.state = "active"
+        expect(process.begin_bookmark_snapshot(
+            snapshot, 2000
+        ).is_ok()).to_be(true)
+        val process_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(19), process.pending_wire
+        )
+        expect(browser_renderer_bookmark_snapshot_decode(
+            process_message.message
+        ).ok).to_be(true)
+
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<p>fresh renderer</p>"
+        )).ok).to_be(true)
+        val encoded = browser_renderer_bookmark_snapshot_encode(
+            7, 3, [saved_url], ["Saved bookmark"]
+        )
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), encoded.wire
+        )
+        expect(worker.handle(decoded.message).ok).to_be(true)
+        val bookmarks = ui_access_find_nodes(
+            worker.browser.ui_access_snapshot(),
+            "browser:session", "link", "Saved bookmark", 1
+        )
+        expect(bookmarks.len()).to_equal(1)
+        expect(bookmarks[0].canonical_id).to_equal(
+            "browser:session#bookmark_0"
+        )
+        worker.browser.register_resource(
+            saved_url, "<p>restored bookmark</p>"
+        )
+        expect(worker.browser.ui_access_act(WinTextActionRequest(
+            target_id: bookmarks[0].canonical_id,
+            action: "click", text_value: "", x: 0, y: 0
+        )).ok).to_be(true)
+        expect(worker.browser.current_url).to_equal(saved_url)
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "bookmark-snapshot", generation: 7, request_id: 4,
+            payload: "SBB1\t1\n%%%\t%%%"
+        )).ok).to_be(false)
+        var too_many_urls: [text] = []
+        var too_many_titles: [text] = []
+        var index = 0
+        while index < 257:
+            too_many_urls.push("https://restart.test/{index}")
+            too_many_titles.push("bookmark")
+            index = index + 1
+        expect(browser_renderer_bookmark_snapshot_encode(
+            7, 4, too_many_urls, too_many_titles
+        ).ok).to_be(false)
+        val host = (
+            rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+        )
+        expect(host).to_contain("profile.load_bookmarks()")
+        expect(host).to_contain(
+            "browser_renderer.begin_bookmark_snapshot("
+        )
 
     it "releases the previous hit graph before repaint allocation":
         val source = rt_file_read_text(

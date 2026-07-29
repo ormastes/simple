@@ -207,6 +207,14 @@ fn _browser_default_font_lock_acquire() -> Mutex:
 fn _browser_default_font_lock_release(active: Mutex):
     _font_mutex_release(active)
 
+fn _browser_default_font_cache_key(family: text) -> text:
+    if family.trim().starts_with("__simple_font_face__|"):
+        return ""
+    val candidates = browser_font_candidates_for_family(family)
+    if candidates.len() == 0:
+        return ""
+    candidates[0]
+
 fn _registered_selected_font_bytes(path: text) -> ([u8], bool):
     val active_lock = _browser_default_font_lock_acquire()
     var index: i64 = 0
@@ -276,19 +284,21 @@ fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
     true
 
 fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
-    val active_lock = _browser_default_font_lock_acquire()
-    var index: i64 = 0
-    while index < _browser_default_font_families.len():
-        if _browser_default_font_families[index] == family:
-            val hit = _browser_default_font_renderers[index]
-            _browser_default_font_lock_release(active_lock)
-            return (hit, true)
-        index = index + 1
-    _browser_default_font_lock_release(active_lock)
+    val cache_key = _browser_default_font_cache_key(family)
+    if cache_key != "":
+        val active_lock = _browser_default_font_lock_acquire()
+        var index: i64 = 0
+        while index < _browser_default_font_families.len():
+            if _browser_default_font_families[index] == cache_key:
+                val hit = _browser_default_font_renderers[index]
+                _browser_default_font_lock_release(active_lock)
+                return (hit, true)
+            index = index + 1
+        _browser_default_font_lock_release(active_lock)
     val loaded = FontRenderer.browser_default_for_family(family)
-    if loaded.has_sffi_ttf():
+    if cache_key != "" and loaded.has_sffi_ttf():
         val store_lock = _browser_default_font_lock_acquire()
-        _browser_default_font_families = _browser_default_font_families.push(family)
+        _browser_default_font_families = _browser_default_font_families.push(cache_key)
         _browser_default_font_renderers = _browser_default_font_renderers.push(loaded)
         _browser_default_font_lock_release(store_lock)
     (loaded, false)

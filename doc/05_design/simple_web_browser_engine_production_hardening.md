@@ -370,3 +370,19 @@ visible and cannot be silently skipped into the score.
   Engine2D; legacy CSV is read-only compatibility input.
 - Chromium capture denies popups/navigation and all production Chromium launch
   paths retain the Electron renderer sandbox.
+- Renderer startup and successful Favorite toggles receive one bounded,
+  canonical bookmark snapshot from the parent-owned profile store. Favorite
+  rejects renderer-busy before committing profile state.
+- Renderer response IPC contains no Set-Cookie headers; only the parent cookie
+  jar persists and attaches transport cookies.
+- Form reset uses captured parse defaults, shared form ownership, and one
+  cancelable bubbling event before mutation.
+- Built-in font aliases share one cache entry per resolved font path; custom
+  faces are not admitted to the process-lifetime default cache.
+- Live Electron screenshot proof is accepted only when decoded PNG pixels
+  exactly reproduce its checksum, nontransparent count, and distinct-color
+  count; compressed and inflated PNG data are each capped at 160 MiB.
+- External `<img src>` is intentionally not claimed complete. Completion
+  requires a bounded broker image request, CSP/HSTS/mixed-content enforcement,
+  decoded pixels in layout/Draw IR, and an HTTPS subdomain-HSTS pixel scenario
+  with a mixed-content-blocked control.
