@@ -11,7 +11,10 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_animation_instances_next_ms,
-    simple_web_layout_hit_test_target_at_time_with_animations
+    simple_web_layout_hit_test_index
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_render_session.{
+    SimpleWebRenderSession
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
@@ -26,6 +29,9 @@ use std.database.sql.types.{DbError}
 use os.hosted.browser_profile_store.{BrowserBookmarkStore}
 use os.hosted.hosted_browser_renderer_policy.{
     hosted_browser_transport_host
+}
+use std.common.web.browser_renderer_protocol.{
+    browser_text_input_overlay_empty
 }
 use common.ui.access.{WinTextActionRequest}
 use common.string_builder.{StringBuilder}
@@ -86,6 +92,7 @@ class HostedWebContentSession:
     width: i32
     height: i32
     browser: BrowserSession
+    render_session: SimpleWebRenderSession
     network: FetchEngine
     mutation_revision: i64
     failure_reason: text
@@ -122,6 +129,7 @@ class HostedWebContentSession:
             width: width,
             height: height,
             browser: browser,
+            render_session: SimpleWebRenderSession.create(),
             network: FetchEngine.new(
                 Logger.new("hosted-browser-network", LogLevel.Error)
             ),
@@ -142,6 +150,47 @@ class HostedWebContentSession:
 
     fn presentation_html() -> text:
         self.browser.current_style_html + self.browser.current_body_html
+
+    me _target_at(x: i32, y: i32) -> text:
+        val animation_time_ms = (
+            self.browser.monotonic_time_ms -
+            self.browser.animation_start_time_ms
+        )
+        val snapshot = self.browser.render_snapshot_since(
+            self.render_session.document_revision,
+            self.render_session.style_revision,
+            self.render_session.resource_revision
+        )
+        val document_html = match snapshot.document_html:
+            Some(html): html
+            nil: self.render_session.document_html
+        self.browser.prepare_css_animation_instances_with_html(
+            self.width, document_html
+        )
+        val layout = self.render_session.render(
+            snapshot,
+            self.width,
+            self.height,
+            animation_time_ms,
+            0,
+            browser_text_input_overlay_empty(),
+            self.browser.css_animation_instances,
+            self.browser.image_resources
+        )
+        val target_key = simple_web_layout_hit_test_index(
+            layout.hit_index, x, y
+        )
+        if target_key.starts_with("id:"):
+            return target_key.slice(3, target_key.len())
+        if target_key.starts_with("path:"):
+            return be_dom_event_identity_at_element_path(
+                self.browser.dom_root(),
+                target_key.slice(5, target_key.len())
+            )
+        ""
+
+    me _invalidate_retained_document():
+        self.render_session.document_revision = -1
 
     me _commit_network_error(request: BrowserRequest, message: text):
         val _ = self.browser.commit_network_response(
@@ -324,6 +373,7 @@ class HostedWebContentSession:
         self._cancel_orphaned_network_job()
         if result.ok:
             if self.browser.current_body_html != before_body:
+                self._invalidate_retained_document()
                 self.published_body_html = self.presentation_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
@@ -429,6 +479,8 @@ class HostedWebContentSession:
             not render_changed and not css_animation_changed
         ):
             return false
+        if body_html != self.published_body_html:
+            self._invalidate_retained_document()
         self.published_body_html = body_html
         self.mutation_revision = self.mutation_revision + 1
         true
@@ -446,25 +498,7 @@ class HostedWebContentSession:
                 mutation_revision: self.mutation_revision,
                 reason: self.failure_reason
         )
-        val root = self.browser.dom_root()
-        val animation_time_ms = (
-            self.browser.monotonic_time_ms -
-            self.browser.animation_start_time_ms
-        )
-        self.browser.prepare_css_animation_instances(self.width)
-        val target_key = simple_web_layout_hit_test_target_at_time_with_animations(
-            self.browser.render_html_document(), self.width, self.height,
-            x, y, animation_time_ms,
-            self.browser.css_animation_instances
-        )
-        val target_id = if target_key.starts_with("id:"):
-            target_key.slice(3, target_key.len())
-        elif target_key.starts_with("path:"):
-            be_dom_event_identity_at_element_path(
-                root, target_key.slice(5, target_key.len())
-            )
-        else:
-            ""
+        val target_id = self._target_at(x, y)
         if target_id == "":
             self.pressed_target_id = ""
             return HostedWebContentDispatch(
@@ -489,6 +523,7 @@ class HostedWebContentSession:
             self._cancel_orphaned_network_job()
             val changed = self.browser.current_body_html != before
             if changed:
+                self._invalidate_retained_document()
                 self.published_body_html = self.presentation_html()
                 self.mutation_revision = self.mutation_revision + 1
             return HostedWebContentDispatch(
@@ -516,6 +551,7 @@ class HostedWebContentSession:
         self.last_target_id = be_dom_focused_id(self.browser.dom_root())
         val changed = self.browser.current_body_html != before
         if changed:
+            self._invalidate_retained_document()
             self.published_body_html = self.presentation_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
@@ -587,6 +623,7 @@ class HostedWebContentSession:
         self.last_target_id = active_id
         val changed = self.browser.current_body_html != before
         if changed:
+            self._invalidate_retained_document()
             self.published_body_html = self.presentation_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
@@ -691,6 +728,7 @@ class HostedWebContentSession:
         self.last_target_id = active_id
         val changed = self.browser.current_body_html != before
         if changed:
+            self._invalidate_retained_document()
             self.published_body_html = self.presentation_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
@@ -712,6 +750,11 @@ class HostedWebContentSession:
 
     fn render_to_pixels() -> [u32]:
         self.browser.render_to_pixels(self.width, self.height).pixel_data
+
+    me close():
+        self.cancel_network()
+        self.render_session.close()
+        self.browser.close()
 
 class HostedWebContentRegistry:
     sessions: [HostedWebContentSession]
@@ -991,7 +1034,7 @@ class HostedWebContentRegistry:
         if index < 0:
             return true
         var closed = self.sessions[index]
-        closed.cancel_network()
+        closed.close()
         var retained: [HostedWebContentSession] = []
         var i = 0
         while i < self.sessions.len():
@@ -1005,7 +1048,7 @@ class HostedWebContentRegistry:
         var i = 0
         while i < self.sessions.len():
             var session = self.sessions[i]
-            session.cancel_network()
+            session.close()
             self.sessions[i] = session
             i = i + 1
         if self.bookmark_store != nil:

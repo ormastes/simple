@@ -467,6 +467,67 @@ describe "hosted Web content session":
             "data-clicked=\"yes\""
         )
 
+    it "reuses retained pointer layout and invalidates it after DOM mutation":
+        step("Run animation pointer keyboard text and scroll workloads")
+        var session = HostedWebContentSession.create(
+            91,
+            "<style>#target{position:absolute;left:48px;top:32px;" +
+            "width:28px;height:20px}</style>" +
+            "<div id='target' onclick='set-attr:data-clicked=yes'>Hit</div>",
+            100, 70
+        )
+        val press = session.dispatch_pointer_at(1, 52, 36, true)
+        val release = session.dispatch_pointer_at(2, 52, 36, false)
+
+        expect(press.semantic_target_id).to_equal("target")
+        expect(press.reason).to_equal("pointer-pressed")
+        expect(release.semantic_target_id).to_equal("target")
+        expect(release.callback_count).to_equal(1)
+        expect(session.current_body_html()).to_contain(
+            "data-clicked=\"yes\""
+        )
+        expect(session.render_session.counters.serialize_count).to_equal(1)
+        expect(session.render_session.counters.parse_count).to_equal(1)
+        expect(session.render_session.counters.css_count).to_equal(1)
+        expect(session.render_session.counters.style_count).to_equal(1)
+        expect(session.render_session.counters.layout_count).to_equal(1)
+        expect(session.render_session.counters.reuse_count).to_equal(1)
+
+        val after_mutation = session.dispatch_pointer_at(
+            3, 52, 36, true
+        )
+        expect(after_mutation.semantic_target_id).to_equal("target")
+        expect(session.render_session.counters.serialize_count).to_equal(2)
+        expect(session.render_session.counters.parse_count).to_equal(2)
+        expect(session.render_session.counters.layout_count).to_equal(2)
+
+        var animated = HostedWebContentSession.create(
+            92,
+            "<style>@keyframes grow{from{width:8px}to{width:32px}}" +
+            "#stage{width:8px;height:24px;background-color:#2563eb;" +
+            "animation:grow 1000ms linear forwards}</style>" +
+            "<div id='stage'></div>",
+            64, 48
+        )
+        expect(animated.advance_at(1000)).to_be(false)
+        val before_growth = animated.dispatch_pointer_at(
+            4, 20, 4, true
+        )
+        expect(
+            before_growth.semantic_target_id == "stage"
+        ).to_be(false)
+        expect(animated.render_session.counters.parse_count).to_equal(1)
+        expect(animated.render_session.counters.layout_count).to_equal(1)
+
+        expect(animated.advance_at(1500)).to_be(true)
+        val after_growth = animated.dispatch_pointer_at(
+            5, 20, 4, true
+        )
+        expect(after_growth.semantic_target_id).to_equal("stage")
+        expect(animated.render_session.counters.parse_count).to_equal(1)
+        expect(animated.render_session.counters.style_count).to_equal(2)
+        expect(animated.render_session.counters.layout_count).to_equal(2)
+
     # @req REQ-WEB-BROWSER-008
     it "appends committed text only to the actually focused hosted input":
         var session = HostedWebContentSession.create(

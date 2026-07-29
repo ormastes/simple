@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -769,6 +769,166 @@ expect(session.current_body_html()).to_contain(
     "data-clicked=\"yes\""
 )
 ```
+
+</details>
+
+#### reuses retained pointer layout and invalidates it after DOM mutation
+
+- Run animation pointer keyboard text and scroll workloads
+   - Expected: press.semantic_target_id equals `target`
+   - Expected: press.reason equals `pointer-pressed`
+   - Expected: release.semantic_target_id equals `target`
+   - Expected: release.callback_count equals `1`
+   - Expected: session.render_session.counters.serialize_count equals `1`
+   - Expected: session.render_session.counters.parse_count equals `1`
+   - Expected: session.render_session.counters.css_count equals `1`
+   - Expected: session.render_session.counters.style_count equals `1`
+   - Expected: session.render_session.counters.layout_count equals `1`
+   - Expected: session.render_session.counters.reuse_count equals `1`
+   - Expected: after_mutation.semantic_target_id equals `target`
+   - Expected: session.render_session.counters.serialize_count equals `2`
+   - Expected: session.render_session.counters.parse_count equals `2`
+   - Expected: session.render_session.counters.layout_count equals `2`
+   - Expected: animated.render_session.counters.parse_count equals `1`
+   - Expected: animated.render_session.counters.layout_count equals `1`
+   - Expected: after_growth.semantic_target_id equals `stage`
+   - Expected: animated.render_session.counters.parse_count equals `1`
+   - Expected: animated.render_session.counters.style_count equals `2`
+   - Expected: animated.render_session.counters.layout_count equals `2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 59 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run animation pointer keyboard text and scroll workloads")
+var session = HostedWebContentSession.create(
+    91,
+    "<style>#target{position:absolute;left:48px;top:32px;" +
+    "width:28px;height:20px}</style>" +
+    "<div id='target' onclick='set-attr:data-clicked=yes'>Hit</div>",
+    100, 70
+)
+val press = session.dispatch_pointer_at(1, 52, 36, true)
+val release = session.dispatch_pointer_at(2, 52, 36, false)
+
+expect(press.semantic_target_id).to_equal("target")
+expect(press.reason).to_equal("pointer-pressed")
+expect(release.semantic_target_id).to_equal("target")
+expect(release.callback_count).to_equal(1)
+expect(session.current_body_html()).to_contain(
+    "data-clicked=\"yes\""
+)
+expect(session.render_session.counters.serialize_count).to_equal(1)
+expect(session.render_session.counters.parse_count).to_equal(1)
+expect(session.render_session.counters.css_count).to_equal(1)
+expect(session.render_session.counters.style_count).to_equal(1)
+expect(session.render_session.counters.layout_count).to_equal(1)
+expect(session.render_session.counters.reuse_count).to_equal(1)
+
+val after_mutation = session.dispatch_pointer_at(
+    3, 52, 36, true
+)
+expect(after_mutation.semantic_target_id).to_equal("target")
+expect(session.render_session.counters.serialize_count).to_equal(2)
+expect(session.render_session.counters.parse_count).to_equal(2)
+expect(session.render_session.counters.layout_count).to_equal(2)
+
+var animated = HostedWebContentSession.create(
+    92,
+    "<style>@keyframes grow{from{width:8px}to{width:32px}}" +
+    "#stage{width:8px;height:24px;background-color:#2563eb;" +
+    "animation:grow 1000ms linear forwards}</style>" +
+    "<div id='stage'></div>",
+    64, 48
+)
+expect(animated.advance_at(1000)).to_be(false)
+val before_growth = animated.dispatch_pointer_at(
+    4, 20, 4, true
+)
+expect(
+    before_growth.semantic_target_id == "stage"
+).to_be(false)
+expect(animated.render_session.counters.parse_count).to_equal(1)
+expect(animated.render_session.counters.layout_count).to_equal(1)
+
+expect(animated.advance_at(1500)).to_be(true)
+val after_growth = animated.dispatch_pointer_at(
+    5, 20, 4, true
+)
+expect(after_growth.semantic_target_id).to_equal("stage")
+expect(animated.render_session.counters.parse_count).to_equal(1)
+expect(animated.render_session.counters.style_count).to_equal(2)
+expect(animated.render_session.counters.layout_count).to_equal(2)
+```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> step("Run animation pointer keyboard text and scroll workloads")<br>
+> var session = HostedWebContentSession.create(<br>
+>     91,<br>
+>     "<style>#target{position:absolute;left:48px;top:32px;" +<br>
+>     "width:28px;height:20px}</style>" +<br>
+>     "<div id='target' onclick='set-attr:data-clicked=yes'>Hit</div>",<br>
+>     100, 70<br>
+> )<br>
+> val press = session.dispatch_pointer_at(1, 52, 36, true)<br>
+> val release = session.dispatch_pointer_at(2, 52, 36, false)<br>
+> <br>
+> expect(press.semantic_target_id).to_equal("target")<br>
+> expect(press.reason).to_equal("pointer-pressed")<br>
+> expect(release.semantic_target_id).to_equal("target")<br>
+> expect(release.callback_count).to_equal(1)<br>
+> expect(session.current_body_html()).to_contain(<br>
+>     "data-clicked=\"yes\""<br>
+> )<br>
+> expect(session.render_session.counters.serialize_count).to_equal(1)<br>
+> expect(session.render_session.counters.parse_count).to_equal(1)<br>
+> expect(session.render_session.counters.css_count).to_equal(1)<br>
+> expect(session.render_session.counters.style_count).to_equal(1)<br>
+> expect(session.render_session.counters.layout_count).to_equal(1)<br>
+> expect(session.render_session.counters.reuse_count).to_equal(1)<br>
+> <br>
+> val after_mutation = session.dispatch_pointer_at(<br>
+>     3, 52, 36, true<br>
+> )<br>
+> expect(after_mutation.semantic_target_id).to_equal("target")<br>
+> expect(session.render_session.counters.serialize_count).to_equal(2)<br>
+> expect(session.render_session.counters.parse_count).to_equal(2)<br>
+> expect(session.render_session.counters.layout_count).to_equal(2)<br>
+> <br>
+> var animated = HostedWebContentSession.create(<br>
+>     92,<br>
+>     "<style>@keyframes grow{fro$width$to{width:32px}}" +<br>
+>     "#stage{width:8px;height:24px;background-color:#2563eb;" +<br>
+>     "animation:grow 1000ms linear forwards}</style>" +<br>
+>     "<div id='stage'></div>",<br>
+>     64, 48<br>
+> )<br>
+> expect(animated.advance_at(1000)).to_be(false)<br>
+> val before_growth = animated.dispatch_pointer_at(<br>
+>     4, 20, 4, true<br>
+> )<br>
+> expect(<br>
+>     before_growth.semantic_target_id == "stage"<br>
+> ).to_be(false)<br>
+> expect(animated.render_session.counters.parse_count).to_equal(1)<br>
+> expect(animated.render_session.counters.layout_count).to_equal(1)<br>
+> <br>
+> expect(animated.advance_at(1500)).to_be(true)<br>
+> val after_growth = animated.dispatch_pointer_at(<br>
+>     5, 20, 4, true<br>
+> )<br>
+> expect(after_growth.semantic_target_id).to_equal("stage")<br>
+> expect(animated.render_session.counters.parse_count).to_equal(1)<br>
+> expect(animated.render_session.counters.style_count).to_equal(2)<br>
+> expect(animated.render_session.counters.layout_count).to_equal(2)
+
+</details>
 
 </details>
 
@@ -1644,8 +1804,8 @@ Tests covering hosted Web content session.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

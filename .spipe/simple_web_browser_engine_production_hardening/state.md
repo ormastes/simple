@@ -2210,3 +2210,14 @@ implementation in progress / target evidence blocked
   bookmarks, and rejects stale SBRQ4 traffic. Independent high-risk review
   returned PASS. The two affected manuals were regenerated (`2 complete,
   0 stubs`); live target-runtime isolation remains an evidence blocker.
+- retained pointer and HTTPS deadline tranche (2026-07-29): Non-external hosted
+  Web pointer edges now reuse one owned `SimpleWebRenderSession` and its
+  canonical retained hit index instead of reparsing HTML/CSS and relaying out
+  on press and release. Mutations invalidate retained state and both close paths
+  release it; counter and animated-geometry oracles passed independent review.
+  Rustls browser HTTP jobs now apply the absolute job deadline to every TLS
+  read, write, and flush, preventing silent peers from pinning the 64-job pool;
+  the deterministic silent-peer unit checks timeout classification, empty
+  response, retirement, and Unix/Windows timeout variants. Independent review
+  returned PASS. The affected SSpec manual was regenerated (`1 complete,
+  0 stubs`); no bootstrap or target runtime was run.

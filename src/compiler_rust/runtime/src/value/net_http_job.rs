@@ -174,6 +174,49 @@ fn browser_http_read_plain(
 }
 
 #[cfg(feature = "runtime-tls")]
+struct BrowserHttpDeadlineStream {
+    stream: TcpStream,
+    deadline: std::time::Instant,
+}
+
+#[cfg(feature = "runtime-tls")]
+impl BrowserHttpDeadlineStream {
+    fn new(stream: TcpStream, deadline: std::time::Instant) -> Self {
+        Self { stream, deadline }
+    }
+
+    fn refresh_timeouts(&self) -> std::io::Result<()> {
+        let remaining = browser_http_remaining(self.deadline)?;
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.set_write_timeout(Some(remaining))
+    }
+}
+
+#[cfg(feature = "runtime-tls")]
+impl std::io::Read for BrowserHttpDeadlineStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.stream
+            .set_read_timeout(Some(browser_http_remaining(self.deadline)?))?;
+        std::io::Read::read(&mut self.stream, buffer)
+    }
+}
+
+#[cfg(feature = "runtime-tls")]
+impl std::io::Write for BrowserHttpDeadlineStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.stream
+            .set_write_timeout(Some(browser_http_remaining(self.deadline)?))?;
+        std::io::Write::write(&mut self.stream, buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream
+            .set_write_timeout(Some(browser_http_remaining(self.deadline)?))?;
+        std::io::Write::flush(&mut self.stream)
+    }
+}
+
+#[cfg(feature = "runtime-tls")]
 fn browser_http_tls(
     host: &str,
     stream: TcpStream,
@@ -187,17 +230,17 @@ fn browser_http_tls(
     let config = platform_tls_client_config().map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
     let connection = rustls::ClientConnection::new(config, server_name)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
-    let mut tls = rustls::StreamOwned::new(connection, stream);
+    let mut tls = rustls::StreamOwned::new(connection, BrowserHttpDeadlineStream::new(stream, deadline));
     browser_http_canceled(job)?;
-    tls.sock.set_write_timeout(Some(browser_http_remaining(deadline)?))?;
+    tls.sock.refresh_timeouts()?;
     tls.write_all(request)?;
+    tls.sock.refresh_timeouts()?;
     tls.flush()?;
 
     let mut response = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
         browser_http_canceled(job)?;
-        tls.sock.set_read_timeout(Some(browser_http_remaining(deadline)?))?;
         match tls.read(&mut chunk) {
             Ok(0) => return Ok(response),
             Ok(count) => {
@@ -417,6 +460,68 @@ pub extern "C" fn rt_browser_http_job_free(handle: i64) -> bool {
 #[cfg(test)]
 mod browser_http_job_tests {
     use super::*;
+
+    #[cfg(feature = "runtime-tls")]
+    #[test]
+    fn silent_tls_peer_respects_job_deadline_and_retires_slot() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(1));
+        });
+        let text_value = |value: &str| crate::value::collections::rt_string_new(value.as_ptr(), value.len() as u64);
+        let request = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        let request_value =
+            unsafe { crate::value::sffi::file_io::rt_bytes_from_raw(request.as_ptr() as i64, request.len() as i64) };
+        let live_before = LIVE_BROWSER_HTTP_JOBS.load(Ordering::Acquire);
+        let started = std::time::Instant::now();
+        let handle = browser_http_job_start(
+            text_value("https"),
+            text_value("127.0.0.1"),
+            i64::from(port),
+            request_value,
+            50,
+            4096,
+            false,
+        );
+        assert!(handle > 0);
+        while rt_browser_http_job_poll(handle) == 0 && started.elapsed() < Duration::from_millis(500) {
+            std::thread::yield_now();
+        }
+        let terminal = rt_browser_http_job_poll(handle);
+        let terminal_elapsed = started.elapsed();
+        let _ = release_tx.send(());
+        server.join().unwrap();
+
+        assert_eq!(terminal, 1, "silent TLS peer outlived the job deadline");
+        assert!(terminal_elapsed >= Duration::from_millis(25));
+        assert!(terminal_elapsed < Duration::from_millis(500));
+        assert!(runtime_byte_array_to_vec(rt_browser_http_job_take_response(handle))
+            .unwrap()
+            .is_empty());
+        let error = browser_http_text(rt_browser_http_job_take_error(handle))
+            .unwrap()
+            .to_lowercase();
+        assert!(
+            error.contains("timed out")
+                || error.contains("would block")
+                || error.contains("temporarily unavailable")
+                || error.contains("deadline exceeded")
+                || error.contains("failed to respond")
+                || error.contains("did not properly respond")
+                || error.contains("os error 10060"),
+            "silent TLS peer failed for a non-timeout reason: {error}"
+        );
+        assert!(rt_browser_http_job_free(handle));
+        while LIVE_BROWSER_HTTP_JOBS.load(Ordering::Acquire) != live_before
+            && started.elapsed() < Duration::from_millis(500)
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(LIVE_BROWSER_HTTP_JOBS.load(Ordering::Acquire), live_before);
+    }
 
     #[test]
     fn public_address_policy_rejects_non_public_ipv4_and_ipv6() {
