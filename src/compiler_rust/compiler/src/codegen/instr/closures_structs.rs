@@ -162,6 +162,24 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             // `.is_empty()` fell all the way through to suffix-based symbol
             // resolution instead of the safe tag-dispatching path.
             | ("len" | "length" | "keys" | "values" | "is_empty", 0)
+            // Array mutators. Same hazard class as the collection idioms
+            // above (doc/08_tracking/bug/codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md):
+            // `push` is enumerated there as a confirmed erased-receiver THEFT
+            // victim (`RingWindow.push` stole a bare `.push()` bind in the
+            // `gui_entry_desktop` census) but was never added to this
+            // allowlist. `pop` was not in that census, but a segfault traced
+            // to `CoreLexer.scan_token`'s `self.indent_stack.pop()`
+            // (doc/08_tracking/bug/self_hosted_array_pop_segfault_lex_command_2026-07-29.md)
+            // is consistent with the same class, and `rt_array_pop` already
+            // tag-dispatches safely on any value (see the `"pop" =>
+            // "rt_array_pop"` arm below), so routing bare `.pop()` there
+            // first is the same defensive move already made for `len` et al.
+            // `clear` is deliberately excluded: the erased-receiver-bind
+            // census in the bug doc classified `clear` binds as legitimate
+            // erased-field dispatch (e.g. `self.backend.clear()`), not theft
+            // — adding it here would break those.
+            | ("pop", 0)
+            | ("push" | "append", 1)
     )
 }
 

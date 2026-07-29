@@ -4,9 +4,16 @@
 **Severity:** high — blocks the WM gate, smoke matrix, and guard-channel work; the
 freshest pure-Simple self-hosted binary is unusable for any subcommand that does
 real work
-**Status:** OPEN
+**Status:** MITIGATED (2026-07-29) — `pop`/`push`/`append` added to
+`is_bare_builtin_collection_method`; validated byte-identical-archive
+(PROVED) on an unaffected fixture and a pre-existing-hang negative control
+(PROVED); full self-hosted binary re-run of the original `lex` repro was
+**not achieved** this pass (INFERRED only) — see "2026-07-29 follow-up"
+below for exactly which validation tier was reached and why.
 **Component:** `src/compiler/10.frontend/core/lexer_struct.spl` (`CoreLexer.scan_token`),
-runtime `rt_array_pop` / `spl_array_pop`
+runtime `rt_array_pop` / `spl_array_pop`,
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
+(`is_bare_builtin_collection_method`)
 
 ## Symptom
 
@@ -185,3 +192,105 @@ byte-identical copies in `simple-redeploy-wt`, `simple-stage4-wt`,
 - `doc/08_tracking/bug/codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md` — the open, broader defect class this is most likely a sibling instance of.
 - `8d1d0a4476c` — narrow fix for `starts_with`/`ends_with` (verified present in the currently-deployed Rust seed via `objdump -r` reloc check).
 - `4dc44e1a110` — landed the `SIMPLE_DEBUG_ERASED_RECEIVER_BIND` diagnostic; checked and ruled out as the cause of this crash (proven zero-behavior-impact by its own commit).
+
+## 2026-07-29 follow-up: fix implemented, validation tiers reached
+
+Added `("pop", 0)` and `("push" | "append", 1)` to
+`is_bare_builtin_collection_method` in
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`, following
+the exact allowlist shape used for `len`/`is_empty`/etc., with a comment citing
+this doc and the sibling `push` THEFT entry from the 2026-07-28 doc. `clear`
+was deliberately NOT added: that doc's own census classified `clear` binds as
+legitimate erased-field dispatch, not theft. `insert` and `sort` were not
+added either — no evidence for either in the 2026-07-28 doc's enumeration, and
+the task's own instruction was to add only what the doc's data justifies, not
+blanket-add sibling mutator names.
+
+Work done in an isolated worktree (`/home/ormastes/dev/pub/wt_scratch/simple_arraypop_fix`,
+detached at the-then origin/main tip), not the shared working copy.
+
+**Tier (a) — byte-identical-archive check on an unaffected fixture: PROVED.**
+Same fixture as `4dc44e1a110`'s proof pattern (the `ByteSpan`/`starts_with`
+repro from `8d1d0a4476c`'s own verification, unrelated to `pop`/`push`),
+built with the OLD (`bin/release/x86_64-unknown-linux-gnu/simple`, currently
+deployed) and NEW (patched) seeds via
+`native-build --entry-closure --emit-archive --target x86_64-unknown-none --backend cranelift`:
+both archives are byte-identical, sha256
+`a6994edb73067fdd16041e1e41db89e156f4a84029c9658e3a1a01b9a0aca202`. No
+collateral codegen change from this patch on a fixture the patch shouldn't
+touch.
+
+**Cargo build: PROVED clean.** `cargo build --release` on the patched tree
+finished with the same 16 pre-existing warnings as an unmodified build of the
+same commit (`rt_*` "redeclared with a different signature" plus one
+`last_value` unused-assignment warning, both in unrelated files) — zero new
+warnings, and `rustfmt --check` on the touched file passes with no diff.
+
+**Tier (c) — targeted synthetic repro: ATTEMPTED, DID NOT REPRODUCE (informative negative result).**
+Two synthetic fixtures were tried against the OLD (unpatched) seed to try to
+reproduce the theft directly, both compiled with
+`native-build --entry-closure --backend cranelift --target x86_64-unknown-none`:
+
+1. `src/compiler/10.frontend/core/lexer_struct.spl` alone as entry (the real
+   crash-site file). Its 5-module closure does not transitively pull in
+   `std.core.list` or any other type exporting a `_dot_pop` symbol, so there
+   is no competing candidate to steal the bind — `self.indent_stack.pop()`
+   compiled to a clean `rt_array_pop` relocation, no theft observed.
+2. A wrapper entry that imports `lexer_struct` AND explicitly calls
+   `.pop()` on a `List<i64>` in the same closure (to force `List_dot_pop`
+   to be linked, mirroring how the 2026-07-28 doc's fixtures forced
+   `common.bytes.span` into the closure for the `starts_with`/`slice`
+   repros). This also resolved cleanly to `rt_array_pop` for both the typed
+   `List<i64>.pop()` call and the lexer's `self.indent_stack.pop()` — no
+   theft observed, because in this fixture `self.indent_stack.pop()`'s
+   receiver type is apparently still not erased in the sense the codegen
+   name-suffix path requires.
+
+**Conclusion from tier (c): the real erasure condition is narrower than
+"a bare `.pop()` call plus a stealable `_dot_pop` symbol somewhere in the same
+closure."** The `starts_with`/`slice` victims were erased specifically because
+they were called on the *return value of another builtin* (`.lower()`,
+`.substring()`) whose result type isn't threaded through this particular
+codegen path as concretely `text`. `self.indent_stack.pop()` is a direct
+struct-field method call, and my synthetic reproductions of that shape did not
+erase. The actual crash site involves `CoreLexer.scan_token()` calling itself
+through `scan_token_rescan()` (a trampoline the file's own comments say exists
+because "the Rust seed interpreter cannot dispatch a self-recursive `me`
+call") — the erasure, if that is indeed the mechanism, is most plausibly tied
+to *that* indirection, not to `.pop()` calls in general. **This means the fix
+in this doc is evidence-based (matches the confirmed `push` victim in the
+2026-07-28 doc) and cheap/safe to land (proved zero collateral impact), but is
+NOT confirmed via reproduction of the original miscompile at the object-code
+level. Future work on this bug class should validate against the real crash
+site (a rebuilt self-hosted CLI binary), not rely on synthetic fixtures alone
+— synthetic fixtures can give false negatives for this class.**
+
+**Tier (b) — full self-hosted CLI rebuild + `lex`/`compile`/`native-build` smoke: NOT ACHIEVED, environmental blocker found (PROVED unrelated to this fix).**
+Attempted three ways to rebuild the actual CLI binary
+(`src/app/cli/main.spl`) with the patched seed to re-run the original `lex`
+repro directly:
+
+1. `native-build --source src/compiler --source src/app --source src/lib --entry src/app/cli/main.spl --threads 16` (matching the source-dir convention printed by the working `build/redeploy_out/simple_stage2` binary) against a warm 425 MB cache copied from `build/bootstrap/native_cache` — hung: all 5 threads at 0.0% CPU, blocked on `futex_wait_queue`/`do_wait`, zero I/O growth over 800+ seconds. Killed.
+2. `native-build --entry src/app/cli/main.spl --entry-closure --threads 8` against the same warm cache — hung identically within 20-80s (0% CPU, no I/O growth, no log progress past one lint warning).
+3. Same as (2) with a **fresh, empty** `--cache-dir` — hung identically (`timeout 60`, exit 124).
+
+**Negative control (PROVED): recipe (2) was re-run with the OLD (unpatched,
+currently-deployed) seed against the same warm cache and hung identically**
+(0.0-0.1% CPU across all threads, no progress) within 30s. This pins the hang
+to something pre-existing in the entry-closure discovery path for the full CLI
+entry point (plausibly related to the `src/os/compositor/host_compositor_core.spl`
+line-continuation parse construct noted in an earlier discovery attempt,
+possibly now causing a retry loop instead of a fast parse-error exit) — **it
+reproduces with both seeds, so it is not caused by this session's fix.** It is
+a separate, real defect worth its own bug report but is out of scope to
+root-cause in this pass.
+
+Net effect: **the original `lex`-segfault repro was not re-run against a
+freshly built self-hosted binary this pass.** The causal link between "adding
+`pop`/`push` to the allowlist" and "the observed `spl_array_pop` segfault
+disappearing" is **INFERRED** (from the tier (a) proof of no collateral
+damage, the doc-confirmed `push` victim status, and the code-level absence of
+`pop`/`push` from the pre-fix allowlist) but **not PROVED** by an end-to-end
+before/after `lex` run. This fix is landed as a well-evidenced, zero-collateral-risk
+mitigation consistent with the established pattern for this bug class, not as
+a fully closed-loop verified fix.
