@@ -1,6 +1,28 @@
 # `bin/simple test` gives wrong results for code that `bin/simple <file>.spl` computes correctly
 
-**Status:** ROOT-CAUSED (2026-07-29, follow-up pass). **Severity:** every
+**Status:** FIXED (2026-07-29, interpreter pass). The interpreter defect was
+NOT recursion/branch-related: the tree-walking interpreter's bracket-slice
+paths used a CHARACTER index space while the default engine (and the
+interpreter's own index normalization) is BYTE-indexed.
+`interpreter/expr/collections.rs` had two broken sites: the range-index
+path (`s[a..b]`) computed indices against the character count and sliced a
+char vector, and the `Expr::Slice` path (`s[a:b]`) normalized indices
+against the BYTE length (`s.len()`) but then sliced a CHAR vector — an
+internally mixed index space. Every byte-offset slice on multi-byte text
+was silently wrong under `SIMPLE_EXECUTION_MODE=interpret`; the "minimal
+isolate is correct" scoping below is explained exactly: the isolate did
+only i64 arithmetic and never sliced text. Both sites now slice the byte
+slice (U+FFFD substitution for a range that splits a codepoint —
+byte-identical to native output when printed). Probes byte-identical across
+engines after the fix (glob true, "日本語"[3:6]=="本",
+"caféZdef"[-3:]=="def"); regression spec
+`test/01_unit/bugs/text_bracket_slice_byte_index_spec.spl` runs under the
+forced-interpret test lane. The double-print quirk below and the
+`v[-2]`-on-default-engine gap remain open, separate issues.
+
+Historical report below (pre-fix):
+
+**Status (superseded):** ROOT-CAUSED (2026-07-29, follow-up pass). **Severity:** every
 `bin/simple test` run executes specs under the buggy engine unconditionally
 — any spec whose code shape matches this bug's trigger (below) reds
 regardless of whether the code under test is correct. **Not fixed** — an

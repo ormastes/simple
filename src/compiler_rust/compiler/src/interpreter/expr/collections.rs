@@ -420,12 +420,26 @@ pub(super) fn eval_collection_expr(
                             Ok(Value::array(sliced))
                         }
                         Value::Str(s) => {
-                            let chars: Vec<char> = s.chars().collect();
-                            let len = chars.len() as i64;
+                            // BYTE-indexed, matching the native lane (`rt_slice`
+                            // slices `s->data` raw bytes), the byte-indexed
+                            // `.slice()`/`.substring()` methods, and the
+                            // Expr::Slice path below. Indexing by CHARACTER here
+                            // silently corrupted every byte-offset slice on
+                            // multi-byte text — the engine divergence behind
+                            // doc/08_tracking/bug/test_harness_execution_divergence_2026-07-29.md
+                            // (glob `_glob_at` false negatives, js `string_charAt`
+                            // returning empty for CJK under `bin/simple test`'s
+                            // forced SIMPLE_EXECUTION_MODE=interpret).
+                            let bytes = s.as_bytes();
+                            let len = bytes.len() as i64;
                             let (start_idx, end_idx) = compute_slice_indices(start, end, len, inclusive);
-                            let sliced: String = chars
-                                .get(start_idx..end_idx.min(chars.len()))
-                                .map(|s| s.iter().collect())
+                            // A range that splits a multi-byte codepoint cannot be
+                            // held in a Rust String; U+FFFD-substitute, which
+                            // prints byte-identically to the native lane's output
+                            // for such a range.
+                            let sliced: String = bytes
+                                .get(start_idx..end_idx.min(bytes.len()))
+                                .map(|b| String::from_utf8_lossy(b).into_owned())
                                 .unwrap_or_default();
                             Ok(Value::text(sliced))
                         }
@@ -878,9 +892,17 @@ pub(super) fn eval_collection_expr(
             let result = match recv_val {
                 Value::Array(arr) => Ok(Value::array(slice_collection(&arr, start_idx, end_idx, step_val))),
                 Value::Str(s) => {
-                    let chars: Vec<char> = s.chars().collect();
-                    let sliced = slice_collection(&chars, start_idx, end_idx, step_val);
-                    Ok(Value::text(sliced.into_iter().collect::<String>()))
+                    // BYTE-indexed slicing. The `len` these indices were
+                    // normalized against (above) is already the BYTE length
+                    // (`s.len()`), but this arm then sliced a CHAR vector with
+                    // those byte-derived indices — an internally mixed index
+                    // space that corrupted every multi-byte slice (e.g.
+                    // "日本語"[3:6] returned "" instead of "本"). Slicing the
+                    // byte slice makes the unit match the normalization and the
+                    // native lane; U+FFFD-substitute for a range that splits a
+                    // codepoint, byte-identical to native output when printed.
+                    let sliced = slice_collection(s.as_bytes(), start_idx, end_idx, step_val);
+                    Ok(Value::text(String::from_utf8_lossy(&sliced).into_owned()))
                 }
                 Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),
                 Value::LabeledTuple { values, .. } => {

@@ -507,9 +507,17 @@ main = if original == "abc" and changed == "abcdef": 1 else: 0
 
 #[test]
 fn shared_text_unicode_index_and_slice() {
+    // Bracket SLICES are BYTE-indexed (matching the native lane's rt_slice
+    // and the byte-indexed .slice()/.substring() methods): "aé🙂z" is bytes
+    // a=0, é=1-2, 🙂=3-6, z=7, so value[1:3] is the two bytes of é. The
+    // previous expectation ("é🙂") pinned the interpreter's char-indexed
+    // slicing — the engine divergence behind
+    // doc/08_tracking/bug/test_harness_execution_divergence_2026-07-29.md.
+    // Single-character INDEXING (value[1], value[-2]) keeps character
+    // semantics, like char_at/char_code_at.
     let source = r#"
 var value = "aé🙂z"
-main = if value[1] == "é" and value[-2] == "🙂" and value[1:3] == "é🙂": 1 else: 0
+main = if value[1] == "é" and value[-2] == "🙂" and value[1:3] == "é" and value[3:7] == "🙂": 1 else: 0
 "#;
     let module = simple_parser::Parser::new(source).parse().expect("parse Unicode text operations");
     let result = crate::interpreter::evaluate_module(&module.items).expect("evaluate Unicode text operations");
