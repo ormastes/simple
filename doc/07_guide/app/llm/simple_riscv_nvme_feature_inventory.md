@@ -118,10 +118,15 @@ Current bootstrap admission is tracked in
 admitted Stage 2, found and fixed a Rust runtime NUL panic at the environment
 boundary, then reached the bounded Stage 3 timeout without another diagnostic.
 Stage 2 is sufficient for RV32 native-build and GHDL but not `run`/`test`; no
-replacement full CLI is admitted yet. A direct Stage-2 native NVMe spec builds
-but currently crashes in `rt_process_run`; the next bounded attempt uses the
-existing test runner with the corrected runtime bundle and `--fork`, as tracked
-in `doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`.
+replacement full CLI is admitted yet. The corrected Stage 2 runner attempt
+still failed in nine unrelated closure modules, and a minimal interpreter-hook
+runner failed closed because standalone mode intentionally lacks that hook.
+The direct native-spec crash is an admitted-compiler ABI-lowering defect:
+generated code calls raw `rt_process_run`, although current source already
+routes native calls through `rt_process_run_tuple`. A subsequent Stage 3
+refresh reached its full 90-minute cap at 1,849,336 KiB peak RSS with no
+diagnostic or binary. Exact evidence and the resume gate are tracked in
+`doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`.
 Do not use the Rust seed or a stale deployed binary as release SSpec/docgen
 evidence.
 
