@@ -7,6 +7,7 @@ use compiler.frontend.flat_ast_bridge.*
 # frontend path when the newer parser surface is unavailable.
 
 use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_advance, par_kind_get, parser_set_had_error}
+use compiler.core.parser.{parser_error}
 use compiler.core.parser.{parser_diagnostics_suppressed_get, parser_diagnostics_suppressed_set}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.frontend.core.parser_expr.{parse_expr}
@@ -153,6 +154,33 @@ fn flat_bootstrap_body_at(index: i64) -> Block:
 
 fn make_span() -> Span:
     Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
+
+# Lane NIL1 (convert-nodes-loud-fallback, doc/08_tracking/bug/
+# spawn_call_expr_silently_becomes_nillit_2026-07-29.md): convert_flat_expr and
+# convert_flat_stmt each end in a generic "unhandled/unmapped node kind ->
+# fall through to a bare NilLit/no-op" catch-all. Every prior instance of this
+# EXACT fallback firing on a real node kind (slice-index, cast, assign,
+# compound-assign, range, spread, dict-lit, block-bodied lambda -- see the
+# comment trail on each of those cases above) was independently rediscovered
+# via a silent-wrong-answer user report, because the fallback itself recorded
+# no diagnostic. `spawn(...)` call expressions are one more, previously
+# unpatched instance of the same class (EXPR_SPAWN has no dispatch arm above).
+# Route the *fallback itself* through the parser's real error channel
+# (`parser_error`, the same fn `[parser_error] ...`-prefixed diagnostics used
+# throughout core/parser.spl use) so `parser_has_errors()` -- what
+# parse_full_frontend/driver.spl actually gate on -- goes true and every FUTURE
+# unmapped node kind surfaces at parse time instead of requiring a fresh
+# user-visible repro. Still returns the NilLit/no-op shape afterward (error
+# recovery, not a hard stop) so downstream lowering doesn't crash on the
+# missing value.
+#
+# NOTE: `span` here is always the zeroed `make_span()` sentinel (see the
+# `decl_span_for` comment above) -- no real per-node source location survives
+# into this bridge below the per-declaration granularity, so the message can
+# only name the tag, not a line/col. That is a pre-existing bridge limitation,
+# not something reintroduced by this lane.
+fn flat_bridge_report_unhandled_node(kind_label: text, tag: i64):
+    parser_error("flat AST bridge: unhandled " + kind_label + " node kind (tag=" + int_to_str(tag) + ") silently converted to nil/no-op -- add a case to convert_nodes.spl's convert_flat_" + kind_label + " (see doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md)")
 
 # Bug hir_lowering_never_populates_function_spans: the flat AST DOES record a
 # real (start, end, line, col) for every declaration (parse_fn_decl captures
@@ -1112,6 +1140,11 @@ fn convert_flat_expr(idx: i64) -> Expr:
             ))
         return Expr(kind: ExprKind.DictComprehension(dc_key, dc_val, dc_clauses), span: span)
     else:
+        # Generic "we don't know what this expr node kind is" fallback -- see
+        # flat_bridge_report_unhandled_node's doc comment. Every tag with a
+        # dedicated arm above returns before reaching here; this is reached
+        # only for a tag with NO arm at all (e.g. EXPR_SPAWN today).
+        flat_bridge_report_unhandled_node("expr", tag)
         return Expr(kind: ExprKind.NilLit, span: span)
 
 fn convert_flat_pattern(pat_eid: i64) -> Pattern:
@@ -1514,6 +1547,10 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         # instead of falling through to the generic NilLit no-op below.
         return defer_unsupported_marker(span)
     else:
+        # Generic "we don't know what this stmt node kind is" fallback --
+        # mirrors the convert_flat_expr fallback above; see
+        # flat_bridge_report_unhandled_node's doc comment.
+        flat_bridge_report_unhandled_node("stmt", tag)
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
 
 fn convert_decl_fn(idx: i64) -> Function:
