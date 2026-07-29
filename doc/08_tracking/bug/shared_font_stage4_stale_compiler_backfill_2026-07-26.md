@@ -178,6 +178,25 @@ and repair aggregate-definition retention with a smallest source regression,
 then build unique Stage 2 and run A/B/C once. It must not rerun the unchanged
 fixture, use the Rust seed as acceptance, or start Stage 3/4 before A passes.
 
+### P0 follow-on — 2026-07-29
+
+`6a16b19cb5d` repaired aggregate dispatch; the fixture's LLVM now defines `%l2`
+and calls `rt_alloc`. The remaining `rt_is_some(i64 undef)` traced to
+`MirLowering.find_local` reading `self.local_symbol_*` while declared `fn`.
+The minimal receiver repair changes it to `me`; all ten callers already use
+`self.find_local`. The permanent fixture now prints `owned.value` and the
+authoritative native expectation is `7`, preventing an unused extraction from
+passing.
+
+The new unique Stage-2 attempt root is
+`build/native_probe/p0-admission-find-local-20260729/`. It compiled all 693
+modules but exited 1 at link: its bootstrap runtime lacks
+`rt_transient_array_scope_begin`, `rt_transient_array_scope_pause`,
+`rt_transient_array_scope_end`, `rt_file_is_regular_no_follow`, and
+`rt_string_free`. The focused source-test command could not initialize because
+of pre-existing test-runner `self.` syntax diagnostics. These are distinct
+runtime/tooling blockers; no A result, Stage 3/4 CLI, or font acceptance exists.
+
 A fresh P0 owner ran exactly one bounded direct Stage 4 cycle from current
 feature checkpoint `427878810b4b2d812dba129f6dfd1eb12e282989` plus isolated
 compatibility bridge `d406b2688ed0096cc3d2758ba3753d2448261a99`. The bridge

@@ -11,15 +11,21 @@ Final done-mark owner: highest-capability `/root`
 
 ## Current P0 admission status — 2026-07-29
 
-The historical Stage-2 parser stop is superseded as an active action by isolated
-head `f289a4529aa`. A fresh Stage-2 producer completed 693 compiled / 0 failed.
-The permanent `Option<Box>` admission fixture now emits a valid LLVM module and
-`@__simple_main`, but `llc` rejects it because `%l2` is used in `ptrtoint` before
-the struct aggregate is emitted. This is compiler-only diagnostic evidence: no
-native fixture binary, Stage 3/4 CLI, essential-tools receipt, focused font
-spec, canonical docgen manual, device, QEMU, or performance row is accepted.
-The next P0 action is one fresh root-cause repair plus regression, followed by a
-unique Stage-2 A/B/C probe; do not rerun the unchanged fixture.
+`6a16b19cb5d` repaired aggregate dispatch: the current fixture now emits the
+struct allocation and `%l2`. A new root cause was then localized to
+`MirLowering.find_local`, which accessed instance state as `fn`; changing it to
+`me` restores the receiver for every existing `self.find_local` call. The fixture
+now observes `opt.?` through `print(owned.value)` and requires native output
+`7`.
+
+The fresh Stage-2 producer at
+`build/native_probe/p0-admission-find-local-20260729/` stopped at link because
+its bootstrap runtime lacks `rt_transient_array_scope_begin/pause/end`,
+`rt_file_is_regular_no_follow`, and `rt_string_free`. A seed-only source-test
+attempt also stops in pre-existing `nogc_sync_mut` test-runner syntax checks.
+Neither is acceptance evidence. No native fixture, Stage 3/4 CLI, essential
+tools, focused font spec, docgen manual, device, QEMU, or performance row is
+accepted; `STATUS: FAIL` remains unchanged.
 
 ## 2026-07-29 scoped SimpleOS Stage 2 result
 

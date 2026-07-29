@@ -21,14 +21,14 @@ cross-platform native-GPU matrix.
 
 ### Current P0 precedence — 2026-07-29
 
-The older Stage-2 parser stop at `ot_layout_gpos_basic.spl:27` is retained as
-historical evidence only. Current isolated admission at `f289a4529aa` rebuilt
-Stage 2 with 693 compiled and 0 failed, then reached LLVM `llc` for the
-`Option<Box>` fixture. It now fails because `%l2` is consumed before its struct
-aggregate definition is emitted. This compiler-only P0 blocker does not
-promote Stage 2 or any font row. A future fresh, bounded admission window must
-repair that root cause and pass the A/B/C probes before Stage 3, incremental
-Stage 4, focused specs, or canonical docgen may start.
+Aggregate dispatch and its missing `%l2` definition are repaired. The current
+`Option<Box>` fixture now forces `opt.?` payload recovery by printing
+`owned.value` and expecting `7`; `MirLowering.find_local` is a receiver method
+so its local lookup does not lower to `undef`. The new isolated Stage-2 attempt
+is blocked separately at link by missing symbols in the hash-bound bootstrap
+runtime. Do not retry that unchanged producer or promote it: provide a runtime
+with those symbols, then run the unique A/B/C probes before Stage 3,
+incremental Stage 4, focused specs, or canonical docgen.
 
 ### Active items and estimate
 
