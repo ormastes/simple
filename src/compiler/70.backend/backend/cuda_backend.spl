@@ -326,7 +326,22 @@ class CudaBackend:
                     case Add | Sub | Mul | Div | Eq | Ne | Lt | Le | Gt | Ge: ()
                     case _:
                         return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend does not support binary operation: {op}"))
-                self.compile_binop(builder, dest, op, left, right, self.local_primitive_type(func, dest)?)
+                val dest_ty = self.local_primitive_type(func, dest)?
+                val op_ty = match op:
+                    case Eq | Ne | Lt | Le | Gt | Ge:
+                        if dest_ty != PrimitiveType.Bool:
+                            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA comparison destination must be Bool"))
+                        val left_ty = self.operand_primitive_type(func, left)?
+                        if self.operand_primitive_type(func, right)? != left_ty:
+                            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA comparison operand types must match"))
+                        match left_ty:
+                            case I32 | I64 | U32 | U64 | F32 | F64: ()
+                            case _:
+                                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA comparison operands must be I32, I64, U32, U64, F32, or F64"))
+                        left_ty
+                    case _:
+                        dest_ty
+                self.compile_binop(builder, dest, op, left, right, op_ty)
 
             case UnaryOp(dest, op, operand):
                 pointer_spaces.remove(dest.id)

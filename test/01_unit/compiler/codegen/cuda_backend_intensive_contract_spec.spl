@@ -17,6 +17,7 @@ fn cuda_i32() -> MirType: MirType(kind: MirTypeKind.I32)
 fn cuda_i64() -> MirType: MirType(kind: MirTypeKind.I64)
 fn cuda_u32() -> MirType: MirType(kind: MirTypeKind.U32)
 fn cuda_u64() -> MirType: MirType(kind: MirTypeKind.U64)
+fn cuda_f32() -> MirType: MirType(kind: MirTypeKind.F32)
 fn cuda_bool() -> MirType: MirType(kind: MirTypeKind.Bool)
 fn cuda_ptr() -> MirType: MirType.ptr(cuda_u32(), true)
 fn cuda_i32_ptr() -> MirType: MirType.ptr(cuda_i32(), true)
@@ -86,7 +87,81 @@ fn compile_cuda_bounds_check(index_type: MirType, name: text, id: i64) -> text:
     )
     compile_supported_cuda([fn_])
 
+fn cuda_compare_function(id: i64, name: text, op: MirBinOp, operand_type: MirType) -> MirFunction:
+    val block = MirBlock(
+        id: BlockId.entry(), label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.BinOp(
+            LocalId(id: 2), op,
+            MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))
+        ), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+    cuda_function(
+        id, name, [operand_type, operand_type], MirType.unit(),
+        [
+            cuda_arg(0, 0, "left", operand_type),
+            cuda_arg(1, 1, "right", operand_type),
+            cuda_temp(2, cuda_bool())
+        ],
+        [block], true
+    )
+
 describe "CUDA backend intensive MIR contract":
+    it "lowers comparisons with operand PTX types and assembles them":
+        val ptx = compile_supported_cuda([
+            cuda_compare_function(16, "cuda_compare_u32", MirBinOp.Eq, cuda_u32()),
+            cuda_compare_function(17, "cuda_compare_i64", MirBinOp.Lt, cuda_i64()),
+            cuda_compare_function(18, "cuda_compare_u64", MirBinOp.Ge, cuda_u64()),
+            cuda_compare_function(19, "cuda_compare_f32", MirBinOp.Ne, cuda_f32())
+        ])
+
+        expect(ptx).to_contain("setp.eq.u32 %r2, %r0, %r1;")
+        expect(ptx).to_contain("setp.lt.s64 %r2, %r0, %r1;")
+        expect(ptx).to_contain("setp.ge.u64 %r2, %r0, %r1;")
+        expect(ptx).to_contain("setp.ne.f32 %r2, %r0, %r1;")
+        expect(ptx.contains("setp.eq.pred")).to_equal(false)
+
+        val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v ptxas >/dev/null 2>&1"])
+        if available == 0:
+            val ptx_path = "/tmp/simple_cuda_comparisons.ptx"
+            val cubin_path = "/tmp/simple_cuda_comparisons.cubin"
+            expect(rt_file_write_text(ptx_path, ptx)).to_equal(true)
+            val (_as_out, as_err, as_code) = rt_process_run("ptxas", ["-arch=sm_86", ptx_path, "-o", cubin_path])
+            expect(as_code).to_equal(0)
+            expect(as_err).to_equal("")
+
+    it "rejects malformed CUDA comparison types":
+        val non_bool_dest = cuda_function(
+            13, "cuda_compare_non_bool", [cuda_u32(), cuda_u32()], MirType.unit(),
+            [cuda_arg(0, 0, "left", cuda_u32()), cuda_arg(1, 1, "right", cuda_u32()), cuda_temp(2, cuda_u32())],
+            [MirBlock(
+                id: BlockId.entry(), label: Some("entry"),
+                instructions: [MirInst(kind: MirInstKind.BinOp(
+                    LocalId(id: 2), MirBinOp.Eq,
+                    MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))
+                ), span: nil)],
+                terminator: MirTerminator.Ret(nil)
+            )], true
+        )
+        assert_backend_error_contains(non_bool_dest, "comparison destination must be Bool")
+
+        val mismatched = cuda_function(
+            14, "cuda_compare_mismatch", [cuda_u32(), cuda_i64()], MirType.unit(),
+            [cuda_arg(0, 0, "left", cuda_u32()), cuda_arg(1, 1, "right", cuda_i64()), cuda_temp(2, cuda_bool())],
+            [MirBlock(
+                id: BlockId.entry(), label: Some("entry"),
+                instructions: [MirInst(kind: MirInstKind.BinOp(
+                    LocalId(id: 2), MirBinOp.Lt,
+                    MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))
+                ), span: nil)],
+                terminator: MirTerminator.Ret(nil)
+            )], true
+        )
+        assert_backend_error_contains(mismatched, "comparison operand types must match")
+
+        val predicates = cuda_compare_function(15, "cuda_compare_predicates", MirBinOp.Eq, cuda_bool())
+        assert_backend_error_contains(predicates, "comparison operands must be I32, I64, U32, U64, F32, or F64")
+
     it "assembles I64, U64-global, and direct U32 GPU index paths":
         val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
             MirInst(kind: MirInstKind.GpuGlobalId(LocalId(id: 0), 0), span: nil),
