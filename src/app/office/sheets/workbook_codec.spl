@@ -1,0 +1,320 @@
+# Workbook Codec — formula-preserving native save/reopen (lane F4).
+#
+# `sheet_to_csv` (file_formats.spl) only ever serializes DISPLAY text: a
+# formula cell's `=DOUBLE(A1)` is written as its computed result ("42"), so
+# reloading a CSV can never recover the formula. This codec is the
+# formula-preserving alternative: it serializes each cell's real model
+# (formula cells keep their expression, not their cached display; every
+# other cell keeps its raw typed value) as SDN, and reconstructing a
+# workbook from that SDN reproduces the exact same Cell values the original
+# had -- recalculation is a separate, explicit step (`workbook_load`),
+# matching `recalculate_formula_cells`'s own "callers must use the return
+# value" contract.
+#
+# Format (see doc comment on `workbook_save` for a worked example):
+#   {active_sheet: 0, sheets: [{name: "Sheet1", cells: [{ref: "A1", kind: "number", value: 21.0}, ...]}], title: "..."}
+# Only cell shape, sheet names, and the workbook title/active index are
+# persisted -- no styles, formatting, charts, or hidden-row state (out of
+# scope for this lane).
+#
+# Implements `std.editor.document.traits.DocumentCodec` so the document
+# service (S3) can dispatch to it like any other codec: `probe` sniffs the
+# `.swbk` extension or a `sheets:`-shaped SDN head; `load`/`save` operate on
+# the DocumentCodec's `text -> text` "model text" contract (canonical SDN is
+# both the on-disk and the in-memory model text here), wrapping
+# `workbook_load`/`workbook_save` underneath for callers that want the real
+# `Workbook` object.
+
+use app.office.sheets.cell.{Cell, CellValue, parse_cell_ref, default_style}
+use app.office.sheets.spreadsheet.{Sheet, Workbook}
+use app.office.file_formats.{recalculate_formula_cells}
+use std.editor.document.traits.{DocumentCodec}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_untrusted}
+use std.common.sdn.encode.{sdn_encode_canonical}
+
+# =========================================================================
+# Encode: Workbook -> canonical SDN text
+# =========================================================================
+
+pub fn workbook_save(workbook: Workbook) -> text:
+    """Serialize a Workbook to canonical SDN text, preserving formula
+    expressions (not their cached display) on every formula cell.
+    Deterministic: encoding the same Workbook twice yields byte-identical
+    text (cell keys are sorted bytewise; `sdn_encode_canonical` sorts dict
+    keys the same way)."""
+    var sheet_list: [SdnValue] = []
+    for sheet in workbook.sheets:
+        sheet_list.push(_sheet_to_sdn(sheet))
+    var root: Dict<text, SdnValue> = {}
+    root["title"] = SdnValue.String(workbook.title)
+    root["active_sheet"] = SdnValue.Int(workbook.active_sheet.to_i64())
+    root["sheets"] = SdnValue.Array(sheet_list)
+    sdn_encode_canonical(SdnValue.Dict(root))
+
+fn _sheet_to_sdn(sheet: Sheet) -> SdnValue:
+    var cell_list: [SdnValue] = []
+    val keys = _sorted_cell_keys(sheet.cells.keys())
+    for key in keys:
+        val cell = sheet.get_cell(key)
+        if val encoded = _cell_to_sdn(key, cell):
+            cell_list.push(encoded)
+    var d: Dict<text, SdnValue> = {}
+    d["name"] = SdnValue.String(sheet.name)
+    d["cells"] = SdnValue.Array(cell_list)
+    SdnValue.Dict(d)
+
+# Returns None for CellValue.Empty (nothing to persist -- an empty ref just
+# does not appear in `cells`, matching how Sheet itself never stores one).
+fn _cell_to_sdn(ref_str: text, cell: Cell) -> SdnValue?:
+    match cell.value:
+        CellValue.Empty:
+            return nil
+        CellValue.TextVal(value):
+            return _cell_sdn(ref_str, "text", SdnValue.String(value))
+        CellValue.NumberVal(value):
+            return _cell_sdn(ref_str, "number", SdnValue.Float(value))
+        CellValue.BoolVal(value):
+            return _cell_sdn(ref_str, "bool", SdnValue.Bool(value))
+        CellValue.FormulaVal(expr, cached_display):
+            # `expr` is the real formula text (no leading "="); cached_display
+            # is intentionally NOT persisted -- it is recomputed by
+            # `workbook_load`'s recalculation pass.
+            return _cell_sdn(ref_str, "formula", SdnValue.String(expr))
+        CellValue.ErrorVal(message):
+            return _cell_sdn(ref_str, "error", SdnValue.String(message))
+
+fn _cell_sdn(ref_str: text, kind: text, value: SdnValue) -> SdnValue:
+    var d: Dict<text, SdnValue> = {}
+    d["ref"] = SdnValue.String(ref_str)
+    d["kind"] = SdnValue.String(kind)
+    d["value"] = value
+    SdnValue.Dict(d)
+
+# Bytewise-sorted cell keys so the encoded `cells` array (and therefore the
+# whole document) is byte-identical across repeated saves. Deliberately NOT
+# the `<` operator on `text`: native codegen compares text by raw pointer,
+# which would make key order nondeterministic (see
+# src/lib/common/sdn/encode.spl's `_sdn_enc_text_lt`, which this mirrors --
+# that helper is module-private so it cannot be imported here).
+fn _cell_ref_lt(a: text, b: text) -> bool:
+    val ab = a.bytes()
+    val bb = b.bytes()
+    var i = 0
+    while i < ab.len() and i < bb.len():
+        val ca = ab[i].to_i64()
+        val cb = bb[i].to_i64()
+        if ca < cb:
+            return true
+        if ca > cb:
+            return false
+        i = i + 1
+    ab.len() < bb.len()
+
+fn _sorted_cell_keys(keys: [text]) -> [text]:
+    var out: [text] = []
+    for k in keys:
+        out.push(k)
+    var i = 1
+    while i < out.len():
+        val key = out[i]
+        var j = i - 1
+        var moving = true
+        while moving and j >= 0:
+            if _cell_ref_lt(key, out[j]):
+                out[j + 1] = out[j]
+                j = j - 1
+            else:
+                moving = false
+        out[j + 1] = key
+        i = i + 1
+    out
+
+# =========================================================================
+# Decode: SDN text -> Workbook
+# =========================================================================
+
+pub fn workbook_decode_sdn(sdn_text: text) -> Result<Workbook, text>:
+    """Reconstruct a Workbook from `workbook_save` output (or any SDN of the
+    same shape). Formula cells come back with their expression restored and
+    an empty cached display -- callers that need fresh display text must run
+    `workbook_load` (decode + recalculate) instead. Malformed / unrelated SDN
+    (including plain garbage text, which the parser accepts as a bare
+    string) is rejected with Err, never a crash."""
+    match parse_untrusted(sdn_text):
+        case Err(e):
+            Err(e)
+        case Ok(root):
+            _workbook_from_sdn(root)
+
+pub fn workbook_load(sdn_text: text) -> Result<Workbook, text>:
+    """Decode and recalculate: the end-to-end "reopen" entry point. Every
+    sheet in the returned Workbook has had `recalculate_formula_cells` run
+    against it, so formula cells show fresh display text."""
+    match workbook_decode_sdn(sdn_text):
+        case Err(e):
+            Err(e)
+        case Ok(workbook):
+            var recalced: [Sheet] = []
+            for sheet in workbook.sheets:
+                recalced.push(recalculate_formula_cells(sheet))
+            Ok(Workbook(
+                title: workbook.title,
+                sheets: recalced,
+                active_sheet: workbook.active_sheet
+            ))
+
+fn _workbook_from_sdn(root: SdnValue) -> Result<Workbook, text>:
+    match root:
+        case Dict(top):
+            if not top.contains_key("sheets"):
+                return Err("workbook SDN: missing 'sheets' key")
+            var title = ""
+            if top.contains_key("title"):
+                match top["title"]:
+                    case String(s): title = s
+                    case _: pass_do_nothing("non-string title falls back to empty")
+            var active = 0
+            if top.contains_key("active_sheet"):
+                match top["active_sheet"]:
+                    case Int(i): active = i.to_i32()
+                    case _: pass_do_nothing("non-int active_sheet falls back to 0")
+            match top["sheets"]:
+                case Array(items):
+                    if items.len() == 0:
+                        return Err("workbook SDN: 'sheets' array is empty")
+                    var sheets: [Sheet] = []
+                    for item in items:
+                        match _sheet_from_sdn(item):
+                            case Ok(sheet):
+                                sheets.push(sheet)
+                            case Err(e):
+                                return Err(e)
+                    Ok(Workbook(title: title, sheets: sheets, active_sheet: active))
+                case _:
+                    Err("workbook SDN: 'sheets' must be an array")
+        case _:
+            Err("workbook SDN: root must be a dict")
+
+fn _sheet_from_sdn(item: SdnValue) -> Result<Sheet, text>:
+    match item:
+        case Dict(d):
+            var name = "Sheet1"
+            if d.contains_key("name"):
+                match d["name"]:
+                    case String(s): name = s
+                    case _: pass_do_nothing("non-string name falls back to Sheet1")
+            var sheet = Sheet.new(name)
+            if d.contains_key("cells"):
+                match d["cells"]:
+                    case Array(cell_items):
+                        for cell_item in cell_items:
+                            match _decode_cell_sdn(cell_item):
+                                case Ok(pair):
+                                    # Mutate the LOCAL `sheet` var directly (not via a
+                                    # helper-function parameter) -- class instances
+                                    # passed as plain function params are not
+                                    # guaranteed to alias back to the caller, only
+                                    # direct-`me`-method calls on a local var are
+                                    # (see spreadsheet.spl spec usage `sh.set_value(...)`).
+                                    sheet.set_cell(pair.0, pair.1)
+                                case Err(e):
+                                    return Err(e)
+                    case _:
+                        return Err("sheet SDN: 'cells' must be an array")
+            Ok(sheet)
+        case _:
+            Err("sheet SDN: entry must be a dict")
+
+# Decodes one cell entry into (ref, Cell) without touching a Sheet -- the
+# caller applies it with `sheet.set_cell(ref, cell)` directly on its own
+# local Sheet var (see the mutation-aliasing note above).
+fn _decode_cell_sdn(item: SdnValue) -> Result<(text, Cell), text>:
+    match item:
+        case Dict(d):
+            if not d.contains_key("ref") or not d.contains_key("kind") or not d.contains_key("value"):
+                return Err("cell SDN: entry missing ref/kind/value")
+            var ref_str = ""
+            match d["ref"]:
+                case String(s): ref_str = s
+                case _: return Err("cell SDN: 'ref' must be a string")
+            if parse_cell_ref(ref_str) == nil:
+                return Err("cell SDN: invalid cell ref '{ref_str}'")
+            var kind = ""
+            match d["kind"]:
+                case String(s): kind = s
+                case _: return Err("cell SDN: 'kind' must be a string")
+            val value = d["value"]
+            if kind == "text":
+                match value:
+                    case String(s):
+                        return Ok((ref_str, Cell(value: CellValue.TextVal(value: s), style: default_style())))
+                    case _:
+                        return Err("cell SDN: 'text' value must be a string")
+            elif kind == "number":
+                match value:
+                    case Float(f):
+                        return Ok((ref_str, Cell(value: CellValue.NumberVal(value: f), style: default_style())))
+                    case Int(i):
+                        return Ok((ref_str, Cell(value: CellValue.NumberVal(value: i.to_float()), style: default_style())))
+                    case _:
+                        return Err("cell SDN: 'number' value must be numeric")
+            elif kind == "bool":
+                match value:
+                    case Bool(b):
+                        return Ok((ref_str, Cell(value: CellValue.BoolVal(value: b), style: default_style())))
+                    case _:
+                        return Err("cell SDN: 'bool' value must be a bool")
+            elif kind == "formula":
+                match value:
+                    case String(s):
+                        return Ok((ref_str, Cell(value: CellValue.FormulaVal(expr: s, cached_display: ""), style: default_style())))
+                    case _:
+                        return Err("cell SDN: 'formula' value must be a string")
+            elif kind == "error":
+                match value:
+                    case String(s):
+                        return Ok((ref_str, Cell(value: CellValue.ErrorVal(message: s), style: default_style())))
+                    case _:
+                        return Err("cell SDN: 'error' value must be a string")
+            else:
+                return Err("cell SDN: unknown kind '{kind}'")
+        case _:
+            Err("cell SDN: entry must be a dict")
+
+# =========================================================================
+# DocumentCodec integration (S3 document service)
+# =========================================================================
+
+class WorkbookCodec:
+    _marker: i32
+
+    static fn new() -> WorkbookCodec:
+        WorkbookCodec(_marker: 0)
+
+impl DocumentCodec for WorkbookCodec:
+
+    fn probe(uri: text, head: text) -> i64:
+        if uri.ends_with(".swbk"):
+            return 5
+        if head.contains("\"sheets\"") or head.starts_with("sheets:") or head.contains("sheets: ["):
+            return 3
+        0
+
+    fn load(content: text) -> Result<text, text>:
+        # DocumentCodec's model text is text-shaped, so this wraps the real
+        # decode+recalculate pass and re-serializes the result: formula
+        # expressions survive (only `expr` is persisted for a formula cell),
+        # and the round-tripped text carries fresh recalculated display data
+        # for any downstream renderer that reads the SDN directly.
+        match workbook_load(content):
+            case Ok(workbook):
+                Ok(workbook_save(workbook))
+            case Err(e):
+                Err(e)
+
+    fn save(model_text: text) -> Result<text, text>:
+        # `model_text` is expected to already be canonical SDN produced by
+        # `workbook_save`/`load` above -- persisted as-is, matching
+        # PlainTextCodec/RichDocumentCodec's identity-save contract.
+        Ok(model_text)
