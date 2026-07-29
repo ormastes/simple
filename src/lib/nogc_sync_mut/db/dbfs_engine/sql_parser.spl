@@ -410,20 +410,29 @@ fn sql_tokenize(input: text) -> [SqlToken]:
             i = i + 1
             continue
         if c == "'":
+            # Accumulate literal content as whole SPANS between quotes,
+            # never single bytes: the interpreter's strings are Rust
+            # Strings, so a mid-codepoint 1-byte slice materializes as
+            # U+FFFD there (native keeps raw bytes) and per-byte
+            # accumulation corrupted every multi-byte SQL string literal.
             var lit = ""
             val start = i
             i = i + 1
+            var run_start = i
             while i < n:
                 val sc = input[i:i + 1]
                 if sc == "'" and i + 1 < n and input[i + 1:i + 1 + 1] == "'":
-                    lit = lit + "'"
+                    lit = lit + input[run_start:i] + "'"
                     i = i + 2
+                    run_start = i
                 elif sc == "'":
+                    lit = lit + input[run_start:i]
                     i = i + 1
                     break
                 else:
-                    lit = lit + sc
                     i = i + 1
+                    if i >= n:
+                        lit = lit + input[run_start:i]
             tokens.push(SqlToken(kind: SqlTokenKind.StringLit, value: lit, pos: start))
             continue
         if _is_digit(c):

@@ -175,12 +175,14 @@ fn _diag_extract_uri(json: text) -> text:
             while j < json.len() and json[j:j + 1] == " ":
                 j = j + 1
             if j < json.len() and json[j:j + 1] == "\"":
-                var result = ""
+                # Whole-SPAN extraction (single-byte appends corrupt
+                # multi-byte values under the interpreter — U+FFFD per
+                # byte; see the run_start comment in completion.spl).
                 j = j + 1
+                val run_start = j
                 while j < json.len() and json[j:j + 1] != "\"":
-                    result = result + json[j:j + 1]
                     j = j + 1
-                return result
+                return json[run_start:j]
         i = i + 1
     ""
 
@@ -350,14 +352,21 @@ fn _diag_extract_string(json: text, field: text) -> text:
             if j < json.len() and json[j:j + 1] == "\"":
                 var result = ""
                 j = j + 1
+                # Span-append between escapes (see completion.spl run_start
+                # comment: per-byte appends corrupt multi-byte values under
+                # the interpreter).
+                var run_start = j
                 while j < json.len() and json[j:j + 1] != "\"":
                     if json[j:j + 1] == "\\":
+                        result = result + json[run_start:j]
                         j = j + 1
                         if j < json.len():
                             result = result + json[j:j + 1]
+                        j = j + 1
+                        run_start = j
                     else:
-                        result = result + json[j:j + 1]
-                    j = j + 1
+                        j = j + 1
+                result = result + json[run_start:j]
                 return result
         i = i + 1
     ""
@@ -376,14 +385,15 @@ fn _diag_extract_value_for_field(json: text, field: text) -> text:
                 return _diag_extract_balanced(json, j, ch)
             if ch == "\"":
                 return "\"" + _diag_extract_string(json, field) + "\""
-            var result = ""
+            # Whole-SPAN scalar extraction (same interpreter per-byte
+            # U+FFFD hazard as the string cases above).
+            val run_start = j
             while j < json.len():
                 val c = json[j:j + 1]
                 if c == "," or c == "}":
-                    return result.trim()
-                result = result + c
+                    return json[run_start:j].trim()
                 j = j + 1
-            return result.trim()
+            return json[run_start:j].trim()
         i = i + 1
     ""
 

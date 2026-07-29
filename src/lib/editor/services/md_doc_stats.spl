@@ -148,7 +148,7 @@ fn _md_count_words(text_content: text) -> i64:
     var in_word = false
     var i = 0
     while i < text_content.len():
-        val ch = text_content.char_at(i)
+        val ch = text_content[i:i + 1]
         if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
             if in_word:
                 count = count + 1
@@ -164,21 +164,21 @@ fn _md_count_words(text_content: text) -> i64:
 
 fn _md_strip_heading_prefix(line: text) -> text:
     var i = 0
-    while i < line.len() and line.char_at(i) == "#":
+    while i < line.len() and line[i:i + 1] == "#":
         i = i + 1
-    while i < line.len() and line.char_at(i) == " ":
+    while i < line.len() and line[i:i + 1] == " ":
         i = i + 1
     line.slice(i, line.len())
 
 fn _md_is_ordered_list_item(line: text) -> bool:
     var i = 0
-    while i < line.len() and line.char_at(i) >= "0" and line.char_at(i) <= "9":
+    while i < line.len() and line[i:i + 1] >= "0" and line[i:i + 1] <= "9":
         i = i + 1
     if i == 0:
         return false
     if i >= line.len():
         return false
-    val ch = line.char_at(i)
+    val ch = line[i:i + 1]
     ch == "." or ch == ")"
 
 fn _md_count_links_in_line(line: text) -> i64:
@@ -186,21 +186,21 @@ fn _md_count_links_in_line(line: text) -> i64:
     var count: i64 = 0
     var i = 0
     while i < line.len():
-        val ch = line.char_at(i)
+        val ch = line[i:i + 1]
         if ch == "[":
             var before = " "
             if i > 0:
-                before = line.char_at(i - 1)
+                before = line[i - 1:i - 1 + 1]
             if before != "!":
                 # look for ](
                 val close_bracket = _md_find_char(line, "]", i + 1)
                 if close_bracket > 0 and close_bracket + 1 < line.len():
-                    if line.char_at(close_bracket + 1) == "(":
+                    if line[close_bracket + 1:close_bracket + 1 + 1] == "(":
                         count = count + 1
                         i = close_bracket + 2
                         continue
             # also count [[wikilinks]]
-            if i + 1 < line.len() and line.char_at(i + 1) == "[":
+            if i + 1 < line.len() and line[i + 1:i + 1 + 1] == "[":
                 count = count + 1
                 i = i + 2
                 continue
@@ -212,10 +212,10 @@ fn _md_count_images_in_line(line: text) -> i64:
     var count: i64 = 0
     var i = 0
     while i < line.len():
-        if line.char_at(i) == "!" and i + 1 < line.len() and line.char_at(i + 1) == "[":
+        if line[i:i + 1] == "!" and i + 1 < line.len() and line[i + 1:i + 1 + 1] == "[":
             val close_bracket = _md_find_char(line, "]", i + 2)
             if close_bracket > 0 and close_bracket + 1 < line.len():
-                if line.char_at(close_bracket + 1) == "(":
+                if line[close_bracket + 1:close_bracket + 1 + 1] == "(":
                     count = count + 1
                     i = close_bracket + 2
                     continue
@@ -225,7 +225,7 @@ fn _md_count_images_in_line(line: text) -> i64:
 fn _md_find_char(haystack: text, needle: text, start: i64) -> i64:
     var i = start
     while i < haystack.len():
-        if haystack.char_at(i) == needle:
+        if haystack[i:i + 1] == needle:
             return i
         i = i + 1
     -1
@@ -234,16 +234,22 @@ fn _md_normalize_line_endings(content: text) -> text:
     # Replace \r\n with \n, then any remaining lone \r with \n.
     var out = ""
     var i = 0
+    # Emit whole SPANS between \r characters, never single bytes: the
+    # interpreter's strings are Rust Strings, so a mid-codepoint 1-byte
+    # slice materializes as U+FFFD there (native keeps raw bytes) and
+    # per-byte accumulation corrupted multi-byte prose. \r is ASCII, so
+    # spans are whole codepoints.
+    var run_start = i
     while i < content.len():
-        val ch = content.char_at(i)
-        if ch == "\r":
-            if i + 1 < content.len() and content.char_at(i + 1) == "\n":
-                # CRLF: skip the \r, \n will be emitted on next iteration
+        if content[i:i + 1] == "\r":
+            out = out + content[run_start:i]
+            if i + 1 < content.len() and content[i + 1:i + 1 + 1] == "\n":
+                # CRLF: skip the \r, \n will be emitted with the next span
                 i = i + 1
+                run_start = i
                 continue
             # lone CR: treat as newline
             out = out + "\n"
-        else:
-            out = out + ch
+            run_start = i + 1
         i = i + 1
-    out
+    out + content[run_start:i]
