@@ -1,5 +1,11 @@
 # IDE Extension Kernel Campaign — Coordination State
 
+**CAMPAIGN COMPLETE 2026-07-29** — all Phase S items and all lanes (L0-L7,
+L6b, F1-F7) landed on origin/main; full commit ledger in the plan's
+"Execution status" section. Open follow-ups: 5-spec re-verify queue (below),
+guest-QEMU theme verification, L1's kernel API change requests, mail/planner
+owner_module fix, F7 interpreter-quirk bug filing.
+
 Plan: doc/03_plan/app/ide_extension_kernel/parallel_agent_shared_foundation_plan.md
 Started: 2026-07-29. Plan landed origin/main e8276bdacbcd.
 

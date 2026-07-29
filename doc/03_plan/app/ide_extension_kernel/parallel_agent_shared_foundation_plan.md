@@ -287,3 +287,39 @@ AI contribution points, aspectHooks for third parties, DOCX/XLSX/PPTX codecs
 (codec trait exists; format work is its own later campaign — no compatibility
 claims until real import/edit/save/reopen fixtures pass), worker/WASM
 sandbox completion (L6 stretch), marketplace/signing.
+
+## Execution status — CAMPAIGN COMPLETE (2026-07-29)
+
+All Phase S items and all lanes landed on origin/main the same day, executed
+by parallel agents per this plan. Coordination log:
+`.spipe/ide_extension_kernel/state.md`.
+
+| Item | Commit | Evidence |
+|---|---|---|
+| Plan | e8276bda | this file |
+| S1 SDN hardening | 3c7caf66 | 33 new cases; 82-case gate exact |
+| S3+S5a document skeleton + tautology deletion | 9d406f18 | 7/7; 318 source-string asserts removed |
+| S2 kernel contracts | 92bc8ebd | 25 cases; typed handlers, wildcard removed |
+| S5b fixture + walking skeleton | f76e5cfd | 4/4 system |
+| L3 Sheets registry | 51437cee | 4/4; 1037-case baseline exact |
+| L6 isolation | eb170580 | 17/17 |
+| L7 capability truth | 23b18383 | 8/8; vscode 35 mismatches surfaced |
+| L4 Slides registries | de71d056 | 11/11; 133/133 baselines |
+| L2 Writer | a433ac40 | 6/6; codec-backed save |
+| L0 dup-key surfacing | 9f69e3c3 | spans 15/15, manifest 11/11 |
+| L7b vscode generation | bea36f79 | hard mismatches 48→0 (spec probe-validated*) |
+| F2 host CSS theme wiring | 7b855f96 | 7/7; guest path explicitly unverified |
+| F3 symlink containment | 95f57c03 | 19/19; real symlink escape rejected |
+| F4 workbook formula codec | 72cae377 | 7/7; expressions survive reopen |
+| F7 document depth | 12788f84 | 15/15; view sync/autosave/hot exit |
+| L6b hooks + F5 manifests | d9ce5aaa | 7/7 + 10/10; providers 6→14, all bound |
+| F6 workbench registries + F1 cleanup | 60ffadcc | 8/8+7/7+8/8; theme_manager deleted (0 importers) |
+| L1 Markdown slice + Wave I | 035e419d | 6/6+13/13; toggle_bold real; wildcard=0 repo-wide |
+| L5 semantic roles | 14ed678b | 26 roles (specs harness-blocked*) |
+
+*Open items (tracked in state.md): re-verify queue of 5 specs blocked by box
+load (probe-validated, not failed); guest-QEMU theme verification (F2 filed);
+L1's four kernel API change requests (LanguageProviderRegistry, typed
+payloads, onLanguage activation, hot-path dispatch); capabilities.spl
+owner_module mismatch for mail/planner; F7's interpreter callback-visibility
+quirk needs a bug filing. §7 deferred scope remains deferred by design.
