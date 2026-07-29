@@ -2246,3 +2246,10 @@ implementation in progress / target evidence blocked
   cancellation preserves focus and dispatch remains stateless. Independent
   review returned PASS after import and mapping repairs. Three affected manuals
   regenerated (`3 complete, 0 stubs`); K2 wire format remains unchanged.
+- canceled text-edit tranche (2026-07-29): Canonical BrowserSession selection
+  now collapses after Backspace/Delete only when the successful
+  `beforeinput` dispatch was not canceled. Hosted and worker K2 rows preserve
+  the UTF-8 `1..3` selection over `é`, emit `beforeinput` without `input` or
+  `change`, reuse the retained focus for Shift+ArrowRight, and clear selection
+  state on blur. Independent review returned PASS. The new modern SSpec manual
+  regenerated with 108 authored lines (`1 complete, 0 stubs`, no warnings).
