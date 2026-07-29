@@ -7,7 +7,7 @@ use super::helpers::*;
 use crate::hir::{self, BinOp};
 use crate::mir::lower::MirLowerer;
 use crate::mir::function::MirFunction;
-use crate::mir::{CallTarget, MirInst};
+use crate::mir::{CallTarget, MirInst, Terminator};
 use simple_parser::Parser;
 
 // =============================================================================
@@ -107,6 +107,64 @@ fn u32_array_index_uses_word_fast_path() {
     }));
     assert!(!has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_index_get"))
+    }));
+}
+
+#[test]
+fn u32_array_parameter_index_decodes_runtime_words() {
+    let mir = compile_to_mir("fn test(arr: [u32]) -> u32:\n    return arr[1]\n").unwrap();
+    let instructions: Vec<_> = mir
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .collect();
+    let (raw_result, receiver) = instructions
+        .iter()
+        .find_map(|inst| match inst {
+            MirInst::Call {
+                dest: Some(dest),
+                target,
+                args,
+            } if target == &CallTarget::from_name("rt_typed_words_u32_at") => {
+                args.first().map(|receiver| (*dest, *receiver))
+            }
+            _ => None,
+        })
+        .expect("typed u32 read must receive the array parameter");
+    let receiver_addr = instructions
+        .iter()
+        .find_map(|inst| match inst {
+            MirInst::Load { dest, addr, .. } if *dest == receiver => Some(*addr),
+            _ => None,
+        })
+        .expect("typed u32 receiver must load from a local");
+    assert!(instructions
+        .iter()
+        .any(|inst| matches!(inst, MirInst::LocalAddr { dest, local_index: 0 } if *dest == receiver_addr)));
+    let narrowed = instructions
+        .iter()
+        .find_map(|inst| match inst {
+            MirInst::UnitNarrow {
+                dest,
+                value,
+                from_bits: 64,
+                to_bits: 32,
+                signed: false,
+                ..
+            } if *value == raw_result => Some(*dest),
+            _ => None,
+        })
+        .expect("typed u32 result must narrow to unsigned 32-bit");
+    assert!(mir
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .any(|block| matches!(block.terminator, Terminator::Return(Some(value)) if value == narrowed)));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. }
+            if target == &CallTarget::from_name("rt_array_get")
+                || target == &CallTarget::from_name("rt_index_get"))
     }));
 }
 

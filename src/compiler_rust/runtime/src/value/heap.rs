@@ -611,6 +611,11 @@ pub fn set_current_owner(name: &str) {
 }
 
 #[inline]
+pub fn current_owner_id() -> u32 {
+    ATTR_CURRENT_OWNER.with(|c| c.get())
+}
+
+#[inline]
 fn note_attr_alloc(ptr: usize, bytes: u64) {
     if !mem_attr_enabled() {
         return;
@@ -692,6 +697,7 @@ mod attr_tests {
     fn owner_attribution_orders_by_live_bytes_and_frees_settle() {
         mem_attr_enable();
         set_current_owner("attr_test_mod_a");
+        assert_ne!(current_owner_id(), 0);
         note_attr_alloc(0xA110C, 10_000_000);
         set_current_owner("attr_test_mod_b");
         note_attr_alloc(0xB110C, 1_000_000);

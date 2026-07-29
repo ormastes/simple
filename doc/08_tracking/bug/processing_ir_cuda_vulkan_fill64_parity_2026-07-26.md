@@ -173,6 +173,15 @@ as canonical self-hosted release evidence.
 
 ## Remaining repair
 
+On 2026-07-29, the committed mem-guard allocation path was found to call a
+missing runtime heap-owner accessor. The runtime now exposes its existing
+thread-local owner ID, and compiler unit compilation advances past that former
+hard error. A focused MIR regression now requires direct indexing of a `[u32]`
+parameter to use `rt_typed_words_u32_at`, narrow 64-to-32 unsigned, and avoid
+boxed `rt_array_get`/`rt_index_get`. The saturated host consumed the 120-second
+runtime and 180-second compiler test bounds before either test executed, so
+current-source native behavior remains unproven.
+
 1. Run the focused transport probe with a compiler containing the current
    direct-index lowering and require zero
    iterator and indexed mismatches for all four recorded cases.
