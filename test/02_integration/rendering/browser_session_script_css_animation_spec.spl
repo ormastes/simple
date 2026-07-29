@@ -394,6 +394,114 @@ describe "BrowserSession script CSS animation rendering":
         expect(_count_color(last.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
         expect(_pixels_equal(last.pixel_data, middle.pixel_data)).to_equal(false)
 
+    it "starts and restarts script-added animations from local time zero":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/dynamic-css-animation",
+            "<!DOCTYPE html><html><head><style>@keyframes Pulse { from { background-color: #ef4444; } to { background-color: #2563eb; } } #a, #b { width: 32px; height: 16px; background-color: #ef4444; } #a, .running { animation-name: Pulse; animation-duration: 1000ms; animation-timing-function: linear; animation-fill-mode: forwards; }</style></head><body><div id='a'></div><div id='b'></div></body></html>"
+        ).is_ok()).to_equal(true)
+
+        expect(session.advance_time(500)).to_equal(0)
+        val before_start = session.render_to_pixels(64, 48)
+        expect(session.eval_script(
+            "document.getElementById('b').className = 'running'"
+        ).is_ok()).to_equal(true)
+        val local_start = session.render_to_pixels(64, 48)
+        expect(_pixels_equal(
+            local_start.pixel_data, before_start.pixel_data
+        )).to_equal(true)
+
+        expect(session.advance_time(1000)).to_equal(0)
+        val first_midpoint = session.render_to_pixels(64, 48)
+        expect(_pixels_equal(
+            first_midpoint.pixel_data, local_start.pixel_data
+        )).to_equal(false)
+        expect(session.eval_script(
+            "document.getElementById('b').className = ''"
+        ).is_ok()).to_equal(true)
+        val before_restart = session.render_to_pixels(64, 48)
+        expect(_count_color(
+            before_restart.pixel_data, 0xFFEF4444u32
+        )).to_be_greater_than(0)
+        expect(_count_color(
+            before_restart.pixel_data, 0xFF2563EBu32
+        )).to_be_greater_than(0)
+
+        expect(session.eval_script(
+            "document.getElementById('b').className = 'running'"
+        ).is_ok()).to_equal(true)
+        val local_restart = session.render_to_pixels(64, 48)
+        expect(_pixels_equal(
+            local_restart.pixel_data, before_restart.pixel_data
+        )).to_equal(true)
+        expect(session.advance_time(1500)).to_equal(0)
+        val restarted_midpoint = session.render_to_pixels(64, 48)
+        expect(_pixels_equal(
+            restarted_midpoint.pixel_data, first_midpoint.pixel_data
+        )).to_equal(true)
+
+    it "preserves animation time across unrelated classes pause and resume":
+        val html = "<!DOCTYPE html><html><head><style>@keyframes Pulse { from { background-color: #ef4444; } to { background-color: #2563eb; } } #stage { width: 32px; height: 24px; background-color: #ef4444; } .running { animation: Pulse 2000ms linear forwards; } .paused { animation-play-state: paused; }</style></head><body><div id='stage' class='running'></div></body></html>"
+        var session = BrowserSession.new()
+        var reference = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/animation-pause", html
+        ).is_ok()).to_equal(true)
+        expect(reference.open_html(
+            "https://example.test/animation-pause-reference", html
+        ).is_ok()).to_equal(true)
+        expect(_pixels_equal(
+            session.render_to_pixels(64, 48).pixel_data,
+            reference.render_to_pixels(64, 48).pixel_data
+        )).to_equal(true)
+
+        expect(session.advance_time(500)).to_equal(0)
+        expect(reference.advance_time(500)).to_equal(0)
+        expect(session.eval_script(
+            "document.getElementById('stage').className = 'running unrelated'"
+        ).is_ok()).to_equal(true)
+        val unrelated = session.render_to_pixels(64, 48)
+        val reference_500 = reference.render_to_pixels(64, 48)
+        expect(_pixels_equal(
+            unrelated.pixel_data, reference_500.pixel_data
+        )).to_equal(true)
+
+        expect(session.advance_time(1000)).to_equal(0)
+        expect(reference.advance_time(1000)).to_equal(0)
+        val running = session.render_to_pixels(64, 48)
+        val reference_1000 = reference.render_to_pixels(64, 48)
+        expect(_pixels_equal(
+            running.pixel_data, reference_1000.pixel_data
+        )).to_equal(true)
+        expect(session.eval_script(
+            "document.getElementById('stage').className = 'running unrelated paused'"
+        ).is_ok()).to_equal(true)
+        val paused = session.render_to_pixels(64, 48)
+        expect(_pixels_equal(
+            paused.pixel_data, running.pixel_data
+        )).to_equal(true)
+
+        expect(session.advance_time(1500)).to_equal(0)
+        val still_paused = session.render_to_pixels(64, 48)
+        expect(_pixels_equal(
+            still_paused.pixel_data, paused.pixel_data
+        )).to_equal(true)
+        expect(session.eval_script(
+            "document.getElementById('stage').className = 'running unrelated'"
+        ).is_ok()).to_equal(true)
+        val resumed = session.render_to_pixels(64, 48)
+        expect(_pixels_equal(
+            resumed.pixel_data, paused.pixel_data
+        )).to_equal(true)
+
+        expect(session.advance_time(2000)).to_equal(0)
+        expect(reference.advance_time(1500)).to_equal(0)
+        val continued = session.render_to_pixels(64, 48)
+        val reference_1500 = reference.render_to_pixels(64, 48)
+        expect(_pixels_equal(
+            continued.pixel_data, reference_1500.pixel_data
+        )).to_equal(true)
+
     it "starts external stylesheet animation when the stylesheet applies":
         var session = BrowserSession.new()
         expect(session.begin_network_navigation(

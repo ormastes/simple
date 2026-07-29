@@ -126,6 +126,18 @@ describe "hosted browser renderer worker":
             css_last_message.message, 64, 48
         ).next_animation_ms).to_equal(-1)
 
+    it "sleeps until a delayed CSS animation can start":
+        val initialized = _render(
+            "<style>@keyframes pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;animation-name:pulse;animation-duration:1000ms;animation-delay:3600000ms;animation-timing-function:linear}</style><div id='stage'></div>",
+            0
+        )
+        expect(initialized.ok).to_be(true)
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), initialized.wire
+        )
+        val frame = browser_renderer_frame_decode(decoded.message, 64, 48)
+        expect(frame.next_animation_ms).to_equal(3600000)
+
     it "rejects non-init input":
         val rejected = hosted_browser_renderer_handle_init(
             BrowserRendererMessage(
@@ -174,6 +186,24 @@ describe "hosted browser renderer worker":
         expect(animated.ok).to_be(true)
         expect(first.wire == animated.wire).to_be(false)
         expect(animated.animation_time_ms).to_equal(16)
+
+    it "schedules frames after script starts a late CSS animation":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>@keyframes pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#a,#b{width:32px;height:16px;background-color:#ef4444}#a,.running{animation:pulse 500ms linear forwards}</style><div id='a'></div><div id='b'></div><script>setTimeout(function(){document.getElementById('b').className='running';},500);</script>"
+        ))
+        expect(initialized.ok).to_be(true)
+
+        val advanced = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "500"
+        ))
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), advanced.wire
+        )
+        val frame = browser_renderer_frame_decode(decoded.message, 64, 48)
+        expect(frame.next_animation_ms).to_equal(516)
 
     it "caps warning diagnostics before encoding animation frames":
         var worker = HostedBrowserRendererWorkerSession.create(64, 48)

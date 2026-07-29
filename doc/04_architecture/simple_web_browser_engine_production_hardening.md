@@ -204,6 +204,8 @@ State:
 - canonical nodes, rule buckets, child index, computed styles, layout;
 - current `DrawIrComposition`;
 - one event loop, animation controller, render state, and monotonic clock;
+- document-bounded per-node CSS animation epochs, swept with the live DOM and
+  passed to layout as engine-owned state rather than author-visible markup;
 - dirty stage and parse/style/layout/paint counters/timings.
 
 Invalidation:

@@ -220,6 +220,15 @@ One monotonic `now_us` drives microtasks, timers, rAF, CSS animation, and the
 rendering opportunity. Due timers run before the one rAF batch. Script and
 animation mutations merge into a single invalidation before paint. rAF receives
 the current rendering-opportunity time even when its deadline was missed.
+Script-created elements and class/animation declaration restarts record a
+per-node epoch relative to that document clock. Layout reconciles computed
+animation identities only after DOM/style/viewport invalidation, passes the
+bounded instance sidecar to sampling and hit testing, freezes paused elapsed
+time, and includes each instance epoch in finite animation-end scheduling.
+Removed nodes are swept; author-facing DOM/HTML serialization remains unchanged.
+The layout result also reports the first actual animation change: positive
+delays sleep until their start boundary, then active animations use the normal
+frame cadence instead of polling unchanged pre-delay frames at 60 Hz.
 
 Scrolling preserves the real viewport dimensions so viewport-relative CSS
 and flex layout do not change with scroll depth. Paint culls boxes wholly

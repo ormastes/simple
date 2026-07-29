@@ -27,8 +27,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     InputTextVisualMap, SimpleWebLayoutHitIndex,
     input_text_source_byte_at_x,
     simple_web_layout_hit_test_index,
-    simple_web_layout_render_html_draw_ir_result_at_time,
-    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time
+    simple_web_layout_render_html_draw_ir_result_at_time_with_animations,
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations
 }
 use std.gc_async_mut.web.browser_session.{
     BrowserResponse, BrowserSession
@@ -81,16 +81,12 @@ fn _worker_result_reject(
     )
 
 fn _worker_next_animation_ms(
-    css_animation_end_ms: i64,
+    css_animation_next_ms: i64,
     script_timer_due_ms: i64,
     caret_due_ms: i64,
     current_time_ms: i64
 ) -> i64:
-    var next: i64 = -1
-    if css_animation_end_ms == -2 or css_animation_end_ms > current_time_ms:
-        next = current_time_ms + 16
-        if css_animation_end_ms >= 0 and next > css_animation_end_ms:
-            next = css_animation_end_ms
+    var next = css_animation_next_ms
     if script_timer_due_ms >= 0:
         val timer_next = if script_timer_due_ms <= current_time_ms:
             current_time_ms + 1
@@ -141,25 +137,27 @@ fn _worker_frame(
     val document_animation_time_ms = _worker_document_animation_time_ms(
         session, animation_time_ms
     )
-    val layout = simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+    session.prepare_css_animation_instances(width)
+    val layout = simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations(
         session.render_html_document(),
         width,
         height,
         document_animation_time_ms,
         scroll_y,
-        overlay
+        overlay,
+        session.css_animation_instances
     )
-    val css_animation_end_ms = if layout.animation_end_ms >= 0:
-        session.animation_start_time_ms + layout.animation_end_ms
+    val css_animation_next_ms = if layout.animation_next_ms >= 0:
+        session.animation_start_time_ms + layout.animation_next_ms
     else:
-        layout.animation_end_ms
+        -1
     val encoded = browser_renderer_frame_encode_with_state(
         layout.composition,
         message.generation,
         response_request_id,
         message.request_id,
         _worker_next_animation_ms(
-            css_animation_end_ms,
+            css_animation_next_ms,
             session.next_script_timer_due_ms(),
             caret_due_ms,
             animation_time_ms
@@ -766,23 +764,25 @@ pub fn hosted_browser_renderer_handle_init(
     val document_animation_time_ms = _worker_document_animation_time_ms(
         session, animation_time_ms
     )
-    val layout = simple_web_layout_render_html_draw_ir_result_at_time(
+    session.prepare_css_animation_instances(width)
+    val layout = simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
         session.render_html_document(),
         width,
         height,
-        document_animation_time_ms
+        document_animation_time_ms,
+        session.css_animation_instances
     )
-    val css_animation_end_ms = if layout.animation_end_ms >= 0:
-        session.animation_start_time_ms + layout.animation_end_ms
+    val css_animation_next_ms = if layout.animation_next_ms >= 0:
+        session.animation_start_time_ms + layout.animation_next_ms
     else:
-        layout.animation_end_ms
+        -1
     browser_renderer_frame_encode_with_state(
         layout.composition,
         message.generation,
         response_request_id,
         message.request_id,
         _worker_next_animation_ms(
-            css_animation_end_ms,
+            css_animation_next_ms,
             session.next_script_timer_due_ms(),
             -1,
             animation_time_ms

@@ -19,7 +19,10 @@ use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.animation.timing.{evaluate_timing, parse_timing_function}
 use std.gc_async_mut.gpu.browser_engine.style_block_parse.{extract_keyframes, KeyframeRegistry}
-use std.gc_async_mut.gpu.browser_engine.style.animation.{sample_keyframes, animation_css_value_text}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{
+    BrowserCssAnimationInstance, animation_css_value_text, sample_keyframes,
+    browser_css_animation_capacity_available
+}
 
 fn _simple_web_extract_keyframes(html: text) -> KeyframeRegistry:
     if not _simple_web_html_source_admitted(
@@ -134,6 +137,51 @@ fn _simple_web_node_target_key(
         part = part - 1
     path
 
+class _SimpleWebAnimationFrameIndex:
+    target_keys: [text]
+    signatures: [text]
+    keyframes_by_name: Dict<text, i32>
+    instances_by_target: Dict<text, i32>
+
+class _SimpleWebAnimationSchedule:
+    animation_end_ms: i64
+    animation_next_ms: i64
+
+fn _simple_web_animation_target_keys(
+    nodes: [HNode], child_index: HtmlChildIndex
+) -> [text]:
+    var target_keys = [""; nodes.len()]
+    var body_index = -1
+    var node_index = 0
+    while node_index < nodes.len():
+        if nodes[node_index].tag == "body":
+            body_index = node_index
+            target_keys[node_index] = "path:"
+            break
+        node_index = node_index + 1
+    if body_index < 0:
+        return target_keys
+
+    var parent_index = body_index
+    while parent_index < nodes.len():
+        if target_keys[parent_index] != "":
+            var ordinal = 0
+            var child = child_index.first_child[parent_index]
+            while child >= 0:
+                if _simple_web_layout_element(nodes[child]):
+                    val separator = if target_keys[parent_index] == "path:":
+                        ""
+                    else:
+                        "/"
+                    target_keys[child] = (
+                        target_keys[parent_index] + separator +
+                        ordinal.to_text()
+                    )
+                    ordinal = ordinal + 1
+                child = child_index.next_sibling[child]
+        parent_index = parent_index + 1
+    target_keys
+
 fn _simple_web_hit_target_key(
     nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
     boxes: LayoutResult, width: i32, height: i32, x: i32, y: i32
@@ -179,15 +227,31 @@ pub fn simple_web_layout_hit_test_target_at_time(
     html: text, width: i32, height: i32,
     x: i32, y: i32, animation_time_ms: i64
 ) -> text:
+    simple_web_layout_hit_test_target_at_time_with_animations(
+        html, width, height, x, y, animation_time_ms, []
+    )
+
+pub fn simple_web_layout_hit_test_target_at_time_with_animations(
+    html: text, width: i32, height: i32,
+    x: i32, y: i32, animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance]
+) -> text:
     _web_budget_begin(WEB_RENDER_BUDGET_MS)
     val nodes = parse_html(html)
     val rules = extract_css_vw(html, width, false)
     val child_index = build_child_index(nodes)
     var styles = compute_styles(nodes, rules, child_index, false, true)
     if animation_time_ms >= 0:
-        styles = _apply_css_animations(
-            styles, _simple_web_extract_keyframes(html), animation_time_ms
-        )
+        val registry = _simple_web_extract_keyframes(html)
+        if registry.entries.len() > 0:
+            val frame_index = _simple_web_animation_frame_index(
+                styles, nodes, child_index, registry, animation_instances,
+                false
+            )
+            styles = _apply_css_animations(
+                styles, registry, animation_time_ms, animation_instances,
+                frame_index
+            )
     val node_count = nodes.len() as i32
     val boxes = layout(
         nodes, styles, child_index, 0, 0, 0, width, height,
@@ -231,6 +295,7 @@ class SimpleWebLayoutDrawIrResult:
     material_fallback: WebRenderMaterialFallbackProvenance
     material_witness: SimpleWebLayoutMaterialWitness
     animation_end_ms: i64
+    animation_next_ms: i64
     hit_index: SimpleWebLayoutHitIndex
     resolved_input_view_start_byte: i64
     resolved_scroll_y: i32
@@ -490,13 +555,144 @@ fn _animation_direction_progress(progress: f64, direction: text, iteration: i64)
         return 1.0 - progress
     progress
 
+fn _css_animation_signature(st: Style) -> text:
+    (
+        st.animation_name + "\u001f" +
+        st.animation_duration_ms.to_text() + "\u001f" +
+        st.animation_delay_ms.to_text() + "\u001f" +
+        st.animation_timing_function + "\u001f" +
+        st.animation_iteration_count + "\u001f" +
+        st.animation_direction + "\u001f" +
+        st.animation_fill_mode
+    )
+
+fn _simple_web_animation_frame_index(
+    styles: [Style], nodes: [HNode], child_index: HtmlChildIndex,
+    registry: KeyframeRegistry,
+    instances: [BrowserCssAnimationInstance], include_signatures: bool
+) -> _SimpleWebAnimationFrameIndex:
+    val target_keys = _simple_web_animation_target_keys(nodes, child_index)
+    var signatures: [text] = if include_signatures:
+        [""; styles.len()]
+    else:
+        []
+    var style_index = 0
+    while style_index < styles.len():
+        if (include_signatures and
+            styles[style_index].animation_name != "none" and
+            styles[style_index].animation_duration_ms > 0
+        ):
+            signatures[style_index] = _css_animation_signature(
+                styles[style_index]
+            )
+        style_index = style_index + 1
+
+    var keyframes_by_name: Dict<text, i32> = {}
+    var keyframe_index = 0
+    while keyframe_index < registry.entries.len():
+        if registry.entries[keyframe_index].frames.len() > 0:
+            keyframes_by_name[registry.entries[keyframe_index].name] = (
+                keyframe_index
+            )
+        keyframe_index = keyframe_index + 1
+
+    var instances_by_target: Dict<text, i32> = {}
+    var instance_index = 0
+    while instance_index < instances.len():
+        instances_by_target[instances[instance_index].target_key] = (
+            instance_index
+        )
+        instance_index = instance_index + 1
+    _SimpleWebAnimationFrameIndex(
+        target_keys: target_keys,
+        signatures: signatures,
+        keyframes_by_name: keyframes_by_name,
+        instances_by_target: instances_by_target
+    )
+
+pub fn simple_web_layout_reconcile_animation_instances(
+    html: text, width: i32, current_time_ms: i64,
+    new_epoch_ms: i64, reset_descendants: bool,
+    previous: [BrowserCssAnimationInstance]
+) -> [BrowserCssAnimationInstance]:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val registry = _simple_web_extract_keyframes(html)
+    if registry.entries.len() == 0:
+        return []
+    val frame_index = _simple_web_animation_frame_index(
+        styles, nodes, child_index, registry, previous, true
+    )
+    var reconciled: [BrowserCssAnimationInstance] = []
+    var style_index = 0
+    while style_index < styles.len():
+        val st = styles[style_index]
+        val keyframe_index = (
+            frame_index.keyframes_by_name.get(st.animation_name) ?? -1
+        )
+        if (
+            st.animation_name != "none" and
+            st.animation_duration_ms > 0 and
+            keyframe_index >= 0
+        ):
+            val target_key = frame_index.target_keys[style_index]
+            if (
+                target_key != "" and
+                browser_css_animation_capacity_available(reconciled.len())
+            ):
+                val signature = frame_index.signatures[style_index]
+                val paused = st.animation_play_state == "paused"
+                val old_index = (
+                    frame_index.instances_by_target.get(target_key) ?? -1
+                )
+                if (
+                    (not reset_descendants or target_key == "path:") and
+                    old_index >= 0 and
+                    previous[old_index].signature == signature
+                ):
+                    val old = previous[old_index]
+                    if paused and not old.paused:
+                        val elapsed = current_time_ms - old.start_time_ms
+                        val paused_elapsed = if elapsed > 0:
+                            elapsed
+                        else:
+                            0
+                        reconciled.push(BrowserCssAnimationInstance(
+                            target_key: target_key,
+                            signature: signature,
+                            start_time_ms: old.start_time_ms,
+                            paused: true,
+                            paused_elapsed_ms: paused_elapsed
+                        ))
+                    elif not paused and old.paused:
+                        reconciled.push(BrowserCssAnimationInstance(
+                            target_key: target_key,
+                            signature: signature,
+                            start_time_ms:
+                                current_time_ms - old.paused_elapsed_ms,
+                            paused: false,
+                            paused_elapsed_ms: old.paused_elapsed_ms
+                        ))
+                    else:
+                        reconciled.push(old)
+                else:
+                    reconciled.push(BrowserCssAnimationInstance(
+                        target_key: target_key,
+                        signature: signature,
+                        start_time_ms: new_epoch_ms,
+                        paused: paused,
+                        paused_elapsed_ms: 0
+                    ))
+        style_index = style_index + 1
+    reconciled
+
 fn _animation_progress(st: Style, animation_time_ms: i64) -> f64?:
     if st.animation_name == "none" or st.animation_duration_ms <= 0:
         return nil
-    val elapsed = if st.animation_play_state == "paused":
-        0 - st.animation_delay_ms.to_i64()
-    else:
-        animation_time_ms - st.animation_delay_ms.to_i64()
+    val elapsed = animation_time_ms - st.animation_delay_ms.to_i64()
     if elapsed < 0:
         if st.animation_fill_mode == "backwards" or st.animation_fill_mode == "both":
             return Some(_animation_direction_progress(0.0, st.animation_direction, 0))
@@ -519,7 +715,10 @@ fn _animation_progress(st: Style, animation_time_ms: i64) -> f64?:
     Some(evaluate_timing(parse_timing_function(st.animation_timing_function), directed))
 
 fn _apply_css_animations(
-    styles: [Style], registry: KeyframeRegistry, animation_time_ms: i64
+    styles: [Style], registry: KeyframeRegistry,
+    animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    frame_index: _SimpleWebAnimationFrameIndex
 ) -> [Style]:
     if registry.entries.len() == 0:
         return styles
@@ -527,55 +726,119 @@ fn _apply_css_animations(
     var style_index = 0
     while style_index < animated.len():
         val st = animated[style_index]
-        if val Some(progress) = _animation_progress(st, animation_time_ms):
-            for entry in registry.entries:
-                if entry.name == st.animation_name:
-                    val updates = sample_keyframes(
-                        style_index.to_i64(), entry.frames, progress
-                    )
-                    var declarations = ""
-                    for update in updates:
-                        if declarations.len() > 0:
-                            declarations = declarations + ";"
-                        declarations = (
-                            declarations + update.property + ":" +
-                            animation_css_value_text(update.value)
-                        )
+        val keyframe_index = (
+            frame_index.keyframes_by_name.get(st.animation_name) ?? -1
+        )
+        if (
+            st.animation_name != "none" and
+            st.animation_duration_ms > 0 and
+            keyframe_index >= 0
+        ):
+            val target_key = frame_index.target_keys[style_index]
+            val matched_index = (
+                frame_index.instances_by_target.get(target_key) ?? -1
+            )
+            val local_animation_time_ms = if matched_index >= 0:
+                val instance = animation_instances[matched_index]
+                if instance.paused:
+                    instance.paused_elapsed_ms
+                else:
+                    animation_time_ms - instance.start_time_ms
+            elif st.animation_play_state == "paused":
+                0
+            else:
+                animation_time_ms
+            if val Some(progress) = _animation_progress(
+                st, local_animation_time_ms
+            ):
+                val entry = registry.entries[keyframe_index]
+                val updates = sample_keyframes(
+                    style_index.to_i64(), entry.frames, progress
+                )
+                var declarations = ""
+                for update in updates:
                     if declarations.len() > 0:
-                        animated[style_index] = apply_decls(
-                            st, declarations, st.font_size
-                        )
+                        declarations = declarations + ";"
+                    declarations = (
+                        declarations + update.property + ":" +
+                        animation_css_value_text(update.value)
+                    )
+                if declarations.len() > 0:
+                    animated[style_index] = apply_decls(
+                        st, declarations, st.font_size
+                    )
         style_index = style_index + 1
     animated
 
-fn _simple_web_layout_animation_end_from_styles(
-    styles: [Style], registry: KeyframeRegistry
-) -> i64:
+fn _simple_web_layout_animation_schedule(
+    styles: [Style], current_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    frame_index: _SimpleWebAnimationFrameIndex
+) -> _SimpleWebAnimationSchedule:
     var latest_end: i64 = -1
-    for st in styles:
-        if st.animation_name != "none" and st.animation_duration_ms > 0:
-            var has_keyframes = false
-            for entry in registry.entries:
-                if entry.name == st.animation_name and entry.frames.len() > 0:
-                    has_keyframes = true
-            if has_keyframes:
-                if st.animation_play_state == "paused":
-                    if latest_end < 0:
-                        latest_end = 0
-                elif st.animation_iteration_count == "infinite":
-                    return -2
-                else:
-                    val iterations = parse_int(st.animation_iteration_count)
-                    val count = if iterations > 0: iterations else: 1
-                    var animation_end = (
-                        st.animation_delay_ms.to_i64() +
-                        st.animation_duration_ms.to_i64() * count.to_i64()
-                    )
-                    if animation_end < 0:
-                        animation_end = 0
-                    if animation_end > latest_end:
-                        latest_end = animation_end
-    latest_end
+    var next_change: i64 = -1
+    var style_index = 0
+    while style_index < styles.len():
+        val st = styles[style_index]
+        val keyframe_index = (
+            frame_index.keyframes_by_name.get(st.animation_name) ?? -1
+        )
+        if (
+            st.animation_name != "none" and
+            st.animation_duration_ms > 0 and
+            keyframe_index >= 0
+        ):
+            val target_key = frame_index.target_keys[style_index]
+            val matched_index = (
+                frame_index.instances_by_target.get(target_key) ?? -1
+            )
+            val matched = matched_index >= 0
+            val paused = if matched:
+                animation_instances[matched_index].paused
+            else:
+                st.animation_play_state == "paused"
+            val start_time_ms = if matched:
+                animation_instances[matched_index].start_time_ms
+            else:
+                0
+            val animation_start = (
+                start_time_ms + st.animation_delay_ms.to_i64()
+            )
+            val infinite = st.animation_iteration_count == "infinite"
+            var animation_end: i64 = -1
+            if infinite:
+                if not paused:
+                    latest_end = -2
+            else:
+                val iterations = parse_int(st.animation_iteration_count)
+                val count = if iterations > 0: iterations else: 1
+                animation_end = animation_start + (
+                    st.animation_duration_ms.to_i64() * count.to_i64()
+                )
+                if animation_end < 0:
+                    animation_end = 0
+                if latest_end != -2 and animation_end > latest_end:
+                    latest_end = animation_end
+
+            if not paused and current_time_ms >= 0:
+                var candidate: i64 = -1
+                if current_time_ms < animation_start:
+                    candidate = animation_start
+                elif infinite:
+                    candidate = current_time_ms + 16
+                elif current_time_ms < animation_end:
+                    candidate = current_time_ms + 16
+                    if candidate > animation_end:
+                        candidate = animation_end
+                if candidate >= 0 and (
+                    next_change < 0 or candidate < next_change
+                ):
+                    next_change = candidate
+        style_index = style_index + 1
+    _SimpleWebAnimationSchedule(
+        animation_end_ms: latest_end,
+        animation_next_ms: next_change
+    )
 
 pub fn simple_web_layout_animation_end_ms(
     html: text, width: i32
@@ -585,14 +848,21 @@ pub fn simple_web_layout_animation_end_ms(
     val rules = extract_css_vw(html, width, false)
     val child_index = build_child_index(nodes)
     val styles = compute_styles(nodes, rules, child_index, false, true)
-    _simple_web_layout_animation_end_from_styles(
-        styles, _simple_web_extract_keyframes(html)
+    val registry = _simple_web_extract_keyframes(html)
+    if registry.entries.len() == 0:
+        return -1
+    val frame_index = _simple_web_animation_frame_index(
+        styles, nodes, child_index, registry, [], false
     )
+    _simple_web_layout_animation_schedule(
+        styles, -1, [], frame_index
+    ).animation_end_ms
 
 fn _simple_web_layout_render_html_draw_ir_result_at_time(
     html: text, width: i32, height: i32, vector_fonts: bool,
     animation_time_ms: i64, scroll_y: i32,
-    overlay: BrowserTextInputOverlay
+    overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance]
 ) -> SimpleWebLayoutDrawIrResult:
     val render_start_us = rt_time_now_micros()
     val env_override = _web_render_budget_ms_env_override()
@@ -679,13 +949,24 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
         material_entries, material_counts,
         cpu_material_nodes, solid_material_nodes)
     val animation_registry = _simple_web_extract_keyframes(html)
-    val animation_end_ms = _simple_web_layout_animation_end_from_styles(
-        styles, animation_registry
+    var animation_schedule = _SimpleWebAnimationSchedule(
+        animation_end_ms: -1,
+        animation_next_ms: -1
     )
-    if animation_time_ms >= 0:
-        styles = _apply_css_animations(
-            styles, animation_registry, animation_time_ms
+    if animation_registry.entries.len() > 0:
+        val animation_frame_index = _simple_web_animation_frame_index(
+            styles, nodes, child_index, animation_registry,
+            animation_instances, false
         )
+        animation_schedule = _simple_web_layout_animation_schedule(
+            styles, animation_time_ms, animation_instances,
+            animation_frame_index
+        )
+        if animation_time_ms >= 0:
+            styles = _apply_css_animations(
+                styles, animation_registry, animation_time_ms,
+                animation_instances, animation_frame_index
+            )
     _web_budget_rearm(render_start_us + budget_us * 9 / 10)
     val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
@@ -737,7 +1018,8 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
         material_fallback: simple_web_layout_material_provenance_after_execution(
             material_witness, 0, 1, 1, 0),
         material_witness: material_witness,
-        animation_end_ms: animation_end_ms,
+        animation_end_ms: animation_schedule.animation_end_ms,
+        animation_next_ms: animation_schedule.animation_next_ms,
         hit_index: SimpleWebLayoutHitIndex(
             nodes: nodes,
             styles: styles,
@@ -756,7 +1038,7 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
 fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result_at_time(
         html, width, height, vector_fonts, -1, 0,
-        browser_text_input_overlay_empty()
+        browser_text_input_overlay_empty(), []
     )
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
@@ -768,7 +1050,16 @@ pub fn simple_web_layout_render_html_draw_ir_result(html: text, width: i32, heig
 pub fn simple_web_layout_render_html_draw_ir_result_at_time(html: text, width: i32, height: i32, animation_time_ms: i64) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result_at_time(
         html, width, height, true, animation_time_ms, 0,
-        browser_text_input_overlay_empty()
+        browser_text_input_overlay_empty(), []
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, 0,
+        browser_text_input_overlay_empty(), animation_instances
     )
 
 pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
@@ -776,7 +1067,7 @@ pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
     overlay: BrowserTextInputOverlay
 ) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result_at_time(
-        html, width, height, true, animation_time_ms, 0, overlay
+        html, width, height, true, animation_time_ms, 0, overlay, []
     )
 
 pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
@@ -784,7 +1075,17 @@ pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
     scroll_y: i32, overlay: BrowserTextInputOverlay
 ) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result_at_time(
-        html, width, height, true, animation_time_ms, scroll_y, overlay
+        html, width, height, true, animation_time_ms, scroll_y, overlay, []
+    )
+
+pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    scroll_y: i32, overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance]
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_render_html_draw_ir_result_at_time(
+        html, width, height, true, animation_time_ms, scroll_y, overlay,
+        animation_instances
     )
 
 pub fn simple_web_layout_render_html_draw_ir_cpu_bitmap(html: text, width: i32, height: i32) -> DrawIrComposition:

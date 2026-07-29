@@ -1581,3 +1581,14 @@ implementation in progress / target evidence blocked
   redirect count as well as the parent permit count; unmarked redirects still
   enforce the normal limit. Focused coverage proves POST body/method/site and
   credential state survive a marked upgrade at the redirect ceiling.
+- CSS animations enabled or restarted by JavaScript now use a document-bounded
+  per-node epoch instead of inheriting elapsed document time. Epochs are swept
+  with computed animation identities, stay outside author markup, affect hit
+  testing and pixels identically, preserve paused elapsed time, and extend
+  hosted-worker wakeup scheduling.
+  Pixel evidence covers an uninterrupted document-start animation beside a
+  late-started and restarted class animation.
+- Hosted animation scheduling now uses layout's next-change deadline. A
+  positive delay sleeps directly to its start boundary instead of triggering
+  full parse/style/layout work every 16 ms; focused worker evidence covers a
+  one-hour delay.
