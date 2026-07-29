@@ -14,9 +14,10 @@ pub(crate) use bdd::{
     BDD_EXPECT_PROVISIONAL, BDD_FAILURE_MSG, BDD_INDENT, BDD_LAZY_VALUES, BDD_MATCHER_RAN, BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
-    bind_args, bind_args_with_injected, exec_function, exec_function_with_bound_args,
+    bind_args, bind_args_with_injected, captured_env_with_live_globals, exec_function, exec_function_with_bound_args,
     exec_function_with_captured_env, exec_function_with_values, exec_function_with_values_and_self, exec_lambda,
-    instantiate_class, ProceedContext, IN_NEW_METHOD,
+    execute_function_body, instantiate_class, publish_live_bound_globals, refresh_live_bound_globals,
+    sync_live_bound_globals, sync_owned_captured_globals, ProceedContext, IN_NEW_METHOD,
 };
 pub(crate) use core::bitfield_support::instantiate_bitfield_from_args;
 

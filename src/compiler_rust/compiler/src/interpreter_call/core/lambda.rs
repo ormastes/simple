@@ -24,14 +24,23 @@ pub(crate) fn exec_lambda(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     use super::super::block_execution::exec_block_closure_into;
+    use super::function_exec::{
+        mark_nodes_locals, publish_live_bound_globals, refresh_live_bound_globals, sync_live_bound_globals,
+    };
 
     // Diagram tracing for lambda execution
     if diagram_sffi::is_diagram_enabled() {
         diagram_sffi::trace_call("<lambda>");
     }
 
+    publish_live_bound_globals(call_env);
     let mut local_env = captured_env.clone();
+    refresh_live_bound_globals(&mut local_env);
     let mut positional_idx = 0usize;
+
+    for param in params {
+        local_env.mark_local(param.clone());
+    }
 
     for arg in args {
         let val = evaluate_expr(&arg.value, call_env, functions, classes, enums, impl_methods)?;
@@ -61,6 +70,7 @@ pub(crate) fn exec_lambda(
     }
 
     let result = if let Expr::DoBlock(nodes) = body {
+        mark_nodes_locals(nodes, &mut local_env);
         // Run the block against local_env in place (same statement semantics as the
         // clone-isolated wrapper) so a `me`-method's mutation to an object argument
         // is observable for write-back below.
@@ -74,6 +84,7 @@ pub(crate) fn exec_lambda(
     } else {
         evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)
     };
+    sync_live_bound_globals(&local_env, call_env);
 
     // Write back mutated container arguments to the caller's bindings, mirroring the
     // function-call write-back in `core::function_exec` (Bug #19). A lambda parameter

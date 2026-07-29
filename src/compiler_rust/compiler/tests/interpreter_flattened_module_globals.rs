@@ -436,6 +436,139 @@ fn flattened_static_method_preserves_module_owner() {
 }
 
 #[test]
+fn flattened_instance_method_preserves_module_owner() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nclass Worker:\n    tag: i32\n\n    me set_value(next: i32) -> i32:\n        value = next\n        return value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{Worker, read}\n\nfn main() -> i32:\n    var worker = Worker(tag: 0)\n    return worker.set_value(9) * 10 + read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 99);
+}
+
+#[test]
+fn flattened_context_hooks_preserve_module_owner() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nclass Guard:\n    tag: i32\n\n    fn __enter__() -> i32:\n        value = 7\n        return value\n\n    fn __exit__(exc, detail, trace):\n        if detail == nil and trace == nil:\n            value = 9\n        else:\n            value = 3\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{Guard, read}\n\nfn main() -> i32:\n    var entered = 0\n    with Guard(tag: 0) as value:\n        entered = value\n    return entered * 10 + read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 79);
+}
+
+#[test]
+fn flattened_lambda_publishes_captured_global_array_mutation() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var values: [i32] = [1]\n\nfn run() -> i32:\n    val append = \\:\n        values.push(7)\n    append()\n    return values.len()\n\nfn read_len() -> i32:\n    return values.len()\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{run, read_len}\n\nfn main() -> i32:\n    return run() * 10 + read_len()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 22);
+}
+
+#[test]
+fn flattened_lambda_relays_nested_same_owner_write() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 0\n\nfn inner():\n    value = 2\n\nfn run() -> i32:\n    value = 1\n    val update = \\:\n        inner()\n    update()\n    return value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{run, read}\n\nfn main() -> i32:\n    return run() * 10 + read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 22);
+}
+
+#[test]
+fn flattened_lambda_return_preserves_global_mutation() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var values: [i32] = []\n\nfn run() -> i32:\n    values.push(1)\n    val append = \\:\n        values.push(7)\n        return values.len()\n    append()\n    return values.len()\n\nfn read_len() -> i32:\n    return values.len()\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{run, read_len}\n\nfn main() -> i32:\n    return run() * 10 + read_len()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 22);
+}
+
+#[test]
+fn flattened_lambda_local_shadow_does_not_publish_global() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 1\n\nfn run() -> i32:\n    val compute = \\:\n        val value = 7\n        return value\n    return compute() * 10 + value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{run, read}\n\nfn main() -> i32:\n    return run() * 10 + read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 711);
+}
+
+#[test]
+fn flattened_lambda_nested_shadow_does_not_publish_global() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var value = 1\n\nfn run() -> i32:\n    val compute = \\:\n        if true:\n            val value = 7\n        return value\n    return compute() * 10 + value\n\nfn read() -> i32:\n    return value\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{run, read}\n\nfn main() -> i32:\n    return run() * 10 + read()\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 111);
+}
+
+#[test]
 fn selective_cache_retains_module_owner_metadata() {
     let dir = tempdir().unwrap();
     let lib_dir = dir.path().join("src/lib");

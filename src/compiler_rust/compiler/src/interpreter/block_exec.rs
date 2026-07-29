@@ -35,10 +35,10 @@ use super::interpreter_helpers::handle_method_call_with_self_update;
 /// bodies of `if`/`for`/`while`/`match`/... statements within it) manage their
 /// own scope via their own `exec_block`/`exec_block_fn` call, so recursing
 /// into them here would double-handle (and mis-scope) their locals.
-fn capture_block_scope_shadows(block: &Block, env: &mut Env) -> Vec<(String, Option<Value>)> {
+pub(crate) fn capture_node_scope_shadows(nodes: &[Node], env: &mut Env) -> Vec<(String, Option<Value>)> {
     let mut shadows = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for stmt in &block.statements {
+    for stmt in nodes {
         let mut names = Vec::new();
         match stmt {
             Node::Let(let_stmt) => {
@@ -78,10 +78,14 @@ fn capture_block_scope_shadows(block: &Block, env: &mut Env) -> Vec<(String, Opt
     shadows
 }
 
+fn capture_block_scope_shadows(block: &Block, env: &mut Env) -> Vec<(String, Option<Value>)> {
+    capture_node_scope_shadows(&block.statements, env)
+}
+
 /// Undo the shadowing captured by `capture_block_scope_shadows`: restore each
 /// name's pre-block value, or remove it entirely if it did not exist before
 /// the block ran (so a block-local `var` never leaks into the caller).
-fn restore_block_scope_shadows(shadows: Vec<(String, Option<Value>)>, env: &mut Env) {
+pub(crate) fn restore_block_scope_shadows(shadows: Vec<(String, Option<Value>)>, env: &mut Env) {
     for (name, prior_value) in shadows {
         env.exit_block_local(&name);
         let owner_global = if env.is_local(&name) {

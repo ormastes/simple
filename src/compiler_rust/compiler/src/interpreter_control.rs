@@ -58,8 +58,9 @@ use std::collections::HashMap;
 
 // Import parent interpreter types and functions
 use super::{
-    await_value, evaluate_expr, exec_block, exec_block_fn, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS, BDD_INDENT,
-    BDD_LAZY_VALUES, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, IMMUTABLE_VARS,
+    await_value, captured_env_with_live_globals, evaluate_expr, exec_block, exec_block_fn, execute_function_body,
+    publish_live_bound_globals, sync_owned_captured_globals, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS,
+    BDD_INDENT, BDD_LAZY_VALUES, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, IMMUTABLE_VARS,
 };
 
 // Import helpers for pattern binding
@@ -3143,37 +3144,31 @@ fn exec_method_body(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    // Save current CONST_NAMES and IMMUTABLE_VARS, clear for method scope
-    // This prevents const/immutable names from caller leaking into callee
-    let saved_const_names = CONST_NAMES.with(|cell| cell.borrow().clone());
-    CONST_NAMES.with(|cell| cell.borrow_mut().clear());
-    let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| cell.borrow().clone());
-    IMMUTABLE_VARS.with(|cell| cell.borrow_mut().clear());
-
-    let mut local_env = env.clone();
-    local_env.insert("self".to_string(), receiver.clone());
+    publish_live_bound_globals(env);
+    let mut local_env = captured_env_with_live_globals(method, &Env::new());
     for (k, v) in fields {
+        local_env.mark_local(k.clone());
         local_env.insert(k.clone(), v.clone());
     }
-    // Bind method parameters to argument values, skipping `self` since it's already bound
-    let non_self_params: Vec<_> = method.params.iter().filter(|p| p.name != "self").collect();
-    for (i, param) in non_self_params.iter().enumerate() {
-        let arg_val = args.get(i).cloned().unwrap_or(Value::Nil);
-        local_env.insert(param.name.clone(), arg_val);
+    let mut bound = HashMap::from([("self".to_string(), receiver.clone())]);
+    for (index, param) in method.params.iter().filter(|p| p.name != "self").enumerate() {
+        bound.insert(
+            param.name.clone(),
+            args.get(index).cloned().unwrap_or(Value::Nil),
+        );
     }
-    // Use exec_block_fn to handle implicit returns properly
-    let result = exec_block_fn(&method.body, &mut local_env, functions, classes, enums, impl_methods);
-
-    // ALWAYS restore CONST_NAMES and IMMUTABLE_VARS before returning to avoid leaking to caller
-    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
-    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
-
-    let (control, implicit_val) = result?;
-    // Return explicit return value if present, otherwise implicit value, otherwise Nil
-    Ok(match control {
-        Control::Return(val) => val,
-        _ => implicit_val.unwrap_or(Value::Nil),
-    })
+    let result = execute_function_body(
+        method,
+        bound,
+        &mut local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        false,
+    );
+    sync_owned_captured_globals(method, &local_env, env);
+    result
 }
 
 /// Helper to call a method if it exists on an object

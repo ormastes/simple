@@ -530,7 +530,11 @@ impl CowEnv {
         self.global_bindings.get(local_name)
     }
 
-    pub fn refresh_bound_global(&mut self, owner: &Arc<str>, source_name: &str, value: Value) {
+    pub fn global_bindings(&self) -> impl Iterator<Item = (&String, &(Arc<str>, String))> {
+        self.global_bindings.iter()
+    }
+
+    pub fn refresh_bound_global(&mut self, owner: &Arc<str>, source_name: &str, value: Value) -> bool {
         let local_names = self
             .global_bindings
             .iter()
@@ -538,7 +542,9 @@ impl CowEnv {
             .map(|(local_name, _)| local_name.clone())
             .filter(|local_name| !self.is_local(local_name))
             .collect::<Vec<_>>();
+        let refreshed = !local_names.is_empty();
         self.refresh_globals(local_names.into_iter().map(|local_name| (local_name, value.clone())));
+        refreshed
     }
 
     /// Create a CowEnv from an existing HashMap (map becomes the overlay).

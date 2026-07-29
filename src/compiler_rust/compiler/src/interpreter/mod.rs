@@ -103,7 +103,9 @@ pub(crate) use node_exec::{exec_assignment, exec_augmented_assignment, exec_node
 
 // Block execution
 mod block_exec;
-pub(crate) use block_exec::{exec_block, exec_block_fn, exec_unsafe_block};
+pub(crate) use block_exec::{
+    capture_node_scope_shadows, exec_block, exec_block_fn, exec_unsafe_block, restore_block_scope_shadows,
+};
 
 // Public API
 mod public_api;
@@ -149,6 +151,9 @@ pub(crate) use interpreter_helpers::{
 mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
+pub(crate) use interpreter_call::{
+    captured_env_with_live_globals, execute_function_body, publish_live_bound_globals, sync_owned_captured_globals,
+};
 pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests, get_test_results};
 use interpreter_call::{
     bind_args, bind_args_with_injected, evaluate_call, exec_function, exec_function_with_bound_args,

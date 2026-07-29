@@ -4,7 +4,8 @@
 
 use crate::error::CompileError;
 use crate::interpreter::{
-    bind_args, exec_block_fn, Control, Enums, ImplMethods, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD,
+    bind_args, captured_env_with_live_globals, execute_function_body, publish_live_bound_globals,
+    sync_owned_captured_globals, Enums, ImplMethods,
 };
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
@@ -189,7 +190,8 @@ pub fn exec_function_with_self_return(
     class_name: &str,
     fields: Arc<HashMap<String, Value>>,
 ) -> Result<(Value, Value), CompileError> {
-    let mut local_env = Env::new();
+    publish_live_bound_globals(outer_env);
+    let mut local_env = captured_env_with_live_globals(func, &Env::new());
 
     // Move fields directly — callers that own the Arc pass refcount 1 (zero-copy mutations)
     local_env.insert(
@@ -212,37 +214,18 @@ pub fn exec_function_with_self_return(
         impl_methods,
         self_mode,
     )?;
-    for (name, val) in bound {
-        local_env.insert(name, val);
-    }
-
-    // Save current CONST_NAMES and IMMUTABLE_VARS, clear for function scope
-    let saved_const_names = CONST_NAMES.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-    let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-
-    // Save and set IN_IMMUTABLE_FN_METHOD flag
-    // Methods always have self here, so check if this is a me method
-    let saved_in_immutable_fn = IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow());
-    let is_immutable_fn_method = !func.is_me_method;
-
-    IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = is_immutable_fn_method);
-
-    // Execute the function body - handle result manually to ensure flag restoration
-    let exec_result = exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods);
-
-    // ALWAYS restore flags before handling the result to avoid flag leaking on error
-    IN_IMMUTABLE_FN_METHOD.with(|cell| *cell.borrow_mut() = saved_in_immutable_fn);
-    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
-    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
-
-    // Now extract result, potentially returning error
-    let result = match exec_result {
-        Ok((Control::Return(v), _)) => v,
-        Ok((_, Some(v))) => v,
-        Ok((_, None)) => Value::Nil,
-        Err(CompileError::TryError(val)) => *val,
-        Err(e) => return Err(e),
-    };
+    let result = execute_function_body(
+        func,
+        bound,
+        &mut local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        true,
+    );
+    sync_owned_captured_globals(func, &local_env, outer_env);
+    let result = result?;
 
     // Write back mutated container arguments passed by identifier.
     // This mirrors normal function-call behavior for arrays, dicts, tuples,

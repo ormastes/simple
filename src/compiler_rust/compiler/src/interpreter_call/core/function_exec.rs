@@ -16,7 +16,7 @@ use simple_parser::ast::{
     SelfMode, StorageClass, Type,
 };
 use simple_runtime::value::diagram_sffi;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -44,7 +44,7 @@ fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
         })
 }
 
-fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &Env) -> Env {
+pub(crate) fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &Env) -> Env {
     let Some(owner) = function_module_owner(func) else {
         let mut initial_env = captured_env.clone();
         let live_globals = MODULE_GLOBALS.with(|cell| {
@@ -120,7 +120,7 @@ fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &Env) -> Env
     env
 }
 
-fn publish_live_bound_globals(env: &Env) {
+pub(crate) fn publish_live_bound_globals(env: &Env) {
     let changed = env
         .overlay_entries()
         .filter(|(name, _)| !env.is_local(name) && !env.is_refreshed_global(name))
@@ -150,7 +150,64 @@ fn publish_live_bound_globals(env: &Env) {
     });
 }
 
-fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &mut Env) {
+pub(crate) fn refresh_live_bound_globals(env: &mut Env) {
+    let targets = env
+        .global_bindings()
+        .map(|(_, (owner, name))| (Arc::clone(owner), name.clone()))
+        .collect::<HashSet<_>>();
+    for (owner, name) in targets {
+        let value = MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            cell.borrow()
+                .get(&owner)
+                .and_then(|globals| globals.get(&name))
+                .cloned()
+        });
+        if let Some(value) = value {
+            env.refresh_bound_global(&owner, &name, value);
+        }
+    }
+}
+
+pub(crate) fn sync_live_bound_globals(local_env: &Env, outer_env: &mut Env) {
+    publish_live_bound_globals(local_env);
+    let mut packets = local_env
+        .forwarded_globals()
+        .map(|((owner, name), value)| ((Arc::clone(owner), name.clone()), value.clone()))
+        .collect::<HashMap<_, _>>();
+    for (local_name, _) in local_env.overlay_entries() {
+        if local_env.is_local(local_name) {
+            continue;
+        }
+        let Some((owner, source_name)) = local_env.global_binding(local_name) else {
+            continue;
+        };
+        if let Some(value) = MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            cell.borrow()
+                .get(owner)
+                .and_then(|globals| globals.get(source_name))
+                .cloned()
+        }) {
+            packets.insert((Arc::clone(owner), source_name.clone()), value);
+        }
+    }
+    let caller_owner = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
+    for ((owner, name), _) in packets {
+        let Some(value) = MODULE_GLOBALS_BY_OWNER.with(|cell| {
+            cell.borrow()
+                .get(&owner)
+                .and_then(|globals| globals.get(&name))
+                .cloned()
+        }) else {
+            continue;
+        };
+        let refreshed = outer_env.refresh_bound_global(&owner, &name, value.clone());
+        if caller_owner.as_ref() != Some(&owner) || !refreshed {
+            outer_env.forward_globals(owner, [(name, value)]);
+        }
+    }
+}
+
+pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, outer_env: &mut Env) {
     let caller_owner = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
     let Some(owner) = function_module_owner(func).or_else(|| caller_owner.clone()) else {
         return;
@@ -249,8 +306,8 @@ fn mark_pattern_locals(pattern: &Pattern, env: &mut Env) {
     visit_pattern_binding_names(pattern, &mut |name| env.mark_local(name.to_owned()));
 }
 
-fn mark_block_locals(block: &Block, env: &mut Env) {
-    for node in &block.statements {
+pub(super) fn mark_nodes_locals(nodes: &[Node], env: &mut Env) {
+    for node in nodes {
         match node {
             Node::Let(stmt) => mark_pattern_locals(&stmt.pattern, env),
             Node::Const(stmt) => env.mark_local(stmt.name.clone()),
@@ -263,6 +320,10 @@ fn mark_block_locals(block: &Block, env: &mut Env) {
             _ => {}
         }
     }
+}
+
+fn mark_block_locals(block: &Block, env: &mut Env) {
+    mark_nodes_locals(&block.statements, env);
 }
 
 static INTERPRETER_CALL_TRACE: LazyLock<Option<String>> =
@@ -456,7 +517,7 @@ fn effective_function_body(func: &FunctionDef) -> Option<Block> {
 /// 3. Validating the return type
 /// 4. Wrapping in Promise if async
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
-fn execute_function_body(
+pub(crate) fn execute_function_body(
     func: &FunctionDef,
     bound_args: HashMap<String, Value>,
     local_env: &mut Env,

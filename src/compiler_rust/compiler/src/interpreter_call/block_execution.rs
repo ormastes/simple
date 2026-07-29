@@ -225,12 +225,9 @@ pub(super) fn exec_block_closure(
     }
 }
 
-/// Like `exec_block_closure`, but runs against `out_env` and, on normal
-/// completion, writes the block's final bindings back into it. Lambda execution
-/// uses this so a `me`-method's mutation to an object argument is observable for
-/// write-back to the caller (control-flow exits — break/continue/return — do not
-/// sync, matching their unwinding semantics). Identical statement handling to the
-/// wrapper above, so DoBlock lambdas keep full block semantics.
+/// Like `exec_block_closure`, but runs directly against `out_env`. Lambda
+/// execution uses this so mutations remain observable on every control-flow
+/// exit. The wrapper above supplies a throwaway clone when isolation is needed.
 pub(super) fn exec_block_closure_into(
     nodes: &[Node],
     out_env: &mut Env,
@@ -253,7 +250,7 @@ pub(super) fn exec_block_closure_into(
         diagram_sffi::trace_call("<block>");
     }
 
-    let mut local_env = out_env.clone();
+    let mut local_env = out_env;
     let mut last_value = Value::Nil;
 
     for node in nodes {
@@ -1062,15 +1059,26 @@ pub(super) fn exec_block_closure_into(
     // Restore CONST_NAMES and IMMUTABLE_VARS before returning
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
-    // Propagate the block's final bindings so callers passing a mutable env (lambda
-    // write-back) observe argument mutations. The throwaway-clone wrapper discards this.
-    *out_env = local_env;
     Ok(last_value)
 }
 
 /// Execute statements in an already-existing mutable environment.
 /// Used for if-let blocks and for loop bodies where assignments should propagate to the outer scope.
 fn exec_block_closure_mut(
+    nodes: &[Node],
+    local_env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let shadows = crate::interpreter::capture_node_scope_shadows(nodes, local_env);
+    let result = exec_block_closure_mut_inner(nodes, local_env, functions, classes, enums, impl_methods);
+    crate::interpreter::restore_block_scope_shadows(shadows, local_env);
+    result
+}
+
+fn exec_block_closure_mut_inner(
     nodes: &[Node],
     local_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
