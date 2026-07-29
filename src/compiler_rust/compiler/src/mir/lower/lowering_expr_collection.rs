@@ -422,18 +422,26 @@ impl<'a> MirLowerer<'a> {
         // sides — was correct. Only key 0 survived, because `0 << 3 == 0`.
         // Box on the WRITE side to match the reads and the runtime contract.
         //
-        // KEYS ONLY. The stored VALUE has an analogous but NOT identical
-        // asymmetry (a raw integer value whose low 3 bits are 0 reads back as
-        // `v >> 3`, so `{"a": 8}` yields `d["a"] == 1`), yet tagging it here is
-        // not a self-contained fix: `d[k]` unboxes the result but the
-        // `Dict.get` lowering emits no UnboxInt at all, so boxing the value
-        // turns `{"a": 1}.get("a")` from an accidentally-correct `1` into `8`.
-        // That needs the missing unbox on the `Dict.get` read path first and is
-        // tracked separately. Floats/bools/strings are likewise untouched.
+        // VALUES, mirroring keys (task: dict_value_read_returns_tag_boxed_word).
+        // The stored VALUE had an analogous but NOT identical asymmetry: a raw
+        // (unboxed) integer value whose low 3 bits are 0 reads back as `v >> 3`
+        // on the Cranelift JIT, so `{"a": 8}` yielded `d["a"] == 1` while
+        // `{"a": 1}.get("a")` was "accidentally correct" (`1` has non-zero low
+        // bits, so `UnboxInt`'s tag check — see `MirInst::UnboxInt` codegen,
+        // Task #123 — left it passed through raw instead of shifting). Boxing
+        // the value here is NOT a self-contained fix on its own: `d[k]`
+        // unboxes its result (see `lower_index_expr`), but until now the
+        // `Dict.get` lowering emitted NO UnboxInt at all, so boxing the value
+        // without also unboxing `.get()` would turn `{"a": 1}.get("a")` from
+        // accidentally-correct `1` into wrongly-boxed `8`. Both sides now land
+        // together: this box here, plus the `.get()` route through
+        // `lower_index_expr` in `lowering_expr_method.rs` (search
+        // `receiver_is_dict`). Floats/bools/strings remain untouched (follow-up).
         for (key_expr, value_expr) in pairs {
             let key_reg = self.lower_expr(key_expr)?;
             let key_reg = self.box_int_operand(key_reg, key_expr.ty)?;
             let value_reg = self.lower_expr(value_expr)?;
+            let value_reg = self.box_int_operand(value_reg, value_expr.ty)?;
             let insert_target = CallTarget::from_name("rt_dict_set");
             self.with_func(|func, current_block| {
                 let block = func.block_mut(current_block).unwrap();

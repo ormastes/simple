@@ -47,6 +47,17 @@ impl<'a> MirLowerer<'a> {
             || recovered_ty.is_some_and(|ty| matches!(registry.get(ty), Some(HirType::Array { .. })))
     }
 
+    /// Same shape as `receiver_is_array`, for `Dict<K, V>` receivers. Used to
+    /// route `d.get(k)` through `lower_index_expr` — see the call site below
+    /// (task: dict_value_read_returns_tag_boxed_word).
+    fn receiver_is_dict(&self, receiver: &HirExpr, recovered_ty: Option<TypeId>) -> bool {
+        let Some(registry) = self.type_registry else {
+            return false;
+        };
+        matches!(registry.get(receiver.ty), Some(HirType::Dict { .. }))
+            || recovered_ty.is_some_and(|ty| matches!(registry.get(ty), Some(HirType::Dict { .. })))
+    }
+
     fn enum_payload_type_for_method_receiver(&self, ty: TypeId) -> Option<TypeId> {
         let registry = self.type_registry?;
         match registry.get(ty) {
@@ -247,6 +258,33 @@ impl<'a> MirLowerer<'a> {
                 })
                 .unwrap_or(TypeId::ANY);
             return self.lower_index_expr(receiver, &args[0], element_ty);
+        }
+
+        // `d.get(k)` on a Dict<K, V> is the SAME read as `d[k]`, but the
+        // generic dotted-name/dynamic-dispatch path emitted a bare
+        // `MethodCallStatic` -> `rt_index_get` with NO UnboxInt on the result
+        // at all — `Dict.get` never unboxed. `d[k]` was always correct
+        // BECAUSE `lower_index_expr` pairs the read with an explicit
+        // `UnboxInt` (tag-aware: only shifts a truly-tagged scalar, Task
+        // #123). Route `.get(k)` through that exact path, mirroring the
+        // `[T].get(i)` fix above. This must land together with the dict
+        // LITERAL now boxing its values on write (lowering_expr_collection.rs
+        // `lower_dict_expr`): boxing the value without unboxing `.get()` (or
+        // vice versa) breaks the OTHER read path — see the comment there.
+        // See task: dict_value_read_returns_tag_boxed_word.
+        if method == "get" && args.len() == 1 && self.receiver_is_dict(receiver, receiver_local_ty) {
+            let value_ty = self
+                .type_registry
+                .and_then(|tr| {
+                    tr.get(receiver.ty)
+                        .or_else(|| receiver_local_ty.and_then(|ty| tr.get(ty)))
+                })
+                .and_then(|ty| match ty {
+                    HirType::Dict { value, .. } => Some(*value),
+                    _ => None,
+                })
+                .unwrap_or(TypeId::ANY);
+            return self.lower_index_expr(receiver, &args[0], value_ty);
         }
 
         // rt_array_push returns bool, not a new pointer — no store-back needed.
