@@ -118,3 +118,10 @@ alt-screen/live-refresh wrapper.
 - No SIGUSR2 hook in `signal_handlers.spl` (§2) — blocks `top --pid`.
 - No `Table` TUI widget — v1 workaround only (§5).
 - `gpu --sanitize` re-exec, P2 sampled call-stack attribution: out of scope.
+- TODO: wire `simple mem top --tui` into `src/app/mem/main.spl`'s dispatcher
+  (`elif str_eq(sub, "--tui"):` in `cmd_top`, or a `--tui` flag check that
+  delegates to `src/app/mem/top_tui.spl`'s render path) — the standalone
+  entry (`bin/simple run src/app/mem/top_tui.spl -- --profile <file>
+  [--watch N]`) and its non-TTY fallback are implemented and spec-covered
+  (`test/03_system/app/mem_top_tui_spec.spl`); only the CLI wiring is
+  deferred.

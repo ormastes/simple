@@ -155,3 +155,23 @@ New `test/03_system/runtime/memory_analysis/`, SSpec style:
 Owner attribution on every trap reuses M1 directly
 (`interpreter_extern/memory.rs:98`, `heap.rs:591-611`) — no new plumbing,
 only new consumers of the existing owner id at fault-report time.
+
+## Status: native-C quarantine + poison portion (§3, `runtime_memory.c`)
+
+Landed: `SIMPLE_MEM_HARDEN=1` gated (getenv checked once into a static
+cached int), `rt_alloc`/`rt_free` in `src/runtime/runtime_memory.c` mirror
+the hosted quarantine ring — 64-slot fixed FIFO of `{user_ptr, base_ptr,
+size}`, `rt_free` poisons with `0xDE` and defers the real `free()` to ring
+eviction, double-free of a still-quarantined pointer is refused (no-op),
+and `rt_mem_harden_check_native()` scans the ring for non-`0xDE` bytes and
+returns the tampered-block count. No `.spl` caller wired (adding new `rt_*`
+externs needs a bootstrap rebuild, out of scope here) — C-level only.
+Verified: standalone `cc -Wall -Wextra` (clean) and
+`-fsanitize=address,undefined` builds of
+`src/runtime/test/rt_mem_harden_selfcheck.c` + `runtime_memory.c`, run in
+both off- and on-modes (poison-on-free, refused double-free, UAF tamper
+detection, >64-alloc ring-eviction churn all pass, 0 failures, exit 0);
+plus `cargo build -p simple-runtime` (which compiles this file via
+`build.rs`) still builds clean with no new warnings. Guard-page sampling
+(§1-§2) and the arena-generation harden extension (§4) are NOT part of
+this lane.

@@ -1,0 +1,108 @@
+# @cover src/compiler/10.frontend/core/_Ast/module_state.spl 5%
+"""
+# AST arena harden — delayed retirement + slot poisoning (M2 index-based equivalent, 2026-07-29)
+
+**Category:** Compiler / Frontend / AST arena
+
+## Overview
+
+`doc/05_design/runtime/memory_analysis/m2_guard_and_harden_design.md` section 4
+extends lane L6's arena-generation diagnostics with a harden mode: freed/reset
+slots should widen the window where a stale index is detectably wrong instead
+of being silently reused, and recycled slots should read back an obviously
+poisoned value rather than fresh data. The `decl_tag`/`module_decl_slots`
+pools in this arena family are append-only with no per-node free-list — the
+only "free" event is the whole-arena `ast_reset()`, which always clears every
+pool back to empty so the next file's indices restart at 0. True per-index
+delayed reuse (holding individual freed indices out of circulation) does not
+apply to that shape; what this spec exercises instead is the practical
+equivalent implemented in `module_state.spl`: on every `ast_reset()`, a
+poisoned, size-only snapshot of the generation that is ending is retired into
+a small bounded FIFO ring (`SIMPLE_MEM_ARENA_DELAY_SLOTS`, default 4). A
+caller holding a stale `(generation, idx)` pair can query that ring for
+several further resets and get back the `AST_ARENA_SLOT_POISON` sentinel
+instead of silently reading whatever now lives at that index in the live
+(already-reused) arena; once the generation ages out of the ring the query
+reports "outside the window" (-1), matching today's behavior exactly.
+
+This spec exercises:
+- gate off (`SIMPLE_AST_GEN_HARDEN` unset/0): retention is fully inert —
+  behavior is identical to before this feature existed
+- gate on: a stale `(generation, idx)` pair minted just before a reset reads
+  back the poison sentinel for both the decl-tag pool and the module-decl-slot
+  registry
+- the existing L6 `ast_gen_check_index` stale-generation diagnostic still
+  fires normally with the harden gate on (the two knobs are independent)
+- the delay window is bounded: shrinking `SIMPLE_MEM_ARENA_DELAY_SLOTS`
+  evicts older generations, and an evicted (or never-retired) generation
+  reports -1, not poison
+"""
+
+use std.spec.*
+use compiler.core.ast.{
+    ast_reset, DECL_FN, decl_alloc, module_add_decl,
+    ast_gen_harden_enabled, ast_harden_lookup_decl_tag,
+    ast_harden_lookup_module_decl_slot, ast_harden_retired_window_depth
+}
+use compiler.core.ast_expr.{ast_generation, ast_gen_check_index}
+
+extern fn rt_env_set(key: text, value_str: text) -> bool
+
+describe "AST arena harden — delayed retirement + slot poisoning (M2)":
+    it "gate off: retention is fully inert, identical to today":
+        assert_true(rt_env_set("SIMPLE_AST_GEN_HARDEN", "0"))
+        ast_reset()
+        assert_false(ast_gen_harden_enabled())
+        val prior_gen = ast_generation() - 1
+        expect(ast_harden_retired_window_depth()).to_equal(0)
+        expect(ast_harden_lookup_decl_tag(prior_gen, 0)).to_equal(-1)
+        expect(ast_harden_lookup_module_decl_slot(prior_gen, 0)).to_equal(-1)
+
+    it "gate on: a stale (generation, idx) pair reads back the poison sentinel within the delay window":
+        assert_true(rt_env_set("SIMPLE_AST_GEN_HARDEN", "1"))
+        assert_true(rt_env_set("SIMPLE_MEM_ARENA_DELAY_SLOTS", "4"))
+        ast_reset()
+        assert_true(ast_gen_harden_enabled())
+
+        # Mint a decl and a module-decl-slot entry at the live generation.
+        val mint_gen = ast_generation()
+        val decl_idx = decl_alloc(DECL_FN, -1)
+        module_add_decl(decl_idx)
+
+        # Reset -> retires mint_gen's (now stale) slots as a poisoned snapshot.
+        ast_reset()
+        expect(ast_harden_lookup_decl_tag(mint_gen, decl_idx)).to_equal(-777)
+        expect(ast_harden_lookup_module_decl_slot(mint_gen, 0)).to_equal(-777)
+
+        # Out-of-bounds index within a retained generation: outside the
+        # snapshot, not poison.
+        expect(ast_harden_lookup_decl_tag(mint_gen, 999)).to_equal(-1)
+        # A generation that was never retired: outside the window.
+        expect(ast_harden_lookup_decl_tag(999999999, 0)).to_equal(-1)
+
+    it "the L6 stale-generation diagnostic still fires with the harden gate on":
+        assert_true(rt_env_set("SIMPLE_AST_GEN_HARDEN", "1"))
+        assert_true(rt_env_set("SIMPLE_AST_GEN_CHECK", "1"))
+        ast_reset()
+        val cur = ast_generation()
+        assert_false(ast_gen_check_index("DeclId", 0, cur))
+        assert_true(ast_gen_check_index("DeclId", 0, cur - 1))
+        assert_true(rt_env_set("SIMPLE_AST_GEN_CHECK", "0"))
+
+    it "the delay window is bounded: shrinking it evicts older generations":
+        assert_true(rt_env_set("SIMPLE_AST_GEN_HARDEN", "1"))
+        assert_true(rt_env_set("SIMPLE_MEM_ARENA_DELAY_SLOTS", "4"))
+        ast_reset()
+        val mint_gen = ast_generation()
+        val decl_idx = decl_alloc(DECL_FN, -1)
+        ast_reset()
+        # Still within a 4-deep window: retained and poisoned.
+        expect(ast_harden_lookup_decl_tag(mint_gen, decl_idx)).to_equal(-777)
+
+        # Shrink the window to 1 and force further resets: mint_gen's slot
+        # ages out and the query reports "outside the window" again.
+        assert_true(rt_env_set("SIMPLE_MEM_ARENA_DELAY_SLOTS", "1"))
+        ast_reset()
+        expect(ast_harden_retired_window_depth()).to_equal(1)
+        expect(ast_harden_lookup_decl_tag(mint_gen, decl_idx)).to_equal(-1)
+        assert_true(rt_env_set("SIMPLE_AST_GEN_HARDEN", "0"))

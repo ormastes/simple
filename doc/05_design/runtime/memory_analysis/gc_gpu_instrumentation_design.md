@@ -102,6 +102,35 @@ plain subprocess. `--mem-infra=gpu-sanitize` resolves to this wrapper in the
 M3 `MemInfraPlan` (new row: all backends `false` — it wraps the whole
 process, needing a matrix carve-out rather than a backend column).
 
+**STATUS (2026-07-29): implemented as a library skeleton, not yet wired into
+`MemInfraPlan`.** `src/lib/gc_async_mut/gpu/mem_profile.spl` adds
+`run_under_compute_sanitizer(tool, cmd) -> (text, text, i64)` — locates
+`compute-sanitizer` on `PATH` (`which`), and on absence returns a clean
+`("", "compute-sanitizer not found", 127)` instead of failing hard; on
+presence it execs `compute-sanitizer --tool <tool> <cmd...>` via
+`rt_process_run` and forwards its result. Spec:
+`test/01_unit/lib/gpu/mem_profile_spec.spl` (5/5 passing, no GPU needed —
+the not-found path is forced deterministically via a scoped `PATH`
+override, independent of whether the running box actually has
+compute-sanitizer installed). Remaining: the `MemInfraPlan` matrix
+carve-out (M3) and an actual seeded-OOB run against a real kernel launch on
+this machine's GPUs (§4) are not done — this closes the library-wrapper
+gap only.
+
+**Device-trace JSON snapshot — memory_viz compatibility is UNVERIFIED.**
+`device_trace_to_memory_viz(events: [DeviceAllocEvent]) -> text` (same
+file) serializes the `DEVICE_ALLOCS`-shaped trace (`ts`, `owner`, `ptr`,
+`bytes`, `kind`) this doc's §2 choke points would emit, once wired, into
+JSON. This design doc does not specify PyTorch memory_viz's minimal
+accepted snapshot shape, and no viewer test has been run against a real
+memory_viz build. Per instruction, the serializer therefore emits our own
+well-formed, versioned schema — `{"schema":"simple-gpu-trace","version":1,
+"event_count":N,"events":[{"ts":...,"owner":"...","ptr":...,"bytes":...,
+"kind":"alloc"|"free"},...]}` — **not** a claimed memory_viz payload.
+**Follow-up needed:** load this JSON (or a mapped form of it) into an
+actual memory_viz viewer on a GPU machine and record pass/fail before
+calling it "memory_viz-compatible" anywhere else in the docs.
+
 ## 3. Shared trait shape
 
 One shape, matching M1's existing pattern in `heap.rs` (free functions
@@ -146,5 +175,14 @@ atomics) to copy for `DEVICE_ALLOCS` and (once wired) `GcRuntime`.
   cross-check: compare `DEVICE_ALLOCS` sum against `nvmlDeviceGetMemoryInfo`
   delta (coarse — assert direction, not exact equality). Torch-tensor path
   is **not** runnable through this choke point (separate allocator, §2).
+  **STATUS (2026-07-29):** the exec-wrapper and trace-serializer library
+  pieces are done and spec-covered without a GPU
+  (`test/01_unit/lib/gpu/mem_profile_spec.spl`, 5/5 passing) — see the
+  "STATUS" notes under the compute-sanitizer paragraph above. The
+  `DEVICE_ALLOCS` bookkeeping itself, the seeded-leak/seeded-OOB runs
+  against real device code, the NVML cross-check, and the memory_viz
+  viewer verification are all still open (require Rust changes to
+  `gpu.rs`, out of this file's scope — owned separately per M7 task
+  split).
 - **Static pools**: design-only regardless of machine — `nogc_async_mut_noalloc`
   targets baremetal/QEMU; covered by the existing board-runnable rule.

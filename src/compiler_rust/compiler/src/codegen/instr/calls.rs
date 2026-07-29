@@ -2340,10 +2340,9 @@ fn compile_known_enum_constructor_call<M: Module>(
     let mut hasher = DefaultHasher::new();
     variant_name.hash(&mut hasher);
     let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
-    let enum_id_val = builder.ins().iconst(
-        types::I32,
-        i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
-    );
+    let enum_id_val = builder
+        .ins()
+        .iconst(types::I32, i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
     let disc_val = builder.ins().iconst(types::I32, disc);
     let payload_val = match args {
         [] => builder.ins().iconst(types::I64, 3),
@@ -2395,6 +2394,10 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // (name_ptr, name_len); see matching RUNTIME_FUNCS entry in
         // codegen/runtime_sffi.rs).
         "rt_mem_attr_set_owner" => Some(&[0]),
+
+        // Panic message (contracts.rs::rt_panic takes (message_ptr, message_len);
+        // see doc/08_tracking/bug/extern_text_cchar_abi_family_sweep_2026-07-29.md).
+        "rt_panic" => Some(&[0]),
 
         // Environment variables
         "rt_env_get" | "rt_env_get_i64" | "rt_get_env" | "rt_env_exists" | "rt_env_remove" => Some(&[0]),
@@ -2530,12 +2533,11 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     }
 }
 
-pub(crate) fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
+fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
     match func_name {
         "rt_process_run"
         | "rt_process_run_inherit"
         | "rt_process_spawn"
-        | "rt_process_spawn_async"
         | "rt_process_spawn_guarded"
         | "rt_process_execute"
         | "rt_process_run_timeout"
@@ -2832,7 +2834,9 @@ pub fn compile_call<M: Module>(
     let func_name: &str = func_name_raw;
     // Handle only the true Result/Option constructors. A custom enum may use
     // the same variant leaves and must retain its qualified custom type ID.
-    let split_variant = func_name.rsplit_once("::").or_else(|| func_name.rsplit_once('.'));
+    let split_variant = func_name
+        .rsplit_once("::")
+        .or_else(|| func_name.rsplit_once('.'));
     let (enum_owner, variant_name) = split_variant
         .map(|(owner, variant)| (Some(owner), variant))
         .unwrap_or((None, func_name));

@@ -1675,7 +1675,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_time_now_unix_micros", &[], &[I64]),
     RuntimeFuncSpec::new("rt_entropy_hardware_ready", &[], &[I64]),
     RuntimeFuncSpec::new("rt_sleep_ms", &[I64], &[]),
-    RuntimeFuncSpec::new("rt_panic", &[I64], &[]),
+    // message_ptr, message_len (text arg — see extern_text_cchar_abi_family_sweep_2026-07-29.md)
+    RuntimeFuncSpec::new("rt_panic", &[I64, I64], &[]),
     RuntimeFuncSpec::new("rt_get_args", &[], &[I64]), // () -> RuntimeValue (array of args)
     RuntimeFuncSpec::new("rt_platform_name", &[], &[I64]), // () -> RuntimeValue
     RuntimeFuncSpec::new("rt_term_enable_ansi", &[], &[I64]), // () -> RuntimeValue (bool)

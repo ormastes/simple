@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use simple_parser::ast::{AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, Node, Type};
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::value::{Env, Value};
-use super::core_types::{Control, Enums, ImplMethods, get_identifier_name, get_pattern_name, is_immutable_by_pattern};
+use crate::value::{strict_mem_enabled, Env, Value};
+use super::core_types::{Control, Enums, ImplMethods, get_identifier_name, get_pattern_name, is_immutable_by_pattern, visit_pattern_binding_names};
 use super::async_support::await_value;
 use super::expr::evaluate_expr;
 use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
@@ -217,6 +217,16 @@ pub(crate) fn exec_node(
                 };
                 let is_mutable = let_stmt.mutability.is_mutable();
                 bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
+            } else if strict_mem_enabled() {
+                // strict-mem (plan M5 §2): an initializer-less `let` binds no
+                // value at all today — the name is indistinguishable from one
+                // never declared, so a read can silently shadow-miss into an
+                // unrelated enclosing/global/function binding. Mark the
+                // pattern's name(s) uninit (no overlay entry) so a strict-mode
+                // read traps before that fallback cascade runs.
+                visit_pattern_binding_names(&let_stmt.pattern, &mut |name| {
+                    env.mark_uninit(name);
+                });
             }
             Ok(Control::Next)
         }

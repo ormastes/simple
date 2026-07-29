@@ -58,3 +58,52 @@ Done this session (all cargo-verified, suite 27 pass / 2 pre-existing fails):
 
 ## Resolved (were "known pre-existing reds")
 Both suite reds fixed by L2 (see above); bug doc updated by commit message.
+
+## M-plan status (2026-07-29)
+Successor plan: `doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md`.
+Feature-expert skill: `doc/00_llm_process/feature_expert/memory_infra/skill.md`.
+
+- **M1 (attribution) — DONE.** Landed b44b07cd2869 (per-owner byte
+  accounting) + 630deb4571ee (JIT `rt_mem_attr_set_owner` text-arg fix,
+  `(ptr,len)` span not C-string). Spec `mem_attr_report_spec.spl` 2/2.
+- **M2 (guard+harden) — hosted DONE, arena/C-path open.** Landed 0917eee9b93d:
+  hosted quarantine ring (`SIMPLE_MEM_HARDEN=1`) + sampled guard-page
+  allocator (`SIMPLE_MEM_GUARD_RATE=N`) in `interpreter_extern/{memory,mem_guard}.rs`,
+  cargo tests 10/0 + 7/0. Open: native C `rt_alloc` (`runtime_memory.c`)
+  guard mirror, and the arena-generation harden extension
+  (`SIMPLE_AST_GEN_HARDEN`, block-on-stale-read) — design done
+  (`m2_guard_and_harden_design.md`), not implemented.
+- **M3 (`--mem-infra=` interface) — resolver DONE, wiring open.**
+  `src/lib/common/mem_infra/config.spl` capability-matrix resolver (7 rows x
+  3 backends), spec `config_spec.spl` 12 its. Open: not wired into CLI/build
+  plumbing — the individual envs (`SIMPLE_MEM_ATTR` etc.) are the
+  load-bearing mechanism today, `--mem-infra=` is not yet a real flag.
+- **M5 (strict interpreter / Miri-lite) — design DONE, impl open.**
+  `doc/05_design/compiler/interpreter/m5_strict_interpreter_mode_design.md`
+  specifies `SIMPLE_STRICT_MEM=1` gate shape; no code landed.
+- **M4 (LLVM lane: asan/memprof) — blocked/unscheduled.** MED cost,
+  LLVM-backend-only; per-tier `sanitizer/asan/` stubs exist but nothing is
+  wired to a `--mem-infra=asan` build path. No design doc yet.
+- **M6 (stdlib generational slotmap) — DONE.** Landed 0917eee9b93d:
+  `src/lib/nogc_sync_mut/mem/gen_arena.spl` `GenArena<T>`, spec
+  `gen_arena_spec.spl` 5/5, `SIMPLE_GEN_ARENA_CHECK=1` diagnostic.
+- **M7 (GPU lane) — design DONE, impl open.**
+  `doc/05_design/runtime/memory_analysis/gc_gpu_instrumentation_design.md`
+  covers both GC (verdict: vestigial, no tracing collector over program
+  values — matrix row satisfied trivially) and GPU (compute-sanitizer wrapper
+  + memory_viz-compatible snapshot plan). No code landed.
+- **M8 (`simple mem` CLI) — skeleton+SIGUSR2 DONE, TUI open.** Landed
+  0917eee9b93d (SIGUSR2 hook in `signal_handlers.spl`, `mem/dump.spl` v1 TSV
+  snapshot, spec `mem_dump_spec.spl` 3/3) + `src/app/mem/main.spl`
+  (`top`/`diff`/`help`, spec `mem_cli_spec.spl` 4 its). Open per
+  `m8_simple_mem_cli_design.md`: live-process polling via SIGUSR2 (`top --pid`),
+  interactive TUI render path (v1 falls back to fixed-width text rows), `gpu`
+  subcommand is a stub.
+
+Overhead measurement on record (M1 ON path): +36.6% in-process /
++31% wall-clock on an allocation-heavy 90k-element array probe — real,
+allocation-rate-proportional cost from the global `Mutex<HashMap>` per
+alloc/free, not yet sharded. OFF path indistinguishable from baseline (single
+cached-bool read). Full detail:
+`doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md`
+§"Overhead measurements".

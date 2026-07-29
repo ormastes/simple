@@ -166,8 +166,100 @@ int32_t rt_transient_raw_scope_end(void) {
     return 1;
 }
 
+/*
+ * Hardened debug allocator (mirrors the hosted quarantine in
+ * interpreter_extern/memory.rs; see
+ * doc/05_design/runtime/memory_analysis/m2_guard_and_harden_design.md §3).
+ *
+ * Gated by SIMPLE_MEM_HARDEN=1, read via getenv exactly once (cached in a
+ * static int; the result is fixed for the life of the process). When
+ * enabled, every rt_alloc grows the block by one hidden size_t header so
+ * rt_free can recover the block's length without changing the rt_free ABI.
+ * rt_free then poisons the user bytes with 0xDE and defers the real free()
+ * into a small fixed-size FIFO quarantine ring instead of releasing the
+ * block immediately; a double-free of a pointer still sitting in the ring
+ * is refused (no-op) rather than acted on twice.
+ */
+
+#define RT_MEM_HARDEN_POISON_BYTE 0xDE
+#define RT_MEM_HARDEN_HEADER_BYTES (sizeof(size_t))
+#define RT_MEM_QUARANTINE_SLOTS 64
+
+typedef struct RtMemQuarantineSlot {
+    uint8_t* user_ptr;  /* pointer as handed out by rt_alloc / seen by rt_free */
+    uint8_t* base_ptr;  /* real malloc'd base (user_ptr - header); NULL = empty slot */
+    size_t size;        /* user-visible size, for poisoning + tamper scan */
+} RtMemQuarantineSlot;
+
+static RtMemQuarantineSlot rt_mem_quarantine[RT_MEM_QUARANTINE_SLOTS];
+static size_t rt_mem_quarantine_write = 0;
+
+static int rt_mem_harden_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = getenv("SIMPLE_MEM_HARDEN");
+        cached = (v != NULL && v[0] == '1' && v[1] == '\0') ? 1 : 0;
+    }
+    return cached;
+}
+
+static int rt_mem_quarantine_contains(uint8_t* ptr) {
+    for (size_t i = 0; i < RT_MEM_QUARANTINE_SLOTS; i++) {
+        if (rt_mem_quarantine[i].base_ptr != NULL && rt_mem_quarantine[i].user_ptr == ptr) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* FIFO by construction: slot index cycles 0..N-1 as writes happen, so the
+ * occupant being overwritten at index i is always the one inserted exactly
+ * (a multiple of RT_MEM_QUARANTINE_SLOTS) writes ago -- the oldest entry
+ * currently mapped to that bucket. */
+static void rt_mem_quarantine_push(uint8_t* user_ptr, uint8_t* base_ptr, size_t size) {
+    size_t idx = rt_mem_quarantine_write % RT_MEM_QUARANTINE_SLOTS;
+    RtMemQuarantineSlot* slot = &rt_mem_quarantine[idx];
+    if (slot->base_ptr != NULL) {
+        free(slot->base_ptr);
+    }
+    slot->user_ptr = user_ptr;
+    slot->base_ptr = base_ptr;
+    slot->size = size;
+    rt_mem_quarantine_write++;
+}
+
+/* Scans the quarantine ring for blocks whose bytes are no longer all
+ * 0xDE poison -- i.e. something wrote to memory after it was "freed".
+ * Returns the number of tampered blocks (not tampered bytes). */
+int64_t rt_mem_harden_check_native(void) {
+    int64_t tampered = 0;
+    for (size_t i = 0; i < RT_MEM_QUARANTINE_SLOTS; i++) {
+        RtMemQuarantineSlot* slot = &rt_mem_quarantine[i];
+        if (slot->base_ptr == NULL) continue;
+        for (size_t j = 0; j < slot->size; j++) {
+            if (slot->user_ptr[j] != (uint8_t)RT_MEM_HARDEN_POISON_BYTE) {
+                tampered++;
+                break;
+            }
+        }
+    }
+    return tampered;
+}
+
 uint8_t* rt_alloc(int64_t size) {
     if (size <= 0) return NULL;
+    if (rt_mem_harden_enabled()) {
+        size_t total = (size_t)size + RT_MEM_HARDEN_HEADER_BYTES;
+        uint8_t* base = (uint8_t*)calloc(1, total);
+        if (!base) return NULL;
+        *(size_t*)base = (size_t)size;
+        uint8_t* user = base + RT_MEM_HARDEN_HEADER_BYTES;
+        if (!rt_transient_raw_register(user, (size_t)size)) {
+            free(base);
+            return NULL;
+        }
+        return user;
+    }
     uint8_t* ptr = (uint8_t*)calloc(1, (size_t)size);
     if (ptr && !rt_transient_raw_register(ptr, (size_t)size)) {
         free(ptr);
@@ -177,6 +269,19 @@ uint8_t* rt_alloc(int64_t size) {
 }
 
 void rt_free(uint8_t* ptr) {
+    if (!ptr) return;
+    if (rt_mem_harden_enabled()) {
+        if (rt_mem_quarantine_contains(ptr)) {
+            /* Double free of a quarantined block: refused, not acted on. */
+            return;
+        }
+        rt_transient_raw_erase(ptr);
+        uint8_t* base = ptr - RT_MEM_HARDEN_HEADER_BYTES;
+        size_t size = *(size_t*)base;
+        memset(ptr, RT_MEM_HARDEN_POISON_BYTE, size);
+        rt_mem_quarantine_push(ptr, base, size);
+        return;
+    }
     rt_transient_raw_erase(ptr);
     free(ptr);
 }

@@ -1,0 +1,74 @@
+# M8 `simple mem top --tui` standalone viewer: exercises the plain-text
+# (non-TTY) fallback path of src/app/mem/top_tui.spl via `simple run`.
+# Spec runs are never TTYs, so this only covers the plain-text render --
+# the real-widget TUI path (src/lib/nogc_sync_mut/tui/) is exercised
+# manually against a real terminal; see
+# doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md section 5.
+
+use std.spec.*
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+val SNAP_A = "test/fixture/memstat/snap_a.tsv"
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
+        return configured
+    "/proc/self/exe"
+
+fn run_top_tui(tui_args: [text]) -> (text, text, i32):
+    var args = ["run", "src/app/mem/top_tui.spl"]
+    for a in tui_args:
+        args.push(a)
+    rt_process_run_timeout(simple_binary(), args, 30000)
+
+describe "simple mem top_tui (non-TTY plain-text fallback)":
+    it "renders owner and kind rows from the fixture snapshot":
+        val (out, _err, code) = run_top_tui(["--profile", SNAP_A])
+        expect(code).to_equal(0)
+        expect(out).to_contain("Snapshot: {SNAP_A}")
+        expect(out).to_contain("Top owners by live bytes:")
+        expect(out).to_contain("Kinds by live bytes:")
+        expect(out).to_contain("app.mem.top")
+        expect(out).to_contain("app.mem.diff_cmd")
+        expect(out).to_contain("lib.json.parser")
+        expect(out).to_contain("array")
+        expect(out).to_contain("string")
+
+    it "sorts owners by descending live bytes":
+        val (out, _err, code) = run_top_tui(["--profile", SNAP_A])
+        expect(code).to_equal(0)
+        val idx_top = out.index_of("app.mem.top")
+        val idx_diff_cmd = out.index_of("app.mem.diff_cmd")
+        val idx_json = out.index_of("lib.json.parser")
+        expect(idx_top >= 0).to_equal(true)
+        expect(idx_diff_cmd >= 0).to_equal(true)
+        expect(idx_json >= 0).to_equal(true)
+        expect(idx_top < idx_diff_cmd).to_equal(true)
+        expect(idx_diff_cmd < idx_json).to_equal(true)
+
+    it "accepts a leading -- separator token (bin/simple run <file> -- <args> form)":
+        val (out, _err, code) = run_top_tui(["--", "--profile", SNAP_A])
+        expect(code).to_equal(0)
+        expect(out).to_contain("app.mem.top")
+
+    it "honors --n to limit the row count":
+        val (out, _err, code) = run_top_tui(["--profile", SNAP_A, "--n", "1"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("app.mem.top")
+        expect(out).to_contain("array")
+        expect(out).to_not_contain("app.mem.diff_cmd")
+        expect(out).to_not_contain("string")
+
+    it "errors when --profile is missing":
+        val (out, _err, code) = run_top_tui([])
+        expect(code).to_equal(1)
+        expect(out).to_contain("--profile")
+
+    it "errors when the profile file does not exist":
+        val (out, _err, code) = run_top_tui(["--profile", "build/mem_top_tui_spec_missing.tsv"])
+        expect(code).to_equal(1)
+        expect(out).to_contain("not found")

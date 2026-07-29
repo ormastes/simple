@@ -1,14 +1,16 @@
 //! Contract checking implemented directly in Rust.
 
-use std::ffi::CStr;
-
+/// Native codegen passes `text` extern arguments as a raw `(ptr, len)`
+/// byte-span pair, not a NUL-terminated C string (same convention as
+/// `rt_file_exists`/`rt_env_get`/`rt_mem_attr_set_owner`; see
+/// doc/08_tracking/bug/extern_text_cchar_abi_family_sweep_2026-07-29.md).
+/// This was previously declared `*const c_char` and decoded with
+/// `CStr::from_ptr`, which silently dropped the panic message (an empty or
+/// garbage string) under the JIT/native engine while still aborting.
 #[no_mangle]
-pub unsafe extern "C" fn rt_panic(message: *const std::ffi::c_char) {
-    let message = if message.is_null() {
-        "panic".into()
-    } else {
-        CStr::from_ptr(message).to_string_lossy()
-    };
+pub unsafe extern "C" fn rt_panic(message_ptr: *const u8, message_len: u64) {
+    let message = string_arg_or_unknown(message_ptr, message_len as i64);
+    let message = if message == "<unknown>" { "panic".to_string() } else { message };
     eprintln!("{message}");
     std::process::abort();
 }

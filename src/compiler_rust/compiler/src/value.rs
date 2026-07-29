@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use simple_common::actor::ActorHandle;
 use simple_common::manual_mem::{
@@ -267,6 +267,31 @@ impl MethodLookupResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Strict interpreter mode (plan M5, "Miri-lite"): SIMPLE_STRICT_MEM=1.
+// Gated: OFF by default, off-path is a single cached-bool relaxed load — no
+// per-check env read, no lock. Mirrors `heap.rs` `ATTR_ENABLED`/
+// `mem_attr_enabled()` and `nodes.spl` `ast_gen_check_enabled`.
+// ---------------------------------------------------------------------------
+
+static STRICT_MEM_ENABLED: OnceLock<bool> = OnceLock::new();
+static STRICT_MEM_FORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[inline]
+pub fn strict_mem_enabled() -> bool {
+    STRICT_MEM_FORCED.load(std::sync::atomic::Ordering::Relaxed)
+        || *STRICT_MEM_ENABLED
+            .get_or_init(|| std::env::var("SIMPLE_STRICT_MEM").map(|v| v == "1").unwrap_or(false))
+}
+
+/// Programmatic enable (CLI `--mem-infra=strict` path, and tests). Effective
+/// even after the env-derived `OnceLock` has been primed false — a plain
+/// `OnceLock::set` here would silently lose to any earlier check (the exact
+/// ordering trap the strict-mode integration test hit).
+pub fn strict_mem_enable() {
+    STRICT_MEM_FORCED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Copy-on-write environment: reads check overlay first, then immutable base.
 /// Clone is O(overlay_size) via Arc base + overlay clone, not O(base_size).
 ///
@@ -295,6 +320,11 @@ pub struct CowEnv {
     /// Distinguishes actual frame writes from values merely present in a
     /// cloned environment, so block/closure write-back can be dirty-only.
     dirty_names: HashSet<String>,
+    /// Strict-mode only (plan M5 §2): names bound by an initializer-less
+    /// `let` that have not yet received a first assignment. Stays an
+    /// unallocated empty `HashSet` when `SIMPLE_STRICT_MEM` is unset — no
+    /// off-path cost beyond the field itself.
+    uninit_names: HashSet<String>,
 }
 
 impl CowEnv {
@@ -310,6 +340,7 @@ impl CowEnv {
             forwarded_globals: HashMap::new(),
             global_bindings: HashMap::new(),
             dirty_names: HashSet::new(),
+            uninit_names: HashSet::new(),
         }
     }
 
@@ -332,7 +363,26 @@ impl CowEnv {
         self.tombstones.remove(&key);
         self.refreshed_globals.remove(&key);
         self.dirty_names.insert(key.clone());
+        // First assignment to a strict-mode uninit name clears its trap
+        // (same removal point `tombstones` uses above).
+        if !self.uninit_names.is_empty() {
+            self.uninit_names.remove(&key);
+        }
         self.overlay.insert(key, value)
+    }
+
+    /// Strict mode only (plan M5 §2): mark `name` as bound-but-uninitialized
+    /// by an initializer-less `let`. No overlay entry is created, so a plain
+    /// read still falls through today's lookup cascade unless this state is
+    /// checked first (see `is_uninit`).
+    pub fn mark_uninit(&mut self, name: impl Into<String>) {
+        self.uninit_names.insert(name.into());
+    }
+
+    /// Strict mode only: true if `name` was `mark_uninit`-ed and has not yet
+    /// received a first assignment via `insert`.
+    pub fn is_uninit(&self, name: &str) -> bool {
+        self.uninit_names.contains(name)
     }
 
     pub fn mark_local(&mut self, name: impl Into<String>) {
@@ -612,6 +662,7 @@ impl CowEnv {
             forwarded_globals: HashMap::new(),
             global_bindings: HashMap::new(),
             dirty_names: HashSet::new(),
+            uninit_names: HashSet::new(),
         }
     }
 
@@ -627,6 +678,7 @@ impl CowEnv {
             forwarded_globals: HashMap::new(),
             global_bindings: HashMap::new(),
             dirty_names: HashSet::new(),
+            uninit_names: HashSet::new(),
         }
     }
 
@@ -661,6 +713,7 @@ impl CowEnv {
         self.forwarded_globals.clear();
         self.global_bindings.clear();
         self.dirty_names.clear();
+        self.uninit_names.clear();
         if let Some(ref base) = self.base {
             // Tombstone all base keys
             self.tombstones = base.keys().cloned().collect();
@@ -703,6 +756,7 @@ impl Clone for CowEnv {
             forwarded_globals: self.forwarded_globals.clone(),
             global_bindings: self.global_bindings.clone(),
             dirty_names: self.dirty_names.clone(),
+            uninit_names: self.uninit_names.clone(),
         }
     }
 }

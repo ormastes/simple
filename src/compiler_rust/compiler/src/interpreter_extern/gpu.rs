@@ -8,8 +8,169 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use parking_lot::lock_api::RawMutex as _;
 use std::ffi::{CStr, CString};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
+
+// ============================================================================
+// Device-memory counters (GC/GPU instrumentation plan M7, §2/§3 of
+// doc/05_design/runtime/memory_analysis/gc_gpu_instrumentation_design.md).
+//
+// Kind-level only for now: `DEVICE_ALLOCS` records ptr->size so the free-side
+// choke point (which only receives a ptr) can decrement live bytes by the
+// right amount, but there is no per-owner breakdown yet — M1's
+// `OWNER_COUNTERS`/`current_owner_id()` in `heap.rs` is the natural join
+// (mirrors `note_attr_alloc`/`note_attr_free`, heap.rs:623/639) but heap.rs
+// had an unrelated attribution-sharding edit in flight when this landed, so
+// the owner join is deferred as a follow-up rather than risked against a
+// moving target. Gated by the same `SIMPLE_MEM_ATTR` toggle via
+// `rt_mem_attr_enabled()` — zero overhead when off, one branch when on.
+static DEVICE_LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
+static DEVICE_PEAK_BYTES: AtomicI64 = AtomicI64::new(0);
+
+static DEVICE_ALLOCS: OnceLock<Mutex<std::collections::HashMap<u64, u64>>> = OnceLock::new();
+
+fn device_allocs() -> &'static Mutex<std::collections::HashMap<u64, u64>> {
+    DEVICE_ALLOCS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Record a successful device allocation. No-op when `SIMPLE_MEM_ATTR` is off.
+#[inline]
+fn note_device_alloc(ptr: u64, bytes: u64) {
+    if simple_runtime::value::heap::rt_mem_attr_enabled() == 0 {
+        return;
+    }
+    if let Ok(mut m) = device_allocs().lock() {
+        m.insert(ptr, bytes);
+    }
+    let live_after = DEVICE_LIVE_BYTES.fetch_add(bytes as i64, Ordering::Relaxed) + bytes as i64;
+    DEVICE_PEAK_BYTES.fetch_max(live_after, Ordering::Relaxed);
+}
+
+/// Record a device free. No-op when `SIMPLE_MEM_ATTR` is off, or when `ptr`
+/// was never seen by `note_device_alloc` (e.g. attribution was toggled on
+/// after the alloc, or the free targets a ptr this lane didn't track).
+#[inline]
+fn note_device_free(ptr: u64) {
+    if simple_runtime::value::heap::rt_mem_attr_enabled() == 0 {
+        return;
+    }
+    let bytes = {
+        let Ok(mut m) = device_allocs().lock() else { return };
+        m.remove(&ptr)
+    };
+    if let Some(bytes) = bytes {
+        DEVICE_LIVE_BYTES.fetch_sub(bytes as i64, Ordering::Relaxed);
+    }
+}
+
+/// Callable from Simple as: `rt_gpu_mem_live_bytes() -> i64`
+pub fn rt_gpu_mem_live_bytes_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(DEVICE_LIVE_BYTES.load(Ordering::Relaxed)))
+}
+
+/// Callable from Simple as: `rt_gpu_mem_peak_bytes() -> i64`
+pub fn rt_gpu_mem_peak_bytes_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(DEVICE_PEAK_BYTES.load(Ordering::Relaxed)))
+}
+
+#[cfg(test)]
+mod device_mem_counter_tests {
+    use super::*;
+
+    // No GPU/CUDA driver required: these exercise `note_device_alloc`/
+    // `note_device_free` directly, the same choke points `rt_cuda_mem_alloc_fn`/
+    // `rt_cuda_mem_free_fn` call, without going through `cuMemAlloc_v2`.
+    // `simple_runtime::value::heap::mem_attr_enable()` force-enables the
+    // shared `SIMPLE_MEM_ATTR` gate for the test process (matches the
+    // pattern `heap.rs`'s own `attr_tests` module uses).
+    //
+    // `DEVICE_LIVE_BYTES`/`DEVICE_PEAK_BYTES` are kind-level (no per-owner
+    // split, unlike `heap.rs`'s `OWNER_COUNTERS` which isolates tests by
+    // owner name) — cargo runs `#[test]` fns in this module on separate
+    // threads by default, so two tests interleaving their alloc/free against
+    // these shared atomics produces real, order-dependent flakiness (the
+    // "before" snapshot in one test can be invalidated by another test's
+    // concurrent alloc+free racing between the snapshot and the assertion).
+    // `TEST_LOCK` serializes this module's tests against each other; it does
+    // not need to cover `rt_cuda_mem_alloc_fn`/`_free_fn` themselves since no
+    // other test in the suite calls those without a GPU.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn alloc_bumps_live_and_peak_bytes() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        simple_runtime::value::heap::mem_attr_enable();
+        let before_live = DEVICE_LIVE_BYTES.load(Ordering::Relaxed);
+
+        note_device_alloc(0xD100_0001, 4096);
+        assert_eq!(DEVICE_LIVE_BYTES.load(Ordering::Relaxed), before_live + 4096);
+        assert!(DEVICE_PEAK_BYTES.load(Ordering::Relaxed) >= before_live + 4096);
+
+        note_device_free(0xD100_0001);
+        assert_eq!(
+            DEVICE_LIVE_BYTES.load(Ordering::Relaxed),
+            before_live,
+            "live returns to baseline after free"
+        );
+    }
+
+    #[test]
+    fn peak_survives_free_seeded_leak() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        simple_runtime::value::heap::mem_attr_enable();
+        // Baseline off `DEVICE_LIVE_BYTES`, not `DEVICE_PEAK_BYTES`: this
+        // process (or an earlier `cargo test` run sharing the binary) may
+        // have already pushed peak above what THIS test's own bytes are
+        // guaranteed to exceed, e.g. a prior test allocated-then-freed a
+        // larger amount, leaving peak high but live back near zero.
+        // `peak_after_alloc >= live_before + bytes` is the invariant this
+        // choke point actually promises; `>= stale_peak + bytes` is not.
+        let before_live = DEVICE_LIVE_BYTES.load(Ordering::Relaxed);
+
+        note_device_alloc(0xD200_0001, 10_000_000);
+        let peak_after_alloc = DEVICE_PEAK_BYTES.load(Ordering::Relaxed);
+        assert!(peak_after_alloc >= before_live + 10_000_000);
+
+        // Seeded-leak scenario from the design doc's test plan: skip the
+        // free and assert live bytes stay nonzero.
+        assert!(DEVICE_LIVE_BYTES.load(Ordering::Relaxed) > 0);
+
+        // Now actually free it (so this test doesn't leak into the others)
+        // and assert peak is untouched by the free, matching the malloc-tier
+        // `note_attr_free` contract (heap.rs `peak survives the free`).
+        note_device_free(0xD200_0001);
+        assert_eq!(
+            DEVICE_PEAK_BYTES.load(Ordering::Relaxed),
+            peak_after_alloc,
+            "peak must not decrease on free"
+        );
+    }
+
+    #[test]
+    fn free_of_untracked_ptr_is_a_safe_noop() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        simple_runtime::value::heap::mem_attr_enable();
+        let before_live = DEVICE_LIVE_BYTES.load(Ordering::Relaxed);
+        // Never allocated through `note_device_alloc` — must not underflow
+        // the atomic counter or panic.
+        note_device_free(0xDEAD_BEEF_0000_0001);
+        assert_eq!(DEVICE_LIVE_BYTES.load(Ordering::Relaxed), before_live);
+    }
+
+    #[test]
+    fn live_and_peak_externs_read_the_same_atomics() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        simple_runtime::value::heap::mem_attr_enable();
+        note_device_alloc(0xD300_0001, 256);
+        let live = rt_gpu_mem_live_bytes_fn(&[]).unwrap();
+        let peak = rt_gpu_mem_peak_bytes_fn(&[]).unwrap();
+        assert_eq!(live, Value::Int(DEVICE_LIVE_BYTES.load(Ordering::Relaxed)));
+        assert_eq!(peak, Value::Int(DEVICE_PEAK_BYTES.load(Ordering::Relaxed)));
+        note_device_free(0xD300_0001);
+    }
+}
 
 mod opencl_dlopen {
     use std::ffi::CString;
@@ -983,7 +1144,11 @@ pub fn rt_cuda_mem_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {
     let size = arg_i64(args, 0, "rt_cuda_mem_alloc", 1)?;
     #[cfg(feature = "cuda")]
     {
-        return Ok(Value::Int(rt_cuda_mem_alloc(size)));
+        let ptr = rt_cuda_mem_alloc(size);
+        if ptr > 0 {
+            note_device_alloc(ptr as u64, size as u64);
+        }
+        return Ok(Value::Int(ptr));
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -991,6 +1156,7 @@ pub fn rt_cuda_mem_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {
             let mut ptr: u64 = 0;
             let r = unsafe { (fns.mem_alloc)(&mut ptr, size as usize) };
             if r == 0 {
+                note_device_alloc(ptr, size as u64);
                 return Ok(Value::Int(ptr as i64));
             }
             return Ok(Value::Int(-(r as i64)));
@@ -1003,11 +1169,13 @@ pub fn rt_cuda_mem_free_fn(args: &[Value]) -> Result<Value, CompileError> {
     let ptr = arg_i64(args, 0, "rt_cuda_mem_free", 1)?;
     #[cfg(feature = "cuda")]
     {
+        note_device_free(ptr as u64);
         return Ok(Value::Int(rt_cuda_mem_free(ptr)));
     }
     #[cfg(not(feature = "cuda"))]
     {
         if let Some(fns) = get_cuda_dl() {
+            note_device_free(ptr as u64);
             let r = unsafe { (fns.mem_free)(ptr as u64) };
             return Ok(Value::Int(r as i64));
         }

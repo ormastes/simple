@@ -171,3 +171,57 @@ device-alloc/free events). External tools:
 - https://vale.dev/memory-safe — Vale generational references
 - https://github.com/koute/bytehound , https://github.com/kde/heaptrack — profilers
 - https://blog.janestreet.com/oxidizing-ocaml-locality/ , https://dl.acm.org/doi/10.1145/3674642 — OxCaml modal memory management
+
+## First dogfood profiles (2026-07-29)
+
+Rust-seed driver (`src/compiler_rust/target/debug/simple`), `SIMPLE_MEM_ATTR=1`.
+
+**Workload A** — `simple run src/app/memstat/main.spl --by-owner` (near-idle
+baseline; `rt_mem_attr_report(32)` on itself):
+| owner | live | peak | allocs |
+|---|---|---|---|
+| `<unattributed>` | 827-865 | 827-865 | 18 |
+(only row; top-5 = 1 row total)
+
+**Workload B** — wrapper script reading a real 485,397-byte `.spl` source
+(`src/lib/nogc_sync_mut/js/engine/interpreter_native.spl`), tokenizing the
+first 15,000 chars into 846 words / 457 unique into a `Dict`, then
+`rt_mem_attr_report(20)` + `rt_heap_live_bytes_by_kind(1..28)`:
+| owner | live | peak | allocs |
+|---|---|---|---|
+| `<unattributed>` | 540,968 | 540,968 | 1,131 |
+(only row; top-5 = 1 row total)
+
+Per-kind live bytes (Workload B; kinds not listed were 0):
+| kind | bytes | count |
+|---|---|---|
+| 1 String | 540,969 | 1,129 |
+| 2 Array | 96 | 3 |
+| 3 Dict | 32 | 1 |
+
+Observations:
+1. **Owner attribution is currently blind for ordinary interpreted
+   execution.** Both workloads dump 100% of live bytes into a single
+   `<unattributed>` bucket — 827-865 B/18 allocs idle, 540,968 B/1,131 allocs
+   under real work. `rt_mem_attr_set_owner` evidently isn't wired into common
+   interpreter allocation sites (string slice, array push, dict insert); only
+   explicitly-tagged call sites would ever show a named owner. As shipped,
+   the owner table answers "how much is live" but not "who allocated it" for
+   a typical compiler-ish run — exactly gap #1 already filed, now confirmed
+   empirically rather than just in principle.
+2. **Per-kind byte counts undercount container backing storage by orders of
+   magnitude.** String (kind 1) is 99.98% of tracked bytes and looks
+   accurate (dominated by the live 485 KB source-file string + its 15 KB
+   slice). But Array holds only 96 B/3 objects despite an 846-element
+   `words` array, and Dict holds only 32 B/1 object despite 457 live
+   entries — container growth/bucket storage clearly isn't routed through
+   the same kind-tagged path as boxed strings, so trusting Array/Dict rows
+   to size "what's using memory" would be actively misleading.
+3. **`rt_mem_attr_report_print` (heap.rs:777) is dead code** — no CLI
+   subcommand calls it, so `simple compile <file>` (pure Rust-side
+   parse/typecheck/codegen, no interpreted `.spl` in the loop) has *no* way
+   to emit an owner/kind report at all; the infra is currently reachable
+   only from inside interpreted `.spl` code via the `rt_mem_attr_report`
+   extern. A real "measure the compiler compiling" workload needs either a
+   CLI flag wiring that print, or the compile path itself moved behind an
+   interpreted entry point.

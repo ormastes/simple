@@ -45,6 +45,137 @@ var ast_reset_seq: i64 = 0
 fn ast_reset_seq_get() -> i64:
     ast_reset_seq
 
+# ===== Arena Harden — delayed retirement + slot poisoning (M2, 2026-07-29) =====
+# Index-based-arena equivalent of the M2 quarantine ring / delayed-reuse-list
+# design (doc/05_design/runtime/memory_analysis/m2_guard_and_harden_design.md
+# section 4). Gate: SIMPLE_AST_GEN_HARDEN=1 (the design's dedicated arena-gen
+# knob; independent of L6's own SIMPLE_AST_GEN_CHECK diagnostic and of the
+# shared SIMPLE_MEM_HARDEN quarantine/poison knob used by the malloc-backed
+# allocators). Off by default -> zero cost (one cached slot read).
+#
+# WHAT THIS DOES: `decl_tag` and `module_decl_slots` are append-only,
+# whole-arena-reset pools (decl_alloc/module_add_decl always append; there is
+# no per-node free-list anywhere in this arena family — ast_reset() is the
+# only "free" event, and it clears every pool back to empty so the next
+# file's indices restart at 0). That means TRUE delayed index reuse (holding
+# individual freed indices out of circulation, as the design's malloc/GWP-ASan
+# and quarantine-ring sections do) is not applicable here: there is nothing
+# to hold back short of changing every consumer's "decl index 0 == this
+# file's first decl" assumption, which spans call sites far outside this
+# module. What IS practical and implemented: on every ast_reset(), before the
+# live pools are cleared, retire a size-only, fully-POISONED snapshot of
+# `decl_tag` and `module_decl_slots` into a small FIFO ring keyed by the
+# generation that is ending. A caller holding a stale (generation, idx) pair
+# from before the reset can query that ring for
+# `SIMPLE_MEM_ARENA_DELAY_SLOTS` (default 4) further resets and get back an
+# unambiguous `AST_ARENA_SLOT_POISON` sentinel instead of silently reading
+# whatever unrelated data now lives at that index in the live (already-reused)
+# arena — the same "stale read hits an obviously-poisoned value, not fresh
+# data" outcome the design calls for, without perturbing the live arena's
+# real index-reuse timing (so ordinary compiles behave byte-identically
+# whether or not the gate is on). Once a generation ages out of the ring it
+# is evicted and lookups report -1 ("outside the window"), same as today.
+const AST_ARENA_SLOT_POISON: i64 = -777
+
+var ast_gen_harden_slot: [i64] = []
+var ast_harden_retired_gens: [i64] = []
+var ast_harden_retired_decl_tag: [[i64]] = []
+var ast_harden_retired_module_decl_slots: [[i64]] = []
+
+fn ast_gen_harden_refresh():
+    # Cached read, refreshed once per ast_reset() cycle (same pattern as
+    # ast_decl_mode_slots_refresh/expr_mode_slots_refresh) — a hot-path check
+    # is then a slot read, not a per-call env syscall.
+    if ast_gen_harden_slot == nil or ast_gen_harden_slot.len() == 0:
+        ast_gen_harden_slot = [0]
+    ast_gen_harden_slot[0] = rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0)
+
+fn ast_gen_harden_enabled() -> bool:
+    if ast_gen_harden_slot != nil and ast_gen_harden_slot.len() > 0:
+        return ast_gen_harden_slot[0] == 1
+    # Interpreter module vars may not persist between calls (same
+    # compatibility fallback as the other *_enabled() gates in this family).
+    rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0) == 1
+
+fn _ast_harden_delay_slots() -> i64:
+    val configured = rt_env_get_i64("SIMPLE_MEM_ARENA_DELAY_SLOTS", 4)
+    if configured < 0:
+        return 0
+    configured
+
+fn _ast_harden_arrays_ensure():
+    if ast_harden_retired_gens == nil:
+        ast_harden_retired_gens = []
+    if ast_harden_retired_decl_tag == nil:
+        ast_harden_retired_decl_tag = []
+    if ast_harden_retired_module_decl_slots == nil:
+        ast_harden_retired_module_decl_slots = []
+
+fn _ast_harden_poisoned_of_len(count: i64) -> [i64]:
+    var result: [i64] = []
+    var i: i64 = 0
+    while i < count:
+        result.push(AST_ARENA_SLOT_POISON)
+        i = i + 1
+    result
+
+fn _ast_harden_evict_oldest():
+    # No front-pop on these arrays in this codebase; rebuild without index 0.
+    # The ring is bounded small (SIMPLE_MEM_ARENA_DELAY_SLOTS, default 4) so
+    # this stays O(delay) per reset, not O(arena size).
+    var new_gens: [i64] = []
+    var new_decl: [[i64]] = []
+    var new_mods: [[i64]] = []
+    var i: i64 = 1
+    while i < ast_harden_retired_gens.len():
+        new_gens.push(ast_harden_retired_gens[i])
+        new_decl.push(ast_harden_retired_decl_tag[i])
+        new_mods.push(ast_harden_retired_module_decl_slots[i])
+        i = i + 1
+    ast_harden_retired_gens = new_gens
+    ast_harden_retired_decl_tag = new_decl
+    ast_harden_retired_module_decl_slots = new_mods
+
+fn _ast_harden_retire_snapshot(retiring_gen: i64):
+    # Called unconditionally from ast_reset(); no-ops when the gate is off so
+    # off-path behavior (and cost) is identical to before this feature.
+    if not ast_gen_harden_enabled():
+        return
+    _ast_harden_arrays_ensure()
+    val decl_len = decl_tag.len()
+    ast_harden_retired_gens.push(retiring_gen)
+    ast_harden_retired_decl_tag.push(_ast_harden_poisoned_of_len(decl_len))
+    ast_harden_retired_module_decl_slots.push(_ast_harden_poisoned_of_len(ast_module_decl_slots_len()))
+    val max_delay = _ast_harden_delay_slots()
+    while ast_harden_retired_gens.len() > max_delay:
+        _ast_harden_evict_oldest()
+
+fn _ast_harden_lookup(gens: [i64], snapshots: [[i64]], retiring_gen: i64, idx: i64) -> i64:
+    var i: i64 = 0
+    while i < gens.len():
+        if gens[i] == retiring_gen:
+            val snap = snapshots[i]
+            if idx >= 0 and idx < snap.len():
+                return snap[idx]
+            return -1
+        i = i + 1
+    -1
+
+fn ast_harden_lookup_decl_tag(retiring_gen: i64, idx: i64) -> i64:
+    # -1 = outside the delay window (never retired, or already evicted).
+    # AST_ARENA_SLOT_POISON = still retained: a stale read is detectably
+    # poisoned rather than reading whatever the live arena holds now.
+    _ast_harden_arrays_ensure()
+    _ast_harden_lookup(ast_harden_retired_gens, ast_harden_retired_decl_tag, retiring_gen, idx)
+
+fn ast_harden_lookup_module_decl_slot(retiring_gen: i64, idx: i64) -> i64:
+    _ast_harden_arrays_ensure()
+    _ast_harden_lookup(ast_harden_retired_gens, ast_harden_retired_module_decl_slots, retiring_gen, idx)
+
+fn ast_harden_retired_window_depth() -> i64:
+    _ast_harden_arrays_ensure()
+    ast_harden_retired_gens.len()
+
 fn _ast_slots_ensure():
     # Nil-guards: module-level var initializers may not run in native
     # binaries (same limitation parser_init_with_path guards against).
@@ -325,6 +456,9 @@ fn ast_reset():
     # read then reports one "stale generation" line (see _AstExpr/nodes.spl,
     # ast_gen_check_index) instead of cascading OOB/missing-tag diagnostics.
     ast_generation_bump()
+    # Refresh the harden gate once per reset cycle (see the "Arena Harden"
+    # section above) before it is consulted below.
+    ast_gen_harden_refresh()
     # DIAGNOSTIC (2026-07-12, flat_bridge_type_index_across_ast_reset): trace
     # every reset with the pre-reset arena sizes so an interleaved reset that
     # clobbers a still-in-flight conversion can be pinpointed. Guarded by an
@@ -424,6 +558,10 @@ fn ast_reset():
     # decl_nodes.spl and ast_module_decl_slots_clear() below re-seeds it to []
     # (a cross-module `module_decl_slots = []` from here is dropped anyway).
     ast_decl_mode_slots_refresh()
+    # Arena Harden: retire a poisoned, size-only snapshot of the generation
+    # that is about to be cleared BEFORE the live pools are wiped below (see
+    # "Arena Harden" section above). No-ops when the gate is off.
+    _ast_harden_retire_snapshot(ast_generation() - 1)
     decl_tag.clear()
     decl_span.clear()
     decl_name.clear()
