@@ -4,14 +4,15 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
+use crate::value_bridge::runtime_to_value;
 use simple_runtime::value::RuntimeValue;
 
 // Import actual SFFI functions from runtime
 use simple_runtime::value::{
-    rt_array_clear, rt_array_extend_i64, rt_array_free, rt_array_get, rt_array_len, rt_array_new, rt_array_pop,
-    rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set, rt_typed_bytes_u8_push,
-    rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set, rt_typed_words_u32_unchecked,
-    rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
+    rt_array_clear, rt_array_concat, rt_array_extend_i64, rt_array_free, rt_array_get, rt_array_len, rt_array_new,
+    rt_array_pop, rt_array_push, rt_array_set, rt_bytes_u32_le_at, rt_bytes_u64_le_at, rt_bytes_u8_set,
+    rt_typed_bytes_u8_push, rt_typed_words_u32_at, rt_typed_words_u32_push, rt_typed_words_u32_set,
+    rt_typed_words_u32_unchecked, rt_typed_words_u64_at, rt_typed_words_u64_unchecked,
 };
 
 fn interpreter_byte_at(value: &Value) -> i64 {
@@ -94,6 +95,56 @@ pub fn rt_array_repeat_fn(args: &[Value]) -> Result<Value, CompileError> {
         })?
         .as_int()?;
     Ok(Value::array(vec![value.clone(); count.max(0) as usize]))
+}
+
+/// Concatenate interpreter arrays without leaking a native RuntimeValue handle
+/// into Simple code.
+pub fn rt_array_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let left = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_array_concat expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
+    let right = args.get(1).ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_array_concat expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
+
+    if let (Value::Int(left_raw), Value::Int(right_raw)) = (left, right) {
+        let result = rt_array_concat(
+            RuntimeValue::from_raw(*left_raw as u64),
+            RuntimeValue::from_raw(*right_raw as u64),
+        );
+        let value = runtime_to_value(result);
+        rt_array_free(result);
+        return Ok(value);
+    }
+
+    let mut items = match left {
+        Value::Array(values) | Value::FrozenArray(values) => values.as_ref().clone(),
+        Value::FixedSizeArray { data, .. } => data.clone(),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "rt_array_concat expects array arguments, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let right_items = match right {
+        Value::Array(values) | Value::FrozenArray(values) => values.as_ref().clone(),
+        Value::FixedSizeArray { data, .. } => data.clone(),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "rt_array_concat expects array arguments, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    items.extend(right_items);
+    Ok(Value::array(items))
 }
 
 /// Get byte at index from a `Value::Array` — interpreter-native variant.
@@ -660,8 +711,8 @@ pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        interpreter_byte_at, rt_array_free_fn, rt_array_len_safe_fn, rt_bytes_u32_le_at_fn, rt_bytes_u64_le_at_fn,
-        rt_bytes_u8_at_fn, rt_bytes_u8_set_fn,
+        interpreter_byte_at, rt_array_concat_fn, rt_array_free_fn, rt_array_len_safe_fn, rt_bytes_u32_le_at_fn,
+        rt_bytes_u64_le_at_fn, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn,
     };
     use crate::value::Value;
     use simple_runtime::value::heap::is_registered_heap_ptr;
@@ -691,6 +742,25 @@ mod tests {
         let result = rt_array_len_safe_fn(&[Value::array(vec![Value::Int(1), Value::Int(2)])])
             .expect("safe length should succeed");
         assert_eq!(result, Value::Int(2));
+    }
+
+    #[test]
+    fn rt_array_concat_preserves_interpreter_array_values() {
+        let result = rt_array_concat_fn(&[
+            Value::FrozenArray(std::sync::Arc::new(vec![Value::UInt { value: 1, width: 8 }])),
+            Value::FixedSizeArray {
+                size: 1,
+                data: vec![Value::UInt { value: 2, width: 8 }],
+            },
+        ])
+        .expect("array concat should succeed");
+        assert_eq!(
+            result,
+            Value::array(vec![
+                Value::UInt { value: 1, width: 8 },
+                Value::UInt { value: 2, width: 8 },
+            ])
+        );
     }
 
     #[test]
