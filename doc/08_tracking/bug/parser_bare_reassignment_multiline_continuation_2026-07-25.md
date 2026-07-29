@@ -1,7 +1,7 @@
 # Parser rejects multi-line continuation of a bare reassignment RHS (`x =\n expr`), while `val x =\n expr` is accepted
 
 - **ID:** parser_bare_reassignment_multiline_continuation_2026-07-25
-- **Status:** OPEN (filed, not fixed)
+- **Status:** SOURCE FIXED / DEPLOYED ARTIFACT BLOCKED
 - **Severity:** low-medium (forces a formatting workaround; asymmetric grammar)
 - **Found via:** `web × headless` showcase-matrix cell — `examples/06_io/ui/web_render_file_gui.spl`
   failed to parse, blocking the web showcase's child process.
@@ -71,16 +71,11 @@ condition (line ~431, matching the style already used at lines 333, 338, 342,
 442, 447, 492, 536) and joined 11 two-line bare reassignments onto single lines.
 12 insertions, 22 deletions, no functional change. The file now parses.
 
-## Suggested fix direction (not attempted)
+## Source fix and remaining artifact work
 
-Allow an expression continuation after `=` in an assignment statement the same
-way it is allowed after `val`/`var` binding — i.e. suppress the
-Newline/Indent-terminates-expression rule while an assignment RHS is
-incomplete. Whoever takes this should check whether the same restriction
-applies to compound assignment (`+=` etc.) and to `return`, and cover all of
-them together rather than one form at a time.
-
-Either fix it, or document the reassignment case explicitly in
-`.claude/rules/language.md` alongside the boolean note — the current state,
-where only half the limitation is written down, is what let this reach a
-showcase cell.
+Commit `ab63c351d142` now suppresses layout after all assignment tokens, and
+`dedent_continuation_spec.spl` covers bare, field, compound, and walrus
+continuation through the current parser source. The deployed Stage2 and old
+Stage3 binaries predate that source fix. A current-source Stage3 build produced
+no progress for the bounded three-minute attempt, so target binaries remain
+blocked until a fresh pure-Simple compiler artifact is admitted.

@@ -2279,3 +2279,12 @@ implementation in progress / target evidence blocked
   production-path evidence plus separate BrowserSession CSP history growth,
   budget, and cleanup defects are recorded in
   `doc/09_report/browser_csp_state_lifecycle_2026-07-29.md`.
+- parser artifact divergence (2026-07-29): Current pure-Simple parser source
+  successfully parses bare, field, compound, and walrus assignment RHS
+  continuations through a focused compiled parser probe. Deployed Stage2
+  (`58c2827c…`) and retained old Stage3 (`98087781…`) still reject the same
+  source before target closure discovery. One current-source Stage3 production
+  attempt emitted no progress for three minutes and was terminated; no full
+  bootstrap or seed fallback was used. JS reclamation and BrowserSession
+  animation execution remain blocked until a fresh pure-Simple compiler
+  artifact is admitted.
