@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 51 | 51 | 0 | 0 |
+| 52 | 52 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -105,6 +105,130 @@ expect(content).to_contain(
 </details>
 
 ### hosted browser renderer broker policy
+
+#### keeps Favorite bound to the committed page during navigation
+
+- Admit one deterministic secondary browser entry
+- var profile = BrowserProfileStore memory
+- Enter a new address through production registry routing
+- Reject Favorite while the navigation command is pending
+   - Expected: command_busy.callback_count equals `0`
+   - Expected: command_busy.reason equals `renderer-busy`
+   - Expected: profile.load_bookmarks()?.entries.len() equals `0`
+- Reject Favorite while the navigation transport is pending
+   - Expected: network_busy.callback_count equals `0`
+   - Expected: network_busy.reason equals `renderer-busy`
+   - Expected: profile.load_bookmarks()?.entries.len() equals `0`
+- Commit the target page before admitting Favorite
+   - Expected: admitted.reason equals `favorite-parent`
+- Persist only the newly committed URL
+   - Expected: saved.entries.len() equals `1`
+   - Expected: saved.entries[0].first equals `https://new.test/`
+- profile close
+   - Expected: registry.close() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 91 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Admit one deterministic secondary browser entry")
+var registry = HostedBrowserRendererRegistry.create(
+    "/definitely/missing/simple-browser-renderer",
+    "https://home.test/"
+)
+expect(registry.ensure(
+    91, "", 320, 200, 1000, 1000
+)).to_equal("failed")
+var entry = registry.entries[0]
+entry.ready = true
+entry.failure_reason = ""
+entry.renderer.state = "active"
+entry.renderer.document_url = "https://old.test/"
+entry.renderer.document_origin = "https://old.test"
+registry.entries[0] = entry
+var profile = BrowserProfileStore.memory()?
+
+step("Enter a new address through production registry routing")
+expect(registry.dispatch_chrome_pointer(
+    1, 91, "address", true
+).reason).to_equal("chrome-pressed")
+expect(registry.dispatch_chrome_pointer(
+    2, 91, "address", false
+).reason).to_equal("address-focused")
+expect(registry.dispatch_text(
+    3, 91, "https://new.test/"
+).callback_count).to_equal(1)
+expect(registry.dispatch_key_with_shift(
+    4, 91, 13, true, false
+).callback_count).to_equal(1)
+expect(registry.address_text(91)).to_equal(
+    "https://new.test/"
+)
+expect(
+    registry.entries[0].renderer.command_deadline_ms
+).to_be_greater_than(0)
+
+step("Reject Favorite while the navigation command is pending")
+val _ = registry.dispatch_chrome_pointer(
+    5, 91, "favorite", true
+)
+val command_busy = registry.dispatch_chrome_pointer(
+    6, 91, "favorite", false
+)
+expect(command_busy.callback_count).to_equal(0)
+expect(command_busy.reason).to_equal("renderer-busy")
+if command_busy.reason == "favorite-parent":
+    val url = registry.document_url(91)
+    val _ = profile.toggle_bookmark(url, url)?
+expect(profile.load_bookmarks()?.entries.len()).to_equal(0)
+
+step("Reject Favorite while the navigation transport is pending")
+entry = registry.entries[0]
+entry.renderer.command_deadline_ms = 0
+entry.renderer.pending_wire = ""
+entry.renderer.network_job_handle = 77
+registry.entries[0] = entry
+val _ = registry.dispatch_chrome_pointer(
+    7, 91, "favorite", true
+)
+val network_busy = registry.dispatch_chrome_pointer(
+    8, 91, "favorite", false
+)
+expect(network_busy.callback_count).to_equal(0)
+expect(network_busy.reason).to_equal("renderer-busy")
+expect(profile.load_bookmarks()?.entries.len()).to_equal(0)
+
+step("Commit the target page before admitting Favorite")
+entry = registry.entries[0]
+entry.renderer.network_job_handle = 0
+entry.renderer.document_url = "https://new.test/"
+entry.renderer.document_origin = "https://new.test"
+registry.entries[0] = entry
+val _ = registry.dispatch_chrome_pointer(
+    9, 91, "favorite", true
+)
+val admitted = registry.dispatch_chrome_pointer(
+    10, 91, "favorite", false
+)
+expect(admitted.reason).to_equal("favorite-parent")
+val committed_url = registry.document_url(91)
+val _ = profile.toggle_bookmark(
+    committed_url, committed_url
+)?
+
+step("Persist only the newly committed URL")
+val saved = profile.load_bookmarks()?
+expect(saved.entries.len()).to_equal(1)
+expect(saved.entries[0].first).to_equal("https://new.test/")
+profile.close()?
+expect(registry.close()).to_equal(true)
+```
+
+</details>
 
 #### admits decoded renderer side effects only through trusted CSP state
 
@@ -3527,8 +3651,8 @@ expect(stale.decoder.error).to_equal("stale-generation")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 51 |
-| Active scenarios | 51 |
+| Total scenarios | 52 |
+| Active scenarios | 52 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

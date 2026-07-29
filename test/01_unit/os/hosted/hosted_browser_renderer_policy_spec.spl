@@ -73,6 +73,10 @@ use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererProcess,
     hosted_browser_network_response_limit_reason
 }
+use os.hosted.hosted_browser_renderer_registry.{
+    HostedBrowserRendererRegistry
+}
+use os.hosted.browser_profile_store.{BrowserProfileStore}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_file_read_text(path: text) -> text
@@ -329,6 +333,104 @@ fn sts_response(status: i64) -> FetchResponse:
     )
 
 describe "hosted browser renderer broker policy":
+
+    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-018
+    it "keeps Favorite bound to the committed page during navigation":
+        """
+        The parent-owned Favorite control must not bookmark the previous
+        committed URL while the address bar already displays a pending target.
+        """
+        step("Admit one deterministic secondary browser entry")
+        var registry = HostedBrowserRendererRegistry.create(
+            "/definitely/missing/simple-browser-renderer",
+            "https://home.test/"
+        )
+        expect(registry.ensure(
+            91, "", 320, 200, 1000, 1000
+        )).to_equal("failed")
+        var entry = registry.entries[0]
+        entry.ready = true
+        entry.failure_reason = ""
+        entry.renderer.state = "active"
+        entry.renderer.document_url = "https://old.test/"
+        entry.renderer.document_origin = "https://old.test"
+        registry.entries[0] = entry
+        var profile = BrowserProfileStore.memory()?
+
+        step("Enter a new address through production registry routing")
+        expect(registry.dispatch_chrome_pointer(
+            1, 91, "address", true
+        ).reason).to_equal("chrome-pressed")
+        expect(registry.dispatch_chrome_pointer(
+            2, 91, "address", false
+        ).reason).to_equal("address-focused")
+        expect(registry.dispatch_text(
+            3, 91, "https://new.test/"
+        ).callback_count).to_equal(1)
+        expect(registry.dispatch_key_with_shift(
+            4, 91, 13, true, false
+        ).callback_count).to_equal(1)
+        expect(registry.address_text(91)).to_equal(
+            "https://new.test/"
+        )
+        expect(
+            registry.entries[0].renderer.command_deadline_ms
+        ).to_be_greater_than(0)
+
+        step("Reject Favorite while the navigation command is pending")
+        val _ = registry.dispatch_chrome_pointer(
+            5, 91, "favorite", true
+        )
+        val command_busy = registry.dispatch_chrome_pointer(
+            6, 91, "favorite", false
+        )
+        expect(command_busy.callback_count).to_equal(0)
+        expect(command_busy.reason).to_equal("renderer-busy")
+        if command_busy.reason == "favorite-parent":
+            val url = registry.document_url(91)
+            val _ = profile.toggle_bookmark(url, url)?
+        expect(profile.load_bookmarks()?.entries.len()).to_equal(0)
+
+        step("Reject Favorite while the navigation transport is pending")
+        entry = registry.entries[0]
+        entry.renderer.command_deadline_ms = 0
+        entry.renderer.pending_wire = ""
+        entry.renderer.network_job_handle = 77
+        registry.entries[0] = entry
+        val _ = registry.dispatch_chrome_pointer(
+            7, 91, "favorite", true
+        )
+        val network_busy = registry.dispatch_chrome_pointer(
+            8, 91, "favorite", false
+        )
+        expect(network_busy.callback_count).to_equal(0)
+        expect(network_busy.reason).to_equal("renderer-busy")
+        expect(profile.load_bookmarks()?.entries.len()).to_equal(0)
+
+        step("Commit the target page before admitting Favorite")
+        entry = registry.entries[0]
+        entry.renderer.network_job_handle = 0
+        entry.renderer.document_url = "https://new.test/"
+        entry.renderer.document_origin = "https://new.test"
+        registry.entries[0] = entry
+        val _ = registry.dispatch_chrome_pointer(
+            9, 91, "favorite", true
+        )
+        val admitted = registry.dispatch_chrome_pointer(
+            10, 91, "favorite", false
+        )
+        expect(admitted.reason).to_equal("favorite-parent")
+        val committed_url = registry.document_url(91)
+        val _ = profile.toggle_bookmark(
+            committed_url, committed_url
+        )?
+
+        step("Persist only the newly committed URL")
+        val saved = profile.load_bookmarks()?
+        expect(saved.entries.len()).to_equal(1)
+        expect(saved.entries[0].first).to_equal("https://new.test/")
+        profile.close()?
+        expect(registry.close()).to_equal(true)
 
     # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     it "admits decoded renderer side effects only through trusted CSP state":
