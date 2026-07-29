@@ -16,6 +16,7 @@ use os.compositor.simple_web_window_renderer.{
     simple_web_external_content_frame
 }
 use os.hosted.hosted_browser_renderer_process.{
+    HOSTED_BROWSER_SITE_SWAP_REQUIRED,
     HostedBrowserRendererProcess,
     HostedBrowserRendererResult
 }
@@ -257,6 +258,73 @@ pub class HostedBrowserRendererRegistry:
         self.entries[index] = entry
         "failed"
 
+    me _begin_site_swap(index: i32, wall_clock_ms: i64) -> text:
+        var entry = self.entries[index]
+        if (not entry.renderer.site_swap_pending or
+            entry.renderer.site_swap_site == "" or
+            not entry.renderer.navigation_permit.active):
+            self.entries[index] = entry
+            return self._fail(index, "site-swap-state")
+        val site = entry.renderer.site_swap_site
+        val permit = entry.renderer.navigation_permit
+        val cookie_store = entry.renderer.network.cookie_store
+        val document_url = entry.renderer.document_url
+        val document_origin = entry.renderer.document_origin
+        val history_urls = entry.renderer.history_urls
+        val history_index = entry.renderer.history_index
+        val history_current_url = entry.renderer.history_current_url
+        val history_back_url = entry.renderer.history_back_url
+        val history_forward_url = entry.renderer.history_forward_url
+        val pending_history_action = entry.renderer.pending_history_action
+        val pending_history_index = entry.renderer.pending_history_index
+        val pending_history_target_url = (
+            entry.renderer.pending_history_target_url
+        )
+        val home_url = entry.renderer.home_url
+        if not entry.renderer.close():
+            self.entries[index] = entry
+            return self._fail(index, "site-swap-close-failed")
+        val generation = self.next_generation
+        self.next_generation = self.next_generation + 1
+        var replacement = HostedBrowserRendererProcess.create(
+            generation, entry.renderer.width, entry.renderer.height
+        )
+        replacement.network.cookie_store = cookie_store
+        replacement.document_url = document_url
+        replacement.document_origin = document_origin
+        replacement.history_urls = history_urls
+        replacement.history_index = history_index
+        replacement.history_current_url = history_current_url
+        replacement.history_back_url = history_back_url
+        replacement.history_forward_url = history_forward_url
+        replacement.pending_history_action = pending_history_action
+        replacement.pending_history_index = pending_history_index
+        replacement.pending_history_target_url = pending_history_target_url
+        replacement.navigation_permit = permit
+        replacement.site_lock = site
+        replacement.site_swap_pending = true
+        replacement.site_swap_site = site
+        val _ = replacement.set_home_url(home_url)
+        val _ = replacement.load_hsts_snapshot(
+            self.hsts_snapshot(wall_clock_ms), wall_clock_ms
+        )
+        entry.renderer = replacement
+        entry.renderer_closed = false
+        entry.close_pending = false
+        entry.close_retry_at_micros = 0
+        entry.ready = false
+        entry.startup_html = ""
+        entry.bookmark_revision = -1
+        val started = entry.renderer.begin_start(
+            self.executable, 2000
+        )
+        self.entries[index] = entry
+        match started:
+            Err(reason):
+                self._fail(index, "site-swap-{reason}")
+            Ok(_):
+                "none"
+
     me _store_frame(
         index: i32,
         result: HostedBrowserRendererResult,
@@ -393,6 +461,8 @@ pub class HostedBrowserRendererRegistry:
             entry = self.entries[index]
         if val Some(result) = polled:
             if not result.ok:
+                if result.reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
+                    return self._begin_site_swap(index, wall_clock_ms)
                 return self._fail(index, result.reason)
             if entry.renderer.state == "await-init":
                 val initialized = entry.renderer.begin_init(
@@ -400,6 +470,14 @@ pub class HostedBrowserRendererRegistry:
                 )
                 self.entries[index] = entry
                 match initialized:
+                    Err(reason):
+                        return self._fail(index, reason)
+                    Ok(_):
+                        return "none"
+            if entry.renderer.site_swap_pending:
+                val resumed = entry.renderer.begin_resume_site_swap(2000)
+                self.entries[index] = entry
+                match resumed:
                     Err(reason):
                         return self._fail(index, reason)
                     Ok(_):

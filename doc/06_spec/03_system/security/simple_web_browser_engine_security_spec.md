@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1594,6 +1594,144 @@ _require_platform_renderer_sandbox_evidence()
 
 </details>
 
+#### should replace the renderer before exposing a cross-site document
+
+-  two origin https fixture
+   - Binary capture: after_step
+-  platform evidence row
+   - Binary capture: after_step
+- var mocks = MockResponseRegistry create
+   - Binary capture: after_step
+- mocks register
+   - Binary capture: after_step
+- mocks register
+   - Binary capture: after_step
+- set mock registry
+   - Binary capture: after_step
+- Start one sandbox generation and commit the source site
+   - Binary capture: after_step
+- Store a target credential only in broker-owned cookie state
+   - Binary capture: after_step
+- Navigate cross-site and observe the first target request
+   - Binary capture: after_step
+- Some
+   - Binary capture: after_step
+-
+   - Binary capture: after_step
+- renderers document url
+   - Binary capture: after_step
+- thread sleep ms
+   - Binary capture: after_step
+- Reject the old generation before target bytes or credentials
+   - Binary capture: after_step
+- set mock registry
+   - Binary capture: after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 93 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+_two_origin_https_fixture()
+_platform_evidence_row()
+val artifact = _production_browser_artifact()
+val source_url = "https://app.example.test/start"
+val target_url = "https://account.victim.test/private"
+var mocks = MockResponseRegistry.create()
+mocks.register(source_url, 200, "<p>source generation</p>")
+mocks.register(target_url, 200, "<p>target generation</p>")
+set_mock_registry(mocks)
+
+step("Start one sandbox generation and commit the source site")
+var renderers = HostedBrowserRendererRegistry.create(
+    artifact, source_url
+)
+expect(renderers.ensure(
+    91, "<p>initial blank</p>", 64, 48, 0, 100000
+)).to_equal("none")
+expect(_await_security_registry_document(
+    renderers, 91, ""
+)).to_be(true)
+var source_entry = renderers.entries[0]
+expect(source_entry.renderer.begin_navigate(
+    source_url, "GET", "", "", "", 2000
+).is_ok()).to_be(true)
+renderers.entries[0] = source_entry
+expect(_await_security_registry_document(
+    renderers, 91, source_url
+)).to_be(true)
+val source_generation = renderers.entries[0].renderer.generation
+val source_pid = renderers.entries[0].renderer.pid
+expect(source_pid).to_be_greater_than(0)
+
+step("Store a target credential only in broker-owned cookie state")
+val target_origin = Origin(
+    scheme: "https", host: "account.victim.test", port: 443
+)
+var credential_entry = renderers.entries[0]
+expect(credential_entry.renderer.network.cookie_store.store_from_origin(
+    parse_set_cookie(
+        "site_secret=broker-only; Secure; SameSite=None; Path=/"
+    ),
+    target_origin,
+    1000
+).accepted).to_be(true)
+renderers.entries[0] = credential_entry
+
+step("Navigate cross-site and observe the first target request")
+var navigation_entry = renderers.entries[0]
+expect(navigation_entry.renderer.begin_navigate(
+    target_url, "GET", "", "", "", 2000
+).is_ok()).to_be(true)
+renderers.entries[0] = navigation_entry
+var target_generation: i64 = -1
+var target_pid: i64 = -1
+var target_headers = ""
+var target_committed = false
+var attempts: i64 = 0
+while attempts < 1000 and not target_committed:
+    val state = renderers.advance_window(
+        91, "", "", 64, 48,
+        1000000 + attempts * 1000, 100000, true
+    )
+    if state == "failed":
+        break
+    if target_generation < 0:
+        match observed_mock_request("/private"):
+            Some(observed):
+                target_generation = (
+                    renderers.entries[0].renderer.generation
+                )
+                target_pid = renderers.entries[0].renderer.pid
+                target_headers = observed.headers
+            nil:
+                ()
+    if (state == "frame" and
+        renderers.document_url(91) == target_url):
+        target_committed = true
+    thread_sleep_ms(1)
+    attempts = attempts + 1
+
+step("Reject the old generation before target bytes or credentials")
+expect(target_committed).to_be(true)
+expect(target_generation).to_be_greater_than(source_generation)
+expect(target_pid).to_be_greater_than(0)
+expect(target_pid == source_pid).to_be(false)
+expect(target_headers).to_contain(
+    "Cookie: site_secret=broker-only"
+)
+expect(renderers.entries[0].renderer.site_lock).to_equal(
+    "https://victim.test"
+)
+expect(renderers.close()).to_be(true)
+set_mock_registry(MockResponseRegistry.create())
+```
+
+</details>
+
 <details>
 <summary>Advanced: should reject malformed late duplicate and oversized renderer messages</summary>
 
@@ -1679,8 +1817,8 @@ _require_production_security_evidence()
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

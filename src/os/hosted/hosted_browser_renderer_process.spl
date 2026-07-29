@@ -29,9 +29,12 @@ use std.common.web.browser_renderer_protocol.{
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
 }
-use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin, Url}
 use std.gc_async_mut.gpu.browser_engine.net.fetch.{
     FetchEngine, resolve_fetch_redirect_url
+}
+use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{
+    schemeful_site_key
 }
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
     build_request_bytes, h1_mock_response, parse_http_response_bytes
@@ -189,6 +192,13 @@ fn _deadline_ms(timeout_ms: i64) -> i64:
     )
 
 val BROWSER_RENDERER_MAX_DEFERRED_COMMANDS: i32 = 64
+pub val HOSTED_BROWSER_SITE_SWAP_REQUIRED: text = "site-swap-required"
+
+fn _hosted_browser_schemeful_site(url: text) -> text:
+    val parsed = Url.parse(url)
+    if not parsed.?:
+        return ""
+    schemeful_site_key(Origin.from_url(parsed!))
 
 struct _HostedBrowserDeferredCommand:
     wire: text
@@ -227,6 +237,9 @@ pub class HostedBrowserRendererProcess:
     pending_scroll_delta_milli_y: i64
     document_url: text
     document_origin: text
+    site_lock: text
+    site_swap_pending: bool
+    site_swap_site: text
     navigation_permit: HostedBrowserNavigationPermit
     history_urls: [text]
     history_index: i64
@@ -281,6 +294,9 @@ pub class HostedBrowserRendererProcess:
             pending_scroll_delta_milli_y: 0,
             document_url: "",
             document_origin: "",
+            site_lock: "",
+            site_swap_pending: false,
+            site_swap_site: "",
             navigation_permit: hosted_browser_empty_navigation_permit(),
             history_urls: [],
             history_index: -1,
@@ -313,6 +329,21 @@ pub class HostedBrowserRendererProcess:
     me _hsts_upgrade_url(url: text) -> text:
         val _ = self.hsts.advance_time(rt_time_now_monotonic_ms())
         self.hsts._hsts_upgrade_url(url)
+
+    me _document_site_swap_required(url: text) -> bool:
+        val site = _hosted_browser_schemeful_site(url)
+        if site == "":
+            self.site_swap_pending = true
+            self.site_swap_site = ""
+            return true
+        if self.site_lock == "":
+            self.site_lock = site
+            return false
+        if site == self.site_lock:
+            return false
+        self.site_swap_pending = true
+        self.site_swap_site = site
+        true
 
     me authorize_navigation(
         url: text,
@@ -538,6 +569,12 @@ pub class HostedBrowserRendererProcess:
     fn _renderer_initiator_valid(
         fetch: BrowserRendererNetworkDecodeResult
     ) -> bool:
+        if fetch.kind == "document" and self.navigation_permit.active:
+            return (
+                fetch.initiator_origin == "" or
+                fetch.initiator_origin == "null" or
+                fetch.initiator_origin == self._requester_origin()
+            )
         if fetch.initiator_origin == "null":
             return (
                 fetch.credentials == "omit" and
@@ -546,6 +583,25 @@ pub class HostedBrowserRendererProcess:
         fetch.initiator_origin != "" and (
             fetch.initiator_origin == self._requester_origin()
         )
+
+    me begin_resume_site_swap(timeout_ms: i64) -> Result<bool, text>:
+        if (not self.site_swap_pending or
+            not self.navigation_permit.active):
+            return Err("site-swap-state")
+        val started = self._begin_navigation_command(
+            "open",
+            self.navigation_permit.url,
+            self.navigation_permit.method,
+            self.navigation_permit.headers,
+            self.navigation_permit.body,
+            self.navigation_permit.content_type,
+            "navigation",
+            timeout_ms
+        )
+        if val Ok(_) = started:
+            self.site_swap_pending = false
+            self.site_swap_site = ""
+        started
 
     me _apply_script_cookie_writes(writes: [text]) -> bool:
         if writes.len() == 0:
@@ -634,6 +690,9 @@ pub class HostedBrowserRendererProcess:
         self.pending_history_action = ""
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
+        self.site_lock = ""
+        self.site_swap_pending = false
+        self.site_swap_site = ""
         self.pending_wire = ""
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = 0
@@ -901,6 +960,12 @@ pub class HostedBrowserRendererProcess:
                     return reason
                 Ok(headers):
                     response_headers = headers
+            if (hosted_browser_redirect_status(response.status) and
+                self.navigation_permit.active and
+                self._document_site_swap_required(
+                    self.navigation_permit.url
+                )):
+                return HOSTED_BROWSER_SITE_SWAP_REQUIRED
         response_headers = hosted_browser_remove_response_header(
             response_headers, "set-cookie"
         )
@@ -1230,6 +1295,10 @@ pub class HostedBrowserRendererProcess:
         if self.network_job_handle > 0:
             val reason = self._poll_network_job()
             if reason != "":
+                if reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
+                    return Some(_renderer_result(
+                        false, reason, _empty_composition()
+                    ))
                 return Some(self.fail(reason))
             return nil
         val chunk = process_read_stdout(self.pid)
@@ -1295,6 +1364,10 @@ pub class HostedBrowserRendererProcess:
                         -1
                     )
                     if reason != "":
+                        if reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
+                            return Some(_renderer_result(
+                                false, reason, _empty_composition()
+                            ))
                         return Some(self.fail(reason))
                     return nil
                 val policy = hosted_browser_renderer_request_policy(
@@ -1319,6 +1392,15 @@ pub class HostedBrowserRendererProcess:
                             return Some(self.fail(reason))
                         return nil
                     return Some(self.fail(policy.reason))
+                if (fetch.kind == "document" and
+                    self._document_site_swap_required(
+                        policy.canonical_url
+                    )):
+                    return Some(_renderer_result(
+                        false,
+                        HOSTED_BROWSER_SITE_SWAP_REQUIRED,
+                        _empty_composition()
+                    ))
                 var redirect_count: i64 = 0
                 if policy.consumes_navigation:
                     redirect_count = self.navigation_permit.redirect_count
@@ -1340,6 +1422,10 @@ pub class HostedBrowserRendererProcess:
                         fetch, policy, response, redirect_count
                     )
                     if reason != "":
+                        if reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
+                            return Some(_renderer_result(
+                                false, reason, _empty_composition()
+                            ))
                         return Some(self.fail(reason))
                 return nil
             val frame_reply_to_request_id = (

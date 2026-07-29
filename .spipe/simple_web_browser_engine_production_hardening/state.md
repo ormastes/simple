@@ -2187,3 +2187,26 @@ implementation in progress / target evidence blocked
   specs now expose immediate imperative `step("...")` flows. Native browser,
   live HTTPS/certificate, platform sandbox, RSS/GC/soak, and production
   performance evidence remain active blockers rather than PASS claims.
+- rendering/event-loop tranche (2026-07-29): Successful address submission now
+  releases chrome focus while rejected navigation preserves editing. Paint-only
+  animation properties reuse layout boxes and repaint canonical Draw IR;
+  layout-affecting or unknown properties still relayout. Browser HTML retains
+  one canonical parsed document instead of serializing and reparsing the visible
+  body. Sticky positioning is conservatively limited to root/html/body ancestry,
+  preserves auto inset sentinels, and rejects transformed or nested-scroll
+  cases; exact Draw IR and Engine2D pixel oracles cover both supported and
+  fallback behavior. Canonical JS timers now select nextTick/FIFO or earliest
+  stable deadline in one scan, remove completed entries with swap-pop, and
+  checkpoint microtasks under the shared 1000-job yield budget. Independent
+  reviews returned PASS. Four affected manuals were regenerated with the
+  phase-2/3 pure-Simple docgen (`4 complete, 0 stubs`); no bootstrap or target
+  runtime claim was made.
+- renderer site-isolation tranche (2026-07-29): Each hosted child generation is
+  locked to one immutable schemeful site. Direct cross-site navigation requests
+  signal a swap before network start; cross-site redirects withhold response
+  metadata and body before child IPC. The registry closes the old process,
+  installs a fresh monotonic generation and decoder, carries only broker-owned
+  cookies plus validated navigation metadata, HSTS, home, history, and
+  bookmarks, and rejects stale SBRQ4 traffic. Independent high-risk review
+  returned PASS. The two affected manuals were regenerated (`2 complete,
+  0 stubs`); live target-runtime isolation remains an evidence blocker.

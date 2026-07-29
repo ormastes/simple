@@ -10,6 +10,7 @@ renderer without ambient host capabilities.
 use std.spec.*
 use std.env.variables.{env_get}
 use std.io_runtime.{file_hash_sha256}
+use app.io.mod.{thread_sleep_ms}
 use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
 use common.web.browser_renderer_protocol.{
     BrowserRendererNetworkDecodeResult
@@ -234,6 +235,28 @@ fn _require_platform_renderer_sandbox_evidence():
     expect(frame.reason).to_equal("ok")
     expect(frame.composition.batches.len()).to_be_greater_than(0)
     expect(closed).to_be(true)
+
+fn _await_security_registry_document(
+    registry: HostedBrowserRendererRegistry,
+    window_id: i64,
+    expected_url: text
+) -> bool:
+    var attempts: i64 = 0
+    while attempts < 1000:
+        val state = registry.advance_window(
+            window_id, "", "", 64, 48,
+            attempts * 1000, 100000, true
+        )
+        if state == "failed":
+            return false
+        if state == "frame" and (
+            expected_url == "" or
+            registry.document_url(window_id) == expected_url
+        ):
+            return true
+        thread_sleep_ms(1)
+        attempts = attempts + 1
+    false
 
 fn _require_production_security_evidence():
     fail("REQ-WEB-BROWSER-010..019: production security evidence not implemented")
@@ -1270,6 +1293,105 @@ describe "Production Simple browser security envelope":
         _platform_evidence_row()
         _check_security_denial()
         _require_platform_renderer_sandbox_evidence()
+
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-013
+    # @manual: show
+    # @capture(protocol)
+    # @capture(binary)
+    it "should replace the renderer before exposing a cross-site document":
+        _two_origin_https_fixture()
+        _platform_evidence_row()
+        val artifact = _production_browser_artifact()
+        val source_url = "https://app.example.test/start"
+        val target_url = "https://account.victim.test/private"
+        var mocks = MockResponseRegistry.create()
+        mocks.register(source_url, 200, "<p>source generation</p>")
+        mocks.register(target_url, 200, "<p>target generation</p>")
+        set_mock_registry(mocks)
+
+        step("Start one sandbox generation and commit the source site")
+        var renderers = HostedBrowserRendererRegistry.create(
+            artifact, source_url
+        )
+        expect(renderers.ensure(
+            91, "<p>initial blank</p>", 64, 48, 0, 100000
+        )).to_equal("none")
+        expect(_await_security_registry_document(
+            renderers, 91, ""
+        )).to_be(true)
+        var source_entry = renderers.entries[0]
+        expect(source_entry.renderer.begin_navigate(
+            source_url, "GET", "", "", "", 2000
+        ).is_ok()).to_be(true)
+        renderers.entries[0] = source_entry
+        expect(_await_security_registry_document(
+            renderers, 91, source_url
+        )).to_be(true)
+        val source_generation = renderers.entries[0].renderer.generation
+        val source_pid = renderers.entries[0].renderer.pid
+        expect(source_pid).to_be_greater_than(0)
+
+        step("Store a target credential only in broker-owned cookie state")
+        val target_origin = Origin(
+            scheme: "https", host: "account.victim.test", port: 443
+        )
+        var credential_entry = renderers.entries[0]
+        expect(credential_entry.renderer.network.cookie_store.store_from_origin(
+            parse_set_cookie(
+                "site_secret=broker-only; Secure; SameSite=None; Path=/"
+            ),
+            target_origin,
+            1000
+        ).accepted).to_be(true)
+        renderers.entries[0] = credential_entry
+
+        step("Navigate cross-site and observe the first target request")
+        var navigation_entry = renderers.entries[0]
+        expect(navigation_entry.renderer.begin_navigate(
+            target_url, "GET", "", "", "", 2000
+        ).is_ok()).to_be(true)
+        renderers.entries[0] = navigation_entry
+        var target_generation: i64 = -1
+        var target_pid: i64 = -1
+        var target_headers = ""
+        var target_committed = false
+        var attempts: i64 = 0
+        while attempts < 1000 and not target_committed:
+            val state = renderers.advance_window(
+                91, "", "", 64, 48,
+                1000000 + attempts * 1000, 100000, true
+            )
+            if state == "failed":
+                break
+            if target_generation < 0:
+                match observed_mock_request("/private"):
+                    Some(observed):
+                        target_generation = (
+                            renderers.entries[0].renderer.generation
+                        )
+                        target_pid = renderers.entries[0].renderer.pid
+                        target_headers = observed.headers
+                    nil:
+                        ()
+            if (state == "frame" and
+                renderers.document_url(91) == target_url):
+                target_committed = true
+            thread_sleep_ms(1)
+            attempts = attempts + 1
+
+        step("Reject the old generation before target bytes or credentials")
+        expect(target_committed).to_be(true)
+        expect(target_generation).to_be_greater_than(source_generation)
+        expect(target_pid).to_be_greater_than(0)
+        expect(target_pid == source_pid).to_be(false)
+        expect(target_headers).to_contain(
+            "Cookie: site_secret=broker-only"
+        )
+        expect(renderers.entries[0].renderer.site_lock).to_equal(
+            "https://victim.test"
+        )
+        expect(renderers.close()).to_be(true)
+        set_mock_registry(MockResponseRegistry.create())
 
     # @manual: folded
     it "should reject malformed late duplicate and oversized renderer messages":

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 42 | 42 | 0 | 0 |
+| 46 | 46 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2457,6 +2457,160 @@ expect(policy.reason).to_equal(
 
 </details>
 
+#### requires a fresh renderer generation before a cross-site document
+
+- var broker = HostedBrowserRendererProcess create
+   - Expected: broker.site_lock equals `https://example.test`
+   - Expected: broker.site_swap_site equals `https://victim.test`
+   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.pending_wire equals ``
+   - Expected: broker.provisional_document_origin equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+expect(broker._document_site_swap_required(
+    "https://app.example.test/start"
+)).to_be(false)
+expect(broker._document_site_swap_required(
+    "https://account.victim.test/"
+)).to_be(true)
+expect(broker.site_lock).to_equal("https://example.test")
+expect(broker.site_swap_pending).to_be(true)
+expect(broker.site_swap_site).to_equal("https://victim.test")
+expect(broker.network_job_handle).to_equal(0)
+expect(broker.pending_wire).to_equal("")
+expect(broker.provisional_document_origin).to_equal("")
+```
+
+</details>
+
+#### retains one generation for same schemeful-site navigation
+
+- var broker = HostedBrowserRendererProcess create
+   - Expected: broker.generation equals `7`
+   - Expected: broker.site_lock equals `https://example.test`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+expect(broker._document_site_swap_required(
+    "https://app.example.test/start"
+)).to_be(false)
+expect(broker._document_site_swap_required(
+    "https://cdn.example.test:8443/asset"
+)).to_be(false)
+expect(broker.generation).to_equal(7)
+expect(broker.site_lock).to_equal("https://example.test")
+expect(broker.site_swap_pending).to_be(false)
+```
+
+</details>
+
+#### withholds a cross-site redirect body and credentials from the old child
+
+- var broker = HostedBrowserRendererProcess create
+- broker navigation permit = permit
+- url: Url parse or opaque
+   - Expected: reason equals `HOSTED_BROWSER_SITE_SWAP_REQUIRED`
+   - Expected: broker.navigation_permit.url equals `target_url`
+   - Expected: broker.site_swap_site equals `https://victim.test`
+   - Expected: broker.pending_wire equals ``
+   - Expected: broker.network_job_handle equals `0`
+   - Expected: broker.provisional_document_origin equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 39 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source_url = "https://app.example.test/start"
+val target_url = "https://account.victim.test/private"
+var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+expect(broker._document_site_swap_required(source_url)).to_be(false)
+broker.document_url = source_url
+broker.document_origin = "https://app.example.test"
+broker.navigation_permit = permit(true, source_url)
+val response = broker._finalize_network(
+    "document",
+    FetchRequest(
+        url: Url.parse_or_opaque(source_url),
+        method: "GET", headers: "", body: [],
+        mode: RequestMode.Navigate, credentials: "include"
+    ),
+    FetchResponse(
+        status: 302,
+        headers: "Location: {target_url}",
+        body: [115u8, 101u8, 99u8, 114u8, 101u8, 116u8]
+    )
+)
+val reason = broker._write_network_response(
+    request(
+        "document", source_url, "GET", "", "", "",
+        "include", [], "https://app.example.test"
+    ),
+    HostedBrowserRequestPolicy(
+        ok: true, reason: "ok", mode: RequestMode.Navigate,
+        credentials: "include", canonical_url: source_url,
+        sanitized_headers: "", consumes_navigation: true
+    ),
+    response,
+    0
+)
+expect(reason).to_equal(HOSTED_BROWSER_SITE_SWAP_REQUIRED)
+expect(broker.navigation_permit.url).to_equal(target_url)
+expect(broker.site_swap_site).to_equal("https://victim.test")
+expect(broker.pending_wire).to_equal("")
+expect(broker.network_job_handle).to_equal(0)
+expect(broker.provisional_document_origin).to_equal("")
+```
+
+</details>
+
+#### rejects old-generation SBRQ4 after a site swap
+
+- browser renderer decoder new
+   - Expected: stale.status equals `violation`
+   - Expected: stale.decoder.error equals `stale-generation`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val old_request = browser_renderer_fetch_request_encode(
+    7, 2, 1, "fetch-1", "fetch",
+    "https://account.victim.test/private", "GET", "", "", "",
+    "include", [], "https://account.victim.test"
+)
+expect(old_request.ok).to_be(true)
+val stale = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(8), old_request.wire
+)
+expect(stale.status).to_equal("violation")
+expect(stale.decoder.error).to_equal("stale-generation")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -2477,8 +2631,8 @@ Tests covering hosted browser renderer transport host, hosted browser renderer b
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 42 |
-| Active scenarios | 42 |
+| Total scenarios | 46 |
+| Active scenarios | 46 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
