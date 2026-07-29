@@ -501,7 +501,35 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
                 format!("[{}]", parts.join(", "))
             }
         }
-        HeapObjectType::Dict => format!("<dict@{ptr:p}>"),
+        HeapObjectType::Dict => {
+            // Match the interpreter's `Value::Dict`/`Value::FrozenDict` display
+            // format exactly (see `to_display_string` and `dict_entries_sorted`
+            // in src/compiler_rust/compiler/src/value_impl.rs): entries are
+            // rendered `key: value` with `, ` separators, wrapped in `{}`, keys
+            // bare (unquoted -- `to_key_string()` on a text/int/bool/float/nil
+            // key is the same bare rendering `value_to_display_string` already
+            // produces for those types), and sorted by the key's STRING form
+            // (not insertion order, not numeric order for int keys, and not
+            // `RuntimeDict`'s FNV-bucket storage order) -- this is a pure
+            // function of contents so the JIT/native path can reproduce it
+            // without sharing the interpreter's per-process HashMap seed.
+            let keys_arr = crate::value::dict::rt_dict_keys(v);
+            let values_arr = crate::value::dict::rt_dict_values(v);
+            let len = crate::value::collections::rt_array_len(keys_arr);
+            if len <= 0 {
+                "{}".to_string()
+            } else {
+                let mut parts: Vec<(String, String)> = Vec::with_capacity(len as usize);
+                for i in 0..len {
+                    let k = crate::value::collections::rt_array_get(keys_arr, i);
+                    let val = crate::value::collections::rt_array_get(values_arr, i);
+                    parts.push((value_to_display_string(k), value_to_display_string(val)));
+                }
+                parts.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+                let rendered: Vec<String> = parts.into_iter().map(|(k, val)| format!("{k}: {val}")).collect();
+                format!("{{{}}}", rendered.join(", "))
+            }
+        }
         HeapObjectType::Tuple => {
             // Match the interpreter's tuple display format exactly (see
             // `to_display_string` in src/compiler_rust/compiler/src/value_impl.rs):
