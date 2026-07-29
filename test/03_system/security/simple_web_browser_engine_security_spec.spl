@@ -11,6 +11,9 @@ use std.spec.*
 use std.env.variables.{env_get}
 use std.io_runtime.{file_hash_sha256}
 use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
+use common.web.browser_renderer_protocol.{
+    BrowserRendererNetworkDecodeResult
+}
 use os.hosted.hosted_browser_renderer_registry.{
     HostedBrowserRendererRegistry
 }
@@ -169,6 +172,18 @@ fn _csp_alias_inline_session() -> BrowserSession:
     )
     expect(result.is_ok()).to_be(true)
     session
+
+fn _broker_initiator_request(
+    origin: text, credentials: text, writes: [text]
+) -> BrowserRendererNetworkDecodeResult:
+    BrowserRendererNetworkDecodeResult(
+        ok: true, reason: "ok", reply_to_request_id: 1,
+        request_id: "fetch-1", kind: "fetch",
+        url: "https://trusted.test/data", method: "GET",
+        headers: "", body: "", content_type: "",
+        credentials: credentials, script_cookie_writes: writes,
+        status: 0, error: "", initiator_origin: origin
+    )
 
 # @inline
 fn _two_origin_https_fixture():
@@ -434,6 +449,31 @@ describe "Production Simple browser security envelope":
             "invalid TLS failure/retry evidence not implemented"
         )
 
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-013
+    # @manual: show
+    it "should validate opaque renderer initiators before cookie writes":
+        var broker = HostedBrowserRendererProcess.create(44, 64, 48)
+        broker.document_url = "https://trusted.test/app"
+        broker.document_origin = "https://trusted.test"
+
+        expect(broker._renderer_initiator_valid(
+            _broker_initiator_request(
+                "https://trusted.test", "include", ["sid=trusted"]
+            )
+        )).to_be(true)
+        expect(broker._renderer_initiator_valid(
+            _broker_initiator_request("null", "omit", [])
+        )).to_be(true)
+        expect(broker._renderer_initiator_valid(
+            _broker_initiator_request("https://forged.test", "omit", [])
+        )).to_be(false)
+        expect(broker._renderer_initiator_valid(
+            _broker_initiator_request("null", "include", [])
+        )).to_be(false)
+        expect(broker._renderer_initiator_valid(
+            _broker_initiator_request("null", "omit", ["sid=forged"])
+        )).to_be(false)
+
     # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012
     # @manual: show
     # @capture(protocol)
@@ -569,6 +609,83 @@ describe "Production Simple browser security envelope":
         )
         expect(session.warnings.join("|")).to_contain(
             "CSP blocked script: https://safe.test/after-limit.js"
+        )
+
+    # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
+    # @manual: show
+    it "should enforce response-header sandbox capabilities before runtime creation":
+        step("Intersect repeated sandbox headers before admitting scripts")
+        var denied = BrowserSession.new()
+        expect(denied.begin_network_navigation(
+            "https://safe.test/sandbox-denied", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val denied_document = denied.take_pending_request().unwrap()
+        expect(denied.commit_network_response(BrowserResponse.create(
+            denied_document.id, "document", denied_document.url, 200,
+            "Content-Security-Policy: sandbox allow-scripts; " +
+            "script-src 'unsafe-inline'\n" +
+            "Content-Security-Policy: sandbox; script-src 'unsafe-inline'",
+            "<html><body><button id='denied-handler' " +
+            "onclick='set-attr:data-fired=yes'>run</button>" +
+            "<script>document.title='escaped'</script>" +
+            "<script src='/escaped.js'></script></body></html>",
+            ""
+        )).is_ok()).to_be(true)
+        expect(denied.current_title).to_equal(
+            "https://safe.test/sandbox-denied"
+        )
+        expect(denied.take_pending_request()).to_be_nil()
+        expect(denied.local_storage_item("secret")).to_be_nil()
+        expect(denied.document_cookie()).to_equal("")
+        val denied_dispatch = denied.dispatch_dom_event(
+            "denied-handler", "click", true, true
+        )
+        expect(denied_dispatch.actions.len()).to_equal(0)
+        expect(denied.warnings.join("|")).to_contain(
+            "CSP sandbox blocked script execution"
+        )
+
+        step("Allow script execution while retaining opaque-origin gates")
+        var scripted = BrowserSession.new()
+        expect(scripted.begin_network_navigation(
+            "https://safe.test/sandbox-scripted", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val scripted_document = scripted.take_pending_request().unwrap()
+        expect(scripted.commit_network_response(BrowserResponse.create(
+            scripted_document.id, "document", scripted_document.url, 200,
+            "Content-Security-Policy: sandbox allow-scripts; " +
+            "script-src 'unsafe-inline'",
+            "<html><body><form id='save' action='/submit'>" +
+            "<button id='send' type='submit'>save</button></form>" +
+            "<script>document.cookie='secret=x';" +
+            "document.title='script-ran';location.href='/escaped';" +
+            "fetch('/data',{credentials:'include'})</script>" +
+            "</body></html>",
+            ""
+        )).is_ok()).to_be(true)
+        expect(scripted.current_title).to_equal("script-ran")
+        expect(scripted.current_url).to_equal(
+            "https://safe.test/sandbox-scripted"
+        )
+        expect(scripted.local_storage_item("secret")).to_be_nil()
+        expect(scripted.document_cookie()).to_equal("")
+        val opaque_fetch = scripted.take_pending_request().unwrap()
+        expect(opaque_fetch.initiator_origin).to_equal("null")
+        expect(opaque_fetch.site_for_cookies_url).to_equal("")
+        expect(opaque_fetch.credentials).to_equal("omit")
+        expect(opaque_fetch.headers.lower().contains("cookie:")).to_be(false)
+        expect(opaque_fetch.script_cookie_writes.len()).to_equal(0)
+
+        val dispatch = scripted.dispatch_dom_event(
+            "send", "click", true, true
+        )
+        expect(dispatch.default_action).to_equal("button-activate")
+        expect(scripted.take_pending_request()).to_be_nil()
+        expect(scripted.warnings.join("|")).to_contain(
+            "CSP sandbox blocked form submission"
+        )
+        expect(scripted.warnings.join("|")).to_contain(
+            "CSP sandbox blocked top navigation"
         )
 
     # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-012
@@ -1036,6 +1153,100 @@ describe "Production Simple browser security envelope":
         expect(session.document_cookie().contains(
             "script_part=visible"
         )).to_equal(false)
+
+    # @req REQ-WEB-BROWSER-013 NFR-WEB-BROWSER-013
+    # @manual: folded
+    it "should bound retained broker cookie bytes without replacing a partition":
+        val origin = Origin(
+            scheme: "https", host: "api.example.test", port: 443
+        )
+        val partition_key = "https://example.test"
+        var store = CookieStore.new()
+        val boundary = parse_set_cookie(
+            "edge=" + "x".repeat(4091) +
+            "; Secure; SameSite=None; Partitioned; Path=/"
+        )
+        val oversized = parse_set_cookie(
+            "edge=" + "y".repeat(4092) +
+            "; Secure; SameSite=None; Partitioned; Path=/"
+        )
+
+        step("Admit exactly 4096 serialized cookie bytes")
+        expect(store.store_from_origin(
+            boundary, origin, 1000, partition_key
+        ).accepted).to_be(true)
+
+        step("Reject 4097 bytes before replacing the partition identity")
+        val rejected = store.store_from_origin(
+            oversized, origin, 1001, partition_key
+        )
+        expect(rejected.accepted).to_be(false)
+        expect(rejected.reason).to_equal(
+            "cookie-exceeds-4096-byte-limit"
+        )
+        expect(store.count()).to_equal(1)
+        val retained = store.get_header_for_origin(
+            origin, "/", Some(origin), "GET", false, 1001, partition_key
+        )
+        expect(retained.len()).to_equal(4096)
+        expect(retained).to_start_with("edge=xxxx")
+        expect(retained.contains("edge=yyyy")).to_be(false)
+
+    # @req REQ-WEB-BROWSER-013
+    # @manual: folded
+    it "should serialize cookies by path length then stable creation order":
+        val origin = Origin(
+            scheme: "https", host: "example.com", port: 443
+        )
+        val top_partition = "https://top.example"
+        val other_partition = "https://other.example"
+        var store = CookieStore.new()
+        val _ = store.store_from_origin(
+            parse_set_cookie("root=base; Path=/"), origin, 100
+        )
+        val _ = store.store_from_origin(
+            parse_set_cookie("same_first=one; Path=/app"), origin, 101
+        )
+        val _ = store.store_from_origin(
+            parse_set_cookie(
+                "private=secret; HttpOnly; Path=/app/admin"
+            ),
+            origin, 102
+        )
+        val _ = store.store_from_origin(
+            parse_set_cookie("same_second=two; Path=/app"), origin, 103
+        )
+        val _ = store.store_from_origin(
+            parse_set_cookie(
+                "partition=top; Secure; SameSite=None; Partitioned; " +
+                "Path=/app/admin/settings"
+            ),
+            origin, 104, top_partition
+        )
+        val _ = store.store_from_origin(
+            parse_set_cookie(
+                "partition=other; Secure; SameSite=None; Partitioned; " +
+                "Path=/app/admin/settings"
+            ),
+            origin, 105, other_partition
+        )
+        val _ = store.store_from_origin(
+            parse_set_cookie("same_first=updated; Path=/app"), origin, 106
+        )
+
+        step("Retain stable tie order while excluding HttpOnly from script")
+        val path = "/app/admin/settings/page"
+        expect(store.get_header_for_origin(
+            origin, path, Some(origin), "GET", false, 107, top_partition
+        )).to_equal(
+            "partition=top; private=secret; same_first=updated; " +
+            "same_second=two; root=base"
+        )
+        expect(store.script_cookie_header(
+            origin, path, 107, top_partition
+        )).to_equal(
+            "partition=top; same_first=updated; same_second=two; root=base"
+        )
 
     # @manual: show
     # @capture(exec)

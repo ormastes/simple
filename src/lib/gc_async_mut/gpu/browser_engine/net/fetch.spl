@@ -31,6 +31,12 @@ val DEFAULT_MAX_REDIRECTS = 20
 # Default DNS cache TTL in seconds.
 val DEFAULT_DNS_TTL = 300
 
+fn _cookie_source_boundary_valid(value: text) -> bool:
+    not (
+        value.contains("\0") or value.contains("\r") or
+        value.contains("\n")
+    )
+
 class FetchSingleHopPreparation:
     request: FetchRequest
     response: FetchResponse?
@@ -91,8 +97,7 @@ class FetchEngine:
         )
         var cookies: [Cookie] = []
         for header in headers:
-            if (header.len() > 4096 or header.contains("\0") or
-                header.contains("\r") or header.contains("\n")):
+            if not _cookie_source_boundary_valid(header):
                 return false
             val cookie = apply_max_age(
                 apply_default_path(
@@ -200,15 +205,19 @@ class FetchEngine:
             for line in validated.headers.split("\r\n"):
                 val lower_line = line.to_lower()
                 if lower_line.starts_with("set-cookie:"):
-                    val cookie_value = line.slice(11, line.len()).trim()
-                    val cookie = apply_max_age(
-                        apply_default_path(
-                            parse_set_cookie(cookie_value), cookie_value, request.url.path
-                        ), cookie_value, now
-                    )
-                    val _ = cookie_store.store_from_origin(
-                        cookie, target_origin, now, partition_key
-                    )
+                    val raw_cookie_value = line.slice(11, line.len())
+                    if _cookie_source_boundary_valid(raw_cookie_value):
+                        val cookie_value = raw_cookie_value.trim()
+                        val cookie = apply_max_age(
+                            apply_default_path(
+                                parse_set_cookie(cookie_value), cookie_value,
+                                request.url.path
+                            ),
+                            cookie_value, now
+                        )
+                        val _ = cookie_store.store_from_origin(
+                            cookie, target_origin, now, partition_key
+                        )
             self.cookie_store = cookie_store
 
         # Step 7: Cache the response if eligible

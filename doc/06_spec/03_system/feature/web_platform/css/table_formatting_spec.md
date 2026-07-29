@@ -1,25 +1,658 @@
-# Fixed HTML table formatting
+# HTML table formatting
 
-This bounded conformance slice proves fixed direct and row-grouped HTML tables
-through the shared Style, canonical table owner, Draw IR, and Engine2D paths.
+> Proves bounded fixed-layout and explicit-width automatic-layout table slices
 
-## Fixed table scenario
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 6 | 6 | 0 | 0 |
 
-1. Render a 40-pixel `table-layout: fixed` table with a caption, two rows,
-   two columns, padded bordered cells, and one `colspan="2"` cell.
-2. Require computed display roles: `table`, `table-caption`, `table-row`, and
-   `table-cell`.
-3. Require exact caption, row, and cell geometry plus Draw IR parentage.
-4. Require absolute Engine2D pixels for the caption, each cell background,
-   a cell border, and the canvas below the table.
+<details>
+<summary>Full Scenario Manual</summary>
 
-## Grouped tbody control
+# HTML table formatting
 
-1. Render two fixed rows inside a `tbody`.
-2. Require the `table-row-group` computed role and exact row/cell geometry.
-3. Require canonical Draw IR parentage from table to group to row to cell.
-4. Check absolute Engine2D cell pixels only after semantics and Draw IR pass.
+Proves bounded fixed-layout and explicit-width automatic-layout table slices
 
-This slice intentionally does not claim the automatic table layout algorithm,
-rowspan placement, or collapsed-border conflict resolution. Those remain
-explicit unsupported gaps.
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/feature/web_platform/css/table_formatting_spec.spl` |
+| Updated | 2026-07-29 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Proves bounded fixed-layout and explicit-width automatic-layout table slices
+through computed Style, canonical Draw IR geometry, and Engine2D pixels.
+
+## Scenarios
+
+### HTML table formatting
+
+#### should format caption rows cells and colspan through shared layout
+
+- Render a fixed two-row two-column table
+   - Artifact capture: after_step
+- Expose the HTML table display roles in computed Style
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 4 expected checks
+   - Expected: _table_style(table, "display") equals `table`
+   - Expected: _table_style(caption, "display") equals `table-caption`
+   - Expected: _table_style(row1, "display") equals `table-row`
+   - Expected: _table_style(a, "display") equals `table-cell`
+- Preserve exact table geometry and Draw IR parentage
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 7 expected checks
+   - Expected: table.parent_id equals `page`
+   - Expected: caption.parent_id equals `grid`
+   - Expected: row1.parent_id equals `grid`
+   - Expected: row2.parent_id equals `grid`
+   - Expected: a.parent_id equals `row1`
+   - Expected: b.parent_id equals `row1`
+   - Expected: wide.parent_id equals `row2`
+- Execute the same table through Engine2D absolute pixels
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 6 expected checks
+   - Expected: pixels[1 * 48 + 1] equals `0xFFFFFF00u32`
+   - Expected: pixels[18 * 48 + 2] equals `0xFFFF0000u32`
+   - Expected: pixels[18 * 48 + 22] equals `0xFF00FF00u32`
+   - Expected: pixels[40 * 48 + 2] equals `0xFF0000FFu32`
+   - Expected: pixels[16 * 48] equals `0xFF000000u32`
+   - Expected: pixels[61 * 48 + 1] equals `0xFFFFFFFFu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 106 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render a fixed two-row two-column table")
+val html = (
+    "<html><head><style>" +
+    "html,body{margin:0;background:#ffffff}" +
+    "table{table-layout:fixed;width:40px}" +
+    "caption{background:#ffff00}" +
+    "tr{background:#dddddd}" +
+    "th,td{padding:2px;border:1px solid #000000}" +
+    "#a{background:#ff0000}#b{background:#00ff00}" +
+    "#wide{background:#0000ff}" +
+    "</style></head><body><table id='grid'>" +
+    "<caption id='cap'>T</caption>" +
+    "<tr id='row1'><th id='a'>A</th><td id='b'>B</td></tr>" +
+    "<tr id='row2'><td id='wide' colspan='2'>C</td></tr>" +
+    "</table></body></html>"
+)
+val composition = simple_web_layout_render_html_draw_ir(
+    html, 48, 64
+)
+val commands = composition.batches[0].commands
+val table_index = _table_command_index(commands, "grid")
+val caption_index = _table_command_index(commands, "cap")
+val row1_index = _table_command_index(commands, "row1")
+val row2_index = _table_command_index(commands, "row2")
+val a_index = _table_command_index(commands, "a")
+val b_index = _table_command_index(commands, "b")
+val wide_index = _table_command_index(commands, "wide")
+expect(table_index).to_be_greater_than(-1)
+expect(caption_index).to_be_greater_than(-1)
+expect(row1_index).to_be_greater_than(-1)
+expect(row2_index).to_be_greater_than(-1)
+expect(a_index).to_be_greater_than(-1)
+expect(b_index).to_be_greater_than(-1)
+expect(wide_index).to_be_greater_than(-1)
+val table = commands[table_index]
+val caption = commands[caption_index]
+val row1 = commands[row1_index]
+val row2 = commands[row2_index]
+val a = commands[a_index]
+val b = commands[b_index]
+val wide = commands[wide_index]
+
+step("Expose the HTML table display roles in computed Style")
+expect(simple_web_layout_debug_style_by_id(
+    html, "grid", "display"
+)).to_equal("table")
+expect(simple_web_layout_debug_style_by_id(
+    html, "cap", "display"
+)).to_equal("table-caption")
+expect(simple_web_layout_debug_style_by_id(
+    html, "row1", "display"
+)).to_equal("table-row")
+expect(simple_web_layout_debug_style_by_id(
+    html, "a", "display"
+)).to_equal("table-cell")
+expect(_table_style(table, "display")).to_equal("table")
+expect(_table_style(caption, "display")).to_equal("table-caption")
+expect(_table_style(row1, "display")).to_equal("table-row")
+expect(_table_style(a, "display")).to_equal("table-cell")
+
+step("Preserve exact table geometry and Draw IR parentage")
+expect(simple_web_layout_debug_layout_by_id(
+    html, 48, 64, "wide", "w"
+)).to_equal("40")
+expect(simple_web_layout_debug_layout_by_id(
+    html, 48, 64, "row2", "y"
+)).to_equal("38")
+expect([table.x, table.y, table.width, table.height]).to_equal(
+    [0, 0, 40, 60]
+)
+expect([caption.x, caption.y, caption.width, caption.height]).to_equal(
+    [0, 0, 40, 16]
+)
+expect([row1.x, row1.y, row1.width, row1.height]).to_equal(
+    [0, 16, 40, 22]
+)
+expect([a.x, a.y, a.width, a.height]).to_equal(
+    [0, 16, 20, 22]
+)
+expect([b.x, b.y, b.width, b.height]).to_equal(
+    [20, 16, 20, 22]
+)
+expect([row2.x, row2.y, row2.width, row2.height]).to_equal(
+    [0, 38, 40, 22]
+)
+expect([wide.x, wide.y, wide.width, wide.height]).to_equal(
+    [0, 38, 40, 22]
+)
+expect(table.parent_id).to_equal("page")
+expect(caption.parent_id).to_equal("grid")
+expect(row1.parent_id).to_equal("grid")
+expect(row2.parent_id).to_equal("grid")
+expect(a.parent_id).to_equal("row1")
+expect(b.parent_id).to_equal("row1")
+expect(wide.parent_id).to_equal("row2")
+
+step("Execute the same table through Engine2D absolute pixels")
+val pixels = simple_web_layout_render_html_readback_engine2d_result(
+    html, 48, 64, "software"
+).readback.pixels
+expect(pixels[1 * 48 + 1]).to_equal(0xFFFFFF00u32)
+expect(pixels[18 * 48 + 2]).to_equal(0xFFFF0000u32)
+expect(pixels[18 * 48 + 22]).to_equal(0xFF00FF00u32)
+expect(pixels[40 * 48 + 2]).to_equal(0xFF0000FFu32)
+expect(pixels[16 * 48]).to_equal(0xFF000000u32)
+expect(pixels[61 * 48 + 1]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### should route grouped tbody rows through the table owner
+
+- Render fixed rows owned by a tbody group
+   - Artifact capture: after_step
+- Expose grouped semantics and canonical Draw IR ownership
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
+   - Expected: group.parent_id equals `grouped`
+   - Expected: row.parent_id equals `group`
+   - Expected: cell.parent_id equals `grow2`
+- Execute grouped rows through Engine2D after semantic checks
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 4 expected checks
+   - Expected: pixels[18 * 48 + 2] equals `0xFFFF0000u32`
+   - Expected: pixels[18 * 48 + 22] equals `0xFF00FF00u32`
+   - Expected: pixels[40 * 48 + 2] equals `0xFF0000FFu32`
+   - Expected: pixels[40 * 48 + 22] equals `0xFFFF00FFu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 58 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render fixed rows owned by a tbody group")
+val html = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{table-layout:fixed;width:40px}" +
+    "caption{background:#ffff00}tbody{background:#eeeeee}" +
+    "tr{background:#dddddd}td{padding:2px;border:1px solid #000}" +
+    "#ga{background:#ff0000}#gb{background:#00ff00}" +
+    "#gc{background:#0000ff}#gd{background:#ff00ff}</style>" +
+    "<table id='grouped'><caption id='gcap'>G</caption>" +
+    "<tbody id='group'><tr id='grow1'>" +
+    "<td id='ga'>A</td><td id='gb'>B</td></tr>" +
+    "<tr id='grow2'><td id='gc'>C</td><td id='gd'>D</td></tr>" +
+    "</tbody></table>"
+)
+val commands = simple_web_layout_render_html_draw_ir(
+    html, 48, 64
+).batches[0].commands
+val group_index = _table_command_index(commands, "group")
+val row_index = _table_command_index(commands, "grow2")
+val cell_index = _table_command_index(commands, "gd")
+expect(group_index).to_be_greater_than(-1)
+expect(row_index).to_be_greater_than(-1)
+expect(cell_index).to_be_greater_than(-1)
+
+step("Expose grouped semantics and canonical Draw IR ownership")
+expect(simple_web_layout_debug_style_by_id(
+    html, "group", "display"
+)).to_equal("table-row-group")
+expect(simple_web_layout_debug_layout_by_id(
+    html, 48, 64, "grow2", "y"
+)).to_equal("38")
+expect(simple_web_layout_debug_layout_by_id(
+    html, 48, 64, "gd", "w"
+)).to_equal("20")
+val group = commands[group_index]
+val row = commands[row_index]
+val cell = commands[cell_index]
+expect([group.x, group.y, group.width, group.height]).to_equal(
+    [0, 16, 40, 44]
+)
+expect([row.x, row.y, row.width, row.height]).to_equal(
+    [0, 38, 40, 22]
+)
+expect([cell.x, cell.y, cell.width, cell.height]).to_equal(
+    [20, 38, 20, 22]
+)
+expect(group.parent_id).to_equal("grouped")
+expect(row.parent_id).to_equal("group")
+expect(cell.parent_id).to_equal("grow2")
+
+step("Execute grouped rows through Engine2D after semantic checks")
+val pixels = simple_web_layout_render_html_readback_engine2d_result(
+    html, 48, 64, "software"
+).readback.pixels
+expect(pixels[18 * 48 + 2]).to_equal(0xFFFF0000u32)
+expect(pixels[18 * 48 + 22]).to_equal(0xFF00FF00u32)
+expect(pixels[40 * 48 + 2]).to_equal(0xFF0000FFu32)
+expect(pixels[40 * 48 + 22]).to_equal(0xFFFF00FFu32)
+```
+
+</details>
+
+#### should size explicit non-spanning columns in automatic layout
+
+- Render an explicit-width table with automatic column layout
+   - Artifact capture: after_step
+- Use one stable column plan for every row
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 6 expected checks
+   - Expected: row1.parent_id equals `auto`
+   - Expected: row2.parent_id equals `auto`
+   - Expected: aa.parent_id equals `ar1`
+   - Expected: ab.parent_id equals `ar1`
+   - Expected: ac.parent_id equals `ar2`
+   - Expected: ad.parent_id equals `ar2`
+- Execute automatic columns through Engine2D absolute pixels
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 5 expected checks
+   - Expected: pixels[2 * 88 + 2] equals `0xFFFF0000u32`
+   - Expected: pixels[2 * 88 + 62] equals `0xFF00FF00u32`
+   - Expected: pixels[14 * 88 + 2] equals `0xFF0000FFu32`
+   - Expected: pixels[14 * 88 + 62] equals `0xFFFF00FFu32`
+   - Expected: pixels[25 * 88 + 2] equals `0xFFFFFFFFu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 136 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render an explicit-width table with automatic column layout")
+val html = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{width:80px}" +
+    "td{box-sizing:border-box;height:12px;padding:0}" +
+    "#aa,#ac{width:50px}" +
+    "#ab,#ad{width:10px}" +
+    "#aa{background:#ff0000}#ab{background:#00ff00}" +
+    "#ac{background:#0000ff}#ad{background:#ff00ff}</style>" +
+    "<table id='auto'><tr id='ar1'>" +
+    "<td id='aa'></td><td id='ab'></td></tr>" +
+    "<tr id='ar2'><td id='ac'></td><td id='ad'></td></tr>" +
+    "</table>"
+)
+val commands = simple_web_layout_render_html_draw_ir(
+    html, 88, 32
+).batches[0].commands
+val table_index = _table_command_index(commands, "auto")
+val row1_index = _table_command_index(commands, "ar1")
+val row2_index = _table_command_index(commands, "ar2")
+val aa_index = _table_command_index(commands, "aa")
+val ab_index = _table_command_index(commands, "ab")
+val ac_index = _table_command_index(commands, "ac")
+val ad_index = _table_command_index(commands, "ad")
+expect(table_index).to_be_greater_than(-1)
+expect(row1_index).to_be_greater_than(-1)
+expect(row2_index).to_be_greater_than(-1)
+expect(aa_index).to_be_greater_than(-1)
+expect(ab_index).to_be_greater_than(-1)
+expect(ac_index).to_be_greater_than(-1)
+expect(ad_index).to_be_greater_than(-1)
+val table = commands[table_index]
+val row1 = commands[row1_index]
+val row2 = commands[row2_index]
+val aa = commands[aa_index]
+val ab = commands[ab_index]
+val ac = commands[ac_index]
+val ad = commands[ad_index]
+
+step("Use one stable column plan for every row")
+expect(simple_web_layout_debug_style_by_id(
+    html, "auto", "table-layout"
+)).to_equal("auto")
+expect([
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "aa", "x"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "aa", "y"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "aa", "w"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "aa", "h"
+    )
+]).to_equal(["0", "0", "60", "12"])
+expect([
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ab", "x"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ab", "y"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ab", "w"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ab", "h"
+    )
+]).to_equal(["60", "0", "20", "12"])
+expect([
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ac", "x"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ac", "y"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ac", "w"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ac", "h"
+    )
+]).to_equal(["0", "12", "60", "12"])
+expect([
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ad", "x"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ad", "y"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ad", "w"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 88, 32, "ad", "h"
+    )
+]).to_equal(["60", "12", "20", "12"])
+expect([table.x, table.y, table.width, table.height]).to_equal(
+    [0, 0, 80, 24]
+)
+expect([row1.x, row1.y, row1.width, row1.height]).to_equal(
+    [0, 0, 80, 12]
+)
+expect([row2.x, row2.y, row2.width, row2.height]).to_equal(
+    [0, 12, 80, 12]
+)
+expect([aa.x, aa.y, aa.width, aa.height]).to_equal(
+    [0, 0, 60, 12]
+)
+expect([ab.x, ab.y, ab.width, ab.height]).to_equal(
+    [60, 0, 20, 12]
+)
+expect([ac.x, ac.y, ac.width, ac.height]).to_equal(
+    [0, 12, 60, 12]
+)
+expect([ad.x, ad.y, ad.width, ad.height]).to_equal(
+    [60, 12, 20, 12]
+)
+expect(row1.parent_id).to_equal("auto")
+expect(row2.parent_id).to_equal("auto")
+expect(aa.parent_id).to_equal("ar1")
+expect(ab.parent_id).to_equal("ar1")
+expect(ac.parent_id).to_equal("ar2")
+expect(ad.parent_id).to_equal("ar2")
+
+step("Execute automatic columns through Engine2D absolute pixels")
+val pixels = simple_web_layout_render_html_readback_engine2d_result(
+    html, 88, 32, "software"
+).readback.pixels
+expect(pixels[2 * 88 + 2]).to_equal(0xFFFF0000u32)
+expect(pixels[2 * 88 + 62]).to_equal(0xFF00FF00u32)
+expect(pixels[14 * 88 + 2]).to_equal(0xFF0000FFu32)
+expect(pixels[14 * 88 + 62]).to_equal(0xFFFF00FFu32)
+expect(pixels[25 * 88 + 2]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### should preserve generic automatic layout when explicit columns overflow
+
+- Render explicit automatic columns wider than their table
+   - Artifact capture: after_step
+- Keep Web layout semantics without equal-width shrinking
+   - Artifact capture: after_step
+- Execute the preserved generic layout through Engine2D
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
+   - Expected: pixels[2 * 88 + 2] equals `0xFFFF0000u32`
+   - Expected: pixels[14 * 88 + 2] equals `0xFF00FF00u32`
+   - Expected: pixels[2 * 88 + 52] equals `0xFFFFFFFFu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 40 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render explicit automatic columns wider than their table")
+val html = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{width:80px}td{box-sizing:border-box;width:50px;" +
+    "height:12px;padding:0}" +
+    "#oa{background:#ff0000}#ob{background:#00ff00}</style>" +
+    "<table id='overflow'><tr id='orow'>" +
+    "<td id='oa'></td><td id='ob'></td></tr></table>"
+)
+val commands = simple_web_layout_render_html_draw_ir(
+    html, 88, 32
+).batches[0].commands
+val oa_index = _table_command_index(commands, "oa")
+val ob_index = _table_command_index(commands, "ob")
+expect(oa_index).to_be_greater_than(-1)
+expect(ob_index).to_be_greater_than(-1)
+val oa = commands[oa_index]
+val ob = commands[ob_index]
+
+step("Keep Web layout semantics without equal-width shrinking")
+expect(simple_web_layout_debug_style_by_id(
+    html, "overflow", "table-layout"
+)).to_equal("auto")
+expect(simple_web_layout_debug_layout_by_id(
+    html, 88, 32, "oa", "w"
+)).to_equal("50")
+expect([oa.x, oa.y, oa.width, oa.height]).to_equal(
+    [0, 0, 50, 12]
+)
+expect([ob.x, ob.y, ob.width, ob.height]).to_equal(
+    [0, 12, 50, 12]
+)
+
+step("Execute the preserved generic layout through Engine2D")
+val pixels = simple_web_layout_render_html_readback_engine2d_result(
+    html, 88, 32, "software"
+).readback.pixels
+expect(pixels[2 * 88 + 2]).to_equal(0xFFFF0000u32)
+expect(pixels[14 * 88 + 2]).to_equal(0xFF00FF00u32)
+expect(pixels[2 * 88 + 52]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### should preserve generic automatic layout for constrained cells
+
+- Render automatic cells with minimum and maximum widths
+   - Artifact capture: after_step
+- Apply constraints before emitting canonical Draw IR geometry
+   - Artifact capture: after_step
+- Execute constrained generic cells through Engine2D
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
+   - Expected: pixels[2 * 88 + 2] equals `0xFF0000FFu32`
+   - Expected: pixels[14 * 88 + 2] equals `0xFFFF00FFu32`
+   - Expected: pixels[2 * 88 + 32] equals `0xFFFFFFFFu32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 43 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render automatic cells with minimum and maximum widths")
+val html = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{width:80px}td{box-sizing:border-box;height:12px;padding:0}" +
+    "#ca{width:10px;min-width:30px;background:#0000ff}" +
+    "#cb{width:50px;max-width:20px;background:#ff00ff}</style>" +
+    "<table id='constrained'><tr>" +
+    "<td id='ca'></td><td id='cb'></td></tr></table>"
+)
+val commands = simple_web_layout_render_html_draw_ir(
+    html, 88, 32
+).batches[0].commands
+val ca_index = _table_command_index(commands, "ca")
+val cb_index = _table_command_index(commands, "cb")
+expect(ca_index).to_be_greater_than(-1)
+expect(cb_index).to_be_greater_than(-1)
+val ca = commands[ca_index]
+val cb = commands[cb_index]
+
+step("Apply constraints before emitting canonical Draw IR geometry")
+expect(simple_web_layout_debug_style_by_id(
+    html, "constrained", "table-layout"
+)).to_equal("auto")
+expect(simple_web_layout_debug_layout_by_id(
+    html, 88, 32, "ca", "w"
+)).to_equal("30")
+expect(simple_web_layout_debug_layout_by_id(
+    html, 88, 32, "cb", "w"
+)).to_equal("20")
+expect([ca.x, ca.y, ca.width, ca.height]).to_equal(
+    [0, 0, 30, 12]
+)
+expect([cb.x, cb.y, cb.width, cb.height]).to_equal(
+    [0, 12, 20, 12]
+)
+
+step("Execute constrained generic cells through Engine2D")
+val pixels = simple_web_layout_render_html_readback_engine2d_result(
+    html, 88, 32, "software"
+).readback.pixels
+expect(pixels[2 * 88 + 2]).to_equal(0xFF0000FFu32)
+expect(pixels[14 * 88 + 2]).to_equal(0xFFFF00FFu32)
+expect(pixels[2 * 88 + 32]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### should include content box padding and borders in automatic columns
+
+- Render supported content-box automatic columns
+   - Artifact capture: after_step
+- Include padding and borders in Web and Draw IR geometry
+   - Artifact capture: after_step
+- Execute padded automatic columns through Engine2D
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 4 expected checks
+   - Expected: pixels[2 * 88 + 2] equals `0xFFFF0000u32`
+   - Expected: pixels[2 * 88 + 57] equals `0xFF00FF00u32`
+   - Expected: pixels[2 * 88] equals `0xFF000000u32`
+   - Expected: pixels[2 * 88 + 55] equals `0xFF000000u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 48 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render supported content-box automatic columns")
+val html = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{width:80px}td{box-sizing:content-box;height:12px;" +
+    "padding:4px;border:1px solid #000}" +
+    "#pa{width:40px;background:#ff0000}" +
+    "#pb{width:10px;background:#00ff00}</style>" +
+    "<table id='padded'><tr id='prow'>" +
+    "<td id='pa'></td><td id='pb'></td></tr></table>"
+)
+val commands = simple_web_layout_render_html_draw_ir(
+    html, 88, 32
+).batches[0].commands
+val row_index = _table_command_index(commands, "prow")
+val pa_index = _table_command_index(commands, "pa")
+val pb_index = _table_command_index(commands, "pb")
+expect(row_index).to_be_greater_than(-1)
+expect(pa_index).to_be_greater_than(-1)
+expect(pb_index).to_be_greater_than(-1)
+val row = commands[row_index]
+val pa = commands[pa_index]
+val pb = commands[pb_index]
+
+step("Include padding and borders in Web and Draw IR geometry")
+expect(simple_web_layout_debug_style_by_id(
+    html, "padded", "table-layout"
+)).to_equal("auto")
+expect(simple_web_layout_debug_layout_by_id(
+    html, 88, 32, "pa", "w"
+)).to_equal("55")
+expect([row.x, row.y, row.width, row.height]).to_equal(
+    [0, 0, 80, 22]
+)
+expect([pa.x, pa.y, pa.width, pa.height]).to_equal(
+    [0, 0, 55, 22]
+)
+expect([pb.x, pb.y, pb.width, pb.height]).to_equal(
+    [55, 0, 25, 22]
+)
+
+step("Execute padded automatic columns through Engine2D")
+val pixels = simple_web_layout_render_html_readback_engine2d_result(
+    html, 88, 32, "software"
+).readback.pixels
+expect(pixels[2 * 88 + 2]).to_equal(0xFFFF0000u32)
+expect(pixels[2 * 88 + 57]).to_equal(0xFF00FF00u32)
+expect(pixels[2 * 88]).to_equal(0xFF000000u32)
+expect(pixels[2 * 88 + 55]).to_equal(0xFF000000u32)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

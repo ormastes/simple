@@ -2159,3 +2159,31 @@ implementation in progress / target evidence blocked
   Broad transform changes were reverted after review found normal-flow
   corruption. Rejected supports/custom-property/specificity work is retried
   only in `/tmp/simple-css-d1-retry.20260729` for reviewed patch import.
+- browser boundary and interaction tranche (2026-07-29): Hosted and worker
+  address editing now keeps `about:blank` until commit, restores the committed
+  URL on Escape, and enforces the 2048-byte UTF-8 limit atomically. Missing or
+  invalid button types use the shared submit default while explicit
+  `type=button` remains inert. CSP sandbox capabilities intersect repeated
+  header policies, gate inline handlers/forms/top navigation/storage/cookies,
+  and use an opaque `null` initiator without ambient cookie authority.
+  The hosted broker now validates every untrusted SBRQ4 initiator before
+  cookie writes or fetch: only its trusted requester or `null` is admitted,
+  and `null` requires `credentials=omit` with no script cookie writes.
+  Cookie storage limits the serialized UTF-8 `name=value` pair to 4096 bytes,
+  preserves global creation ordering across jars and replacement, and keeps
+  the bounded raw setter transport distinct at 8192 bytes. Independent
+  security and interaction reviews returned PASS after the final adversarial
+  protocol-boundary repair.
+- retained animation and manual evidence tranche (2026-07-29): Hosted animation
+  invalidation reuses retained CSS animation instances and reconciles dynamic
+  class changes once. Duration, delay, and iteration schedules are retained as
+  typed fields, so the hot next-frame helper performs arithmetic only and no
+  longer splits or reparses text each tick; delayed, paused/resumed, infinite,
+  finite-end, title-only rAF, and quiescent behavior remain covered. The
+  phase-2/3 pure-Simple docgen artifact regenerated 47 affected browser,
+  HTML, CSS, security, runner, and docgen manuals with
+  `47 complete, 0 stubs`; no full
+  bootstrap or target-runtime claim was made. Previously step-less changed
+  specs now expose immediate imperative `step("...")` flows. Native browser,
+  live HTTPS/certificate, platform sandbox, RSS/GC/soak, and production
+  performance evidence remain active blockers rather than PASS claims.

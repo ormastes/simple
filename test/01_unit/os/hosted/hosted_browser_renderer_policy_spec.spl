@@ -238,7 +238,8 @@ fn request(
     body: text = "",
     content_type: text = "",
     credentials: text = "include",
-    script_cookie_writes: [text] = []
+    script_cookie_writes: [text] = [],
+    initiator_origin: text = ""
 ) -> BrowserRendererNetworkDecodeResult:
     BrowserRendererNetworkDecodeResult(
         ok: true,
@@ -254,7 +255,8 @@ fn request(
         credentials: credentials,
         script_cookie_writes: script_cookie_writes,
         status: 0,
-        error: ""
+        error: "",
+        initiator_origin: initiator_origin
     )
 
 fn fetch_request(url: text, mode: RequestMode) -> FetchRequest:
@@ -1036,6 +1038,33 @@ describe "hosted browser renderer broker policy":
             old_origin, "/next", Some(old_origin), "GET", false,
             rt_time_now_unix_micros() / 1000000
         ).contains("fresh=yes")).to_be(false)
+
+    it "validates renderer initiators before cookie writes or fetch":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.document_url = "https://trusted.test/app"
+        broker.document_origin = "https://trusted.test"
+
+        expect(broker._renderer_initiator_valid(request(
+            "fetch", "https://trusted.test/data", credentials: "include",
+            initiator_origin: "https://trusted.test"
+        ))).to_be(true)
+        expect(broker._renderer_initiator_valid(request(
+            "fetch", "https://trusted.test/data", credentials: "omit",
+            initiator_origin: "null"
+        ))).to_be(true)
+        expect(broker._renderer_initiator_valid(request(
+            "fetch", "https://trusted.test/data", credentials: "omit",
+            initiator_origin: "https://forged.test"
+        ))).to_be(false)
+        expect(broker._renderer_initiator_valid(request(
+            "fetch", "https://trusted.test/data", credentials: "include",
+            initiator_origin: "null"
+        ))).to_be(false)
+        expect(broker._renderer_initiator_valid(request(
+            "fetch", "https://trusted.test/data", credentials: "omit",
+            script_cookie_writes: ["sid=forged"],
+            initiator_origin: "null"
+        ))).to_be(false)
 
     it "keeps all cookies in the broker transport only":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)

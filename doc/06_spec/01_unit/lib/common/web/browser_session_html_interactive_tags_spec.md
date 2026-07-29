@@ -1,29 +1,6 @@
-# Browser Session Html Interactive Tags Specification
+# BrowserSession HTML interactive text projection
 
-> <details>
-
-<!-- sdn-diagram:id=browser_session_html_interactive_tags_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=browser_session_html_interactive_tags_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-browser_session_html_interactive_tags_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=browser_session_html_interactive_tags_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Projects the supported `details` and `dialog` visibility semantics to visible
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,45 +9,9 @@ browser_session_html_interactive_tags_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Browser Session Html Interactive Tags Specification
+# BrowserSession HTML interactive text projection
 
-## Scenarios
-
-### BrowserSession HTML interactive tag text semantics
-
-#### shows only summary text for closed details and full content for open details
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val closed_html = "<details><summary>More</summary><p>Hidden detail</p></details>"
-val open_html = "<details open><summary>More</summary><p>Visible detail</p></details>"
-expect(html_to_text(closed_html)).to_equal("More")
-expect(html_to_text(open_html)).to_equal("MoreVisible detail")
-```
-
-</details>
-
-#### hides closed dialog content and exposes open dialog fallback text
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val closed_html = "<p>Before</p><dialog>Hidden dialog</dialog><p>After</p>"
-val open_html = "<p>Before</p><dialog open>Visible dialog</dialog><p>After</p>"
-expect(html_to_text(closed_html)).to_equal("BeforeAfter")
-expect(html_to_text(open_html)).to_equal("BeforeVisible dialogAfter")
-```
-
-</details>
+Projects the supported `details` and `dialog` visibility semantics to visible
 
 ## At a Glance
 
@@ -79,13 +20,61 @@ expect(html_to_text(open_html)).to_equal("BeforeVisible dialogAfter")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_html_interactive_tags_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+Projects the supported `details` and `dialog` visibility semantics to visible
+text. This is focused text projection, not event or interaction evidence.
 
-Tests covering:
-- BrowserSession HTML interactive tag text semantics
+## Scenarios
+
+### BrowserSession HTML interactive tag text semantics
+
+#### should show summary text when details is closed and content when open
+
+- Project supported HTML semantics to visible text
+   - Expected: html_to_text(closed_html) equals `More`
+   - Expected: html_to_text(open_html) equals `MoreVisible detail`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project supported HTML semantics to visible text")
+val closed_html = "<details><summary>More</summary><p>Hidden detail</p></details>"
+val open_html = "<details open><summary>More</summary><p>Visible detail</p></details>"
+expect(html_to_text(closed_html)).to_equal("More")
+expect(html_to_text(open_html)).to_equal("MoreVisible detail")
+```
+
+</details>
+
+#### should hide closed dialog content and expose open dialog fallback text
+
+- Project supported HTML semantics to visible text
+   - Expected: html_to_text(closed_html) equals `BeforeAfter`
+   - Expected: html_to_text(open_html) equals `BeforeVisible dialogAfter`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project supported HTML semantics to visible text")
+val closed_html = "<p>Before</p><dialog>Hidden dialog</dialog><p>After</p>"
+val open_html = "<p>Before</p><dialog open>Visible dialog</dialog><p>After</p>"
+expect(html_to_text(closed_html)).to_equal("BeforeAfter")
+expect(html_to_text(open_html)).to_equal("BeforeVisible dialogAfter")
+```
+
+</details>
 
 ## Scenario Summary
 

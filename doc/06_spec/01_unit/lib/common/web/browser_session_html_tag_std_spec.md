@@ -1,29 +1,6 @@
-# Browser Session Html Tag Std Specification
+# BrowserSession supported HTML tag projection
 
-> <details>
-
-<!-- sdn-diagram:id=browser_session_html_tag_std_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=browser_session_html_tag_std_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-browser_session_html_tag_std_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=browser_session_html_tag_std_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Checks the supported sectioning fallback and inert-template behavior in the
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,14 +9,30 @@ browser_session_html_tag_std_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Browser Session Html Tag Std Specification
+# BrowserSession supported HTML tag projection
+
+Checks the supported sectioning fallback and inert-template behavior in the
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/common/web/browser_session_html_tag_std_spec.spl` |
+| Updated | 2026-07-29 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Checks the supported sectioning fallback and inert-template behavior in the
+BrowserSession document projection. This is not full HTML or pixel parity.
 
 ## Scenarios
 
 ### BrowserSession HTML standard tag base coverage
 
-#### covers sectioning and landmark tags with visible fallback rendering
+#### should preserve sectioning and landmark tags in visible fallback output
 
+- Project supported HTML semantics to visible text
 -  assert visible tag
 -  assert visible tag
 -  assert visible tag
@@ -56,10 +49,11 @@ browser_session_html_tag_std_spec -> std
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Project supported HTML semantics to visible text")
 _assert_visible_tag("main", "<main>Main content</main>", "Main content")
 _assert_visible_tag("section", "<section>Section content</section>", "Section content")
 _assert_visible_tag("article", "<article>Article content</article>", "Article content")
@@ -76,15 +70,21 @@ expect(render.height).to_equal(160)
 
 </details>
 
-#### keeps template contents inert and out of visible body rendering
+#### should keep template contents inert and out of visible body output
+
+- Project supported HTML semantics to visible text
+   - Expected: session.current_body_html does not contain `Hidden template text`
+   - Expected: session.render_html_document() does not contain `Hidden template text`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Project supported HTML semantics to visible text")
 val session = _open_body("<p>Visible</p><template><section>Hidden template text</section></template>")
 expect(session.source_html).to_contain("<template>")
 expect(session.source_html).to_contain("Hidden template text")
@@ -94,21 +94,6 @@ expect(session.render_html_document().contains("Hidden template text")).to_equal
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/common/web/browser_session_html_tag_std_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- BrowserSession HTML standard tag base coverage
 
 ## Scenario Summary
 

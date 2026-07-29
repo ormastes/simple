@@ -10,6 +10,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity_at_element_path, be_dom_focused_id
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_animation_instances_next_ms,
     simple_web_layout_hit_test_target_at_time_with_animations
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
@@ -40,6 +41,8 @@ extern fn rt_browser_http_job_take_response(handle: i64) -> [u8]
 extern fn rt_browser_http_job_take_error(handle: i64) -> text
 extern fn rt_browser_http_job_cancel(handle: i64) -> bool
 extern fn rt_browser_http_job_free(handle: i64) -> bool
+
+val HOSTED_ADDRESS_MAX_BYTES: i64 = 2048
 
 fn _hosted_fetch_mode(kind: text) -> RequestMode:
     if kind == "document":
@@ -240,8 +243,14 @@ class HostedWebContentSession:
             self._poll_network_job()
             return
         if val Some(request) = self.browser.take_pending_request():
+            val requester_origin = if request.initiator_origin != "":
+                request.initiator_origin
+            else:
+                Origin.from_url(
+                    Url.parse_or_opaque(self.browser.document_url)
+                ).to_text()
             self.network.set_requester_origin(
-                Origin.from_url(Url.parse_or_opaque(self.browser.document_url)).to_text()
+                requester_origin
             )
             val fetch_request = FetchRequest(
                 url: Url.parse_or_opaque(request.url),
@@ -382,10 +391,43 @@ class HostedWebContentSession:
             return false
         if self.started_at_ms < 0:
             self.started_at_ms = now_ms
+        if self.browser.css_animation_reconcile_pending:
+            self.browser.prepare_css_animation_instances(self.width)
+        val before_time_ms = self.browser.monotonic_time_ms
+        val before_revisions = self.browser.render_revisions()
+        val before_title = self.browser.current_title
+        val before_animation_ms = max(
+            0_i64,
+            before_time_ms - self.browser.animation_start_time_ms
+        )
+        val animation_next_ms = simple_web_layout_animation_instances_next_ms(
+            self.browser.css_animation_instances, before_animation_ms
+        )
         val _ = self.browser.advance_time(now_ms - self.started_at_ms)
         self._pump_network_once()
         val body_html = self.presentation_html()
-        if body_html == self.published_body_html:
+        val after_revisions = self.browser.render_revisions()
+        val current_animation_ms = max(
+            0_i64,
+            self.browser.monotonic_time_ms -
+                self.browser.animation_start_time_ms
+        )
+        val css_animation_changed = (
+            animation_next_ms >= 0 and
+            animation_next_ms <= current_animation_ms
+        )
+        val render_changed = (
+            before_revisions.document_revision !=
+                after_revisions.document_revision or
+            before_revisions.style_revision != after_revisions.style_revision or
+            before_revisions.resource_revision !=
+                after_revisions.resource_revision or
+            before_title != self.browser.current_title
+        )
+        if (
+            body_html == self.published_body_html and
+            not render_changed and not css_animation_changed
+        ):
             return false
         self.published_body_html = body_html
         self.mutation_revision = self.mutation_revision + 1
@@ -499,6 +541,18 @@ class HostedWebContentSession:
                 value
             else:
                 current + value
+            if (
+                rt_text_to_bytes(updated).len().to_i64() >
+                HOSTED_ADDRESS_MAX_BYTES
+            ):
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "browser:session#address",
+                    callback_count: 0,
+                    mutation_revision: self.mutation_revision,
+                    reason: "address-too-long"
+                )
             self.address_replace_on_text = false
             return self._chrome_action(
                 event_id, "address", "set_value", updated
@@ -565,6 +619,18 @@ class HostedWebContentSession:
             if keycode == 13:
                 return self._chrome_action(
                     event_id, "address", "submit", ""
+                )
+            if keycode == 27:
+                self.browser.address_draft = self.browser.document_url
+                self.chrome_focus = ""
+                self.address_replace_on_text = false
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "browser:session#address",
+                    callback_count: 1,
+                    mutation_revision: self.mutation_revision,
+                    reason: ""
                 )
             if keycode == 8:
                 val current = self.address_text()

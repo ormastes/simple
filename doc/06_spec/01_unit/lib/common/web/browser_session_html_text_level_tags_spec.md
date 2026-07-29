@@ -1,29 +1,6 @@
-# Browser Session Html Text Level Tags Specification
+# BrowserSession HTML text-level projection
 
-> <details>
-
-<!-- sdn-diagram:id=browser_session_html_text_level_tags_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=browser_session_html_text_level_tags_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-browser_session_html_text_level_tags_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=browser_session_html_text_level_tags_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Projects the supported inline text-level semantics to visible text. This is
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,41 +9,9 @@ browser_session_html_text_level_tags_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Browser Session Html Text Level Tags Specification
+# BrowserSession HTML text-level projection
 
-## Scenarios
-
-### BrowserSession HTML text-level tag semantics
-
-#### preserves text content across common text-level formatting tags
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<p><em>em</em><strong>strong</strong><small>small</small><s>s</s><cite>cite</cite><q>quote</q><dfn>dfn</dfn><abbr>abbr</abbr><data value='7'>data</data><time datetime='2026-06-06'>time</time><code>code</code><var>var</var><samp>samp</samp><kbd>kbd</kbd><sub>sub</sub><sup>sup</sup><i>i</i><b>b</b><u>u</u><mark>mark</mark><bdi>bdi</bdi><bdo dir='rtl'>bdo</bdo><span>span</span></p>"
-expect(html_to_text(html)).to_equal("emstrongsmallscitequotedfnabbrdatatimecodevarsampkbdsubsupibumarkbdibdospan")
-```
-
-</details>
-
-#### maps br to a visible line break and wbr to an optional zero-width break
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<p>alpha<br>beta<wbr>gamma</p>"
-expect(html_to_text(html)).to_equal("alpha\nbetagamma")
-```
-
-</details>
+Projects the supported inline text-level semantics to visible text. This is
 
 ## At a Glance
 
@@ -75,13 +20,55 @@ expect(html_to_text(html)).to_equal("alpha\nbetagamma")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_html_text_level_tags_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+Projects the supported inline text-level semantics to visible text. This is
+focused text-projection evidence, not typography, layout, or pixel evidence.
 
-Tests covering:
-- BrowserSession HTML text-level tag semantics
+## Scenarios
+
+### BrowserSession HTML text-level tag semantics
+
+#### should preserve text across common text-level formatting tags
+
+- Project supported HTML semantics to visible text
+   - Expected: html_to_text(html) equals `emstrongsmallscitequotedfnabbrdatatimecodevarsampkbdsubsupibumarkbdibdospan`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project supported HTML semantics to visible text")
+val html = "<p><em>em</em><strong>strong</strong><small>small</small><s>s</s><cite>cite</cite><q>quote</q><dfn>dfn</dfn><abbr>abbr</abbr><data value='7'>data</data><time datetime='2026-06-06'>time</time><code>code</code><var>var</var><samp>samp</samp><kbd>kbd</kbd><sub>sub</sub><sup>sup</sup><i>i</i><b>b</b><u>u</u><mark>mark</mark><bdi>bdi</bdi><bdo dir='rtl'>bdo</bdo><span>span</span></p>"
+expect(html_to_text(html)).to_equal("emstrongsmallscitequotedfnabbrdatatimecodevarsampkbdsubsupibumarkbdibdospan")
+```
+
+</details>
+
+#### should map br to a line break and wbr to an optional zero-width break
+
+- Project supported HTML semantics to visible text
+   - Expected: html_to_text(html) equals `alpha\nbetagamma`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project supported HTML semantics to visible text")
+val html = "<p>alpha<br>beta<wbr>gamma</p>"
+expect(html_to_text(html)).to_equal("alpha\nbetagamma")
+```
+
+</details>
 
 ## Scenario Summary
 

@@ -660,6 +660,45 @@ describe "spipe docgen scenario body extraction":
                     case Ok(path):
                         expect(path).to_contain("/feature/usage/math_blocks_spec.md")
 
+    it "parses inline manual docstrings and replaces longer generated files":
+        val nonce = time_now_unix_micros().to_string()
+        val root = "/tmp/spipe_docgen_inline_" + nonce
+        val spec_dir = root + "/test/03_system/feature"
+        val output_dir = root + "/manuals"
+        val output_subdir = output_dir + "/03_system/feature"
+        val spec_path = spec_dir + "/inline_manual_spec.spl"
+        val output_path = output_subdir + "/inline_manual_spec.md"
+        expect(dir_create(spec_dir, true)).to_equal(true)
+        expect(dir_create(output_subdir, true)).to_equal(true)
+        expect(file_write(spec_path,
+            "\"\"\"# Inline Manual\n\n## Overview\nInline scope prose.\n\"\"\"\n" +
+            "describe \"Inline behavior\":\n    it \"passes\":\n        expect(1).to_equal(1)\n"
+        )).to_equal(true)
+        expect(file_write(output_path, "STALE_TRAILER".repeat(4096))).to_equal(true)
+
+        match parse_spipe_file(spec_path):
+            case Err(e):
+                expect(e).to_equal("")
+            case Ok(parsed):
+                expect(parsed.doc_blocks.len()).to_equal(1)
+                expect(parsed.feature_title).to_equal("Inline Manual")
+                val doc = SspecDoc(
+                    file_path: parsed.file_path,
+                    raw_content: parsed.raw_content,
+                    doc_blocks: parsed.doc_blocks,
+                    feature_title: parsed.feature_title,
+                    feature_ids: parsed.feature_ids,
+                    metadata: extract_metadata(parsed)
+                )
+                match generate_feature_doc(doc, output_dir):
+                    case Err(e):
+                        expect(e).to_equal("")
+                    case Ok(path):
+                        val generated = read_file(path)
+                        expect(generated).to_start_with("# Inline Manual\n\n> Inline scope prose.")
+                        expect(generated.contains("STALE_TRAILER")).to_equal(false)
+        val _cleanup = dir_remove_all(root)
+
     it "mirrors the source spec folder under the output directory":
         val parsed_result = parse_spipe_file("test/03_system/feature/usage/math_blocks_spec.spl")
         match parsed_result:
@@ -814,6 +853,8 @@ describe "spipe docgen scenario body extraction":
                 expect(e).to_equal("")
             case Ok(path):
                 val generated = read_file(path)
+                expect(generated).to_start_with("# Manual First\n\n> Tests covering Manual First.")
+                expect(generated.contains("> <details>")).to_equal(false)
                 val before_scenarios = generated.split("## Scenarios")[0]
                 val after_scenarios_parts = generated.split("## Scenarios")
                 expect(before_scenarios).to_equal("# Manual First\n\n")

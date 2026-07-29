@@ -1,29 +1,6 @@
-# Browser Session Html Metadata Tags Specification
+# BrowserSession HTML metadata text projection
 
-> <details>
-
-<!-- sdn-diagram:id=browser_session_html_metadata_tags_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=browser_session_html_metadata_tags_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-browser_session_html_metadata_tags_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=browser_session_html_metadata_tags_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Keeps supported document metadata outside visible text projection. This is
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,41 +9,9 @@ browser_session_html_metadata_tags_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Browser Session Html Metadata Tags Specification
+# BrowserSession HTML metadata text projection
 
-## Scenarios
-
-### BrowserSession HTML metadata tag text semantics
-
-#### keeps document metadata out of visible text extraction
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<!DOCTYPE html><html><head><title>Hidden title</title><base href='https://example.com/'><link rel='stylesheet' href='site.css'><meta name='description' content='Hidden meta'><style>body { color: red; }</style></head><body>Visible body</body></html>"
-expect(html_to_text(html)).to_equal("Visible body")
-```
-
-</details>
-
-#### keeps standalone title and style contents hidden
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<title>Hidden title</title><style>.hidden { display: none; }</style><p>Visible paragraph</p>"
-expect(html_to_text(html)).to_equal("Visible paragraph")
-```
-
-</details>
+Keeps supported document metadata outside visible text projection. This is
 
 ## At a Glance
 
@@ -75,13 +20,55 @@ expect(html_to_text(html)).to_equal("Visible paragraph")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_html_metadata_tags_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+Keeps supported document metadata outside visible text projection. This is
+focused visibility evidence, not complete metadata processing or rendering.
 
-Tests covering:
-- BrowserSession HTML metadata tag text semantics
+## Scenarios
+
+### BrowserSession HTML metadata tag text semantics
+
+#### should keep document metadata out of visible text extraction
+
+- Project supported HTML semantics to visible text
+   - Expected: html_to_text(html) equals `Visible body`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project supported HTML semantics to visible text")
+val html = "<!DOCTYPE html><html><head><title>Hidden title</title><base href='https://example.com/'><link rel='stylesheet' href='site.css'><meta name='description' content='Hidden meta'><style>body { color: red; }</style></head><body>Visible body</body></html>"
+expect(html_to_text(html)).to_equal("Visible body")
+```
+
+</details>
+
+#### should keep standalone title and style contents hidden
+
+- Project supported HTML semantics to visible text
+   - Expected: html_to_text(html) equals `Visible paragraph`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project supported HTML semantics to visible text")
+val html = "<title>Hidden title</title><style>.hidden { display: none; }</style><p>Visible paragraph</p>"
+expect(html_to_text(html)).to_equal("Visible paragraph")
+```
+
+</details>
 
 ## Scenario Summary
 

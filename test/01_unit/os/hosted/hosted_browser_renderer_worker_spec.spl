@@ -1265,6 +1265,110 @@ describe "hosted browser renderer worker":
         )).ok).to_be(true)
         expect(worker.browser.address_draft).to_equal("")
 
+    it "accepts 2048 UTF-8 address bytes and atomically rejects 2049":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 4,
+            payload: "C1\t2\t0\t7\naddress"
+        )).ok).to_be(true)
+
+        val exact = "é".repeat(1024)
+        val exact_wire = browser_renderer_text_encode(7, 5, 3, exact)
+        expect(exact_wire.ok).to_be(true)
+        expect(worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), exact_wire.wire
+        ).message).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal(exact)
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 6,
+            payload: "C1\t4\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 7,
+            payload: "C1\t5\t0\t7\naddress"
+        )).ok).to_be(true)
+        val oversized_wire = browser_renderer_text_encode(
+            7, 8, 6, exact + "x"
+        )
+        expect(oversized_wire.ok).to_be(true)
+        val rejected = worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), oversized_wire.wire
+        ).message)
+
+        expect(rejected.ok).to_be(false)
+        expect(rejected.reason).to_equal("address-too-long")
+        expect(worker.browser.address_draft).to_equal(exact)
+        expect(worker.chrome_focus).to_equal("address")
+        expect(worker.address_replace_on_text).to_be(true)
+
+    it "restores the committed address or about blank on Escape":
+        var committed = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(committed.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(committed.browser.open_html(
+            "https://committed.test/page", "<p>committed</p>"
+        ).is_ok()).to_be(true)
+        expect(committed.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(committed.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 4,
+            payload: "C1\t2\t0\t7\naddress"
+        )).ok).to_be(true)
+        val draft_wire = browser_renderer_text_encode(
+            7, 5, 3, "https://draft.test/"
+        )
+        expect(committed.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), draft_wire.wire
+        ).message).ok).to_be(true)
+        val committed_escape = committed.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 6,
+            payload: "K1\t4\t27\t1"
+        ))
+        expect(committed_escape.ok).to_be(true)
+        expect(committed.browser.address_draft).to_equal(
+            "https://committed.test/page"
+        )
+        expect(committed.chrome_focus).to_equal("")
+        expect(committed.address_replace_on_text).to_be(false)
+
+        var blank = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(blank.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(blank.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(blank.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 4,
+            payload: "C1\t2\t0\t7\naddress"
+        )).ok).to_be(true)
+        val blank_draft_wire = browser_renderer_text_encode(
+            7, 5, 3, "https://draft.test/"
+        )
+        expect(blank.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), blank_draft_wire.wire
+        ).message).ok).to_be(true)
+        val blank_escape = blank.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 6,
+            payload: "K1\t4\t27\t1"
+        ))
+        expect(blank_escape.ok).to_be(true)
+        expect(blank.browser.address_draft).to_equal("about:blank")
+        expect(blank.chrome_focus).to_equal("")
+        expect(blank.address_replace_on_text).to_be(false)
+
     it "fails closed on malformed UTF-8 address drafts through Backspace actions":
         var worker = HostedBrowserRendererWorkerSession.create(80, 40)
         expect(worker.handle(BrowserRendererMessage(

@@ -535,6 +535,18 @@ pub class HostedBrowserRendererProcess:
             return self.pending_document_commit_url
         self.document_url
 
+    fn _renderer_initiator_valid(
+        fetch: BrowserRendererNetworkDecodeResult
+    ) -> bool:
+        if fetch.initiator_origin == "null":
+            return (
+                fetch.credentials == "omit" and
+                fetch.script_cookie_writes.len() == 0
+            )
+        fetch.initiator_origin != "" and (
+            fetch.initiator_origin == self._requester_origin()
+        )
+
     me _apply_script_cookie_writes(writes: [text]) -> bool:
         if writes.len() == 0:
             return true
@@ -734,9 +746,15 @@ pub class HostedBrowserRendererProcess:
             mode: policy.mode,
             credentials: policy.credentials
         )
-        self.network.set_requester_origin(self._requester_origin())
+        val requester_origin = if fetch.initiator_origin != "":
+            fetch.initiator_origin
+        else:
+            self._requester_origin()
+        self.network.set_requester_origin(requester_origin)
         val active_document_url = self._active_renderer_document_url()
-        val site_for_cookies_url = if active_document_url != "":
+        val site_for_cookies_url = if requester_origin == "null":
+            ""
+        elif active_document_url != "":
             active_document_url
         else:
             "about:blank"
@@ -1243,6 +1261,8 @@ pub class HostedBrowserRendererProcess:
                     self.expected_reply_to_request_id
                 ):
                     return Some(self.fail("stale-renderer-request"))
+                if not self._renderer_initiator_valid(fetch):
+                    return Some(self.fail("invalid-renderer-initiator"))
                 if not self._apply_script_cookie_writes(
                     fetch.script_cookie_writes
                 ):

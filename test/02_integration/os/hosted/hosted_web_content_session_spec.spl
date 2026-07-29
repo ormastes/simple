@@ -23,7 +23,15 @@ use os.compositor.simple_web_window_renderer.{
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
     MockResponseRegistry, set_mock_registry
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_style_by_id,
+    simple_web_layout_render_html_draw_ir_result_at_time
+}
+use common.ui.draw_ir.{DrawIrComposition}
 use std.js.types.pair.{Pair}
+
+extern fn rt_text_to_bytes(value: text) -> [u8]
+extern fn rt_file_read_text(path: text) -> text
 
 fn checksum(pixels: [u32]) -> i64:
     var out: i64 = 0
@@ -37,6 +45,25 @@ fn count_color(pixels: [u32], color: u32) -> i64:
         if pixel == color:
             count = count + 1
     count
+
+fn repeated_text(value: text, count: i32) -> text:
+    var out = ""
+    var index = 0
+    while index < count:
+        out = out + value
+        index = index + 1
+    out
+
+fn draw_ir_style_value(
+    composition: DrawIrComposition, component_id: text, key: text
+) -> text:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                for property in command.computed_style:
+                    if property.key == key:
+                        return property.value
+    ""
 
 describe "hosted Web content session":
 
@@ -150,6 +177,189 @@ describe "hosted Web content session":
             comp.pure_simple_pixel_buffer(), 0xFF2563EBu32
         )).to_be_greater_than(0)
         raster.shutdown()
+
+    it "invalidates retained CSS animation frames and quiesces without reparsing":
+        val renderer_source = rt_file_read_text(
+            "src/lib/gc_async_mut/gpu/browser_engine/" +
+            "simple_web_html_layout_renderer.spl"
+        ) ?? ""
+        val hot_start = renderer_source.find(
+            "fn _simple_web_css_animation_instance_next_ms("
+        )
+        val hot_end = renderer_source.find(
+            "pub fn simple_web_layout_animation_instances_next_ms(",
+            hot_start
+        )
+        expect(hot_start).to_be_greater_than(-1)
+        expect(hot_end).to_be_greater_than(hot_start)
+        val hot_helper = renderer_source.slice(hot_start, hot_end)
+        expect(hot_helper.contains(".split(")).to_be(false)
+        expect(hot_helper.contains("parse_int(")).to_be(false)
+        expect(hot_helper).to_contain("instance.duration_ms")
+        expect(hot_helper).to_contain("instance.delay_ms")
+        expect(hot_helper).to_contain("instance.iteration_count")
+        var delayed = HostedWebContentSession.create(
+            70,
+            "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#16a34a;animation:Pulse 32ms linear 16ms}</style><div id='stage'></div>",
+            64, 48
+        )
+        val delayed_start = delayed.render_to_pixels()
+        expect(count_color(
+            delayed_start, 0xFF16A34Au32
+        )).to_be_greater_than(0)
+        expect(delayed.browser.css_animation_reconcile_pending).to_be(false)
+        expect(delayed.advance_at(1000)).to_be(false)
+        expect(delayed.advance_at(1015)).to_be(false)
+        expect(delayed.advance_at(1016)).to_be(true)
+        expect(delayed.advance_at(1048)).to_be(true)
+        val delayed_end = delayed.render_to_pixels()
+        expect(count_color(
+            delayed_end, 0xFF16A34Au32
+        )).to_be_greater_than(0)
+        val settled_revision = delayed.mutation_revision
+        expect(delayed.advance_at(1049)).to_be(false)
+        expect(delayed.advance_at(2000)).to_be(false)
+        expect(delayed.mutation_revision).to_equal(settled_revision)
+        expect(delayed.browser.css_animation_reconcile_pending).to_be(false)
+
+    it "starts a script-added animation at its retained local epoch through its end":
+        var session = HostedWebContentSession.create(
+            71,
+            "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444}.running{animation:Pulse 1000ms linear forwards}</style><div id='stage'></div><script>setTimeout(function(){document.getElementById('stage').className='running';},500);</script>",
+            64, 48
+        )
+        val before = session.render_to_pixels()
+        expect(session.advance_at(1000)).to_be(false)
+        expect(session.advance_at(1500)).to_be(true)
+        val local_start = session.render_to_pixels()
+        expect(checksum(local_start)).to_equal(checksum(before))
+        expect(session.advance_at(1515)).to_be(false)
+        expect(session.advance_at(1516)).to_be(true)
+        val moving = session.render_to_pixels()
+        expect(checksum(moving) == checksum(local_start)).to_be(false)
+        expect(session.advance_at(2500)).to_be(true)
+        val end_frame = session.render_to_pixels()
+        expect(count_color(
+            end_frame, 0xFF2563EBu32
+        )).to_be_greater_than(0)
+        val end_revision = session.mutation_revision
+        expect(session.advance_at(2501)).to_be(false)
+        expect(session.mutation_revision).to_equal(end_revision)
+
+    it "does not schedule paused animation frames and resumes from retained time":
+        var session = HostedWebContentSession.create(
+            72,
+            "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444}.running{animation:Pulse 1000ms linear forwards}.paused{animation-play-state:paused}</style><div id='stage' class='running paused'></div><script>setTimeout(function(){document.getElementById('stage').className='running';},500);</script>",
+            64, 48
+        )
+        val paused = session.render_to_pixels()
+        expect(session.advance_at(1000)).to_be(false)
+        expect(session.advance_at(1499)).to_be(false)
+        expect(checksum(session.render_to_pixels())).to_equal(checksum(paused))
+        expect(session.advance_at(1500)).to_be(true)
+        val resumed = session.render_to_pixels()
+        expect(checksum(resumed)).to_equal(checksum(paused))
+        expect(session.advance_at(1515)).to_be(false)
+        expect(session.advance_at(1516)).to_be(true)
+        expect(
+            checksum(session.render_to_pixels()) == checksum(resumed)
+        ).to_be(false)
+
+    it "publishes title-only animation frame once with identical Draw IR and pixels":
+        var session = HostedWebContentSession.create(
+            73,
+            "<div style='width:32px;height:24px;background-color:#ef4444'></div><script>requestAnimationFrame(function(){document.title='Only title';});</script>",
+            64, 48
+        )
+        val before_pixels = session.render_to_pixels()
+        val before_ir = simple_web_layout_render_html_draw_ir_result_at_time(
+            session.browser.render_html_document(), 64, 48, 0
+        )
+        expect(session.advance_at(1000)).to_be(false)
+        expect(session.advance_at(1016)).to_be(true)
+        val after_pixels = session.render_to_pixels()
+        val after_ir = simple_web_layout_render_html_draw_ir_result_at_time(
+            session.browser.render_html_document(), 64, 48, 16
+        )
+        expect(checksum(after_pixels)).to_equal(checksum(before_pixels))
+        expect(after_ir.composition.batches.len()).to_equal(
+            before_ir.composition.batches.len()
+        )
+        expect(after_ir.composition.batches[0].commands.len()).to_equal(
+            before_ir.composition.batches[0].commands.len()
+        )
+        expect(after_ir.composition.batches[0].commands[0].color).to_equal(
+            before_ir.composition.batches[0].commands[0].color
+        )
+        val title_revision = session.mutation_revision
+        expect(session.advance_at(1017)).to_be(false)
+        expect(session.mutation_revision).to_equal(title_revision)
+
+    it "advances registry CSS animations without a pre-render":
+        var registry = HostedWebContentRegistry.create()
+        val static_html = (
+            "<style>@keyframes Pulse{from{background-color:#ef4444}" +
+            "to{background-color:#2563eb}}#stage{width:32px;height:24px;" +
+            "animation:Pulse 32ms linear forwards}</style>" +
+            "<div id='stage'></div>"
+        )
+        expect(registry.advance_window(
+            74, static_html, 64, 48, 1000, false
+        )).to_be(false)
+        expect(
+            registry.sessions[0].browser.css_animation_instances.len()
+        ).to_equal(1)
+        expect(registry.advance_window(
+            74, static_html, 64, 48, 1015, false
+        )).to_be(false)
+        expect(registry.advance_window(
+            74, static_html, 64, 48, 1016, false
+        )).to_be(true)
+        expect(registry.advance_window(
+            74, static_html, 64, 48, 1032, false
+        )).to_be(true)
+        val settled_revision = registry.sessions[0].mutation_revision
+        expect(registry.advance_window(
+            74, static_html, 64, 48, 1033, false
+        )).to_be(false)
+        expect(registry.sessions[0].mutation_revision).to_equal(
+            settled_revision
+        )
+        expect(
+            registry.sessions[0].browser.css_animation_reconcile_pending
+        ).to_be(false)
+
+        val dynamic_html = (
+            "<style>@keyframes Pulse{from{background-color:#ef4444}" +
+            "to{background-color:#2563eb}}#dynamic{width:32px;height:24px;" +
+            "background-color:#ef4444}.running{" +
+            "animation:Pulse 1000ms linear forwards}</style>" +
+            "<div id='dynamic'></div><script>setTimeout(function(){" +
+            "document.getElementById('dynamic').className='running';" +
+            "},500);</script>"
+        )
+        expect(registry.advance_window(
+            75, dynamic_html, 64, 48, 2000, false
+        )).to_be(false)
+        expect(registry.advance_window(
+            75, dynamic_html, 64, 48, 2500, false
+        )).to_be(true)
+        expect(registry.advance_window(
+            75, dynamic_html, 64, 48, 2515, false
+        )).to_be(false)
+        expect(registry.advance_window(
+            75, dynamic_html, 64, 48, 2516, false
+        )).to_be(true)
+        expect(registry.advance_window(
+            75, dynamic_html, 64, 48, 3500, false
+        )).to_be(true)
+        val dynamic_end_revision = registry.sessions[1].mutation_revision
+        expect(registry.advance_window(
+            75, dynamic_html, 64, 48, 3501, false
+        )).to_be(false)
+        expect(registry.sessions[1].mutation_revision).to_equal(
+            dynamic_end_revision
+        )
 
     it "commits one HTTPS redirect hop per host tick through browser policy":
         var registry = MockResponseRegistry.create()
@@ -484,6 +694,81 @@ describe "hosted Web content session":
         )
         expect(erased.callback_count).to_equal(1)
         expect(session.address_text()).to_equal("https://example.test/")
+
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+    it "cancels the hosted address draft and defocuses on Escape":
+        var session = HostedWebContentSession.create(
+            18, "<p>ready</p>", 320, 180
+        )
+        expect(session.browser.open_html(
+            "https://committed.test/page",
+            "<html><body><p>committed</p></body></html>"
+        ).is_ok()).to_be(true)
+        val committed_url = session.browser.current_url
+
+        step("Focus the address bar and replace the committed URL")
+        val _ = session.dispatch_chrome_pointer(5, "address", true)
+        val _ = session.dispatch_chrome_pointer(6, "address", false)
+        val typed = session.dispatch_text(7, "https://draft.test/")
+        expect(typed.callback_count).to_equal(1)
+        expect(session.address_text()).to_equal("https://draft.test/")
+        expect(session.chrome_focus).to_equal("address")
+        val revision_before_escape = session.mutation_revision
+
+        step("Cancel the draft with Escape")
+        val canceled = session.dispatch_key(8, 27, true)
+        expect(canceled.semantic_target_id).to_equal(
+            "browser:session#address"
+        )
+        expect(canceled.callback_count).to_equal(1)
+        expect(canceled.reason).to_equal("")
+        expect(canceled.mutation_revision).to_equal(revision_before_escape)
+        expect(session.browser.address_draft).to_equal(committed_url)
+        expect(session.address_text()).to_equal(committed_url)
+        expect(session.chrome_focus).to_equal("")
+        expect(session.address_replace_on_text).to_be(false)
+
+        step("Keep later text away from the defocused address bar")
+        val ignored = session.dispatch_text(9, "ignored")
+        expect(ignored.callback_count).to_equal(0)
+        expect(ignored.reason).to_equal("no-focused-semantic-target")
+        expect(session.address_text()).to_equal(committed_url)
+
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+    it "accepts 2048 UTF-8 address bytes and rejects 2049 without mutation":
+        var session = HostedWebContentSession.create(
+            19, "<p>ready</p>", 320, 180
+        )
+        val accepted_value = repeated_text("a", 2045) + "한"
+        val rejected_value = accepted_value + "b"
+        expect(rt_text_to_bytes(accepted_value).len()).to_equal(2048)
+        expect(rt_text_to_bytes(rejected_value).len()).to_equal(2049)
+
+        step("Accept the exact UTF-8 byte boundary")
+        val _ = session.dispatch_chrome_pointer(10, "address", true)
+        val _ = session.dispatch_chrome_pointer(11, "address", false)
+        val accepted = session.dispatch_text(12, accepted_value)
+        expect(accepted.callback_count).to_equal(1)
+        expect(accepted.reason).to_equal("")
+        expect(session.address_text()).to_equal(accepted_value)
+
+        step("Reject one extra byte without changing editing state")
+        val _ = session.dispatch_chrome_pointer(13, "address", true)
+        val _ = session.dispatch_chrome_pointer(14, "address", false)
+        val revision_before_rejection = session.mutation_revision
+        val rejected = session.dispatch_text(15, rejected_value)
+        expect(rejected.semantic_target_id).to_equal(
+            "browser:session#address"
+        )
+        expect(rejected.callback_count).to_equal(0)
+        expect(rejected.reason).to_equal("address-too-long")
+        expect(rejected.mutation_revision).to_equal(
+            revision_before_rejection
+        )
+        expect(session.browser.address_draft).to_equal(accepted_value)
+        expect(session.address_text()).to_equal(accepted_value)
+        expect(session.chrome_focus).to_equal("address")
+        expect(session.address_replace_on_text).to_be(true)
 
     # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
     it "keeps trusted browser chrome outside hostile page hit testing":

@@ -1,6 +1,6 @@
 use std.spec.*
 
-use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
@@ -206,6 +206,93 @@ describe "BrowserSession live DOM input":
         expect(session.current_body_html.contains(
             "data-submitted=\"true\""
         )).to_equal(false)
+        expect(session.has_pending_requests()).to_equal(false)
+
+    # @req REQ-WEB-BROWSER-012
+    it "dispatches submit but blocks form navigation under header sandbox":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://example.test/form", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: request.kind,
+                    url: request.url,
+                    status: 200,
+                    headers: (
+                        "Content-Security-Policy: sandbox allow-scripts;" +
+                        " script-src 'unsafe-inline'"
+                    ),
+                    body: (
+                        "<html><body><form id='profile' action='/save'" +
+                        " method='post'><input name='name' value='Ada'>" +
+                        "<button id='save'>Save</button></form></body></html>"
+                    ),
+                    error: ""
+                )).is_ok()).to_be(true)
+            nil:
+                fail("Expected sandbox form document request")
+
+        val dispatch = session.dispatch_dom_event(
+            "save", "click", true, true
+        )
+        expect(dispatch.default_action).to_equal("button-activate")
+        expect(session.has_pending_requests()).to_be(false)
+        expect(session.warnings.join("|")).to_contain(
+            "CSP sandbox blocked form submission"
+        )
+
+    it "submits a button with an invalid type as the default submitter":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/form",
+            "<html><body><form id='profile' action='/save' method='post'><input name='name' value='Ada'><button id='save' type='wat'>Save</button></form></body></html>"
+        )
+
+        expect(be_dom_default_submitter_id(
+            session.dom_root(), "profile"
+        )).to_equal("save")
+        val dispatch = session.dispatch_dom_event(
+            "save", "click", true, true
+        )
+
+        expect(dispatch.default_action).to_equal("button-activate")
+        match session.take_pending_request():
+            Some(request):
+                expect(request.method).to_equal("POST")
+                expect(request.url).to_equal("https://example.test/save")
+                expect(request.body).to_equal("name=Ada")
+            nil:
+                fail("Expected invalid button type to submit its form")
+
+    it "does not submit an invalid button type when click is canceled":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/form",
+            "<html><body><form action='/save' method='post'><button id='save' type='wat' onclick='prevent-default'>Save</button></form></body></html>"
+        )
+
+        val dispatch = session.dispatch_dom_event(
+            "save", "click", true, true
+        )
+
+        expect(dispatch.default_action_allowed).to_equal(false)
+        expect(session.has_pending_requests()).to_equal(false)
+
+    it "does not submit an explicit button control":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/form",
+            "<html><body><form action='/save' method='post'><button id='save' type='button'>Save</button></form></body></html>"
+        )
+
+        val dispatch = session.dispatch_dom_event(
+            "save", "click", true, true
+        )
+
+        expect(dispatch.default_action).to_equal("button-activate")
         expect(session.has_pending_requests()).to_equal(false)
 
     it "resets nested controls to parsed defaults unless reset is canceled":

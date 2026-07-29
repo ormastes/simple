@@ -669,6 +669,15 @@ pub fn simple_web_layout_reconcile_animation_instances(
             ):
                 val signature = frame_index.signatures[style_index]
                 val paused = st.animation_play_state == "paused"
+                val duration_ms = st.animation_duration_ms.to_i64()
+                val delay_ms = st.animation_delay_ms.to_i64()
+                val iteration_count = if (
+                    st.animation_iteration_count == "infinite"
+                ):
+                    -1_i64
+                else:
+                    val parsed = parse_int(st.animation_iteration_count)
+                    if parsed > 0: parsed.to_i64() else: 1_i64
                 val old_index = (
                     frame_index.instances_by_target.get(target_key) ?? -1
                 )
@@ -689,7 +698,10 @@ pub fn simple_web_layout_reconcile_animation_instances(
                             signature: signature,
                             start_time_ms: old.start_time_ms,
                             paused: true,
-                            paused_elapsed_ms: paused_elapsed
+                            paused_elapsed_ms: paused_elapsed,
+                            duration_ms: duration_ms,
+                            delay_ms: delay_ms,
+                            iteration_count: iteration_count
                         ))
                     elif not paused and old.paused:
                         reconciled.push(BrowserCssAnimationInstance(
@@ -698,7 +710,10 @@ pub fn simple_web_layout_reconcile_animation_instances(
                             start_time_ms:
                                 current_time_ms - old.paused_elapsed_ms,
                             paused: false,
-                            paused_elapsed_ms: old.paused_elapsed_ms
+                            paused_elapsed_ms: old.paused_elapsed_ms,
+                            duration_ms: duration_ms,
+                            delay_ms: delay_ms,
+                            iteration_count: iteration_count
                         ))
                     else:
                         reconciled.push(old)
@@ -708,7 +723,10 @@ pub fn simple_web_layout_reconcile_animation_instances(
                         signature: signature,
                         start_time_ms: new_epoch_ms,
                         paused: paused,
-                        paused_elapsed_ms: 0
+                        paused_elapsed_ms: 0,
+                        duration_ms: duration_ms,
+                        delay_ms: delay_ms,
+                        iteration_count: iteration_count
                     ))
         style_index = style_index + 1
     reconciled
@@ -794,6 +812,37 @@ fn _apply_css_animations(
         style_index = style_index + 1
     animated
 
+fn _simple_web_css_animation_instance_next_ms(
+    instance: BrowserCssAnimationInstance, current_time_ms: i64
+) -> i64:
+    if instance.paused:
+        return -1
+    if instance.duration_ms <= 0:
+        return -1
+    val start_ms = instance.start_time_ms + instance.delay_ms
+    if current_time_ms < start_ms:
+        return start_ms
+    if instance.iteration_count < 0:
+        return current_time_ms + 16
+    val end_ms = (
+        start_ms + instance.duration_ms * instance.iteration_count
+    )
+    if current_time_ms < end_ms:
+        return min(current_time_ms + 16, end_ms)
+    -1
+
+pub fn simple_web_layout_animation_instances_next_ms(
+    instances: [BrowserCssAnimationInstance], current_time_ms: i64
+) -> i64:
+    var next_ms: i64 = -1
+    for instance in instances:
+        val candidate_ms = _simple_web_css_animation_instance_next_ms(
+            instance, current_time_ms
+        )
+        if candidate_ms >= 0 and (next_ms < 0 or candidate_ms < next_ms):
+            next_ms = candidate_ms
+    next_ms
+
 fn _simple_web_layout_animation_schedule(
     styles: [Style], current_time_ms: i64,
     animation_instances: [BrowserCssAnimationInstance],
@@ -846,7 +895,11 @@ fn _simple_web_layout_animation_schedule(
 
             if not paused and current_time_ms >= 0:
                 var candidate: i64 = -1
-                if current_time_ms < animation_start:
+                if matched:
+                    candidate = _simple_web_css_animation_instance_next_ms(
+                        animation_instances[matched_index], current_time_ms
+                    )
+                elif current_time_ms < animation_start:
                     candidate = animation_start
                 elif infinite:
                     candidate = current_time_ms + 16

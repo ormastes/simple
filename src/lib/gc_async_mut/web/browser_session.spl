@@ -86,7 +86,8 @@ use std.gc_async_mut.web.browser_session_html.{
     _css_background_image_urls, _rewrite_css_background_image_urls
 }
 use std.gc_async_mut.web.browser_session_context.{
-    browser_csp_allows, browser_session_is_loopback_http,
+    BrowserCspSandboxPolicy, browser_csp_allows,
+    browser_csp_header_sandbox, browser_session_is_loopback_http,
     browser_session_is_secure_context
 }
 
@@ -183,6 +184,7 @@ class BrowserRequest:
     content_type: text
     redirect_count: i32
     redirect_origin_url: text
+    initiator_origin: text
     site_for_cookies_url: text
     credentials: text
     is_top_level_navigation: bool
@@ -201,6 +203,7 @@ class BrowserRequest:
             content_type: content_type,
             redirect_count: 0,
             redirect_origin_url: url,
+            initiator_origin: "",
             site_for_cookies_url: "",
             credentials: "include",
             is_top_level_navigation: kind == "document",
@@ -687,7 +690,8 @@ class BrowserRuntimeState:
         body_html: text,
         session_storage: [Pair<text, text>],
         local_storage: [Pair<text, text>],
-        cookie_text: text
+        cookie_text: text,
+        origin_storage_allowed: bool = true
     ) -> BrowserRuntimeState:
         val logger = Logger.new("browser-session", LogLevel.Error)
         var runtime = JsRuntime.new_browser(logger)
@@ -715,7 +719,12 @@ class BrowserRuntimeState:
         runtime.set_host_property(location_id, "href", JsValue.String(v: url))
         runtime.set_host_property(location_id, "protocol", JsValue.String(v: url_protocol(url)))
         runtime.set_host_property(location_id, "host", JsValue.String(v: url_host(url)))
-        runtime.set_host_property(location_id, "origin", JsValue.String(v: url_origin(url)))
+        runtime.set_host_property(
+            location_id, "origin",
+            JsValue.String(
+                v: if origin_storage_allowed: url_origin(url) else: "null"
+            )
+        )
         runtime.set_host_property(location_id, "pathname", JsValue.String(v: url_pathname(url)))
         runtime.set_host_property(location_id, "search", JsValue.String(v: url_search(url)))
         runtime.set_host_property(location_id, "hash", JsValue.String(v: url_hash(url)))
@@ -796,7 +805,13 @@ class BrowserRuntimeState:
         runtime.set_host_property(document_id, "body", JsValue.Object(id: body_id))
         runtime.set_host_property(document_id, "URL", JsValue.String(v: url))
         runtime.set_host_property(document_id, "location", JsValue.Object(id: location_id))
-        runtime.set_host_property(document_id, "cookie", JsValue.String(v: cookie_text))
+        runtime.set_host_property(
+            document_id, "cookie",
+            if origin_storage_allowed:
+                JsValue.String(v: cookie_text)
+            else:
+                JsValue.Undefined
+        )
         runtime._define_method_on(
             document_id, "addEventListener", NATIVE_DOM_EVENT_TARGET_ADD
         )
@@ -819,8 +834,15 @@ class BrowserRuntimeState:
         runtime.set_host_property(window_id, "history", JsValue.Object(id: history_id))
         runtime.set_host_property(window_id, "navigator", JsValue.Object(id: navigator_id))
         runtime.set_host_property(window_id, "chrome", JsValue.Object(id: chrome_id))
-        runtime.set_host_property(window_id, "sessionStorage", JsValue.Object(id: session_storage_id))
-        runtime.set_host_property(window_id, "localStorage", JsValue.Object(id: local_storage_id))
+        if origin_storage_allowed:
+            runtime.set_host_property(
+                window_id, "sessionStorage",
+                JsValue.Object(id: session_storage_id)
+            )
+            runtime.set_host_property(
+                window_id, "localStorage",
+                JsValue.Object(id: local_storage_id)
+            )
         runtime.set_host_property(window_id, "isSecureContext", JsValue.Boolean(v: is_secure_context))
         runtime._define_method_on(
             window_id, "addEventListener", NATIVE_DOM_EVENT_TARGET_ADD
@@ -894,8 +916,13 @@ class BrowserRuntimeState:
         runtime.interpreter.define_global_value("history", JsValue.Object(id: history_id))
         runtime.interpreter.define_global_value("navigator", JsValue.Object(id: navigator_id))
         runtime.interpreter.define_global_value("chrome", JsValue.Object(id: chrome_id))
-        runtime.interpreter.define_global_value("sessionStorage", JsValue.Object(id: session_storage_id))
-        runtime.interpreter.define_global_value("localStorage", JsValue.Object(id: local_storage_id))
+        if origin_storage_allowed:
+            runtime.interpreter.define_global_value(
+                "sessionStorage", JsValue.Object(id: session_storage_id)
+            )
+            runtime.interpreter.define_global_value(
+                "localStorage", JsValue.Object(id: local_storage_id)
+            )
         runtime.interpreter.define_global_value("WebAssembly", JsValue.Object(id: webassembly_id))
         var interpreter = runtime.interpreter
         interpreter.host_window_id = window_id
@@ -907,7 +934,10 @@ class BrowserRuntimeState:
         interpreter.host_session_storage_id = session_storage_id
         interpreter.host_local_storage_id = local_storage_id
         interpreter.host_document_title_value = JsValue.String(v: title)
-        interpreter.host_document_cookie_value = JsValue.String(v: cookie_text)
+        interpreter.host_document_cookie_value = if origin_storage_allowed:
+            JsValue.String(v: cookie_text)
+        else:
+            JsValue.Undefined
         interpreter.host_body_inner_html_value = JsValue.String(v: body_html)
         val host_body_text_value = if is_guest_runtime: JsValue.String(v: "") else: JsValue.String(v: html_to_text(body_html))
         interpreter.host_body_text_content_value = host_body_text_value
@@ -916,10 +946,15 @@ class BrowserRuntimeState:
         if is_guest_runtime:
             print "[BRS] runtime create stage=after-define-globals"
 
-        runtime = install_storage_api(runtime, session_storage_id)
-        runtime = install_storage_api(runtime, local_storage_id)
-        runtime = sync_storage_runtime_state(runtime, session_storage_id, session_storage)
-        runtime = sync_storage_runtime_state(runtime, local_storage_id, local_storage)
+        if origin_storage_allowed:
+            runtime = install_storage_api(runtime, session_storage_id)
+            runtime = install_storage_api(runtime, local_storage_id)
+            runtime = sync_storage_runtime_state(
+                runtime, session_storage_id, session_storage
+            )
+            runtime = sync_storage_runtime_state(
+                runtime, local_storage_id, local_storage
+            )
         var runtime_after_url_search_params_api = runtime
         val _url_search_params_api_result = runtime_after_url_search_params_api.eval(
             "function __usp_sp(v) { var out = ''; for (var i = 0; i < v.length; i = i + 1) { var ch = v.slice(i, i + 1); out = out + (ch === ' ' ? '+' : ch); } return out; } function __usp_ps(v) { var out = ''; for (var i = 0; i < v.length; i = i + 1) { var ch = v.slice(i, i + 1); out = out + (ch === '+' ? ' ' : ch); } return out; } function __usp_k(pair) { var eq = pair.indexOf('='); return __usp_ps(eq >= 0 ? pair.slice(0, eq) : pair); } function __usp_v(pair) { var eq = pair.indexOf('='); return __usp_ps(eq >= 0 ? pair.slice(eq + 1) : ''); } function __usp_get(q, name) { var pos = 0; while (pos <= q.length) { var rest = q.slice(pos); var amp = rest.indexOf('&'); var pair = amp >= 0 ? rest.slice(0, amp) : rest; if (pair !== '' && __usp_k(pair) === name) { return __usp_v(pair); } if (amp < 0) { break; } pos = pos + amp + 1; } return null; } function __usp_has(q, name) { var pos = 0; while (pos <= q.length) { var rest = q.slice(pos); var amp = rest.indexOf('&'); var pair = amp >= 0 ? rest.slice(0, amp) : rest; if (pair !== '' && __usp_k(pair) === name) { return true; } if (amp < 0) { break; } pos = pos + amp + 1; } return false; } function __usp_set(q, name, value) { var out = ''; var found = false; var pos = 0; while (pos <= q.length) { var rest = q.slice(pos); var amp = rest.indexOf('&'); var pair = amp >= 0 ? rest.slice(0, amp) : rest; if (pair !== '') { if (__usp_k(pair) === name) { if (!found) { out = out + (out === '' ? '' : '&') + __usp_sp(name) + '=' + __usp_sp(value); found = true; } } else { out = out + (out === '' ? '' : '&') + pair; } } if (amp < 0) { break; } pos = pos + amp + 1; } if (!found) { out = out + (out === '' ? '' : '&') + __usp_sp(name) + '=' + __usp_sp(value); } return out; } class URLSearchParams { constructor(init) { var text = (init === undefined || init === null) ? '' : String(init); if (text.slice(0, 1) === '?') { text = text.slice(1); } this._query = text; } get(name) { return __usp_get(this._query, String(name)); } has(name) { return __usp_has(this._query, String(name)); } set(name, value) { this._query = __usp_set(this._query, String(name), String(value)); } append(name, value) { this._query = this._query + (this._query === '' ? '' : '&') + __usp_sp(String(name)) + '=' + __usp_sp(String(value)); } toString() { return this._query; } } window.URLSearchParams = URLSearchParams;"
@@ -1672,6 +1707,7 @@ class BrowserSession:
     address_draft: text
     content_security_policy: text
     pending_content_security_policy: text
+    csp_sandbox_policy: BrowserCspSandboxPolicy
     pending_space_activation_target: text
     text_selection_target_id: text
     text_selection_anchor_byte: i64
@@ -1747,6 +1783,7 @@ class BrowserSession:
             address_draft: "",
             content_security_policy: "",
             pending_content_security_policy: "",
+            csp_sandbox_policy: BrowserCspSandboxPolicy.unrestricted(),
             pending_space_activation_target: "",
             text_selection_target_id: "",
             text_selection_anchor_byte: 0,
@@ -1809,7 +1846,11 @@ impl BrowserSession:
         header: text, url: text, from_http: bool,
         top_level_site_url: text = ""
     ):
-        if header.len() > 4096 or header.contains("\r") or header.contains("\n"):
+        if not from_http and not self.csp_sandbox_policy.allow_same_origin:
+            self._append_warning("CSP sandbox blocked document.cookie")
+            return
+        if (header.contains("\r") or header.contains("\n") or
+            header.contains("\0")):
             return
         if (not from_http and self.broker_network_policy and
             self.pending_script_cookie_writes.len() >=
@@ -1858,6 +1899,8 @@ impl BrowserSession:
         writes
 
     me _script_cookie_for_url(url: text) -> text:
+        if not self.csp_sandbox_policy.allow_same_origin:
+            return ""
         self.cookies.script_cookie_header(
             self._cookie_origin(url), url_pathname(url),
             self._cookie_now_seconds(),
@@ -2321,25 +2364,12 @@ impl BrowserSession:
                             match runtime.get_host_property(req_obj_id, "credentials"):
                                 JsValue.String(v): credentials = v.lower()
                                 _: pass_dn("async request defaults credentials to same-origin")
-                            val request_headers = self._headers_with_session_cookie(
-                                headers, url, method, self.document_url, false,
-                                credentials
+                            val drained_req = self._build_request(
+                                kind, url, method, headers, body,
+                                content_type, credentials
                             )
-                            val drained_req = BrowserRequest.create(
-                                id: request_id,
-                                kind: kind,
-                                url: url,
-                                method: method,
-                                headers: request_headers,
-                                body: body,
-                                content_type: content_type
-                            )
-                            drained_req.site_for_cookies_url = self.document_url
-                            drained_req.credentials = credentials
+                            drained_req.id = request_id
                             drained_req.is_top_level_navigation = false
-                            drained_req.script_cookie_writes = (
-                                self.take_pending_script_cookie_writes()
-                            )
                             self.pending_requests.push(drained_req)
                             drained = true
                     nil:
@@ -2522,6 +2552,7 @@ impl BrowserSession:
                 )
             var redirect_count = 0
             var redirect_origin_url = response.url
+            var redirect_initiator_origin = url_origin(self.document_url)
             var redirect_site_url = self.document_url
             var redirect_credentials = "include"
             var redirect_is_top_level = false
@@ -2533,6 +2564,7 @@ impl BrowserSession:
             if val Some(original) = inflight:
                 redirect_count = original.redirect_count
                 redirect_origin_url = original.redirect_origin_url
+                redirect_initiator_origin = original.initiator_origin
                 redirect_site_url = original.site_for_cookies_url
                 redirect_credentials = original.credentials
                 redirect_is_top_level = original.is_top_level_navigation
@@ -2548,6 +2580,7 @@ impl BrowserSession:
                 if transport_upgrade: 0 else: 1
             )
             next_request.redirect_origin_url = redirect_origin_url
+            next_request.initiator_origin = redirect_initiator_origin
             next_request.site_for_cookies_url = redirect_site_url
             next_request.credentials = redirect_credentials
             next_request.is_top_level_navigation = redirect_is_top_level
@@ -2610,6 +2643,9 @@ impl BrowserSession:
                         var original_content_type = ""
                         var redirect_count = 0
                         var original_site_url = self.document_url
+                        var original_initiator_origin = url_origin(
+                            self.document_url
+                        )
                         var original_credentials = "include"
                         var original_is_top_level = true
                         val transport_upgrade = (
@@ -2624,6 +2660,9 @@ impl BrowserSession:
                             original_content_type = original.content_type
                             redirect_count = original.redirect_count
                             original_site_url = original.site_for_cookies_url
+                            original_initiator_origin = (
+                                original.initiator_origin
+                            )
                             original_credentials = original.credentials
                             original_is_top_level = original.is_top_level_navigation
                         if redirect_count >= 20 and not transport_upgrade:
@@ -2647,6 +2686,9 @@ impl BrowserSession:
                         if val Some(original) = inflight:
                             next_request.redirect_origin_url = original.redirect_origin_url
                         next_request.site_for_cookies_url = original_site_url
+                        next_request.initiator_origin = (
+                            original_initiator_origin
+                        )
                         next_request.credentials = original_credentials
                         next_request.is_top_level_navigation = original_is_top_level
                         next_request.headers = self._headers_with_session_cookie(
@@ -2708,6 +2750,7 @@ impl BrowserSession:
             var orig_content_type = ""
             var orig_redirect_count = 0
             var orig_site_url = self.document_url
+            var orig_initiator_origin = url_origin(self.document_url)
             var orig_credentials = "same-origin"
             var orig_is_top_level = false
             if val Some(orig) = inflight:
@@ -2717,6 +2760,7 @@ impl BrowserSession:
                 orig_content_type = orig.content_type
                 orig_redirect_count = orig.redirect_count
                 orig_site_url = orig.site_for_cookies_url
+                orig_initiator_origin = orig.initiator_origin
                 orig_credentials = orig.credentials
                 orig_is_top_level = orig.is_top_level_navigation
             if response.error == "":
@@ -2807,6 +2851,7 @@ impl BrowserSession:
                     if val Some(original) = inflight:
                         redirect_req.redirect_origin_url = original.redirect_origin_url
                     redirect_req.site_for_cookies_url = orig_site_url
+                    redirect_req.initiator_origin = orig_initiator_origin
                     redirect_req.credentials = orig_credentials
                     redirect_req.is_top_level_navigation = orig_is_top_level
                     self.pending_requests.push(redirect_req)
@@ -3077,12 +3122,18 @@ impl BrowserSession:
             nil: false
 
     me session_storage_item(key: text) -> text?:
+        if not self.csp_sandbox_policy.allow_same_origin:
+            return nil
         pair_value(self.session_storage, key)
 
     me local_storage_item(key: text) -> text?:
+        if not self.csp_sandbox_policy.allow_same_origin:
+            return nil
         pair_value(self.local_storage, key)
 
     me document_cookie() -> text:
+        if not self.csp_sandbox_policy.allow_same_origin:
+            return ""
         if _guest_runtime_probe_url(self.current_url):
             if val Some(state) = self.runtime_state:
                 match state.runtime.interpreter.host_document_cookie_value:

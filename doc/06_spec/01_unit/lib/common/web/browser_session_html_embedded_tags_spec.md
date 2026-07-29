@@ -1,29 +1,6 @@
-# Browser Session Html Embedded Tags Specification
+# BrowserSession HTML embedded fallback text projection
 
-> <details>
-
-<!-- sdn-diagram:id=browser_session_html_embedded_tags_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=browser_session_html_embedded_tags_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-browser_session_html_embedded_tags_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=browser_session_html_embedded_tags_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Projects supported embedded-content alternatives and fallback content to
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,41 +9,9 @@ browser_session_html_embedded_tags_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Browser Session Html Embedded Tags Specification
+# BrowserSession HTML embedded fallback text projection
 
-## Scenarios
-
-### BrowserSession HTML embedded tag text alternatives
-
-#### uses image alt text inside picture source fallback groups
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<picture><source srcset='hero.avif' type='image/avif'><source srcset='hero.webp' type='image/webp'><img src='hero.png' alt='Hero image'></picture>"
-expect(html_to_text(html)).to_equal("Hero image")
-```
-
-</details>
-
-#### uses area alt text while preserving embedded fallback text
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<map name='m'><area href='/a' alt='Area label'></map><iframe>Frame fallback</iframe><object>Object fallback</object><video><track kind='captions' src='captions.vtt'>Video fallback</video><audio>Audio fallback</audio><embed src='plugin.bin'>"
-expect(html_to_text(html)).to_equal("Area labelFrame fallbackObject fallbackVideo fallbackAudio fallback")
-```
-
-</details>
+Projects supported embedded-content alternatives and fallback content to
 
 ## At a Glance
 
@@ -75,13 +20,55 @@ expect(html_to_text(html)).to_equal("Area labelFrame fallbackObject fallbackVide
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_html_embedded_tags_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+Projects supported embedded-content alternatives and fallback content to
+visible text. This is not media loading, layout, or pixel evidence.
 
-Tests covering:
-- BrowserSession HTML embedded tag text alternatives
+## Scenarios
+
+### BrowserSession HTML embedded tag text alternatives
+
+#### should use image alt text inside picture source fallback groups
+
+- Project supported HTML semantics to visible text
+   - Expected: html_to_text(html) equals `Hero image`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project supported HTML semantics to visible text")
+val html = "<picture><source srcset='hero.avif' type='image/avif'><source srcset='hero.webp' type='image/webp'><img src='hero.png' alt='Hero image'></picture>"
+expect(html_to_text(html)).to_equal("Hero image")
+```
+
+</details>
+
+#### should use area alt text while preserving embedded fallback text
+
+- Project supported HTML semantics to visible text
+   - Expected: html_to_text(html) equals `Area labelFrame fallbackObject fallbackVideo fallbackAudio fallback`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project supported HTML semantics to visible text")
+val html = "<map name='m'><area href='/a' alt='Area label'></map><iframe>Frame fallback</iframe><object>Object fallback</object><video><track kind='captions' src='captions.vtt'>Video fallback</video><audio>Audio fallback</audio><embed src='plugin.bin'>"
+expect(html_to_text(html)).to_equal("Area labelFrame fallbackObject fallbackVideo fallbackAudio fallback")
+```
+
+</details>
 
 ## Scenario Summary
 

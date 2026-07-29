@@ -8,13 +8,15 @@ use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_context.{
     browser_csp_allows, browser_csp_allows_after_redirect,
-    browser_csp_source_matches_url
+    browser_csp_source_matches_url, browser_csp_header_sandbox,
+    browser_meta_content_security_policy
 }
 use std.js.types.js_types.{JsValue}
 
 describe "BrowserSession production security boundary":
     # @req REQ-WEB-BROWSER-017
     it "bounds hostile do-while script execution":
+        step("Run a nonterminating do-while script in a browser session")
         var session = BrowserSession.new()
         val opened = session.open_html(
             "https://safe.test/app", "<html><body>safe</body></html>"
@@ -34,6 +36,7 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-017
     it "bounds hostile recursive script execution":
+        step("Run an unbounded recursive script in a browser session")
         var session = BrowserSession.new()
         val opened = session.open_html(
             "https://safe.test/app", "<html><body>safe</body></html>"
@@ -50,6 +53,7 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-017
     it "shares one execution budget across nested script loops":
+        step("Run nested loops and then advance the queued timer task")
         var session = BrowserSession.new()
         val opened = session.open_html(
             "https://safe.test/app", "<html><body>safe</body></html>"
@@ -74,6 +78,7 @@ describe "BrowserSession production security boundary":
                 fail("Expected the shared execution budget to preserve runtime state")
 
     it "rejects direct file navigation before reading the host filesystem":
+        step("Navigate directly to a local file URL")
         var session = BrowserSession.new()
         val result = session.begin_network_navigation("file:///etc/passwd", "GET", "", "", "")
         expect(result.is_err()).to_equal(true)
@@ -81,6 +86,7 @@ describe "BrowserSession production security boundary":
         expect(session.has_pending_requests()).to_equal(false)
 
     it "rejects request-line injection in the central subresource pump":
+        step("Queue a subresource URL containing an injected request line")
         var session = BrowserSession.new()
         session.open_html(
             "https://safe.test/app", "<html><body>safe</body></html>"
@@ -98,6 +104,7 @@ describe "BrowserSession production security boundary":
         )
 
     it "rejects direct file open and file home navigation":
+        step("Open and assign a local file URL through browser navigation APIs")
         var session = BrowserSession.new()
         expect(session.open_url("file:///etc/hosts").is_err()).to_equal(true)
         expect(session.try_set_home_url("file:///etc/hosts")).to_equal(false)
@@ -105,6 +112,7 @@ describe "BrowserSession production security boundary":
         expect(session.current_url).to_equal("about:blank")
 
     it "rejects executable and unknown top-level navigation schemes":
+        step("Navigate to executable and inline-data URL schemes")
         var session = BrowserSession.new()
         expect(session.begin_network_navigation("javascript:alert(1)", "GET", "", "", "").is_err()).to_equal(true)
         expect(session.begin_network_navigation("data:text/html,<script>alert(1)</script>", "GET", "", "", "").is_err()).to_equal(true)
@@ -112,6 +120,7 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     it "keeps storage and cookies bound to the active document after a cross-origin location write":
+        step("Write cross-origin location, storage, and cookie state from the active document")
         var session = BrowserSession.new()
         val opened = session.open_html(
             "https://bank.test/app",
@@ -143,6 +152,7 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
     it "rejects cross-origin history state URLs without changing the document principal":
+        step("Push a cross-origin URL into same-document history")
         var session = BrowserSession.new()
         val opened = session.open_html(
             "https://bank.test/app", "<html><body>bank</body></html>"
@@ -161,6 +171,7 @@ describe "BrowserSession production security boundary":
         )
 
     it "blocks mixed-content and unvalidated cross-origin executable resources":
+        step("Open an HTTPS page containing mixed and cross-origin executable resources")
         var session = BrowserSession.new()
         val opened = session.open_html(
             "https://safe.test/app",
@@ -175,6 +186,7 @@ describe "BrowserSession production security boundary":
         expect(warnings).to_contain("module load error: cross-origin:")
 
     it "allows registered HTTPS resources without host filesystem access":
+        step("Register and navigate to an in-memory HTTPS resource")
         var session = BrowserSession.new()
         session.register_resource("https://example.test/page", "<html><body>safe</body></html>")
         val result = session.begin_network_navigation("https://example.test/page", "GET", "", "", "")
@@ -182,6 +194,7 @@ describe "BrowserSession production security boundary":
         expect(session.current_url).to_equal("https://example.test/page")
 
     it "escapes page-controlled title text before rebuilding render HTML":
+        step("Render a document after assigning markup-shaped title text")
         var session = BrowserSession.new()
         session.open_html(
             "https://safe.test/app", "<html><head><title>Safe</title></head><body>Body</body></html>"
@@ -194,6 +207,7 @@ describe "BrowserSession production security boundary":
         expect(rendered).to_contain("&lt;/title&gt;&lt;style&gt;body{display:none}&lt;/style&gt;")
 
     it "rejects a response whose URL differs from its inflight request":
+        step("Commit a network response from a URL different from its request")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation("https://example.test/page", "GET", "", "", "")
         expect(started.is_ok()).to_equal(true)
@@ -230,6 +244,7 @@ describe "BrowserSession production security boundary":
                 fail("Expected pending HTTPS document request")
 
     it "blocks cross-origin page fetches before they reach the host network":
+        step("Issue repeated cross-origin fetches from page script")
         var session = BrowserSession.new()
         session.open_html(
             "https://safe.test/app",
@@ -256,6 +271,7 @@ describe "BrowserSession production security boundary":
                 fail("Expected blocked cross-origin fetch to reject: {e}")
 
     it "bounds and deduplicates retained browser warnings":
+        step("Append duplicate, excessive, and oversized browser warnings")
         var session = BrowserSession.new()
         session._append_warning("duplicate")
         session._append_warning("duplicate")
@@ -277,6 +293,7 @@ describe "BrowserSession production security boundary":
         expect(oversized.warnings[0].len()).to_equal(4096)
 
     it "bounds active-load warnings before finalization":
+        step("Fail enough active subresource loads to exceed warning limits")
         var html = "<html><body>"
         var index = 0
         while index < 130:
@@ -317,6 +334,7 @@ describe "BrowserSession production security boundary":
                 fail("Expected the final script request to keep loading active")
 
     it "still exports same-origin page fetches":
+        step("Issue a relative same-origin fetch from page script")
         var session = BrowserSession.new()
         session.open_html(
             "https://safe.test/app",
@@ -331,6 +349,7 @@ describe "BrowserSession production security boundary":
                 fail("Expected same-origin fetch request")
 
     it "enforces document CSP before style script and fetch dispatch":
+        step("Load a document whose CSP blocks style, script, and fetch dispatch")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
             "https://safe.test/app", "GET", "", "", ""
@@ -363,7 +382,202 @@ describe "BrowserSession production security boundary":
         expect(warnings).to_contain("CSP blocked fetch: https://safe.test/private")
 
     # @req REQ-WEB-BROWSER-012
+    it "intersects bounded header sandbox capabilities and ignores meta sandbox":
+        step("Parse intersecting header sandboxes alongside a meta sandbox")
+        val bare = browser_csp_header_sandbox("sandbox")
+        val allow_scripts = browser_csp_header_sandbox(
+            "sandbox allow-scripts allow-forms\nsandbox allow-forms"
+        )
+        val comma_intersection = browser_csp_header_sandbox(
+            "sandbox allow-scripts, sandbox allow-forms"
+        )
+        val first_duplicate = browser_csp_header_sandbox(
+            "sandbox allow-scripts; sandbox"
+        )
+        val meta = browser_meta_content_security_policy(
+            "sandbox allow-scripts; script-src 'unsafe-inline'"
+        )
+
+        expect(bare.active).to_be(true)
+        expect(bare.allow_scripts).to_be(false)
+        expect(bare.allow_forms).to_be(false)
+        expect(bare.allow_same_origin).to_be(false)
+        expect(bare.allow_popups).to_be(false)
+        expect(bare.allow_top_navigation).to_be(false)
+        expect(allow_scripts.active).to_be(true)
+        expect(allow_scripts.allow_scripts).to_be(false)
+        expect(allow_scripts.allow_forms).to_be(true)
+        expect(comma_intersection.allow_scripts).to_be(false)
+        expect(comma_intersection.allow_forms).to_be(false)
+        expect(first_duplicate.allow_scripts).to_be(true)
+        expect(meta).to_equal("script-src 'unsafe-inline'")
+
+    # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
+    it "blocks scripts under intersected header sandbox policies":
+        step("Load script content under intersected header sandbox policies")
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://safe.test/sandbox", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: request.kind,
+                    url: request.url,
+                    status: 200,
+                    headers: (
+                        "Content-Security-Policy: sandbox allow-scripts\n" +
+                        "Content-Security-Policy: sandbox"
+                    ),
+                    body: (
+                        "<html><body><script>" +
+                        "document.title='escaped'; localStorage.secret='x';" +
+                        "document.cookie='sid=x; Path=/';" +
+                        "</script><script src='/escape.js'></script></body></html>"
+                    ),
+                    error: ""
+                )).is_ok()).to_be(true)
+            nil:
+                fail("Expected sandbox document request")
+
+        expect(session.current_title).to_equal(
+            "https://safe.test/sandbox"
+        )
+        expect(session.take_pending_request().is_none()).to_be(true)
+        expect(session.eval_script("document.title='late'").is_err()).to_be(
+            true
+        )
+        expect(session.local_storage_item("secret").is_none()).to_be(true)
+        expect(session.document_cookie()).to_equal("")
+        expect(session.warnings.join("|")).to_contain(
+            "CSP sandbox blocked script execution"
+        )
+
+    # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
+    it "allows scripts without restoring sandboxed origin storage or navigation":
+        step("Run allowed script inside an opaque-origin sandbox")
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://safe.test/sandbox", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: request.kind,
+                    url: request.url,
+                    status: 200,
+                    headers: (
+                        "Content-Security-Policy: sandbox allow-scripts;" +
+                        " script-src 'unsafe-inline'"
+                    ),
+                    body: (
+                        "<html><body><script>" +
+                        "document.title='script-ran';" +
+                        "document.cookie='sid=x; Path=/';" +
+                        "location.href='/escape';" +
+                        "</script></body></html>"
+                    ),
+                    error: ""
+                )).is_ok()).to_be(true)
+            nil:
+                fail("Expected allow-scripts sandbox document request")
+
+        expect(session.current_title).to_equal("script-ran")
+        match session.eval_script("location.origin"):
+            Ok(JsValue.String(origin)):
+                expect(origin).to_equal("null")
+            _:
+                fail("Expected the sandboxed runtime origin")
+        match session.eval_script("typeof localStorage"):
+            Ok(JsValue.String(kind)):
+                expect(kind).to_equal("undefined")
+            _:
+                fail("Expected sandboxed storage to be absent")
+        expect(session.local_storage_item("secret").is_none()).to_be(true)
+        expect(session.document_cookie()).to_equal("")
+        expect(session.current_url).to_equal("https://safe.test/sandbox")
+        expect(session.has_pending_requests()).to_be(false)
+
+    # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-012
+    it "blocks inline DOM handlers when sandbox does not allow scripts":
+        step("Dispatch an inline DOM handler in a script-blocked sandbox")
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://safe.test/handler", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document.id, "document", document.url, 200,
+            "Content-Security-Policy: sandbox; script-src 'unsafe-inline'",
+            "<html><body><button id='go' " +
+            "onclick='set-attr:data-fired=yes'>Go</button></body></html>",
+            ""
+        )).is_ok()).to_be(true)
+
+        val dispatch = session.dispatch_dom_event(
+            "go", "click", true, true
+        )
+        expect(dispatch.actions.len()).to_equal(0)
+        expect(session.render_html_document().contains(
+            "data-fired=\"yes\""
+        )).to_be(false)
+        expect(session.warnings.join("|")).to_contain(
+            "CSP blocked inline event handler"
+        )
+
+    # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
+    it "carries an opaque cookie-free initiator on sandboxed fetch":
+        step("Issue a fetch from an opaque-origin sandbox with ambient cookies")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://safe.test/start", "<html><body>start</body></html>"
+        ).is_ok()).to_be(true)
+        session.apply_set_cookie_header(
+            "ambient=secret; Secure; Path=/", "https://safe.test/start"
+        )
+        expect(session.begin_network_navigation(
+            "https://safe.test/sandbox-fetch", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document.id, "document", document.url, 200,
+            "Content-Security-Policy: sandbox allow-scripts; " +
+            "script-src 'unsafe-inline'",
+            "<html><body><script>document.cookie='script=x';" +
+            "fetch('/data', {credentials:'include'})</script></body></html>",
+            ""
+        )).is_ok()).to_be(true)
+
+        val fetch = session.take_pending_request().unwrap()
+        expect(fetch.kind).to_equal("fetch")
+        expect(fetch.initiator_origin).to_equal("null")
+        expect(fetch.site_for_cookies_url).to_equal("")
+        expect(fetch.credentials).to_equal("omit")
+        expect(fetch.headers.lower().contains("cookie:")).to_be(false)
+        expect(fetch.script_cookie_writes.len()).to_equal(0)
+
+    # @req REQ-WEB-BROWSER-012
+    it "ignores meta sandbox while retaining its source directives":
+        step("Parse a meta CSP containing sandbox and source directives")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://safe.test/meta",
+            "<html><head><meta http-equiv='Content-Security-Policy'" +
+            " content=\"sandbox; script-src 'unsafe-inline'\"></head>" +
+            "<body><script>document.title='meta-ran'</script></body></html>"
+        ).is_ok()).to_be(true)
+        expect(session.current_title).to_equal("meta-ran")
+        match session.eval_script("location.origin"):
+            Ok(JsValue.String(origin)):
+                expect(origin).to_equal("https://safe.test")
+            _:
+                fail("Expected meta sandbox to leave the normal origin")
+
+    # @req REQ-WEB-BROWSER-012
     it "rechecks CSP before following style and script redirects":
+        step("Redirect admitted style and script requests to CSP-blocked URLs")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
             "https://safe.test/app", "GET", "", "", ""
@@ -438,6 +652,7 @@ describe "BrowserSession production security boundary":
         )
 
     it "enforces CSP host-source paths before script dispatch":
+        step("Dispatch scripts against matching and nonmatching CSP host paths")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
             "https://safe.test/app", "GET", "", "", ""
@@ -551,6 +766,7 @@ describe "BrowserSession production security boundary":
         )).to_be(false)
 
     it "upgrades HSTS hosts and subdomains until max-age expires":
+        step("Record HSTS and navigate through covered hosts before and after expiry")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
             "https://secure.test/start", "GET", "", "", ""
@@ -625,6 +841,7 @@ describe "BrowserSession production security boundary":
 
     # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017
     it "ignores signed HSTS max-age but accepts zero clearing":
+        step("Apply signed, clearing, and malformed HSTS max-age directives")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
             "https://secure.test/start", "GET", "", "", ""
@@ -703,6 +920,7 @@ describe "BrowserSession production security boundary":
                 fail("Expected HTTP request after HSTS clearing")
 
     it "restores only valid unexpired HSTS state across sessions":
+        step("Restore persisted HSTS entries with mixed validity and expiry")
         var entries: [BrowserHstsSnapshotEntry] = []
         entries.push(BrowserHstsSnapshotEntry(
             host: "secure.test",
@@ -777,6 +995,7 @@ describe "BrowserSession production security boundary":
                 fail("Expected request after restored HSTS expiry")
 
     it "rejects JavaScript fetches after the document request budget is spent":
+        step("Issue JavaScript fetches after exhausting the document request budget")
         var session = BrowserSession.new()
         session.open_html("https://safe.test/app", "<html><body>safe</body></html>")
         session.subresource_request_count = 1024
@@ -798,6 +1017,7 @@ describe "BrowserSession production security boundary":
                 fail("Expected request-budget rejection to settle: {e}")
 
     it "keeps HttpOnly and transport cookie state outside page-visible JS":
+        step("Store transport and HttpOnly cookies, then inspect page-visible state")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
             "https://safe.test/app", "GET", "", "", ""
@@ -851,7 +1071,26 @@ describe "BrowserSession production security boundary":
             nil:
                 fail("Expected sanitized same-origin fetch")
 
+    it "rejects cookie source controls and delegates serialized byte limits":
+        step("Set cookies containing source controls and boundary-sized serialized values")
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://safe.test/", "<html><body>safe</body></html>"
+        )
+        session.apply_set_cookie_header(
+            "long=accepted; ignored=" + "x".repeat(5000)
+        )
+        session.apply_set_cookie_header("cr=bad\rInjected=yes")
+        session.apply_set_cookie_header("lf=bad\nInjected=yes")
+        session.apply_set_cookie_header("nul=bad\0Injected=yes")
+
+        expect(session.document_cookie()).to_equal("long=accepted")
+        expect(session.cookie_header_for_request(
+            "https://safe.test/"
+        )).to_equal("long=accepted")
+
     it "defaults cookie Path to the response URL directory":
+        step("Store a response cookie without an explicit Path")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
             "https://safe.test/account/login", "GET", "", "", ""
@@ -882,6 +1121,7 @@ describe "BrowserSession production security boundary":
         )).to_equal("")
 
     it "rejects a fetch redirect that crosses the page origin":
+        step("Redirect a same-origin page fetch across origins")
         var session = BrowserSession.new()
         session.open_html(
             "https://safe.test/app",
@@ -914,6 +1154,7 @@ describe "BrowserSession production security boundary":
                 fail("Expected redirected fetch to reject: {e}")
 
     it "bounds recursive microtask work in one browser flush":
+        step("Run a recursively replenished microtask queue")
         var session = BrowserSession.new()
         session.open_html(
             "https://safe.test/app",
@@ -928,6 +1169,7 @@ describe "BrowserSession production security boundary":
         expect(session.current_title).to_equal("8000")
 
     it "strips forbidden and CR-injected request headers":
+        step("Issue a fetch with forbidden and CR-injected request headers")
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(
             "https://safe.test/", "GET",
@@ -942,6 +1184,7 @@ describe "BrowserSession production security boundary":
                 fail("Expected sanitized navigation request")
 
     it "leaves hosted cookie attachment to the broker":
+        step("Export a hosted request while page cookies are present")
         var session = BrowserSession.new()
         session.broker_network_policy = true
         session.open_html("https://safe.test/app", "<html><body>safe</body></html>")
@@ -966,6 +1209,7 @@ describe "BrowserSession production security boundary":
             nil: fail("Expected include request")
 
     it "retains admitted hosted script cookie setters in order":
+        step("Run multiple admitted hosted script cookie assignments")
         var session = BrowserSession.new()
         session.broker_network_policy = true
         session.open_html(
@@ -988,6 +1232,7 @@ describe "BrowserSession production security boundary":
         expect(session.document_cookie().contains("hidden=no")).to_be(false)
 
     it "keeps hosted cookie setters ordered around fetch calls":
+        step("Set hosted cookies before and after a scripted fetch")
         var session = BrowserSession.new()
         session.broker_network_policy = true
         session.open_html(
@@ -1013,6 +1258,7 @@ describe "BrowserSession production security boundary":
             nil: fail("Expected second fetch request")
 
     it "surfaces hosted script cookie setter overflow":
+        step("Exceed the hosted script cookie setter queue limit")
         var session = BrowserSession.new()
         session.broker_network_policy = true
         session.open_html(
@@ -1033,6 +1279,7 @@ describe "BrowserSession production security boundary":
         expect(session.script_cookie_write_overflow).to_be(true)
 
     it "prevents script from replacing an HttpOnly cookie":
+        step("Attempt to replace an HttpOnly cookie from page script")
         var session = BrowserSession.new()
         session.open_html("https://safe.test/", "<html><body>safe</body></html>")
         session.apply_set_cookie_header("sid=secret; Secure; HttpOnly; Path=/")

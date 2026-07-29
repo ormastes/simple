@@ -7,6 +7,117 @@ use std.gc_async_mut.web.browser_session_url.{
     url_hostname, url_origin, url_pathname
 }
 
+val BROWSER_CSP_SANDBOX_MAX_POLICIES: i64 = 64
+val BROWSER_CSP_SANDBOX_MAX_POLICY_BYTES: i64 = 65536
+val BROWSER_CSP_SANDBOX_MAX_TOKENS: i64 = 64
+
+pub class BrowserCspSandboxPolicy:
+    active: bool
+    allow_scripts: bool
+    allow_forms: bool
+    allow_same_origin: bool
+    allow_popups: bool
+    allow_top_navigation: bool
+
+    static fn unrestricted() -> BrowserCspSandboxPolicy:
+        BrowserCspSandboxPolicy(
+            active: false,
+            allow_scripts: true,
+            allow_forms: true,
+            allow_same_origin: true,
+            allow_popups: true,
+            allow_top_navigation: true
+        )
+
+    static fn deny_all() -> BrowserCspSandboxPolicy:
+        BrowserCspSandboxPolicy(
+            active: true,
+            allow_scripts: false,
+            allow_forms: false,
+            allow_same_origin: false,
+            allow_popups: false,
+            allow_top_navigation: false
+        )
+
+fn _browser_csp_sandbox_has_token(
+    directive: text, expected: text
+) -> bool:
+    var token_count: i64 = 0
+    var found = false
+    for raw_token in directive.replace(
+        "\t", " "
+    ).replace("\r", " ").replace("\n", " ").split(" "):
+        val token = raw_token.trim().lower()
+        if token == "":
+            continue
+        token_count = token_count + 1
+        if token_count > BROWSER_CSP_SANDBOX_MAX_TOKENS:
+            return false
+        if token == expected:
+            found = true
+    found
+
+fn browser_csp_header_sandbox(policy: text) -> BrowserCspSandboxPolicy:
+    """Intersect response-header CSP sandbox capabilities; meta strips sandbox."""
+    if policy.len() > BROWSER_CSP_SANDBOX_MAX_POLICY_BYTES:
+        return BrowserCspSandboxPolicy.deny_all()
+    var result = BrowserCspSandboxPolicy.unrestricted()
+    var policy_count: i64 = 0
+    for raw_policy in policy.replace(",", "\n").split("\n"):
+        if raw_policy.trim() == "":
+            continue
+        policy_count = policy_count + 1
+        if policy_count > BROWSER_CSP_SANDBOX_MAX_POLICIES:
+            return BrowserCspSandboxPolicy.deny_all()
+        var saw_sandbox = false
+        for raw_directive in raw_policy.split(";"):
+            val directive = raw_directive.trim()
+            if directive == "":
+                continue
+            val name = directive.replace(
+                "\t", " "
+            ).replace("\r", " ").replace("\n", " ").split(" ")[0].lower()
+            if name != "sandbox" or saw_sandbox:
+                continue
+            saw_sandbox = true
+            val allow_scripts = _browser_csp_sandbox_has_token(
+                directive, "allow-scripts"
+            )
+            val allow_forms = _browser_csp_sandbox_has_token(
+                directive, "allow-forms"
+            )
+            val allow_same_origin = _browser_csp_sandbox_has_token(
+                directive, "allow-same-origin"
+            )
+            val allow_popups = _browser_csp_sandbox_has_token(
+                directive, "allow-popups"
+            )
+            val allow_top_navigation = (
+                _browser_csp_sandbox_has_token(
+                    directive, "allow-top-navigation"
+                )
+            )
+            if not result.active:
+                result = BrowserCspSandboxPolicy(
+                    active: true,
+                    allow_scripts: allow_scripts,
+                    allow_forms: allow_forms,
+                    allow_same_origin: allow_same_origin,
+                    allow_popups: allow_popups,
+                    allow_top_navigation: allow_top_navigation
+                )
+            else:
+                result.allow_scripts = result.allow_scripts and allow_scripts
+                result.allow_forms = result.allow_forms and allow_forms
+                result.allow_same_origin = (
+                    result.allow_same_origin and allow_same_origin
+                )
+                result.allow_popups = result.allow_popups and allow_popups
+                result.allow_top_navigation = (
+                    result.allow_top_navigation and allow_top_navigation
+                )
+    result
+
 fn browser_session_is_loopback_http(url: text) -> bool:
     if not url.starts_with("http://"):
         return false

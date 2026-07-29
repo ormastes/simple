@@ -1,29 +1,6 @@
-# Browser Session Html Table Tags Specification
+# BrowserSession HTML table text projection
 
-> <details>
-
-<!-- sdn-diagram:id=browser_session_html_table_tags_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=browser_session_html_table_tags_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-browser_session_html_table_tags_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=browser_session_html_table_tags_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Projects supported caption, row, and cell boundaries to visible text. This is
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,26 +9,9 @@ browser_session_html_table_tags_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Browser Session Html Table Tags Specification
+# BrowserSession HTML table text projection
 
-## Scenarios
-
-### BrowserSession HTML table tag text semantics
-
-#### preserves caption row and cell boundaries for table text
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val html = "<table><caption>Scores</caption><colgroup><col></colgroup><thead><tr><th>Name</th><th>Score</th></tr></thead><tbody><tr><td>Ada</td><td>10</td></tr></tbody><tfoot><tr><td>Total</td><td>10</td></tr></tfoot></table>"
-expect(html_to_text(html)).to_equal("Scores\nName\tScore\nAda\t10\nTotal\t10")
-```
-
-</details>
+Projects supported caption, row, and cell boundaries to visible text. This is
 
 ## At a Glance
 
@@ -60,13 +20,35 @@ expect(html_to_text(html)).to_equal("Scores\nName\tScore\nAda\t10\nTotal\t10")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_html_table_tags_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+Projects supported caption, row, and cell boundaries to visible text. This is
+not table layout, Draw IR, or pixel evidence.
 
-Tests covering:
-- BrowserSession HTML table tag text semantics
+## Scenarios
+
+### BrowserSession HTML table tag text semantics
+
+#### should preserve caption row and cell boundaries for table text
+
+- Project supported HTML semantics to visible text
+   - Expected: html_to_text(html) equals `Scores\nName\tScore\nAda\t10\nTotal\t10`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project supported HTML semantics to visible text")
+val html = "<table><caption>Scores</caption><colgroup><col></colgroup><thead><tr><th>Name</th><th>Score</th></tr></thead><tbody><tr><td>Ada</td><td>10</td></tr></tbody><tfoot><tr><td>Total</td><td>10</td></tr></tfoot></table>"
+expect(html_to_text(html)).to_equal("Scores\nName\tScore\nAda\t10\nTotal\t10")
+```
+
+</details>
 
 ## Scenario Summary
 

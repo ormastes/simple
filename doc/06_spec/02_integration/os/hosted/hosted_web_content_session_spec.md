@@ -1,10 +1,10 @@
 # Hosted Web Content Session Specification
 
-> <details>
+> Tests covering hosted Web content session.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,30 +17,709 @@
 
 #### uses a required external web frame and rejects a missing one
 
-- A matching Simple Web frame reaches the canonical Engine2D composition and
-  remains present after unrelated window metadata changes.
-- Wrong-origin and missing required frames fail closed.
+- checksum: wm content frame checksum
+- 1, 1, COMP CREATE WINDOW to i64
+- comp require external web frame
+- comp pure simple pixel buffer
+- comp pure simple pixel buffer
+- raster shutdown
+- 1, 1, COMP CREATE WINDOW to i64
+- missing require external web frame
+- missing raster shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 69 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val theme = default_theme_id()
+val body = "<div style='background:#ef4444'>parent-rendered</div>"
+val content_revision = simple_web_content_revision_with_theme(
+    theme, "External", body, 92, 44, 0
+)
+val pixels = [0xFF22C55Eu32; 92 * 44]
+val external = WmContentFrame(
+    window_id: "1",
+    scene_revision: 0,
+    content_revision: content_revision,
+    origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    width: 92,
+    height: 44,
+    pixels: pixels,
+    checksum: wm_content_frame_checksum(pixels),
+    parent_window_id: "",
+    offset_x: 0,
+    offset_y: 0,
+    engine2d_status: "engine2d_rendered",
+    engine2d_backend: "software",
+    engine2d_reason: "sandbox-worker",
+    material_fallback_kind: "solid-material",
+    material_fallback_reason:
+        "cpu-raster-backdrop-sampling-unavailable",
+    material_fallback_sha256:
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    theme_id: theme,
+    theme_source_manifest_sha256:
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+)
+var comp = HostCompositor.new_headless(Size(
+    width: 160u64, height: 120u64
+))
+comp.apply_bridge_request(
+    1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "External",
+    8, 8, 100, 80, body, 1, "terminal"
+)
+comp.require_external_web_frame(1)
+var wrong_origin = external
+wrong_origin.origin_kind = "gui"
+expect(comp.set_external_web_frame(1, wrong_origin)).to_be(false)
+expect(comp.set_external_web_frame(1, external)).to_be(true)
+val raster = Engine2dCompositorBackend.create_named(
+    160, 120, "software"
+)
+expect(comp.render_frame_engine2d(raster)).to_be(true)
+expect(count_color(
+    comp.pure_simple_pixel_buffer(), 0xFF22C55Eu32
+)).to_be_greater_than(1000)
+expect(comp.update_window_title(1, "edited-address")).to_be(true)
+expect(comp.render_frame_engine2d(raster)).to_be(true)
+expect(count_color(
+    comp.pure_simple_pixel_buffer(), 0xFF22C55Eu32
+)).to_be_greater_than(1000)
+raster.shutdown()
+
+var missing = HostCompositor.new_headless(Size(
+    width: 160u64, height: 120u64
+))
+missing.apply_bridge_request(
+    1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "External",
+    8, 8, 100, 80, body, 1, "terminal"
+)
+missing.require_external_web_frame(1)
+val missing_raster = Engine2dCompositorBackend.create_named(
+    160, 120, "software"
+)
+expect(missing.render_frame_engine2d(missing_raster)).to_be(false)
+missing_raster.shutdown()
+```
+
+</details>
 
 #### applies CSS and advances Simple Script and JavaScript animation on the host clock
 
-- Simple Script creates the CSS-targeted red first frame.
-- The host monotonic clock keeps requestAnimationFrame pending through 15 ms.
-- At 16 ms JavaScript selects the element created by Simple Script, mutates its
-  live style, and Engine2D renders a distinct blue frame.
+- "<style>#stage{width:32px;height:24px;background-color:#ef4444}</style><script type='text/simple'>title \"SimpleReady\"\nbody html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame
+   - Expected: session.browser.current_title equals `SimpleReady`
+- 1, 1, COMP CREATE WINDOW to i64
+- 8, 8, 100, 80, session current body html
+- comp pure simple pixel buffer
+   - Expected: session.browser.current_title equals `Animated`
+- comp, 1, session current body html
+- comp pure simple pixel buffer
+- raster shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 38 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    7,
+    "<style>#stage{width:32px;height:24px;background-color:#ef4444}</style><script type='text/simple'>title \"SimpleReady\"\nbody_html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame(function(frameTime){var stage=document.getElementById('stage');stage.style.backgroundColor='#2563eb';document.title='Animated';});</script>",
+    64, 48
+)
+expect(session.advance_at(1000)).to_be(true)
+val first = session.render_to_pixels()
+expect(session.browser.current_title).to_equal("SimpleReady")
+expect(count_color(first, 0xFFEF4444u32)).to_be_greater_than(0)
+var comp = HostCompositor.new_headless(Size(
+    width: 160u64, height: 120u64
+))
+comp.apply_bridge_request(
+    1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "Browser",
+    8, 8, 100, 80, session.current_body_html(),
+    1, "browser"
+)
+val raster = Engine2dCompositorBackend.create_named(
+    160, 120, "software"
+)
+expect(comp.render_frame_engine2d(raster)).to_be(true)
+expect(count_color(
+    comp.pure_simple_pixel_buffer(), 0xFFEF4444u32
+)).to_be_greater_than(0)
+expect(session.advance_at(1015)).to_be(false)
+expect(session.advance_at(1016)).to_be(true)
+val second = session.render_to_pixels()
+expect(session.browser.current_title).to_equal("Animated")
+expect(count_color(second, 0xFF2563EBu32)).to_be_greater_than(0)
+expect(checksum(second) == checksum(first)).to_be(false)
+comp = host_compositor_update_window_content(
+    comp, 1, session.current_body_html()
+)
+expect(comp.render_frame_engine2d(raster)).to_be(true)
+expect(count_color(
+    comp.pure_simple_pixel_buffer(), 0xFF2563EBu32
+)).to_be_greater_than(0)
+raster.shutdown()
+```
+
+</details>
+
+#### invalidates retained CSS animation frames and quiesces without reparsing
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 42 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val renderer_source = rt_file_read_text(
+    "src/lib/gc_async_mut/gpu/browser_engine/" +
+    "simple_web_html_layout_renderer.spl"
+) ?? ""
+val hot_start = renderer_source.find(
+    "fn _simple_web_css_animation_instance_next_ms("
+)
+val hot_end = renderer_source.find(
+    "pub fn simple_web_layout_animation_instances_next_ms(",
+    hot_start
+)
+expect(hot_start).to_be_greater_than(-1)
+expect(hot_end).to_be_greater_than(hot_start)
+val hot_helper = renderer_source.slice(hot_start, hot_end)
+expect(hot_helper.contains(".split(")).to_be(false)
+expect(hot_helper.contains("parse_int(")).to_be(false)
+expect(hot_helper).to_contain("instance.duration_ms")
+expect(hot_helper).to_contain("instance.delay_ms")
+expect(hot_helper).to_contain("instance.iteration_count")
+var delayed = HostedWebContentSession.create(
+    70,
+    "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#16a34a;animation:Pulse 32ms linear 16ms}</style><div id='stage'></div>",
+    64, 48
+)
+val delayed_start = delayed.render_to_pixels()
+expect(count_color(
+    delayed_start, 0xFF16A34Au32
+)).to_be_greater_than(0)
+expect(delayed.browser.css_animation_reconcile_pending).to_be(false)
+expect(delayed.advance_at(1000)).to_be(false)
+expect(delayed.advance_at(1015)).to_be(false)
+expect(delayed.advance_at(1016)).to_be(true)
+expect(delayed.advance_at(1048)).to_be(true)
+val delayed_end = delayed.render_to_pixels()
+expect(count_color(
+    delayed_end, 0xFF16A34Au32
+)).to_be_greater_than(0)
+val settled_revision = delayed.mutation_revision
+expect(delayed.advance_at(1049)).to_be(false)
+expect(delayed.advance_at(2000)).to_be(false)
+expect(delayed.mutation_revision).to_equal(settled_revision)
+expect(delayed.browser.css_animation_reconcile_pending).to_be(false)
+```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> val renderer_source = rt_file_read_text(<br>
+>     "src/lib/gc_async_mut/gpu/browser_engine/" +<br>
+>     "simple_web_html_layout_renderer.spl"<br>
+> ) ?? ""<br>
+> val hot_start = renderer_source.find(<br>
+>     "fn _simple_web_css_animation_instance_next_ms("<br>
+> )<br>
+> val hot_end = renderer_source.find(<br>
+>     "pub fn simple_web_layout_animation_instances_next_ms(",<br>
+>     hot_start<br>
+> )<br>
+> expect(hot_start).to_be_greater_than(-1)<br>
+> expect(hot_end).to_be_greater_than(hot_start)<br>
+> val hot_helper = renderer_source.slice(hot_start, hot_end)<br>
+> expect(hot_helper.contains(".split(")).to_be(false)<br>
+> expect(hot_helper.contains("parse_int(")).to_be(false)<br>
+> expect(hot_helper).to_contain("instance.duration_ms")<br>
+> expect(hot_helper).to_contain("instance.delay_ms")<br>
+> expect(hot_helper).to_contain("instance.iteration_count")<br>
+> var delayed = HostedWebContentSession.create(<br>
+>     70,<br>
+>     "<style>@keyframes Pulse{fro$background - color$to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#16a34a;animation:Pulse 32ms linear 16ms}</style><div id='stage'></div>",<br>
+>     64, 48<br>
+> )<br>
+> val delayed_start = delayed.render_to_pixels()<br>
+> expect(count_color(<br>
+>     delayed_start, 0xFF16A34Au32<br>
+> )).to_be_greater_than(0)<br>
+> expect(delayed.browser.css_animation_reconcile_pending).to_be(false)<br>
+> expect(delayed.advance_at(1000)).to_be(false)<br>
+> expect(delayed.advance_at(1015)).to_be(false)<br>
+> expect(delayed.advance_at(1016)).to_be(true)<br>
+> expect(delayed.advance_at(1048)).to_be(true)<br>
+> val delayed_end = delayed.render_to_pixels()<br>
+> expect(count_color(<br>
+>     delayed_end, 0xFF16A34Au32<br>
+> )).to_be_greater_than(0)<br>
+> val settled_revision = delayed.mutation_revision<br>
+> expect(delayed.advance_at(1049)).to_be(false)<br>
+> expect(delayed.advance_at(2000)).to_be(false)<br>
+> expect(delayed.mutation_revision).to_equal(settled_revision)<br>
+> expect(delayed.browser.css_animation_reconcile_pending).to_be(false)
+
+</details>
+
+</details>
+
+#### starts a script-added animation at its retained local epoch through its end
+
+- "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444} running{animation:Pulse 1000ms linear forwards}</style><div id='stage'></div><script>setTimeout
+   - Expected: checksum(local_start) equals `checksum(before)`
+   - Expected: session.mutation_revision equals `end_revision`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    71,
+    "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444}.running{animation:Pulse 1000ms linear forwards}</style><div id='stage'></div><script>setTimeout(function(){document.getElementById('stage').className='running';},500);</script>",
+    64, 48
+)
+val before = session.render_to_pixels()
+expect(session.advance_at(1000)).to_be(false)
+expect(session.advance_at(1500)).to_be(true)
+val local_start = session.render_to_pixels()
+expect(checksum(local_start)).to_equal(checksum(before))
+expect(session.advance_at(1515)).to_be(false)
+expect(session.advance_at(1516)).to_be(true)
+val moving = session.render_to_pixels()
+expect(checksum(moving) == checksum(local_start)).to_be(false)
+expect(session.advance_at(2500)).to_be(true)
+val end_frame = session.render_to_pixels()
+expect(count_color(
+    end_frame, 0xFF2563EBu32
+)).to_be_greater_than(0)
+val end_revision = session.mutation_revision
+expect(session.advance_at(2501)).to_be(false)
+expect(session.mutation_revision).to_equal(end_revision)
+```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> var session = HostedWebContentSession.create(<br>
+>     71,<br>
+>     "<style>@keyframes Pulse{fro$background - color$to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444}.running{animation:Pulse 1000ms linear forwards}</style><div id='stage'></div><script>setTimeout(function(){document.getElementById('stage').className='running';},500);</script>",<br>
+>     64, 48<br>
+> )<br>
+> val before = session.render_to_pixels()<br>
+> expect(session.advance_at(1000)).to_be(false)<br>
+> expect(session.advance_at(1500)).to_be(true)<br>
+> val local_start = session.render_to_pixels()<br>
+> expect(checksum(local_start)).to_equal(checksum(before))<br>
+> expect(session.advance_at(1515)).to_be(false)<br>
+> expect(session.advance_at(1516)).to_be(true)<br>
+> val moving = session.render_to_pixels()<br>
+> expect(checksum(moving) == checksum(local_start)).to_be(false)<br>
+> expect(session.advance_at(2500)).to_be(true)<br>
+> val end_frame = session.render_to_pixels()<br>
+> expect(count_color(<br>
+>     end_frame, 0xFF2563EBu32<br>
+> )).to_be_greater_than(0)<br>
+> val end_revision = session.mutation_revision<br>
+> expect(session.advance_at(2501)).to_be(false)<br>
+> expect(session.mutation_revision).to_equal(end_revision)
+
+</details>
+
+</details>
+
+#### does not schedule paused animation frames and resumes from retained time
+
+- "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444} running{animation:Pulse 1000ms linear forwards} paused{animation-play-state:paused}</style><div id='stage' class='running paused'></div><script>setTimeout
+   - Expected: checksum(session.render_to_pixels()) equals `checksum(paused)`
+   - Expected: checksum(resumed) equals `checksum(paused)`
+- checksum
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    72,
+    "<style>@keyframes Pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444}.running{animation:Pulse 1000ms linear forwards}.paused{animation-play-state:paused}</style><div id='stage' class='running paused'></div><script>setTimeout(function(){document.getElementById('stage').className='running';},500);</script>",
+    64, 48
+)
+val paused = session.render_to_pixels()
+expect(session.advance_at(1000)).to_be(false)
+expect(session.advance_at(1499)).to_be(false)
+expect(checksum(session.render_to_pixels())).to_equal(checksum(paused))
+expect(session.advance_at(1500)).to_be(true)
+val resumed = session.render_to_pixels()
+expect(checksum(resumed)).to_equal(checksum(paused))
+expect(session.advance_at(1515)).to_be(false)
+expect(session.advance_at(1516)).to_be(true)
+expect(
+    checksum(session.render_to_pixels()) == checksum(resumed)
+).to_be(false)
+```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> var session = HostedWebContentSession.create(<br>
+>     72,<br>
+>     "<style>@keyframes Pulse{fro$background - color$to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444}.running{animation:Pulse 1000ms linear forwards}.paused{animation-play-state:paused}</style><div id='stage' class='running paused'></div><script>setTimeout(function(){document.getElementById('stage').className='running';},500);</script>",<br>
+>     64, 48<br>
+> )<br>
+> val paused = session.render_to_pixels()<br>
+> expect(session.advance_at(1000)).to_be(false)<br>
+> expect(session.advance_at(1499)).to_be(false)<br>
+> expect(checksum(session.render_to_pixels())).to_equal(checksum(paused))<br>
+> expect(session.advance_at(1500)).to_be(true)<br>
+> val resumed = session.render_to_pixels()<br>
+> expect(checksum(resumed)).to_equal(checksum(paused))<br>
+> expect(session.advance_at(1515)).to_be(false)<br>
+> expect(session.advance_at(1516)).to_be(true)<br>
+> expect(<br>
+>     checksum(session.render_to_pixels()) == checksum(resumed)<br>
+> ).to_be(false)
+
+</details>
+
+</details>
+
+#### publishes title-only animation frame once with identical Draw IR and pixels
+
+- "<div style='width:32px;height:24px;background-color:#ef4444'></div><script>requestAnimationFrame
+- session browser render html document
+- session browser render html document
+   - Expected: checksum(after_pixels) equals `checksum(before_pixels)`
+- before ir composition batches len
+- before ir composition batches[0] commands len
+   - Expected: session.mutation_revision equals `title_revision`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    73,
+    "<div style='width:32px;height:24px;background-color:#ef4444'></div><script>requestAnimationFrame(function(){document.title='Only title';});</script>",
+    64, 48
+)
+val before_pixels = session.render_to_pixels()
+val before_ir = simple_web_layout_render_html_draw_ir_result_at_time(
+    session.browser.render_html_document(), 64, 48, 0
+)
+expect(session.advance_at(1000)).to_be(false)
+expect(session.advance_at(1016)).to_be(true)
+val after_pixels = session.render_to_pixels()
+val after_ir = simple_web_layout_render_html_draw_ir_result_at_time(
+    session.browser.render_html_document(), 64, 48, 16
+)
+expect(checksum(after_pixels)).to_equal(checksum(before_pixels))
+expect(after_ir.composition.batches.len()).to_equal(
+    before_ir.composition.batches.len()
+)
+expect(after_ir.composition.batches[0].commands.len()).to_equal(
+    before_ir.composition.batches[0].commands.len()
+)
+expect(after_ir.composition.batches[0].commands[0].color).to_equal(
+    before_ir.composition.batches[0].commands[0].color
+)
+val title_revision = session.mutation_revision
+expect(session.advance_at(1017)).to_be(false)
+expect(session.mutation_revision).to_equal(title_revision)
+```
+
+</details>
+
+#### advances registry CSS animations without a pre-render
+
+- var registry = HostedWebContentRegistry create
+- registry sessions[0] browser css animation instances len
+- "<div id='dynamic'></div><script>setTimeout
+- "document getElementById
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 64 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var registry = HostedWebContentRegistry.create()
+val static_html = (
+    "<style>@keyframes Pulse{from{background-color:#ef4444}" +
+    "to{background-color:#2563eb}}#stage{width:32px;height:24px;" +
+    "animation:Pulse 32ms linear forwards}</style>" +
+    "<div id='stage'></div>"
+)
+expect(registry.advance_window(
+    74, static_html, 64, 48, 1000, false
+)).to_be(false)
+expect(
+    registry.sessions[0].browser.css_animation_instances.len()
+).to_equal(1)
+expect(registry.advance_window(
+    74, static_html, 64, 48, 1015, false
+)).to_be(false)
+expect(registry.advance_window(
+    74, static_html, 64, 48, 1016, false
+)).to_be(true)
+expect(registry.advance_window(
+    74, static_html, 64, 48, 1032, false
+)).to_be(true)
+val settled_revision = registry.sessions[0].mutation_revision
+expect(registry.advance_window(
+    74, static_html, 64, 48, 1033, false
+)).to_be(false)
+expect(registry.sessions[0].mutation_revision).to_equal(
+    settled_revision
+)
+expect(
+    registry.sessions[0].browser.css_animation_reconcile_pending
+).to_be(false)
+
+val dynamic_html = (
+    "<style>@keyframes Pulse{from{background-color:#ef4444}" +
+    "to{background-color:#2563eb}}#dynamic{width:32px;height:24px;" +
+    "background-color:#ef4444}.running{" +
+    "animation:Pulse 1000ms linear forwards}</style>" +
+    "<div id='dynamic'></div><script>setTimeout(function(){" +
+    "document.getElementById('dynamic').className='running';" +
+    "},500);</script>"
+)
+expect(registry.advance_window(
+    75, dynamic_html, 64, 48, 2000, false
+)).to_be(false)
+expect(registry.advance_window(
+    75, dynamic_html, 64, 48, 2500, false
+)).to_be(true)
+expect(registry.advance_window(
+    75, dynamic_html, 64, 48, 2515, false
+)).to_be(false)
+expect(registry.advance_window(
+    75, dynamic_html, 64, 48, 2516, false
+)).to_be(true)
+expect(registry.advance_window(
+    75, dynamic_html, 64, 48, 3500, false
+)).to_be(true)
+val dynamic_end_revision = registry.sessions[1].mutation_revision
+expect(registry.advance_window(
+    75, dynamic_html, 64, 48, 3501, false
+)).to_be(false)
+expect(registry.sessions[1].mutation_revision).to_equal(
+    dynamic_end_revision
+)
+```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> var registry = HostedWebContentRegistry.create()<br>
+> val static_html = (<br>
+>     "<style>@keyframes Pulse{fro$background - color$" +<br>
+>     "to{background-color:#2563eb}}#stage{width:32px;height:24px;" +<br>
+>     "animation:Pulse 32ms linear forwards}</style>" +<br>
+>     "<div id='stage'></div>"<br>
+> )<br>
+> expect(registry.advance_window(<br>
+>     74, static_html, 64, 48, 1000, false<br>
+> )).to_be(false)<br>
+> expect(<br>
+>     registry.sessions[0].browser.css_animation_instances.len()<br>
+> ).to_equal(1)<br>
+> expect(registry.advance_window(<br>
+>     74, static_html, 64, 48, 1015, false<br>
+> )).to_be(false)<br>
+> expect(registry.advance_window(<br>
+>     74, static_html, 64, 48, 1016, false<br>
+> )).to_be(true)<br>
+> expect(registry.advance_window(<br>
+>     74, static_html, 64, 48, 1032, false<br>
+> )).to_be(true)<br>
+> val settled_revision = registry.sessions[0].mutation_revision<br>
+> expect(registry.advance_window(<br>
+>     74, static_html, 64, 48, 1033, false<br>
+> )).to_be(false)<br>
+> expect(registry.sessions[0].mutation_revision).to_equal(<br>
+>     settled_revision<br>
+> )<br>
+> expect(<br>
+>     registry.sessions[0].browser.css_animation_reconcile_pending<br>
+> ).to_be(false)<br>
+> <br>
+> val dynamic_html = (<br>
+>     "<style>@keyframes Pulse{fro$background - color$" +<br>
+>     "to{background-color:#2563eb}}#dynamic{width:32px;height:24px;" +<br>
+>     "background-color:#ef4444}.running{" +<br>
+>     "animation:Pulse 1000ms linear forwards}</style>" +<br>
+>     "<div id='dynamic'></div><script>setTimeout(function(){" +<br>
+>     "document.getElementById('dynamic').className='running';" +<br>
+>     "},500);</script>"<br>
+> )<br>
+> expect(registry.advance_window(<br>
+>     75, dynamic_html, 64, 48, 2000, false<br>
+> )).to_be(false)<br>
+> expect(registry.advance_window(<br>
+>     75, dynamic_html, 64, 48, 2500, false<br>
+> )).to_be(true)<br>
+> expect(registry.advance_window(<br>
+>     75, dynamic_html, 64, 48, 2515, false<br>
+> )).to_be(false)<br>
+> expect(registry.advance_window(<br>
+>     75, dynamic_html, 64, 48, 2516, false<br>
+> )).to_be(true)<br>
+> expect(registry.advance_window(<br>
+>     75, dynamic_html, 64, 48, 3500, false<br>
+> )).to_be(true)<br>
+> val dynamic_end_revision = registry.sessions[1].mutation_revision<br>
+> expect(registry.advance_window(<br>
+>     75, dynamic_html, 64, 48, 3501, false<br>
+> )).to_be(false)<br>
+> expect(registry.sessions[1].mutation_revision).to_equal(<br>
+>     dynamic_end_revision<br>
+> )
+
+</details>
+
+</details>
 
 #### commits one HTTPS redirect hop per host tick through browser policy
 
-- The hosted adapter returns the raw 302 response to `BrowserSession` instead
-  of consuming the redirect inside Fetch.
-- Strict-Transport-Security upgrades the plaintext Location before the next
-  request is emitted.
-- A second host tick commits the HTTPS document while preserving the previous
-  page until that final response arrives.
+- var registry = MockResponseRegistry create
+- Pair
+- Pair
+- set mock registry
+   - Expected: session.network_job_handle equals `0`
+   - Expected: session.network_job_handle equals `0`
+- set mock registry
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 38 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var registry = MockResponseRegistry.create()
+registry.register_with_headers(
+    "https://secure.test/start",
+    302,
+    [
+        Pair("Location", "http://secure.test/final"),
+        Pair("Strict-Transport-Security", "max-age=3600")
+    ],
+    ""
+)
+registry.register(
+    "https://secure.test/final", 200,
+    "<html><body><div id='network-ready'>Secure</div></body></html>"
+)
+set_mock_registry(registry)
+var session = HostedWebContentSession.create(
+    8, "<div id='prior'>Prior</div>", 120, 60
+)
+expect(session.browser.begin_network_navigation(
+    "https://secure.test/start", "GET", "", "", ""
+).is_ok()).to_be(true)
+
+expect(session.advance_at(2000)).to_be(false)
+expect(session.network_job_handle).to_equal(0)
+expect(session.browser.current_body_html).to_contain("prior")
+expect(session.browser.pending_url).to_equal(
+    "https://secure.test/final"
+)
+expect(session.browser.has_pending_requests()).to_be(true)
+
+expect(session.advance_at(2001)).to_be(true)
+expect(session.network_job_handle).to_equal(0)
+expect(session.browser.current_url).to_equal(
+    "https://secure.test/final"
+)
+expect(session.browser.current_body_html).to_contain("network-ready")
+expect(session.browser.has_pending_requests()).to_be(false)
+set_mock_registry(MockResponseRegistry.create())
+```
+
+</details>
 
 #### cancels the native job immediately when browser chrome stops loading
 
-- A trusted Stop click cancels the retained native network job, preserves the
-  previous document, and reports one chrome callback.
+- Some
+- session network job request = Some
+   - Expected: down.reason equals `chrome-pressed`
+   - Expected: up.callback_count equals `1`
+   - Expected: session.network_job_handle equals `0`
+   - Expected: session.browser.can_stop_loading() is false
+   - Expected: session.address_text() equals `prior_url`
+   - Expected: session.browser.current_url equals `prior_url`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    81, "<div id='prior'>Prior</div>", 120, 60
+)
+val prior_url = session.browser.current_url
+val address_down = session.dispatch_chrome_pointer(
+    80, "address", true
+)
+val address_up = session.dispatch_chrome_pointer(
+    81, "address", false
+)
+val address_text = session.dispatch_text(
+    82, "https://slow.test/page"
+)
+val address_submit = session.dispatch_key(83, 13, true)
+expect(address_down.reason).to_equal("chrome-pressed")
+expect(address_up.reason).to_equal("address-focused")
+expect(address_text.callback_count).to_equal(1)
+expect(address_submit.callback_count).to_equal(1)
+match session.browser.take_pending_request():
+    Some(request):
+        session.network_job_handle = 424242
+        session.network_job_request = Some(request)
+    None:
+        expect(false).to_be(true)
+
+val down = session.dispatch_chrome_pointer(84, "stop", true)
+val up = session.dispatch_chrome_pointer(85, "stop", false)
+
+expect(down.reason).to_equal("chrome-pressed")
+expect(up.callback_count).to_equal(1)
+expect(session.network_job_handle).to_equal(0)
+expect(session.browser.can_stop_loading()).to_equal(false)
+expect(session.current_body_html()).to_contain("prior")
+expect(session.address_text()).to_equal(prior_url)
+expect(session.browser.current_url).to_equal(prior_url)
+```
+
+</details>
 
 #### fails closed when no semantic element is hit or focused
 
@@ -66,87 +745,842 @@ expect(unfocused.mutation_revision).to_equal(0)
 
 #### targets a control at its CSS-painted geometry
 
-- Pointer hit testing uses final CSS layout coordinates, and the executed
-  button listener reports one callback.
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    90,
+    "<style>.moved{position:absolute;left:48px;top:32px;width:28px;height:20px}</style><button class='moved' onclick='set-attr:data-clicked=yes'>Move</button>",
+    100, 70
+)
+val press = session.dispatch_pointer_at(91, 52, 36, true)
+val release = session.dispatch_pointer_at(92, 52, 36, false)
+
+expect(press.semantic_target_id.starts_with("node:")).to_be(true)
+expect(release.semantic_target_id).to_equal(
+    press.semantic_target_id
+)
+expect(release.callback_count).to_equal(1)
+expect(session.current_body_html()).to_contain(
+    "data-clicked=\"yes\""
+)
+```
+
+</details>
 
 #### appends committed text only to the actually focused hosted input
 
-- Press and release the input to establish DOM focus.
-- Commit `"A"` and then `"da"` as separate host text events.
-- The focused input ends with `value="Ada"`; no pointer-position lookup is
-  involved in text routing.
-- Default input editing advances `mutation_revision` but leaves
-  `callback_count` at zero because no application listener ran.
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    10, "<input id='name' value=''>", 80, 40
+)
+val press = session.dispatch_pointer_at(3, 5, 5, true)
+val release = session.dispatch_pointer_at(4, 5, 5, false)
+expect(press.semantic_target_id).to_equal("name")
+expect(release.semantic_target_id).to_equal("name")
+expect(session.last_target_id).to_equal("name")
+
+val first = session.dispatch_text(5, "A")
+val second = session.dispatch_text(6, "da")
+expect(first.reason).to_equal("")
+expect(second.reason).to_equal("")
+expect(first.callback_count).to_equal(0)
+expect(second.callback_count).to_equal(0)
+expect(first.mutation_revision).to_equal(2)
+expect(second.mutation_revision).to_equal(3)
+expect(session.current_body_html()).to_contain("value=\"Ada\"")
+```
+
+</details>
 
 #### counts only an executed input listener as an application callback
 
-- Nested focus, before-input, and input listeners are all counted; default
-  editing itself adds no callback.
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    13,
+    "<input id='name' value='' onfocus='set-attr:data-focus=yes' onbeforeinput='set-attr:data-before=yes' oninput='set-attr:data-callback=yes'>",
+    80, 40
+)
+val focused = session.dispatch_pointer_at(7, 5, 5, true)
+val _ = session.dispatch_pointer_at(8, 5, 5, false)
+val edited = session.dispatch_text(9, "Ada")
+expect(focused.callback_count).to_equal(1)
+expect(edited.callback_count).to_equal(3)
+expect(edited.mutation_revision).to_equal(2)
+expect(session.current_body_html()).to_contain("value=\"Ada\"")
+expect(session.current_body_html()).to_contain("data-focus=\"yes\"")
+expect(session.current_body_html()).to_contain("data-before=\"yes\"")
+expect(session.current_body_html()).to_contain(
+    "data-callback=\"yes\""
+)
+```
+
+</details>
 
 #### enforces authored maxlength after cancelable beforeinput
 
-- Clamp text input to the authored maxlength after the cancelable
-  `beforeinput` listener runs.
-- Count the astral emoji as two UTF-16 units, retaining `a😀` under
-  `maxlength="3"` and rejecting the trailing `Z` without splitting UTF-8.
-- A canceled edit preserves the old value and never emits `input`.
+- Clamp text input to the authored maxlength
+   - Expected: limited_press.semantic_target_id equals `limited`
+   - Expected: limited_release.semantic_target_id equals `limited`
+   - Expected: accepted.semantic_target_id equals `limited`
+   - Expected: accepted.callback_count equals `2`
+   - Expected: accepted.reason equals ``
+- limited current body html
+   - Expected: canceled_press.semantic_target_id equals `blocked`
+   - Expected: canceled_release.semantic_target_id equals `blocked`
+   - Expected: blocked.semantic_target_id equals `blocked`
+   - Expected: blocked.callback_count equals `1`
+   - Expected: blocked.reason equals `no-application-mutation`
+- canceled current body html
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 42 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Clamp text input to the authored maxlength")
+var limited = HostedWebContentSession.create(
+    14,
+    "<input id='limited' maxlength='3' value='' " +
+    "onbeforeinput='set-attr:data-before=yes' " +
+    "oninput='set-attr:data-input=yes'>",
+    80, 40
+)
+val limited_press = limited.dispatch_pointer_at(10, 5, 5, true)
+val limited_release = limited.dispatch_pointer_at(11, 5, 5, false)
+expect(limited_press.semantic_target_id).to_equal("limited")
+expect(limited_release.semantic_target_id).to_equal("limited")
+val accepted = limited.dispatch_text(12, "a😀Z")
+expect(accepted.semantic_target_id).to_equal("limited")
+expect(accepted.callback_count).to_equal(2)
+expect(accepted.reason).to_equal("")
+expect(limited.current_body_html()).to_contain("value=\"a😀\"")
+expect(limited.current_body_html()).to_contain("data-before=\"yes\"")
+expect(limited.current_body_html()).to_contain("data-input=\"yes\"")
+expect(
+    limited.current_body_html().contains("value=\"a😀Z\"")
+).to_be(false)
+
+var canceled = HostedWebContentSession.create(
+    15,
+    "<input id='blocked' maxlength='3' value='kept' " +
+    "onbeforeinput='prevent-default' " +
+    "oninput='set-attr:data-input=yes'>",
+    80, 40
+)
+val canceled_press = canceled.dispatch_pointer_at(13, 5, 5, true)
+val canceled_release = canceled.dispatch_pointer_at(14, 5, 5, false)
+expect(canceled_press.semantic_target_id).to_equal("blocked")
+expect(canceled_release.semantic_target_id).to_equal("blocked")
+val blocked = canceled.dispatch_text(15, "a😀Z")
+expect(blocked.semantic_target_id).to_equal("blocked")
+expect(blocked.callback_count).to_equal(1)
+expect(blocked.reason).to_equal("no-application-mutation")
+expect(canceled.current_body_html()).to_contain("value=\"kept\"")
+expect(
+    canceled.current_body_html().contains("data-input=\"yes\"")
+).to_be(false)
+```
+
+</details>
 
 #### clicks only after a matching hosted pointer press and release
 
-- A release without a preceding press must not check the checkbox.
-- A press followed by a release outside the semantic surface must not click.
-- Only a same-target press/release emits the click default action.
-- The checkbox default action mutates checked state with `callback_count=0`.
-- The resulting checked state must change the hosted pixels and survive the
-  canonical compositor-to-Engine2D frame.
+- var comp = HostCompositor new headless
+- 1, 0, COMP CREATE WINDOW to i64
+- target unwrap
+- target unwrap
+- target unwrap
+- target unwrap
+- 17, target unwrap
+   - Expected: release_only.reason equals `pointer-release-without-press`
+   - Expected: release_only.mutation_revision equals `0`
+- session current body html
+- 18, target unwrap
+   - Expected: abandoned_press.reason equals `pointer-pressed`
+   - Expected: missed_release.reason equals `no-semantic-target`
+- session current body html
+- 20, target unwrap
+   - Expected: press.reason equals `pointer-pressed`
+- 21, target unwrap
+   - Expected: receipt.event_id equals `21`
+   - Expected: receipt.wm_target_id equals `target.unwrap().window_id`
+   - Expected: receipt.semantic_target_id equals `accept`
+   - Expected: receipt.callback_count equals `0`
+   - Expected: receipt.mutation_revision equals `2`
+- comp = host compositor update window content
+   - Expected: frame.len() equals `240 * 180`
+- raster shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 58 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
+comp.apply_bridge_request(
+    1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Form", 20, 48, 180, 100,
+    "<style>input{display:block;width:40px;height:28px;background-color:#ef4444}input[checked]{background-color:#2563eb}</style><input id='accept' type='checkbox'>",
+    1, "hosted-web-event"
+)
+val target = comp.content_target(40, 90)
+expect(target.is_some()).to_be(true)
+
+var session = HostedWebContentSession.create(
+    target.unwrap().window_id,
+    target.unwrap().body_html,
+    target.unwrap().width,
+    target.unwrap().height
+)
+val before = session.render_to_pixels()
+val release_only = session.dispatch_pointer_at(
+    17, target.unwrap().local_x, target.unwrap().local_y, false
+)
+expect(release_only.reason).to_equal("pointer-release-without-press")
+expect(release_only.mutation_revision).to_equal(0)
+expect(
+    session.current_body_html().contains("checked=\"checked\"")
+).to_be(false)
+
+val abandoned_press = session.dispatch_pointer_at(
+    18, target.unwrap().local_x, target.unwrap().local_y, true
+)
+expect(abandoned_press.reason).to_equal("pointer-pressed")
+val missed_release = session.dispatch_pointer_at(19, 1000, 1000, false)
+expect(missed_release.reason).to_equal("no-semantic-target")
+expect(
+    session.current_body_html().contains("checked=\"checked\"")
+).to_be(false)
+
+val press = session.dispatch_pointer_at(
+    20, target.unwrap().local_x, target.unwrap().local_y, true
+)
+expect(press.reason).to_equal("pointer-pressed")
+val receipt = session.dispatch_pointer_at(
+    21, target.unwrap().local_x, target.unwrap().local_y, false
+)
+
+expect(receipt.event_id).to_equal(21)
+expect(receipt.wm_target_id).to_equal(target.unwrap().window_id)
+expect(receipt.semantic_target_id).to_equal("accept")
+expect(receipt.callback_count).to_equal(0)
+expect(receipt.mutation_revision).to_equal(2)
+expect(session.current_body_html()).to_contain("checked=\"checked\"")
+expect(checksum(session.render_to_pixels()) == checksum(before)).to_be(false)
+
+comp = host_compositor_update_window_content(comp, target.unwrap().window_id, session.current_body_html())
+val raster = Engine2dCompositorBackend.create_named(240, 180, "software")
+expect(comp.render_frame_engine2d(raster)).to_be(true)
+val frame = comp.pure_simple_pixel_buffer()
+expect(frame.len()).to_equal(240 * 180)
+expect(checksum(frame)).to_be_greater_than(0)
+raster.shutdown()
+```
+
+</details>
 
 #### routes hosted key edges to DOM focus before window shortcuts
 
-- Focus a hosted text input through the production pointer route.
-- Deliver W keydown, committed text, and W keyup to that DOM focus.
-- Verify both key listeners run and the input value becomes `w`, preventing
-  the bare W edge from becoming a window-close shortcut.
-- Key listeners report one callback; committed text and the Space default
-  toggle report zero callbacks.
-- Focus a checkbox and verify Space keydown reuses the canonical click/default
-  path while Space keyup reaches its listener.
+- checkbox session current body html
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 56 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var input_session = HostedWebContentSession.create(
+    11,
+    "<input id='name' value='' onkeydown='set-attr:data-down=yes' onkeyup='set-attr:data-up=yes'>",
+    80, 40
+)
+val input_press = input_session.dispatch_pointer_at(30, 5, 5, true)
+val input_release = input_session.dispatch_pointer_at(31, 5, 5, false)
+expect(input_press.semantic_target_id).to_equal("name")
+expect(input_release.semantic_target_id).to_equal("name")
+
+val letter_down = input_session.dispatch_key(32, 87, true)
+val committed = input_session.dispatch_text(33, "w")
+val letter_up = input_session.dispatch_key(34, 87, false)
+expect(letter_down.semantic_target_id).to_equal("name")
+expect(committed.semantic_target_id).to_equal("name")
+expect(letter_up.semantic_target_id).to_equal("name")
+expect(letter_down.callback_count).to_equal(1)
+expect(committed.callback_count).to_equal(0)
+expect(letter_up.callback_count).to_equal(1)
+expect(input_session.current_body_html()).to_contain(
+    "data-down=\"yes\""
+)
+expect(input_session.current_body_html()).to_contain(
+    "data-up=\"yes\""
+)
+expect(input_session.current_body_html()).to_contain("value=\"w\"")
+
+var checkbox_session = HostedWebContentSession.create(
+    12,
+    "<input id='toggle' type='checkbox' onkeyup='set-attr:data-up=yes'>",
+    80, 40
+)
+val checkbox_press = checkbox_session.dispatch_pointer_at(
+    35, 5, 5, true
+)
+val checkbox_release = checkbox_session.dispatch_pointer_at(
+    36, 5, 5, false
+)
+expect(checkbox_press.semantic_target_id).to_equal("toggle")
+expect(checkbox_release.semantic_target_id).to_equal("toggle")
+expect(checkbox_session.current_body_html()).to_contain(
+    "checked=\"checked\""
+)
+
+val space_down = checkbox_session.dispatch_key(37, 32, true)
+val space_up = checkbox_session.dispatch_key(38, 32, false)
+expect(space_down.semantic_target_id).to_equal("toggle")
+expect(space_up.semantic_target_id).to_equal("toggle")
+expect(space_down.callback_count).to_equal(0)
+expect(space_up.callback_count).to_equal(1)
+expect(
+    checkbox_session.current_body_html().contains("checked=\"checked\"")
+).to_be(false)
+expect(checkbox_session.current_body_html()).to_contain(
+    "data-up=\"yes\""
+)
+```
+
+</details>
 
 #### deletes one UTF-8 scalar from the hosted address bar
 
-- Focus the trusted hosted address field and commit a URL ending in Hangul.
-- Backspace removes the complete trailing scalar, never one UTF-8 byte.
-- The resulting address remains exactly `https://example.test/`.
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    17, "<p>ready</p>", 320, 180
+)
+val down = session.dispatch_chrome_pointer(1, "address", true)
+val up = session.dispatch_chrome_pointer(2, "address", false)
+val typed = session.dispatch_text(
+    3, "https://example.test/한"
+)
+val erased = session.dispatch_key(4, 8, true)
+
+expect(down.semantic_target_id).to_equal(
+    "browser:session#address"
+)
+expect(up.reason).to_equal("address-focused")
+expect(typed.callback_count).to_equal(1)
+expect(erased.semantic_target_id).to_equal(
+    "browser:session#address"
+)
+expect(erased.callback_count).to_equal(1)
+expect(session.address_text()).to_equal("https://example.test/")
+```
+
+</details>
+
+#### cancels the hosted address draft and defocuses on Escape
+
+- Focus the address bar and replace the committed URL
+   - Expected: typed.callback_count equals `1`
+   - Expected: session.address_text() equals `https://draft.test/`
+   - Expected: session.chrome_focus equals `address`
+- Cancel the draft with Escape
+   - Expected: canceled.callback_count equals `1`
+   - Expected: canceled.reason equals ``
+   - Expected: canceled.mutation_revision equals `revision_before_escape`
+   - Expected: session.browser.address_draft equals `committed_url`
+   - Expected: session.address_text() equals `committed_url`
+   - Expected: session.chrome_focus equals ``
+- Keep later text away from the defocused address bar
+   - Expected: ignored.callback_count equals `0`
+   - Expected: ignored.reason equals `no-focused-semantic-target`
+   - Expected: session.address_text() equals `committed_url`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 36 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    18, "<p>ready</p>", 320, 180
+)
+expect(session.browser.open_html(
+    "https://committed.test/page",
+    "<html><body><p>committed</p></body></html>"
+).is_ok()).to_be(true)
+val committed_url = session.browser.current_url
+
+step("Focus the address bar and replace the committed URL")
+val _ = session.dispatch_chrome_pointer(5, "address", true)
+val _ = session.dispatch_chrome_pointer(6, "address", false)
+val typed = session.dispatch_text(7, "https://draft.test/")
+expect(typed.callback_count).to_equal(1)
+expect(session.address_text()).to_equal("https://draft.test/")
+expect(session.chrome_focus).to_equal("address")
+val revision_before_escape = session.mutation_revision
+
+step("Cancel the draft with Escape")
+val canceled = session.dispatch_key(8, 27, true)
+expect(canceled.semantic_target_id).to_equal(
+    "browser:session#address"
+)
+expect(canceled.callback_count).to_equal(1)
+expect(canceled.reason).to_equal("")
+expect(canceled.mutation_revision).to_equal(revision_before_escape)
+expect(session.browser.address_draft).to_equal(committed_url)
+expect(session.address_text()).to_equal(committed_url)
+expect(session.chrome_focus).to_equal("")
+expect(session.address_replace_on_text).to_be(false)
+
+step("Keep later text away from the defocused address bar")
+val ignored = session.dispatch_text(9, "ignored")
+expect(ignored.callback_count).to_equal(0)
+expect(ignored.reason).to_equal("no-focused-semantic-target")
+expect(session.address_text()).to_equal(committed_url)
+```
+
+</details>
+
+#### accepts 2048 UTF-8 address bytes and rejects 2049 without mutation
+
+- Accept the exact UTF-8 byte boundary
+   - Expected: accepted.callback_count equals `1`
+   - Expected: accepted.reason equals ``
+   - Expected: session.address_text() equals `accepted_value`
+- Reject one extra byte without changing editing state
+   - Expected: rejected.callback_count equals `0`
+   - Expected: rejected.reason equals `address-too-long`
+   - Expected: session.browser.address_draft equals `accepted_value`
+   - Expected: session.address_text() equals `accepted_value`
+   - Expected: session.chrome_focus equals `address`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = HostedWebContentSession.create(
+    19, "<p>ready</p>", 320, 180
+)
+val accepted_value = repeated_text("a", 2045) + "한"
+val rejected_value = accepted_value + "b"
+expect(rt_text_to_bytes(accepted_value).len()).to_equal(2048)
+expect(rt_text_to_bytes(rejected_value).len()).to_equal(2049)
+
+step("Accept the exact UTF-8 byte boundary")
+val _ = session.dispatch_chrome_pointer(10, "address", true)
+val _ = session.dispatch_chrome_pointer(11, "address", false)
+val accepted = session.dispatch_text(12, accepted_value)
+expect(accepted.callback_count).to_equal(1)
+expect(accepted.reason).to_equal("")
+expect(session.address_text()).to_equal(accepted_value)
+
+step("Reject one extra byte without changing editing state")
+val _ = session.dispatch_chrome_pointer(13, "address", true)
+val _ = session.dispatch_chrome_pointer(14, "address", false)
+val revision_before_rejection = session.mutation_revision
+val rejected = session.dispatch_text(15, rejected_value)
+expect(rejected.semantic_target_id).to_equal(
+    "browser:session#address"
+)
+expect(rejected.callback_count).to_equal(0)
+expect(rejected.reason).to_equal("address-too-long")
+expect(rejected.mutation_revision).to_equal(
+    revision_before_rejection
+)
+expect(session.browser.address_draft).to_equal(accepted_value)
+expect(session.address_text()).to_equal(accepted_value)
+expect(session.chrome_focus).to_equal("address")
+expect(session.address_replace_on_text).to_be(true)
+```
+
+</details>
 
 #### keeps trusted browser chrome outside hostile page hit testing
 
+- 1, 1, COMP CREATE WINDOW to i64
+   - Expected: toolbar.unwrap().control equals `address`
+   - Expected: back.unwrap().control equals `back`
+   - Expected: page.unwrap().local_y equals `6`
+- page unwrap
+- page unwrap
+- page unwrap
+- page unwrap
+   - Expected: address_up.reason equals `address-focused`
+   - Expected: edited.callback_count equals `1`
+   - Expected: submitted.callback_count equals `1`
+- session current body html
+   - Expected: abandoned_back.reason equals `chrome-pressed`
+   - Expected: back_up.callback_count equals `1`
+   - Expected: forward_up.callback_count equals `1`
+- comp, page unwrap
+- comp, page unwrap
+   - Expected: pixels[90 * 420 + 300] equals `0xFFFFFFFFu32`
+- raster shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 106 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var comp = HostCompositor.new_headless(Size(
+    width: 420u64, height: 280u64
+))
+comp.apply_bridge_request(
+    1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "Browser",
+    20, 48, 320, 180,
+    "<button id='trap' onclick='set-attr:data-hostile-fired=yes'>Back</button><input id='trap-address' value='trap'>",
+    1, "browser"
+)
+
+val toolbar = comp.browser_chrome_target(300, 90)
+val back = comp.browser_chrome_target(30, 90)
+expect(toolbar.is_some()).to_be(true)
+expect(toolbar.unwrap().control).to_equal("address")
+expect(back.is_some()).to_be(true)
+expect(back.unwrap().control).to_equal("back")
+expect(comp.content_target(300, 90).is_some()).to_be(false)
+
+val page = comp.content_target(30, 130)
+expect(page.is_some()).to_be(true)
+expect(page.unwrap().local_y).to_equal(6)
+var session = HostedWebContentSession.create(
+    page.unwrap().window_id,
+    page.unwrap().body_html,
+    page.unwrap().width,
+    page.unwrap().height
+)
+session.browser.register_resource(
+    "https://example.com/target",
+    "<html><body><div id='target'>Target</div></body></html>"
+)
+
+val address_down = session.dispatch_chrome_pointer(
+    40, "address", true
+)
+val address_up = session.dispatch_chrome_pointer(
+    41, "address", false
+)
+val edited = session.dispatch_text(
+    42, "https://example.com/target"
+)
+val submitted = session.dispatch_key(43, 13, true)
+expect(address_down.semantic_target_id).to_equal(
+    "browser:session#address"
+)
+expect(address_up.reason).to_equal("address-focused")
+expect(edited.callback_count).to_equal(1)
+expect(submitted.callback_count).to_equal(1)
+expect(session.browser.current_url).to_equal(
+    "https://example.com/target"
+)
+expect(session.current_body_html()).to_contain("Target")
+expect(
+    session.current_body_html().contains("data-hostile-fired")
+).to_be(false)
+val abandoned_back = session.dispatch_chrome_pointer(
+    44, "back", true
+)
+val page_release = session.dispatch_pointer_at(45, 5, 5, false)
+val rejected_back = session.dispatch_chrome_pointer(
+    46, "back", false
+)
+expect(abandoned_back.reason).to_equal("chrome-pressed")
+expect(page_release.reason).to_equal(
+    "pointer-release-without-press"
+)
+expect(rejected_back.reason).to_equal(
+    "chrome-release-target-mismatch"
+)
+expect(session.browser.current_url).to_equal(
+    "https://example.com/target"
+)
+
+val back_down = session.dispatch_chrome_pointer(47, "back", true)
+val back_up = session.dispatch_chrome_pointer(48, "back", false)
+expect(back_down.semantic_target_id).to_equal(
+    "browser:session#back"
+)
+expect(back_up.callback_count).to_equal(1)
+expect(session.current_body_html()).to_contain("trap-address")
+val forward_down = session.dispatch_chrome_pointer(
+    49, "forward", true
+)
+val forward_up = session.dispatch_chrome_pointer(
+    50, "forward", false
+)
+expect(forward_down.semantic_target_id).to_equal(
+    "browser:session#forward"
+)
+expect(forward_up.callback_count).to_equal(1)
+expect(session.current_body_html()).to_contain("Target")
+
+comp = host_compositor_update_window_content(
+    comp, page.unwrap().window_id, session.current_body_html()
+)
+comp = host_compositor_update_window_title(
+    comp, page.unwrap().window_id, session.address_text()
+)
+val raster = Engine2dCompositorBackend.create_named(
+    420, 280, "software"
+)
+expect(comp.render_frame_engine2d(raster)).to_be(true)
+val pixels = comp.pure_simple_pixel_buffer()
+expect(checksum(pixels)).to_be_greater_than(0)
+expect(pixels[90 * 420 + 300]).to_equal(0xFFFFFFFFu32)
+raster.shutdown()
+```
+
+</details>
+
 #### isolates address history and page state between browser windows
 
-- Address focus, text, Enter, and Back target only the selected hosted browser
-  session.
-- The other browser window retains its address and page body unchanged.
-- Favorite rejects without mutating memory when durable profile ownership is
-  unavailable.
+- var registry = HostedWebContentRegistry create
+   - Expected: address_down.reason equals `chrome-pressed`
+   - Expected: address_up.reason equals `address-focused`
+   - Expected: edited.callback_count equals `1`
+   - Expected: submitted.callback_count equals `1`
+   - Expected: registry.address_text(71) equals `first_address`
+   - Expected: registry.body_html(71) equals `first_body`
+   - Expected: back_down.reason equals `chrome-pressed`
+   - Expected: back_up.callback_count equals `1`
+   - Expected: registry.body_html(71) equals `first_body`
+   - Expected: favorite_down.reason equals `chrome-pressed`
+   - Expected: favorite_up.callback_count equals `0`
+   - Expected: favorite_up.reason equals `profile-unavailable`
+- registry address text
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 60 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var registry = HostedWebContentRegistry.create()
+val _ = registry.advance_window(
+    71, "<div id='first'>First</div>", 120, 60, 1000, false
+)
+val _ = registry.advance_window(
+    72, "<div id='second'>Second</div>", 120, 60, 1000, false
+)
+val first_body = registry.body_html(71)
+val first_address = registry.address_text(71)
+var second = registry.sessions[1]
+second.browser.register_resource(
+    "https://second.test/target",
+    "<html><body><div id='target'>Target</div></body></html>"
+)
+registry.sessions[1] = second
+
+val address_down = registry.dispatch_chrome_pointer(
+    73, 72, "address", true
+)
+val address_up = registry.dispatch_chrome_pointer(
+    74, 72, "address", false
+)
+val edited = registry.dispatch_text(
+    75, 72, "https://second.test/target"
+)
+val submitted = registry.dispatch_key(76, 72, 13, true)
+expect(address_down.reason).to_equal("chrome-pressed")
+expect(address_up.reason).to_equal("address-focused")
+expect(edited.callback_count).to_equal(1)
+expect(submitted.callback_count).to_equal(1)
+expect(registry.address_text(72)).to_equal(
+    "https://second.test/target"
+)
+expect(registry.body_html(72)).to_contain("Target")
+expect(registry.address_text(71)).to_equal(first_address)
+expect(registry.body_html(71)).to_equal(first_body)
+
+val back_down = registry.dispatch_chrome_pointer(
+    77, 72, "back", true
+)
+val back_up = registry.dispatch_chrome_pointer(
+    78, 72, "back", false
+)
+expect(back_down.reason).to_equal("chrome-pressed")
+expect(back_up.callback_count).to_equal(1)
+expect(registry.body_html(72)).to_contain("second")
+expect(registry.body_html(71)).to_equal(first_body)
+
+val favorite_down = registry.dispatch_chrome_pointer(
+    79, 72, "favorite", true
+)
+val favorite_up = registry.dispatch_chrome_pointer(
+    80, 72, "favorite", false
+)
+expect(favorite_down.reason).to_equal("chrome-pressed")
+expect(favorite_up.callback_count).to_equal(0)
+expect(favorite_up.reason).to_equal("profile-unavailable")
+expect(registry.sessions[1].browser.is_favorite(
+    registry.address_text(72)
+)).to_be(false)
+```
+
+</details>
 
 #### persists Favorite only for the selected secondary browser window
 
-- A bookmark-only profile handle commits the selected window's URL.
-- The sibling browser window remains unchanged.
-- Registry shutdown closes bookmark ownership without touching HSTS.
+- BrowserBookmarkStore memory
+   - Expected: favorite_down.reason equals `chrome-pressed`
+   - Expected: favorite_up.callback_count equals `1`
+   - Expected: registry.profile_bookmarks.entries.len() equals `1`
+   - Expected: registry.close() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var registry = HostedWebContentRegistry.create_with_bookmark_store(
+    BrowserBookmarkStore.memory()?
+)
+val _ = registry.advance_window(
+    81, "<div>First</div>", 120, 60, 1000, true
+)
+val _ = registry.advance_window(
+    82, "<div>Second</div>", 120, 60, 1000, true
+)
+var second = registry.sessions[1]
+expect(second.browser.open_html(
+    "https://second.test/page",
+    "<html><body>Second</body></html>"
+).is_ok()).to_equal(true)
+registry.sessions[1] = second
+
+val favorite_down = registry.dispatch_chrome_pointer(
+    83, 82, "favorite", true
+)
+val favorite_up = registry.dispatch_chrome_pointer(
+    84, 82, "favorite", false
+)
+expect(favorite_down.reason).to_equal("chrome-pressed")
+expect(favorite_up.callback_count).to_equal(1)
+expect(registry.sessions[1].browser.is_favorite(
+    "https://second.test/page"
+)).to_equal(true)
+expect(registry.sessions[0].browser.is_favorite(
+    "https://second.test/page"
+)).to_equal(false)
+expect(registry.profile_bookmarks.entries.len()).to_equal(1)
+expect(registry.close()).to_equal(true)
+```
+
+</details>
 
 #### carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame
 
-- A checkbox default action crosses compositor-local coordinates, mutates the
-  hosted pixels with zero callbacks, and reaches a nonblank Engine2D frame.
-- The WM-owned toolbar and address field occupy a reserved region above the
-  hostile page frame.
-- A toolbar coordinate resolves only to `browser:session#address`, never to
-  page DOM hit testing.
-- Committed text edits the trusted address draft and Enter submits it through
-  BrowserSession; a hostile page control with the same label remains untouched.
-- Matching trusted Back and Forward press/release pairs traverse the real
-  BrowserSession history without firing the hostile page's `Back` button.
-- The canonical Engine2D frame keeps the address field white at its real screen
-  coordinate, proving page pixels do not overwrite trusted chrome.
+- var comp = HostCompositor new headless
+- 1, 0, COMP CREATE WINDOW to i64
+- target unwrap
+- target unwrap
+- target unwrap
+- target unwrap
+- 16, target unwrap
+- 17, target unwrap
+   - Expected: receipt.event_id equals `17`
+   - Expected: receipt.wm_target_id equals `target.unwrap().window_id`
+   - Expected: receipt.semantic_target_id equals `accept`
+   - Expected: receipt.callback_count equals `0`
+   - Expected: receipt.mutation_revision equals `2`
+- comp, target unwrap
+   - Expected: frame.len() equals `240 * 180`
+- raster shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 40 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
+comp.apply_bridge_request(
+    1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Form", 20, 48, 180, 100,
+    "<style>input{display:block;width:40px;height:28px;background-color:#ef4444}input[checked]{background-color:#2563eb}</style><input id='accept' type='checkbox'>",
+    1, "hosted-web-event"
+)
+val target = comp.content_target(40, 90)
+expect(target.is_some()).to_be(true)
+
+var session = HostedWebContentSession.create(
+    target.unwrap().window_id,
+    target.unwrap().body_html,
+    target.unwrap().width,
+    target.unwrap().height
+)
+val before = session.render_to_pixels()
+val _ = session.dispatch_pointer_at(
+    16, target.unwrap().local_x, target.unwrap().local_y, true
+)
+val receipt = session.dispatch_pointer_at(
+    17, target.unwrap().local_x, target.unwrap().local_y, false
+)
+
+expect(receipt.event_id).to_equal(17)
+expect(receipt.wm_target_id).to_equal(target.unwrap().window_id)
+expect(receipt.semantic_target_id).to_equal("accept")
+expect(receipt.callback_count).to_equal(0)
+expect(receipt.mutation_revision).to_equal(2)
+expect(session.current_body_html()).to_contain("checked=\"checked\"")
+expect(checksum(session.render_to_pixels()) == checksum(before)).to_be(false)
+
+comp = host_compositor_update_window_content(
+    comp, target.unwrap().window_id, session.current_body_html()
+)
+val raster = Engine2dCompositorBackend.create_named(240, 180, "software")
+expect(comp.render_frame_engine2d(raster)).to_be(true)
+val frame = comp.pure_simple_pixel_buffer()
+expect(frame.len()).to_equal(240 * 180)
+expect(checksum(frame)).to_be_greater_than(0)
+raster.shutdown()
+```
+
+</details>
 
 ## At a Glance
 
@@ -155,20 +1589,20 @@ expect(unfocused.mutation_revision).to_equal(0)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/02_integration/os/hosted/hosted_web_content_session_spec.spl` |
-| Updated | 2026-07-28 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering hosted Web content session.
 - hosted Web content session
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 23 |
+| Active scenarios | 23 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -1,6 +1,7 @@
 """Hidden, fail-closed browser renderer worker entry."""
 
 use common.string_builder.{StringBuilder}
+use std.common.base_encoding.utilities.{text_to_bytes}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES,
     BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI,
@@ -459,6 +460,8 @@ pub class HostedBrowserRendererWorkerSession:
                 action.value
             else:
                 current + action.value
+            if text_to_bytes(updated).len() > 2048:
+                return "address-too-long"
             self.address_replace_on_text = false
             self._chrome_action("address", "set_value", updated)
             return ""
@@ -490,6 +493,17 @@ pub class HostedBrowserRendererWorkerSession:
                     ""
                 self.address_replace_on_text = false
                 self._chrome_action("address", "set_value", shortened)
+            elif action.key_code == 27:
+                val committed_url = _worker_network_history_neighbor(
+                    self.browser.current_url
+                )
+                val restored = if committed_url != "":
+                    committed_url
+                else:
+                    "about:blank"
+                self._chrome_action("address", "set_value", restored)
+                self.chrome_focus = ""
+                self.address_replace_on_text = false
             return ""
         self._reset_caret_blink()
         val target_id = be_dom_focused_id(self.browser.dom_root())
@@ -736,7 +750,8 @@ pub class HostedBrowserRendererWorkerSession:
                 request.body,
                 request.content_type,
                 request.credentials,
-                request.script_cookie_writes
+                request.script_cookie_writes,
+                request.initiator_origin
             )
             if not encoded.ok:
                 return _worker_result_reject(

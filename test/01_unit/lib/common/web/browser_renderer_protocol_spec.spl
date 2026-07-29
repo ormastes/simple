@@ -105,6 +105,7 @@ fn _renderer_protocol_dense_image_fixture(
 
 describe "isolated browser renderer protocol":
     it "selects dense image resources once in first-reference order":
+        step("Encode a dense frame whose image resources arrive in reverse order")
         val (dense_composition, dense_resources) = (
             _renderer_protocol_dense_image_fixture(1024, 64)
         )
@@ -129,6 +130,7 @@ describe "isolated browser renderer protocol":
         ).ok).to_be(true)
 
     it "round-trips only bounded positive viewport resize commands":
+        step("Encode and decode valid and oversized viewport resize commands")
         val encoded = browser_renderer_resize_encode(7, 1, 800, 600)
         expect(encoded.ok).to_be(true)
         val message = browser_renderer_decoder_feed(
@@ -143,10 +145,11 @@ describe "isolated browser renderer protocol":
         ).ok).to_be(false)
 
     it "round-trips bounded network messages without delimiter ambiguity":
+        step("Round-trip bounded fetch and response messages across the renderer boundary")
         val request_wire = browser_renderer_fetch_request_encode(
             7, 1, 41, "fetch-1", "fetch", "https://example.test/a",
             "POST", "X-Test: a\tb", "h\u00e9llo\nbody", "text/plain",
-            "include", ["theme=dark", "lang=\u754c"]
+            "include", ["theme=dark", "lang=\u754c"], "null"
         )
         expect(request_wire.ok).to_be(true)
         val request_message = browser_renderer_decoder_feed(
@@ -162,9 +165,24 @@ describe "isolated browser renderer protocol":
         expect(request.headers).to_equal("X-Test: a\tb")
         expect(request.body).to_equal("h\u00e9llo\nbody")
         expect(request.credentials).to_equal("include")
+        expect(request.initiator_origin).to_equal("null")
         expect(request.script_cookie_writes.len()).to_equal(2)
         expect(request.script_cookie_writes[0]).to_equal("theme=dark")
         expect(request.script_cookie_writes[1]).to_equal("lang=\u754c")
+        val boundary_cookie = (
+            "edge=" + "x".repeat(4091) + "; Path=/account"
+        )
+        val boundary_wire = browser_renderer_fetch_request_encode(
+            7, 4, 44, "fetch-4", "fetch", "https://example.test/cookie",
+            "GET", "", "", "", "include", [boundary_cookie],
+            "https://example.test"
+        )
+        expect(boundary_wire.ok).to_be(true)
+        expect(browser_renderer_fetch_request_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), boundary_wire.wire
+            ).message
+        ).script_cookie_writes[0]).to_equal(boundary_cookie)
         val empty_cookie_writes = browser_renderer_fetch_request_encode(
             7, 2, 42, "fetch-2", "fetch", "https://example.test/b",
             "GET", "", "", "", "omit", []
@@ -215,8 +233,8 @@ describe "isolated browser renderer protocol":
         expect(browser_renderer_fetch_request_decode(
             BrowserRendererMessage(
                 kind: "fetch_request", generation: 7, request_id: 1,
-                payload: "SBRQ3\t1\t1\t5\t1\t3\t0\t0\t0\t7\t2\n" +
-                    "xfetchuGETINCLUDE0\n"
+                payload: "SBRQ4\t1\t1\t5\t1\t3\t0\t0\t0\t7\t4\t2\n" +
+                    "xfetchuGETINCLUDEnull0\n"
             )
         ).ok).to_be(false)
         for malformed_cookie_batch in [
@@ -225,15 +243,16 @@ describe "isolated browser renderer protocol":
             "1\t03\none",
             "1\t3\nonetwo",
             "1\t3\na\nb",
-            "1\t4097\n"
+            "1\t8193\n"
         ]:
             expect(browser_renderer_fetch_request_decode(
                 BrowserRendererMessage(
                     kind: "fetch_request", generation: 7, request_id: 1,
                     payload: (
-                        "SBRQ3\t1\t1\t5\t1\t3\t0\t0\t0\t11\t" +
+                        "SBRQ4\t1\t1\t5\t1\t3\t0\t0\t0\t11\t4\t" +
                         str(malformed_cookie_batch.len()) + "\n" +
-                        "xfetchuGETsame-origin" + malformed_cookie_batch
+                        "xfetchuGETsame-originnull" +
+                        malformed_cookie_batch
                     )
                 )
             ).ok).to_be(false)
@@ -257,12 +276,12 @@ describe "isolated browser renderer protocol":
                 "https://example.test/", "GET", "", "", "",
                 "same-origin", [invalid_cookie_write]
             ).ok).to_be(false)
-        val maximum_cookie_write = ["x"; 4096].join("")
+        val maximum_cookie_write = ["x"; 8192].join("")
         expect(browser_renderer_fetch_request_encode(
             7, 1, 1, "fetch-1", "fetch", "https://example.test/",
             "GET", "", "", "", "same-origin", [maximum_cookie_write]
         ).ok).to_be(true)
-        val oversized_cookie_write = ["x"; 4097].join("")
+        val oversized_cookie_write = ["x"; 8193].join("")
         expect(browser_renderer_fetch_request_encode(
             7, 1, 1, "fetch-1", "fetch", "https://example.test/",
             "GET", "", "", "", "same-origin", [oversized_cookie_write]
@@ -275,9 +294,10 @@ describe "isolated browser renderer protocol":
             7, 1, 1, "fetch-1", "fetch", "https://example.test/",
             "GET", "", "", "", "same-origin", ["x"; 33]
         ).ok).to_be(false)
+        val aggregate_cookie_write = ["x"; 4096].join("")
         expect(browser_renderer_fetch_request_encode(
             7, 1, 1, "fetch-1", "fetch", "https://example.test/",
-            "GET", "", "", "", "same-origin", [maximum_cookie_write; 32]
+            "GET", "", "", "", "same-origin", [aggregate_cookie_write; 32]
         ).ok).to_be(true)
         expect(browser_renderer_network_response_encode(
             7, 1, "fetch-1", "fetch", "https://example.test/",
@@ -285,6 +305,7 @@ describe "isolated browser renderer protocol":
         ).ok).to_be(false)
 
     it "round-trips bounded actions and rejects ambiguous payloads":
+        step("Round-trip renderer actions and submit malformed payload shapes")
         val pointer_wire = browser_renderer_pointer_encode(7, 1, 9, -3, 4, true)
         expect(pointer_wire.ok).to_be(true)
         val pointer_message = browser_renderer_decoder_feed(
@@ -371,6 +392,7 @@ describe "isolated browser renderer protocol":
         )).ok).to_be(false)
 
     it "round-trips typed navigation and rejects noncanonical shapes":
+        step("Round-trip typed navigation and submit noncanonical messages")
         val open_wire = browser_renderer_navigation_encode(
             7, 1, "open", "https://example.test/form", "POST",
             "X-Test: one", "name=value",
@@ -410,6 +432,7 @@ describe "isolated browser renderer protocol":
         )).ok).to_be(false)
 
     it "round-trips canonical DrawIR and fails closed on malformed stale duplicate or oversized frames":
+        step("Round-trip a canonical DrawIR frame and submit invalid frame variants")
         val encoded = browser_renderer_frame_encode(_renderer_protocol_fixture(), 7, 1)
         expect(encoded.ok).to_be(true)
 
