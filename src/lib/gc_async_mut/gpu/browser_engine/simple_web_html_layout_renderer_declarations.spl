@@ -304,6 +304,16 @@ val _APPLY_DECLS_DISPATCH_PROPS: [text] = [
     # No Style field exists for border-collapse; both paths intentionally
     # preserve the existing silent no-op.
     "border-collapse",
+    # Stage 2: each of these is independent of every other name in this
+    # list (no shorthand/longhand pair where BOTH sides are dispatched --
+    # e.g. "padding-left" is not in this list, so a call carrying both
+    # "padding" and "padding-left" correctly falls back to the full probe
+    # rather than being handled partially/incorrectly here). Where a
+    # property has a related shorthand that IS in this list ("margin" vs
+    # "margin-left"), the dispatch arms below preserve the full-probe
+    # body's fixed processing order for that pair.
+    "justify-content", "align-items", "gap", "text-align", "cursor",
+    "outline", "overflow", "box-shadow", "padding", "margin",
 ]
 
 fn _decl_tbl_all_dispatch_handled(decl_tbl: [text]) -> bool:
@@ -365,6 +375,40 @@ fn _apply_decls_dispatch(mut st: Style, decl_tbl: [text], em_base: i32) -> Style
             st.min_height_vh = true
         else:
             st.min_height_px = parse_int(min_height)
+    # "margin" (shorthand) must be applied BEFORE "margin-left" (longhand)
+    # to match the full-probe body's fixed processing order (margin's
+    # block precedes margin-left's block there; margin-left unconditionally
+    # overrides afterward when present -- this is not a source-order/
+    # decl_tbl-position comparison, so preserving code order here is
+    # sufficient, unlike the background shorthand in the full-probe body).
+    val margin = decl_tbl_get(decl_tbl, "margin")
+    if margin.len() > 0:
+        val mtoks = ws_tokens(margin.trim().lower())
+        val mn = mtoks.len()
+        if mn > 0:
+            var t_tok = mtoks[0]
+            var r_tok = mtoks[0]
+            var b_tok = mtoks[0]
+            var l_tok = mtoks[0]
+            if mn == 2:
+                r_tok = mtoks[1]
+                l_tok = mtoks[1]
+            elif mn == 3:
+                r_tok = mtoks[1]
+                l_tok = mtoks[1]
+                b_tok = mtoks[2]
+            elif mn >= 4:
+                r_tok = mtoks[1]
+                b_tok = mtoks[2]
+                l_tok = mtoks[3]
+            st.margin_t_auto = t_tok == "auto"
+            st.margin_r_auto = r_tok == "auto"
+            st.margin_b_auto = b_tok == "auto"
+            st.margin_l_auto = l_tok == "auto"
+            st.margin_t = if t_tok == "auto": 0 else: margin_token_vh_px(t_tok)
+            st.margin_r = if r_tok == "auto": 0 else: margin_token_px(r_tok)
+            st.margin_b = if b_tok == "auto": 0 else: margin_token_vh_px(b_tok)
+            st.margin_l = if l_tok == "auto": 0 else: margin_token_px(l_tok)
     val ml = decl_tbl_get(decl_tbl, "margin-left")
     if ml.len() > 0:
         if ml == "auto":
@@ -376,6 +420,83 @@ fn _apply_decls_dispatch(mut st: Style, decl_tbl: [text], em_base: i32) -> Style
     val z_index_decl = decl_tbl_get(decl_tbl, "z-index")
     if z_index_decl.len() > 0:
         st.z_index = parse_int(z_index_decl)
+    val justify_content_decl = decl_tbl_get(decl_tbl, "justify-content")
+    if justify_content_decl.len() > 0:
+        val normalized_justify_content = normalize_overflow_box_alignment(justify_content_decl)
+        if supports_content_distribution_alignment(normalized_justify_content):
+            st.justify_content = normalized_justify_content
+    val align_items_decl = decl_tbl_get(decl_tbl, "align-items")
+    if align_items_decl.len() > 0:
+        st.align_items = align_items_decl
+    val gap = decl_tbl_get(decl_tbl, "gap")
+    if gap.len() > 0:
+        val gv = parse_int(gap)
+        if gv > 0:
+            st.gap_px = gv
+            st.row_gap_px = gv
+            st.column_gap_px = gv
+    val ta = decl_tbl_get(decl_tbl, "text-align")
+    if ta.len() > 0:
+        st.text_align = ta
+    val cursor_decl = decl_tbl_get(decl_tbl, "cursor")
+    if cursor_decl.len() > 0:
+        val cursor_norm = cursor_decl.trim().lower()
+        if cursor_norm.len() > 0:
+            st.cursor = cursor_norm
+    val outline = decl_tbl_get(decl_tbl, "outline")
+    if outline.len() > 0:
+        val ow = parse_int(outline)
+        if ow > 0:
+            st.outline_w = ow
+        val oc = parse_color_any(outline)
+        if oc != 0u32:
+            st.outline_color = oc
+        if border_style_disables_paint(outline):
+            st.outline_w = 0
+    val overflow_decl = decl_tbl_get(decl_tbl, "overflow")
+    if overflow_decl.len() > 0:
+        st.overflow_hidden = overflow_decl == "hidden"
+        st.overflow_auto_y = (
+            overflow_decl == "auto" or overflow_decl == "scroll"
+        )
+        st.overflow_scroll_y = overflow_decl == "scroll"
+    val box_shadow_decl = decl_tbl_get(decl_tbl, "box-shadow")
+    if box_shadow_decl.len() > 0:
+        val box_shadow_norm = box_shadow_decl.trim().lower()
+        if box_shadow_norm == "none":
+            st.box_shadow_x_px = 0
+            st.box_shadow_y_px = 0
+            st.box_shadow_color = 0u32
+            st.box_shadow_blur_px = 0
+            st.box_shadow_alpha = 255
+            st.box_shadow_raw = ""
+        else:
+            st.box_shadow_raw = box_shadow_norm
+            val agg = parse_box_shadow_agg(box_shadow_norm)
+            if agg.found:
+                st.box_shadow_x_px = agg.x
+                st.box_shadow_y_px = agg.y
+                st.box_shadow_blur_px = agg.blur
+                st.box_shadow_alpha = agg.alpha
+                st.box_shadow_color = agg.color
+    val pad = decl_tbl_get(decl_tbl, "padding")
+    if pad.len() > 0:
+        val p0 = parse_nth_int(pad, 0)
+        val p1 = parse_nth_int(pad, 1)
+        val p2 = parse_nth_int(pad, 2)
+        val p3 = parse_nth_int(pad, 3)
+        if p0 >= 0:
+            st.pad_t = p0
+            st.pad_r = p0
+            st.pad_b = p0
+            st.pad_l = p0
+            if p1 >= 0:
+                st.pad_r = p1
+                st.pad_l = p1
+            if p2 >= 0:
+                st.pad_b = p2
+            if p3 >= 0:
+                st.pad_l = p3
     val display_decl = decl_tbl_get(decl_tbl, "display")
     if display_decl.len() > 0:
         if display_decl == "none":

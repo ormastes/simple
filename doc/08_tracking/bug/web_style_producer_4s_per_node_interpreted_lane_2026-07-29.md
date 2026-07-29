@@ -357,6 +357,94 @@ measurement (verified via the 145-line pure-addition rebuild above), so
 the numbers should still hold once `text_list_prefix` is fixed and a
 fresh run is possible -- but that re-confirmation has not been done.
 
+### Stage 2 landed 2026-07-29: 10 more properties (former stage 1d + padding/margin)
+
+`text_list_prefix` (blocked live measurement in stage 1) is fixed upstream
+(`85173c22289`) -- the `bin/simple run` example lane works again, so this
+stage's coverage/timing numbers below are freshly measured, not carried
+forward from before a regression. The `hardware_replay_controller.spl`
+transitive syntax error (blocks `apply_decls_merge_probe_spec.spl`'s own
+`bin/simple test` lane specifically) is still present and still unrelated
+to this work; `css_spec.spl` remains the live regression check, as in
+stage 1.
+
+**Landing collision, worth recording:** while this stage was in flight, a
+different concurrent session landed CSS Grid support (`grid-template-*`,
+`grid-column`/`-row`) and `position: sticky` in the SAME function this
+stage edits (`_apply_decls_dispatch`) plus `apply_decls` itself (renamed
+to `_apply_decls_without_grid`, wrapped by a new Grid-aware `apply_decls`).
+Confirmed a real, direct textual overlap (not just same-file) via
+`git diff` both directions; resolved by re-extracting this stage's own
+diff as a pure-addition patch (121 insertions, 0 deletions, verified)
+against the CURRENT upstream content and re-splicing at the same logical
+anchor points (still valid -- their `display: grid` arm and dispatch-list
+additions are adjacent to, not overlapping, this stage's insertions).
+Separately hit and had to work around a stale-worktree trap: an
+intermediate worktree, created one fetch earlier, had `declarations.spl`
+updated (referencing the new `Style.position_sticky` field) copied in
+without its matching `style.spl` (the `Style` class definition, still the
+older version in that worktree) -- `class Style has no field named
+position_sticky`. Not a bug in either file; a version-skew artifact of
+mixing file versions across worktrees created at different fetches. Fixed
+by discarding that worktree and creating a genuinely fresh one from the
+latest fetch of both files together, per the "pristine worktree from
+FETCH_HEAD only" protocol.
+
+**Landed:** `justify-content`, `align-items`, `gap`, `text-align`,
+`cursor`, `outline`, `overflow`, `box-shadow` (former "stage 1d", all
+independent single/aggregate-field properties, no cross-dispatch-property
+coupling), plus `padding` and `margin` (moderate-complexity shorthands,
+higher value -- used across roughly half the showcase's rules). 18
+properties dispatched in total now (8 from stage 1 + 10 here) + the
+no-ops (`border-collapse`, and now also `grid-template-rows`/
+`grid-column`/`grid-row` per the concurrent Grid work above).
+
+**Correctness finding, filed not fixed (per instruction: pin existing
+behavior, record disagreement separately):** `margin` (shorthand) and
+`margin-left` (longhand) do **not** resolve their conflict by source
+position. The full-probe body processes the `margin` block, then
+unconditionally processes the `margin-left` block afterward in fixed CODE
+order -- so `margin-left` always wins when both are present, **even when
+`margin-left` appears BEFORE `margin` in the CSS source** (verified: `#e4
+{margin-left:40px;margin:15px;}` resolves to `margin_l:40`, i.e. the
+value from the property that appears earlier in the stylesheet, not
+later; confirmed against pristine, unmodified origin content before
+pinning it in the spec, not assumed). This is the opposite of standard
+CSS cascade semantics ("last declaration among equal-specificity rules
+wins") and does not match how the `background`/`background-color`
+shorthand pair in the same file behaves (that pair *is*
+source-position-aware, via `decl_tbl_last_index` comparison -- see the
+merge-probe spec's existing stage-0 cases). Pinned as-is in
+`apply_decls_merge_probe_spec.spl` (the dispatch arms must match the
+fallback body exactly, and changing runtime behavior is out of scope for
+a performance pass) -- but this looks like a genuine, independent
+correctness bug in the full-probe body worth its own investigation and
+fix, unrelated to performance.
+
+**Verified (PROVED):** `css_spec.spl` 9/12, unchanged. `apply_decls_merge_probe_spec.spl`
+extended with a "stage-2 dispatch/probe-fallback equivalence" describe
+block (20/20 total in the file): margin-shorthand-alone, margin-then-
+margin-left (longhand wins), margin-left-then-margin (longhand STILL
+wins, pinning the finding above), padding 2-value shorthand expansion,
+and all ten new properties combined in one call without corrupting
+unrelated width/height/margin_l/pad_l -- each paired with a
+fallback-forced (via `border-left`, still undispatched) equivalent
+producing identical results. Vacuity-probed (corrupted one expected
+value, confirmed red with the exact message, reverted, confirmed green).
+
+**Measured (PROVED, fresh -- `text_list_prefix` fix confirmed live):**
+`pgrep` showed 12 concurrent heavy processes (load-checked before
+quoting). Default budget: `budget-break at=6 of=151` -- **the cell
+cannot complete 151 nodes in the default budget** even after two
+dispatch stages (unchanged from the original bug report; the per-node
+cost reduction has not yet reached the ~10x needed to close a ~4s/node
+gap against a ~7s default budget). At `SIMPLE_WEB_RENDER_BUDGET_MS=40000`
+(same budget used for the stage-1 measurement): `budget-break at=17 of=151`
+(same node count as stage 1's measurement at this budget -- consistent
+with the fallback path, not the dispatch path, still dominating wall
+time for the remaining ~18% of calls) with **14 of 17 calls (82.4%)
+taking the dispatch path**, up from stage 1's 76.5%.
+
 ### Remaining fix proposal (not implemented — needs its own scoped change)
 
 1. ~~Batch all candidate rules' declarations into one merged decl table and
@@ -365,45 +453,48 @@ fresh run is possible -- but that re-confirmation has not been done.
    pass-by-reference/builder-pattern mutation was not attempted for the
    full-probe path, only for the new dispatch path).
 2. ~~Replace individual `decl_tbl_get(tbl, "prop-name")` linear-scan
-   probes with dispatch on the property name.~~ Landed for 8 conflict-free
-   properties (stage 1, above), measured at 76.5% of calls / ~9.9x lower
-   per-call cost on the showcase page (measurement predates the
-   `text_list_prefix` regression above; not yet re-confirmed against the
-   current tip). Remaining stages, roughly in priority order by rule-count
-   impact on this specific page:
-   - **Fix `text_list_prefix` / the `hardware_replay_controller.spl`
-     syntax error first** -- both currently block any further live
-     measurement or `apply_decls_merge_probe_spec.spl` test-lane
-     verification of this whole bug's fixes.
-   - **Stage 1b (highest value):** `padding`, `margin`, `border`
-     (shorthand expanding to 4 sides' width/color/style),
-     `border-left`/`border-radius`. Used across roughly half the
-     showcase's 21 rules; their shorthand-vs-longhand conflict resolution
-     (see `background` example already handled in the merge-probe spec)
-     needs the same careful lift-and-trace treatment this stage used for
-     `display:contents`. Note the file has grown a second `background`
-     shorthand path (two-URL layers) since this stage started -- re-read
-     the current `background`/`background-*` handling before lifting it,
-     don't work from a stale copy.
-   - **Stage 1c:** `background`, `font`, `flex`/`flex-wrap`/
-     `flex-direction` -- the most complex shorthands (multi-field
-     resolution, cross-property reset-on-later-shorthand logic).
-   - **Stage 1d (optional, lower value on this page):** `color`,
-     `justify-content`, `align-items`, `gap`, `box-shadow`, `text-align`,
-     `cursor`, `outline`, `overflow` -- each only 1-2 rules on this
-     fixture, but worth a batch pass since they are simple. Note
-     `overflow`/`overflow-y` gained an `overflow_scroll_y` distinction
-     since this stage started -- re-read before lifting.
+   probes with dispatch on the property name.~~ Landed for 18 properties
+   across stages 1+2, measured at 82.4% of calls on the showcase page.
+   Remaining, roughly in priority order by rule-count impact on this page:
+   - **`padding`/`margin` longhand siblings** (`padding-left`/`-top`/
+     `-right`/`-bottom`/`-block`/`-inline`/etc, `margin-top`/`-right`/
+     `-bottom`/`-block`/etc): not yet dispatched, so any rule combining
+     the shorthand (now dispatched) with one of its own longhand siblings
+     still falls back. Not used in the showcase fixture's 21 rules, so
+     zero impact on the 82.4% measurement above, but likely needed for
+     the ">90%" aim on other pages.
+   - **`border`, `border-left`, `border-radius`** (shorthand expanding to
+     4 sides' width/color/style) -- highest remaining value on THIS page.
+     Note the file has grown a second `background` shorthand path
+     (two-URL layers) AND CSS Grid/`position:sticky` support since stage 1
+     started -- re-read the current `background`/`background-*`/`border`/
+     `border-*` handling before lifting any of it, don't work from a
+     stale copy, and re-check for concurrent-session collisions on
+     `_apply_decls_dispatch` before landing (this stage hit one).
+   - **`background`, `font`, `flex`/`flex-wrap`/`flex-direction`** -- the
+     most complex shorthands (multi-field resolution, cross-property
+     reset-on-later-shorthand logic, now including the two-URL-layer
+     background path).
+   - **`place-content`/`place-items`:** each writes into the same fields
+     as `justify-content`/`align-items` (now dispatched) via a DIFFERENT
+     decl entry not currently recognized -- a call carrying `justify-
+     content`/`align-items` together with `place-content`/`place-items`
+     already correctly falls back (both must be dispatch-recognized or
+     neither is), but adding these two would raise coverage further.
    - **`top`/`right`/`position`:** only dispatchable together with the
-     full `left`/`bottom`/`inset*` family (see landmine above) --
-     treat as one unit, not incremental additions.
-3. Profile whether, after stage 1b/1c close most of the remaining 23.5%
-   fallback fraction, the fallback path's ~175ms/call full-probe cost
+     full `left`/`bottom`/`inset*` family (see stage-1 landmine) --
+     treat as one unit, not incremental additions. Now also intersects
+     with the concurrent `position: sticky` work (`SIMPLE_WEB_STICKY_TOP_AUTO`
+     sentinel) -- re-read before touching.
+3. Fix the margin/margin-left non-standard ordering finding above --
+   separate correctness work, not a performance-pass change.
+4. Profile whether the fallback path's ~175ms/call full-probe cost
    itself needs the batched-lookup treatment (a single pass over `tbl`'s
    actual entries instead of ~283 named probes) for the residual rare-
-   property calls, or whether coverage alone is enough that this no
-   longer matters in practice.
-4. Investigate the node 5 / node 8 outliers separately -- they are not
+   property calls once border/background/font/flex close most of the
+   remaining ~18% fallback fraction, or whether coverage alone is enough
+   that this no longer matters in practice.
+5. Investigate the node 5 / node 8 outliers separately -- they are not
    explained by anything in this section and could be a second, unrelated
    defect (GC pressure or a `wm_fallback` code path cost).
 
