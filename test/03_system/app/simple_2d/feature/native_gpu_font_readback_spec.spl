@@ -14,6 +14,9 @@ use std.spec.{describe, it, expect, step, fail_test}
 use std.io_runtime.{env_get, file_read, file_write, file_size, file_hash_sha256}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_cache_identity}
+use std.common.gpu.font_owner_fault_receipt.{
+    FONT_OWNER_FAULT_UNSUPPORTED_FORMAT, FONT_OWNER_FAULT_SUBMIT_FAILURE
+}
 use std.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine3d.engine.{Engine3D}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderer}
@@ -64,6 +67,18 @@ class Engine2DFontReadbackEvidence:
     nonblank_pixels: bool
     cpu_oracle_parity: bool
     physical_device_identity: text
+    owner_fault_code: i64
+    owner_fault_sequence_before: i64
+    owner_fault_sequence_after: i64
+    owner_fault_mask: i64
+    device_loss_sequence: i64
+    device_loss_observed: bool
+    fallback_count_before: i64
+    fallback_count_after: i64
+    owner_fault_observed: bool
+    owner_identity_preserved: bool
+    owner_identity_before: text
+    owner_identity_after: text
 
 class Engine3DFontReadbackEvidence:
     status: text
@@ -110,6 +125,23 @@ class Engine3DFontReadbackEvidence:
     cpu_oracle_parity: bool
     translucent_destination_parity: bool
     physical_device_identity: text
+    owner_fault_code: i64
+    owner_fault_sequence_before: i64
+    owner_fault_sequence_after: i64
+    owner_fault_mask: i64
+    device_loss_sequence: i64
+    device_loss_observed: bool
+    fallback_count_before: i64
+    fallback_count_after: i64
+    fault_attempt_count: i64
+    vulkan_fault_attempt_index: i64
+    cpu_success_attempt_index: i64
+    owner_fault_observed: bool
+    owner_identity_preserved: bool
+    owner_identity_before: text
+    owner_identity_after: text
+    shutdown_wait_idle_before: bool
+    shutdown_wait_idle_observed: bool
 
 class SimpleOsFontPixelEvidence:
     status: text
@@ -127,7 +159,14 @@ fn _engine2d_unavailable(reason: text) -> Engine2DFontReadbackEvidence:
         pipeline_handle: 0, atlas_handle: 0, command_handle: 0,
         fence_handle: 0, fence_waited: false, fence_destroyed: false,
         readback_source: "none", readback_handle: 0, readback_bytes: 0,
-        execution_target: "", nonblank_pixels: false, cpu_oracle_parity: false)
+        execution_target: "", nonblank_pixels: false, cpu_oracle_parity: false,
+        owner_fault_code: 0, owner_fault_sequence_before: 0,
+        owner_fault_sequence_after: 0, owner_fault_mask: 0,
+        device_loss_sequence: 0, device_loss_observed: false,
+        fallback_count_before: 0, fallback_count_after: 0,
+        owner_fault_observed: false,
+        owner_identity_preserved: false, owner_identity_before: "",
+        owner_identity_after: "")
 
 fn _engine3d_unavailable(reason: text) -> Engine3DFontReadbackEvidence:
     Engine3DFontReadbackEvidence(
@@ -151,7 +190,17 @@ fn _engine3d_unavailable(reason: text) -> Engine3DFontReadbackEvidence:
         fence_waited: false, fence_destroyed: false, readback_source: "none",
         color_image_handle: 0, readback_bytes: 0,
         readback_matches_evidence: false, nonblank_pixels: false,
-        cpu_oracle_parity: false, translucent_destination_parity: false)
+        cpu_oracle_parity: false, translucent_destination_parity: false,
+        owner_fault_code: 0, owner_fault_sequence_before: 0,
+        owner_fault_sequence_after: 0, owner_fault_mask: 0,
+        device_loss_sequence: 0, device_loss_observed: false,
+        fallback_count_before: 0, fallback_count_after: 0,
+        fault_attempt_count: 0,
+        vulkan_fault_attempt_index: -1, cpu_success_attempt_index: -1,
+        owner_fault_observed: false,
+        owner_identity_preserved: false, owner_identity_before: "",
+        owner_identity_after: "", shutdown_wait_idle_before: false,
+        shutdown_wait_idle_observed: false)
 
 fn _hardware_device_type(device_type: text) -> bool:
     device_type == "discrete" or device_type == "integrated"
@@ -175,7 +224,15 @@ fn expect_engine2d_font_readback(evidence: Engine2DFontReadbackEvidence) -> bool
         evidence.fence_handle > 0 and evidence.fence_waited and evidence.fence_destroyed and
         evidence.readback_source == "device_readback" and evidence.readback_handle > 0 and
         evidence.readback_bytes == 16384 and evidence.execution_target == "vulkan" and
-        evidence.nonblank_pixels and evidence.cpu_oracle_parity
+        evidence.nonblank_pixels and evidence.cpu_oracle_parity and
+        evidence.owner_fault_code == FONT_OWNER_FAULT_UNSUPPORTED_FORMAT and
+        evidence.owner_fault_observed and
+        evidence.owner_fault_sequence_after == evidence.owner_fault_sequence_before + 1 and
+        (evidence.owner_fault_mask & FONT_OWNER_FAULT_UNSUPPORTED_FORMAT) != 0 and
+        evidence.device_loss_sequence == 0 and not evidence.device_loss_observed and
+        evidence.fallback_count_after == evidence.fallback_count_before and
+        evidence.owner_identity_preserved and evidence.owner_identity_before != "" and
+        evidence.owner_identity_after == evidence.owner_identity_before
 
 fn expect_engine3d_font_readback(evidence: Engine3DFontReadbackEvidence) -> bool:
     evidence.status == "pass" and evidence.device_handle > 0 and
@@ -205,7 +262,19 @@ fn expect_engine3d_font_readback(evidence: Engine3DFontReadbackEvidence) -> bool
         evidence.fence_destroyed and evidence.readback_source == "device_image_readback" and
         evidence.color_image_handle > 0 and evidence.readback_bytes == 16384 and
         evidence.readback_matches_evidence and evidence.nonblank_pixels and
-        evidence.cpu_oracle_parity and evidence.translucent_destination_parity
+        evidence.cpu_oracle_parity and evidence.translucent_destination_parity and
+        evidence.owner_fault_code == FONT_OWNER_FAULT_SUBMIT_FAILURE and
+        evidence.owner_fault_observed and
+        evidence.owner_fault_sequence_after == evidence.owner_fault_sequence_before + 1 and
+        (evidence.owner_fault_mask & FONT_OWNER_FAULT_SUBMIT_FAILURE) != 0 and
+        evidence.device_loss_sequence == 0 and not evidence.device_loss_observed and
+        evidence.fallback_count_after == evidence.fallback_count_before + 1 and
+        evidence.fault_attempt_count == 2 and
+        evidence.vulkan_fault_attempt_index == 0 and
+        evidence.cpu_success_attempt_index == 1 and
+        evidence.owner_identity_preserved and evidence.owner_identity_before != "" and
+        evidence.owner_identity_after == evidence.owner_identity_before and
+        not evidence.shutdown_wait_idle_before and evidence.shutdown_wait_idle_observed
 
 fn classify_native_font_promotion(engine2d: Engine2DFontReadbackEvidence,
                                   engine3d: Engine3DFontReadbackEvidence) -> text:
@@ -243,6 +312,39 @@ fn _native_font_readback_record(engine2d: Engine2DFontReadbackEvidence,
         "engine2d_resource_device_handle={engine2d.device_identity}\nengine3d_resource_device_handle={engine3d.device_handle}\n" +
         "engine2d_physical_device_identity={engine2d.physical_device_identity}\n" +
         "engine3d_physical_device_identity={engine3d.physical_device_identity}\n" +
+        "physical_device_identity={engine2d.physical_device_identity}\n" +
+        "engine2d_fault_code={engine2d.owner_fault_code}\n" +
+        "engine3d_fault_code={engine3d.owner_fault_code}\n" +
+        "engine2d_fault_sequence_before={engine2d.owner_fault_sequence_before}\n" +
+        "engine2d_fault_sequence_after={engine2d.owner_fault_sequence_after}\n" +
+        "engine3d_fault_sequence_before={engine3d.owner_fault_sequence_before}\n" +
+        "engine3d_fault_sequence_after={engine3d.owner_fault_sequence_after}\n" +
+        "engine2d_fault_mask={engine2d.owner_fault_mask}\n" +
+        "engine3d_fault_mask={engine3d.owner_fault_mask}\n" +
+        "engine2d_device_loss_sequence={engine2d.device_loss_sequence}\n" +
+        "engine3d_device_loss_sequence={engine3d.device_loss_sequence}\n" +
+        "engine2d_device_loss_observed={engine2d.device_loss_observed}\n" +
+        "engine3d_device_loss_observed={engine3d.device_loss_observed}\n" +
+        "engine2d_fallback_count_before={engine2d.fallback_count_before}\n" +
+        "engine2d_fallback_count_after={engine2d.fallback_count_after}\n" +
+        "engine3d_fallback_count_before={engine3d.fallback_count_before}\n" +
+        "engine3d_fallback_count_after={engine3d.fallback_count_after}\n" +
+        "engine3d_fault_attempt_count={engine3d.fault_attempt_count}\n" +
+        "engine3d_vulkan_attempt_index={engine3d.vulkan_fault_attempt_index}\n" +
+        "engine3d_cpu_success_attempt_index={engine3d.cpu_success_attempt_index}\n" +
+        "engine2d_owner_fault_observed={engine2d.owner_fault_observed}\n" +
+        "engine3d_owner_fault_observed={engine3d.owner_fault_observed}\n" +
+        "engine2d_identity_preserved={engine2d.owner_identity_preserved}\n" +
+        "engine3d_identity_preserved={engine3d.owner_identity_preserved}\n" +
+        "engine2d_owner_identity_before={engine2d.owner_identity_before}\n" +
+        "engine2d_owner_identity_after={engine2d.owner_identity_after}\n" +
+        "engine3d_owner_identity_before={engine3d.owner_identity_before}\n" +
+        "engine3d_owner_identity_after={engine3d.owner_identity_after}\n" +
+        "engine2d_fence_waited={engine2d.fence_waited}\n" +
+        "engine3d_wait_idle_before={engine3d.shutdown_wait_idle_before}\n" +
+        "engine3d_wait_idle_observed={engine3d.shutdown_wait_idle_observed}\n" +
+        "vulkan_fence_wait_observed={engine2d.fence_waited}\n" +
+        "vulkan_wait_idle_observed={engine3d.shutdown_wait_idle_observed}\n" +
         "device_name={engine2d.device_name}\ndevice_type={engine2d.device_type}\ndriver_identity={engine2d.driver_identity}\n" +
         "engine2d_pipeline_handle={engine2d.pipeline_handle}\nengine2d_atlas_handle={engine2d.atlas_handle}\n" +
         "engine2d_command_handle={engine2d.command_handle}\nengine2d_fence_handle={engine2d.fence_handle}\n" +
@@ -343,6 +445,16 @@ fn _collect_engine2d_font_readback() -> Engine2DFontReadbackEvidence:
         readback.backend_handle == native.readback_buffer_handle and
         readback.device_identity > 0 and readback.pixel_count == 4096 and
         native.readback_byte_count == 16384 and nonblank and native.parity)
+    val fault_sequence_before = engine.font_owner_fault_sequence()
+    val fallback_count_before = engine.font_owner_fault_fallback_count()
+    val owner_identity_before = native.batch_identity
+    val invalid_install_rejected = not engine.install_vulkan_font_spirv([0u8])
+    val post_fault = engine.vulkan_font_performance_evidence()
+    val owner_identity_after = if post_fault == nil: "" else: post_fault.?.batch_identity
+    val fault_sequence_after = engine.font_owner_fault_sequence()
+    val owner_fault_observed = (invalid_install_rejected and
+        fault_sequence_after == fault_sequence_before + 1 and
+        engine.font_owner_fault_receipt() == FONT_OWNER_FAULT_UNSUPPORTED_FORMAT)
     val evidence = Engine2DFontReadbackEvidence(
         status: if passed: "pass" elif native.device_executed: "failed" else: "unavailable",
         reason: if not native.promotion_ready: native.reason
@@ -364,7 +476,19 @@ fn _collect_engine2d_font_readback() -> Engine2DFontReadbackEvidence:
         fence_waited: native.completion_waited, fence_destroyed: native.fence_destroyed,
         readback_source: readback.source, readback_handle: readback.backend_handle,
         readback_bytes: native.readback_byte_count, execution_target: target,
-        nonblank_pixels: nonblank, cpu_oracle_parity: native.parity)
+        nonblank_pixels: nonblank, cpu_oracle_parity: native.parity,
+        owner_fault_code: engine.font_owner_fault_receipt(),
+        owner_fault_sequence_before: fault_sequence_before,
+        owner_fault_sequence_after: fault_sequence_after,
+        owner_fault_mask: engine.font_owner_fault_mask(),
+        device_loss_sequence: engine.font_device_loss_sequence(),
+        device_loss_observed: engine.font_device_loss_observed(),
+        fallback_count_before: fallback_count_before,
+        fallback_count_after: engine.font_owner_fault_fallback_count(),
+        owner_fault_observed: owner_fault_observed,
+        owner_identity_preserved: engine.font_owner_fault_identity_unchanged(),
+        owner_identity_before: owner_identity_before,
+        owner_identity_after: owner_identity_after)
     engine.shutdown()
     evidence
 
@@ -579,6 +703,37 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
                 native.pixels_rgba8[byte_index + 2] == (pixel & 255u32).to_u8() and
                 native.pixels_rgba8[byte_index + 3] == ((pixel >> 24u32) & 255u32).to_u8())
         i = i + 1
+    val fault_sequence_before = engine.font_owner_fault_sequence()
+    val fallback_count_before = engine.font_owner_fault_fallback_count()
+    val owner_identity_before = native.atlas_owner_identity
+    val _ = engine.draw_text_hud(4, 4, "FAULT", 0xffffffffu32, 18)
+    val post_fault = engine.vulkan_font_evidence()
+    val owner_identity_after = if post_fault == nil: "" else: post_fault.?.atlas_owner_identity
+    val fault_sequence_after = engine.font_owner_fault_sequence()
+    val fallback_count_after = engine.font_owner_fault_fallback_count()
+    val fault_attempts = engine.font_execution_attempts()
+    var vulkan_fault_attempt_index: i64 = -1
+    var cpu_success_attempt_index: i64 = -1
+    var fault_attempt_index: i64 = 0
+    for attempt in fault_attempts:
+        if attempt == "vulkan:vulkan-font-frame-inactive" and vulkan_fault_attempt_index < 0:
+            vulkan_fault_attempt_index = fault_attempt_index
+        if attempt == "cpu:success" and cpu_success_attempt_index < 0:
+            cpu_success_attempt_index = fault_attempt_index
+        fault_attempt_index = fault_attempt_index + 1
+    val owner_fault_observed = (
+        fault_sequence_after == fault_sequence_before + 1 and
+        engine.font_owner_fault_receipt() == FONT_OWNER_FAULT_SUBMIT_FAILURE and
+        vulkan_fault_attempt_index >= 0 and
+        vulkan_fault_attempt_index < cpu_success_attempt_index)
+    val owner_fault_code = engine.font_owner_fault_receipt()
+    val owner_fault_mask = engine.font_owner_fault_mask()
+    val device_loss_sequence = engine.font_device_loss_sequence()
+    val device_loss_observed = engine.font_device_loss_observed()
+    val owner_identity_preserved = engine.font_owner_fault_identity_unchanged()
+    val wait_idle_before = engine.vulkan_font_shutdown_wait_idle_observed()
+    engine.shutdown()
+    val wait_idle_after = engine.vulkan_font_shutdown_wait_idle_observed()
     val passed = (native.ready and distinct_pipelines and adapter_reused and upload_receipts and
         native.device.physical_device_identity != "" and
         hud_placement_verified and mixed_hud_drawn and
@@ -634,8 +789,24 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
         color_image_handle: native.device.color_image_handle,
         readback_bytes: native.device.readback_bytes, readback_matches_evidence: matches_evidence,
         nonblank_pixels: nonblank,
-        cpu_oracle_parity: parity, translucent_destination_parity: translucent_destination_parity)
-    engine.shutdown()
+        cpu_oracle_parity: parity, translucent_destination_parity: translucent_destination_parity,
+        owner_fault_code: owner_fault_code,
+        owner_fault_sequence_before: fault_sequence_before,
+        owner_fault_sequence_after: fault_sequence_after,
+        owner_fault_mask: owner_fault_mask,
+        device_loss_sequence: device_loss_sequence,
+        device_loss_observed: device_loss_observed,
+        fallback_count_before: fallback_count_before,
+        fallback_count_after: fallback_count_after,
+        fault_attempt_count: fault_attempts.len(),
+        vulkan_fault_attempt_index: vulkan_fault_attempt_index,
+        cpu_success_attempt_index: cpu_success_attempt_index,
+        owner_fault_observed: owner_fault_observed,
+        owner_identity_preserved: owner_identity_preserved,
+        owner_identity_before: owner_identity_before,
+        owner_identity_after: owner_identity_after,
+        shutdown_wait_idle_before: wait_idle_before,
+        shutdown_wait_idle_observed: wait_idle_after)
     evidence
 
 fn _collect_simpleos_pixel_evidence() -> SimpleOsFontPixelEvidence:
@@ -697,7 +868,18 @@ fn _engine3d_receipt_fixture(atlas_frame: i64, vertex_frame: i64,
         readback_source: "device_image_readback", color_image_handle: 1,
         readback_bytes: 16384, readback_matches_evidence: true,
         nonblank_pixels: true, cpu_oracle_parity: true,
-        translucent_destination_parity: true)
+        translucent_destination_parity: true,
+        owner_fault_code: FONT_OWNER_FAULT_SUBMIT_FAILURE,
+        owner_fault_sequence_before: 0, owner_fault_sequence_after: 1,
+        owner_fault_mask: FONT_OWNER_FAULT_SUBMIT_FAILURE,
+        device_loss_sequence: 0, device_loss_observed: false,
+        fallback_count_before: 0, fallback_count_after: 1,
+        fault_attempt_count: 2,
+        vulkan_fault_attempt_index: 0, cpu_success_attempt_index: 1,
+        owner_fault_observed: true, owner_identity_preserved: true,
+        owner_identity_before: "fixture-owner",
+        owner_identity_after: "fixture-owner", shutdown_wait_idle_before: false,
+        shutdown_wait_idle_observed: true)
 
 fn _engine2d_receipt_fixture(device_identity: i64, device_type: text) -> Engine2DFontReadbackEvidence:
     Engine2DFontReadbackEvidence(
@@ -709,7 +891,14 @@ fn _engine2d_receipt_fixture(device_identity: i64, device_type: text) -> Engine2
         command_handle: 1, fence_handle: 1, fence_waited: true,
         fence_destroyed: true, readback_source: "device_readback",
         readback_handle: 1, readback_bytes: 16384, execution_target: "vulkan",
-        nonblank_pixels: true, cpu_oracle_parity: true)
+        nonblank_pixels: true, cpu_oracle_parity: true,
+        owner_fault_code: FONT_OWNER_FAULT_UNSUPPORTED_FORMAT,
+        owner_fault_sequence_before: 0, owner_fault_sequence_after: 1,
+        owner_fault_mask: FONT_OWNER_FAULT_UNSUPPORTED_FORMAT,
+        device_loss_sequence: 0, device_loss_observed: false,
+        fallback_count_before: 0, fallback_count_after: 0,
+        owner_fault_observed: true, owner_identity_preserved: true,
+        owner_identity_before: "fixture-owner", owner_identity_after: "fixture-owner")
 
 describe "native GPU font promotion evidence":
     # codex-system-test
@@ -815,7 +1004,14 @@ describe "native GPU font promotion evidence":
             command_handle: 1, fence_handle: 1, fence_waited: true,
             fence_destroyed: true, readback_source: "cpu_fallback",
             readback_handle: 1, readback_bytes: 16384, execution_target: "vulkan",
-            nonblank_pixels: true, cpu_oracle_parity: true)
+            nonblank_pixels: true, cpu_oracle_parity: true,
+            owner_fault_code: 0, owner_fault_sequence_before: 0,
+            owner_fault_sequence_after: 0, owner_fault_mask: 0,
+            device_loss_sequence: 0, device_loss_observed: false,
+            fallback_count_before: 0, fallback_count_after: 0,
+            owner_fault_observed: false,
+            owner_identity_preserved: false, owner_identity_before: "",
+            owner_identity_after: "")
         val forged_3d = Engine3DFontReadbackEvidence(
             status: "pass", reason: "forged", device_handle: 1,
             device_name: "forged-device", device_type: "virtual",
@@ -838,7 +1034,17 @@ describe "native GPU font promotion evidence":
             readback_source: "device_image_readback", color_image_handle: 1,
             readback_bytes: 16384, readback_matches_evidence: false,
             nonblank_pixels: true, cpu_oracle_parity: true,
-            translucent_destination_parity: false)
+            translucent_destination_parity: false,
+            owner_fault_code: 0, owner_fault_sequence_before: 0,
+            owner_fault_sequence_after: 0, owner_fault_mask: 0,
+            device_loss_sequence: 0, device_loss_observed: false,
+            fallback_count_before: 0, fallback_count_after: 0,
+            fault_attempt_count: 0,
+            vulkan_fault_attempt_index: -1, cpu_success_attempt_index: -1,
+            owner_fault_observed: false,
+            owner_identity_preserved: false, owner_identity_before: "",
+            owner_identity_after: "", shutdown_wait_idle_before: false,
+            shutdown_wait_idle_observed: false)
         expect(classify_native_font_promotion(forged_2d, forged_3d)).to_equal("rejected")
         expect(expect_engine2d_font_readback(forged_2d)).to_be(false)
         expect(expect_engine3d_font_readback(forged_3d)).to_be(false)

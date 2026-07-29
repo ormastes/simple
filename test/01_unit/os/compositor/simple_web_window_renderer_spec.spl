@@ -2,8 +2,9 @@ use std.spec.*
 use app.io.mod.{file_read}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_frame_cached_at_time, simple_web_content_full_html_with_theme, simple_web_content_render_request_with_theme, simple_web_content_revision, simple_web_content_revision_with_theme, simple_web_external_content_frame}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
-use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_web_provenance_valid}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_GUI, WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_web_provenance_valid}
+use common.ui.draw_ir.{draw_ir_font_advance_digest}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderFontProvenance, WebRenderRequest}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_software_pixels,
     simple_web_layout_render_html_software_result,
@@ -18,63 +19,74 @@ fn contains_pixel(pixels: [u32], value: u32) -> bool:
             return true
     false
 
-fn _web_provenance_frame(material_kind: text, material_reason: text, material_sha256: text, manifest_sha256: text) -> WmContentFrame:
+fn _web_provenance_frame(base: WmContentFrame, material_kind: text, material_reason: text, material_sha256: text, manifest_sha256: text) -> WmContentFrame:
     WmContentFrame(
-        window_id: "provenance-contract",
-        scene_revision: 1,
-        content_revision: 1,
-        origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
-        width: 1,
-        height: 1,
-        pixels: [0xFF000000u32],
-        checksum: 1u64,
-        parent_window_id: "",
-        offset_x: 0,
-        offset_y: 0,
-        engine2d_status: "engine2d_rendered",
-        engine2d_backend: "software",
+        window_id: base.window_id,
+        scene_revision: base.scene_revision,
+        content_revision: base.content_revision,
+        origin_kind: base.origin_kind,
+        width: base.width,
+        height: base.height,
+        pixels: base.pixels,
+        checksum: base.checksum,
+        parent_window_id: base.parent_window_id,
+        offset_x: base.offset_x,
+        offset_y: base.offset_y,
+        engine2d_status: base.engine2d_status,
+        engine2d_backend: base.engine2d_backend,
         material_fallback_kind: material_kind,
         material_fallback_reason: material_reason,
         material_fallback_sha256: material_sha256,
-        theme_id: "aetheric_dark",
-        theme_source_manifest_sha256: manifest_sha256
+        theme_id: base.theme_id,
+        theme_source_manifest_sha256: manifest_sha256,
+        font_provenance: base.font_provenance
     )
 
 describe "Simple Web compositor adapter":
 
     it "accepts only exact solid, CPU, and Metal material provenance reasons":
         val sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val cache = web_render_pixel_artifact_cache(36, 18, "software")
+        val base = simple_web_content_frame_cached(
+            cache, "provenance-contract", 1, 1, "aetheric_dark",
+            "Provenance", "<p>actual producer</p>", 36, 18, 0)
         val solid = _web_provenance_frame(
+            base,
             "solid-material",
             "cpu-raster-backdrop-sampling-unavailable",
             sha256,
             sha256
         )
         val cpu = _web_provenance_frame(
+            base,
             "cpu-composited-material",
             "native-device-backdrop-path-pending",
             sha256,
             sha256
         )
         val metal = _web_provenance_frame(
+            base,
             "metal-device-composited-material",
             "metal-device-glass-dispatch",
             sha256,
             sha256
         )
         val wrong_solid = _web_provenance_frame(
+            base,
             "solid-material",
             "some-other-reason",
             sha256,
             sha256
         )
         val wrong_cpu = _web_provenance_frame(
+            base,
             "cpu-composited-material",
             "cpu-raster-backdrop-sampling-unavailable",
             sha256,
             sha256
         )
         val wrong_metal = _web_provenance_frame(
+            base,
             "metal-device-composited-material",
             "native-device-backdrop-path-pending",
             sha256,
@@ -87,29 +99,188 @@ describe "Simple Web compositor adapter":
         expect(wm_content_frame_web_provenance_valid(wrong_cpu)).to_be(false)
         expect(wm_content_frame_web_provenance_valid(wrong_metal)).to_be(false)
 
+    it "fails closed when Web font or ordered-advance composition provenance is missing":
+        val sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val cache = web_render_pixel_artifact_cache(36, 18, "software")
+        val base = simple_web_content_frame_cached(
+            cache, "tamper-contract", 1, 1, "aetheric_dark",
+            "Tamper", "<p>actual producer</p>", 36, 18, 0)
+        var missing_font = _web_provenance_frame(
+            base,
+            "cpu-composited-material",
+            "native-device-backdrop-path-pending",
+            sha256,
+            sha256
+        )
+        var missing_font_provenance = missing_font.font_provenance
+        missing_font_provenance.identity = ""
+        missing_font.font_provenance = missing_font_provenance
+        var wrong_binding = _web_provenance_frame(
+            base,
+            "cpu-composited-material",
+            "native-device-backdrop-path-pending",
+            sha256,
+            sha256
+        )
+        var wrong_binding_provenance = wrong_binding.font_provenance
+        wrong_binding_provenance.execution_advance_digest =
+            wrong_binding_provenance.layout_advance_digest + 1
+        wrong_binding.font_provenance = wrong_binding_provenance
+        var wrong_composition = _web_provenance_frame(
+            base,
+            "cpu-composited-material",
+            "native-device-backdrop-path-pending",
+            sha256,
+            sha256
+        )
+        var wrong_composition_provenance = wrong_composition.font_provenance
+        wrong_composition_provenance.execution_composition_id = "other-layout"
+        wrong_composition.font_provenance = wrong_composition_provenance
+        expect(wm_content_frame_web_provenance_valid(missing_font)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(wrong_binding)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(
+            wrong_composition)).to_be(false)
+
+    it "does not accept fabricated or GUI-origin font provenance":
+        val sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val fabricated = WmContentFrame(
+            window_id: "fabricated",
+            scene_revision: 1,
+            content_revision: 1,
+            origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+            width: 1,
+            height: 1,
+            pixels: [0xFF000000u32],
+            checksum: 1u64,
+            parent_window_id: "",
+            offset_x: 0,
+            offset_y: 0,
+            engine2d_status: "engine2d_rendered",
+            engine2d_backend: "software",
+            material_fallback_kind: "cpu-composited-material",
+            material_fallback_reason:
+                "native-device-backdrop-path-pending",
+            material_fallback_sha256: sha256,
+            theme_id: "aetheric_dark",
+            theme_source_manifest_sha256: sha256,
+            font_provenance: WebRenderFontProvenance(
+                identity: "font:fabricated",
+                execution_target: "cpu",
+                layout_composition_id: "html-layout",
+                execution_composition_id: "other-layout",
+                layout_advance_digest: 101,
+                execution_advance_digest: 202,
+                batch_identity: "",
+                ordered_text_command_count: 1,
+                vulkan_batch_count: 0,
+                vulkan_batch_digest: 0,
+                vulkan_aggregate_valid: false,
+                vulkan_composition_id: "",
+                vulkan_advance_digest: 0,
+                vulkan_all_device_executed: false,
+                vulkan_all_promotion_ready: false,
+                vulkan_all_parity: false))
+        expect(wm_content_frame_web_provenance_valid(fabricated)).to_be(false)
+        var gui = fabricated
+        gui.origin_kind = WM_CONTENT_ORIGIN_GUI
+        var gui_provenance = gui.font_provenance
+        gui_provenance.execution_composition_id = "html-layout"
+        gui_provenance.execution_advance_digest = 101
+        gui.font_provenance = gui_provenance
+        expect(wm_content_frame_web_provenance_valid(gui)).to_be(false)
+
+    it "rejects Vulkan CPU fallback and tampered aggregate batch receipts":
+        val sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val cache = web_render_pixel_artifact_cache(36, 18, "software")
+        val base = simple_web_content_frame_cached(
+            cache, "vulkan-tamper", 1, 1, "aetheric_dark",
+            "Vulkan", "<p>actual producer</p>", 36, 18, 0)
+        var valid = _web_provenance_frame(
+            base,
+            "cpu-composited-material",
+            "native-device-backdrop-path-pending",
+            sha256,
+            sha256
+        )
+        valid.engine2d_backend = "vulkan"
+        var valid_provenance = valid.font_provenance
+        valid_provenance.execution_target = "vulkan"
+        valid_provenance.ordered_text_command_count = 2
+        valid_provenance.vulkan_composition_id =
+            valid_provenance.layout_composition_id
+        valid_provenance.vulkan_batch_count = 2
+        valid_provenance.vulkan_batch_digest = 101
+        valid_provenance.vulkan_aggregate_valid = true
+        valid_provenance.vulkan_advance_digest =
+            valid_provenance.execution_advance_digest
+        valid_provenance.vulkan_all_device_executed = true
+        valid_provenance.vulkan_all_promotion_ready = true
+        valid_provenance.vulkan_all_parity = true
+        valid.font_provenance = valid_provenance
+        expect(wm_content_frame_web_provenance_valid(valid)).to_be(true)
+
+        var cpu_fallback = valid
+        var cpu_provenance = cpu_fallback.font_provenance
+        cpu_provenance.execution_target = "cpu"
+        cpu_fallback.font_provenance = cpu_provenance
+        var mid_fallback = valid
+        var mid_provenance = mid_fallback.font_provenance
+        mid_provenance.vulkan_batch_count = 1
+        mid_fallback.font_provenance = mid_provenance
+        var bad_device = valid
+        var device_provenance = bad_device.font_provenance
+        device_provenance.vulkan_all_device_executed = false
+        bad_device.font_provenance = device_provenance
+        var bad_promotion = valid
+        var promotion_provenance = bad_promotion.font_provenance
+        promotion_provenance.vulkan_all_promotion_ready = false
+        bad_promotion.font_provenance = promotion_provenance
+        var bad_parity = valid
+        var parity_provenance = bad_parity.font_provenance
+        parity_provenance.vulkan_all_parity = false
+        bad_parity.font_provenance = parity_provenance
+        expect(wm_content_frame_web_provenance_valid(
+            cpu_fallback)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(
+            mid_fallback)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(
+            bad_device)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(
+            bad_promotion)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(
+            bad_parity)).to_be(false)
+
     it "rejects non-lowercase or nonhex material and manifest SHA-256 receipts":
         val valid_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         val uppercase_sha256 = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         val nonhex_sha256 = "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val cache = web_render_pixel_artifact_cache(36, 18, "software")
+        val base = simple_web_content_frame_cached(
+            cache, "sha-contract", 1, 1, "aetheric_dark",
+            "SHA", "<p>actual producer</p>", 36, 18, 0)
         val uppercase_material = _web_provenance_frame(
+            base,
             "cpu-composited-material",
             "native-device-backdrop-path-pending",
             uppercase_sha256,
             valid_sha256
         )
         val nonhex_material = _web_provenance_frame(
+            base,
             "cpu-composited-material",
             "native-device-backdrop-path-pending",
             nonhex_sha256,
             valid_sha256
         )
         val uppercase_manifest = _web_provenance_frame(
+            base,
             "cpu-composited-material",
             "native-device-backdrop-path-pending",
             valid_sha256,
             uppercase_sha256
         )
         val nonhex_manifest = _web_provenance_frame(
+            base,
             "cpu-composited-material",
             "native-device-backdrop-path-pending",
             valid_sha256,
@@ -131,6 +302,10 @@ describe "Simple Web compositor adapter":
         expect(renderer.contains("web_render_pixel_software_backend")).to_be(false)
         expect(host.contains("web_render_pixel_software_backend")).to_be(false)
         expect(surface.contains("web_render_request_to_native_safe_pixel_artifact")).to_be(false)
+        expect(host).to_contain("for frame in top_frames:")
+        expect(host).to_contain(
+            "print \"[hosted-wm] content-presented")
+        expect(host.contains("for frame in frames:\n            print \"[hosted-wm] content-presented")).to_be(false)
 
     it "produces an authoritative shared-WM frame from runtime HTML":
         val cache = web_render_pixel_artifact_cache(36, 18, "software")
@@ -152,6 +327,15 @@ describe "Simple Web compositor adapter":
         expect(frame.material_fallback_sha256.len()).to_equal(64)
         expect(frame.theme_id).to_equal("glass_dark")
         expect(frame.theme_source_manifest_sha256.len()).to_equal(64)
+        expect(frame.font_provenance.identity.len()).to_be_greater_than(0)
+        expect(frame.font_provenance.execution_target.len()).to_be_greater_than(0)
+        expect(frame.font_provenance.layout_composition_id).to_equal("html-layout")
+        expect(frame.font_provenance.execution_composition_id).to_equal(
+            frame.font_provenance.layout_composition_id)
+        expect(frame.font_provenance.layout_advance_digest).to_be_greater_than(0)
+        expect(frame.font_provenance.execution_advance_digest).to_equal(
+            frame.font_provenance.layout_advance_digest)
+        expect(frame.font_provenance.ordered_text_command_count).to_be_greater_than(0)
         expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
 
     it "turns validated external DrawIR execution into a web frame":
@@ -175,15 +359,27 @@ describe "Simple Web compositor adapter":
             layout.material_witness.cpu_composited_count,
             layout.material_witness.cpu_composited_sha256,
             layout.material_witness.solid_material_count,
-            layout.material_witness.solid_material_sha256
+            layout.material_witness.solid_material_sha256,
+            layout.composition.composition_id,
+            draw_ir_font_advance_digest(layout.composition)
         )
         expect(frame.pixels.len()).to_equal(64 * 48)
         expect(frame.checksum).to_be_greater_than(0u64)
+        expect(frame.font_provenance.identity.len()).to_be_greater_than(0)
+        expect(frame.font_provenance.execution_target.len()).to_be_greater_than(0)
+        expect(frame.font_provenance.layout_composition_id).to_equal(
+            layout.composition.composition_id)
+        expect(frame.font_provenance.execution_composition_id).to_equal(
+            render.font_composition_id)
+        expect(frame.font_provenance.layout_advance_digest).to_equal(
+            draw_ir_font_advance_digest(layout.composition))
+        expect(frame.font_provenance.execution_advance_digest).to_equal(
+            render.font_advance_command_digest)
         expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
         raster.shutdown()
 
     it "renders bounded CSS animation frames then becomes quiescent":
-        val body = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
+        val body = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'>animated</div>"
         val revision = simple_web_content_revision_with_theme(
             "glass_dark", "Animation", body, 64, 48, 0
         )
@@ -193,6 +389,13 @@ describe "Simple Web compositor adapter":
             body, 64, 48, 0, 1000
         )
         expect(contains_pixel(first.pixels, 0xFFEF4444u32)).to_be(true)
+        expect(first.font_provenance.identity.len()).to_be_greater_than(0)
+        expect(first.font_provenance.execution_composition_id).to_equal(
+            first.font_provenance.layout_composition_id)
+        expect(first.font_provenance.layout_advance_digest).to_be_greater_than(0)
+        expect(first.font_provenance.execution_advance_digest).to_equal(
+            first.font_provenance.layout_advance_digest)
+        expect(wm_content_frame_web_provenance_valid(first)).to_be(true)
         expect(cache.animation_frame_due(1015)).to_be(false)
         expect(cache.animation_frame_due(1016)).to_be(true)
 
@@ -201,12 +404,28 @@ describe "Simple Web compositor adapter":
             body, 64, 48, 0, 1500
         )
         assert_not_equal(middle.checksum, first.checksum)
+        expect(middle.font_provenance.identity).to_equal(
+            first.font_provenance.identity)
+        expect(middle.font_provenance.layout_composition_id).to_equal(
+            first.font_provenance.layout_composition_id)
+        expect(middle.font_provenance.execution_advance_digest).to_equal(
+            first.font_provenance.execution_advance_digest)
+        expect(middle.font_provenance.ordered_text_command_count).to_equal(
+            first.font_provenance.ordered_text_command_count)
+        expect(wm_content_frame_web_provenance_valid(middle)).to_be(true)
         val last = simple_web_content_frame_cached_at_time(
             cache, "animated", 3, revision, "glass_dark", "Animation",
             body, 64, 48, 0, 2000
         )
         expect(contains_pixel(last.pixels, 0xFF2563EBu32)).to_be(true)
         assert_not_equal(last.checksum, middle.checksum)
+        expect(last.font_provenance.identity).to_equal(
+            first.font_provenance.identity)
+        expect(last.font_provenance.execution_advance_digest).to_equal(
+            first.font_provenance.execution_advance_digest)
+        expect(last.font_provenance.ordered_text_command_count).to_equal(
+            first.font_provenance.ordered_text_command_count)
+        expect(wm_content_frame_web_provenance_valid(last)).to_be(true)
         expect(cache.animation_frame_due(2001)).to_be(false)
 
     it "keeps shared-WM content requests free of a duplicate inner titlebar":
@@ -276,6 +495,18 @@ describe "Simple Web compositor adapter":
         expect(first.material_fallback.reason).to_equal("native-device-backdrop-path-pending")
         expect(first.material_fallback.material_sha256.len()).to_equal(64)
         expect(second.material_fallback.material_sha256).to_equal(first.material_fallback.material_sha256)
+        expect(second.font_provenance.identity).to_equal(
+            first.font_provenance.identity)
+        expect(second.font_provenance.layout_composition_id).to_equal(
+            first.font_provenance.layout_composition_id)
+        expect(second.font_provenance.execution_composition_id).to_equal(
+            first.font_provenance.execution_composition_id)
+        expect(second.font_provenance.layout_advance_digest).to_equal(
+            first.font_provenance.layout_advance_digest)
+        expect(second.font_provenance.execution_advance_digest).to_equal(
+            first.font_provenance.execution_advance_digest)
+        expect(second.font_provenance.ordered_text_command_count).to_equal(
+            first.font_provenance.ordered_text_command_count)
         expect(cache.hits()).to_equal(1)
 
     it "keeps Aetheric fallback provenance for an empty runtime window":

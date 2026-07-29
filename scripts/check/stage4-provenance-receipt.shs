@@ -1,0 +1,522 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    echo "stage4 provenance receipt: FAIL ($1)" >&2
+    exit 1
+}
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+facade="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_FACADE_PATH=$facade
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$facade"
+
+field() {
+    bootstrap_stage3_manifest_value "$1" "$2"
+}
+
+regular() {
+    [ -f "$1" ] && [ ! -L "$1" ] &&
+        [ "$(bootstrap_stage3_canonical_file "$1")" = "$1" ]
+}
+
+directory() {
+    [ -d "$1" ] && [ ! -L "$1" ] &&
+        [ "$(bootstrap_stage3_canonical_path "$1")" = "$1" ]
+}
+
+native_binary() {
+    magic=$(od -An -tx1 -N4 "$1" | tr -d '[:space:]') || return 1
+    case "$2:$magic" in
+        *-linux-*:*|*-freebsd:*|*-unknown-linux-*:*|*-unknown-freebsd:*)
+            [ "$magic" = 7f454c46 ]
+            ;;
+        *-apple-darwin:feedfacf|*-apple-darwin:cffaedfe) return 0 ;;
+        *-pc-windows-*:4d5a*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+cache_snapshot() {
+    snapshot=$1
+    cache=$2
+    directory "$cache" || return 1
+    ! find "$cache" -type l -print -quit | grep -q . || return 1
+    if find "$cache" -type f -print -quit | grep -q .; then
+        bootstrap_stage3_directory_snapshot "$snapshot" "$cache"
+    else
+        printf 'schema=simple-stage4-cache-snapshot-v1\nstatus=empty\n' \
+            >"$snapshot"
+    fi
+}
+
+verify_capsule() {
+    runtime=$1
+    manifest=$2
+    directory "$runtime" && regular "$manifest" ||
+        return 1
+    sh "$root/scripts/check/build-core-c-bootstrap-runtime-capsule.shs" \
+        --check "$runtime" >/dev/null || return 1
+    [ "$manifest" = "$runtime/capsule.manifest" ] &&
+        [ "$(field schema "$manifest")" = \
+            core-c-bootstrap-runtime-capsule-v1 ] &&
+        [ "$(field status "$manifest")" = pass ] &&
+        [ "$(field head_revision "$manifest")" = \
+            "$(git -C "$root" rev-parse HEAD)" ] &&
+        regular "$runtime/libsimple_runtime.a"
+}
+
+# Recreate the exact ordered vector without evaluating serialized shell text.
+verify_transcript() {
+    transcript=$1
+    stage3=$2
+    cache=$3
+    output=$4
+    target=$5
+    backend=$6
+    threads=$7
+    runtime=$8
+    bootstrap_stage3_verify_command_transcript "$transcript" "$root" \
+        RUST_LOG=error \
+        SIMPLE_BOOTSTRAP=1 \
+        SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+        SIMPLE_BOOTSTRAP_STAGE4=1 \
+        SIMPLE_COMPILER_PHASE_PROFILE=1 \
+        "SIMPLE_NATIVE_BUILD_TARGET=$target" \
+        "SIMPLE_NATIVE_BUILD_THREADS=$threads" \
+        "SIMPLE_NATIVE_BUILD_CACHE_DIR=$cache" \
+        "SIMPLE_RUNTIME_PATH=$runtime" \
+        LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+        SIMPLE_NO_STUB_FALLBACK=1 \
+        "SIMPLE_BINARY=$stage3" -- \
+        "$stage3" native-build \
+        --target "$target" --backend "$backend" \
+        --runtime-bundle core-c-bootstrap \
+        --source src/compiler --source src/app --source src/lib \
+        --source examples/10_tooling --entry-closure --low-memory \
+        --threads "$threads" --cache-dir "$cache" --mode one-binary \
+        --entry src/app/cli/main.spl --runtime-path "$runtime" -o "$output"
+}
+
+verify_receipt() {
+    receipt=$1
+    expected_sha=$2
+    expected_output=${3-}
+    regular "$receipt" || fail receipt-not-canonical
+    printf '%s\n' "$expected_sha" | grep -Eq '^[0-9a-f]{64}$' ||
+        fail receipt-sha-invalid
+    [ "$(bootstrap_stage3_hash_file "$receipt")" = "$expected_sha" ] ||
+        fail receipt-sha-mismatch
+    regular "${receipt}.sha256" &&
+        [ "$(tr -d '[:space:]' <"${receipt}.sha256")" = "$expected_sha" ] ||
+        fail receipt-hash-sidecar-invalid
+    [ "$(field schema "$receipt")" = \
+        simple-stage4-provenance-receipt-v1 ] &&
+        [ "$(field status "$receipt")" = pass ] ||
+        fail schema-or-status
+    if [ "$(field kind "$receipt")" = deployed ]; then
+        [ -n "$expected_output" ] || fail deployed-output-required
+        for deployed_sha_field in source_receipt_sha256 \
+            core_c_manifest_sha256 core_c_sha256; do
+            printf '%s\n' "$(field "$deployed_sha_field" "$receipt")" |
+                grep -Eq '^[0-9a-f]{64}$' ||
+                fail "deployed-authority-sha-invalid:$deployed_sha_field"
+        done
+        case "$(field threads "$receipt")" in
+            ''|*[!0-9]*|0) fail deployed-threads-invalid ;;
+        esac
+        [ -n "$(field backend "$receipt")" ] ||
+            fail deployed-backend-missing
+        regular "$expected_output" && [ -x "$expected_output" ] &&
+            native_binary "$expected_output" "$(field target "$receipt")" &&
+            [ "$(bootstrap_stage3_hash_file "$expected_output")" = \
+                "$(field output_sha256 "$receipt")" ] ||
+            fail deployed-output-identity-mismatch
+        deployed_git=$(mktemp \
+            "${TMPDIR:-/tmp}/simple-stage4-deployed-git.XXXXXX") ||
+            fail deployed-git-state-temp
+        trap 'rm -f "$deployed_git"' EXIT INT TERM
+        bootstrap_stage3_git_state "$root" "$deployed_git" &&
+            [ "$(field head "$deployed_git")" = \
+                "$(field source_head "$receipt")" ] &&
+            [ "$(field dirty_fingerprint "$deployed_git")" = \
+                "$(field source_dirty_fingerprint "$receipt")" ] ||
+            fail deployed-source-state-changed
+        [ "$(bootstrap_stage3_hash_file \
+            "$root/scripts/check/stage4-provenance-receipt.shs")" = \
+            "$(field writer_sha256 "$receipt")" ] ||
+            fail deployed-receipt-writer-changed
+        rm -f "$deployed_git"
+        trap - EXIT INT TERM
+        printf 'stage4_receipt_path=%s\n' "$receipt"
+        printf 'stage4_receipt_sha256=%s\n' "$expected_sha"
+        echo 'stage4_receipt_status=pass'
+        return
+    fi
+    [ "$(field kind "$receipt")" = build ] || fail receipt-kind-invalid
+
+    for key in source_snapshot_before_path source_snapshot_after_path \
+        git_state_before_path git_state_after_path runtime_before_path \
+        runtime_after_path tool_before_path tool_after_path \
+        cache_preinventory_path cache_postinventory_path \
+        cache_owner_path argv_transcript_path helper_bundle_path \
+        build_log_path core_c_manifest_path output_path core_c_path; do
+        path=$(field "$key" "$receipt")
+        regular "$path" || fail "bound-file-not-canonical:$key"
+        [ "$(bootstrap_stage3_hash_file "$path")" = \
+            "$(field "${key%_path}_sha256" "$receipt")" ] ||
+            fail "bound-file-hash-mismatch:$key"
+    done
+    cmp -s "$(field source_snapshot_before_path "$receipt")" \
+        "$(field source_snapshot_after_path "$receipt")" ||
+        fail source-changed-during-build
+    cmp -s "$(field git_state_before_path "$receipt")" \
+        "$(field git_state_after_path "$receipt")" ||
+        fail checkout-changed-during-build
+    cmp -s "$(field runtime_before_path "$receipt")" \
+        "$(field runtime_after_path "$receipt")" ||
+        fail runtime-changed-during-build
+    cmp -s "$(field tool_before_path "$receipt")" \
+        "$(field tool_after_path "$receipt")" ||
+        fail tool-authority-changed-during-build
+
+    stage3_manifest=$(field stage3_manifest_path "$receipt")
+    stage3=$(field stage3_path "$receipt")
+    regular "$stage3_manifest" && regular "$stage3" ||
+        fail stage3-not-canonical
+    [ "$(bootstrap_stage3_hash_file "$stage3_manifest")" = \
+        "$(field stage3_manifest_sha256 "$receipt")" ] &&
+        [ "$(bootstrap_stage3_hash_file "$stage3")" = \
+            "$(field stage3_sha256 "$receipt")" ] ||
+        fail stage3-hash-mismatch
+    bootstrap_stage3_verify_manifest "$stage3_manifest" "$root" "$stage3" ||
+        fail stage3-manifest-current-state-invalid
+    writer=$(field writer_path "$receipt")
+    regular "$writer" &&
+        [ "$(bootstrap_stage3_hash_file "$writer")" = \
+            "$(field writer_sha256 "$receipt")" ] ||
+        fail writer-changed
+    [ "$(bootstrap_stage3_helper_bundle_fingerprint)" = \
+        "$(field helper_bundle_sha256 "$receipt")" ] ||
+        fail provenance-helpers-changed
+
+    git_now="${receipt}.verify-git.$$"
+    source_now="${receipt}.verify-source.$$"
+    runtime_now="${receipt}.verify-runtime.$$"
+    tool_now="${receipt}.verify-tool.$$"
+    trap 'rm -f "$git_now" "$source_now" "$runtime_now" "$tool_now"' \
+        EXIT INT TERM
+    bootstrap_stage3_git_state "$root" "$git_now" ||
+        fail current-git-state-unavailable
+    [ "$(field head "$git_now")" = "$(field source_head "$receipt")" ] ||
+        fail source-head-changed
+    bootstrap_stage3_source_snapshot "$source_now" "$root" &&
+        cmp -s "$source_now" "$(field source_snapshot_after_path "$receipt")" ||
+        fail build-input-source-changed
+    bootstrap_stage3_tool_authority_snapshot "$tool_now" \
+        "$(bootstrap_stage3_transcript_host_value \
+            "$(field argv_transcript_path "$receipt")" PATH)" "$root" &&
+        cmp -s "$tool_now" "$(field tool_after_path "$receipt")" ||
+        fail tool-authority-changed
+
+    runtime=$(field runtime_path "$receipt")
+    capsule=$(field core_c_manifest_path "$receipt")
+    verify_capsule "$runtime" "$capsule" || fail core-c-capsule-invalid
+    bootstrap_stage3_directory_snapshot "$runtime_now" "$runtime" &&
+        cmp -s "$runtime_now" "$(field runtime_after_path "$receipt")" ||
+        fail runtime-capsule-changed
+    [ "$(field source_head "$receipt")" = "$(field head_revision "$capsule")" ] ||
+        fail core-c-checkpoint-mismatch
+
+    output=$(field output_path "$receipt")
+    [ -x "$output" ] &&
+        native_binary "$output" "$(field target "$receipt")" ||
+        fail output-is-wrapper-or-wrong-format
+    [ "$(bootstrap_stage3_hash_file "$output")" = \
+        "$(field output_sha256 "$receipt")" ] ||
+        fail output-hash-mismatch
+    if [ -n "$expected_output" ] && [ "$output" != "$expected_output" ]; then
+        regular "$expected_output" && [ -x "$expected_output" ] &&
+            native_binary "$expected_output" "$(field target "$receipt")" &&
+            [ "$(bootstrap_stage3_hash_file "$expected_output")" = \
+                "$(field output_sha256 "$receipt")" ] ||
+            fail deployed-output-identity-mismatch
+    fi
+
+    transcript=$(field argv_transcript_path "$receipt")
+    cache=$(field cache_path "$receipt")
+    directory "$cache" || fail cache-not-canonical
+    owner=$(field cache_owner_path "$receipt")
+    [ "$(field schema "$owner")" = simple-stage4-cache-owner-v1 ] &&
+        [ "$(field status "$owner")" = owned ] &&
+        [ "$(field cache_path "$owner")" = "$cache" ] ||
+        fail cache-owner-invalid
+    case "$(field owner_pid "$owner")" in
+        ''|*[!0-9]*|0) fail cache-owner-pid-invalid ;;
+    esac
+    verify_transcript "$transcript" "$stage3" \
+        "$cache" "$output" \
+        "$(field target "$receipt")" "$(field backend "$receipt")" \
+        "$(field threads "$receipt")" "$runtime" ||
+        fail exact-command-transcript-invalid
+    [ "$(field route_controls_unset "$receipt")" = \
+        SIMPLE_FRONTEND_DELEGATED,SIMPLE_FRONTEND_FALLBACK,SIMPLE_FORCE_RUST_DRIVER,SIMPLE_RUST_SEED_WARNING ] ||
+        fail route-controls-contract-invalid
+    rm -f "$git_now" "$source_now" "$runtime_now" "$tool_now"
+    trap - EXIT INT TERM
+    printf 'stage4_receipt_path=%s\n' "$receipt"
+    printf 'stage4_receipt_sha256=%s\n' "$expected_sha"
+    echo 'stage4_receipt_status=pass'
+}
+
+case "${1-}" in
+    write)
+        [ "$#" -eq 11 ] || fail write-arguments
+        receipt=$2
+        supplied_root=$3
+        stage3_manifest=$4
+        cache=$5
+        output=$6
+        target=$7
+        backend=$8
+        threads=$9
+        runtime=${10}
+        capsule=${11}
+        [ "$supplied_root" = "$root" ] || fail repository-root-mismatch
+        directory "$cache" && directory "$runtime" ||
+            fail authority-directory-invalid
+        regular "$stage3_manifest" && regular "$capsule" ||
+            fail authority-file-invalid
+        [ ! -e "$output" ] && [ ! -L "$output" ] ||
+            fail output-already-exists
+        case "$threads" in ''|*[!0-9]*|0) fail threads-invalid ;; esac
+
+        for suffix in '' .sha256 .argv .build.log .source-before \
+            .source-after .git-before .git-after .runtime-before \
+            .runtime-after .tool-before .tool-after .cache-before \
+            .cache-after .cache-owner.env \
+            .helpers .lock; do
+            [ ! -e "${receipt}${suffix}" ] &&
+                [ ! -L "${receipt}${suffix}" ] ||
+                fail "receipt-member-already-exists:$suffix"
+        done
+        receipt_lock="${receipt}.lock"
+        mkdir "$receipt_lock" || fail receipt-lock-acquire
+        lock="${cache}.stage4-exclusive-lock"
+        [ ! -e "$lock" ] && [ ! -L "$lock" ] ||
+            fail cache-lock-already-exists
+        mkdir "$lock" || {
+            rmdir "$receipt_lock"
+            fail cache-lock-acquire
+        }
+        lock_owner="$lock/owner.env"
+        cleanup_lock() {
+            rm -f "$lock_owner"
+            rmdir "$lock" 2>/dev/null || true
+            rmdir "$receipt_lock" 2>/dev/null || true
+        }
+        trap cleanup_lock EXIT INT TERM
+        (
+            set -C
+            {
+                echo 'schema=simple-stage4-cache-owner-v1'
+                echo 'status=owned'
+                echo "owner_pid=$$"
+                echo "cache_path=$cache"
+            } >"$lock_owner"
+        ) || fail cache-owner-create
+        cp "$lock_owner" "${receipt}.cache-owner.env"
+
+        stage3=$(field stage3_path "$stage3_manifest")
+        regular "$stage3" || fail stage3-binary-invalid
+        bootstrap_stage3_verify_manifest "$stage3_manifest" "$root" "$stage3" ||
+            fail stage3-manifest-invalid
+        verify_capsule "$runtime" "$capsule" || fail core-c-capsule-invalid
+        [ "$(field head_revision "$capsule")" = \
+            "$(git -C "$root" rev-parse HEAD)" ] ||
+            fail core-c-checkpoint-mismatch
+
+        stage3_manifest_sha_before=$(
+            bootstrap_stage3_hash_file "$stage3_manifest"
+        )
+        stage3_sha_before=$(bootstrap_stage3_hash_file "$stage3")
+        writer_sha_before=$(
+            bootstrap_stage3_hash_file \
+                "$root/scripts/check/stage4-provenance-receipt.shs"
+        )
+        bootstrap_stage3_source_snapshot "${receipt}.source-before" "$root" &&
+            bootstrap_stage3_git_state "$root" "${receipt}.git-before" &&
+            bootstrap_stage3_tool_authority_snapshot \
+                "${receipt}.tool-before" "$PATH" "$root" &&
+            bootstrap_stage3_directory_snapshot \
+                "${receipt}.runtime-before" "$runtime" &&
+            cache_snapshot "${receipt}.cache-before" "$cache" &&
+            bootstrap_stage3_helper_bundle_snapshot "${receipt}.helpers" ||
+            fail before-snapshot-failed
+
+        bootstrap_stage3_run_transcribed "${receipt}.argv" "$root" \
+            "${receipt}.build.log" "$HOME" "${TMPDIR:-/tmp}" "$PATH" \
+            RUST_LOG=error \
+            SIMPLE_BOOTSTRAP=1 \
+            SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+            SIMPLE_BOOTSTRAP_STAGE4=1 \
+            SIMPLE_COMPILER_PHASE_PROFILE=1 \
+            "SIMPLE_NATIVE_BUILD_TARGET=$target" \
+            "SIMPLE_NATIVE_BUILD_THREADS=$threads" \
+            "SIMPLE_NATIVE_BUILD_CACHE_DIR=$cache" \
+            "SIMPLE_RUNTIME_PATH=$runtime" \
+            LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+            SIMPLE_NO_STUB_FALLBACK=1 \
+            "SIMPLE_BINARY=$stage3" -- \
+            "$stage3" native-build \
+            --target "$target" --backend "$backend" \
+            --runtime-bundle core-c-bootstrap \
+            --source src/compiler --source src/app --source src/lib \
+            --source examples/10_tooling --entry-closure --low-memory \
+            --threads "$threads" --cache-dir "$cache" --mode one-binary \
+            --entry src/app/cli/main.spl --runtime-path "$runtime" -o "$output" ||
+            {
+                cat "${receipt}.build.log" >&2
+                fail native-build-failed
+            }
+        cat "${receipt}.build.log"
+
+        bootstrap_stage3_source_snapshot "${receipt}.source-after" "$root" &&
+            bootstrap_stage3_git_state "$root" "${receipt}.git-after" &&
+            bootstrap_stage3_tool_authority_snapshot \
+                "${receipt}.tool-after" "$PATH" "$root" &&
+            bootstrap_stage3_directory_snapshot \
+                "${receipt}.runtime-after" "$runtime" &&
+            cache_snapshot "${receipt}.cache-after" "$cache" ||
+            fail after-snapshot-failed
+        cmp -s "${receipt}.source-before" "${receipt}.source-after" &&
+            cmp -s "${receipt}.git-before" "${receipt}.git-after" &&
+            cmp -s "${receipt}.tool-before" "${receipt}.tool-after" &&
+            cmp -s "${receipt}.runtime-before" "${receipt}.runtime-after" ||
+            fail authority-changed-during-build
+        [ "$(bootstrap_stage3_hash_file "$stage3_manifest")" = \
+            "$stage3_manifest_sha_before" ] &&
+            [ "$(bootstrap_stage3_hash_file "$stage3")" = \
+                "$stage3_sha_before" ] &&
+            [ "$(bootstrap_stage3_hash_file \
+                "$root/scripts/check/stage4-provenance-receipt.shs")" = \
+                "$writer_sha_before" ] &&
+            [ "$(bootstrap_stage3_helper_bundle_fingerprint)" = \
+                "$(bootstrap_stage3_hash_file "${receipt}.helpers")" ] ||
+            fail executable-authority-changed-during-build
+        [ -x "$output" ] && native_binary "$output" "$target" ||
+            fail output-is-wrapper-or-wrong-format
+        verify_capsule "$runtime" "$capsule" ||
+            fail core-c-capsule-changed
+
+        receipt_tmp="${receipt}.tmp.$$"
+        {
+            echo 'schema=simple-stage4-provenance-receipt-v1'
+            echo 'status=pass'
+            echo 'kind=build'
+            echo "source_head=$(field head "${receipt}.git-after")"
+            echo "source_dirty_fingerprint=$(field dirty_fingerprint "${receipt}.git-after")"
+            echo "stage3_manifest_path=$stage3_manifest"
+            echo "stage3_manifest_sha256=$stage3_manifest_sha_before"
+            echo "stage3_path=$stage3"
+            echo "stage3_sha256=$stage3_sha_before"
+            echo "target=$target"
+            echo "backend=$backend"
+            echo "threads=$threads"
+            echo "cache_path=$cache"
+            echo "runtime_path=$runtime"
+            echo "route_controls_unset=SIMPLE_FRONTEND_DELEGATED,SIMPLE_FRONTEND_FALLBACK,SIMPLE_FORCE_RUST_DRIVER,SIMPLE_RUST_SEED_WARNING"
+            for name in source_snapshot_before source_snapshot_after \
+                git_state_before git_state_after runtime_before runtime_after \
+                tool_before tool_after \
+                cache_preinventory cache_postinventory cache_owner \
+                argv_transcript helper_bundle build_log; do
+                case "$name" in
+                    source_snapshot_before) path="${receipt}.source-before" ;;
+                    source_snapshot_after) path="${receipt}.source-after" ;;
+                    git_state_before) path="${receipt}.git-before" ;;
+                    git_state_after) path="${receipt}.git-after" ;;
+                    runtime_before) path="${receipt}.runtime-before" ;;
+                    runtime_after) path="${receipt}.runtime-after" ;;
+                    tool_before) path="${receipt}.tool-before" ;;
+                    tool_after) path="${receipt}.tool-after" ;;
+                    cache_preinventory) path="${receipt}.cache-before" ;;
+                    cache_postinventory) path="${receipt}.cache-after" ;;
+                    cache_owner) path="${receipt}.cache-owner.env" ;;
+                    argv_transcript) path="${receipt}.argv" ;;
+                    helper_bundle) path="${receipt}.helpers" ;;
+                    build_log) path="${receipt}.build.log" ;;
+                esac
+                echo "${name}_path=$path"
+                echo "${name}_sha256=$(bootstrap_stage3_hash_file "$path")"
+            done
+            echo "core_c_manifest_path=$capsule"
+            echo "core_c_manifest_sha256=$(bootstrap_stage3_hash_file "$capsule")"
+            echo "core_c_repeated_build_receipt_sha256=$(field repeated_build_receipt_sha256 "$capsule")"
+            echo "output_path=$output"
+            echo "output_sha256=$(bootstrap_stage3_hash_file "$output")"
+            echo "core_c_path=$runtime/libsimple_runtime.a"
+            echo "core_c_sha256=$(bootstrap_stage3_hash_file "$runtime/libsimple_runtime.a")"
+            echo "writer_path=$root/scripts/check/stage4-provenance-receipt.shs"
+            echo "writer_sha256=$writer_sha_before"
+        } >"$receipt_tmp" || fail receipt-write
+        mv "$receipt_tmp" "$receipt"
+        receipt_sha=$(bootstrap_stage3_hash_file "$receipt")
+        printf '%s\n' "$receipt_sha" >"${receipt}.sha256"
+        cleanup_lock
+        trap - EXIT INT TERM
+        verify_receipt "$receipt" "$receipt_sha" "$output"
+        ;;
+    seal-deployed)
+        [ "$#" -eq 5 ] || fail seal-deployed-arguments
+        source_receipt=$2
+        source_sha=$3
+        deployed_output=$4
+        deployed_receipt=$5
+        verify_receipt "$source_receipt" "$source_sha" "$deployed_output" \
+            >/dev/null
+        regular "$deployed_output" || fail deployed-output-not-canonical
+        [ ! -L "$deployed_receipt" ] &&
+            [ ! -L "${deployed_receipt}.sha256" ] ||
+            fail deployed-receipt-is-symlink
+        deployed_tmp="${deployed_receipt}.tmp.$$"
+        deployed_hash_tmp="${deployed_receipt}.sha256.tmp.$$"
+        trap 'rm -f "$deployed_tmp" "$deployed_hash_tmp"' EXIT INT TERM
+        {
+            echo 'schema=simple-stage4-provenance-receipt-v1'
+            echo 'status=pass'
+            echo 'kind=deployed'
+            echo "source_head=$(field source_head "$source_receipt")"
+            echo "source_dirty_fingerprint=$(field \
+                source_dirty_fingerprint "$source_receipt")"
+            echo "target=$(field target "$source_receipt")"
+            echo "backend=$(field backend "$source_receipt")"
+            echo "threads=$(field threads "$source_receipt")"
+            echo "output_sha256=$(field output_sha256 "$source_receipt")"
+            echo "core_c_sha256=$(field core_c_sha256 "$source_receipt")"
+            echo "core_c_manifest_sha256=$(field \
+                core_c_manifest_sha256 "$source_receipt")"
+            echo "source_receipt_sha256=$source_sha"
+            echo "writer_sha256=$(bootstrap_stage3_hash_file \
+                "$root/scripts/check/stage4-provenance-receipt.shs")"
+        } >"$deployed_tmp"
+        deployed_sha=$(bootstrap_stage3_hash_file "$deployed_tmp")
+        printf '%s\n' "$deployed_sha" >"$deployed_hash_tmp"
+        mv "$deployed_tmp" "$deployed_receipt"
+        mv "$deployed_hash_tmp" "${deployed_receipt}.sha256"
+        trap - EXIT INT TERM
+        verify_receipt "$deployed_receipt" "$deployed_sha" "$deployed_output"
+        ;;
+    check)
+        [ "$#" -ge 2 ] && [ "$#" -le 4 ] || fail check-arguments
+        receipt=$2
+        receipt_sha=${3-}
+        if [ -z "$receipt_sha" ]; then
+            regular "${receipt}.sha256" || fail receipt-hash-sidecar-invalid
+            receipt_sha=$(tr -d '[:space:]' <"${receipt}.sha256")
+        fi
+        verify_receipt "$receipt" "$receipt_sha" "${4-}"
+        ;;
+    *) fail usage ;;
+esac

@@ -67,13 +67,23 @@ the applicable full lint and duplication gates. If duplicate caching changed,
 the same gate must prove token/cosine create/reuse parity, changed/deleted-file
 invalidation, `--no-cache`, exit parity, and JSON stdout purity.
 
-Build that Stage 4 full CLI incrementally by default from a proven pure-Simple
-parent and a stable, exclusively locked cache, with
+Before promotion, bind the pure-Simple parent to the canonical
+`build/bootstrap/stage2/<triple>/stage2-provenance.env` plus `.sha256` and
+verify it with `bootstrap_stage2_verify_manifest`. Option-lowering lanes must
+also pass the sealed A/B/C admission in
+`scripts/check/check-native-option-admission-probes.shs`, pinned to that exact
+Stage 2 binary and manifest, source checkpoint, and deterministic core-C
+capsule. Loose probe stdout or manually reconstructed counts are not evidence.
+
+Build that Stage 4 full CLI incrementally by default from the admitted
+pure-Simple parent and a stable, exclusively locked cache, with
 `SIMPLE_NATIVE_INCREMENTAL=1`, `SIMPLE_NO_STUB_FALLBACK=1`, and the full
 `src/app/cli/main.spl` entry. A successful artifact is Stage 4 evidence when its
 source overlay, parent, runtime, exact command, cache receipt, and output hash
 are retained and the exact artifact passes every existing Stage 4 admission and
-smoke gate. Do not rerun it cleanly merely to call it "actual Stage 4". Normal
+smoke gate. `scripts/check/stage4-provenance-receipt.shs write` must own the
+isolated build and transcript; never wrap a receipt around a separately run
+build. Do not rerun it cleanly merely to call it "actual Stage 4". Normal
 cache-key rejection may rebuild affected or all modules in that same invocation;
 start a clean retry only for cache-integrity failure or a failed acceptance gate.
 
@@ -84,7 +94,9 @@ clippy/rustfmt commands, not substitutes.
 
 A temporarily deployed Stage 2 compiler may unblock native artifact builds,
 but it is not Stage 4 evidence and cannot qualify `run`, `test`, SPipe docgen,
-or release. Record its exact path, hash, supported commands, and rollback path.
+or release. It may act as a promotion parent only after the canonical manifest
+verification and any feature-specific sealed admission above. Record its exact
+path, hash, supported commands, and rollback path.
 If a direct lexer probe and parser-facing token stream disagree, capture both
 streams plus continuation state in one compiled probe. After three distinct
 fix/probe cycles, update the tracked bug and lane state and stop; do not rewrite

@@ -110,6 +110,49 @@ struct DrawIrComposition:
     backend_target: text
     batches: [DrawIrBatch]
 
+fn _draw_ir_font_digest_text(hash: i64, value: text) -> i64:
+    var mixed = hash
+    var i = 0
+    while i < value.len():
+        mixed = ((mixed * 131 + value.char_code_at(i) as i64) %
+            2147483647) + 1
+        i = i + 1
+    mixed
+
+# Producer/executor-stable receipt over the ordered text commands and the
+# resolved font identity/advance metadata that those commands actually carry.
+fn draw_ir_font_advance_digest(composition: DrawIrComposition) -> i64:
+    var digest = _draw_ir_font_digest_text(17, composition.composition_id)
+    var resolved_text_count = 0
+    for batch in composition.batches:
+        digest = _draw_ir_font_digest_text(digest, batch.batch_id)
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT:
+                var identity = ""
+                var advances = ""
+                var identity_found = false
+                var advances_found = false
+                for prop in command.computed_style:
+                    if prop.key == "font-identity":
+                        if not identity_found:
+                            identity = prop.value
+                            identity_found = true
+                    elif prop.key == "font-advance-widths":
+                        if not advances_found:
+                            advances = prop.value
+                            advances_found = true
+                if identity != "" and advances != "" and advances != "[]":
+                    digest = _draw_ir_font_digest_text(
+                        digest, command.component_id)
+                    digest = _draw_ir_font_digest_text(
+                        digest, command.text_value)
+                    digest = _draw_ir_font_digest_text(digest, identity)
+                    digest = _draw_ir_font_digest_text(digest, advances)
+                    resolved_text_count = resolved_text_count + 1
+    if resolved_text_count == 0:
+        return 0
+    digest
+
 struct DrawIrEventTargetContext:
     schema: text
     composition_id: text
@@ -644,3 +687,4 @@ fn simple_2d_draw_ir_adv_composition_plan(composition: DrawIrComposition, gpu_av
     )
 
 export DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_EDGE, DRAW_IR_COMMAND_GROUP, DRAW_IR_COMMAND_IMAGE, DRAW_IR_COMMAND_PATH, DRAW_IR_COMMAND_PORT, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_EDGE_BEZIER, DRAW_IR_EDGE_ORTHOGONAL, DRAW_IR_EDGE_STRAIGHT, DRAW_IR_SCHEMA_VERSION, DRAW_IR_SOURCE_GUI_AST, DRAW_IR_SOURCE_HTML_AST, DRAW_IR_SOURCE_MANUAL, DRAW_IR_SOURCE_WM_SCENE
+export draw_ir_font_advance_digest

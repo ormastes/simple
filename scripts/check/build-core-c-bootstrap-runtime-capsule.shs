@@ -15,6 +15,7 @@ die() {
 }
 
 OUTPUT_ROOT=""
+CHECK_DIR=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --output)
@@ -22,8 +23,13 @@ while [ "$#" -gt 0 ]; do
             OUTPUT_ROOT=$2
             shift 2
             ;;
+        --check)
+            [ "$#" -ge 2 ] || die "missing-check-value"
+            CHECK_DIR=$2
+            shift 2
+            ;;
         --help)
-            echo "usage: sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs --output DIR"
+            echo "usage: sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs (--output DIR | --check CAPSULE)"
             exit 0
             ;;
         *)
@@ -32,22 +38,9 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-[ -n "$OUTPUT_ROOT" ] || die "output-required"
-case "$OUTPUT_ROOT" in
-    /*) ;;
-    *) OUTPUT_ROOT="$ROOT_DIR/$OUTPUT_ROOT" ;;
-esac
-mkdir -p "$OUTPUT_ROOT"
-OUTPUT_ROOT=$(CDPATH= cd -- "$OUTPUT_ROOT" && pwd)
-FINAL_DIR="$OUTPUT_ROOT/core-c-bootstrap"
-[ ! -e "$FINAL_DIR" ] || die "output-already-exists:$FINAL_DIR"
-
 CC_NAME=${CC:-cc}
 AR_NAME=${AR:-ar}
 NM_NAME=${NM:-nm}
-command -v "$CC_NAME" >/dev/null 2>&1 || die "cc-not-found:$CC_NAME"
-command -v "$AR_NAME" >/dev/null 2>&1 || die "ar-not-found:$AR_NAME"
-command -v "$NM_NAME" >/dev/null 2>&1 || die "nm-not-found:$NM_NAME"
 
 absolute_tool_path() {
     tool_path=$(command -v "$1")
@@ -59,10 +52,6 @@ absolute_tool_path() {
             ;;
     esac
 }
-
-CC_PATH=$(absolute_tool_path "$CC_NAME")
-AR_PATH=$(absolute_tool_path "$AR_NAME")
-NM_PATH=$(absolute_tool_path "$NM_NAME")
 
 hash_stream() {
     if command -v shasum >/dev/null 2>&1; then
@@ -77,6 +66,128 @@ hash_stream() {
 hash_file() {
     hash_stream <"$1"
 }
+
+manifest_value() {
+    manifest_key=$1
+    manifest_file=$2
+    [ "$(grep -c "^${manifest_key}=" "$manifest_file" || true)" = 1 ] ||
+        return 1
+    sed -n "s/^${manifest_key}=//p" "$manifest_file"
+}
+
+check_capsule() {
+    capsule=$1
+    case "$capsule" in /*) ;; *) capsule="$ROOT_DIR/$capsule" ;; esac
+    [ -d "$capsule" ] && [ ! -L "$capsule" ] || return 1
+    capsule=$(CDPATH= cd -- "$capsule" && pwd -P) || return 1
+    capsule_manifest="$capsule/capsule.manifest"
+    capsule_archive="$capsule/libsimple_runtime.a"
+    for capsule_file in "$capsule_manifest" "$capsule_archive" \
+        "$capsule/repeated-build.receipt" "$capsule/archive.members.txt" \
+        "$capsule/runtime-coverage-core-selfcheck.receipt" \
+        "$capsule/runtime_coverage_core_selfcheck.out" \
+        "$capsule/rt_string_free_selfcheck.out" \
+        "$capsule/local-runtime-inputs.txt"; do
+        [ -f "$capsule_file" ] && [ ! -L "$capsule_file" ] || return 1
+    done
+    [ "$(manifest_value schema "$capsule_manifest")" = \
+        core-c-bootstrap-runtime-capsule-v1 ] &&
+        [ "$(manifest_value status "$capsule_manifest")" = pass ] &&
+        [ "$(manifest_value head_revision "$capsule_manifest")" = \
+            "$(git rev-parse HEAD)" ] &&
+        [ "$(manifest_value runtime_tree "$capsule_manifest")" = \
+            "$(git rev-parse HEAD:src/runtime)" ] &&
+        [ "$(manifest_value producer_script_sha256 "$capsule_manifest")" = \
+            "$(hash_file scripts/check/build-core-c-bootstrap-runtime-capsule.shs)" ] &&
+        [ "$(manifest_value repeated_build_equal "$capsule_manifest")" = true ] ||
+        return 1
+    capsule_archive_sha=$(hash_file "$capsule_archive") || return 1
+    [ "$(wc -l <"$capsule/repeated-build.receipt" | tr -d ' ')" = 3 ] &&
+        [ "$(manifest_value repeated_build_equal \
+            "$capsule/repeated-build.receipt")" = true ] &&
+        [ "$(manifest_value archive_sha256 \
+            "$capsule/repeated-build.receipt")" = "$capsule_archive_sha" ] &&
+        [ "$(manifest_value repeat_archive_sha256 \
+            "$capsule/repeated-build.receipt")" = "$capsule_archive_sha" ] ||
+        return 1
+    [ "$(manifest_value archive_sha256 "$capsule_manifest")" = \
+        "$capsule_archive_sha" ] &&
+        [ "$(manifest_value repeat_archive_sha256 "$capsule_manifest")" = \
+            "$capsule_archive_sha" ] &&
+        [ "$(manifest_value repeated_build_receipt_sha256 "$capsule_manifest")" = \
+            "$(hash_file "$capsule/repeated-build.receipt")" ] &&
+        [ "$(manifest_value archive_members_sha256 "$capsule_manifest")" = \
+            "$(hash_file "$capsule/archive.members.txt")" ] &&
+        [ "$(manifest_value local_input_list_sha256 "$capsule_manifest")" = \
+            "$(hash_file "$capsule/local-runtime-inputs.txt")" ] &&
+        [ "$(manifest_value runtime_coverage_core_selfcheck "$capsule_manifest")" = pass ] &&
+        [ "$(manifest_value runtime_coverage_core_selfcheck_receipt_sha256 "$capsule_manifest")" = \
+            "$(hash_file "$capsule/runtime-coverage-core-selfcheck.receipt")" ] &&
+        [ "$(manifest_value runtime_coverage_core_selfcheck_output_sha256 "$capsule_manifest")" = \
+            "$(hash_file "$capsule/runtime_coverage_core_selfcheck.out")" ] &&
+        [ "$(manifest_value rt_string_free_selfcheck "$capsule_manifest")" = pass ] &&
+        [ "$(manifest_value rt_string_free_selfcheck_output_sha256 "$capsule_manifest")" = \
+            "$(hash_file "$capsule/rt_string_free_selfcheck.out")" ] ||
+        return 1
+    for tool in cc ar nm; do
+        capsule_tool=$(manifest_value "${tool}_path" "$capsule_manifest") ||
+            return 1
+        [ -f "$capsule_tool" ] || return 1
+        [ "$(manifest_value "${tool}_binary_sha256" "$capsule_manifest")" = \
+            "$(hash_file "$capsule_tool")" ] || return 1
+    done
+    capsule_members_now=$(mktemp "${TMPDIR:-/tmp}/core-c-members.XXXXXX") ||
+        return 1
+    capsule_ar=$(manifest_value ar_path "$capsule_manifest") || {
+        rm -f "$capsule_members_now"
+        return 1
+    }
+    "$capsule_ar" t "$capsule_archive" >"$capsule_members_now" 2>/dev/null &&
+        cmp -s "$capsule_members_now" "$capsule/archive.members.txt" || {
+        rm -f "$capsule_members_now"
+        return 1
+    }
+    rm -f "$capsule_members_now"
+    while IFS= read -r capsule_input; do
+        [ -f "$capsule_input" ] && [ ! -L "$capsule_input" ] || return 1
+        capsule_key=$(printf '%s' "${capsule_input#src/runtime/}" |
+            tr '/.' '__')
+        [ "$(manifest_value "input_${capsule_key}_sha256" \
+            "$capsule_manifest")" = "$(hash_file "$capsule_input")" ] ||
+            return 1
+    done <"$capsule/local-runtime-inputs.txt"
+    for capsule_object in "$capsule"/objects/*.o; do
+        [ -f "$capsule_object" ] && [ ! -L "$capsule_object" ] || return 1
+        capsule_member=$(basename "$capsule_object")
+        capsule_key=$(printf '%s' "$capsule_member" | tr '/.' '__')
+        [ "$(manifest_value "object_${capsule_key}_sha256" \
+            "$capsule_manifest")" = "$(hash_file "$capsule_object")" ] ||
+            return 1
+    done
+}
+
+if [ -n "$CHECK_DIR" ]; then
+    [ -z "$OUTPUT_ROOT" ] || die "output-and-check-conflict"
+    check_capsule "$CHECK_DIR" || die "capsule-verification-failed"
+    echo "core_c_runtime_capsule_status=pass"
+    exit 0
+fi
+
+[ -n "$OUTPUT_ROOT" ] || die "output-required"
+case "$OUTPUT_ROOT" in
+    /*) ;;
+    *) OUTPUT_ROOT="$ROOT_DIR/$OUTPUT_ROOT" ;;
+esac
+mkdir -p "$OUTPUT_ROOT"
+OUTPUT_ROOT=$(CDPATH= cd -- "$OUTPUT_ROOT" && pwd)
+FINAL_DIR="$OUTPUT_ROOT/core-c-bootstrap"
+[ ! -e "$FINAL_DIR" ] || die "output-already-exists:$FINAL_DIR"
+command -v "$CC_NAME" >/dev/null 2>&1 || die "cc-not-found:$CC_NAME"
+command -v "$AR_NAME" >/dev/null 2>&1 || die "ar-not-found:$AR_NAME"
+command -v "$NM_NAME" >/dev/null 2>&1 || die "nm-not-found:$NM_NAME"
+CC_PATH=$(absolute_tool_path "$CC_NAME")
+AR_PATH=$(absolute_tool_path "$AR_NAME")
+NM_PATH=$(absolute_tool_path "$NM_NAME")
 
 RUNTIME_DIR="src/runtime"
 RUNTIME_STATUS=$(git status --porcelain --untracked-files=all -- "$RUNTIME_DIR")
@@ -413,6 +524,7 @@ MANIFEST_SHA256=$(hash_file "$MANIFEST")
 mv "$TMP_DIR" "$FINAL_DIR"
 trap - EXIT INT TERM
 
+check_capsule "$FINAL_DIR" || die "new-capsule-verification-failed"
 echo "core_c_runtime_capsule_status=pass"
 echo "core_c_runtime_capsule_dir=$FINAL_DIR"
 echo "core_c_runtime_capsule_archive=$FINAL_DIR/libsimple_runtime.a"

@@ -167,7 +167,7 @@ runs. The 2026-07-29 audited current inventory is 46 focused commands and 42
 font manuals plus four compiler-prerequisite manuals; these counts require the
 admitted current-source pure-Simple CLI, retained output, and `0 stubs`.
 
-## Superseding current admission attempt
+## Historical admission attempts — superseded by the late f2db frontier
 
 ### P0 successor receipt — 2026-07-29
 
@@ -182,11 +182,10 @@ failed. The fixture reaches LLVM `llc` with a valid module and
 struct aggregate definition is emitted. No native binary, Stage 3/4 artifact,
 essential-tools receipt, or shared-font evidence exists from this attempt.
 
-This replaces the former parser/nil-receiver probe as the active P0 action.
-Retain the prior records as history. A future fresh bounded window must localize
-and repair aggregate-definition retention with a smallest source regression,
-then build unique Stage 2 and run A/B/C once. It must not rerun the unchanged
-fixture, use the Rust seed as acceptance, or start Stage 3/4 before A passes.
+This historically replaced the former parser/nil-receiver probe. It is retained
+as explanation, not as the current operator action; the canonical A → B → C
+authority is `scripts/check/check-native-option-admission-probes.shs` under the
+fresh bounded producer order below.
 
 ### P0 follow-on — 2026-07-29
 
@@ -487,9 +486,8 @@ The repair must satisfy all three owner invariants:
    were a `HirType`.
 
 The retained logs have no RIP or backtrace, so the first executed violation is
-not yet proven. Do not guess between them. In one fresh diagnostic batch, use
-three isolated generated probes with
-`SIMPLE_MIRB_TRACE=1 SIMPLE_TRACE_FIELD_GET=1`:
+not yet proven. The following A/B/C descriptions are retained as diagnostic
+rationale; they are not an operator command:
 
 - A: construct `Option<Box>`, assign `val owned = opt.?`, and return a
   constant; this adds only the ExistsCheck boundary;
@@ -501,20 +499,43 @@ If A fails, repair the ExistsCheck owner. If A passes and B fails, repair the
 shared optional-struct `if val` binding. If A and B pass while C fails, repair
 field/provenance resolution. In every case, keep
 `test/01_unit/compiler/mir/option_variant_order_source_spec.spl` as the focused
-source contract and cases 25/26 in `scripts/check/native-smoke-matrix.shs` as
-the behavioral gates. Do not add another renderer/runtime shim or rewrite
-valid font source.
+source contract. Cases 25/26 in `scripts/check/native-smoke-matrix.shs` remain
+historical behavioral context, not current admission commands. Do not add
+another renderer/runtime shim or rewrite valid font source.
+
+The canonical admission command is now
+`scripts/check/check-native-option-admission-probes.shs`:
+
+```sh
+export SIMPLE_BIN=/absolute/path/to/pinned/pure-simple
+export SIMPLE_BIN_SHA=<64-lowercase-hex-compiler-sha256>
+export CHECKPOINT_SHA=<40-or-64-lowercase-hex-clean-checkpoint>
+export CORE_C_DIR=/absolute/path/to/pinned/core-c-capsule
+export CORE_C_SHA=<64-lowercase-hex-libsimple_runtime.a-sha256>
+export CORE_C_MANIFEST_SHA=<64-lowercase-hex-capsule.manifest-sha256>
+export OPTION_ADMISSION_ATTEMPT_ROOT=/absolute/path/to/new-immutable-attempt
+scripts/check/check-native-option-admission-probes.shs
+```
+
+The wrapper rejects a Rust/bootstrap seed, dirty or mismatched checkpoint,
+compiler/archive/manifest hash drift, a nondeterministic or mismatched core-C
+manifest, and an existing attempt root. It builds and runs A → B → C in order,
+stopping at the first failure. Each build has a 1,200-second timeout with a
+30-second kill grace; each produced binary has a 30-second timeout with a
+5-second kill grace. A pass retains the fixed 37-member receipt plus
+`evidence.sha256` and emits `native_option_admission_probes=true`.
 
 ### Fresh bounded producer order
 
-1. Revalidate source, seed, runtime, command, cache lock, and output hashes.
-2. Run the A/B/C diagnostic batch once against the immutable successor3. This is
-   a new discriminating diagnostic, not an unchanged acceptance-smoke retry.
-   Stop that batch after the first failing probe and route its owner; a
-   diagnostic failure is not an acceptance PASS.
-3. Apply one owner-level correction and build a newly hashed temporary Stage 2
-   with the retained cache under its existing exclusive lock. Run case 25 once;
-   stop on failure. Run case 26 once only after case 25 passes.
+1. Revalidate the clean checkpoint, pure-Simple compiler, core-C
+   archive/manifest, command, cache lock, and output hashes.
+2. Export the pinned compiler/checkpoint/core-C archive and manifest hashes plus
+   a new immutable attempt root, then run
+   `scripts/check/check-native-option-admission-probes.shs` once. Its A → B → C
+   fail-fast result is the sole current Option admission authority.
+3. On failure, stop and route the first failing owner. Only after an owner-level
+   correction may a new hash-bound Stage 2 and new immutable attempt root run
+   the wrapper again; never retry unchanged inputs.
 4. Produce current Stage 3 positionally from `src/app/cli/bootstrap_main.spl`
    with an exclusive cache and `SIMPLE_NO_STUB_FALLBACK=1`.
 5. Produce Stage 4 incrementally from that hashed pure-Simple Stage 3 using
@@ -524,12 +545,12 @@ valid font source.
    zero-example calibration, and the focused-result-wrapper preflight once
    before any font command or canonical docgen.
 
-The fresh Option window has at most three total diagnostic/fix cycles:
-A/B/C discrimination is cycle 1, the first fix plus case 25 is cycle 2, and
-case 26 or one case-25 corrective rerun is cycle 3. Case 26 runs only if case
-25 passes within that budget. Stage 3 and Stage 4 each get one initial run
-after Option admission; either failure is recorded as a new blocker without an
-unchanged retry in this window.
+The fresh Option window has at most three total diagnostic/fix cycles. One
+wrapper invocation is one cycle even though it internally runs A, B, then C.
+Every retry requires a root-cause change, newly pinned compiler identity, and
+new immutable attempt root. Stage 3 and Stage 4 each get one initial run after
+Option admission; either failure is recorded as a new blocker without an
+unchanged retry in that window.
 
 Stop on provenance drift, shared-cache writes, unchanged failure, signal,
 timeout, absent ELF, unresolved stubs, or missing admission markers. Preserve
@@ -658,11 +679,25 @@ closed:
 ```sh
 : "${ATTEMPT_ROOT:?export the immutable attempt root}"
 : "${STAGE3_OUTPUT:?export the hash-bound Stage 3}"
+: "${STAGE3_MANIFEST:?export its checked provenance manifest}"
 : "${PROVEN_RUNTIME_DIR:?export the manifested runtime directory}"
 : "${STAGE4_CACHE:?export the exclusive Stage 4 cache}"
 : "${STAGE4_CACHE_LOCK:?export the matching cache lock}"
+: "${STAGE4_CACHE_PREINVENTORY:?export the pre-run cache receipt}"
+: "${STAGE4_CACHE_OWNER:?export the exclusive cache-owner receipt}"
 : "${STAGE4_OUTPUT:?export the unique Stage 4 output}"
+: "${CORE_C_ARCHIVE:?export the matching core-C archive}"
+REPO_ROOT=$(pwd -P)
+STAGE4_RECEIPT="${STAGE4_OUTPUT}.stage4-receipt.env"
 mkdir -p "$STAGE4_CACHE"
+set -- "$STAGE3_OUTPUT" native-build \
+  --target x86_64-unknown-linux-gnu --backend llvm \
+  --runtime-bundle core-c-bootstrap \
+  --source src/compiler --source src/app --source src/lib \
+  --source examples/10_tooling --entry-closure --low-memory --threads 2 \
+  --cache-dir "$STAGE4_CACHE" --mode one-binary \
+  --entry src/app/cli/main.spl --runtime-path "$PROVEN_RUNTIME_DIR" \
+  -o "$STAGE4_OUTPUT"
 stage4_rc=0
 /usr/bin/time -v -o "$ATTEMPT_ROOT/stage4.time" \
   timeout -k 30s 7200s flock -n "$STAGE4_CACHE_LOCK" \
@@ -675,27 +710,39 @@ stage4_rc=0
   SIMPLE_NATIVE_BUILD_THREADS=2 \
   SIMPLE_BINARY="$STAGE3_OUTPUT" SIMPLE_RUNTIME_PATH="$PROVEN_RUNTIME_DIR" \
   SIMPLE_NATIVE_BUILD_CACHE_DIR="$STAGE4_CACHE" \
-  "$STAGE3_OUTPUT" native-build --target x86_64-unknown-linux-gnu \
-  --backend llvm --runtime-bundle core-c-bootstrap \
-  --source src/compiler --source src/app --source src/lib \
-  --source examples/10_tooling --entry-closure --low-memory --threads 2 \
-  --cache-dir "$STAGE4_CACHE" --mode one-binary \
-  --entry src/app/cli/main.spl --runtime-path "$PROVEN_RUNTIME_DIR" \
-  -o "$STAGE4_OUTPUT" >"$ATTEMPT_ROOT/stage4.log" 2>&1 || stage4_rc=$?
+  "$@" >"$ATTEMPT_ROOT/stage4.log" 2>&1 || stage4_rc=$?
 printf '%s\n' "$stage4_rc" >"$ATTEMPT_ROOT/stage4.exit"
 [ "$stage4_rc" -eq 0 ] || exit "$stage4_rc"
+sh scripts/check/stage4-provenance-receipt.shs write \
+  "$STAGE4_RECEIPT" "$REPO_ROOT" "$STAGE3_MANIFEST" "$STAGE4_CACHE" \
+  "$STAGE4_CACHE_PREINVENTORY" "$STAGE4_CACHE_OWNER" "$STAGE4_OUTPUT" \
+  "$CORE_C_ARCHIVE" -- "$@" >"$ATTEMPT_ROOT/stage4-receipt.write.out"
+sh scripts/check/stage4-provenance-receipt.shs check \
+  "$STAGE4_RECEIPT" >"$ATTEMPT_ROOT/stage4-receipt.check.out"
 ```
 
-Before Stage 4 promotion, hash-bind its Stage 3 parent, complete runtime
-manifest, cache owner, exact command, exit, output, and matching core-C
-archive. Record whether `STAGE4_CACHE` was fresh or contained reusable objects;
-do not claim reuse without a pre-run cache receipt. Retain that same exclusive
-cache after the run. The old external parent and paths are forbidden.
+All exported artifact paths above must be canonical absolute paths. The four
+`--source` pairs are canonical command-identity fields but are otherwise
+decorative: the exact compilation capsule is the import closure rooted at
+`--entry src/app/cli/main.spl`; they must not be interpreted as four independent
+source capsules.
+
+Before Stage 4 promotion, the receipt must have schema
+`simple-stage4-provenance-receipt-v1`, status `pass`, and sidecars
+`<full-bin>.stage4-receipt.env{,.argv,.sha256}`. Its `check` output must contain
+exactly once each: `stage4_receipt_path=...`, `stage4_receipt_sha256=...`, and
+`stage4_receipt_status=pass`. This binds the clean source identity, Stage 3
+manifest and binary, exact argv, runtime manifest, cache preinventory/owner,
+output, and matching core-C archive. Do not claim reuse without the pre-run
+cache receipt. Retain the same exclusive cache after the run. The old external
+parent and paths are forbidden.
 
 Run essential-tools explicitly as
 `SIMPLE_BINARY="$STAGE4_OUTPUT" sh scripts/check/check-bootstrap-essential-tools-smoke.shs`.
 It must exit zero and contain each marker exactly once:
-`essential_test_runner_smoke=true`, `essential_lint_smoke=true`,
+`essential_tools_pure_simple_identity=true`,
+`essential_list_constructor_smoke=true`, `essential_test_runner_smoke=true`,
+`essential_lint_smoke=true`,
 `essential_duplicate_checker_smoke=true`, and
 `bootstrap_essential_tools_smoke=true`. Runner calibration then requires both
 fixtures to exit 1 and contain `test-runner: spec failed` and

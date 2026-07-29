@@ -1,11 +1,12 @@
 ---
 name: unstable-build-fixes
-description: Use when a Simple bootstrap/native-build is unstable, slow, or failing one bug at a time and needs cache-preserving retry loops, isolated parallel mini builds, grouped compiler errors, and repeat fix/rebuild cycles until a Simple executable is produced.
+description: Use when a Simple bootstrap/native-build is unstable, slow, or failing one bug at a time and needs cache-preserving retries, isolated parallel mini builds, grouped compiler errors, and receipt-sealed incremental promotion.
 ---
 
 # Unstable Build Fixes
 
-Goal: produce the requested Simple executable without throwing away useful cache.
+Goal: produce the requested Simple executable without throwing away useful
+cache or accepting unsealed build evidence.
 
 ## Rules
 
@@ -21,21 +22,40 @@ Goal: produce the requested Simple executable without throwing away useful cache
 
 ## Loop
 
-1. Start or keep the main build:
+1. Establish the promotion parent. A Stage 2 parent must have the canonical
+   `build/bootstrap/stage2/<triple>/stage2-provenance.env` and `.sha256`, both
+   accepted by `bootstrap_stage2_verify_manifest`. For Option-lowering work,
+   run `scripts/check/check-native-option-admission-probes.shs` once against
+   that exact Stage 2 binary/manifest, checkpoint, and deterministic core-C
+   capsule. Its sealed A/B/C result is required; loose probe output is not.
+2. Start or keep a diagnostic main build:
    ```bash
    SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build --backend cranelift --source src/compiler --source src/app --source src/lib \
      --entry-closure --threads 8 --cache-dir build/bootstrap/native_cache --mode dynload \
      --entry src/app/cli/_CliMain/main_and_help.spl -o build/native_probe/simple
    ```
-2. Run parallel mini builds with separate caches for early failures:
+   This output localizes failures; it is not Stage 3/Stage 4 evidence.
+3. Run parallel mini builds with separate caches for early failures:
    - `src/app/cli/bootstrap_main.spl` -> `build/mini_cache_bootstrap`
    - `src/app/cli/native_build_main.spl` -> `build/mini_cache_native_build`
    - `src/app/mcp/main.spl` -> `build/mini_cache_mcp`
-3. For each failure, group by the first real error, not warnings.
-4. Fix the smallest shared root cause. Add one focused regression.
-5. Rerun only failed shards first, with the same shard cache.
-6. Rerun the main build with the same main cache.
-7. Stop when `build/native_probe/simple` or the requested deployed `bin/simple` exists.
+4. For each failure, group by the first real error, not warnings.
+5. Fix the smallest shared root cause. Add one focused regression.
+6. Rerun only failed shards first, with the same shard cache.
+7. Rerun the diagnostic build with the same main cache.
+8. Promote incrementally through the canonical staged wrapper. For Stage 4,
+   `scripts/check/stage4-provenance-receipt.shs write` must own the isolated
+   command and transcript while binding the admitted parent, deterministic
+   core-C capsule, before/after source and Git state, exclusively locked cache,
+   native output, and output hash. Do not create a receipt around an earlier
+   loose build.
+9. Stop when the requested binary exists, its native format and focused smoke
+   pass, and any Stage 4 result has a sealed receipt plus an essential-tools
+   smoke result against that exact artifact.
+
+Do not use `--full-bootstrap` as a retry strategy. It is reserved for changed
+Rust seed/runtime inputs or a demonstrated capability missing from the admitted
+seed; pure-Simple failures stay on the cache-preserving incremental path.
 
 ## Patterns
 

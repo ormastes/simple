@@ -8,6 +8,7 @@ use common.ui.window.{WindowManager, ManagedWindow}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_LEGACY}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.ui.web_render_api.{WebRenderFontProvenance}
 
 struct SharedWmWindow:
     surface_id: text
@@ -284,6 +285,45 @@ struct WmSceneRevision:
 val WM_CONTENT_ORIGIN_SIMPLE_WEB: text = "simple_web"
 val WM_CONTENT_ORIGIN_GUI: text = "gui"
 
+pub class WmGuiContentFrameReceipt:
+    # Private fields make the receipt opaque to direct WmContentFrame
+    # construction. The canonical GUI adapter is the only production caller
+    # of issued(); consumers can only ask whether the binding matches.
+    _window_id: text
+    _scene_revision: i64
+    _content_revision: i64
+    _width: i32
+    _height: i32
+    _checksum: u64
+
+    static fn none() -> WmGuiContentFrameReceipt:
+        WmGuiContentFrameReceipt(
+            _window_id: "",
+            _scene_revision: 0,
+            _content_revision: 0,
+            _width: 0,
+            _height: 0,
+            _checksum: 0u64)
+
+    pub(package) static fn issued(window_id: text, scene_revision: i64, content_revision: i64, width: i32, height: i32, checksum: u64) -> WmGuiContentFrameReceipt:
+        WmGuiContentFrameReceipt(
+            _window_id: window_id,
+            _scene_revision: scene_revision,
+            _content_revision: content_revision,
+            _width: width,
+            _height: height,
+            _checksum: checksum)
+
+    fn matches(window_id: text, scene_revision: i64, content_revision: i64, width: i32, height: i32, checksum: u64) -> bool:
+        self._window_id != "" and
+            self._window_id == window_id and
+            self._scene_revision == scene_revision and
+            self._content_revision == content_revision and
+            self._width == width and
+            self._height == height and
+            self._checksum > 0u64 and
+            self._checksum == checksum
+
 # Canonical rendered content supplied by the Simple Web adapter (or, with
 # origin_kind WM_CONTENT_ORIGIN_GUI, a GUI panel producer). Pixels are ARGB
 # u32 values in row-major order and must exactly match width * height.
@@ -309,8 +349,9 @@ struct WmContentFrame:
     parent_window_id: text
     offset_x: i32
     offset_y: i32
-    # Web-render provenance travels with the pixels all the way to the WM
-    # presenter. GUI producers may leave these defaults unchanged.
+    # Render provenance travels with the pixels all the way to the WM
+    # presenter. GUI defaults remain fail-closed until its producer supplies
+    # an origin-specific typed receipt.
     engine2d_status: text = "not_requested"
     engine2d_backend: text = ""
     engine2d_reason: text = ""
@@ -319,6 +360,8 @@ struct WmContentFrame:
     material_fallback_sha256: text = ""
     theme_id: text = ""
     theme_source_manifest_sha256: text = ""
+    font_provenance: WebRenderFontProvenance = WebRenderFontProvenance.none()
+    gui_producer_receipt: WmGuiContentFrameReceipt = WmGuiContentFrameReceipt.none()
 
 fn _wm_lower_hex_sha256_valid(value: text) -> bool:
     if value.len() != 64:
@@ -333,11 +376,40 @@ fn _wm_lower_hex_sha256_valid(value: text) -> bool:
 
 # Theme-backed Simple Web WM frames must prove that the canonical renderer
 # produced them and that backdrop material handling used one of the two
-# declared realizations. Other content origins have their own producer
-# contracts and are not constrained by this predicate.
+# declared realizations. Other origins remain blocked until their producer
+# exposes an origin-specific receipt.
 fn wm_content_frame_web_provenance_valid(frame: WmContentFrame) -> bool:
     if frame.origin_kind != WM_CONTENT_ORIGIN_SIMPLE_WEB:
-        return true
+        return false
+    val font = frame.font_provenance
+    val font_binding_valid = (
+        font.identity != "" and
+        font.execution_target != "" and
+        font.layout_composition_id != "" and
+        font.execution_composition_id ==
+            font.layout_composition_id and
+        font.layout_advance_digest > 0 and
+        font.execution_advance_digest ==
+            font.layout_advance_digest and
+        font.ordered_text_command_count > 0
+    )
+    val vulkan_selected = frame.engine2d_backend.contains("vulkan")
+    val vulkan_receipt_valid = (
+        not vulkan_selected or
+        (font.execution_target == "vulkan" and
+            font.vulkan_composition_id ==
+                font.layout_composition_id and
+            font.vulkan_batch_count ==
+                font.ordered_text_command_count and
+            font.vulkan_batch_count > 0 and
+            font.vulkan_batch_digest > 0 and
+            font.vulkan_aggregate_valid and
+            font.vulkan_advance_digest ==
+                font.execution_advance_digest and
+            font.vulkan_all_device_executed and
+            font.vulkan_all_promotion_ready and
+            font.vulkan_all_parity)
+    )
     val material_valid = (
         (frame.material_fallback_kind == "solid-material" and
             frame.material_fallback_reason ==
@@ -353,10 +425,42 @@ fn wm_content_frame_web_provenance_valid(frame: WmContentFrame) -> bool:
     (frame.engine2d_status == "engine2d_rendered" and
         frame.engine2d_backend != "" and
         frame.engine2d_backend != "native-safe-fallback" and
+        font_binding_valid and
+        vulkan_receipt_valid and
         material_valid and
         _wm_lower_hex_sha256_valid(frame.material_fallback_sha256) and
         frame.theme_id != "" and
         _wm_lower_hex_sha256_valid(frame.theme_source_manifest_sha256))
+
+# GUI pixels are already produced by the canonical GUI content-frame adapter.
+# Its receipt is the exact revision/shape/checksum contract shared by every WM
+# executor; it must not be forced to fabricate Web layout/font evidence.
+fn wm_content_frame_gui_provenance_valid(frame: WmContentFrame) -> bool:
+    frame.origin_kind == WM_CONTENT_ORIGIN_GUI and
+        frame.scene_revision > 0 and
+        frame.content_revision > 0 and
+        frame.width > 0 and
+        frame.height > 0 and
+        frame.pixels.len().to_i64() ==
+            frame.width.to_i64() * frame.height.to_i64() and
+        frame.checksum > 0u64 and
+        frame.checksum == wm_content_frame_checksum(frame.pixels) and
+        frame.gui_producer_receipt.matches(
+            frame.window_id,
+            frame.scene_revision,
+            frame.content_revision,
+            frame.width,
+            frame.height,
+            frame.checksum)
+
+# Dispatch provenance validation by the producer that owns the receipt.
+# Unknown origins remain fail-closed.
+fn wm_content_frame_origin_provenance_valid(frame: WmContentFrame) -> bool:
+    if frame.origin_kind == WM_CONTENT_ORIGIN_SIMPLE_WEB:
+        return wm_content_frame_web_provenance_valid(frame)
+    if frame.origin_kind == WM_CONTENT_ORIGIN_GUI:
+        return wm_content_frame_gui_provenance_valid(frame)
+    false
 
 # Shared checksum algorithm for WmContentFrame.checksum. Extracted from the
 # Simple Web adapter (os.compositor.simple_web_window_renderer) so every

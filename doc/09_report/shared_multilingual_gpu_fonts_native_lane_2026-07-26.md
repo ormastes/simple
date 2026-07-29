@@ -16,7 +16,7 @@ authoritative aggregate attempt.
 | NFR-004 | blocked | The selected 11-sample, one-warmup, 1,024-glyph 1080p/4K protocol is source-covered; no durable current-host record exists. |
 | NFR-005 | blocked | The equal-semantics 4,096-glyph CPU/Vulkan p95 comparison is source-covered; no durable current-host record exists. |
 | NFR-006 | blocked | Warm upload counters, paired isolated 2D/3D RSS, and GPU-resource high-water checks are source-covered; no durable current-host record exists. |
-| NFR-007 | blocked | Exact blocker: `font-owner-fault-runtime-proof-unavailable`. Engine2D and Engine3D now retain scalar owner-fault/device-loss, identity, and committed CPU-fallback state on real production paths. Current runtime source also retains Vulkan3D fence-wait/wait-idle errors in the canonical last-error owner. Promotion still needs an admitted current pure-Simple run on one stable-identity hardware Vulkan device; the source repair is runtime-unverified. |
+| NFR-007 | blocked | Exact blocker: `font-owner-device-loss-runtime-proof-unavailable`. The aggregate directly validates the focused native runner artifacts and Engine2D/Engine3D owner-fault trace, including unchanged identity, fallback ordering, and fence/wait-idle evidence. The trace explicitly records no device loss (`observed=false`, `sequence=0`), so device-loss recovery remains unproven and the row cannot promote. |
 | NFR-008 | blocked | Stage, handle, hash, fence, device-origin readback, CPU-oracle, device type/identity, and reliability receipt fields are fail-closed in typed immutable attempt records; no current promoted record exists. |
 
 No row is promoted from source inspection, emission, a CPU mirror, or hardware
@@ -43,11 +43,10 @@ discovery.
   consumes that perf record and writes `native_gpu_font_readback.evidence.env`.
   Existing records are never overwritten. The aggregate path hashes all three
   into its sealed evidence set. The AA `*_limit` fields are contract
-  metadata, not observations. Owner-fault receipt acceptance is sourced from
-  the tracked owner scalars rather than self-authored summary labels. The perf
-  spec still reports unavailable and the `set -e` runbook stops before native
-  readback. A direct aggregate check fails before focused admission with
-  `font-owner-fault-runtime-proof-unavailable`.
+  metadata, not observations. Owner-fault acceptance is sourced directly from
+  the focused runner artifacts and tracked native trace, not a second summary
+  envelope. The device-loss row stays blocked with
+  `font-owner-device-loss-runtime-proof-unavailable`.
 
 ## Host and retained evidence
 

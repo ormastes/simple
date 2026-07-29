@@ -42,8 +42,10 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
   lib; **never runs cargo** unless `--full-bootstrap` is passed. Errors out if
   no seed exists yet.
 - "If the Rust seed can build the changed pure-Simple" is enforced by Stage 2: the
-  seed recompiles the changed `.spl`. If Stage 2 fails, the new pure-Simple needs
-  a Rust feature the seed lacks — rerun with `--full-bootstrap`.
+  seed recompiles the changed `.spl`. A Stage 2 failure justifies
+  `--full-bootstrap` only when it proves that the existing seed lacks a required
+  Rust-owned language/runtime capability; ordinary pure-Simple build failures do
+  not.
 - Combine with `--deploy` to swap `bin/release/<triple>/simple` (same smoke gate).
 - Pure-Simple build modes:
   - `dynload` (default): reuse `build/bootstrap/native_cache` unless compiler/AOP/loader
@@ -147,10 +149,24 @@ right gate ships a stale binary. **A small change is NOT a full bootstrap.**
 
 ### Stage 4 is incremental too
 
-Produce the Stage 4 full CLI from a proven pure-Simple parent with
+Before an incremental Stage 3 or Stage 4 promotion, require the canonical
+`build/bootstrap/stage2/<triple>/stage2-provenance.env` and its `.sha256`
+sidecar to pass `bootstrap_stage2_verify_manifest`. For Option-lowering work,
+also require the sealed A/B/C admission from
+`scripts/check/check-native-option-admission-probes.shs`, pinned to that exact
+Stage 2 manifest and binary, source checkpoint, and deterministic core-C
+capsule. Its isolated absent, payload-free present, and struct-payload present
+probes are the admission evidence; manually reconstructed commands, stdout, or
+counts are not.
+
+Produce the Stage 4 full CLI from that admitted pure-Simple parent with
 `SIMPLE_NATIVE_INCREMENTAL=1`, `SIMPLE_NO_STUB_FALLBACK=1`, the full
 `src/app/cli/main.spl` entry, and a stable, exclusively locked cache. Retain the
 source-overlay, parent, runtime, exact-command, cache, and output-hash receipts.
+Use `scripts/check/stage4-provenance-receipt.shs write` as the owner of the
+isolated build and transcript; do not backfill a receipt around a separately
+run build. The receipt must bind the deterministic core-C capsule, before/after
+source and Git snapshots, cache authority, native output, and exact binary.
 If that exact CLI passes every existing Stage 4 admission and essential-tools
 smoke gate, it is the accepted Stage 4 artifact; do not repeat the same build
 with a clean cache only to relabel it as an "actual" Stage 4 build. Normal

@@ -1,0 +1,660 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+ROOT_DIR=$repo_root
+cd "$repo_root"
+
+: "${SIMPLE_BIN:?export the pure-Simple compiler path}"
+: "${SIMPLE_BIN_SHA:?export the pinned pure-Simple compiler sha256}"
+: "${STAGE2_PROVENANCE_PATH:?export the Stage2 provenance manifest path}"
+: "${STAGE2_PROVENANCE_SHA:?export the pinned Stage2 provenance manifest sha256}"
+: "${CHECKPOINT_SHA:?export the pinned clean git checkpoint sha}"
+: "${CORE_C_DIR:?export the pinned core-C runtime capsule directory}"
+: "${CORE_C_SHA:?export the pinned core-C runtime archive sha256}"
+: "${CORE_C_MANIFEST_SHA:?export the pinned core-C capsule manifest sha256}"
+: "${OPTION_ADMISSION_ATTEMPT_ROOT:?export a new Option admission attempt root}"
+: "${OPTION_ADMISSION_CACHE_ROOT:?export a new Option admission cache root}"
+
+case "$SIMPLE_BIN" in
+    /*) ;;
+    *) SIMPLE_BIN="$repo_root/$SIMPLE_BIN" ;;
+esac
+case "$STAGE2_PROVENANCE_PATH" in
+    /*) ;;
+    *) STAGE2_PROVENANCE_PATH="$repo_root/$STAGE2_PROVENANCE_PATH" ;;
+esac
+case "$CORE_C_DIR" in
+    /*) ;;
+    *) CORE_C_DIR="$repo_root/$CORE_C_DIR" ;;
+esac
+case "$OPTION_ADMISSION_ATTEMPT_ROOT" in
+    /*) ;;
+    *) OPTION_ADMISSION_ATTEMPT_ROOT="$repo_root/$OPTION_ADMISSION_ATTEMPT_ROOT" ;;
+esac
+case "$OPTION_ADMISSION_CACHE_ROOT" in
+    /*) ;;
+    *) OPTION_ADMISSION_CACHE_ROOT="$repo_root/$OPTION_ADMISSION_CACHE_ROOT" ;;
+esac
+
+require_sha256() {
+    local label=$1
+    local value=$2
+    case "$value" in
+        *[!0-9a-f]*|'')
+            echo "option admission: $label is not a lowercase sha256" >&2
+            exit 2
+            ;;
+    esac
+    [ "${#value}" -eq 64 ] || {
+        echo "option admission: $label is not a lowercase sha256" >&2
+        exit 2
+    }
+}
+
+require_git_oid() {
+    local value=$1
+    case "$value" in
+        *[!0-9a-f]*|'')
+            echo "option admission: CHECKPOINT_SHA is not a lowercase git object id" >&2
+            exit 2
+            ;;
+    esac
+    [ "${#value}" -eq 40 ] || [ "${#value}" -eq 64 ] || {
+        echo "option admission: CHECKPOINT_SHA is not a lowercase git object id" >&2
+        exit 2
+    }
+}
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+manifest_value() {
+    local key=$1
+    bootstrap_stage3_manifest_value "$key" "$CORE_C_MANIFEST"
+}
+
+checkpoint_file_sha() {
+    local path=$1
+    git cat-file blob "$CHECKPOINT_SHA:$path" | sha256sum | awk '{print $1}'
+}
+
+native_magic() {
+    od -An -tx1 -N4 "$1" | tr -d '[:space:]'
+}
+
+native_format_for_magic() {
+    local target=$1
+    local magic=$2
+    case "$target:$magic" in
+        *-linux-*:*|*-freebsd:*|*-unknown-linux-*:*|*-unknown-freebsd:*)
+            [ "$magic" = 7f454c46 ] && printf 'elf\n'
+            ;;
+        *-apple-darwin:feedfacf|*-apple-darwin:cffaedfe)
+            printf 'mach-o\n'
+            ;;
+        *-pc-windows-*:4d5a*)
+            printf 'pe\n'
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+canonical_native_output() {
+    local output=$1
+    local target=$2
+    local magic
+    [ -f "$output" ] && [ -x "$output" ] && [ ! -L "$output" ] &&
+        [ "$(bootstrap_stage3_canonical_file "$output")" = "$output" ] ||
+        return 1
+    bootstrap_stage2_native_binary "$output" "$target" || return 1
+    magic=$(native_magic "$output") || return 1
+    native_format_for_magic "$target" "$magic" >/dev/null
+}
+
+bootstrap_facade="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_FACADE_PATH=$bootstrap_facade
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$bootstrap_facade"
+
+require_sha256 SIMPLE_BIN_SHA "$SIMPLE_BIN_SHA"
+require_sha256 STAGE2_PROVENANCE_SHA "$STAGE2_PROVENANCE_SHA"
+require_git_oid "$CHECKPOINT_SHA"
+require_sha256 CORE_C_SHA "$CORE_C_SHA"
+require_sha256 CORE_C_MANIFEST_SHA "$CORE_C_MANIFEST_SHA"
+
+[ -x "$SIMPLE_BIN" ] || {
+    echo "option admission: compiler is not executable: $SIMPLE_BIN" >&2
+    exit 2
+}
+case "$SIMPLE_BIN" in
+    *compiler_rust*|*/target/bootstrap/*)
+        echo "option admission: Rust/bootstrap seed is forbidden: $SIMPLE_BIN" >&2
+        exit 2
+        ;;
+esac
+[ -d "$CORE_C_DIR" ] || {
+    echo "option admission: core-C capsule is not a directory: $CORE_C_DIR" >&2
+    exit 2
+}
+CORE_C_DIR=$(cd "$CORE_C_DIR" && pwd -P)
+CORE_C_ARCHIVE="$CORE_C_DIR/libsimple_runtime.a"
+CORE_C_MANIFEST="$CORE_C_DIR/capsule.manifest"
+for core_file in "$CORE_C_ARCHIVE" "$CORE_C_MANIFEST"; do
+    [ "$(bootstrap_stage3_canonical_file "$core_file")" = "$core_file" ] || {
+        echo "option admission: core-C capsule member is missing, symlinked, or non-canonical: $core_file" >&2
+        exit 2
+    }
+done
+[ "$(hash_file "$SIMPLE_BIN")" = "$SIMPLE_BIN_SHA" ] || {
+    echo "option admission: compiler sha does not match SIMPLE_BIN_SHA" >&2
+    exit 2
+}
+STAGE2_PROVENANCE_SIDECAR="${STAGE2_PROVENANCE_PATH}.sha256"
+[ "$(bootstrap_stage3_canonical_file "$STAGE2_PROVENANCE_PATH")" = \
+    "$STAGE2_PROVENANCE_PATH" ] &&
+    [ "$(bootstrap_stage3_canonical_file "$STAGE2_PROVENANCE_SIDECAR")" = \
+    "$STAGE2_PROVENANCE_SIDECAR" ] || {
+    echo "option admission: Stage2 provenance manifest or sidecar is not canonical" >&2
+    exit 2
+}
+stage2_sidecar_sha=$(
+    awk 'NF { print; count += 1 } END { if (count != 1) exit 1 }' \
+        "$STAGE2_PROVENANCE_SIDECAR"
+) || {
+    echo "option admission: Stage2 provenance sidecar is invalid" >&2
+    exit 2
+}
+[ "$stage2_sidecar_sha" = "$STAGE2_PROVENANCE_SHA" ] &&
+    [ "$(hash_file "$STAGE2_PROVENANCE_PATH")" = \
+    "$STAGE2_PROVENANCE_SHA" ] || {
+    echo "option admission: Stage2 provenance sha does not match its explicit pin" >&2
+    exit 2
+}
+bootstrap_stage2_verify_manifest "$STAGE2_PROVENANCE_PATH" \
+    "$ROOT_DIR" "$SIMPLE_BIN" || {
+    echo "option admission: Stage2 provenance manifest verification failed" >&2
+    exit 2
+}
+[ "$(bootstrap_stage3_manifest_value stage2_path \
+    "$STAGE2_PROVENANCE_PATH")" = "$SIMPLE_BIN" ] &&
+    [ "$(bootstrap_stage3_manifest_value stage2_sha256 \
+    "$STAGE2_PROVENANCE_PATH")" = "$SIMPLE_BIN_SHA" ] || {
+    echo "option admission: Stage2 provenance does not bind the selected compiler" >&2
+    exit 2
+}
+OPTION_TARGET=$(
+    bootstrap_stage3_manifest_value platform "$STAGE2_PROVENANCE_PATH"
+)
+[ "$(hash_file "$CORE_C_ARCHIVE")" = "$CORE_C_SHA" ] || {
+    echo "option admission: runtime archive sha does not match CORE_C_SHA" >&2
+    exit 2
+}
+[ "$(hash_file "$CORE_C_MANIFEST")" = "$CORE_C_MANIFEST_SHA" ] || {
+    echo "option admission: runtime manifest sha does not match CORE_C_MANIFEST_SHA" >&2
+    exit 2
+}
+sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs \
+    --check "$CORE_C_DIR" >/dev/null || {
+    echo "option admission: canonical core-C capsule verification failed" >&2
+    exit 2
+}
+[ "$(manifest_value head_revision)" = "$CHECKPOINT_SHA" ] || {
+    echo "option admission: core-C manifest checkpoint differs from CHECKPOINT_SHA" >&2
+    exit 2
+}
+[ "$(git rev-parse HEAD)" = "$CHECKPOINT_SHA" ] || {
+    echo "option admission: HEAD does not match CHECKPOINT_SHA" >&2
+    exit 2
+}
+[ -z "$(git status --porcelain --untracked-files=normal)" ] || {
+    echo "option admission: checkpoint worktree is not clean" >&2
+    exit 2
+}
+BUILD_PATH=${PATH:?PATH must be set for the isolated build}
+case "$BUILD_PATH" in
+    *'
+'*) echo "option admission: isolated build PATH contains a newline" >&2; exit 2 ;;
+    :*|*:|*::*)
+        echo "option admission: isolated build PATH contains an empty entry" >&2
+        exit 2
+        ;;
+esac
+IFS=: read -r -a build_path_directories <<<"$BUILD_PATH"
+for build_directory in "${build_path_directories[@]}"; do
+    [ -n "$build_directory" ] && [ -d "$build_directory" ] &&
+        [ ! -L "$build_directory" ] &&
+        [ "$(bootstrap_stage3_canonical_path "$build_directory")" = \
+        "$build_directory" ] || {
+        echo "option admission: isolated build PATH is not canonical" >&2
+        exit 2
+    }
+done
+[ ! -e "$OPTION_ADMISSION_ATTEMPT_ROOT" ] || {
+    echo "option admission: refusing to overwrite $OPTION_ADMISSION_ATTEMPT_ROOT" >&2
+    exit 125
+}
+[ ! -e "$OPTION_ADMISSION_CACHE_ROOT" ] || {
+    echo "option admission: refusing to overwrite $OPTION_ADMISSION_CACHE_ROOT" >&2
+    exit 125
+}
+case "$OPTION_ADMISSION_CACHE_ROOT/" in
+    "$OPTION_ADMISSION_ATTEMPT_ROOT/"*)
+        echo "option admission: cache root must be outside the sealed attempt root" >&2
+        exit 2
+        ;;
+esac
+case "$OPTION_ADMISSION_ATTEMPT_ROOT/" in
+    "$OPTION_ADMISSION_CACHE_ROOT/"*)
+        echo "option admission: sealed attempt root must be outside the cache root" >&2
+        exit 2
+        ;;
+esac
+
+umask 077
+mkdir -p "$(dirname "$OPTION_ADMISSION_ATTEMPT_ROOT")"
+mkdir -p "$(dirname "$OPTION_ADMISSION_CACHE_ROOT")"
+mkdir "$OPTION_ADMISSION_ATTEMPT_ROOT"
+mkdir "$OPTION_ADMISSION_CACHE_ROOT"
+for admission_root in "$OPTION_ADMISSION_ATTEMPT_ROOT" \
+    "$OPTION_ADMISSION_CACHE_ROOT"; do
+    [ ! -L "$admission_root" ] &&
+        [ "$(bootstrap_stage3_canonical_path "$admission_root")" = \
+        "$admission_root" ] || {
+        echo "option admission: attempt/cache root is not canonical" >&2
+        exit 2
+    }
+done
+BUILD_HOME="$OPTION_ADMISSION_CACHE_ROOT/home"
+BUILD_TMPDIR="$OPTION_ADMISSION_CACHE_ROOT/tmp"
+mkdir "$BUILD_HOME" "$BUILD_TMPDIR"
+{
+    printf 'schema=native-option-admission-cache-preinventory/v1\n'
+    printf 'cache_root=%s\npreexisting=false\n' "$OPTION_ADMISSION_CACHE_ROOT"
+} >"$OPTION_ADMISSION_ATTEMPT_ROOT/cache-preinventory.env"
+
+record_command() {
+    local destination=$1
+    shift
+    {
+        printf '%q ' "$@"
+        printf '\n'
+    } >"$destination"
+}
+
+run_probe() {
+    local id=$1
+    local source=$2
+    local expected=$3
+    local base="$OPTION_ADMISSION_ATTEMPT_ROOT/$id"
+    local cache="$OPTION_ADMISSION_CACHE_ROOT/$id"
+    local output="$OPTION_ADMISSION_ATTEMPT_ROOT/$id.bin"
+    local build_rc run_rc output_sha output_magic output_format
+    local source_sha checkpoint_source_sha
+    local -a build_command=(
+        "$SIMPLE_BIN" native-build
+        --backend cranelift
+        --runtime-bundle core-c-bootstrap
+        --runtime-path "$CORE_C_DIR"
+        --mode one-binary
+        --cache-dir "$cache"
+        --output "$output"
+        "$source"
+    )
+    local -a build_exec=(
+        /usr/bin/timeout --kill-after=30s 1200s
+        /usr/bin/env -i
+        "HOME=$BUILD_HOME"
+        "PATH=$BUILD_PATH"
+        "TMPDIR=$BUILD_TMPDIR"
+        LC_ALL=C
+        LANG=C
+        RUST_LOG=error
+        LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1
+        "SIMPLE_RUNTIME_PATH=$CORE_C_DIR"
+        SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap
+        SIMPLE_MIRB_TRACE=1
+        SIMPLE_TRACE_FIELD_GET=1
+        SIMPLE_NO_STUB_FALLBACK=1
+        SIMPLE_BOOTSTRAP=1
+        "SIMPLE_BINARY=$SIMPLE_BIN"
+        "${build_command[@]}"
+    )
+    local -a run_command=(
+        /usr/bin/timeout --kill-after=5s 30s
+        /usr/bin/env -i
+        "HOME=$BUILD_HOME"
+        "PATH=$BUILD_PATH"
+        "TMPDIR=$BUILD_TMPDIR"
+        LC_ALL=C
+        LANG=C
+        "SIMPLE_RUNTIME_PATH=$CORE_C_DIR"
+        SIMPLE_NO_STUB_FALLBACK=1
+        "$output"
+    )
+
+    source_sha=$(hash_file "$source")
+    checkpoint_source_sha=$(checkpoint_file_sha "$source") || {
+        echo "option admission: fixture is absent from CHECKPOINT_SHA: $source" >&2
+        return 1
+    }
+    [ "$source_sha" = "$checkpoint_source_sha" ] || {
+        echo "option admission: fixture differs from CHECKPOINT_SHA: $source" >&2
+        return 1
+    }
+    record_command "$base.build.command" "${build_exec[@]}"
+    record_command "$base.run.command" "${run_command[@]}"
+    set +e
+    "${build_exec[@]}" >"$base.build.stdout" 2>"$base.build.stderr"
+    build_rc=$?
+    set -e
+    printf '%s\n' "$build_rc" >"$base.build.exit"
+
+    output_sha=absent
+    output_magic=absent
+    output_format=absent
+    if [ -f "$output" ]; then
+        output_sha=$(hash_file "$output")
+    fi
+    if [ "$build_rc" -eq 0 ] &&
+        canonical_native_output "$output" "$OPTION_TARGET"; then
+        output_magic=$(native_magic "$output")
+        output_format=$(native_format_for_magic \
+            "$OPTION_TARGET" "$output_magic")
+    fi
+    {
+        printf 'schema=native-option-admission-probe/v1\n'
+        printf 'probe=%s\ncheckpoint_sha=%s\n' "$id" "$CHECKPOINT_SHA"
+        printf 'source=%s\nsource_sha256=%s\ncheckpoint_source_sha256=%s\n' \
+            "$source" "$source_sha" "$checkpoint_source_sha"
+        printf 'compiler=%s\ncompiler_sha256=%s\n' \
+            "$SIMPLE_BIN" "$SIMPLE_BIN_SHA"
+        printf 'stage2_provenance_path=%s\nstage2_provenance_sha256=%s\n' \
+            "$STAGE2_PROVENANCE_PATH" "$STAGE2_PROVENANCE_SHA"
+        printf 'core_c_dir=%s\ncore_c_archive_sha256=%s\n' \
+            "$CORE_C_DIR" "$CORE_C_SHA"
+        printf 'core_c_manifest=%s\ncore_c_manifest_sha256=%s\n' \
+            "$CORE_C_MANIFEST" "$CORE_C_MANIFEST_SHA"
+        printf 'output=%s\noutput_sha256=%s\n' "$output" "$output_sha"
+        printf 'output_target=%s\noutput_format=%s\noutput_magic=%s\n' \
+            "$OPTION_TARGET" "$output_format" "$output_magic"
+        printf 'run_command_path=%s\nrun_command_sha256=%s\n' \
+            "$base.run.command" "$(hash_file "$base.run.command")"
+    } >"$base.identity.env"
+
+    [ "$(hash_file "$source")" = "$source_sha" ] || {
+        printf 'status=fail\nphase=source-drift\n' >"$base.summary.env"
+        return 1
+    }
+    [ "$(checkpoint_file_sha "$source")" = "$checkpoint_source_sha" ] || {
+        printf 'status=fail\nphase=checkpoint-source-drift\n' >"$base.summary.env"
+        return 1
+    }
+    if [ "$build_rc" -ne 0 ]; then
+        printf 'status=fail\nphase=build\n' >"$base.summary.env"
+        return "$build_rc"
+    fi
+    [ "$output_format" != absent ] || {
+        printf 'status=fail\nphase=build-output-format\n' >"$base.summary.env"
+        return 1
+    }
+
+    printf '%s\n' "$expected" >"$base.run.expected"
+    set +e
+    "${run_command[@]}" >"$base.run.stdout" 2>"$base.run.stderr"
+    run_rc=$?
+    set -e
+    printf '%s\n' "$run_rc" >"$base.run.exit"
+    if [ "$run_rc" -ne 0 ] ||
+        ! cmp -s "$base.run.expected" "$base.run.stdout" ||
+        [ -s "$base.run.stderr" ]; then
+        printf 'status=fail\nphase=run\nexpected_sha256=%s\nactual_sha256=%s\n' \
+            "$(hash_file "$base.run.expected")" \
+            "$(hash_file "$base.run.stdout")" >"$base.summary.env"
+        return 1
+    fi
+    [ "$(hash_file "$output")" = "$output_sha" ] || {
+        printf 'status=fail\nphase=output-drift\n' >"$base.summary.env"
+        return 1
+    }
+    printf 'status=pass\nexpected_sha256=%s\n' \
+        "$(hash_file "$base.run.expected")" >"$base.summary.env"
+}
+
+run_probe A test/fixtures/compiler/native_option_exists_check_absent.spl 3 ||
+    exit $?
+run_probe B test/fixtures/compiler/native_option_exists_check_present_value.spl 5 ||
+    exit $?
+run_probe C test/fixtures/compiler/native_option_exists_check_struct.spl 7 ||
+    exit $?
+[ "$(git rev-parse HEAD)" = "$CHECKPOINT_SHA" ] &&
+    [ -z "$(git status --porcelain --untracked-files=normal)" ] || {
+    echo "option admission: checkpoint HEAD or clean state changed during probes" >&2
+    exit 1
+}
+[ "$(bootstrap_stage3_canonical_file "$STAGE2_PROVENANCE_PATH")" = \
+    "$STAGE2_PROVENANCE_PATH" ] &&
+    [ "$(bootstrap_stage3_canonical_file "$STAGE2_PROVENANCE_SIDECAR")" = \
+    "$STAGE2_PROVENANCE_SIDECAR" ] &&
+    [ "$(hash_file "$SIMPLE_BIN")" = "$SIMPLE_BIN_SHA" ] &&
+    [ "$(hash_file "$STAGE2_PROVENANCE_PATH")" = \
+    "$STAGE2_PROVENANCE_SHA" ] &&
+    [ "$(awk 'NF { print; count += 1 } END { if (count != 1) exit 1 }' \
+    "$STAGE2_PROVENANCE_SIDECAR")" = "$STAGE2_PROVENANCE_SHA" ] || {
+    echo "option admission: pinned Stage2 compiler authority changed during probes" >&2
+    exit 1
+}
+bootstrap_stage2_verify_manifest "$STAGE2_PROVENANCE_PATH" \
+    "$ROOT_DIR" "$SIMPLE_BIN" || {
+    echo "option admission: final Stage2 provenance verification failed" >&2
+    exit 1
+}
+[ "$(bootstrap_stage3_manifest_value stage2_path \
+    "$STAGE2_PROVENANCE_PATH")" = "$SIMPLE_BIN" ] &&
+    [ "$(bootstrap_stage3_manifest_value stage2_sha256 \
+    "$STAGE2_PROVENANCE_PATH")" = "$SIMPLE_BIN_SHA" ] || {
+    echo "option admission: final Stage2 compiler binding changed" >&2
+    exit 1
+}
+[ "$(bootstrap_stage3_manifest_value platform \
+    "$STAGE2_PROVENANCE_PATH")" = "$OPTION_TARGET" ] || {
+    echo "option admission: final Stage2 target binding changed" >&2
+    exit 1
+}
+for core_file in "$CORE_C_ARCHIVE" "$CORE_C_MANIFEST"; do
+    [ "$(bootstrap_stage3_canonical_file "$core_file")" = "$core_file" ] || {
+        echo "option admission: pinned core-C authority became non-canonical" >&2
+        exit 1
+    }
+done
+[ "$(hash_file "$CORE_C_ARCHIVE")" = "$CORE_C_SHA" ] &&
+    [ "$(hash_file "$CORE_C_MANIFEST")" = "$CORE_C_MANIFEST_SHA" ] &&
+    [ "$(manifest_value head_revision)" = "$CHECKPOINT_SHA" ] || {
+    echo "option admission: pinned core-C authority changed during probes" >&2
+    exit 1
+}
+sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs \
+    --check "$CORE_C_DIR" >/dev/null || {
+    echo "option admission: final canonical core-C capsule verification failed" >&2
+    exit 1
+}
+for id in A B C; do
+    output="$OPTION_ADMISSION_ATTEMPT_ROOT/$id.bin"
+    identity="$OPTION_ADMISSION_ATTEMPT_ROOT/$id.identity.env"
+    canonical_native_output "$output" "$OPTION_TARGET" &&
+        [ "$(hash_file "$output")" = \
+        "$(bootstrap_stage3_manifest_value output_sha256 "$identity")" ] &&
+        [ "$(native_magic "$output")" = \
+        "$(bootstrap_stage3_manifest_value output_magic "$identity")" ] &&
+        [ "$(native_format_for_magic "$OPTION_TARGET" \
+        "$(native_magic "$output")")" = \
+        "$(bootstrap_stage3_manifest_value output_format "$identity")" ] || {
+        echo "option admission: probe output identity or native format changed: $id" >&2
+        exit 1
+    }
+    final_run_base="$OPTION_ADMISSION_ATTEMPT_ROOT/$id.final-run"
+    final_run_command=(
+        /usr/bin/timeout --kill-after=5s 30s
+        /usr/bin/env -i
+        "HOME=$BUILD_HOME"
+        "PATH=$BUILD_PATH"
+        "TMPDIR=$BUILD_TMPDIR"
+        LC_ALL=C
+        LANG=C
+        "SIMPLE_RUNTIME_PATH=$CORE_C_DIR"
+        SIMPLE_NO_STUB_FALLBACK=1
+        "$output"
+    )
+    record_command "$final_run_base.command" "${final_run_command[@]}"
+    cmp -s "$final_run_base.command" \
+        "$OPTION_ADMISSION_ATTEMPT_ROOT/$id.run.command" || {
+        echo "option admission: final run vector differs from admitted vector: $id" >&2
+        exit 1
+    }
+    set +e
+    "${final_run_command[@]}" \
+        >"$final_run_base.stdout" 2>"$final_run_base.stderr"
+    final_run_rc=$?
+    set -e
+    printf '%s\n' "$final_run_rc" >"$final_run_base.exit"
+    [ "$final_run_rc" -eq 0 ] &&
+        cmp -s "$OPTION_ADMISSION_ATTEMPT_ROOT/$id.run.expected" \
+            "$final_run_base.stdout" &&
+        [ ! -s "$final_run_base.stderr" ] &&
+        [ "$(hash_file "$output")" = \
+        "$(bootstrap_stage3_manifest_value output_sha256 "$identity")" ] || {
+        echo "option admission: final isolated execution failed: $id" >&2
+        exit 1
+    }
+done
+
+[ "$(git rev-parse HEAD)" = "$CHECKPOINT_SHA" ] &&
+    [ -z "$(git status --porcelain --untracked-files=normal)" ] &&
+    [ "$(hash_file "$SIMPLE_BIN")" = "$SIMPLE_BIN_SHA" ] &&
+    [ "$(hash_file "$STAGE2_PROVENANCE_PATH")" = \
+    "$STAGE2_PROVENANCE_SHA" ] &&
+    [ "$(tr -d '[:space:]' <"$STAGE2_PROVENANCE_SIDECAR")" = \
+    "$STAGE2_PROVENANCE_SHA" ] &&
+    [ "$(hash_file "$CORE_C_ARCHIVE")" = "$CORE_C_SHA" ] &&
+    [ "$(hash_file "$CORE_C_MANIFEST")" = "$CORE_C_MANIFEST_SHA" ] || {
+    echo "option admission: pinned authority changed during final executions" >&2
+    exit 1
+}
+bootstrap_stage2_verify_manifest "$STAGE2_PROVENANCE_PATH" \
+    "$ROOT_DIR" "$SIMPLE_BIN" &&
+    sh scripts/check/build-core-c-bootstrap-runtime-capsule.shs \
+        --check "$CORE_C_DIR" >/dev/null || {
+    echo "option admission: final authority revalidation failed" >&2
+    exit 1
+}
+
+if find "$OPTION_ADMISSION_CACHE_ROOT" -type l -print -quit | grep -q .; then
+    echo "option admission: cache contains a symlink" >&2
+    exit 1
+fi
+if find "$OPTION_ADMISSION_CACHE_ROOT" ! -type d ! -type f \
+    -print -quit | grep -q .; then
+    echo "option admission: cache contains a non-regular entry" >&2
+    exit 1
+fi
+for id in A B C; do
+    [ -d "$OPTION_ADMISSION_CACHE_ROOT/$id" ] &&
+        [ ! -L "$OPTION_ADMISSION_CACHE_ROOT/$id" ] || {
+        echo "option admission: probe cache directory is missing or symlinked: $id" >&2
+        exit 1
+    }
+done
+cache_post_manifest="$OPTION_ADMISSION_ATTEMPT_ROOT/cache-postinventory.sha256"
+(
+    cd "$OPTION_ADMISSION_CACHE_ROOT"
+    while IFS= read -r -d '' cache_file; do
+        sha256sum "$cache_file"
+    done < <(find . -type f -print0 | LC_ALL=C sort -z)
+) >"$cache_post_manifest"
+[ -s "$cache_post_manifest" ] || {
+    echo "option admission: cache postinventory is empty" >&2
+    exit 1
+}
+{
+    printf 'schema=native-option-admission-cache-postinventory/v1\n'
+    printf 'cache_root=%s\n' "$OPTION_ADMISSION_CACHE_ROOT"
+    printf 'manifest_path=%s\nmanifest_sha256=%s\n' \
+        "$cache_post_manifest" "$(hash_file "$cache_post_manifest")"
+    printf 'file_count=%s\n' "$(wc -l <"$cache_post_manifest" | tr -d ' ')"
+} >"$OPTION_ADMISSION_ATTEMPT_ROOT/cache-postinventory.env"
+(
+    cd "$OPTION_ADMISSION_CACHE_ROOT"
+    sha256sum -c "$cache_post_manifest" >/dev/null
+)
+chmod -R a-w "$OPTION_ADMISSION_CACHE_ROOT"
+(
+    cd "$OPTION_ADMISSION_CACHE_ROOT"
+    sha256sum -c "$cache_post_manifest" >/dev/null
+)
+
+printf 'schema=native-option-admission/v1\nstatus=pass\ncheckpoint_sha=%s\ncompiler_sha256=%s\nstage2_provenance_path=%s\nstage2_provenance_sha256=%s\ncore_c_archive_sha256=%s\ncore_c_manifest_sha256=%s\ncache_root=%s\ncache_postinventory_sha256=%s\n' \
+    "$CHECKPOINT_SHA" "$SIMPLE_BIN_SHA" \
+    "$STAGE2_PROVENANCE_PATH" "$STAGE2_PROVENANCE_SHA" \
+    "$CORE_C_SHA" "$CORE_C_MANIFEST_SHA" \
+    "$OPTION_ADMISSION_CACHE_ROOT" "$(hash_file "$cache_post_manifest")" \
+    >"$OPTION_ADMISSION_ATTEMPT_ROOT/summary.env"
+
+receipt_members=(
+    cache-postinventory.env
+    cache-postinventory.sha256
+    cache-preinventory.env
+    summary.env
+)
+for id in A B C; do
+    receipt_members+=(
+        "$id.bin"
+        "$id.build.command"
+        "$id.build.exit"
+        "$id.build.stderr"
+        "$id.build.stdout"
+        "$id.final-run.command"
+        "$id.final-run.exit"
+        "$id.final-run.stderr"
+        "$id.final-run.stdout"
+        "$id.identity.env"
+        "$id.run.command"
+        "$id.run.exit"
+        "$id.run.expected"
+        "$id.run.stderr"
+        "$id.run.stdout"
+        "$id.summary.env"
+    )
+done
+expected_inventory=$(printf '%s\n' "${receipt_members[@]}" | LC_ALL=C sort)
+if find "$OPTION_ADMISSION_ATTEMPT_ROOT" -mindepth 2 \
+    -print -quit | grep -q . ||
+    find "$OPTION_ADMISSION_ATTEMPT_ROOT" -mindepth 1 \
+        ! -type f -print -quit | grep -q .; then
+    echo "option admission: receipt contains a nested or non-regular entry" >&2
+    exit 1
+fi
+actual_inventory=$(
+    cd "$OPTION_ADMISSION_ATTEMPT_ROOT"
+    find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort
+)
+[ "$actual_inventory" = "$expected_inventory" ] || {
+    echo "option admission: receipt member inventory mismatch" >&2
+    exit 1
+}
+(
+    cd "$OPTION_ADMISSION_ATTEMPT_ROOT"
+    sha256sum "${receipt_members[@]}" >evidence.sha256
+    sha256sum -c evidence.sha256 >/dev/null
+)
+(
+    cd "$OPTION_ADMISSION_CACHE_ROOT"
+    sha256sum -c "$cache_post_manifest" >/dev/null
+)
+chmod a-w "$OPTION_ADMISSION_ATTEMPT_ROOT"/*
+(
+    cd "$OPTION_ADMISSION_ATTEMPT_ROOT"
+    sha256sum -c evidence.sha256 >/dev/null
+)
+chmod a-w "$OPTION_ADMISSION_ATTEMPT_ROOT"
+echo "native_option_admission_probes=true"

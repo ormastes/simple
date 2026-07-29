@@ -49,14 +49,17 @@ use common.ui.window_scene.{
     WM_CONTENT_ORIGIN_SIMPLE_WEB,
     WM_CONTENT_ORIGIN_GUI,
     wm_content_frame_checksum,
+    wm_content_frame_origin_provenance_valid,
     simple_gui_internal_window_with_chrome_kind,
     simple_gui_internal_window_scene
 }
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE}
+use common.ui.web_render_api.{WebRenderFontProvenance}
 use common.ui.window_scene_draw_ir.{shared_wm_content_frame_image_uri, shared_wm_nested_content_frames, shared_wm_scene_render_context_to_backend, shared_wm_scene_draw_ir_composition_with_content}
 use common.ui.wm_gui_content_frame.{wm_gui_content_frame_from_pixels}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.engine2d_wm_frame_executor.{engine2d_wm_acknowledgment_frames}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition_with_images, engine2d_resolved_draw_ir_image}
 
@@ -160,6 +163,8 @@ fn _solid_pixels(count: i32, color: u32) -> [u32]:
 
 fn _top_level_web_frame(window_id: text, scene_revision: i64, w: i32, h: i32, color: u32) -> WmContentFrame:
     val pixels = _solid_pixels(w * h, color)
+    val sha256 =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     WmContentFrame(
         window_id: window_id,
         scene_revision: scene_revision,
@@ -171,7 +176,31 @@ fn _top_level_web_frame(window_id: text, scene_revision: i64, w: i32, h: i32, co
         checksum: wm_content_frame_checksum(pixels),
         parent_window_id: "",
         offset_x: 0,
-        offset_y: 0
+        offset_y: 0,
+        engine2d_status: "engine2d_rendered",
+        engine2d_backend: "software",
+        material_fallback_kind: "cpu-composited-material",
+        material_fallback_reason: "native-device-backdrop-path-pending",
+        material_fallback_sha256: sha256,
+        theme_id: "aetheric_dark",
+        theme_source_manifest_sha256: sha256,
+        font_provenance: WebRenderFontProvenance(
+            identity: "test-font",
+            execution_target: "cpu",
+            layout_composition_id: "test-layout",
+            execution_composition_id: "test-layout",
+            layout_advance_digest: 101,
+            execution_advance_digest: 101,
+            batch_identity: "",
+            ordered_text_command_count: 1,
+            vulkan_batch_count: 0,
+            vulkan_batch_digest: 0,
+            vulkan_aggregate_valid: false,
+            vulkan_composition_id: "",
+            vulkan_advance_digest: 0,
+            vulkan_all_device_executed: false,
+            vulkan_all_promotion_ready: false,
+            vulkan_all_parity: false)
     )
 
 describe "Nested content frames (Lane C: rendering inside rendering)":
@@ -194,6 +223,45 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         step("A pixel outside the child rect but inside the parent rect keeps the parent's own color")
         expect(backend.pixels[15 * 140 + 15]).to_equal(0xFF111111u32)
         expect(stats.content_pixel_count).to_be_greater_than(7000)
+
+    it "excludes a rejected nested Web frame from both presentation acknowledgment paths":
+        val window = _borderless_window("win-parent", 10, 10, 100, 70)
+        val scene = simple_gui_internal_window_scene(
+            140, 140, "nested-web-reject", [window])
+        val parent_pixels = _solid_pixels(100 * 70, 0xFF111111u32)
+        val parent_frame = wm_gui_content_frame_from_pixels(
+            "win-parent", "", 0, 0, 100, 70,
+            parent_pixels, 7, 1)
+        val child_pixels = _solid_pixels(20 * 15, 0xFF222222u32)
+        val rejected_web = WmContentFrame(
+            window_id: "win-web-rejected",
+            scene_revision: 7,
+            content_revision: 1,
+            origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+            width: 20,
+            height: 15,
+            pixels: child_pixels,
+            checksum: wm_content_frame_checksum(child_pixels),
+            parent_window_id: "win-parent",
+            offset_x: 10,
+            offset_y: 10)
+        expect(wm_content_frame_origin_provenance_valid(
+            parent_frame)).to_be(true)
+        expect(wm_content_frame_origin_provenance_valid(
+            rejected_web)).to_be(false)
+
+        val nested = shared_wm_nested_content_frames(
+            scene, [parent_frame, rejected_web], [parent_frame], 7, 28)
+        var good_content_frames: [WmContentFrame] = [parent_frame]
+        for frame in nested:
+            good_content_frames.push(frame)
+        expect(good_content_frames.len()).to_equal(1)
+
+        val acknowledgment_frames = engine2d_wm_acknowledgment_frames(
+            [parent_frame, rejected_web])
+        expect(acknowledgment_frames.len()).to_equal(1)
+        expect(acknowledgment_frames[0].window_id).to_equal(
+            parent_frame.window_id)
 
     it "clips a child frame that extends past its parent's content rect":
         step("Child offset + width overflows the parent's 100px-wide content rect")
@@ -351,8 +419,8 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         step("Same scene/frame shape as the existing window_scene_render_executor_spec top-level content-frame test")
         val window = _borderless_window("win-probe", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-f", [window])
-        val pixels: [u32] = [0xFF123456u32; 100 * 70]
-        val frame = WmContentFrame(window_id: "win-probe", scene_revision: 7, content_revision: 3, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 100, height: 70, pixels: pixels, checksum: wm_content_frame_checksum(pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
+        val frame = _top_level_web_frame(
+            "win-probe", 7, 100, 70, 0xFF123456u32)
         val revision = WmSceneRevision(scene_revision: 7, input_revision: 11, taskbar_revision: 3)
         val input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: [frame], metrics: _metrics(), t_micros: 0)
         val backend = TestPixelBackend.create(140, 140, 0u32)
@@ -365,7 +433,8 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val window = _borderless_window("win-parent", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-g", [window])
         val parent_pixels = _solid_pixels(100 * 70, 0xFF112233u32)
-        val parent_frame = WmContentFrame(window_id: "win-parent", scene_revision: 7, content_revision: 1, origin_kind: WM_CONTENT_ORIGIN_GUI, width: 100, height: 70, pixels: parent_pixels, checksum: wm_content_frame_checksum(parent_pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
+        val parent_frame = wm_gui_content_frame_from_pixels(
+            "win-parent", "", 0, 0, 100, 70, parent_pixels, 7, 1)
         val child_pixels = _solid_pixels(20 * 15, 0xFF222222u32)
         val child_frame = wm_gui_content_frame_from_pixels("win-child", "win-parent", 10, 10, 20, 15, child_pixels, 7, 1)
         val taskbar = TaskbarModel(pinned: [], running: [], tray: [])
@@ -443,7 +512,9 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         val window = _borderless_window("win-parent-invalid", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-invalid", [window])
         val parent_pixels = _solid_pixels(100 * 70, 0xFF112233u32)
-        val parent_frame = WmContentFrame(window_id: "win-parent-invalid", scene_revision: 7, content_revision: 1, origin_kind: WM_CONTENT_ORIGIN_GUI, width: 100, height: 70, pixels: parent_pixels, checksum: wm_content_frame_checksum(parent_pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
+        val parent_frame = wm_gui_content_frame_from_pixels(
+            "win-parent-invalid", "", 0, 0, 100, 70,
+            parent_pixels, 7, 1)
         val child_pixels = _solid_pixels(20 * 15, 0xFF445566u32)
         val invalid_child = WmContentFrame(window_id: "win-child-invalid", scene_revision: 7, content_revision: 1, origin_kind: WM_CONTENT_ORIGIN_GUI, width: 20, height: 15, pixels: child_pixels, checksum: 0u64, parent_window_id: "win-parent-invalid", offset_x: 10, offset_y: 10)
 
@@ -467,8 +538,8 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
     it "projects an authoritative top-level content frame as a resolved Draw IR image":
         val window = _borderless_window("win-image", 10, 10, 20, 20)
         val scene = simple_gui_internal_window_scene(80, 80, "image-projection", [window])
-        val pixels = _solid_pixels(20 * 20, 0xFF556677u32)
-        val frame = WmContentFrame(window_id: "win-image", scene_revision: 9, content_revision: 2, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 20, height: 20, pixels: pixels, checksum: wm_content_frame_checksum(pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
+        val frame = _top_level_web_frame(
+            "win-image", 9, 20, 20, 0xFF556677u32)
         val composition = shared_wm_scene_draw_ir_composition_with_content(scene, TaskbarModel(pinned: [], running: [], tray: []), [frame], "cpu", 1000, "", 0)
         var found = false
         for batch in composition.batches:
@@ -480,8 +551,9 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
     it "rejects a top-level Draw IR image whose nonzero checksum is incorrect":
         val window = _borderless_window("win-bad-image", 10, 10, 20, 20)
         val scene = simple_gui_internal_window_scene(80, 80, "bad-image-projection", [window])
-        val pixels = _solid_pixels(20 * 20, 0xFF556677u32)
-        val frame = WmContentFrame(window_id: "win-bad-image", scene_revision: 9, content_revision: 2, origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 20, height: 20, pixels: pixels, checksum: 1u64, parent_window_id: "", offset_x: 0, offset_y: 0)
+        var frame = _top_level_web_frame(
+            "win-bad-image", 9, 20, 20, 0xFF556677u32)
+        frame.checksum = 1u64
         val composition = shared_wm_scene_draw_ir_composition_with_content(scene, TaskbarModel(pinned: [], running: [], tray: []), [frame], "cpu", 1000, "", 0)
         var found = false
         for batch in composition.batches:

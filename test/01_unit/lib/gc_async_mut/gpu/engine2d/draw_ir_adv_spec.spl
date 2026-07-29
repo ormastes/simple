@@ -43,6 +43,7 @@ use common.ui.draw_ir.{
     draw_ir_batch,
     draw_ir_box_with_style,
     draw_ir_composition,
+    draw_ir_font_advance_digest,
     draw_ir_embedding_config,
     draw_ir_empty_glyph_run_payload,
     draw_ir_glyph_run_payload,
@@ -50,6 +51,7 @@ use common.ui.draw_ir.{
     draw_ir_rect_bounds,
     draw_ir_rect,
     draw_ir_text,
+    draw_ir_text_resolved_font,
     draw_ir_text_styled,
     draw_ir_text_styled_clipped,
     draw_ir_text_shaped_font,
@@ -69,6 +71,67 @@ val BLUE: u32 = 0xff0000ffu32
 val YELLOW: u32 = 0xffffff00u32
 
 describe "Engine2D advanced Draw IR executor":
+
+    it "aggregates ordered text deterministically and resets the next composition":
+        val candidate = selected_font_asset_candidates()[8]
+        val identity = selected_font_asset_identity(candidate)
+        val first = draw_ir_text_resolved_font(
+            "first", 1, 1, "A", GREEN, candidate.family,
+            identity, [7], 7, 14, 12)
+        var duplicate = draw_ir_text_styled(
+            "duplicate", 10, 1, "B", GREEN, [
+                draw_ir_style_prop("font-identity", identity),
+                draw_ir_style_prop("font-identity", "sha256=ignored"),
+                draw_ir_style_prop("font-advance-widths", "7"),
+                draw_ir_style_prop("font-advance-widths", "99"),
+                draw_ir_style_prop("font-size", "12")
+            ])
+        duplicate.width = 7
+        duplicate.height = 14
+        val batch = draw_ir_batch(
+            "two-font-commands", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 32, 20, 0, 1000, false),
+            [first, duplicate])
+        val composition = draw_ir_composition(
+            "font-composition-one", "scene", DRAW_IR_BACKEND_CPU, [batch])
+        var engine = Engine2D.create_with_backend(32, 20, "cpu")
+        val first_result = engine2d_draw_ir_adv_composition(
+            engine, composition, false)
+
+        expect(first_result.skipped_command_count).to_equal(0)
+        expect(first_result.font_ordered_text_command_count).to_equal(2)
+        expect(first_result.font_advance_command_digest).to_equal(
+            draw_ir_font_advance_digest(composition))
+        expect(first_result.font_vulkan_batch_count).to_equal(0)
+        expect(first_result.font_vulkan_batch_digest).to_equal(0)
+        expect(first_result.font_vulkan_aggregate_valid).to_be(false)
+
+        val next_command = draw_ir_text_resolved_font(
+            "next", 1, 1, "C", GREEN, candidate.family,
+            identity, [7], 7, 14, 12)
+        val next_batch = draw_ir_batch(
+            "one-font-command", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 32, 20, 0, 1000, false),
+            [next_command])
+        val next_composition = draw_ir_composition(
+            "font-composition-two", "scene", DRAW_IR_BACKEND_CPU,
+            [next_batch])
+        val next_result = engine2d_draw_ir_adv_composition(
+            engine, next_composition, false)
+
+        expect(next_result.font_composition_id).to_equal(
+            "font-composition-two")
+        expect(next_result.font_ordered_text_command_count).to_equal(1)
+        expect(next_result.font_advance_command_digest).to_equal(
+            draw_ir_font_advance_digest(next_composition))
+        assert_not_equal(
+            next_result.font_advance_command_digest,
+            first_result.font_advance_command_digest)
+        expect(next_result.font_vulkan_batch_count).to_equal(0)
+        expect(next_result.font_vulkan_batch_digest).to_equal(0)
+        engine.shutdown()
 
     it "clips Draw IR text and restores the enclosing Engine2D route":
         var direct = Engine2D.create_with_backend(24, 16, "cpu")

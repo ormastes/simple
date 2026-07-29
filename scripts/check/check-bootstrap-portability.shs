@@ -16,6 +16,7 @@ for script in \
   scripts/check/check-freebsd-bootstrap-qemu.shs \
   scripts/check/check-native-seed-parity.shs \
   scripts/check/check-stage4-hosted-dynload-provider-archive.shs \
+  scripts/check/stage4-provenance-receipt.shs \
   scripts/check/lib/bootstrap-stage3/authority.shs \
   scripts/check/lib/bootstrap-stage3/manifest-write.shs \
   scripts/check/lib/bootstrap-stage3/manifest-verify.shs \
@@ -79,6 +80,59 @@ env_probe_line=$(grep -n '^[[:space:]]*env_probe=$(SIMPLE_BINARY="$candidate"' s
 grep -Fq 'unknown command '\''run'\''' scripts/bootstrap/bootstrap-from-scratch.sh || fail "stage sanity does not reject unsupported run"
 grep -Fq 'stage4-essential-tools-smoke' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 essential-tools smoke hook missing"
 grep -Fq 'SIMPLE_BINARY="$(absolute_path "${full_bin}")"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "essential-tools smoke does not receive the fresh Stage 4 binary"
+grep -Fq 'simple-stage4-provenance-receipt-v1' scripts/check/stage4-provenance-receipt.shs ||
+  fail "Stage 4 receipt schema missing"
+grep -Fq 'stage4_receipt_status=pass' scripts/check/stage4-provenance-receipt.shs ||
+  fail "Stage 4 receipt PASS marker missing"
+grep -Fq 'STAGE4_RECEIPT_PATH="$(absolute_path "${stage4_receipt}")"' scripts/bootstrap/bootstrap-from-scratch.sh ||
+  fail "essential-tools smoke is not bound to the Stage 4 receipt"
+grep -Fq 'stage4-provenance-receipt.shs" check' scripts/check/check-bootstrap-essential-tools-smoke.shs ||
+  fail "essential-tools smoke does not validate the Stage 4 receipt"
+grep -Fq 'stage4_receipt_status=pass' scripts/check/check-shared-multilingual-font-evidence.shs ||
+  fail "shared-font aggregate does not require the Stage 4 receipt"
+grep -Fq 'essential_tools_pure_simple_identity=true \' scripts/check/check-shared-multilingual-font-evidence.shs ||
+  fail "shared-font aggregate does not require one pure identity marker"
+grep -Fq 'essential_list_constructor_smoke=true \' scripts/check/check-shared-multilingual-font-evidence.shs ||
+  fail "shared-font aggregate does not require one list-constructor marker"
+grep -Fq 'valid_native_owner_fault_evidence "$native_record"' \
+  scripts/check/check-shared-multilingual-font-evidence.shs ||
+  fail "shared-font aggregate does not validate native owner-fault evidence directly"
+grep -Fq 'native_trace_sha256' \
+  scripts/check/check-shared-multilingual-font-evidence.shs ||
+  fail "shared-font native runner outputs are not hash-bound"
+grep -Fq 'engine3d_fault_attempt_count)" = 2' \
+  scripts/check/check-shared-multilingual-font-evidence.shs ||
+  fail "shared-font native fallback attempt order is not exact"
+grep -Fq 'font-owner-device-loss-runtime-proof-unavailable: NFR-007 requires' \
+  scripts/check/check-shared-multilingual-font-evidence.shs ||
+  fail "shared-font aggregate lost the exact NFR-007 device-loss blocker"
+grep -Fq 'sh scripts/check/stage4-provenance-receipt.shs check \' \
+  scripts/check/check-shared-multilingual-font-evidence.shs ||
+  fail "shared-font aggregate does not rerun the complete Stage 4 verifier"
+grep -Fq 'bootstrap_stage3_run_transcribed "${receipt}.argv"' \
+  scripts/check/stage4-provenance-receipt.shs ||
+  fail "Stage 4 build is not owned by the receipt-aware env-i runner"
+grep -Fq 'bootstrap_stage3_verify_command_transcript "$transcript"' \
+  scripts/check/stage4-provenance-receipt.shs ||
+  fail "Stage 4 verifier does not reject command transcript extras"
+grep -Fq 'cmp -s "${receipt}.source-before" "${receipt}.source-after"' \
+  scripts/check/stage4-provenance-receipt.shs ||
+  fail "Stage 4 receipt does not fail on source mutation"
+grep -Fq 'cmp -s "${receipt}.runtime-before" "${receipt}.runtime-after"' \
+  scripts/check/stage4-provenance-receipt.shs ||
+  fail "Stage 4 receipt does not fail on runtime-capsule mutation"
+grep -Fq -- '--check "$runtime"' \
+  scripts/check/stage4-provenance-receipt.shs ||
+  fail "Stage 4 receipt bypasses the canonical core-C capsule verifier"
+grep -Fq 'fail output-is-wrapper-or-wrong-format' \
+  scripts/check/stage4-provenance-receipt.shs ||
+  fail "Stage 4 receipt does not reject wrappers and wrong native formats"
+receipt_check_line=$(grep -n 'stage4-provenance-receipt.shs" check' \
+  scripts/check/check-bootstrap-essential-tools-smoke.shs | head -1 | cut -d: -f1)
+identity_exec_line=$(grep -n 'identity_output=.*--version' \
+  scripts/check/check-bootstrap-essential-tools-smoke.shs | head -1 | cut -d: -f1)
+[ "$receipt_check_line" -lt "$identity_exec_line" ] ||
+  fail "essential-tools executes the candidate before validating its Stage 4 receipt"
 essential_tools_smoke=scripts/check/check-bootstrap-essential-tools-smoke.shs
 seed_probe_dir=$(mktemp -d)
 trap 'rm -rf "${seed_probe_dir}"' EXIT INT TERM
@@ -99,8 +153,11 @@ seed_rejection_output=$(SIMPLE_BINARY="${fake_seed}" SEED_REJECTION_TOOL_PROBE="
 seed_rejection_rc=$?
 set -e
 [ "${seed_rejection_rc}" -ne 0 ] || fail "essential-tools smoke accepted Rust seed identity"
-printf '%s\n' "${seed_rejection_output}" | grep -Fq 'error=rust_seed_binary' || fail "Rust seed rejection marker missing"
-[ ! -e "${seed_sentinel}" ] || fail "essential-tools smoke ran tool probes before rejecting Rust seed"
+printf '%s\n' "${seed_rejection_output}" |
+  grep -Fq 'error=stage4_receipt_hash_missing' ||
+  fail "unreceipted executable rejection marker missing"
+[ ! -e "${seed_sentinel}" ] ||
+  fail "essential-tools executed an unreceipted candidate"
 rm -rf "${seed_probe_dir}"
 trap - EXIT INT TERM
 grep -Fq 'essential_test_runner_smoke=true' "${essential_tools_smoke}" || fail "test-runner bootstrap smoke missing"

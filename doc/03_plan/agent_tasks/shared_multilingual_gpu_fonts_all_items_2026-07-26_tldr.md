@@ -28,7 +28,8 @@ reviews, syncs, and pushes.
   pure-Simple CLI/core-C supplies runtime evidence. Runtime, canonical docgen,
   native, QEMU, and performance acceptance remain open.
 - Unavailable hardware rows remain explicitly blocked, never skipped or PASS.
-- Exact NFR-007 blocker remains `font-owner-fault-runtime-proof-unavailable`.
+- Exact NFR-007 blocker is
+  `font-owner-device-loss-runtime-proof-unavailable`.
 
 ## Open Next
 

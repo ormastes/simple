@@ -145,6 +145,7 @@ class VulkanRenderBackend3D:
     base_submit_ok: bool
     recording_blocked: bool
     completion_unknown: bool
+    shutdown_wait_idle_observed: bool
     font_binding_submitted: bool
     font_draw_count: i64
     blocker_reason: text
@@ -194,6 +195,7 @@ class VulkanRenderBackend3D:
             base_submit_ok: false,
             recording_blocked: false,
             completion_unknown: false,
+            shutdown_wait_idle_observed: false,
             font_binding_submitted: false,
             font_draw_count: 0,
             blocker_reason: "texture-descriptor-layout-unavailable",
@@ -539,6 +541,7 @@ impl RenderBackend3D for VulkanRenderBackend3D:
             if not rt_vulkan_wait_idle():
                 self.record_font_fault_from_runtime("graphics-submission-still-in-flight", true)
                 return
+            self.shutdown_wait_idle_observed = true
             self.completion_unknown = false
         if self.command_handle > 0:
             rt_vulkan_discard_graphics_command(self.command_handle)
@@ -595,6 +598,16 @@ impl RenderBackend3D for VulkanRenderBackend3D:
         self.owns_session = false
 
 impl VulkanRenderBackend3D:
+    me wait_idle_after_font_fault() -> bool:
+        if not self.initialized:
+            return false
+        if not rt_vulkan_wait_idle():
+            self.record_font_fault_from_runtime("graphics-submission-still-in-flight", true)
+            return false
+        self.shutdown_wait_idle_observed = true
+        self.completion_unknown = false
+        true
+
     me retain_font_identity_unchanged(identity_unchanged: bool):
         self.font_fault_identity_unchanged = self.font_fault_identity_unchanged and identity_unchanged
 

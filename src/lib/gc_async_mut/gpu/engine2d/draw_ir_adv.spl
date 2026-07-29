@@ -101,6 +101,17 @@ struct Engine2dDrawIrAdvResult:
     # Typed execution signal for production owners. Diagnostics may change,
     # but a skipped selected-font command must remain fail-closed.
     selected_font_command_skipped: bool = false
+    font_composition_id: text = ""
+    font_advance_command_digest: i64 = 0
+    font_ordered_text_command_count: i32 = 0
+    font_vulkan_batch_count: i32 = 0
+    font_vulkan_batch_digest: i64 = 0
+    font_vulkan_aggregate_valid: bool = false
+    font_vulkan_composition_id: text = ""
+    font_vulkan_advance_digest: i64 = 0
+    font_vulkan_all_device_executed: bool = false
+    font_vulkan_all_promotion_ready: bool = false
+    font_vulkan_all_parity: bool = false
 
 struct Engine2dResolvedDrawIrImage:
     image_uri: text
@@ -112,11 +123,48 @@ struct Engine2dDrawIrFreshDevicePreflight:
     reason: text
     selected_font_command_rejected: bool = false
 
+struct Engine2dFontCompositionReceipt:
+    composition_id: text
+    advance_digest: i64
+    ordered_text_command_count: i32
+    vulkan_batch_count: i32
+    vulkan_batch_digest: i64
+    vulkan_all_valid: bool
+    vulkan_all_device_executed: bool
+    vulkan_all_promotion_ready: bool
+    vulkan_all_parity: bool
+
+fn _engine2d_font_receipt_mix(hash: i64, value: text) -> i64:
+    var mixed = hash
+    var i = 0
+    while i < value.len():
+        mixed = ((mixed * 131 + value.char_code_at(i) as i64) %
+            2147483647) + 1
+        i = i + 1
+    mixed
+
+fn _engine2d_font_composition_receipt(
+    composition_id: text
+) -> Engine2dFontCompositionReceipt:
+    Engine2dFontCompositionReceipt(
+        composition_id: composition_id,
+        advance_digest:
+            _engine2d_font_receipt_mix(17, composition_id),
+        ordered_text_command_count: 0,
+        vulkan_batch_count: 0,
+        vulkan_batch_digest: 17,
+        vulkan_all_valid: true,
+        vulkan_all_device_executed: true,
+        vulkan_all_promotion_ready: true,
+        vulkan_all_parity: true
+    )
+
 # Named result for the internal render walkers. Positional tuple-member reads
 # are miscompiled on the entry-closure freestanding native path; named fields
 # preserve rendered/skipped counts on every backend.
 struct Engine2dDrawIrRenderOutcome:
     engine: DrawIrRenderTarget
+    font_receipt: Engine2dFontCompositionReceipt
     rendered: i32
     skipped: i32
     unsupported_kinds: text
@@ -140,6 +188,7 @@ struct Engine2dDrawIrGlassOutcome:
 
 fn _engine2d_draw_ir_render_outcome(
     engine: DrawIrRenderTarget,
+    font_receipt: Engine2dFontCompositionReceipt,
     rendered: i32,
     skipped: i32,
     unsupported_kinds: text,
@@ -154,6 +203,7 @@ fn _engine2d_draw_ir_render_outcome(
 ) -> Engine2dDrawIrRenderOutcome:
     Engine2dDrawIrRenderOutcome(
         engine: engine,
+        font_receipt: font_receipt,
         rendered: rendered,
         skipped: skipped,
         unsupported_kinds: unsupported_kinds,
@@ -839,8 +889,9 @@ fn _engine2d_embed_offscreen_acquire(owner: DrawIrRenderTarget, w: i32, h: i32) 
 # offset_x/offset_y are 0 since the surface origin IS the batch origin).
 # DrawIrRenderTarget is value-copied across this free-function boundary (see
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
-fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, font_receipt_start: Engine2dFontCompositionReceipt, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
+    var font_receipt = font_receipt_start
     var rendered = 0
     var skipped = 0
     var unsupported_kinds = ""
@@ -976,6 +1027,50 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
                         print("[e2d-text-probe] ir kind={branch_kind} shaped={shaped} payload_valid={payload_valid} glyphs={glyph_count} advances={advances.len()} drawn={drawn}")
                     if drawn:
                         rendered = rendered + 1
+                        font_receipt.advance_digest =
+                            _engine2d_font_receipt_mix(
+                                font_receipt.advance_digest,
+                                command.component_id)
+                        font_receipt.advance_digest =
+                            _engine2d_font_receipt_mix(
+                                font_receipt.advance_digest,
+                                command.text_value)
+                        font_receipt.advance_digest =
+                            _engine2d_font_receipt_mix(
+                                font_receipt.advance_digest, font_identity)
+                        font_receipt.advance_digest =
+                            _engine2d_font_receipt_mix(
+                                font_receipt.advance_digest,
+                                encoded_advances)
+                        font_receipt.ordered_text_command_count =
+                            font_receipt.ordered_text_command_count + 1
+                        if eng.font_execution_target() == "vulkan":
+                            font_receipt.vulkan_batch_count =
+                                font_receipt.vulkan_batch_count + 1
+                            val current = eng.draw_ir_font_evidence()
+                            if current == nil:
+                                font_receipt.vulkan_all_valid = false
+                                font_receipt.vulkan_all_device_executed = false
+                                font_receipt.vulkan_all_promotion_ready = false
+                                font_receipt.vulkan_all_parity = false
+                            else:
+                                val evidence: DrawIrTargetFontEvidence =
+                                    current
+                                font_receipt.vulkan_batch_digest =
+                                    _engine2d_font_receipt_mix(
+                                        font_receipt.vulkan_batch_digest,
+                                        evidence.batch_identity)
+                                if (evidence.batch_identity == "" or
+                                    not evidence.device_executed or
+                                    not evidence.promotion_ready or
+                                    not evidence.parity):
+                                    font_receipt.vulkan_all_valid = false
+                                if not evidence.device_executed:
+                                    font_receipt.vulkan_all_device_executed = false
+                                if not evidence.promotion_ready:
+                                    font_receipt.vulkan_all_promotion_ready = false
+                                if not evidence.parity:
+                                    font_receipt.vulkan_all_parity = false
                     else:
                         font_ready = false
                         # Discriminator vs the callee-side receipt: this line
@@ -1027,6 +1122,7 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
                 eng.clear_clip()
     _engine2d_draw_ir_render_outcome(
         eng,
+        font_receipt,
         rendered,
         skipped,
         unsupported_kinds,
@@ -1155,7 +1251,7 @@ fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
 # today's exact direct translate+clip behavior — this is the load-bearing
 # backward-compatibility path: no regression for callers that never opted
 # into a real embedded surface.
-fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, font_receipt: Engine2dFontCompositionReceipt, batch: DrawIrBatch, images: [Engine2dResolvedDrawIrImage], depth: i32, allow_parent_image: bool) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     # Preserve the nested Draw IR struct layout across the native
     # free-function boundary. Native inference has historically treated an
@@ -1166,7 +1262,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
     # call and trapped before the first WM frame.
     val commands: [DrawIrCommand] = batch.commands
     if commands.len() == 0:
-        return _engine2d_draw_ir_render_outcome(eng, 0, 0, "", 0)
+        return _engine2d_draw_ir_render_outcome(
+            eng, font_receipt, 0, 0, "", 0)
     # Perf short-circuit: a batch whose embedding is (0,0) at full opacity and
     # EXACTLY the size of the target it renders onto composites as a plain 1:1
     # copy with no cropping/offset/alpha effect — offscreen-then-blit would be
@@ -1238,7 +1335,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
         if batch.backend_target == "metal" and eng.backend_name() == "metal":
             val requested = _engine2d_draw_ir_parent_material_request_count(batch)
             return _engine2d_draw_ir_render_outcome(
-                eng, 0, batch.commands.len().to_i32(),
+                eng, font_receipt, 0, batch.commands.len().to_i32(),
                 "metal-parent-material-subopaque-requires-gpu-only-delta", 0,
                 0, requested, requested,
                 _engine2d_draw_ir_unfulfilled_metal_receipts(batch)
@@ -1253,20 +1350,21 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
             delta_width, delta_height)
         if seed.len() != delta_width.to_i64() * delta_height.to_i64():
             return _engine2d_draw_ir_render_outcome(
-                eng, 0, batch.commands.len().to_i32(),
+                eng, font_receipt, 0, batch.commands.len().to_i32(),
                 "parent-material-seed-unavailable", 0)
         val seeded_surface = eng.draw_ir_create_offscreen(
             delta_width, delta_height)
         match seeded_surface:
             Err(reason):
                 return _engine2d_draw_ir_render_outcome(
-                    eng, 0, batch.commands.len().to_i32(),
+                    eng, font_receipt, 0, batch.commands.len().to_i32(),
                     "parent-material-offscreen-unavailable:{reason}", 0)
             Ok(child):
                 var delta = child
                 delta.draw_image(0, 0, delta_width, delta_height, seed)
                 val inner = _engine2d_draw_ir_render_commands(
-                    delta, batch.commands, parent_padding, parent_padding, images, true,
+                    delta, font_receipt, batch.commands,
+                    parent_padding, parent_padding, images, true,
                     batch.backend_target == "metal", draw_ir_no_rect())
                 delta = inner.engine
                 val child_readback = delta.read_pixels_with_source()
@@ -1284,10 +1382,12 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
                 delta.shutdown()
                 if not composited:
                     return _engine2d_draw_ir_render_outcome(
-                        eng, 0, batch.commands.len().to_i32(),
+                        eng, font_receipt, 0,
+                        batch.commands.len().to_i32(),
                         "parent-material-delta-composite-not-proven", 0)
                 return _engine2d_draw_ir_render_outcome(
-                    eng, inner.rendered, inner.skipped,
+                    eng, inner.font_receipt,
+                    inner.rendered, inner.skipped,
                     inner.unsupported_kinds,
                     inner.cpu_composited_material_count,
                     inner.metal_device_glass_material_count,
@@ -1303,7 +1403,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
             eng.set_clip(embedding.x, embedding.y, embedding.width, embedding.height)
         val blend_images = allow_parent_image or (embedding.surface_id != "" and fills_target_exactly)
         val direct = _engine2d_draw_ir_render_commands(
-            eng, commands, embedding.x, embedding.y, images,
+            eng, font_receipt, commands,
+            embedding.x, embedding.y, images,
             blend_images, batch.backend_target == "metal",
             if apply_clip:
                 draw_ir_rect_bounds(
@@ -1316,6 +1417,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
             eng.clear_clip()
         return _engine2d_draw_ir_render_outcome(
             eng,
+            direct.font_receipt,
             direct.rendered,
             direct.skipped,
             direct.unsupported_kinds,
@@ -1349,7 +1451,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
         match pooled:
             Err(reason):
                 return _engine2d_draw_ir_render_outcome(
-                    eng, 0, commands.len().to_i32(), reason, 0)
+                    eng, font_receipt, 0,
+                    commands.len().to_i32(), reason, 0)
             Ok(created):
                 offscreen = created
                 offscreen_created = true
@@ -1360,20 +1463,22 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
         match created:
             Err(reason):
                 return _engine2d_draw_ir_render_outcome(
-                    eng, 0, commands.len().to_i32(), reason, 0)
+                    eng, font_receipt, 0,
+                    commands.len().to_i32(), reason, 0)
             Ok(target):
                 offscreen = target
                 offscreen_created = true
     if not offscreen_created:
         return _engine2d_draw_ir_render_outcome(
             eng,
+            font_receipt,
             0,
             commands.len().to_i32(),
             "embedded-offscreen-not-created",
             0
         )
     val inner = _engine2d_draw_ir_render_commands(
-        offscreen, commands, 0, 0, images, true,
+        offscreen, font_receipt, commands, 0, 0, images, true,
         batch.backend_target == "metal", draw_ir_no_rect())
     offscreen = inner.engine
     val child = offscreen.read_pixels_with_source()
@@ -1392,6 +1497,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
     if not composited:
         return _engine2d_draw_ir_render_outcome(
             eng,
+            font_receipt,
             0,
             commands.len().to_i32(),
             "embedded-device-composite-not-proven",
@@ -1399,6 +1505,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
         )
     _engine2d_draw_ir_render_outcome(
         eng,
+        inner.font_receipt,
         inner.rendered,
         inner.skipped,
         inner.unsupported_kinds,
@@ -1420,7 +1527,11 @@ fn engine2d_draw_ir_adv_batch(engine: DrawIrRenderTarget, batch: DrawIrBatch, gp
 
 fn engine2d_draw_ir_adv_batch_with_images(engine: DrawIrRenderTarget, batch: DrawIrBatch, gpu_available: bool, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
-    val outcome = _engine2d_draw_ir_render_batch_embedded(engine, batch, images, 0, false)
+    var font_receipt = _engine2d_font_composition_receipt(batch.batch_id)
+    font_receipt.advance_digest = _engine2d_font_receipt_mix(
+        font_receipt.advance_digest, batch.batch_id)
+    val outcome = _engine2d_draw_ir_render_batch_embedded(
+        engine, font_receipt, batch, images, 0, false)
     val eng = outcome.engine
     var unsupported_kinds = outcome.unsupported_kinds
     if unsupported_kinds == "":
@@ -1505,6 +1616,11 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
     var glass_execution_target = ""
     var glass_backend_handle: i64 = 0
     var glass_device_identity: i64 = 0
+    # Composition-owned evidence is fresh for every execution. It survives
+    # batch/offscreen boundaries through the typed render outcome and never
+    # inherits the engine's last batch receipt.
+    var font_receipt =
+        _engine2d_font_composition_receipt(composition.composition_id)
     # NOTE(layer ordering): batches composite in array order, not re-sorted by
     # embedding.layer. Every real producer (e.g. window_scene_draw_ir.spl)
     # already emits batches desktop-first/chrome-next/windows-by-ascending-
@@ -1514,8 +1630,12 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
     # accounting) for no behavior change against any current producer, so it
     # is left as a documented limitation rather than done speculatively.
     for batch in composition.batches:
-        val outcome = _engine2d_draw_ir_render_batch_embedded(eng, batch, images, 0, allow_parent_image)
+        font_receipt.advance_digest = _engine2d_font_receipt_mix(
+            font_receipt.advance_digest, batch.batch_id)
+        val outcome = _engine2d_draw_ir_render_batch_embedded(
+            eng, font_receipt, batch, images, 0, allow_parent_image)
         eng = outcome.engine
+        font_receipt = outcome.font_receipt
         rendered = rendered + outcome.rendered
         skipped = skipped + outcome.skipped
         cpu_composited_material_count = (
@@ -1590,6 +1710,30 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
             result.fallback_reason = "metal glass material device receipt missing"
     val rendered_fonts = eng.fonts()
     result.font_identity = rendered_fonts.current_font_identity()
+    result.font_composition_id = composition.composition_id
+    if font_receipt.ordered_text_command_count > 0:
+        result.font_advance_command_digest = font_receipt.advance_digest
+    result.font_ordered_text_command_count =
+        font_receipt.ordered_text_command_count
+    result.font_vulkan_batch_count = font_receipt.vulkan_batch_count
+    if font_receipt.vulkan_batch_count > 0:
+        result.font_vulkan_batch_digest =
+            font_receipt.vulkan_batch_digest
+    result.font_vulkan_aggregate_valid = (
+        font_receipt.vulkan_all_valid and
+        font_receipt.vulkan_batch_count ==
+            font_receipt.ordered_text_command_count and
+        font_receipt.ordered_text_command_count > 0)
+    result.font_vulkan_composition_id = font_receipt.composition_id
+    if font_receipt.vulkan_batch_count > 0:
+        result.font_vulkan_advance_digest =
+            font_receipt.advance_digest
+        result.font_vulkan_all_device_executed =
+            font_receipt.vulkan_all_device_executed
+        result.font_vulkan_all_promotion_ready =
+            font_receipt.vulkan_all_promotion_ready
+        result.font_vulkan_all_parity =
+            font_receipt.vulkan_all_parity
     eng.install_font_renderer(rendered_fonts)
     result.font_execution_target = eng.font_execution_target()
     val target_font = eng.draw_ir_font_evidence()

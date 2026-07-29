@@ -217,6 +217,34 @@ remain fail-closed: when Stage 3 is unavailable, the wrapper reports incomplete
 pure-Simple evidence and exits before producing a Stage 4 full CLI; it does not
 publish a seed fallback as a self-hosted result.
 
+### Provenance-gated incremental promotion
+
+The wrapper seals each accepted Stage 2 in
+`build/bootstrap/stage2/<triple>/stage2-provenance.env` plus its `.sha256`
+sidecar. Consumers must validate both with
+`bootstrap_stage2_verify_manifest`; a binary path and hash alone do not prove
+the source, Git, tool, runtime, seed, cache, command, and sanity authorities
+recorded by that manifest.
+
+For changes that depend on Option lowering, run
+`scripts/check/check-native-option-admission-probes.shs` before promotion. Pin
+the exact Stage 2 binary and manifest, source checkpoint, deterministic core-C
+capsule, and fresh attempt/cache roots. The wrapper executes isolated A/B/C
+native probes for absent, payload-free present, and struct-payload present
+values and seals their commands, outputs, formats, and inventory. Manual probe
+stdout or reconstructed success counts are not admission evidence.
+
+Stage 3 and Stage 4 may then build incrementally from that admitted parent.
+Stage 4 evidence is written by
+`scripts/check/stage4-provenance-receipt.shs write`, which owns the isolated
+build command and transcript and binds before/after source and Git snapshots,
+the parent and runtime, deterministic core-C capsule, locked cache, native
+output, and output hash. Run the essential-tools smoke against that exact
+artifact. Do not replace a missing receipt with a clean rebuild or
+`--full-bootstrap`; rebuild Rust only when Rust-owned seed/runtime inputs
+changed or the accepted Stage 2 proves that the seed lacks a required
+capability.
+
 ### Quick Bootstrap
 
 The canonical entrypoint is the host bootstrap wrapper. Normal runs do not

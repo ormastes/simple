@@ -460,6 +460,7 @@ prepare_native_cache() {
   if [ "${bootstrap_mode}" = "one-binary" ]; then
     echo "  ${label}: clearing native cache (one-binary mode)"
     rm -rf "${native_cache_dir}/"
+    mkdir -p "${native_cache_dir}"
     return
   fi
 
@@ -579,36 +580,6 @@ bootstrap_stage_sanity() (
   rm -f "${frontend_log}"
   [ "${sanity_status}" = pass ]
 )
-
-bootstrap_native_build_main() {
-  compiler=$1
-  output=$2
-  env RUST_LOG="${RUST_LOG:-error}" \
-    SIMPLE_BOOTSTRAP=1 \
-    SIMPLE_NO_DEPRECATED_WARNINGS=1 \
-    SIMPLE_BOOTSTRAP_STAGE4=1 \
-    SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
-    SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
-    SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
-    SIMPLE_NATIVE_BUILD_CACHE_DIR="${native_cache_dir}" \
-    SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
-    LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-    SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_BINARY="$(absolute_path "${compiler}")" \
-    "${compiler}" native-build \
-    --target "${PLATFORM}" \
-    --backend "${backend}" \
-    --runtime-bundle core-c-bootstrap \
-    --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
-    --entry-closure \
-    --low-memory \
-    --threads "${selfhost_jobs}" \
-    --cache-dir "${native_cache_dir}" \
-    --mode one-binary \
-    --entry src/app/cli/main.spl \
-    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-    -o "${output}"
-}
 
 # ===========================================================================
 # Bootstrap pipeline
@@ -1000,10 +971,16 @@ else
   # The manifest is emitted only after an identical post-Stage-3 snapshot.
   stage3_provenance_dir="${output_dir}/stage3/${PLATFORM}"
   stage3_provenance_manifest="${stage3_provenance_dir}/provenance.env"
+  stage2_provenance_manifest="${output_dir}/stage2/${PLATFORM}/stage2-provenance.env"
   stage3_source_before="${stage3_provenance_dir}/source-inputs-before.txt"
   stage3_source_after="${stage3_provenance_dir}/source-inputs-after.txt"
+  stage2_source_after="${stage3_provenance_dir}/source-inputs-after-stage2.txt"
   stage3_git_before="${stage3_provenance_dir}/git-state-before.env"
   stage3_git_after="${stage3_provenance_dir}/git-state-after.env"
+  stage2_git_after="${stage3_provenance_dir}/git-state-after-stage2.env"
+  stage2_tool_after="${stage3_provenance_dir}/tool-authority-after-stage2.txt"
+  stage2_cache_before="${stage3_provenance_dir}/stage2-cache-before.txt"
+  stage2_cache_after="${stage3_provenance_dir}/stage2-cache-after.txt"
   stage2_command_transcript="${stage3_provenance_dir}/stage2-command.transcript"
   stage3_command_transcript="${stage3_provenance_dir}/stage3-command.transcript"
   stage2_sanity_evidence="${stage3_provenance_dir}/stage2-sanity.env"
@@ -1031,8 +1008,12 @@ else
     exit 1
   }
   rm -f "${stage3_provenance_manifest}" \
+    "${stage2_provenance_manifest}" "${stage2_provenance_manifest}.sha256" \
     "${stage3_source_before}" "${stage3_source_after}" \
+    "${stage2_source_after}" \
     "${stage3_git_before}" "${stage3_git_after}" \
+    "${stage2_git_after}" "${stage2_tool_after}" \
+    "${stage2_cache_before}" "${stage2_cache_after}" \
     "${stage2_command_transcript}" "${stage3_command_transcript}" \
     "${stage2_sanity_evidence}" "${stage3_sanity_evidence}"
   rm -rf "${stage2_provenance_cache}" "${stage3_provenance_cache}" \
@@ -1128,6 +1109,9 @@ else
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
   mkdir -p "${stage2_provenance_cache}"
+  bootstrap_stage2_cache_snapshot \
+    "$(absolute_path "${stage2_cache_before}")" \
+    "$(absolute_path "${stage2_provenance_cache}")" || exit 1
   # Stage 2 failure is reported before Stage 3; no later stage may claim it.
   # the self-hosting frontend now fails closed instead of linking a ret-0 stub
   # (doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md), so a
@@ -1200,8 +1184,8 @@ else
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
       --source src/compiler --source src/app --source src/lib \
-      --entry-closure --threads "${jobs}" --cache-dir "${stage2_cache_absolute}" \
-      ${native_verbose_arg} \
+      --entry-closure --threads "${jobs}" ${native_verbose_arg} \
+      --cache-dir "${stage2_cache_absolute}" \
       --mode "${bootstrap_mode}" --entry src/app/cli/bootstrap_main.spl \
       --runtime-path "${stage_runtime_absolute}" \
       -o "${stage2_bin}"
@@ -1291,6 +1275,81 @@ else
       echo "error: Stage 2 compiler changed during private admission" >&2
       exit 1
     }
+    bootstrap_stage3_source_snapshot \
+      "$(absolute_path "${stage2_source_after}")" "${repo_root}" &&
+      bootstrap_stage3_git_state "${repo_root}" \
+        "$(absolute_path "${stage2_git_after}")" &&
+      bootstrap_stage3_tool_authority_snapshot \
+        "$(absolute_path "${stage2_tool_after}")" "${PATH}" "${repo_root}" &&
+      bootstrap_stage2_cache_snapshot \
+        "$(absolute_path "${stage2_cache_after}")" \
+        "${stage2_cache_absolute}" || {
+      echo "error: could not capture Stage 2 provenance checkpoint" >&2
+      exit 1
+    }
+    BSTAGE2_ROOT="${repo_root}"
+    BSTAGE2_MANIFEST="$(absolute_path "${stage2_provenance_manifest}")"
+    BSTAGE2_MANIFEST_SHA="${BSTAGE2_MANIFEST}.sha256"
+    BSTAGE2_PLATFORM="${PLATFORM}"
+    BSTAGE2_BACKEND="${backend}"
+    BSTAGE2_MODE="${bootstrap_mode}"
+    BSTAGE2_VERBOSE="${verbose}"
+    BSTAGE2_RUST_LOG="${stage_build_rust_log}"
+    BSTAGE2_SOURCE_BEFORE="$(absolute_path "${stage3_source_before}")"
+    BSTAGE2_SOURCE_AFTER="$(absolute_path "${stage2_source_after}")"
+    BSTAGE2_GIT_BEFORE="$(absolute_path "${stage3_git_before}")"
+    BSTAGE2_GIT_AFTER="$(absolute_path "${stage2_git_after}")"
+    BSTAGE2_TOOL_BEFORE="$(absolute_path "${tool_authority_before}")"
+    BSTAGE2_TOOL_AFTER="$(absolute_path "${stage2_tool_after}")"
+    BSTAGE2_RUNTIME_PATH="${stage_runtime_absolute}"
+    BSTAGE2_RUNTIME_BEFORE="$(absolute_path \
+      "${stage3_provenance_dir}/runtime-before-stage2.txt")"
+    BSTAGE2_RUNTIME_AFTER="$(absolute_path \
+      "${stage3_provenance_dir}/runtime-after-stage2.txt")"
+    BSTAGE2_CACHE_DIR="${stage2_cache_absolute}"
+    BSTAGE2_CACHE_BEFORE="$(absolute_path "${stage2_cache_before}")"
+    BSTAGE2_CACHE_AFTER="$(absolute_path "${stage2_cache_after}")"
+    BSTAGE2_SEED="${stage2_seed_absolute}"
+    BSTAGE2_SEED_STAMP="${stage2_seed_absolute}.inputs.sha256"
+    BSTAGE2_NATIVE_ALL="${stage_runtime_absolute}/${archive_prefix}simple_native_all${archive_suffix}"
+    BSTAGE2_BACKFILL="${stage_runtime_absolute}/${archive_prefix}simple_compiler_backfill${archive_suffix}"
+    BSTAGE2_SEED_INPUTS_FINGERPRINT="${seed_inputs_fingerprint}"
+    BSTAGE2_SEED_FEATURES="${llvm_features}"
+    BSTAGE2_STAGE2="$(absolute_path "${stage2_bin}")"
+    BSTAGE2_STAGE2_ADMITTED="${stage2_admitted_absolute}"
+    BSTAGE2_THREADS="${jobs}"
+    BSTAGE2_COMMAND_OUTPUT="${stage2_bin}"
+    BSTAGE2_ARGS_SHA256="${stage2_build_args_sha256}"
+    BSTAGE2_TRANSCRIPT="$(absolute_path "${stage2_command_transcript}")"
+    BSTAGE2_LOG="$(absolute_path "${log_dir}/stage2-native-build.log")"
+    BSTAGE2_SANITY="$(absolute_path "${stage2_sanity_evidence}")"
+    BSTAGE2_BOOTSTRAP_SCRIPT="${bootstrap_script_path}"
+    BSTAGE2_BOOTSTRAP_SCRIPT_SHA256_BEFORE="${bootstrap_script_sha256_before}"
+    BSTAGE2_HELPER="${bootstrap_provenance_helper}"
+    BSTAGE2_HELPER_SHA256_BEFORE="${bootstrap_provenance_helper_sha256_before}"
+    BSTAGE2_HELPER_BUNDLE_FINGERPRINT_BEFORE=\
+"${bootstrap_provenance_bundle_fingerprint_before}"
+    export BSTAGE2_ROOT BSTAGE2_MANIFEST BSTAGE2_MANIFEST_SHA \
+      BSTAGE2_PLATFORM BSTAGE2_BACKEND BSTAGE2_MODE BSTAGE2_VERBOSE \
+      BSTAGE2_RUST_LOG BSTAGE2_SOURCE_BEFORE BSTAGE2_SOURCE_AFTER \
+      BSTAGE2_GIT_BEFORE BSTAGE2_GIT_AFTER BSTAGE2_TOOL_BEFORE \
+      BSTAGE2_TOOL_AFTER BSTAGE2_RUNTIME_PATH BSTAGE2_RUNTIME_BEFORE \
+      BSTAGE2_RUNTIME_AFTER BSTAGE2_CACHE_DIR BSTAGE2_CACHE_BEFORE \
+      BSTAGE2_CACHE_AFTER BSTAGE2_SEED BSTAGE2_SEED_STAMP \
+      BSTAGE2_NATIVE_ALL BSTAGE2_BACKFILL BSTAGE2_SEED_INPUTS_FINGERPRINT \
+      BSTAGE2_SEED_FEATURES BSTAGE2_STAGE2 BSTAGE2_STAGE2_ADMITTED \
+      BSTAGE2_THREADS BSTAGE2_COMMAND_OUTPUT BSTAGE2_ARGS_SHA256 \
+      BSTAGE2_TRANSCRIPT BSTAGE2_LOG BSTAGE2_SANITY \
+      BSTAGE2_BOOTSTRAP_SCRIPT BSTAGE2_BOOTSTRAP_SCRIPT_SHA256_BEFORE \
+      BSTAGE2_HELPER BSTAGE2_HELPER_SHA256_BEFORE \
+      BSTAGE2_HELPER_BUNDLE_FINGERPRINT_BEFORE
+    bootstrap_stage2_write_manifest &&
+      bootstrap_stage2_verify_manifest "${BSTAGE2_MANIFEST}" \
+        "${BSTAGE2_ROOT}" "${BSTAGE2_STAGE2}" || {
+      echo "error: refusing admitted Stage 2 without canonical provenance" >&2
+      exit 1
+    }
+    echo "  Stage 2 provenance: ${stage2_provenance_manifest}"
   fi
   if [ "${stage2_status}" -ne 0 ]; then
     if [ "${strict_bootstrap}" -eq 1 ]; then
@@ -1590,15 +1649,82 @@ echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 prepare_native_cache stage4
-rm -f "${full_dir}/simple${exe_suffix}"
-run_logged stage4-native-build bootstrap_native_build_main \
-  "${stage_for_build}" "${full_dir}/simple${exe_suffix}"
+stage4_compiler=$(absolute_path "${stage_for_build}")
+stage4_cache_path=$(absolute_path "${native_cache_dir}")
+[ -n "${stage3_provenance_manifest:-}" ] &&
+  [ -f "${stage3_provenance_manifest}" ] &&
+  [ "${stage4_compiler}" = "$(absolute_path "${stage3}")" ] || {
+  echo "error: Stage 4 requires the current pure Stage 3 provenance manifest" >&2
+  exit 1
+}
+stage4_capsule_identity=$(
+  {
+    printf 'producer=%s\n' \
+      "$(hash_file scripts/check/build-core-c-bootstrap-runtime-capsule.shs)"
+    printf 'runtime_tree=%s\n' "$(git rev-parse HEAD:src/runtime)"
+    for stage4_tool in "${CC:-cc}" "${AR:-ar}" "${NM:-nm}"; do
+      stage4_tool_path=$(command -v "${stage4_tool}") || exit 1
+      stage4_tool_path=$(absolute_path "${stage4_tool_path}")
+      printf 'tool=%s:%s\n' "${stage4_tool_path}" \
+        "$(hash_file "${stage4_tool_path}")"
+    done
+  } | bootstrap_stage3_hash_stream
+)
+stage4_attempt_key=$(
+  {
+    printf 'stage3=%s\n' "$(hash_file "${stage3_provenance_manifest}")"
+    printf 'target=%s\nbackend=%s\nthreads=%s\n' \
+      "${PLATFORM}" "${backend}" "${selfhost_jobs}"
+    printf 'capsule_identity=%s\n' "${stage4_capsule_identity}"
+  } | bootstrap_stage3_hash_stream | cut -c1-20
+)
+stage4_reuse=0
+stage4_attempt_index=1
+while :; do
+  stage4_attempt_dir="${full_dir}/attempt-${stage4_attempt_key}-${stage4_attempt_index}"
+  full_bin="${stage4_attempt_dir}/simple${exe_suffix}"
+  stage4_output=$(absolute_path "${full_bin}")
+  stage4_receipt="${stage4_output}.stage4-receipt.env"
+  stage4_capsule_root=$(absolute_path "${stage4_attempt_dir}/core-c-runtime")
+  stage4_runtime_path="${stage4_capsule_root}/core-c-bootstrap"
+  stage4_core_c_manifest="${stage4_runtime_path}/capsule.manifest"
+  if [ ! -e "${stage4_attempt_dir}" ] &&
+    mkdir "${stage4_attempt_dir}" 2>/dev/null; then
+    break
+  fi
+  if [ -x "${stage4_output}" ] && [ -f "${stage4_receipt}" ] &&
+    [ -f "${stage4_receipt}.sha256" ]; then
+    stage4_existing_sha=$(tr -d '[:space:]' <"${stage4_receipt}.sha256")
+    if sh scripts/check/stage4-provenance-receipt.shs check \
+      "${stage4_receipt}" "${stage4_existing_sha}" "${stage4_output}" \
+      >/dev/null; then
+      stage4_reuse=1
+      echo "  Reusing verified Stage 4 attempt ${stage4_attempt_key}-${stage4_attempt_index}"
+      break
+    fi
+  fi
+  stage4_attempt_index=$((stage4_attempt_index + 1))
+done
+if [ "${stage4_reuse}" -eq 0 ]; then
+  run_logged stage4-core-c-capsule sh \
+    scripts/check/build-core-c-bootstrap-runtime-capsule.shs \
+    --output "${stage4_capsule_root}"
+  run_logged stage4-native-build sh \
+    scripts/check/stage4-provenance-receipt.shs write \
+    "$(absolute_path "${stage4_receipt}")" "${repo_root}" \
+    "$(absolute_path "${stage3_provenance_manifest}")" \
+    "${stage4_cache_path}" "${stage4_output}" "${PLATFORM}" "${backend}" \
+    "${selfhost_jobs}" "${stage4_runtime_path}" "${stage4_core_c_manifest}"
+fi
 
-full_bin="${full_dir}/simple${exe_suffix}"
 if [ ! -x "${full_bin}" ]; then
   echo "error: failed to compile full CLI binary from main.spl" >&2
   exit 1
 fi
+
+stage4_receipt_sha=$(
+  tr -d '[:space:]' <"${stage4_receipt}.sha256"
+)
 
 install -m755 "${seed_bin}" "${full_dir}/simple_seed${exe_suffix}"
 
@@ -1627,6 +1753,8 @@ run_logged stage4-redeploy-gate run_timeout_kill 180 sh \
 
 run_logged stage4-essential-tools-smoke run_timeout_kill 180 env \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
+  STAGE4_RECEIPT_PATH="$(absolute_path "${stage4_receipt}")" \
+  STAGE4_RECEIPT_SHA256="${stage4_receipt_sha}" \
   sh scripts/check/check-bootstrap-essential-tools-smoke.shs
 
 echo "Stage 4b: compiling cached UI backend..."
@@ -1727,6 +1855,50 @@ fi
 if [ "${deploy}" -eq 1 ]; then
   deploy_dir="bin/release/${PLATFORM}"
   mkdir -p "${deploy_dir}"
+  deploy_lock="${deploy_dir}/.simple-deploy.lock"
+  mkdir "${deploy_lock}" 2>/dev/null || {
+    echo "ERROR: another Simple CLI deployment owns ${deploy_lock}." >&2
+    exit 1
+  }
+  deploy_committed=0
+  deploy_publish_started=0
+  deployed_bin="${deploy_dir}/simple${exe_suffix}"
+  deployed_receipt="${deployed_bin}.stage4-receipt.env"
+  deployed_hash="${deployed_receipt}.sha256"
+  staged_bin="${deploy_dir}/.simple${exe_suffix}.deploy.$$"
+  staged_receipt="${staged_bin}.stage4-receipt.env"
+  previous_bin="${deployed_bin}.pre_deploy.$$"
+  previous_receipt="${deployed_receipt}.pre_deploy.$$"
+  previous_hash="${deployed_hash}.pre_deploy.$$"
+  had_previous_bin=0
+  had_previous_receipt=0
+  had_previous_hash=0
+  restore_deploy_member() {
+    if [ "$3" -eq 1 ]; then
+      mv "$2" "$1" 2>/dev/null || true
+    else
+      rm -f "$1"
+    fi
+  }
+  restore_deployed_cli() {
+    restore_deploy_member "${deployed_receipt}" "${previous_receipt}" \
+      "${had_previous_receipt}"
+    restore_deploy_member "${deployed_hash}" "${previous_hash}" \
+      "${had_previous_hash}"
+    restore_deploy_member "${deployed_bin}" "${previous_bin}" \
+      "${had_previous_bin}"
+  }
+  cleanup_cli_deploy() {
+    if [ "${deploy_committed}" -eq 0 ] &&
+      [ "${deploy_publish_started}" -eq 1 ]; then
+      restore_deployed_cli
+    fi
+    rm -f "${staged_bin:-}" "${staged_receipt:-}" \
+      "${staged_receipt:-}.sha256" "${previous_bin:-}" \
+      "${previous_receipt:-}" "${previous_hash:-}"
+    rmdir "${deploy_lock}" 2>/dev/null || true
+  }
+  trap cleanup_cli_deploy EXIT INT TERM
 
   # Deploy gate: never swap bin/simple to the self-hosted stage4 binary unless
   # a working seed driver exists at the delegate path. Without it the stage4
@@ -1746,23 +1918,46 @@ if [ "${deploy}" -eq 1 ]; then
   install -m755 "${seed_src}" "${seed_delegate}"
   echo "Installed current seed delegate: ${seed_src} -> ${seed_delegate}"
 
-  deployed_bin="${deploy_dir}/simple${exe_suffix}"
-  prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"
-  [ -x "${deployed_bin}" ] && cp "${deployed_bin}" "${prev_bin}"
-  install -m755 "${full_bin}" "${deployed_bin}"
-  echo "Deployed full CLI binary to ${deployed_bin}"
+  for deploy_path in "${deployed_bin}" "${deployed_receipt}" \
+    "${deployed_hash}"; do
+    [ ! -L "${deploy_path}" ] || {
+      echo "ERROR: deploy target is a symlink: ${deploy_path}" >&2
+      exit 1
+    }
+  done
+  install -m755 "${full_bin}" "${staged_bin}"
+  sh scripts/check/stage4-provenance-receipt.shs seal-deployed \
+    "${stage4_receipt}" "${stage4_receipt_sha}" "${staged_bin}" \
+    "${staged_receipt}"
 
-  # Post-swap smoke: the deployed binary must evaluate code; restore on failure.
-  smoke_out="$(run_timeout 30 "${deployed_bin}" -c 'print(1+1)' 2>/dev/null)"
+  # Smoke the complete staged pair before publishing any member.
+  smoke_out="$(run_timeout 30 "${staged_bin}" -c 'print(1+1)' 2>/dev/null)"
   if [ "${smoke_out}" != "2" ]; then
-    echo "ERROR: deployed binary failed smoke test (-c 'print(1+1)' -> '${smoke_out}')." >&2
-    if [ -x "${prev_bin}" ]; then
-      mv "${prev_bin}" "${deployed_bin}"
-      echo "Restored previous binary to ${deployed_bin}" >&2
-    fi
+    echo "ERROR: staged binary failed smoke test (-c 'print(1+1)' -> '${smoke_out}')." >&2
     exit 1
   fi
-  rm -f "${prev_bin}"
+  if [ -e "${deployed_bin}" ]; then
+    cp -p "${deployed_bin}" "${previous_bin}"
+    had_previous_bin=1
+  fi
+  if [ -e "${deployed_receipt}" ]; then
+    cp -p "${deployed_receipt}" "${previous_receipt}"
+    had_previous_receipt=1
+  fi
+  if [ -e "${deployed_hash}" ]; then
+    cp -p "${deployed_hash}" "${previous_hash}"
+    had_previous_hash=1
+  fi
+  # Receipts publish first so every intermediate state fails closed; the
+  # binary rename commits the complete staged identity.
+  deploy_publish_started=1
+  mv "${staged_receipt}" "${deployed_receipt}" &&
+    mv "${staged_receipt}.sha256" "${deployed_hash}" &&
+    mv "${staged_bin}" "${deployed_bin}" || exit 1
+  deploy_committed=1
+  cleanup_cli_deploy
+  trap - EXIT INT TERM
+  echo "Deployed full CLI binary and receipt to ${deployed_bin}"
   install -m755 "${ui_backend_bin}" "${deploy_dir}/simple_ui_backend${exe_suffix}"
   echo "Deployed cached UI backend to ${deploy_dir}/simple_ui_backend${exe_suffix}"
 

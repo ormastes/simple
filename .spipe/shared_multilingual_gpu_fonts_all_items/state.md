@@ -41,16 +41,18 @@ GitHub checkpoint.
   bounded cache/lifecycle, shared batch/config policy, Draw IR round-trip, and
   Engine2D/Web/GUI/hosted-WM/current-host SimpleOS routing without a private
   font path.
-- AC-7: REQ-012/013 and NFR-002/005–008 prove real native Engine2D and Engine3D
-  texture/upload/bind/draw/fence/device-origin readback, or remain explicitly
-  blocked with an exact native-host resume contract. Simulation and CPU mirrors
-  are never native PASS evidence.
+- AC-7: REQ-012/013 and NFR-002/005–008 prove actual selected native promotion
+  through real Engine2D and Engine3D texture/upload/bind/draw/fence/device-origin
+  readback. Every unavailable native-host row retains an exact blocker and
+  resume contract, but that blocked state does not satisfy promotion. Simulation
+  and CPU mirrors are never native PASS evidence.
 - AC-8: NFR-004–006 evidence records fixture, warmup/samples, cache hit rate,
   p95, CPU/GPU comparison, RSS/VRAM, upload behavior, hashes, host, device, and
   driver and enforces the selected thresholds.
-- AC-9: Unavailable host/capability rows stay visible as `blocked` or
-  `unsupported`, never skipped/PASS, with prerequisite, resume command,
-  artifacts, owner, and reviewer.
+- AC-9: Blocker hygiene keeps unavailable host/capability rows visible as
+  `blocked` or `unsupported`, never skipped/PASS, with prerequisite, resume
+  command, artifacts, owner, and reviewer. Satisfying this bookkeeping
+  criterion does not complete AC-7, AC-8, or the overall hardware requirements.
 - AC-10: Eligible host-independent tasks run in parallel after interfaces are
   frozen; agents do not overwrite unrelated work and `/root` integrates and
   reviews their bounded handoffs.
@@ -201,3 +203,5 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
 - simpleos-stage2-runner6-calibration-2026-07-29: Runner6 SHA-256 `5f5245fdfb151c74436ee0c7f0cdd75808dcd7199da5298b738710633d80cb80` built 33/0 against the admitted Runtime6 archive/manifest. Calibration receipt SHA-256 is `22bf1bf5850c333677621672b023b4106f7378a394545d730a7c24c4c22af93d`; deliberate-red and zero-example contracts each passed exactly once. Runtime6/Runner6 supersede Runtime5/Runner5 and the older Runner4 calibration. The parser lane remains capped at `ot_layout_gpos_basic.spl:27`, so focused execution is still pending and 0/10 specs are accepted. Counts/phase are unchanged; `SIMPLEOS_STAGE2_FONT: BLOCKED`; `STATUS: FAIL`.
 - simpleos-stage2-runner8-acceptance-2026-07-29: Accepted Runner8 supersedes Runner6 while retaining the Runner6 calibration entry above as history. Runner8 binary SHA-256 is `8096d0897994d7602b23a8eadc6252ed1f7ea00bb811ebfc5a0f3050cf282440`; its source SHA-256 is `093e013427a070f79889dc7dcb710063551533ae6cfc993e474d233f173a4c9e`; admitted Runtime6 remains `a6d21c8fcf88d1ca788577a799564df022e917762abca1bad7736d3babb52782`. Green receipt SHA-256 `6afa15355dd3e1a4c05183b0a9d552c4757a01384b07d092b141510f54be05df` records 1 example / 0 failures / exit 0. Provider receipt SHA-256 `b70fa412075a5a0a51593b68c02213ab9ce736115440f2259be0f8b9c2482466` records the runtime capsule at 7 examples / 0 failures / exit 0 and core I/O at 3 examples / 0 failures / exit 0. The parser lane remains capped at `ot_layout_gpos_basic.spl:27`; focused execution is still pending and 0/10 specs are accepted. Counts/phase are unchanged; `SIMPLEOS_STAGE2_FONT: BLOCKED`; `STATUS: FAIL`.
 - stage2-runtime-authority-link-2026-07-29: A late post-commit Stage 2 link produced `build/native_probe/p0-admission-find-local-20260729/stage2-find-local-runtime-authority-core-simple`, SHA-256 `f2db67c629f1fe1505e8374f1c4d701d23a5d1868820f58df02d115d475dc075`; retained receipts record 690 reused, 3 rebuilt, 0 failed, and exit 0. The adjacent receiver repair makes `find_local_hir_type`, `is_runtime_value_local`, and `local_enum_type_id` explicit `me` methods with focused source-contract assertions. The artifact remains diagnostic and unadmitted without hash-bound provenance or A/B/C results, and the producer window remains exhausted, so no rerun or promotion is authorized. Counts, phase, and `STATUS: FAIL` are unchanged.
+- current-inventory-refresh-2026-07-29: Supersedes only the current 46-command/42-font-manual/four-prerequisite accounting without rewriting historical entries. The changed REQ-011 `simple_web_window_renderer_spec.spl` adds one D focused execution and one stale canonical mirror, yielding 47 commands (preflight, B6, C18, D13, E9) and 43 font manuals (19 missing, 24 stale, zero current; A1+B6+C17+D12+E7). The changed `option_variant_order_source_spec.spl` adds a fifth, currently missing compiler-prerequisite manual outside the font graph. Stage 2 receipt machinery is source-present but no current manifest/sidecar is accepted; Stage 4 requires receipt-check PASS plus essential/aggregate sealing. No runtime or docgen command ran; phase and `STATUS: FAIL` are unchanged.
+- current-inventory-draw-ir-refresh-2026-07-29: Supersedes only the current 47-command/43-font-manual accounting above. The changed `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` adds one lane-C focused execution and one stale canonical mirror, yielding 48 commands (preflight, B6, C19, D13, E9) and 44 font manuals (19 missing, 25 stale, zero current; A1+B6+C18+D12+E7). The five compiler-prerequisite manuals remain separate and missing. No runtime or docgen command ran; phase and `STATUS: FAIL` are unchanged.

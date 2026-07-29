@@ -20,7 +20,7 @@ use common.gpu.simpleos_host_gpu_protocol.{
 }
 use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DrawIrComposition}
 use common.ui.taskbar_model.{TaskbarModel}
-use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, wm_content_frame_web_provenance_valid}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, wm_content_frame_origin_provenance_valid}
 use common.ui.window_scene_draw_ir.{
     shared_wm_content_frame_for_window,
     shared_wm_content_frame_image_uri,
@@ -45,6 +45,16 @@ use os.lib.gpu_bridge.host_gpu_ivshmem.{
     host_gpu_ivshmem_submit_draw_ir,
     host_gpu_ivshmem_submit_draw_ir_retained
 }
+
+# Both presentation branches acknowledge only frames that still carry their
+# origin owner's valid receipt. Keeping this admission in one helper prevents
+# a rejected frame from being logged as presented by either backend.
+pub fn engine2d_wm_acknowledgment_frames(frames: [WmContentFrame]) -> [WmContentFrame]:
+    var admitted: [WmContentFrame] = []
+    for frame in frames:
+        if wm_content_frame_origin_provenance_valid(frame):
+            admitted.push(frame)
+    admitted
 
 extern fn serial_println(msg: text)
 
@@ -235,10 +245,10 @@ class Engine2dWmFrameExecutor:
                 expected_images = expected_images + 1
                 var resolved = false
                 if val frame = shared_wm_content_frame_for_window(content_frames, scene_revision, window, 28):
-                    if not wm_content_frame_web_provenance_valid(frame):
+                    if not wm_content_frame_origin_provenance_valid(frame):
                         serial_println("[wm-frame] content-provenance-rejected window_id={window.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
                     val image_uri = shared_wm_content_frame_image_uri(frame)
-                    if wm_content_frame_web_provenance_valid(frame) and image_uri != "":
+                    if wm_content_frame_origin_provenance_valid(frame) and image_uri != "":
                         var duplicate_uri = false
                         for image in images:
                             if image.image_uri == image_uri:
@@ -274,7 +284,8 @@ class Engine2dWmFrameExecutor:
             if self._render_host_gpu(composition, host_images):
                 if degraded_window_count > 0:
                     serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=host-gpu scene_revision={scene_revision}")
-                for frame in good_content_frames:
+                for frame in engine2d_wm_acknowledgment_frames(
+                        good_content_frames):
                     serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=host-gpu window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
                 return scene_revision
         if _WM_TRACE: serial_println("[wm-exec] at=present-begin")
@@ -298,6 +309,6 @@ class Engine2dWmFrameExecutor:
             return 0
         if degraded_window_count > 0 or result.skipped_command_count != 0:
             serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} scene_revision={scene_revision} reason={result.fallback_reason}")
-        for frame in good_content_frames:
+        for frame in engine2d_wm_acknowledgment_frames(good_content_frames):
             serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=software window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
         scene_revision

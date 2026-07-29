@@ -23,9 +23,10 @@ use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use common.ui.web_render_api.{
     WEB_RENDER_ENGINE2D_STATUS_RENDERED,
     WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
+    WebRenderFontProvenance,
     WebRenderMaterialFallbackProvenance
 }
-use common.ui.draw_ir.{DrawIrComposition}
+use common.ui.draw_ir.{DrawIrComposition, draw_ir_font_advance_digest}
 
 class SimpleWebLayoutEngine2DExecutionResult:
     render: Engine2dDrawIrAdvResult
@@ -42,6 +43,7 @@ class SimpleWebLayoutEngine2DExecutionResult:
     vector_font_readback_nonblank_pixels: i64
     vector_font_device_executed: bool
     vector_font_promotion_ready: bool
+    font_provenance: WebRenderFontProvenance
 
 class SimpleWebLayoutEngine2DReadbackResult:
     readback: Engine2DReadback
@@ -58,6 +60,7 @@ class SimpleWebLayoutEngine2DReadbackResult:
     vector_font_readback_nonblank_pixels: i64
     vector_font_device_executed: bool
     vector_font_promotion_ready: bool
+    font_provenance: WebRenderFontProvenance
 
 struct SimpleWebVectorFontEvidence:
     identity: text
@@ -88,10 +91,17 @@ fn _simple_web_layout_render_html_engine2d_execution(html: text, width: i32, hei
     else:
         simple_web_layout_render_html_draw_ir_result(html, width, height)
     val vector_font = _simple_web_vector_font_evidence(layout_result.composition)
+    val vector_font_layout_digest =
+        draw_ir_font_advance_digest(layout_result.composition)
     var engine = Engine2D.create_with_backend_fast(width, height, backend_name)
     engine.clear(0u32)
     val render = engine2d_draw_ir_adv_composition(engine, layout_result.composition, true)
     engine.shutdown()
+    val vector_font_execution_digest = if render.font_composition_id ==
+            layout_result.composition.composition_id:
+        render.font_advance_command_digest
+    else:
+        0
     val material_fallback = simple_web_layout_material_provenance_after_backend_execution(
         layout_result.material_witness,
         render.skipped_command_count,
@@ -117,7 +127,27 @@ fn _simple_web_layout_render_html_engine2d_execution(html: text, width: i32, hei
         vector_font_readback_nonblank_pixels:
             render.font_readback_nonblank_pixels,
         vector_font_device_executed: render.font_device_executed,
-        vector_font_promotion_ready: render.font_promotion_ready)
+        vector_font_promotion_ready: render.font_promotion_ready,
+        font_provenance: WebRenderFontProvenance(
+            identity: render.font_identity,
+            execution_target: render.font_execution_target,
+            layout_composition_id: layout_result.composition.composition_id,
+            execution_composition_id: render.font_composition_id,
+            layout_advance_digest: vector_font_layout_digest,
+            execution_advance_digest: vector_font_execution_digest,
+            batch_identity: render.font_batch_identity,
+            ordered_text_command_count:
+                render.font_ordered_text_command_count,
+            vulkan_batch_count: render.font_vulkan_batch_count,
+            vulkan_batch_digest: render.font_vulkan_batch_digest,
+            vulkan_aggregate_valid: render.font_vulkan_aggregate_valid,
+            vulkan_composition_id: render.font_vulkan_composition_id,
+            vulkan_advance_digest: render.font_vulkan_advance_digest,
+            vulkan_all_device_executed:
+                render.font_vulkan_all_device_executed,
+            vulkan_all_promotion_ready:
+                render.font_vulkan_all_promotion_ready,
+            vulkan_all_parity: render.font_vulkan_all_parity))
 
 # Render `html` to a flat ARGB [u32] framebuffer through the layout Draw IR on an
 # Engine2D in native-only fast mode. On Metal this is GPU-rendered with a
@@ -167,7 +197,8 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             vector_font_oracle_checksum: 0,
             vector_font_readback_nonblank_pixels: 0,
             vector_font_device_executed: false,
-            vector_font_promotion_ready: false
+            vector_font_promotion_ready: false,
+            font_provenance: WebRenderFontProvenance.none()
         )
     val execution = _simple_web_layout_render_html_engine2d_execution(
         html, width, height, backend_name, animation_time_ms
@@ -189,7 +220,8 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             vector_font_readback_nonblank_pixels:
                 execution.vector_font_readback_nonblank_pixels,
             vector_font_device_executed: execution.vector_font_device_executed,
-            vector_font_promotion_ready: execution.vector_font_promotion_ready
+            vector_font_promotion_ready: execution.vector_font_promotion_ready,
+            font_provenance: execution.font_provenance
         )
     val pixel_count = execution.render.pixels.len().to_i64()
     val readback = Engine2DReadback(pixels: execution.render.pixels, source: execution.render.readback_source,
@@ -208,7 +240,8 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
         vector_font_readback_nonblank_pixels:
             execution.vector_font_readback_nonblank_pixels,
         vector_font_device_executed: execution.vector_font_device_executed,
-        vector_font_promotion_ready: execution.vector_font_promotion_ready)
+        vector_font_promotion_ready: execution.vector_font_promotion_ready,
+        font_provenance: execution.font_provenance)
 
 pub fn simple_web_layout_render_html_readback_engine2d_result(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DReadbackResult:
     _simple_web_layout_render_html_readback_engine2d_result_at_time(

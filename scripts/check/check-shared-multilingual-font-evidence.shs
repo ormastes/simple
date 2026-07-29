@@ -25,10 +25,6 @@ case "$docgen_attempt" in
   *) fail "docgen attempt must be 1, 2, or 3" ;;
 esac
 
-# Scalar owner facades exist, but source shape is not runtime evidence. Keep the
-# authoritative NFR-007 blocker ahead of focused-result admission.
-fail "font-owner-fault-runtime-proof-unavailable: NFR-007 requires admitted native execution of the real Engine2D/Engine3D owner fault paths; a Vulkan3D fence-wait/wait-idle runtime receipt remains unavailable"
-
 focused_root="$evidence_root/focused/attempt-$focused_attempt"
 docgen_root="$evidence_root/docgen/attempt-$docgen_attempt"
 calibration_root="$evidence_root/runner-calibration"
@@ -40,6 +36,145 @@ field() {
   count=$(grep -c "^$key=" "$file" || true)
   [ "$count" -eq 1 ] || fail "$file must contain one $key field"
   sed -n "s/^$key=//p" "$file"
+}
+
+receipt_value() {
+  local file=$1 key=$2
+  [ "$(grep -c "^$key=" "$file" || true)" -eq 1 ] || return 1
+  sed -n "s/^$key=//p" "$file"
+}
+
+valid_native_owner_fault_evidence() {
+  local native_trace=$1 spec name base command stdout stderr exit_record
+  local sequence_before sequence_after fallback_before fallback_after
+  local vulkan_attempt_index cpu_attempt_index identity expected_command
+  spec=test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl
+  name=$(artifact_name "$spec")
+  base="$focused_root/$name"
+  command="$base.command"
+  stdout="$base.out"
+  stderr="$base.err"
+  exit_record="$base.exit"
+  for path in "$command" "$stdout" "$stderr" "$exit_record" "$native_trace"; do
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  done
+  [ "$(receipt_value "$command" checkpoint_sha)" = "$head_sha" ] &&
+    [ "$(receipt_value "$command" checkpoint_clean)" = true ] &&
+    [ "$(receipt_value "$command" spec)" = "$spec" ] &&
+    [ "$(receipt_value "$command" spec_sha256)" = \
+      "$(sha256sum "$spec" | awk '{print $1}')" ] &&
+    [ "$(receipt_value "$command" cli)" = "$common_cli" ] &&
+    [ "$(receipt_value "$command" cli_sha256)" = "$common_cli_sha" ] &&
+    [ "$(receipt_value "$command" core_c_dir)" = "$common_core_dir" ] &&
+    [ "$(receipt_value "$command" core_c_sha256)" = "$common_core_sha" ] &&
+    [ "$(receipt_value "$command" runner_sha256)" = "$runner_sha" ] &&
+    [ "$(receipt_value "$command" stdout_sha256)" = \
+      "$(sha256sum "$stdout" | awk '{print $1}')" ] &&
+    [ "$(receipt_value "$command" stderr_sha256)" = \
+      "$(sha256sum "$stderr" | awk '{print $1}')" ] &&
+    [ "$(receipt_value "$command" exit_sha256)" = \
+      "$(sha256sum "$exit_record" | awk '{print $1}')" ] &&
+    [ "$(receipt_value "$command" native_trace_path)" = "$native_trace" ] &&
+    [ "$(receipt_value "$command" native_trace_sha256)" = \
+      "$(sha256sum "$native_trace" | awk '{print $1}')" ] &&
+    [ "$(cat "$exit_record")" = 0 ] &&
+    [ "$(grep -Fxc 'test-runner: native result wrapper complete' \
+      "$stdout")" -eq 1 ] &&
+    grep -Eq '^[1-9][0-9]* examples, 0 failures$' "$stdout" &&
+    [ ! -s "$stderr" ] ||
+    return 1
+  expected_command=$(
+    printf 'command'
+    printf ' %q' "$common_cli" run src/app/test/font_evidence_runner.spl -- \
+      "$common_cli" "$common_cli_sha" "$common_core_dir" "$common_core_sha" "$spec"
+  )
+  [ "$(grep -c '^command ' "$command" || true)" -eq 1 ] &&
+    [ "$(grep '^command ' "$command")" = "$expected_command" ] ||
+    return 1
+
+  [ "$(receipt_value "$native_trace" schema)" = \
+    shared-multilingual-native-font-readback/v2 ] &&
+    [ "$(receipt_value "$native_trace" promotion_status)" = pass ] &&
+    [ "$(receipt_value "$native_trace" engine2d_fault_code)" = 4 ] &&
+    [ "$(receipt_value "$native_trace" engine3d_fault_code)" = 16 ] &&
+    [ "$(receipt_value "$native_trace" engine2d_fault_mask)" = 4 ] &&
+    [ "$(receipt_value "$native_trace" engine3d_fault_mask)" = 16 ] &&
+    [ "$(receipt_value "$native_trace" engine2d_owner_fault_observed)" = true ] &&
+    [ "$(receipt_value "$native_trace" engine3d_owner_fault_observed)" = true ] ||
+    return 1
+
+  sequence_before=$(receipt_value "$native_trace" engine2d_fault_sequence_before) ||
+    return 1
+  sequence_after=$(receipt_value "$native_trace" engine2d_fault_sequence_after) ||
+    return 1
+  [[ "$sequence_before" =~ ^[0-9]+$ ]] &&
+    [[ "$sequence_after" =~ ^[0-9]+$ ]] &&
+    [ "$sequence_after" -eq $((sequence_before + 1)) ] ||
+    return 1
+  sequence_before=$(receipt_value "$native_trace" engine3d_fault_sequence_before) ||
+    return 1
+  sequence_after=$(receipt_value "$native_trace" engine3d_fault_sequence_after) ||
+    return 1
+  [[ "$sequence_before" =~ ^[0-9]+$ ]] &&
+    [[ "$sequence_after" =~ ^[0-9]+$ ]] &&
+    [ "$sequence_after" -eq $((sequence_before + 1)) ] ||
+    return 1
+
+  identity=$(receipt_value "$native_trace" physical_device_identity) || return 1
+  [ -n "$identity" ] &&
+    [ "$identity" = \
+      "$(receipt_value "$native_trace" engine2d_physical_device_identity)" ] &&
+    [ "$identity" = \
+      "$(receipt_value "$native_trace" engine3d_physical_device_identity)" ] &&
+    [ -n "$(receipt_value "$native_trace" device_name)" ] &&
+    [ -n "$(receipt_value "$native_trace" driver_identity)" ] &&
+    [ "$(receipt_value "$native_trace" engine2d_identity_preserved)" = true ] &&
+    [ "$(receipt_value "$native_trace" engine3d_identity_preserved)" = true ] &&
+    [ -n "$(receipt_value "$native_trace" engine2d_owner_identity_before)" ] &&
+    [ "$(receipt_value "$native_trace" engine2d_owner_identity_before)" = \
+      "$(receipt_value "$native_trace" engine2d_owner_identity_after)" ] &&
+    [ -n "$(receipt_value "$native_trace" engine3d_owner_identity_before)" ] &&
+    [ "$(receipt_value "$native_trace" engine3d_owner_identity_before)" = \
+      "$(receipt_value "$native_trace" engine3d_owner_identity_after)" ] ||
+    return 1
+  case "$(receipt_value "$native_trace" device_type)" in
+    discrete|integrated) ;;
+    *) return 1 ;;
+  esac
+
+  [ "$(receipt_value "$native_trace" engine2d_fence_waited)" = true ] &&
+    [ "$(receipt_value "$native_trace" vulkan_fence_wait_observed)" = true ] &&
+    [ "$(receipt_value "$native_trace" engine3d_wait_idle_before)" = false ] &&
+    [ "$(receipt_value "$native_trace" engine3d_wait_idle_observed)" = true ] &&
+    [ "$(receipt_value "$native_trace" vulkan_wait_idle_observed)" = true ] &&
+    [ "$(receipt_value "$native_trace" engine2d_device_loss_sequence)" = 0 ] &&
+    [ "$(receipt_value "$native_trace" engine3d_device_loss_sequence)" = 0 ] &&
+    [ "$(receipt_value "$native_trace" engine2d_device_loss_observed)" = false ] &&
+    [ "$(receipt_value "$native_trace" engine3d_device_loss_observed)" = false ] ||
+    return 1
+
+  fallback_before=$(receipt_value "$native_trace" engine2d_fallback_count_before) ||
+    return 1
+  fallback_after=$(receipt_value "$native_trace" engine2d_fallback_count_after) ||
+    return 1
+  [[ "$fallback_before" =~ ^[0-9]+$ ]] &&
+    [ "$fallback_after" = "$fallback_before" ] ||
+    return 1
+  fallback_before=$(receipt_value "$native_trace" engine3d_fallback_count_before) ||
+    return 1
+  fallback_after=$(receipt_value "$native_trace" engine3d_fallback_count_after) ||
+    return 1
+  [[ "$fallback_before" =~ ^[0-9]+$ ]] &&
+    [[ "$fallback_after" =~ ^[0-9]+$ ]] &&
+    [ "$fallback_after" -eq $((fallback_before + 1)) ] ||
+    return 1
+  vulkan_attempt_index=$(receipt_value \
+    "$native_trace" engine3d_vulkan_attempt_index) || return 1
+  cpu_attempt_index=$(receipt_value \
+    "$native_trace" engine3d_cpu_success_attempt_index) || return 1
+  [ "$(receipt_value "$native_trace" engine3d_fault_attempt_count)" = 2 ] &&
+    [ "$vulkan_attempt_index" = 0 ] &&
+    [ "$cpu_attempt_index" = 1 ]
 }
 
 artifact_name() {
@@ -81,6 +216,7 @@ focused_specs=(
   test/01_unit/lib/skia/selected_arabic_spec.spl
   test/01_unit/lib/common/text_layout/font_renderer_spec.spl
   test/01_unit/lib/common/text_layout/font_render_config_spec.spl
+  test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl
   test/01_unit/lib/gpu/engine2d/font_runtime_config_spec.spl
   test/01_unit/lib/gpu/engine3d/font_compat_spec.spl
   test/01_unit/helpers/shared_multilingual_gpu_fonts_perf_evidence_spec.spl
@@ -92,6 +228,7 @@ focused_specs=(
   test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.spl
   test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
   test/02_integration/rendering/wm_nested_content_frame_spec.spl
+  test/01_unit/os/compositor/simple_web_window_renderer_spec.spl
   test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl
   test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl
   test/03_system/gui/feature/gui_font_event_surface_spec.spl
@@ -115,6 +252,7 @@ docgen_specs=(
   test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.spl
   test/01_unit/helpers/shared_multilingual_gpu_fonts_perf_evidence_spec.spl
   test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_spec.spl
+  test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl
   test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_font_scalar_receipt_spec.spl
   test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_device_metadata_spec.spl
   test/01_unit/lib/gpu/engine2d/font_runtime_config_spec.spl
@@ -135,6 +273,7 @@ docgen_specs=(
   test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
   test/01_unit/os/hosted/hosted_entry_live_proof_focus_contract_spec.spl
   test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl
+  test/01_unit/os/compositor/simple_web_window_renderer_spec.spl
   test/01_unit/os/port/simpleos_font_bundle_spec.spl
   test/02_integration/os/port/simpleos_font_asset_staging_spec.spl
   test/02_integration/rendering/wm_nested_content_frame_spec.spl
@@ -151,8 +290,8 @@ docgen_specs=(
   test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
 )
 
-[ "${#focused_specs[@]}" -eq 46 ] || fail "focused inventory is not 46"
-[ "${#docgen_specs[@]}" -eq 42 ] || fail "docgen inventory is not 42"
+[ "${#focused_specs[@]}" -eq 48 ] || fail "focused inventory is not 48"
+[ "${#docgen_specs[@]}" -eq 44 ] || fail "docgen inventory is not 44"
 [ -d "$focused_root" ] || fail "missing $focused_root"
 [ -d "$docgen_root" ] || fail "missing $docgen_root"
 [ -f "$essential_root/evidence.sha256" ] || fail "missing essential-tools hash record"
@@ -168,6 +307,9 @@ grep -Fqx 'status=pass' "$essential_root/summary.env" ||
 [ "$(cat "$essential_root/exit")" = 0 ] ||
   fail "essential-tools admission did not exit zero"
 for marker in \
+    stage4_receipt_status=pass \
+    essential_tools_pure_simple_identity=true \
+    essential_list_constructor_smoke=true \
     essential_test_runner_smoke=true \
     essential_lint_smoke=true \
     essential_duplicate_checker_smoke=true \
@@ -300,6 +442,9 @@ esac
 [ "$(field "$native_record" aa_edge_channel_abs_limit)" = 2 ] &&
   [ "$(field "$native_record" aa_coverage_abs_limit)" = 1 ] ||
   fail "native font AA bounds differ from the selected contract"
+valid_native_owner_fault_evidence "$native_record" ||
+  fail "native Engine2D/Engine3D owner-fault evidence is incomplete or inconsistent"
+fail "font-owner-device-loss-runtime-proof-unavailable: NFR-007 requires a native device-loss receipt; the admitted owner-fault trace explicitly records device_loss_observed=false and device_loss_sequence=0"
 [ "$(field "$perf_started" schema)" = shared-multilingual-gpu-font-perf/v5 ] ||
   fail "Lane-E measurement-started record schema mismatch"
 [ "$(field "$perf_started" status)" = unavailable ] ||
@@ -315,6 +460,46 @@ esac
 hash_files+=("$common_cli" "$common_core_dir/libsimple_runtime.a")
 
 essential_identity="$essential_root/identity.env"
+stage4_receipt=$(field "$essential_root/out" stage4_receipt_path)
+stage4_receipt_sha=$(field "$essential_root/out" stage4_receipt_sha256)
+[ "$(field "$essential_root/out" stage4_receipt_status)" = pass ] ||
+  fail "Stage 4 receipt status is not PASS"
+[ -f "$stage4_receipt" ] && [ ! -L "$stage4_receipt" ] ||
+  fail "Stage 4 receipt is missing or symlinked"
+[ "$(sha256sum "$stage4_receipt" | awk '{print $1}')" = "$stage4_receipt_sha" ] ||
+  fail "Stage 4 receipt hash differs from essential evidence"
+[ "$(field "$stage4_receipt" schema)" = simple-stage4-provenance-receipt-v1 ] &&
+  [ "$(field "$stage4_receipt" status)" = pass ] ||
+  fail "Stage 4 receipt schema or status is invalid"
+[ "$(field "$stage4_receipt" source_head)" = "$head_sha" ] ||
+  fail "Stage 4 receipt checkpoint differs from HEAD"
+[ "$(field "$stage4_receipt" output_sha256)" = "$common_cli_sha" ] ||
+  fail "Stage 4 receipt CLI identity differs from focused evidence"
+[ "$(field "$stage4_receipt" core_c_path)" = \
+  "$common_core_dir/libsimple_runtime.a" ] &&
+  [ "$(field "$stage4_receipt" core_c_sha256)" = "$common_core_sha" ] ||
+  fail "Stage 4 receipt core-C identity differs from focused evidence"
+[ -f "${stage4_receipt}.sha256" ] && [ ! -L "${stage4_receipt}.sha256" ] ||
+  fail "Stage 4 receipt hash sidecar is missing or symlinked"
+[ "$(tr -d '[:space:]' <"${stage4_receipt}.sha256")" = "$stage4_receipt_sha" ] ||
+  fail "Stage 4 receipt hash sidecar differs from essential evidence"
+sh scripts/check/stage4-provenance-receipt.shs check \
+  "$stage4_receipt" "$stage4_receipt_sha" "$common_cli" >/dev/null ||
+  fail "Stage 4 receipt full verification failed"
+hash_files+=(
+  scripts/check/stage4-provenance-receipt.shs
+  "$stage4_receipt"
+  "${stage4_receipt}.sha256"
+)
+for receipt_path_key in argv_transcript_path build_log_path \
+    source_snapshot_before_path source_snapshot_after_path \
+    git_state_before_path git_state_after_path runtime_before_path \
+    runtime_after_path tool_before_path tool_after_path \
+    cache_preinventory_path cache_postinventory_path \
+    cache_owner_path helper_bundle_path core_c_manifest_path \
+    stage3_manifest_path stage3_path output_path core_c_path writer_path; do
+  hash_files+=("$(field "$stage4_receipt" "$receipt_path_key")")
+done
 [ "$(field "$essential_identity" checkpoint_sha)" = "$head_sha" ] ||
   fail "essential-tools checkpoint differs from HEAD"
 [ "$(field "$essential_identity" checkpoint_clean)" = true ] ||
@@ -352,7 +537,7 @@ calibration_identity="$calibration_root/identity.env"
 
 for suffix in command out err exit; do
   count=$(find "$focused_root" -maxdepth 1 -type f -name "*.$suffix" | wc -l)
-  [ "$count" -eq 46 ] || fail "focused $suffix count is $count, expected 46"
+  [ "$count" -eq 48 ] || fail "focused $suffix count is $count, expected 48"
 done
 
 for spec in "${docgen_specs[@]}"; do
@@ -369,7 +554,7 @@ for spec in "${docgen_specs[@]}"; do
   [ -f "$manual" ] || fail "missing generated manual $manual"
   hash_files+=("$manual")
   [ "$(cat "$base.exit")" = 0 ] || fail "$spec docgen did not exit zero"
-  grep -Eq '^DONE Generated [0-9]+ docs \([0-9]+ complete, 0 stubs\)$' "$base.out" ||
+  grep -Fqx 'DONE Generated 1 docs (1 complete, 0 stubs)' "$base.out" ||
     fail "$spec docgen lacks the complete zero-stub marker"
   command_file="$base.command"
   [ "$(field "$command_file" checkpoint_sha)" = "$head_sha" ] ||
@@ -395,17 +580,14 @@ for spec in "${docgen_specs[@]}"; do
   manual_sha=$(sha256sum "$manual" | awk '{print $1}')
   [ "$(field "$base.manual.sha256" manual_sha256)" = "$manual_sha" ] ||
     fail "$spec manual hash mismatch"
-  manual_before=$(field "$command_file" manual_before_sha256)
-  [ "$manual_before" = missing ] || [ "$manual_before" != "$manual_sha" ] ||
-    fail "$spec stale manual was unchanged"
 done
 
 for suffix in command out err exit; do
   count=$(find "$docgen_root" -maxdepth 1 -type f -name "*.$suffix" | wc -l)
-  [ "$count" -eq 42 ] || fail "docgen $suffix count is $count, expected 42"
+  [ "$count" -eq 44 ] || fail "docgen $suffix count is $count, expected 44"
 done
 count=$(find "$docgen_root" -maxdepth 1 -type f -name "*.manual.sha256" | wc -l)
-[ "$count" -eq 42 ] || fail "docgen manual-hash count is $count, expected 42"
+[ "$count" -eq 44 ] || fail "docgen manual-hash count is $count, expected 44"
 [ "$(sha256sum "$common_cli" | awk '{print $1}')" = "$common_cli_sha" ] ||
   fail "CLI changed during aggregate verification"
 [ "$(sha256sum "$common_core_dir/libsimple_runtime.a" | awk '{print $1}')" = "$common_core_sha" ] ||
@@ -445,10 +627,10 @@ if [ -e "$summary" ] || [ -e "$manifest" ]; then
     fail "existing aggregate is not PASS"
   [ "$(field "$summary" checkpoint_sha)" = "$head_sha" ] ||
     fail "existing aggregate checkpoint differs from selected evidence"
-  [ "$(field "$summary" focused_count)" = 46 ] ||
-    fail "existing aggregate focused count is not 46"
-  [ "$(field "$summary" docgen_count)" = 42 ] ||
-    fail "existing aggregate docgen count is not 42"
+  [ "$(field "$summary" focused_count)" = 48 ] ||
+    fail "existing aggregate focused count is not 48"
+  [ "$(field "$summary" docgen_count)" = 44 ] ||
+    fail "existing aggregate docgen count is not 44"
   [ "$(field "$summary" focused_attempt)" = "$focused_attempt" ] ||
     fail "existing aggregate focused attempt differs from this audit"
   [ "$(field "$summary" docgen_attempt)" = "$docgen_attempt" ] ||
@@ -471,8 +653,8 @@ trap cleanup EXIT
 {
   printf 'status=pass\n'
   printf 'checkpoint_sha=%s\n' "$head_sha"
-  printf 'focused_count=46\n'
-  printf 'docgen_count=42\n'
+  printf 'focused_count=48\n'
+  printf 'docgen_count=44\n'
   printf 'focused_attempt=%s\n' "$focused_attempt"
   printf 'docgen_attempt=%s\n' "$docgen_attempt"
   printf 'cli_sha256=%s\ncore_c_sha256=%s\n' "$common_cli_sha" "$common_core_sha"

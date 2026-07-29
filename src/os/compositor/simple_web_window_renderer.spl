@@ -4,7 +4,7 @@
 # canonical Simple Web renderer and then blitting pixels to CompositorBackend.
 
 use os.compositor.display_backend_core.{CompositorBackend}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderRequest, web_render_full_html}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderFontProvenance, WebRenderRequest, web_render_full_html}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_checksum}
 use nogc_sync_mut.ui.theme_package.{default_theme_id, resolved_theme_css, resolve_theme_alias, theme_package_fingerprint, theme_package_material_solid_fallback_rgba, theme_package_material_text_rgba}
 use common.ui.wm_chrome_theme.{
@@ -187,7 +187,9 @@ fn simple_web_external_content_frame(
     cpu_composited_count: i32,
     cpu_composited_sha256: text,
     solid_material_count: i32,
-    solid_material_sha256: text
+    solid_material_sha256: text,
+    font_layout_composition_id: text,
+    font_layout_advance_digest: i64
 ) -> WmContentFrame:
     if (window_id == "" or content_revision <= 0 or width <= 0 or height <= 0 or
         render.fallback_required or render.skipped_command_count != 0 or
@@ -229,6 +231,12 @@ fn simple_web_external_content_frame(
         installed_fingerprint
     else:
         theme_package_fingerprint(theme)
+    val checksum = wm_content_frame_checksum(render.pixels)
+    val font_execution_advance_digest = if render.font_composition_id ==
+            font_layout_composition_id:
+        render.font_advance_command_digest
+    else:
+        0
     WmContentFrame(
         window_id: window_id,
         scene_revision: 0,
@@ -237,7 +245,7 @@ fn simple_web_external_content_frame(
         width: width,
         height: height,
         pixels: render.pixels,
-        checksum: wm_content_frame_checksum(render.pixels),
+        checksum: checksum,
         parent_window_id: "",
         offset_x: 0,
         offset_y: 0,
@@ -251,7 +259,27 @@ fn simple_web_external_content_frame(
         material_fallback_reason: material.reason,
         material_fallback_sha256: material.material_sha256,
         theme_id: theme,
-        theme_source_manifest_sha256: theme_fingerprint
+        theme_source_manifest_sha256: theme_fingerprint,
+        font_provenance: WebRenderFontProvenance(
+            identity: render.font_identity,
+            execution_target: render.font_execution_target,
+            layout_composition_id: font_layout_composition_id,
+            execution_composition_id: render.font_composition_id,
+            layout_advance_digest: font_layout_advance_digest,
+            execution_advance_digest: font_execution_advance_digest,
+            batch_identity: render.font_batch_identity,
+            ordered_text_command_count:
+                render.font_ordered_text_command_count,
+            vulkan_batch_count: render.font_vulkan_batch_count,
+            vulkan_batch_digest: render.font_vulkan_batch_digest,
+            vulkan_aggregate_valid: render.font_vulkan_aggregate_valid,
+            vulkan_composition_id: render.font_vulkan_composition_id,
+            vulkan_advance_digest: render.font_vulkan_advance_digest,
+            vulkan_all_device_executed:
+                render.font_vulkan_all_device_executed,
+            vulkan_all_promotion_ready:
+                render.font_vulkan_all_promotion_ready,
+            vulkan_all_parity: render.font_vulkan_all_parity)
     )
 
 # Slices the `ch`-tall visible window starting at row `scroll_y` out of a
@@ -332,6 +360,7 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
             # provenance gate downstream. Attributes the loss to the artifact
             # TRANSIT when the producer-side digest receipt stayed silent.
             print "[wm-content] material-sha-degenerate kind={material_kind} sha_len={material_sha.len()}"
+    val checksum = wm_content_frame_checksum(visible)
     WmContentFrame(
         window_id: window_id,
         scene_revision: scene_revision,
@@ -340,7 +369,7 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
         width: width,
         height: height,
         pixels: visible,
-        checksum: wm_content_frame_checksum(visible),
+        checksum: checksum,
         parent_window_id: parent_window_id,
         offset_x: offset_x,
         offset_y: offset_y,
@@ -351,7 +380,8 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
         material_fallback_reason: artifact.material_fallback.reason,
         material_fallback_sha256: artifact.material_fallback.material_sha256,
         theme_id: theme,
-        theme_source_manifest_sha256: theme_fingerprint
+        theme_source_manifest_sha256: theme_fingerprint,
+        font_provenance: artifact.font_provenance
     )
 
 # Production Simple Web -> shared-WM content adapter. `body_html` is the
