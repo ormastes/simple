@@ -20,17 +20,26 @@
 # Freestanding-safe: pure text scanning, no fs/env/allocator-heavy imports,
 # so this module can be pulled into the in-guest/baremetal build too.
 #
-# Design note (in-guest consumption, not wired this pass): once the guest
-# VFS/module-init path is stable, the boot sequence would read a well-known
-# path (e.g. /theme.css) off the mounted FAT32 disk after mount, pass its
-# text straight to wm_chrome_colors_from_css_text(), and
-# register_wm_chrome_theme() the result — the exact same two calls the host
-# lane below makes from SIMPLE_WM_THEME_FILE. Not wired here because the
-# guest module-init and VFS read-before-mount ordering are still landmines
-# tracked separately; the host lane (this pass) exercises the parser and
-# bridge end-to-end so the in-guest wiring is a pure plumbing change later.
+# Design note (2026-07-29, lane F2 — host-side wiring landed): the reusable
+# lazy-apply entry point is apply_wm_css_theme_text() below — call it AFTER
+# fs/VFS is available (e.g. after SIMPLE_WM_THEME_FILE is read on the hosted
+# hosted_entry.spl path, or after a mounted /THEME.CSS is read on the guest
+# freestanding path), never at module init. It only calls
+# register_wm_chrome_theme() when at least one of the 6 tokens actually
+# parsed; empty/garbage CSS text is a no-op, so whatever chrome theme was
+# already installed (defaults, or an earlier package/snapshot install)
+# survives untouched — see simpleos_wm_theme_bootstrap.spl's
+# apply_simpleos_css_theme_override() for the guest-side call point this
+# hands off to.
+#
+# Still open: no caller reads SIMPLE_WM_THEME_FILE (hosted) or a mounted
+# /THEME.CSS (guest) and feeds this function yet — that requires fs/env
+# access this module deliberately does not have (freestanding-safety, see
+# below), and for the guest specifically the VFS read-before-mount ordering
+# landmine referenced below. Tracked in
+# doc/08_tracking/bug/wm_theme_css_loaded_not_applied_2026-07-20.md.
 
-use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_colors_from_gui_tokens}
+use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_colors_from_gui_tokens, register_wm_chrome_theme}
 
 # Unique `wtc_` field prefix dodges the most-fields-wins struct-inference
 # landmine when multiple small text-only structs are in scope.
@@ -178,3 +187,47 @@ fn wm_chrome_colors_from_css_text(content: text) -> WmChromeColors:
         tokens.wtc_surface,
         tokens.wtc_surface_hover,
         tokens.wtc_error)
+
+fn _wm_theme_tokens_all_absent(tokens: WmThemeCssTokens) -> bool:
+    if tokens.wtc_bg != "":
+        return false
+    if tokens.wtc_fg != "":
+        return false
+    if tokens.wtc_accent != "":
+        return false
+    if tokens.wtc_surface != "":
+        return false
+    if tokens.wtc_surface_hover != "":
+        return false
+    if tokens.wtc_error != "":
+        return false
+    true
+
+fn apply_wm_css_theme_text(content: text) -> bool:
+    """Lazy wiring point: parse `content` (a loaded .css or .html theme
+    file's text) and, if at least one of the 6 --wm-* tokens parsed,
+    install the resulting palette via register_wm_chrome_theme() so every
+    chrome pipeline (wm_chrome_theme()) picks it up on the next scene
+    projection. Returns true when a theme was installed.
+
+    Fallback contract: if none of the 6 tokens parse (content is empty,
+    garbage, or has no recognizable --wm-* declarations at all), this is a
+    no-op and returns false — the currently active chrome palette (byte-
+    identical defaults, or whatever was registered before this call, e.g. a
+    generated/package theme snapshot) is left untouched rather than being
+    overwritten with an all-default WmChromeColors.
+
+    Callers MUST invoke this only once fs/VFS access is available (after
+    mount, never at module init) — see the design note atop this file."""
+    val tokens = wm_theme_tokens_from_html(content)
+    if _wm_theme_tokens_all_absent(tokens):
+        return false
+    val colors = wm_chrome_colors_from_gui_tokens(
+        tokens.wtc_bg,
+        tokens.wtc_fg,
+        tokens.wtc_accent,
+        tokens.wtc_surface,
+        tokens.wtc_surface_hover,
+        tokens.wtc_error)
+    register_wm_chrome_theme(colors)
+    true
