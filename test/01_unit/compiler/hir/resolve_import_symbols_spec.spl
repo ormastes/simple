@@ -197,6 +197,25 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(hir.symbols.lookup("facade_answer").?).to_equal(true)
         expect(lowering.errors.len()).to_equal(0)
 
+    it "glob import traverses an exported facade star import with own symbols":
+        val log = make_logger()
+        val leaf = parse_full_frontend("struct FacadeType:\n    value: i64\npub fn facade_answer() -> i64:\n    42", "leaf", "leaf", log)
+        val facade = parse_full_frontend("export use leaf.*\nstruct FacadeOwn:\n    value: i64", "facade", "facade", log)
+        val consumer = parse_full_frontend("use facade.*\nfn main() -> i64:\n    facade_answer()", "facade_consumer", "facade_consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["leaf"] = leaf
+        modules["facade"] = facade
+        var lowering = HirLowering.with_filename("facade_consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(facade.exports.len()).to_equal(1)
+        expect(facade.exports[0].items).to_equal(["leaf.*"])
+        expect(hir.symbols.lookup("FacadeType").?).to_equal(true)
+        expect(hir.symbols.lookup("facade_answer").?).to_equal(true)
+        expect(hir.symbols.lookup("FacadeOwn").?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
     it "glob import bounds a cyclic diamond facade traversal":
         val log = make_logger()
         val leaf = parse_full_frontend("pub fn shared_answer() -> i64:\n    42", "graph.leaf", "graph.leaf", log)
