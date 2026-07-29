@@ -681,3 +681,187 @@ inferred.
    alias.
 3. **Interpreter `keys()` order is nondeterministic run to run** — the same
    binary flips `a`/`b`. Any spec asserting key order is flaky.
+
+# Re-measurement — 2026-07-29
+
+Fresh measurement against a binary built from scratch today, after "many fixes
+landed" per the task brief (array `index_of`, `first`/`last`/`pop`, `to_upper`,
+`strip`, `enumerate`, `parse_int`, `text.lines`, dict integer keys/values,
+array-to-string formatting, `Dict.insert`, enum associated fns, plus the
+lambda-demotion stopgap `8b72b34f005` — "fix(jit): refuse to compile
+lambda-containing modules -- the closure ABI is wrong"). Same 60-probe corpus,
+same probe names, so this diffs cleanly against both prior sections.
+
+## Binary under test
+
+| | |
+|---|---|
+| Command | `cd src/compiler_rust && cargo build -p simple-driver` |
+| Binary | `/home/ormastes/dev/pub/simple/src/compiler_rust/target/debug/simple` |
+| mtime | **2026-07-29 02:55:53.500 +0000** |
+| Size | 481,205,552 bytes |
+
+`src/compiler_rust/` has heavy concurrent edits from other sessions (the build
+itself blocked briefly on another session's cargo lock; a stray `nohup` build
+was killed and restarted cleanly). The binary above is the artifact every probe
+in this section actually ran against — driver invocation:
+
+```sh
+ROOT=/home/ormastes/dev/pub/simple
+PROBE_BIN=$ROOT/src/compiler_rust/target/debug/simple \
+PROBE_OUTDIR=$ROOT/build/probe_divergence/fast_0729 \
+PROBE_RESULTS=$ROOT/build/probe_divergence/fast_results_0729.tsv \
+  sh build/probe_divergence/fast_driver.shs
+```
+
+`fast_driver.shs` still works unmodified — it already takes `PROBE_BIN` (fixed
+in the prior re-measurement) and already tags a bailout-detected value with
+`<via-jit-bailout>` in its own output, which is what caught the four
+lambda-demotion probes below without any extra scripting.
+
+## JIT-compiled vs demoted — `SIMPLE_JIT_TRACE_ADDR=1` audit
+
+Per the task's method rule, every probe was re-run a second time with
+`SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_TRACE_ADDR=1` to check for a `[jit-addr]`
+line (real Cranelift compile) versus its absence (demotion to the interpreter,
+whether or not it also printed `JIT compilation failed`).
+
+**56 of 60 probes show `[jit-addr] probe_all ...` and `[jit-addr] main ...`** —
+real JIT compiles, including `dict_get_or_present`, `dict_get_or_absent`,
+`dict_insert_then_keys`, `text_lines_len`, and `text_parse_int` (all
+independently confirmed with the marker present).
+
+**4 probes have no `[jit-addr]` marker at all: `arr_map`, `arr_filter`,
+`arr_any`, `arr_all`.** These are exactly the lambda-taking probes, and they
+match the `<via-jit-bailout>` tag `fast_driver.shs` already attached from
+grepping `JIT compilation failed` in their logs. This is the
+`8b72b34f005` stopgap guard working as designed: the whole module demotes to
+the interpreter rather than miscompiling the closure ABI. **They are AGREE, but
+AGREE-via-demotion — the JIT never ran on these four, so the JIT builtin itself
+remains unverified for `map`/`filter`/`any`/`all`.**
+
+## Totals
+
+| Verdict | 07-28 orig | 07-28 re-measured | **07-29 (this run)** | Δ vs 07-28 re-measured |
+|---|---|---|---|---|
+| AGREE (table verdict) | 31 | 51 | **58** | +7 |
+| — of which AGREE-via-demotion (not real JIT) | 0 | 0 (arr_map/filter/any/all were DISAGREE then) | **4** | +4 |
+| — of which AGREE-on-actual-JIT | 31 | 51 | **54** | +3 |
+| DISAGREE | 18 | 9 | **2** | −7 |
+| UNMEASURED on JIT | 11 | 0 | **0** | 0 |
+
+By receiver: array **0 DISAGREE / 27** (4 AGREE-via-demotion), dict **2
+DISAGREE / 11**, text **0 DISAGREE / 22**.
+
+## Full table
+
+| Probe | Recv | JIT (`run`) | Interp (`test`) | Verdict |
+|---|---|---|---|---|
+| `arr_len` | array | `3` | `3` | AGREE |
+| `arr_index_of_first` | array | `0` | `0` | AGREE |
+| `arr_index_of_mid` | array | `1` | `1` | AGREE |
+| `arr_index_of_last` | array | `2` | `2` | AGREE |
+| `arr_index_of_absent` | array | `-1` | `-1` | AGREE |
+| `arr_index_of_empty` | array | `-1` | `-1` | AGREE |
+| `arr_index_of_text` | array | `2` | `2` | AGREE |
+| `arr_contains_yes` | array | `true` | `true` | AGREE |
+| `arr_contains_no` | array | `false` | `false` | AGREE |
+| `arr_contains_text` | array | `true` | `true` | AGREE |
+| `arr_push_len` | array | `3` | `3` | AGREE |
+| `arr_push_last` | array | `3` | `3` | AGREE |
+| `arr_enumerate_len` | array | `3` | `3` | AGREE |
+| `arr_index0` | array | `10` | `10` | AGREE |
+| `arr_index_last` | array | `30` | `30` | AGREE |
+| `arr_first` | array | `10` | `10` | AGREE |
+| `arr_last` | array | `30` | `30` | AGREE |
+| `arr_pop` | array | `3` | `3` | AGREE |
+| `arr_reverse` | array | `30` | `30` | AGREE |
+| `arr_sort` | array | `10` | `10` | AGREE |
+| `arr_join` | array | `a-b` | `a-b` | AGREE |
+| `arr_slice` | array | `2` | `2` | AGREE |
+| `arr_is_empty` | array | `true` | `true` | AGREE |
+| `arr_map` | array | `2` (`<via-jit-bailout>`, no `[jit-addr]`) | `2` | AGREE-via-demotion |
+| `arr_filter` | array | `2` (`<via-jit-bailout>`, no `[jit-addr]`) | `2` | AGREE-via-demotion |
+| `arr_any` | array | `true` (`<via-jit-bailout>`, no `[jit-addr]`) | `true` | AGREE-via-demotion |
+| `arr_all` | array | `true` (`<via-jit-bailout>`, no `[jit-addr]`) | `true` | AGREE-via-demotion |
+| `dict_keys_len` | dict | `2` | `2` | AGREE |
+| `dict_values_len` | dict | `2` | `2` | AGREE |
+| `dict_contains_key_yes` | dict | `true` | `true` | AGREE |
+| `dict_contains_key_no` | dict | `false` | `false` | AGREE |
+| `dict_get_or_present` | dict | `error` (stderr `Runtime error: Function 'Dict.get_or' not found`, exit 0, `[jit-addr]` present) | `1` | **DISAGREE** |
+| `dict_get_or_absent` | dict | `error` (stderr `Runtime error: Function 'Dict.get_or' not found`, exit 0, `[jit-addr]` present) | `-7` | **DISAGREE** |
+| `dict_index_read` | dict | `2` | `2` | AGREE |
+| `dict_len` | dict | `2` | `2` | AGREE |
+| `dict_insert_then_keys` | dict | `2` | `2` | AGREE |
+| `dict_index_write` | dict | `2` | `2` | AGREE |
+| `dict_get` | dict | `1` | `1` | AGREE |
+| `text_len` | text | `11` | `11` | AGREE |
+| `text_contains_yes` | text | `true` | `true` | AGREE |
+| `text_contains_no` | text | `false` | `false` | AGREE |
+| `text_index_of_present` | text | `2` | `2` | AGREE |
+| `text_index_of_first` | text | `0` | `0` | AGREE |
+| `text_index_of_absent` | text | `-1` | `-1` | AGREE |
+| `text_substring` | text | `hello` | `hello` | AGREE |
+| `text_slice` | text | `hello` | `hello` | AGREE |
+| `text_starts_with` | text | `true` | `true` | AGREE |
+| `text_ends_with` | text | `true` | `true` | AGREE |
+| `text_replace` | text | `hello there` | `hello there` | AGREE |
+| `text_split_len` | text | `2` | `2` | AGREE |
+| `text_strip` | text | `pad` | `pad` | AGREE |
+| `text_to_upper` | text | `HELLO` | `HELLO` | AGREE |
+| `text_to_lower` | text | `abc` | `abc` | AGREE |
+| `text_char_code_at` | text | `104` | `104` | AGREE |
+| `text_lines_len` | text | `3` | `3` | AGREE |
+| `text_char_at` | text | `e` | `e` | AGREE |
+| `text_find_str` | text | `2` | `2` | AGREE |
+| `text_rfind` | text | `3` | `3` | AGREE |
+| `text_parse_int` | text | `42` | `42` | AGREE |
+| `text_to_string` | text | `hi` | `hi` | AGREE |
+
+## (a) Newly-AGREE since the 2026-07-28 re-measurement — 7 probes
+
+| Probe | Was (07-28 re-measured) | Now | Mechanism |
+|---|---|---|---|
+| `arr_map` | DISAGREE (`3` wrong value, exit 0) | AGREE-via-demotion | lambda-demotion guard `8b72b34f005`; JIT never compiles it |
+| `arr_filter` | DISAGREE (`0`, silent wrong value) | AGREE-via-demotion | same |
+| `arr_any` | DISAGREE (`nil`) | AGREE-via-demotion | same |
+| `arr_all` | DISAGREE (`nil`) | AGREE-via-demotion | same |
+| `dict_insert_then_keys` | DISAGREE (`1`, `Dict.insert` not found) | **AGREE (real JIT fix)** | `Dict.insert` dispatch landed; `[jit-addr]` confirmed |
+| `text_lines_len` | DISAGREE (`-1`, `str.lines` not found) | **AGREE (real JIT fix)** | `text.lines` landed; `[jit-addr]` confirmed |
+| `text_parse_int` | DISAGREE (float-formatted `0`) | **AGREE (real JIT fix)** | `parse_int` fix landed; `[jit-addr]` confirmed |
+
+Only 3 of these 7 (`dict_insert_then_keys`, `text_lines_len`, `text_parse_int`)
+are confirmed fixes on the JIT itself. The other 4 (`arr_map/filter/any/all`)
+read as fixed in the verdict column but are masked by demotion, not fixed in
+the JIT builtin dispatch — see the audit above.
+
+## (b) Still DISAGREE — 2 probes
+
+| Probe | JIT | Interp | Note |
+|---|---|---|---|
+| `dict_get_or_present` | `error` | `1` | `Dict.get_or` still unrouted; `[jit-addr]` confirms the JIT compiled the module and hit a missing-function runtime error, exit 0 — this is the task's known-still-open item, confirmed present |
+| `dict_get_or_absent` | `error` | `-7` | same missing symbol, `Dict.get_or` |
+
+Both are the same root cause as the fixed `Dict.insert` case in (a): a missing
+dispatch arm, not a compile failure. `Dict.get_or` is the one remaining unrouted
+`Dict.*` method in this corpus.
+
+## (c) Newly DISAGREE — 0 probes (no regression found)
+
+Checked deliberately, per the task brief. Every probe in the 07-28 re-measured
+AGREE set (51 probes) is still AGREE today; the two 07-29 DISAGREE probes
+(`dict_get_or_present`, `dict_get_or_absent`) were **already** DISAGREE in the
+07-28 re-measurement, not new. **Zero `AGREE → DISAGREE` transitions.** No
+regression to report for this run.
+
+## Artifacts
+
+| | |
+|---|---|
+| Results TSV | `build/probe_divergence/fast_results_0729.tsv` |
+| Per-probe logs (value capture) | `build/probe_divergence/fast_0729/{j,i}_<name>.log` |
+| Per-probe logs (`[jit-addr]` audit, `SIMPLE_JIT_TRACE_ADDR=1`) | `build/probe_divergence/jit_trace_0729/j_<name>.log` |
+| Corpus | `build/probe_divergence/cases.txt` (unchanged, 60 cases) |
+| Driver | `build/probe_divergence/fast_driver.shs` (unchanged, still correct) |
+
+All prior sections and artifacts are left in place.

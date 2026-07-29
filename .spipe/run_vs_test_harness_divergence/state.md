@@ -109,3 +109,15 @@ follow-up — it is the mechanism behind all 3 regressions. Full table + three
 groups: `doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`
 § "Re-measurement". `fast_driver.shs` gained a `PROBE_BIN` override; it had
 hardcoded the stale deployed `bin/simple`.
+
+## Re-measurement 2026-07-29 (measurement only, no fixes)
+Same 60-probe corpus on a fresh `target/debug/simple` build (mtime 2026-07-29
+02:55:53): **58 AGREE / 2 DISAGREE / 0 UNMEASURED**, of which 4 AGREE rows
+(`arr_map`/`filter`/`any`/`all`) are AGREE-via-demotion (`8b72b34f005` lambda
+guard — no `[jit-addr]`, JIT never ran), so AGREE-on-actual-JIT is 54. The 3
+prior "regressions" are now 1: `dict_insert_then_keys` and `text_lines_len` and
+`text_parse_int` are real fixes (confirmed `[jit-addr]`); `dict_get_or_present`
+/`dict_get_or_absent` remain DISAGREE — `Dict.get_or` is still unrouted, same
+symptom as before. **Zero new `AGREE→DISAGREE` regressions.** Full table:
+`doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`
+§ "Re-measurement — 2026-07-29".
