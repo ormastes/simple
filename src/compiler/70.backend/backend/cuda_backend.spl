@@ -82,6 +82,7 @@ class CudaBackend:
     # Struct(SymbolId)/Enum(SymbolId) instead of hitting the legacy 8-byte
     # WARN fallback. Empty until compile() runs (matches function_signatures).
     type_defs: Dict<SymbolId, MirTypeDef>
+    pointer_spaces: Dict<i64, MemorySpace>
 
     static fn create(compute_cap: (i64, i64)) -> CudaBackend:
         """Create CUDA backend for specific compute capability."""
@@ -92,7 +93,8 @@ class CudaBackend:
             compute_capability: compute_cap,
             options: opts,
             function_signatures: {},
-            type_defs: {}
+            type_defs: {},
+            pointer_spaces: {}
         )
 
     static fn create_with_options(compute_cap: (i64, i64), opts: CompileOptions) -> CudaBackend:
@@ -102,7 +104,8 @@ class CudaBackend:
             compute_capability: compute_cap,
             options: opts,
             function_signatures: {},
-            type_defs: {}
+            type_defs: {},
+            pointer_spaces: {}
         )
 
     static fn for_target(target: CodegenTarget) -> Result<CudaBackend, CompileError>:
@@ -133,8 +136,8 @@ class CudaBackend:
         # destructuring FuncPtr payloads inside a nested MirOperand match. The
         # bootstrap interpreter currently misbinds that payload accessor.
         self.function_signatures = {}
-        for signature_symbol in module.functions.keys():
-            val signature_func: MirFunction = module.functions[signature_symbol]
+        for signature_value in module.functions.values():
+            val signature_func: MirFunction = signature_value
             self.function_signatures[signature_func.name] = signature_func.signature
 
         # Carry the module's Struct/Enum symbol table so field/aggregate/GEP
@@ -142,9 +145,8 @@ class CudaBackend:
         # falling back to legacy 8-byte slots (see cuda_can_size/cuda_type_size).
         self.type_defs = module.types
 
-        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-        for symbol in module.functions.keys():
-            val func: MirFunction = module.functions[symbol]
+        for function_value in module.functions.values():
+            val func: MirFunction = function_value
             if not CudaBackend.accepts_gpu_kernel_target(func):
                 return Err(compileerror_backend_error(
                     BackendKind.Cuda,
@@ -178,7 +180,8 @@ class CudaBackend:
         ))
 
     me compile_function(builder: PtxBuilder, func: MirFunction) -> Result<CompiledFunction, CompileError>:
-        self.compile_function_with_kind(builder, func, self.is_kernel_function(func))
+        val is_kernel = func.is_kernel
+        self.compile_function_with_kind(builder, func, is_kernel)
 
     me compile_function_with_kind(builder: PtxBuilder, func: MirFunction, is_kernel: bool) -> Result<CompiledFunction, CompileError>:
         """Compile a single function."""
@@ -225,14 +228,14 @@ class CudaBackend:
                     self.emit_local_decl(builder, local)
 
         # Compile each basic block
-        var pointer_spaces: Dict<i64, MemorySpace> = {}
+        self.pointer_spaces = {}
         for local in func.locals:
             match local.kind:
                 case Arg(_):
                     if is_kernel:
                         match local.type_.kind:
                             case Ptr(_, _) | Ref(_, _):
-                                pointer_spaces[local.id.id] = MemorySpace.Global
+                                self.pointer_spaces[local.id.id] = MemorySpace.Global
                             case _:
                                 ()
                 case _:
@@ -242,7 +245,7 @@ class CudaBackend:
             builder.emit_label(label)
 
             for inst in block.instructions:
-                val result = self.compile_instruction(builder, inst, func, pointer_spaces)
+                val result = self.compile_instruction(builder, inst, func)
                 if result.is_err():
                     return Err(result.unwrap_err())
 
@@ -260,10 +263,6 @@ class CudaBackend:
             ptx: "",  # PTX is accumulated in builder
             is_kernel: is_kernel
         ))
-
-    fn is_kernel_function(func: MirFunction) -> bool:
-        """Check if function should be compiled as a kernel."""
-        func.is_kernel
 
     fn function_uses_non_global_pointer_origin(func: MirFunction) -> bool:
         for block in func.blocks:
@@ -299,13 +298,14 @@ class CudaBackend:
             case F64: builder.emit_reg_decl(reg, PrimitiveType.F64)
             case F32: builder.emit_reg_decl(reg, PrimitiveType.F32)
             case Bool: builder.emit_pred_decl(reg)
+            case Ptr(_, _) | Ref(_, _) | FuncPtr(_): builder.emit_reg_decl(reg, PrimitiveType.U64)
             case _: ()
 
-    me compile_instruction(builder: PtxBuilder, inst: MirInst, func: MirFunction, mut pointer_spaces: Dict<i64, MemorySpace>) -> Result<(), CompileError>:
+    me compile_instruction(builder: PtxBuilder, inst: MirInst, func: MirFunction) -> Result<(), CompileError>:
         """Compile a single MIR instruction to PTX."""
         match inst.kind:
             case Const(dest, value, ty):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 match value:
                     case Int(_) | Float(_) | Bool(_): ()
                     case _:
@@ -314,14 +314,14 @@ class CudaBackend:
 
             case Copy(dest, src):
                 self.compile_copy(builder, dest, src, self.local_primitive_type(func, dest)?)
-                self.propagate_pointer_space(dest, MirOperand.copy(src), pointer_spaces)
+                self.propagate_pointer_space(dest, MirOperand.copy(src))
 
             case Move(dest, src):
                 self.compile_copy(builder, dest, src, self.local_primitive_type(func, dest)?)  # Same as copy in PTX
-                self.propagate_pointer_space(dest, MirOperand.move(src), pointer_spaces)
+                self.propagate_pointer_space(dest, MirOperand.move(src))
 
             case BinOp(dest, op, left, right):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 match op:
                     case Add | Sub | Mul | Div | Eq | Ne | Lt | Le | Gt | Ge: ()
                     case _:
@@ -344,7 +344,7 @@ class CudaBackend:
                 self.compile_binop(builder, dest, op, left, right, op_ty)
 
             case UnaryOp(dest, op, operand):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 val dest_mir_ty = self.operand_mir_type(func, MirOperand.copy(dest))?
                 val operand_mir_ty = self.operand_mir_type(func, operand)?
                 if dest_mir_ty.kind != operand_mir_ty.kind:
@@ -368,37 +368,37 @@ class CudaBackend:
                 self.compile_unaryop(builder, dest, op, operand, self.mir_type_to_primitive(dest_mir_ty))
 
             case Load(dest, ptr):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 val load_ty = self.local_primitive_type(func, dest)?
                 if self.pointer_pointee_primitive_type(func, ptr)? != load_ty:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA load result must match pointer element type"))
-                self.compile_load(builder, dest, ptr, load_ty, self.pointer_memory_space(ptr, pointer_spaces)?)
+                self.compile_load(builder, dest, ptr, load_ty, self.pointer_memory_space(ptr, self.pointer_spaces)?)
 
             case Store(ptr, value):
                 val store_ty = self.operand_primitive_type(func, value)?
                 if self.pointer_pointee_primitive_type(func, ptr)? != store_ty:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA store value must match pointer element type"))
-                self.compile_store(builder, ptr, value, store_ty, self.pointer_memory_space(ptr, pointer_spaces)?)
+                self.compile_store(builder, ptr, value, store_ty, self.pointer_memory_space(ptr, self.pointer_spaces)?)
 
             # GPU-specific instructions
             case GpuGlobalId(dest, dim):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 return self.compile_gpu_index(builder, dest, dim, func, "global")
 
             case GpuLocalId(dest, dim):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 return self.compile_gpu_index(builder, dest, dim, func, "local")
 
             case GpuBlockId(dest, dim):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 return self.compile_gpu_index(builder, dest, dim, func, "block")
 
             case GpuBlockDim(dest, dim):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 return self.compile_gpu_index(builder, dest, dim, func, "block_dim")
 
             case GpuGridDim(dest, dim):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 return self.compile_gpu_index(builder, dest, dim, func, "grid_dim")
 
             case GpuBarrier(scope):
@@ -430,10 +430,10 @@ class CudaBackend:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA shared allocation type must match destination pointer element type"))
                 builder.emit_shared_memory(name, prim_ty, size)
                 builder.emit_shared_address("%r{dest.id}", name)
-                pointer_spaces[dest.id] = MemorySpace.Shared
+                self.pointer_spaces[dest.id] = MemorySpace.Shared
 
             case GpuAtomicOp(dest, op, ptr, value):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 if op == GpuAtomicOpKind.CompareExchange:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA compare-exchange requires GpuAtomicCas"))
                 val atomic_ty = self.local_primitive_type(func, dest)?
@@ -441,23 +441,25 @@ class CudaBackend:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA generic atomics require a 32-bit or 64-bit integer type"))
                 if self.pointer_pointee_primitive_type(func, ptr)? != atomic_ty or self.operand_primitive_type(func, value)? != atomic_ty:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA atomic value and result must match pointer element type"))
-                self.compile_atomic(builder, dest, op, ptr, value, atomic_ty, self.atomic_memory_space(ptr, pointer_spaces)?)
+                val atomic_space = self.atomic_memory_space(ptr, self.pointer_spaces)?
+                self.compile_mir_atomic(builder, dest, op, ptr, value, atomic_ty, atomic_space)
 
             case GpuAtomicCas(dest, ptr, expected, desired):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 val cas_ty = self.local_primitive_type(func, dest)?
                 if not self.integer_atomic_type_supported(cas_ty):
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA atomic CAS requires a 32-bit or 64-bit integer type"))
                 if self.pointer_pointee_primitive_type(func, ptr)? != cas_ty or self.operand_primitive_type(func, expected)? != cas_ty or self.operand_primitive_type(func, desired)? != cas_ty:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA atomic CAS operands and result must match pointer element type"))
-                self.compile_atomic_cas(builder, dest, ptr, expected, desired, cas_ty, self.atomic_memory_space(ptr, pointer_spaces)?)
+                val cas_space = self.atomic_memory_space(ptr, self.pointer_spaces)?
+                self.compile_mir_atomic_cas(builder, dest, ptr, expected, desired, cas_ty, cas_space)
 
             # --- Function Calls ---
 
-            case Call(dest, func, args):
+            case Call(dest, callee, args):
                 if dest.?:
-                    pointer_spaces.remove(dest.unwrap().id)
-                val call_result = self.compile_call(builder, dest, func, args)
+                    self.pointer_spaces.remove(dest.unwrap().id)
+                val call_result = self.compile_call(builder, dest, callee, args)
                 if call_result.is_err():
                     return Err(call_result.unwrap_err())
 
@@ -470,11 +472,11 @@ class CudaBackend:
             # --- Aggregate Operations ---
 
             case Aggregate(dest, kind, operands):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 self.compile_aggregate(builder, dest, kind, operands, func)
 
             case GetField(dest, base, field):
-                pointer_spaces.remove(dest.id)
+                self.pointer_spaces.remove(dest.id)
                 self.compile_get_field(builder, dest, base, field, func)
 
             case SetField(base, field, value):
@@ -484,7 +486,7 @@ class CudaBackend:
 
             case Cast(dest, operand, target):
                 self.compile_cast(builder, dest, operand, target, func)
-                self.propagate_pointer_space(dest, operand, pointer_spaces)
+                self.propagate_pointer_space(dest, operand)
 
             case Bitcast(dest, operand, target):
                 val dest_mir_ty = self.operand_mir_type(func, MirOperand.copy(dest))?
@@ -508,7 +510,7 @@ class CudaBackend:
                 val dest_reg = "%r{dest.id}"
                 val src_reg = self.operand_to_reg(builder, operand)
                 builder.emit_line("mov.b{dest_width} {dest_reg}, {src_reg};")
-                self.propagate_pointer_space(dest, operand, pointer_spaces)
+                self.propagate_pointer_space(dest, operand)
 
             # --- Memory Allocation ---
 
@@ -517,12 +519,12 @@ class CudaBackend:
                 if self.pointer_pointee_primitive_type(func, MirOperand.copy(dest))? != alloc_ty:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA local allocation type must match destination pointer element type"))
                 self.compile_alloc(builder, dest, type_)
-                pointer_spaces[dest.id] = MemorySpace.Local
+                self.pointer_spaces[dest.id] = MemorySpace.Local
 
             case GetElementPtr(dest, base, indices):
-                val base_space = self.pointer_memory_space(base, pointer_spaces)?
+                val base_space = self.pointer_memory_space(base, self.pointer_spaces)?
                 self.compile_gep(builder, dest, base, indices, func)
-                pointer_spaces[dest.id] = base_space
+                self.pointer_spaces[dest.id] = base_space
 
             # --- Checked Arithmetic ---
 
@@ -533,13 +535,13 @@ class CudaBackend:
 
             case Intrinsic(dest, name, args):
                 if dest.?:
-                    pointer_spaces.remove(dest.unwrap().id)
+                    self.pointer_spaces.remove(dest.unwrap().id)
                 val validation = self.validate_intrinsic(name, dest, args.len())
                 if validation.is_err():
                     return Err(validation.unwrap_err())
                 if name == "bounds_check":
                     return self.compile_bounds_check(builder, args, func)
-                return self.compile_intrinsic(builder, dest, name, args, func, pointer_spaces)
+                return self.compile_intrinsic(builder, dest, name, args, func, self.pointer_spaces)
 
             # --- Debug ---
 
@@ -711,7 +713,7 @@ class CudaBackend:
         val value_reg = self.operand_to_reg(builder, value)
         builder.emit_store(ty, addr_reg, value_reg, space)
 
-    me compile_atomic(builder: PtxBuilder, dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand, ty: PrimitiveType, space: MemorySpace):
+    me compile_mir_atomic(builder: PtxBuilder, dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand, ty: PrimitiveType, space: MemorySpace):
         """Compile atomic operation."""
         val dest_reg = "%r{dest.id}"
         val addr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, ptr), space)
@@ -739,7 +741,7 @@ class CudaBackend:
             case _:
                 builder.emit_comment("Unsupported atomic op: {op}")
 
-    me compile_atomic_cas(builder: PtxBuilder, dest: LocalId, ptr: MirOperand, expected: MirOperand, desired: MirOperand, ty: PrimitiveType, space: MemorySpace):
+    me compile_mir_atomic_cas(builder: PtxBuilder, dest: LocalId, ptr: MirOperand, expected: MirOperand, desired: MirOperand, ty: PrimitiveType, space: MemorySpace):
         """Compile atomic compare-and-swap (3-operand CAS)."""
         val dest_reg = "%r{dest.id}"
         val addr_reg = self.memory_address_reg(builder, self.operand_to_reg(builder, ptr), space)
@@ -762,7 +764,13 @@ class CudaBackend:
                     return Ok(pointer_spaces[local.id])
             case _:
                 ()
-        Err(compileerror_backend_error(BackendKind.Cuda, "CUDA pointer has no memory-space provenance"))
+        val local_id = match ptr.kind:
+            case Copy(local) | Move(local): local.id
+            case _: -1
+        Err(compileerror_backend_error(
+            BackendKind.Cuda,
+            "CUDA pointer has no memory-space provenance for local {local_id}; tracked={pointer_spaces.keys().len()}"
+        ))
 
     me pointer_pointee_primitive_type(func: MirFunction, ptr: MirOperand) -> Result<PrimitiveType, CompileError>:
         val ptr_type = self.operand_mir_type(func, ptr)?
@@ -806,17 +814,17 @@ class CudaBackend:
             return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA atomics require global or shared memory"))
         Ok(space)
 
-    fn propagate_pointer_space(dest: LocalId, source: MirOperand, mut pointer_spaces: Dict<i64, MemorySpace>):
+    me propagate_pointer_space(dest: LocalId, source: MirOperand):
         val source_id = match source.kind:
             case Copy(local) | Move(local):
                 local.id
             case _:
                 -1
-        val source_has_space = source_id >= 0 and pointer_spaces.has(source_id)
-        val source_space = if source_has_space: pointer_spaces[source_id] else: MemorySpace.Global
-        pointer_spaces.remove(dest.id)
+        val source_has_space = source_id >= 0 and self.pointer_spaces.has(source_id)
+        val source_space = if source_has_space: self.pointer_spaces[source_id] else: MemorySpace.Global
+        self.pointer_spaces.remove(dest.id)
         if source_has_space:
-            pointer_spaces[dest.id] = source_space
+            self.pointer_spaces[dest.id] = source_space
 
     me compile_call(builder: PtxBuilder, dest: LocalId?, callee: MirOperand, args: [MirOperand]) -> Result<(), CompileError>:
         """Compile device function call."""
@@ -831,7 +839,7 @@ class CudaBackend:
                 func_name = name
                 if not self.function_signatures.contains_key(name):
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call target is not defined in the MIR module: {name}"))
-                val sig = self.function_signatures[name]
+                val sig: MirSignature = self.function_signatures[name]
                 if sig.params.len() != args.len():
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call argument count does not match its signature"))
                 for param_ty in sig.params:
