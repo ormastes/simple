@@ -35,6 +35,12 @@ fn vulkan_local(id: i64) -> LocalId:
 fn vulkan_temp(id: i64, ty: MirType) -> MirLocal:
     MirLocal(id: vulkan_local(id), name: nil, type_: ty, kind: LocalKind.Temp, is_ghost: false)
 
+fn vulkan_arg(id: i64, index: i64, ty: MirType) -> MirLocal:
+    MirLocal(id: vulkan_local(id), name: Some("arg_{index}"), type_: ty, kind: LocalKind.Arg(index), is_ghost: false)
+
+fn vulkan_return(id: i64, ty: MirType) -> MirLocal:
+    MirLocal(id: vulkan_local(id), name: Some("_return"), type_: ty, kind: LocalKind.Return, is_ghost: false)
+
 fn vulkan_operand(id: i64) -> MirOperand:
     MirOperand.copy(vulkan_local(id))
 
@@ -48,12 +54,15 @@ fn vulkan_inst(kind: MirInstKind) -> MirInst:
     MirInst(kind: kind, span: nil)
 
 fn vulkan_body_with_locals(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal]) -> MirBody:
+    vulkan_body_with_signature(instructions, terminator, locals, 0, MirType.unit())
+
+fn vulkan_body_with_signature(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal], arg_count: i64, return_ty: MirType) -> MirBody:
     MirBody(
         name: "intensive_vulkan_kernel",
         blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: instructions, terminator: terminator)],
         locals: locals,
-        arg_count: 0,
-        return_ty: MirType.unit()
+        arg_count: arg_count,
+        return_ty: return_ty
     )
 
 fn vulkan_body(instructions: [MirInst], terminator: MirTerminator) -> MirBody:
@@ -104,14 +113,20 @@ fn assert_spirv_valid_if_available(output: text, stem: text):
     expect(val_err).to_equal("")
 
 fn vulkan_function_with_locals(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal]) -> MirFunction:
+    vulkan_function_with_signature(instructions, terminator, locals, [], MirType.unit())
+
+fn vulkan_function_with_signature(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal], params: [MirType], return_type: MirType) -> MirFunction:
+    vulkan_function_with_abi(instructions, terminator, locals, params, return_type, false, "vulkan", "vulkan")
+
+fn vulkan_function_with_abi(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal], params: [MirType], return_type: MirType, is_variadic: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
     MirFunction(
         symbol: SymbolId(id: 1), name: "intensive_vulkan_kernel",
-        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        signature: MirSignature(params: params, return_type: return_type, is_variadic: is_variadic),
         locals: locals, blocks: vulkan_body(instructions, terminator).blocks,
         entry_block: BlockId.entry(), span: Span.empty(),
         generic_params: [], is_generic_template: false, specialization_of: nil,
         type_bindings: {}, layout_phase: nil, is_kernel: true,
-        gpu_target: "vulkan", gpu_backend_order: "vulkan", is_export_c: false,
+        gpu_target: gpu_target, gpu_backend_order: gpu_backend_order, is_export_c: false,
         export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
         has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
     )
@@ -662,6 +677,96 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
             ]
         )
         assert_backend_error_contains(bad_dest, "U32 pointer and U32 destination")
+
+    it "rejects non-unit parameterized and value-returning Vulkan entry points":
+        val backend = VulkanBackend.create_with_options([1, 3], compileoptions_default_options())
+
+        val non_unit_body = vulkan_body_with_signature([], MirTerminator.Ret(nil), [], 0, vulkan_u32())
+        val non_unit = backend.compile_kernel("non_unit_vulkan", non_unit_body)
+        expect(non_unit.is_err()).to_equal(true)
+        assert_backend_error_contains(non_unit.unwrap_err(), "must return Unit")
+
+        val parameter_body = vulkan_body_with_signature(
+            [], MirTerminator.Ret(nil), [vulkan_arg(0, 0, vulkan_u32())], 1, MirType.unit()
+        )
+        val parameterized = backend.compile_kernel("parameterized_vulkan", parameter_body)
+        expect(parameterized.is_err()).to_equal(true)
+        assert_backend_error_contains(parameterized.unwrap_err(), "require StorageBuffer interface lowering")
+
+        val value_body = vulkan_body_with_signature(
+            [], MirTerminator.Ret(Some(vulkan_u32_operand(1))), [], 0, MirType.unit()
+        )
+        val value_return = backend.compile_kernel("value_return_vulkan", value_body)
+        expect(value_return.is_err()).to_equal(true)
+        assert_backend_error_contains(value_return.unwrap_err(), "cannot return a value")
+
+        val hidden_arg = backend.compile_kernel(
+            "hidden_arg_vulkan",
+            vulkan_body_with_signature([], MirTerminator.Ret(nil), [vulkan_arg(0, 0, vulkan_u32())], 0, MirType.unit())
+        )
+        expect(hidden_arg.is_err()).to_equal(true)
+        assert_backend_error_contains(hidden_arg.unwrap_err(), "argument locals require StorageBuffer")
+
+        val negative_arg_count = backend.compile_kernel(
+            "negative_arg_count_vulkan",
+            vulkan_body_with_signature([], MirTerminator.Ret(nil), [], -1, MirType.unit())
+        )
+        expect(negative_arg_count.is_err()).to_equal(true)
+        assert_backend_error_contains(negative_arg_count.unwrap_err(), "require StorageBuffer interface lowering")
+
+        val oversized_arg_count = backend.compile_kernel(
+            "oversized_arg_count_vulkan",
+            vulkan_body_with_signature([], MirTerminator.Ret(nil), [], 1, MirType.unit())
+        )
+        expect(oversized_arg_count.is_err()).to_equal(true)
+        assert_backend_error_contains(oversized_arg_count.unwrap_err(), "require StorageBuffer interface lowering")
+
+    it "rejects non-unit returns through compile_module":
+        val fn_ = vulkan_function_with_signature(
+            [vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(0), 0))],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_i64())],
+            [],
+            vulkan_u32()
+        )
+        val result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(fn_))
+        expect(result.is_err()).to_equal(true)
+        assert_backend_error_contains(result.unwrap_err(), "must return Unit")
+
+    it "selects annotated Vulkan kernels before ABI validation":
+        val valid = vulkan_function([], MirTerminator.Ret(nil))
+        val valid_result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(valid))
+        expect(valid_result.is_ok()).to_equal(true)
+        expect(valid_result.unwrap().text_output).to_contain("OpEntryPoint GLCompute")
+
+        val invalid = vulkan_function_with_signature([], MirTerminator.Ret(nil), [], [], vulkan_u32())
+        val invalid_result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(invalid))
+        expect(invalid_result.is_err()).to_equal(true)
+        assert_backend_error_contains(invalid_result.unwrap_err(), "must return Unit")
+
+        val parameterized = vulkan_function_with_signature(
+            [], MirTerminator.Ret(nil), [vulkan_arg(0, 0, vulkan_u32())], [vulkan_u32()], MirType.unit()
+        )
+        val parameter_result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(parameterized))
+        expect(parameter_result.is_err()).to_equal(true)
+        assert_backend_error_contains(parameter_result.unwrap_err(), "require StorageBuffer interface lowering")
+
+        val variadic = vulkan_function_with_abi([], MirTerminator.Ret(nil), [], [], MirType.unit(), true, "vulkan", "vulkan")
+        val variadic_result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(variadic))
+        expect(variadic_result.is_err()).to_equal(true)
+        assert_backend_error_contains(variadic_result.unwrap_err(), "require StorageBuffer interface lowering")
+
+        val return_local = vulkan_function_with_signature(
+            [], MirTerminator.Ret(nil), [vulkan_return(0, MirType.unit())], [], MirType.unit()
+        )
+        val return_local_result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(return_local))
+        expect(return_local_result.is_err()).to_equal(true)
+        assert_backend_error_contains(return_local_result.unwrap_err(), "cannot have a return local")
+
+        val cuda = vulkan_function_with_abi([], MirTerminator.Ret(nil), [], [], MirType.unit(), false, "cuda", "cuda")
+        val cuda_result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(cuda))
+        expect(cuda_result.is_ok()).to_equal(true)
+        expect(cuda_result.unwrap().text_output.contains("OpEntryPoint GLCompute")).to_equal(false)
 
     it "propagates typed instruction errors through compile_module":
         val bad = vulkan_function_with_locals(

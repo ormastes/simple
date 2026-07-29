@@ -8,7 +8,7 @@ use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.backend.backend_api.*
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.gpu_codegen_types.{GpuCodegen, GpuBarrierScope as CodegenBarrierScope}
-use compiler.backend.gpu_backend_metadata.{gpu_backend_supports_target}
+use compiler.backend.gpu_backend_metadata.{gpu_backend_accepts_kernel, gpu_backend_supports_target}
 use compiler.backend.vulkan_type_mapper.*
 use compiler.backend.vulkan.spirv_builder.{SpirvBuilder}
 use compiler.hir.hir_types.{MemorySpace, SymbolId}
@@ -117,6 +117,8 @@ class VulkanBackend:
 
     fn is_compute_shader(func: MirFunction) -> bool:
         """Check if function should be compiled as a compute shader."""
+        if func.is_kernel:
+            return gpu_backend_accepts_kernel(BackendKind.Vulkan, func)
         # Functions with GPU instructions are compute shaders
         for block in func.blocks:
             for inst in block.instructions:
@@ -130,6 +132,30 @@ class VulkanBackend:
     fn compile_compute_shader(builder: SpirvBuilder, func: MirFunction) -> text:
         """Compile a compute shader."""
 
+        if func.signature.params.len() != 0 or func.signature.is_variadic:
+            return Err(compileerror_backend_error(
+                BackendKind.Vulkan,
+                "Vulkan compute entry parameters require StorageBuffer interface lowering"
+            ))
+        if func.signature.return_type.kind != MirTypeKind.Unit:
+            return Err(compileerror_backend_error(
+                BackendKind.Vulkan,
+                "Vulkan compute entry points must return Unit"
+            ))
+        for local in func.locals:
+            match local.kind:
+                case LocalKind.Arg(_):
+                    return Err(compileerror_backend_error(
+                        BackendKind.Vulkan,
+                        "Vulkan compute entry argument locals require StorageBuffer interface lowering"
+                    ))
+                case LocalKind.Return:
+                    return Err(compileerror_backend_error(
+                        BackendKind.Vulkan,
+                        "Vulkan Unit compute entry points cannot have a return local"
+                    ))
+                case _:
+                    ()
         if func.blocks.len() != 1 or func.blocks[0].id.id != 0:
             return Err(compileerror_backend_error(
                 BackendKind.Vulkan,
@@ -764,7 +790,9 @@ class VulkanBackend:
     fn compile_terminator(builder: SpirvBuilder, term: MirTerminator) -> Result<(), CompileError>:
         """Compile block terminator."""
         match term:
-            case Ret(_):
+            case Ret(value):
+                if value.?:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan compute entry points cannot return a value"))
                 builder.emit_return()
             case Goto(target):
                 return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V loop/goto lowering is not implemented"))
@@ -819,13 +847,12 @@ impl Codegen for VulkanBackend:
 impl GpuCodegen for VulkanBackend:
     fn compile_kernel(func_name: text, body: MirBody) -> Result<text, CompileError>:
         val mir_body: MirBody = body
-        var vk_param_types: [MirType] = []
-        var vk_pi = 0
-        while vk_pi < mir_body.arg_count:
-            val vk_loc: MirLocal = mir_body.locals[vk_pi]
-            vk_param_types = vk_param_types.push(vk_loc.type_)
-            vk_pi = vk_pi + 1
-        val vk_sig = MirSignature(params: vk_param_types, return_type: mir_body.return_ty, is_variadic: false)
+        if mir_body.arg_count != 0:
+            return Err(compileerror_backend_error(
+                BackendKind.Vulkan,
+                "Vulkan compute entry parameters require StorageBuffer interface lowering"
+            ))
+        val vk_sig = MirSignature(params: [], return_type: mir_body.return_ty, is_variadic: false)
         val func = MirFunction(
             symbol: SymbolId(id: 0), name: func_name, signature: vk_sig,
             locals: mir_body.locals, blocks: mir_body.blocks, entry_block: BlockId.entry(), span: Span.empty(),
