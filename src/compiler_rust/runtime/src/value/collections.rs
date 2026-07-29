@@ -2553,6 +2553,8 @@ pub extern "C" fn rt_string_trim_end(string: RuntimeValue) -> RuntimeValue {
 /// Called as array.join(separator) so array is first arg
 #[no_mangle]
 pub extern "C" fn rt_string_join(array: RuntimeValue, separator: RuntimeValue) -> RuntimeValue {
+    use super::sffi::rt_value_to_string;
+
     let arr_len = rt_array_len(array);
     if arr_len <= 0 {
         return rt_string_new(std::ptr::null(), 0);
@@ -2569,10 +2571,16 @@ pub extern "C" fn rt_string_join(array: RuntimeValue, separator: RuntimeValue) -
                 result.push_str(sep);
             }
         }
+        // Elements are not guaranteed to already be String RuntimeValues (they
+        // may be tag-boxed ints/floats/bools/etc.). Render each element via
+        // the same display formatter the print path uses (rt_value_to_string
+        // wraps value_to_display_string) before reading it as UTF-8, so
+        // `[1,2,3].join(",")` renders bare ints instead of empty strings.
         let elem = rt_array_get(array, i);
-        let elem_len = rt_string_len(elem);
+        let elem_str = rt_value_to_string(elem);
+        let elem_len = rt_string_len(elem_str);
         if elem_len > 0 {
-            let elem_data = rt_string_data(elem);
+            let elem_data = rt_string_data(elem_str);
             unsafe {
                 let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(elem_data, elem_len as usize));
                 result.push_str(s);
