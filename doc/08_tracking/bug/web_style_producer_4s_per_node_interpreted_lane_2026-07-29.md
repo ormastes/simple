@@ -445,6 +445,84 @@ with the fallback path, not the dispatch path, still dominating wall
 time for the remaining ~18% of calls) with **14 of 17 calls (82.4%)
 taking the dispatch path**, up from stage 1's 76.5%.
 
+## Closing measurement 2026-07-29: outlier nodes, not apply_decls, are the true dominant cost
+
+**Raised-budget A/B, from a pristine worktree at the current SSH tip
+(`4737529f5c86`), load-checked before and after both runs (pgrep count:
+7 -> 2 -> 4, low/comparable throughout):**
+
+```
+SHOWCASE_RESOLUTION=480x360 SIMPLE_WEB_RENDER_BUDGET_MS=120000 \
+SIMPLE_TIMEOUT_SECONDS=270 bin/simple run examples/06_io/ui/web_render_file_gui.spl
+```
+
+Two runs, both: `budget-break at=38 of=151`. Styling did **not** complete
+151 nodes in either run (no `status=pass`/checksum line reached), so the
+"changed checksum + varied pixels = success" case does not apply this
+pass. Historical series at this budget: **29 (pre-char_at-fix) -> 38
+(post-char_at-fix) -> 38 (post-stage-1) -> 38 (post-stage-2, this
+measurement, twice)**. Stages 1 and 2 raised dispatch-path coverage
+(76.5% -> 82.4%) and cut per-call `apply_decls` cost substantially, but
+neither moved the node count at this budget past what the char_at fixes
+alone already achieved -- explained below.
+
+**Arithmetic reconciliation (PROVED via a bounded 10-node per-call
+bracket probe, temporary, reverted after measuring):** stage-1/2's
+17.7ms-dispatch/174.9ms-fallback per-call numbers and 1-2-calls/node
+batching predict well under 0.5s/node; the measured ~3.16s/node average
+did not match. Bracketed the real per-node loop again, this time
+counting every `apply_decls` invocation (there are up to 8 call sites in
+the node body: presentational-attribute decls, the batched candidate-rule
+cascade, inline style, the important-origin cascade, inline-important,
+a `selectedcontent` special case, and two WM-theme-fallback material
+paths) and timing the main batched call plus total node time, over the
+first 10 nodes:
+
+| index | main apply_decls call | total node time | apply_decls call count |
+|---|---|---|---|
+| 0 | 21.1ms | 54.3ms | 1 |
+| 1 | 25.0ms | 84.8ms | 1 |
+| 2 | 198.5ms | 261.6ms | 1 |
+| 3 | 225.1ms | 298.5ms | 1 |
+| 4 | 23.1ms | 63.4ms | 1 |
+| 5 | 21.8ms | **9673.3ms** | 1 |
+| 6 | 21.0ms | 57.7ms | 1 |
+| 7 | 35.4ms | 114.9ms | 1 |
+| 8 | 21.3ms | **1818.8ms** | 1 |
+| 9 | 32.1ms | 121.8ms | 1 |
+
+**Call count is exactly 1 per node in every case -- the batching from
+stage 0 works as intended; call volume is not the gap.** The gap is that
+`apply_decls` (the batched call) is now genuinely fast for every node
+(21-225ms), but **2 of these 10 nodes (indices 5 and 8 -- the SAME two
+outlier indices flagged, unexplained, in the original "Cost center
+attribution" section above) have a residual cost OUTSIDE apply_decls of
+9.65 seconds and 1.8 seconds respectively**, dwarfing everything else.
+Summed over this sample, those two nodes alone are **12.3ms of the
+12.5ms-node-average's 12,549,237us total -- 98.5% of the sampled time**.
+This is the missing piece: stage 1/2's 70-90% attribution to
+`apply_decls` was correct for typical nodes and for the aggregate
+profile it was measured against, but a small number of pathological
+nodes dominate the wall-clock average almost entirely, and their cost is
+NOT in `apply_decls` at all.
+
+**Residual cost center, named per the profiled call sites (not
+`apply_decls`):** the time is spent somewhere in the node body AFTER the
+batched `apply_decls` call and its immediate neighbors -- i.e. within the
+7 other, un-batched `apply_decls` call sites (inline style, the
+important-origin cascade, `selectedcontent`, or the two WM-theme-fallback
+material paths) or the non-`apply_decls` logic interleaved with them
+(attribute lookups, material-witness bookkeeping). This matches and
+sharpens the original "node 5 / node 8 outliers, unexplained" note from
+the stage-0 profiling pass, rather than being a new finding -- confirms
+those two nodes specifically hit an expensive path unrelated to CSS
+declaration parsing. Not isolated further this pass (would need
+per-call-site brackets inside that ~7-site region, which is out of scope
+for a closing measurement pass); no code change made, per instruction, since
+nothing trivial and safe (<20 lines) was identified -- the fix requires
+first finding which of the 7 sites or which surrounding logic is
+expensive on these specific two nodes.
+
 ### Remaining fix proposal (not implemented — needs its own scoped change)
 
 1. ~~Batch all candidate rules' declarations into one merged decl table and
@@ -494,9 +572,19 @@ taking the dispatch path**, up from stage 1's 76.5%.
    property calls once border/background/font/flex close most of the
    remaining ~18% fallback fraction, or whether coverage alone is enough
    that this no longer matters in practice.
-5. Investigate the node 5 / node 8 outliers separately -- they are not
-   explained by anything in this section and could be a second, unrelated
-   defect (GC pressure or a `wm_fallback` code path cost).
+5. **Now the top priority, per the 2026-07-29 closing measurement above:**
+   investigate the outlier-node cost (9.65s and 1.8s for 2 of a 10-node
+   sample, ~98.5% of sampled wall time, confirmed NOT inside
+   `apply_decls`). Bracket the other 7 `apply_decls` call sites in the
+   node body individually (inline style, important-origin cascade,
+   `selectedcontent`, the two WM-theme-fallback material paths) plus the
+   non-`apply_decls` logic interleaved with them, on nodes that reproduce
+   the outlier, to localize which one is expensive. This is very likely
+   the actual reason no budget value makes this lane green (dispatch/
+   fallback optimization work on the batched call has real, measured
+   wins -- 9.9x per call, 82.4% coverage -- but has not moved the
+   budget-break node count past 38 across three fix stages, because the
+   bottleneck was never primarily there).
 
 ## bracket-slice (`s[i:j]`) survey gap — enumerated 2026-07-29, not fixed
 
