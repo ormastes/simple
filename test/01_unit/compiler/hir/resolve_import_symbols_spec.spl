@@ -35,7 +35,15 @@ describe "resolve_import_symbols 2-pass import resolver":
         val log = make_logger()
         val src_provider = "pub fn answer() -> i64:\n    42"
         val provider = parse_full_frontend(src_provider, "provider", "provider", log)
-        val consumer = parse_full_frontend("use provider.{answer}\nfn main() -> i64:\n    if answer() == 42: 0 else: 1", "consumer_fn", "consumer_fn", log)
+        # NOTE: braces must be escaped (\{ \}) -- an un-escaped `{answer}` is
+        # this HOST spec file's own string interpolation syntax (double-quoted
+        # strings interpolate `{expr}` by default; see
+        # doc/07_guide/language/syntax.md), not literal text for the GUEST
+        # source being parsed. Unescaped, the host interpreter evaluates
+        # `answer` as an identifier in ITS OWN scope before parse_full_frontend
+        # ever runs, crashing with "variable `answer` not found" -- see
+        # doc/08_tracking/bug/frontend_single_item_use_braces_import_crash_2026-07-29.md.
+        val consumer = parse_full_frontend("use provider.\{answer\}\nfn main() -> i64:\n    if answer() == 42: 0 else: 1", "consumer_fn", "consumer_fn", log)
         var modules: Dict<text, Module> = {}
         modules["provider"] = provider
         var sources: [SourceFile] = []
@@ -147,9 +155,14 @@ describe "resolve_import_symbols 2-pass import resolver":
         val log = make_logger()
         val src_shared_access = "class AccessResult:\n    value: text"
         val provider = parse_full_frontend(src_shared_access, "shared.access", "shared.access", log)
-        val src_compat_types = "export use shared.access.{AccessResult as T32BridgeResult}"
+        # NOTE: braces escaped (\{ \}) -- see the "registers an explicitly
+        # imported public function" example above for why an un-escaped
+        # single-identifier `{name}` here would be interpolated by the HOST
+        # spec file's own string syntax and crash before parse_full_frontend
+        # is ever reached.
+        val src_compat_types = "export use shared.access.\{AccessResult as T32BridgeResult\}"
         val facade = parse_full_frontend(src_compat_types, "compat.types", "compat.types", log)
-        val consumer = parse_full_frontend("use compat.types.{T32BridgeResult}\nfn main(value: T32BridgeResult) -> T32BridgeResult:\n    value", "compat.consumer", "compat.consumer", log)
+        val consumer = parse_full_frontend("use compat.types.\{T32BridgeResult\}\nfn main(value: T32BridgeResult) -> T32BridgeResult:\n    value", "compat.consumer", "compat.consumer", log)
 
         var modules: Dict<text, Module> = {}
         modules["shared.access"] = provider

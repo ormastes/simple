@@ -1,11 +1,52 @@
 # `parse_full_frontend` crashes on some single-item `use MODULE.{name}` imports
 
-**Status:** open
+**Status:** RESOLVED (2026-07-29, lane IMP1) — root cause was NOT in the
+frontend; see "Actual root cause" below. No `src/compiler/10.frontend/**`
+change was needed or made.
 **Found:** 2026-07-29 (lane RIS1, `resolve_import_symbols_spec.spl` repair)
-**Area:** frontend parsing/desugaring (`src/compiler/10.frontend/`), reached via
-`compiler.frontend.frontend.parse_full_frontend`
-**Severity:** medium — corrupts unit-test fixtures and crashes standalone
-frontend calls; production impact unconfirmed (see Scope below)
+**Area:** ~~frontend parsing/desugaring (`src/compiler/10.frontend/`)~~ — was
+misdiagnosed; actual area is test-fixture authoring (host spec files'
+own string-interpolation syntax), not the frontend.
+**Severity:** medium — corrupted 2 unit-test fixtures; zero production impact
+(confirmed: the frontend parser has no defect here)
+
+## Actual root cause (lane IMP1, 2026-07-29)
+
+There is no parser/desugar ambiguity at all. Simple's own double-quoted
+string literals interpolate `{expr}` **by default**
+(`doc/07_guide/language/syntax.md`: `print "Hello, {name}!"  # Default:
+interpolated`). The two red examples wrote the *guest* source under test as
+a plain double-quoted *host* string literal containing an **un-escaped**
+`{answer}` / `{T32BridgeResult}` — a single bare identifier, which is valid
+interpolation-expression syntax. The host spec file's own interpreter
+therefore evaluated `answer` / `T32BridgeResult` as an identifier lookup in
+the spec's own scope **before the string literal was even constructed**, let
+alone passed to `parse_full_frontend` — and since neither name is bound
+there, it raised exactly `semantic: variable `X` not found`. Confirmed with
+a two-line isolated repro (`val s = "use somemod.{zzzfoo}"` alone crashes,
+with no call into the frontend at all).
+
+This also explains the two observations recorded below:
+- `use somemod.{a, b}` never crashed: `a, b` is not a valid single
+  interpolation expression, so the host lexer leaves the braces as literal
+  text instead of attempting to evaluate anything.
+- The "named import from module A wins..." example never crashed: it builds
+  its source via `+` string concatenation with `open`/`close` variables, so
+  no single host string literal ever contains a literal `{identifier}`
+  substring for the host's own interpolation to catch — this was NOT
+  "context-dependent suppression" of a parser bug, it was simply a fixture
+  that happened to dodge the host-interpolation trap by construction.
+
+**Fix:** escape the braces (`\{ \}`) in the two affected fixtures in
+`resolve_import_symbols_spec.spl` — `\n` and other escapes still work
+normally inside an escaped-brace interpolated string, so no raw-string
+(`r"..."`) rewrite was needed. Added
+`test/01_unit/compiler/frontend/single_item_use_import_spec.spl` with a
+direct minimal repro plus multi-item and aliased-single-item control cases
+so a future regression here fails loudly instead of being re-diagnosed as a
+parser bug again.
+
+## Original (superseded) finding
 
 ## Finding
 
