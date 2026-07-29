@@ -2340,9 +2340,10 @@ fn compile_known_enum_constructor_call<M: Module>(
     let mut hasher = DefaultHasher::new();
     variant_name.hash(&mut hasher);
     let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
-    let enum_id_val = builder
-        .ins()
-        .iconst(types::I32, i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
+    let enum_id_val = builder.ins().iconst(
+        types::I32,
+        i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
+    );
     let disc_val = builder.ins().iconst(types::I32, disc);
     let payload_val = match args {
         [] => builder.ins().iconst(types::I64, 3),
@@ -2529,11 +2530,12 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     }
 }
 
-fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
+pub(crate) fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
     match func_name {
         "rt_process_run"
         | "rt_process_run_inherit"
         | "rt_process_spawn"
+        | "rt_process_spawn_async"
         | "rt_process_spawn_guarded"
         | "rt_process_execute"
         | "rt_process_run_timeout"
@@ -2830,9 +2832,7 @@ pub fn compile_call<M: Module>(
     let func_name: &str = func_name_raw;
     // Handle only the true Result/Option constructors. A custom enum may use
     // the same variant leaves and must retain its qualified custom type ID.
-    let split_variant = func_name
-        .rsplit_once("::")
-        .or_else(|| func_name.rsplit_once('.'));
+    let split_variant = func_name.rsplit_once("::").or_else(|| func_name.rsplit_once('.'));
     let (enum_owner, variant_name) = split_variant
         .map(|(owner, variant)| (Some(owner), variant))
         .unwrap_or((None, func_name));

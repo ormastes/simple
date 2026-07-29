@@ -2,8 +2,9 @@
 
 ## Status
 
-BLOCKED after the bounded Stage 2 and Stage 3 attempts. No full bootstrap was
-run.
+ABI FIXED in the Rust LLVM backend. The exact native NVMe SSpec passes under the
+explicit bootstrap compiler handler. Pure-Simple compiler admission and
+standalone docgen remain blocked; no full bootstrap was run.
 
 ## Evidence
 
@@ -51,16 +52,60 @@ cap. It remained at 99% CPU, reached 1,849,336 KiB peak RSS, emitted no
 diagnostic, produced no output binary, and exited 124. Do not rerun this
 identical command.
 
+## Root-Cause Fix and Focused Evidence
+
+The Rust LLVM direct-call and method-call paths did not apply the existing
+process-runtime argument expansion used by Cranelift. Both now reuse
+`process_c_runtime_arg_indices`, so `rt_process_run(text, args)` lowers to
+`rt_process_run(cmd_ptr, cmd_len, args)`. The focused LLVM IR regression passed:
+
+```text
+process_run_uses_ptr_len_array_runtime_abi ... ok
+1 passed; 0 failed
+```
+
+The incrementally rebuilt `simple-driver` then compiled the exact canonical
+SSpec through the explicit `SIMPLE_NATIVE_BUILD_RUST=1` bootstrap handler in
+23.00 seconds at 693,884 KiB peak RSS. The resulting 45,552-byte executable ran
+the real self-test, clean/garbage GHDL, and AXI recovery gates:
+
+```text
+5 examples, 0 failures
+elapsed 3:17.08; peak RSS 349,924 KiB
+```
+
+This is focused compiler/SSpec diagnostic evidence, not pure-Simple release
+admission. A standalone SPipe docgen build reached a separate existing codegen
+failure in `src/lib/common/math_repr.spl`: LLVM global load referenced
+undeclared symbol `T`.
+
+The required pure-Simple source checks each reported `OK` for `src/compiler`,
+`src/lib`, `src/app/mcp`, and `src/app/simple_lsp_mcp`, then exited 1 in the
+repository hygiene gate because the deployed CLI has no sibling
+`bin/release/x86_64-unknown-linux-gnu/simple_seed`. The MCP stdio smoke is also
+blocked on that missing sibling and unresolved SSpec names (`describe`,
+`slow_it`, `step`, and `expect`). These are tool admission failures, not failures
+of the focused LLVM regression or NVMe SSpec.
+
+Final review also found a separate pre-existing ABI mismatch outside this
+focused fix: `rt_process_run_with_limits` is declared with five parameters in
+`runtime_sffi.rs` and four source-level arguments in the Simple facade, while
+the Rust provider takes eight parameters. It remains fail-closed follow-up work
+and is intentionally not added to the shared process argument map here.
+
 Local evidence:
 
 - `build/logs/stage2-nvme-sspec-direct/`
 - `build/logs/stage2-sspec-runner/`
 - `build/logs/stage2-sspec-runner-runtime-bundle/`
+- `build/mini_builds/fixed-driver-build.*`
+- `build/mini_builds/fixed-spec-rust-build.*`
+- `build/mini_builds/fixed-spec-run.*`
+- `build/mini_builds/fixed-docgen-build.*`
 
 ## Resume Gate
 
-First admit a Stage 3 compiler that demonstrably emits
-`rt_process_run_tuple`, or fix the silent Stage 3 compile throughput defect.
-Then rebuild and execute the exact NVMe SSpec and standalone SPipe docgen once.
-Do not accept the Rust `rt_cli_run_file` compatibility path as pure-Simple
-release evidence.
+Admit a pure-Simple compiler containing the process-runtime ABI fix, then fix
+the `math_repr.spl` docgen closure failure and execute standalone SPipe docgen
+once. Do not accept the explicit Rust bootstrap handler or `rt_cli_run_file`
+compatibility path as pure-Simple release evidence.

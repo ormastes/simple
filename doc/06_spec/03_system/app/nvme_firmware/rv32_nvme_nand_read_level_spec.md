@@ -49,6 +49,12 @@ RAM, and full AXI4 RAM GHDL. The AXI gate observed 847 `.nandram` reads and 461
 writes inside the exact 256-byte region. Each synthesizable-BRAM run recovered
 a complete 229-byte observation transcript matching its own live UART stream
 and every ordered marker.
+On 2026-07-29, the corrected LLVM process-runtime ABI compiled the exact
+canonical native SSpec through the explicit bootstrap compiler handler. It
+passed 5 examples with 0 failures in 3:17.08 at 349,924 KiB peak RSS, including
+the self-test, clean/garbage GHDL, and AXI prevention/recovery scenarios. This
+is focused compiler diagnostic evidence; final release admission still requires
+the pure-Simple tool path and standalone docgen.
 The hashes and USER4 result below are historical; current physical PASS requires
 a fresh retained source-matched ELF/bitstream/transcript bundle.
 

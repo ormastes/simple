@@ -2619,13 +2619,9 @@ impl LlvmBackend {
                     let fallback_name = resolved
                         .map(|n| n.replace("_dot_", "."))
                         .unwrap_or_else(|| dotted_name.clone());
-                    let native_c_process_run = fallback_name == "rt_process_run"
-                        || func_name == "rt_process_run"
-                        || dotted_name == "rt_process_run";
                     let runtime_spec = crate::codegen::runtime_sffi::RUNTIME_FUNCS
                         .iter()
-                        .find(|spec| spec.name == fallback_name || spec.name == func_name || spec.name == dotted_name)
-                        .filter(|_| !native_c_process_run);
+                        .find(|spec| spec.name == fallback_name || spec.name == func_name || spec.name == dotted_name);
                     let fallback_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = runtime_spec
                         .map(|spec| {
                             spec.params
@@ -2669,18 +2665,14 @@ impl LlvmBackend {
                         let val = self.get_vreg(arg, vreg_map)?;
                         let target_ty = declared_param_types.get(i).copied().or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
-                        let mut int_val = casted.into_int_value();
-                        if native_c_process_run && i == 1 {
-                            int_val = builder
-                                .build_and(int_val, i64_type.const_int(!0x7_u64, false), "process_args_raw_ptr")
-                                .map_err(|e| crate::error::factory::llvm_build_failed("process args untag", &e))?;
-                        }
-                        raw_arg_vals.push(int_val);
+                        raw_arg_vals.push(casted.into_int_value());
                     }
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    if let Some(text_indices) = crate::codegen::instr::calls::text_arg_indices(
-                        runtime_spec.map(|spec| spec.name).unwrap_or(&fallback_name),
-                    ) {
+                    let runtime_name = runtime_spec.map(|spec| spec.name).unwrap_or(&fallback_name);
+                    let text_indices = crate::codegen::instr::calls::process_c_runtime_arg_indices(runtime_name)
+                        .map(|(indices, _)| indices)
+                        .or_else(|| crate::codegen::instr::calls::text_arg_indices(runtime_name));
+                    if let Some(text_indices) = text_indices {
                         let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
                             let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                             module.add_function("rt_string_data", fn_type, None)
@@ -3341,6 +3333,59 @@ mod tests {
         assert!(ir.contains("call i64 @rt_value_bool(i64 1)"), "{ir}");
         assert!(!ir.contains("call i64 @rt_value_bool(i64 19)"), "{ir}");
         assert!(!ir.contains("call i64 @rt_value_bool(i64 11)"), "{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn process_run_uses_ptr_len_array_runtime_abi() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("process_run_runtime_abi").unwrap();
+
+        let mut func = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        func.blocks[0].instructions.push(MirInst::ConstString {
+            dest: VReg(0),
+            value: "/bin/true".to_string(),
+        });
+        func.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(1),
+            value: 1,
+        });
+        func.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(2)),
+            target: CallTarget::from_name("rt_process_run"),
+            args: vec![VReg(0), VReg(1)],
+        });
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(3)),
+            receiver: VReg(0),
+            func_name: "rt_process_run".to_string(),
+            args: vec![VReg(1)],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        let calls: Vec<_> = ir
+            .lines()
+            .filter(|line| line.contains("call i64 @rt_process_run("))
+            .collect();
+        assert_eq!(calls.len(), 2, "{ir}");
+        for call in calls {
+            let call_args = call
+                .split_once('(')
+                .and_then(|(_, args)| args.rsplit_once(')'))
+                .map(|(args, _)| args)
+                .expect("malformed rt_process_run call");
+            assert_eq!(call_args.matches("i64 ").count(), 3, "{call}\n{ir}");
+        }
+        assert!(ir.contains("call i64 @rt_string_data("), "{ir}");
+        assert!(ir.contains("call i64 @rt_string_len("), "{ir}");
+        assert!(!ir.contains("process_args_raw_ptr"), "{ir}");
         backend.verify().unwrap();
     }
 

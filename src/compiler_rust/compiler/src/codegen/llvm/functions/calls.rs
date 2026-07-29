@@ -33,9 +33,9 @@ fn map_sffi_name(func_name: &str) -> &str {
 fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
     match rt_name {
         "rt_len" | "rt_to_string" | "rt_string_to_int" | "rt_string_to_float" | "rt_string_to_upper"
-        | "rt_string_to_lower" | "rt_string_trim" | "rt_string_bytes" | "rt_string_chars" | "rt_string_lines" | "rt_array_pop"
-        | "rt_array_sort" | "rt_array_reverse" | "rt_array_clear" | "rt_dict_keys" | "rt_dict_values"
-        | "rt_is_none" | "rt_is_some" | "rt_enum_payload" => Some(1),
+        | "rt_string_to_lower" | "rt_string_trim" | "rt_string_bytes" | "rt_string_chars" | "rt_string_lines"
+        | "rt_array_pop" | "rt_array_sort" | "rt_array_reverse" | "rt_array_clear" | "rt_dict_keys"
+        | "rt_dict_values" | "rt_is_none" | "rt_is_some" | "rt_enum_payload" => Some(1),
         "rt_string_starts_with"
         | "rt_string_ends_with"
         | "rt_contains"
@@ -2479,7 +2479,10 @@ impl LlvmBackend {
                     .left()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                 vec![path_ptr.into(), path_len.into(), data_ptr.into(), data_len.into()]
-            } else if let Some(text_indices) = crate::codegen::instr::calls::text_arg_indices(sffi_name) {
+            } else if let Some(text_indices) = crate::codegen::instr::calls::process_c_runtime_arg_indices(sffi_name)
+                .map(|(indices, _)| indices)
+                .or_else(|| crate::codegen::instr::calls::text_arg_indices(sffi_name))
+            {
                 let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
                     let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                     module.add_function("rt_string_data", fn_type, None)
