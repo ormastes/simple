@@ -35,6 +35,7 @@ type HirPackageSiblingIndex = {text: [text]}
 type HirPackageSiblingSymbolIndex = {text: text}
 type HirImplFunctions = {SymbolId: HirFunction}
 type HirTraitsByName = {text: HirTrait}
+type HirImportedTraitsByName = {text: Trait}
 type HirImportedEnumsByName = {text: Enum}
 type HirImportedEnumOwners = {text: text}
 type HirFieldTypesByName = {text: {text: HirType}}
@@ -116,6 +117,7 @@ class HirLowering:
     current_method_self_type: HirType?
     lowered_impl_functions: HirImplFunctions
     lowered_traits: HirTraitsByName   # Traits lowered in this module (by name), for injecting defaults into impls
+    imported_traits: HirImportedTraitsByName
     imported_enums: HirImportedEnumsByName
     imported_enum_owners: HirImportedEnumOwners
     # Nested-field-access support (native-build --entry path has no type
@@ -204,6 +206,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_package_sibling_misses: {text: bool} = {}
     val empty_impl_functions: HirImplFunctions = {}
     val empty_traits: HirTraitsByName = {}
+    val empty_imported_traits: HirImportedTraitsByName = {}
     val empty_imported_enums: HirImportedEnumsByName = {}
     val empty_imported_enum_owners: HirImportedEnumOwners = {}
     val empty_struct_field_types: HirFieldTypesByName = {}
@@ -247,6 +250,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         current_method_self_type: nil,
         lowered_impl_functions: empty_impl_functions,
         lowered_traits: empty_traits,
+        imported_traits: empty_imported_traits,
         imported_enums: empty_imported_enums,
         imported_enum_owners: empty_imported_enum_owners,
         struct_field_types_by_name: empty_struct_field_types,
@@ -400,8 +404,7 @@ impl HirLowering:
         # value. `struct Function` (parser_types.spl) additionally SHADOWS
         # TypeKind.Function: even a qualified `case TypeKind.Function` compiles
         # as an always-true struct pattern (bug doc iteration 18 hazard #1), so
-        # it is pre-dispatched by discriminant (reference disc from a constructed
-        # value — no fragile hardcoded name-hash) and kept OUT of the big match.
+        # it is pre-dispatched by discriminant and kept OUT of the big match.
         # NOTE: the corrupt-field-type upstream cause is fixed in lower_struct/
         # lower_class (direct field access instead of struct destructure).
         # DISC-DISPATCH (bug doc iteration 20 #86). A multi-arm `match lt_kind`
@@ -413,16 +416,16 @@ impl HirLowering:
         # in lower_type_list (gdb: lower_type_list <- lower_type <- lower_field).
         # The identical match works for function param/return types, so this is
         # value-specific irrefutable-arm mis-routing. Dispatch by discriminant
-        # (reference discs from freshly constructed values — construction is
-        # always correct; only pattern MATCHING mis-dereferences) and extract
-        # each payload in an ISOLATED single-arm guarded match, the idiom proven
-        # in expressions.spl / statements.spl.
+        # using the stable variant-name hashes emitted by the compiler. Avoid
+        # constructing eight recursive TypeKind exemplars for every source type:
+        # the no-GC bootstrap retains those throwaway payload graphs forever.
+        # Extract each payload in an ISOLATED single-arm guarded match, the idiom
+        # proven in expressions.spl / statements.spl.
         val kind_disc_v: i64 = hir_type_kind_disc(lt_kind)
-        val d_named: i64 = hir_type_kind_disc(TypeKind.Named("", []))
 
         # Extract in the frontend owner module, where HirTypeKind.Named is not
         # in scope and cannot collide with TypeKind.Named on stage4.
-        if kind_disc_v == d_named:
+        if kind_disc_v == 2288079638:  # hash("Named")
             val nm: text = parser_type_kind_named_name(lt_kind)
             val nargs: [Type] = parser_type_kind_named_args(lt_kind)
             if self.focused_hir_diag:
@@ -433,17 +436,8 @@ impl HirLowering:
             val named_kind = self.lower_named_kind(nm, self.lower_type_list(nargs), lt.span)
             return HirType(kind: named_kind, span: lt.span)
 
-        val d_tuple: i64 = hir_type_kind_disc(TypeKind.Tuple([]))
-
-        val d_array: i64 = hir_type_kind_disc(TypeKind.Array(lt, nil))
-        val d_func: i64 = hir_type_kind_disc(TypeKind.Function([], lt))
-        val d_opt: i64 = hir_type_kind_disc(TypeKind.Optional(lt))
-        val d_ref: i64 = hir_type_kind_disc(TypeKind.Reference(lt, false))
-        val d_union: i64 = hir_type_kind_disc(TypeKind.Union([]))
-        val d_proj: i64 = hir_type_kind_disc(TypeKind.Projection(lt, ""))
-
         var kind: HirTypeKind = HirTypeKind.Infer(0, 0)
-        if kind_disc_v == d_tuple:
+        if kind_disc_v == 4090216459:  # hash("Tuple")
             var elems: [Type] = []
             match lt_kind:
                 case TypeKind.Tuple(elements):
@@ -454,7 +448,7 @@ impl HirLowering:
                 kind = HirTypeKind.Unit
             else:
                 kind = HirTypeKind.Tuple(self.lower_type_list(elems))
-        elif kind_disc_v == d_array:
+        elif kind_disc_v == 1984125491:  # hash("Array")
             var elem: Type = lt
             match lt_kind:
                 case TypeKind.Array(element, size):
@@ -462,7 +456,7 @@ impl HirLowering:
                 case _:
                     pass
             kind = HirTypeKind.Array(self.lower_type(elem), nil)
-        elif kind_disc_v == d_func:
+        elif kind_disc_v == 2452922934:  # hash("Function")
             var fparams: [Type] = []
             var fret: Type = lt
             match lt_kind:
@@ -472,7 +466,7 @@ impl HirLowering:
                 case _:
                     pass
             kind = HirTypeKind.Function(self.lower_type_list(fparams), self.lower_type(fret), [])
-        elif kind_disc_v == d_opt:
+        elif kind_disc_v == 2589120870:  # hash("Optional")
             var oinner: Type = lt
             match lt_kind:
                 case TypeKind.Optional(inner):
@@ -480,7 +474,7 @@ impl HirLowering:
                 case _:
                     pass
             kind = HirTypeKind.Optional(self.lower_type(oinner))
-        elif kind_disc_v == d_ref:
+        elif kind_disc_v == 2396904320:  # hash("Reference")
             var rinner: Type = lt
             var rmut: bool = false
             match lt_kind:
@@ -490,7 +484,7 @@ impl HirLowering:
                 case _:
                     pass
             kind = HirTypeKind.Ref(self.lower_type(rinner), rmut)
-        elif kind_disc_v == d_union:
+        elif kind_disc_v == 557650139:  # hash("Union")
             var umembers: [Type] = []
             match lt_kind:
                 case TypeKind.Union(members):
@@ -504,7 +498,7 @@ impl HirLowering:
                 kind = hir_members[0].kind
             else:
                 kind = HirTypeKind.Union(hir_members)
-        elif kind_disc_v == d_proj:
+        elif kind_disc_v == 2918955767:  # hash("Projection")
             var pbase: Type = lt
             var passoc: text = ""
             match lt_kind:

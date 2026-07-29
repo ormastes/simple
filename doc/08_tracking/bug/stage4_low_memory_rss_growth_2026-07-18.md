@@ -279,3 +279,34 @@ state. The two aggregate-valued dictionaries retain replacement initialization
 because seed construction can leave that field shape nil. The focused source
 regression passes 1/1 under bounded seed diagnostics; pure-Simple runtime and
 RSS evidence remain unavailable without a current parent.
+
+## Current-parent allocation result (2026-07-29)
+
+The next bounded window removed throwaway enum exemplars from four hot no-GC
+dispatch paths. HIR type lowering no longer constructs eight recursive
+`TypeKind` payload graphs per type; HIR statement lowering, MIR statement
+lowering, and the whole-module MIR struct-type prescan likewise compare the
+stable variant-name discriminants without allocating fallback AST/HIR graphs
+for every node. The focused source regression passes 1/1. Two stale Stage 2
+variant names exposed by the no-stub build were corrected to the declared
+`ConstValue.String` and `MirTypeKind.Opaque` variants.
+
+The bootstrap-only Rust seed then produced a current pure-Simple Stage 2
+parent on the second cache-preserving attempt:
+
+- output: `build/native_probe/memory-dispatch-fix/stage2-simple`;
+- SHA-256: `d7c8f5008af12a1883a3491adf96f9a9bc3ea6a50e7f3cd61626f0702dba4873`;
+- elapsed: 4m32.50s;
+- maximum RSS: 428,700 KiB;
+- no compatibility stubs were permitted.
+
+That current parent ran the canonical positional pure-Simple Stage 3 route
+under a 32 GiB cgroup cap. It exited normally after 7m24.84s at 11,756,032 KiB
+(11.21 GiB) maximum RSS, rather than reproducing the prior 63.73 GiB cgroup
+OOM. It did not produce a Stage 3 executable: HIR completed far enough to emit
+6,859 ordinary unresolved-name/type diagnostics, beginning in
+`src/compiler/driver/driver.spl`. Therefore the high-RSS/OOM prerequisite is
+cleared for the exercised path, but successful Stage 3 and downstream Stage 4
+artifact acceptance remain open behind a separate HIR-resolution failure.
+Receipts and logs are retained under
+`build/native_probe/memory-dispatch-fix/`.
