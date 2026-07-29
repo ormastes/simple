@@ -1,0 +1,82 @@
+# Extension lifecycle — lazy activation on typed onCommand events, real
+# handler dispatch, and deactivation disposing every registration.
+
+use std.spec
+use std.editor.extensions.host.*
+use std.editor.extensions.manifest.*
+use std.editor.extensions.api.{Disposable}
+
+fn lifecycle_handler(payload: text) -> Result<text, text>:
+    Ok("ran:" + payload)
+
+fn lifecycle_listener(payload: text):
+    pass_do_nothing
+
+fn lifecycle_demo_manifest() -> ExtensionManifest:
+    extension_manifest_basic(
+        "demo-ext", "1.0.0", "",
+        ["onCommand:demo.hello"],
+        [ExtensionCommand(id: "demo.hello", title: "Demo Hello", category: "Demo")],
+        []
+    )
+
+describe "extension lifecycle: activate -> dispatch -> deactivate":
+
+    it "dispatch_command lazily activates the owner then runs the handler":
+        val host = ExtensionHost.new()
+        host.register_manifest(lifecycle_demo_manifest(), "<test>")
+        host.register_command_handler("demo-ext", "demo.hello", "Demo Hello", lifecycle_handler)
+        expect(host.is_active("demo-ext")).to_equal(false)
+        match host.dispatch_command("demo.hello", "world"):
+            case Ok(out):
+                expect(out).to_equal("ran:world")
+            case Err(_):
+                expect("dispatch").to_equal("failed")
+        expect(host.is_active("demo-ext")).to_equal(true)
+        expect(host.lifetime_disposable_count("demo-ext")).to_equal(1)
+
+    it "deactivation disposes all registrations and dispatch fails cleanly":
+        val host = ExtensionHost.new()
+        host.register_manifest(lifecycle_demo_manifest(), "<test>")
+        host.register_command_handler("demo-ext", "demo.hello", "Demo Hello", lifecycle_handler)
+        host.on_event("demo-ext", "doc.saved", lifecycle_listener)
+        expect(host.lifetime_disposable_count("demo-ext")).to_equal(2)
+        match host.dispatch_command("demo.hello", "x"):
+            case Ok(out):
+                expect(out).to_equal("ran:x")
+            case Err(_):
+                expect("dispatch").to_equal("failed")
+        expect(host.deactivate("demo-ext")).to_equal(true)
+        expect(host.lifetime_disposable_count("demo-ext")).to_equal(0)
+        expect(host.command_handler_registered("demo.hello")).to_equal(false)
+        match host.dispatch_command("demo.hello", "again"):
+            case Ok(_):
+                expect("dispatch after deactivate").to_equal("should fail")
+            case Err(e):
+                expect(e.contains("no handler registered")).to_equal(true)
+
+    it "typed event listeners are invoked and counted by emit_event":
+        val host = ExtensionHost.new()
+        host.register_manifest(lifecycle_demo_manifest(), "<test>")
+        host.activate("demo-ext")
+        host.on_event("demo-ext", "doc.saved", lifecycle_listener)
+        expect(host.emit_event("doc.saved", "payload") >= 1).to_equal(true)
+        host.deactivate("demo-ext")
+        expect(host.emit_event("doc.saved", "payload")).to_equal(0)
+
+    it "dispatching a command nobody declared or registered fails cleanly":
+        val host = ExtensionHost.new()
+        match host.dispatch_command("ghost.cmd", "x"):
+            case Ok(_):
+                expect("ghost dispatch").to_equal("should fail")
+            case Err(e):
+                expect(e.contains("no handler registered")).to_equal(true)
+
+    it "builtins register and activate without wildcard activation":
+        val host = extension_host_with_builtins()
+        expect(host.extension_count()).to_equal(3)
+        expect(host.is_active("simple-language")).to_equal(true)
+        expect(host.is_active("markdown-language")).to_equal(true)
+        expect(host.is_active("sdn-graph-language")).to_equal(true)
+        expect(host.command_registered("md.toggleBold")).to_equal(true)
+        expect(host.find_language_for_ext(".md")).to_equal("markdown")

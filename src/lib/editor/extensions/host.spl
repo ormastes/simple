@@ -5,6 +5,9 @@
 
 use std.editor.extensions.api.*
 use std.editor.extensions.manifest.*
+use std.editor.extensions.manifest_sdn.{extension_manifest_load}
+use std.editor.extensions.registry.{CommandRegistry, EventListenerRegistry, LanguageIndex}
+use std.editor.extensions.builtin.index.{builtin_manifest_providers}
 use std.editor.extensions.builtin.spl_language.*
 use std.editor.extensions.builtin.md_language.*
 use std.editor.core.path_text.*
@@ -33,34 +36,19 @@ fn _extension_host_is_manifest_path(path: text) -> bool:
         return false
     parts[parts.len() - 1] == "extension.sdn"
 
-fn extension_host_graph_language_manifest() -> ExtensionManifest:
-    ExtensionManifest(
-        name: "sdn-graph-language",
-        version: "1.0.0",
-        main: "",
-        activation_events: ["onLanguage:sdn-graph"],
-        contributes_commands: [
-            ExtensionCommand(id: "graph.render", title: "Render SDN Graph"),
-            ExtensionCommand(id: "graph.showCanonical", title: "Show Canonical SDN Graph")
-        ],
-        contributes_languages: [
-            ExtensionLanguage(id: "sdn-graph", extensions: [".graph.sdn", ".sdngraph"])
-        ],
-        contributes_debug_adapters: [],
-        contributes_themes: [],
-        contributes_keybindings: []
-    )
-
 class ExtensionHost:
     extensions: [ExtensionEntry]
     command_registry: [ExtensionCommandEntry]
-    language_registry: [ExtensionLanguageEntry]
+    language_index: LanguageIndex
     debug_adapter_registry: [ExtensionDebugAdapterEntry]
     context_registry: [ExtensionContextEntry]
     event_log: [ExtensionEventRecord]
     invocation_queue: [ExtensionCommandInvocation]
     runtime_policy: ExtensionRuntimePolicy
     runtime_dispatch_log: [ExtensionRuntimeDispatchRecord]
+    commands: CommandRegistry
+    listeners: EventListenerRegistry
+    lifetimes: [ExtensionLifetimeEntry]
 
 struct ExtensionCommandEntry:
     extension_name: text
@@ -72,9 +60,12 @@ fn extension_command_entry_name(entry: ExtensionCommandEntry) -> text:
 fn extension_command_entry_command_id(entry: ExtensionCommandEntry) -> text:
     entry.command.id
 
-struct ExtensionLanguageEntry:
-    extension_name: text
-    language: ExtensionLanguage
+# Per-extension registration ownership. Struct (not the ExtensionLifetime
+# class): class instances stored inside an array field lose later mutations
+# (value-copy semantics), so the host mutates entries by index reassignment.
+struct ExtensionLifetimeEntry:
+    owner: text
+    disposables: [Disposable]
 
 struct ExtensionDebugAdapterEntry:
     extension_name: text
@@ -124,13 +115,16 @@ impl ExtensionHost:
         ExtensionHost(
             extensions: [],
             command_registry: [],
-            language_registry: [],
+            language_index: LanguageIndex.new(),
             debug_adapter_registry: [],
             context_registry: [],
             event_log: [],
             invocation_queue: [],
             runtime_policy: extension_runtime_policy_default(),
-            runtime_dispatch_log: []
+            runtime_dispatch_log: [],
+            commands: CommandRegistry.new(),
+            listeners: EventListenerRegistry.new(),
+            lifetimes: []
         )
 
     me index_extension(path: text):
@@ -205,11 +199,61 @@ impl ExtensionHost:
     me activate_command(command_id: text) -> i64:
         me.activate_event("onCommand:" + command_id)
 
+    # Record a Disposable under its owning extension's lifetime entry.
+    me _lifetime_add(name: text, d: Disposable):
+        var i = 0
+        while i < me.lifetimes.len():
+            if me.lifetimes[i].owner == name:
+                var entry = me.lifetimes[i]
+                entry.disposables = entry.disposables.push(d)
+                me.lifetimes[i] = entry
+                return
+            i = i + 1
+        me.lifetimes.push(ExtensionLifetimeEntry(owner: name, disposables: [d]))
+
+    fn lifetime_disposable_count(name: text) -> i64:
+        for entry in me.lifetimes:
+            if entry.owner == name:
+                return entry.disposables.len()
+        0
+
+    # Register a typed command handler. The registration is owned by the
+    # extension's lifetime and disposed on deactivation. First registration
+    # of a command id wins; duplicates are recorded as registry conflicts.
+    me register_command_handler(extension_name: text, command_id: text, title: text,
+                                handler_fn: fn(text) -> Result<text, text>) -> Disposable:
+        val d = me.commands.register(extension_name, command_id, title, handler_fn)
+        if d.kind == "command":
+            me._lifetime_add(extension_name, d)
+        d
+
+    fn command_handler_registered(command_id: text) -> bool:
+        me.commands.has(command_id)
+
+    # Lazy activation + real dispatch: "onCommand:<id>" activates the owning
+    # extension, then the registered typed handler executes.
+    me dispatch_command(command_id: text, payload: text) -> Result<text, text>:
+        me.activate_command(command_id)
+        if not me.commands.has(command_id):
+            return Err("no handler registered for command '" + command_id + "'")
+        val owner = me.commands.owner_of(command_id)
+        val entry = me.find_extension(owner)
+        if entry.manifest.name != "" and not entry.active:
+            return Err("extension not active: " + owner)
+        me.commands.run(command_id, payload)
+
+    # Register a typed event listener, owned by the extension's lifetime.
+    me on_event(extension_name: text, event: text, handler_fn: fn(text)) -> Disposable:
+        val d = me.listeners.add(extension_name, event, handler_fn)
+        me._lifetime_add(extension_name, d)
+        d
+
     me emit_event(event: text, payload: text) -> i64:
         var delivered = 0
         for entry in me.context_registry:
             if extension_context_is_subscribed(entry.context, event):
                 delivered = delivered + 1
+        delivered = delivered + me.listeners.deliver(event, payload)
         me.event_log.push(ExtensionEventRecord(
             event: event,
             payload: payload,
@@ -386,24 +430,35 @@ impl ExtensionHost:
                 me.extensions[i] = entry
                 me._unregister_contributions(entry.manifest.name)
                 me._unregister_context(entry.manifest.name)
+                me._dispose_lifetime(entry.manifest.name)
                 return true
             i = i + 1
         false
+
+    # Dispose every registration the extension's lifetime owns.
+    me _dispose_lifetime(name: text):
+        var i = 0
+        while i < me.lifetimes.len():
+            if me.lifetimes[i].owner == name:
+                var entry = me.lifetimes[i]
+                for d in entry.disposables:
+                    if d.kind == "command":
+                        me.commands.dispose(d.id)
+                    elif d.kind == "listener":
+                        me.listeners.dispose(d.id)
+                entry.disposables = []
+                me.lifetimes[i] = entry
+            i = i + 1
+        # safety sweep for registrations that bypassed the lifetime
+        me.commands.dispose_owner(name)
+        me.listeners.dispose_owner(name)
 
     fn find_extension(name: text) -> ExtensionEntry:
         for entry in me.extensions:
             if entry.manifest.name == name:
                 return entry
         ExtensionEntry(
-            manifest: ExtensionManifest(
-                name: "", version: "", main: "",
-                activation_events: [],
-                contributes_commands: [],
-                contributes_languages: [],
-                contributes_debug_adapters: [],
-                contributes_themes: [],
-                contributes_keybindings: []
-            ),
+            manifest: extension_manifest_empty(),
             path: "",
             active: false
         )
@@ -437,7 +492,7 @@ impl ExtensionHost:
                 return entry
         ExtensionCommandEntry(
             extension_name: "",
-            command: ExtensionCommand(id: "", title: "")
+            command: ExtensionCommand(id: "", title: "", category: "")
         )
 
     fn command_registered(command_id: text) -> bool:
@@ -445,11 +500,7 @@ impl ExtensionHost:
         entry.command.id != ""
 
     fn find_language_for_ext(file_ext: text) -> text:
-        for entry in me.language_registry:
-            for ext in entry.language.extensions:
-                if ext == file_ext:
-                    return entry.language.id
-        ""
+        me.language_index.language_for_file_ext(file_ext)
 
     fn find_debug_adapter(adapter_id: text) -> ExtensionDebugAdapterEntry:
         for entry in me.debug_adapter_registry:
@@ -471,10 +522,7 @@ impl ExtensionHost:
                 command: cmd
             ))
         for lang in manifest.contributes_languages:
-            me.language_registry.push(ExtensionLanguageEntry(
-                extension_name: manifest.name,
-                language: lang
-            ))
+            me.language_index.register(manifest.name, lang.id, lang.extensions)
         for adapter in manifest.contributes_debug_adapters:
             me.debug_adapter_registry.push(ExtensionDebugAdapterEntry(
                 extension_name: manifest.name,
@@ -497,11 +545,7 @@ impl ExtensionHost:
             if entry.extension_name != name:
                 new_cmds.push(entry)
         me.command_registry = new_cmds
-        var new_langs: [ExtensionLanguageEntry] = []
-        for entry in me.language_registry:
-            if entry.extension_name != name:
-                new_langs.push(entry)
-        me.language_registry = new_langs
+        me.language_index.remove_owner(name)
         var new_adapters: [ExtensionDebugAdapterEntry] = []
         for entry in me.debug_adapter_registry:
             if entry.extension_name != name:
@@ -553,10 +597,13 @@ fn extension_runtime_policy_external_process(allowed_roots: [text]) -> Extension
         allowed_roots: allowed_roots
     )
 
+# Builtin manifests come from the registration seam (builtin/index.spl) and
+# are activated explicitly by name — no wildcard activation.
 fn extension_host_with_builtins() -> ExtensionHost:
     val host = ExtensionHost.new()
-    host.register_manifest(spl_language_manifest(), "<builtin>")
-    host.register_manifest(md_language_manifest(), "<builtin>")
-    host.register_manifest(extension_host_graph_language_manifest(), "<builtin>")
-    host.activate_event("*")
+    val builtins = builtin_manifest_providers()
+    for manifest in builtins:
+        host.register_manifest(manifest, "<builtin>")
+    for manifest in builtins:
+        host.activate(manifest.name)
     host

@@ -1,13 +1,14 @@
-# Extension Manifest — SDN manifest types for editor extensions.
+# Extension Manifest — typed manifest model for editor extensions.
+# Model ONLY: parsing/decoding lives in manifest_sdn.spl.
 #
 # Provides: ExtensionCommand, ExtensionLanguage, ExtensionDebugAdapterManifest,
-#           ExtensionTheme, ExtensionKeybinding, ExtensionManifest.
-
-use std.io_runtime.{file_read}
+#           ExtensionTheme, ExtensionKeybinding, ExtensionCustomEditor,
+#           ExtensionPermissions, ExtensionManifest.
 
 struct ExtensionCommand:
     id: text
     title: text
+    category: text
 
 struct ExtensionLanguage:
     id: text
@@ -29,109 +30,85 @@ struct ExtensionKeybinding:
     key: text
     when: text
 
+struct ExtensionCustomEditor:
+    id: text
+    document_kind: text
+    priority: i64
+
+# Default-deny capability grants. Every field is false unless the manifest
+# grants it explicitly.
+struct ExtensionPermissions:
+    workspace_read: bool
+    workspace_write: bool
+    process_spawn: bool
+    network_client: bool
+    secrets: bool
+    native_ffi: bool
+
+fn extension_permissions_none() -> ExtensionPermissions:
+    ExtensionPermissions(
+        workspace_read: false,
+        workspace_write: false,
+        process_spawn: false,
+        network_client: false,
+        secrets: false,
+        native_ffi: false
+    )
+
 struct ExtensionManifest:
+    # legacy identity fields (kept for backward compatibility)
     name: text
     version: text
     main: text
+    # schema "simple.ide.extension/1" fields ("" on legacy manifests)
+    schema_version: text
+    display_name: text
+    engine: text            # raw semver range text; check via contract.semver_range_parse
+    entry: text             # runtime entry module (aliases `main` on new manifests)
+    host: text              # "" | "builtin" | "in_process" | "worker"
+    permissions: ExtensionPermissions
     activation_events: [text]
     contributes_commands: [ExtensionCommand]
     contributes_languages: [ExtensionLanguage]
     contributes_debug_adapters: [ExtensionDebugAdapterManifest]
     contributes_themes: [ExtensionTheme]
     contributes_keybindings: [ExtensionKeybinding]
+    contributes_custom_editors: [ExtensionCustomEditor]
 
 fn extension_manifest_empty() -> ExtensionManifest:
     ExtensionManifest(
         name: "",
         version: "",
         main: "",
+        schema_version: "",
+        display_name: "",
+        engine: "",
+        entry: "",
+        host: "",
+        permissions: extension_permissions_none(),
         activation_events: [],
         contributes_commands: [],
         contributes_languages: [],
         contributes_debug_adapters: [],
         contributes_themes: [],
-        contributes_keybindings: []
+        contributes_keybindings: [],
+        contributes_custom_editors: []
     )
 
-fn extension_manifest_load(path: text) -> ExtensionManifest:
-    val content = file_read(path) ?? ""
-    if content == "":
-        return extension_manifest_empty()
-    var manifest = extension_manifest_empty()
-    manifest.name = _extension_manifest_text_value(content, "name")
-    manifest.version = _extension_manifest_text_value(content, "version")
-    manifest.main = _extension_manifest_text_value(content, "main")
-    manifest.activation_events = _extension_manifest_list_value(content, "activation_events")
-    manifest.contributes_commands = _extension_manifest_command_list(content)
-    manifest.contributes_languages = _extension_manifest_language_list(content)
-    manifest.contributes_debug_adapters = _extension_manifest_debug_adapter_list(content)
-    manifest.contributes_themes = []
-    manifest.contributes_keybindings = []
-    manifest
-
-fn _extension_manifest_text_value(content: text, key: text) -> text:
-    val lines = content.split("\n")
-    val quoted = "\"" + key + "\""
-    for line in lines:
-        if line.index_of(quoted) >= 0:
-            val parts = line.split("\"")
-            var i = 0
-            while i + 2 < parts.len():
-                if parts[i] == key:
-                    return parts[i + 2]
-                i = i + 1
-    ""
-
-fn _extension_manifest_list_value(content: text, key: text) -> [text]:
-    val lines = content.split("\n")
-    val quoted = "\"" + key + "\""
-    var result: [text] = []
-    for line in lines:
-        if line.index_of(quoted) >= 0:
-            val parts = line.split("\"")
-            var seen_key = false
-            var i = 0
-            while i < parts.len():
-                if parts[i] == key:
-                    seen_key = true
-                elif seen_key and i % 2 == 1:
-                    result.push(parts[i])
-                i = i + 1
-            return result
-    result
-
-fn _extension_manifest_command_list(content: text) -> [ExtensionCommand]:
-    val ids = _extension_manifest_object_field_values(content, "id")
-    val titles = _extension_manifest_object_field_values(content, "title")
-    var result: [ExtensionCommand] = []
-    var i = 0
-    while i < ids.len():
-        var title = ids[i]
-        if i < titles.len():
-            title = titles[i]
-        result.push(ExtensionCommand(id: ids[i], title: title))
-        i = i + 1
-    result
-
-fn _extension_manifest_language_list(content: text) -> [ExtensionLanguage]:
-    val ids = _extension_manifest_object_field_values(content, "id")
-    var result: [ExtensionLanguage] = []
-    for id in ids:
-        if id != "":
-            result.push(ExtensionLanguage(id: id, extensions: []))
-    result
-
-fn _extension_manifest_debug_adapter_list(content: text) -> [ExtensionDebugAdapterManifest]:
-    []
-
-fn _extension_manifest_object_field_values(content: text, field: text) -> [text]:
-    var values: [text] = []
-    val lines = content.split("\n")
-    for line in lines:
-        val parts = line.split("\"")
-        var i = 0
-        while i + 2 < parts.len():
-            if parts[i] == field and parts[i + 2] != "":
-                values.push(parts[i + 2])
-            i = i + 1
-    values
+# Convenience constructor for builtin manifests: fills schema/permission
+# fields with safe defaults (host "builtin", default-deny permissions).
+fn extension_manifest_basic(name: text, version: text, main: text,
+                            activation_events: [text],
+                            commands: [ExtensionCommand],
+                            languages: [ExtensionLanguage]) -> ExtensionManifest:
+    var m = extension_manifest_empty()
+    m.name = name
+    m.display_name = name
+    m.version = version
+    m.main = main
+    m.entry = main
+    m.host = "builtin"
+    m.activation_events = activation_events
+    m.contributes_commands = commands
+    m.contributes_languages = languages
+    m
