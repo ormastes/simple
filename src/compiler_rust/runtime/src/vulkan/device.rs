@@ -66,6 +66,10 @@ fn resource_queue_families(compute: u32, transfer: u32, graphics: Option<u32>) -
 }
 
 impl VulkanDevice {
+    pub fn max_push_constant_size(&self) -> u32 {
+        self.physical_device.properties.limits.max_push_constants_size
+    }
+
     /// Create a logical device from a physical device
     pub fn new(physical_device: VulkanPhysicalDevice) -> VulkanResult<Arc<Self>> {
         let instance = VulkanInstance::get_or_init()?;

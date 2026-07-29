@@ -28,7 +28,7 @@
 //! input.upload(&data)?;
 //!
 //! // Compile kernel from SPIR-V
-//! let pipeline = ComputePipeline::new(device.clone(), spirv_bytecode)?;
+//! let pipeline = ComputePipeline::new(device.clone(), spirv_bytecode, "main", 0)?;
 //!
 //! // Execute
 //! pipeline.execute(&[&input, &output], [256, 1, 1], [64, 1, 1])?;

@@ -5,7 +5,26 @@ use super::device::VulkanDevice;
 use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use std::collections::BTreeMap;
+use std::ffi::CString;
 use std::sync::Arc;
+
+fn compute_entry_name(entry_name: &str) -> VulkanResult<CString> {
+    if entry_name.is_empty() {
+        return Err(VulkanError::PipelineCreationFailed(
+            "Entry name must not be empty".to_string(),
+        ));
+    }
+    CString::new(entry_name).map_err(|e| VulkanError::PipelineCreationFailed(format!("Entry name: {e}")))
+}
+
+fn validate_push_constant_size(size: u32, max_size: u32) -> VulkanResult<()> {
+    if size % 4 != 0 || size > max_size {
+        return Err(VulkanError::PipelineCreationFailed(format!(
+            "Push constant size {size} must be four-byte aligned and at most {max_size}"
+        )));
+    }
+    Ok(())
+}
 
 fn storage_binding_numbers(spirv_code: &[u8]) -> VulkanResult<Vec<u32>> {
     if spirv_code.len() < 20 || spirv_code.len() % 4 != 0 {
@@ -94,9 +113,69 @@ pub struct ComputePipeline {
     push_constant_size: u32,
 }
 
+struct ComputePipelineBuildGuard {
+    device: Arc<VulkanDevice>,
+    shader_module: Option<vk::ShaderModule>,
+    descriptor_set_layout: Option<vk::DescriptorSetLayout>,
+    pipeline_layout: Option<vk::PipelineLayout>,
+    pipeline: Option<vk::Pipeline>,
+    descriptor_pool: Option<vk::DescriptorPool>,
+}
+
+impl ComputePipelineBuildGuard {
+    fn new(device: Arc<VulkanDevice>) -> Self {
+        Self {
+            device,
+            shader_module: None,
+            descriptor_set_layout: None,
+            pipeline_layout: None,
+            pipeline: None,
+            descriptor_pool: None,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.shader_module = None;
+        self.descriptor_set_layout = None;
+        self.pipeline_layout = None;
+        self.pipeline = None;
+        self.descriptor_pool = None;
+    }
+}
+
+impl Drop for ComputePipelineBuildGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(pool) = self.descriptor_pool.take() {
+                self.device.handle().destroy_descriptor_pool(pool, None);
+            }
+            if let Some(pipeline) = self.pipeline.take() {
+                self.device.handle().destroy_pipeline(pipeline, None);
+            }
+            if let Some(layout) = self.pipeline_layout.take() {
+                self.device.handle().destroy_pipeline_layout(layout, None);
+            }
+            if let Some(layout) = self.descriptor_set_layout.take() {
+                self.device.handle().destroy_descriptor_set_layout(layout, None);
+            }
+            if let Some(shader) = self.shader_module.take() {
+                self.device.handle().destroy_shader_module(shader, None);
+            }
+        }
+    }
+}
+
 impl ComputePipeline {
     /// Create a compute pipeline from SPIR-V bytecode
-    pub fn new(device: Arc<VulkanDevice>, spirv_code: &[u8], push_constant_size: u32) -> VulkanResult<Self> {
+    pub fn new(
+        device: Arc<VulkanDevice>,
+        spirv_code: &[u8],
+        entry_name: &str,
+        push_constant_size: u32,
+    ) -> VulkanResult<Self> {
+        let entry_name = compute_entry_name(entry_name)?;
+        validate_push_constant_size(push_constant_size, device.max_push_constant_size())?;
+        let mut build = ComputePipelineBuildGuard::new(device.clone());
         // Validate SPIR-V magic number
         if spirv_code.len() < 4 {
             return Err(VulkanError::SpirvCompilationFailed("Code too short".to_string()));
@@ -125,6 +204,7 @@ impl ComputePipeline {
                 .create_shader_module(&shader_info, None)
                 .map_err(|e| VulkanError::SpirvCompilationFailed(format!("{:?}", e)))?
         };
+        build.shader_module = Some(shader_module);
 
         // Engine2D compute kernels use storage buffers in descriptor set 0.
         // Parse their Binding decorations directly: the C spirv-reflect parser
@@ -161,6 +241,7 @@ impl ComputePipeline {
         } else {
             Vec::new()
         };
+        build.descriptor_set_layout = Some(descriptor_set_layout);
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)
             .push_constant_ranges(&push_ranges);
@@ -171,11 +252,9 @@ impl ComputePipeline {
                 .create_pipeline_layout(&pipeline_layout_info, None)
                 .map_err(|e| VulkanError::PipelineCreationFailed(format!("Pipeline layout: {:?}", e)))?
         };
+        build.pipeline_layout = Some(pipeline_layout);
 
         // Create compute pipeline
-        let entry_name = std::ffi::CString::new("main")
-            .map_err(|e| VulkanError::PipelineCreationFailed(format!("Entry name: {:?}", e)))?;
-
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
@@ -185,12 +264,32 @@ impl ComputePipeline {
             .stage(stage_info)
             .layout(pipeline_layout);
 
-        let pipeline = unsafe {
-            device
+        let pipelines = unsafe {
+            match device
                 .handle()
                 .create_compute_pipelines(device.pipeline_cache(), &[pipeline_info], None)
-                .map_err(|e| VulkanError::PipelineCreationFailed(format!("{:?}", e.1)))?[0]
+            {
+                Ok(pipelines) => pipelines,
+                Err((partial, error)) => {
+                    for pipeline in partial {
+                        device.handle().destroy_pipeline(pipeline, None);
+                    }
+                    return Err(VulkanError::PipelineCreationFailed(format!("{error:?}")));
+                }
+            }
         };
+        if pipelines.len() != 1 {
+            unsafe {
+                for pipeline in pipelines {
+                    device.handle().destroy_pipeline(pipeline, None);
+                }
+            }
+            return Err(VulkanError::PipelineCreationFailed(
+                "Vulkan did not return exactly one compute pipeline".to_string(),
+            ));
+        }
+        let pipeline = pipelines[0];
+        build.pipeline = Some(pipeline);
 
         // Create descriptor pool
         let pool_size = vk::DescriptorPoolSize::default()
@@ -208,10 +307,11 @@ impl ComputePipeline {
                 .create_descriptor_pool(&pool_info, None)
                 .map_err(|e| VulkanError::PipelineCreationFailed(format!("Descriptor pool: {:?}", e)))?
         };
+        build.descriptor_pool = Some(descriptor_pool);
 
         tracing::info!("Compute pipeline created with {} bindings", bindings.len());
 
-        Ok(Self {
+        let result = Self {
             device,
             pipeline,
             pipeline_layout,
@@ -220,7 +320,9 @@ impl ComputePipeline {
             descriptor_pool,
             descriptor_binding_count: bindings.len() as u32,
             push_constant_size,
-        })
+        };
+        build.disarm();
+        Ok(result)
     }
 
     /// Execute the kernel with given buffers
@@ -325,7 +427,27 @@ impl ComputePipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::storage_binding_numbers;
+    use super::{compute_entry_name, storage_binding_numbers, validate_push_constant_size};
+
+    #[test]
+    fn compute_entry_name_preserves_non_main_names_and_rejects_invalid_names() {
+        assert_eq!(
+            compute_entry_name("processing_fill_u32").unwrap().to_bytes(),
+            b"processing_fill_u32"
+        );
+        assert!(compute_entry_name("").is_err());
+        assert!(compute_entry_name("bad\0entry").is_err());
+    }
+
+    #[test]
+    fn push_constant_size_requires_alignment_and_device_limit() {
+        assert!(validate_push_constant_size(0, 128).is_ok());
+        assert!(validate_push_constant_size(4, 128).is_ok());
+        assert!(validate_push_constant_size(128, 128).is_ok());
+        assert!(validate_push_constant_size(2, 128).is_err());
+        assert!(validate_push_constant_size(132, 128).is_err());
+        assert!(validate_push_constant_size(u32::MAX, 128).is_err());
+    }
 
     #[test]
     fn storage_binding_parser_defaults_to_binding_zero() {
