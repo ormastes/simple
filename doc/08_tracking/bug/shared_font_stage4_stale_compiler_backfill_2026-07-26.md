@@ -189,13 +189,14 @@ authoritative native expectation is `7`, preventing an unused extraction from
 passing.
 
 The new unique Stage-2 attempt root is
-`build/native_probe/p0-admission-find-local-20260729/`. It compiled all 693
-modules but exited 1 at link: its bootstrap runtime lacks
-`rt_transient_array_scope_begin`, `rt_transient_array_scope_pause`,
-`rt_transient_array_scope_end`, `rt_file_is_regular_no_follow`, and
-`rt_string_free`. The focused source-test command could not initialize because
-of pre-existing test-runner `self.` syntax diagnostics. These are distinct
-runtime/tooling blockers; no A result, Stage 3/4 CLI, or font acceptance exists.
+`build/native_probe/p0-admission-find-local-20260729/`. Its fresh core-C capsule
+proves all five previously missing C providers. A second link advanced to the
+bootstrap-only `rt_cranelift_*` boundary. The final canonical authority attempt
+(current C capsule plus seed `native_all`) reused 690 objects, rebuilt 3, and
+exited 1 without an ELF or terminal linker diagnostic. The focused source-test
+command could not initialize because of pre-existing test-runner `self.` syntax
+diagnostics. The three-attempt producer window is exhausted: no A result,
+Stage 3/4 CLI, or font acceptance exists.
 
 A fresh P0 owner ran exactly one bounded direct Stage 4 cycle from current
 feature checkpoint `427878810b4b2d812dba129f6dfd1eb12e282989` plus isolated

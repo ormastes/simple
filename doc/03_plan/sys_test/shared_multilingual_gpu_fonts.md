@@ -24,11 +24,13 @@ cross-platform native-GPU matrix.
 Aggregate dispatch and its missing `%l2` definition are repaired. The current
 `Option<Box>` fixture now forces `opt.?` payload recovery by printing
 `owned.value` and expecting `7`; `MirLowering.find_local` is a receiver method
-so its local lookup does not lower to `undef`. The new isolated Stage-2 attempt
-is blocked separately at link by missing symbols in the hash-bound bootstrap
-runtime. Do not retry that unchanged producer or promote it: provide a runtime
-with those symbols, then run the unique A/B/C probes before Stage 3,
-incremental Stage 4, focused specs, or canonical docgen.
+so its local lookup does not lower to `undef`. The fresh core-C capsule clears
+the first five missing C symbols, but the final authority invocation reused 690
+objects, rebuilt 3, and exited `1` without an ELF or final diagnostic. The
+three-attempt producer window is exhausted. Do not retry or promote it; a future
+fresh owner must preserve this cache and establish the missing Stage-2 terminal
+receipt before A/B/C probes, Stage 3, incremental Stage 4, focused specs, or
+canonical docgen.
 
 ### Active items and estimate
 

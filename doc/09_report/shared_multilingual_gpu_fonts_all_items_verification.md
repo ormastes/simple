@@ -18,14 +18,15 @@ struct allocation and `%l2`. A new root cause was then localized to
 now observes `opt.?` through `print(owned.value)` and requires native output
 `7`.
 
-The fresh Stage-2 producer at
-`build/native_probe/p0-admission-find-local-20260729/` stopped at link because
-its bootstrap runtime lacks `rt_transient_array_scope_begin/pause/end`,
-`rt_file_is_regular_no_follow`, and `rt_string_free`. A seed-only source-test
-attempt also stops in pre-existing `nogc_sync_mut` test-runner syntax checks.
-Neither is acceptance evidence. No native fixture, Stage 3/4 CLI, essential
-tools, focused font spec, docgen manual, device, QEMU, or performance row is
-accepted; `STATUS: FAIL` remains unchanged.
+The fresh core-C capsule proved those five C symbols, then the bounded producer
+advanced to bootstrap-only `rt_cranelift_*` requirements. Its final canonical
+authority invocation (current core-C capsule plus seed `native_all`) reused 690
+objects, rebuilt 3, and exited `1` without an ELF or final linker diagnostic.
+A seed-only source-test attempt also stops in pre-existing `nogc_sync_mut`
+test-runner syntax checks. The three-attempt producer window is exhausted.
+Neither result is acceptance evidence. No native fixture, Stage 3/4 CLI,
+essential tools, focused font spec, docgen manual, device, QEMU, or performance
+row is accepted; `STATUS: FAIL` remains unchanged.
 
 ## 2026-07-29 scoped SimpleOS Stage 2 result
 
