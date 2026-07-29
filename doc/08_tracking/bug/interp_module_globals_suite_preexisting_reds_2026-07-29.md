@@ -1,5 +1,23 @@
 # Pre-existing reds in interpreter_flattened_module_globals suite (2026-07-29)
 
+## RESOLVED (same day) — TWO independent root causes, both required
+
+- **Lane L2 (harness):** process-global `RECURSION_DEPTH` reset mid-flight by a
+  parallel test underflowed to `usize::MAX` (phantom StackOverflow), and
+  `INSTRUCTION_COUNT` was never reset — one 10M-op budget shared by the whole
+  suite. Fixed: saturating RecursionGuard, execution-count reset in
+  `clear_interpreter_state`, suite mutex (commit 941e0b646dd).
+- **Lane L1 (product .spl, the ISOLATED red):** the vmm scenario genuinely ran
+  34,659,018 ops — `_pmm_initialize_refcounts` issued one MMIO read per
+  physical page (16,384) and test-mode `_mmio_test_find` forward-scanned the
+  ~2,113-entry append-only write journal with no early exit (16,384 × 2,113 ≈
+  34.6M). Fixed: backward scan with early return (last write wins) in
+  `src/os/kernel/boot/mmio.spl` + prefix refcount init in
+  `src/os/kernel/memory/pmm.spl`. 34.6M → 19,016 ops (1,823x). Op-budget
+  regression harness: `compiler/tests/interpreter_vmm_globals_l1.rs`.
+
+Suite after both: 36 passed / 0 failed. Original report below for history.
+
 Both fail at HEAD (b47326d parent tree) with interpreter files restored to
 HEAD — verified by file-swap baseline; NOT introduced by the 2026-07-29
 frame-lifecycle fixes.

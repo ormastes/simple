@@ -291,7 +291,12 @@ fn pmm_init_identity_range(total_memory: u64, kernel_start: u64, kernel_end: u64
     val reserved_pages = _align_up(bitmap_end, PAGE_SIZE) / PAGE_SIZE
     _bitmap_initialize_free_with_reserved_prefix(bitmap_addr, bitmap_bytes, reserved_pages)
     _pmm_set_state(bitmap_addr, total_pages, total_pages - reserved_pages, reserved_pages)
-    _pmm_initialize_refcounts()
+    # The bitmap at this point is exactly "first reserved_pages allocated, rest
+    # free", so initialize refcounts from that fact directly instead of issuing
+    # one MMIO bitmap read per physical page (_pmm_initialize_refcounts). Under
+    # the hosted-test MMIO journal those per-page reads are O(journal) each and
+    # pushed this init path past the interpreter's 10M-op execution limit.
+    _pmm_initialize_refcounts_prefix(reserved_pages)
 
     log_raw_println("[PMM] scalar init complete")
     true
@@ -441,6 +446,18 @@ fn _pmm_initialize_refcounts():
     var index: u64 = 0
     while index < _pmm_total_pages:
         val count: u16 = if _bitmap_test_addr(_pmm_bitmap_addr, index): 1 else 0
+        g_page_refcounts.push(count)
+        index = index + 1
+
+fn _pmm_initialize_refcounts_prefix(reserved_pages: u64):
+    """Refcount init for the identity-range path: exactly the first
+    `reserved_pages` frames are allocated (refcount 1), everything after is
+    free (refcount 0). Equivalent to _pmm_initialize_refcounts on that bitmap
+    shape, without any per-page bitmap MMIO reads."""
+    g_page_refcounts = []
+    var index: u64 = 0
+    while index < _pmm_total_pages:
+        val count: u16 = if index < reserved_pages: 1 else 0
         g_page_refcounts.push(count)
         index = index + 1
 

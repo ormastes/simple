@@ -26,12 +26,22 @@ Done this session (all cargo-verified, suite 27 pass / 2 pre-existing fails):
 - Heap registry byte accounting: rt_heap_live_bytes/peak/alloc/free/by-kind.
 - Research doc: doc/01_research/compiler/bootstrap/stage4_memory_ownership_research_2026-07-29.md
 
-## Open lanes
-L1 vmm ExecutionLimit red (BLOCKER) · L2 test thread-local isolation ·
-L3 aux-byte accounting · L4 hosted memory truth · L5 OS sampler + gate spec ·
-L6 typed arena generation IDs · L7 Retry 12 (after L1+L2).
+## Lane status (2026-07-29, parallel-agent execution)
+- L2 LANDED 941e0b646dd — root-caused BOTH suite reds: process-global
+  RECURSION_DEPTH underflow (usize::MAX -> phantom StackOverflow) +
+  INSTRUCTION_COUNT never reset (one 10M budget for whole suite). Suite
+  34/2 -> 36/0. This also closed L1's target; L1 asked to stand down.
+- L3+L4 LANDED 3e4cd8fc7e3 — aux-byte counters (array buffers, dict slots,
+  rt_heap_aux_live_bytes, rt_heap_array_capacity_bytes) + truthful hosted
+  memory (real RSS memory_usage, working hosted rt_free, rt_mem_profile_*).
+- L5 LANDED 76e43b18741 — src/app/memstat sampler, check-stage4-memory-gate.shs
+  (PASS + proven fail path), 2/2 SSpec, [MEM-SNAPSHOT] driver line; filed
+  lint PARSE001-on-spec false positive bug doc.
+- L6 LANDED 5eef43f775e — arena generation counter + stale-ID diagnostics
+  (SIMPLE_AST_GEN_CHECK=1), spec 5/5.
+- L7 IN FLIGHT — full bootstrap (dynload) running with SIMPLE_AST_GEN_CHECK=1
+  + SIMPLE_MEM_SNAPSHOT=1 + 10s max-RSS sampler; multifile parse-memory guard
+  requires the bootstrap-produced provenance candidate, will run after.
 
-## Known pre-existing reds (NOT introduced here; file-swap baseline verified)
-- real_vmm_sparse_init_preserves_active_root (ExecutionLimit 10M, isolated)
-- reentrant_callback_refreshes_foreign_imported_array_before_mutation
-  (in-suite only; thread-local pollution)
+## Resolved (were "known pre-existing reds")
+Both suite reds fixed by L2 (see above); bug doc updated by commit message.
