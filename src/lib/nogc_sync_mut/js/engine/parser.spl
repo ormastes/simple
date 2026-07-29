@@ -496,14 +496,21 @@ fn _js_parser_hex_digit(ch: text) -> i64:
     -1
 
 fn _js_parser_decode_string_literal(raw: text) -> text:
+    # slice() is byte-indexed: accumulating one raw byte at a time (the old
+    # `out = out + ch`) shreds multi-byte UTF-8 characters in the JS string
+    # literal into separate U+FFFD replacement characters. Escape markers
+    # are always the single ASCII byte '\\', so byte-stepping to find them
+    # is safe; copy whole runs via slice() between escapes instead of
+    # rebuilding byte-by-byte.
     var out = ""
+    var seg_start = 0
     var i = 0
     while i < raw.len():
         val ch = raw.slice(i, i + 1)
         if ch != "\\" or i + 1 >= raw.len():
-            out = out + ch
             i = i + 1
             continue
+        out = out + raw.slice(seg_start, i)
         val esc = raw.slice(i + 1, i + 2)
         if esc == "n":
             out = out + "\n"
@@ -552,7 +559,8 @@ fn _js_parser_decode_string_literal(raw: text) -> text:
         else:
             out = out + esc
             i = i + 2
-    out
+        seg_start = i
+    out + raw.slice(seg_start, raw.len())
 
 fn _js_parser_matching_paren(expr: text, start: i64) -> i64:
     var depth = 0
