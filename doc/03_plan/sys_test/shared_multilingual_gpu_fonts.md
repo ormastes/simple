@@ -25,12 +25,19 @@ Aggregate dispatch and its missing `%l2` definition are repaired. The current
 `Option<Box>` fixture now forces `opt.?` payload recovery by printing
 `owned.value` and expecting `7`; `MirLowering.find_local` is a receiver method
 so its local lookup does not lower to `undef`. The fresh core-C capsule clears
-the first five missing C symbols, but the final authority invocation reused 690
-objects, rebuilt 3, and exited `1` without an ELF or final diagnostic. The
-three-attempt producer window is exhausted. Do not retry or promote it; a future
-fresh owner must preserve this cache and establish the missing Stage-2 terminal
-receipt before A/B/C probes, Stage 3, incremental Stage 4, focused specs, or
-canonical docgen.
+the first five missing C symbols. A late post-commit Stage 2 link succeeded at
+`build/native_probe/p0-admission-find-local-20260729/stage2-find-local-runtime-authority-core-simple`
+(SHA-256 `f2db67c629f1fe1505e8374f1c4d701d23a5d1868820f58df02d115d475dc075`).
+The exact receipts
+`build/native_probe/p0-admission-find-local-20260729/stage2-runtime-authority-core.log`,
+`build/native_probe/p0-admission-find-local-20260729/stage2-runtime-authority-core.exit`,
+and
+`build/native_probe/p0-admission-find-local-20260729/stage2-runtime-authority-core.time`
+record 690 objects reused, 3 rebuilt, 0 failed, and exit `0`. The result remains
+diagnostic and unadmitted without provenance and A/B/C results. The
+three-attempt producer window remains exhausted: do not rerun or promote it. A
+future fresh owner must preserve this cache and establish provenance plus A/B/C
+before Stage 3, incremental Stage 4, focused specs, or canonical docgen.
 
 ### Active items and estimate
 

@@ -18,25 +18,32 @@ struct allocation and `%l2`. A new root cause was then localized to
 now observes `opt.?` through `print(owned.value)` and requires native output
 `7`.
 
-The fresh core-C capsule proved those five C symbols, then the bounded producer
-advanced to bootstrap-only `rt_cranelift_*` requirements. Its final canonical
-authority invocation (current core-C capsule plus seed `native_all`) reused 690
-objects, rebuilt 3, and exited `1` without an ELF or final linker diagnostic.
-A seed-only source-test attempt also stops in pre-existing `nogc_sync_mut`
-test-runner syntax checks. The three-attempt producer window is exhausted.
-Neither result is acceptance evidence. No native fixture, Stage 3/4 CLI,
-essential tools, focused font spec, docgen manual, device, QEMU, or performance
-row is accepted; `STATUS: FAIL` remains unchanged.
+The latest bounded Stage 2 producer succeeded at
+`build/native_probe/p0-admission-find-local-20260729/stage2-find-local-runtime-authority-core-simple`
+with SHA-256
+`f2db67c629f1fe1505e8374f1c4d701d23a5d1868820f58df02d115d475dc075`.
+Its incremental receipt records 690 reused / 3 rebuilt, zero failed, and exit
+`0`.
 
-## 2026-07-29 scoped SimpleOS Stage 2 result
+This remains diagnostic producer evidence because complete provenance and the
+A/B/C admission receipts are absent, and no Stage 3 or Stage 4 CLI exists.
+Accordingly every font evidence row remains unchanged: no native fixture,
+essential tool, focused font spec, docgen manual, device, QEMU, or performance
+row is accepted; `STATUS: FAIL` remains unchanged. Earlier producer failures
+remain retained below as history.
+
+## Historical diagnostic-only SimpleOS Stage 2 result — superseded
 
 `SIMPLEOS_STAGE2_FONT: BLOCKED`
 
-The active scope is the ten-spec SimpleOS override in
+The historical scope was the ten-spec SimpleOS override in
 `doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`; Stage 3/4 and the
-cross-platform GPU/performance matrix are deferred.
+cross-platform GPU/performance matrix were deferred. Every PASS, accepted, or
+green label in this subsection is diagnostic-only and does not advance a font
+acceptance row.
 
-- Runtime and runner gates: PASS. The pure-Simple Stage 2 compiler
+- Runtime and runner gates: diagnostic-only PASS (non-acceptance). The
+  pure-Simple Stage 2 compiler
   SHA-256 is
   `7f9f101472ba081ba89e58137820eb24fc8357f0d050c52c24fb725b6b14e142`.
   Reproducible Runtime6 archive SHA-256 is
@@ -53,7 +60,8 @@ cross-platform GPU/performance matrix are deferred.
   The manifest records unique strong `T` providers in `runtime_native.o` for
   `rt_dir_list`, `rt_dir_remove`, `rt_file_copy`, `rt_file_hash_sha256`,
   `rt_file_rename`, and `rt_process_exists`. Runtime6 supersedes
-  Runtime5/Runner5. Accepted Runner8 supersedes Runner6 with binary SHA-256
+  Runtime5/Runner5. Runner8 was accepted only for this diagnostic scope and
+  supersedes Runner6 with binary SHA-256
   `8096d0897994d7602b23a8eadc6252ed1f7ea00bb811ebfc5a0f3050cf282440`
   and source SHA-256
   `093e013427a070f79889dc7dcb710063551533ae6cfc993e474d233f173a4c9e`.
@@ -67,7 +75,8 @@ cross-platform GPU/performance matrix are deferred.
   `22bf1bf5850c333677621672b023b4106f7378a394545d730a7c24c4c22af93d`
   remains retained; its deliberate-red and zero-example contracts each
   passed exactly once.
-- Manuals: 10/10 commands exited zero and each reported
+- Manuals (diagnostic-only, non-acceptance): 10/10 commands exited zero and
+  each reported
   `DONE Generated 1 docs (1 complete, 0 stubs)`. The immutable diagnostic tree
   is
   `build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-1/`
@@ -75,8 +84,8 @@ cross-platform GPU/performance matrix are deferred.
   `a0af0d4e2d04625c2d493074b2b53f77be70b34851215e2ca70a9872f7ac7386`.
   Canonical promotion remains blocked with the executable specs.
 - Assets: all three specs wrapped, then Stage 2 native-build exited 1 before
-  examples. Supporting immutable asset/notice checks passed 59/59, but no
-  runtime PASS is claimed.
+  examples. Supporting immutable asset/notice diagnostics passed 59/59, but no
+  runtime PASS or acceptance is claimed.
 - Shaping: all three specs wrapped, then native-build exited 1 before examples.
   Static source now includes registered-only Hindi, Arabic, and Urdu exact
   witnesses, handle-free Draw IR round-trip, and nonempty material checks; no
@@ -103,11 +112,11 @@ One native-build blocker remains:
 Runner source now preserves native-build stderr and safely handles ordinary
 multiline matchers while leaving manual/comment/raw-string content unchanged.
 Runtime6 clears the prior six-symbol asset/RV64 link blocker, but supersedes
-Runtime5/Runner5. Runner8 supersedes Runner6 and is source-matched, green, and
-provider-checked against Runtime6; the Runner6 and older Runner4 calibration
-history remains retained. Focused execution remains pending behind the capped
-parser blocker. Therefore 0/10 focused specs are accepted and the scoped done
-mark remains absent.
+Runtime5/Runner5. Runner8 supersedes Runner6 and was diagnostically
+source-matched, green, and provider-checked against Runtime6; the Runner6 and
+older Runner4 calibration history remains retained. Focused execution remained
+pending behind the capped parser blocker. Therefore 0/10 focused specs were
+accepted and the scoped done mark remains absent.
 
 ## 2026-07-29 temporary Stage 2 and capped Stage 3 result
 

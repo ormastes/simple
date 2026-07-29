@@ -40,7 +40,17 @@ Exact retained evidence:
 - `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/cycle2/bootstrap-console.log`
 - `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/cycle3/bootstrap-console.log`
 
-Resume in a fresh bounded lane:
+## Current frontier — 2026-07-29
+
+The newest artifact is the diagnostic Stage 2
+`stage2-find-local-runtime-authority-core-simple`, SHA-256
+`f2db67c629f1fe1505e8374f1c4d701d23a5d1868820f58df02d115d475dc075`.
+It lacks complete immutable provenance and admitted A/B/C, Stage 3, and Stage
+4 evidence. The bounded window is exhausted, so no rerun is authorized here.
+A fresh lane must resume cache-preserving incremental Stage 2 → Stage 3 →
+Stage 4 admission; it must not run a full bootstrap.
+
+Historical, superseded full-bootstrap command (do not resume):
 
 ```sh
 timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \
@@ -194,9 +204,12 @@ proves all five previously missing C providers. A second link advanced to the
 bootstrap-only `rt_cranelift_*` boundary. The final canonical authority attempt
 (current C capsule plus seed `native_all`) reused 690 objects, rebuilt 3, and
 exited 1 without an ELF or terminal linker diagnostic. The focused source-test
-command could not initialize because of pre-existing test-runner `self.` syntax
-diagnostics. The three-attempt producer window is exhausted: no A result,
-Stage 3/4 CLI, or font acceptance exists.
+run did initialize and reach its examples: the test-runner `self.` messages
+were INFO hints, not syntax failures. Its first real failure was the stale
+Dict-local contract already satisfied at current HEAD, followed by an array
+index out-of-bounds diagnostic. This is non-authoritative old-runtime evidence,
+so no source fix follows from it. The three-attempt producer window is
+exhausted: no A result, Stage 3/4 CLI, or font acceptance exists.
 
 A fresh P0 owner ran exactly one bounded direct Stage 4 cycle from current
 feature checkpoint `427878810b4b2d812dba129f6dfd1eb12e282989` plus isolated
@@ -555,6 +568,21 @@ performance row was run or promoted.  Do not rerun this producer chain in this
 window.  The next owner must retain these receipts and localize the bootstrap
 seed/self-host transition that still compiles the compiler's own optional
 metadata path with the pre-repair lowering.
+
+### Late Stage 2 runtime-authority receipt — 2026-07-29
+
+A bounded producer already in flight completed three seconds after the `b3`
+documentation snapshot. Its `stage2-runtime-authority-core.exit` receipt
+records `0`, and the log records `690 reused / 3 rebuilt / 0 failed`. The
+resulting ELF `stage2-find-local-runtime-authority-core-simple` is 20,380,432
+bytes with SHA-256
+`f2db67c629f1fe1505e8374f1c4d701d23a5d1868820f58df02d115d475dc075`.
+Its time receipt records 1:17.95 elapsed and 298,748 KiB maximum RSS.
+
+This is the newest P0 frontier artifact, but remains diagnostic Stage 2
+evidence: it lacks complete immutable producer provenance and has no admitted
+A/B/C, Stage 3, or Stage 4 successor. It does not supersede the exhausted
+window, authorize a rerun, or promote acceptance evidence.
 
 The following is a reconstructed Stage 2 template. It fails closed until the
 operator exports every required path. Record the full source/seed/runtime
