@@ -2261,3 +2261,11 @@ implementation in progress / target evidence blocked
   Validator/encoder rejection parity, a multibyte near-limit URI, 256 same-key
   replacements, revision bounds, navigation cleanup, and close cleanup passed
   independent review. Two manuals regenerated (`2 complete, 0 stubs`).
+- open JS VM retention blocker (2026-07-29): Read-only ownership tracing proved
+  each listener call appends an Event object/methods/global plus an invocation
+  environment and `arguments` object. No deletion, sweep, compaction, or
+  free-list API exists, and stored invocation frames make Event-only escape
+  detection unsafe. The concrete root fix and 1,000-dispatch/escaped-identity
+  evidence are recorded in
+  `doc/09_report/js_event_dispatch_vm_growth_2026-07-29.md`; no unsafe
+  Event-only reuse was accepted.
