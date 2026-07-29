@@ -1,0 +1,717 @@
+#!/usr/bin/env bash
+# Build and seal the Stage2-only font runner/docgen toolchain.
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$repo_root"
+
+facade="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_FACADE_PATH=$facade
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$facade"
+
+failure_reason=unclassified
+die() {
+    failure_reason=$1
+    echo "stage2_font_scoped_tools_status=fail" >&2
+    echo "stage2_font_scoped_tools_reason=$1" >&2
+    exit "${2:-1}"
+}
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+field() {
+    local key=$1
+    local file=$2
+    local value
+    value=$(sed -n "s/^${key}=//p" "$file")
+    [ "$(grep -c "^${key}=" "$file" || true)" -eq 1 ] || return 1
+    printf '%s\n' "$value"
+}
+
+require_sha256() {
+    [[ $2 =~ ^[0-9a-f]{64}$ ]] || die "$1-invalid-sha256" 2
+}
+
+canonical_file() {
+    [ "$(bootstrap_stage3_canonical_file "$1")" = "$1" ]
+}
+
+record_command() {
+    local destination=$1
+    shift
+    printf '%q ' "$@" >"$destination"
+    printf '\n' >>"$destination"
+}
+
+native_elf() {
+    local binary=$1
+    local target=$2
+    local header
+    canonical_file "$binary" && [ -x "$binary" ] &&
+        bootstrap_stage2_native_binary "$binary" "$target" || return 1
+    header=$(LC_ALL=C "$readelf_path" -h "$binary") || return 1
+    printf '%s\n' "$header" | grep -Eq 'Class:[[:space:]]+ELF64([[:space:]]|$)' &&
+        printf '%s\n' "$header" |
+            grep -Eq 'Type:[[:space:]]+(EXEC|DYN)([[:space:]]|$)' || return 1
+    case "$target" in
+        x86_64-unknown-linux-gnu)
+            printf '%s\n' "$header" |
+                grep -Eq 'Machine:[[:space:]]+(Advanced Micro Devices X86-64|AMD x86-64)([[:space:]]|$)'
+            ;;
+        aarch64-unknown-linux-gnu)
+            printf '%s\n' "$header" |
+                grep -Eq 'Machine:[[:space:]]+AArch64([[:space:]]|$)'
+            ;;
+        *) return 1 ;;
+    esac || return 1
+    "$nm_path" -u "$binary" |
+        awk '$1 == "U" && $2 !~ /@/ { bad = 1 } END { exit bad ? 1 : 0 }'
+}
+
+unique_text_symbol() {
+    awk -v expected="$2" '
+        NF >= 3 {
+            symbol = $NF
+            sub(/^_/, "", symbol)
+            if ($(NF - 1) == "T" && symbol == expected) count++
+        }
+        END { exit(count == 1 ? 0 : 1) }
+    ' "$1"
+}
+
+runtime6_providers_valid() {
+    local capsule=$1
+    local symbol
+    local provider_file
+    for symbol in \
+        rt_dir_list rt_dir_remove rt_file_copy rt_file_hash_sha256 \
+        rt_file_rename rt_process_exists; do
+        provider_file="$capsule/$symbol.providers.txt"
+        canonical_file "$provider_file" &&
+            [ "$(cat "$provider_file")" = "T runtime_native.o" ] || return 1
+    done
+    unique_text_symbol "$capsule/runtime_native.nm.txt" rt_file_create_excl &&
+        unique_text_symbol "$capsule/archive.nm.txt" rt_file_create_excl
+}
+
+check_hash_manifest() {
+    local root=$1
+    local manifest=$2
+    (
+        cd "$root"
+        sha256sum -c "$manifest" >/dev/null
+    )
+}
+
+manifest_inventory() {
+    sed -n 's/^[0-9a-f]\{64\}  //p' "$1" | LC_ALL=C sort
+}
+
+tree_inventory() {
+    local root=$1
+    local excluded=${2:-}
+    (
+        cd "$root"
+        find . -type l -o ! -type d ! -type f | grep -q . && exit 1
+        if [ -n "$excluded" ]; then
+            find . -type f ! -path "$excluded" -printf '%p\n'
+        else
+            find . -type f -printf '%p\n'
+        fi | LC_ALL=C sort
+    )
+}
+
+command_matches() {
+    local transcript=$1
+    local time_file=$2
+    shift 2
+    local expected
+    expected=$(mktemp "${TMPDIR:-/tmp}/stage2-font-command.XXXXXX") ||
+        return 1
+    record_command "$expected" /usr/bin/time -v -o "$time_file" "$@"
+    cmp -s "$expected" "$transcript"
+    local rc=$?
+    rm -f "$expected"
+    return "$rc"
+}
+
+time_receipt_valid() {
+    local receipt=$1
+    local expected_exit=$2
+    [ "$(sed -n 's/^[[:space:]]*Exit status:[[:space:]]*//p' \
+        "$receipt")" = "$expected_exit" ] &&
+        grep -Eq '^[[:space:]]*Elapsed \(wall clock\) time.*:[[:space:]]*[^[:space:]]+' \
+            "$receipt" &&
+        grep -Eq '^[[:space:]]*Maximum resident set size \(kbytes\):[[:space:]]*[0-9]+$' \
+            "$receipt"
+}
+
+authority_tool_requested() {
+    local snapshot=$1
+    local name=$2
+    sed -n "s/^tool=${name}|requested=\\([^|]*\\)|.*/\\1/p" "$snapshot"
+}
+
+isolated_prefix() {
+    local owner=$1
+    local -n destination=$2
+    destination=(
+        /usr/bin/env -i
+        "HOME=$cache_root/$owner/home"
+        "PATH=$build_path"
+        "TMPDIR=$cache_root/$owner/tmp"
+        LC_ALL=C
+        LANG=C
+    )
+}
+
+core_argv() {
+    local -n destination=$1
+    local -a prefix
+    isolated_prefix core prefix
+    destination=(
+        /usr/bin/timeout --kill-after=15s 300s
+        "${prefix[@]}"
+        "$shell_path" scripts/check/build-core-c-bootstrap-runtime-capsule.shs
+        --output "$attempt_root/runtime"
+    )
+}
+
+build_argv() {
+    local name=$1
+    local source=$2
+    local -n destination=$3
+    local -a prefix
+    isolated_prefix "$name" prefix
+    destination=(
+        /usr/bin/timeout --kill-after=15s 900s
+        "${prefix[@]}"
+        RUST_LOG=error
+        SIMPLE_NATIVE_INCREMENTAL=1
+        SIMPLE_NO_STUB_FALLBACK=1
+        SIMPLE_NATIVE_ARENA_DECLS=1
+        "SIMPLE_BINARY=$STAGE2_PARENT"
+        "SIMPLE_RUNTIME_PATH=$capsule"
+        SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap
+        "$STAGE2_PARENT" native-build
+        --target "$target"
+        --backend cranelift
+        --runtime-bundle core-c-bootstrap
+        --runtime-path "$capsule"
+        --entry-closure
+        --entry "$source"
+        --threads 1
+        --cache-dir "$cache_root/$name/cache"
+        --mode one-binary
+        -o "$attempt_root/bin/$name"
+    )
+}
+
+calibration_argv() {
+    local name=$1
+    local fixture=$2
+    local -n destination=$3
+    local -a prefix
+    isolated_prefix "calibration-$name" prefix
+    destination=(
+        /usr/bin/timeout --kill-after=15s 600s
+        "${prefix[@]}"
+        SIMPLE_NO_STUB_FALLBACK=1
+        "SIMPLE_RUNTIME_PATH=$capsule"
+        "$attempt_root/bin/font_evidence_runner"
+        "$STAGE2_PARENT"
+        "$STAGE2_PARENT_SHA"
+        "$capsule"
+        "$runtime_sha"
+        "$fixture"
+    )
+}
+
+docgen_fixture_argv() {
+    local -n destination=$1
+    local -a prefix
+    isolated_prefix docgen-fixture prefix
+    destination=(
+        /usr/bin/timeout --kill-after=15s 120s
+        "${prefix[@]}"
+        "$attempt_root/bin/spipe_docgen"
+        scripts/check/fixtures/font_evidence_runner_pass_spec.spl
+        --output "$attempt_root/docgen-fixture"
+        --no-index
+    )
+}
+
+verify_attempt() {
+    local root=$1
+    local identity="$root/identity.env"
+    local summary="$root/summary.env"
+    local manual
+    local transcript
+    local manifest_tool
+    local -a expected
+
+    canonical_file "$identity" && canonical_file "$summary" &&
+        canonical_file "$root/evidence.sha256" &&
+        [ "$(field schema "$identity")" = \
+            stage2-font-scoped-tools-identity/v1 ] &&
+        [ "$(field schema "$summary")" = stage2-font-scoped-tools/v1 ] &&
+        [ "$(field status "$summary")" = pass ] || return 1
+    CHECKPOINT_SHA=$(field checkpoint_sha "$identity") || return 1
+    STAGE2_PARENT=$(field parent_path "$identity") || return 1
+    STAGE2_PARENT_SHA=$(field parent_sha256 "$identity") || return 1
+    STAGE2_PROVENANCE_PATH=$(field stage2_provenance_path "$identity") ||
+        return 1
+    STAGE2_PROVENANCE_SHA=$(field stage2_provenance_sha256 "$identity") ||
+        return 1
+    attempt_root=$(field attempt_root "$identity") || return 1
+    cache_root=$(field cache_root "$identity") || return 1
+    capsule=$(field runtime_dir "$identity") || return 1
+    runtime_sha=$(field runtime_archive_sha256 "$identity") || return 1
+    target=$(field target "$identity") || return 1
+    transcript=$(bootstrap_stage3_manifest_value \
+        stage2_command_transcript_path "$STAGE2_PROVENANCE_PATH") || return 1
+    build_path=$(bootstrap_stage3_transcript_host_value \
+        "$transcript" PATH) || return 1
+    [ "$build_path" = "$(field build_path "$identity")" ] || return 1
+    readelf_path=$(field readelf_path "$identity") || return 1
+    nm_path=$(field nm_path "$identity") || return 1
+    shell_path=$(field shell_path "$identity") || return 1
+    [ "$root" = "$attempt_root" ] &&
+        [ "$capsule" = "$root/runtime/core-c-bootstrap" ] &&
+        [ "$target" = "$(bootstrap_stage3_host_platform)" ] &&
+        [ "$target" = "$(bootstrap_stage3_manifest_value platform \
+            "$STAGE2_PROVENANCE_PATH")" ] || return 1
+    [ "$(git rev-parse HEAD)" = "$CHECKPOINT_SHA" ] &&
+        [ -z "$(git status --porcelain --untracked-files=normal)" ] &&
+        canonical_file "$STAGE2_PARENT" &&
+        [ "$(hash_file "$STAGE2_PARENT")" = "$STAGE2_PARENT_SHA" ] ||
+        return 1
+    [ "$(hash_file "$STAGE2_PROVENANCE_PATH")" = \
+        "$STAGE2_PROVENANCE_SHA" ] &&
+        [ "$(cat "${STAGE2_PROVENANCE_PATH}.sha256")" = \
+            "$STAGE2_PROVENANCE_SHA" ] &&
+        bootstrap_stage2_verify_manifest "$STAGE2_PROVENANCE_PATH" \
+            "$repo_root" "$STAGE2_PARENT" &&
+        [ "$(bootstrap_stage3_manifest_value git_head \
+            "$STAGE2_PROVENANCE_PATH")" = "$CHECKPOINT_SHA" ] &&
+        [ "$(bootstrap_stage3_manifest_value stage2_sha256 \
+            "$STAGE2_PROVENANCE_PATH")" = "$STAGE2_PARENT_SHA" ] || return 1
+    for tool in env time timeout; do
+        [ "$(hash_file "/usr/bin/$tool")" = \
+            "$(field "${tool}_tool_sha256" "$identity")" ] || return 1
+    done
+    for tool in readelf nm; do
+        local tool_path
+        tool_path=$(field "${tool}_path" "$identity") || return 1
+        canonical_file "$tool_path" &&
+            [ "$(hash_file "$tool_path")" = \
+                "$(field "${tool}_sha256" "$identity")" ] || return 1
+    done
+    manifest_tool=$(bootstrap_stage3_manifest_value tool_after_path \
+        "$STAGE2_PROVENANCE_PATH") || return 1
+    cmp -s "$root/source.before" "$root/source.after" &&
+        cmp -s "$root/git.before" "$root/git.after" &&
+        cmp -s "$root/tool.before" "$root/tool.after" &&
+        cmp -s "$root/source.before" \
+            "$(bootstrap_stage3_manifest_value source_after_path \
+                "$STAGE2_PROVENANCE_PATH")" &&
+        cmp -s "$root/git.before" \
+            "$(bootstrap_stage3_manifest_value git_after_path \
+                "$STAGE2_PROVENANCE_PATH")" &&
+        cmp -s "$root/tool.before" "$manifest_tool" &&
+        [ "$shell_path" = \
+            "$(authority_tool_requested "$root/tool.before" sh)" ] &&
+        canonical_file "$shell_path" || return 1
+    "$shell_path" scripts/check/build-core-c-bootstrap-runtime-capsule.shs \
+        --check "$capsule" >/dev/null &&
+        runtime6_providers_valid "$capsule" || return 1
+    [ "$(hash_file "$capsule/libsimple_runtime.a")" = \
+        "$runtime_sha" ] || return 1
+    native_elf "$root/bin/font_evidence_runner" "$target" &&
+        native_elf "$root/bin/spipe_docgen" "$target" &&
+        [ "$(hash_file "$root/bin/font_evidence_runner")" = \
+            "$(field runner_sha256 "$identity")" ] &&
+        [ "$(hash_file "$root/bin/spipe_docgen")" = \
+            "$(field docgen_sha256 "$identity")" ] || return 1
+    core_argv expected
+    command_matches "$root/core.command" "$root/core.time" \
+        "${expected[@]}" || return 1
+    build_argv font_evidence_runner \
+        src/app/test/font_evidence_runner.spl expected
+    command_matches "$root/font_evidence_runner.build.command" \
+        "$root/font_evidence_runner.build.time" "${expected[@]}" || return 1
+    build_argv spipe_docgen src/app/spipe_docgen/main.spl expected
+    command_matches "$root/spipe_docgen.build.command" \
+        "$root/spipe_docgen.build.time" "${expected[@]}" || return 1
+    calibration_argv green \
+        scripts/check/fixtures/font_evidence_runner_pass_spec.spl expected
+    command_matches "$root/green.command" "$root/green.time" \
+        "${expected[@]}" || return 1
+    calibration_argv deliberate-red \
+        scripts/check/fixtures/font_evidence_runner_fail_spec.spl expected
+    command_matches "$root/deliberate-red.command" \
+        "$root/deliberate-red.time" "${expected[@]}" || return 1
+    calibration_argv zero-example \
+        scripts/check/fixtures/font_evidence_runner_empty_spec.spl expected
+    command_matches "$root/zero-example.command" \
+        "$root/zero-example.time" "${expected[@]}" || return 1
+    docgen_fixture_argv expected
+    command_matches "$root/docgen-fixture.command" \
+        "$root/docgen-fixture.time" "${expected[@]}" || return 1
+    [ "$(cat "$root/core.exit")" = 0 ] &&
+        [ "$(cat "$root/runner.build.exit")" = 0 ] &&
+        [ "$(cat "$root/docgen.build.exit")" = 0 ] &&
+        [ "$(cat "$root/green.exit")" = 0 ] &&
+        [ "$(cat "$root/deliberate-red.exit")" = 1 ] &&
+        [ "$(cat "$root/zero-example.exit")" = 1 ] &&
+        [ "$(cat "$root/docgen-fixture.exit")" = 0 ] &&
+        [ ! -s "$root/green.stderr" ] &&
+        [ ! -s "$root/deliberate-red.stderr" ] &&
+        [ ! -s "$root/zero-example.stderr" ] &&
+        [ ! -s "$root/docgen-fixture.stderr" ] &&
+        [ "$(grep -Fxc 'test-runner: native result wrapper complete' \
+            "$root/green.stdout")" -eq 1 ] &&
+        grep -Eq '(^|[^0-9])1 examples, 0 failures([^0-9]|$)' \
+            "$root/green.stdout" &&
+        [ "$(grep -Fxc 'error: test-runner: spec failed' \
+            "$root/deliberate-red.stdout")" -eq 1 ] &&
+        [ "$(grep -Fxc 'error: test-runner: no examples executed' \
+            "$root/zero-example.stdout")" -eq 1 ] &&
+        [ "$(grep -Fxc 'DONE Generated 1 docs (1 complete, 0 stubs)' \
+            "$root/docgen-fixture.stdout")" -eq 1 ] &&
+        time_receipt_valid "$root/core.time" 0 &&
+        time_receipt_valid "$root/font_evidence_runner.build.time" 0 &&
+        time_receipt_valid "$root/spipe_docgen.build.time" 0 &&
+        time_receipt_valid "$root/green.time" 0 &&
+        time_receipt_valid "$root/deliberate-red.time" 1 &&
+        time_receipt_valid "$root/zero-example.time" 1 &&
+        time_receipt_valid "$root/docgen-fixture.time" 0 || return 1
+    manual=$(field docgen_fixture_manual_path "$identity") || return 1
+    canonical_file "$manual" &&
+        [ "${manual#"$root/docgen-fixture/"}" != "$manual" ] &&
+        [ "$(find "$root/docgen-fixture" -type f | wc -l | tr -d ' ')" = 1 ] &&
+        [ "$(hash_file "$manual")" = \
+            "$(field docgen_fixture_manual_sha256 "$identity")" ] || return 1
+    check_hash_manifest "$root" evidence.sha256 &&
+        check_hash_manifest "$cache_root" \
+            "$root/cache-postinventory.sha256" || return 1
+    diff -u <(manifest_inventory "$root/evidence.sha256") \
+        <(tree_inventory "$root" './evidence.sha256') >/dev/null &&
+        diff -u <(manifest_inventory "$root/cache-postinventory.sha256") \
+            <(tree_inventory "$cache_root") >/dev/null || return 1
+    ! find "$root" "$cache_root" -perm /222 -print -quit | grep -q .
+}
+
+usage() {
+    echo "usage:"
+    echo "  CHECKPOINT_SHA=... STAGE2_PARENT=... STAGE2_PARENT_SHA=... \\"
+    echo "  STAGE2_PROVENANCE_PATH=... STAGE2_PROVENANCE_SHA=... \\"
+    echo "  STAGE2_FONT_TOOL_ATTEMPT_ROOT=... STAGE2_FONT_TOOL_CACHE_ROOT=... \\"
+    echo "  sh scripts/check/build-stage2-font-scoped-tools.shs write"
+    echo "  sh scripts/check/build-stage2-font-scoped-tools.shs check ATTEMPT_ROOT"
+}
+
+mode=${1:-}
+case "$mode" in
+    check)
+        [ "$#" -eq 2 ] || die "check-requires-attempt-root" 2
+        attempt_root=$(readlink -f "$2")
+        verify_attempt "$attempt_root" || die "attempt-verification-failed"
+        echo "stage2_font_scoped_tools_status=pass"
+        exit 0
+        ;;
+    write)
+        [ "$#" -eq 1 ] || die "write-takes-no-arguments" 2
+        ;;
+    --help|-h)
+        usage
+        exit 0
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
+
+: "${CHECKPOINT_SHA:?export the clean pinned checkpoint}"
+: "${STAGE2_PARENT:?export the pure-Simple Stage2 parent path}"
+: "${STAGE2_PARENT_SHA:?export the Stage2 parent sha256}"
+: "${STAGE2_PROVENANCE_PATH:?export the canonical Stage2 provenance manifest}"
+: "${STAGE2_PROVENANCE_SHA:?export the Stage2 provenance manifest sha256}"
+: "${STAGE2_FONT_TOOL_ATTEMPT_ROOT:?export a new attempt root}"
+: "${STAGE2_FONT_TOOL_CACHE_ROOT:?export a separate new cache root}"
+
+require_sha256 STAGE2_PARENT_SHA "$STAGE2_PARENT_SHA"
+require_sha256 STAGE2_PROVENANCE_SHA "$STAGE2_PROVENANCE_SHA"
+[[ $CHECKPOINT_SHA =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] ||
+    die "checkpoint-invalid-git-oid" 2
+case "$STAGE2_PARENT" in
+    /*) ;;
+    *) STAGE2_PARENT="$repo_root/$STAGE2_PARENT" ;;
+esac
+case "$STAGE2_PROVENANCE_PATH" in
+    /*) ;;
+    *) STAGE2_PROVENANCE_PATH="$repo_root/$STAGE2_PROVENANCE_PATH" ;;
+esac
+case "$STAGE2_FONT_TOOL_ATTEMPT_ROOT" in
+    /*) ;;
+    *) STAGE2_FONT_TOOL_ATTEMPT_ROOT="$repo_root/$STAGE2_FONT_TOOL_ATTEMPT_ROOT" ;;
+esac
+case "$STAGE2_FONT_TOOL_CACHE_ROOT" in
+    /*) ;;
+    *) STAGE2_FONT_TOOL_CACHE_ROOT="$repo_root/$STAGE2_FONT_TOOL_CACHE_ROOT" ;;
+esac
+
+[ "$(git rev-parse HEAD)" = "$CHECKPOINT_SHA" ] ||
+    die "checkpoint-head-mismatch" 2
+[ -z "$(git status --porcelain --untracked-files=normal)" ] ||
+    die "checkpoint-worktree-dirty" 2
+canonical_file "$STAGE2_PARENT" && [ -x "$STAGE2_PARENT" ] ||
+    die "parent-not-canonical-executable" 2
+case "$STAGE2_PARENT" in
+    *compiler_rust*|*/target/bootstrap/*) die "rust-seed-parent-forbidden" 2 ;;
+esac
+[ "$(hash_file "$STAGE2_PARENT")" = "$STAGE2_PARENT_SHA" ] ||
+    die "parent-sha-mismatch" 2
+canonical_file "$STAGE2_PROVENANCE_PATH" &&
+    canonical_file "${STAGE2_PROVENANCE_PATH}.sha256" &&
+    [ "$(hash_file "$STAGE2_PROVENANCE_PATH")" = \
+        "$STAGE2_PROVENANCE_SHA" ] &&
+    [ "$(cat "${STAGE2_PROVENANCE_PATH}.sha256")" = \
+        "$STAGE2_PROVENANCE_SHA" ] &&
+    bootstrap_stage2_verify_manifest "$STAGE2_PROVENANCE_PATH" \
+        "$repo_root" "$STAGE2_PARENT" ||
+    die "stage2-provenance-verification-failed" 2
+[ "$(bootstrap_stage3_manifest_value git_head \
+    "$STAGE2_PROVENANCE_PATH")" = "$CHECKPOINT_SHA" ] &&
+    [ "$(bootstrap_stage3_manifest_value stage2_sha256 \
+        "$STAGE2_PROVENANCE_PATH")" = "$STAGE2_PARENT_SHA" ] ||
+    die "stage2-provenance-checkpoint-or-parent-mismatch" 2
+target=$(bootstrap_stage3_manifest_value platform "$STAGE2_PROVENANCE_PATH")
+[ "$target" = "$(bootstrap_stage3_host_platform)" ] ||
+    die "stage2-provenance-target-mismatch" 2
+stage2_transcript=$(bootstrap_stage3_manifest_value \
+    stage2_command_transcript_path "$STAGE2_PROVENANCE_PATH")
+build_path=$(bootstrap_stage3_transcript_host_value \
+    "$stage2_transcript" PATH)
+manifest_tool=$(bootstrap_stage3_manifest_value tool_after_path \
+    "$STAGE2_PROVENANCE_PATH")
+shell_path=$(authority_tool_requested "$manifest_tool" sh)
+canonical_file "$shell_path" || die "stage2-shell-not-canonical" 2
+readelf_path=$(command -v readelf) || die "readelf-not-found" 2
+nm_path=$(command -v nm) || die "nm-not-found" 2
+case "$readelf_path" in /*) ;; *) readelf_path="$repo_root/$readelf_path" ;; esac
+case "$nm_path" in /*) ;; *) nm_path="$repo_root/$nm_path" ;; esac
+canonical_file "$readelf_path" && canonical_file "$nm_path" ||
+    die "native-inspection-tool-not-canonical" 2
+native_elf "$STAGE2_PARENT" "$target" || die "parent-not-valid-native-elf" 2
+
+if [ -e "$STAGE2_FONT_TOOL_ATTEMPT_ROOT" ]; then
+    if verify_attempt "$STAGE2_FONT_TOOL_ATTEMPT_ROOT"; then
+        die "attempt-already-verified-refusing-reuse" 125
+    fi
+    die "attempt-exists-but-fails-verification" 125
+fi
+[ ! -e "$STAGE2_FONT_TOOL_CACHE_ROOT" ] ||
+    die "cache-exists-without-verified-attempt" 125
+case "$STAGE2_FONT_TOOL_CACHE_ROOT/" in
+    "$STAGE2_FONT_TOOL_ATTEMPT_ROOT/"*) die "cache-inside-attempt" 2 ;;
+esac
+case "$STAGE2_FONT_TOOL_ATTEMPT_ROOT/" in
+    "$STAGE2_FONT_TOOL_CACHE_ROOT/"*) die "attempt-inside-cache" 2 ;;
+esac
+
+for tool in /usr/bin/env /usr/bin/time /usr/bin/timeout; do
+    canonical_file "$tool" || die "required-tool-not-canonical:$tool" 2
+done
+umask 077
+mkdir -p "$(dirname "$STAGE2_FONT_TOOL_ATTEMPT_ROOT")" \
+    "$(dirname "$STAGE2_FONT_TOOL_CACHE_ROOT")"
+mkdir "$STAGE2_FONT_TOOL_ATTEMPT_ROOT" "$STAGE2_FONT_TOOL_CACHE_ROOT"
+attempt_root=$(cd "$STAGE2_FONT_TOOL_ATTEMPT_ROOT" && pwd -P)
+cache_root=$(cd "$STAGE2_FONT_TOOL_CACHE_ROOT" && pwd -P)
+mkdir "$attempt_root/bin"
+for owner in core font_evidence_runner spipe_docgen \
+    calibration-green calibration-deliberate-red calibration-zero-example \
+    docgen-fixture; do
+    mkdir -p "$cache_root/$owner/home" "$cache_root/$owner/tmp"
+done
+
+seal_failed_attempt() {
+    local rc=$?
+    [ "$rc" -ne 0 ] || return 0
+    if [ -d "$attempt_root" ] && [ ! -e "$attempt_root/evidence.sha256" ]; then
+        printf 'schema=stage2-font-scoped-tools/v1\nstatus=fail\nreason=%s\n' \
+            "$failure_reason" >"$attempt_root/failure.env" 2>/dev/null || true
+        (
+            cd "$attempt_root" &&
+                find . -type f ! -name evidence.sha256 -print0 |
+                LC_ALL=C sort -z | xargs -0 sha256sum >evidence.sha256
+        ) 2>/dev/null || true
+    fi
+    chmod -R a-w "$cache_root" "$attempt_root" 2>/dev/null || true
+}
+trap seal_failed_attempt EXIT
+
+bootstrap_stage3_source_snapshot "$attempt_root/source.before" "$repo_root" ||
+    die "source-before-snapshot-failed"
+bootstrap_stage3_git_state "$repo_root" "$attempt_root/git.before" ||
+    die "git-before-snapshot-failed"
+bootstrap_stage3_tool_authority_snapshot "$attempt_root/tool.before" \
+    "$build_path" "$repo_root" ||
+    die "tool-before-snapshot-failed"
+cmp -s "$attempt_root/tool.before" "$manifest_tool" ||
+    die "tool-authority-differs-from-stage2-provenance"
+[ "$(hash_file "$attempt_root/source.before")" = \
+    "$(bootstrap_stage3_manifest_value source_fingerprint \
+        "$STAGE2_PROVENANCE_PATH")" ] ||
+    die "source-snapshot-differs-from-stage2-provenance"
+
+run_timed() {
+    local base=$1
+    shift
+    record_command "$base.command" /usr/bin/time -v -o "$base.time" "$@"
+    /usr/bin/time -v -o "$base.time" "$@" \
+        >"$base.stdout" 2>"$base.stderr"
+    local rc=$?
+    printf '%s\n' "$rc" >"$base.exit"
+    return "$rc"
+}
+
+core_argv core_command
+run_timed "$attempt_root/core" "${core_command[@]}" ||
+    die "core-c-build-failed"
+capsule="$attempt_root/runtime/core-c-bootstrap"
+runtime_sha=$(hash_file "$capsule/libsimple_runtime.a")
+
+build_tool() {
+    local name=$1
+    local source=$2
+    local output="$attempt_root/bin/$name"
+    local base="$attempt_root/$name.build"
+    local -a command
+    mkdir "$cache_root/$name/cache"
+    build_argv "$name" "$source" command
+    run_timed "$base" "${command[@]}" || die "$name-build-failed"
+    native_elf "$output" "$target" || die "$name-output-not-valid-native-elf"
+}
+
+build_tool font_evidence_runner src/app/test/font_evidence_runner.spl
+build_tool spipe_docgen src/app/spipe_docgen/main.spl
+
+run_calibration() {
+    local name=$1
+    local fixture=$2
+    local expected_exit=$3
+    local marker=$4
+    local base="$attempt_root/$name"
+    local -a command
+    calibration_argv "$name" "$fixture" command
+    local rc
+    if run_timed "$base" "${command[@]}"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq "$expected_exit" ] &&
+        [ ! -s "$base.stderr" ] &&
+        [ "$(grep -Fxc "$marker" "$base.stdout")" -eq 1 ] ||
+        die "$name-calibration-failed"
+}
+
+run_calibration green \
+    scripts/check/fixtures/font_evidence_runner_pass_spec.spl 0 \
+    "test-runner: native result wrapper complete"
+run_calibration deliberate-red \
+    scripts/check/fixtures/font_evidence_runner_fail_spec.spl 1 \
+    "error: test-runner: spec failed"
+run_calibration zero-example \
+    scripts/check/fixtures/font_evidence_runner_empty_spec.spl 1 \
+    "error: test-runner: no examples executed"
+
+docgen_fixture_argv docgen_command
+run_timed "$attempt_root/docgen-fixture" "${docgen_command[@]}" ||
+    die "docgen-fixture-failed"
+[ ! -s "$attempt_root/docgen-fixture.stderr" ] &&
+    [ "$(grep -Fxc 'DONE Generated 1 docs (1 complete, 0 stubs)' \
+        "$attempt_root/docgen-fixture.stdout")" -eq 1 ] ||
+    die "docgen-fixture-result-invalid"
+docgen_manual=$(
+    find "$attempt_root/docgen-fixture" -type f -name '*_spec.md' -print
+)
+[ -n "$docgen_manual" ] &&
+    [ "$(printf '%s\n' "$docgen_manual" | wc -l | tr -d ' ')" = 1 ] ||
+    die "docgen-fixture-manual-inventory-invalid"
+
+bootstrap_stage3_source_snapshot "$attempt_root/source.after" "$repo_root" ||
+    die "source-after-snapshot-failed"
+bootstrap_stage3_git_state "$repo_root" "$attempt_root/git.after" ||
+    die "git-after-snapshot-failed"
+bootstrap_stage3_tool_authority_snapshot "$attempt_root/tool.after" \
+    "$build_path" "$repo_root" ||
+    die "tool-after-snapshot-failed"
+cmp -s "$attempt_root/source.before" "$attempt_root/source.after" &&
+    cmp -s "$attempt_root/git.before" "$attempt_root/git.after" &&
+    cmp -s "$attempt_root/tool.before" "$attempt_root/tool.after" ||
+    die "source-git-or-tool-authority-changed-during-producer"
+
+identity="$attempt_root/identity.env"
+{
+    echo "schema=stage2-font-scoped-tools-identity/v1"
+    echo "checkpoint_sha=$CHECKPOINT_SHA"
+    echo "parent_path=$STAGE2_PARENT"
+    echo "parent_sha256=$STAGE2_PARENT_SHA"
+    echo "stage2_provenance_path=$STAGE2_PROVENANCE_PATH"
+    echo "stage2_provenance_sha256=$STAGE2_PROVENANCE_SHA"
+    echo "target=$target"
+    echo "attempt_root=$attempt_root"
+    echo "cache_root=$cache_root"
+    echo "build_path=$build_path"
+    echo "shell_path=$shell_path"
+    echo "runtime_dir=$capsule"
+    echo "runtime_archive_sha256=$runtime_sha"
+    echo "runner_sha256=$(hash_file "$attempt_root/bin/font_evidence_runner")"
+    echo "docgen_sha256=$(hash_file "$attempt_root/bin/spipe_docgen")"
+    echo "env_tool_sha256=$(hash_file /usr/bin/env)"
+    echo "time_tool_sha256=$(hash_file /usr/bin/time)"
+    echo "timeout_tool_sha256=$(hash_file /usr/bin/timeout)"
+    echo "readelf_path=$readelf_path"
+    echo "readelf_sha256=$(hash_file "$readelf_path")"
+    echo "nm_path=$nm_path"
+    echo "nm_sha256=$(hash_file "$nm_path")"
+    echo "docgen_fixture_manual_path=$docgen_manual"
+    echo "docgen_fixture_manual_sha256=$(hash_file "$docgen_manual")"
+} >"$identity"
+
+if find "$cache_root" -type l -o ! -type d ! -type f | grep -q .; then
+    die "cache-contains-nonregular-entry"
+fi
+(
+    cd "$cache_root"
+    find . -type f -print0 | LC_ALL=C sort -z |
+        xargs -0 sha256sum
+) >"$attempt_root/cache-postinventory.sha256"
+[ -s "$attempt_root/cache-postinventory.sha256" ] ||
+    die "cache-inventory-empty"
+
+{
+    echo "schema=stage2-font-scoped-tools/v1"
+    echo "status=pass"
+} >"$attempt_root/summary.env"
+
+(
+    cd "$attempt_root"
+    find . -type f ! -name evidence.sha256 -print0 | LC_ALL=C sort -z |
+        xargs -0 sha256sum >evidence.sha256
+    sha256sum -c evidence.sha256 >/dev/null
+)
+check_hash_manifest "$cache_root" "$attempt_root/cache-postinventory.sha256"
+chmod -R a-w "$cache_root" "$attempt_root"
+verify_attempt "$attempt_root" || die "final-attempt-verification-failed"
+
+echo "stage2_font_scoped_tools_status=pass"
+echo "stage2_font_scoped_tools_attempt_root=$attempt_root"
+echo "stage2_font_scoped_tools_cache_root=$cache_root"

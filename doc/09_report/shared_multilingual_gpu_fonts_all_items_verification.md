@@ -9,6 +9,33 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
+## Current active delivery scope — SimpleOS Stage 2 (supersedes)
+
+The active delivery goal is `SIMPLEOS_STAGE2_FONT`. It covers exactly the ten
+focused SimpleOS specs and their ten canonical manuals named in
+`doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`. The current manual
+inventory is `0 missing / 9 stale / 1 source-current / 0 accepted receipts`.
+The source-current pair is `selected_arabic_spec`; source currency alone is not
+an accepted zero-stub docgen receipt.
+
+`build/native_probe/stage2-spipe-docgen` exists only as a diagnostic artifact.
+It has no fresh sealed command/stdout/stderr/exit and provenance receipt for
+this scope, so it does not promote any manual. Current source now closes the
+transactional 53-file staging, exact 59-source pin-set, Arabic/Hindi batch
+identity, and native-safe fresh-device material gaps. A reviewed
+`--stop-after-stage2` and scoped runner/docgen producer bind canonical Stage 2
+provenance, source/tool stability, four calibrations, and immutable evidence;
+they have not executed. The next blockers are a clean checkpoint, one fresh
+canonical Stage 2, a sealed runner/docgen, followed by the ten focused
+executions and the x86/RV64 SimpleOS QEMU framebuffer/input evidence. Stage 3,
+Stage 4, non-SimpleOS native GPU hosts, and the broader cross-platform matrix
+are deferred from this active delivery scope.
+
+No scoped execution or manual has yet been accepted, so
+`SIMPLEOS_STAGE2_FONT: BLOCKED`. The broader verification result remains
+`STATUS: FAIL`. Historical Stage 2 and cross-platform records below remain
+evidence history only.
+
 ## Current P0 admission status — 2026-07-29
 
 `6a16b19cb5d` repaired aggregate dispatch: the current fixture now emits the

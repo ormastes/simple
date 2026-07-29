@@ -32,6 +32,8 @@ Options:
                      rebuild the pure-Simple stages. Without this flag bootstrap
                      never runs cargo and reuses the existing Rust seed.
   --pure-simple      Compatibility alias for the default no-Rust rebuild mode.
+  --stop-after-stage2
+                     Stop after Stage 2 sanity and canonical provenance verification.
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
                      SIMPLE_NO_STUB_FALLBACK=1 also makes staged failures fatal
@@ -61,6 +63,7 @@ verbose=0
 jobs=""
 pure_simple=0
 full_bootstrap=0
+stop_after_stage2=0
 full_cli=0
 fresh_cache=0
 release_tests=0
@@ -96,6 +99,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --pure-simple)
       pure_simple=1
+      ;;
+    --stop-after-stage2)
+      stop_after_stage2=1
       ;;
     --full-cli)
       full_cli=1
@@ -163,6 +169,10 @@ fi
 if [ "${deploy}" -eq 1 ] || [ "${bootstrap_mode}" = "one-binary" ]; then
   full_cli=1
 fi
+if [ "${stop_after_stage2}" -eq 1 ] && [ "${full_cli}" -eq 1 ]; then
+  echo "error: --stop-after-stage2 conflicts with full CLI, deploy, release, and one-binary modes" >&2
+  exit 1
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
@@ -212,6 +222,11 @@ normalize_target() {
 }
 
 target=$(normalize_target "${target}")
+if [ "${stop_after_stage2}" -eq 1 ] &&
+   [ "${target}" = "simpleos-x86_64" ]; then
+  echo "error: --stop-after-stage2 is unavailable for the separate SimpleOS target lane" >&2
+  exit 1
+fi
 
 # ===========================================================================
 # Platform detection — <arch>-<vendor>-<os>-<abi> target triple
@@ -1208,7 +1223,11 @@ else
       --runtime-path "${stage_runtime_absolute}" \
       -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
   )
-  rm -f "${stage2_bin}" "${stage3_bin}"
+  rm -f "${stage2_bin}"
+  if [ "${stop_after_stage2}" -eq 0 ]; then
+    rm -f "${stage3_bin}"
+  fi
+  stage2_provenance_ok=0
   bootstrap_stage3_directory_snapshot \
     "${stage3_provenance_dir}/runtime-before-stage2.txt" \
     "${stage_runtime_absolute}" || exit 1
@@ -1349,7 +1368,20 @@ else
       echo "error: refusing admitted Stage 2 without canonical provenance" >&2
       exit 1
     }
+    stage2_provenance_ok=1
     echo "  Stage 2 provenance: ${stage2_provenance_manifest}"
+  fi
+  if [ "${stop_after_stage2}" -eq 1 ]; then
+    if [ "${stage2_status}" -eq 0 ] &&
+       [ "${stage2_provenance_ok}" -eq 1 ]; then
+      echo "Stopped after verified Stage 2."
+      exit 0
+    fi
+    echo "error: --stop-after-stage2 requires a sane, provenance-verified Stage 2" >&2
+    if [ "${stage2_status}" -ne 0 ]; then
+      exit "${stage2_status}"
+    fi
+    exit 1
   fi
   if [ "${stage2_status}" -ne 0 ]; then
     if [ "${strict_bootstrap}" -eq 1 ]; then

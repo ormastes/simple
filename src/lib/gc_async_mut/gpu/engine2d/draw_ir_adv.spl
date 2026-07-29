@@ -23,7 +23,12 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
     DrawIrTargetFontEvidence
 }
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
-use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+use std.gc_async_mut.text_layout.font_renderer.{
+    FontRenderBatch
+}
+use std.nogc_sync_mut.text_layout.font_types.{
+    font_render_config_default_for_size
+}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassExecutionResult,
     Engine2dGlassMaterialConfig,
@@ -112,6 +117,7 @@ struct Engine2dDrawIrAdvResult:
     font_vulkan_all_device_executed: bool = false
     font_vulkan_all_promotion_ready: bool = false
     font_vulkan_all_parity: bool = false
+    font_preflight_material_quad_count: i64 = 0
 
 struct Engine2dResolvedDrawIrImage:
     image_uri: text
@@ -705,43 +711,71 @@ fn _engine2d_draw_ir_fresh_device_preflight(composition: DrawIrComposition, imag
         return Engine2dDrawIrFreshDevicePreflight(reason: "fresh-device-nonempty-composition-required")
     Engine2dDrawIrFreshDevicePreflight(reason: "")
 
-fn _engine2d_draw_ir_prepare_fresh_device_text(engine: DrawIrRenderTarget, composition: DrawIrComposition, width: i32, height: i32) -> (DrawIrRenderTarget, text):
+fn _engine2d_draw_ir_prepare_fresh_device_text(engine: DrawIrRenderTarget, composition: DrawIrComposition, width: i32, height: i32) -> (DrawIrRenderTarget, text, i64):
     var eng = engine
     var pixel_work: i64 = 0
+    var prepared_quad_count: i64 = 0
     val max_pixel_work = width.to_i64() * height.to_i64()
     for batch in composition.batches:
         for command in batch.commands:
             if command.kind == "text":
                 val identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
                 if not eng.select_font_identity(identity):
-                    return (eng, "fresh-device-font-identity-unavailable")
+                    return (eng, "fresh-device-font-identity-unavailable", 0)
                 val font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
                 val advances = _engine2d_draw_ir_text_advances(command)
                 if advances.len() == 0:
-                    return (eng, "fresh-device-font-advances-invalid")
-                val fonts = eng.fonts()
+                    return (eng, "fresh-device-font-advances-invalid", 0)
+                var fonts = eng.fonts()
                 val shaped = _engine2d_draw_ir_shaping_requested(command)
                 if shaped and not _engine2d_draw_ir_shaped_payload_valid(command, advances):
-                    return (eng, "fresh-device-font-shaping-invalid")
-                val prepared: FontRenderBatch = if shaped:
-                    fonts.prepare_selected_glyph_run(command.glyph_run, command.color, font_size)
+                    return (eng, "fresh-device-font-shaping-invalid", 0)
+                val config = font_render_config_default_for_size(font_size)
+                if shaped:
+                    fonts.stage_selected_glyph_run_configured(
+                        command.glyph_run, command.color, config)
                 else:
-                    fonts.prepare_text_with_advances(command.text_value, advances, command.color, font_size)
+                    fonts.stage_text_with_advances_configured(
+                        command.text_value, advances, command.color, config)
+                # Native aggregate returns can lose FontRenderBatch.quads.
+                # Match Engine2D's production path: read the live renderer's
+                # staged fields and construct the transient batch locally.
+                val prepared = FontRenderBatch(
+                    program_version: fonts.staged_program_version,
+                    transform_identity: fonts.staged_transform_identity,
+                    font_identity: fonts.staged_font_identity,
+                    face_generation: fonts.staged_face_generation,
+                    valid: fonts.staged_valid,
+                    atlas_width: fonts.staged_atlas_width,
+                    atlas_height: fonts.staged_atlas_height,
+                    atlas_pixels: fonts.atlas_pixels,
+                    quads: fonts.staged_quads,
+                    atlas_generation: fonts.staged_atlas_generation,
+                    dirty_rects: fonts.staged_dirty_rects,
+                    atlas_owner_generation:
+                        fonts.staged_atlas_owner_generation,
+                    render_config_identity:
+                        fonts.staged_render_config_identity,
+                    execution_target: fonts.staged_execution_target,
+                    execution_policy: fonts.staged_execution_policy
+                )
                 eng.install_font_renderer(fonts)
-                if not prepared.valid or prepared.font_identity != identity:
-                    return (eng, if shaped: "fresh-device-font-shaping-invalid" else: "fresh-device-font-batch-invalid")
+                if (not prepared.valid or prepared.font_identity != identity or
+                    prepared.quads.len() == 0):
+                    return (eng, if shaped: "fresh-device-font-shaping-invalid" else: "fresh-device-font-batch-invalid", 0)
                 for quad in prepared.quads:
                     val total = quad.width.to_i64() * quad.height.to_i64()
                     val dst_x = font_destination_origin(command.x, quad.dst_x, quad.width)
                     val dst_y = font_destination_origin(command.y, quad.dst_y, quad.height)
                     if total <= 0 or total > max_pixel_work - pixel_work:
-                        return (eng, "fresh-device-font-work-limit-exceeded")
+                        return (eng, "fresh-device-font-work-limit-exceeded", 0)
                     pixel_work = pixel_work + total
                     if (dst_x == nil or dst_y == nil or
                         font_atlas_subrect_pixels(prepared.atlas_pixels, prepared.atlas_width, prepared.atlas_height,
                             quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color).len() != total):
-                        return (eng, "fresh-device-font-quad-invalid")
-    (eng, "")
+                        return (eng, "fresh-device-font-quad-invalid", 0)
+                prepared_quad_count = prepared_quad_count + prepared.quads.len()
+    (eng, "", prepared_quad_count)
 
 # Append one diagnostic kind without unbounded duplicate string growth.
 fn _engine2d_draw_ir_note_unsupported_kind(kinds: text, kind: text) -> text:
@@ -1584,7 +1618,10 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: DrawIrRende
         val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
         return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
             plan, 0, 1, prepared.1, engine2d_readback([], "preflight_rejected"), true)
-    _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true)
+    var result = _engine2d_draw_ir_adv_composition_with_images(
+        prepared.0, composition, true, images, true, false, true)
+    result.font_preflight_material_quad_count = prepared.2
+    result
 
 fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)

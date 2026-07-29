@@ -10,6 +10,38 @@ State and acceptance criteria live in
 the scheduling sections—not the historical evidence—of
 `shared_multilingual_gpu_fonts.md`.
 
+## Active SimpleOS Stage 2 delivery override
+
+The active system-test scope is the ten-spec SimpleOS Stage 2 delivery in
+`doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`. Stage 3, Stage 4, a
+full bootstrap, non-SimpleOS GPU hosts, and the wider performance matrix are
+deferred and do not block `SIMPLEOS_STAGE2_FONT: PASS`.
+
+Lane A first runs `sh scripts/bootstrap/bootstrap-from-scratch.sh
+--stop-after-stage2` at the clean checkpoint, then supplies that canonical
+Stage2 binary and provenance manifest to exactly one bounded scoped-tool
+producer invocation:
+
+```bash
+export CHECKPOINT_SHA=<clean-commit-sha>
+export STAGE2_PARENT=<canonical-stage2-simple>
+export STAGE2_PARENT_SHA=<sha256>
+export STAGE2_PROVENANCE_PATH=<canonical-stage2-provenance.env>
+export STAGE2_PROVENANCE_SHA=<sha256>
+export STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-1
+export STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-1
+sh scripts/check/build-stage2-font-scoped-tools.shs write
+```
+
+`scripts/check/build-stage2-font-scoped-tools.shs` reuses the canonical core-C
+producer/verifier, builds current standalone runner/docgen ELF files, validates
+the Runtime6 provider set including `rt_file_create_excl`, and seals exact
+build/calibration receipts plus separate caches. It runs green, deliberate-red,
+zero-example, and zero-stub docgen calibration once each. A failure returns
+only this lane to a new numbered
+attempt, for at most three cycles; it never starts Stage 3/4 or a full
+bootstrap.
+
 ## Frozen coordination contract
 
 Use only the interfaces, manual steps, and checker names frozen in the state

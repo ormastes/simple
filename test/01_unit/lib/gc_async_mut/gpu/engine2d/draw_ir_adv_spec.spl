@@ -57,12 +57,14 @@ use common.ui.draw_ir.{
     draw_ir_text_shaped_font,
     draw_ir_style_prop
 }
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_present_with_images}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_present_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images}
 use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_adv.{engine2d_draw_ir_adv_batch_runtime_queue}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{engine2d_host_gpu_runtime_queue_with_backend_handle, engine2d_host_gpu_runtime_reset}
 use std.gc_async_mut.ui_test.sgtti.{SgttiTestDriver, sgtti_snapshot_from_draw_ir_batch}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity}
+use std.nogc_sync_mut.text_layout.font_renderer.{font_renderer_register_selected_bytes, resolve_font_metrics_with_language}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 
 val BG: u32 = 0xff000000u32
 val RED: u32 = 0xffff0000u32
@@ -803,4 +805,58 @@ describe "Engine2D advanced Draw IR executor":
         expect(result.fallback_required).to_equal(true)
         expect(result.fallback_reason).to_contain("future-path")
         expect(result.pixels[0]).to_equal(RED)
+        engine.shutdown()
+
+    it "admits registered shaped Draw IR with nonempty canonical material":
+        val width = 128
+        val height = 72
+        val candidate = selected_font_asset_candidates()[2]
+        val identity = selected_font_asset_identity(candidate)
+        expect(font_renderer_register_selected_bytes(
+            candidate.local_path, file_read_bytes(candidate.local_path))).to_be(true)
+        val metrics = resolve_font_metrics_with_language(
+            candidate.family, "اردو", 32, "ur")
+        expect(metrics.valid).to_be(true)
+        expect(metrics.identity).to_equal(identity)
+        expect(metrics.glyph_run.valid).to_be(true)
+        expect(metrics.glyph_run.glyph_ids.len()).to_be_greater_than(0)
+        val command = draw_ir_text_shaped_font(
+            "registered-shaped", 8, 8, "اردو", GREEN, metrics.family,
+            identity, metrics.advances, metrics.width, metrics.line_height,
+            32, metrics.glyph_run)
+        val composition = draw_ir_composition(
+            "registered-shaped-frame", "registered-shaped-scene",
+            DRAW_IR_BACKEND_CPU, [
+                draw_ir_batch(
+                    "registered-shaped-batch", DRAW_IR_BACKEND_CPU,
+                    draw_ir_embedding_config(
+                        "", "registered-shaped", 0, 0, width, height,
+                        0, 1000, false),
+                    [
+                        draw_ir_rect(
+                            "registered-shaped-background", 0, 0,
+                            width, height, BG),
+                        command
+                    ])
+            ])
+        var engine = Engine2D.create_with_backend(width, height, "cpu")
+
+        val result = engine2d_draw_ir_adv_fresh_device_composition_with_images(
+            engine, composition, [])
+
+        expect(result.readback_source).to_equal("cpu_mirror")
+        expect(result.rendered_command_count).to_equal(2)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.selected_font_command_skipped).to_be(false)
+        expect(result.font_identity).to_equal(identity)
+        expect(result.font_ordered_text_command_count).to_equal(1)
+        expect(result.font_preflight_material_quad_count).to_be_greater_than(0)
+        expect(result.font_advance_command_digest).to_equal(
+            draw_ir_font_advance_digest(composition))
+        expect(result.pixels.len()).to_equal(width * height)
+        var painted = 0
+        for pixel in result.pixels:
+            if pixel != BG:
+                painted = painted + 1
+        expect(painted).to_be_greater_than(0)
         engine.shutdown()

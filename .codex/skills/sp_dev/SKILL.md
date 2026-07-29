@@ -97,6 +97,30 @@ but it is not Stage 4 evidence and cannot qualify `run`, `test`, SPipe docgen,
 or release. It may act as a promotion parent only after the canonical manifest
 verification and any feature-specific sealed admission above. Record its exact
 path, hash, supported commands, and rollback path.
+
+The active SimpleOS shared-font scope is a narrow exception for its ten
+standalone runner/docgen checks only; it is not Stage 4 or release evidence.
+From a clean pinned checkpoint, first run `sh
+scripts/bootstrap/bootstrap-from-scratch.sh --stop-after-stage2`, then pass its
+canonical Stage2 binary and provenance manifest to exactly:
+
+```bash
+CHECKPOINT_SHA=<clean-commit-sha> \
+STAGE2_PARENT=<canonical-stage2-simple> \
+STAGE2_PARENT_SHA=<sha256> \
+STAGE2_PROVENANCE_PATH=<canonical-stage2-provenance.env> \
+STAGE2_PROVENANCE_SHA=<sha256> \
+STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-1 \
+STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-1 \
+sh scripts/check/build-stage2-font-scoped-tools.shs write
+```
+
+The writer owns the fresh canonical core-C capsule, current runner/docgen ELF
+builds, separate caches, and one green/deliberate-red/zero-example runner plus
+zero-stub docgen calibration.
+Independent or later audit uses `sh
+scripts/check/build-stage2-font-scoped-tools.shs check <attempt-root>`; do not
+rerun a green writer. Stage 3/4 and full bootstrap remain out of scope.
 If a direct lexer probe and parser-facing token stream disagree, capture both
 streams plus continuation state in one compiled probe. After three distinct
 fix/probe cycles, update the tracked bug and lane state and stop; do not rewrite

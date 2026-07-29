@@ -101,6 +101,25 @@ GitHub checkpoint.
 
 active-plan-remade
 
+## Current Active Delivery Scope — SimpleOS Stage 2
+
+The superseding delivery goal is `SIMPLEOS_STAGE2_FONT`: exactly ten focused
+SimpleOS specs and ten canonical manuals. The current manual inventory is
+`0 missing / 9 stale / 1 source-current / 0 accepted receipts`; only
+`selected_arabic_spec` has a source-current mirror, and that does not replace a
+sealed zero-stub receipt. The existing standalone Stage 2 docgen is diagnostic
+only. Current source now prevalidates all 53 image files before staging
+mutation, checks the exact 59-source pin set, uses native-safe staged
+FontRenderer material in fresh-device Draw IR, and provides a reviewed
+provenance-only `--stop-after-stage2` plus sealed scoped-tool producer. These
+changes remain execution-unverified. Completion is blocked on a clean
+checkpoint, fresh canonical Stage 2, sealed runner/docgen,
+followed by all ten focused executions and x86/RV64 SimpleOS QEMU
+framebuffer/input evidence. Stage 3, Stage 4, non-SimpleOS GPU hosts, and the
+broader cross-platform matrix are deferred from this delivery scope. Current
+status is `SIMPLEOS_STAGE2_FONT: BLOCKED`; the broader `STATUS: FAIL` is
+unchanged.
+
 ## Compiler-enablement boundary
 
 `HIR-BOOTSTRAP-NIL-001` is not a font requirement. Its minimal current-source
@@ -117,6 +136,20 @@ Historical resume/cache/bridge imperatives below are superseded by
 historical artifact is an eligible parent or cache, and this window permits no
 Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
 
+- active-simpleos-stage2-scope-2026-07-29: Supersedes the broad current-delivery
+  interpretation without rewriting its history. The active goal is
+  `SIMPLEOS_STAGE2_FONT` over ten SimpleOS specs/manuals. Inventory is
+  `0 missing / 9 stale / 1 source-current / 0 accepted receipts`; the existing
+  standalone docgen is diagnostic only. A fresh sealed Stage 2 runner/docgen,
+  ten focused executions, and x86/RV64 QEMU framebuffer/input evidence remain
+  blocking. Stage 3/4 and cross-platform GPU rows are deferred for this
+  delivery; `SIMPLEOS_STAGE2_FONT: BLOCKED` and broader `STATUS: FAIL` remain.
+- active-simpleos-stage2-host-closures-2026-07-29: Parallel implementation and
+  review closed the host-side staging and fresh-device material defects,
+  added exact Arabic/Hindi batch identity checks, and added reviewed
+  provenance-only Stage 2 stop/scoped-tool evidence contracts. No runtime,
+  docgen, image, or QEMU command ran. The next eligible action is a clean
+  checkpoint followed by one bounded `--stop-after-stage2` producer.
 - dev-remake-2026-07-29: Replaced stale hard-coded 42-manual/46-command
   acceptance counts with a current-tree inventory requirement, preserved the
   frozen shared owners and fail-fast helper policy, and assigned six bounded

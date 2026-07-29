@@ -15,8 +15,8 @@ pixel evidence remain covered by the parent shared-font plan.
 | Requirement | Executable/manual evidence | Pass condition |
 |---|---|---|
 | REQ-004 | `test/01_unit/os/port/simpleos_font_bundle_spec.spl` / `doc/06_spec/01_unit/os/port/simpleos_font_bundle_spec.md` | 53 unique paths/aliases; 51 immutable pins; two nonempty root notices; missing/unpinned rejection |
-| REQ-004, REQ-005 | `test/02_integration/os/port/simpleos_font_asset_staging_spec.spl` / `doc/06_spec/02_integration/os/port/simpleos_font_asset_staging_spec.md` | four staging owners share the OS projection; TTF registry paths stay unchanged; direct C checksum manifest matches all 35 pinned companions; mono overrides cannot redirect companion reads |
-| NFR-001 | `scripts/os/simpleos_font_bundle_companion.sha256` plus the integration spec | every C-staged pinned companion matches `selected_font_bundle_asset_pins()` before image mutation |
+| REQ-004, REQ-005 | `test/02_integration/os/port/simpleos_font_asset_staging_spec.spl` / `doc/06_spec/02_integration/os/port/simpleos_font_asset_staging_spec.md` | four staging owners share the 53-file image projection; TTF registry paths stay unchanged; direct C preflight matches all 59 immutable source pins; mono overrides cannot redirect companion reads |
+| NFR-001 | `scripts/os/simpleos_font_bundle_companion.sha256` plus the integration spec | the 59-source preflight matches all 57 selected asset pins plus the two pinned root notices before image mutation |
 | NFR-003 | integration spec, live bridge buffer declarations, and C directory guard | 53 payloads total; fixed FAT directory uses 91/128 entries; projection is 51,932,530 bytes; 25,125,512-byte maximum face fits each 32 MiB live path-read buffer |
 
 ## Checks

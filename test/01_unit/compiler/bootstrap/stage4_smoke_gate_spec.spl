@@ -1,6 +1,31 @@
 extern fn rt_file_read_text(path: text) -> text
 
 describe "bootstrap stage4 smoke gate":
+    it "stops only after verified Stage 2 and before Stage 3":
+        val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
+        val verifier = rt_file_read_text("scripts/check/lib/bootstrap-stage3/manifest-verify.shs") ?? ""
+        val sanity_pos: i64 = script.find("bootstrap_stage_sanity \"${{stage2_bin}}\"") ?? -1
+        val sidecar_pos: i64 = script.find("BSTAGE2_MANIFEST_SHA=\"${{BSTAGE2_MANIFEST}}.sha256\"") ?? -1
+        val verify_pos: i64 = script.find("bootstrap_stage2_verify_manifest \"${{BSTAGE2_MANIFEST}}\"") ?? -1
+        val stop_pos: i64 = script.find("if [ \"${{stop_after_stage2}}\" -eq 1 ]; then") ?? -1
+        val stage3_pos: i64 = script.find("# Stage 3: stage2 recompiles bootstrap_main.spl") ?? -1
+
+        expect(script).to_contain("--stop-after-stage2")
+        expect(script).to_contain("Stop after Stage 2 sanity and canonical provenance verification.")
+        expect(script).to_contain("--stop-after-stage2 conflicts with full CLI, deploy, release, and one-binary modes")
+        expect(script).to_contain("--stop-after-stage2 is unavailable for the separate SimpleOS target lane")
+        expect(script).to_contain("rm -f \"${{stage2_bin}}\"\n  if [ \"${{stop_after_stage2}}\" -eq 0 ]; then\n    rm -f \"${{stage3_bin}}\"\n  fi")
+        expect(script).to_contain("if [ \"${{stage2_status}}\" -eq 0 ] &&\n       [ \"${{stage2_provenance_ok}}\" -eq 1 ]; then")
+        expect(script).to_contain("[ \"${{stage2_provenance_ok}}\" -eq 1 ]")
+        expect(script).to_contain("error: --stop-after-stage2 requires a sane, provenance-verified Stage 2")
+        expect(verifier).to_contain("bootstrap_stage2_manifest_sha=\"${{bootstrap_stage2_manifest}}.sha256\"")
+        expect(verifier).to_contain("\"$(bootstrap_stage3_hash_file \"${{bootstrap_stage2_manifest}}\")\" ]")
+        expect(sanity_pos).to_be_greater_than(-1)
+        expect(sidecar_pos).to_be_greater_than(sanity_pos)
+        expect(verify_pos).to_be_greater_than(sidecar_pos)
+        expect(stop_pos).to_be_greater_than(verify_pos)
+        expect(stop_pos).to_be_less_than(stage3_pos)
+
     it "keeps diagnostic whole-archive mode out of canonical bootstrap":
         val script = rt_file_read_text("scripts/bootstrap/bootstrap-from-scratch.sh") ?? ""
 

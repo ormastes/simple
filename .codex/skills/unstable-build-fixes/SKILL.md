@@ -20,6 +20,29 @@ cache or accepting unsealed build evidence.
 - Set `SIMPLE_NO_STUB_FALLBACK=1` for every candidate or verification build;
   a binary containing generated unresolved stubs is debug evidence only.
 
+For the active ten-spec SimpleOS shared-font Stage2 scope, do not enter the
+Stage3/4 loop. First run `sh scripts/bootstrap/bootstrap-from-scratch.sh
+--stop-after-stage2` at a clean pinned checkpoint, then pass its canonical
+Stage2 binary and provenance manifest to the only scoped-tool producer:
+
+```bash
+CHECKPOINT_SHA=<clean-commit-sha> \
+STAGE2_PARENT=<canonical-stage2-simple> \
+STAGE2_PARENT_SHA=<sha256> \
+STAGE2_PROVENANCE_PATH=<canonical-stage2-provenance.env> \
+STAGE2_PROVENANCE_SHA=<sha256> \
+STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-1 \
+STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-1 \
+sh scripts/check/build-stage2-font-scoped-tools.shs write
+```
+
+It owns the fresh canonical core-C capsule, current standalone runner/docgen
+ELF builds, separate caches, and one green/deliberate-red/zero-example runner
+plus zero-stub docgen calibration.
+A later verifier runs `sh scripts/check/build-stage2-font-scoped-tools.shs
+check <attempt-root>` instead of rerunning a green writer. Repairs use a new
+numbered attempt/cache and stop after three cycles; full bootstrap is excluded.
+
 ## Loop
 
 1. Establish the promotion parent. A Stage 2 parent must have the canonical

@@ -1,7 +1,11 @@
 use std.spec
 use std.io_runtime.{file_read}
-use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_bundle_pin_sha256, simpleos_default_font_asset_candidate, simpleos_font_asset_guest_path, simpleos_font_asset_short_guest_path, simpleos_font_asset_short_name}
-use os.port.font_bundle.{simpleos_font_bundle_entries}
+use std.common.encoding.font_registry.{selected_font_asset_candidates,
+    selected_font_bundle_asset_pins, selected_font_bundle_pin_sha256,
+    validate_selected_font_bundle_bytes,
+    simpleos_default_font_asset_candidate, simpleos_font_asset_guest_path,
+    simpleos_font_asset_short_guest_path, simpleos_font_asset_short_name}
+use os.port.font_bundle.{simpleos_font_bundle_entries, load_simpleos_font_bundle_entry}
 use std.nogc_sync_mut.sffi.package.{package_sha256}
 
 fn bundle_pin_sha256(path: text) -> text:
@@ -33,8 +37,50 @@ fn expect_simpleos_font_asset():
     val boot_vfs = file_read("src/os/services/vfs/vfs_boot_init.spl")
     val x86_stubs = file_read("examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c")
     val arm64_stubs = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+    val direct_short_names = direct_builder.substring(
+        direct_builder.index_of("static const char *font_fat_names"),
+        direct_builder.index_of("static const char *font_long_names"))
+    val direct_long_names = direct_builder.substring(
+        direct_builder.index_of("static const char *font_long_names"),
+        direct_builder.index_of("static const char *font_companion_anchor_paths"))
     expect(selected_font_asset_candidates().len()).to_equal(16)
-    expect(simpleos_font_bundle_entries().len()).to_equal(53)
+    val bundle_entries = simpleos_font_bundle_entries()
+    expect(bundle_entries.len()).to_equal(53)
+    var bundle_bytes: i64 = 0
+    for entry in bundle_entries:
+        val loaded = load_simpleos_font_bundle_entry(entry)
+        expect(loaded.valid).to_be(true)
+        expect(validate_selected_font_bundle_bytes(
+            entry.source_path, loaded.data
+        )).to_be(true)
+        bundle_bytes = bundle_bytes + loaded.data.len()
+    expect(bundle_bytes).to_equal(51932530)
+    var previous_direct_short_index: i64 = -1
+    var previous_direct_long_index: i64 = -1
+    for candidate in selected_font_asset_candidates():
+        var mapped = false
+        var mapped_long_path = ""
+        var mapped_short_name = ""
+        for entry in bundle_entries:
+            if entry.source_path == candidate.local_path:
+                expect(entry.guest_long_path).to_equal(
+                    simpleos_font_asset_guest_path(candidate))
+                expect("/SYS/FONTS/" + entry.guest_short_name).to_equal(
+                    simpleos_font_asset_short_guest_path(candidate))
+                mapped_long_path = entry.guest_long_path
+                mapped_short_name = entry.guest_short_name
+                mapped = true
+        expect(mapped).to_be(true)
+        val long_parts = mapped_long_path.split("/")
+        val long_leaf = long_parts[long_parts.len() - 1]
+        val direct_short_index = direct_short_names.index_of(
+            "\"" + mapped_short_name)
+        val direct_long_index = direct_long_names.index_of(
+            "\"" + long_leaf + "\"")
+        expect(direct_short_index).to_be_greater_than(previous_direct_short_index)
+        expect(direct_long_index).to_be_greater_than(previous_direct_long_index)
+        previous_direct_short_index = direct_short_index
+        previous_direct_long_index = direct_long_index
     expect(package_sha256("LICENSE")).to_equal(
         "sha256:337c6e14f6a0a05be187442ca816c5cc256bbc76ca7f61db766facddcb587ce2")
     expect(package_sha256("THIRD_PARTY_NOTICES.md")).to_equal(
@@ -48,8 +94,10 @@ fn expect_simpleos_font_asset():
     expect(image_builder).to_contain("_manifest_file(font_path, kind, \"simpleos-core\")")
     expect(image_builder.contains("rootfs_root, \"/\" + font_path")).to_equal(false)
     expect(image_builder.contains("{rootfs_root}/\" + font_path")).to_equal(false)
-    expect(initramfs).to_contain("for entry in simpleos_font_bundle_entries()")
-    expect(initramfs).to_contain("file_write_bytes(font_dst, loaded.data)")
+    expect(initramfs).to_contain("val font_entries = simpleos_font_bundle_entries()")
+    expect(initramfs).to_contain("file_write_bytes(font_dst, font_blobs[font_index])")
+    expect(initramfs.index_of("font_blobs.push(loaded.data)")).to_be_less_than(
+        initramfs.index_of("if dir_exists(s):"))
     expect(legacy_bake).to_contain("for entry in simpleos_font_bundle_entries()")
     expect(legacy_bake).to_contain("path: entry.guest_short_name")
     expect(legacy_bake).to_contain("data: loaded.data")
@@ -91,19 +139,23 @@ fn expect_simpleos_font_asset():
     expect(4096 / 32).to_equal(128)
     expect(93).to_be_less_than(4096 / 32)
 
-    var companion_manifest_count: i64 = 0
+    var companion_manifest_lines: [text] = []
     for line in companion_manifest.split("\n"):
-        if line.trim() != "": companion_manifest_count = companion_manifest_count + 1
-    expect(companion_manifest_count).to_equal(59)
-    for entry in simpleos_font_bundle_entries():
+        val normalized = line.trim()
+        if normalized != "": companion_manifest_lines.push(normalized)
+    expect(companion_manifest_lines.len()).to_equal(59)
+    for pin in selected_font_bundle_asset_pins():
+        expect(companion_manifest_lines.contains(
+            pin.sha256 + "  " + pin.path)).to_be(true)
+    for root_notice in ["LICENSE", "THIRD_PARTY_NOTICES.md"]:
+        expect(companion_manifest_lines.contains(
+            bundle_pin_sha256(root_notice) + "  " + root_notice)).to_be(true)
+    for entry in bundle_entries:
         val pin_sha256 = bundle_pin_sha256(entry.source_path)
-        if pin_sha256 != "":
-            if entry.source_path.ends_with(".ttf"):
-                expect(direct_script).to_contain(entry.source_path)
-                expect(direct_script).to_contain(pin_sha256)
-                expect(direct_builder).to_contain(entry.source_path)
-            else:
-                expect(companion_manifest).to_contain(pin_sha256 + "  " + entry.source_path)
+        if pin_sha256 != "" and entry.source_path.ends_with(".ttf"):
+            expect(direct_script).to_contain(entry.source_path)
+            expect(direct_script).to_contain(pin_sha256)
+            expect(direct_builder).to_contain(entry.source_path)
     expect(desktop_bootstrap).to_contain("val candidates = selected_font_asset_candidates()")
     expect(desktop_bootstrap).to_contain("for candidate in candidates:")
     expect(desktop_bootstrap.contains("vfs_is_ready")).to_equal(false)

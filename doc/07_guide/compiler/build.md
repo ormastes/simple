@@ -234,6 +234,35 @@ native probes for absent, payload-free present, and struct-payload present
 values and seals their commands, outputs, formats, and inventory. Manual probe
 stdout or reconstructed success counts are not admission evidence.
 
+The active ten-spec SimpleOS shared-font delivery has a narrower Stage2-only
+tool contract and does not promote a compiler. First run `sh
+scripts/bootstrap/bootstrap-from-scratch.sh --stop-after-stage2` at a clean
+pinned checkpoint, then pass its canonical Stage2 binary and provenance
+manifest to:
+
+```bash
+CHECKPOINT_SHA=<clean-commit-sha> \
+STAGE2_PARENT=<canonical-stage2-simple> \
+STAGE2_PARENT_SHA=<sha256> \
+STAGE2_PROVENANCE_PATH=<canonical-stage2-provenance.env> \
+STAGE2_PROVENANCE_SHA=<sha256> \
+STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-1 \
+STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-1 \
+sh scripts/check/build-stage2-font-scoped-tools.shs write
+```
+
+The wrapper builds and canonically verifies a fresh core-C capsule, then uses
+entry closure discovery without broad `--source` roots to build the current
+standalone font runner and SPipe docgen as ELF files. It preserves separate
+caches, exact command/environment/stream/exit/time and source/tool/runtime
+hashes, validates Runtime6 providers including `rt_file_create_excl`, and runs
+green, deliberate-red, zero-example, and zero-stub docgen calibration exactly
+once. A later independent
+audit runs `sh scripts/check/build-stage2-font-scoped-tools.shs check
+<attempt-root>`; do not rerun a green writer. This exception is only
+`SIMPLEOS_STAGE2_FONT` evidence: Stage 3/4, full bootstrap, general `run`/`test`
+qualification, and release remain outside it.
+
 Stage 3 and Stage 4 may then build incrementally from that admitted parent.
 Stage 4 evidence is written by
 `scripts/check/stage4-provenance-receipt.shs write`, which owns the isolated

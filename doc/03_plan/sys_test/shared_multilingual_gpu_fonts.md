@@ -1,49 +1,27 @@
 <!-- codex-design -->
 # Shared Multilingual GPU Fonts System Test Plan
 
-## Temporary diagnostic scope — SimpleOS fonts with Stage 2
+## Active scope override — SimpleOS fonts with Stage 2
 
-This retained scope can produce temporary SimpleOS diagnostic/producer
-artifacts. It does not supersede the broader cross-platform completion plan or
-provide final runtime-dependent acceptance evidence.
+This is the active completion plan. It supersedes the broader cross-platform
+GPU plan below for the current delivery, while retaining that material as
+future work.
 
 ### Goal
 
 Exercise pinned multilingual font loading, shaping, Draw IR materialization,
 and visible SimpleOS desktop rendering using a provenance-recorded pure-Simple
-Stage 2 compiler plus standalone runner/docgen artifacts. Treat every result as
-diagnostic only. Final runtime-dependent font evidence requires a current,
-hash-bound admitted pure-Simple full CLI/core-C identity.
+Stage 2 compiler plus standalone runner/docgen artifacts. Do not wait for a
+Stage 3/Stage 4 full CLI or unavailable non-SimpleOS GPU hosts.
 
-The strongest resulting mark is `SIMPLEOS_STAGE2_FONT: DIAGNOSTIC`; it is not a
-feature PASS and must not be presented as completion of the deferred
-cross-platform native-GPU matrix.
-
-### Current P0 precedence — 2026-07-29
-
-Aggregate dispatch and its missing `%l2` definition are repaired. The current
-`Option<Box>` fixture now forces `opt.?` payload recovery by printing
-`owned.value` and expecting `7`; `MirLowering.find_local` is a receiver method
-so its local lookup does not lower to `undef`. The fresh core-C capsule clears
-the first five missing C symbols. A late post-commit Stage 2 link succeeded at
-`build/native_probe/p0-admission-find-local-20260729/stage2-find-local-runtime-authority-core-simple`
-(SHA-256 `f2db67c629f1fe1505e8374f1c4d701d23a5d1868820f58df02d115d475dc075`).
-The exact receipts
-`build/native_probe/p0-admission-find-local-20260729/stage2-runtime-authority-core.log`,
-`build/native_probe/p0-admission-find-local-20260729/stage2-runtime-authority-core.exit`,
-and
-`build/native_probe/p0-admission-find-local-20260729/stage2-runtime-authority-core.time`
-record 690 objects reused, 3 rebuilt, 0 failed, and exit `0`. The result remains
-diagnostic and unadmitted without provenance and A/B/C results. The
-three-attempt producer window remains exhausted: do not rerun or promote it. A
-future fresh owner must preserve this cache and establish provenance plus A/B/C
-before Stage 3, incremental Stage 4, focused specs, or canonical docgen.
+The resulting done mark is `SIMPLEOS_STAGE2_FONT: PASS`; it must not be
+presented as completion of the deferred cross-platform native-GPU matrix.
 
 ### Active items and estimate
 
 | Item | Required result | Estimate |
 |---|---|---:|
-| Stage 2 runner | Build a fresh core-C capsule, link `font_evidence_runner`, and pass deliberate-red plus zero-example calibration | 1–2 h |
+| Stage 2 runner | Build a fresh core-C capsule, link the runner and docgen, and pass green/red/empty runner plus zero-stub docgen calibration | 1–2 h |
 | Font assets | Verify pinned bytes, licenses, notices, hashes, sizes, and SimpleOS image paths | 1–2 h |
 | Registered-only shaping | Shape the accepted Hindi, Arabic, and Urdu witnesses from registered bytes without host font ABI/filesystem access | 1–3 h |
 | SimpleOS material path | Preserve a handle-free glyph run through Draw IR and prepare a nonempty batch through the existing `FontRenderer` | 1–2 h |
@@ -72,21 +50,48 @@ Run only this scoped set:
 
 1. Record the Stage 2 binary path/SHA-256 and build a core-C capsule containing
    every runner symbol, including `rt_file_create_excl`.
-2. Build the standalone `src/app/test/font_evidence_runner.spl`; require the
-   deliberate-red and zero-example fixtures to exit 1 with their exact markers.
+2. Build the standalone runner and docgen; require one green example, exact
+   deliberate-red and zero-example failures, and one complete zero-stub manual.
 3. Run the manifest, shaping, and asset-staging specs with nonzero examples and
    zero failures.
 4. Build the SimpleOS image with the exact pinned font bytes and notices.
 5. Boot the canonical SimpleOS desktop and retain guest path/length/hash,
    registered-only shaping, Draw IR/batch identity, QMP framebuffer crop, and
    input/frame correlation evidence.
-6. Generate the ten scoped diagnostic manuals with the standalone Stage 2
-   docgen and require `0 stubs`; regenerate final manuals with the admitted
-   full CLI.
-7. Record `SIMPLEOS_STAGE2_FONT: DIAGNOSTIC` only after independent review of
+6. Generate the ten scoped manuals with the standalone Stage 2 docgen and
+   require `0 stubs`.
+7. Record `SIMPLEOS_STAGE2_FONT: PASS` only after independent review of
    all scoped evidence.
 
-### Diagnostic-run non-blockers
+### Bounded Stage 2 tool producer
+
+After committing this plan at a clean checkpoint, first run `sh
+scripts/bootstrap/bootstrap-from-scratch.sh --stop-after-stage2`, then pass its
+canonical Stage2 binary and provenance manifest to this producer once. It
+builds and canonically verifies a fresh core-C capsule, builds the current
+standalone runner and docgen with separate caches, validates native ELF and the
+Runtime6 providers, then runs green, deliberate-red, zero-example, and docgen
+calibration exactly once. It does not build Stage 3, Stage 4, or a full
+bootstrap.
+
+```bash
+export CHECKPOINT_SHA=<clean-commit-sha>
+export STAGE2_PARENT=<canonical-stage2-simple>
+export STAGE2_PARENT_SHA=<sha256>
+export STAGE2_PROVENANCE_PATH=<canonical-stage2-provenance.env>
+export STAGE2_PROVENANCE_SHA=<sha256>
+export STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-1
+export STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-1
+sh scripts/check/build-stage2-font-scoped-tools.shs write
+```
+
+The producer retains exact commands, both streams, exits, timing, source/tool/
+runtime identities, calibration markers, and recursive SHA-256 inventories.
+It seals the attempt and caches read-only. A repeated invocation first verifies
+the complete receipt and then refuses reuse; a repair uses a new attempt/cache
+number and counts toward the three-cycle cap.
+
+### Non-blocking warnings and deferred work
 
 The following do not block this scoped goal:
 
@@ -95,8 +100,7 @@ The following do not block this scoped goal:
   evidence;
 - unrelated compiler warnings or cleanup that does not affect the Stage 2
   runner, selected font bytes, SimpleOS build, or QEMU execution;
-- full-CLI admission during this diagnostic run; it remains mandatory for final
-  runtime-dependent acceptance;
+- Stage 3/Stage 4 full-CLI admission;
 - Web/hosted desktop, Engine3D, CUDA, ROCm/HIP, Metal, DirectX, and
   cross-platform native-GPU promotion;
 - the deferred cross-platform performance NFR matrix.
@@ -107,19 +111,18 @@ missing QEMU pixels, or an uncorrelated input/frame receipt remain blocking.
 Software or source-only evidence cannot replace the SimpleOS QEMU framebuffer
 oracle.
 
-### Scoped diagnostic criteria
+### Scoped pass criteria
 
-Diagnostic completion requires all ten focused specs to execute with real
-assertions, the runner calibration to fail exactly as designed, guest font
+Pass requires all ten focused specs to execute with real assertions, all four
+tool calibrations to match exactly, guest font
 identity to match the pinned manifest, accepted Hindi/Arabic/Urdu shaping to
 produce nonempty handle-free material, the canonical SimpleOS desktop to render
 those pixels, the independent crop and input/frame receipts to agree, and all
-ten manuals to report `0 stubs`. Final acceptance still requires the admitted
-full CLI/core-C rerun.
+ten manuals to report `0 stubs`.
 
 Everything below this section is deferred reference for the original
 cross-platform GPU goal and is not part of
-`SIMPLEOS_STAGE2_FONT: DIAGNOSTIC`.
+`SIMPLEOS_STAGE2_FONT: PASS`.
 
 ## Scope
 

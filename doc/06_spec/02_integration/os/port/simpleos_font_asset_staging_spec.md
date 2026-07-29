@@ -56,11 +56,13 @@ bytes under the canonical repository identity, and refuses to render when the
 registered count differs from the selected catalog count.
 
 Every Simple builder validates the exact returned byte array before staging.
-The still-live C compatibility wrapper mirrors the same 53 files: its shell
-preflight validates all 16 TTF hashes and a 35-entry companion checksum
-manifest through `sha256sum` or `shasum`; root notices remain nonempty
-transport-owned inputs. Its `/SYS/FONTS` directory uses 91 of 128 available
-entries, including TTF LFN slots. `SIMPLEOS_FONT_ASSET` may relocate only the
+The still-live C compatibility wrapper mirrors the same 53-file image
+projection. Its shell preflight validates all 59 immutable source pins through
+`sha256sum` or `shasum`: 16 TTFs, 34 Google companion files, seven CLDR source
+files, and the two root notices. Only 35 non-root companion files enter the
+image alongside the 16 TTFs and two root notices. Its `/SYS/FONTS` directory
+uses 91 of 128 available entries, including TTF LFN slots.
+`SIMPLEOS_FONT_ASSET` may relocate only the
 exact hash-validated Noto Sans Mono TTF bytes; metadata and license reads remain
 anchored to the canonical pinned repository directory, so altered override
 siblings cannot enter the image. The shell rejects stale pinned bytes and the C

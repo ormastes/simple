@@ -109,9 +109,9 @@ all 50 Google Fonts files, the CLDR license, root `LICENSE`, and
 XML/tag/source/ranking inputs stay host-build evidence because the guest uses
 the compiled ranking, not those inputs. Existing TTF long paths and 8.3 aliases
 remain unchanged; metadata, licenses, corpus, and notices use unique 8.3
-siblings below `/SYS/FONTS`. The legacy C writer checks the 16 TTF hashes plus
-the exact 35-entry pinned companion manifest before mutation and uses 91 of its
-128 font-directory entries.
+siblings below `/SYS/FONTS`. The legacy C writer checks the 16 TTF sizes and
+hashes, then rechecks the exact 59-source pinned preflight before mutation; the
+53-file image projection uses 91 of its 128 font-directory entries.
 The two serif script candidates have bounded default-instance source profiles
 and independent glyph/advance/offset probes. They remain unavailable to normal
 selection because the retained full pure-Simple CLI has not executed those
