@@ -14,24 +14,20 @@ reviews, syncs, and pushes.
 ## Current Truth
 
 - Focused graph: 46 commands (preflight, B6, C18, D12, E9).
-- Manuals: 42 font mirrors (19 missing, 23 stale) plus four missing compiler
-  prerequisite mirrors; every mirror needs immutable docgen and `0 stubs`.
+- Manuals: 42 font mirrors (0 current, 19 missing, 23 stale) plus four missing
+  compiler-prerequisite mirrors; every canonical mirror needs immutable docgen
+  and `0 stubs`. Diagnostic manuals under `build/test-artifacts/` are noncanonical.
 - Evidence: REQ/NFR `0 pass / 0 active / 24 blocked`; AC
   `1 pass / 4 active / 7 blocked`.
-- Checkout: 75 changed/new paths at `24a77be3c89a`; origin comparison is 87
-  behind / 70 ahead. No completion sync has run.
-- Source fixes cover per-invocation Stage3/HIR env/profile hoisting, GPOS
-  owner-relative lookup, scalar owner-fault receipts, transactional atlas/fence
-  safety, reusable vertex bytes, a bounded completed vertex pool, one deferred
-  fallback snapshot, cleared Engine2D fallback pixels, stable Vulkan UUID/LUID
-  identity, and wait/device-loss error retention.
-- Host-independent exact Rust diagnostics pass: runtime UUID/LUID identity
-  (0.00s, 5,632 KiB max RSS) and compiler device-loss classification (17.84s,
-  2,169,768 KiB max RSS). They are not pure-Simple acceptance evidence.
-- No admitted current-source CLI exists. Runtime, docgen, native, QEMU, and
-  performance acceptance rows have not run; unavailable hardware is never PASS.
-- Three producer/profile cycles are exhausted. This window permits no fourth
-  producer or full bootstrap; a fresh window may resume the retained cache once.
+- Checkout: HEAD and the pushed checkpoint are `502b70b5460` (0 ahead/0 behind);
+  `origin/main` is `dcc5328864d5`, with HEAD 82 ahead and 467 behind main.
+- Stage2 successor3 `dd7e747a…26cf` reused 689 modules and rebuilt four; that
+  incremental receipt is diagnostic only. The capped Option smoke ended in
+  nil/SIGILL, produced no Stage4 CLI, and must not be promoted or repeated.
+- Source audits justify no new product code before one admitted current-source
+  pure-Simple CLI/core-C supplies runtime evidence. Runtime, canonical docgen,
+  native, QEMU, and performance acceptance remain open.
+- Unavailable hardware rows remain explicitly blocked, never skipped or PASS.
 - Exact NFR-007 blocker remains `font-owner-fault-runtime-proof-unavailable`.
 
 ## Open Next

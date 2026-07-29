@@ -1,21 +1,23 @@
 <!-- codex-design -->
 # Shared Multilingual GPU Fonts System Test Plan
 
-## Active scope override — SimpleOS fonts with Stage 2
+## Temporary diagnostic scope — SimpleOS fonts with Stage 2
 
-This is the active completion plan. It supersedes the broader cross-platform
-GPU plan below for the current delivery, while retaining that material as
-future work.
+This retained scope can produce temporary SimpleOS diagnostic/producer
+artifacts. It does not supersede the broader cross-platform completion plan or
+provide final runtime-dependent acceptance evidence.
 
 ### Goal
 
-Complete pinned multilingual font loading, shaping, Draw IR materialization,
+Exercise pinned multilingual font loading, shaping, Draw IR materialization,
 and visible SimpleOS desktop rendering using a provenance-recorded pure-Simple
-Stage 2 compiler plus standalone runner/docgen artifacts. Do not wait for a
-Stage 3/Stage 4 full CLI or unavailable non-SimpleOS GPU hosts.
+Stage 2 compiler plus standalone runner/docgen artifacts. Treat every result as
+diagnostic only. Final runtime-dependent font evidence requires a current,
+hash-bound admitted pure-Simple full CLI/core-C identity.
 
-The resulting done mark is `SIMPLEOS_STAGE2_FONT: PASS`; it must not be
-presented as completion of the deferred cross-platform native-GPU matrix.
+The strongest resulting mark is `SIMPLEOS_STAGE2_FONT: DIAGNOSTIC`; it is not a
+feature PASS and must not be presented as completion of the deferred
+cross-platform native-GPU matrix.
 
 ### Active items and estimate
 
@@ -58,12 +60,13 @@ Run only this scoped set:
 5. Boot the canonical SimpleOS desktop and retain guest path/length/hash,
    registered-only shaping, Draw IR/batch identity, QMP framebuffer crop, and
    input/frame correlation evidence.
-6. Generate the ten scoped manuals with the standalone Stage 2 docgen and
-   require `0 stubs`.
-7. Record `SIMPLEOS_STAGE2_FONT: PASS` only after independent review of all
-   scoped evidence.
+6. Generate the ten scoped diagnostic manuals with the standalone Stage 2
+   docgen and require `0 stubs`; regenerate final manuals with the admitted
+   full CLI.
+7. Record `SIMPLEOS_STAGE2_FONT: DIAGNOSTIC` only after independent review of
+   all scoped evidence.
 
-### Non-blocking warnings and deferred work
+### Diagnostic-run non-blockers
 
 The following do not block this scoped goal:
 
@@ -72,7 +75,8 @@ The following do not block this scoped goal:
   evidence;
 - unrelated compiler warnings or cleanup that does not affect the Stage 2
   runner, selected font bytes, SimpleOS build, or QEMU execution;
-- Stage 3/Stage 4 full-CLI admission;
+- full-CLI admission during this diagnostic run; it remains mandatory for final
+  runtime-dependent acceptance;
 - Web/hosted desktop, Engine3D, CUDA, ROCm/HIP, Metal, DirectX, and
   cross-platform native-GPU promotion;
 - the deferred cross-platform performance NFR matrix.
@@ -83,17 +87,19 @@ missing QEMU pixels, or an uncorrelated input/frame receipt remain blocking.
 Software or source-only evidence cannot replace the SimpleOS QEMU framebuffer
 oracle.
 
-### Scoped pass criteria
+### Scoped diagnostic criteria
 
-Pass requires all ten focused specs to execute with real assertions, the runner
-calibration to fail exactly as designed, guest font identity to match the
-pinned manifest, accepted Hindi/Arabic/Urdu shaping to produce nonempty
-handle-free material, the canonical SimpleOS desktop to render those pixels,
-the independent crop and input/frame receipts to agree, and all ten manuals to
-report `0 stubs`.
+Diagnostic completion requires all ten focused specs to execute with real
+assertions, the runner calibration to fail exactly as designed, guest font
+identity to match the pinned manifest, accepted Hindi/Arabic/Urdu shaping to
+produce nonempty handle-free material, the canonical SimpleOS desktop to render
+those pixels, the independent crop and input/frame receipts to agree, and all
+ten manuals to report `0 stubs`. Final acceptance still requires the admitted
+full CLI/core-C rerun.
 
 Everything below this section is deferred reference for the original
-cross-platform GPU goal and is not part of `SIMPLEOS_STAGE2_FONT: PASS`.
+cross-platform GPU goal and is not part of
+`SIMPLEOS_STAGE2_FONT: DIAGNOSTIC`.
 
 ## Scope
 
@@ -251,11 +257,11 @@ with the one `FontRenderConfig`; no parallel step/helper vocabulary is added.
 Each listed case count is a minimum and includes happy, boundary, and failure
 behavior.
 
-The current all-items classification is 34 changed/new specs since
-`origin/main`: 14 mirrors are missing, 20 are stale, zero are current, and all
-34 require focused docgen through the deployed pure-Simple runtime. The
-authoritative 39-command graph is one runner-contract preflight, B6, C17, D11,
-and E4. The exact paths, immutable owner commands, and runtime/native blockers
+The current all-items classification is 42 changed/new canonical font specs
+since `origin/main`: 19 mirrors are missing, 23 are stale, zero are current,
+and all 42 require focused docgen through the admitted pure-Simple runtime. The
+authoritative 46-command graph is one runner-contract preflight, B6, C18, D12,
+and E9. The exact paths, immutable owner commands, and runtime/native blockers
 are authoritative in
 `doc/09_report/shared_multilingual_gpu_fonts_all_items_verification.md`.
 Historical rows below remain useful evidence history, but do not override that
@@ -276,7 +282,7 @@ current report or promote a row from static evidence.
 | REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, `wm_nested_content_frame_spec.spl`, production host route contract, `simpleos_wm_qemu_evidence_contract_spec.spl`, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical-owner legacy atlas/pipeline dependency exclusion; shared producer/consumer artifact root; canonical SimpleOS pixels; shared nested-frame collection and fail-closed rejection | canonical-owner exclusion, the `taskbar-clock` route, dynamic crop, shared artifact-root contract, and QEMU hash recomputation are source-covered; the shared nested collector has behavioral source cases for a valid reachable collection and stale, duplicate, and orphan rejection, but is runtime-unverified; hosted image/motion/nested parity and a current retained QEMU PASS remain pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
-| REQ-014 | 34 executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | the source/manual flows remain unverified on the deployed pure-Simple runtime, so 0/34 pairs are accepted |
+| REQ-014 | 42 executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | the source/manual flows remain unverified on the admitted pure-Simple runtime, so 0/42 pairs are accepted |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; canonical `rocm` target with `hip` alias; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | source includes ROCm/HIP identity and policy-plan cases; the reduced 2D spec links and the mutex receiver fault is fixed, but all three cycles still exit 132 before results |
 | REQ-016 | five focused full-layout specs plus `selected_devanagari_spec.spl` and generated manuals | GSUB 1–8; GPOS 1–9; all context/extension formats; LookupFlag/GDEF combinations; Device/VariationIndex and anchors; true/false FeatureVariations; non-witness generic input; malformed transactional rollback | source implementation is merged and independent P0/P1 review is clean; admitted-runtime execution and regenerated-manual PASS remain pending |
 
@@ -327,9 +333,10 @@ collector produces a passing durable record.
 
 ## Environment and order
 
-Use the admitted self-hosted release binary. Run the authoritative 39-command
-graph in the verification report exactly once: runner preflight, B6, C17, D11,
-then E4. The former eleven-spec order is historical and must not be used.
+Use the admitted self-hosted full CLI/core-C identity. Run the authoritative
+46-command graph in the verification report exactly once: runner preflight,
+B6, C18, D12, then E9. The former eleven-spec order is historical and must not
+be used.
 Native specs require a declared promoted graphics backend/driver; other
 backends may provide compile-only rows. Pin fixtures, viewport,
 premultiplication, rounding, warmups, samples, and percentile method.

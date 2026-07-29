@@ -10,22 +10,57 @@ todo
 
 ## Refined Goal
 
-Finish every selected shared-multilingual-font requirement and NFR by integrating the completed GSUB/GPOS lane, executing all remaining host-independent work in parallel, retaining explicit owners and resume commands for unavailable native-host rows, and producing one independently reviewed verification result.
+Finish every selected shared-multilingual-font requirement and NFR from the
+current branch, using parallel owner lanes where dependencies permit, without
+promoting temporary Stage 2 diagnostics or unavailable native-host evidence,
+and finish with one independently reviewed verification result and a synced
+GitHub checkpoint.
 
 ## Acceptance Criteria
 
-- AC-1: One current matrix classifies every REQ-001–016 and NFR-001–008 row as `pass`, `active`, or `blocked`; every non-pass row has an owner, writable scope, exact command/evidence, dependency, and final reviewer.
-- AC-2: The completed `codex/gsub-gpos-complete-20260725` implementation is integrated without importing superseded `gsub-gpos-stage1` duplicates, losing tracked files, or overwriting unrelated work.
-- AC-3: Before any font evidence is accepted, one current pure-Simple full CLI and matching core-C identity are hash-bound and admitted by `scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact binary, including the required test-runner, lint, duplicate-check, and aggregate pass markers, followed exactly once by deliberate-red and zero-example calibration retained under `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`. Minimal compiler-enablement fixes may produce this prerequisite incrementally, but they never promote a font requirement. A full bootstrap is permitted only when changed seed/runtime inputs make it essential; this verification window permits neither Rust-seed producer/acceptance use nor a fourth producer. Bounded Rust-seed diagnostics remain non-acceptance evidence.
-- AC-4: The authoritative 46-command graph (one runner preflight, B6, C18, D12, E9) runs once against that admitted hash-bound pure-Simple runtime with nonzero examples and an authoritative summary.
-- AC-5: REQ-001–005 and NFR-001/003 have executable deterministic manifest, license, byte-identity, package, archive, and SimpleOS projection evidence with no missing generated manual.
-- AC-6: REQ-006–011/015 have executable exact-face shaping, bounded cache/lifecycle, shared `FontRenderBatch`, configuration-policy, Draw IR round-trip, Engine2D, Web, GUI, hosted-WM, and current-host SimpleOS/QEMU evidence without a private font path.
-- AC-7: REQ-012/013 and NFR-002/005–008 prove at least one real promoted native backend through texture/upload/bind/draw/fence/device-origin readback for both Engine2D and Engine3D, or remain explicitly blocked with retained artifacts and an exact native-host resume contract; simulation and CPU mirrors never count as native pass.
-- AC-8: NFR-004–006 performance evidence records the selected fixture, warmup/sample protocol, cache hit rate, p95 latency, CPU/GPU comparison, RSS/VRAM, upload behavior, hashes, host, device, and driver, and checks the selected numeric thresholds.
-- AC-9: Every unavailable cross-host/capability row remains active in the matrix and executable/manual evidence as `blocked` or `unsupported`, with prerequisite, exact resume command, retained artifact paths, owner, and final reviewer; no row is silently skipped or excluded.
-- AC-10: All 42 changed executable SSpecs use the applicable frozen primary-flow `step("...")` phrases plus clear scenario-specific steps, real canonical matchers, absolute oracles, and fail-fast helpers; mirrored manuals report `0 stubs`, read as operator manuals, and `doc/06_spec` contains zero executable `.spl` files.
-- AC-11: A highest-capability final review maps every requirement to current evidence, runs the direct-runtime guards and scoped verification once, records `STATUS: PASS` only when all required rows pass, and otherwise leaves precise open blockers without weakening the goal.
-- AC-12: The isolated branch is cleanly rebased onto current `origin/main` with the file-count guard, committed, and pushed only after the applicable verification state is recorded; unrelated dirty work is untouched.
+- AC-1: A regenerated current-worktree matrix covers REQ-001–016 and
+  NFR-001–008. Every row is `pass`, `active`, or `blocked`; every non-pass row
+  has an owner, dependency, exact command/evidence, retained artifact path, and
+  final reviewer. Counts are derived from the current tree, not copied from
+  historical 42/46-command snapshots.
+- AC-2: Current GSUB/GPOS and selected-shaping code has no superseded duplicate
+  lane, uses the shared `FontRenderer`/`FontRenderBatch` path, and has focused
+  executable coverage for selected scripts and negative inputs.
+- AC-3: Runtime-dependent font evidence uses one hash-bound, current-source,
+  pure-Simple full CLI and matching core-C runtime admitted once by the
+  essential-tools smoke plus deliberate-red and zero-example calibration.
+  Stage 2 successor3 is diagnostic/producer evidence only. No Rust-seed
+  acceptance and no full bootstrap unless incremental production cannot
+  satisfy the prerequisite.
+- AC-4: Each current focused font spec and its manual is inventoried once,
+  contains real assertions and frozen primary-flow steps, reports `0 stubs`,
+  and leaves no executable `.spl` under `doc/06_spec`.
+- AC-5: REQ-001–005 and NFR-001/003 prove deterministic manifest, licensing,
+  exact bytes, packaging/archive, and SimpleOS projection.
+- AC-6: REQ-006–011/015/016 prove exact-face shaping, GSUB/GPOS selection,
+  bounded cache/lifecycle, shared batch/config policy, Draw IR round-trip, and
+  Engine2D/Web/GUI/hosted-WM/current-host SimpleOS routing without a private
+  font path.
+- AC-7: REQ-012/013 and NFR-002/005–008 prove real native Engine2D and Engine3D
+  texture/upload/bind/draw/fence/device-origin readback, or remain explicitly
+  blocked with an exact native-host resume contract. Simulation and CPU mirrors
+  are never native PASS evidence.
+- AC-8: NFR-004–006 evidence records fixture, warmup/samples, cache hit rate,
+  p95, CPU/GPU comparison, RSS/VRAM, upload behavior, hashes, host, device, and
+  driver and enforces the selected thresholds.
+- AC-9: Unavailable host/capability rows stay visible as `blocked` or
+  `unsupported`, never skipped/PASS, with prerequisite, resume command,
+  artifacts, owner, and reviewer.
+- AC-10: Eligible host-independent tasks run in parallel after interfaces are
+  frozen; agents do not overwrite unrelated work and `/root` integrates and
+  reviews their bounded handoffs.
+- AC-11: Final highest-capability verification maps every requirement to
+  current evidence and runs each applicable guard/check at most once. It emits
+  `STATUS: PASS` only when all selected required rows pass, otherwise precise
+  blockers remain.
+- AC-12: The isolated branch is fetched/rebased safely, file-count guarded,
+  committed, and pushed after verification; unrelated worktrees remain
+  untouched.
 
 ## Scope Exclusions
 
@@ -36,8 +71,11 @@ Finish every selected shared-multilingual-font requirement and NFR by integratin
 ## Cooperative Review
 
 - Merge owner: `/root` in `/tmp/simple-font-sync-20260727`.
-- Final reviewer and generated-manual acceptance owner: highest-capability primary model after all lane handoffs; A–E run their focused docgen sets and lane F audits all 42 immutable results.
-- Parallel lanes: admitted-runtime calibration; manifests/distribution; shaping/material/configuration; production surfaces/SimpleOS; native 2D/3D/performance; specs/manuals/evidence audit.
+- Final reviewer and generated-manual acceptance owner: highest-capability
+  primary model after all lane handoffs.
+- Parallel lanes: runtime admission/resume; manifests/distribution;
+  shaping/material/configuration; production surfaces/SimpleOS; native
+  2D/3D/performance; specs/manuals/evidence inventory.
 - Frozen owners/interfaces: `FontRenderer`, `FontRenderQuad`, `FontRenderBatch`, `FontRenderConfig`, `FontExecutionPolicy`, `emit_portable_font_atlas_composite_kernel`, `draw_text_hud`, and `draw_text_world`. No parallel renderer, emitter, atlas, cache, or runtime facade.
 - Frozen manual steps: `step("Load the pinned multilingual font manifest")`, `step("Accept exact-face-bound simple-script shaping")`, `step("Prepare one shared font batch for 2D and 3D")`, `step("Emit the selected font composite program and plan compilation")`, `step("Prove native submission and device readback")`, `step("Render legacy Web GUI and WM text through DrawIR")`, `step("Capture SimpleOS pinned-font pixels")`, and `step("Measure warm font rendering and resource bounds")`.
 - Frozen setup/checkers: `setup_shared_font_fixture`, `expect_font_license`, `expect_language_coverage`, `expect_shared_font_batch`, `expect_selected_unicode_shaping`, `expect_backend_emission`, `expect_font_render_parity`, `expect_engine3d_font_readback`, `expect_simpleos_font_pixel_oracle`, and `expect_font_perf_budget`.
@@ -59,7 +97,7 @@ Finish every selected shared-multilingual-font requirement and NFR by integratin
 
 ## Phase
 
-verify-pending
+dev-done
 
 ## Compiler-enablement boundary
 
@@ -77,6 +115,22 @@ Historical resume/cache/bridge imperatives below are superseded by
 historical artifact is an eligible parent or cache, and this window permits no
 Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
 
+- dev-remake-2026-07-29: Replaced stale hard-coded 42-manual/46-command
+  acceptance counts with a current-tree inventory requirement, preserved the
+  frozen shared owners and fail-fast helper policy, and assigned six bounded
+  parallel audit lanes before implementation. Current pushed checkpoint is
+  `502b70b5460`; temporary Stage 2 successor3
+  `dd7e747ad1e22bb71d46c5737d20d2d250146af70fdd3c621f66d7ab57ca26cf`
+  is diagnostic only. The Option admission smoke exhausted its three-cycle cap
+  and must not be repeated in this session.
+- parallel-plan-audit-2026-07-29: Six bounded agents independently audited
+  runtime admission, manifests, shaping, production surfaces, native/performance,
+  and canonical manuals. The current graph is 46 commands
+  (preflight+B6+C18+D12+E9); 42 changed canonical font manuals are 19 missing
+  and 23 stale, and four compiler-prerequisite manuals are missing. Static
+  routing is source-complete except the still-blocked REQ-011 compatibility
+  bitmap row; no speculative product edit is assigned before admitted runtime
+  evidence. Unavailable host/device rows remain blocked.
 - dev: Remade the goal around all selected requirements and NFRs with twelve testable acceptance criteria, six parallel lanes, frozen shared interfaces, and explicit unavailable-host policy.
 - verify: At HEAD `7a161abfabb` plus the current working changes, no fresh Stage 4 CLI is admitted. The frozen B4+C13+D5+E4 inventory is 26 executable sources, 18 present mirrors, eight missing mirrors, 12 stale mirrors, six same-revision but unverified mirrors, and zero retained docgen logs; no requirement is marked pass. Static scans found no prohibited placeholder pass, and `doc/06_spec` contains no executable `_spec.spl`.
 - bootstrap: `e331a5700ab`, integrated as `7a161abfabb`, fixed impl-method accumulation and added direct 0+2/1+2 regression coverage. The final cycle-3 Stage 4 check advanced `compiler.spl` from count 0 to count 15 and localized the remaining nil receiver after `driver:errors-read:done`, inside the error collector. A typed-index collector fix and direct recovered/fatal error regression now exist in the working tree but are bootstrap-unverified. The three-check cap is reached, no further retry is permitted this session, and the full CLI is absent.

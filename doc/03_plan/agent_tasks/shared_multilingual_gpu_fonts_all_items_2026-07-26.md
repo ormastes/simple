@@ -21,18 +21,18 @@ atlas, cache, process/env facade, or device-success path.
 
 | Area | Current evidence | Required next state |
 |---|---|---|
-| GSUB/GPOS | reviewed completion is integrated on the isolated branch; superseded stage1 duplicates were not imported | execute the frozen shaping/parser specs on the deployed pure-Simple runtime |
-| Runtime | proven pure-Simple bootstrap parent SHA-256 `a920123d919c4a4c384161e16fe35a1853d6e3da6bfd3a4a4e7291a2c072f04d` exists, but it is not a full CLI. Two later bounded producer profiles exited 124 in HIR with no child; no admitted current full CLI/core-C identity exists. The exact font-owner aggregate blocker is `font-owner-fault-runtime-proof-unavailable` | P0 is blocked in this window. Preserve the cycle-3 cache and receipts; a fresh bounded producer window may produce one current-source child, then profile that child on one incremental self-build. No fourth producer or full bootstrap is allowed in this window |
-| Focused tests | implementation and static coverage exist; prior runner exited before examples | calibrated, nonzero, authoritative runtime results |
-| Native GPU | Engine2D and Engine3D retain native-safe scalar `i64` owner-fault/device-loss state, identity preservation, and committed CPU-fallback counts; atlas replacement and unknown-completion cleanup are transactional, vertex bytes and plan/projection scratch are reused, the completed vertex pool is bounded, deferred fallback keeps one snapshot, Engine2D clears fallback pixels, and the runtime facade retains Vulkan3D fence-wait/wait-idle errors | one admitted real 2D+3D promoted device route and current perf record proving that source-present error path |
-| Surfaces | source contracts and retained artifacts exist | live canonical Web/GUI/WM/SimpleOS evidence and honest blocked rows |
-| Docs/manuals | 42 font sources: 19 mirrors missing, 23 stale, zero current, and zero retained docgen logs. All four canonical prerequisite compiler perf-repair mirrors outside the font graph are missing; a stale legacy-path resolve-import copy does not satisfy the canonical path | regenerate the 42 font mirrors and four prerequisite mirrors with the admitted pure-Simple runtime, require `0 stubs`, and update one requirement/evidence matrix |
+| GSUB/GPOS | the current source is a static implementation candidate with no superseded duplicate lane; REQ-006–010/015/016 remain runtime-unverified. REQ-011 is still blocked by the compatibility bitmap route | execute C18 once on the admitted runtime; route the REQ-011 compatibility removal/parity row to `surface_simpleos` |
+| Runtime | pushed HEAD `502b70b5460` produced temporary Stage 2 successor3 at `build/native_probe/memory-dispatch-fix/stage2-goal-successor3-simple`, SHA-256 `dd7e747ad1e22bb71d46c5737d20d2d250146af70fdd3c621f66d7ab57ca26cf`, with `689 reused / 4 rebuilt`. Both Option gates then stopped in the pure in-process compiler with `field access on nil receiver` and SIGILL; the three-cycle cap is exhausted and no Stage 4 candidate exists | a fresh P0 session first diagnoses the Option root cause, then produces a current pure-Simple Stage 3 parent and one incremental Stage 4 full CLI. Stage 2 is diagnostic only; do not rerun the unchanged smoke or start a full bootstrap |
+| Focused tests | the exact immutable graph is 46 commands: preflight 1 + B6 + C18 + D12 + E9. No current-runtime command has accepted evidence | after A admission/calibration, each owner runs its commands once and retains immutable command/stdout/stderr/exit receipts |
+| Native GPU | the E audit leaves every native/performance row blocked; CPU/simulation diagnostics cannot promote a row, and no product edit is justified before real-device evidence exposes a concrete failure | one admitted real 2D+3D same-device route and current performance/device-loss receipts, or an explicit unavailable-host blocker |
+| Surfaces | Web/GUI/WM/SimpleOS routing is statically valid through the frozen Draw IR/Engine2D owners; no live hosted/QEMU evidence exists | D12 executes once after admission; unavailable hosted, x86, RV64, or device rows stay blocked, never skipped/PASS |
+| Docs/manuals | the authoritative changed-font manifest has 42 canonical pairs: 19 mirrors missing, 23 stale, zero current. Four canonical compiler-prerequisite mirrors are also missing. Diagnostic manuals under `build/` are noncanonical and cannot satisfy docgen | owners generate A1 + B6 + C17 + D11 + E7 canonical font manuals and the four prerequisite manuals with the admitted runtime and `0 stubs`; F audits the linked manifest |
 
-The checkout has 75 changed/new paths at tracked implementation checkpoint
-`24a77be3c89a`; current evidence working changes follow it without inventing a
-commit hash. The branch is currently 87 commits behind and 70 ahead of
-`origin/main`; AC-12 remains active until the completion-time linear rebase,
-file-count guard, and push.
+The isolated branch and its remote are synchronized at pushed HEAD
+`502b70b5460` (`0 ahead / 0 behind`). Without fetching, the recorded
+`origin/main` is `dcc5328864d5`; HEAD is 82 commits ahead and 467 behind it.
+AC-12 remains active until completion-time fetch, linear rebase, file-count
+guard, and push.
 Source-present but runtime-unverified work at that checkpoint includes the one-pass package sibling index, positional Stage 3
 build with target/cache/thread/runtime forwarding, reviewed GSUB/GPOS coverage,
 GPOS VariationIndex long-word handling, fail-closed degenerate Web results,
@@ -61,17 +61,17 @@ test completed in 0.00s at 5,632 KiB max RSS, and the exact compiler
 device-loss classification test completed in 17.84s at 2,169,768 KiB max RSS.
 They remain diagnostics, not pure-Simple acceptance evidence.
 
-## Current owner overlay
+## Current owner overlay — 2026-07-29 remade schedule
 
-| Current sidecar | Exact scope | Status / writable authority |
+| Completed audit lane | Audited result | Next owner / writable authority |
 |---|---|---|
-| `font_matrix_audit` | AC/matrix truth; hosted-WM and typed SimpleOS selected-font rejection; owner reason/lifecycle review | source review complete; integrated paths remain runtime-unverified |
-| `font_spec_manual_audit` | 42+4 mirror inventory; Draw IR SDN round trip; fail-closed NFR-007 perf/spec/checker contract | source-complete; exact blocker `font-owner-fault-runtime-proof-unavailable`; 19 font mirrors missing, 23 stale, and four prerequisite mirrors missing |
-| `font_layout_impl_audit` | GSUB/GPOS/REQ-016 and PairPos owner-relative correction; native scalar/lifetime review | source review complete; scalar owner corrections integrated, runtime-unverified |
-| `font_surface_audit` | native-safe Engine2D/Engine3D transfer, transactional atlas cleanup, bounded retired-resource cleanup, and reusable plan/projection scratch | source-complete and statically reviewed; runtime/profile evidence unavailable |
-| `font_native_perf_audit` | hardware-only identity, immutable Lane-E evidence, scalar owner-fault/device-loss truth, NFR-002/007 honesty | source-complete; admitted owner-path execution and a runtime receipt for Vulkan3D fence-wait/wait-idle observability remain blocked |
-| `stage3_hir_lifetime` | native-safety crosscheck for aggregate transport, owner lifetime, completion safety, and scratch allocation | review complete; corrections integrated into the scalar/transactional owner overlay, runtime-unverified |
-| `/root` | merge owner, owner-overlay integration, plan/state/report truth, final review | source integration complete; 42+4 docgen and runtime/native evidence blockers remain active |
+| `runtime_admission_audit10` | successor3 provenance is valid diagnostic evidence; both Option gates nil/SIGILL, the cap is exhausted, and no Stage 4 exists | `/root` as P0 in a fresh bounded session; compiler/runtime root-cause files and isolated producer artifacts only |
+| `manifest_audit10` | B source is complete; execution and all six B docgens remain blocked on A admission | `manifest_distribution` after A2; no source edit unless the first authoritative failure identifies one |
+| `shaping_audit10` | C is a static implementation candidate with no duplicate GSUB/GPOS lane; REQ-011 remains blocked by the compatibility bitmap route | `shaping_material` owns C18 execution/C17 manuals; `surface_simpleos` owns the REQ-011 compatibility row |
+| `surface_audit10` | D routing is statically valid through canonical Draw IR/Engine2D owners; live hosted/QEMU evidence is absent | `surface_simpleos` owns D12 execution/D11 manuals and retains unavailable rows as blocked |
+| `native_perf_audit10` | all E rows remain blocked; no product edit is justified from static evidence | `native_gpu_perf` owns E9 execution/E7 manuals only after admitted runtime and real-device prerequisites exist |
+| `manual_inventory_audit10` | 42 font pairs = 19 missing + 23 stale + 0 current; four compiler-prerequisite mirrors are missing; build-tree manuals are diagnostic/noncanonical | A/B/C/D/E owners generate; `spec_docs_audit` audits the [authoritative manifest](../../../09_report/shared_multilingual_gpu_fonts_all_items_verification.md#canonical-executablemanual-audit) |
+| `/root` | merge owner and highest-capability final reviewer | integrates bounded handoffs, owns done marks, final guards, rebase, and push |
 
 ### Current focused source-contract ownership
 
@@ -88,10 +88,9 @@ stdout, stderr, and exit receipts remain under
 | `font_matrix_audit` | hosted-WM live-proof focus/provenance source contract | `run_focused_spec test/01_unit/os/hosted/hosted_entry_live_proof_focus_contract_spec.spl` | future fresh producer window and admitted CLI/core-C | `/root` |
 | `stage3_hir_lifetime` | Vulkan runtime selected-device identity plus fence-wait/wait-idle last-error retention, runtime symbol/codegen/interpreter wiring, canonical `std.*.io.vulkan_sffi` facades, and source assertions in `test/01_unit/lib/gpu/engine3d/font_hud_material_spec.spl`; no Engine2D/Engine3D evidence-record ownership | `run_focused_spec test/01_unit/lib/gpu/engine3d/font_hud_material_spec.spl` | future fresh producer window and admitted CLI/core-C; runtime execution remains blocked in this window | `/root` |
 
-Acceptance-criterion accounting is now `1 pass / 4 active / 7 blocked`:
-AC-2 passes; AC-1, AC-7, AC-11, and AC-12 are active; AC-3–6 and AC-8–10
-remain blocked. This does not promote the REQ/NFR matrix, which remains
-`0 pass / 0 active / 24 blocked`.
+No audit promotes a runtime-dependent requirement or unavailable capability.
+Every unavailable host/device row remains blocked, and final requirement/AC
+counts are regenerated only from current owner evidence.
 
 ## Prior owner overlay (superseded by the continuation)
 
@@ -122,18 +121,18 @@ unless `/root` assigns a concrete failed acceptance row after CLI admission.
 | C shaping/material/config | `shaping_material` | `src/lib/skia/feature/{glyph,shaper}/**`, canonical text-layout/font-renderer files, their unit specs | integrate GSUB/GPOS, exact selected-script shaping, shared batch/cache/config-policy evidence |
 | D production surfaces | `surface_simpleos` | Web/GUI/WM/SimpleOS producer adapters and their dedicated system specs/manuals; no renderer internals | canonical Draw IR identity plus hosted and QEMU pixel/input evidence |
 | E native 2D/3D/perf | `native_gpu_perf` | existing Engine2D/Engine3D native adapters, font native-readback/perf specs, retained native evidence | REQ-012/013 and NFR-002/004–008 real device proof or exact blocked-host contracts |
-| F specs/docs/audit | `spec_docs_audit` | aggregate test plan, guides, state/traceability reports; no product code or owner-specific manuals | map every REQ/NFR, audit all 42 changed/new source-to-manual pairs and owner logs, and reject stale, missing, stubbed, or premature PASS evidence |
+| F specs/docs/audit | `spec_docs_audit` | aggregate test plan, guides, state/traceability reports; no product code or owner-specific manuals | map every REQ/NFR, audit the [authoritative 42-pair manifest](../../../09_report/shared_multilingual_gpu_fonts_all_items_verification.md#canonical-executablemanual-audit) and owner logs, and reject stale, missing, build-tree-only, stubbed, or premature PASS evidence |
 | H merge/final verify | `/root` | integration conflict resolution, final evidence report, branch history | primary review, direct-runtime guards, scoped verification once, status, rebase/file-count guard, push |
 
 | Task | Owner | Exclusive writable scope | Dependency | Deliverable and evidence |
 |---|---|---|---|---|
-| P0 current-source pure-CLI admission | `/root` (fresh producer window only) | future detached current checkpoint, unique incremental cache/output, admission logs, and retained `build/native_probe/` cache/profile artifacts; no product-code edits | blocked in this exhausted window; a future fresh producer window must first prove an immutable pure-Simple parent/current source receipt and use the conditional resume/admission command below | future current-source pure-Simple full CLI plus CLI/core-C paths and SHA-256 identities; essential-tools smoke PASS; final reviewer `/root` |
+| P0 current-source pure-CLI admission | `/root` (fresh producer window only) | future detached current checkpoint, unique incremental cache/output, admission logs, and retained `build/native_probe/` cache/profile artifacts; no font product-code edits | successor3 `dd7e747a...26cf` is diagnostic only; both Option gates nil/SIGILL and the three-cycle cap is exhausted. First make a root-cause change in a fresh session, then produce current Stage 3 and incremental Stage 4 | current-source pure-Simple full CLI plus CLI/core-C paths and SHA-256 identities; essential-tools smoke PASS; no unchanged Option rerun, Rust-seed acceptance, or full bootstrap |
 | A1 runtime identity | `bootstrap_runner` | retained runtime identity and focused runner artifacts only | P0 | immutable admitted CLI/core-C identity; reject Rust seed and stale binaries |
 | A2 command calibration | `bootstrap_runner` | `build/test-artifacts/shared_multilingual_gpu_fonts/{essential-tools,runner-calibration}/**`, focused runner contract/manual, and immutable preflight evidence | A1 | essential-tools (including its lint/duplicate probes), deliberate-red, zero-example evidence, then one focused `test_runner_result_wrapper_spec.spl` preflight before B–E use the helper |
 | B1 manifests/distribution | `manifest_distribution` | font registry/assets/notices, release/package/SimpleOS font-manifest code and specs | A2 | REQ-001–005 and NFR-001/003 executable byte/license/package evidence |
 | B2 distribution manuals | `manifest_distribution` | only B-owned mirrored manuals and docgen logs | B1 | current `0 stubs` manuals for B's six changed specs |
 | C1 shaping/material/config | `shaping_material` | `src/lib/skia/feature/{glyph,shaper}/**`, canonical text-layout/font-renderer files, their unit/aggregate specs | A2 | reviewed GSUB/GPOS, exact selected-script shaping, shared batch/cache/config-policy evidence |
-| C2 shaping manuals | `shaping_material` | only C-owned mirrored manuals and docgen logs | C1 | current `0 stubs` manuals for C's 16 changed specs |
+| C2 shaping manuals | `shaping_material` | only C-owned mirrored manuals and docgen logs | C1 | current `0 stubs` manuals for C's 17 changed specs |
 | D1 Engine2D capability | `surface_simpleos` | Engine2D production-route spec/manual only; no renderer internals | C1 | `engine2d_font_surface_verification_spec.spl` proves Draw IR text reaches the shared `FontRenderer` path |
 | D2 Web capability | `surface_simpleos` | Web producer adapters and Web specs/manuals | D1 | canonical HTML/WebIR → Draw IR identity and visible result |
 | D3 GUI capability | `surface_simpleos` | GUI producer adapters and GUI specs/manuals | D1 | widget scene → Draw IR identity and correlated input |
@@ -144,21 +143,22 @@ unless `/root` assigns a concrete failed acceptance row after CLI admission.
 | E1 deterministic emission | `native_gpu_perf` | existing portable emitter/native adapter specs and retained compile artifacts | A2+C1 | versioned deterministic emission/compile evidence; no execution claim |
 | E2 native 2D/3D | `native_gpu_perf` | existing Engine2D/Engine3D native adapters, native-readback spec, retained device evidence | D1+E1 plus real device | texture/upload/bind/draw/fence/device-origin readback for 2D and 3D |
 | E3 native performance/manuals | `native_gpu_perf` | native-readback and performance specs/manuals plus retained device/perf evidence | E2 | current `0 stubs` manuals for E's seven changed specs; NFR-002/004–008 fixture, p95, hit, CPU/GPU, RSS/VRAM, upload, device/driver record |
-| F1 evidence/manual audit | `spec_docs_audit` | aggregate plan, guide, state/traceability reports; no product code or owner manuals | A2+B2+C2+D7+E3 | audit all 42 source/manual/log triples; reject missing, stale, stubbed, simulated, or premature PASS evidence |
+| F1 evidence/manual audit | `spec_docs_audit` | aggregate plan, guide, state/traceability reports; no product code or owner manuals | A2+B2+C2+D7+E3 | audit the [authoritative 42 source/manual manifest](../../../09_report/shared_multilingual_gpu_fonts_all_items_verification.md#canonical-executablemanual-audit) and owner logs; reject missing, stale, diagnostic-build-tree-only, stubbed, simulated, or premature PASS evidence |
 | H1 final review | `/root` | integration conflict resolution and final evidence report | F1 | independently map REQ-001–016/NFR-001–008 and run final guards once |
 | H2 sync/push | `/root` | branch history only | H1 | linear rebase, tracked-file-count guard, owned commit, push |
 
-1. Lanes A–F start together with the frozen contract above.
-2. C integrates only `cd600a18d06` or equivalent reviewed content; it must not
-   import dirty files from the superseded stage1 worktree.
-3. B–F finish all source/static work without waiting on A. They hand exact
-   commands to A for execution on the admitted CLI.
-4. A publishes the immutable CLI path and SHA once. Each owning lane runs its
-   acceptance command once; unchanged green commands are never repeated.
-5. F updates the matrix and manual-audit status from owner evidence; it never
-   promotes static inspection, cached logs, simulation, or unavailable hardware.
+1. The six read-only audit lanes above are complete; they create no done marks.
+2. P0 resumes only in a fresh bounded session after a root-cause change; it
+   publishes one immutable current CLI/core-C identity after admission.
+3. B has no static source gap. C is a static candidate; only the REQ-011
+   compatibility route is assigned to D. E has no justified product edit before
+   authoritative native execution.
+4. After A2, owners run preflight 1 + B6 + C18 + D12 + E9 exactly once.
+5. Owners generate A1 + B6 + C17 + D11 + E7 manuals; F audits the linked
+   manifest and never accepts build-tree manuals, simulation, or unavailable
+   hardware.
 6. H reviews every handoff. A failed criterion returns only to its owner for at
-   most three fix/verify cycles.
+   most three fix/verify cycles; unavailable rows remain blocked.
 
 ### Historical Stage 4 evidence and current admission rule
 
@@ -260,13 +260,15 @@ before B–E use the helper.
 ## Forty-two-spec manual inventory
 
 Owners generate their own manuals with the immutable docgen helper in the
-verification report. A owns the focused runner contract, B owns six changed
-specs, C owns 17, D owns eleven, and E owns seven. Nineteen mirrors are missing
-and 23 are stale; zero are current. Static cleanup of nine boolean matcher wrappers
-and four production-surface step-vocabulary violations is source-complete and
-independently reviewed PASS, but remains runtime-unverified. Hand edits do not
-count; every source requires current docgen with `0 stubs`. F audits only after
-owner generation.
+verification report. Exact ownership is A1 + B6 + C17 + D11 + E7. The
+[authoritative manifest](../../../09_report/shared_multilingual_gpu_fonts_all_items_verification.md#canonical-executablemanual-audit)
+contains 19 missing mirrors, 23 stale mirrors, and zero current canonical
+manuals. Four compiler-prerequisite mirrors are also missing. Static cleanup of
+nine boolean matcher wrappers and four production-surface step-vocabulary
+violations is source-complete and independently reviewed PASS, but remains
+runtime-unverified. Hand edits and diagnostic manuals under `build/` do not
+count; every source requires current canonical docgen with `0 stubs`. F audits
+only after owner generation.
 
 ## Dependency rules
 
@@ -286,12 +288,15 @@ Compiler/bootstrap behavior is not a font requirement and cannot promote a font
 row. The current HirBlock, typed lowering-error collector, native-arena, and
 direct-entry fixes are retained only because they are necessary to produce the
 pure-Simple prerequisite. P0 is owned by `/root` for a future fresh producer
-window only and is blocked here because no admitted full CLI/core-C identity
-exists. A future verification window may consume a proven
-external pure-Simple parent to build current sources incrementally, but this
-window must not invoke the Rust seed as a producer or another full bootstrap;
-bounded seed diagnostics remain non-acceptance only. All font
-evidence uses the admitted current-source pure-Simple binary.
+window only. Temporary successor3 at
+`build/native_probe/memory-dispatch-fix/stage2-goal-successor3-simple`
+(`dd7e747ad1e22bb71d46c5737d20d2d250146af70fdd3c621f66d7ab57ca26cf`,
+`689 reused / 4 rebuilt`) remains diagnostic: both Option gates trap on a nil
+receiver with SIGILL, the three-cycle cap is exhausted, and no Stage 4 exists.
+A fresh window must make a root-cause change before another Option gate, produce
+a current Stage 3 parent, and then use the documented incremental Stage 4 route.
+The Rust seed, Stage 2, stale parents, and full bootstrap are not acceptance
+evidence. All font evidence uses the admitted current-source pure-Simple binary.
 
 P0 retains cache/profile history under `build/native_probe/`, including
 `stage3-importfix-cache/`, `rebased-stage4-cycle3-final.log`, and
