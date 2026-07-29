@@ -413,15 +413,28 @@ implementation-in-progress
   uses direct stable-ID `WidgetNode` handles. The exact demo-tree probe passes
   native mutation, property readback, and canonical Draw-IR generation, and
   the rebuilt `spl_main` calls only `WidgetNode.set_prop()`.
-- host-mapped-frame: The no-timeout full demo remains alive and maps a real
-  640x600 X11/GLFW window. Its title crosses the native boundary as corrupt
-  `RTS\x01`, so earlier name-based capture polling was invalid. Direct window-ID
-  captures before and after native pointer plus Ctrl+A input are both
-  640x600, but fail closed as one-color black images (mean/min/max zero,
-  changed pixels zero, SHA-256
+- host-glfw-packed-argb: The raw presenter now consumes the compositor's
+  packed four-byte ARGB32 buffer instead of reading eight-byte words past its
+  allocation. The live C probe deliberately uses a valid four-byte-aligned,
+  non-eight-byte-aligned buffer and passes two-color presentation, two frame
+  sequences, native key/text/pointer/button input, and clean teardown
+  (`colors=2`, `mean=0.366013`, SHA-256
+  `ee82698fd31521729756cd3f7dcf6fe3a4c3dcc73290deb87aa431871463addb`).
+- host-glfw-title-abi: `SimpleGlfw.create_window()` now reuses the established
+  scalar `spl_str_ptr()` bridge rather than passing a runtime `text` header as
+  `const char*`. The rebuilt full demo is discoverable by its exact
+  `Simple Full Stack WM Demo` title.
+- runtime-boundary-decision: `runtime_need=GLFW owns the final native window
+  and packed-pixel copy`; `facade_checked=SimpleGlfw is the existing owner`;
+  `chosen_path=reuse-facade plus existing spl_str_ptr bridge`;
+  `rejected_shortcuts=no app-side pixel repack, no C title copy, no second
+  presenter`.
+- host-mapped-frame: The exact-title 640x600 full-demo window still captures
+  as a one-color black image (mean/min/max zero, SHA-256
   `0b56d6bd870958ec99fb98026aa09e576e046046c5815efe02d39c9f8d393cc1`).
-  The next host gate is the raw compositor-buffer/presentation boundary, not
-  widget mutation.
+  A bounded live run then faults in `rt_to_string()` before the post-input
+  capture. The next host gate is compositor pixel population/native string
+  conversion; the corrected GLFW raw copier itself is independently green.
 
 ## Remaining runtime gates
 
@@ -429,9 +442,10 @@ implementation-in-progress
   the full Phase-3 closure and static provider link are green. Live execution
   now passes the canonical widget lookup, pure-Simple font provider, initial
   GUI-frame admission, scalar pointer-router, and stable-ID widget mutation
-  probes. The full demo maps a real 640x600 host window, but its title is
-  corrupt and its captured framebuffer remains all black before and after
-  native input; non-black presentation and semantic input evidence remain RED.
+  probes. Packed ARGB presentation and title conversion are now independently
+  green. The full demo maps under its exact title, but its framebuffer remains
+  black and the current live run faults in `rt_to_string()` before post-input
+  evidence; non-black presentation and semantic input remain RED.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the

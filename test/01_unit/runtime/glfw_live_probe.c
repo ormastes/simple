@@ -39,10 +39,12 @@ static void wait_10ms(void) {
 
 int main(void) {
     enum { width = 96, height = 64, count = width * height };
-    int64_t* words = calloc(count, sizeof(*words));
-    if (!words) return 1;
+    uint8_t* storage = calloc(count * sizeof(uint32_t) + 4, 1);
+    if (!storage) return 1;
+    /* Valid ARGB32 alignment; intentionally rejects the old i64-word ABI. */
+    uint32_t* pixels = (uint32_t*)(storage + 4);
     for (int i = 0; i < count; ++i) {
-        words[i] = (i / width < height / 2)
+        pixels[i] = (i / width < height / 2)
             ? UINT32_C(0xff204080) : UINT32_C(0xffd06020);
     }
 
@@ -57,13 +59,13 @@ int main(void) {
             window, 0, count, width, height
         ) != 5 ||
         rt_glfw_present_argb_words_raw(
-            window, (int64_t)(uintptr_t)words, count - 1, width, height
+            window, (int64_t)(uintptr_t)pixels, count - 1, width, height
         ) != 5 ||
         rt_glfw_present_argb_words_raw(
-            window, (int64_t)(uintptr_t)words, count, width, height
+            window, (int64_t)(uintptr_t)pixels, count, width, height
         ) != 0 ||
         rt_glfw_present_argb_words_raw(
-            window, (int64_t)(uintptr_t)words, count, width, height
+            window, (int64_t)(uintptr_t)pixels, count, width, height
         ) != 0 ||
         rt_glfw_frame_sequence(window) != 2 ||
         rt_glfw_buffer_growth_count(window) != 1) return 5;
@@ -86,7 +88,7 @@ int main(void) {
         rt_glfw_live_window_count() != 0) return 8;
     rt_glfw_terminate();
     rt_glfw_terminate();
-    free(words);
-    puts("glfw_live_probe=pass raw_words=1 frames=2 native_input=key,text,pointer,button");
+    free(storage);
+    puts("glfw_live_probe=pass packed_argb32=1 frames=2 native_input=key,text,pointer,button");
     return 0;
 }

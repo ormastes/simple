@@ -594,15 +594,15 @@ int64_t rt_glfw_present_argb_words_raw(
 ) {
     rt_glfw_window_slot* slot = glfw_slot(handle);
     if (!slot) return 3;
-    if (pixels_addr <= 0 || (pixels_addr & 7) != 0) return 5;
+    if (pixels_addr <= 0 || (pixels_addr & 3) != 0) return 5;
     int64_t status = glfw_validate_frame(width, height, pixel_count);
     if (status != 0) return status;
     status = glfw_stage_capacity(slot, pixel_count);
     if (status != 0) return status;
-    const int64_t* words = (const int64_t*)(uintptr_t)pixels_addr;
+    const uint32_t* pixels = (const uint32_t*)(uintptr_t)pixels_addr;
     int64_t i;
     for (i = 0; i < pixel_count; ++i) {
-        slot->pixels[i] = (uint32_t)words[i];
+        slot->pixels[i] = pixels[i];
     }
     return glfw_present_staged(slot, width, height);
 }

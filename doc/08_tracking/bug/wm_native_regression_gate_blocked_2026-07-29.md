@@ -139,18 +139,32 @@ controls. The exact demo-tree native probe passes property mutation/readback
 and Draw-IR generation, while rebuilt `spl_main` references only
 `WidgetNode.set_prop()`.
 
-A direct no-timeout run remains alive and maps a real 640x600 X11 window. The
-native title is corrupt (`RTS\x01`), explaining why name-based capture polling
-reported no window. Capturing by the mapped X11 ID succeeds, but both the
-initial image and the image after native pointer plus Ctrl+A injection are
-entirely black:
+A direct no-timeout run mapped a real 640x600 X11 window. Two native ABI
+defects were then isolated at the GLFW boundary:
 
 ```text
-colors=1 mean=0 min=0 max=0 changed_pixels=0
-sha256=0b56d6bd870958ec99fb98026aa09e576e046046c5815efe02d39c9f8d393cc1
+Simple text header -> const char*       # title appeared as RTS\x01
+packed uint32_t pixels -> int64_t words # 8-byte stride over 4-byte allocation
 ```
 
-The next bounded target is the raw compositor pixel-buffer/presentation
-boundary, plus the independent native title-text ABI. This checkpoint does not
-claim a non-black full-WM frame, semantic input mutation, or clean outer-window
-close evidence.
+`SimpleGlfw.create_window()` now uses the existing `spl_str_ptr()` bridge. The
+raw presenter now accepts four-byte alignment and copies `uint32_t` pixels. Its
+live C probe deliberately presents a four-byte-aligned/non-eight-byte-aligned
+buffer and passes:
+
+```text
+glfw_live_probe=pass packed_argb32=1 frames=2
+native_input=key,text,pointer,button
+capture: 96x64 colors=2 mean=0.366013 min=8224 max=53456
+sha256=ee82698fd31521729756cd3f7dcf6fe3a4c3dcc73290deb87aa431871463addb
+```
+
+The rebuilt full demo is now discoverable by the exact
+`Simple Full Stack WM Demo` title. Its first 640x600 capture remains entirely
+black (`colors=1`, `mean=0`, SHA-256
+`0b56d6bd870958ec99fb98026aa09e576e046046c5815efe02d39c9f8d393cc1`),
+and a bounded live run next faults in `rt_to_string()` before the post-input
+capture. The next target is compositor pixel population/native string
+conversion, not the independently green GLFW raw copier. This checkpoint does
+not claim a non-black full-WM frame, semantic input mutation, or clean
+outer-window close evidence.
