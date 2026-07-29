@@ -68,10 +68,25 @@ build/aggfix/stage3/simple native-build ... \
 ```
 
 After normalizing the multiline expressions rejected by that older parser,
-the focused GPOS source-entry build now completes. No full-WM retry, full
-bootstrap, or Phase 2 retry was run after that focused proof.
-The retained diagnostic is:
+the focused GPOS source-entry build and the full WM closure now complete. The
+cold full closure built 512 modules; the final incremental pass compiled 3 and
+reused 509 cached modules. No full bootstrap or Phase 2 retry was run.
+
+The existing `SIMPLE_LINK_OBJECTS` final-link hook supplies the GLFW and
+miniaudio provider objects. The resulting executable defines its active
+`rt_glfw_*` and `rt_audio_*` symbols and no longer depends on an ineffective
+preload for compiler-generated extern slots.
+
+Two live native faults in theme parsing were the documented erased-result
+`.to_i32()` misdispatch into `Px.to_i32()`. Typed `i64` intermediates with
+`as i32` now carry those conversions. The third and final capped live attempt
+passed host/audio initialization and theme loading, then faulted here before a
+capturable frame:
 
 ```text
-build/native_probe/wm_full_stack_demo_phase3.log
+ProfileResolver.orientation_changed()
+  <- UISession.dispatch()
+  <- spl_main()
 ```
+
+That aggregate-receiver/compiler fault is the current full hosted WM gate.

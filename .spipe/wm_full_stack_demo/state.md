@@ -367,12 +367,25 @@ implementation-in-progress
   minimized runtime evidence while recording the close. The dedicated
   pure-Simple Phase-3 probe builds and runs
   (`WM CLOSE MINIMIZED CLEANUP PROBE: PASS`).
+- phase3-full-closure: Parenthesized the two remaining multiline Web
+  conditions rejected by the older Phase-3 parser. The full demo entry closure
+  now builds with `build/aggfix/stage3/simple`: 512 modules on the cold pass,
+  then 509 cached modules after the theme changes. No bootstrap was run.
+- phase3-host-providers: Reused `SIMPLE_LINK_OBJECTS` to link the existing GLFW
+  and miniaudio C providers. Active `rt_glfw_*` and `rt_audio_*` symbols are
+  real definitions in the executable; preload is no longer required. Native
+  execution passed host and audio initialization plus theme loading after
+  replacing two known erased-result `.to_i32()` misdispatches with typed
+  scalar casts. The third capped live attempt now faults in
+  `ProfileResolver.orientation_changed()` from `UISession.dispatch()`, before
+  a capturable WM frame.
 
 ## Remaining runtime gates
 
 - Host GLFW: the real backend/window/input/presentation boundary is green;
-  the focused Skia discovery blocker is repaired, but the capped full WM
-  closure and scene capture have not yet been rerun.
+  the full Phase-3 closure and static provider link are green. Live execution
+  reaches `UISession.dispatch()` but the aggregate receiver fault at
+  `ProfileResolver.orientation_changed()` blocks the first scene capture.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the
