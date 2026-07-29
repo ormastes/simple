@@ -5,11 +5,22 @@ use std.gc_async_mut.web.browser_session.{
     BrowserStylesheetSource
 }
 use common.web.browser_renderer_protocol.{BROWSER_RENDERER_MAX_PAYLOAD_BYTES}
+use std.common.image.png_encode.{encode_argb_to_png}
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_loading.*
 use std.js.types.js_types.{JsValue}
 use std.platform.{get_host_os}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_id}
+
+fn _browser_image_hex(bytes: [u8]) -> text:
+    var out = ""
+    for byte in bytes:
+        val piece = byte.to_i64().to_hex()
+        out = out + if piece.len() == 1: "0{piece}" else: piece
+    out
+
+fn _browser_image_png_hex(pixel: u32) -> text:
+    _browser_image_hex(encode_argb_to_png([pixel], 1, 1))
 
 fn _display_js(v: JsValue) -> text:
     match v:
@@ -197,7 +208,7 @@ describe "BrowserSession page loading":
     it "bounds cumulative stylesheet source and retained HTML bytes":
         var load = BrowserLoadState.create(
             "https://example.com/", "", -1, true, [],
-            [BrowserStylesheetSource.external("/later.css")]
+            [BrowserStylesheetSource.external("/later.css")], []
         )
         val accepted_html = "<style>x</style>"
         load.stylesheet_source_bytes = BROWSER_RENDERER_MAX_PAYLOAD_BYTES - 1
@@ -245,6 +256,166 @@ describe "BrowserSession page loading":
                 expect(session.warnings.len()).to_equal(0)
             Err(e) =>
                 fail("Expected linked stylesheet resource to load through the session pump: {e}")
+
+    it "discovers, redirects, and commits bounded PNG image resources":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document.id, "document", document.url, 200, "",
+            "<html><body><img src='/start.png'></body></html>", ""
+        )).is_ok()).to_be(true)
+
+        val first = session.take_pending_request().unwrap()
+        expect(first.kind).to_equal("image")
+        expect(first.url).to_equal("https://example.com/start.png")
+        expect(session.commit_network_response(BrowserResponse.create(
+            first.id, "image", first.url, 302,
+            "Location: /final.png", "", ""
+        )).is_ok()).to_be(true)
+
+        val redirected = session.take_pending_request().unwrap()
+        expect(redirected.url).to_equal("https://example.com/final.png")
+        expect(redirected.redirect_origin_url).to_equal(
+            "https://example.com/start.png"
+        )
+        expect(session.commit_network_response(BrowserResponse.create(
+            redirected.id, "image", redirected.url, 200,
+            "Content-Type: image/png; charset=binary",
+            _browser_image_png_hex(0xFFCC3020u32), ""
+        )).is_ok()).to_be(true)
+        expect(session.image_resources.len()).to_equal(1)
+        expect(session.image_resources[0].image_uri).to_equal(
+            "/start.png"
+        )
+        expect(session.image_resources[0].pixels).to_equal(
+            [0xFFCC3020u32]
+        )
+
+    it "blocks images with img-src and rejects non-PNG or noncanonical bodies":
+        var blocked = BrowserSession.new()
+        expect(blocked.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val blocked_document = blocked.take_pending_request().unwrap()
+        expect(blocked.commit_network_response(BrowserResponse.create(
+            blocked_document.id, "document", blocked_document.url, 200,
+            "Content-Security-Policy: img-src 'none'",
+            "<html><body><img src='/blocked.png'></body></html>", ""
+        )).is_ok()).to_be(true)
+        expect(blocked.take_pending_request()).to_be_nil()
+        expect(blocked.warnings.join("|")).to_contain("CSP blocked image")
+
+        var hsts_blocked = BrowserSession.new()
+        hsts_blocked.broker_network_policy = true
+        expect(hsts_blocked.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val hsts_blocked_document = (
+            hsts_blocked.take_pending_request().unwrap()
+        )
+        expect(hsts_blocked.commit_network_response(
+            BrowserResponse.create(
+                hsts_blocked_document.id, "document",
+                hsts_blocked_document.url, 200,
+                "Content-Security-Policy: img-src 'none'",
+                "<html><body><img src='http://cdn.test/p.png'></body></html>",
+                ""
+            )
+        ).is_ok()).to_be(true)
+        expect(hsts_blocked.take_pending_request()).to_be_nil()
+        expect(hsts_blocked.warnings.join("|")).to_contain(
+            "CSP blocked image: https://cdn.test/p.png"
+        )
+
+        var hsts_allowed = BrowserSession.new()
+        hsts_allowed.broker_network_policy = true
+        expect(hsts_allowed.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val hsts_allowed_document = (
+            hsts_allowed.take_pending_request().unwrap()
+        )
+        expect(hsts_allowed.commit_network_response(
+            BrowserResponse.create(
+                hsts_allowed_document.id, "document",
+                hsts_allowed_document.url, 200,
+                "Content-Security-Policy: img-src https:",
+                "<html><body><img src='http://cdn.test/p.png'></body></html>",
+                ""
+            )
+        ).is_ok()).to_be(true)
+        val raw_hsts_request = hsts_allowed.take_pending_request().unwrap()
+        expect(raw_hsts_request.kind).to_equal("image")
+        expect(raw_hsts_request.url).to_equal("http://cdn.test/p.png")
+
+        var invalid = BrowserSession.new()
+        expect(invalid.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val invalid_document = invalid.take_pending_request().unwrap()
+        expect(invalid.commit_network_response(BrowserResponse.create(
+            invalid_document.id, "document", invalid_document.url, 200, "",
+            "<html><body><img src='/bad.png'></body></html>", ""
+        )).is_ok()).to_be(true)
+        val wrong_mime = invalid.take_pending_request().unwrap()
+        expect(invalid.commit_network_response(BrowserResponse.create(
+            wrong_mime.id, "image", wrong_mime.url, 200,
+            "Content-Type: text/plain",
+            _browser_image_png_hex(0xFF112233u32), ""
+        )).is_ok()).to_be(true)
+        expect(invalid.image_resources.len()).to_equal(0)
+        expect(invalid.warnings.join("|")).to_contain(
+            "unsupported content type"
+        )
+
+        var noncanonical = BrowserSession.new()
+        expect(noncanonical.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val noncanonical_document = noncanonical.take_pending_request().unwrap()
+        expect(noncanonical.commit_network_response(BrowserResponse.create(
+            noncanonical_document.id, "document",
+            noncanonical_document.url, 200, "",
+            "<html><body><img src='/bad.png'></body></html>", ""
+        )).is_ok()).to_be(true)
+        val bad_body = noncanonical.take_pending_request().unwrap()
+        expect(noncanonical.commit_network_response(BrowserResponse.create(
+            bad_body.id, "image", bad_body.url, 200,
+            "Content-Type: image/png",
+            _browser_image_png_hex(0xFF112233u32).upper(), ""
+        )).is_ok()).to_be(true)
+        expect(noncanonical.image_resources.len()).to_equal(0)
+        expect(noncanonical.warnings.join("|")).to_contain(
+            "invalid image payload"
+        )
+
+    it "deduplicates and caps discovered image sources":
+        var html = "<html><body><img src='/same.png'>"
+        var image_index = 0
+        while image_index < 65:
+            html = html + "<img src='/image-{image_index}.png'>"
+            image_index = image_index + 1
+        html = html + "</body></html>"
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document.id, "document", document.url, 200, "", html, ""
+        )).is_ok()).to_be(true)
+        expect(session.active_load.unwrap().image_sources.len()).to_equal(64)
+        expect(
+            session.active_load.unwrap().image_sources[0].resolved_url
+        ).to_equal(
+            "https://example.com/same.png"
+        )
+        expect(session.active_load.unwrap().warnings.join("|")).to_contain(
+            "image resource limit reached"
+        )
 
     it "expands stylesheet imports before rendering":
         var session = BrowserSession.new()

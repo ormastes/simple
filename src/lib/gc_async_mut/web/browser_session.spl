@@ -24,6 +24,9 @@
 
 use common.string_builder.{StringBuilder}
 use common.web.browser_renderer_protocol.{BROWSER_RENDERER_MAX_PAYLOAD_BYTES}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResource
+}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
@@ -84,6 +87,8 @@ val BROWSER_HISTORY_MAX_ENTRIES: i32 = 64
 val BROWSER_WARNING_MAX_ENTRIES: i64 = 128
 val BROWSER_WARNING_MAX_BYTES: i64 = 4096
 val BROWSER_PENDING_SCRIPT_COOKIE_WRITE_MAX_ENTRIES: i64 = 32
+val BROWSER_MAX_IMAGE_RESOURCES: i64 = 64
+val BROWSER_MAX_IMAGE_PIXELS: i64 = 131072
 
 class BrowserHistoryEntry:
     url: text
@@ -313,6 +318,18 @@ class BrowserScriptBlock:
             is_defer: false
         )
 
+class BrowserImageSource:
+    authored_src: text
+    resolved_url: text
+
+    static fn create(
+        authored_src: text, resolved_url: text
+    ) -> BrowserImageSource:
+        BrowserImageSource(
+            authored_src: authored_src,
+            resolved_url: resolved_url
+        )
+
 class BrowserLoadState:
     document_url: text
     source_html: text
@@ -326,9 +343,11 @@ class BrowserLoadState:
     stylesheet_source_bytes: i64
     stylesheet_html_bytes: i64
     stylesheet_html_chunks: [text]
+    image_sources: [BrowserImageSource]
+    next_image_idx: i32
     pending_module: BrowserPendingModuleEval?
 
-    static fn create(document_url: text, source_html: text, target_index: i32, push_history: bool, script_blocks: [BrowserScriptBlock], style_sources: [BrowserStylesheetSource]) -> BrowserLoadState:
+    static fn create(document_url: text, source_html: text, target_index: i32, push_history: bool, script_blocks: [BrowserScriptBlock], style_sources: [BrowserStylesheetSource], image_sources: [BrowserImageSource]) -> BrowserLoadState:
         BrowserLoadState(
             document_url: document_url,
             source_html: source_html,
@@ -342,6 +361,8 @@ class BrowserLoadState:
             stylesheet_source_bytes: 0,
             stylesheet_html_bytes: 0,
             stylesheet_html_chunks: [],
+            image_sources: image_sources,
+            next_image_idx: 0,
             pending_module: nil
         )
 
@@ -1291,6 +1312,7 @@ class BrowserSession:
     loaded_module_urls: [text]
     module_eval_stack: [text]
     wasm_modules: [BrowserWasmModuleRecord]
+    image_resources: [SimpleOsHostGpuImageResource]
     home_url: text
     favorite_links: [Pair<text, text>]
     address_draft: text
@@ -1359,6 +1381,7 @@ class BrowserSession:
             loaded_module_urls: [],
             module_eval_stack: [],
             wasm_modules: [],
+            image_resources: [],
             home_url: "about:blank",
             favorite_links: [],
             address_draft: "",
@@ -1659,7 +1682,8 @@ impl BrowserSession:
             )
             val is_active_subresource = (
                 req.kind == "style" or req.kind == "script" or
-                req.kind == "module" or req.kind == "wasm"
+                req.kind == "module" or req.kind == "wasm" or
+                req.kind == "image"
             )
             val is_subresource = req.kind != "document"
             val resource_limit_reached = (
@@ -2013,6 +2037,8 @@ impl BrowserSession:
             return self._commit_module_response(failed)
         if response.kind == "wasm":
             return self._commit_wasm_response(failed)
+        if response.kind == "image":
+            return self._commit_image_response(failed, response.url)
         Err("not a subresource response: {response.kind}")
 
     me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
@@ -2040,7 +2066,8 @@ impl BrowserSession:
             return Err(limit_error)
         val is_active_subresource = (
             response.kind == "style" or response.kind == "script" or
-            response.kind == "module" or response.kind == "wasm"
+            response.kind == "module" or response.kind == "wasm" or
+            response.kind == "image"
         )
         if is_active_subresource and response.error == "" and
            browser_status_is_redirect(response.status):
@@ -2068,6 +2095,8 @@ impl BrowserSession:
                 )
             val csp_directive = if response.kind == "style":
                 "style-src"
+            elif response.kind == "image":
+                "img-src"
             else:
                 "script-src"
             if not browser_csp_allows(
@@ -2211,6 +2240,11 @@ impl BrowserSession:
             return self._commit_script_response(response)
         if response.kind == "wasm":
             return self._commit_wasm_response(response)
+        if response.kind == "image":
+            var resource_url = response.url
+            if val Some(request) = inflight:
+                resource_url = request.redirect_origin_url
+            return self._commit_image_response(response, resource_url)
         if response.kind == "module":
             if val Some(request) = inflight:
                 if request.redirect_origin_url != response.url:

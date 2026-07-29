@@ -120,6 +120,10 @@ Owns:
 
 - typed renderer IPC;
 - broker Fetch/CORS/CSP/mixed-content/cookies/HSTS;
+- external PNG lane: one sidecar each for strict bounded PNG decode, additive
+  `SBRF5` image-resource transport, BrowserSession/CSP/HSTS request ownership,
+  canonical layout/Draw IR image emission, and absolute pixel evidence; merge
+  owner and final reviewer are highest-capability Codex;
 - platform renderer sandbox and crash containment;
 - scheme/file capability policy and limits.
 

@@ -455,3 +455,12 @@ or native TLS behavior.
 - External images remain an open architecture lane: CSP `img-src`, HSTS and
   mixed-content decisions stay in the broker; decoded bounded pixels then enter
   layout and Draw IR through the existing image owner.
+## External PNG image path (2026-07-29)
+
+External `<img src>` follows the existing active-subresource broker path:
+BrowserSession resolves the URL and enforces `img-src`, HSTS, mixed-content,
+redirect, cookie, and cancellation policy. It decodes only bounded PNG input
+into the existing `SimpleOsHostGpuImageResource`; `SBRF5` carries those
+resources to the parent, and Engine2D converts them once to its existing
+resolved Draw-IR image material. The resource key stays the authored `src`, so
+layout needs no parallel URL resolver. Older frame versions remain decodable.

@@ -11,6 +11,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_frame_decode, browser_renderer_frame_encode,
     browser_renderer_frame_encode_with_diagnostics,
     browser_renderer_frame_encode_with_state,
+    browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_frame_encode_with_witness,
     browser_renderer_frame_reply_to_request_id,
     browser_renderer_fetch_request_decode,
@@ -28,13 +29,17 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_resize_encode,
     browser_renderer_text_encode
 }
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResource,
+    simpleos_host_gpu_image_resource
+}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir
 }
 use std.common.ui.draw_ir.{
     DRAW_IR_BACKEND_AUTO,
     DrawIrComposition, DrawIrStyleProp,
-    draw_ir_style_prop
+    draw_ir_image_command, draw_ir_style_prop
 }
 
 fn _renderer_protocol_fixture() -> DrawIrComposition:
@@ -43,6 +48,19 @@ fn _renderer_protocol_fixture() -> DrawIrComposition:
         64,
         48
     )
+
+fn _renderer_protocol_image_fixture(image_uri: text) -> DrawIrComposition:
+    var composition = _renderer_protocol_fixture()
+    var batches = composition.batches
+    var batch = batches[0]
+    var commands = batch.commands
+    commands.push(draw_ir_image_command(
+        "hero-image", 4, 4, 2, 1, image_uri, []
+    ))
+    batch.commands = commands
+    batches[0] = batch
+    composition.batches = batches
+    composition
 
 describe "isolated browser renderer protocol":
     it "round-trips only bounded positive viewport resize commands":
@@ -92,6 +110,17 @@ describe "isolated browser renderer protocol":
                 browser_renderer_decoder_new(7), empty_cookie_writes.wire
             ).message
         ).script_cookie_writes.len()).to_equal(0)
+        val image_request_wire = browser_renderer_fetch_request_encode(
+            7, 3, 43, "image-1", "image",
+            "https://example.test/pixel.png",
+            "GET", "", "", "", "omit", []
+        )
+        expect(image_request_wire.ok).to_be(true)
+        expect(browser_renderer_fetch_request_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), image_request_wire.wire
+            ).message
+        ).kind).to_equal("image")
 
         val response_wire = browser_renderer_network_response_encode(
             7, 1, "fetch-1", "fetch", "https://example.test/a",
@@ -453,6 +482,144 @@ describe "isolated browser renderer protocol":
         )
         expect(malformed_state.ok).to_be(false)
         expect(malformed_state.reason).to_equal("malformed-frame-state")
+
+        val image_uri = "https://example.test/pixel.png"
+        val image_composition = _renderer_protocol_image_fixture(image_uri)
+        var image_resources: [SimpleOsHostGpuImageResource] = []
+        image_resources.push(simpleos_host_gpu_image_resource(
+            image_uri, 2, 1, [0xffc080feu32, 0x01020304u32]
+        ))
+        val image_state = browser_renderer_frame_encode_with_state_and_images(
+            image_composition,
+            7,
+            5,
+            45,
+            -1,
+            0,
+            "",
+            0,
+            "",
+            "",
+            "https://example.test/image",
+            "",
+            "",
+            image_resources
+        )
+        expect(image_state.ok).to_be(true)
+        val image_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), image_state.wire
+        )
+        expect(browser_renderer_frame_reply_to_request_id(
+            image_message.message
+        )).to_equal(45)
+        val image_frame = browser_renderer_frame_decode(
+            image_message.message, 64, 48
+        )
+        expect(image_frame.ok).to_be(true)
+        expect(image_frame.history_state_present).to_be(true)
+        expect(image_frame.image_resources.len()).to_equal(1)
+        expect(image_frame.image_resources[0].image_uri).to_equal(image_uri)
+        expect(image_frame.image_resources[0].pixels[0]).to_equal(
+            0xffc080feu32
+        )
+        val empty_image_state = browser_renderer_frame_encode_with_state_and_images(
+            _renderer_protocol_fixture(), 7, 6, 46, -1,
+            0, "", 0, "", "", "", "", "", []
+        )
+        expect(empty_image_state.ok).to_be(true)
+        expect(browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), empty_image_state.wire
+            ).message,
+            64,
+            48
+        ).image_resources.len()).to_equal(0)
+
+        expect(browser_renderer_frame_encode_with_state_and_images(
+            image_composition, 7, 6, 46, -1, 0, "", 0, "",
+            "", "", "", "", []
+        ).reason).to_equal("image-resources-missing-image-resource")
+        expect(browser_renderer_frame_encode_with_state_and_images(
+            _renderer_protocol_fixture(), 7, 6, 46, -1, 0, "", 0, "",
+            "", "", "", "", image_resources
+        ).reason).to_equal("image-resources-unreferenced-image-resource")
+        var duplicate_resources: [SimpleOsHostGpuImageResource] = []
+        duplicate_resources.push(image_resources[0])
+        duplicate_resources.push(image_resources[0])
+        expect(browser_renderer_frame_encode_with_state_and_images(
+            image_composition, 7, 6, 46, -1, 0, "", 0, "",
+            "", "", "", "", duplicate_resources
+        ).reason).to_equal("image-resources-duplicate-image-uri")
+        val oversized_resource = simpleos_host_gpu_image_resource(
+            image_uri, 513, 256, [0xff112233u32; 131328]
+        )
+        expect(browser_renderer_frame_encode_with_state_and_images(
+            image_composition, 7, 6, 46, -1, 0, "", 0, "",
+            "", "", "", "", [oversized_resource]
+        ).ok).to_be(false)
+
+        val unresolved_state = browser_renderer_frame_encode_with_state(
+            image_composition, 7, 6, 46, -1, 0, "", 0, "",
+            "", "", "", ""
+        )
+        val unresolved_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), unresolved_state.wire
+        )
+        expect(browser_renderer_frame_decode(
+            unresolved_message.message, 64, 48
+        ).reason).to_equal("image-resources-missing-image-resource")
+
+        val empty_state = browser_renderer_frame_encode_with_state(
+            _renderer_protocol_fixture(), 7, 6, 46, -1, 0, "", 0, "",
+            "", "", "", ""
+        )
+        val empty_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), empty_state.wire
+        ).message
+        val empty_header_end = empty_message.payload.index_of("\n")
+        val empty_draw_ir = empty_message.payload.slice(
+            empty_header_end + 1, empty_message.payload.len()
+        )
+        val trailing_image_bytes = BrowserRendererMessage(
+            kind: "frame",
+            generation: 7,
+            request_id: 6,
+            payload: "SBRF5\t46\t0\t-\t0\t-\t-1\t0\t0\t0\t0\t0\t1\t2\n" +
+                "AA" + empty_draw_ir
+        )
+        expect(browser_renderer_frame_decode(
+            trailing_image_bytes, 64, 48
+        ).reason).to_equal("image-resources-trailing-bytes")
+        val noncanonical_image_bytes = BrowserRendererMessage(
+            kind: "frame",
+            generation: 7,
+            request_id: 6,
+            payload: "SBRF5\t46\t0\t-\t0\t-\t-1\t0\t0\t0\t0\t0\t1\t2\n" +
+                "A=" + empty_draw_ir
+        )
+        expect(browser_renderer_frame_decode(
+            noncanonical_image_bytes, 64, 48
+        ).reason).to_equal("invalid-image-resources")
+        val oversized_image_header = BrowserRendererMessage(
+            kind: "frame",
+            generation: 7,
+            request_id: 6,
+            payload: "SBRF5\t46\t0\t-\t0\t-\t-1\t0\t0\t0\t0\t0\t1\t699052\n" +
+                empty_draw_ir
+        )
+        expect(browser_renderer_frame_decode(
+            oversized_image_header, 64, 48
+        ).reason).to_equal("malformed-image-resources")
+        val excessive_resource_count = BrowserRendererMessage(
+            kind: "frame",
+            generation: 7,
+            request_id: 6,
+            payload: "SBRF5\t46\t0\t-\t0\t-\t-1\t0\t0\t0\t0\t65\t0\t0\n" +
+                empty_draw_ir
+        )
+        expect(browser_renderer_frame_decode(
+            excessive_resource_count, 64, 48
+        ).reason).to_equal("malformed-image-resources")
 
         var incomplete_canvas = _renderer_protocol_fixture()
         var incomplete_batches = incomplete_canvas.batches

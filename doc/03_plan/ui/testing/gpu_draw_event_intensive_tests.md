@@ -65,8 +65,9 @@ concrete reason (fail-closed — never silent `skip()`).
 - **Metal `clip` no-op** (`metal_session/backend :389`): implement scissor clip or mark honest.
 - **Draw-IR flat-fill collapse** (`draw_ir_adv.spl:182/264`): the HTML/CSS
   executor fix makes RECT boxes render borders/gradients/radius/shadow; the
-  item-dispatch spec (shared #6) is its gate. (`<img>` blocked — see bug
-  `engine2d_draw_ir_image_path_no_resolver_2026-07-06.md`.)
+  item-dispatch spec (shared #6) is its gate. External PNG `<img>` is covered
+  by the browser HSTS/CSP-to-pixel evidence; CSS `background-image: url(...)`
+  remains in `engine2d_draw_ir_image_path_no_resolver_2026-07-06.md`.
 
 ## 5. File layout
 

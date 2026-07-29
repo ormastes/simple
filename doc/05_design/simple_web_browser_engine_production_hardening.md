@@ -386,3 +386,13 @@ visible and cannot be silently skipped into the score.
   requires a bounded broker image request, CSP/HSTS/mixed-content enforcement,
   decoded pixels in layout/Draw IR, and an HTTPS subdomain-HSTS pixel scenario
   with a mixed-content-blocked control.
+## External PNG image rendering (2026-07-29)
+
+- Discover at most 64 distinct authored `<img src>` values and retain both the
+  authored key and resolved fetch URL.
+- Admit only canonical lowercase-hex `image/png` responses after broker policy
+  and strict bounded PNG/zlib/DEFLATE validation.
+- Cap a document at 131,072 decoded image pixels. Emit the image after its box,
+  applying object-fit, object-position, and ancestor/content clipping.
+- Carry resources in additive `SBRF5`; legacy render/frame APIs delegate with an
+  empty resource list.

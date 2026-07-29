@@ -4,6 +4,8 @@ use std.common.encoding.utf8.{
 use std.common.web.browser_renderer_protocol.{
     BrowserTextInputOverlay, browser_text_input_overlay_empty
 }
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+use common.ui.draw_ir.{DrawIrCommand, draw_ir_image_command, draw_ir_rect_bounds}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.*
 
 fn has_visible_overflow_clip(styles: [Style]) -> bool:
@@ -1326,6 +1328,106 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
     )
     command
 
+fn _html_draw_ir_image_index(
+    images: [SimpleOsHostGpuImageResource], image_uri: text
+) -> i32:
+    var index = 0
+    while index < images.len():
+        val image = images[index]
+        if (
+            image.image_uri == image_uri and image.width > 0 and
+            image.height > 0 and
+            image.pixels.len() == image.width.to_i64() * image.height.to_i64()
+        ):
+            return index
+        index = index + 1
+    -1
+
+fn _html_draw_ir_fit_size(
+    object_fit: text, box_w: i32, box_h: i32,
+    image_w: i32, image_h: i32
+) -> (i32, i32):
+    if object_fit == "fill":
+        return (box_w, box_h)
+    if object_fit == "none":
+        return (image_w, image_h)
+    val box_w64 = box_w.to_i64()
+    val box_h64 = box_h.to_i64()
+    val image_w64 = image_w.to_i64()
+    val image_h64 = image_h.to_i64()
+    val contain_by_width = box_w64 * image_h64 <= box_h64 * image_w64
+    var contain_w = box_w
+    var contain_h = (
+        (box_w64 * image_h64) / image_w64
+    ).to_i32()
+    if not contain_by_width:
+        contain_h = box_h
+        contain_w = ((box_h64 * image_w64) / image_h64).to_i32()
+    if object_fit == "contain":
+        return (contain_w, contain_h)
+    if object_fit == "scale-down":
+        if image_w <= box_w and image_h <= box_h:
+            return (image_w, image_h)
+        return (contain_w, contain_h)
+    val cover_by_width = box_w64 * image_h64 >= box_h64 * image_w64
+    if cover_by_width:
+        return (
+            box_w, ((box_w64 * image_h64) / image_w64).to_i32()
+        )
+    (((box_h64 * image_w64) / image_h64).to_i32(), box_h)
+
+fn _html_draw_ir_image_command(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    i: i32, images: [SimpleOsHostGpuImageResource],
+    ancestor_clip: ClipRect
+) -> DrawIrCommand?:
+    val node = nodes[i]
+    if node.tag != "img":
+        return nil
+    val image_uri = attr_value(node.attrs_raw, "src").trim()
+    val image_index = _html_draw_ir_image_index(images, image_uri)
+    if image_index < 0:
+        return nil
+    val st = styles[i]
+    val box_x = boxes.bx[i] + st.border_l + st.pad_l
+    val box_y = boxes.by[i] + st.border_t + st.pad_t
+    val box_w = _html_draw_ir_non_negative(
+        boxes.bw[i] - st.border_l - st.border_r - st.pad_l - st.pad_r
+    )
+    val box_h = _html_draw_ir_non_negative(
+        boxes.bh[i] - st.border_t - st.border_b - st.pad_t - st.pad_b
+    )
+    if box_w <= 0 or box_h <= 0:
+        return nil
+    val image = images[image_index]
+    val (draw_w, draw_h) = _html_draw_ir_fit_size(
+        st.object_fit, box_w, box_h, image.width, image.height
+    )
+    if draw_w <= 0 or draw_h <= 0:
+        return nil
+    val draw_x = box_x + (
+        (box_w.to_i64() - draw_w.to_i64()) *
+        object_position_x_pct(st.object_position).to_i64() / 100
+    ).to_i32()
+    val draw_y = box_y + (
+        (box_h.to_i64() - draw_h.to_i64()) *
+        object_position_y_pct(st.object_position).to_i64() / 100
+    ).to_i32()
+    val clip = clip_intersect(
+        ancestor_clip, box_x, box_y, box_x + box_w, box_y + box_h
+    )
+    if clip.x1 <= clip.x0 or clip.y1 <= clip.y0:
+        return nil
+    var command = draw_ir_image_command(
+        _html_draw_ir_component_id(node, i) + "_image",
+        draw_x, draw_y, draw_w, draw_h, image_uri,
+        _html_draw_ir_style_props(node, st)
+    )
+    command.clip_rect = draw_ir_rect_bounds(
+        clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
+    )
+    Some(command)
+
 fn _html_draw_ir_has_input_text(
     node: HNode, st: Style, box_width: i32
 ) -> bool:
@@ -1473,7 +1575,7 @@ fn _html_draw_ir_commands(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     width: i32, height: i32, vector_fonts: bool,
     target_keys: [text], overlay: BrowserTextInputOverlay,
-    visible_nodes: [bool]
+    visible_nodes: [bool], images: [SimpleOsHostGpuImageResource]
 ) -> [DrawIrCommand]:
     val clip_cache = build_ancestor_clip_cache(
         nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
@@ -1486,6 +1588,10 @@ fn _html_draw_ir_commands(
             commands.push(_html_draw_ir_command(
                 nodes, styles, boxes, i, width, height, vector_fonts
             ))
+            if val image_command = _html_draw_ir_image_command(
+                nodes, styles, boxes, i, images, paint_clip_at(clip_cache, i)
+            ):
+                commands.push(image_command)
             val overlay_target = (
                 i < target_keys.len() and
                 target_keys[i] != "" and

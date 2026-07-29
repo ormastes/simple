@@ -1,6 +1,7 @@
 """Persistent broker for a sandboxed browser renderer session."""
 
 use std.common.ui.draw_ir.{DrawIrComposition, draw_ir_composition}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 use common.string_builder.{RtStringBuilder}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_WORKER_ARG,
@@ -96,6 +97,7 @@ pub struct HostedBrowserRendererResult:
     reason: text
     next_animation_ms: i64
     composition: DrawIrComposition
+    image_resources: [SimpleOsHostGpuImageResource]
     cpu_composited_count: i32
     cpu_composited_sha256: text
     solid_material_count: i32
@@ -118,7 +120,7 @@ fn _network_result(
         error: error
     )
 
-fn _renderer_wasm_hex(data: [u8]) -> text:
+fn _renderer_binary_hex(data: [u8]) -> text:
     var out = RtStringBuilder.new()
     for byte in data:
         val piece = byte.to_i64().to_hex()
@@ -132,7 +134,7 @@ pub fn hosted_browser_network_response_limit_reason(
         BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES
     ):
         return "renderer-network-headers-too-large"
-    val body_limit = if kind == "wasm":
+    val body_limit = if kind == "wasm" or kind == "image":
         BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES / 2
     else:
         BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES
@@ -149,6 +151,7 @@ fn _renderer_result(ok: bool, reason: text, composition: DrawIrComposition) -> H
         reason: reason,
         next_animation_ms: -1,
         composition: composition,
+        image_resources: [],
         cpu_composited_count: 0,
         cpu_composited_sha256: "",
         solid_material_count: 0,
@@ -158,6 +161,7 @@ fn _renderer_result(ok: bool, reason: text, composition: DrawIrComposition) -> H
 
 fn _renderer_frame_result(
     composition: DrawIrComposition,
+    image_resources: [SimpleOsHostGpuImageResource],
     next_animation_ms: i64,
     cpu_composited_count: i32,
     cpu_composited_sha256: text,
@@ -170,6 +174,7 @@ fn _renderer_frame_result(
         reason: "ok",
         next_animation_ms: next_animation_ms,
         composition: composition,
+        image_resources: image_resources,
         cpu_composited_count: cpu_composited_count,
         cpu_composited_sha256: cpu_composited_sha256,
         solid_material_count: solid_material_count,
@@ -685,8 +690,8 @@ pub class HostedBrowserRendererProcess:
         )
         if limit_reason != "":
             return _network_result(0, "", "", limit_reason)
-        val body = if kind == "wasm":
-            _renderer_wasm_hex(response.body)
+        val body = if kind == "wasm" or kind == "image":
+            _renderer_binary_hex(response.body)
         else:
             response.body_text()
         if rt_text_to_bytes(body).len() > (
@@ -758,7 +763,7 @@ pub class HostedBrowserRendererProcess:
                     return Some(_network_result(
                         0, "", "", "renderer-network-timeout"
                     ))
-                val raw_limit = if fetch.kind == "wasm":
+                val raw_limit = if fetch.kind == "wasm" or fetch.kind == "image":
                     327680
                 else:
                     589824
@@ -1355,6 +1360,7 @@ pub class HostedBrowserRendererProcess:
             self.state = "active"
             return Some(_renderer_frame_result(
                 frame.composition,
+                frame.image_resources,
                 frame.next_animation_ms,
                 frame.cpu_composited_count,
                 frame.cpu_composited_sha256,

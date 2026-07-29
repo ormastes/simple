@@ -41,6 +41,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_material_provenance_after_backend_execution,
     simple_web_layout_material_provenance_after_execution,
     simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_draw_ir_with_images,
     simple_web_layout_render_html_draw_ir_result,
     simple_web_layout_render_html_software_pixels,
     simple_web_layout_uses_legacy_widget_chrome,
@@ -53,6 +54,9 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
 use common.ui.draw_ir.{DrawIrCommand}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    simpleos_host_gpu_image_resource
+}
 
 fn _count_non_bg(pixels: [u32], bg: u32) -> i32:
     var count: i32 = 0
@@ -292,6 +296,41 @@ describe "SimpleWebRenderer":
         expect(_draw_ir_style_value(card, "backdrop-filter-realized")).to_equal("")
         expect(_draw_ir_style_value(card, "backdrop-filter-realized-blur-radius-px")).to_equal("")
         expect(_draw_ir_style_value(card, "backdrop-filter-realized-saturation-milli")).to_equal("")
+
+    it "lowers a resolved img through Draw IR and Engine2D with object fit":
+        val html = (
+            "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+            "<img id='photo' src='image://photo' " +
+            "style='display:block;width:8px;height:8px;" +
+            "object-fit:contain;object-position:right bottom'>" +
+            "</body></html>"
+        )
+        val image = simpleos_host_gpu_image_resource(
+            "image://photo", 4, 2, [0xFFFF0000u32; 8]
+        )
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            html, 12, 12, [image]
+        )
+        val commands = composition.batches[0].commands
+        val box = _draw_ir_command_by_id(commands, "photo")
+        val draw = _draw_ir_command_by_id(commands, "photo_image")
+        val renderer = BrowserRenderer.create(12, 12)
+        val rendered = renderer.render_html_to_pixels_with_images(
+            html, [image]
+        )
+
+        expect(box.kind).to_equal("rect")
+        expect(draw.kind).to_equal("image")
+        expect(draw.image_uri).to_equal("image://photo")
+        expect(draw.x).to_equal(box.content_rect.x)
+        expect(draw.y).to_equal(box.content_rect.y + 4)
+        expect(draw.width).to_equal(8)
+        expect(draw.height).to_equal(4)
+        expect(draw.clip_rect.present).to_be(true)
+        expect(rendered.pixel_data.len()).to_equal(12 * 12)
+        expect(_count_color(
+            rendered.pixel_data, 0xFFFF0000u32
+        )).to_equal(8 * 4)
 
     it "projects a complete WM Web material request with explicit bounded realization":
         val html = "<html><body><section id='card' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"

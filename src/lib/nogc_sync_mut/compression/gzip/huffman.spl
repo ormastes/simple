@@ -433,7 +433,7 @@ fn bitstream_finish(bs) -> [u8]:
 # =============================================================================
 # BITSTREAM READER — LSB-first (RFC 1951 §3.1.1)
 #
-# State: [data: [u8], byte_pos: i64, bit_pos: i64]
+# State: [data: [u8], byte_pos: i64, bit_pos: i64, failed: bool]
 #   data     — input byte array
 #   byte_pos — current byte index
 #   bit_pos  — bit within current byte (0 = LSB)
@@ -441,7 +441,7 @@ fn bitstream_finish(bs) -> [u8]:
 
 # Create a new BitStream reader over a byte array
 fn bitstream_reader_new(data) -> [Any]:
-    return [data, 0, 0]
+    return [data, 0, 0, false]
 
 # Read `n` bits LSB-first (non-Huffman values: BFINAL, BTYPE, extra bits)
 # Returns [value, new_reader_state]
@@ -449,6 +449,7 @@ fn bitstream_read_bits_lsb(br, n) -> [Any]:
     var data     = br[0]
     var byte_pos = br[1]
     var bit_pos  = br[2]
+    var failed   = br[3]
 
     var result = 0
     var shift = 0
@@ -457,6 +458,7 @@ fn bitstream_read_bits_lsb(br, n) -> [Any]:
         if remaining <= 0:
             break
         if byte_pos >= data.len():
+            failed = true
             break
         val cur_byte = data[byte_pos].to_i64()
         val bit = (cur_byte >> bit_pos) & 1
@@ -468,7 +470,7 @@ fn bitstream_read_bits_lsb(br, n) -> [Any]:
             byte_pos = byte_pos + 1
         remaining = remaining - 1
 
-    return [result, [data, byte_pos, bit_pos]]
+    return [result, [data, byte_pos, bit_pos, failed]]
 
 # Read one Huffman code bit-by-bit (MSB-first encoding, packed LSB-first into bytes).
 # Caller accumulates bits from calls to bitstream_read_one_bit.
@@ -477,9 +479,10 @@ fn bitstream_read_one_bit(br) -> [Any]:
     var data     = br[0]
     var byte_pos = br[1]
     var bit_pos  = br[2]
+    var failed   = br[3]
 
     if byte_pos >= data.len():
-        return [0, [data, byte_pos, bit_pos]]
+        return [0, [data, byte_pos, bit_pos, true]]
 
     val cur_byte = data[byte_pos].to_i64()
     val bit = (cur_byte >> bit_pos) & 1
@@ -489,7 +492,7 @@ fn bitstream_read_one_bit(br) -> [Any]:
         bit_pos = 0
         byte_pos = byte_pos + 1
 
-    return [bit, [data, byte_pos, bit_pos]]
+    return [bit, [data, byte_pos, bit_pos, failed]]
 
 # Get current byte/bit position for block-boundary tracking
 fn bitstream_reader_pos(br) -> [Any]:

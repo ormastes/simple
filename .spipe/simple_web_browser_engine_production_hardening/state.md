@@ -1633,3 +1633,51 @@ implementation in progress / target evidence blocked
   or painted. The next lane must route bounded image requests through CSP
   `img-src`, broker HSTS/mixed-content policy, binary image decoding, and the
   canonical layout/Draw IR path; protocol-only admission is not sufficient.
+- external-image research: The existing renderer already has the correct
+  `DrawIrCommand.image` executor and bounded
+  `SimpleOsHostGpuImageResource` codec, but BrowserSession never discovers an
+  image, the network/frame protocols reject or omit image material, layout emits
+  only a box, and all hosted raster calls pass an empty resource list.
+- external-image interfaces: Reuse `SimpleOsHostGpuImageResource` rather than
+  adding a second image type. `BrowserSession.image_resources` owns decoded
+  document resources; additive layout `*_with_images` entrypoints emit canonical
+  image commands; additive `SBRF5` carries a checksummed byte-safe resource
+  section while SBRF2-4 remain compatible.
+- external-image bounds: The first admitted frame carries at most 64 resources,
+  131,072 decoded pixels, and 524,288 resource bytes. Network PNG input remains
+  within the existing 524,288-byte response envelope. The general PNG decoder
+  rejects dimensions above 4096x4096 or 16,777,216 pixels and bounds inflate to
+  the exact expected scanline size before allocation growth.
+- external-image security: Ordinary cross-origin images use `NoCors`; CSP
+  `img-src`, parent-owned HSTS/mixed-content policy, public-network transport,
+  redirects, cookies, and cancellation remain on the existing broker path.
+  Image response redirects map to `img-src`, HTTPS downgrade remains rejected,
+  and only strict `image/png` responses become renderer resources.
+- external-image cooperative review: Sidecars own disjoint PNG decoder,
+  SBRF5 protocol, BrowserSession/security, Draw IR/layout, and evidence reviews.
+  Merge owner and final reviewer are highest-capability Codex. Frozen manual
+  steps are `Load an HTTPS document with an HTTP image under includeSubDomains
+  HSTS`, `Fetch and decode the upgraded PNG through the broker`, `Render the
+  decoded image through Draw IR`, and `Block the same mixed-content image
+  without HSTS`; helpers are `_external_png_pixels`,
+  `_external_png_bytes`, `_commit_broker_image_response`, and
+  `_render_image_resource_draw_ir`. Any incomplete helper fails explicitly;
+  no placeholder pass is permitted.
+- external-image implementation: BrowserSession now retains authored/resolved
+  image identities, applies CSP and broker transport policy, strictly decodes
+  bounded PNG responses, and passes resources through additive `SBRF5` to the
+  canonical Draw-IR/Engine2D path. Layout preserves the normal box then paints
+  object-fit/object-position image content under ancestor clipping.
+- external-image doc refactor: Updated the architecture, detail design, system
+  test plan, rendering gap guide, intensive GPU plan, and the original image
+  resolver bug. The remaining bug is scoped to CSS `background-image: url(...)`;
+  external PNG `<img>` is no longer described as wholly blocked.
+- external-image adversarial fixes: CSP evaluates the HSTS-upgraded effective
+  URL without bypassing `img-src`; bounded PNG decode receives the document's
+  remaining pixel budget before inflate/allocation; and session admission uses
+  the canonical resource encoder as an exact `SBRF5` payload preflight.
+- external-image verification: two adversarial reviews converged to PASS;
+  numbered-artifact, rendering-coupling, direct-env/runtime, conflict,
+  placeholder, layout, and static source-shape checks are clean. The pure-Simple
+  target compiler blocker still prevents executable specs/docgen, so no runtime
+  verification PASS or generated-manual refresh is claimed.

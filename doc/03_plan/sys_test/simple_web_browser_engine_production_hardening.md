@@ -145,3 +145,10 @@ Unavailable rows remain blocked or unsupported and do not count as PASS.
 6. applicable compiler/lib/UI/whole-release and environment-facade gates.
 
 Each final unchanged green command is recorded once.
+## External PNG evidence (2026-07-29)
+
+The focused scenario must prove a real broker HSTS include-subdomains upgrade
+does not consume the redirect budget, strict PNG admission, `SBRF5` resource
+round-trip, canonical Draw-IR/Engine2D absolute pixels, and no-HSTS/CSP
+rejection. Runtime execution remains unclaimed while the known target compiler
+blocker prevents the pure-Simple test binary from running.

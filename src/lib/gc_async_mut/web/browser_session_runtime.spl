@@ -18,6 +18,9 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEventDispatch}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     browser_resource_size_allowed, BROWSER_MAX_DOCUMENT_SUBRESOURCES
 }
+use std.common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES
+}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_dispatch_event_to_id, be_dom_find_by_tag, be_dom_find_path_to_id,
     be_dom_focused_route_id, be_dom_get_attr, be_dom_has_attr,
@@ -40,7 +43,7 @@ use std.gc_async_mut.gpu.browser_engine.script.form_api.{
     form_capture_defaults, form_reset
 }
 use std.js.types.js_types.{JsValue}
-use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage, browser_history_push_bounded}
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage, BrowserImageSource, BROWSER_MAX_IMAGE_RESOURCES, browser_history_push_bounded}
 use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
 use std.js.types.pair.{Pair}
 use std.gc_async_mut.web.browser_session_url.{resolve_relative_url, url_protocol, url_pathname, url_origin, url_host, url_search, url_hash}
@@ -1115,8 +1118,9 @@ impl BrowserSession:
         self.prepare_css_animation_instances(width)
         val html = self.render_html_document()
         val animation_time_ms = self.monotonic_time_ms - self.animation_start_time_ms
-        var result = renderer.render_html_to_pixels_at_time_with_animations(
-            html, animation_time_ms, self.css_animation_instances
+        var result = renderer.render_html_to_pixels_at_time_with_animations_with_images(
+            html, animation_time_ms, self.css_animation_instances,
+            self.image_resources
         )
         result.node_count = _browser_session_dom_node_count(self.current_dom)
         result
@@ -1126,8 +1130,9 @@ impl BrowserSession:
         self.prepare_css_animation_instances(width)
         val html = self.render_html_document()
         val animation_time_ms = self.monotonic_time_ms - self.animation_start_time_ms
-        var result = renderer.render_html_to_pixels_at_time_with_animations(
-            html, animation_time_ms, self.css_animation_instances
+        var result = renderer.render_html_to_pixels_at_time_with_animations_with_images(
+            html, animation_time_ms, self.css_animation_instances,
+            self.image_resources
         )
         result.node_count = _browser_session_dom_node_count(self.current_dom)
         result
@@ -1242,6 +1247,7 @@ impl BrowserSession:
         self.loaded_module_urls = []
         self.module_eval_stack = []
         self.wasm_modules = []
+        self.image_resources = []
         self.pending_space_activation_target = ""
         self.text_selection_target_id = ""
         self.text_selection_anchor_byte = 0
@@ -1304,14 +1310,43 @@ impl BrowserSession:
             state.bind_dom(self.current_dom)
             self.runtime_state = Some(state)
 
+        var image_sources: [BrowserImageSource] = []
+        var image_source_overflow = false
+        for image_node in be_dom_find_by_tag(final_parse.doc, "img"):
+            val raw_source = be_dom_get_attr(image_node, "src").trim()
+            if raw_source == "":
+                continue
+            if raw_source.len() > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES:
+                image_source_overflow = true
+                continue
+            val resolved_source = resolve_relative_url(url, raw_source)
+            var duplicate_source = false
+            for existing_source in image_sources:
+                if (existing_source.authored_src == raw_source and
+                    existing_source.resolved_url == resolved_source):
+                    duplicate_source = true
+            if duplicate_source:
+                continue
+            if image_sources.len() >= BROWSER_MAX_IMAGE_RESOURCES:
+                image_source_overflow = true
+                continue
+            image_sources.push(BrowserImageSource.create(
+                raw_source, resolved_source
+            ))
+
         var load = BrowserLoadState.create(
             document_url: url,
             source_html: html,
             target_index: target_index,
             push_history: push_history,
             script_blocks: script_blocks,
-            style_sources: style_sources
+            style_sources: style_sources,
+            image_sources: image_sources
         )
+        if image_source_overflow:
+            load.append_warning(
+                "image resource limit reached; additional images ignored"
+            )
         if native_globals_diagnostic != "":
             load.append_warning(native_globals_diagnostic)
         if script_blocks.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:

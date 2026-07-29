@@ -3,9 +3,13 @@ use std.common.web.browser_renderer_protocol.{
     BrowserRendererNetworkDecodeResult,
     browser_renderer_action_decode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_frame_decode,
+    browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_navigation_decode,
-    browser_renderer_network_response_decode
+    browser_renderer_network_response_decode,
+    browser_renderer_network_response_encode
 }
+use std.common.image.png_encode.{encode_argb_to_png}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
 }
@@ -21,6 +25,11 @@ use std.gc_async_mut.web.browser_session.{
     BrowserHstsSnapshot, BrowserHstsSnapshotEntry,
     BrowserRequest, BrowserResponse, BrowserSession
 }
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_with_images
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.hosted.hosted_browser_renderer_policy.{
     HostedBrowserNavigationPermit, HostedBrowserRequestPolicy,
     hosted_browser_cors_response_headers,
@@ -35,6 +44,85 @@ use os.hosted.hosted_browser_renderer_process.{
 }
 
 extern fn rt_time_now_unix_micros() -> i64
+
+fn _external_png_pixels() -> [u32]:
+    [0xFFCC3020u32, 0xFF112233u32, 0xFF445566u32, 0xFF778899u32]
+
+fn _external_png_bytes() -> [u8]:
+    encode_argb_to_png(_external_png_pixels(), 2, 2)
+
+fn _external_png_hex() -> text:
+    var out = ""
+    for byte in _external_png_bytes():
+        val piece = byte.to_i64().to_hex()
+        out = out + if piece.len() == 1: "0{piece}" else: piece
+    out
+
+fn _commit_broker_image_response(
+    session: BrowserSession,
+    original: BrowserRequest,
+    transport_upgrade: BrowserRendererNetworkDecodeResult
+) -> BrowserRequest:
+    match session.commit_network_response(BrowserResponse.create(
+        original.id, "image", original.url,
+        transport_upgrade.status, transport_upgrade.headers, "", ""
+    )):
+        Err(reason): fail(reason)
+        Ok(_): pass_dn("transport upgrade queued the correlated HTTPS request")
+    val upgraded = match session.take_pending_request():
+        nil: fail("Expected the broker-upgraded image request")
+        Some(request): request
+    if upgraded.redirect_count != 20:
+        fail("Broker HSTS transport upgrade spent redirect budget")
+    val encoded = browser_renderer_network_response_encode(
+        1, 2, upgraded.id, "image", upgraded.url, 200,
+        "Content-Type: image/png", _external_png_hex(), ""
+    )
+    if not encoded.ok:
+        fail(encoded.reason)
+    val decoded = browser_renderer_network_response_decode(
+        browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), encoded.wire
+        ).message
+    )
+    if not decoded.ok:
+        fail(decoded.reason)
+    match session.commit_network_response(BrowserResponse.create(
+        decoded.request_id, decoded.kind, decoded.url, decoded.status,
+        decoded.headers, decoded.body, decoded.error
+    )):
+        Err(reason): fail(reason)
+        Ok(_): pass_dn("PNG response decoded and committed")
+    upgraded
+
+fn _render_image_resource_draw_ir(session: BrowserSession) -> [u32]:
+    val composition = simple_web_layout_render_html_draw_ir_with_images(
+        session.render_html_document(), 4, 4, session.image_resources
+    )
+    val encoded = browser_renderer_frame_encode_with_state_and_images(
+        composition, 1, 3, 3, -1, 0, "", 0, "", "",
+        session.current_url, "", "", session.image_resources
+    )
+    if not encoded.ok:
+        fail(encoded.reason)
+    if not encoded.wire.contains("SBRF5\t"):
+        fail("Expected SBRF5 image frame")
+    val frame = browser_renderer_frame_decode(
+        browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), encoded.wire
+        ).message,
+        4, 4
+    )
+    if not frame.ok:
+        fail(frame.reason)
+    val raster = Engine2dCompositorBackend.create_named(4, 4, "software")
+    val rendered = raster.render_draw_ir_composition_resources(
+        frame.composition, frame.image_resources
+    )
+    raster.shutdown()
+    if rendered.skipped_command_count != 0:
+        fail("Decoded image Draw IR command was skipped")
+    rendered.pixels
 
 fn permit(
     active: bool,
@@ -845,6 +933,152 @@ describe "hosted browser renderer broker policy":
             )
             expect(policy.ok).to_be(false)
             expect(policy.reason).to_equal("mixed-content-blocked")
+
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-012
+    # @capture(protocol)
+    # @capture(artifact)
+    it "renders an HSTS-upgraded external PNG and blocks its mixed-content control":
+        step("Load an HTTPS document with an HTTP image under includeSubDomains HSTS")
+        val image_url = "http://cdn.secure.test/pixel.png"
+        val image_html = (
+            "<html><body style='margin:0;background:#ffffff'>" +
+            "<img src='{image_url}' style='width:2px;height:2px'>" +
+            "</body></html>"
+        )
+        val now_ms = rt_time_now_unix_micros() / 1000
+        var entries: [BrowserHstsSnapshotEntry] = []
+        entries.push(BrowserHstsSnapshotEntry(
+            host: "secure.test",
+            received_at_unix_ms: now_ms - 1000,
+            expires_at_unix_ms: now_ms + 60000,
+            include_subdomains: true
+        ))
+        var broker = HostedBrowserRendererProcess.create(1, 4, 4)
+        expect(broker.load_hsts_snapshot(
+            BrowserHstsSnapshot.create(entries), now_ms
+        )).to_equal(1)
+        broker.document_url = "https://source.test/page"
+        broker.document_origin = "https://source.test"
+
+        var session = BrowserSession.new()
+        session.broker_network_policy = true
+        expect(session.open_html(
+            broker.document_url, image_html
+        ).is_ok()).to_be(true)
+        session.pending_requests[0].redirect_count = 20
+        val original = session.take_pending_request().unwrap()
+        expect(original.kind).to_equal("image")
+        expect(original.url).to_equal(image_url)
+
+        val fetch = BrowserRendererNetworkDecodeResult(
+            ok: true,
+            reason: "ok",
+            reply_to_request_id: 1,
+            request_id: original.id,
+            kind: original.kind,
+            url: original.url,
+            method: original.method,
+            headers: original.headers,
+            body: original.body,
+            content_type: original.content_type,
+            credentials: original.credentials,
+            script_cookie_writes: [],
+            status: 0,
+            error: ""
+        )
+        val effective_url = broker._hsts_upgrade_url(fetch.url)
+        expect(effective_url).to_equal(
+            "https://cdn.secure.test/pixel.png"
+        )
+        val policy = hosted_browser_renderer_request_policy(
+            broker.document_origin, permit(false, ""), fetch, effective_url
+        )
+        expect(policy.ok).to_be(true)
+        expect(policy.mode == RequestMode.NoCors).to_be(true)
+        expect(broker._queue_hsts_transport_upgrade(
+            fetch, policy, 20
+        )).to_equal("")
+        val transport_upgrade = browser_renderer_network_response_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(1), broker.pending_wire
+            ).message
+        )
+        expect(transport_upgrade.status).to_equal(307)
+        expect(transport_upgrade.headers).to_contain(
+            "X-Simple-Broker-Transport-Upgrade: 1"
+        )
+
+        step("Fetch and decode the upgraded PNG through the broker")
+        val upgraded = _commit_broker_image_response(
+            session, original, transport_upgrade
+        )
+        expect(upgraded.url).to_equal(effective_url)
+        expect(upgraded.redirect_count).to_equal(20)
+        expect(session.image_resources.len()).to_equal(1)
+        expect(session.image_resources[0].pixels).to_equal(
+            _external_png_pixels()
+        )
+
+        step("Render the decoded image through Draw IR")
+        val pixels = _render_image_resource_draw_ir(session)
+        expect(pixels.len()).to_equal(16)
+        expect(pixels[0]).to_equal(0xFFCC3020u32)
+        expect(pixels[1]).to_equal(0xFF112233u32)
+        expect(pixels[4]).to_equal(0xFF445566u32)
+        expect(pixels[5]).to_equal(0xFF778899u32)
+
+        step("Block the same mixed-content image without HSTS")
+        var blocked = BrowserSession.new()
+        blocked.broker_network_policy = true
+        expect(blocked.open_html(
+            "https://source.test/page", image_html
+        ).is_ok()).to_be(true)
+        val blocked_request = blocked.take_pending_request().unwrap()
+        val blocked_policy = hosted_browser_renderer_request_policy(
+            "https://source.test", permit(false, ""), fetch
+        )
+        expect(blocked_policy.ok).to_be(false)
+        expect(blocked_policy.reason).to_equal("mixed-content-blocked")
+        expect(blocked.commit_network_response(BrowserResponse.create(
+            blocked_request.id, "image", blocked_request.url, 0, "", "",
+            blocked_policy.reason
+        )).is_ok()).to_be(true)
+        expect(blocked.image_resources.len()).to_equal(0)
+
+        var csp = BrowserSession.new()
+        expect(csp.begin_network_navigation(
+            "https://source.test/page", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val csp_document = csp.take_pending_request().unwrap()
+        expect(csp.commit_network_response(BrowserResponse.create(
+            csp_document.id, "document", csp_document.url, 200,
+            "Content-Security-Policy: img-src 'none'", image_html, ""
+        )).is_ok()).to_be(true)
+        expect(csp.take_pending_request()).to_be_nil()
+        expect(csp.image_resources.len()).to_equal(0)
+        expect(csp.warnings.join("|")).to_contain("CSP blocked image")
+
+    it "loads ordinary cross-origin images without exposing a CORS fetch":
+        val image = hosted_browser_renderer_request_policy(
+            "https://example.test",
+            permit(false, ""),
+            request("image", "https://cdn.test/pixel.png")
+        )
+        expect(image.ok).to_be(true)
+        expect(image.mode == RequestMode.NoCors).to_be(true)
+        expect(image.credentials).to_equal("include")
+        expect(image.sanitized_headers).to_equal("")
+
+        val script = hosted_browser_renderer_request_policy(
+            "https://example.test",
+            permit(false, ""),
+            request("script", "https://cdn.test/app.js")
+        )
+        expect(script.ok).to_be(true)
+        expect(script.mode == RequestMode.Cors).to_be(true)
+        expect(script.sanitized_headers).to_equal(
+            "Origin: https://example.test"
+        )
 
     it "accepts only exact broker-owned HSTS transport upgrades":
         expect(hosted_browser_hsts_upgrade_valid(

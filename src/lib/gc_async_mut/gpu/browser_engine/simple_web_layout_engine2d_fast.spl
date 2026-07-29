@@ -13,18 +13,23 @@
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_material_provenance_after_backend_execution,
-    simple_web_layout_render_html_draw_ir_result,
-    simple_web_layout_render_html_draw_ir_result_at_time_with_animations
+    simple_web_layout_render_html_draw_ir_result_with_images,
+    simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images
 }
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_composition_with_images,
+    engine2d_resolved_draw_ir_image
+}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use common.ui.draw_ir.{DrawIrComposition}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 
 class SimpleWebLayoutEngine2DExecutionResult:
     render: Engine2dDrawIrAdvResult
@@ -78,18 +83,29 @@ fn _simple_web_vector_font_evidence(composition: DrawIrComposition) -> SimpleWeb
 fn _simple_web_layout_render_html_engine2d_execution(
     html: text, width: i32, height: i32, backend_name: text,
     animation_time_ms: i64,
-    animation_instances: [BrowserCssAnimationInstance]
+    animation_instances: [BrowserCssAnimationInstance],
+    image_resources: [SimpleOsHostGpuImageResource]
 ) -> SimpleWebLayoutEngine2DExecutionResult:
     val layout_result = if animation_time_ms >= 0:
-        simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
-            html, width, height, animation_time_ms, animation_instances
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images(
+            html, width, height, animation_time_ms, animation_instances,
+            image_resources
         )
     else:
-        simple_web_layout_render_html_draw_ir_result(html, width, height)
+        simple_web_layout_render_html_draw_ir_result_with_images(
+            html, width, height, image_resources
+        )
     val vector_font = _simple_web_vector_font_evidence(layout_result.composition)
     var engine = Engine2D.create_with_backend_fast(width, height, backend_name)
     engine.clear(0u32)
-    val render = engine2d_draw_ir_adv_composition(engine, layout_result.composition, true)
+    var images: [Engine2dResolvedDrawIrImage] = []
+    for image in image_resources:
+        images.push(engine2d_resolved_draw_ir_image(
+            image.image_uri, image.width, image.height, image.pixels
+        ))
+    val render = engine2d_draw_ir_adv_composition_with_images(
+        engine, layout_result.composition, true, images
+    )
     engine.shutdown()
     val material_fallback = simple_web_layout_material_provenance_after_backend_execution(
         layout_result.material_witness,
@@ -128,14 +144,35 @@ fn _simple_web_layout_render_html_engine2d_execution(
 # download path rather than the shrunken mirror.
 pub fn simple_web_layout_render_html_engine2d_result(html: text, width: i32, height: i32, backend_name: text) -> Engine2dDrawIrAdvResult:
     _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, -1, []
+        html, width, height, backend_name, -1, [], []
+    ).render
+
+pub fn simple_web_layout_render_html_engine2d_result_with_images(
+    html: text, width: i32, height: i32, backend_name: text,
+    images: [SimpleOsHostGpuImageResource]
+) -> Engine2dDrawIrAdvResult:
+    _simple_web_layout_render_html_engine2d_execution(
+        html, width, height, backend_name, -1, [], images
     ).render
 
 pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, -1, []
+        html, width, height, backend_name, -1, [], []
+    )
+    if execution.render.skipped_command_count != 0:
+        return []
+    execution.render.pixels
+
+pub fn simple_web_layout_render_html_pixels_engine2d_with_images(
+    html: text, width: i32, height: i32, backend_name: text,
+    images: [SimpleOsHostGpuImageResource]
+) -> [u32]:
+    if width <= 0 or height <= 0:
+        return []
+    val execution = _simple_web_layout_render_html_engine2d_execution(
+        html, width, height, backend_name, -1, [], images
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -145,7 +182,20 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time(html: text, width: 
     if width <= 0 or height <= 0:
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, animation_time_ms, []
+        html, width, height, backend_name, animation_time_ms, [], []
+    )
+    if execution.render.skipped_command_count != 0:
+        return []
+    execution.render.pixels
+
+pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_images(
+    html: text, width: i32, height: i32, backend_name: text,
+    animation_time_ms: i64, images: [SimpleOsHostGpuImageResource]
+) -> [u32]:
+    if width <= 0 or height <= 0:
+        return []
+    val execution = _simple_web_layout_render_html_engine2d_execution(
+        html, width, height, backend_name, animation_time_ms, [], images
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -160,7 +210,23 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_animations(
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
         html, width, height, backend_name, animation_time_ms,
-        animation_instances
+        animation_instances, []
+    )
+    if execution.render.skipped_command_count != 0:
+        return []
+    execution.render.pixels
+
+pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_animations_with_images(
+    html: text, width: i32, height: i32, backend_name: text,
+    animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource]
+) -> [u32]:
+    if width <= 0 or height <= 0:
+        return []
+    val execution = _simple_web_layout_render_html_engine2d_execution(
+        html, width, height, backend_name, animation_time_ms,
+        animation_instances, images
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -180,7 +246,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             vector_font_promotion_ready: false
         )
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, animation_time_ms, []
+        html, width, height, backend_name, animation_time_ms, [], []
     )
     if execution.render.skipped_command_count != 0:
         return SimpleWebLayoutEngine2DReadbackResult(
