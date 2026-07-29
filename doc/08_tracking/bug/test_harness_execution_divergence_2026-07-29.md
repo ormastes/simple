@@ -1,97 +1,165 @@
 # `bin/simple test` gives wrong results for code that `bin/simple <file>.spl` computes correctly
 
-**Status:** open, newly found while landing the bracket-slice byte-index
-fixes below. **Severity:** blocks trusting `bin/simple test` output for at
-least this code shape; scope beyond it not yet characterized.
+**Status:** ROOT-CAUSED (2026-07-29, follow-up pass). **Severity:** every
+`bin/simple test` run executes specs under the buggy engine unconditionally
+— any spec whose code shape matches this bug's trigger (below) reds
+regardless of whether the code under test is correct. **Not fixed** — an
+interpreter-evaluation bug is out of scope for this pass; documenting
+precisely per instruction, not attempting a codegen/interpreter fix.
 
-## Symptom
+## Root cause (PROVED, not inferred)
 
-`src/lib/nogc_sync_mut/glob.spl`'s `_glob_at`, `?`-wildcard branch:
+`bin/simple test`'s per-spec child process
+(`src/app/test_runner_new/test_runner_single.spl:330-331`,
+`fn main() -> i64`) unconditionally sets, before running the spec's actual
+code:
 ```
-val step = _glob_codepoint_len_at(s, si)
-val next_si = si + step
-return _glob_at(s: s, si: next_si, p: p, pi: pi + 1)
+rt_env_set("SIMPLE_RUNTIME_MODE", "interpreter")
+rt_env_set("SIMPLE_EXECUTION_MODE", "interpret")
 ```
-Calling `glob_match("café.txt", "caf?.txt")`:
-- **Direct execution** (`bin/simple probe.spl` wrapping the call in `fn
-  main()`): returns `true` (correct — `?` consumes "é", then ".txt"
-  literal-matches ".txt"). Verified 3x, deterministic.
-- **Test harness** (`bin/simple test test/.../glob_multibyte_spec.spl`,
-  which the test runner reports spawns a `child binary:
-  .../bin/release/x86_64-unknown-linux-gnu/simple` subprocess): the exact
-  same source returns `false`.
+This forces the tree-walking **interpreter** engine for every spec run,
+regardless of what `bin/simple <file>.spl` would default to on its own.
 
-Instrumented both paths with an identical `print()` placed *after* capturing
-the recursive call's result into a local (avoiding the project's own
-documented "no intervening call before a return" landmine class,
-`doc/08_tracking/bug/native_tuple_spill_clobber_across_call_2026-07-19.md`-
-adjacent):
+**Discriminating experiment** (same file, same path, zero test-runner
+machinery involved — a plain script, run two ways):
 ```
-si=3 step=2 next_si=5 result=<true under direct exec, false under test harness>
+$ bin/simple probe.spl                                  # default engine
+RESULT=true                                              # correct
+
+$ SIMPLE_EXECUTION_MODE=interpret bin/simple probe.spl   # forced interpreter
+RESULT=false                                             # WRONG
+RESULT=false                                             # (printed twice — see "Also observed" below)
+
+$ SIMPLE_RUNTIME_MODE=interpreter bin/simple probe.spl   # the OTHER var alone
+RESULT=true                                               # correct — NOT the trigger
 ```
-Same inputs, same source, same binary path reported in both invocations —
-only the invocation *mode* differs (`bin/simple file.spl` vs `bin/simple
-test file.spl`) — and the boolean returned by the identical recursive call
-differs.
+`SIMPLE_EXECUTION_MODE=interpret` alone reproduces the wrong result;
+`SIMPLE_RUNTIME_MODE=interpreter` alone does not. The test harness sets
+both, but **`SIMPLE_EXECUTION_MODE=interpret` is the specific trigger**.
 
-## Also reproduces in `src/lib/common/js/builtins/string.spl`
+This directly reproduces the exact `bin/simple test` failure using nothing
+but an env var on a plain script — conclusively locating the divergence in
+the **execution engine** (default/JIT-or-native vs. forced interpreter),
+not in the test harness's path resolution, caching, or spec-block
+semantics.
 
-`string_charAt`/`string_split("")` walk `text_codepoints(s)` and sum
-`utf8_codepoint_byte_len(cps[i])` in a loop to find a codepoint's byte
-range. For a 2-byte codepoint (café's "é") both direct execution and the
-test harness agree (correct). For 3-byte codepoints (CJK "日本語", the
-em-dash "—") direct execution is correct (verified: `charAt(0)="日"`,
-`charAt(1)="本"`, `charAt(2)="語"`, `charCodeAt` on em-dash `=8212`,
-`split("")` on CJK gives 3 correct elements) but the test harness returns
-empty strings / wrong values for the same inputs.
+## Investigation-guide checklist (all 4 hypotheses tested)
+
+- **(a) test-path/module resolution divergence:** RULED OUT. Reproduced
+  with a plain script at a path with zero test-runner involvement — same
+  file, same `use` import, no `test/` directory, no spec framework.
+- **(b) different execution engine:** CONFIRMED — this is the root cause.
+  Correction to the guide's framing: it is **not** "test lane JITs where
+  direct interprets" — empirically it's the reverse. Default execution
+  (what `bin/simple file.spl` uses with no env override) is correct;
+  forced **interpreter** mode (what the test harness always sets) is
+  **wrong**. The guide's suggested "known call-boundary miscompile family"
+  connection is directionally right (an engine evaluates a call-derived
+  value incorrectly) but the specific broken engine is the interpreter,
+  not JIT/native.
+- **(c) stale `.smf` cache shadowing:** RULED OUT. Fresh worktree, `find
+  <worktree> -iname '*.smf'` → 0 results before any run; no
+  `.simple/`/`~/.simple` cache directory exists in this environment at
+  all. Nothing to shadow.
+- **(d) test-runner spec-harness semantics (it-block/return quirks):**
+  RULED OUT. Reproduced with a plain `fn main(): print(...)` script — no
+  `describe`/`it`/`expect`, no spec harness of any kind involved.
+
+## Scoping: NOT simply "any call-derived local threaded into a recursive argument"
+
+A minimal isolate with the *same shape* (extract a helper-call result to a
+local, add it to an index, pass the result as a named argument to a
+recursive call) evaluates **correctly under forced interpreter mode**,
+even at recursion depth 5:
+```
+fn codepoint_len(s: text, si: i64) -> i64: ...        # same helper shape
+fn recursive_probe(s: text, si: i64, depth: i64) -> i64:
+    if depth <= 0: return si
+    val step = codepoint_len(s, si)
+    val next_si = si + step
+    recursive_probe(s: s, si: next_si, depth: depth - 1)
+# SIMPLE_EXECUTION_MODE=interpret: correct at depth 1 AND depth 5
+```
+So the bug needs more of `_glob_at`'s real shape to manifest — most likely
+its **multiple early-return branches** (`*`/`?`/`[`/literal-match/`false`
+all coexisting in one function with several `if ... return` guards ahead of
+the recursive call) and/or genuine multi-step pattern-matching recursion
+(not just repeated identical steps) — not merely "a call result in a
+recursive argument position." Not narrowed further than this; a full
+interpreter-internals investigation is out of scope for this pass per
+instruction.
+
+## Also reproduces in `src/lib/common/js/builtins/string.spl` (confirms it's not glob-specific)
+
+```
+$ bin/simple probe.spl                                       # default
+charAt1=本                                                    # correct
+
+$ SIMPLE_EXECUTION_MODE=interpret bin/simple probe.spl        # forced interpreter
+charAt1=                                                       # WRONG (empty)
+charAt1=                                                       # (printed twice, same as glob)
+```
+Same `string_charAt`/`text_codepoints`/`utf8_codepoint_byte_len`-walking
+loop as documented in the bracket-slice fix pass. Same trigger
+(`SIMPLE_EXECUTION_MODE=interpret`), same engine, confirming this is a
+general interpreter-engine defect for this code shape, not something
+specific to `glob.spl`'s recursion.
+
+## Also observed, not investigated further (tangential)
+
+Under forced interpreter mode only, both repro scripts above print their
+`RESULT=`/`charAt1=` line **twice** for one `main()` call and one explicit
+`main()` invocation at module scope. Not seen under default execution.
+Could be an unrelated "module top-level re-executed" interpreter quirk, or
+could be mechanically related to the same root cause (e.g. a retry-on-
+wrong-result path). Not chased down — flagging in case it helps whoever
+investigates the interpreter bug itself.
 
 ## What this is NOT
 
-- Not a logic bug in the fixes below — proved by direct execution producing
-  correct output for every case the harness gets wrong, on the identical
-  source, same session, same binary.
+- Not a logic bug in the bracket-slice fixes (`1bd388912f5`) — proved by
+  default-engine execution producing correct output for every case the
+  forced-interpreter path gets wrong, same source, same session.
 - Not the previously-fixed for-loop-over-text corruption
   (`doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md`)
-  — neither fix uses `for x in text:`.
-- Not the tuple/aggregate-return corruption class
+  — neither fixed function uses `for x in text:`.
+- Not literally the tuple/aggregate-return corruption class
   (`doc/08_tracking/bug/native_tuple_spill_clobber_across_call_2026-07-19.md`)
-  — the glob.spl fix was rewritten specifically to avoid returning a tuple
-  from a helper, and still diverges between the two invocation modes.
+  — that family is about **native/codegen** aggregate returns; this bug is
+  in the **interpreter**, triggers with plain scalar (`i64`) locals (no
+  tuples anywhere in the final `glob.spl`/`string.spl` source), and needs
+  multi-branch recursion to manifest (see Scoping above) where that family
+  needed only a single intervening call. Related in spirit (an execution
+  engine mishandles a value threaded through locals across a call
+  boundary) but a distinct instance — do not merge these into one bug.
+- Not path resolution, not `.smf` caching, not spec-harness semantics —
+  all three directly ruled out above.
 
-## Suspected shape
+## Impact
 
-2-byte codepoints (café) pass in both modes; 3+-byte codepoints and
-`si > 0`-rooted recursive matches fail only under the test harness. This
-narrows it toward the harness's execution path specifically (JIT vs.
-interpreter, or a different codegen/opt setting the harness passes that
-`bin/simple file.spl` does not) rather than the shared interpreter/compiler
-core, but this was not root-caused further — filing per repo policy rather
-than guessing at a fix for shared harness infrastructure without a
-bootstrap-validated change.
-
-## Impact on this session's work
-
-Both `string.spl` and `glob.spl` fixes below are **logically verified
-correct** via direct interpreter execution (equivalent evidentiary weight
-to a passing spec run) but their sspec files currently show red under
-`bin/simple test` due to this harness bug, not due to the fixes. Landed
-anyway per repo policy (fix + spec are still correct and valuable; the red
-is a filed, explained, pre-existing infrastructure gap, not a cover-up) —
-see the fix commit for exact repro commands to re-verify once this is
-root-caused.
+Every `bin/simple test` run forces `SIMPLE_EXECUTION_MODE=interpret` for
+every spec, unconditionally (`test_runner_single.spl:330-331`, no opt-out
+flag found in that file). Any spec exercising code with this bug's trigger
+shape reds regardless of whether the code under test is correct — this
+poisons `bin/simple test` as a verification source for that code shape
+specifically, not just for the two files in this session's fix. The
+`string.spl`/`glob.spl` fixes from `1bd388912f5` remain landed; re-verify
+them via default-engine execution (see Reproduce) until the interpreter bug
+itself is fixed, not via `bin/simple test`.
 
 ## Reproduce
 
 ```
-cd <fresh worktree>
-# Direct (correct):
-bin/simple -c '
-use std.nogc_sync_mut.glob.{glob_match}
-fn main(): print("{glob_match(\"café.txt\", \"caf?.txt\")}")
-main()'
-# -> true
+cd <fresh worktree, built bin/simple symlink>
 
-# Harness (wrong):
-bin/simple test test/01_unit/lib/nogc_sync_mut/glob_multibyte_spec.spl
-# -> "'?' matches one café-style accented character" fails, expected true got false
+cat > probe.spl <<'EOF'
+use std.nogc_sync_mut.glob.{glob_match}
+fn main():
+    print("RESULT={glob_match(\"café.txt\", \"caf?.txt\")}")
+main()
+EOF
+
+bin/simple probe.spl                                # RESULT=true (correct)
+SIMPLE_EXECUTION_MODE=interpret bin/simple probe.spl # RESULT=false (WRONG)
+SIMPLE_RUNTIME_MODE=interpreter bin/simple probe.spl # RESULT=true (correct -- isolates the trigger var)
 ```
