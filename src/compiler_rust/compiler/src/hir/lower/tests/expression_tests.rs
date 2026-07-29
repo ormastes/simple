@@ -357,6 +357,24 @@ fn test_lower_resolves_constant_receiver_and_acronym_static_type_semantically() 
 }
 
 #[test]
+fn f64_round_cast_preserves_float_source_type() {
+    let module = parse_and_lower("fn rounded() -> i64:\n    return 0.5.round() as i64\n").unwrap();
+    let HirStmt::Return(Some(result)) = &module.functions[0].body[0] else {
+        panic!("expected rounded return");
+    };
+    let HirExprKind::Cast { expr: rounded, target } = &result.kind else {
+        panic!("expected round result cast");
+    };
+    assert_eq!(*target, TypeId::I64);
+    assert_eq!(rounded.ty, TypeId::F64);
+    assert!(matches!(
+        &rounded.kind,
+        HirExprKind::MethodCall { receiver, method, dispatch: DispatchMode::Static, .. }
+            if receiver.ty == TypeId::F64 && method == "round"
+    ));
+}
+
+#[test]
 fn test_lower_binary_ops() {
     let module = parse_and_lower("fn compare(a: i64, b: i64) -> bool:\n    return a < b\n").unwrap();
 
