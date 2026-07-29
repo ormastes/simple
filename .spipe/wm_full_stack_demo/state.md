@@ -494,6 +494,27 @@ implementation-in-progress
   produced the same result and was reverted as ineffective. The remaining
   focused blocker is the native aggregate/trait pixel-return boundary in the
   Draw IR renderer, not GLFW presentation; no live retry was run.
+- phase3-exact-image-fixture-correction: The preceding pixel-boundary
+  diagnosis is superseded. The demo tree always emits
+  `wm-demo://image`, while the probe passed an empty resolved-image list.
+  Draw IR correctly counted the missing image as skipped, and the GUI adapter
+  correctly returned an empty fail-closed frame. The probe now supplies the
+  exact production 2x2 image. Its cached Phase-3 build compiled 2 modules,
+  reused 378, and exits `0`, proving canonical GUI frame dimensions, 6000
+  pixels, checksum, external-frame admission, and raw compositor pixel
+  `0xff0e0e10`. No pixel aggregate failure remains proven at this boundary.
+- host-glfw-live-nonblack: GDB identified the next live fault as generic
+  interpolation inside `ui.web.html_css.responsive_css()` while constructing
+  the default pinned-app manifest. That shared CSS owner now uses direct text
+  concatenation and `ui_native_i64_text()` for breakpoint values. The fresh
+  build compiled 3 modules and reused 511. Xvfb `:77` then captured the exact
+  titled 640x600 GLFW window with 138 colors and SHA-256
+  `43ef5a5e3047c2064b5419c3ae9ec837995dd36a8de3a229ad72b6c0214c45c8`
+  at `/tmp/wm_full_stack_demo_v4.png`. The window is non-black and visibly
+  contains WM chrome/content/taskbar, but widget layout is collapsed and
+  overlapping. Native `windowclose` removes the X11 window but does not stop
+  the demo loop; it required Ctrl-C. No clean-close or complete widget-layout
+  claim is made.
 
 ## Remaining runtime gates
 
@@ -504,10 +525,11 @@ implementation-in-progress
   probes. Packed ARGB presentation and title conversion are now independently
   green. The focused native compositor now admits an external pixel frame and
   reaches an exact nonzero framebuffer sample. The richer exact-demo GUI probe
-  now passes Resize token, theme source parsing, and theme material checksum
-  serialization. It preserves frame dimensions but loses the Draw IR pixel
-  array at the GUI producer boundary. The full GUI demo remains RED for
-  non-black live presentation and semantic input.
+  now passes Resize token, theme source parsing, theme material checksum
+  serialization, exact image resolution, GUI frame construction, external
+  admission, and raw compositor readback. The exact-title live demo now has a
+  retained non-black screenshot. Widget layout, semantic input, and clean
+  outer-window close remain RED.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the

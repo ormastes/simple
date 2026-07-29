@@ -270,3 +270,33 @@ build compiled 3 and reused 377. Reading pixels directly from the concrete
 was reverted. The remaining gate is the native aggregate/trait pixel-return
 boundary in the Draw IR renderer. Per the three-cycle cap, no further repair,
 live GLFW rebuild, or presentation claim was attempted in this turn.
+
+That pixel-boundary conclusion was subsequently disproven. The demo widget
+tree emits an image command for `wm-demo://image`, but the focused probe passed
+an empty resolved-image list. Draw IR therefore reported a skipped command and
+the GUI adapter deliberately emitted an empty fail-closed frame. With the same
+2x2 image supplied by the production demo, the focused cached Phase-3 build
+compiled 2 modules, reused 378, and exits `0`. It proves a 100x60/6000-pixel
+GUI frame, nonzero checksum, external-frame admission, and exact raw compositor
+pixel `0xff0e0e10`. The earlier direct-read experiment was inconclusive because
+the combined fallback/skip guard discarded its pixels; it remains reverted.
+
+The next fresh full-demo build reached a different generic formatter call:
+
+```text
+rt_to_string
+  <- ui.web.html_css.responsive_css
+  <- ui.web.html_css.generate_package_authoritative_css
+  <- HostTaskbarRuntime._default_pinned
+```
+
+`responsive_css()` now uses direct concatenation and the existing native scalar
+owner for breakpoint values. The rebuilt binary compiled 3 modules and reused
+511. On Xvfb `:77`, the exact titled GLFW window captured at 640x600 with 138
+colors and SHA-256
+`43ef5a5e3047c2064b5419c3ae9ec837995dd36a8de3a229ad72b6c0214c45c8`
+(`/tmp/wm_full_stack_demo_v4.png`). This is the first current non-black
+full-demo capture. It visibly shows WM chrome, client content, and taskbar, but
+the widget layout is collapsed/overlapping. Sending native `windowclose`
+removes the X11 window while the demo loop remains alive, so clean event-driven
+shutdown is still unproven and the process was stopped with Ctrl-C.
