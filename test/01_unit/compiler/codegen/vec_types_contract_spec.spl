@@ -24,11 +24,20 @@ fn i32_type() -> MirType:
 fn i64_type() -> MirType:
     MirType(kind: MirTypeKind.I64)
 
+fn u64_type() -> MirType:
+    MirType(kind: MirTypeKind.U64)
+
+fn f32_type() -> MirType:
+    MirType(kind: MirTypeKind.F32)
+
 fn ptr_type() -> MirType:
-    MirType(kind: MirTypeKind.I64)
+    MirType.ptr(f32_type(), true)
 
 fn temp_local(id: i64, type_: MirType) -> MirLocal:
     MirLocal(id: LocalId(id: id), name: nil, type_: type_, kind: LocalKind.Temp, is_ghost: false)
+
+fn arg_local(id: i64, index: i64, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: type_, kind: LocalKind.Arg(index), is_ghost: false)
 
 fn i64_const_operand(v: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(v), MirType.i64()))
@@ -41,7 +50,7 @@ fn make_opencl_vec_kernel(name: text, sym_id: i64, block: MirBlock) -> MirFuncti
         symbol: SymbolId(id: sym_id),
         name: name,
         signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
-        locals: [temp_local(0, i32_type()), temp_local(1, ptr_type()), temp_local(2, i64_type()), temp_local(3, i32_type()), temp_local(4, i32_type()), temp_local(5, i32_type()), temp_local(6, i32_type())],
+        locals: [temp_local(0, i32_type()), temp_local(1, ptr_type()), temp_local(2, u64_type()), temp_local(3, f32_type()), temp_local(4, f32_type()), temp_local(5, f32_type()), temp_local(6, f32_type())],
         blocks: [block],
         entry_block: BlockId.entry(),
         span: Span.empty(),
@@ -66,8 +75,8 @@ fn make_cuda_vec_kernel(name: text, sym_id: i64, block: MirBlock) -> MirFunction
     MirFunction(
         symbol: SymbolId(id: sym_id),
         name: name,
-        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
-        locals: [temp_local(0, i32_type()), temp_local(1, ptr_type()), temp_local(2, i64_type()), temp_local(3, i32_type()), temp_local(4, i32_type()), temp_local(5, i32_type()), temp_local(6, i32_type())],
+        signature: MirSignature(params: [ptr_type(), u64_type()], return_type: MirType.unit(), is_variadic: false),
+        locals: [temp_local(0, i32_type()), arg_local(1, 0, ptr_type()), arg_local(2, 1, u64_type()), temp_local(3, f32_type()), temp_local(4, f32_type()), temp_local(5, f32_type()), temp_local(6, f32_type())],
         blocks: [block],
         entry_block: BlockId.entry(),
         span: Span.empty(),
@@ -256,21 +265,19 @@ describe "vec_types contract — OpenCL backend vec2 load/store":
 
 describe "vec_types contract — CUDA backend vec4 load":
 
-    it "emits ld.global.v4.f32 for gpu_vec4_load_f32":
+    it "rejects gpu_vec4_load_f32 until MIR carries vector results":
         val func = make_cuda_vec_kernel("cuda_vec4_load", 400, vec4_load_block())
         val backend = CudaBackend.create((8, 6))
         val result = backend.compile(make_module_from(func))
-        expect(result.is_ok()).to_equal(true)
-        val ptx = result.unwrap().ptx
-        expect(ptx).to_contain("ld.global.v4.f32")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message).to_contain("vector loads require MIR vector result lowering")
 
-    it "emits diagnostic comment for gpu_vec4_load_f32 with bad arity (PTX)":
+    it "rejects gpu_vec4_load_f32 with bad arity":
         val func = make_cuda_vec_kernel("cuda_vec4_load_bad", 401, vec4_load_bad_args_block())
         val backend = CudaBackend.create((8, 6))
         val result = backend.compile(make_module_from(func))
-        expect(result.is_ok()).to_equal(true)
-        val ptx = result.unwrap().ptx
-        expect(ptx).to_contain("gpu_vec4_load_f32")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message).to_contain("requires exactly 2 arguments")
 
 describe "vec_types contract — CUDA backend vec4 store":
 
@@ -282,13 +289,12 @@ describe "vec_types contract — CUDA backend vec4 store":
         val ptx = result.unwrap().ptx
         expect(ptx).to_contain("st.global.v4.f32")
 
-    it "emits diagnostic comment for gpu_vec4_store_f32 with bad arity (PTX)":
+    it "rejects gpu_vec4_store_f32 with bad arity":
         val func = make_cuda_vec_kernel("cuda_vec4_store_bad", 411, vec4_store_bad_args_block())
         val backend = CudaBackend.create((8, 6))
         val result = backend.compile(make_module_from(func))
-        expect(result.is_ok()).to_equal(true)
-        val ptx = result.unwrap().ptx
-        expect(ptx).to_contain("gpu_vec4_store_f32")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message).to_contain("requires exactly 6 arguments")
 
 # ============================================================================
 # CUDA/PTX emission — vec2 load/store
@@ -296,13 +302,12 @@ describe "vec_types contract — CUDA backend vec4 store":
 
 describe "vec_types contract — CUDA backend vec2 load":
 
-    it "emits ld.global.v2.f32 for gpu_vec2_load_f32":
+    it "rejects gpu_vec2_load_f32 until MIR carries vector results":
         val func = make_cuda_vec_kernel("cuda_vec2_load", 420, vec2_load_block())
         val backend = CudaBackend.create((8, 6))
         val result = backend.compile(make_module_from(func))
-        expect(result.is_ok()).to_equal(true)
-        val ptx = result.unwrap().ptx
-        expect(ptx).to_contain("ld.global.v2.f32")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message).to_contain("vector loads require MIR vector result lowering")
 
 describe "vec_types contract — CUDA backend vec2 store":
 

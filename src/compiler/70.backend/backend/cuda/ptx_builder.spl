@@ -385,8 +385,9 @@ class PtxBuilder:
         """Emit atomic add instruction."""
         val tm = self.type_mapper
         val ptx_ty = tm.ptx_type(ty)
+        val atomic_ty = if ty == PrimitiveType.I64: ".u64" else: ptx_ty
         val space_str = tm.ptx_state_space(space)
-        self.emit_line("atom{space_str}.add{ptx_ty} {dest}, [{addr}], {value};")
+        self.emit_line("atom{space_str}.add{atomic_ty} {dest}, [{addr}], {value};")
 
     me emit_atomic_min(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
         """Emit atomic min instruction."""
@@ -406,47 +407,54 @@ class PtxBuilder:
         """Emit atomic subtract (via neg + add) instruction."""
         val tm = self.type_mapper
         val ptx_ty = tm.ptx_type(ty)
+        val atomic_ty = if ty == PrimitiveType.I64: ".u64" else: ptx_ty
+        val neg_ty = match ty:
+            case U32: ".s32"
+            case U64: ".s64"
+            case _: ptx_ty
         val space_str = tm.ptx_state_space(space)
         # PTX has no atom.sub; negate value then atomic add
         val neg_tmp = self.alloc_reg(ty)
         self.emit_reg_decl(neg_tmp, ty)
-        self.emit_line("neg{ptx_ty} {neg_tmp}, {value};")
-        self.emit_line("atom{space_str}.add{ptx_ty} {dest}, [{addr}], {neg_tmp};")
+        self.emit_line("neg{neg_ty} {neg_tmp}, {value};")
+        self.emit_line("atom{space_str}.add{atomic_ty} {dest}, [{addr}], {neg_tmp};")
 
     me emit_atomic_and(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
         """Emit atomic bitwise AND instruction."""
         val tm = self.type_mapper
-        val ptx_ty = tm.ptx_type(ty)
         val space_str = tm.ptx_state_space(space)
-        self.emit_line("atom{space_str}.and.b64 {dest}, [{addr}], {value};")
+        self.emit_line("atom{space_str}.and{self.atomic_bit_type(ty)} {dest}, [{addr}], {value};")
 
     me emit_atomic_or(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
         """Emit atomic bitwise OR instruction."""
         val tm = self.type_mapper
-        val ptx_ty = tm.ptx_type(ty)
         val space_str = tm.ptx_state_space(space)
-        self.emit_line("atom{space_str}.or.b64 {dest}, [{addr}], {value};")
+        self.emit_line("atom{space_str}.or{self.atomic_bit_type(ty)} {dest}, [{addr}], {value};")
 
     me emit_atomic_xor(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
         """Emit atomic bitwise XOR instruction."""
         val tm = self.type_mapper
-        val ptx_ty = tm.ptx_type(ty)
         val space_str = tm.ptx_state_space(space)
-        self.emit_line("atom{space_str}.xor.b64 {dest}, [{addr}], {value};")
+        self.emit_line("atom{space_str}.xor{self.atomic_bit_type(ty)} {dest}, [{addr}], {value};")
 
     me emit_atomic_exch(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
         """Emit atomic exchange instruction."""
         val tm = self.type_mapper
-        val ptx_ty = tm.ptx_type(ty)
         val space_str = tm.ptx_state_space(space)
-        self.emit_line("atom{space_str}.exch{ptx_ty} {dest}, [{addr}], {value};")
+        self.emit_line("atom{space_str}.exch{self.atomic_bit_type(ty)} {dest}, [{addr}], {value};")
 
     me emit_atomic_cas(dest: text, ty: PrimitiveType, addr: text, compare: text, value: text, space: MemorySpace):
         """Emit atomic compare-and-swap instruction."""
         val tm = self.type_mapper
-        val ptx_ty = tm.ptx_type(ty)
         val space_str = tm.ptx_state_space(space)
-        self.emit_line("atom{space_str}.cas{ptx_ty} {dest}, [{addr}], {compare}, {value};")
+        self.emit_line("atom{space_str}.cas{self.atomic_bit_type(ty)} {dest}, [{addr}], {compare}, {value};")
+
+    fn atomic_bit_type(ty: PrimitiveType) -> text:
+        match ty:
+            case I64 | U64 | F64:
+                ".b64"
+            case _:
+                ".b32"
 
     # === Function Calls ===
 

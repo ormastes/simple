@@ -19,6 +19,8 @@ fn cuda_u32() -> MirType: MirType(kind: MirTypeKind.U32)
 fn cuda_u64() -> MirType: MirType(kind: MirTypeKind.U64)
 fn cuda_bool() -> MirType: MirType(kind: MirTypeKind.Bool)
 fn cuda_ptr() -> MirType: MirType.ptr(cuda_u32(), true)
+fn cuda_i32_ptr() -> MirType: MirType.ptr(cuda_i32(), true)
+fn cuda_u64_ptr() -> MirType: MirType.ptr(cuda_u64(), true)
 
 fn cuda_arg(id: i64, index: i64, name: text, ty: MirType) -> MirLocal:
     MirLocal(id: LocalId(id: id), name: Some(name), type_: ty, kind: LocalKind.Arg(index), is_ghost: false)
@@ -127,7 +129,7 @@ describe "CUDA backend intensive MIR contract":
         else:
             expect(ptx).to_contain(".target sm_86")
 
-    it "keeps U32 dimensions direct and recognizes dimension-only kernels":
+    it "keeps U32 dimensions direct in explicit dimension-only kernels":
         val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
             MirInst(kind: MirInstKind.GpuBlockDim(LocalId(id: 0), 2), span: nil),
             MirInst(kind: MirInstKind.GpuGridDim(LocalId(id: 1), 0), span: nil)
@@ -135,7 +137,7 @@ describe "CUDA backend intensive MIR contract":
         val fn_ = cuda_function(
             21, "cuda_u32_dimensions", [], MirType.unit(),
             [cuda_temp(0, cuda_u32()), cuda_temp(1, cuda_u32())],
-            [block], false
+            [block], true
         )
         val ptx = compile_supported_cuda([fn_])
         expect(ptx).to_contain(".visible .entry cuda_u32_dimensions(")
@@ -196,23 +198,192 @@ describe "CUDA backend intensive MIR contract":
         expect(ptx.contains("call (%r2)")).to_equal(false)
         assert_no_placeholder_output(ptx)
 
-    it "emits global load store and shared allocation":
+    it "preserves global and shared pointer spaces through GEP copy and bitcast":
         val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
             MirInst(kind: MirInstKind.Load(LocalId(id: 1), MirOperand.copy(LocalId(id: 0))), span: nil),
             MirInst(kind: MirInstKind.Store(MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))), span: nil),
-            MirInst(kind: MirInstKind.GpuSharedAlloc(LocalId(id: 2), cuda_u32(), 64), span: nil)
+            MirInst(kind: MirInstKind.GpuSharedAlloc(LocalId(id: 2), cuda_u32(), 64), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 3), MirConstValue.Int(0), cuda_u64()), span: nil),
+            MirInst(kind: MirInstKind.GetElementPtr(LocalId(id: 4), MirOperand.copy(LocalId(id: 2)), [MirOperand.copy(LocalId(id: 3))]), span: nil),
+            MirInst(kind: MirInstKind.Store(MirOperand.copy(LocalId(id: 4)), MirOperand.copy(LocalId(id: 1))), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 5), MirOperand.copy(LocalId(id: 4))), span: nil),
+            MirInst(kind: MirInstKind.GpuAtomicOp(LocalId(id: 6), GpuAtomicOpKind.Add, MirOperand.copy(LocalId(id: 4)), MirOperand.copy(LocalId(id: 5))), span: nil),
+            MirInst(kind: MirInstKind.Copy(LocalId(id: 7), LocalId(id: 4)), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 8), MirOperand.copy(LocalId(id: 7))), span: nil),
+            MirInst(kind: MirInstKind.Bitcast(LocalId(id: 9), MirOperand.copy(LocalId(id: 7)), cuda_ptr()), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 10), MirOperand.copy(LocalId(id: 9))), span: nil),
+            MirInst(kind: MirInstKind.GpuAtomicCas(LocalId(id: 11), MirOperand.copy(LocalId(id: 4)), MirOperand.copy(LocalId(id: 5)), MirOperand.copy(LocalId(id: 1))), span: nil),
+            MirInst(kind: MirInstKind.GpuSharedAlloc(LocalId(id: 12), cuda_i32(), 1), span: nil),
+            MirInst(kind: MirInstKind.Const(LocalId(id: 13), MirConstValue.Int(1), cuda_i32()), span: nil),
+            MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 14)), "gpu_atomic_add_i32", [MirOperand.copy(LocalId(id: 12)), MirOperand.copy(LocalId(id: 13))]), span: nil),
+            MirInst(kind: MirInstKind.Move(LocalId(id: 15), LocalId(id: 4)), span: nil),
+            MirInst(kind: MirInstKind.Load(LocalId(id: 16), MirOperand.copy(LocalId(id: 15))), span: nil)
         ], terminator: MirTerminator.Ret(nil))
-        val fn_ = cuda_function(4, "cuda_memory", [cuda_ptr()], MirType.unit(), [cuda_arg(0, 0, "data", cuda_ptr()), cuda_temp(1, cuda_u32()), cuda_temp(2, cuda_ptr())], [block], true)
+        val fn_ = cuda_function(
+            4, "cuda_memory", [cuda_ptr()], MirType.unit(),
+            [
+                cuda_arg(0, 0, "data", cuda_ptr()), cuda_temp(1, cuda_u32()),
+                cuda_temp(2, cuda_ptr()), cuda_temp(3, cuda_u64()),
+                cuda_temp(4, cuda_ptr()), cuda_temp(5, cuda_u32()),
+                cuda_temp(6, cuda_u32()), cuda_temp(7, cuda_ptr()),
+                cuda_temp(8, cuda_u32()), cuda_temp(9, cuda_ptr()),
+                cuda_temp(10, cuda_u32()), cuda_temp(11, cuda_u32()),
+                cuda_temp(12, cuda_i32_ptr()), cuda_temp(13, cuda_i32()),
+                cuda_temp(14, cuda_i32()), cuda_temp(15, cuda_ptr()),
+                cuda_temp(16, cuda_u32())
+            ],
+            [block], true
+        )
         val ptx = compile_supported_cuda([fn_])
-        expect(ptx).to_contain("ld.global")
-        expect(ptx).to_contain("st.global")
         expect(ptx).to_contain("ld.global.u32 %r1, [%r0];")
         expect(ptx).to_contain("st.global.u32 [%r0], %r1;")
-        expect(ptx).to_contain(".shared")
-        expect(ptx).to_contain("shared_2")
+        expect(ptx).to_contain(".shared .u32 shared_2[64];")
         expect(ptx).to_contain("cvta.shared.u64 %r2, shared_2;")
+        expect(ptx).to_contain("cvta.to.shared.u64")
+        expect(ptx).to_contain("st.shared.u32 [")
+        expect(ptx).to_contain("ld.shared.u32 %r5, [")
+        expect(ptx).to_contain("atom.shared.add.u32 %r6, [")
+        expect(ptx).to_contain("ld.shared.u32 %r8, [")
+        expect(ptx).to_contain("ld.shared.u32 %r10, [")
+        expect(ptx).to_contain("atom.shared.cas.b32 %r11, [")
+        expect(ptx).to_contain("atom.shared.add.s32 %r14, [")
+        expect(ptx).to_contain("ld.shared.u32 %r16, [")
+        expect(ptx.contains("ld.global.u32 %r5")).to_equal(false)
+        expect(ptx.contains("st.global.u32 [%r4]")).to_equal(false)
+        expect(ptx.contains("atom.global.add.u32 %r6")).to_equal(false)
         expect(ptx).to_contain("ld.param.u64 %r0, [param_0];")
         assert_no_placeholder_output(ptx)
+
+        val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v ptxas >/dev/null 2>&1"])
+        if available == 0:
+            val ptx_path = "/tmp/simple_cuda_shared_space.ptx"
+            val cubin_path = "/tmp/simple_cuda_shared_space.cubin"
+            expect(rt_file_write_text(ptx_path, ptx)).to_equal(true)
+            val (_as_out, as_err, as_code) = rt_process_run("ptxas", ["-arch=sm_86", ptx_path, "-o", cubin_path])
+            expect(as_code).to_equal(0)
+            expect(as_err).to_equal("")
+
+    it "rejects pointers without CUDA memory-space provenance":
+        val block = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Load(LocalId(id: 1), MirOperand.copy(LocalId(id: 0))), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val fn_ = cuda_function(
+            24, "cuda_unknown_pointer_space", [], MirType.unit(),
+            [cuda_temp(0, cuda_ptr()), cuda_temp(1, cuda_u32())], [block], true
+        )
+        assert_backend_error_contains(fn_, "pointer has no memory-space provenance")
+
+    it "rejects mismatched CAS local atomics and multi-block shared provenance":
+        val bad_cas_block = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.GpuSharedAlloc(LocalId(id: 0), cuda_u32(), 1), span: nil),
+                MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(1), cuda_i64()), span: nil),
+                MirInst(kind: MirInstKind.GpuAtomicCas(LocalId(id: 2), MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 1))), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val bad_cas = cuda_function(
+            25, "cuda_bad_cas_type", [], MirType.unit(),
+            [cuda_temp(0, cuda_ptr()), cuda_temp(1, cuda_i64()), cuda_temp(2, cuda_i64())],
+            [bad_cas_block], true
+        )
+        assert_backend_error_contains(bad_cas, "CAS operands and result must match pointer element type")
+
+        val local_atomic_block = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.Alloc(LocalId(id: 0), cuda_u32()), span: nil),
+                MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(1), cuda_u32()), span: nil),
+                MirInst(kind: MirInstKind.GpuAtomicOp(LocalId(id: 2), GpuAtomicOpKind.Add, MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val local_atomic = cuda_function(
+            26, "cuda_local_atomic", [], MirType.unit(),
+            [cuda_temp(0, cuda_ptr()), cuda_temp(1, cuda_u32()), cuda_temp(2, cuda_u32())],
+            [local_atomic_block], true
+        )
+        assert_backend_error_contains(local_atomic, "atomics require global or shared memory")
+
+        val shared_blocks = [
+            MirBlock(
+                id: BlockId.entry(), label: Some("entry"),
+                instructions: [MirInst(kind: MirInstKind.GpuSharedAlloc(LocalId(id: 0), cuda_u32(), 1), span: nil)],
+                terminator: MirTerminator.Goto(BlockId(id: 1))
+            ),
+            MirBlock(
+                id: BlockId(id: 1), label: Some("use"),
+                instructions: [MirInst(kind: MirInstKind.Load(LocalId(id: 1), MirOperand.copy(LocalId(id: 0))), span: nil)],
+                terminator: MirTerminator.Ret(nil)
+            )
+        ]
+        val multi_block_shared = cuda_function(
+            27, "cuda_multiblock_shared", [], MirType.unit(),
+            [cuda_temp(0, cuda_ptr()), cuda_temp(1, cuda_u32())], shared_blocks, true
+        )
+        assert_backend_error_contains(multi_block_shared, "requires CFG dataflow lowering")
+
+    it "rejects allocation typed-atomic and vector-memory type mismatches":
+        val bad_alloc_block = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.GpuSharedAlloc(LocalId(id: 0), cuda_u32(), 1), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val bad_alloc = cuda_function(
+            29, "cuda_bad_alloc_type", [], MirType.unit(),
+            [cuda_temp(0, cuda_u64_ptr())], [bad_alloc_block], true
+        )
+        assert_backend_error_contains(bad_alloc, "shared allocation type must match destination pointer element type")
+
+        val bad_typed_atomic_block = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.GpuSharedAlloc(LocalId(id: 0), cuda_i32(), 1), span: nil),
+                MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(1), cuda_i32()), span: nil),
+                MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 2)), "gpu_atomic_add_i32", [MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))]), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val bad_typed_atomic = cuda_function(
+            30, "cuda_bad_typed_atomic_dest", [], MirType.unit(),
+            [cuda_temp(0, cuda_i32_ptr()), cuda_temp(1, cuda_i32()), cuda_temp(2, cuda_i64())],
+            [bad_typed_atomic_block], true
+        )
+        assert_backend_error_contains(bad_typed_atomic, "typed atomic destination type does not match intrinsic")
+
+        val bad_vector_block = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 2)), "gpu_vec2_load_f32", [MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))]), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val bad_vector = cuda_function(
+            31, "cuda_bad_vector_pointer", [cuda_ptr(), cuda_u64()], MirType.unit(),
+            [
+                cuda_arg(0, 0, "ptr", cuda_ptr()), cuda_arg(1, 1, "index", cuda_u64()),
+                cuda_temp(2, cuda_i32())
+            ],
+            [bad_vector_block], true
+        )
+        assert_backend_error_contains(bad_vector, "F32 vector memory intrinsic requires an F32 pointer")
+
+    it "does not assume GPU-using device-function pointer parameters are global":
+        val block = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.GpuAtomicOp(LocalId(id: 2), GpuAtomicOpKind.Add, MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val fn_ = cuda_function(
+            28, "cuda_device_pointer", [cuda_ptr(), cuda_u32()], MirType.unit(),
+            [
+                cuda_arg(0, 0, "ptr", cuda_ptr()), cuda_arg(1, 1, "value", cuda_u32()),
+                cuda_temp(2, cuda_u32())
+            ],
+            [block], false
+        )
+        assert_backend_error_contains(fn_, "pointer has no memory-space provenance")
 
     it "rejects compare-exchange through the deprecated generic atomic instruction":
         val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
@@ -261,7 +432,43 @@ describe "CUDA backend intensive MIR contract":
 
         val malformed = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_vec4_load_f32", []), span: nil)], terminator: MirTerminator.Ret(nil))
         val malformed_fn = cuda_function(10, "cuda_bad_intrinsic", [], MirType.unit(), [cuda_temp(0, cuda_u32())], [malformed], true)
-        assert_backend_error_contains(malformed_fn, "requires 2 arguments")
+        assert_backend_error_contains(malformed_fn, "requires exactly 2 arguments")
+
+        val extra = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 3)), "gpu_atomic_add_i32", [
+                MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1)), MirOperand.copy(LocalId(id: 2))
+            ]), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val extra_fn = cuda_function(
+            32, "cuda_extra_intrinsic_arg", [cuda_i32_ptr(), cuda_i32(), cuda_i32()], MirType.unit(),
+            [
+                cuda_arg(0, 0, "ptr", cuda_i32_ptr()), cuda_arg(1, 1, "value", cuda_i32()),
+                cuda_arg(2, 2, "extra", cuda_i32()), cuda_temp(3, cuda_i32())
+            ],
+            [extra], true
+        )
+        assert_backend_error_contains(extra_fn, "requires exactly 2 arguments")
+
+        val store_dest = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 4)), "gpu_vec2_store_f32", [
+                MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1)),
+                MirOperand.copy(LocalId(id: 2)), MirOperand.copy(LocalId(id: 3))
+            ]), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val store_dest_fn = cuda_function(
+            33, "cuda_store_with_dest", [cuda_ptr(), cuda_u64(), cuda_u32(), cuda_u32()], MirType.unit(),
+            [
+                cuda_arg(0, 0, "ptr", cuda_ptr()), cuda_arg(1, 1, "index", cuda_u64()),
+                cuda_arg(2, 2, "x", cuda_u32()), cuda_arg(3, 3, "y", cuda_u32()),
+                cuda_temp(4, cuda_u32())
+            ],
+            [store_dest], true
+        )
+        assert_backend_error_contains(store_dest_fn, "does not produce a destination")
 
     it "emits executable signed bounds checks for indexed kernels":
         val ptx = compile_cuda_bounds_check(cuda_i32(), "cuda_bounds_check", 24)
