@@ -555,7 +555,7 @@ expect(fallback).to_be_greater_than(escape)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 211 lines folded for reproduction.
+Runnable source: 219 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -634,8 +634,12 @@ val browser_key_end = key_body.find("                elif focused > 0:")
 expect(browser_key_start).to_be_greater_than(-1)
 expect(browser_key_end).to_be_greater_than(browser_key_start)
 val browser_key = key_body.slice(browser_key_start, browser_key_end)
+val semantic_target_start = browser_key.find(
+    "val semantic_target_id = if browser_address_editing:"
+)
 val address_key_start = browser_key.find(
-    "if browser_address_editing:"
+    "                    if browser_address_editing:",
+    semantic_target_start + 1
 )
 val non_address_key_start = browser_key.find(
     "elif keycode != KEY_ESCAPE:"
@@ -643,7 +647,13 @@ val non_address_key_start = browser_key.find(
 val key_targets_start = browser_key.find(
     "input_receipt = host_wm_input_record_semantic("
 )
-expect(address_key_start).to_be_greater_than(-1)
+expect(semantic_target_start).to_be_greater_than(-1)
+expect(address_key_start).to_be_greater_than(semantic_target_start)
+val semantic_target_block = browser_key.slice(
+    semantic_target_start, address_key_start
+)
+expect(semantic_target_block).to_contain("\"browser:parent#address\"")
+expect(semantic_target_block).to_contain("\"browser:page\"")
 expect(non_address_key_start).to_be_greater_than(address_key_start)
 expect(key_targets_start).to_be_greater_than(non_address_key_start)
 val address_key = browser_key.slice(
@@ -664,8 +674,7 @@ val title_update = address_key.find(
 val page_key_call = non_address_key.find(
     "browser_renderer.begin_key_with_shift("
 )
-val address_target = key_targets.find("\"browser:parent#address\"")
-val page_key_target = key_targets.find("\"browser:page\"")
+val semantic_target = key_targets.find("semantic_target_id,")
 expect(navigate_call).to_be_greater_than(-1)
 expect(title_update).to_be_greater_than(navigate_call)
 expect(address_key.contains(
@@ -678,8 +687,7 @@ expect(non_address_key.contains(
 expect(non_address_key.contains(
     "host_compositor_update_window_title("
 )).to_be(false)
-expect(address_target).to_be_greater_than(-1)
-expect(page_key_target).to_be_greater_than(address_target)
+expect(semantic_target).to_be_greater_than(-1)
 expect(browser_key.contains(
     "web_sessions.dispatch_key_with_shift("
 )).to_be(false)

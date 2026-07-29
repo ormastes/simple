@@ -2288,3 +2288,12 @@ implementation in progress / target evidence blocked
   bootstrap or seed fallback was used. JS reclamation and BrowserSession
   animation execution remain blocked until a fresh pure-Simple compiler
   artifact is admitted.
+- hosted input receipt tranche (2026-07-29): The production hosted key path
+  now snapshots its semantic target before Enter/Escape clears address-edit
+  state, so evidence retains `browser:parent#address` instead of falsely
+  recording `browser:page`. The shared semantic receipt contract now accepts,
+  stores, and serializes the input timestamp already supplied by every hosted
+  caller, repairing the seven/eight-argument type-check break. Focused Stage2
+  native compilation completed with zero failed files; the produced probe hit
+  the existing unhealthy native-runtime segfault, so no live interaction PASS
+  is claimed.
