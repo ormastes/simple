@@ -34,12 +34,54 @@ typedef struct {
     int paused;
 } rt_audio_slot;
 
+typedef struct {
+    uint32_t generation;
+    int live;
+} rt_audio_engine_slot;
+
+static rt_audio_engine_slot g_engine_slots[RT_AUDIO_SLOT_COUNT];
 static rt_audio_slot g_source_slots[RT_AUDIO_SLOT_COUNT];
 static rt_audio_slot g_playback_slots[RT_AUDIO_SLOT_COUNT];
 static pthread_mutex_t g_audio_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int64_t audio_handle(size_t index, uint32_t generation) {
     return (int64_t)((uint64_t)generation * RT_AUDIO_HANDLE_BASE + index + 1);
+}
+
+static rt_audio_engine_slot* audio_engine_slot(int64_t handle) {
+    if (handle <= 0) return NULL;
+    uint64_t raw = (uint64_t)handle;
+    uint64_t one_based = raw % RT_AUDIO_HANDLE_BASE;
+    uint32_t generation = (uint32_t)(raw / RT_AUDIO_HANDLE_BASE);
+    if (one_based == 0 || one_based > RT_AUDIO_SLOT_COUNT || generation == 0) {
+        return NULL;
+    }
+    rt_audio_engine_slot* slot = &g_engine_slots[one_based - 1];
+    if (!slot->live || slot->generation != generation) return NULL;
+    return slot;
+}
+
+static int64_t audio_engine_store(void) {
+    size_t i;
+    for (i = 0; i < RT_AUDIO_SLOT_COUNT; ++i) {
+        if (!g_engine_slots[i].live) {
+            if (g_engine_slots[i].generation == 0) {
+                g_engine_slots[i].generation = 1;
+            }
+            g_engine_slots[i].live = 1;
+            return audio_handle(i, g_engine_slots[i].generation);
+        }
+    }
+    return 0;
+}
+
+static int64_t audio_engine_live_count_unlocked(void) {
+    int64_t count = 0;
+    size_t i;
+    for (i = 0; i < RT_AUDIO_SLOT_COUNT; ++i) {
+        if (g_engine_slots[i].live) count += 1;
+    }
+    return count;
 }
 
 static rt_audio_slot* audio_slot(
@@ -117,30 +159,46 @@ static void audio_reap_finished(void) {
 
 int64_t rt_audio_init(void) {
     pthread_mutex_lock(&g_audio_lock);
-    if (g_audio_initialized) {
+    int initialized_here = 0;
+    if (!g_audio_initialized) {
+        ma_engine_config config = ma_engine_config_init();
+        config.sampleRate = 48000;
+        ma_result result = ma_engine_init(&config, &g_audio_engine);
+        if (result != MA_SUCCESS) {
+            pthread_mutex_unlock(&g_audio_lock);
+            return 0;
+        }
+        g_audio_initialized = 1;
+        initialized_here = 1;
+    }
+
+    int64_t handle = audio_engine_store();
+    if (handle == 0 && initialized_here) {
+        ma_engine_uninit(&g_audio_engine);
+        g_audio_initialized = 0;
+    }
+    pthread_mutex_unlock(&g_audio_lock);
+    return handle;
+}
+
+int64_t rt_audio_shutdown(int64_t engine_handle) {
+    pthread_mutex_lock(&g_audio_lock);
+    rt_audio_engine_slot* engine_slot = audio_engine_slot(engine_handle);
+    if (!engine_slot) {
+        pthread_mutex_unlock(&g_audio_lock);
+        return 0;
+    }
+    engine_slot->live = 0;
+    engine_slot->generation += 1;
+    if (engine_slot->generation == 0 ||
+        engine_slot->generation > 0x7fffffffu) {
+        engine_slot->generation = 1;
+    }
+    if (audio_engine_live_count_unlocked() > 0) {
         pthread_mutex_unlock(&g_audio_lock);
         return 1;
     }
 
-    ma_engine_config config = ma_engine_config_init();
-    config.sampleRate = 48000;
-    ma_result result = ma_engine_init(&config, &g_audio_engine);
-    if (result != MA_SUCCESS) {
-        pthread_mutex_unlock(&g_audio_lock);
-        return 0;
-    }
-
-    g_audio_initialized = 1;
-    pthread_mutex_unlock(&g_audio_lock);
-    return 1;
-}
-
-void rt_audio_shutdown(void) {
-    pthread_mutex_lock(&g_audio_lock);
-    if (!g_audio_initialized) {
-        pthread_mutex_unlock(&g_audio_lock);
-        return;
-    }
     size_t i;
     for (i = 0; i < RT_AUDIO_SLOT_COUNT; ++i) {
         audio_release_slot(&g_playback_slots[i]);
@@ -149,6 +207,7 @@ void rt_audio_shutdown(void) {
     ma_engine_uninit(&g_audio_engine);
     g_audio_initialized = 0;
     pthread_mutex_unlock(&g_audio_lock);
+    return 1;
 }
 
 /* ================================================================
@@ -425,13 +484,19 @@ void rt_audio_set_volume(int64_t playback_handle, double volume) {
 }
 
 void rt_audio_set_master_volume(double volume) {
-    if (!g_audio_initialized) return;
-    ma_engine_set_volume(&g_audio_engine, (float)volume);
+    pthread_mutex_lock(&g_audio_lock);
+    if (g_audio_initialized) {
+        ma_engine_set_volume(&g_audio_engine, (float)volume);
+    }
+    pthread_mutex_unlock(&g_audio_lock);
 }
 
 double rt_audio_get_master_volume(void) {
-    if (!g_audio_initialized) return 0.0;
-    return (double)ma_engine_get_volume(&g_audio_engine);
+    pthread_mutex_lock(&g_audio_lock);
+    double volume = g_audio_initialized
+        ? (double)ma_engine_get_volume(&g_audio_engine) : 0.0;
+    pthread_mutex_unlock(&g_audio_lock);
+    return volume;
 }
 
 /* ================================================================
@@ -471,15 +536,33 @@ void rt_audio_set_spatialization_enabled(int64_t playback_handle, int64_t enable
 }
 
 void rt_audio_set_listener_position(double x, double y, double z) {
-    ma_engine_listener_set_position(&g_audio_engine, 0, (float)x, (float)y, (float)z);
+    pthread_mutex_lock(&g_audio_lock);
+    if (g_audio_initialized) {
+        ma_engine_listener_set_position(
+            &g_audio_engine, 0, (float)x, (float)y, (float)z
+        );
+    }
+    pthread_mutex_unlock(&g_audio_lock);
 }
 
 void rt_audio_set_listener_direction(double x, double y, double z) {
-    ma_engine_listener_set_direction(&g_audio_engine, 0, (float)x, (float)y, (float)z);
+    pthread_mutex_lock(&g_audio_lock);
+    if (g_audio_initialized) {
+        ma_engine_listener_set_direction(
+            &g_audio_engine, 0, (float)x, (float)y, (float)z
+        );
+    }
+    pthread_mutex_unlock(&g_audio_lock);
 }
 
 void rt_audio_set_listener_world_up(double x, double y, double z) {
-    ma_engine_listener_set_world_up(&g_audio_engine, 0, (float)x, (float)y, (float)z);
+    pthread_mutex_lock(&g_audio_lock);
+    if (g_audio_initialized) {
+        ma_engine_listener_set_world_up(
+            &g_audio_engine, 0, (float)x, (float)y, (float)z
+        );
+    }
+    pthread_mutex_unlock(&g_audio_lock);
 }
 
 void rt_audio_set_sound_min_distance(int64_t playback_handle, double distance) {
@@ -503,6 +586,13 @@ int64_t rt_audio_live_source_count(void) {
     for (i = 0; i < RT_AUDIO_SLOT_COUNT; ++i) {
         if (g_source_slots[i].live) count += 1;
     }
+    pthread_mutex_unlock(&g_audio_lock);
+    return count;
+}
+
+int64_t rt_audio_live_device_count(void) {
+    pthread_mutex_lock(&g_audio_lock);
+    int64_t count = audio_engine_live_count_unlocked();
     pthread_mutex_unlock(&g_audio_lock);
     return count;
 }

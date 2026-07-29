@@ -87,6 +87,7 @@ Hardening belongs in codec parsers, backend lifecycle, mixer queues, and teardow
 ## Observability
 Required counters:
 - selected backend and status;
+- live device, source, and playback handles;
 - no-audio backend selected;
 - mixer command count;
 - streaming chunks decoded;
@@ -95,6 +96,17 @@ Required counters:
 - codec corrupt-input rejects;
 - teardown cleanup count.
 - SimpleOS HDA IRQ and completed-period counts.
+
+Cleanup evidence reads those native counters after teardown. It must not infer
+zero merely because the high-level `device_started` flag was cleared.
+
+Miniaudio client ownership uses generation-counted engine handles. Closing one
+client leaves the shared native engine alive for other clients; the final
+client close releases remaining global slots and the device. Repeating a close
+is safe and returns false because that invocation released nothing. Source and
+playback handles remain global in this MVP, so raw FFI clients must explicitly
+unload/stop their own handles; add per-client ownership tags only when raw
+multi-client isolation becomes a supported contract.
 
 ## Architecture Risks
 - Runtime effects declarations currently exceed sampled `runtime_audio.c` implementation evidence; implementation must reconcile declarations and C symbols.

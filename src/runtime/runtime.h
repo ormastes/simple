@@ -791,7 +791,7 @@ void        rt_fb_blit32(uint64_t dst_addr, uint64_t dst_stride_pixels,
 /* ===== Audio (miniaudio backend) ===== */
 
 int64_t  rt_audio_init(void);
-void     rt_audio_shutdown(void);
+int64_t  rt_audio_shutdown(int64_t engine_handle);
 int64_t  rt_audio_load_sound(const char* path);
 void     rt_audio_unload_sound(int64_t handle);
 int64_t  rt_audio_play(int64_t sound_handle);
@@ -806,6 +806,7 @@ double   rt_audio_get_master_volume(void);
 int64_t  rt_audio_is_playing(int64_t playback_handle);
 int64_t  rt_audio_live_source_count(void);
 int64_t  rt_audio_live_playback_count(void);
+int64_t  rt_audio_live_device_count(void);
 
 /* ===== Audio (SDL2 queued-device backend) ===== */
 

@@ -282,6 +282,15 @@ implementation-in-progress
   dummy-audio probe passes with strict C warnings enabled. The current native
   compiler still requires the host runtime object to be supplied explicitly;
   demand-selected host provider compilation remains an open compiler lane.
+- audio-handle-truth: SoundEngine cleanup no longer returns a fabricated zero
+  after clearing `device_started`. Each miniaudio client now owns a distinct
+  generation-counted engine handle; closing one client preserves the shared
+  device and playback for remaining clients, and only the last close releases
+  global resources. Duplicate stale close is a safe no-op reported as false.
+  The full-stack demo records the real pre-start device/source/playback
+  baseline and requires the same count after teardown. The strict native
+  two-client raw PCM probe passes init, first-client close, continued playback,
+  stop, stale-close rejection, final close, and zero live-handle checks.
 - host-resize-rendering: The GLFW facade now exposes logical window size
   separately from framebuffer size and content scale. The live demo renders
   and presents at current framebuffer dimensions, scales logical pointer

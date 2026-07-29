@@ -15,7 +15,8 @@ double spl_as_float(SplValue value) {
 }
 
 int main(void) {
-    if (!rt_audio_init()) {
+    int64_t engine = rt_audio_init();
+    if (!engine) {
         puts("UNAVAILABLE: miniaudio device");
         return 77;
     }
@@ -30,15 +31,15 @@ int main(void) {
     }
     int64_t playback = rt_audio_play_pcm_f32(&samples, 2, 48000);
     if (!playback || rt_audio_live_playback_count() < 1) {
-        rt_audio_shutdown();
+        rt_audio_shutdown(engine);
         return 2;
     }
     rt_audio_stop(playback);
     if (rt_audio_live_playback_count() != 0) {
-        rt_audio_shutdown();
+        rt_audio_shutdown(engine);
         return 3;
     }
-    rt_audio_shutdown();
+    rt_audio_shutdown(engine);
     puts("PASS: miniaudio PCM playback handles returned to baseline");
     return 0;
 }
