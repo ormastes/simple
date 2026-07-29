@@ -7,7 +7,7 @@ mod special;
 use super::{
     eval_arg, eval_arg_int, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env,
     exec_function_with_values, find_and_exec_method, instantiate_class, try_method_missing, Enums, ImplMethods,
-    BITFIELDS, BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, TRAIT_IMPLS,
+    BITFIELDS, BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, TRAIT_IMPLS,
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{format_f32_display, Env, Value};
@@ -1060,10 +1060,40 @@ pub(crate) fn evaluate_method_call(
                     }
                 }
 
-                // Check if it's a static method on the enum
+                // Check if it's a static method on the enum (declared inline in
+                // the enum body, e.g. `enum E: ... static fn make() -> E: ...`).
                 for m in &enum_def.methods {
                     if m.name == method && m.params.first().is_none_or(|p| p.name != "self") {
                         return exec_function(m, args, env, functions, classes, enums, impl_methods, None);
+                    }
+                }
+
+                // Also check static methods declared via a separate `impl
+                // EnumName:` block. These are registered into `impl_methods`
+                // (module-local) / `GLOBAL_IMPL_METHODS` (cross-module
+                // fallback) by evaluate_module_impl exactly like enum-body
+                // methods are registered into `enum_def.methods` above --
+                // without this check, a same-file `impl Enum:` static was
+                // never found because the only enum-callee dispatch path that
+                // consults impl_methods is the imported-module Dict-export
+                // path (`Value::Dict` receiver in this same function), which
+                // an entry-file enum never goes through since it has no
+                // `use` statement rebinding its env entry away from
+                // `Value::EnumType`. See bug doc
+                // enum_impl_static_fn_scoping_2026-07-29.md.
+                let impl_static = impl_methods
+                    .get(enum_name.as_str())
+                    .and_then(|methods| methods.iter().find(|m| m.name == method).cloned())
+                    .or_else(|| {
+                        GLOBAL_IMPL_METHODS.with(|cell| {
+                            cell.borrow()
+                                .get(enum_name.as_str())
+                                .and_then(|methods| methods.iter().find(|m| m.name == method).cloned())
+                        })
+                    });
+                if let Some(m) = impl_static {
+                    if m.params.first().is_none_or(|p| p.name != "self") {
+                        return exec_function(&m, args, env, functions, classes, enums, impl_methods, None);
                     }
                 }
 
