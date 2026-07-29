@@ -22,6 +22,7 @@ use compiler.driver.driver_source_loading.{
 }
 use compiler.driver.watcher.watcher_client.{check_shb_freshness}
 use compiler.driver.cache.cache_types.{CACHE_FRESH}
+use compiler.driver.driver_log_helpers.{log_phase}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
@@ -129,6 +130,8 @@ impl CompilerDriver:
             return (self.ctx, self.ctx.errors.len() == 0)
         while i < input_len:
             val input_path = driver_inputs[i]
+            log_phase(
+                "phase1:load_sources:input:start index={i} path={input_path}")
             val loaded = _driver_collect_sources(input_path)
             for s in loaded:
                 val source_key = s.path + "::" + s.module_name
@@ -137,7 +140,11 @@ impl CompilerDriver:
                     all_sources = all_sources.push(s)
             if input_path.starts_with("src/"):
                 has_project_source = true
+            log_phase(
+                "phase1:load_sources:input:done index={i} loaded={loaded.len()} total={all_sources.len()}")
             i = i + 1
+        log_phase(
+            "phase1:load_sources:seeded inputs={input_len} total={all_sources.len()}")
 
         # ROOT FIX (#138 Wall #1): a native-build seeded with one entry used to
         # load ONLY the entry file — never its import closure. ctx.modules then
@@ -177,7 +184,12 @@ impl CompilerDriver:
             var closure_seen_mods = _driver_text_bucket_set_new(512)
             var closure_scanned_paths = _driver_text_bucket_set_new(512)
             var closure_idx = 0
+            log_phase(
+                "phase1:load_sources:closure:start total={all_sources.len()}")
             while closure_idx < all_sources.len():
+                if closure_idx % 64 == 0:
+                    log_phase(
+                        "phase1:load_sources:closure:progress index={closure_idx} total={all_sources.len()}")
                 val closure_src = all_sources[closure_idx]
                 # One physical file may be present under several module aliases.
                 # Its imports are identical for every alias, so scanning each
@@ -234,6 +246,8 @@ impl CompilerDriver:
                             all_sources = all_sources.push(SourceFile(path: closure_file, content: closure_content, module_name: closure_mp))
                             closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, closure_mp)
                 closure_idx = closure_idx + 1
+            log_phase(
+                "phase1:load_sources:closure:done scanned={closure_idx} total={all_sources.len()}")
             # An explicit-entry walk is a closure even when import resolution
             # reports an error. Keep that error bounded to the requested graph
             # instead of hiding it behind an unrelated whole-workspace failure.
