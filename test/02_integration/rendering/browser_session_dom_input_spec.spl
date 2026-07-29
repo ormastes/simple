@@ -2,6 +2,11 @@ use std.spec.*
 
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id
+}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity, be_dom_find_by_tag, be_dom_find_path_to_id,
     be_dom_get_attr, be_dom_get_text_content, be_dom_has_attr
@@ -25,6 +30,84 @@ fn _dom_input_pixels_equal(left: [u32], right: [u32]) -> bool:
     true
 
 describe "BrowserSession live DOM input":
+
+    # @manual: show
+    # @capture(html)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should parse mixed-case document tags through layout Draw IR and pixels":
+        step("Open a document with uppercase structural and visible tags")
+        var session = BrowserSession.new()
+        val opened = session.open_html(
+            "https://example.test/mixed-case",
+            "<HTML><HEAD><TITLE>Case İ</TITLE></HEAD><BODY>" +
+            "<P id='case' style='display:block;width:24px;height:16px;" +
+            "background-color:#2563eb'>Visible İ</P></BODY></HTML>"
+        ).is_ok()
+        expect(session.current_title).to_equal("Case İ")
+        val paragraphs = be_dom_find_by_tag(session.dom_root(), "p")
+        expect(paragraphs.len()).to_equal(1)
+        val paragraph_id = be_dom_get_attr(paragraphs[0], "id")
+        val paragraph_text = be_dom_get_text_content(paragraphs[0])
+        expect(paragraph_id).to_equal("case")
+        expect(paragraph_text).to_equal("Visible İ")
+
+        step("Inspect the canonical web semantic style and layout box")
+        val rendered = session.render_html_document()
+        val display = simple_web_layout_debug_style_by_id(
+            rendered, "case", "display"
+        )
+        expect(display).to_equal("block")
+        val layout_width = simple_web_layout_debug_layout_by_id(
+            rendered, 64, 48, "case", "w"
+        )
+        expect(layout_width).to_equal("24")
+        val layout_height = simple_web_layout_debug_layout_by_id(
+            rendered, 64, 48, "case", "h"
+        )
+        expect(layout_height).to_equal("16")
+
+        step("Require matching final Draw IR and visible pixels")
+        val composition = WebRenderBackend.create(
+            "pure_simple", 64, 48
+        ).render_html_to_draw_ir(rendered)
+        var box_found = false
+        var box_geometry_ok = true
+        var text_found = false
+        var sources_ok = true
+        var tag = ""
+        for batch in composition.batches:
+            if batch.source.source_kind != "html_ast":
+                sources_ok = false
+            for command in batch.commands:
+                if command.component_id == "case":
+                    box_found = true
+                    if command.width != 24 or command.height != 16:
+                        box_geometry_ok = false
+                    for property in command.computed_style:
+                        if property.key == "tag":
+                            tag = property.value
+                if (
+                    command.kind == "text" and
+                    command.text_value == "Visible İ" and
+                    command.parent_id == "case"
+                ):
+                    text_found = true
+        expect(box_found).to_equal(true)
+        expect(text_found).to_equal(true)
+        expect(tag).to_equal("p")
+        val pixels = session.render_to_pixels(64, 48).pixel_data
+        val visible_pixels = _count_dom_input_color(
+            pixels, 0xFF2563EBu32
+        )
+        expect(
+            "{opened}|{session.current_title}|{paragraphs.len()}|" +
+            "{paragraph_id}|{paragraph_text}|{display}|" +
+            "{layout_width}|{layout_height}|{sources_ok}|{box_found}|" +
+            "{box_geometry_ok}|{text_found}|{tag}|{visible_pixels > 0}"
+        ).to_equal(
+            "true|Case İ|1|case|Visible İ|block|24|16|" +
+            "true|true|true|true|p|true"
+        )
 
     it "runs an inline click handler and renders the checkbox default state":
         var session = BrowserSession.new()
@@ -238,3 +321,40 @@ describe "BrowserSession live DOM input":
         val inputs = be_dom_find_by_tag(session.dom_root(), "input")
         expect(be_dom_get_attr(inputs[0], "data-focused")).to_equal("")
         expect(be_dom_get_attr(inputs[1], "data-focused")).to_equal("true")
+
+    it "blurs the old control before focus mutates and paints the new state":
+        step("Open two controls whose focus transition mutates rendered CSS")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/focus-order",
+            "<html><head><style>#stage{width:32px;height:24px;background-color:#ef4444}.blurred{background-color:#f59e0b}.focused{background-color:#2563eb}</style></head><body><div id='stage'></div><input id='first' onblur=\"document.title=document.title+'blur>';document.getElementById('stage').className='blurred'\"><input id='second' onfocus=\"document.title=document.title+'focus>';document.getElementById('stage').className='focused'\"></body></html>"
+        ).is_ok()).to_equal(true)
+
+        step("Focus the first control, then move focus to the second")
+        expect(session.set_dom_text_input("first", "Ada").is_ok()).to_equal(true)
+        expect(session.eval_script("document.title=''").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input("second", "Bob").is_ok()).to_equal(true)
+
+        step("Require blur-before-focus state through DOM, Draw IR, and pixels")
+        expect(session.current_title).to_equal("blur>focus>")
+        val inputs = be_dom_find_by_tag(session.dom_root(), "input")
+        expect(be_dom_get_attr(inputs[0], "data-focused")).to_equal("")
+        expect(be_dom_get_attr(inputs[1], "data-focused")).to_equal("true")
+        val rendered = session.render_html_document()
+        expect(rendered).to_contain("id=\"stage\" class=\"focused\"")
+        val composition = WebRenderBackend.create(
+            "pure_simple", 64, 64
+        ).render_html_to_draw_ir(rendered)
+        var stage_color = 0u32
+        for batch in composition.batches:
+            for command in batch.commands:
+                if command.component_id == "stage":
+                    stage_color = command.color
+        expect(stage_color).to_equal(0xFF2563EBu32)
+        val pixels = session.render_to_pixels(64, 64).pixel_data
+        expect(_count_dom_input_color(
+            pixels, 0xFF2563EBu32
+        )).to_be_greater_than(0)
+        expect(_count_dom_input_color(
+            pixels, 0xFFF59E0Bu32
+        )).to_equal(0)

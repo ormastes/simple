@@ -1259,6 +1259,10 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("orphans", "{st.orphans}"),
         draw_ir_style_prop("widows", "{st.widows}")
     ]
+    if backdrop_requested:
+        props.push(draw_ir_style_prop(
+            "backdrop-filter-fallback-material-hash", ""
+        ))
     if material_ready:
         props.push(draw_ir_style_prop("wm-material-request", "window-surface-glass"))
         props.push(draw_ir_style_prop(
@@ -1738,6 +1742,11 @@ fn _html_draw_ir_overlay_rect(
 fn _html_draw_ir_abs_i32(value: i32) -> i64:
     if value < 0: 0 - value.to_i64() else: value.to_i64()
 
+fn _html_draw_ir_saturated_i32(value: i64) -> i32:
+    _html_draw_ir_clamp_i64(
+        value, 0i64 - 2147483647i64 - 1i64, 2147483647i64
+    ).to_i32()
+
 fn _html_draw_ir_visible(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     i: i32, clip: ClipRect
@@ -1882,12 +1891,215 @@ fn _html_draw_ir_commands(
     width: i32, height: i32, vector_fonts: bool,
     target_keys: [text], overlay: BrowserTextInputOverlay,
     visible_nodes: [bool], images: [SimpleOsHostGpuImageResource]
-) -> [DrawIrCommand]:
+) -> ([DrawIrCommand], [i32]):
     val clip_cache = build_ancestor_clip_cache(
         nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
     )
     var commands: [DrawIrCommand] = []
+    var owner_nodes: [i32] = []
+    var scrollbar_lowering = false
+    for st in styles:
+        if st.overflow_auto_y:
+            scrollbar_lowering = true
     val paint_order = _html_draw_ir_node_paint_order(nodes, styles)
+    # Cache subtree geometry only when a scrollport exists. A clipping child
+    # contributes its own border edge, never its hidden descendants.
+    var descendant_bottom: [i64] = []
+    var subtree_last_paint: [i32] = []
+    var scrollbar_commands_at: [[DrawIrCommand]] = []
+    var scrollbar_owners_at: [[i32]] = []
+    if scrollbar_lowering:
+        descendant_bottom = [0i64; nodes.len()]
+        var extent_init = 0
+        while extent_init < nodes.len():
+            descendant_bottom[extent_init] = (
+                boxes.by[extent_init].to_i64() +
+                boxes.bh[extent_init].to_i64()
+            )
+            extent_init = extent_init + 1
+        var extent_index = nodes.len() - 1
+        while extent_index >= 0:
+            val own_bottom = (
+                boxes.by[extent_index].to_i64() +
+                boxes.bh[extent_index].to_i64()
+            )
+            val extent_parent = nodes[extent_index].parent
+            if extent_parent >= 0:
+                val propagated_bottom = if (
+                    styles[extent_index].overflow_hidden or
+                    styles[extent_index].overflow_auto_y
+                ):
+                    own_bottom
+                else:
+                    descendant_bottom[extent_index]
+                if propagated_bottom > descendant_bottom[extent_parent]:
+                    descendant_bottom[extent_parent] = propagated_bottom
+            extent_index = extent_index - 1
+        # Schedule chrome immediately after the owner's last painted
+        # descendant. This keeps it above owned content, below later stacking
+        # contexts/glass, and contiguous with its opacity subtree.
+        subtree_last_paint = [0; nodes.len()]
+        var order_index = 0
+        while order_index < paint_order.len():
+            subtree_last_paint[paint_order[order_index]] = order_index
+            order_index = order_index + 1
+        var subtree_index = nodes.len() - 1
+        while subtree_index >= 0:
+            val subtree_parent = nodes[subtree_index].parent
+            if (
+                subtree_parent >= 0 and
+                subtree_last_paint[subtree_index] >
+                    subtree_last_paint[subtree_parent]
+            ):
+                subtree_last_paint[subtree_parent] = (
+                    subtree_last_paint[subtree_index]
+                )
+            subtree_index = subtree_index - 1
+        scrollbar_commands_at = [[]; paint_order.len()]
+        scrollbar_owners_at = [[]; paint_order.len()]
+        var scrollbar_index = nodes.len() - 1
+        while scrollbar_index >= 0:
+            val st = styles[scrollbar_index]
+            if (
+                scrollbar_index < visible_nodes.len() and
+                visible_nodes[scrollbar_index] and
+                nodes[scrollbar_index].tag != "#text" and
+                st.overflow_auto_y
+            ):
+                val raw_track_h = (
+                    boxes.bh[scrollbar_index].to_i64() -
+                    st.border_t.to_i64() - st.border_b.to_i64()
+                )
+                val track_h64 = _html_draw_ir_clamp_i64(
+                    raw_track_h, 0, 2147483647
+                )
+                val inner_width64 = (
+                    boxes.bw[scrollbar_index].to_i64() -
+                    st.border_l.to_i64() - st.border_r.to_i64()
+                )
+                val track_x64 = (
+                    boxes.bx[scrollbar_index].to_i64() +
+                    boxes.bw[scrollbar_index].to_i64() -
+                    st.border_r.to_i64() - 15
+                )
+                val track_y64 = (
+                    boxes.by[scrollbar_index].to_i64() +
+                    st.border_t.to_i64()
+                )
+                val content_extent = (
+                    descendant_bottom[scrollbar_index] - track_y64
+                )
+                if (
+                    inner_width64 >= 15 and track_h64 >= 8 and
+                    (
+                        st.overflow_scroll_y or
+                        content_extent > track_h64
+                    )
+                ):
+                    val track_x = _html_draw_ir_saturated_i32(track_x64)
+                    val track_y = _html_draw_ir_saturated_i32(track_y64)
+                    val track_h = _html_draw_ir_saturated_i32(track_h64)
+                    val node_clip = paint_clip_at(
+                        clip_cache, scrollbar_index
+                    )
+                    val scrollport_clip = clip_intersect(
+                        node_clip,
+                        _html_draw_ir_saturated_i32(
+                            boxes.bx[scrollbar_index].to_i64() +
+                            st.border_l.to_i64()
+                        ),
+                        track_y,
+                        _html_draw_ir_saturated_i32(
+                            boxes.bx[scrollbar_index].to_i64() +
+                            boxes.bw[scrollbar_index].to_i64() -
+                            st.border_r.to_i64()
+                        ),
+                        _html_draw_ir_saturated_i32(
+                            track_y64 + track_h64
+                        )
+                    )
+                    if (
+                        scrollport_clip.x1 > scrollport_clip.x0 and
+                        scrollport_clip.y1 > scrollport_clip.y0
+                    ):
+                        val component_id = _html_draw_ir_component_id(
+                            nodes[scrollbar_index], scrollbar_index
+                        )
+                        val track_color = if (
+                            st.scrollbar_track_color != 0u32
+                        ):
+                            st.scrollbar_track_color
+                        else:
+                            argb(209, 213, 219)
+                        val thumb_color = if (
+                            st.scrollbar_thumb_color != 0u32
+                        ):
+                            st.scrollbar_thumb_color
+                        else:
+                            argb(107, 114, 128)
+                        var track = _html_draw_ir_overlay_rect(
+                            component_id + "_scrollbar_track",
+                            ClipRect(
+                                x0: track_x, y0: track_y,
+                                x1: _html_draw_ir_saturated_i32(
+                                    track_x64 + 15
+                                ),
+                                y1: _html_draw_ir_saturated_i32(
+                                    track_y64 + track_h64
+                                )
+                            ),
+                            track_color, scrollport_clip
+                        )
+                        track.parent_id = component_id
+                        track.computed_style = [
+                            draw_ir_style_prop(
+                                "scrollbar-part", "track"
+                            ),
+                            draw_ir_style_prop(
+                                "scrollbar-color", "{track_color}"
+                            )
+                        ]
+                        val effective_extent = if (
+                            content_extent > track_h64
+                        ):
+                            content_extent
+                        else:
+                            track_h64
+                        var thumb_h64 = (
+                            track_h64 * track_h64 / effective_extent
+                        )
+                        if thumb_h64 < 16:
+                            thumb_h64 = 16
+                        if thumb_h64 > track_h64:
+                            thumb_h64 = track_h64
+                        var thumb = _html_draw_ir_overlay_rect(
+                            component_id + "_scrollbar_thumb",
+                            ClipRect(
+                                x0: track_x, y0: track_y,
+                                x1: _html_draw_ir_saturated_i32(
+                                    track_x64 + 15
+                                ),
+                                y1: _html_draw_ir_saturated_i32(
+                                    track_y64 + thumb_h64
+                                )
+                            ),
+                            thumb_color, scrollport_clip
+                        )
+                        thumb.parent_id = component_id
+                        thumb.computed_style = [
+                            draw_ir_style_prop(
+                                "scrollbar-part", "thumb"
+                            ),
+                            draw_ir_style_prop(
+                                "scrollbar-color", "{thumb_color}"
+                            )
+                        ]
+                        val flush_at = subtree_last_paint[scrollbar_index]
+                        scrollbar_commands_at[flush_at].push(track)
+                        scrollbar_owners_at[flush_at].push(scrollbar_index)
+                        scrollbar_commands_at[flush_at].push(thumb)
+                        scrollbar_owners_at[flush_at].push(scrollbar_index)
+            scrollbar_index = scrollbar_index - 1
     var paint_index: i32 = 0
     while paint_index < paint_order.len():
         val i = paint_order[paint_index]
@@ -1904,6 +2116,7 @@ fn _html_draw_ir_commands(
             )
             node_command.parent_id = parent_id
             commands.push(node_command)
+            owner_nodes.push(i)
             if styles[i].background_image_uri != "" or styles[i].bg_layers_raw != "":
                 val background_layers = _html_draw_ir_background_layers(styles[i])
                 var backgrounds_ready = background_layers.len() > 0
@@ -1928,17 +2141,20 @@ fn _html_draw_ir_commands(
                 if backgrounds_ready and lowered_backgrounds.len() > 0:
                     for background in lowered_backgrounds:
                         commands.push(background)
+                        owner_nodes.push(i)
                     var border_overlay = _html_draw_ir_background_border_overlay(
                         nodes, styles, boxes, i, node_clip, vector_fonts
                     )
                     border_overlay.parent_id = component_id
                     commands.push(border_overlay)
+                    owner_nodes.push(i)
             if val image_command = _html_draw_ir_image_command(
                 nodes, styles, boxes, i, images, node_clip
             ):
                 var image = image_command
                 image.parent_id = component_id
                 commands.push(image)
+                owner_nodes.push(i)
             val overlay_target = (
                 i < target_keys.len() and
                 target_keys[i] != "" and
@@ -1968,12 +2184,14 @@ fn _html_draw_ir_commands(
                     )
                     selection.parent_id = component_id
                     commands.push(selection)
+                    owner_nodes.push(i)
                 if plan.text_value != "":
                     var input_text = _html_draw_ir_input_text_command_from_plan(
                         nodes[i], styles[i], i, plan
                     )
                     input_text.parent_id = component_id
                     commands.push(input_text)
+                    owner_nodes.push(i)
                 if plan.caret_present:
                     var caret = _html_draw_ir_overlay_rect(
                         component_id + "_caret",
@@ -1983,8 +2201,14 @@ fn _html_draw_ir_commands(
                     )
                     caret.parent_id = component_id
                     commands.push(caret)
+                    owner_nodes.push(i)
+        if scrollbar_lowering:
+            for scrollbar_command in scrollbar_commands_at[paint_index]:
+                commands.push(scrollbar_command)
+            for scrollbar_owner in scrollbar_owners_at[paint_index]:
+                owner_nodes.push(scrollbar_owner)
         paint_index = paint_index + 1
-    commands
+    (commands, owner_nodes)
 
 fn _html_draw_ir_canvas_command(width: i32, height: i32, color: u32) -> DrawIrCommand:
     val rect = draw_ir_rect_bounds(0, 0, width, height)

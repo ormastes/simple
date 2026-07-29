@@ -16,6 +16,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_set_children
 }
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style}
+use common.web.html_escape.{html_escape_core}
 
 val HTML_MAX_TREE_DEPTH: i32 = 512
 val HTML_MAX_NODES: i64 = 65536
@@ -23,6 +24,7 @@ val HTML_MAX_NODES: i64 = 65536
 # Preallocated owner keeps stack mutation O(1) without aliased array parameters.
 class _TreeStack:
     nodes: [BeDomNode]
+    parent_indices: [i32]
     length: i32
     empty: BeDomNode
 
@@ -46,7 +48,7 @@ class _TreeStack:
     me push_open(node: BeDomNode):
         if self.length >= self.nodes.len():
             val completed_idx = self.length - 1
-            val parent_idx = completed_idx - 1
+            val parent_idx = self.parent_indices[completed_idx]
             val completed = self.nodes[completed_idx]
             var parent = self.nodes[parent_idx]
             self.nodes[completed_idx] = self.empty
@@ -55,6 +57,18 @@ class _TreeStack:
             self.nodes[parent_idx] = parent
             self.length = completed_idx
         self.nodes[self.length] = node
+        self.parent_indices[self.length] = self.length - 1
+        self.length = self.length + 1
+
+    me foster_push_open(node: BeDomNode):
+        var table_idx = self.length - 1
+        while table_idx >= 0 and be_dom_get_tag(self.nodes[table_idx]) != "table":
+            table_idx = table_idx - 1
+        val parent_idx = if table_idx > 0: table_idx - 1 else: self.length - 1
+        if self.length >= self.nodes.len():
+            self.close_top()
+        self.nodes[self.length] = node
+        self.parent_indices[self.length] = parent_idx
         self.length = self.length + 1
 
     me replace_top(node: BeDomNode):
@@ -71,7 +85,7 @@ class _TreeStack:
     me close_top():
         if self.length <= 1: return
         val completed_idx = self.length - 1
-        val parent_idx = completed_idx - 1
+        val parent_idx = self.parent_indices[completed_idx]
         val completed = self.nodes[completed_idx]
         var parent = self.nodes[parent_idx]
         self.nodes[completed_idx] = self.empty
@@ -85,7 +99,7 @@ class _TreeStack:
         while limit > 0 and self.length > 1:
             limit = limit - 1
             val completed_idx = self.length - 1
-            val parent_idx = completed_idx - 1
+            val parent_idx = self.parent_indices[completed_idx]
             val top_tag = be_dom_get_tag(self.nodes[completed_idx])
             val completed = self.nodes[completed_idx]
             var parent = self.nodes[parent_idx]
@@ -207,6 +221,18 @@ pub class TreeBuilderResult:
     src_paths: [text]
     truncated: bool
 
+pub class HtmlFlatNode:
+    """Canonical bounded HTML node projected in pre-order."""
+    tag: text
+    text_data: text
+    normalized_attrs: text
+    parent: i32
+    depth: i32
+
+pub class HtmlFlatProjection:
+    nodes: [HtmlFlatNode]
+    truncated: bool
+
 pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
     """Build a BeDomNode tree. Returns a #document node with an html child."""
     val result = html_tree_builder_build_with_scripts(html_text)
@@ -262,13 +288,18 @@ pub fn html_tree_builder_build_with_parse_limits(
     next_node_id = next_node_id + 1
 
     val empty_node = BeDomNode.element(0, "")
-    val stack = _TreeStack(nodes: [empty_node; HTML_MAX_TREE_DEPTH], length: 0, empty: empty_node)
+    val stack = _TreeStack(
+        nodes: [empty_node; HTML_MAX_TREE_DEPTH],
+        parent_indices: [-1; HTML_MAX_TREE_DEPTH],
+        length: 0, empty: empty_node
+    )
     stack.push_open(doc_node)
     stack.push_open(html_el)
     stack.push_open(head_el)
 
     var in_body = false
     var in_script = false
+    var script_in_template = false
     var script_content = ""
     var script_src = ""
     var skipped_raw_text_tag = ""
@@ -297,17 +328,39 @@ pub fn html_tree_builder_build_with_parse_limits(
         elif tok.token_kind == HtmlTokenKind.StartTag:
             val t = tok.tag_name
 
-            if t == "html" or t == "head":
-                pass_dn  # already implicit
+            if t == "html":
+                val html_idx = stack.find_tag("html")
+                if html_idx >= 0:
+                    stack.nodes[html_idx] = _apply_attrs(
+                        stack.nodes[html_idx], tok.attrs
+                    )
+
+            elif t == "head":
+                val head_idx = stack.find_tag("head")
+                if head_idx >= 0:
+                    stack.nodes[head_idx] = _apply_attrs(
+                        stack.nodes[head_idx], tok.attrs
+                    )
 
             elif t == "body":
                 if not in_body:
                     # Pop head, push body
                     stack.close_top()
-                    stack.push_open(body_el)
+                    stack.push_open(_apply_attrs(body_el, tok.attrs))
                     in_body = true
+                else:
+                    val body_idx = stack.find_tag("body")
+                    if body_idx >= 0:
+                        stack.nodes[body_idx] = _apply_attrs(
+                            stack.nodes[body_idx], tok.attrs
+                        )
 
-            elif t == "title" or t == "meta" or t == "link" or t == "base":
+            elif t == "title":
+                val title_raw = BeDomNode.element(next_node_id, t)
+                next_node_id = next_node_id + 1
+                stack.push_open(_apply_attrs(title_raw, tok.attrs))
+
+            elif t == "meta" or t == "link" or t == "base":
                 # head elements — add to top of stack as void children
                 val he_raw = BeDomNode.element(next_node_id, t)
                 next_node_id = next_node_id + 1
@@ -321,6 +374,7 @@ pub fn html_tree_builder_build_with_parse_limits(
                     stack.push_open(body_el)
                     in_body = true
                 in_script = true
+                script_in_template = stack.find_tag("template") >= 0
                 script_content = ""
                 # Check for src attribute
                 script_src = ""
@@ -378,7 +432,7 @@ pub fn html_tree_builder_build_with_parse_limits(
                     val fp_raw = BeDomNode.element(next_node_id, t)
                     next_node_id = next_node_id + 1
                     val fp_el = _apply_attrs(fp_raw, tok.attrs)
-                    stack.foster_append(fp_el)
+                    stack.foster_push_open(fp_el)
                 else:
                     val el_raw = BeDomNode.element(next_node_id, t)
                     next_node_id = next_node_id + 1
@@ -390,10 +444,11 @@ pub fn html_tree_builder_build_with_parse_limits(
             if et == "script" and in_script:
                 # M15: Close script tag — collect content
                 in_script = false
-                if script_src != "":
-                    script_src_paths.push(script_src)
-                elif script_content.trim().len() > 0:
-                    script_bodies.push(script_content)
+                if not script_in_template:
+                    if script_src != "":
+                        script_src_paths.push(script_src)
+                    elif script_content.trim().len() > 0:
+                        script_bodies.push(script_content)
                 # Store content as a real DOM text child.
                 var top = stack.top()
                 top.children = [BeDomNode.text_node(next_node_id, script_content)]
@@ -404,6 +459,7 @@ pub fn html_tree_builder_build_with_parse_limits(
                     stack.close_top()
                 script_content = ""
                 script_src = ""
+                script_in_template = false
             elif et == skipped_raw_text_tag:
                 skipped_raw_text_tag = ""
             elif et == "html" or et == "body" or et == "head":
@@ -418,6 +474,10 @@ pub fn html_tree_builder_build_with_parse_limits(
                 script_content = "{script_content}{data}"
             elif skipped_raw_text_tag != "":
                 pass_dn
+            elif be_dom_get_tag(stack.top()) == "title":
+                val title_text = BeDomNode.text_node(next_node_id, data)
+                next_node_id = next_node_id + 1
+                stack.append_child(title_text)
             elif not in_body:
                 if data.trim().len() > 0:
                     # Non-whitespace before body — switch to body
@@ -430,8 +490,19 @@ pub fn html_tree_builder_build_with_parse_limits(
             else:
                 val tn2 = BeDomNode.text_node(next_node_id, data)
                 next_node_id = next_node_id + 1
-                stack.append_child(tn2)
+                if (
+                    data.trim().len() > 0 and
+                    _is_table_context(be_dom_get_tag(stack.top()))
+                ):
+                    stack.foster_append(tn2)
+                else:
+                    stack.append_child(tn2)
 
+    # Empty and head-only documents still own one independently synthesized
+    # body element.
+    if not in_body:
+        stack.close_top()
+        stack.push_open(body_el)
     # Drain remaining open elements
     while stack.len() > 1:
         stack.close_top()
@@ -441,3 +512,66 @@ pub fn html_tree_builder_build_with_parse_limits(
         doc: final_doc, scripts: script_bodies,
         src_paths: script_src_paths, truncated: truncated
     )
+
+fn _flat_projection_attrs(node: BeDomNode) -> text:
+    var keys = node.attributes.keys()
+    keys.sort()
+    var normalized = ""
+    for key in keys:
+        if not key.starts_with("\u0000"):
+            normalized = normalized + " " + key + "=\"" +
+                html_escape_core(node.attributes.get(key) ?? "") + "\""
+    normalized
+
+pub fn html_tree_builder_flat_projection(
+    html_text: text
+) -> HtmlFlatProjection:
+    html_tree_builder_flat_projection_with_limits(
+        html_text, HTML_MAX_NODES, HTML_MAX_TOKENS, HTML_MAX_ATTRIBUTES
+    )
+
+pub fn html_tree_builder_flat_projection_with_limits(
+    html_text: text, requested_node_limit: i64,
+    requested_token_limit: i32, requested_attr_limit: i32
+) -> HtmlFlatProjection:
+    """Build once canonically, then flatten in authoritative child order."""
+    val built = html_tree_builder_build_with_parse_limits(
+        html_text, requested_node_limit,
+        requested_token_limit, requested_attr_limit
+    )
+    val projection_limit = if requested_node_limit < 4:
+        4
+    elif requested_node_limit > HTML_MAX_NODES:
+        HTML_MAX_NODES
+    else:
+        requested_node_limit
+    var nodes: [HtmlFlatNode] = []
+    var node_stack: [BeDomNode] = [built.doc]
+    var parent_stack: [i32] = [-1]
+    var depth_stack: [i32] = [0]
+    var truncated = built.truncated
+    while node_stack.len() > 0:
+        val node = node_stack.pop()
+        val parent = parent_stack.pop()
+        val depth = depth_stack.pop()
+        if nodes.len() >= projection_limit:
+            truncated = true
+            node_stack = []
+            parent_stack = []
+            depth_stack = []
+            continue
+        val projected_index = nodes.len() as i32
+        nodes.push(HtmlFlatNode(
+            tag: node.tag_name,
+            text_data: node.data,
+            normalized_attrs: _flat_projection_attrs(node),
+            parent: parent,
+            depth: depth
+        ))
+        var child_i = node.children.len()
+        while child_i > 0:
+            child_i = child_i - 1
+            node_stack.push(node.children[child_i])
+            parent_stack.push(projected_index)
+            depth_stack.push(depth + 1)
+    HtmlFlatProjection(nodes: nodes, truncated: truncated)

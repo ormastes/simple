@@ -1,10 +1,10 @@
 # codex-system-test
 # @req REQ-WEB-BROWSER-004
 # @evidence-display: links
-"""# Fixed HTML table formatting
+"""# HTML table formatting
 
-Proves the bounded fixed-layout table slice through computed Style, canonical
-Draw IR parentage/geometry, and Engine2D absolute pixels.
+Proves bounded fixed-layout and explicit-width automatic-layout table slices
+through computed Style, canonical Draw IR geometry, and Engine2D pixels.
 """
 use std.spec.*
 use common.ui.draw_ir.{DrawIrCommand}
@@ -33,7 +33,7 @@ fn _table_style(
             return property.value
     ""
 
-describe "Fixed HTML table formatting":
+describe "HTML table formatting":
     # @manual: show
     # @capture(html)
     # @capture(artifact)
@@ -207,3 +207,290 @@ describe "Fixed HTML table formatting":
         expect(pixels[18 * 48 + 22]).to_equal(0xFF00FF00u32)
         expect(pixels[40 * 48 + 2]).to_equal(0xFF0000FFu32)
         expect(pixels[40 * 48 + 22]).to_equal(0xFFFF00FFu32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should size explicit non-spanning columns in automatic layout":
+        step("Render an explicit-width table with automatic column layout")
+        val html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "table{width:80px}" +
+            "td{box-sizing:border-box;height:12px;padding:0}" +
+            "#aa,#ac{width:50px}" +
+            "#ab,#ad{width:10px}" +
+            "#aa{background:#ff0000}#ab{background:#00ff00}" +
+            "#ac{background:#0000ff}#ad{background:#ff00ff}</style>" +
+            "<table id='auto'><tr id='ar1'>" +
+            "<td id='aa'></td><td id='ab'></td></tr>" +
+            "<tr id='ar2'><td id='ac'></td><td id='ad'></td></tr>" +
+            "</table>"
+        )
+        val commands = simple_web_layout_render_html_draw_ir(
+            html, 88, 32
+        ).batches[0].commands
+        val table_index = _table_command_index(commands, "auto")
+        val row1_index = _table_command_index(commands, "ar1")
+        val row2_index = _table_command_index(commands, "ar2")
+        val aa_index = _table_command_index(commands, "aa")
+        val ab_index = _table_command_index(commands, "ab")
+        val ac_index = _table_command_index(commands, "ac")
+        val ad_index = _table_command_index(commands, "ad")
+        expect(table_index).to_be_greater_than(-1)
+        expect(row1_index).to_be_greater_than(-1)
+        expect(row2_index).to_be_greater_than(-1)
+        expect(aa_index).to_be_greater_than(-1)
+        expect(ab_index).to_be_greater_than(-1)
+        expect(ac_index).to_be_greater_than(-1)
+        expect(ad_index).to_be_greater_than(-1)
+        val table = commands[table_index]
+        val row1 = commands[row1_index]
+        val row2 = commands[row2_index]
+        val aa = commands[aa_index]
+        val ab = commands[ab_index]
+        val ac = commands[ac_index]
+        val ad = commands[ad_index]
+
+        step("Use one stable column plan for every row")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "auto", "table-layout"
+        )).to_equal("auto")
+        expect([
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "aa", "x"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "aa", "y"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "aa", "w"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "aa", "h"
+            )
+        ]).to_equal(["0", "0", "60", "12"])
+        expect([
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ab", "x"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ab", "y"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ab", "w"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ab", "h"
+            )
+        ]).to_equal(["60", "0", "20", "12"])
+        expect([
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ac", "x"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ac", "y"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ac", "w"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ac", "h"
+            )
+        ]).to_equal(["0", "12", "60", "12"])
+        expect([
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ad", "x"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ad", "y"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ad", "w"
+            ),
+            simple_web_layout_debug_layout_by_id(
+                html, 88, 32, "ad", "h"
+            )
+        ]).to_equal(["60", "12", "20", "12"])
+        expect([table.x, table.y, table.width, table.height]).to_equal(
+            [0, 0, 80, 24]
+        )
+        expect([row1.x, row1.y, row1.width, row1.height]).to_equal(
+            [0, 0, 80, 12]
+        )
+        expect([row2.x, row2.y, row2.width, row2.height]).to_equal(
+            [0, 12, 80, 12]
+        )
+        expect([aa.x, aa.y, aa.width, aa.height]).to_equal(
+            [0, 0, 60, 12]
+        )
+        expect([ab.x, ab.y, ab.width, ab.height]).to_equal(
+            [60, 0, 20, 12]
+        )
+        expect([ac.x, ac.y, ac.width, ac.height]).to_equal(
+            [0, 12, 60, 12]
+        )
+        expect([ad.x, ad.y, ad.width, ad.height]).to_equal(
+            [60, 12, 20, 12]
+        )
+        expect(row1.parent_id).to_equal("auto")
+        expect(row2.parent_id).to_equal("auto")
+        expect(aa.parent_id).to_equal("ar1")
+        expect(ab.parent_id).to_equal("ar1")
+        expect(ac.parent_id).to_equal("ar2")
+        expect(ad.parent_id).to_equal("ar2")
+
+        step("Execute automatic columns through Engine2D absolute pixels")
+        val pixels = simple_web_layout_render_html_readback_engine2d_result(
+            html, 88, 32, "software"
+        ).readback.pixels
+        expect(pixels[2 * 88 + 2]).to_equal(0xFFFF0000u32)
+        expect(pixels[2 * 88 + 62]).to_equal(0xFF00FF00u32)
+        expect(pixels[14 * 88 + 2]).to_equal(0xFF0000FFu32)
+        expect(pixels[14 * 88 + 62]).to_equal(0xFFFF00FFu32)
+        expect(pixels[25 * 88 + 2]).to_equal(0xFFFFFFFFu32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve generic automatic layout when explicit columns overflow":
+        step("Render explicit automatic columns wider than their table")
+        val html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "table{width:80px}td{box-sizing:border-box;width:50px;" +
+            "height:12px;padding:0}" +
+            "#oa{background:#ff0000}#ob{background:#00ff00}</style>" +
+            "<table id='overflow'><tr id='orow'>" +
+            "<td id='oa'></td><td id='ob'></td></tr></table>"
+        )
+        val commands = simple_web_layout_render_html_draw_ir(
+            html, 88, 32
+        ).batches[0].commands
+        val oa_index = _table_command_index(commands, "oa")
+        val ob_index = _table_command_index(commands, "ob")
+        expect(oa_index).to_be_greater_than(-1)
+        expect(ob_index).to_be_greater_than(-1)
+        val oa = commands[oa_index]
+        val ob = commands[ob_index]
+
+        step("Keep Web layout semantics without equal-width shrinking")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "overflow", "table-layout"
+        )).to_equal("auto")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 88, 32, "oa", "w"
+        )).to_equal("50")
+        expect([oa.x, oa.y, oa.width, oa.height]).to_equal(
+            [0, 0, 50, 12]
+        )
+        expect([ob.x, ob.y, ob.width, ob.height]).to_equal(
+            [0, 12, 50, 12]
+        )
+
+        step("Execute the preserved generic layout through Engine2D")
+        val pixels = simple_web_layout_render_html_readback_engine2d_result(
+            html, 88, 32, "software"
+        ).readback.pixels
+        expect(pixels[2 * 88 + 2]).to_equal(0xFFFF0000u32)
+        expect(pixels[14 * 88 + 2]).to_equal(0xFF00FF00u32)
+        expect(pixels[2 * 88 + 52]).to_equal(0xFFFFFFFFu32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve generic automatic layout for constrained cells":
+        step("Render automatic cells with minimum and maximum widths")
+        val html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "table{width:80px}td{box-sizing:border-box;height:12px;padding:0}" +
+            "#ca{width:10px;min-width:30px;background:#0000ff}" +
+            "#cb{width:50px;max-width:20px;background:#ff00ff}</style>" +
+            "<table id='constrained'><tr>" +
+            "<td id='ca'></td><td id='cb'></td></tr></table>"
+        )
+        val commands = simple_web_layout_render_html_draw_ir(
+            html, 88, 32
+        ).batches[0].commands
+        val ca_index = _table_command_index(commands, "ca")
+        val cb_index = _table_command_index(commands, "cb")
+        expect(ca_index).to_be_greater_than(-1)
+        expect(cb_index).to_be_greater_than(-1)
+        val ca = commands[ca_index]
+        val cb = commands[cb_index]
+
+        step("Apply constraints before emitting canonical Draw IR geometry")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "constrained", "table-layout"
+        )).to_equal("auto")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 88, 32, "ca", "w"
+        )).to_equal("30")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 88, 32, "cb", "w"
+        )).to_equal("20")
+        expect([ca.x, ca.y, ca.width, ca.height]).to_equal(
+            [0, 0, 30, 12]
+        )
+        expect([cb.x, cb.y, cb.width, cb.height]).to_equal(
+            [0, 12, 20, 12]
+        )
+
+        step("Execute constrained generic cells through Engine2D")
+        val pixels = simple_web_layout_render_html_readback_engine2d_result(
+            html, 88, 32, "software"
+        ).readback.pixels
+        expect(pixels[2 * 88 + 2]).to_equal(0xFF0000FFu32)
+        expect(pixels[14 * 88 + 2]).to_equal(0xFFFF00FFu32)
+        expect(pixels[2 * 88 + 32]).to_equal(0xFFFFFFFFu32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should include content box padding and borders in automatic columns":
+        step("Render supported content-box automatic columns")
+        val html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "table{width:80px}td{box-sizing:content-box;height:12px;" +
+            "padding:4px;border:1px solid #000}" +
+            "#pa{width:40px;background:#ff0000}" +
+            "#pb{width:10px;background:#00ff00}</style>" +
+            "<table id='padded'><tr id='prow'>" +
+            "<td id='pa'></td><td id='pb'></td></tr></table>"
+        )
+        val commands = simple_web_layout_render_html_draw_ir(
+            html, 88, 32
+        ).batches[0].commands
+        val row_index = _table_command_index(commands, "prow")
+        val pa_index = _table_command_index(commands, "pa")
+        val pb_index = _table_command_index(commands, "pb")
+        expect(row_index).to_be_greater_than(-1)
+        expect(pa_index).to_be_greater_than(-1)
+        expect(pb_index).to_be_greater_than(-1)
+        val row = commands[row_index]
+        val pa = commands[pa_index]
+        val pb = commands[pb_index]
+
+        step("Include padding and borders in Web and Draw IR geometry")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "padded", "table-layout"
+        )).to_equal("auto")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 88, 32, "pa", "w"
+        )).to_equal("55")
+        expect([row.x, row.y, row.width, row.height]).to_equal(
+            [0, 0, 80, 22]
+        )
+        expect([pa.x, pa.y, pa.width, pa.height]).to_equal(
+            [0, 0, 55, 22]
+        )
+        expect([pb.x, pb.y, pb.width, pb.height]).to_equal(
+            [55, 0, 25, 22]
+        )
+
+        step("Execute padded automatic columns through Engine2D")
+        val pixels = simple_web_layout_render_html_readback_engine2d_result(
+            html, 88, 32, "software"
+        ).readback.pixels
+        expect(pixels[2 * 88 + 2]).to_equal(0xFFFF0000u32)
+        expect(pixels[2 * 88 + 57]).to_equal(0xFF00FF00u32)
+        expect(pixels[2 * 88]).to_equal(0xFF000000u32)
+        expect(pixels[2 * 88 + 55]).to_equal(0xFF000000u32)

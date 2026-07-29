@@ -43,7 +43,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 }
 use std.common.ui.draw_ir.{
     DRAW_IR_BACKEND_AUTO,
-    DrawIrComposition, DrawIrStyleProp,
+    DrawIrCommand, DrawIrComposition, DrawIrStyleProp,
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config,
     draw_ir_image_command, draw_ir_style_prop
 }
 
@@ -67,7 +68,66 @@ fn _renderer_protocol_image_fixture(image_uri: text) -> DrawIrComposition:
     composition.batches = batches
     composition
 
+fn _renderer_protocol_dense_image_fixture(
+    command_count: i32, resource_count: i32
+) -> (DrawIrComposition, [SimpleOsHostGpuImageResource]):
+    var resources: [SimpleOsHostGpuImageResource] = []
+    var resource_index = 0
+    while resource_index < resource_count:
+        resources.push(simpleos_host_gpu_image_resource(
+            "dense:{resource_index}", 1, 1,
+            [(0xff000000u32 + resource_index.to_u32())]
+        ))
+        resource_index = resource_index + 1
+    var commands: [DrawIrCommand] = []
+    var command_index = 0
+    while command_index < command_count:
+        val selected_index = command_index % resource_count
+        commands.push(draw_ir_image_command(
+            "dense-command:{command_index}", 0, 0, 1, 1,
+            "dense:{selected_index}", []
+        ))
+        command_index = command_index + 1
+    (
+        draw_ir_composition(
+            "dense-images", "dense-images", DRAW_IR_BACKEND_AUTO,
+            [draw_ir_batch(
+                "dense-images", DRAW_IR_BACKEND_AUTO,
+                draw_ir_embedding_config(
+                    "dense-images", "dense-images", 0, 0, 1, 1,
+                    0, 1000, false
+                ),
+                commands
+            )]
+        ),
+        resources
+    )
+
 describe "isolated browser renderer protocol":
+    it "selects dense image resources once in first-reference order":
+        val (dense_composition, dense_resources) = (
+            _renderer_protocol_dense_image_fixture(1024, 64)
+        )
+        var reverse_resources: [SimpleOsHostGpuImageResource] = []
+        var reverse_index = dense_resources.len() - 1
+        while reverse_index >= 0:
+            reverse_resources.push(dense_resources[reverse_index])
+            reverse_index = reverse_index - 1
+        val selected = browser_renderer_referenced_image_resources(
+            dense_composition, reverse_resources
+        )
+        expect(selected.len()).to_equal(64)
+        var selected_index = 0
+        while selected_index < selected.len():
+            expect(selected[selected_index].image_uri).to_equal(
+                "dense:{selected_index}"
+            )
+            selected_index = selected_index + 1
+        expect(browser_renderer_frame_encode_with_state_and_images(
+            dense_composition, 7, 1, 1, -1, 0, "", 0, "",
+            "", "", "", "", selected
+        ).ok).to_be(true)
+
     it "round-trips only bounded positive viewport resize commands":
         val encoded = browser_renderer_resize_encode(7, 1, 800, 600)
         expect(encoded.ok).to_be(true)

@@ -1645,6 +1645,17 @@ pub fn browser_renderer_referenced_image_resources(
     image_resources: [SimpleOsHostGpuImageResource]
 ) -> [SimpleOsHostGpuImageResource]:
     var selected: [SimpleOsHostGpuImageResource] = []
+    var resource_index_by_uri: Dict<text, i32> = {}
+    var resource_index = 0
+    while resource_index < image_resources.len():
+        val resource = image_resources[resource_index]
+        if (
+            _browser_renderer_image_resource_valid(resource) and
+            not resource_index_by_uri.has(resource.image_uri)
+        ):
+            resource_index_by_uri[resource.image_uri] = resource_index
+        resource_index = resource_index + 1
+    var selected_uris: Dict<text, bool> = {}
     var selected_pixels: i64 = 0
     var selected_wire_bytes: i64 = 0
     var command_count: i64 = 0
@@ -1655,37 +1666,36 @@ pub fn browser_renderer_referenced_image_resources(
                 return selected
             if command.kind != DRAW_IR_COMMAND_IMAGE:
                 continue
-            var already_selected = false
-            for resource in selected:
-                if resource.image_uri == command.image_uri:
-                    already_selected = true
-            if already_selected or selected.len().to_i64() >= (
+            if selected_uris.has(command.image_uri) or
+                selected.len().to_i64() >= (
                 BROWSER_RENDERER_MAX_IMAGE_RESOURCES
             ):
                 continue
-            for resource in image_resources:
-                if (resource.image_uri == command.image_uri and
-                    _browser_renderer_image_resource_valid(resource)):
-                    val pixel_count = resource.pixels.len().to_i64()
-                    val uri_bytes = text_to_bytes(
-                        resource.image_uri
-                    ).len().to_i64()
-                    val record_bytes = (
-                        SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES +
-                        ((uri_bytes + 7) / 8) * 8 +
-                        ((pixel_count * 4 + 7) / 8) * 8
-                    )
-                    if (selected_pixels <=
-                            BROWSER_RENDERER_MAX_IMAGE_PIXELS - pixel_count and
-                        selected_wire_bytes <=
-                            BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES -
-                                record_bytes):
-                        selected.push(resource)
-                        selected_pixels = selected_pixels + pixel_count
-                        selected_wire_bytes = (
-                            selected_wire_bytes + record_bytes
-                        )
-                    break
+            if not resource_index_by_uri.has(command.image_uri):
+                continue
+            val resource = image_resources[
+                resource_index_by_uri[command.image_uri]
+            ]
+            val pixel_count = resource.pixels.len().to_i64()
+            val uri_bytes = text_to_bytes(
+                resource.image_uri
+            ).len().to_i64()
+            val record_bytes = (
+                SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES +
+                ((uri_bytes + 7) / 8) * 8 +
+                ((pixel_count * 4 + 7) / 8) * 8
+            )
+            if (selected_pixels <=
+                    BROWSER_RENDERER_MAX_IMAGE_PIXELS - pixel_count and
+                selected_wire_bytes <=
+                    BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES -
+                        record_bytes):
+                selected.push(resource)
+                selected_uris[resource.image_uri] = true
+                selected_pixels = selected_pixels + pixel_count
+                selected_wire_bytes = (
+                    selected_wire_bytes + record_bytes
+                )
     selected
 
 fn _browser_renderer_revision_for(

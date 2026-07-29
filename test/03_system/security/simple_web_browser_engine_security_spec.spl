@@ -44,6 +44,19 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 }
 use std.common.image.png_encode.{encode_argb_to_png}
 use common.ui.draw_ir.{DrawIrCommand}
+use common.ui.window_scene.{
+    WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    WmContentFrame,
+    wm_content_frame_checksum
+}
+use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW}
+use common.window_protocol.geometry.{Size}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.host_compositor_core.{HostCompositor}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_revision_with_theme
+}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_get_attr, be_dom_serialize_html
@@ -72,6 +85,35 @@ fn _csp_alias_color_count(pixels: [u32], color: u32) -> i32:
         if pixel == color:
             count = count + 1
     count
+
+fn _browser_security_external_frame(
+    window_id: text, revision: i64, color: u32
+) -> WmContentFrame:
+    val pixels = [color; 104 * 80]
+    WmContentFrame(
+        window_id: window_id,
+        scene_revision: 0,
+        content_revision: revision,
+        origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+        width: 104,
+        height: 80,
+        pixels: pixels,
+        checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "",
+        offset_x: 0,
+        offset_y: 0,
+        engine2d_status: "engine2d_rendered",
+        engine2d_backend: "software",
+        engine2d_reason: "sandbox-worker",
+        material_fallback_kind: "solid-material",
+        material_fallback_reason:
+            "cpu-raster-backdrop-sampling-unavailable",
+        material_fallback_sha256:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        theme_id: default_theme_id(),
+        theme_source_manifest_sha256:
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    )
 
 fn _csp_alias_remove_node(node: BeDomNode, id_value: text) -> BeDomNode:
     var next = node
@@ -182,6 +224,81 @@ fn _require_production_security_evidence():
     fail("REQ-WEB-BROWSER-010..019: production security evidence not implemented")
 
 describe "Production Simple browser security envelope":
+    # @req REQ-WEB-BROWSER-014
+    # @manual: show
+    # @capture(gui)
+    # @capture(protocol)
+    it "should isolate positive-owner rendering and input behind exact-window frames":
+        val hostile = (
+            "<style>body{background-color:#ef4444}</style>" +
+            "<script>document.body.setAttribute('data-ran','yes')</script>"
+        )
+
+        step("Render owner-zero web content through the local control lane")
+        var local = HostCompositor.new_headless(Size(
+            width: 160u64, height: 120u64
+        ))
+        local.apply_bridge_request(
+            1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Local",
+            8, 8, 100, 80, hostile, 1, "hosted-web-event"
+        )
+        expect(local.requires_external_web_frame(1)).to_be(false)
+        val local_raster = Engine2dCompositorBackend.create_named(
+            160, 120, "software"
+        )
+        expect(local.render_frame_engine2d(local_raster)).to_be(true)
+        expect(_csp_alias_color_count(
+            local.pure_simple_pixel_buffer(), 0xFFEF4444u32
+        )).to_be_greater_than(0)
+        local_raster.shutdown()
+
+        step("Keep positive-owner hostile content blank without a renderer frame")
+        var remote = HostCompositor.new_headless(Size(
+            width: 160u64, height: 200u64
+        ))
+        remote.apply_bridge_request(
+            1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Remote",
+            8, 8, 112, 160, hostile, 77, "browser"
+        )
+        expect(remote.requires_external_web_frame(1)).to_be(true)
+        val remote_raster = Engine2dCompositorBackend.create_named(
+            160, 200, "software"
+        )
+        expect(remote.render_frame_engine2d(remote_raster)).to_be(false)
+        expect(_csp_alias_color_count(
+            remote.pure_simple_pixel_buffer(), 0xFFEF4444u32
+        )).to_equal(0)
+
+        step("Route positive-owner input only to an admitted renderer registry")
+        remote.pointer_move(16, 80)
+        remote.handle_mouse_wheel(0.0, 1.0)
+        expect(remote.scroll_offset_for(1)).to_equal(0.0)
+        var renderers = HostedBrowserRendererRegistry.create(
+            "", "https://example.test/"
+        )
+        val denied = renderers.dispatch_pointer(41, 1, 8, 8, true)
+        expect(denied.callback_count).to_equal(0)
+        expect(denied.reason).to_equal("renderer-unavailable")
+
+        step("Paint only an admitted frame bound to the exact window")
+        expect(remote.require_external_web_frame(1)).to_be(true)
+        val revision = simple_web_content_revision_with_theme(
+            default_theme_id(), "Remote", hostile, 104, 80, 0
+        )
+        val admitted = _browser_security_external_frame(
+            "1", revision, 0xFF123456u32
+        )
+        expect(remote.set_external_web_frame(2, admitted)).to_be(false)
+        expect(remote.set_external_web_frame(1, admitted)).to_be(true)
+        expect(remote.render_frame_engine2d(remote_raster)).to_be(true)
+        expect(_csp_alias_color_count(
+            remote.pure_simple_pixel_buffer(), 0xFF123456u32
+        )).to_be_greater_than(5000)
+        expect(_csp_alias_color_count(
+            remote.pure_simple_pixel_buffer(), 0xFFEF4444u32
+        )).to_equal(0)
+        remote_raster.shutdown()
+
     # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-014
     # @manual: show
     # @capture(protocol)

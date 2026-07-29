@@ -29,24 +29,54 @@ use std.common.gpu.simpleos_host_gpu_protocol.{
 
 extern fn rt_text_to_bytes(value: text) -> [u8]
 
+fn _find_ascii_case_insensitive(
+    haystack: text, lowercase_needle: text, start: i64
+) -> i64:
+    if start < 0 or start > haystack.len() or lowercase_needle.len() == 0:
+        return -1
+    val haystack_bytes = rt_text_to_bytes(haystack)
+    val needle_bytes = rt_text_to_bytes(lowercase_needle)
+    var index = start
+    val last = haystack_bytes.len() - needle_bytes.len()
+    while index <= last:
+        var offset = 0
+        while offset < needle_bytes.len():
+            val candidate = haystack_bytes[index + offset] as i64
+            val expected = needle_bytes[offset] as i64
+            if (
+                candidate != expected and
+                not (
+                    candidate >= 65 and candidate <= 90 and
+                    candidate + 32 == expected
+                )
+            ):
+                break
+            offset = offset + 1
+        if offset == needle_bytes.len():
+            return index
+        index = index + 1
+    -1
+
 fn extract_title_text(html: text) -> text:
-    val start = find_text(html, "<title>", 0)
+    val start = _find_ascii_case_insensitive(html, "<title>", 0)
     if start < 0:
         return ""
     val content_start = start + 7
-    val end = find_text(html, "</title>", content_start)
+    val end = _find_ascii_case_insensitive(html, "</title>", content_start)
     if end < 0:
         return ""
     html[content_start:end].trim()
 
 fn extract_body_inner_html(html: text) -> text:
-    val body_open = find_text(html, "<body", 0)
+    val body_open = _find_ascii_case_insensitive(html, "<body", 0)
     if body_open < 0:
         return ""
     val open_end = find_text(html, ">", body_open)
     if open_end < 0:
         return ""
-    val body_close = find_text(html, "</body>", open_end + 1)
+    val body_close = _find_ascii_case_insensitive(
+        html, "</body>", open_end + 1
+    )
     if body_close < 0:
         return html[open_end + 1:html.len()]
     html[open_end + 1:body_close]
@@ -381,6 +411,8 @@ fn browser_document_resource_plan(
     var meta_policy_count = 0
     var meta_fail_closed = false
     var head_active = true
+    var template_depth = 0
+    var template_depth_overflow = false
     val lower = html.lower()
     var pos = 0
     val html_len = html.len()
@@ -409,9 +441,38 @@ fn browser_document_resource_plan(
             html.slice(start + 1, tag_end)
         )
         if closing:
+            val was_in_template = (
+                template_depth > 0 or template_depth_overflow
+            )
+            if tag_name == "template" and template_depth > 0:
+                template_depth = template_depth - 1
+            if was_in_template:
+                pos = tag_end + 1
+                continue
             if tag_name == "head":
                 head_active = false
             pos = tag_end + 1
+            continue
+        if tag_name == "template":
+            if template_depth < 512:
+                template_depth = template_depth + 1
+            else:
+                # Fail closed: an over-depth inert subtree cannot reactivate.
+                template_depth_overflow = true
+            pos = tag_end + 1
+            continue
+        if template_depth > 0 or template_depth_overflow:
+            # Raw-text bodies may contain tag-shaped strings. Skip to their
+            # exact closing token while the containing template is inert.
+            if tag_name == "style" or tag_name == "script":
+                val raw_close = find_text(
+                    lower, "</{tag_name}>", tag_end + 1
+                )
+                if raw_close < 0:
+                    break
+                pos = raw_close + tag_name.len() + 3
+            else:
+                pos = tag_end + 1
             continue
         if tag_name == "body":
             head_active = false

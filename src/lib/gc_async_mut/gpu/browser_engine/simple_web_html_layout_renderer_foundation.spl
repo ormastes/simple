@@ -5,6 +5,9 @@ use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_langu
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_PAYLOAD_BYTES
 }
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_flat_projection_with_limits
+}
 
 # Render budget + CSS quotas (hostile-page hardening)
 # ---------------------------------------------------------------------------
@@ -523,7 +526,7 @@ fn attr_value_by_key(inner: text, key: text) -> text:
     var i = kpos + key_len
     if i >= inner.len():
         return ""
-    val q = inner.char_at(i)
+    val q = inner.slice(i, i + 1)
     if q == "\"" or q == "'":
         val end = find_from(inner, q, i + 1)
         if end < 0:
@@ -533,94 +536,18 @@ fn attr_value_by_key(inner: text, key: text) -> text:
     var j = i
     val inner_len = inner.len()
     while j < inner_len:
-        val c = inner.char_at(j)
+        val c = inner.slice(j, j + 1)
         if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "/":
             break
         j = j + 1
     decode_html_entities(inner.substring(i, j))
-
-fn html_ascii_is_upper(c: text) -> bool:
-    c == "A" or c == "B" or c == "C" or c == "D" or c == "E" or c == "F" or c == "G" or
-    c == "H" or c == "I" or c == "J" or c == "K" or c == "L" or c == "M" or c == "N" or
-    c == "O" or c == "P" or c == "Q" or c == "R" or c == "S" or c == "T" or c == "U" or
-    c == "V" or c == "W" or c == "X" or c == "Y" or c == "Z"
-
-fn tag_name_of(inner: text) -> text:
-    var j = 0
-    val m = inner.len()
-    var has_upper = false
-    while j < m:
-        val c = inner.char_at(j)
-        if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "/":
-            break
-        if html_ascii_is_upper(c):
-            has_upper = true
-        j = j + 1
-    val nm = inner.substring(0, j)
-    if has_upper:
-        return nm.lower()
-    nm
-
-fn html_ascii_lower_char_matches(c: text, lower: text) -> bool:
-    if c == lower:
-        return true
-    if lower == "a": return c == "A"
-    if lower == "b": return c == "B"
-    if lower == "c": return c == "C"
-    if lower == "d": return c == "D"
-    if lower == "e": return c == "E"
-    if lower == "f": return c == "F"
-    if lower == "g": return c == "G"
-    if lower == "h": return c == "H"
-    if lower == "i": return c == "I"
-    if lower == "j": return c == "J"
-    if lower == "k": return c == "K"
-    if lower == "l": return c == "L"
-    if lower == "m": return c == "M"
-    if lower == "n": return c == "N"
-    if lower == "o": return c == "O"
-    if lower == "p": return c == "P"
-    if lower == "q": return c == "Q"
-    if lower == "r": return c == "R"
-    if lower == "s": return c == "S"
-    if lower == "t": return c == "T"
-    if lower == "u": return c == "U"
-    if lower == "v": return c == "V"
-    if lower == "w": return c == "W"
-    if lower == "x": return c == "X"
-    if lower == "y": return c == "Y"
-    if lower == "z": return c == "Z"
-    false
-
-fn close_tag_matches(inner: text, tag: text) -> bool:
-    var start = 1
-    var end = inner.len()
-    while start < end:
-        val c = inner.char_at(start)
-        if c != " " and c != "\t" and c != "\n" and c != "\r":
-            break
-        start = start + 1
-    while end > start:
-        val c = inner.char_at(end - 1)
-        if c != " " and c != "\t" and c != "\n" and c != "\r":
-            break
-        end = end - 1
-    val tag_len = tag.len()
-    if end - start != tag_len:
-        return false
-    var i = 0
-    while i < tag_len:
-        if not html_ascii_lower_char_matches(inner.char_at(start + i), tag.char_at(i)):
-            return false
-        i = i + 1
-    true
 
 fn split_class_words_trimmed(class_attr: text) -> [text]:
     var word_count = 1
     var i = 0
     val class_len = class_attr.len()
     while i < class_len:
-        if class_attr.char_at(i) == " ":
+        if class_attr.slice(i, i + 1) == " ":
             word_count = word_count + 1
         i = i + 1
     var words: [text] = [""; word_count]
@@ -628,7 +555,7 @@ fn split_class_words_trimmed(class_attr: text) -> [text]:
     var start = 0
     var word_i = 0
     while i < class_len:
-        if class_attr.char_at(i) == " ":
+        if class_attr.slice(i, i + 1) == " ":
             words[word_i] = class_attr.substring(start, i).trim()
             word_i = word_i + 1
             start = i + 1
@@ -641,7 +568,7 @@ fn class_flags_from_attr(class_attr: text) -> ClassFlags:
     var i = 0
     val class_len = class_attr.len()
     while i < class_len:
-        val c = class_attr.char_at(i)
+        val c = class_attr.slice(i, i + 1)
         if c == "w":
             if not flags.has_widget_class and text_matches_at(class_attr, "widget-", i):
                 flags.has_widget_class = true
@@ -685,53 +612,8 @@ fn mk_element_node(tag: text, parent: i64, inner: text) -> HNode:
         parent: parent
     )
 
-fn html_text_range_has_non_ws(html: text, start: i32, end: i32) -> bool:
-    var i = start
-    while i < end:
-        val c = html.char_at(i)
-        if c != " " and c != "\t" and c != "\n" and c != "\r":
-            return true
-        i = i + 1
-    false
-
 # ---------------------------------------------------------------------------
-# Split-based HTML structural scanning (parse_html)
-#
-# parse_html used to scan the WHOLE `html` document with
-# `find_from(html, needle, pos)` (growing `pos`) and materialize every tag's
-# inner text with `html.substring(lt + 1, gt)`. Under this interpreter both
-# cost O(len(receiver)) PER CALL (substring collects the whole receiver's
-# chars; find_from slices the receiver's tail), so one call per tag made the
-# parse O(tag_count * doc_len) = O(n^2) -- measured 1.5s/6.7s/26s at
-# 700/1500/3000 synthetic rules (doc/08_tracking/bug/
-# text_substring_o_offset_parse_html_quadratic_2026-07-07.md).
-#
-# A byte-array rewrite (the CSS scanner's css_bytes_find idiom) was tried
-# first and measured ~10x WORSE (14.5s at N=700): interpreted per-element
-# array reads make byte walking slower than the original whole-string calls.
-# The pattern that actually works under the interpreter is the one
-# _css_scan_rules_simple (~:3900) already uses: split the document ONCE on
-# "<" (native, O(n)), then only ever slice the SMALL per-tag segments
-# (native, O(segment)). Total cost is O(doc_len).
-
-# True if a tag event's inner text produces an element node in the arena
-# (mirrors the skip rules in parse_html's build pass).
-fn _html_tag_event_makes_node(inner: text) -> bool:
-    if inner.len() == 0:
-        return false
-    # Code points, not 1-char `text` handles: "!" is 33, "/" is 47. Comparing
-    # allocated 1-char strings routes the answer through a runtime boolean the
-    # freestanding build mis-marshals at depth (see text_matches_at).
-    val first_code = inner.char_code_at(0)
-    if first_code == 33 or first_code == 47:
-        return false
-    val name = tag_name_of(inner)
-    if name == "style" or name == "script" or name == "title" or name == "head" or name == "meta" or name == "link" or name == "base":
-        return false
-    true
-
-# ---------------------------------------------------------------------------
-# Parser -> arena
+# Canonical projection -> renderer arena
 # ---------------------------------------------------------------------------
 
 # Encode a Unicode code point to UTF-8 text. The common-tier helper
@@ -843,14 +725,6 @@ fn decode_html_entities(s: text) -> text:
     out = out.replace("&#X3e;", ">")
     out.replace("&amp;", "&")
 
-fn text_list_prefix(values: [text], count: i32) -> [text]:
-    var out: [text] = [""; count]
-    var i = 0
-    while i < count:
-        out[i] = values[i]
-        i = i + 1
-    out
-
 fn parse_html(html: text) -> [HNode]:
     _parse_html_with_limits(
         html, SIMPLE_WEB_MAX_HTML_NODES, SIMPLE_WEB_MAX_HTML_BYTES
@@ -878,232 +752,57 @@ fn _parse_html_with_limits(
         requested_byte_limit
     if not _simple_web_html_source_admitted(html, byte_limit):
         return [mk_node("#root", -1)]
-    # Scan the document into a flat event list, two parallel LOCAL arrays:
-    #   kind "g" -- tag: payload is the tag's inner text
-    #   kind "x" -- text run between tags (raw, entities still encoded)
-    #   kind "e" -- trailing text after the last tag (the single-space rule
-    #               txt == " " applies only to middle runs, never the tail)
-    # Comments and raw-text elements (style/script/title) are consumed here
-    # and produce no events, matching the old pos-jump scanner exactly,
-    # including unterminated comments/tags discarding the rest.
-    # INLINED on purpose: this scan used to be a separate function, and BOTH
-    # cross-function handoffs of the event arrays lost the data in the
-    # freestanding SimpleOS build while every scanner receipt stayed silent —
-    # first the nested-array [[text]] return decoded as empty, then the
-    # same-module global-array fallback read back 0 entries while the
-    # function's scalar count said 15 ([web-parse] scan-handoff-loss
-    # returned=15 module=0, 2026-07-26 guest run; doc/08_tracking/bug/
-    # cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md).
-    # Locals never cross the call ABI, so the events survive by construction.
-    val parts = html.split("<")
-    val np = parts.len() as i32
-    val cap = np * 2 + 2
-    var kinds: [text] = [""; cap]
-    var payloads: [text] = [""; cap]
-    var out = 0
-    if np > 0 and parts[0].len() > 0:
-        kinds[out] = if np == 1: "e" else: "x"
-        payloads[out] = parts[0]
-        out = out + 1
-    var scan_k = 1
-    var divergence_reported = false
-    var scan_aborted = false
-    while scan_k < np:
-        var seg: text = parts[scan_k]
-        # ONE-SHOT builtin-vs-portable divergence receipt: `starts_with` and
-        # `index_of` are the only runtime text builtins this scan needs, and
-        # both were once suspected of mis-marshalling their result in the
-        # freestanding build. Comparing them against the in-Simple
-        # equivalents costs one extra segment scan and stays SILENT on a
-        # healthy build, so a future collapse says which builtin lied.
-        if not divergence_reported:
-            val sw_builtin = if seg.starts_with("!--"): 1 else: 0
-            val sw_portable = if text_matches_at(seg, "!--", 0): 1 else: 0
-            # NO `?? -1` here: `index_of` returns a RAW i64 already using -1 as
-            # its own not-found sentinel, so the coalesce could never improve
-            # the result — and it actively corrupted the one case where the
-            # answer is genuinely 3, because nil is encoded as the integer 3
-            # (TAG_SPECIAL = 0b011) and `??` tests `value == TAG_SPECIAL`.
-            # That made this very receipt lie: it reported
-            # index_of_builtin=-1 index_of_portable=3 on a HEALTHY builtin.
-            val gt_builtin = seg.index_of(">") as i32
-            val gt_portable = find_from(seg, ">", 0)
-            if sw_builtin != sw_portable or gt_builtin != gt_portable:
-                divergence_reported = true
-                print "[web-scan] builtin-divergence k={scan_k} np={np} seg_len={seg.len()} starts_with_builtin={sw_builtin} starts_with_portable={sw_portable} index_of_builtin={gt_builtin} index_of_portable={gt_portable}"
-        if text_matches_at(seg, "!--", 0):
-            # Comment: content may contain "<" (spanning later parts), but
-            # "-->" contains no "<" so it always lies within a single part.
-            var cidx = find_from(seg, "-->", 0)
-            var terminated = cidx >= 0
-            while not terminated:
-                scan_k = scan_k + 1
-                if scan_k >= np:
-                    break
-                seg = parts[scan_k]
-                cidx = find_from(seg, "-->", 0)
-                terminated = cidx >= 0
-            if not terminated:
-                # Unterminated comment: discard the rest of the document.
-                print "[web-scan] bail reason=unterminated-comment np={np} out={out}"
-                break
-            val ctail = seg.substring(cidx + 3, seg.len())
-            if ctail.len() > 0 and out < cap:
-                kinds[out] = if scan_k == np - 1: "e" else: "x"
-                payloads[out] = ctail
-                out = out + 1
-            scan_k = scan_k + 1
+    val projected = html_tree_builder_flat_projection_with_limits(
+        html, node_limit, SIMPLE_WEB_MAX_HTML_PARTS, 65536
+    )
+    var flat_to_hnode: [i32] = [-1; projected.nodes.len()]
+    var skip_subtree: [bool] = [false; projected.nodes.len()]
+    var nodes: [HNode] = []
+    var i = 0
+    while i < projected.nodes.len() and nodes.len() < node_limit:
+        val flat = projected.nodes[i]
+        val parent_skipped = (
+            flat.parent >= 0 and skip_subtree[flat.parent]
+        )
+        val skip = (
+            parent_skipped or flat.tag == "head" or flat.tag == "style" or
+            flat.tag == "script" or flat.tag == "title" or
+            flat.tag == "meta" or flat.tag == "link" or flat.tag == "base"
+        )
+        skip_subtree[i] = skip
+        if skip:
+            i = i + 1
             continue
-        # Normal tag: search ">" from the "<" across any embedded "<".
-        var gt = find_from(seg, ">", 0)
-        while gt < 0:
-            scan_k = scan_k + 1
-            if scan_k >= np:
-                # No ">" until EOF: discard the rest of the document.
-                print "[web-scan] bail reason=no-tag-close np={np} out={out} seg_len={seg.len()}"
-                scan_aborted = true
-                break
-            seg = seg + "<" + parts[scan_k]
-            gt = find_from(seg, ">", 0)
-        if scan_aborted:
-            break
-        val scan_inner = seg.substring(0, gt)
-        var rest = seg.substring(gt + 1, seg.len())
-        if out < cap:
-            kinds[out] = "g"
-            payloads[out] = scan_inner
-            out = out + 1
-        # Raw-text elements: consume content + closing tag, no events.
-        if scan_inner.len() > 0:
-            # Code points, not 1-char `text` handles: "!" is 33, "/" is 47.
-            val scan_first = scan_inner.char_code_at(0)
-            if scan_first != 33 and scan_first != 47:
-                val scan_name = tag_name_of(scan_inner)
-                if scan_name == "style" or scan_name == "script" or scan_name == "title":
-                    val closer = "/" + scan_name
-                    var scan_j = scan_k + 1
-                    var scan_found = -1
-                    while scan_j < np:
-                        val pj: text = "{parts[scan_j]}"
-                        if text_matches_at(pj, closer, 0):
-                            scan_found = scan_j
-                            break
-                        scan_j = scan_j + 1
-                    if scan_found >= 0:
-                        # First ">" from the closer on (may cross a "<").
-                        var seg2: text = parts[scan_found]
-                        var gt2 = find_from(seg2, ">", 0)
-                        while gt2 < 0:
-                            scan_found = scan_found + 1
-                            if scan_found >= np:
-                                # Closer without ">": discard the rest.
-                                print "[web-scan] bail reason=raw-text-closer-unterminated np={np} out={out} tag={scan_name}"
-                                scan_aborted = true
-                                break
-                            seg2 = seg2 + "<" + parts[scan_found]
-                            gt2 = find_from(seg2, ">", 0)
-                        if scan_aborted:
-                            break
-                        rest = seg2.substring(gt2 + 1, seg2.len())
-                        scan_k = scan_found
-                    # Closer missing entirely: keep scanning the content as
-                    # normal HTML (falling through with `rest` does exactly
-                    # that).
-        if rest.len() > 0 and out < cap:
-            kinds[out] = if scan_k == np - 1: "e" else: "x"
-            payloads[out] = rest
-            out = out + 1
-        scan_k = scan_k + 1
-    val ev_count = out as i32
-    # Counting pass: arena size, mirroring the node-creation rules below.
-    # (Replaces the old count_html_nodes second full scan of the document.)
-    # Kind comparisons use code points ("g" 103, "x" 120): 1-char text
-    # equality routes a boolean through the runtime call boundary the
-    # freestanding build mis-marshals at depth (see text_matches_at).
-    var node_count = 1
-    var node_limit_hit = false
-    var e = 0
-    while e < ev_count and not node_limit_hit:
-        if kinds[e].char_code_at(0) == 103:
-            if _html_tag_event_makes_node(payloads[e]):
-                if node_count < node_limit:
-                    node_count = node_count + 1
-                else:
-                    node_limit_hit = true
+        val parent = if flat.parent < 0:
+            -1
         else:
-            val ctxt = decode_html_entities(payloads[e])
-            if ctxt.trim().len() > 0 or (kinds[e].char_code_at(0) == 120 and ctxt == " "):
-                if node_count < node_limit:
-                    node_count = node_count + 1
+            flat_to_hnode[flat.parent]
+        if flat.tag == "#text":
+            val trimmed = flat.text_data.trim()
+            if trimmed.len() > 0 or flat.text_data == " ":
+                if (nodes.len() > 0 and nodes[nodes.len() - 1].tag == "#text" and
+                    nodes[nodes.len() - 1].parent == parent):
+                    val previous_index = nodes.len() - 1
+                    var previous = nodes[previous_index]
+                    previous.text_data = previous.text_data + flat.text_data
+                    previous.text_trimmed = previous.text_data.trim()
+                    nodes[previous_index] = previous
+                    flat_to_hnode[i] = previous_index
                 else:
-                    node_limit_hit = true
-        e = e + 1
-    if node_count <= 1 and ev_count > 0:
-        # Events arrived but none made a node: dump each event's kind code,
-        # payload length, and the makes-node verdict so a degenerate arena is
-        # attributable to a specific classification instead of guessed at.
-        print "[web-parse] degenerate-arena ev_count={ev_count}"
-        var de = 0
-        while de < ev_count and de < 8:
-            val kk = kinds[de]
-            val kc = if kk.len() > 0: kk.char_code_at(0) else: -1
-            val mk = if kc == 103 and _html_tag_event_makes_node(payloads[de]): 1 else: 0
-            print "[web-parse] degenerate-event i={de} kind_code={kc} payload_len={payloads[de].len()} makes_node={mk}"
-            de = de + 1
-    var nodes: [HNode] = [mk_node("#root", -1); node_count]
-    var node_i = 1
-    var pstack: [i64] = [0; node_count]
-    var stack_len = 1
-    e = 0
-    while e < ev_count and node_i < node_count:
-        val kind_code = kinds[e].char_code_at(0)
-        e = e + 1
-        if kind_code != 103:
-            val txt = decode_html_entities(payloads[e - 1])
-            val txt_trimmed = txt.trim()
-            if txt_trimmed.len() > 0 or (kind_code == 120 and txt == " "):
-                var tn = mk_node("#text", pstack[stack_len - 1])
-                tn.text_data = txt
-                tn.text_trimmed = txt_trimmed
-                nodes[node_i] = tn
-                node_i = node_i + 1
-            continue
-        val inner = payloads[e - 1]
-        if inner.len() == 0:
-            continue
-        # Code points, not 1-char `text` handles ("!" 33, "/" 47) — this must
-        # agree exactly with _html_tag_event_makes_node, which sizes the arena.
-        val first_code = inner.char_code_at(0)
-        if first_code == 33:
-            continue
-        if first_code == 47:
-            var k = stack_len - 1
-            var found = -1
-            while k >= 1:
-                val pidx = pstack[k]
-                if close_tag_matches(inner, nodes[pidx].tag):
-                    found = k
-                    break
-                k = k - 1
-            if found >= 1:
-                stack_len = found
-            continue
-        val name = tag_name_of(inner)
-        # style/script/title content is consumed by _html_scan_events; their
-        # open-tag events (and head/meta/link/base) produce no nodes.
-        if name == "style" or name == "script" or name == "title":
-            continue
-        if name == "head" or name == "meta" or name == "link" or name == "base":
-            continue
-        val node = mk_element_node(name, pstack[stack_len - 1], inner)
-        val current_index = node_i
-        nodes[current_index] = node
-        node_i = node_i + 1
-        val self_close = inner.char_at(inner.len() - 1) == "/"
-        if not is_void(name) and not self_close:
-            if stack_len < pstack.len():
-                pstack[stack_len] = current_index
-                stack_len = stack_len + 1
+                    var text_node = mk_node("#text", parent)
+                    text_node.text_data = flat.text_data
+                    text_node.text_trimmed = trimmed
+                    flat_to_hnode[i] = nodes.len() as i32
+                    nodes.push(text_node)
+        else:
+            val tag = if flat.tag == "#document": "#root" else: flat.tag
+            flat_to_hnode[i] = nodes.len() as i32
+            nodes.push(mk_element_node(
+                tag, parent, tag + flat.normalized_attrs
+            ))
+        i = i + 1
+    if nodes.len() == 0:
+        return [mk_node("#root", -1)]
     nodes
 
 pub fn simple_web_layout_debug_capped_node_count(

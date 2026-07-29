@@ -331,6 +331,68 @@ describe "Engine2D advanced Draw IR executor":
         expect(result.pixels[1 * 4 + 1]).to_equal(BLUE)
         engine.shutdown()
 
+    it "admits the fallback material hash but rejects an unknown sibling key":
+        val admitted = draw_ir_box_with_style(
+            "admitted-material-hash", 0, 0, 4, 4, BLUE,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            draw_ir_no_rect(), [
+                draw_ir_style_prop(
+                    "backdrop-filter-fallback-material-hash", ""
+                )
+            ]
+        )
+        val unknown = draw_ir_box_with_style(
+            "unknown-material-key", 0, 0, 4, 4, BLUE,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            draw_ir_no_rect(), [
+                draw_ir_style_prop(
+                    "backdrop-filter-fallback-material-unknown", ""
+                )
+            ]
+        )
+        val admitted_composition = draw_ir_composition(
+            "admitted-material-hash", "scene", DRAW_IR_BACKEND_CPU,
+            [draw_ir_batch(
+                "admitted-material-hash", DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config(
+                    "surface", "window", 0, 0, 4, 4, 0, 1000, false
+                ),
+                [admitted]
+            )]
+        )
+        val unknown_composition = draw_ir_composition(
+            "unknown-material-key", "scene", DRAW_IR_BACKEND_CPU,
+            [draw_ir_batch(
+                "unknown-material-key", DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config(
+                    "surface", "window", 0, 0, 4, 4, 0, 1000, false
+                ),
+                [unknown]
+            )]
+        )
+        var images: [Engine2dResolvedDrawIrImage] = []
+        var admitted_engine = Engine2D.create_with_backend(4, 4, "cpu")
+        val admitted_result = (
+            engine2d_draw_ir_adv_fresh_device_composition_with_images(
+                admitted_engine, admitted_composition, images
+            )
+        )
+        admitted_engine.shutdown()
+        var unknown_engine = Engine2D.create_with_backend(4, 4, "cpu")
+        val unknown_result = (
+            engine2d_draw_ir_adv_fresh_device_composition_with_images(
+                unknown_engine, unknown_composition, images
+            )
+        )
+        unknown_engine.shutdown()
+
+        expect(admitted_result.readback_source).to_equal("cpu_mirror")
+        expect(admitted_result.skipped_command_count).to_equal(0)
+        expect(unknown_result.readback_source).to_equal("preflight_rejected")
+        expect(unknown_result.fallback_reason).to_contain(
+            "fresh-device-command-preflight-required"
+        )
+
     it "rejects malformed and gap-producing CSS backgrounds in fresh-device preflight":
         val image = engine2d_resolved_draw_ir_image(
             "image://fresh-css-background", 2, 2,

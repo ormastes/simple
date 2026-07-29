@@ -5,8 +5,12 @@
 grep for as the trustworthy signal under the interpreter-mode greenwash
 caveat) is itself unreliable whenever an `it` block contains more than one
 `expect()`/`assert_*` call
-**Status:** Open — mitigated in new specs by using a single combined
-assertion per `it` block; no interpreter fix yet
+**Status:** Fix implemented 2026-07-29; runtime verification blocked by the
+unqualified deployed artifact. `std.spec` now keeps an identity-stable list of
+failures, clears it before hooks, accumulates hook/body/teardown failures, and
+preserves bare-boolean versus chained-boolean matcher behavior. Focused child
+fixtures cover earlier-fail/later-pass, distinct failure messages, next-example
+isolation, and before-hook failures.
 
 ## Summary
 

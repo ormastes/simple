@@ -1,11 +1,30 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-006
+"""# CSS Animation Frame Preservation
+
+Proves the supported keyframe subset at its start, midpoint, and filled end
+through web semantics, layout, canonical Draw IR, and exact expected-color
+Engine2D coverage/count. Web Animations compositing and unsupported properties
+remain outside this bounded profile.
+"""
+
 use std.spec.*
 
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
-    interpolate, ease_value, interpolate_keyframes, interpolate_length,
-    CSSValue, CSSDeclaration, Keyframe
+    interpolate, ease_value, interpolate_length,
+    CSSValue
 }
 use std.common.animation.timing.{TimingFunction}
 use std.gc_async_mut.gpu.browser_engine.style_block.{extract_keyframes}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id,
+    simple_web_layout_render_html_draw_ir_result_at_time
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+val WIDTH: i32 = 32
+val HEIGHT: i32 = 24
 
 fn approx(a: f64, b: f64) -> bool:
     val diff = a - b
@@ -17,26 +36,155 @@ fn _interp_number_half() -> bool:
         CSSValue.Number(v): approx(v, 0.5)
         _: false
 
-describe "WPT-derived CSS animations subset":
+fn _animation_html() -> text:
+    (
+        "<style>html,body{margin:0}@keyframes preserve{" +
+        "from{width:4px;height:4px;background-color:#dc2626}" +
+        "to{width:12px;height:4px;background-color:#2563eb}}" +
+        "#box{width:4px;height:4px;background-color:#dc2626;" +
+        "animation:preserve 1000ms linear forwards}</style>" +
+        "<div id='box'></div>"
+    )
 
-    context "CSS animation pure function coverage":
+fn _animation_color_count(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
 
-        it "interpolate_length at t=0.5 returns midpoint":
-            val result = interpolate_length(0.0, 100.0, 0.5)
-            expect(approx(result, 50.0)).to_equal(true)
+fn _animation_frame_fingerprint(
+    time_ms: i64, expected_color: u32
+) -> text:
+    val html = _animation_html()
+    val semantic = (
+        simple_web_layout_debug_style_by_id(
+            html, "box", "animation_name"
+        ) + "," +
+        simple_web_layout_debug_style_by_id(
+            html, "box", "animation_duration_ms"
+        ) + "," +
+        simple_web_layout_debug_style_by_id(
+            html, "box", "animation_fill_mode"
+        )
+    )
+    val layout = (
+        simple_web_layout_debug_layout_by_id(
+            html, WIDTH, HEIGHT, "box", "w"
+        ) + "," +
+        simple_web_layout_debug_layout_by_id(
+            html, WIDTH, HEIGHT, "box", "h"
+        )
+    )
+    val result = simple_web_layout_render_html_draw_ir_result_at_time(
+        html, WIDTH, HEIGHT, time_ms
+    )
+    var draw = "missing"
+    var animation_name = "missing"
+    var animation_duration = "missing"
+    var background_color = "missing"
+    for command in result.composition.batches[0].commands:
+        if command.component_id == "box":
+            draw = (
+                command.component_id + ":" + command.x.to_string() + "," +
+                command.y.to_string() + "," + command.width.to_string() +
+                "," + command.height.to_string()
+            )
+            for property in command.computed_style:
+                if property.key == "animation-name":
+                    animation_name = property.value
+                elif property.key == "animation-duration":
+                    animation_duration = property.value
+                elif property.key == "background-color":
+                    background_color = property.value
+    val raster = Engine2dCompositorBackend.create_named(
+        WIDTH, HEIGHT, "software"
+    )
+    val rendered = raster.render_draw_ir_composition(
+        result.composition, []
+    )
+    raster.shutdown()
+    (
+        semantic + "|" + layout + "|" +
+        result.composition.batches[0].source.source_kind + "|" + draw +
+        "|" + animation_name + "," + animation_duration + "," +
+        background_color + "|" + result.animation_next_ms.to_string() +
+        "|" + rendered.skipped_command_count.to_string() + "|" +
+        _animation_color_count(
+            rendered.pixels, expected_color
+        ).to_string()
+    )
 
-        it "ease_value linear returns identity":
-            val result = ease_value(0.5, TimingFunction.Linear)
-            expect(approx(result, 0.5)).to_equal(true)
+describe "REQ-WEB-BROWSER-003/004/006: CSS animation frames":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve the animation feature at its exact start frame":
+        step("Resolve the animation start in canonical web semantic and layout state")
+        step("Render the animation start through canonical Draw IR and Engine2D")
+        expect(_animation_frame_fingerprint(
+            0, 0xFFDC2626u32
+        )).to_equal(
+            "preserve,1000,forwards|4,4|html_ast|box:0,0,4,4|" +
+            "preserve,1000ms,4292617766|16|0|16"
+        )
 
-        it "ease_value ease-in starts slow":
-            val result = ease_value(0.5, TimingFunction.EaseIn)
-            expect(result < 0.5).to_equal(true)
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve interpolated geometry and color at the midpoint":
+        step("Resolve the animation midpoint in canonical web semantic and layout state")
+        step("Render the animation midpoint through canonical Draw IR and Engine2D")
+        expect(_animation_frame_fingerprint(
+            500, 0xFF804488u32
+        )).to_equal(
+            "preserve,1000,forwards|4,4|html_ast|box:0,0,8,4|" +
+            "preserve,1000ms,4286596232|516|0|32"
+        )
 
-        it "interpolate Number values at midpoint":
-            expect(_interp_number_half()).to_equal(true)
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve the filled end frame without scheduling another frame":
+        step("Resolve the animation end in canonical web semantic and layout state")
+        step("Render the animation end through canonical Draw IR and Engine2D")
+        expect(_animation_frame_fingerprint(
+            1000, 0xFF2563EBu32
+        )).to_equal(
+            "preserve,1000,forwards|4,4|html_ast|box:0,0,12,4|" +
+            "preserve,1000ms,4280640491|-1|0|48"
+        )
 
-        it "extract_keyframes parses @keyframes block":
-            val css = "@keyframes fade { from { opacity: 0; } to { opacity: 1; } }"
-            val registry = extract_keyframes(css)
-            expect(registry.entries.len() >= 1).to_equal(true)
+    # @manual: folded
+    it "should retain linear length interpolation at the midpoint":
+        step("Check the bounded animation interpolation primitives")
+        expect(approx(
+            interpolate_length(0.0, 100.0, 0.5), 50.0
+        )).to_equal(true)
+
+    # @manual: folded
+    it "should retain linear timing identity":
+        step("Check the bounded animation interpolation primitives")
+        expect(approx(
+            ease_value(0.5, TimingFunction.Linear), 0.5
+        )).to_equal(true)
+
+    # @manual: folded
+    it "should retain the ease-in slow start":
+        step("Check the bounded animation interpolation primitives")
+        expect(ease_value(
+            0.5, TimingFunction.EaseIn
+        ) < 0.5).to_equal(true)
+
+    # @manual: folded
+    it "should interpolate number values at the midpoint":
+        step("Check the bounded animation interpolation primitives")
+        expect(_interp_number_half()).to_equal(true)
+
+    # @manual: folded
+    it "should parse the bounded keyframes block":
+        step("Parse supported CSS keyframes")
+        val registry = extract_keyframes(
+            "@keyframes fade { from { opacity: 0; } to { opacity: 1; } }"
+        )
+        expect(registry.entries.len()).to_be_greater_than(0)

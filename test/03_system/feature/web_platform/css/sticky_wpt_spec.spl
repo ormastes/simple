@@ -1,42 +1,126 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+"""# CSS Sticky Positioning Gap
+
+Records the current truthful static-position fallback at two document scroll
+offsets through Web layout, canonical Draw IR, and exact expected-color
+Engine2D coverage/count. Sticky pinning and containing-block constraints remain
+RED because `position: sticky` has no admitted style/layout representation.
+"""
+
 use std.spec.*
 
-use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixels_with_viewport}
-use std.gc_async_mut.gpu.browser_engine.html_string_parser.{browser_renderer_normalize_style_rules}
+use std.common.ui.draw_ir.{DrawIrCommand}
+use std.common.web.browser_renderer_protocol.{
+    browser_text_input_overlay_empty
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 
-val WIDTH: i32 = 80
-val HEIGHT: i32 = 60
+fn _sticky_html() -> text:
+    (
+        "<style>html,body{margin:0}#spacer{height:4px}" +
+        "#sticky{position:sticky;top:0;width:4px;height:4px;" +
+        "background:#2563eb}#tail{height:20px}</style>" +
+        "<div id='spacer'></div><div id='sticky'></div><div id='tail'></div>"
+    )
 
-fn _count_color(pixels: [u32], color: u32) -> i32:
-    var count: i32 = 0
-    var idx: i32 = 0
-    while idx < pixels.len():
-        if pixels[idx] == color:
+fn _sticky_command_index(
+    commands: [DrawIrCommand], component_id: text
+) -> i32:
+    var i = 0
+    while i < commands.len():
+        if commands[i].component_id == component_id:
+            return i
+        i = i + 1
+    -1
+
+fn _sticky_color_count(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel == color:
             count = count + 1
-        idx = idx + 1
     count
 
-fn _renders_color(style: text, body: text, color: u32) -> bool:
-    val css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(style)
-    val html = "<html><head><style>" + css + "</style></head><body>" + body + "</body></html>"
-    val result = render_html_to_pixels_with_viewport(html, WIDTH, HEIGHT)
-    val pixels = result.pixel_data
-    _count_color(pixels, color) > 0
+describe "REQ-WEB-BROWSER-003/004: CSS sticky positioning gap":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should expose static fallback at two offsets while sticky pinning remains RED":
+        val html = _sticky_html()
 
-describe "WPT-derived CSS sticky positioning subset":
+        step("Resolve the sticky declaration through the current static layout")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 16, 12, "sticky", "y"
+        )).to_equal("4")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 16, 12, "sticky", "w"
+        )).to_equal("4")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 16, 12, "sticky", "h"
+        )).to_equal("4")
 
-    context "CSS position sticky rendering coverage":
+        step("Lower the unscrolled and document-scrolled fallback to Draw IR")
+        val zero =
+            simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+                html, 16, 12, 0, 0, browser_text_input_overlay_empty()
+            )
+        val scrolled =
+            simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+                html, 16, 12, 0, 6, browser_text_input_overlay_empty()
+            )
+        expect(zero.resolved_scroll_y).to_equal(0)
+        expect(scrolled.resolved_scroll_y).to_equal(6)
+        expect(zero.composition.batches[0].source.source_kind).to_equal(
+            "html_ast"
+        )
+        val zero_index = _sticky_command_index(
+            zero.composition.batches[0].commands, "sticky"
+        )
+        val scrolled_index = _sticky_command_index(
+            scrolled.composition.batches[0].commands, "sticky"
+        )
+        expect(zero_index).to_be_greater_than(-1)
+        expect(scrolled_index).to_be_greater_than(-1)
+        if zero_index >= 0:
+            val zero_command =
+                zero.composition.batches[0].commands[zero_index]
+            expect([
+                zero_command.x, zero_command.y,
+                zero_command.width, zero_command.height
+            ]).to_equal([0, 4, 4, 4])
+        if scrolled_index >= 0:
+            val scrolled_command =
+                scrolled.composition.batches[0].commands[scrolled_index]
+            expect([
+                scrolled_command.x, scrolled_command.y,
+                scrolled_command.width, scrolled_command.height
+            ]).to_equal([0, -2, 4, 4])
+            expect([
+                scrolled_command.clip_rect.x, scrolled_command.clip_rect.y,
+                scrolled_command.clip_rect.width,
+                scrolled_command.clip_rect.height
+            ]).to_equal([0, 0, 16, 12])
 
-        it "position sticky element renders at scroll-adjusted position":
-            val style = ".sticky { position: sticky; top: 0; width: 20px; height: 10px; background-color: #2563eb; }"
-            val body = "<div class='sticky'></div>"
-            expect(_renders_color(style, body, 0xFF2563EBu32)).to_equal(true)
-
-        it "sticky element stays visible within containing block":
-            val style = ".sticky { position: sticky; top: 5px; width: 20px; height: 10px; background-color: #16a34a; }"
-            val body = "<div class='sticky'></div>"
-            expect(_renders_color(style, body, 0xFF16A34Au32)).to_equal(true)
-
-        it "sticky element does not affect sibling non-sticky elements":
-            val style = ".sticky { position: sticky; top: 0; width: 10px; height: 8px; background-color: #dc2626; } .sibling { width: 10px; height: 8px; background-color: #16a34a; }"
-            val body = "<div class='sticky'></div><div class='sibling'></div>"
-            expect(_renders_color(style, body, 0xFF16A34Au32)).to_equal(true)
+        step("Execute both truthful fallback frames through Engine2D")
+        val raster = Engine2dCompositorBackend.create_named(
+            16, 12, "software"
+        )
+        val zero_frame = raster.render_draw_ir_composition(
+            zero.composition, []
+        )
+        val scrolled_frame = raster.render_draw_ir_composition(
+            scrolled.composition, []
+        )
+        raster.shutdown()
+        expect(zero_frame.skipped_command_count).to_equal(0)
+        expect(scrolled_frame.skipped_command_count).to_equal(0)
+        expect(_sticky_color_count(
+            zero_frame.pixels, 0xFF2563EBu32
+        )).to_equal(16)
+        expect(_sticky_color_count(
+            scrolled_frame.pixels, 0xFF2563EBu32
+        )).to_equal(8)

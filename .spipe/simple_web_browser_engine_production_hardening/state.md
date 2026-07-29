@@ -2115,3 +2115,47 @@ implementation in progress / target evidence blocked
   production provider. The wrapper improvements remain useful fail-closed
   hardening, but this tranche does not promote hosted-WM evidence to production
   PASS or close the existing runtime-provider bug.
+- production-gap audit tranche (2026-07-29): Six guided read-only sidecars
+  selected disjoint root defects under existing owners. Cookie replacement
+  must include `partition_key`; positive-owner hosted HTML must use the
+  existing external renderer registry while owner-zero local content retains
+  its current lane; focus transitions must blur the old target and apply the
+  new focus state before the new focus listener. Explicit-width
+  `table-layout:auto` may add one O(cells) non-spanning column-minimum pass.
+  One bounded fractional-opacity subtree may partition canonical absolute
+  Draw-IR commands into pre/group/post batches and reuse existing
+  `embedding.opacity_milli` group compositing. Per-frame image resource
+  selection/coverage may replace nested URI scans with transient ordered
+  indexes. Frozen manual steps remain `Reject renderer host capability access`,
+  `Render HTML and CSS through canonical Draw IR`, `Reuse parsed layout work
+  across unchanged animation frames`, and `Close the page and reclaim browser
+  resources`; cookie coverage reuses `Keep partitioned and unpartitioned names
+  distinct`. No new DOM, clock, dispatcher, table engine, WebIR, Draw-IR kind,
+  renderer, compositor, framebuffer, resource owner, or retained cache is
+  permitted. Residual table spans/collapsed borders, multiple/nested opacity
+  groups, remote URL content-kind loss, live TLS, native performance, and
+  runtime-provider provenance remain explicit RED rows. Root Codex is merge
+  and generated-manual owner; implementation sidecars write real RED oracles
+  first and an independent high-capability reviewer accepts the merged result.
+  The deployed CLI was rechecked at the same SHA-256
+  `40edbb4989132623fc57d770b7c02fa85760ec0dd02405d5c22e568e0063e41b`
+  and still identifies itself as the Rust bootstrap seed, so no target spec,
+  docgen, runtime, bootstrap, or network command is authorized in this tranche.
+- HTML/CSS conformance expansion (2026-07-29): Repository inventory confirmed
+  there is no trustworthy standards-Markdown-to-SSpec generator. The canonical
+  path is manual-first executable SSpec under `test/` followed by pure-Simple
+  `spipe-docgen`; the legacy extractor emits placeholder-prone tests and is not
+  admitted. “WebIR” remains the existing HTML semantic/style/layout model, not
+  a new IR type. Every newly admitted case must witness that model, the same
+  downstream `DrawIrComposition`, and Engine2D output. Legacy HTML visible-text
+  suites are being relabeled without widening their claims; generated manuals
+  remain pending a qualified pure-Simple runtime. The open `std.spec`
+  last-expect masking root is repaired by identity-preserving accumulated
+  failures plus child-runner adversaries, including hook failure and
+  `expect(false).to_equal(false)` isolation. A sidecar nevertheless invoked
+  the unqualified deployed artifact once during object-fit checking; its ABI
+  probe failed and the direct artifact segfaulted. No result was accepted, no
+  bootstrap/Rust fallback followed, and that command must not be repeated.
+  Broad transform changes were reverted after review found normal-flow
+  corruption. Rejected supports/custom-property/specificity work is retried
+  only in `/tmp/simple-css-d1-retry.20260729` for reviewed patch import.

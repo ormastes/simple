@@ -393,8 +393,64 @@ fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Ru
         html, viewport_w, trace_stages, WEB_STYLE_RULE_QUOTA
     )
 
+fn _html_without_inert_template_sources(source: text) -> text:
+    val lower = source.lower()
+    var parts: [text] = []
+    var visible_start = 0
+    var pos = 0
+    var depth = 0
+    var guard = 0
+    while pos < source.len() and guard < SIMPLE_WEB_MAX_HTML_PARTS:
+        guard = guard + 1
+        val lt = find_from(lower, "<", pos)
+        if lt < 0:
+            pos = source.len()
+            continue
+        val gt = find_from(lower, ">", lt + 1)
+        if gt < 0:
+            pos = source.len()
+            continue
+        val inner = lower.substring(lt + 1, gt).trim()
+        val closing = inner.starts_with("/")
+        val raw_name = if closing:
+            inner.substring(1, inner.len()).trim()
+        else:
+            inner
+        var name_end = 0
+        while (
+            name_end < raw_name.len() and
+            raw_name.char_at(name_end) != " " and
+            raw_name.char_at(name_end) != "\t" and
+            raw_name.char_at(name_end) != "\n" and
+            raw_name.char_at(name_end) != "\r" and
+            raw_name.char_at(name_end) != "/"
+        ):
+            name_end = name_end + 1
+        val name = raw_name.substring(0, name_end)
+        if name == "template":
+            if closing:
+                if depth > 0:
+                    depth = depth - 1
+                    if depth == 0:
+                        visible_start = gt + 1
+            else:
+                if depth == 0:
+                    parts.push(source.substring(visible_start, lt))
+                if depth < 512:
+                    depth = depth + 1
+                else:
+                    depth = 513
+        if not closing and (name == "script" or name == "style"):
+            val close = find_from(lower, "</{name}", gt + 1)
+            pos = if close < 0: source.len() else: close
+        else:
+            pos = gt + 1
+    if depth == 0 and visible_start < source.len():
+        parts.push(source.substring(visible_start, source.len()))
+    parts.join("")
+
 fn _extract_css_vw_with_rule_limit(
-    html: text, viewport_w: i32, trace_stages: bool,
+    source_html: text, viewport_w: i32, trace_stages: bool,
     requested_rule_limit: i32
 ) -> Rules:
     val rule_limit = if requested_rule_limit < 0:
@@ -404,12 +460,13 @@ fn _extract_css_vw_with_rule_limit(
     else:
         requested_rule_limit
     if (rule_limit == 0 or not _simple_web_html_source_admitted(
-        html, SIMPLE_WEB_MAX_HTML_BYTES
+        source_html, SIMPLE_WEB_MAX_HTML_BYTES
     )):
         return Rules(
             group_parts: [], group_specificities: [], decls: [],
             important_decls: []
         )
+    val html = _html_without_inert_template_sources(source_html)
     # First pass: collect CSS custom properties from all :root blocks
     var html_tag = find_from(html, "<html", 0)
     var html_tag_guard = 0

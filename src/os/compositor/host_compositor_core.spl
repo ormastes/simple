@@ -664,6 +664,13 @@ class HostCompositor:
         val index = self._find_window_index(window_id)
         index >= 0 and self.windows[index].app_id == "browser"
 
+    fn requires_external_web_frame(window_id: i64) -> bool:
+        val index = self._find_window_index(window_id)
+        index >= 0 and (
+            self.windows[index].app_id == "browser" or
+            self.windows[index].owner_port > 0
+        )
+
     me _drop_external_web_frame(window_id: i64) -> bool:
         val drop_index = self._external_web_frame_index(window_id)
         if drop_index < 0:
@@ -1254,9 +1261,9 @@ class HostCompositor:
                         external.checksum = 0u64
                         self.external_web_frames[external_index] = external
                     content_frames.push(external)
-                elif win.app_id == "browser":
-                    # Browser content is renderer-owned. Missing admission or
-                    # a crashed child must stay blank, never execute in WM.
+                elif self.requires_external_web_frame(win.id):
+                    # Positive-owner and browser content is renderer-owned.
+                    # Missing admission or a crashed child stays blank.
                     content_frames.push(_host_empty_external_web_frame())
                 else:
                     val full_h = content_paint_full_height(ch, scroll)
@@ -1715,9 +1722,9 @@ class HostCompositor:
             i = i + 1
         if hit_idx >= 0:
             val wid = self.windows[hit_idx].id
-            # Sandboxed browser frames own page scrolling. Retaining a parent
-            # offset only dirties and redraws the same external pixels.
-            if self.is_browser_window(wid):
+            # Sandboxed external frames own page scrolling. Retaining a
+            # parent offset only dirties and redraws the same pixels.
+            if self.requires_external_web_frame(wid):
                 return
             val current = self.scroll_offsets.get(wid) ?? 0.0
             self.scroll_offsets[wid] = current + dy

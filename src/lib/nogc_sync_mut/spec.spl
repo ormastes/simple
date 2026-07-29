@@ -34,8 +34,9 @@ var indent_level = 0
 var before_hooks = []
 var after_hooks = []
 
-# Current test error: nil = no error, text = error message (Option pattern)
-var current_test_error = nil
+# Assertion failures are accumulated in-place so a later passing matcher cannot
+# overwrite an earlier failure through nested-call global writeback.
+var current_test_errors = []
 
 # NOTE: passed_test_names for pending_on dependency tracking is defined
 # inline in test files. Module vars can't be accessed from imported functions.
@@ -96,14 +97,15 @@ fn _execute_it(name: text, block: fn()):
     if current_context != "":
         full_name = "{current_suite} > {current_context} > {name}"
 
+    # Preserve the shared array identity across nested calls; rebinding here
+    # can leave matchers mutating a stale value under global writeback.
+    current_test_errors.clear()
+
     # Run before_each hooks
     for hook in before_hooks:
         hook()
 
-    # Reset error state (nil = no error)
-    current_test_error = nil
-
-    # Run test block - assertions set current_test_error on failure
+    # Run test block - assertions append to current_test_errors on failure
     block()
 
     # Run after_each hooks
@@ -113,7 +115,7 @@ fn _execute_it(name: text, block: fn()):
     # Check result via Option pattern
     var passed = test_passed
     var failed = test_failed
-    if current_test_error == nil:
+    if current_test_errors.len() == 0:
         passed = passed + 1
         test_passed = passed
         print "{indent}  it {name} ... ok"
@@ -121,6 +123,7 @@ fn _execute_it(name: text, block: fn()):
         failed = failed + 1
         test_failed = failed
         print "{indent}  it {name} ... FAILED"
+        val current_test_error = current_test_errors.join("; ")
         print "{indent}    Error: {current_test_error}"
         test_errors.push("{full_name}: {current_test_error}")
     # global write is not visible to callees until return — pass the tallies
@@ -513,24 +516,35 @@ pub fn after_each(hook: fn()):
 pub fn expect(value: bool) -> ExpectHelper:
     if not value:
         fail_assertion("Expected true, got false")
-    ExpectHelper(value: value, negated: false)
+    ExpectHelper(value: value, negated: false, implicit_error: not value)
 
 pub fn expect(value) -> ExpectHelper:
-    ExpectHelper(value: value, negated: false)
+    ExpectHelper(value: value, negated: false, implicit_error: false)
 
 pub fn expect_not(value: bool) -> ExpectHelper:
     if value:
         fail_assertion("Expected false, got true")
-    ExpectHelper(value: value, negated: true)
+    ExpectHelper(value: value, negated: true, implicit_error: value)
 
 pub class ExpectHelper:
     value: any
     negated: bool
+    implicit_error: bool
 
     fn not_() -> ExpectHelper:
-        ExpectHelper(value: self.value, negated: true)
+        ExpectHelper(
+            value: self.value, negated: true,
+            implicit_error: self.implicit_error
+        )
+
+    fn _begin_matcher():
+        # A bare boolean expect is itself an assertion. A chained matcher
+        # replaces that provisional result with its own comparison.
+        if self.implicit_error and current_test_errors.len() > 0:
+            val _ = current_test_errors.pop()
 
     fn to_equal(expected):
+        self._begin_matcher()
         val matches = self.value == expected
         if self.negated:
             if matches:
@@ -543,6 +557,7 @@ pub class ExpectHelper:
         self.to_equal(expected)
 
     fn to_be_true():
+        self._begin_matcher()
         if self.negated:
             if self.value == true:
                 fail_assertion("Expected value to NOT be true")
@@ -551,6 +566,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected true, got {self.value}")
 
     fn to_be_false():
+        self._begin_matcher()
         if self.negated:
             if self.value == false:
                 fail_assertion("Expected value to NOT be false")
@@ -559,6 +575,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected false, got {self.value}")
 
     fn to_be_nil():
+        self._begin_matcher()
         if self.negated:
             if self.value == nil:
                 fail_assertion("Expected value to NOT be nil")
@@ -567,6 +584,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected nil, got {self.value}")
 
     fn to_be_truthy():
+        self._begin_matcher()
         if self.negated:
             if self.value:
                 fail_assertion("Expected value to NOT be truthy")
@@ -575,6 +593,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected truthy value, got {self.value}")
 
     fn to_be_falsy():
+        self._begin_matcher()
         if self.negated:
             if not self.value:
                 fail_assertion("Expected value to NOT be falsy")
@@ -583,6 +602,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected falsy value, got {self.value}")
 
     fn to_be_greater_than(expected):
+        self._begin_matcher()
         if self.negated:
             if self.value > expected:
                 fail_assertion("Expected {self.value} to NOT be greater than {expected}")
@@ -591,6 +611,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to be greater than {expected}")
 
     fn to_be_less_than(expected):
+        self._begin_matcher()
         if self.negated:
             if self.value < expected:
                 fail_assertion("Expected {self.value} to NOT be less than {expected}")
@@ -599,6 +620,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to be less than {expected}")
 
     fn to_be_at_least(expected):
+        self._begin_matcher()
         if self.negated:
             if self.value >= expected:
                 fail_assertion("Expected {self.value} to NOT be at least {expected}")
@@ -607,6 +629,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to be at least {expected}")
 
     fn to_be_at_most(expected):
+        self._begin_matcher()
         if self.negated:
             if self.value <= expected:
                 fail_assertion("Expected {self.value} to NOT be at most {expected}")
@@ -615,6 +638,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to be at most {expected}")
 
     fn to_contain(item):
+        self._begin_matcher()
         val contains = self.value.contains(item)
         if self.negated:
             if contains:
@@ -624,6 +648,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to contain {item}")
 
     fn to_start_with(prefix: text):
+        self._begin_matcher()
         val starts = self.value.starts_with(prefix)
         if self.negated:
             if starts:
@@ -633,6 +658,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected '{self.value}' to start with '{prefix}'")
 
     fn to_end_with(suffix: text):
+        self._begin_matcher()
         val ends = self.value.ends_with(suffix)
         if self.negated:
             if ends:
@@ -642,6 +668,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected '{self.value}' to end with '{suffix}'")
 
     fn to_be_empty():
+        self._begin_matcher()
         val is_empty = self.value.len() == 0
         if self.negated:
             if is_empty:
@@ -651,6 +678,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected empty, got length {self.value.len()}")
 
     fn to_have_length(expected: i64):
+        self._begin_matcher()
         val actual_len = self.value.len()
         if self.negated:
             if actual_len == expected:
@@ -660,6 +688,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected length {expected}, got {actual_len}")
 
     fn to_be_close_to(expected, tolerance):
+        self._begin_matcher()
         val diff = self.value - expected
         var abs_diff = diff
         if diff < 0:
@@ -672,6 +701,7 @@ pub class ExpectHelper:
                 fail_assertion("Expected {self.value} to be close to {expected} (tolerance: {tolerance}), diff: {abs_diff}")
 
     fn to_match(pattern: text):
+        self._begin_matcher()
         val matches = self.value.contains(pattern)
         if self.negated:
             if matches:
@@ -686,18 +716,16 @@ pub class ExpectHelper:
 
 # Assertion Helpers
 pub fn fail_assertion(message: text):
-    current_test_error = message
+    current_test_errors.push(message)
 
 pub fn fail_test(message: text):
     fail_assertion(message)
 
 pub fn check(condition: bool):
-    expect(condition)
     if not condition:
         fail_assertion("expected true to equal true")
 
 pub fn check_msg(condition: bool, message: text):
-    expect(condition)
     if not condition:
         fail_assertion(message)
 

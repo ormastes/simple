@@ -48,6 +48,46 @@ fn trusted_frame(window_id: text, revision: i64, color: u32) -> WmContentFrame:
     )
 
 describe "hosted external browser frames":
+    # @req REQ-WEB-BROWSER-014
+    it "keeps positive-owner content out of the in-process renderer":
+        val hostile = (
+            "<style>body{background-color:#ef4444}</style>" +
+            "<script>document.body.setAttribute('data-ran','yes')</script>"
+        )
+        var local = HostCompositor.new_headless(Size(
+            width: 160u64, height: 120u64
+        ))
+        local.apply_bridge_request(
+            1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Local",
+            8, 8, 100, 80, hostile, 1, "hosted-web-event"
+        )
+        expect(local.requires_external_web_frame(1)).to_be(false)
+        val local_raster = Engine2dCompositorBackend.create_named(
+            160, 120, "software"
+        )
+        expect(local.render_frame_engine2d(local_raster)).to_be(true)
+        expect(count_color(
+            local.pure_simple_pixel_buffer(), 0xFFEF4444u32
+        )).to_be_greater_than(0)
+        local_raster.shutdown()
+
+        var remote = HostCompositor.new_headless(Size(
+            width: 160u64, height: 120u64
+        ))
+        remote.apply_bridge_request(
+            1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Remote",
+            8, 8, 100, 80, hostile, 77, "hosted-web-event"
+        )
+        expect(remote.requires_external_web_frame(1)).to_be(true)
+        val remote_raster = Engine2dCompositorBackend.create_named(
+            160, 120, "software"
+        )
+        expect(remote.render_frame_engine2d(remote_raster)).to_be(false)
+        expect(count_color(
+            remote.pure_simple_pixel_buffer(), 0xFFEF4444u32
+        )).to_equal(0)
+        remote_raster.shutdown()
+
     it "keeps trusted frames isolated by window through close":
         step("Open two browser compositor windows")
         val first_body = "<div>first parent body</div>"
