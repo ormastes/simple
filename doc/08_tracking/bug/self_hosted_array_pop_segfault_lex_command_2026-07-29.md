@@ -21,9 +21,19 @@ the earlier tier-c finding that narrow/synthetic closures do not contain
 whatever competing symbol the real (large) CLI closure links in — the crash
 genuinely requires the full closure to reproduce, so no reproduction attempt
 made in this doc (three total) has verified the fix against the real defect.
-The causal link between this fix and the original segfault's disappearance
-therefore remains **INFERRED**, not PROVED end-to-end. See "2026-07-29
-follow-up" below for full detail on each attempt and recommended next steps.
+A seventh attempt deliberately imported real `pop()`-defining competing
+types (`Stack`, `Mailbox`) alongside the lexer, single then combined, with
+`SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1` — again **zero erased-receiver binds
+detected, zero theft, for either candidate alone or combined.** Across all
+seven attempts in this doc, `self.indent_stack.pop()` has never once been
+observed to bind to anything but `rt_array_pop`. **The causal link therefore
+remains INFERRED, not just unconfirmed for lack of a full build, but now
+explicitly flagged as uncertain at the mechanism level** — it is possible
+this crash is not an instance of the erased-receiver-bind class this fix
+targets at all, and only a completed full-CLI build (or an equivalent
+debug-instrumented run against the real closure) can settle it. See
+"2026-07-29 follow-up" below for full detail on each attempt and recommended
+next steps.
 **Component:** `src/compiler/10.frontend/core/lexer_struct.spl` (`CoreLexer.scan_token`),
 runtime `rt_array_pop` / `spl_array_pop`,
 `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
@@ -506,3 +516,75 @@ established pattern for this bug class, not as a fully closed-loop verified
 fix. Whoever next has a completed full-CLI build should re-run the original
 `lex` repro against it directly — that remains the cheapest real
 confirmation once tier (b)'s infrastructure blockers are cleared.
+
+**Retry 7 (competing-symbol census — deliberately import a real `pop()`-defining
+type alongside the lexer, single then combined, to force the theft directly
+instead of building the whole CLI): tried, DECISIVE NEGATIVE RESULT again,
+reported per instruction 4 ("if no single candidate triggers it, try
+two-at-once... report the negative with the bind census — still decisive
+data").**
+
+A census of `pop()`-defining structs in owned source (18 files) was narrowed
+to candidates plausibly in the real CLI closure by real-usage count (grep for
+importers, excluding `src/compiler_rust/lib/std` — seed-stdlib, a different
+lane): `tooling.ds_utils.Stack` (0 real importers — dead code, kept anyway as
+the requested starting candidate), `nogc_async_mut.actors.actor.Mailbox` (9
+importers), `nogc_async_mut.async_host.scheduler.WorkStealingQueue` (62
+importers), `common.js.engine.vm.Vm` (37 importers, needs a `Logger` to
+construct — not attempted, extra setup cost), `app.interpreter.collections.persistent_vec.PersistentVec`
+(12 importers, `fn pop() -> PersistentVec<T>` is a free/functional-style pop
+returning a new vec, not `me pop() -> T?` — structurally different call
+convention, not attempted), `nogc_async_mut.concurrent` (35 importers, two
+`fn pop() -> Any` — same functional-style caveat, not attempted).
+
+1. **Single candidate, `Stack<i64>.pop()` alongside the lexer** (both called
+   with a statically-typed, non-erased receiver — `s: Stack<i64>` param,
+   `self.indent_stack` a typed struct field), built with the **unpatched**
+   seed, `SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1`: **zero
+   `[CODEGEN-ERASED-RECEIVER-BIND]` lines** (PROVED — the diagnostic did not
+   fire for either call), and `objdump -r` shows `self.indent_stack.pop()`
+   still resolves to 4 clean `rt_array_pop` relocations, while
+   `touch_stack_pop`'s `s.pop()` correctly resolves to `Stack_dot_pop` — no
+   collision, both correct, ran to exit 0.
+2. **`WorkStealingQueue` (the highest real-usage candidate, 62 importers)
+   pulled in a separate, unrelated, pre-existing compile failure**
+   (`mir enum identity: enum construction: missing runtime identity for
+   'Poll'`/`'TaskState'`, from its transitive `async_host/future.spl`
+   dependency) when compiled in this narrow closure — reported, not chased
+   further or fixed (out of scope), and dropped from the fixture.
+3. **Two candidates at once, `Stack<i64>` + `Mailbox`, unpatched seed,
+   `SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1`:** same result — zero erased-bind
+   diagnostics, `self.indent_stack.pop()` still 4 clean `rt_array_pop`
+   relocations, `Stack.pop()` → `Stack_dot_pop`, `Mailbox.pop()` →
+   `Mailbox_dot_pop`, no cross-contamination, exit 0.
+
+**Across all attempts to reproduce this class of miscompile in this doc
+(three tier-c/narrow-entry attempts plus this two-part census — six real
+build+run experiments total), none has ever caused
+`self.indent_stack.pop()` to bind to anything other than `rt_array_pop`, and
+`SIMPLE_DEBUG_ERASED_RECEIVER_BIND` has never once reported an erased-receiver
+bind for any `.pop()` call site attempted, single or combined competing
+symbols.** This is stronger and more specific than "narrow closures don't
+reproduce it" (the earlier framing): it suggests the erasure precondition for
+`.pop()` — unlike the *confirmed* `starts_with`/`ends_with`/`slice` victims,
+which reliably erase from a `.lower()`/`.upper()`/`.substring()` builtin
+result in even a small fixture — may depend on conditions not reproduced by
+directly constructing a competing type and calling `.pop()` on it in a small
+program. Two honest possibilities, neither settled by this pass: (a) the real
+CLI closure has some structural property (huge `use_map`/`import_map`, a
+specific resolution-order artifact, or literally thousands of distinct
+candidates) that these hand-built fixtures cannot approximate at small scale;
+or (b) `self.indent_stack.pop()`'s original segfault is not actually an
+instance of the erased-receiver-bind class at all, and this session's fix,
+while a real, evidence-backed, zero-collateral-risk hardening of the
+allowlist (and directly closes the *documented* `push` theft victim), may not
+be the actual fix for the original crash. **This doc does not claim either
+possibility as settled — causation remains INFERRED, not PROVED, and is now
+explicitly flagged as uncertain at the mechanism level, not just
+unconfirmed for lack of a build.** The only way to settle it that has not
+been tried is running the original `lex` repro against an actually-completed
+full CLI build (still blocked, see tier (b) above) or obtaining a debug build
+capable of reporting exactly which symbol `self.indent_stack.pop()` binds to
+inside that real closure at the moment of the crash (e.g. via
+`SIMPLE_DEBUG_ERASED_RECEIVER_BIND` on a completed, not just attempted, full
+build).
