@@ -1558,7 +1558,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vulkan_selected_device_driver_identity_hash", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_type", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_fence_submission_supported", &[], &[I64]),
-    RuntimeFuncSpec::new("rt_vulkan_accepted_compute_submit_count", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_submit_and_wait_fence", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_submit_graphics_and_wait_fence", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_wait_fence", &[I64, I64], &[I64]),
@@ -1631,14 +1630,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cuda_mem_free", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memset", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memcpy_dtoh", &[I64, I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_cuda_module_load_data", &[I64], &[I64]), // ptx_ptr (cstr) -> module
+    RuntimeFuncSpec::new("rt_cuda_module_load_data", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module
     RuntimeFuncSpec::new("rt_cuda_module_load_data_bytes", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module
     RuntimeFuncSpec::new("rt_cuda_module_unload", &[I64], &[I64]),
     RuntimeFuncSpec::new(
         "rt_cuda_launch_kernel",
-        &[I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
         &[I64],
-    ), // module, name_ptr, grid_xyz, block_xyz, args_ptr
+    ), // module, name_ptr, name_len, grid_xyz, block_xyz, args_ptr
     RuntimeFuncSpec::new(
         "rt_cuda_launch_kernel_name",
         &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
@@ -1807,7 +1806,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_bdd_expect_eq_rv", &[I64, I64], &[]), // actual, expected as RuntimeValues
     RuntimeFuncSpec::new("rt_bdd_expect_truthy_rv", &[I64], &[]),  // value as RuntimeValue
     // Runtime profiler SFFI
-    RuntimeFuncSpec::new("rt_profiler_record_call", &[I64], &[]), // name_ptr (C string)
+    RuntimeFuncSpec::new("rt_profiler_record_call", &[I64, I64], &[]), // name_ptr, name_len
     RuntimeFuncSpec::new("rt_profiler_record_return", &[], &[]),
     RuntimeFuncSpec::new("rt_profiler_is_active", &[], &[I32]),
     // =========================================================================

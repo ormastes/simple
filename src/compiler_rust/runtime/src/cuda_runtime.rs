@@ -119,7 +119,7 @@ struct CUuuid {
     bytes: [u8; 16],
 }
 
-pub fn cuda_device_uuid_identity(bytes: &[u8; 16]) -> i64 {
+fn cuda_device_uuid_identity(bytes: &[u8; 16]) -> i64 {
     if bytes.iter().all(|byte| *byte == 0) {
         return 0;
     }
@@ -2294,18 +2294,24 @@ fn launch_f64_slice_kernel(
 }
 
 /// Load CUDA module from file
+/// Native codegen passes `text` extern arguments as a raw `(ptr, len)`
+/// byte-span pair, not a NUL-terminated C string.
 #[no_mangle]
 #[cfg(feature = "cuda")]
-pub extern "C" fn rt_cuda_module_load(path: *const c_char) -> i64 {
-    if path.is_null() {
+pub extern "C" fn rt_cuda_module_load(path_ptr: *const u8, path_len: u64) -> i64 {
+    if path_ptr.is_null() || path_len == 0 {
         return -1;
     }
     if let Err(err) = ensure_default_context_current() {
         return -(err as i64);
     }
     unsafe {
+        let bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+        let Ok(path) = CString::new(bytes) else {
+            return -1;
+        };
         let mut module: CUmodule = ptr::null_mut();
-        let err = cuModuleLoad(&mut module, path);
+        let err = cuModuleLoad(&mut module, path.as_ptr());
         if err != 0 {
             return -(err as i64);
         }
@@ -2315,23 +2321,26 @@ pub extern "C" fn rt_cuda_module_load(path: *const c_char) -> i64 {
 
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
-pub extern "C" fn rt_cuda_module_load(_path: *const c_char) -> i64 {
+pub extern "C" fn rt_cuda_module_load(_path_ptr: *const u8, _path_len: u64) -> i64 {
     -3
 }
 
 /// Load CUDA module from PTX string
+/// Native codegen passes `text` extern arguments as a raw `(ptr, len)`
+/// byte-span pair, not a NUL-terminated C string.
 #[no_mangle]
 #[cfg(feature = "cuda")]
-pub extern "C" fn rt_cuda_module_load_data(ptx: *const c_char) -> i64 {
-    if ptx.is_null() {
+pub extern "C" fn rt_cuda_module_load_data(ptx_ptr: *const u8, ptx_len: u64) -> i64 {
+    if ptx_ptr.is_null() || ptx_len == 0 {
         return -1;
     }
     if let Err(err) = ensure_default_context_current() {
         return -(err as i64);
     }
     unsafe {
+        let bytes = std::slice::from_raw_parts(ptx_ptr, ptx_len as usize);
         let mut module: CUmodule = ptr::null_mut();
-        let err = cuModuleLoadData(&mut module, ptx as *const c_void);
+        let err = cuModuleLoadData(&mut module, bytes.as_ptr() as *const c_void);
         if err != 0 {
             return -(err as i64);
         }
@@ -2424,11 +2433,14 @@ pub extern "C" fn rt_cuda_module_get_function(_module: i64, _func_name: *const c
 }
 
 /// Launch CUDA kernel (module handle + function name)
+/// Native codegen passes `text` extern arguments as a raw `(ptr, len)`
+/// byte-span pair, not a NUL-terminated C string.
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_launch_kernel(
     module: i64,
-    func_name: *const c_char,
+    func_name_ptr: *const u8,
+    func_name_len: u64,
     grid_x: i64,
     grid_y: i64,
     grid_z: i64,
@@ -2437,16 +2449,20 @@ pub extern "C" fn rt_cuda_launch_kernel(
     block_z: i64,
     args_ptr: i64,
 ) -> i64 {
-    if func_name.is_null() {
+    if func_name_ptr.is_null() || func_name_len == 0 {
         return -1;
     }
     if let Err(err) = ensure_default_context_current() {
         return -(err as i64);
     }
     unsafe {
+        let bytes = std::slice::from_raw_parts(func_name_ptr, func_name_len as usize);
+        let Ok(func_name) = CString::new(bytes) else {
+            return -1;
+        };
         // Get function from module
         let mut func: CUfunction = ptr::null_mut();
-        let err = cuModuleGetFunction(&mut func, module as CUmodule, func_name);
+        let err = cuModuleGetFunction(&mut func, module as CUmodule, func_name.as_ptr());
         if err != 0 {
             return -(err as i64);
         }

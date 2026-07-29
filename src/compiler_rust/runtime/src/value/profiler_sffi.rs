@@ -27,22 +27,31 @@ pub fn is_profiling_enabled() -> bool {
 
 /// Record a function call from native (Cranelift) code.
 ///
-/// # Safety
-/// `name` must be a valid null-terminated C string.
+/// Native codegen passes `text` extern arguments as a raw `(ptr, len)`
+/// byte-span pair, not a NUL-terminated C string (same convention as
+/// `rt_file_exists`/`rt_env_get`/`rt_mem_attr_set_owner`).
 #[no_mangle]
-pub extern "C" fn rt_profiler_record_call(name: *const c_char) {
+pub extern "C" fn rt_profiler_record_call(name_ptr: *const u8, name_len: u64) {
     if !PROFILING_ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    let func_name = if name.is_null() {
-        "<unknown>"
-    } else {
-        unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("<invalid>")
-    };
+    let func_name = unsafe { string_arg_or_unknown(name_ptr, name_len as i64) };
     // Delegate to the compiler's global profiler via a callback
     if let Some(cb) = RECORD_CALL_CALLBACK.get() {
-        cb(func_name);
+        cb(&func_name);
     }
+}
+
+unsafe fn string_arg_or_unknown(ptr: *const u8, len: i64) -> String {
+    string_arg(ptr, len).unwrap_or_else(|| "<unknown>".to_string())
+}
+
+unsafe fn string_arg(ptr: *const u8, len: i64) -> Option<String> {
+    if ptr.is_null() || len <= 0 {
+        return None;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len as usize);
+    Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// Record a function return from native (Cranelift) code.

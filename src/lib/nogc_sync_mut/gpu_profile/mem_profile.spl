@@ -1,0 +1,118 @@
+# GPU memory-profile instrumentation skeleton (M7 remainder)
+#
+# Two pieces per the GPU section (§2) of
+# doc/05_design/runtime/memory_analysis/gc_gpu_instrumentation_design.md:
+#
+#   1. run_under_compute_sanitizer — subprocess wrapper around the
+#      `compute-sanitizer` CLI (memcheck/racecheck/initcheck), the exec
+#      wrapper backing the `--mem-infra=gpu-sanitize` matrix row.
+#   2. device_trace_to_memory_viz — serializes a `DeviceAllocEvent` trace
+#      (the shape `DEVICE_ALLOCS` bookkeeping in gpu.rs would emit, once
+#      wired) into a minimal, well-formed JSON snapshot.
+#
+# COMPATIBILITY NOTE: `device_trace_to_memory_viz` emits our own versioned
+# schema ("simple-gpu-trace v1"), NOT a verified PyTorch `memory_viz`
+# payload. The design doc does not specify memory_viz's minimal accepted
+# shape, and no viewer test has been run against a real memory_viz build on
+# a GPU machine. Do not treat this output as memory_viz-compatible until
+# that viewer test is done — see the design doc's GPU section status line.
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# compute-sanitizer exec wrapper
+# ============================================================================
+
+fn _which(name: text) -> text:
+    """Locate a binary on PATH. Returns "" if not found or `which` fails."""
+    val (stdout, _stderr, code) = rt_process_run("which", [name])
+    if code == 0:
+        stdout.trim()
+    else:
+        ""
+
+pub fn run_under_compute_sanitizer(tool: text, cmd: [text]) -> (text, text, i64):
+    """Run `cmd` under `compute-sanitizer --tool <tool>`.
+
+    `tool` is expected to be one of "memcheck", "racecheck", "initcheck"
+    (any value the installed compute-sanitizer accepts is passed through
+    verbatim, unvalidated here).
+
+    If `compute-sanitizer` is not found on PATH, this does NOT fail hard:
+    it returns a clear ("", "compute-sanitizer not found", 127) so callers
+    on a GPU-less box can detect and report the condition instead of
+    crashing.
+
+    Args:
+        tool: sanitizer tool name (passed to `--tool`)
+        cmd: the command + args to run under the sanitizer, e.g.
+             ["bin/release/x86_64-unknown-linux-gnu/simple", "run", "prog.spl"]
+
+    Returns:
+        (stdout, stderr, exit_code) of the sanitizer subprocess, or the
+        127-path tuple above when compute-sanitizer is absent.
+    """
+    val sanitizer_path = _which("compute-sanitizer")
+    if sanitizer_path == "":
+        return ("", "compute-sanitizer not found", 127)
+    var args: [text] = ["--tool", tool]
+    for part in cmd:
+        args.push(part)
+    rt_process_run(sanitizer_path, args)
+
+# ============================================================================
+# Device alloc/free trace -> JSON snapshot
+# ============================================================================
+
+struct DeviceAllocEvent:
+    """One device alloc or free event, as `DEVICE_ALLOCS` bookkeeping
+    (design doc §2, gpu.rs choke points) would emit per call."""
+    ts: i64
+    owner: text
+    ptr: i64
+    bytes: i64
+    kind: text  # "alloc" | "free"
+
+fn _json_escape(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        elif ch == "\t":
+            out = out + "\\t"
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _event_to_json(ev: DeviceAllocEvent) -> text:
+    "{\"ts\":" + ev.ts.to_text() +
+        ",\"owner\":\"" + _json_escape(ev.owner) + "\"" +
+        ",\"ptr\":" + ev.ptr.to_text() +
+        ",\"bytes\":" + ev.bytes.to_text() +
+        ",\"kind\":\"" + _json_escape(ev.kind) + "\"}"
+
+pub fn device_trace_to_memory_viz(events: [DeviceAllocEvent]) -> text:
+    """Serialize a device alloc/free trace to a minimal, well-formed,
+    versioned JSON snapshot ("simple-gpu-trace v1").
+
+    NOT verified against PyTorch's `memory_viz` tool — see the
+    COMPATIBILITY NOTE at the top of this file.
+    """
+    var body = "{\"schema\":\"simple-gpu-trace\",\"version\":1,\"event_count\":" +
+        events.len().to_text() + ",\"events\":["
+    var i = 0
+    while i < events.len():
+        if i > 0:
+            body = body + ","
+        body = body + _event_to_json(events[i])
+        i = i + 1
+    body + "]}"

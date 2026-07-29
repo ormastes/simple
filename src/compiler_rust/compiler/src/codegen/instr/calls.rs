@@ -2504,6 +2504,14 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // Hosted compositor (Cocoa / Win32 windows take title text at index 2)
         "rt_cocoa_window_new" | "rt_win32_window_new" => Some(&[2]),
 
+        // CUDA (function/module names and PTX source as text)
+        "rt_cuda_launch_kernel" => Some(&[1]),      // func_name
+        "rt_cuda_module_load" => Some(&[0]),        // path
+        "rt_cuda_module_load_data" => Some(&[0]),   // ptx
+
+        // Profiler (function name as text)
+        "rt_profiler_record_call" => Some(&[0]),    // name
+
         _ => None,
     }
 }
@@ -2517,8 +2525,9 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // process_c_runtime_arg_indices (checked before this table), which now
         // expands cmd to a (ptr, len) pair to match the linked runtime's actual
         // signature (compiler_rust/runtime/src/value/sffi/env_process.rs).
-        "rt_cuda_launch_kernel" => Some(&[1]),
-        "rt_cuda_module_load_data" => Some(&[0]),
+        // NOTE: rt_cuda_launch_kernel, rt_cuda_module_load, rt_cuda_module_load_data,
+        // and rt_profiler_record_call are in text_arg_indices now (not text_cstr)
+        // because they take (ptr, len) pairs; see doc/08_tracking/bug/extern_text_cchar_abi_family_sweep_2026-07-29.md
         // Fast in-memory DB: C functions accept const char* for string params
         "rt_db_table_create" => Some(&[0]),   // name
         "rt_db_put" => Some(&[1]),            // pk_text
