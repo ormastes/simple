@@ -1,0 +1,102 @@
+# Document Registry
+#
+# URI -> DocumentHandle registry: open/get/close/apply/undo/mark_saved.
+# Skeleton only -- no view-invalidation callback, no autosave, no hot exit,
+# no collaboration; depth arrives with lane L1. Part of the S3
+# document-service skeleton; see
+# doc/03_plan/app/ide_extension_kernel/parallel_agent_shared_foundation_plan.md
+# section S3.
+#
+# `get()` returns a sentinel handle (version 0) instead of an Option --
+# native codegen has known corruption on `Dict.get()`/Option<struct> paths
+# (see .claude/rules/code-style.md "Native-Codegen Dict Pitfalls" and
+# .claude/memory/ref_*), and the rest of this lib (multi_buffer.spl,
+# debug_session_registry.spl) already prefers sentinel-default returns over
+# Option<struct> for the same reason. Use `is_open(uri)` to check presence.
+
+use std.editor.document.model.*
+use std.editor.document.transaction.*
+
+struct DocumentHandle:
+    uri: text
+    version: i64
+    dirty: bool
+    model: TextDocumentModel
+    undo_stack: [DocumentTransaction]
+
+fn document_registry_default_handle(uri: text) -> DocumentHandle:
+    DocumentHandle(
+        uri: uri,
+        version: 0,
+        dirty: false,
+        model: text_document_model_new(""),
+        undo_stack: []
+    )
+
+fn document_handle_content(handle: DocumentHandle) -> text:
+    text_document_model_snapshot(handle.model)
+
+class DocumentRegistry:
+    handles: Dict<text, DocumentHandle>
+
+impl DocumentRegistry:
+
+    static fn new() -> DocumentRegistry:
+        DocumentRegistry(handles: {})
+
+    me open(uri: text, content: text) -> DocumentHandle:
+        val handle = DocumentHandle(
+            uri: uri,
+            version: 1,
+            dirty: false,
+            model: text_document_model_new(content),
+            undo_stack: []
+        )
+        self.handles[uri] = handle
+        handle
+
+    fn get(uri: text) -> DocumentHandle:
+        # Bracket + contains_key, not `.get()`: dict `.get()` is unreliable
+        # for struct values under native codegen -- see file header.
+        if self.handles.contains_key(uri):
+            return self.handles[uri]
+        document_registry_default_handle(uri)
+
+    fn is_open(uri: text) -> bool:
+        self.handles.contains_key(uri)
+
+    me close(uri: text):
+        if self.handles.contains_key(uri):
+            self.handles.remove(uri)
+
+    me apply(uri: text, tx: DocumentTransaction) -> bool:
+        if not self.handles.contains_key(uri):
+            return false
+        var handle = self.handles[uri]
+        handle.model = document_transaction_apply(tx, handle.model)
+        handle.undo_stack.push(document_transaction_inverse(tx))
+        handle.version = handle.version + 1
+        handle.dirty = true
+        self.handles[uri] = handle
+        true
+
+    me undo(uri: text) -> bool:
+        if not self.handles.contains_key(uri):
+            return false
+        var handle = self.handles[uri]
+        if handle.undo_stack.len() == 0:
+            return false
+        val inverse_tx = handle.undo_stack.pop()
+        handle.model = document_transaction_apply(inverse_tx, handle.model)
+        handle.version = handle.version + 1
+        handle.dirty = true
+        self.handles[uri] = handle
+        true
+
+    me mark_saved(uri: text) -> bool:
+        if not self.handles.contains_key(uri):
+            return false
+        var handle = self.handles[uri]
+        handle.dirty = false
+        self.handles[uri] = handle
+        true
