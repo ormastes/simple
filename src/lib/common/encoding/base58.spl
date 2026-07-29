@@ -17,6 +17,7 @@
 #   BIP-0058, BIP-0032
 #
 use std.crypto.sha256.{sha256_bytes}
+use std.common.encoding.utf8.{char_from_code}
 
 # ============================================================================
 # Public types
@@ -70,7 +71,7 @@ fn _b58_list_all_zero(lst: list) -> bool:
     """Return true if all elements in list are zero."""
     var i = 0
     while i < lst.len():
-        if (lst.get(i) & 0xFF) != 0:
+        if (lst[i] & 0xFF) != 0:
             return false
         i = i + 1
     true
@@ -87,7 +88,7 @@ fn _b58_u8arr_to_list(bytes: [u8]) -> list:
 
 fn _b58_list_get_byte(l: list, i: i64) -> i64:
     """Get element i from untyped list as i64 byte value."""
-    l.get(i) & 0xFF
+    l[i] & 0xFF
 
 # ============================================================================
 # Base58 encode
@@ -132,7 +133,7 @@ fn base58_encode(input: [u8]) -> text:
             var carry: i64 = 0
             var k = 0
             while k < work.len():
-                val x = carry * 256 + (work.get(k) & 0xFF)
+                val x = carry * 256 + (work[k] & 0xFF)
                 work[k] = x / 58
                 carry = x % 58
                 k = k + 1
@@ -148,8 +149,26 @@ fn base58_encode(input: [u8]) -> text:
     # Append digits in reverse (they were collected LSB-first)
     var d = digits.len() - 1
     while d >= 0:
-        val alpha_ord = _b58_alphabet_ord(digits.get(d))
-        result = result + alpha_ord.chr()
+        val alpha_ord = _b58_alphabet_ord(digits[d])
+        # char_from_code, not `.chr()` -- `.chr()` is implemented only in
+        # the tree-walking interpreter's method dispatch
+        # (interpreter_method/primitives.rs), not in the JIT/native
+        # codegen path, so it crashes ("Function 'i64.chr' not found")
+        # under this engine's DEFAULT execution mode and only works when
+        # SIMPLE_EXECUTION_MODE=interpret is forced (verified directly:
+        # identical `65.chr()` fails under the default engine, succeeds
+        # under forced interpret). Not a receiver-typing/erased-receiver
+        # issue -- confirmed by testing an i64 literal, a typed local, a
+        # function-result local, and a direct call-site receiver, all four
+        # shapes fail identically under the default engine and all four
+        # succeed identically under forced interpret. char_from_code is
+        # documented as "byte value (0-255) to a single-byte text
+        # character" (not a general Unicode codepoint converter -- it
+        # returns U+FFFD for 128-255), but base58's alphabet is entirely
+        # ASCII 49-122 (digits/letters), well within char_from_code's
+        # correct range -- verified directly for the alphabet's own
+        # endpoints (49='1', 122='z').
+        result = result + char_from_code(alpha_ord)
         d = d - 1
 
     result
@@ -196,12 +215,12 @@ fn base58_decode(input: text) -> Result<[u8], Base58Error>:
 
     var di = 0
     while di < indices.len():
-        val digit = indices.get(di)
+        val digit = indices[di]
         # Multiply by 58 and add digit (LSB→MSB carry propagation through work)
         var carry: i64 = digit
         var wi: i64 = work.len() - 1
         while wi >= 0:
-            val x = work.get(wi) * 58 + carry
+            val x = work[wi] * 58 + carry
             work[wi] = x & 0xFF
             carry = x / 256
             wi = wi - 1
@@ -211,7 +230,7 @@ fn base58_decode(input: text) -> Result<[u8], Base58Error>:
             new_work.push(carry & 0xFF)
             var ci = 0
             while ci < work.len():
-                new_work.push(work.get(ci))
+                new_work.push(work[ci])
                 ci = ci + 1
             work = new_work
             carry = carry / 256
@@ -225,7 +244,8 @@ fn base58_decode(input: text) -> Result<[u8], Base58Error>:
         z = z + 1
     var wi2 = 0
     while wi2 < work.len():
-        result.push(work.get(wi2))
+        val wv: i64 = work[wi2]
+        result.push(wv.to_u8())
         wi2 = wi2 + 1
 
     Ok(result)
