@@ -17,6 +17,7 @@ components that are intended to ship with Simple distributions.
 | liburing subset | `src/runtime/vendor/liburing/` | https://github.com/axboe/liburing | MIT for dual-licensed liburing files; `io_uring.h` keeps its upstream SPDX identifier `(GPL-2.0 WITH Linux-syscall-note) OR MIT` |
 | Google Fonts pinned font set | `assets/fonts/google-fonts/` | https://github.com/google/fonts at `ec0464b978de222073645d6d3366f3fdf03376d8` | Fifteen font files under OFL-1.1; Roboto Slab under Apache-2.0. Each family directory includes its upstream `METADATA.pb` and license; Roboto Slab also includes `COPYRIGHT.txt`. |
 | Unicode CLDR 48.2 ranking inputs | `assets/fonts/cldr/release-48-2/` | https://github.com/unicode-org/cldr tag `release-48-2`, commit `11299982335beb974c1c63c45265184e759c0f41` | Unicode License v3 (`Unicode-3.0`); the adjacent `LICENSE` is bundled unchanged. |
+| CPython HTML5 named character references | `src/lib/gc_async_mut/gpu/browser_engine/html_named_character_references.spl`, `scripts/generate/generate-html-named-character-references.shs` | https://github.com/python/cpython/blob/v3.12.3/Lib/html/entities.py | Python Software Foundation License 2.0 (`PSF-2.0`); the generated table retains the source notice and its adjacent `html_named_character_references.LICENSE.txt`. |
 
 ## Distribution Notes
 
@@ -29,6 +30,8 @@ components that are intended to ship with Simple distributions.
   bytes and must not reuse those names for modified versions.
 - Keep `assets/fonts/cldr/release-48-2/LICENSE` with the three pinned
   supplemental XML inputs and their derived source/ranking manifests.
+- Keep `html_named_character_references.LICENSE.txt` beside the generated
+  pure-Simple HTML named-reference table.
 - `src/runtime/vendor/liburing/include/liburing/io_uring.h` is carried with its original upstream SPDX identifier because it mirrors kernel interface definitions. The vendored copy remains dual-licensed exactly as marked in the file.
 - Release bundles should exclude development-only caches and downloaded runtimes such as `src/app/vscode_extension/node_modules/`, `src/app/vscode_extension/.vscode-test/`, and `src/compiler_rust/target/`.
 

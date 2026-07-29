@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 25 | 25 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -429,6 +429,83 @@ expect(_first_char_token_data("<p>&hellip;</p>")).to_equal(text.from_char_code(8
 
 </details>
 
+#### AC-1: decodes the complete named-reference value forms
+
+- Tokenize one-codepoint and two-codepoint WHATWG named references
+   - Expected: data equals `≂̸Æ∳`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Tokenize one-codepoint and two-codepoint WHATWG named references")
+val data = _all_character_data(
+    "<p>&NotEqualTilde;&AElig;&CounterClockwiseContourIntegral;</p>"
+)
+
+expect(data).to_equal("≂̸Æ∳")
+```
+
+</details>
+
+#### AC-1: applies longest legacy matches only in data context
+
+- Compare legacy no-semicolon matches in data and attribute values
+   - Expected: data equals `¬it;&ersand;`
+   - Expected: _attr_value(equals_tag, "title") equals `&not=x`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Compare legacy no-semicolon matches in data and attribute values")
+val data = _all_character_data("<p>&notit;&ampersand;</p>")
+val tag = _first_start_tag(
+    "<a title='&notit;&ampersand;&NotEqualTilde;'>"
+)
+val equals_tag = _first_start_tag("<a title='&not=x'>")
+
+expect(data).to_equal("¬it;&ersand;")
+expect(_attr_value(tag, "title")).to_equal(
+    "&notit;&ampersand;≂̸"
+)
+expect(_attr_value(equals_tag, "title")).to_equal("&not=x")
+```
+
+</details>
+
+#### AC-1: preserves required-semicolon and unknown references
+
+- Tokenize missing-semicolon and unknown named references literally
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Tokenize missing-semicolon and unknown named references literally")
+val data = _all_character_data(
+    "<p>&NotEqualTilde &madeup; &CounterClockwiseContourIntegral</p>"
+)
+
+expect(data).to_equal(
+    "&NotEqualTilde &madeup; &CounterClockwiseContourIntegral"
+)
+```
+
+</details>
+
 #### AC-1: decodes decimal numeric character references
 
 - Tokenize a decimal numeric character reference
@@ -570,8 +647,8 @@ Tests covering HtmlTokenizer basic tags, HtmlTokenizer attributes, HtmlTokenizer
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 25 |
+| Active scenarios | 25 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

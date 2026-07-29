@@ -6,6 +6,11 @@
 # with adaptations for canonical engine types.
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.html_named_character_references.{
+    HTML_NAMED_REFERENCE_MAX_LENGTH,
+    HTML_NAMED_REFERENCE_NAMES,
+    HTML_NAMED_REFERENCE_VALUES
+}
 
 extern fn rt_text_to_bytes(value: text) -> [u8]
 extern fn rt_bytes_to_text(value: [u8]) -> text
@@ -198,7 +203,7 @@ pub fn html_tokenizer_tokenize_with_limits(
                                 val _ = sink.push(_tok_char(
                                     raw_data.slice(raw_pos, amp)
                                 ))
-                            val entity = _parse_entity(raw_data, amp)
+                            val entity = _parse_entity(raw_data, amp, false)
                             val _ = sink.push(_tok_char(entity.decoded))
                             raw_pos = entity.end_pos
                 else:
@@ -306,7 +311,7 @@ pub fn html_tokenizer_tokenize_with_limits(
                     pos = pos + 1
         elif ch == "&":
             # Named entity reference
-            val entity_result = _parse_entity(html, pos)
+            val entity_result = _parse_entity(html, pos, false)
             val _ = sink.push(_tok_char(entity_result.decoded))
             pos = entity_result.end_pos
         else:
@@ -495,7 +500,42 @@ fn _entity_digit(byte_text: text, hex: bool) -> i64:
         return b - 87
     -1
 
-fn _parse_entity(html: text, pos: i32) -> _EntityResult:
+fn _named_reference_text_less(left: text, right: text) -> bool:
+    val limit = if left.len() < right.len(): left.len() else: right.len()
+    var index = 0
+    while index < limit:
+        val left_code = left.char_code_at(index)
+        val right_code = right.char_code_at(index)
+        if left_code < right_code:
+            return true
+        if left_code > right_code:
+            return false
+        index = index + 1
+    left.len() < right.len()
+
+fn _named_reference_index(name: text) -> i32:
+    var low = 0
+    var high = HTML_NAMED_REFERENCE_NAMES.len()
+    while low < high:
+        val middle = low + (high - low) / 2
+        val candidate = HTML_NAMED_REFERENCE_NAMES[middle]
+        if candidate == name:
+            return middle
+        if _named_reference_text_less(candidate, name):
+            low = middle + 1
+        else:
+            high = middle
+    -1
+
+fn _is_ascii_alnum_or_equals(value: text) -> bool:
+    (
+        value == "=" or _is_alpha_char(value) or
+        (value >= "0" and value <= "9")
+    )
+
+fn _parse_entity(
+    html: text, pos: i32, in_attribute: bool
+) -> _EntityResult:
     """Parse an HTML entity reference starting at pos (which points to &)."""
     val n = html.len()
     if pos + 1 >= n:
@@ -533,115 +573,33 @@ fn _parse_entity(html: text, pos: i32) -> _EntityResult:
         return _EntityResult(
             decoded: _codepoint_text(code), end_pos: cursor
         )
-    # Named entity: scan to ; or whitespace
-    var end = pos + 1
-    while end < n:
-        val c = html.slice(end, end + 1)
-        if c == ";":
-            end = end + 1
-            end = n + 1  # break
-        elif _is_alpha_char(c) or (c >= "0" and c <= "9"):
-            end = end + 1
-        else:
-            end = n + 1  # break
-    # Re-find actual entity end
-    var entity_end = pos + 1
-    var e_done = false
-    while entity_end < n and not e_done:
-        val ec = html.slice(entity_end, entity_end + 1)
-        if ec == ";":
-            entity_end = entity_end + 1
-            e_done = true
-        elif _is_alpha_char(ec) or (ec >= "0" and ec <= "9"):
-            entity_end = entity_end + 1
-        else:
-            e_done = true
-    val entity_name = html.slice(pos + 1, entity_end)
-    val stripped = if entity_name.ends_with(";"): entity_name.slice(0, entity_name.len() - 1) else: entity_name
-    val named = _decode_named_entity(stripped)
-    val decoded = if named == "":
-        html.slice(pos, entity_end)
-    else:
-        named
-    _EntityResult(decoded: decoded, end_pos: entity_end)
-
-fn _decode_named_entity(name: text) -> text:
-    """Decode a named HTML entity to its character."""
-    if name == "amp":
-        return "&"
-    if name == "lt":
-        return "<"
-    if name == "gt":
-        return ">"
-    if name == "quot":
-        return "\""
-    if name == "apos":
-        return "'"
-    if name == "nbsp":
-        return "\u00A0"
-    if name == "copy":
-        return "©"
-    if name == "reg":
-        return "®"
-    if name == "trade":
-        return "™"
-    if name == "euro":
-        return "€"
-    if name == "pound":
-        return "£"
-    if name == "yen":
-        return "¥"
-    if name == "cent":
-        return "¢"
-    if name == "sect":
-        return "§"
-    if name == "deg":
-        return "°"
-    if name == "plusmn":
-        return "±"
-    if name == "micro":
-        return "µ"
-    if name == "para":
-        return "¶"
-    if name == "middot":
-        return "·"
-    if name == "frac14":
-        return "¼"
-    if name == "frac12":
-        return "½"
-    if name == "frac34":
-        return "¾"
-    if name == "times":
-        return "×"
-    if name == "divide":
-        return "÷"
-    if name == "mdash":
-        return "—"
-    if name == "ndash":
-        return "–"
-    if name == "hellip":
-        return "…"
-    if name == "laquo":
-        return "«"
-    if name == "raquo":
-        return "»"
-    if name == "ldquo":
-        return "“"
-    if name == "rdquo":
-        return "”"
-    if name == "lsquo":
-        return "‘"
-    if name == "rsquo":
-        return "’"
-    if name == "hearts":
-        return "♥"
-    if name == "clubs":
-        return "♣"
-    if name == "diams":
-        return "♦"
-    if name == "spades":
-        return "♠"
-    ""
+    var match_length = n - pos - 1
+    if match_length > HTML_NAMED_REFERENCE_MAX_LENGTH:
+        match_length = HTML_NAMED_REFERENCE_MAX_LENGTH
+    while match_length > 0:
+        val entity_end = pos + 1 + match_length
+        val entity_name = html.slice(pos + 1, entity_end)
+        val named_index = _named_reference_index(entity_name)
+        if named_index >= 0:
+            val has_semicolon = entity_name.ends_with(";")
+            val next = if entity_end < n:
+                html.slice(entity_end, entity_end + 1)
+            else:
+                ""
+            if (
+                not has_semicolon and in_attribute and
+                _is_ascii_alnum_or_equals(next)
+            ):
+                return _EntityResult(
+                    decoded: html.slice(pos, entity_end),
+                    end_pos: entity_end
+                )
+            return _EntityResult(
+                decoded: HTML_NAMED_REFERENCE_VALUES[named_index],
+                end_pos: entity_end
+            )
+        match_length = match_length - 1
+    _EntityResult(decoded: "&", end_pos: pos + 1)
 
 fn _decode_character_references(value: text) -> text:
     if not value.contains("&"):
@@ -653,7 +611,7 @@ fn _decode_character_references(value: text) -> text:
         if value.slice(pos, pos + 1) == "&":
             if pos > literal_start:
                 parts.push(value.slice(literal_start, pos))
-            val entity = _parse_entity(value, pos)
+            val entity = _parse_entity(value, pos, true)
             parts.push(entity.decoded)
             pos = entity.end_pos
             literal_start = pos

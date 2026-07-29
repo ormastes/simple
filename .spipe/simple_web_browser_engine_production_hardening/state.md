@@ -2221,3 +2221,11 @@ implementation in progress / target evidence blocked
   response, retirement, and Unix/Windows timeout variants. Independent review
   returned PASS. The affected SSpec manual was regenerated (`1 complete,
   0 stubs`); no bootstrap or target runtime was run.
+- HTML named-reference tranche (2026-07-29): The canonical tokenizer now uses a
+  generated pure-Simple 2,231-entry WHATWG-compatible named-character table and
+  bounded 32-byte longest-prefix lookup, including 93 two-scalar expansions and
+  attribute-context legacy suppression. Numeric and unknown-reference behavior
+  remains on the canonical tokenizer path. A deterministic repo-style `.shs`
+  generator pins CPython 3.12.3 source data, cardinalities, and digest; PSF-2.0
+  attribution and license treatment are bundled. Independent review returned
+  PASS and the affected SSpec manual regenerated (`1 complete, 0 stubs`).
