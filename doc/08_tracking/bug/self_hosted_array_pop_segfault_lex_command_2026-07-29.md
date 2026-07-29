@@ -6,23 +6,21 @@ freshest pure-Simple self-hosted binary is unusable for any subcommand that does
 real work
 **Status:** MITIGATED (2026-07-29) — `pop`/`push`/`append` added to
 `is_bare_builtin_collection_method`; validated byte-identical-archive on an
-unaffected fixture (PROVED); full self-hosted binary re-run of the original
-`lex` repro was **not achieved** this pass across five attempts, each
-blocked by a distinct, precisely-diagnosed cause: (1) a monitoring error on
-this session's part — mistook a `native_build_worker` child steadily at
-~99% CPU for a hang because only the blocked *parent* was checked (corrected
-same day, see "CORRECTION" below); (2) a real pre-existing broken-import
-defect in `src/lib/common/json/{validation,utilities,path_ops,array_ops,object_ops,parser}.spl`
-(fixed upstream same day, commit `ab1ea6fc1a6`); (3) the interpreted
-`native_build_worker`'s default 7200s (2 CPU-hour) timeout, insufficient for
-the whole CLI entry closure's import-graph-loading phase; (4) a real,
-separate, out-of-scope defect where the non-closure `--source` bulk-scan mode
-hits 51 unresolved-import errors across files outside the CLI's actual
-transitive closure (relative-import resolution gap in that mode, not 51
-individual file bugs — not fixed, reported precisely); (5) the same
-`native_build_worker` timeout **still insufficient at 3x budget (21600s / 6
-CPU-hours)**, with a perfectly linear utime curve showing no sign of nearing
-completion — stopped here rather than guessing at a further multiplier.
+unaffected fixture (PROVED). Full-CLI tier (b) **not achieved** across five
+attempts (monitoring error, a real json-import bug fixed upstream same day
+as `ab1ea6fc1a6`, the worker's 7200s timeout, a separate out-of-scope
+relative-import gap in non-closure `--source` mode, the same timeout still
+insufficient at 3x/21600s — see below for full detail). A sixth attempt used
+a fast (~7s), minimal, **executed** narrow entry that reaches the exact
+crash line directly (`self.indent_stack.pop()`,
+`lexer_struct.spl:1071`) — **decisive negative result, reported honestly**:
+both the patched and unpatched seed produce **sha256-identical** executables
+and identical exit-0 runtime behavior for this fixture; `pop()` resolves to
+`rt_array_pop` in both, byte-for-byte, no theft in either. This corroborates
+the earlier tier-c finding that narrow/synthetic closures do not contain
+whatever competing symbol the real (large) CLI closure links in — the crash
+genuinely requires the full closure to reproduce, so no reproduction attempt
+made in this doc (three total) has verified the fix against the real defect.
 The causal link between this fix and the original segfault's disappearance
 therefore remains **INFERRED**, not PROVED end-to-end. See "2026-07-29
 follow-up" below for full detail on each attempt and recommended next steps.
@@ -414,15 +412,97 @@ deliberately narrower entry point that still reaches
 entire CLI's LLVM-linked import graph, trading full end-to-end confidence for
 a much faster signal.
 
-Net effect: **the original `lex`-segfault repro was not re-run against a
-freshly built self-hosted binary this pass**, blocked in turn by a monitoring
-error, then a real import bug, then a real worker-timeout budget that held
-even after a 3x raise, plus one more real (separate, out-of-scope) defect
-found and reported along the way. The causal link between "adding
-`pop`/`push` to the allowlist" and "the observed `spl_array_pop` segfault
-disappearing" remains **INFERRED** (from the tier (a) proof of no collateral
-damage, the doc-confirmed `push` victim status, and the code-level absence of
-`pop`/`push` from the pre-fix allowlist) but **not PROVED** by an end-to-end
-before/after `lex` run. This fix is landed as a well-evidenced,
-zero-collateral-risk mitigation consistent with the established pattern for
-this bug class, not as a fully closed-loop verified fix.
+**Retry 6 (option (d) above — narrow entry that reaches the real crash site
+directly, executed rather than only compiled): tried, DECISIVE NEGATIVE
+RESULT, reported honestly per instruction — the narrow closure does not
+reproduce the crash on either seed, so it neither proves nor disproves
+causation.**
+
+Wrote a minimal, self-contained entry
+(`use frontend.core.lexer_struct.{make_core_lexer, core_lexer_next_token}`,
+`fn main()`) that drives the lexer directly over an in-memory source string
+with two levels of indentation (forcing `self.indent_stack` to `[0, 4, 8]`
+mid-file, then a dedent to `[0, 4]` at `print(2)`, then the EOF-time
+`self.indent_stack.pop()` at the real crash line —
+`src/compiler/10.frontend/core/lexer_struct.spl:1071` — with `slen=2 > 1`,
+identical shape to both the original `simple_test.spl` repro and the earlier
+tier-c fixtures), looping over `core_lexer_next_token` and printing each
+returned kind plus a final count.
+
+First native-build attempt without an explicit `--target`/`--backend` failed
+outright (`unresolved import 'frontend.core.lexer_struct'`) regardless of
+`--source` flags — PROVED workaround: passing `--target
+x86_64-unknown-linux-gnu --backend cranelift` explicitly (instead of relying
+on the default) fixed discovery and produced a real, runnable, linked host
+executable in **~7 seconds** (6 modules compiled, 0.2-0.3s compile + 6.6-6.9s
+link) — confirming the narrow-entry strategy is exactly as fast as hoped,
+in sharp contrast to the multi-hour full-CLI closure.
+
+Ran the built executable directly (not just compiled/inspected) with **both**
+seeds, same recipe, same cache-dir pattern:
+
+- **Patched seed**: exit 0, no crash. Output includes kind `1456` (=
+  `182 << 3`, the DEDENT token, tag-boxed — a separate, already-known,
+  unrelated tag-boxing quirk documented in project memory, harmless here)
+  followed by many repeats of `1520` (= `190 << 3`, EOF, tag-boxed) because
+  my own outer-loop comparison (`if kind == 190`) never matches the
+  boxed value and so the loop runs to its `0..40` bound rather than
+  breaking early — a bug in **my test driver**, not in the lexer or the fix;
+  it does not affect whether the crash site itself was exercised, since the
+  EOF-dedent-pop line executes regardless of what my loop does with the
+  returned kind afterward.
+- **Unpatched (currently-deployed) seed, same recipe**: **exit 0, identical
+  output, byte-for-byte** — same 6-module compile, same runtime behavior,
+  same printed kind sequence.
+- **PROVED at the object-code level (not just behaviorally):** the two
+  built executables are **sha256-identical**
+  (`d79135977e9499b7a177b2dc76c3633adae610610d28b0ea496f9da4ad6f8dba`, both
+  builds). `objdump -r` on each build's cache objects shows the exact same 4
+  `rt_array_pop` relocations in the exact same object, byte-identical
+  offsets, in both the patched and unpatched build — `self.indent_stack.pop()`
+  resolves cleanly to the real builtin in **both** compilers here. No theft,
+  no crash, no difference of any kind between old and new seed for this
+  fixture.
+
+**This is exactly the "both artifacts behave identically" case flagged as
+possible up front, and it is reported honestly rather than reframed as a
+pass:** the allowlist fix does not govern this narrow closure's compiled
+output at all — `pop()` was never miscompiled here in the first place, in
+either seed. This **corroborates, rather than contradicts, the tier (c)
+synthetic-repro finding from earlier in this doc**: a closure containing only
+the lexer module (plus its handful of direct dependencies) does not contain
+whatever competing `_dot_pop`-suffixed symbol the real crash's much larger
+CLI closure links in, so the erased-receiver name-suffix collision this fix
+targets never triggers here. **The real crash's preconditions appear to
+require the actual, large, LLVM/multi-thousand-module CLI closure — no
+minimal or narrow reproduction attempted in this doc (three so far: two
+tier-c synthetic fixtures, and this executed narrow-entry test) has
+reproduced it.** This is a meaningful, generalizable finding for this bug
+class: **synthetic and narrow-closure reproductions are structurally
+insufficient for verifying fixes to erased-receiver name-collision bugs**,
+because the defect's trigger condition is a property of the *whole linked
+closure's* symbol set, not of the call site in isolation. Confirming this fix
+against the real crash therefore still requires either completing a full CLI
+build (blocked, see above) or finding the *specific* competing symbol that
+the real CLI closure links in for `.pop` and constructing a closure that
+includes exactly that symbol (not attempted this pass — would require
+locating it via a working, completed CLI build first, which is the same
+blocker).
+
+Net effect: **the original `lex`-segfault repro was not reproduced,
+confirmed-fixed, or confirmed-unfixed against a real closure this pass** —
+blocked in turn by a monitoring error, a real import bug, a real
+worker-timeout budget that held even after a 3x raise, one more real
+(separate, out-of-scope) defect found along the way, and finally a decisive
+but negative result from the fastest, most targeted reproduction attempt
+available. The causal link between "adding `pop`/`push` to the allowlist"
+and "the observed `spl_array_pop` segfault disappearing" remains
+**INFERRED** (from the tier (a) proof of no collateral damage, the
+doc-confirmed `push` victim status, and the code-level absence of
+`pop`/`push` from the pre-fix allowlist) but **not PROVED** by any
+before/after run attempted this pass, narrow or full. This fix is landed as
+a well-evidenced, zero-collateral-risk mitigation consistent with the
+established pattern for this bug class, not as a fully closed-loop verified
+fix. Whoever next has a completed full-CLI build should re-run the original
+`lex` repro against it directly — that remains the cheapest real
+confirmation once tier (b)'s infrastructure blockers are cleared.
