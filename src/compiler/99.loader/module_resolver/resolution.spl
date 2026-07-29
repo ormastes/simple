@@ -121,6 +121,11 @@ impl ModuleResolver:
                             sub_segments.extend(inner_segments)
                             match self.resolve_from_base(self.source_root.clone(), sub_segments, path):
                                 Ok(resolved):
+                                    # Stage-1 tier-ambiguity diagnostic: a
+                                    # tier-less std.<path> that also exists in
+                                    # other tiers resolved by listing order.
+                                    # Non-fatal; never alters resolution.
+                                    self.maybe_warn_tier_ambiguity(lib_dir, inner_segments, from_file)
                                     self.resolution_cache[cache_key] = Some(resolved.path)
                                     return Ok(resolved)
                                 Err(_):
@@ -181,6 +186,113 @@ impl ModuleResolver:
             else:
                 0
             print "[resolve-stats] calls={self.resolve_count} cache_hits={self.cache_hit_count} hit_rate={hit_rate}% dir_list={self.dir_list_call_count}"
+
+    # ------------------------------------------------------------------
+    # Tier-ambiguity warning (stage 1, non-fatal)
+    #
+    # A tier-less `use std.<path>` whose <path> exists under 2+ of the 5
+    # lib tiers (common, nogc_sync_mut, nogc_async_mut, gc_async_mut,
+    # nogc_async_mut_noalloc) resolves by directory-listing order, so an
+    # unrelated edit elsewhere can silently change which symbol an
+    # importer gets. Stage 1 emits a default-on, NON-FATAL warning naming
+    # the candidate tiers. Mirrors the file-vs-directory ambiguity error
+    # below (which stays fatal); this one must NOT become fatal until the
+    # ambiguous-import list is drained. See:
+    # doc/08_tracking/bug/tierless_std_import_ambiguity_resolves_by_registration_order_2026-07-29.md
+    #
+    # Env knob SIMPLE_AMBIGUOUS_IMPORT_WARN:
+    #   unset / other -> warn once per distinct ambiguous path (default)
+    #   "0"           -> silence
+    #   "verbose"     -> warn on every occurrence
+    #
+    # Perf: the tier-multiplicity map is built lazily ONCE per resolver
+    # (first tier-less std resolution), never a per-import directory
+    # scan. Each later occurrence costs two dict lookups.
+    # ------------------------------------------------------------------
+
+    fn tier_warn_mode() -> text:
+        """Resolve SIMPLE_AMBIGUOUS_IMPORT_WARN to on|off|verbose (cached)."""
+        if self.tier_warn_mode_cache != "":
+            return self.tier_warn_mode_cache
+        val env = rt_env_get("SIMPLE_AMBIGUOUS_IMPORT_WARN")
+        var mode = "on"
+        if env.?:
+            val v = env ?? ""
+            if v == "0":
+                mode = "off"
+            elif v == "verbose":
+                mode = "verbose"
+        self.tier_warn_mode_cache = mode
+        mode
+
+    fn record_tier_module(dotted: text, tier: text):
+        """Record that module sub-path `dotted` exists under `tier`."""
+        if self.tier_multiplicity.contains_key(dotted):
+            var tiers = self.tier_multiplicity[dotted]
+            var found = false
+            for t in tiers:
+                if t == tier:
+                    found = true
+            if not found:
+                tiers.push(tier)
+                self.tier_multiplicity[dotted] = tiers
+        else:
+            self.tier_multiplicity[dotted] = [tier]
+
+    fn collect_tier_modules(dir: text, rel: text, tier: text):
+        """Recursively record module sub-paths (.spl files and __init__.spl dirs)."""
+        val entries = rt_dir_list(dir)
+        for entry in entries:
+            if entry == "" or entry.starts_with("."):
+                continue
+            val full = path_join(dir, entry)
+            if rt_dir_exists(full):
+                val child_rel = if rel == "": "{entry}" else: "{rel}.{entry}"
+                if rt_file_exists(path_join(full, "__init__.spl")):
+                    self.record_tier_module(child_rel, tier)
+                self.collect_tier_modules(full, child_rel, tier)
+            elif entry.ends_with(".spl"):
+                val stem = entry.substring(0, entry.len() - 4)
+                if stem != "" and stem != "__init__":
+                    val dotted = if rel == "": "{stem}" else: "{rel}.{stem}"
+                    self.record_tier_module(dotted, tier)
+
+    fn build_tier_multiplicity(lib_dir: text):
+        """One-time (per resolver) walk of the 5 canonical tier directories."""
+        val tier_names = ["common", "nogc_sync_mut", "nogc_async_mut", "gc_async_mut", "nogc_async_mut_noalloc"]
+        for tier in tier_names:
+            val tier_dir = path_join(lib_dir, tier)
+            if rt_dir_exists(tier_dir):
+                self.collect_tier_modules(tier_dir, "", tier)
+        self.tier_map_built = true
+
+    fn maybe_warn_tier_ambiguity(lib_dir: text, inner_segments: [text], from_file: text):
+        """Warn when a tier-less std import path exists under 2+ lib tiers.
+
+        Non-fatal by design (stage 1). Deduplicated to once per distinct
+        ambiguous path per compilation unless SIMPLE_AMBIGUOUS_IMPORT_WARN
+        is "verbose"; "0" silences entirely. Never alters resolution.
+        """
+        val mode = self.tier_warn_mode()
+        if mode == "off":
+            return
+        if inner_segments.is_empty():
+            return
+        val dotted = inner_segments.join(".")
+        if mode != "verbose" and self.tier_warned.contains_key(dotted):
+            return
+        if not self.tier_map_built:
+            self.build_tier_multiplicity(lib_dir)
+        if not self.tier_multiplicity.contains_key(dotted):
+            return
+        val tiers = self.tier_multiplicity[dotted]
+        if tiers.len() < 2:
+            return
+        self.tier_warned[dotted] = true
+        self.tier_warn_count = self.tier_warn_count + 1
+        # stdout on purpose: stderr from native-built compiler binaries can
+        # be dropped, and the resolver stats above already print to stdout.
+        print "warning: ambiguous import: std.{dotted} exists in tiers {tiers.join(', ')}; resolving by registration order - qualify as std.<tier>.{dotted} (importing file: {from_file}; SIMPLE_AMBIGUOUS_IMPORT_WARN=0 silences)"
 
     fn resolve_from_base(
         base: text,

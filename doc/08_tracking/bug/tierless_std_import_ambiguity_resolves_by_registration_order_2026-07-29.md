@@ -1,7 +1,17 @@
 # Tier-less `use std.X` imports resolve by registration order, not by tier
 
-**Status:** open — systemic. One instance fixed (`552b5a335b2`); the mechanism is untouched.
-**Severity:** silent wrong-symbol selection. No diagnostic is emitted.
+**Status:** stage 1 landed — the resolver now emits a default-on, NON-FATAL
+warning when a tier-less `use std.<path>` resolves via the `lib/*/` tier
+search and the path exists under 2+ tiers, naming the candidate tiers
+(`maybe_warn_tier_ambiguity` in
+`src/compiler/99.loader/module_resolver/resolution.spl`). Deduplicated to
+once per distinct path per compilation; `SIMPLE_AMBIGUOUS_IMPORT_WARN=0`
+silences, `=verbose` warns per occurrence. Tier-multiplicity map is built
+lazily once per lib dir. Resolution behavior is unchanged. Stages 2
+(deterministic precedence) and 3 (error) remain open.
+Spec: `test/01_unit/compiler/module_resolver/tier_ambiguity_warning_spec.spl`.
+One instance fixed earlier (`552b5a335b2`).
+**Severity:** silent wrong-symbol selection. Diagnostic now emitted (stage 1).
 
 ## Mechanism
 
