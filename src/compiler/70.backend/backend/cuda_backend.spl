@@ -471,10 +471,27 @@ class CudaBackend:
                 self.propagate_pointer_space(dest, operand, pointer_spaces)
 
             case Bitcast(dest, operand, target):
-                # Bitcast is a reinterpretation, use mov in PTX
+                val dest_mir_ty = self.operand_mir_type(func, MirOperand.copy(dest))?
+                if dest_mir_ty.kind != target.kind:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast destination type must match target type"))
+                val dest_width = match dest_mir_ty.kind:
+                    case I32 | U32 | F32: 32
+                    case I64 | U64 | F64: 64
+                    case Ptr(_, _) | Ref(_, _) | FuncPtr(_): 64
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast requires a 32-bit or 64-bit scalar or pointer target"))
+                val source_mir_ty = self.operand_mir_type(func, operand)?
+                val source_width = match source_mir_ty.kind:
+                    case I32 | U32 | F32: 32
+                    case I64 | U64 | F64: 64
+                    case Ptr(_, _) | Ref(_, _) | FuncPtr(_): 64
+                    case _:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast requires a 32-bit or 64-bit scalar or pointer source"))
+                if source_width != dest_width:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bitcast source and target widths must match"))
                 val dest_reg = "%r{dest.id}"
                 val src_reg = self.operand_to_reg(builder, operand)
-                builder.emit_line("mov.b64 {dest_reg}, {src_reg};")
+                builder.emit_line("mov.b{dest_width} {dest_reg}, {src_reg};")
                 self.propagate_pointer_space(dest, operand, pointer_spaces)
 
             # --- Memory Allocation ---

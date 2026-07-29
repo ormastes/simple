@@ -18,6 +18,7 @@ fn cuda_i64() -> MirType: MirType(kind: MirTypeKind.I64)
 fn cuda_u32() -> MirType: MirType(kind: MirTypeKind.U32)
 fn cuda_u64() -> MirType: MirType(kind: MirTypeKind.U64)
 fn cuda_f32() -> MirType: MirType(kind: MirTypeKind.F32)
+fn cuda_f64() -> MirType: MirType(kind: MirTypeKind.F64)
 fn cuda_bool() -> MirType: MirType(kind: MirTypeKind.Bool)
 fn cuda_ptr() -> MirType: MirType.ptr(cuda_u32(), true)
 fn cuda_i32_ptr() -> MirType: MirType.ptr(cuda_i32(), true)
@@ -106,7 +107,67 @@ fn cuda_compare_function(id: i64, name: text, op: MirBinOp, operand_type: MirTyp
         [block], true
     )
 
+fn cuda_bitcast_function(id: i64, name: text, source_type: MirType, dest_type: MirType, target_type: MirType) -> MirFunction:
+    val block = MirBlock(
+        id: BlockId.entry(), label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Bitcast(
+            LocalId(id: 1), MirOperand.copy(LocalId(id: 0)), target_type
+        ), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+    cuda_function(
+        id, name, [source_type], MirType.unit(),
+        [cuda_arg(0, 0, "source", source_type), cuda_temp(1, dest_type)],
+        [block], true
+    )
+
 describe "CUDA backend intensive MIR contract":
+    it "emits width-correct CUDA bitcasts and assembles them":
+        val ptx = compile_supported_cuda([
+            cuda_bitcast_function(34, "cuda_f32_to_u32", cuda_f32(), cuda_u32(), cuda_u32()),
+            cuda_bitcast_function(35, "cuda_u32_to_f32", cuda_u32(), cuda_f32(), cuda_f32()),
+            cuda_bitcast_function(39, "cuda_f64_to_u64", cuda_f64(), cuda_u64(), cuda_u64()),
+            cuda_bitcast_function(40, "cuda_u64_to_f64", cuda_u64(), cuda_f64(), cuda_f64())
+        ])
+
+        expect(ptx).to_contain("mov.b32 %r1, %r0;")
+        expect(ptx).to_contain("mov.b64 %r1, %r0;")
+
+        val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v ptxas >/dev/null 2>&1"])
+        if available == 0:
+            val ptx_path = "/tmp/simple_cuda_bitcasts.ptx"
+            val cubin_path = "/tmp/simple_cuda_bitcasts.cubin"
+            expect(rt_file_write_text(ptx_path, ptx)).to_equal(true)
+            val (_as_out, as_err, as_code) = rt_process_run("ptxas", ["-arch=sm_86", ptx_path, "-o", cubin_path])
+            expect(as_code).to_equal(0)
+            expect(as_err).to_equal("")
+
+    it "rejects malformed CUDA bitcasts":
+        val width_mismatch = cuda_bitcast_function(
+            36, "cuda_bad_bitcast_width", cuda_f32(), cuda_u64(), cuda_u64()
+        )
+        assert_backend_error_contains(width_mismatch, "source and target widths must match")
+
+        val target_mismatch = cuda_bitcast_function(
+            37, "cuda_bad_bitcast_target", cuda_u32(), cuda_u32(), cuda_f32()
+        )
+        assert_backend_error_contains(target_mismatch, "destination type must match target type")
+
+        val pointer_target_mismatch = cuda_bitcast_function(
+            41, "cuda_bad_pointer_bitcast_target", cuda_u64(), cuda_ptr(), cuda_u64()
+        )
+        assert_backend_error_contains(pointer_target_mismatch, "destination type must match target type")
+
+        val unsupported_target = cuda_bitcast_function(
+            42, "cuda_bad_unit_bitcast_target", cuda_u64(), MirType.unit(), MirType.unit()
+        )
+        assert_backend_error_contains(unsupported_target, "32-bit or 64-bit scalar or pointer target")
+
+        val predicate_source = cuda_bitcast_function(
+            38, "cuda_bad_bitcast_predicate", cuda_bool(), cuda_u32(), cuda_u32()
+        )
+        assert_backend_error_contains(predicate_source, "32-bit or 64-bit scalar or pointer source")
+
     it "lowers comparisons with operand PTX types and assembles them":
         val ptx = compile_supported_cuda([
             cuda_compare_function(16, "cuda_compare_u32", MirBinOp.Eq, cuda_u32()),
