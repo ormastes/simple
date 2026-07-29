@@ -502,7 +502,24 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
             }
         }
         HeapObjectType::Dict => format!("<dict@{ptr:p}>"),
-        HeapObjectType::Tuple => format!("<tuple@{ptr:p}>"),
+        HeapObjectType::Tuple => {
+            // Match the interpreter's tuple display format exactly (see
+            // `to_display_string` in src/compiler_rust/compiler/src/value_impl.rs):
+            // `(elem, elem, ...)` with `, ` separators, each element rendered via
+            // the same recursive display rule. Mirrors the `Array` arm above,
+            // using `rt_tuple_len`/`rt_tuple_get` instead of the array accessors.
+            let len = crate::value::collections::rt_tuple_len(v);
+            if len <= 0 {
+                "()".to_string()
+            } else {
+                let mut parts = Vec::with_capacity(len as usize);
+                for i in 0..len {
+                    let elem = crate::value::collections::rt_tuple_get(v, i as u64);
+                    parts.push(value_to_display_string(elem));
+                }
+                format!("({})", parts.join(", "))
+            }
+        }
         HeapObjectType::Object => format!("<object@{ptr:p}>"),
         HeapObjectType::Closure => format!("<closure@{ptr:p}>"),
         HeapObjectType::Enum => format!("<enum@{ptr:p}>"),
