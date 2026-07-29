@@ -60,10 +60,17 @@ fn _vscode_contains(xs: [text], v: text) -> bool:
             return true
     false
 
-# Mismatch lines between package.json's `contributes.commands` and the
-# extension kernel's builtin manifests. Empty result = conformant.
-#   "missing-in-vscode: <id>" -- a builtin command has no vscode contribution.
-#   "missing-builtin: <id>"   -- a vscode command has no builtin manifest owner.
+# Mismatch/classification lines between package.json's
+# `contributes.commands` and the extension kernel's builtin manifests.
+#   "missing-in-vscode: <id>" -- a builtin command has no vscode
+#                                 contribution. HARD mismatch: the generator
+#                                 (manifest_gen.spl) should add this id.
+#   "bridge-only: <id>"       -- a vscode command has no builtin manifest
+#                                 owner. ALLOWED: legitimate VS Code-side
+#                                 commands (LSP, math, AI, editor markers,
+#                                 ...) the `.spl` extension kernel doesn't
+#                                 back. Not a mismatch -- see
+#                                 `vscode_manifest_hard_mismatches()`.
 fn vscode_manifest_check() -> [text]:
     val package_text = if file_exists(vscode_package_json_path()): file_read(vscode_package_json_path()) else: ""
     val vscode_ids = vscode_manifest_command_ids(package_text)
@@ -74,5 +81,16 @@ fn vscode_manifest_check() -> [text]:
             mismatches.push("missing-in-vscode: " + id)
     for id in vscode_ids:
         if not _vscode_contains(builtin_ids, id):
-            mismatches.push("missing-builtin: " + id)
+            mismatches.push("bridge-only: " + id)
     mismatches
+
+# Only the HARD mismatches from `vscode_manifest_check()` -- builtin
+# commands with no vscode contribution. This is the CI gate primitive:
+# a clean generation (manifest_gen.spl) drives this to empty; bridge-only
+# entries are excluded because they're allowed by design.
+fn vscode_manifest_hard_mismatches() -> [text]:
+    var out: [text] = []
+    for line in vscode_manifest_check():
+        if line.starts_with("missing-in-vscode: "):
+            out.push(line)
+    out
