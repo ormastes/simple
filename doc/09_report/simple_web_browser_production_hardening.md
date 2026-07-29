@@ -20,6 +20,14 @@
   non-TLS dev fallback.
 - TLS mode never uses the insecure dev secret.
 - Login origin checks fail closed before token minting.
+- Normal and shared-WM servers generate one cryptographically random 256-bit
+  login grant per process and expose only its safe lowercase-hex form in the
+  same-origin root document.
+- Generated browser clients and static `wm.js` redeem the root bootstrap grant;
+  missing, attacker-chosen, or mismatched grants return `403` without a token.
+- Successful login tokens use a distinct server-owned random token grant claim
+  rather than either the private login proof or the request body value. The
+  serialized claim cannot be replayed at `/ui/login`.
 - `/ui/ws`, `/ui/resume`, and sensitive `/api/*` require origin-bound bearer
   authorization, including `/api/state`, `/api/widgets`, and the async
   `/api/clients` route.

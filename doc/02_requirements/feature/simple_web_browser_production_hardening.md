@@ -8,7 +8,7 @@ Selected scope: Option C - Full Browser Production Hardening.
 |----|-------------|
 | `REQ-WEB-HARD-001` | Production web servers require `SIMPLE_UI_WEB_TOKEN_SECRET` unless non-TLS local development explicitly opts into `SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1`. |
 | `REQ-WEB-HARD-002` | TLS web serving never uses the insecure development secret fallback. |
-| `REQ-WEB-HARD-003` | `/ui/login` rejects missing or disallowed `Origin` before token minting. |
+| `REQ-WEB-HARD-003` | `/ui/login` rejects missing or disallowed `Origin` and missing or mismatched server-owned bootstrap grants before token minting. |
 | `REQ-WEB-HARD-004` | Sensitive `/api/*` browser state routes require an allowed origin and valid bearer before returning state. |
 | `REQ-WEB-HARD-005` | Production browser clients do not place bearer tokens in WebSocket URLs by default. |
 | `REQ-WEB-HARD-006` | Live `/ui/login` negative requests cover missing origin, oversized unauthenticated bodies, and fail-closed status. |
@@ -25,4 +25,3 @@ Selected scope: Option C - Full Browser Production Hardening.
 
 The selected requirements are traced in
 `doc/03_plan/sys_test/simple_web_browser_production_hardening.md`.
-

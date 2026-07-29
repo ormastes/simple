@@ -31,8 +31,15 @@ upgrade success are returned.
 opt into an insecure fallback only with `SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1`.
 TLS mode never accepts the insecure fallback.
 
-`/ui/login` accepts only allowed origins and bounded unauthenticated bodies. It
-issues an HMAC-signed `SessionToken` bound to the request origin. `/ui/ws`,
+Each normal or shared-WM server process creates a 256-bit random login grant
+and a distinct 256-bit random token grant claim.
+The root document exposes that lowercase-hex grant in a same-origin meta tag;
+generated clients and static `wm.js` redeem it at `/ui/login`. Login accepts
+only allowed origins, bounded unauthenticated bodies, and an exact match for
+the server-owned grant. Missing, attacker-chosen, or mismatched grants return
+`403` without a token. The signed `SessionToken` uses only the distinct
+server-owned token grant claim and is bound to the request origin. The
+serialized token claim is never accepted as login proof. `/ui/ws`,
 `/ui/resume`, and sensitive `/api/*` routes require an allowed origin plus a
 token verified against that exact origin. Legacy `/ws` is hidden before upgrade
 routing and returns `404`.
@@ -67,7 +74,8 @@ not request handlers.
 
 ## Startup And Invalidation
 
-Startup reads secret/origin environment once per server instance. File-backed UI
+Startup reads secret/origin environment once and generates the login grant once
+per server process. File-backed UI
 content still uses the existing file-change watcher in `server.spl`; auth
 configuration changes require server restart.
 
@@ -77,6 +85,7 @@ configuration changes require server restart.
 - Unauthorized `/api/*`, `/ui/ws`, `/ui/resume`: `403` before data or upgrade.
 - Legacy `/ws`: `404` before upgrade.
 - Oversized unauthenticated `/ui/login`: `413`.
+- Missing or mismatched `/ui/login` bootstrap grant: `403` without a token.
 - Renderer parity wrapper: exit `0`, `blur_or_tolerance_used=false`, surface
   fail counts `0`.
 - Generated-spec layout guard: `find doc/06_spec -name '*_spec.spl' | wc -l`

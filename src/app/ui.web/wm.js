@@ -996,10 +996,12 @@ class SimpleWindowManager {
 
   async _authenticate() {
     try {
+      const meta = document.querySelector('meta[name="simple-ui-login-grant"]');
+      const loginGrant = meta ? meta.content : '';
       const resp = await fetch('/ui/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ capability_grant: 'dev' })
+        body: JSON.stringify({ capability_grant: loginGrant })
       });
       if (!resp.ok) throw new Error('login failed: ' + resp.status);
       const data = await resp.json();

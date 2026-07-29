@@ -8,7 +8,7 @@ Selected scope: Option C - Release-Blocking Production Evidence NFRs.
 |----|-----|
 | `NFR-WEB-HARD-001` | Production secret policy is fail-closed by default. |
 | `NFR-WEB-HARD-002` | TLS mode forbids insecure local development fallback. |
-| `NFR-WEB-HARD-003` | Origin checks happen before token minting, bearer verification, sensitive data return, or WebSocket upgrade. |
+| `NFR-WEB-HARD-003` | Origin and exact server-owned bootstrap-grant checks happen before token minting; origin-bound bearer verification precedes sensitive data return or WebSocket upgrade. |
 | `NFR-WEB-HARD-004` | Bearer verification is origin-bound and precedes any authenticated browser action. |
 | `NFR-WEB-HARD-005` | Unauthenticated login/resume/body readers enforce bounded request sizes. |
 | `NFR-WEB-HARD-006` | Live negative endpoint tests complete with deterministic child-process cleanup. |
@@ -25,4 +25,3 @@ The selected NFRs are traced in
 `doc/03_plan/sys_test/simple_web_browser_production_hardening.md`.
 macOS Metal, AMD ROCm/HIP, Windows DirectX, and real browser WebGPU native
 device-readback proof remain external-host gates.
-

@@ -9,12 +9,12 @@ use common.ui.widget.{UIState, UITree, UIEvent, UIMode}
 use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{update_state}
 use common.ui.event.{process_event}
-use app.ui.web.html.{generate_css, generate_html_page, generate_wm_html_page, wm_root_data_attrs}
+use app.ui.web.html.{generate_css, generate_html_page, generate_wm_html_page, ui_web_with_login_grant, wm_root_data_attrs}
 use app.ui.web.ws_handler.{handle_ws_upgrade, handle_ws_wm_upgrade, is_ws_upgrade_request, ui_web_ws_upgrade_method_allowed, ui_web_ws_upgrade_path_allowed, extract_ws_key, compute_ws_accept}
 use app.ui.web.async_ws.{parse_ws_event}
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.origin_guard.{OriginGuard}
-use app.ui.web.session_token.{SessionToken, load_secret, TOKEN_TTL_DEFAULT_MS}
+use app.ui.web.session_token.{SessionToken, load_secret, random_hex, TOKEN_TTL_DEFAULT_MS}
 use std.nogc_sync_mut.io.tls_sffi.{rt_tls_server_create}
 use nogc_sync_mut.ui.session.{UISession}
 use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open_with_override}
@@ -26,7 +26,7 @@ use app.ui.web.async_server.{AsyncWebServer}
 use app.ui.web.wm_bridge.{WmBridge}
 use app.ui.web.ui_routes.{dispatch_ui_route, ui_web_request_authorized, ui_web_resume_body_status}
 use app.ui.web.tls_serve_loop.{serve_tls, ConnStream}
-use app.ui.web.auth_params.{UI_WEB_MAX_REQUEST_HEAD_BYTES, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_request_body_status, ui_web_login_rate_decision, ui_web_auth_json_field, ui_web_ws_response_protocol, ui_web_ws_frame_payload_allowed, ui_web_request_id, ui_web_request_head_allowed, ui_web_request_line_allowed, ui_web_header_line_allowed, ui_web_json_security_headers, ui_web_static_script_security_headers, ui_web_html_security_headers}
+use app.ui.web.auth_params.{UI_WEB_MAX_REQUEST_HEAD_BYTES, ui_web_content_length, ui_web_body_exceeds_unauth_limit, ui_web_request_body_status, ui_web_login_rate_decision, ui_web_login_grant_status, ui_web_auth_json_field, ui_web_ws_response_protocol, ui_web_ws_frame_payload_allowed, ui_web_request_id, ui_web_request_head_allowed, ui_web_request_line_allowed, ui_web_header_line_allowed, ui_web_json_security_headers, ui_web_static_script_security_headers, ui_web_html_security_headers}
 use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtime_hides_desktop, host_taskbar_runtime_hides_taskbar, host_taskbar_runtime_mode_name, host_taskbar_runtime_native_window_html}
 use app.ui.web.json.{state_to_json, widgets_to_json}
 use os.compositor.host_compositor_entry.{HostBackendKind}
@@ -189,6 +189,8 @@ class WebServer:
     wm_mode: bool
     origin_guard: OriginGuard
     token_secret: text
+    login_grant: text
+    token_grant_id: text
     login_rate_window_start_ms: u64
     login_rate_attempt_count: i64
 
@@ -236,6 +238,8 @@ class WebServer:
                     wm_mode: wm_mode,
                     origin_guard: OriginGuard.from_env(),
                     token_secret: secret,
+                    login_grant: random_hex(32),
+                    token_grant_id: random_hex(32),
                     login_rate_window_start_ms: 0u64,
                     login_rate_attempt_count: 0
                 ))
@@ -455,7 +459,7 @@ class WebServer:
                             generate_wm_html_page(_active_or_default_wm_theme_id(), self.state.tree.title_text(), self.port)
                         else:
                             generate_html_page(self.state, self.port)
-                        val payload_text = "{payload}"
+                        val payload_text = ui_web_with_login_grant("{payload}", self.login_grant)
                         var response_headers = "HTTP/1.1 200 OK\r\n"
                         response_headers = "{response_headers}Content-Type: text/html\r\n"
                         response_headers = "{response_headers}{ui_web_html_security_headers(\"text/html\")}"
@@ -602,12 +606,12 @@ class WebServer:
 
                 # Extract capability_grant from JSON body
                 val grant_id = ui_web_auth_json_field(body, "capability_grant")
-                if grant_id == "":
-                    val resp = _simple_response_for_request(400, "application/json", "{\"error\": \"missing capability_grant\"}", headers)
+                if ui_web_login_grant_status(grant_id, self.login_grant) != "ok":
+                    val resp = _simple_response_for_request(403, "application/json", "{\"error\": \"forbidden_login_grant\"}", headers)
                     self.send_small_http(stream, resp)
                     return
 
-                val tok = SessionToken.issue(grant_id, origin, TOKEN_TTL_DEFAULT_MS, self.token_secret)
+                val tok = SessionToken.issue(self.token_grant_id, origin, TOKEN_TTL_DEFAULT_MS, self.token_secret)
                 val serialized = tok.serialize()
                 val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
                 val resp = _simple_response_for_request(200, "application/json", body_json, headers)
@@ -726,6 +730,8 @@ fn run_shared_wm_web(title: text) -> i64:
     if secret == "":
         print "Error: SIMPLE_UI_WEB_TOKEN_SECRET is required unless SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 is set for local development"
         return 1
+    val login_grant = random_hex(32)
+    val token_grant_id = random_hex(32)
     val mode_name = env_get("SIMPLE_UI_WEB_SHELL_MODE") ?? "embedded"
     val backend_name = env_get("SIMPLE_UI_BACKEND") ?? ""
     val electron_env = env_get("SIMPLE_HOST_ELECTRON_AVAILABLE") ?? ""
@@ -751,7 +757,7 @@ fn run_shared_wm_web(title: text) -> i64:
             print "Error: Failed to bind to port {port}: {e}"
             return 1
         Ok(listener):
-            _wm_serve_loop(listener, session, guard, secret)
+            _wm_serve_loop(listener, session, guard, secret, login_grant, token_grant_id)
 
     return 0
 
@@ -793,16 +799,16 @@ fn _write_temp_ui(path: text):
         "}\n"
     val _ = write_file(path, content)
 
-fn _wm_serve_loop(listener: TcpListener, session: UISession, guard: OriginGuard, secret: text):
+fn _wm_serve_loop(listener: TcpListener, session: UISession, guard: OriginGuard, secret: text, login_grant: text, token_grant_id: text):
     """Accept and dispatch connections for the shared WM server."""
     loop:
         match listener.accept():
             Err(e):
                 print "Accept error: {e}"
             Ok(stream):
-                _wm_handle_connection(stream, session, guard, secret)
+                _wm_handle_connection(stream, session, guard, secret, login_grant, token_grant_id)
 
-fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGuard, secret: text):
+fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGuard, secret: text, login_grant: text, token_grant_id: text):
     """Handle one HTTP connection in the shared WM server."""
     match _wm_read_head(stream):
         Err(e):
@@ -819,13 +825,13 @@ fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGua
                 return
 
             if path == "/ui/login" and method == "POST":
-                _wm_handle_login(stream, headers, initial_body, guard, secret)
+                _wm_handle_login(stream, headers, initial_body, guard, secret, login_grant, token_grant_id)
                 return
 
             if path == "/" or path == "/index.html":
-                val payload = _decorate_host_shell_html(
+                val payload = ui_web_with_login_grant(_decorate_host_shell_html(
                     generate_wm_html_page(_active_or_default_wm_theme_id(), "SimpleOS WM", 0)
-                )
+                ), login_grant)
                 val response = _simple_response(200, "text/html", payload)
                 stream.write_text(response)
                 return
@@ -911,7 +917,7 @@ fn _wm_read_head(stream: TcpStream) -> Result<(text, text, text, text), text>:
         hi = hi + 1
     return Ok((request.0, request.1, headers, initial_body))
 
-fn _wm_handle_login(stream: TcpStream, headers: text, initial_body: text, guard: OriginGuard, secret: text):
+fn _wm_handle_login(stream: TcpStream, headers: text, initial_body: text, guard: OriginGuard, secret: text, login_grant: text, token_grant_id: text):
     """POST /ui/login in shared WM mode."""
     var origin = ""
     match guard.check(headers):
@@ -929,7 +935,7 @@ fn _wm_handle_login(stream: TcpStream, headers: text, initial_body: text, guard:
         val too_large = _simple_response(413, "application/json", "{\"error\": \"request_body_too_large\"}")
         stream.write_text(too_large)
         return
-    val _body = _wm_read_remaining_body(stream, headers, initial_body)
+    val body = _wm_read_remaining_body(stream, headers, initial_body)
     val rate = ui_web_login_rate_decision(_wm_login_rate_window_start_ms, _wm_login_rate_attempt_count, web_server_time_ms())
     _wm_login_rate_window_start_ms = rate.1
     _wm_login_rate_attempt_count = rate.2
@@ -937,7 +943,12 @@ fn _wm_handle_login(stream: TcpStream, headers: text, initial_body: text, guard:
         val limited = _simple_response(429, "application/json", "{\"error\": \"login_rate_limited\"}")
         stream.write_text(limited)
         return
-    val tok = SessionToken.issue("wm-default", origin, TOKEN_TTL_DEFAULT_MS, secret)
+    val grant_id = ui_web_auth_json_field(body, "capability_grant")
+    if ui_web_login_grant_status(grant_id, login_grant) != "ok":
+        val forbidden = _simple_response(403, "application/json", "{\"error\": \"forbidden_login_grant\"}")
+        stream.write_text(forbidden)
+        return
+    val tok = SessionToken.issue(token_grant_id, origin, TOKEN_TTL_DEFAULT_MS, secret)
     val serialized = tok.serialize()
     val body_json = "{\"token\": \"{serialized}\", \"expires_at\": {tok.expires_at_ms}}"
     val resp = _simple_response(200, "application/json", body_json)

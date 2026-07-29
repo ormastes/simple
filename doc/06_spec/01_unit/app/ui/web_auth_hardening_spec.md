@@ -2,33 +2,9 @@
 
 > Verifies selected Feature C and NFR C production authentication, origin, request-boundary, generated-client, and login burst behavior.
 
-<!-- sdn-diagram:id=web_auth_hardening_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=web_auth_hardening_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-web_auth_hardening_spec -> std
-web_auth_hardening_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=web_auth_hardening_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -44,8 +20,11 @@ Verifies selected Feature C and NFR C production authentication, origin, request
 | Category | Application |
 | Status | Active |
 | Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
+| Plan | doc/03_plan/sys_test/simple_web_browser_production_hardening.md |
+| Design | doc/05_design/ui/web/simple_web_browser_production_hardening.md |
+| Research | doc/01_research/local/simple_web_browser_production_hardening.md |
 | Source | `test/01_unit/app/ui/web_auth_hardening_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -53,9 +32,163 @@ Verifies selected Feature C and NFR C production authentication, origin, request
 Verifies selected Feature C and NFR C production authentication, origin,
 request-boundary, generated-client, and login burst behavior.
 
+**Plan:** doc/03_plan/sys_test/simple_web_browser_production_hardening.md
+**Design:** doc/05_design/ui/web/simple_web_browser_production_hardening.md
+**Research:** doc/01_research/local/simple_web_browser_production_hardening.md
 **Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
 **Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
 **Traceability:** REQ-WEB-HARD-001, REQ-WEB-HARD-002, REQ-WEB-HARD-003, REQ-WEB-HARD-004, REQ-WEB-HARD-005, REQ-WEB-HARD-008, REQ-WEB-HARD-011, NFR-WEB-HARD-001, NFR-WEB-HARD-002, NFR-WEB-HARD-003, NFR-WEB-HARD-004, NFR-WEB-HARD-005, NFR-WEB-HARD-010, NFR-WEB-HARD-011
+
+## Syntax
+
+Run this focused unit specification from the repository root:
+
+```sh
+bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter
+```
+
+Regenerate its manual after changing the executable specification:
+
+```sh
+bin/simple spipe-docgen test/01_unit/app/ui/web_auth_hardening_spec.spl --output doc/06_spec
+```
+
+## Security Model
+
+Production startup requires a token-signing secret.
+
+The insecure development fallback requires explicit opt-in.
+
+TLS never accepts the insecure fallback.
+
+Each server process owns a random 256-bit login grant.
+
+Each server process also owns a distinct random token grant claim.
+
+The login grant is rendered only as lowercase hex.
+
+The root document publishes it through a same-origin meta element.
+
+Generated browser JavaScript reads that meta element.
+
+Generated WM JavaScript reads that meta element.
+
+Static `wm.js` reads that meta element.
+
+No client sends the former `legacy`, `wm`, or `dev` literals.
+
+Login grant equality uses a constant-time comparison.
+
+A missing login grant is forbidden.
+
+An attacker-chosen login grant is forbidden.
+
+The distinct token grant claim is forbidden as login proof.
+
+Only the exact login grant is accepted.
+
+The serialized token contains the token grant claim.
+
+The serialized token does not contain the login grant.
+
+The token remains bound to its accepted origin.
+
+## Exact Oracles
+
+```text
+missing login grant                  -> forbidden
+attacker-chosen login grant          -> forbidden
+serialized token grant replay        -> forbidden
+exact per-process login grant        -> ok
+unsafe login-grant HTML input        -> no meta insertion
+safe 64-character lowercase hex      -> exact meta insertion
+```
+
+The tests use exact status strings where policy has multiple outcomes.
+
+The tests inspect response-producing client text directly.
+
+The tests do not hide HTTP or token behavior behind boolean wrappers.
+
+The tests reject static login grant literals in generated clients.
+
+The tests require the positive `loginGrant()` request body expression.
+
+## Origin And Bearer Rules
+
+Missing login origins fail closed.
+
+Disallowed login origins fail closed.
+
+Default loopback policy accepts valid loopback origins with numeric ports.
+
+Explicit allowlists remain exact.
+
+Sensitive API state routes require a bearer.
+
+Resume routes require a bearer.
+
+WebSocket routes require a bearer.
+
+Wrong-origin tokens fail verification.
+
+Expired tokens fail verification.
+
+Malformed tokens fail verification.
+
+Query bearer decoding remains single-pass.
+
+Bearer-like request identifiers are never reflected.
+
+## Request Boundary Rules
+
+Unauthenticated JSON bodies are bounded.
+
+Oversized content lengths fail before allocation.
+
+Duplicate content lengths are rejected.
+
+Malformed content lengths are rejected.
+
+Unsupported transfer encodings are rejected.
+
+Request heads are bounded.
+
+Request lines are bounded.
+
+Individual header lines are bounded.
+
+Inbound WebSocket frames are bounded.
+
+Login attempts remain fixed-window rate limited.
+
+## Response Rules
+
+JSON responses are no-store.
+
+JSON responses disable MIME sniffing.
+
+HTML responses deny framing.
+
+HTML responses disable referrer disclosure.
+
+HTML responses use restrictive permissions policy.
+
+HTML responses use a restrictive content security policy.
+
+## Scope
+
+This unit specification covers pure policy and generated-client contracts.
+
+The live TCP behavior is covered by
+`test/03_system/gui/simple_web_browser_production_hardening_spec.spl`.
+
+Normal and shared-WM root extraction, mismatch rejection, token-claim replay
+rejection, valid redemption, and rate limiting are live system-test concerns.
+
+Renderer parity and host GPU evidence remain separate release gates.
+
+No bootstrap, package, release, or deployment behavior is exercised here.
 
 ## Scenarios
 
@@ -230,12 +363,15 @@ expect(verify(wrong_origin, "https://other.example", "unit-test-secret", 1000u64
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val legacy_js = generate_js(8080)
 expect(legacy_js).to_contain("fetch('/ui/login'")
+expect(legacy_js).to_contain("meta[name=\"simple-ui-login-grant\"]")
+expect(legacy_js).to_contain("capability_grant: loginGrant()")
+expect(legacy_js.contains("capability_grant: 'legacy'")).to_be(false)
 expect(legacy_js).to_contain("new WebSocket(browserWsUrl(), ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")
 expect(legacy_js).to_contain("return wsProto + '://' + wsHost + '/ui/ws'")
 expect(legacy_js.contains("legacyWsUrl")).to_be(false)
@@ -243,11 +379,43 @@ expect(legacy_js.contains("/ws?token=")).to_be(false)
 expect(legacy_js.contains("'/ws'")).to_be(false)
 val wm_js = generate_wm_js(8080)
 expect(wm_js).to_contain("fetch('/ui/login'")
+expect(wm_js).to_contain("meta[name=\"simple-ui-login-grant\"]")
+expect(wm_js).to_contain("capability_grant: loginGrant()")
+expect(wm_js.contains("capability_grant: 'wm'")).to_be(false)
 expect(wm_js).to_contain("new WebSocket(wsProto + '://' + wsHost + '/ui/ws', ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")
 expect(wm_js.contains("/ui/ws?token=")).to_be(false)
 val static_wm_js = rt_file_read_text("src/app/ui.web/wm.js")
+expect(static_wm_js).to_contain("meta[name=\"simple-ui-login-grant\"]")
+expect(static_wm_js).to_contain("capability_grant: loginGrant")
+expect(static_wm_js.contains("capability_grant: 'dev'")).to_be(false)
 expect(static_wm_js).to_contain("new WebSocket(url, ['simple-ui', 'bearer.' + encodeURIComponent(this.token)])")
 expect(static_wm_js.contains("/ui/ws?token=")).to_be(false)
+```
+
+</details>
+
+#### publishes and accepts only the exact server-owned bootstrap grant
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val grant = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+val attacker_grant = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+val token_grant_id = "1111111111111111111111111111111111111111111111111111111111111111"
+val page = ui_web_with_login_grant("<html><head>\n<title>Simple</title></head></html>", grant)
+val serialized = SessionToken.issue(token_grant_id, "http://localhost:8080", 3600000u64, "secret").serialize()
+expect(page).to_contain("<meta name=\"simple-ui-login-grant\" content=\"{grant}\">")
+expect(ui_web_with_login_grant("<html><head></head></html>", "not-hex")).to_equal("<html><head></head></html>")
+expect(ui_web_login_grant_status("", grant)).to_equal("forbidden")
+expect(ui_web_login_grant_status(attacker_grant, grant)).to_equal("forbidden")
+expect(ui_web_login_grant_status(token_grant_id, grant)).to_equal("forbidden")
+expect(ui_web_login_grant_status(grant, grant)).to_equal("ok")
+expect(serialized.contains(grant)).to_be(false)
+expect(serialized).to_contain(token_grant_id)
 ```
 
 </details>
@@ -463,8 +631,8 @@ expect(reset.2).to_equal(1)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -472,7 +640,10 @@ expect(reset.2).to_equal(1)
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
+- **Requirements:** `doc/02_requirements/nfr/simple_web_browser_production_hardening.md`
+- **Plan:** `doc/03_plan/sys_test/simple_web_browser_production_hardening.md`
+- **Design:** `doc/05_design/ui/web/simple_web_browser_production_hardening.md`
+- **Research:** `doc/01_research/local/simple_web_browser_production_hardening.md`
 
 
 </details>

@@ -12,6 +12,7 @@ traced below.
 | Surface | Evidence | Current Status |
 |---------|----------|----------------|
 | Secret policy, origin guard, login burst gate | `test/01_unit/app/ui/web_auth_hardening_spec.spl` | passing |
+| Per-process bootstrap grant publication and exact redemption | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | unit contract plus live normal/shared-WM extraction, attacker localhost-port mismatch `403`, no-token, and valid redemption coverage |
 | Bearer extraction and query-token compatibility gate | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing, including deprecated env non-authorization |
 | Live `/ui/login`, `/api/state`, `/api/widgets`, `/ui/resume`, `/ui/ws`, legacy `/ws`, and query-token `/ui/ws` fail-closed behavior | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; `/api/clients` unit policy coverage in `test/01_unit/app/ui/web_auth_hardening_spec.spl` | passed locally on 2026-06-16; legacy `/ws` hidden with 404 |
 | Browser JSON response cache-control and anti-sniff headers | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; `test/01_unit/app/ui/async_web_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |

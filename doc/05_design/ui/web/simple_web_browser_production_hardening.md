@@ -18,15 +18,22 @@ Option C trace IDs.
 
 ## Request Flow
 
-1. Server startup loads `OriginGuard` and token secret.
-2. `/ui/login` checks origin before reading or parsing the grant body.
-3. Content-Length above `UI_WEB_MAX_UNAUTH_BODY_BYTES` returns `413`.
-4. Login attempts pass through a fixed-window burst gate before body parsing.
-5. Login body fields are parsed through bounded `ui_web_auth_json_field`.
-6. Successful login returns an origin-bound signed token.
-7. `/ui/ws`, `/ui/resume`, and sensitive `/api/*` call
+1. Server startup loads `OriginGuard` and token secret, then creates one
+   cryptographically random 256-bit login grant plus a distinct random 256-bit
+   token grant claim.
+2. Root HTML publishes the lowercase-hex grant in the
+   `simple-ui-login-grant` same-origin meta tag.
+3. `/ui/login` checks origin before reading or parsing the grant body.
+4. Content-Length above `UI_WEB_MAX_UNAUTH_BODY_BYTES` returns `413`.
+5. Login attempts pass through the existing fixed-window burst gate.
+6. Login body fields are parsed through bounded `ui_web_auth_json_field`; a
+   missing or non-exact grant returns `403` without a token.
+7. Successful login signs the token with the distinct server-owned token grant
+   claim and binds it to the accepted origin. The serialized claim cannot be
+   replayed as login proof.
+8. `/ui/ws`, `/ui/resume`, and sensitive `/api/*` call
    `ui_web_request_authorized`; legacy `/ws` is hidden with `404`.
-8. WebSocket upgrade is computed only after origin and token verification pass.
+9. WebSocket upgrade is computed only after origin and token verification pass.
 
 ## Token Transport
 
@@ -45,7 +52,7 @@ deprecated and non-authorizing, including when
 
 - Missing/disallowed origin: `403`.
 - Missing/invalid bearer on protected routes: `403`.
-- Missing login grant: `400`.
+- Missing or mismatched login grant: `403`, with no token.
 - Oversized unauthenticated login: `413`.
 - Unknown `/ui/*`: `404`.
 
