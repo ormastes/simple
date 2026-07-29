@@ -3,8 +3,9 @@
 ## Status
 
 ABI FIXED in the Rust LLVM backend. The exact native NVMe SSpec passes under the
-explicit bootstrap compiler handler. Pure-Simple compiler admission and
-standalone docgen remain blocked; no full bootstrap was run.
+explicit bootstrap compiler handler. Standalone docgen now builds and runs
+through that same focused handler. Pure-Simple compiler admission remains
+blocked; no full bootstrap was run.
 
 ## Evidence
 
@@ -75,9 +76,19 @@ elapsed 3:17.08; peak RSS 349,924 KiB
 ```
 
 This is focused compiler/SSpec diagnostic evidence, not pure-Simple release
-admission. A standalone SPipe docgen build reached a separate existing codegen
-failure in `src/lib/common/math_repr.spl`: LLVM global load referenced
-undeclared symbol `T`.
+admission. The standalone SPipe docgen closure exposed two further native
+defects. Literal LaTeX braces in `src/lib/common/math_repr.spl` were parsed as
+an interpolation of undeclared `T`; escaping them as `{{T}}` fixes HIR lowering.
+LLVM also omitted the existing `has` collection-method alias and emitted an
+undefined `has` symbol. The alias now lowers to `rt_contains`, matching
+Cranelift, and the parser uses its existing `ends_with` plus slicing support
+instead of the unavailable native `trim_end_matches` method.
+
+Both focused LLVM alias regressions pass. The incrementally rebuilt driver then
+compiled standalone `spipe_docgen`, which ran against the canonical NVMe SSpec
+and generated all five scenarios with zero stubs. The generated page was
+not retained because its five-line source documentation block would replace
+the richer existing manual and reported seven documentation-quality warnings.
 
 The required pure-Simple source checks each reported `OK` for `src/compiler`,
 `src/lib`, `src/app/mcp`, and `src/app/simple_lsp_mcp`, then exited 1 in the
@@ -102,10 +113,12 @@ Local evidence:
 - `build/mini_builds/fixed-spec-rust-build.*`
 - `build/mini_builds/fixed-spec-run.*`
 - `build/mini_builds/fixed-docgen-build.*`
+- `build/mini_builds/docgen-driver-build.*`
+- `build/mini_builds/docgen-native-build.*`
 
 ## Resume Gate
 
-Admit a pure-Simple compiler containing the process-runtime ABI fix, then fix
-the `math_repr.spl` docgen closure failure and execute standalone SPipe docgen
-once. Do not accept the explicit Rust bootstrap handler or `rt_cli_run_file`
-compatibility path as pure-Simple release evidence.
+Admit a pure-Simple compiler containing the verified process-runtime and native
+docgen fixes, then execute SSpec and docgen through that admitted tool. Do not
+accept the explicit Rust bootstrap handler or `rt_cli_run_file` compatibility
+path as pure-Simple release evidence.

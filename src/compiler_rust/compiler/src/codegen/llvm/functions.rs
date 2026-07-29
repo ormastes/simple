@@ -2363,7 +2363,7 @@ impl LlvmBackend {
                 // MUST match Cranelift's exact mapping at src/codegen/instr/calls.rs:3162-3201
                 let runtime_func = match method {
                     // Copied verbatim from Cranelift lines 3163-3200
-                    "contains" | "contains_key" | "has_key" => Some("rt_contains"),
+                    "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
                     "len" | "length" => Some("rt_len"),
                     "starts_with" => Some("rt_string_starts_with"),
                     "ends_with" => Some("rt_string_ends_with"),
@@ -2755,7 +2755,10 @@ impl LlvmBackend {
                     ("String" | "string", "ends_with") => Some("rt_string_ends_with"),
                     ("String" | "string", "contains")
                     | ("Array" | "array", "contains")
-                    | ("Dict" | "dict", "contains") => Some("rt_contains"),
+                    | ("Dict" | "dict", "contains")
+                    | ("String" | "string", "has")
+                    | ("Array" | "array", "has")
+                    | ("Dict" | "dict", "has") => Some("rt_contains"),
                     ("String" | "string", "substring") => Some("rt_slice"),
                     ("String" | "string", "split") => Some("rt_string_split"),
                     ("String" | "string" | "str" | "text", "trim") => Some("rt_string_trim"),
@@ -3270,6 +3273,7 @@ mod tests {
             (VReg(6), "str.ord", vec![VReg(0)]),
             (VReg(7), "rt_string_contains", vec![VReg(0), VReg(0)]),
             (VReg(8), "rt_dict_insert", vec![VReg(0), VReg(1), VReg(2)]),
+            (VReg(9), "has", vec![VReg(0), VReg(1)]),
         ] {
             func.blocks[0].instructions.push(MirInst::Call {
                 dest: Some(dest),
@@ -3288,6 +3292,7 @@ mod tests {
             "@rt_string_char_code_at",
             "@rt_contains",
             "@rt_dict_set",
+            "@has(",
         ] {
             assert!(ir.contains(symbol), "missing {symbol}:\n{ir}");
         }

@@ -174,7 +174,7 @@ impl LlvmEmitter<'_> {
             "starts_with" => Some("rt_string_starts_with"),
             "ends_with" => Some("rt_string_ends_with"),
             "concat" => Some("rt_string_concat"),
-            "contains" | "contains_key" | "has_key" => Some("rt_contains"),
+            "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
             "char_at" | "at" => Some("rt_string_char_at"),
             "char_code_at" => Some("rt_string_char_code_at"),
             "join" => Some("rt_string_join"),
@@ -2144,6 +2144,7 @@ mod tests {
     #[test]
     fn llvm_runtime_method_name_covers_freestanding_leaks() {
         assert_eq!(LlvmEmitter::runtime_method_name("rfind"), Some("rt_string_rfind"));
+        assert_eq!(LlvmEmitter::runtime_method_name("has"), Some("rt_contains"));
         assert_eq!(LlvmEmitter::runtime_method_name("repeat"), None);
         assert_eq!(LlvmEmitter::runtime_method_name("unwrap_err"), Some("rt_enum_payload"));
         assert_eq!(LlvmEmitter::runtime_method_name("to_string"), Some("rt_to_string"));

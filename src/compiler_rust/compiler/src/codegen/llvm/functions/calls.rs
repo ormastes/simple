@@ -2081,7 +2081,7 @@ impl LlvmBackend {
             let qualified_rt_redirect: Option<&str> = match method {
                 "starts_with" => Some("rt_string_starts_with"),
                 "ends_with" => Some("rt_string_ends_with"),
-                "contains" | "contains_key" | "has_key" => Some("rt_contains"),
+                "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
                 "split" => Some("rt_string_split"),
                 "bytes" => Some("rt_string_bytes"),
                 "chars" => Some("rt_string_chars"),

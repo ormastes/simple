@@ -3,7 +3,7 @@
 These items are deliberately separate from completed host/ARM contract work.
 Postponed hardware rows remain open and must not be converted into host PASS.
 
-# TODO: [bootstrap][P0] Admit a pure-Simple compiler/test path containing the fixed process-runtime ABI lowering, then compile and execute standalone docgen once. The focused Rust LLVM fix expands `rt_process_run(text, args)` to `(cmd_ptr, cmd_len, args)`, and its exact native NVMe SSpec diagnostic passed 5 examples with 0 failures. That explicit bootstrap-handler run is not pure-Simple release admission. Standalone docgen now stops at the separate `src/lib/common/math_repr.spl` undeclared-`T` LLVM global failure. Do not rerun the bounded Stage 3 command or claim Rust interpreter-hook evidence; root cause and logs are recorded in `doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`.
+# TODO: [bootstrap][P0] Admit a pure-Simple compiler/test path containing the fixed process-runtime ABI and native docgen lowering. The exact native NVMe SSpec diagnostic passed 5 examples with 0 failures. Standalone docgen also builds and runs after escaping the `math_repr.spl` LaTeX literal, lowering LLVM `has` through `rt_contains`, and replacing unsupported `trim_end_matches` use with `ends_with` plus slicing. Those explicit bootstrap-handler runs are not pure-Simple release admission. Do not rerun the bounded Stage 3 command or claim Rust interpreter-hook evidence; root cause and logs are recorded in `doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`.
 # DONE: [nvme][P0] Restore the RAM-NAND policy, linker regions, AXI endpoint/testbenches, GHDL runners, K26 NVMe/trace wiring, SSpec/research artifacts, and the 609 deleted lines that implement `entry.spl` startup/queue/erase/program/read/prevention/recovery. The corrected Retry 15 Stage 2 pure-Simple compiler builds the restored 88,220-byte RV32 ELF in 17.56s at 158,580 KiB peak RSS.
 # DONE: [nvme][P0] The source-matched Retry 15 Stage 2 image passes `check-rv32-nvme-nand-recovery.shs --ghdl`: behavioral soft-core, full AXI RAM, and clean plus garbage-filled synthesizable BRAM. The 89,668-byte ELF generated every ordered startup/queue/erase/program/read/prevention/recovery marker, performed 847 reads and 461 writes inside the exact 256-byte `.nandram`, and rejected word-64 access. Each 229-byte BRAM observation capture matched its own live UART stream. The current run retains its v1 source/ELF manifest; the hardened next-run gate binds the freshly built ELF explicitly, validates separate clean/garbage logs, and fail-closed records revision plus transitive source/evidence hashes in manifest v2.
 # DONE: [nvme][P0] GHDL runs host-issued Create CQ/SQ, Identify, Write, Flush, and Read against `build/nvme_fw_rv32_service.elf`, retaining MMIO/DMA/IRQ/recovery/remap evidence.
@@ -16,9 +16,8 @@ Postponed hardware rows remain open and must not be converted into host PASS.
 ## Resume Order
 
 1. Admit a pure-Simple compiler containing the verified process-runtime ABI fix.
-2. Fix the standalone docgen `math_repr.spl` undeclared-`T` closure failure and
-   run docgen once. The exact NVMe SSpec already passes as focused bootstrap
-   diagnostic evidence.
+2. Execute SSpec and docgen through that admitted pure-Simple tool; both already
+   pass as focused bootstrap diagnostic evidence.
 3. Pin the exact identified-board package and run BT-001..BT-006 on Cosmos+ hardware.
 4. Run the optional UNO Q portability lane when its environment exists.
 

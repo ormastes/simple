@@ -127,10 +127,14 @@ fix lowers `rt_process_run(text, args)` to `(cmd_ptr, cmd_len, args)`. An
 explicit bootstrap-handler diagnostic built the exact native NVMe SSpec in
 23.00 seconds and passed all 5 scenarios, including clean/garbage GHDL and AXI
 prevention/recovery. Standalone docgen then exposed a separate
-`src/lib/common/math_repr.spl` undeclared-`T` LLVM global failure. A subsequent
-Stage 3 refresh had already reached its full 90-minute cap at 1,849,336 KiB
-peak RSS with no diagnostic or binary. Exact evidence and the resume gate are
-tracked in
+`src/lib/common/math_repr.spl` undeclared-`T` LLVM global failure. Escaping the
+literal LaTeX braces, mapping LLVM `has` to `rt_contains`, and replacing one
+unsupported `trim_end_matches` call with `ends_with` plus slicing unblocked the
+standalone build. The resulting docgen parses all five canonical NVMe scenarios
+and reports zero stubs; its shorter generated page is not retained over the
+richer existing manual. A subsequent Stage 3 refresh had already reached its
+full 90-minute cap at 1,849,336 KiB peak RSS with no diagnostic or binary.
+Exact evidence and the remaining pure-Simple admission gate are tracked in
 `doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`.
 Do not use the explicit Rust bootstrap handler or a stale deployed binary as
 release SSpec/docgen evidence.
