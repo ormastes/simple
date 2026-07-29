@@ -222,3 +222,33 @@ rt_to_string
 Per the three-cycle guard, `event.spl:66-67` is recorded for the next bounded
 turn and was not fixed/rebuilt here. The full GLFW demo was not retried behind
 this red focused gate.
+
+The next bounded turn routed the Resize token dimensions through the existing
+native scalar-text owner. The exact GUI probe then advanced through two theme
+owners:
+
+```text
+theme_package._source_manifest_sha256()  # path.len()
+theme_package._split_top_level_commas()  # text-only current/ch interpolation
+```
+
+The path length now uses `ui_native_i64_text()`. The sibling CSS argument and
+shadow splitters now use direct `text + text` concatenation instead of invoking
+the generic formatter for each character.
+
+All three incremental Phase-3 builds linked successfully. The final receipt was
+3 compiled and 377 cached modules, followed by exit 139. Its remaining first
+call is:
+
+```text
+rt_to_string
+  <- common.ui.theme_render_snapshot.normalized_theme_material_text
+  <- common.ui.theme_render_snapshot.theme_material_sha256
+  <- nogc_sync_mut.ui.theme_package.load_theme_package
+  <- UISession.submit_widget_draw_ir
+```
+
+`normalized_theme_material_text()` still serializes many `u32`, `i32`, boolean,
+and shadow-index fields through interpolation. It is the exact next owner; no
+layout-aggregate fix or live GLFW retry is justified before this focused gate
+passes.

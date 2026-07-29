@@ -472,6 +472,19 @@ implementation-in-progress
   formatting, and finally `common.ui.event.process_event()` viewport token
   formatting at `event.spl:66-67`. The final binary still exits 139; no full
   live retry was run behind a red focused gate.
+- phase3-gui-event-theme-progression: Three further focused cycles moved the
+  exact GUI producer probe past canonical Resize token storage, theme source
+  manifest path-length formatting, and text-only CSS splitter interpolation.
+  Every build reused the warm Phase-3 cache; the last compiled 3 modules and
+  reused 377. The remaining first `rt_to_string()` caller is
+  `common.ui.theme_render_snapshot.normalized_theme_material_text()`, whose
+  material checksum serialization still interpolates scalar aggregate fields.
+  The final probe exits 139, so no GLFW retry or pixel claim follows.
+- native-event-sibling-audit: Pointer/scroll diagnostic payloads in
+  `UISession.dispatch()` and scroll/caret property writes in
+  `common.ui.widget_hit` still contain generic numeric interpolation. They
+  remain active event-hardening work, but were not changed speculatively before
+  the first-frame producer gate reaches them.
 
 ## Remaining runtime gates
 
@@ -482,9 +495,9 @@ implementation-in-progress
   probes. Packed ARGB presentation and title conversion are now independently
   green. The focused native compositor now admits an external pixel frame and
   reaches an exact nonzero framebuffer sample. The richer exact-demo GUI probe
-  now stops at the remaining Resize token formatter in
-  `common.ui.event.process_event`; the full GUI demo remains RED for non-black
-  live presentation and semantic input.
+  now passes Resize token and theme source parsing, then stops in theme material
+  checksum serialization. The full GUI demo remains RED for non-black live
+  presentation and semantic input.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the
