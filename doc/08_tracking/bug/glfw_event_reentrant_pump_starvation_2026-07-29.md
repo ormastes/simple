@@ -39,5 +39,5 @@ older direct C callers.
 ## Remaining event work
 
 SDL2 still exposes only one mutable `g_last_event`, so it cannot preserve a
-multi-event batch or owned text payloads. SimpleOS WM IPC still lacks a
-separate committed-text event. Those are separate follow-up owners.
+multi-event batch or owned text payloads. SimpleOS committed text is now a
+separate WM event; live QEMU evidence remains a separate follow-up gate.

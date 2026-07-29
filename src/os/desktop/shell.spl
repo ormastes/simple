@@ -32,6 +32,7 @@ use os.compositor.compositor.{
     WM_CONTENT_KIND_WEB_DOCUMENT,
     WM_CONTENT_KIND_PIXEL_SURFACE,
 }
+use os.compositor.ps2_wm_key_decode.{ps2_wm_character, ps2_wm_key_name}
 use os.compositor.pixel_content_store.{
     pixel_content_store_length,
     pixel_content_store_color,
@@ -45,9 +46,9 @@ use os.drivers.framebuffer.fb_driver.{Color}
 use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use os.services.wm.wm_service.{WmService, WmAction}
-use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Point, Size, Rect, Modifiers}
-use common.window_protocol.window_protocol.{WM_STATUS_ERROR}
-use common.window_protocol.input_translator.{pointer_to_wm_mouse_event}
+use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Point, Size, Rect, KeyCode, Modifiers}
+use common.window_protocol.window_protocol.{WM_STATUS_ERROR, WmInputEvent}
+use common.window_protocol.input_translator.{ascii_code_for_key, pointer_to_wm_mouse_event}
 use os.services.launcher.launcher.{
     launcher_init, launcher_launch, launcher_shortcut_dispatch, launcher_register, launcher_terminate,
     launcher_get_app_name, launcher_get_process_app_index, launcher_get_process_app_id_for_pid,
@@ -1029,7 +1030,9 @@ impl DesktopShell:
                 self.compositor.pending_fullscreen_release_sequence > 0 or
                 self.compositor.pending_meta_key > 0 or
                 self.compositor.pending_shortcut != "" or
-                self.compositor.pending_wm_pointer_valid)
+                self.compositor.pending_wm_pointer_valid or
+                self.compositor.pending_wm_key_valid or
+                self.compositor.pending_wm_text_valid)
             val ps2_status = port_inb(0x64)
             val ps2_byte_ready = ((ps2_status as i32) & 1) != 0
             if not ps2_byte_ready and not queued_input_active:
@@ -1089,7 +1092,13 @@ impl DesktopShell:
                     remote_event_window_id = input_compositor.pending_wm_pointer_window_id
                     remote_event_input_seq = pointer_sequence
                     remote_bootstrap_poll_ticks = 0
-            val input_active = (fullscreen_sequence > 0 or fullscreen_release_sequence > 0 or input_compositor.pending_meta_key > 0 or input_compositor.pending_shortcut != "" or input_compositor.pending_wm_pointer_valid)
+            if (input_compositor.pending_wm_key_valid and
+                input_compositor.window_owner_port(input_compositor.pending_wm_key_window_id.to_u64()) > 0):
+                remote_event_polls_left = 256
+                remote_event_window_id = input_compositor.pending_wm_key_window_id
+                remote_event_input_seq = input_compositor.input_sequence
+                remote_bootstrap_poll_ticks = 0
+            val input_active = (fullscreen_sequence > 0 or fullscreen_release_sequence > 0 or input_compositor.pending_meta_key > 0 or input_compositor.pending_shortcut != "" or input_compositor.pending_wm_pointer_valid or input_compositor.pending_wm_key_valid or input_compositor.pending_wm_text_valid)
             if not input_active:
                 # A partial PS/2 packet may not have produced a receipt yet,
                 # but its decoder state must survive until the next byte.
@@ -1136,9 +1145,63 @@ impl DesktopShell:
                 serial_println("[wm-input-irq] input_seq={fullscreen_release_sequence} scancode=215 kind=release")
             if pointer_sequence > 0:
                 serial_println("[wm-pointer-irq] input_seq={pointer_sequence} x={pointer_x} y={pointer_y} button_code={pointer_button_code} kind_code={pointer_kind_code}")
+            var remote_text_window_id: i32 = 0
+            var remote_text_scancode: i32 = 0
+            var remote_text_shift = false
+            var remote_key_window_id: i32 = 0
+            var remote_key_scancode: i32 = 0
+            var remote_key_shift = false
+            var remote_key_ctrl = false
+            var remote_key_alt = false
+            if input_compositor.pending_wm_key_valid:
+                remote_key_window_id = input_compositor.pending_wm_key_window_id
+                remote_key_scancode = input_compositor.pending_wm_key_scancode
+                remote_key_shift = input_compositor.pending_wm_key_shift
+                remote_key_ctrl = input_compositor.pending_wm_key_ctrl
+                remote_key_alt = input_compositor.pending_wm_key_alt
+                input_compositor.pending_wm_key_valid = false
+            if input_compositor.pending_wm_text_valid:
+                remote_text_window_id = input_compositor.pending_wm_text_window_id
+                remote_text_scancode = input_compositor.pending_wm_text_scancode
+                remote_text_shift = input_compositor.pending_wm_text_shift
+                input_compositor.pending_wm_text_valid = false
             self.compositor = input_compositor
             self.drain_wm_actions()
             self.handle_pending_wm_pointer_step()
+            if (remote_key_window_id > 0 and
+                self.compositor.window_owner_port(remote_key_window_id.to_u64()) > 0):
+                val key_name = ps2_wm_key_name(remote_key_scancode)
+                if key_name != "":
+                    val key_code = match remote_key_scancode:
+                        0x01: 27u32
+                        0x0E: 8u32
+                        0x0F: 9u32
+                        0x1C: 13u32
+                        _: ascii_code_for_key(key_name)
+                    self.wm.send_input_to_owner(
+                        remote_key_window_id.to_u64(),
+                        WmInputEvent.key_down(
+                            WindowId(value: remote_key_window_id.to_u64()),
+                            KeyCode(code: key_code, name: key_name),
+                            Modifiers(
+                                shift: remote_key_shift,
+                                ctrl: remote_key_ctrl,
+                                alt: remote_key_alt,
+                                meta: false
+                            )
+                        )
+                    )
+            if (remote_text_window_id > 0 and
+                self.compositor.window_owner_port(remote_text_window_id.to_u64()) > 0):
+                val committed_text = ps2_wm_character(remote_text_scancode, remote_text_shift)
+                if committed_text != "":
+                    self.wm.send_input_to_owner(
+                        remote_text_window_id.to_u64(),
+                        WmInputEvent.text_input(
+                            WindowId(value: remote_text_window_id.to_u64()),
+                            committed_text
+                        )
+                    )
             if pointer_sequence > 0:
                 serial_println("[wm-pointer-state] input_seq={pointer_sequence} window={pointer_window_id} marker={self.last_wm_loop_marker}")
             # Step receipts between the pointer state and frame receipts. The

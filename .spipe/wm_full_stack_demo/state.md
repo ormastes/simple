@@ -595,6 +595,19 @@ implementation-in-progress
   live probe passes real key, committed text, pointer motion, and button input.
   The full Simple WM demo closure linked with the new runtime object
   (`3 compiled / 511 cached`); no new rendering claim is made.
+- simpleos-remote-committed-text: Remote SimpleOS windows previously received
+  pointer events only; PS/2 text was consumed by local GUI sessions before the
+  WM IPC boundary. `WmEventType.Text` now remains separate from physical keys,
+  the existing event wire appends bounded UTF-8 without renumbering older
+  event kinds, and the client rejects malformed/truncated payloads. The QEMU
+  path carries scalar scancode/modifier state through the freestanding
+  compositor boundary and reconstructs ordered key-then-text events in the
+  shell before delivery. PS/2 polling returns after one routable key so the
+  hardware FIFO, rather than an overwriteable aggregate queue, preserves
+  bursts. Remote content polling is re-armed after keyboard input.
+  A pure-Simple Stage-2 native probe linked and exited `0`. An attempted
+  aggregate-returning modifier decoder crashed with a nil receiver, so it was
+  deleted in favor of scalar inline packing/unpacking.
 
 ## Remaining runtime gates
 
@@ -618,7 +631,8 @@ implementation-in-progress
   close-request evidence.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
-- QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the
+- QEMU: PS/2 committed text now reaches remote WM IPC through a native-safe
+  scalar handoff. Pixel and HDA controller/stream/IRQ source paths share the
   canonical desktop entry, but none has current live guest evidence.
 - UNO Q: Debian host validation and the QRB2210 SimpleOS port remain open; the
   STM32U585 lane is not desktop evidence.

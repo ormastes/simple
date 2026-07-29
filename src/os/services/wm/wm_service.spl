@@ -29,7 +29,7 @@
 
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE, COMP_INPUT_EVENT, COMP_CLOSE_REQUEST, COMP_FOCUS_CHANGED, COMP_TEST_API_REQ}
 use os.userlib.syscall_raw.{syscall}
-use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_STATUS_NO_SPACE, WM_EVENT_CLOSE, WM_EVENT_FOCUS, wm_input_event, wm_focus_event}
+use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_STATUS_NO_SPACE, WM_EVENT_CLOSE, WM_EVENT_FOCUS, WM_INPUT_TEXT_MAX_BYTES, wm_input_event, wm_focus_event}
 use os.services.launcher.launcher.{launcher_get_process_app_id_for_pid}
 use std.ecs.entity.{Entity, EntityAllocator}
 use std.ecs.component_store.{ComponentStore}
@@ -559,23 +559,13 @@ impl WmService:
         Called by the compositor when a remote window receives input.
         Encodes the WmInputEvent as:
           method(u32=COMP_INPUT_EVENT) | window_id(u64) | event_type(u32) |
-          key_code(u32) | mouse_x(i32) | mouse_y(i32) | modifiers(u32)
+          key_code(u32) | mouse_x(i32) | mouse_y(i32) | modifiers(u32) |
+          text_len(u32) | committed_utf8(text_len)
         """
         val owner = self.find_owner(window_id)
         if owner == 0:
             return
-
-        var buf: [u8] = []
-        # Method header
-        _push_u32(buf, COMP_INPUT_EVENT)
-        # Event payload
-        _push_u64(buf, event.window_id.to_u64())
-        _push_u32(buf, event.event_type.to_u32())
-        _push_u32(buf, event.key_code.to_u32())
-        _push_i32(buf, event.point.x.to_i32())
-        _push_i32(buf, event.point.y.to_i32())
-        _push_u32(buf, event.modifiers.to_u32())
-        _ipc_send(owner, self.port_id, buf)
+        self.send_input_to_port(owner, event)
 
     me send_close_request(window_id: u64):
         """Send a close request to the app that owns this window.
@@ -617,16 +607,32 @@ impl WmService:
         Called by the shell to deliver input events to remote app windows.
         The shell owns the compositor and drains pending_remote_events itself.
         """
+        val text_bytes = event.committed_text.bytes()
+        if text_bytes.len() > WM_INPUT_TEXT_MAX_BYTES.to_i64():
+            log_raw_println("[wm-service] rejected oversized committed text event")
+            return
         var buf: [u8] = []
         # Method header
         _push_u32(buf, COMP_INPUT_EVENT)
         # Event payload
-        _push_u64(buf, event.window_id.to_u64())
+        _push_u64(buf, event.window_id.value)
         _push_u32(buf, event.event_type.to_u32())
-        _push_u32(buf, event.key_code.to_u32())
+        _push_u32(buf, event.key_code.code)
         _push_i32(buf, event.point.x.to_i32())
         _push_i32(buf, event.point.y.to_i32())
-        _push_u32(buf, event.modifiers.to_u32())
+        var modifier_bits: u32 = 0
+        if event.modifiers.shift:
+            modifier_bits = modifier_bits | 1u32
+        if event.modifiers.ctrl:
+            modifier_bits = modifier_bits | 2u32
+        if event.modifiers.alt:
+            modifier_bits = modifier_bits | 4u32
+        if event.modifiers.meta:
+            modifier_bits = modifier_bits | 8u32
+        _push_u32(buf, modifier_bits)
+        _push_u32(buf, text_bytes.len().to_u32())
+        for byte in text_bytes:
+            buf.push(byte.to_u8())
         _ipc_send(dst_port, self.port_id, buf)
 
     # -- Ownership Tracking --------------------------------------------------
