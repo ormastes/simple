@@ -108,6 +108,9 @@ The reusable feature wiki is
 `doc/00_llm_process/feature_expert/nvme_firmware/skill.md`. Specs must name the
 target profile, independent `NVME_RV32_*` build mode, transport, media, and
 evidence class; a target ID alone is not a complete test configuration.
+Before running NVMe SSpec/docgen, check the full-CLI admission row in
+`doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`; a Rust
+seed, stale binary, or bootstrap receipt cannot satisfy that gate.
 For RV32 IDs `3`/`4`, catalog presence is not runtime dispatch: require evidence
 from the selected build mode and transport runner before naming the profile as
 exercised.

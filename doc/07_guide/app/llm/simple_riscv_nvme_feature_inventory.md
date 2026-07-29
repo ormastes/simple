@@ -111,6 +111,13 @@ compiler builds the resident service ELF and VHDL generator; SSpec/docgen still
 requires an admitted full CLI. The stale deployed binary is not acceptable
 evidence.
 
+Current bootstrap admission is tracked in
+`doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`. Retry 12
+stopped before Stage 3 on four source-shape errors introduced by consolidated
+upstream work; focused repairs and a 3/3 regression exist, but no replacement
+full CLI is admitted yet. Do not run NVMe SSpec/docgen with the Rust seed or a
+stale deployed binary.
+
 The current endpoint-wired K26 top also passes full SimpleOS boot with both
 zeroed and garbage-filled DDR. That rehearsal uses a tied-off endpoint and does
 not replace the firmware-in-loop DMA/IRQ gate or physical board evidence.

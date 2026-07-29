@@ -75,6 +75,11 @@ gate with `--post-bootstrap`. Physical Cosmos+ evidence is accepted only by
 `--board-evidence DIR`; missing board/runtime/trace data is POSTPONED or FAIL,
 never a simulator fallback.
 
+Bootstrap admission status is not inferred from a build receipt. Read
+`doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`; until its
+Stage 4/full-CLI row passes, keep SSpec/docgen blocked and never substitute the
+Rust seed.
+
 The board campaign uses `cosmos-board-campaign-v1`. It retains inventory,
 commands, tools, artifact hashes, the original v3 package manifest, six BT raw
 logs, `result.md`, and `manifest.txt`. Each BT-001..BT-006 PASS row includes a
