@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -176,6 +176,71 @@ expect(pixels[40 * 48 + 2]).to_equal(0xFF0000FFu32)
 expect(pixels[16 * 48]).to_equal(0xFF000000u32)
 expect(pixels[61 * 48 + 1]).to_equal(0xFFFFFFFFu32)
 ```
+
+</details>
+
+#### should separate fixed table cells with authored border spacing
+
+- Render two fixed columns with horizontal and vertical spacing
+   - Artifact capture: after_step
+- Expose normalized spacing and exact Draw IR table geometry
+   - Artifact capture: after_step
+   - Evidence: artifact verified by exact computed-style, geometry, and parentage checks
+   - Expected: table `border-spacing` equals `4px 3px`
+   - Expected: table geometry equals `[0, 0, 40, 14]`
+   - Expected: row geometry equals `[4, 3, 32, 8]`
+   - Expected: first cell geometry equals `[4, 3, 14, 8]`
+   - Expected: second cell geometry equals `[22, 3, 14, 8]`
+- Rasterize outer and inter-cell gaps through Engine2D
+   - Artifact capture: after_step
+   - Evidence: outer and inter-cell pixels retain the table background
+   - Expected: red and green cells do not paint into the authored gaps
+- Keep zero spacing as the adjacent-cell control
+   - Artifact capture: after_step
+   - Expected: normalized control value equals `0px`
+   - Expected: control cells remain adjacent at x `0` and x `20`
+- Preserve the same gaps in explicit-width automatic layout
+   - Artifact capture: after_step
+   - Expected: explicit single-span cells retain `[4, 3, 14, 8]` and `[22, 3, 14, 8]`
+- Keep gaps through constrained rows groups spans and captions
+   - Artifact capture: after_step
+   - Expected: constrained automatic cells retain the horizontal gap
+   - Expected: the row group spans both rows and their internal vertical gap
+   - Expected: a colspan cell includes the internal horizontal gap
+   - Expected: the bottom caption follows the final outer vertical gap
+- Expand a narrow fixed table to contain valid large spacing
+   - Artifact capture: after_step
+   - Expected: a 40px authored table expands to 302px for two 1px tracks and three 100px gaps
+- Handle inherited CSS-wide values and reject negative spacing
+   - Artifact capture: after_step
+   - Expected: `inherit`, `unset`, `revert`, `revert-layer`, and an invalid negative value retain `6px 2px`
+   - Expected: `initial` resets to `0px`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: the complete executable scenario is retained in
+`test/03_system/feature/web_platform/css/table_formatting_spec.spl`.
+
+</details>
+
+#### should keep vertical-only spacing constraints inside the table
+
+- Lay out a constrained auto table with vertical-only spacing
+   - Artifact capture: after_step
+- Keep constrained and colspan cells non-overlapping and contained
+   - Artifact capture: after_step
+   - Expected: the 30px minimum-width cell ends where its 10px sibling begins
+   - Expected: the sibling and colspan cell end at the 40px table edge
+   - Expected: vertical spacing remains 3px while horizontal spacing stays zero
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: the complete executable scenario is retained in
+`test/03_system/feature/web_platform/css/table_formatting_spec.spl`.
 
 </details>
 
@@ -790,8 +855,8 @@ expect(pixels[2 * 88 + 55]).to_equal(0xFF000000u32)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -148,6 +148,362 @@ describe "HTML table formatting":
     # @manual: show
     # @capture(html)
     # @capture(artifact)
+    it "should separate fixed table cells with authored border spacing":
+        step("Render two fixed columns with horizontal and vertical spacing")
+        val spaced_html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "table{table-layout:fixed;width:40px;border-spacing:4px 3px;" +
+            "background:#112233}td{height:8px}" +
+            "#spaced-a{background:#ff0000}" +
+            "#spaced-b{background:#00ff00}</style>" +
+            "<table id='spaced'><tr id='spaced-row'>" +
+            "<td id='spaced-a'></td><td id='spaced-b'></td>" +
+            "</tr></table>"
+        )
+        val spaced_commands = simple_web_layout_render_html_draw_ir(
+            spaced_html, 48, 24
+        ).batches[0].commands
+        val spaced_table_index = _table_command_index(
+            spaced_commands, "spaced"
+        )
+        val spaced_row_index = _table_command_index(
+            spaced_commands, "spaced-row"
+        )
+        val spaced_a_index = _table_command_index(
+            spaced_commands, "spaced-a"
+        )
+        val spaced_b_index = _table_command_index(
+            spaced_commands, "spaced-b"
+        )
+        expect(spaced_table_index).to_be_greater_than(-1)
+        expect(spaced_row_index).to_be_greater_than(-1)
+        expect(spaced_a_index).to_be_greater_than(-1)
+        expect(spaced_b_index).to_be_greater_than(-1)
+        val spaced_table = spaced_commands[spaced_table_index]
+        val spaced_row = spaced_commands[spaced_row_index]
+        val spaced_a = spaced_commands[spaced_a_index]
+        val spaced_b = spaced_commands[spaced_b_index]
+
+        step("Expose normalized spacing and exact Draw IR table geometry")
+        expect(simple_web_layout_debug_style_by_id(
+            spaced_html, "spaced", "border-spacing"
+        )).to_equal("4px 3px")
+        expect(_table_style(
+            spaced_table, "border-spacing"
+        )).to_equal("4px 3px")
+        expect([spaced_table.x, spaced_table.y,
+                spaced_table.width, spaced_table.height]).to_equal(
+            [0, 0, 40, 14]
+        )
+        expect([spaced_row.x, spaced_row.y,
+                spaced_row.width, spaced_row.height]).to_equal(
+            [4, 3, 32, 8]
+        )
+        expect([spaced_a.x, spaced_a.y,
+                spaced_a.width, spaced_a.height]).to_equal(
+            [4, 3, 14, 8]
+        )
+        expect([spaced_b.x, spaced_b.y,
+                spaced_b.width, spaced_b.height]).to_equal(
+            [22, 3, 14, 8]
+        )
+        expect(spaced_row.parent_id).to_equal("spaced")
+        expect(spaced_a.parent_id).to_equal("spaced-row")
+        expect(spaced_b.parent_id).to_equal("spaced-row")
+
+        step("Rasterize outer and inter-cell gaps through Engine2D")
+        val spaced_pixels = (
+            simple_web_layout_render_html_readback_engine2d_result(
+                spaced_html, 48, 24, "software"
+            ).readback.pixels
+        )
+        expect(spaced_pixels[1 * 48 + 1]).to_equal(0xFF112233u32)
+        expect(spaced_pixels[4 * 48 + 5]).to_equal(0xFFFF0000u32)
+        expect(spaced_pixels[4 * 48 + 19]).to_equal(0xFF112233u32)
+        expect(spaced_pixels[4 * 48 + 23]).to_equal(0xFF00FF00u32)
+        expect(spaced_pixels[12 * 48 + 1]).to_equal(0xFF112233u32)
+        expect(spaced_pixels[14 * 48 + 1]).to_equal(0xFFFFFFFFu32)
+
+        step("Keep zero spacing as the adjacent-cell control")
+        val control_html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "table{table-layout:fixed;width:40px;border-spacing:0;" +
+            "background:#112233}td{height:8px}" +
+            "#control-a{background:#ff0000}" +
+            "#control-b{background:#00ff00}</style>" +
+            "<table id='control'><tr id='control-row'>" +
+            "<td id='control-a'></td><td id='control-b'></td>" +
+            "</tr></table>"
+        )
+        val control_commands = simple_web_layout_render_html_draw_ir(
+            control_html, 48, 24
+        ).batches[0].commands
+        val control_table_index = _table_command_index(
+            control_commands, "control"
+        )
+        val control_a_index = _table_command_index(
+            control_commands, "control-a"
+        )
+        val control_b_index = _table_command_index(
+            control_commands, "control-b"
+        )
+        expect(control_table_index).to_be_greater_than(-1)
+        expect(control_a_index).to_be_greater_than(-1)
+        expect(control_b_index).to_be_greater_than(-1)
+        val control_table = control_commands[control_table_index]
+        val control_a = control_commands[control_a_index]
+        val control_b = control_commands[control_b_index]
+        expect(_table_style(
+            control_table, "border-spacing"
+        )).to_equal("0px")
+        expect([control_table.x, control_table.y,
+                control_table.width, control_table.height]).to_equal(
+            [0, 0, 40, 8]
+        )
+        expect([control_a.x, control_a.y,
+                control_a.width, control_a.height]).to_equal(
+            [0, 0, 20, 8]
+        )
+        expect([control_b.x, control_b.y,
+                control_b.width, control_b.height]).to_equal(
+            [20, 0, 20, 8]
+        )
+        val control_pixels = (
+            simple_web_layout_render_html_readback_engine2d_result(
+                control_html, 48, 24, "software"
+            ).readback.pixels
+        )
+        expect(control_pixels[4 * 48 + 19]).to_equal(0xFFFF0000u32)
+        expect(control_pixels[4 * 48 + 20]).to_equal(0xFF00FF00u32)
+
+        step("Preserve the same gaps in explicit-width automatic layout")
+        val auto_html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "table{width:40px;border-spacing:4px 3px;background:#112233}" +
+            "td{width:10px;height:8px}" +
+            "#auto-a{background:#ff0000}#auto-b{background:#00ff00}" +
+            "</style><table id='auto-spaced'><tr>" +
+            "<td id='auto-a'></td><td id='auto-b'></td></tr></table>"
+        )
+        val auto_commands = simple_web_layout_render_html_draw_ir(
+            auto_html, 48, 24
+        ).batches[0].commands
+        val auto_a_index = _table_command_index(auto_commands, "auto-a")
+        val auto_b_index = _table_command_index(auto_commands, "auto-b")
+        expect(auto_a_index).to_be_greater_than(-1)
+        expect(auto_b_index).to_be_greater_than(-1)
+        val auto_a = auto_commands[auto_a_index]
+        val auto_b = auto_commands[auto_b_index]
+        expect([auto_a.x, auto_a.y, auto_a.width, auto_a.height]).to_equal(
+            [4, 3, 14, 8]
+        )
+        expect([auto_b.x, auto_b.y, auto_b.width, auto_b.height]).to_equal(
+            [22, 3, 14, 8]
+        )
+        val auto_pixels = (
+            simple_web_layout_render_html_readback_engine2d_result(
+                auto_html, 48, 24, "software"
+            ).readback.pixels
+        )
+        expect(auto_pixels[4 * 48 + 19]).to_equal(0xFF112233u32)
+
+        step("Keep gaps through constrained rows groups spans and captions")
+        val grouped_html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "table{width:40px;border-spacing:2px 3px;background:#112233}" +
+            "caption{caption-side:bottom;height:2px;background:#ffff00}" +
+            "td{height:4px}#group-a{width:10px;min-width:30px;" +
+            "background:#ff0000}#group-b{width:10px;background:#00ff00}" +
+            "#group-wide{background:#0000ff}</style>" +
+            "<table id='grouped'><caption id='group-caption'></caption>" +
+            "<tbody id='group'><tr id='group-row-a'>" +
+            "<td id='group-a'></td><td id='group-b'></td></tr>" +
+            "<tr id='group-row-b'><td id='group-wide' colspan='2'></td>" +
+            "</tr></tbody></table>"
+        )
+        val grouped_commands = simple_web_layout_render_html_draw_ir(
+            grouped_html, 48, 24
+        ).batches[0].commands
+        val grouped_table_index = _table_command_index(
+            grouped_commands, "grouped"
+        )
+        val group_index = _table_command_index(grouped_commands, "group")
+        val group_row_a_index = _table_command_index(
+            grouped_commands, "group-row-a"
+        )
+        val group_row_b_index = _table_command_index(
+            grouped_commands, "group-row-b"
+        )
+        val group_a_index = _table_command_index(
+            grouped_commands, "group-a"
+        )
+        val group_b_index = _table_command_index(
+            grouped_commands, "group-b"
+        )
+        val group_wide_index = _table_command_index(
+            grouped_commands, "group-wide"
+        )
+        val group_caption_index = _table_command_index(
+            grouped_commands, "group-caption"
+        )
+        expect(grouped_table_index).to_be_greater_than(-1)
+        expect(group_index).to_be_greater_than(-1)
+        expect(group_row_a_index).to_be_greater_than(-1)
+        expect(group_row_b_index).to_be_greater_than(-1)
+        expect(group_a_index).to_be_greater_than(-1)
+        expect(group_b_index).to_be_greater_than(-1)
+        expect(group_wide_index).to_be_greater_than(-1)
+        expect(group_caption_index).to_be_greater_than(-1)
+        val grouped_table = grouped_commands[grouped_table_index]
+        val group = grouped_commands[group_index]
+        val group_row_a = grouped_commands[group_row_a_index]
+        val group_row_b = grouped_commands[group_row_b_index]
+        val group_a = grouped_commands[group_a_index]
+        val group_b = grouped_commands[group_b_index]
+        val group_wide = grouped_commands[group_wide_index]
+        val group_caption = grouped_commands[group_caption_index]
+        expect([grouped_table.x, grouped_table.y,
+                grouped_table.width, grouped_table.height]).to_equal(
+            [0, 0, 46, 19]
+        )
+        expect([group.x, group.y, group.width, group.height]).to_equal(
+            [2, 3, 42, 11]
+        )
+        expect([group_row_a.x, group_row_a.y,
+                group_row_a.width, group_row_a.height]).to_equal(
+            [2, 3, 42, 4]
+        )
+        expect([group_row_b.x, group_row_b.y,
+                group_row_b.width, group_row_b.height]).to_equal(
+            [2, 10, 42, 4]
+        )
+        expect([group_a.x, group_a.y, group_a.width, group_a.height]).to_equal(
+            [2, 3, 30, 4]
+        )
+        expect([group_b.x, group_b.y, group_b.width, group_b.height]).to_equal(
+            [34, 3, 10, 4]
+        )
+        expect([group_wide.x, group_wide.y,
+                group_wide.width, group_wide.height]).to_equal(
+            [2, 10, 42, 4]
+        )
+        expect([group_caption.x, group_caption.y,
+                group_caption.width, group_caption.height]).to_equal(
+            [0, 17, 46, 2]
+        )
+        val grouped_pixels = (
+            simple_web_layout_render_html_readback_engine2d_result(
+                grouped_html, 48, 24, "software"
+            ).readback.pixels
+        )
+        expect(grouped_pixels[4 * 48 + 33]).to_equal(0xFF112233u32)
+        expect(grouped_pixels[11 * 48 + 3]).to_equal(0xFF0000FFu32)
+        expect(grouped_pixels[17 * 48 + 1]).to_equal(0xFFFFFF00u32)
+
+        step("Expand a narrow fixed table to contain valid large spacing")
+        val large_html = (
+            "<style>html,body{margin:0}table{table-layout:fixed;" +
+            "width:40px;border-spacing:100px 0}td{height:1px}</style>" +
+            "<table id='large'><tr><td id='large-a'></td>" +
+            "<td id='large-b'></td></tr></table>"
+        )
+        val large_commands = simple_web_layout_render_html_draw_ir(
+            large_html, 320, 8
+        ).batches[0].commands
+        val large_table_index = _table_command_index(
+            large_commands, "large"
+        )
+        val large_a_index = _table_command_index(
+            large_commands, "large-a"
+        )
+        val large_b_index = _table_command_index(
+            large_commands, "large-b"
+        )
+        expect(large_table_index).to_be_greater_than(-1)
+        expect(large_a_index).to_be_greater_than(-1)
+        expect(large_b_index).to_be_greater_than(-1)
+        val large_table = large_commands[large_table_index]
+        val large_a = large_commands[large_a_index]
+        val large_b = large_commands[large_b_index]
+        expect([large_table.x, large_table.width]).to_equal([0, 302])
+        expect([large_a.x, large_a.width]).to_equal([100, 1])
+        expect([large_b.x, large_b.width]).to_equal([201, 1])
+
+        step("Handle inherited CSS-wide values and reject negative spacing")
+        val value_html = (
+            "<style>#scope{border-spacing:6px 2px}" +
+            "#inherited{border-spacing:inherit}" +
+            "#initial{border-spacing:initial}" +
+            "#unset{border-spacing:unset}" +
+            "#revert{border-spacing:revert}" +
+            "#revert-layer{border-spacing:revert-layer}" +
+            "#invalid{border-spacing:-1px}</style>" +
+            "<div id='scope'>" +
+            "<table id='inherited'></table>" +
+            "<table id='initial'></table>" +
+            "<table id='unset'></table>" +
+            "<table id='revert'></table>" +
+            "<table id='revert-layer'></table>" +
+            "<table id='invalid'></table></div>"
+        )
+        expect(simple_web_layout_debug_style_by_id(
+            value_html, "inherited", "border-spacing"
+        )).to_equal("6px 2px")
+        expect(simple_web_layout_debug_style_by_id(
+            value_html, "initial", "border-spacing"
+        )).to_equal("0px")
+        expect(simple_web_layout_debug_style_by_id(
+            value_html, "unset", "border-spacing"
+        )).to_equal("6px 2px")
+        expect(simple_web_layout_debug_style_by_id(
+            value_html, "revert", "border-spacing"
+        )).to_equal("6px 2px")
+        expect(simple_web_layout_debug_style_by_id(
+            value_html, "revert-layer", "border-spacing"
+        )).to_equal("6px 2px")
+        expect(simple_web_layout_debug_style_by_id(
+            value_html, "invalid", "border-spacing"
+        )).to_equal("6px 2px")
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should keep vertical-only spacing constraints inside the table":
+        step("Lay out a constrained auto table with vertical-only spacing")
+        val html = (
+            "<style>html,body{margin:0}table{width:40px;" +
+            "border-spacing:0 3px}td{width:10px;height:4px}" +
+            "#vertical-a{min-width:30px}</style>" +
+            "<table id='vertical-table'><tr>" +
+            "<td id='vertical-a'></td><td id='vertical-b'></td></tr>" +
+            "<tr><td id='vertical-wide' colspan='2'></td></tr></table>"
+        )
+        val commands = simple_web_layout_render_html_draw_ir(
+            html, 48, 24
+        ).batches[0].commands
+        val table = commands[_table_command_index(
+            commands, "vertical-table"
+        )]
+        val a = commands[_table_command_index(commands, "vertical-a")]
+        val b = commands[_table_command_index(commands, "vertical-b")]
+        val wide = commands[_table_command_index(commands, "vertical-wide")]
+
+        step("Keep constrained and colspan cells non-overlapping and contained")
+        expect([table.x, table.y, table.width, table.height]).to_equal(
+            [0, 0, 40, 17]
+        )
+        expect([a.x, a.y, a.width, a.height]).to_equal([0, 3, 30, 4])
+        expect([b.x, b.y, b.width, b.height]).to_equal([30, 3, 10, 4])
+        expect([wide.x, wide.y, wide.width, wide.height]).to_equal(
+            [0, 10, 40, 4]
+        )
+        expect(a.x + a.width).to_equal(b.x)
+        expect(b.x + b.width).to_equal(table.x + table.width)
+        expect(wide.x + wide.width).to_equal(table.x + table.width)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
     it "should place captions from the inherited caption-side value":
         step("Trace implemented CSS properties through canonical rendering")
         val common = (

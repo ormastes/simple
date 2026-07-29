@@ -85,10 +85,10 @@ source/spec/manual evidence.
 - Functional count: not proven.
 - Existing generated-combination scenarios: 38 source scenarios; retained
   evidence records 13 passing and 25 failing.
-- Exactly 37 claimed properties are not recognized by canonical renderer
+- Exactly 36 claimed properties are not recognized by canonical renderer
   declaration owners after counting lookups through every local declaration
   table variable.
-- Only 42 behavioral cases exist for the 284 claimed names.
+- Only 43 behavioral cases exist for the 284 claimed names.
 - Several claimed properties are metadata-only and have no layout/raster
   consumer.
 - Invalid declarations and CSS-wide keywords do not have one correct
@@ -124,8 +124,9 @@ an inventory literal, an `@supports` table, or metadata.
 | REQ-003/004/019/021 | CSS claimed 284 | Functional count unknown | generated-combinations spec has 38 scenarios | declaration/cascade/style/layout/paint/DrawIR/Engine2D | isolated semantic, layout, DrawIR, pixel baseline/control | retained 13 pass/25 fail; manuals stale | FAIL |
 | REQ-003/004/019/021 | CSS Grid bounded foundation | Bounded behavior landed in `b17e868199af` | `test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl` | canonical declaration/style/layout/paint-layout, DrawIR, Engine2D | exact tracks, placement/span/implicit-row geometry and pixels; block and quota controls | canonical manual complete; independent static PASS; manifest `red-not-run`; runtime unavailable | Evidence-blocked |
 | REQ-003/004/005/006/007/017/021 | CSS/JavaScript animation frame trace | Bounded initial/intermediate/completed and pause/resume trace implemented | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl`: `should trace JavaScript pause and resume through deterministic Draw IR frames` | BrowserSession monotonic clock/DOM bridge, CSS animation instances, canonical HTML layout/DrawIR, Engine2D | exact stage geometry, Draw IR color transitions/holds, scheduler state, exact in-rectangle pixels, and zero matching-color pixels outside it | canonical generated manual complete with zero stubs; qualified Stage2 discovery is blocked by a pre-existing parse error in `browser_session.spl:1287` | Evidence-blocked |
-| REQ-003/004/019/021 | CSS claimed but unrecognized, 37 source diagnostics | False implemented claim | checker regression records exact source diagnostic; behavioral scenarios missing | canonical declaration dispatch and downstream owners | valid/invalid/inherited style plus discriminating render | checker manual current; behavior evidence missing | FAIL |
+| REQ-003/004/019/021 | CSS claimed but unrecognized, 36 source diagnostics | False implemented claim | checker regression records exact source diagnostic; behavioral scenarios missing | canonical declaration dispatch and downstream owners | valid/invalid/inherited style plus discriminating render | checker manual current; behavior evidence missing | FAIL |
 | REQ-003/004/019/021 | CSS `caption-side` | Bounded behavior landed in `ec39dc4ef85d` | focused table caption scenario | canonical declaration/style/table layout/DrawIR/Engine2D | top/bottom geometry and exact pixels with control | canonical manual; independent static PASS; qualified execution unavailable | Evidence-blocked |
+| REQ-003/004/019/021 | CSS `border-spacing` | Bounded separated-border implementation in current change; `border-collapse` remains excluded | focused fixed/automatic table scenario plus zero-spacing control in `table_formatting_spec.spl` | canonical declaration/style/table layout/DrawIR/Engine2D | one/two nonnegative pixel values, CSS-wide handling, exact gap geometry and pixels | canonical manual current; Stage2 build passed but runtime segfaulted before assertions | Evidence-blocked |
 | REQ-003/004/019/021 | CSS unsupported production 92 | Unsupported backlog | inventory spec is name-only | owners named by lane below | executable fail-closed or full four-oracle chain | manual stale; no behavior PASS | RED |
 | REQ-003/019/021 | CSS speech/aural 23 | Explicit scope exclusion | fail-closed/nonvisual scenario missing | future TTS/accessibility owner | no false visual support claim | missing | RED |
 | REQ-003/019/021 | Deprecated `glyph-orientation-vertical` | Unsupported/alias candidate | missing | declaration alias owner if selected | audited equality with `text-orientation` | missing | RED |

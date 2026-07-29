@@ -208,9 +208,10 @@ expect(_traceability_value(evidence, "html_css_sspec_traceability_receipt_sha256
 - Verify executable HTML and CSS traceability
    - Expected: code equals `1`
    - Expected: _traceability_value(evidence, "html_css_sspec_traceability_css_property_count") equals `2`
-   - Expected: unrecognized count equals `37`
+   - Expected: unrecognized count equals `36`
    - Expected: unrecognized contains `quotes`
    - Expected: unrecognized does not contain `caption-side`
+   - Expected: unrecognized does not contain `border-spacing`
    - Expected: unrecognized does not contain `color`
    - Expected: unrecognized does not contain `property-name`
    - Expected: _traceability_value(evidence, "html_css_sspec_traceability_implemented_css_property_indexed_count") equals `0`
@@ -239,9 +240,10 @@ expect(code).to_equal(1)
 val evidence = file_read("build/test-html-css-sspec-local-inventory/out/evidence.env") ?? ""
 val unrecognized = _traceability_value(evidence, "html_css_sspec_traceability_claimed_unrecognized_css_properties")
 expect(_traceability_value(evidence, "html_css_sspec_traceability_css_property_count")).to_equal("2")
-expect(unrecognized.split(",").len()).to_equal(37)
+expect(unrecognized.split(",").len()).to_equal(36)
 expect(unrecognized.contains("quotes")).to_equal(true)
 expect(unrecognized.contains("caption-side")).to_equal(false)
+expect(unrecognized.contains("border-spacing")).to_equal(false)
 expect(unrecognized.contains("color")).to_equal(false)
 expect(unrecognized.contains("property-name")).to_equal(false)
 expect(_traceability_value(evidence, "html_css_sspec_traceability_implemented_css_property_indexed_count")).to_equal("0")
