@@ -5,11 +5,15 @@
 freshest pure-Simple self-hosted binary is unusable for any subcommand that does
 real work
 **Status:** MITIGATED (2026-07-29) — `pop`/`push`/`append` added to
-`is_bare_builtin_collection_method`; validated byte-identical-archive
-(PROVED) on an unaffected fixture and a pre-existing-hang negative control
-(PROVED); full self-hosted binary re-run of the original `lex` repro was
-**not achieved** this pass (INFERRED only) — see "2026-07-29 follow-up"
-below for exactly which validation tier was reached and why.
+`is_bare_builtin_collection_method`; validated byte-identical-archive on an
+unaffected fixture (PROVED); full self-hosted binary re-run of the original
+`lex` repro was **not achieved** this pass — first attempt misdiagnosed as a
+"pre-existing hang" (this was a monitoring error, corrected same day: see
+"CORRECTION" in the tier (b) section below), second attempt hit a real,
+pre-existing, unrelated broken-import defect in
+`src/lib/common/json/{validation,utilities}.spl` that blocks discovery of the
+full CLI entry closure regardless of seed. See "2026-07-29 follow-up" below
+for exactly which validation tier was reached and why.
 **Component:** `src/compiler/10.frontend/core/lexer_struct.spl` (`CoreLexer.scan_token`),
 runtime `rt_array_pop` / `spl_array_pop`,
 `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
@@ -265,32 +269,67 @@ level. Future work on this bug class should validate against the real crash
 site (a rebuilt self-hosted CLI binary), not rely on synthetic fixtures alone
 — synthetic fixtures can give false negatives for this class.**
 
-**Tier (b) — full self-hosted CLI rebuild + `lex`/`compile`/`native-build` smoke: NOT ACHIEVED, environmental blocker found (PROVED unrelated to this fix).**
-Attempted three ways to rebuild the actual CLI binary
-(`src/app/cli/main.spl`) with the patched seed to re-run the original `lex`
-repro directly:
+**Tier (b) — full self-hosted CLI rebuild + `lex`/`compile`/`native-build` smoke: NOT ACHIEVED. Two distinct real findings below; the first correction supersedes an earlier, WRONG claim in this doc's initial 2026-07-29 push.**
 
-1. `native-build --source src/compiler --source src/app --source src/lib --entry src/app/cli/main.spl --threads 16` (matching the source-dir convention printed by the working `build/redeploy_out/simple_stage2` binary) against a warm 425 MB cache copied from `build/bootstrap/native_cache` — hung: all 5 threads at 0.0% CPU, blocked on `futex_wait_queue`/`do_wait`, zero I/O growth over 800+ seconds. Killed.
-2. `native-build --entry src/app/cli/main.spl --entry-closure --threads 8` against the same warm cache — hung identically within 20-80s (0% CPU, no I/O growth, no log progress past one lint warning).
-3. Same as (2) with a **fresh, empty** `--cache-dir` — hung identically (`timeout 60`, exit 124).
+**CORRECTION (same day, later pass): the "hang" reported in the first version
+of this section was a measurement error, not a real hang — flagged here by
+name so the next agent doesn't repeat it.** `native-build` on a big entry
+forks a `native_build_worker.spl` **child** process (visible as
+`simple run src/app/cli/native_build_worker.spl ...` under a `timeout`
+wrapper) and the **parent** process blocks on it via IPC/pipe, so the parent
+legitimately shows ~0% CPU and `futex_wait_queue`/`do_wait` the entire time —
+that is normal blocking-on-child behavior, not evidence of a stall. The
+original observation only checked the parent's threads (`ps -T -p <parent>`);
+checking the worker child (`pgrep -af native_build_worker`, or its
+`/proc/<child>/stat` utime across two samples) showed it steadily consuming
+99.8-99.9% CPU the entire time. The processes reported as "hung" and killed
+after 13-23 minutes were doing real, CPU-bound work, not stuck — killing them
+destroyed real progress rather than terminating a dead build. **Measurement
+rule for this build tool going forward: always watch the
+`native_build_worker` child's CPU/utime, never the top-level `native-build`
+process's — the parent's own CPU is not a signal of build health.**
 
-**Negative control (PROVED): recipe (2) was re-run with the OLD (unpatched,
-currently-deployed) seed against the same warm cache and hung identically**
-(0.0-0.1% CPU across all threads, no progress) within 30s. This pins the hang
-to something pre-existing in the entry-closure discovery path for the full CLI
-entry point (plausibly related to the `src/os/compositor/host_compositor_core.spl`
-line-continuation parse construct noted in an earlier discovery attempt,
-possibly now causing a retry loop instead of a fast parse-error exit) — **it
-reproduces with both seeds, so it is not caused by this session's fix.** It is
-a separate, real defect worth its own bug report but is out of scope to
-root-cause in this pass.
+Re-run with correct monitoring (worker child CPU tracked) surfaced the real
+outcome: after several more minutes of genuine work, the worker **failed with
+a real compile error**, not a hang and not a segfault:
+
+    error: unresolved import 'lib.json.types' (used in src/std/common/json/validation.spl): no source file found ...
+    error: unresolved import 'lib.json.object_ops' (used in src/std/common/json/validation.spl): no source file found ...
+    error: unresolved import 'lib.json.path_ops' (used in src/lib/common/json/utilities.spl): no source file found ...
+    error: unresolved import 'lib.json.validation' (used in src/lib/common/json/utilities.spl): no source file found ...
+    error: native-build worker exited with code 1.
+
+Checked directly (PROVED, static read, no build needed):
+`src/lib/common/json/validation.spl:9-10` and
+`src/lib/common/json/utilities.spl:9-12` both `use lib.json.<name>...`, but
+the real files live at `src/lib/common/json/<name>.spl` (i.e. the import
+should be `lib.common.json.<name>` or equivalent) — a genuine, pre-existing
+broken-import defect in those two files, unrelated to `pop`/`push`/arrays and
+unmodified by this session. It blocks any `native-build --entry
+src/app/cli/main.spl` closure that transitively reaches these two files,
+**regardless of seed** — confirmed present at the same origin/main tip this
+session's fix was built from, so it predates this change.
+
+**This means: tier (b) is still NOT ACHIEVED, but for a different and now
+correctly-diagnosed reason than first reported** (a real pre-existing import
+bug blocking discovery, not a hang, and not this session's fix). A clean
+negative-control comparison (same recipe, OLD seed, full log preserved) was
+not completed in this pass — the earlier control run's buffered stdout was
+lost when its process was killed under the (incorrect) hang diagnosis before
+this correction was made, and time in this pass ran out before it could be
+cleanly re-run. That specific comparison is left as the remaining INFERRED
+gap; the import-bug diagnosis itself is PROVED by direct source inspection
+and does not depend on which seed is used, since the imports are wrong
+regardless of who compiles them.
 
 Net effect: **the original `lex`-segfault repro was not re-run against a
-freshly built self-hosted binary this pass.** The causal link between "adding
-`pop`/`push` to the allowlist" and "the observed `spl_array_pop` segfault
-disappearing" is **INFERRED** (from the tier (a) proof of no collateral
-damage, the doc-confirmed `push` victim status, and the code-level absence of
-`pop`/`push` from the pre-fix allowlist) but **not PROVED** by an end-to-end
-before/after `lex` run. This fix is landed as a well-evidenced, zero-collateral-risk
-mitigation consistent with the established pattern for this bug class, not as
+freshly built self-hosted binary this pass**, first blocked by a monitoring
+error, then by an unrelated pre-existing import bug once monitoring was
+corrected. The causal link between "adding `pop`/`push` to the allowlist" and
+"the observed `spl_array_pop` segfault disappearing" is **INFERRED** (from
+the tier (a) proof of no collateral damage, the doc-confirmed `push` victim
+status, and the code-level absence of `pop`/`push` from the pre-fix
+allowlist) but **not PROVED** by an end-to-end before/after `lex` run. This
+fix is landed as a well-evidenced, zero-collateral-risk mitigation consistent
+with the established pattern for this bug class, not as
 a fully closed-loop verified fix.
