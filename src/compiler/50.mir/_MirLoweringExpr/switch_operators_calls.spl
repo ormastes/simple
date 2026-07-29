@@ -1220,14 +1220,36 @@ impl MirLowering:
                                 if s.?: s.name else: ""
                             case _: ""
                     var d: i64 = -1
-                    if self.enum_variant_index.has(enum_name):
+                    val enum_name_known = self.enum_variant_index.has(enum_name)
+                    if enum_name_known:
                         d = self.enum_variant_discriminant(enum_name, variant)
-                    if d < 0:
+                    if d < 0 and enum_name_known:
+                        # pattern-truth lane (2026-07-29): the scrutinee's enum
+                        # is DEFINITIVELY known here -- either an explicit
+                        # `EnumName.Variant` qualifier on this arm, or
+                        # established by an earlier bare arm in this same
+                        # match -- and this arm's variant is not among its
+                        # declared members. Previously this fell through to
+                        # the global owner-search below and, if some UNRELATED
+                        # enum happened to declare a same-named variant,
+                        # silently borrowed that enum's discriminant, which
+                        # can never equal the real scrutinee's
+                        # rt_enum_discriminant -- a permanently dead arm
+                        # falling through to `case _` (the exact mechanism
+                        # behind the SafetyChecker Val/Var/AssignOp finding;
+                        # see doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md).
+                        # Known enum + unknown variant name is now a loud
+                        # compile error instead of a silent wrong-enum borrow.
+                        val known_variants = self.enum_variant_index[enum_name]
+                        val known_text = known_variants.join(", ")
+                        self.error("enum match: '{enum_name}' has no variant '{variant}' (known variants: {known_text})", Some(arm.pattern.span))
+                    elif d < 0:
                         # Bare pattern (`case Circle(r)` — no qualifier survived
-                        # to HIR) or variant missing from the presumed enum:
-                        # resolve the variant name against every registered
-                        # enum. Exactly one owner -> use it; otherwise emit a
-                        # LOUD error instead of silently falling through.
+                        # to HIR) with no enum established yet, so the
+                        # scrutinee's type is NOT known here: resolve the
+                        # variant name against every registered enum. Exactly
+                        # one owner -> use it; otherwise emit a LOUD error
+                        # instead of silently falling through.
                         var owner = ""
                         var owner_count = 0
                         for ename in self.enum_variant_index.keys():
@@ -3070,6 +3092,16 @@ impl MirLowering:
             if self.struct_field_order.has(direct_name):
                 return self.lower_struct_construct(direct_symbol, direct_name, args)
 
+        # TODO(LANE ISO1, switch_operators_calls.spl:3105-3182): call arguments
+        # are lowered straight to a `mir_operand_copy(arg_local)` MirOperand
+        # (line 3182) -- an operand reference, not an emit_copy/emit_move
+        # INSTRUCTION -- so there is no existing copy-instruction to swap for
+        # a move here the way mir_lowering_stmts.spl's let-binding fallback
+        # does. Wiring a real move fact for an iso-typed argument would mean
+        # inserting a synthetic emit_move(fresh_local, arg_local) ahead of
+        # the call for every iso-typed arg across this call-lowering path's
+        # several callee shapes (direct/indirect/lambda/bitfield) -- not
+        # attempted in this lane; scoped out per binding-transfer-only.
         var arg_operands: [MirOperand] = []
         var call_param_types: [HirType] = []
         # A Var/NamedVar callee keeps its resolved symbol even when it names a

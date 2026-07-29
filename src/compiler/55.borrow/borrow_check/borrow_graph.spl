@@ -535,7 +535,25 @@ pub class BorrowGraph:
 
         Keeps the per-point gen record (moved_places) and adds the place
         to the forward moved state so later program points observe it.
+
+        LANE ISO1 (2026-07-29): checks the forward-propagated moved state
+        FIRST, mirroring record_use. Before this, moving an
+        already-moved place (e.g. `val b = a; val c = a` where every
+        place-read of an iso-typed `a` lowers to a real Move -- see
+        mir_lowering_stmts.spl's mir_hir_type_is_isolated wiring, not just
+        the first one) silently re-recorded the move with no diagnostic:
+        record_use only ever saw an explicit Copy instruction, which an
+        iso-typed source never emits (it is move-only by definition), so
+        this exact "second transfer of an already-moved iso place" pattern
+        -- the shape a real iso use-after-move program actually lowers to
+        -- was invisible. A second move of a place already in moved_now IS
+        a use-after-move: it reads memory the first move already
+        invalidated.
         """
+        for moved_place in self.moved_now:
+            if place_conflicts_with(place, moved_place):
+                self.errors = self.errors.push(borrowerror_use_after_move(place, point))
+                return
         var moved: [Place] = self.moved_places[point] ?? []
         moved = moved.push(place)
         self.moved_places[point] = moved

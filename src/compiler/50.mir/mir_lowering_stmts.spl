@@ -45,6 +45,22 @@ fn mir_expr_kind_is_place(k: HirExprKind) -> bool:
         case _:
             false
 
+fn mir_hir_type_is_isolated(t: HirType?) -> bool:
+    """LANE ISO1 (2026-07-29): true when a HIR type is the `iso` capability
+    wrapper (HirTypeKind.Isolated). Used at variable-to-variable binding
+    sites to choose emit_move over emit_copy so the NLL borrow checker sees
+    a real Move fact for iso-typed bindings (see MirBuilder.emit_move,
+    mir_data.spl, for the prior "no caller yet" state this wires up)."""
+    match t:
+        case Some(ht):
+            match ht.kind:
+                case HirTypeKind.Isolated(_):
+                    true
+                case _:
+                    false
+        case nil:
+            false
+
 # ============================================================================
 # Statement Lowering
 # ============================================================================
@@ -580,6 +596,15 @@ impl MirLowering:
                         # outer.child`), maybe_copy_struct_value materializes a
                         # private per-binding copy instead (skipped for classes,
                         # which keep reference semantics).
+                        # TODO(LANE ISO1, mir_lowering_stmts.spl:600): an iso-typed
+                        # `struct` (not class) binding takes this
+                        # maybe_copy_struct_value path and is NOT wired to
+                        # emit_move -- it still emits emit_copy inside that
+                        # helper. Binding-transfer for class/primitive iso
+                        # types is covered below (mir_hir_type_is_isolated +
+                        # emit_move at the new_local+emit_copy fallback); iso
+                        # structs are scoped out of this lane per the "cover
+                        # binding-transfer only" guardrail.
                         val struct_sym = self.struct_value_syms.get(init_local.id)
                         val struct_copy = self.maybe_copy_struct_value(init_local, struct_sym, mir_expr_kind_is_place(let_init.kind))
                         if val copy_local = struct_copy:
@@ -639,7 +664,20 @@ impl MirLowering:
                                     if ael_name != "":
                                         self.array_element_struct_syms[local.id] = ael_name
                                 var b2 = self.builder
-                                b2.emit_copy(local, init_local)
+                                # LANE ISO1 (2026-07-29): the genuine move site
+                                # named in MirBuilder.emit_move's docstring --
+                                # a PLACE read (plain variable/field/index, not
+                                # a fresh construction) of an iso-typed source
+                                # is a real transfer, not a copy. Emitting Move
+                                # here feeds the NLL checker's already-real
+                                # Move handling (55.borrow) so iso use-after-
+                                # move is reported; non-iso code is unaffected
+                                # (mir_hir_type_is_isolated is false for every
+                                # pre-existing HirTypeKind).
+                                if mir_expr_kind_is_place(let_init.kind) and mir_hir_type_is_isolated(found_init_hir_type):
+                                    b2.emit_move(local, init_local)
+                                else:
+                                    b2.emit_copy(local, init_local)
                                 self.builder = b2
                     else:
                         self.error("let binding has no resolved symbol", Some(span))
