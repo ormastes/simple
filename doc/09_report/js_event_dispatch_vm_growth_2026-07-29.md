@@ -2,6 +2,13 @@
 
 Status: OPEN production-performance blocker
 
+Architecture and test planning (still RED):
+
+- [`js_vm_reclamation.md`](../04_architecture/js_vm_reclamation.md)
+- [`js_vm_reclamation_tldr.md`](../04_architecture/js_vm_reclamation_tldr.md)
+- [`js_event_dispatch_vm_reclamation.md`](../03_plan/sys_test/js_event_dispatch_vm_reclamation.md)
+- [`js_vm_reclamation.md`](../03_plan/agent_tasks/js_vm_reclamation.md)
+
 ## Symptom
 
 Every JavaScript DOM-listener dispatch permanently grows interpreter state.
