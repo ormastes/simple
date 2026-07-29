@@ -395,20 +395,30 @@ implementation-in-progress
   canonical widget Draw-IR main/scroll paths read the matching array element
   directly; scroll batch construction no longer returns an aggregate Option.
   The exact demo-tree probe moved past `_emit_widget()` into font loading.
-- phase3-font-provider-chain: A no-mangle pure-Simple
-  `core_sha256.spl` archive defines `rt_file_hash_sha256`, but its
-  `fs_copy_cstr` dependency remains a generated stub under the narrow
-  core-C bundle. The third capped probe faults in `free(0x3)` from that hash
-  provider. Resume by linking the matching no-mangle `core_fs.spl` provider
-  with the retained SHA provider before retrying the same probe; do not add a
-  C hash shim or skip font validation.
+- phase3-font-provider-chain: Targeted no-mangle pure-Simple
+  `core_sha256.spl` and `core_fs.spl` archives now supply
+  `rt_file_hash_sha256` and `fs_copy_cstr` without a bootstrap or C shim. The
+  exact demo-tree widget Draw-IR probe passes with root, button, scrollbar,
+  embedded 2D, and embedded Web commands.
+- phase3-initial-gui-frame: The first GUI frame now uses scene revision
+  `render_revision + 1`; revision zero is intentionally rejected by the
+  fail-closed GUI frame producer.
+- host-router-native-safe: The focused native pointer-routing probe exposed a
+  corrupted nested compositor receiver after the aggregate target result was
+  removed. The live GUI router now performs its small scalar client hit-test
+  inline; its Phase-3 pointer-capture probe exits cleanly. The rebuilt full
+  demo advances past this route but still faults before a capturable window in
+  `WidgetStore.set_prop()` from `spl_main()`. The live gate stopped after the
+  bounded retry.
 
 ## Remaining runtime gates
 
 - Host GLFW: the real backend/window/input/presentation boundary is green;
   the full Phase-3 closure and static provider link are green. Live execution
-  now passes the repaired canonical widget lookup boundary. The first scene
-  remains blocked by the incomplete pure-Simple font file/hash provider chain.
+  now passes the canonical widget lookup, pure-Simple font provider, initial
+  GUI-frame admission, and focused scalar pointer-router probes. The first
+  capturable full-demo frame remains blocked by the native
+  `WidgetStore.set_prop()` fault reached from `spl_main()`.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the

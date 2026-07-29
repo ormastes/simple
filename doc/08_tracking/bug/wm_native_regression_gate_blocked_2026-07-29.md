@@ -111,13 +111,26 @@ Disassembly proved the `_emit_widget()` fault was the known aggregate
 nil. The renderer now uses scalar `find_rect_index()` lookups and direct array
 reads for main and scroll paths, and no longer returns an optional scroll batch.
 
-The exact demo-tree native probe moved beyond `_emit_widget()` into selected
-font loading. A no-mangle pure-Simple `core_sha256.spl` provider resolves
-`rt_file_hash_sha256`, but that archive depends on `fs_copy_cstr` from
-`core_fs.spl`. With the latter still stubbed, the third capped run calls
-`free(0x3)` from the SHA provider.
+Targeted no-mangle pure-Simple archives now provide both
+`rt_file_hash_sha256` and `fs_copy_cstr`. With both linked, the exact demo-tree
+native probe passes and verifies root, button, scrollbar, embedded Simple 2D,
+and embedded Simple Web Draw-IR commands. No bootstrap, C hash shim, or skipped
+font validation was used.
 
-The next bounded resume is to build and link matching no-mangle
-`core_fs.spl` plus `core_sha256.spl` providers, then rerun
-`probe_widget_draw_ir_native.spl`. A C hash shim or skipped font validation
-would not be valid evidence.
+The first full run with those providers correctly rejected scene revision
+zero. The demo now submits `render_revision + 1`, preserving the producer's
+fail-closed revision rule. Its next native fault was a corrupted nested
+`HostCompositor.content_target()` receiver in the GUI router. The operational
+router now performs the small scalar hit-test inline, and the focused native
+pointer-capture probe exits cleanly.
+
+The rebuilt full demo advances past that router boundary but still exits 139
+before GLFW exposes a capturable window:
+
+```text
+common.ui.widget_store.WidgetStore.set_prop()
+  <- spl_main()
+```
+
+This is the next bounded native regression target. The current checkpoint does
+not claim a live full-WM frame or native input evidence.
