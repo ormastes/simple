@@ -182,12 +182,12 @@ Green receipt SHA-256
 records 1/0 at exit 0; provider receipt SHA-256
 `b70fa412075a5a0a51593b68c02213ab9ce736115440f2259be0f8b9c2482466`
 records the runtime capsule at 7/0 and core I/O at 3/0, both exit 0. Runner6
-calibration remains retained as history. Focused execution remains pending
-and 0/10 specs are accepted. The final parser probe advanced Stage 2
-discovery past `ot_layout_apply.spl:91:1` to
-`ot_layout_gpos_basic.spl:27`, exhausting the three-cycle cap. The scoped
-status is BLOCKED, not PASS; Stage 3/4 and the cross-platform matrix are
-deferred.
+calibration remains retained as history. Focused execution remains pending and
+0/10 specs are accepted. The former parser probe is historical only: current
+P0 at `f289a4529aa` rebuilt Stage 2 with 693 compiled / 0 failed, then reached
+LLVM `llc` for `Option<Box>` and failed on an undefined aggregate local `%l2`.
+The scoped status is BLOCKED, not PASS; Stage 3/4 and the cross-platform matrix
+are deferred.
 
 REQ-011 canonical routing and REQ-015 runtime configuration are implemented in
 source; canonical execution is pending. Direct `arch/*/wm_entry.spl` demos are
@@ -196,6 +196,15 @@ execution, canonical docgen, native Engine3D promotion, retained SimpleOS
 pixels, and performance evidence remain release-blocking.
 
 ## Log
+
+- plan-remake-2026-07-29: six independent audits reconciled the selected
+  requirements, current worktree, plans, manual inventory, and runtime receipts.
+  The authoritative schedule is P0 admission -> B manifest and C shaping in
+  parallel -> D surfaces -> E native/perf -> per-lane docgen/final review.
+  P0 is the isolated `f289a4529aa` aggregate-local LLVM failure (`%l2` has no
+  emitted definition), not the historical GPOS parser stop. There are 42 font
+  executable/manual pairs (19 missing, 23 stale, 0 current) plus four missing
+  compiler-prerequisite mirrors. No runtime-dependent requirement is promoted.
 
 - simpleos-artifact-binding lane: The fullscreen producer and retained
   consumer now bind the canonical wrapper, kernel ELF, and FAT32 image by exact

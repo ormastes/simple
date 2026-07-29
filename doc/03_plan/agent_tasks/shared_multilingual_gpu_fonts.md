@@ -33,9 +33,9 @@ raw `rt_*` shortcuts, a new dependency, or a fake device-success path.
 
 ## Active Stage 2 SimpleOS campaign — 2026-07-29
 
-This campaign follows the active override in the system-test plan. Its done
-mark is `SIMPLEOS_STAGE2_FONT: PASS`; the broader cross-platform matrix below
-is deferred.
+This campaign follows the active override in the system-test plan. Its strongest
+mark is `SIMPLEOS_STAGE2_FONT: DIAGNOSTIC`; it cannot promote the broader
+cross-platform matrix or feature status.
 
 | Small lane | Owned result | Focused specs |
 |---|---|---|
@@ -53,7 +53,17 @@ the cross-platform GPU/performance matrix are out of scope. A Phase 2 change is
 allowed only when one of the ten focused checks exposes a small direct blocker.
 The primary agent owns merge, independent review, and the done mark.
 
-### Fresh-session TODO/resume handoff after Runtime6
+### Superseding P0 admission handoff — 2026-07-29
+
+The parser TODO and resume order below are retained history, not executable
+work. Current isolated head `f289a4529aa` has a fresh Stage-2 receipt of 693
+compiled / 0 failed. Its `Option<Box>` A probe now reaches LLVM `llc` and fails
+only because `%l2` is used without an emitted struct-aggregate definition.
+`/root` owns one future fresh P0 window: make a root-cause repair with a source
+regression, then rebuild unique Stage 2 and run A/B/C once. Stage 3, incremental
+Stage 4, focused font specs, and canonical docgen remain blocked until A passes.
+
+### Historical Runtime6 parser resume record
 
 Runtime6 is accepted with archive SHA-256
 `a6d21c8fcf88d1ca788577a799564df022e917762abca1bad7736d3babb52782` and
@@ -115,7 +125,7 @@ rerun in the fresh session.
 | B — shared material | implementation agent; small sidecar may review shaping fixtures | canonical text-layout types/renderer/rasterizer and existing shaper/BiDi | REQ-006–009 and REQ-015 shared-surface/configuration scenarios and cache counters |
 | C — emission | implementation agent; Spark-style sidecar may inspect target markers read-only | existing compiler portable-compute/generated-artifact files | REQ-010 deterministic emission/compile scenarios |
 | D — 2D/3D native | implementation agent; small sidecar may audit evidence completeness read-only | existing Engine2D/Engine3D adapters and backend facade only | REQ-011–013 plus NFR-002/004–008 native evidence |
-| E — specs/manuals/docs | test/doc owner; small sidecar may review generated-manual readability | 34 changed/new executable/manual pairs, affected guides, SPipe recipe | REQ-014, zero stubs, freshness audits |
+| E — specs/manuals/docs | test/doc owner; small sidecar may review generated-manual readability | 42 changed/new font executable/manual pairs plus four compiler prerequisites, affected guides, SPipe recipe | REQ-014, zero stubs, freshness audits |
 | F — resolved UI fonts | Spark metric sidecar + Spark Draw IR sidecar | `ResolvedFontMetrics`, Web layout advances, Draw IR identity verification; no font material in IR | legacy + WebRender IR/Draw IR parity |
 | G — SimpleOS font host | Spark image-builder sidecar | existing `FontAssetCandidate`, four existing image payload paths, verified-byte startup | guest path/hash/glyph/framebuffer evidence |
 | H — final verification | primary/best available reviewer only | verification report; fixes returned to owning lane | requirement-by-requirement PASS/WARN/FAIL |
@@ -161,7 +171,7 @@ checking source and executable evidence.
   claims.
 - D: one real graphics backend with texture/bind/draw/fence/device-readback proof
   for both 2D and 3D, plus selected performance/resource evidence.
-- E: all 34 changed/new executable SSpecs, 34 mirrored zero-stub manuals, updated guides/notices,
+- E: all 42 changed/new font executable SSpecs plus four prerequisite mirrors, all canonical zero-stub manuals, updated guides/notices,
   and no executable spec under `doc/06_spec`.
 - F: legacy WebIR, GUI, and WM text preserve resolved face identity through
   DrawIR and the canonical Engine2D font path.

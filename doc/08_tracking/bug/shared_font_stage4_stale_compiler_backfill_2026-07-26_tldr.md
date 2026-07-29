@@ -1,33 +1,18 @@
-# Shared-Font Stage 4 Stale Compiler Backfill — TLDR
+# Shared-Font Compiler Admission — TLDR
 
-Stage 2/3 are retained, but no Stage 4 CLI exists. Explicit enums and GPOS now
-parse. HEAD `7a161abfabb` fixes impl-only bootstrap accumulation; the final
-cycle-3 check advanced `compiler.spl` from zero to 15 retained functions and
-localized the remaining nil receiver inside HIR error collection. The
-typed-index collector fix and direct regression are implemented but
-bootstrap-unverified. The three-check cap is exhausted.
+Fresh isolated Stage 2 at `f289a4529aa` completed 693/0 and restored a valid
+LLVM module/header for the permanent `Option<Box>` admission fixture. The
+fixture still fails in `llc`: `%l2` is used before its struct aggregate is
+emitted. No native fixture binary, Stage 3/4 CLI, essential-tools receipt, or
+font runtime/docgen/device/QEMU/performance evidence is accepted.
 
-## Core Shape
+## Next bounded action
 
-- directory symlink source snapshots now pass with regression coverage;
-- `pub mod` now uses the shared module parser path with a focused spec;
-- the GPOS grammar blocker is cleared;
-- explicit enum discriminants and impl-only function accumulation are
-  implemented with direct regressions;
-- the final markers are `driver:errors-read:done` followed by the nil receiver;
-- HIP-to-ROCm batches, fail-closed degenerate Web, nested IMAGE projection, and
-  shared nested collection (valid plus stale/duplicate/orphan rejection) are
-  source-present but runtime-unverified;
-- 32 changed/new specs require post-admission docgen: 18 mirrors are missing,
-  14 are stale, and zero are current;
-- retained Stage 2/3 and native caches must be preserved;
-- do not use the Rust seed or stale CLI as evidence.
+- In a fresh window, localize and repair aggregate-definition retention with a
+  smallest source regression.
+- Build a unique Stage 2 and run A/B/C once. Only A success may unlock Stage 3,
+  incremental Stage 4, and the font evidence graph.
+- Do not rerun the unchanged fixture or use the Rust seed/stale CLI as evidence.
 
-## Open Next
-
-- run the exact cache-preserving command in the full blocker doc only in a
-  fresh continuation and require exit 0;
-- then run the impl-accumulator and typed-error-collector regressions before
-  any font evidence;
-- [full blocker and exact resume command](shared_font_stage4_stale_compiler_backfill_2026-07-26.md)
-- [all-items verification](../../09_report/shared_multilingual_gpu_fonts_all_items_verification.md)
+See the [full blocker](shared_font_stage4_stale_compiler_backfill_2026-07-26.md)
+and [all-items verification](../../09_report/shared_multilingual_gpu_fonts_all_items_verification.md).

@@ -97,7 +97,7 @@ GitHub checkpoint.
 
 ## Phase
 
-dev-done
+active-plan-remade
 
 ## Compiler-enablement boundary
 
@@ -124,6 +124,13 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   `dd7e747ad1e22bb71d46c5737d20d2d250146af70fdd3c621f66d7ab57ca26cf`
   is diagnostic only. The Option admission smoke exhausted its three-cycle cap
   and must not be repeated in this session.
+- plan-reconcile-2026-07-29: current isolated head is `f289a4529aa`, not the
+  historical successor3 checkpoint. Static receiver ABI repairs let a fresh
+  Stage-2 build finish 693/0 and restore a valid LLVM module/function header.
+  The permanent `Option<Box>` probe now stops at `llc` because `%l2` is used
+  before its struct aggregate is emitted. P0 remains compiler-only and blocked
+  pending a fresh root-cause repair; no font evidence, Stage 3/4, or docgen is
+  promoted.
 - parallel-plan-audit-2026-07-29: Six bounded agents independently audited
   runtime admission, manifests, shaping, production surfaces, native/performance,
   and canonical manuals. The current graph is 46 commands

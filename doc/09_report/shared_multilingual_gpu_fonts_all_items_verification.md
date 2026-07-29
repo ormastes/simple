@@ -9,6 +9,18 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
+## Current P0 admission status — 2026-07-29
+
+The historical Stage-2 parser stop is superseded as an active action by isolated
+head `f289a4529aa`. A fresh Stage-2 producer completed 693 compiled / 0 failed.
+The permanent `Option<Box>` admission fixture now emits a valid LLVM module and
+`@__simple_main`, but `llc` rejects it because `%l2` is used in `ptrtoint` before
+the struct aggregate is emitted. This is compiler-only diagnostic evidence: no
+native fixture binary, Stage 3/4 CLI, essential-tools receipt, focused font
+spec, canonical docgen manual, device, QEMU, or performance row is accepted.
+The next P0 action is one fresh root-cause repair plus regression, followed by a
+unique Stage-2 A/B/C probe; do not rerun the unchanged fixture.
+
 ## 2026-07-29 scoped SimpleOS Stage 2 result
 
 `SIMPLEOS_STAGE2_FONT: BLOCKED`

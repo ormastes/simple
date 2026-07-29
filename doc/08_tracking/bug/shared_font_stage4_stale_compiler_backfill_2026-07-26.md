@@ -159,6 +159,25 @@ admitted current-source pure-Simple CLI, retained output, and `0 stubs`.
 
 ## Superseding current admission attempt
 
+### P0 successor receipt — 2026-07-29
+
+Commits `bda2149c558`, `1d29cf485a0`, `91dacdfb7ec`, and `f289a4529aa`
+supersede the old e480 action as the current isolated diagnostic. They make the
+Rust-seed-sensitive LLVM type mapper, native integer helper, symbol mapper, and
+aggregate dispatch receiver-free where required, register the Option runtime
+signatures, and add the permanent `Option<Box>` admission fixture. Fresh Stage
+2 at `build/native_probe/p0-admission-f289a452/` completed 693 compiled / 0
+failed. The fixture reaches LLVM `llc` with a valid module and
+`@__simple_main`, but fails because `%l2` is converted to `i64` before any
+struct aggregate definition is emitted. No native binary, Stage 3/4 artifact,
+essential-tools receipt, or shared-font evidence exists from this attempt.
+
+This replaces the former parser/nil-receiver probe as the active P0 action.
+Retain the prior records as history. A future fresh bounded window must localize
+and repair aggregate-definition retention with a smallest source regression,
+then build unique Stage 2 and run A/B/C once. It must not rerun the unchanged
+fixture, use the Rust seed as acceptance, or start Stage 3/4 before A passes.
+
 A fresh P0 owner ran exactly one bounded direct Stage 4 cycle from current
 feature checkpoint `427878810b4b2d812dba129f6dfd1eb12e282989` plus isolated
 compatibility bridge `d406b2688ed0096cc3d2758ba3753d2448261a99`. The bridge
