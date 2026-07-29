@@ -6,9 +6,11 @@ use common.ui.widget.{WidgetNode, UITree, UIEvent}
 use common.ui.builder.{column, row, panel, label, text_widget, button, dropdown, scroll, textarea, statusbar, build_tree_with_title, with_flex}
 use common.ui.theme_registry.{ThemeId, theme_id_key}
 use common.ui.ios.builder.{navigation_bar}
-use app.office.slides.slide.{Presentation, Slide, SlideLayout, SlideElement, SlideElementKind, empty_presentation, title_slide, blank_slide, content_slide, add_text_box, add_slide_element, slide_count, current_slide, slide_layout_display_name}
+use nogc_sync_mut.ui.theme_package.{load_default_theme_package}
+use app.office.slides.slide.{Presentation, Slide, empty_presentation, blank_slide, add_slide_element, slide_count, current_slide, slide_layout_display_name, create_slide_from_layout_id}
 use app.office.slides.render.{render_slide_thumbnail, render_slide_canvas}
-use app.office.slides.templates.{apply_template}
+use app.office.slides.layout_registry.{slide_layout_registry_display_names, slide_layout_registry_has}
+use app.office.slides.element_kind_registry.{create_slide_element_by_kind}
 use common.office.number.{office_parse_non_negative_i32}
 
 # =========================================================================
@@ -21,6 +23,7 @@ class SlidesApp:
     editing_notes: bool
     modified: bool
     file_path: text
+    selected_layout_id: text
 
 impl SlidesApp:
 
@@ -31,7 +34,8 @@ impl SlidesApp:
             selected_element: "",
             editing_notes: false,
             modified: false,
-            file_path: ""
+            file_path: "",
+            selected_layout_id: "blank"
         )
 
     me build_ui() -> UITree:
@@ -50,9 +54,7 @@ impl SlidesApp:
         val add_text_btn = button("btn_add_text", "+Text", "add_text")
         val add_image_btn = button("btn_add_image", "+Image", "add_image")
         val add_shape_btn = button("btn_add_shape", "+Shape", "add_shape")
-        val layout_drop = dropdown("layout_dropdown", [
-            "Title Slide", "Title + Content", "Two Column", "Blank", "Section Header"
-        ])
+        val layout_drop = dropdown("layout_dropdown", slide_layout_registry_display_names())
         val toolbar = row("toolbar", [add_text_btn, add_image_btn, add_shape_btn, layout_drop])
 
         # Slide thumbnails panel (left sidebar)
@@ -99,7 +101,11 @@ impl SlidesApp:
         )
 
         val root = column("root", [nav, toolbar, main_row, notes_panel, status])
-        return build_tree_with_title(root, "Simple Slides", theme_id_key(ThemeId.IOSLight))
+        # Look up the workspace default theme package first (ThemeService is
+        # not landed yet -- see plan §3 L5); IOSLight is the final fallback.
+        val resolved_theme_id = load_default_theme_package().id
+        val theme_key = if resolved_theme_id == "": theme_id_key(ThemeId.IOSLight) else: resolved_theme_id
+        return build_tree_with_title(root, "Simple Slides", theme_key)
 
     me handle_event(event: UIEvent):
         """Handle UI events for the Slides editor."""
@@ -107,38 +113,13 @@ impl SlidesApp:
             UIEvent.Action(name):
                 match name:
                     "add_slide":
-                        me.add_slide(SlideLayout.Blank)
+                        me.add_slide(me.selected_layout_id)
                     "add_text":
-                        val cur = current_slide(me.presentation)
-                        if cur != nil:
-                            val el_id = "el_{slide_count(me.presentation)}_{cur.elements.len()}"
-                            val updated = add_text_box(cur, el_id, "New Text", 100, 100, 300, 60)
-                            me._replace_current_slide(updated)
-                            me.modified = true
+                        me._add_element_by_kind("text_box", 100, 100, 300, 60)
                     "add_image":
-                        val cur = current_slide(me.presentation)
-                        if cur != nil:
-                            val el = SlideElement(
-                                id: "el_img_{cur.elements.len()}",
-                                kind: SlideElementKind.ImageEl(src: "", alt: "Image Frame"),
-                                x: 100, y: 100,
-                                width: 400, height: 300
-                            )
-                            val updated = add_slide_element(cur, el)
-                            me._replace_current_slide(updated)
-                            me.modified = true
+                        me._add_element_by_kind("image", 100, 100, 400, 300)
                     "add_shape":
-                        val cur = current_slide(me.presentation)
-                        if cur != nil:
-                            val el = SlideElement(
-                                id: "el_shape_{cur.elements.len()}",
-                                kind: SlideElementKind.ShapeEl(shape_type: "rectangle", fill_color: "#4A90D9"),
-                                x: 150, y: 150,
-                                width: 200, height: 150
-                            )
-                            val updated = add_slide_element(cur, el)
-                            me._replace_current_slide(updated)
-                            me.modified = true
+                        me._add_element_by_kind("shape", 150, 150, 200, 150)
                     "delete_slide":
                         me.delete_slide(me.presentation.active_slide)
                     "save":
@@ -148,14 +129,40 @@ impl SlidesApp:
                             val idx_str = name.substring(9)
                             val idx = office_parse_non_negative_i32(idx_str)
                             me.navigate_slide(idx)
+                        elif name.starts_with("select_layout_"):
+                            val layout_id = name.substring(14)
+                            if slide_layout_registry_has(layout_id):
+                                me.selected_layout_id = layout_id
             _:
                 pass_do_nothing("non-action UI events do not affect the slide editor")
 
-    me add_slide(layout: SlideLayout):
-        """Add a new slide with the given layout after the current slide."""
+    me _add_element_by_kind(kind_id: text, x: i32, y: i32, w: i32, h: i32):
+        """Add an element to the current slide by element_kind_registry id.
+        Unknown kind ids (should not happen for the builtin toolbar buttons)
+        are a silent no-op -- the registry is the single source of truth for
+        which kind ids exist."""
+        val cur = current_slide(me.presentation)
+        if cur != nil:
+            val el_id = "el_{kind_id}_{cur.elements.len()}"
+            match create_slide_element_by_kind(kind_id, el_id, x, y, w, h):
+                Ok(el):
+                    val updated = add_slide_element(cur, el)
+                    me._replace_current_slide(updated)
+                    me.modified = true
+                Err(_):
+                    pass_do_nothing("unknown element kind id -- nothing to add")
+
+    me add_slide(layout_id: text):
+        """Add a new slide with the given layout_registry id after the
+        current slide. Falls back to a blank slide if the id is unknown."""
         val total = slide_count(me.presentation)
         val new_id = "slide_{total}"
-        val new_slide = apply_template(blank_slide(new_id), layout)
+        var new_slide = blank_slide(new_id)
+        match create_slide_from_layout_id(layout_id, new_id):
+            Ok(s):
+                new_slide = s
+            Err(_):
+                pass_do_nothing("unknown layout id -- fall back to a blank slide")
         var new_slides: [Slide] = []
         var idx: i32 = 0
         var inserted = false
