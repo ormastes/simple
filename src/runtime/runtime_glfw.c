@@ -607,14 +607,24 @@ int64_t rt_glfw_present_argb_words_raw(
     return glfw_present_staged(slot, width, height);
 }
 
-int64_t rt_glfw_poll_event(void) {
+int64_t rt_glfw_pump_events(void) {
     if (!g_glfw_initialized) return 0;
     p_glfwPollEvents();
+    return 1;
+}
+
+int64_t rt_glfw_pop_event(void) {
+    if (!g_glfw_initialized) return 0;
     if (g_glfw_event_count == 0) return 0;
     g_glfw_last_event = g_glfw_events[g_glfw_event_head];
     g_glfw_event_head = (g_glfw_event_head + 1) % RT_GLFW_MAX_EVENTS;
     g_glfw_event_count -= 1;
     return g_glfw_last_event.kind;
+}
+
+int64_t rt_glfw_poll_event(void) {
+    rt_glfw_pump_events();
+    return rt_glfw_pop_event();
 }
 
 int64_t rt_glfw_event_window(void) { return g_glfw_last_event.window_handle; }

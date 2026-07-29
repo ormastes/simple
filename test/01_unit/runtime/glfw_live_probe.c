@@ -15,6 +15,8 @@ int64_t rt_glfw_present_argb_words_raw(
     int64_t, int64_t, int64_t, int64_t, int64_t
 );
 int64_t rt_glfw_poll_event(void);
+int64_t rt_glfw_pump_events(void);
+int64_t rt_glfw_pop_event(void);
 int64_t rt_glfw_event_key(void);
 const char* rt_glfw_event_text(void);
 int64_t rt_glfw_framebuffer_width(int64_t);
@@ -75,11 +77,15 @@ int main(void) {
     int saw_key = 0, saw_text = 0, saw_pointer = 0, saw_button = 0;
     for (int i = 0; i < 300 && !(saw_key && saw_text &&
                                   saw_pointer && saw_button); ++i) {
-        int64_t kind = rt_glfw_poll_event();
-        if (kind == 4 && rt_glfw_event_key() != 0) saw_key = 1;
-        if (kind == 5 && rt_glfw_event_text()[0] != '\0') saw_text = 1;
-        if (kind == 6) saw_pointer = 1;
-        if (kind == 7) saw_button = 1;
+        if (rt_glfw_pump_events() != 1) return 7;
+        int64_t kind = rt_glfw_pop_event();
+        while (kind != 0) {
+            if (kind == 4 && rt_glfw_event_key() != 0) saw_key = 1;
+            if (kind == 5 && rt_glfw_event_text()[0] != '\0') saw_text = 1;
+            if (kind == 6) saw_pointer = 1;
+            if (kind == 7) saw_button = 1;
+            kind = rt_glfw_pop_event();
+        }
         wait_10ms();
     }
     if (!(saw_key && saw_text && saw_pointer && saw_button)) return 7;

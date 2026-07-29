@@ -973,6 +973,8 @@ int64_t rt_glfw_destroy_window(int64_t handle);
 int64_t rt_glfw_present_argb(int64_t handle, SplArray* pixels, int64_t width, int64_t height);
 int64_t rt_glfw_present_argb_words_raw(int64_t handle, int64_t pixels_addr, int64_t pixel_count, int64_t width, int64_t height);
 int64_t rt_glfw_poll_event(void);
+int64_t rt_glfw_pump_events(void);
+int64_t rt_glfw_pop_event(void);
 int64_t rt_glfw_event_window(void);
 int64_t rt_glfw_event_sequence(void);
 int64_t rt_glfw_event_timestamp_ns(void);

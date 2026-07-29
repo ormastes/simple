@@ -587,6 +587,14 @@ implementation-in-progress
   `1/25/61/91/123/195/285/375`. The ineffective production stack and probe
   hooks were reverted. The exact regression keeps the corrected panel-inner
   button width `478` instead of `480`.
+- host-glfw-single-pump-event-drain: Parallel event audits found that the
+  canonical GLFW facade re-entered `glfwPollEvents()` before every FIFO pop,
+  allowing sustained input to starve rendering. The runtime now exposes one
+  native pump plus FIFO-only pop operations; the facade pumps once and drains
+  the finite queued snapshot. The no-display C selfcheck exits `0`. The Xvfb
+  live probe passes real key, committed text, pointer motion, and button input.
+  The full Simple WM demo closure linked with the new runtime object
+  (`3 compiled / 511 cached`); no new rendering claim is made.
 
 ## Remaining runtime gates
 
@@ -604,8 +612,10 @@ implementation-in-progress
   geometry is corrupted before Draw IR consumes the returned `WidgetRect[]`;
   the failed in-traversal mirror further narrows it to argument/scalar
   evaluation before or at the recursive layout call.
-  Semantic input and clean outer-window close remain RED; Xvfb without a
-  window manager is not valid close-request evidence.
+  Native GLFW pump/pop input is now live-green for key, committed text,
+  pointer motion, and button events. Semantic widget mutation and clean
+  outer-window close remain RED; Xvfb without a window manager is not valid
+  close-request evidence.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the

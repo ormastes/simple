@@ -9,6 +9,7 @@ int64_t spl_array_get_i64(SplArray* array, int64_t index) {
 }
 
 int main(void) {
+    if (rt_glfw_pump_events() != 0 || rt_glfw_pop_event() != 0) return 1;
     int64_t initialized = rt_glfw_init();
     if (rt_glfw_live_window_count() != 0 ||
         rt_glfw_queued_event_count() != 0) return 2;
