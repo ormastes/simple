@@ -42,13 +42,18 @@ runs the scenarios, both tranches remain execution-evidence-blocked.
 
 ### HTML
 
+The counts below are the pre-tranche inventory audit. The two bounded rows
+called out as inventory-only or missing were subsequently covered by
+`28f0e779b0d2`; their current status is recorded separately in the traceability
+matrix. Do not add them back to the remaining behavioral backlog.
+
 | Classification | Count | Meaning |
 |---|---:|---|
 | Full | 12 | Direct semantic/tree plus applicable layout/DrawIR/Engine2D or hidden/fail-closed evidence |
 | Partial | 80 | Tag appears in text/grouped render coverage but lacks isolated end-to-end proof |
 | Unsupported/fail-closed | 11 | Embedded/media/native semantics are not implemented |
-| Inventory-only | 2 | Name/fixture occurrence without isolated behavior |
-| Missing from checker inventory | 8 | `h1`–`h6`, `sub`, `sup` |
+| Inventory-only before landed tranche | 2 | `selectedcontent`, `slot`; bounded behavior landed |
+| Missing before landed tranche | 8 | `h1`–`h6`, `sub`, `sup`; bounded behavior landed |
 
 Full rows currently identified:
 
@@ -58,12 +63,13 @@ Unsupported/fail-closed rows:
 
 `area, audio, canvas, embed, iframe, map, object, picture, source, track, video`
 
-Inventory-only rows:
+Former inventory-only rows:
 
 `selectedcontent, slot`
 
-The checker’s published `105/105` denominator is therefore incomplete and
-cannot remain a PASS claim.
+The old checker’s published `105/105` denominator remains insufficient as a
+behavioral PASS claim even though the ten named omissions now have bounded
+source/spec/manual evidence.
 
 ### CSS
 
