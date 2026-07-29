@@ -327,3 +327,20 @@ runs without a window manager, so `xdotool windowclose` directly removes the
 surface without setting the GLFW close flag; the unchanged process remains
 alive. This is invalid close-request certification rather than proof that the
 fallback is wrong. A real WM_DELETE_WINDOW host smoke remains required.
+
+The next bounded experiment moved scalar geometry capture into
+`_compute_layout()` immediately after its scalar `sx/sy/sw/sh` calculation and
+before recursion. Parallel small-model review confirmed that this traversal is
+preorder and aligns with the surviving returned ID order. Results:
+
+```text
+cycle 1: i32 raw scalar store, 4 compiled / 376 cached -> exit 23
+cycle 2: diagnostic build, 2 compiled / 378 cached -> stored button Y = 1
+cycle 3: i64 raw scalar store, 3 compiled / 377 cached -> exit 23
+```
+
+The production experiment was reverted because it did not improve the gate.
+This disproves the narrower theory that only aggregate-array return transport
+corrupts geometry. The next investigation must isolate scalar argument
+evaluation at the VBox-to-recursive-call boundary before attempting another
+renderer or live-window change.

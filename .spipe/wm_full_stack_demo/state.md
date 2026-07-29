@@ -531,6 +531,16 @@ implementation-in-progress
   without setting GLFW's close flag or producing a valid callback request; the
   process remained alive and was stopped with Ctrl-C. This environment cannot
   certify outer close, but real-host close flags will no longer be ignored.
+- phase3-vbox-in-traversal-scalar-experiment: Two small-model reviews confirmed
+  that recursive layout order and the returned ID-array order are both
+  preorder. A raw scalar geometry mirror was therefore written at
+  `_compute_layout()` entry before recursion. The first cached native build
+  compiled 4 modules, reused 376, and still exited `23`. A diagnostic build
+  compiled 2/reused 378 and encoded the stored button Y as `1`. Replacing the
+  i32 store/readback with an i64 store/readback compiled 3/reused 377 and still
+  exited `23`. The experiment was reverted: the corruption exists before or
+  during the scalar push call, not only in the returned `WidgetRect[]`.
+  Per the three-cycle cap, no live rebuild was attempted.
 
 ## Remaining runtime gates
 
@@ -545,7 +555,9 @@ implementation-in-progress
   serialization, exact image resolution, GUI frame construction, external
   admission, and raw compositor readback. The exact-title live demo now has a
   retained non-black screenshot. The new native regression proves VBox row
-  geometry is corrupted before Draw IR consumes the returned `WidgetRect[]`.
+  geometry is corrupted before Draw IR consumes the returned `WidgetRect[]`;
+  the failed in-traversal mirror further narrows it to argument/scalar
+  evaluation before or at the recursive layout call.
   Semantic input and clean outer-window close remain RED; Xvfb without a
   window manager is not valid close-request evidence.
 - SDL2: its focused native event/window boundary probe is green; the shared
