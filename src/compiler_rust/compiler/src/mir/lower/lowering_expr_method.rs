@@ -287,6 +287,111 @@ impl<'a> MirLowerer<'a> {
             return self.lower_index_expr(receiver, &args[0], value_ty);
         }
 
+        // `d.insert(k, v)` / `d.set(k, v)` on a Dict<K, V> are routed by
+        // codegen (codegen/instr/closures_structs.rs `"set" | "insert"`,
+        // codegen/llvm/functions.rs `("Dict"|"dict", "set") | (.., "insert")`)
+        // onto the SAME `rt_dict_set` runtime symbol the dict LITERAL uses.
+        // `rt_dict_set(dict, key, value)` requires TAGGED RuntimeValues for
+        // both key and value (see lowering_expr_collection.rs
+        // `lower_dict_expr`'s comment) — but the generic dotted-name
+        // method-call path below lowers `args` RAW with no boxing, and the
+        // codegen routing just forwards those two vregs verbatim as
+        // `key_val`/`val_val`. Text keys/values are unaffected (strings are
+        // already heap RuntimeValue pointers), which is why
+        // `{"a":1}.insert("b",2)` looked correct — but an int KEY stored raw
+        // hashes into a different bucket than the boxed key every read path
+        // uses, so `{1:10}.insert(2,20)` then `d[2]` silently returned the
+        // nil sentinel (3) instead of 20. Emit our own boxed `rt_dict_set`
+        // call here, bypassing the generic path entirely, mirroring exactly
+        // how `d[k] = v` index-assignment boxes key and value
+        // (lowering_stmt.rs `HirExprKind::Index` write arm): box int keys
+        // unconditionally, box int values UNLESS the dict's value type is a
+        // heap type (struct/enum/etc — boxing a heap pointer would corrupt
+        // its tag, task #117).
+        // See task: dict_insert_integer_key_boxing.
+        if (method == "set" || method == "insert")
+            && args.len() == 2
+            && self.receiver_is_dict(receiver, receiver_local_ty)
+        {
+            fn needs_int_boxing(t: TypeId) -> bool {
+                matches!(
+                    t,
+                    TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                )
+            }
+            let value_is_heap = self
+                .type_registry
+                .and_then(|tr| {
+                    tr.get(receiver.ty)
+                        .or_else(|| receiver_local_ty.and_then(|ty| tr.get(ty)))
+                })
+                .and_then(|ty| match ty {
+                    HirType::Dict { value, .. } => Some(*value),
+                    _ => None,
+                })
+                .is_some_and(|t| {
+                    t != TypeId::ANY
+                        && !matches!(
+                            t,
+                            TypeId::I8
+                                | TypeId::I16
+                                | TypeId::I32
+                                | TypeId::I64
+                                | TypeId::U8
+                                | TypeId::U16
+                                | TypeId::U32
+                                | TypeId::U64
+                                | TypeId::F32
+                                | TypeId::F64
+                                | TypeId::BOOL
+                        )
+                });
+
+            let receiver_reg = self.lower_expr(receiver)?;
+
+            let raw_key_reg = self.lower_expr(&args[0])?;
+            let key_reg = if needs_int_boxing(args[0].ty) {
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxInt {
+                        dest: boxed,
+                        value: raw_key_reg,
+                    });
+                    boxed
+                })?
+            } else {
+                raw_key_reg
+            };
+
+            let raw_value_reg = self.lower_expr(&args[1])?;
+            let value_reg = if !value_is_heap && needs_int_boxing(args[1].ty) {
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxInt {
+                        dest: boxed,
+                        value: raw_value_reg,
+                    });
+                    boxed
+                })?
+            } else {
+                raw_value_reg
+            };
+
+            let target = crate::mir::effects::CallTarget::from_name("rt_dict_set");
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target,
+                    args: vec![receiver_reg, key_reg, value_reg],
+                });
+                dest
+            });
+        }
+
         // rt_array_push returns bool, not a new pointer — no store-back needed.
         let _receiver_local_index: Option<usize> = None;
 
