@@ -53,7 +53,9 @@ use std.common.web.browser_renderer_protocol.{
 use std.gc_async_mut.web.browser_session_url.{
     normalize_network_navigation_url
 }
-use std.gc_async_mut.web.browser_session.{BrowserBookmarkSnapshot}
+use std.gc_async_mut.web.browser_session.{
+    BrowserBookmarkSnapshot, BrowserHstsSnapshot
+}
 use std.common.encoding.utf8.{text_without_last_codepoint}
 use os.hosted.hosted_browser_renderer_worker.{hosted_browser_renderer_worker_main}
 use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
@@ -404,6 +406,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var browser_pressed_control = ""
     var browser_profile: BrowserProfileStore? = nil
     var browser_bookmarks = BrowserBookmarkSnapshot.create([])
+    var browser_hsts = BrowserHstsSnapshot.create([])
+    var browser_primary_hsts_revision: i64 = 0
     var browser_bookmark_revision: i64 = 0
     var browser_bookmark_applied_revision: i64 = 0
     var browser_resource_close_failed = false
@@ -427,6 +431,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                     hsts,
                                     rt_time_now_unix_micros() / 1000
                                 )
+                                browser_hsts = hsts
                                 browser_bookmarks = bookmarks
                                 browser_bookmark_revision = 1
                                 browser_profile = Some(profile)
@@ -579,6 +584,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     )
     if browser_bookmark_revision > 0:
         browser_renderers.set_bookmark_snapshot(browser_bookmarks)
+    val _ = browser_renderers.load_hsts_snapshot(
+        browser_hsts, rt_time_now_unix_micros() / 1000
+    )
     # Motion-background cadence seam (plan item B): the loop stays dirty-gated
     # (GUI-5a) — a due motion frame is just one more dirty *trigger*, evaluated
     # by the pure shared_wm_motion_dirty_due predicate on the loop's existing
@@ -625,18 +633,20 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 )
         if browser_renderer_ready:
             val browser_poll = browser_renderer.poll()
-            if (browser_renderer.hsts_dirty and browser_profile != nil and
-                now_micros >= browser_hsts_save_retry_at_micros):
-                val saved_renderer = _save_hosted_browser_hsts(
-                    browser_renderer, browser_profile, wall_clock_ms
-                )
-                if saved_renderer != nil:
-                    browser_renderer = saved_renderer.unwrap()
-                    browser_hsts_save_retry_at_micros = 0
-                else:
-                    browser_hsts_save_retry_at_micros = (
-                        now_micros + 1000000
+            if browser_renderer.hsts_dirty:
+                val _ = (
+                    browser_renderers.accept_renderer_hsts_snapshot(
+                        browser_renderer.hsts_snapshot(wall_clock_ms),
+                        wall_clock_ms
                     )
+                )
+                val _ = browser_renderer.load_hsts_snapshot(
+                    browser_renderers.hsts_snapshot(wall_clock_ms),
+                    wall_clock_ms
+                )
+                browser_primary_hsts_revision = (
+                    browser_renderers.hsts_revision()
+                )
             if val Some(browser_result) = browser_poll:
                 if browser_result.ok:
                     if (browser_raster.w != browser_renderer.width or
@@ -762,12 +772,13 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             val _ = browser_renderers.ensure(
                                 web_window.id, web_window.content,
                                 web_window.w - 8, web_content_height,
-                                now_micros
+                                now_micros, wall_clock_ms
                             )
                     if admitted:
                         val renderer_status = browser_renderers.advance_window(
                             web_window.id, web_window.title, web_window.content,
                             web_window.w - 8, web_content_height, now_micros,
+                            wall_clock_ms,
                             not web_window.minimized
                         )
                         if renderer_status == "frame":
@@ -813,6 +824,34 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             web_window_index = web_window_index + 1
         if not browser_renderers.reconcile(live_browser_window_ids):
             browser_resource_close_failed = true
+        if (browser_profile_window_id > 0 and
+            browser_primary_hsts_revision <
+                browser_renderers.hsts_revision()):
+            val shared_hsts = browser_renderers.hsts_snapshot(
+                wall_clock_ms
+            )
+            val _ = browser_renderer.load_hsts_snapshot(
+                shared_hsts, wall_clock_ms
+            )
+            browser_primary_hsts_revision = (
+                browser_renderers.hsts_revision()
+            )
+        if (browser_renderers.hsts_dirty() and browser_profile != nil and
+            now_micros >= browser_hsts_save_retry_at_micros):
+            val shared_hsts = browser_renderers.hsts_snapshot(
+                wall_clock_ms
+            )
+            var profile = browser_profile.unwrap()
+            match profile.save_hsts(shared_hsts, wall_clock_ms):
+                Ok(_):
+                    browser_renderers.mark_hsts_saved()
+                    browser_hsts_save_retry_at_micros = 0
+                Err(error):
+                    browser_hsts_save_retry_at_micros = (
+                        now_micros + 1000000
+                    )
+                    print "ERROR: hosted browser HSTS save failed reason={error.message()}"
+            browser_profile = Some(profile)
         if comp.web_animation_dirty_due(now_micros):
             other_dirty = true
         if (surface.phase == HostDisplayTransitionPhase.Requested or surface.phase == HostDisplayTransitionPhase.AwaitingResize) and now_micros > surface.deadline_micros:
@@ -1669,6 +1708,25 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 running = false
             else:
                 print "[hosted-wm] evidence-ack nonce={evidence_nonce} phase={evidence_phase} surface_phase={surface.phase} revision={comp.render_revision} semantic_event_id={presented_event_id} mutation_revision={presented_mutation_revision} {raster.frame_provenance()} {raster.font_provenance()}"
+    var shared_hsts_closed = true
+    if browser_renderers.hsts_dirty():
+        if browser_profile == nil:
+            shared_hsts_closed = false
+        else:
+            var profile = browser_profile.unwrap()
+            val final_wall_clock_ms = rt_time_now_unix_micros() / 1000
+            match profile.save_hsts(
+                browser_renderers.hsts_snapshot(
+                    final_wall_clock_ms
+                ),
+                final_wall_clock_ms
+            ):
+                Ok(_):
+                    browser_renderers.mark_hsts_saved()
+                Err(error):
+                    shared_hsts_closed = false
+                    print "ERROR: hosted browser HSTS final save failed reason={error.message()}"
+            browser_profile = Some(profile)
     val profile_closed = web_sessions.close()
     val secondary_renderers_closed = browser_renderers.close()
     val browser_close = _close_hosted_browser_resources(
@@ -1680,6 +1738,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     rt_winit_event_loop_free(el)
     if (not profile_closed or not secondary_renderers_closed or
         not browser_close.ok or
+        not shared_hsts_closed or
         browser_resource_close_failed):
         print "ERROR: hosted browser profile close failed reason={web_sessions.profile_failure_reason}"
         return 1

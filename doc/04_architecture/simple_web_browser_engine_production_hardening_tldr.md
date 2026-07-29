@@ -21,6 +21,10 @@ DrawIrComposition -> persistent Engine2dCompositorBackend
 - Browser-only JS profile excludes Node/native capabilities.
 - One canonical DOM event path and one monotonic animation/timer/rAF clock.
 - One persistent render session with staged invalidation.
+- BrowserSession reuses its repaired UI-access revision as the document
+  revision and adds only style/resource revisions; the renderer owns viewport
+  and composition revisions. One retained private stage set lowers directly
+  to Draw IR—no Web IR or second pixel cache.
 - Engine2D owns device/font/cache state; no per-frame recreation.
 - The compositor/hosted registry own four keyed external renderer/frame slots;
   missing frames stay blank, hidden windows poll cleanup without animation.
@@ -39,7 +43,8 @@ DrawIrComposition -> persistent Engine2dCompositorBackend
 - Zero-opacity subtrees are skipped; fractional subtree opacity awaits bounded
   group compositing. One bookmark snapshot/revision feeds primary, secondary,
   and new windows; Escape restores committed-or-startup URL in both lanes.
-- Deferred resizes coalesce and each animation frame serializes HTML once.
+- Deferred resizes coalesce. Unchanged frames serialize nothing; scroll/caret
+  reuse raw layout, and CSS animation frames reuse parse/CSS/base style.
 - Linux/macOS/Windows sandbox failure blocks production startup.
 
 Hot-path evidence: stage counters/timings, frame/input latency, cache reuse,

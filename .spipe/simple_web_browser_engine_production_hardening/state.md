@@ -1849,3 +1849,34 @@ implementation in progress / target evidence blocked
   blocked because `ScriptRunner.run_script` denies host execution and
   `SimpleScriptExecutor.tick` has IDs but no executable closure registry. No
   partial listener API was retained.
+- next convergence tranche (2026-07-29): Six small sidecars run in parallel:
+  essential deployed-compiler crash diagnosis; canonical DOM callable-event
+  design; exact retained-render invalidation design; ordered meta-CSP/resource
+  design; one bounded HTML/CSS fidelity implementation; and one browser
+  chrome/network/sandbox adversarial implementation lane. Merge owner,
+  generated-manual owner, and final reviewer remain highest-capability Codex.
+  Existing shared owners stay authoritative: `be_dom_dispatch_event_path`,
+  `BrowserSession`, `BrowserRenderRevisions`, `BrowserRenderSnapshot`,
+  `SimpleWebRenderSession`, `BrowserScriptBlock`,
+  `BrowserStylesheetSource`, `BrowserImageSource`, and
+  `DrawIrComposition`. Sidecars may not create a second DOM, parser, WebIR,
+  event dispatcher, render cache, network stack, or browser controller.
+  Frozen manual steps are `Deliver JavaScript and Simple Script listeners on
+  the live DOM`, `Reuse parsed layout work across unchanged animation frames`,
+  `Enforce CSP host paths and head meta policies`,
+  `Render HTML and CSS through canonical Draw IR`, `Operate page and browser
+  controls`, and `Run the smallest healthy pure-Simple target check`.
+  Existing `_check_event_phase_order`, `_check_canonical_draw_ir`,
+  `_check_security_denial`, and `_check_budget_row` remain the checker helpers;
+  unfinished production rows keep their existing `fail("REQ-WEB-BROWSER-NNN:
+  ... not implemented")` placeholders. No full bootstrap or Rust-seed
+  fallback is permitted.
+- TDD mandate (2026-07-29): Every product fix in this and later tranches starts
+  with a modern `use std.spec.*` system scenario under `test/03_system`, tagged
+  to its `REQ-WEB-BROWSER-*`/`NFR-WEB-BROWSER-*` rows, using imperative frozen
+  `step("...")` text, canonical matchers, and semantic/Draw-IR/state absolute
+  oracles before pixels. Unit tests are supporting evidence only. The mirrored
+  `doc/06_spec` operator manual and system-test traceability plan change with
+  the scenario. When the unhealthy deployed pure-Simple runtime prevents the
+  required red run or docgen, record that exact blocker; never invent a RED,
+  hand-edit a generated PASS, substitute the Rust seed, or skip the scenario.

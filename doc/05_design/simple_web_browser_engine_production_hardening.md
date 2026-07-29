@@ -234,6 +234,89 @@ Scrolling preserves the real viewport dimensions so viewport-relative CSS
 and flex layout do not change with scroll depth. Paint culls boxes wholly
 outside that viewport before Draw IR submission.
 
+### Exact retained-render contract
+
+The TDD gate lands before implementation. The focused worker/session SSpecs
+must first fail on real counter expectations for unchanged advance,
+navigation, DOM mutation, stylesheet/resource commit, viewport resize, active
+animation, scroll, caret overlay, and close/soak replacement. Source-text
+presence checks do not satisfy this gate.
+
+```text
+BrowserRenderRevisions
+  document_revision  # existing ui_access_revision, repaired
+  style_revision
+  resource_revision
+
+BrowserRenderSnapshot
+  revisions
+  document_html?     # present only when document/style changed
+
+SimpleWebRenderCounters
+  serialize_count parse_count css_count style_count layout_count paint_count
+  reuse_count composition_revision
+  serialize_us parse_us css_us style_us layout_us paint_us
+  retained_node_count retained_style_count retained_box_count
+  retained_command_count
+
+SimpleWebRenderSession
+  viewport_revision composition_revision
+  prior BrowserRenderRevisions + viewport/scroll/overlay/time keys
+  one existing private semantic/layout stage set + one DrawIrComposition
+```
+
+Current authoritative mutation owners to repair (line numbers are from the
+2026-07-29 audit and symbol names remain authoritative after edits):
+
+| Owner | Current location | Revision |
+|---|---|---|
+| DOM replacement | `browser_session_runtime.spl:380-393` `_replace_current_body_children` | document |
+| serialized DOM reconciliation | `browser_session_runtime.spl:557-583` `_sync_body_html_from_dom` / `_sync_runtime_body_from_dom` | document, only when serialized body changed |
+| event/default actions | `browser_session_runtime.spl:645-737` `dispatch_dom_event` | route through the two owners above |
+| text/select/focus edits | `browser_session_runtime.spl:1009-1079,1128-1171` | route through the two owners above |
+| document commit/reset | `browser_session_runtime.spl:1294-1375` `_load_page_source` | document + style + resource |
+| JS bridge sync/title | `browser_session_runtime.spl:1479-1686` `_sync_from_runtime` | document |
+| Simple Script body/title | `browser_session_loading.spl:314-363` | document |
+| decoded image replacement | `browser_session_loading.spl:502-548` | resource |
+| stylesheet finalize/Stop | `browser_session_loading.spl:950-995` | style |
+
+The existing `_advance_ui_access_revision` at
+`browser_session_runtime.spl:374-378` is completed and exposed as
+`document_revision`; no second structural revision is added. Title-only
+changes in `browser_session.spl:1635-1652` and
+`browser_session_loading.spl:767-773,836-859` must advance it; body changes
+there must route through `_replace_current_body_children`, not update the
+detached `current_body_html` string alone.
+
+The snapshot API is deliberately small:
+
+```text
+render_revisions() -> BrowserRenderRevisions
+render_snapshot_since(document_revision, style_revision)
+  -> BrowserRenderSnapshot
+```
+
+The second method increments `serialize_count` and supplies `document_html`
+only when either input revision is stale. Resource-only, scroll, overlay, and
+unchanged frames do not serialize.
+
+Implementation is split into three conflict-free batches:
+
+1. Add the failing counter/invalidation SSpecs, repair BrowserSession revision
+   ownership, and expose conditional `BrowserRenderSnapshot`. No renderer
+   cache yet.
+2. Add `SimpleWebRenderSession` beside the canonical layout renderer and move
+   the existing `parse_html` through Draw-IR body at
+   `simple_web_html_layout_renderer.spl:869-1038` behind its stage methods.
+   First prove exact unchanged reuse and bounded reset/close.
+3. Replace `_worker_frame`'s unconditional serialize/rebuild at
+   `hosted_browser_renderer_worker.spl:153-167` with the one session. Then
+   enable parse/CSS/base-style reuse for animation, raw-layout reuse for
+   scroll/overlay, and paint-only image invalidation.
+
+No batch adds Draw-IR diffing, partial damage, per-node invalidation, or a
+second pixel cache. Those wait for measured retained-session evidence.
+
 ## Engine2D lifecycle
 
 - create backend/device/font owner once at browser/app start;

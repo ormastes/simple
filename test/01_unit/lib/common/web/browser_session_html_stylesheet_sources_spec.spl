@@ -7,10 +7,42 @@ use std.gc_async_mut.web.browser_session_html.{
     strip_css_imports,
     insert_stylesheet_sources,
     _css_background_image_urls,
-    _rewrite_css_background_image_urls
+    _rewrite_css_background_image_urls,
+    browser_document_resource_plan
 }
 
 describe "BrowserSession HTML stylesheet sources":
+
+    # @req REQ-WEB-BROWSER-012
+    it "snapshots intersected head meta CSP in document source order":
+        val plan = browser_document_resource_plan(
+            "<html><head>" +
+            "<script src='/before.js'></script>" +
+            "<meta http-equiv='content-security-policy' content=\"sandbox; report-uri /r; script-src 'none'; style-src 'unsafe-inline'; img-src 'none'\">" +
+            "<style>.after{background-image:url('/after.png')}</style>" +
+            "<script src='/after.js'></script>" +
+            "<img src='/after-image.png'>" +
+            "</head></html>",
+            "https://safe.test/app",
+            "default-src 'self'"
+        )
+
+        expect(plan.script_blocks.len()).to_equal(2)
+        expect(plan.script_blocks[0].csp_policy).to_equal(
+            "default-src 'self'"
+        )
+        expect(plan.script_blocks[1].csp_policy).to_contain(
+            "script-src 'none'"
+        )
+        expect(plan.style_sources[0].csp_policy).to_contain(
+            "style-src 'unsafe-inline'"
+        )
+        expect(plan.image_sources[0].csp_policy).to_contain(
+            "img-src 'none'"
+        )
+        expect(plan.final_csp_policy).to_equal(
+            "default-src 'self'\nscript-src 'none'; style-src 'unsafe-inline'; img-src 'none'"
+        )
 
     it "extracts inline and linked stylesheets in source order":
         val html = "<html><head><link rel=\"stylesheet\" href=\"/first.css\"><style>body { color: red; }</style><link rel=\"icon\" href=\"/favicon.ico\"><link rel=\"preload stylesheet\" href=\"/last.css\"><style>.last { color: blue; }</style></head></html>"

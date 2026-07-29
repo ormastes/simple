@@ -14,15 +14,15 @@ use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRen
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_reconcile_animation_instances
 }
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEventDispatch}
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode, BeDomEventDispatch, normalize_dom_event_type
+}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     browser_resource_size_allowed, BROWSER_MAX_DOCUMENT_SUBRESOURCES
 }
-use std.common.gpu.simpleos_host_gpu_protocol.{
-    SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES
-}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_dispatch_event_to_id, be_dom_find_by_tag, be_dom_find_path_to_id,
+    be_dom_dispatch_event_to_id, be_dom_find_by_tag,
+    be_dom_find_path_to_id,
     be_dom_focused_route_id, be_dom_get_attr, be_dom_get_text_content,
     be_dom_has_attr,
     be_dom_route_identity,
@@ -44,7 +44,7 @@ use std.gc_async_mut.gpu.browser_engine.script.form_api.{
     form_capture_defaults, form_reset
 }
 use std.js.types.js_types.{JsValue}
-use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage, BrowserImageSource, BROWSER_MAX_IMAGE_RESOURCES, browser_history_push_bounded}
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage, BrowserImageSource, browser_history_push_bounded}
 use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
 use std.js.types.pair.{Pair}
 use std.gc_async_mut.web.browser_session_url.{resolve_relative_url, url_protocol, url_pathname, url_origin, url_host, url_search, url_hash}
@@ -52,9 +52,8 @@ use std.gc_async_mut.web.browser_session_html.{
     extract_title_text, extract_body_inner_html, own_text,
     html_to_text, escape_html_text,
     strip_script_blocks, strip_template_blocks, strip_noscript_blocks,
-    extract_stylesheet_sources, _guest_runtime_probe_url
+    browser_document_resource_plan, _guest_runtime_probe_url
 }
-use std.gc_async_mut.web.browser_session_modules.{extract_script_blocks}
 use std.gc_async_mut.web.browser_session_form.{
     browser_form_submission, browser_select_has_value,
     browser_select_update
@@ -75,7 +74,8 @@ val BROWSER_STORAGE_MAX_RETAINED_BYTES: i64 = 16777216
 val BROWSER_INLINE_STYLE_MAX_DEPTH: i32 = 256
 
 fn _queue_inline_style_background_images(
-    node: BeDomNode, load: BrowserLoadState, document_url: text, depth: i32
+    node: BeDomNode, load: BrowserLoadState, document_url: text, depth: i32,
+    csp_policy: text
 ):
     if depth >= BROWSER_INLINE_STYLE_MAX_DEPTH:
         load.append_warning(
@@ -85,11 +85,11 @@ fn _queue_inline_style_background_images(
     val inline_style = be_dom_get_attr(node, "style").trim()
     if inline_style != "":
         load._queue_background_image_sources(
-            inline_style, document_url, false
+            inline_style, document_url, false, csp_policy, -1
         )
     for child in node.children:
         _queue_inline_style_background_images(
-            child, load, document_url, depth + 1
+            child, load, document_url, depth + 1, csp_policy
         )
 
 fn _browser_session_previous_utf8_boundary(value: text, index: i64) -> i64:
@@ -600,13 +600,16 @@ impl BrowserSession:
             known_sources
         )
         _queue_inline_style_background_images(
-            self.current_dom, discovered, self.document_url, 0
+            self.current_dom, discovered, self.document_url, 0,
+            self.content_security_policy
         )
         for style_node in be_dom_find_by_tag(self.current_dom, "style"):
             discovered._queue_background_image_sources(
                 be_dom_get_text_content(style_node),
                 self.document_url,
-                false
+                false,
+                self.content_security_policy,
+                -1
             )
         for warning in discovered.warnings:
             self._append_dynamic_image_warning(load, warning)
@@ -646,8 +649,30 @@ impl BrowserSession:
                 self.current_dom, target_route_id, checkable_action, true
             )
             self._sync_runtime_body_from_dom()
+        val dispatch_path = be_dom_find_path_to_id(
+            self.current_dom, target_route_id
+        )
+        val normalized_event_type = normalize_dom_event_type(event_type)
+        val inline_action = if dispatch_path.len() > 0:
+            be_dom_get_attr(
+                dispatch_path[dispatch_path.len() - 1],
+                "on" + normalized_event_type
+            )
+        else:
+            ""
+        val inline_allowed = (
+            inline_action == "" or browser_csp_allows(
+                self.content_security_policy, "script-src",
+                self.document_url, self.document_url, true
+            )
+        )
+        if inline_action != "" and not inline_allowed:
+            self._append_warning(
+                "CSP blocked inline event handler: {normalized_event_type}"
+            )
         val dispatch = be_dom_dispatch_event_to_id(
-            self.current_dom, target_route_id, event_type, bubbles, cancelable
+            self.current_dom, target_route_id, event_type, bubbles, cancelable,
+            inline_allowed
         )
         self.dom_callback_count = (
             self.dom_callback_count + dispatch.actions.len().to_i64()
@@ -1256,7 +1281,10 @@ impl BrowserSession:
         val previous_document_url = self.document_url
         if url.starts_with("https://guest.runtime/"):
             print "[BRS] load page source start"
-        val script_blocks = extract_script_blocks(html)
+        val resource_plan = browser_document_resource_plan(
+            html, url, self.pending_content_security_policy
+        )
+        val script_blocks = resource_plan.script_blocks
         if url.starts_with("https://guest.runtime/"):
             print "[BRS] script blocks={script_blocks.len()}"
         val has_runtime_scripts = self.runtime_enabled and script_blocks.len() > 0
@@ -1316,9 +1344,9 @@ impl BrowserSession:
         self.text_selection_target_id = ""
         self.text_selection_anchor_byte = 0
         self.text_selection_focus_byte = 0
-        self.content_security_policy = self.pending_content_security_policy
+        self.content_security_policy = resource_plan.final_csp_policy
         self.pending_content_security_policy = ""
-        val style_sources = extract_stylesheet_sources(html)
+        val style_sources = resource_plan.style_sources
         if url.starts_with("https://guest.runtime/"):
             print "[BRS] style sources={style_sources.len()}"
 
@@ -1374,29 +1402,7 @@ impl BrowserSession:
             state.bind_dom(self.current_dom)
             self.runtime_state = Some(state)
 
-        var image_sources: [BrowserImageSource] = []
-        var image_source_overflow = false
-        for image_node in be_dom_find_by_tag(final_parse.doc, "img"):
-            val raw_source = be_dom_get_attr(image_node, "src").trim()
-            if raw_source == "":
-                continue
-            if raw_source.len() > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES:
-                image_source_overflow = true
-                continue
-            val resolved_source = resolve_relative_url(url, raw_source)
-            var duplicate_source = false
-            for existing_source in image_sources:
-                if (existing_source.authored_src == raw_source and
-                    existing_source.resolved_url == resolved_source):
-                    duplicate_source = true
-            if duplicate_source:
-                continue
-            if image_sources.len() >= BROWSER_MAX_IMAGE_RESOURCES:
-                image_source_overflow = true
-                continue
-            image_sources.push(BrowserImageSource.create(
-                raw_source, resolved_source
-            ))
+        val image_sources = resource_plan.image_sources
 
         var load = BrowserLoadState.create(
             document_url: url,
@@ -1407,11 +1413,8 @@ impl BrowserSession:
             style_sources: style_sources,
             image_sources: image_sources
         )
-        _queue_inline_style_background_images(final_parse.doc, load, url, 0)
-        if image_source_overflow:
-            load.append_warning(
-                "image resource limit reached; additional images ignored"
-            )
+        for warning in resource_plan.warnings:
+            load.append_warning(warning)
         if native_globals_diagnostic != "":
             load.append_warning(native_globals_diagnostic)
         if script_blocks.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:

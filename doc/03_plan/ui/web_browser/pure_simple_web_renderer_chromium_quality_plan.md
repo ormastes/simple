@@ -286,6 +286,46 @@ timing counters.
   find-in-page lifecycle and `beforematch` behavior; this slice does not claim
   it or full HTML compatibility.
 
+## Ordered HTML/CSS compatibility matrix (2026-07-29)
+
+| Priority | Surface | Current state | Next canonical owner |
+|---|---|---|---|
+| P0 | HTML tree construction and recovery | partial: common table and implicit-close contexts exist; full WHATWG/WPT parity is unproven | shared HTML tree builder |
+| P0 | CSS cascade, inheritance, selectors | partial: specificity and common selectors exist; complete cascade layers/scoping are unproven | shared CSS cascade |
+| P0 | inline formatting | partial: text wrapping exists; `<br>` forced-line semantics are this bounded slice; inline-block/bidi parity remain | shared layout |
+| P0 | block sizing and overflow | partial; overflow/z-index evidence is owned by the DrawIR lane | shared layout/Draw IR |
+| P1 | flex layout | partial row/column/wrap support; full flex sizing parity unproven | shared layout |
+| P1 | grid and table layout | unsupported/incomplete; `display:grid` and table formatting must not be claimed | shared layout |
+| P1 | replaced elements, backgrounds, fonts | partial; fixed single-image background is covered, local/multiple layers remain unsupported | canonical resource/layout/paint owners |
+| P1 | transitions and animations | supported bounded path; preserve the single canonical animation clock | style/layout/paint invalidation |
+| P2 | interactive HTML semantics | partial; details/dialog/forms and complete accessibility semantics remain unproven | DOM/event/accessibility owners |
+| Gate | Chromium/WPT equality | not claimed until pinned corpus receipts and production runtime evidence exist | conformance runner |
+
+This matrix orders compatibility work; it is not a full-browser claim. Each
+row advances only with semantic/computed-style/Draw IR evidence before pixels.
+
+## Forced inline line-break progress (2026-07-29)
+
+- `<br>` is assigned its HTML inline default and canonical inline-flow layout
+  forces one line-height advance with zero width.
+- The system oracle requires ordered text/break/text Draw IR, exact 20 px
+  geometry, then software pixel divergence from a single-line control.
+- `inline-block`, bidi line breaking, grid, table formatting, and full WPT
+  parity remain explicitly outside this bounded slice.
+
+## Fixed CSS background progress (2026-07-29)
+
+- Resolved single-image `background-attachment: fixed` now uses the viewport as
+  its positioning area while retaining the element background clip in the
+  canonical web semantic/layout to Draw IR lowering.
+- The system oracle covers absolute Draw IR geometry, fixed-versus-scroll
+  repeat phase, stable viewport tile origin while document scroll moves the
+  element shape, the no-repeat edge outside the viewport-anchored tile, and
+  Engine2D software readback.
+- `background-attachment: local` remains unsupported because canonical layout
+  does not yet carry an element scrollport offset; the unsupported ledger now
+  names only that remaining behavior.
+
 ## GitHub Sync Plan
 
 Do not sync this document together with unrelated worktree changes. The current

@@ -1,6 +1,78 @@
 # Production Simple Browser Security Envelope
 
+## Shared secondary-window HSTS evidence
+
+REQ-WEB-BROWSER-011/014 require every hosted browser window to use the same
+broker-owned HSTS state rather than a renderer-local or secondary-window store.
+
+1. `Navigate through verified HTTPS` loads one persisted include-subdomains
+   policy into the existing hosted renderer registry and requires an HTTP
+   subdomain URL to upgrade to HTTPS.
+2. `Share secondary-window HSTS through the existing registry` admits a policy
+   learned by a secondary broker, requires an HTTPS upgrade, and requires the
+   shared state to become dirty.
+3. `Persist shared HSTS before every browser window closes` saves that exact
+   shared snapshot through `BrowserProfileStore`, clears dirty state only after
+   success, reloads it into a fresh registry, and requires the secondary policy
+   to upgrade after restart. A closed profile must reject the save, preserve
+   dirty state, and still permit bounded registry resource reclamation; the
+   hosted owner reports/retries that persistence failure instead of leaking a
+   secondary renderer.
+
+The scenario was authored before implementation. Pre-fix RED is structural:
+`HostedBrowserRendererRegistry` had no HSTS owner or snapshot API, secondary
+renderers started empty, and `hosted_entry` persisted only the primary
+renderer. The failed-save branch admits a real sandbox renderer with the exact
+hashed `HOSTED_WM_ARTIFACT`, then requires `remove_window` to reclaim it while
+the shared snapshot remains dirty. The unhealthy pure-Simple runtime prevents
+executing that RED; no bootstrap or seed fallback is used. Live
+`advance_window`, retry timing, and wall-clock expiry remain part of the
+blocked production artifact gate.
+
 Source: `test/03_system/security/simple_web_browser_engine_security_spec.spl`
+
+## Ordered head meta CSP
+
+The `should apply head meta CSP in source order to every active resource`
+scenario is requirement-traced executable coverage for the ordered policy
+contract. It requires the response-header policy to govern resources before a
+head meta policy, each following meta policy to intersect with earlier policy,
+and script elements, stylesheets, imports, images, CSS backgrounds, and
+redirects to retain the policy applicable at their document position. It also requires
+`sandbox`, `frame-ancestors`, and `report-uri` to have no effect when delivered
+by meta. The scenario was authored red before the ordered resource plan and
+policy snapshots were implemented. The recorded pure-Simple compiler crash
+still prevents executable confirmation, so no runtime PASS is claimed.
+
+Dispatchable inline `on*` handlers live in the serialized body after every
+valid head meta policy, so they use the final intersected document policy. The
+focused handler scenario uses the same `prevent-default` action twice:
+`script-src 'none'` suppresses it before canonical dispatch and permits the
+anchor default, while `'unsafe-inline'` admits it and cancels that default.
+
+The folded bounds scenario supplies a 4,097-byte meta policy and requires the
+loader to fail closed, retain a bounded warning, and dispatch no following
+script request. It does not treat malformed policy input as permission.
+
+## Identical image URL admission identity
+
+REQ-WEB-BROWSER-004/012 require resource admission to remain bound to the node
+whose source-position CSP allowed it. The scenario uses one URI twice: an
+earlier stylesheet background is allowed before meta CSP, while a later inline
+background is denied by `img-src 'none'`.
+
+1. Load and retain the earlier one-pixel magenta PNG.
+2. Require canonical Draw IR to contain `allowed_background_image`.
+3. Require canonical Draw IR to omit `blocked_background_image`.
+4. Require Engine2D software readback to contain exactly the four pixels of the
+   allowed 2x2 background.
+
+The scenario was authored before any implementation. Its RED is
+source-semantic, not an observed run: `BrowserImageSource` carries
+`source_offset`, `csp_policy`, and `resource_key`, but admission currently
+collapses the loaded resource to its URI; `_html_draw_ir_image_index` then
+resolves every matching node by that URI. The unhealthy pure-Simple runtime
+prevents executing the RED, and no bootstrap or seed fallback was used.
 
 ## Platform renderer sandbox
 

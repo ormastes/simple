@@ -1485,26 +1485,35 @@ fn _html_draw_ir_background_offset(value: i32, free_space: i32) -> i32:
 fn _html_draw_ir_background_image_command(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     i: i32, images: [SimpleOsHostGpuImageResource],
-    ancestor_clip: ClipRect
+    ancestor_clip: ClipRect, viewport_width: i32, viewport_height: i32
 ) -> DrawIrCommand?:
     val st = styles[i]
     if (
         st.background_image_uri == "" or st.bg_layers_raw != "" or
-        st.background_attachment != "scroll"
+        st.background_attachment == "local"
     ):
         return nil
     val image_index = _html_draw_ir_image_index(images, st.background_image_uri)
     if image_index < 0:
         return nil
     val image = images[image_index]
-    val (origin_x, origin_w) = _html_draw_ir_background_edge(
+    val (element_origin_x, element_origin_w) = _html_draw_ir_background_edge(
         st.background_origin, boxes.bx[i], boxes.bw[i],
         st.border_l, st.border_r, st.pad_l, st.pad_r
     )
-    val (origin_y, origin_h) = _html_draw_ir_background_edge(
+    val (element_origin_y, element_origin_h) = _html_draw_ir_background_edge(
         st.background_origin, boxes.by[i], boxes.bh[i],
         st.border_t, st.border_b, st.pad_t, st.pad_b
     )
+    var origin_x = element_origin_x
+    var origin_y = element_origin_y
+    var origin_w = element_origin_w
+    var origin_h = element_origin_h
+    if st.background_attachment == "fixed":
+        origin_x = 0
+        origin_y = 0
+        origin_w = viewport_width
+        origin_h = viewport_height
     val (clip_x, clip_w) = _html_draw_ir_background_edge(
         st.background_clip, boxes.bx[i], boxes.bw[i],
         st.border_l, st.border_r, st.pad_l, st.pad_r
@@ -1815,20 +1824,34 @@ fn _html_draw_ir_commands(
         val i = paint_order[paint_index]
         if i < visible_nodes.len() and visible_nodes[i]:
             val node_clip = paint_clip_at(clip_cache, i)
-            commands.push(_html_draw_ir_command(
+            val component_id = _html_draw_ir_component_id(nodes[i], i)
+            val parent = nodes[i].parent
+            val parent_id = if parent >= 0 and parent < nodes.len():
+                _html_draw_ir_component_id(nodes[parent], parent)
+            else:
+                ""
+            var node_command = _html_draw_ir_command(
                 nodes, styles, boxes, i, node_clip, vector_fonts
-            ))
+            )
+            node_command.parent_id = parent_id
+            commands.push(node_command)
             if val background_command = _html_draw_ir_background_image_command(
-                nodes, styles, boxes, i, images, node_clip
+                nodes, styles, boxes, i, images, node_clip, width, height
             ):
-                commands.push(background_command)
-                commands.push(_html_draw_ir_background_border_overlay(
+                var background = background_command
+                background.parent_id = component_id
+                commands.push(background)
+                var border_overlay = _html_draw_ir_background_border_overlay(
                     nodes, styles, boxes, i, node_clip, vector_fonts
-                ))
+                )
+                border_overlay.parent_id = component_id
+                commands.push(border_overlay)
             if val image_command = _html_draw_ir_image_command(
                 nodes, styles, boxes, i, images, node_clip
             ):
-                commands.push(image_command)
+                var image = image_command
+                image.parent_id = component_id
+                commands.push(image)
             val overlay_target = (
                 i < target_keys.len() and
                 target_keys[i] != "" and
@@ -1849,25 +1872,30 @@ fn _html_draw_ir_commands(
                     boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i],
                     node_clip, node_overlay
                 )
-                val component_id = _html_draw_ir_component_id(nodes[i], i)
                 if plan.selection_present:
-                    commands.push(_html_draw_ir_overlay_rect(
+                    var selection = _html_draw_ir_overlay_rect(
                         component_id + "_selection",
                         plan.selection_rect,
                         plan.selection_color,
                         plan.clip
-                    ))
+                    )
+                    selection.parent_id = component_id
+                    commands.push(selection)
                 if plan.text_value != "":
-                    commands.push(_html_draw_ir_input_text_command_from_plan(
+                    var input_text = _html_draw_ir_input_text_command_from_plan(
                         nodes[i], styles[i], i, plan
-                    ))
+                    )
+                    input_text.parent_id = component_id
+                    commands.push(input_text)
                 if plan.caret_present:
-                    commands.push(_html_draw_ir_overlay_rect(
+                    var caret = _html_draw_ir_overlay_rect(
                         component_id + "_caret",
                         plan.caret_rect,
                         plan.caret_color,
                         plan.clip
-                    ))
+                    )
+                    caret.parent_id = component_id
+                    commands.push(caret)
         paint_index = paint_index + 1
     commands
 

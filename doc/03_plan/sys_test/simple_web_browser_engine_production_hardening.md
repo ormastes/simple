@@ -199,8 +199,38 @@ the `SBRF5` frame, preserve redirect count `20` across the broker HSTS upgrade,
 and assert exact pixels for transparent PNG-over-color, repeat/position/clip,
 content paint order, and border overlay. The negative controls require a
 mixed-content denial without HSTS and no queued image under `img-src 'none'`.
-Animation remains enabled and unchanged. Multiple image layers and fixed/local
+Animation remains enabled and unchanged. Multiple image layers and local
 background attachment remain fail-closed follow-ups rather than PASS claims.
+
+The requirement-traced fixed-background scenario was authored before its
+implementation. Its pre-fix RED is source-semantic, not an observed runtime
+run: `_html_draw_ir_background_image_command` rejected every attachment other
+than `scroll`, so the first required `fixed_background_image` command was
+absent. The known unhealthy pure-Simple runtime prevents executing that RED.
+The retained oracle requires viewport tile origin `(0,0)`, element clip
+`x=3,width=4`, tile origin staying at `y=0` while document scroll moves the
+element shape to `y=-1`, distinct fixed/scroll repeat phase pixels, a no-repeat
+fallback pixel, and an explicit `local` unsupported result.
+
+## Canonical Draw IR semantic tree evidence (2026-07-29)
+
+The REQ-WEB-BROWSER-003/004 system scenario is ordered:
+
+1. assert stable element command IDs and DOM-derived `parent_id`;
+2. assert the overflow-hidden ancestor clip on the top positioned child;
+3. assert computed z-index metadata and stable bottom/middle/top command order;
+4. round-trip the composition through the hosted SBRF encode/decode gate and
+   assert semantic parentage survives;
+5. replay the same composition through Engine2D and assert exact overlap colors.
+
+This is the semantic oracle before raster evidence, not a second web IR. The
+pre-fix RED was `parent_id=""` on every HTML command. The central lowering now
+links main commands to their DOM parent and synthetic image/input commands to
+their owning element. Draw IR v2 SDN already carries the field, so protocol
+coverage removes only the stale validator rejection and retains canonical
+encode/decode equality. Parent IDs remain non-authoritative metadata: Engine2D
+does not use them for geometry, resources, or command dispatch. Runtime PASS
+remains blocked by the unhealthy pure-Simple target.
 
 ## Post-load hardening evidence (2026-07-29)
 
@@ -250,3 +280,51 @@ Focused checks must retain:
 
 These remain focused source/unit/pixel gates until the pure-Simple target can
 run; full bootstrap and Rust-seed output are not substitutes.
+
+## Forced HTML line-break TDD slice (2026-07-29)
+
+Frozen step: `Render forced HTML line breaks through canonical Draw IR`.
+
+The modern system scenario must first prove ordered text/`br`/text semantics,
+then computed `display:inline` and exact line geometry, and only then Engine2D
+software pixel divergence from a single-line control. The implementation may
+change only the shared tag default and inline-flow layout branch: it must not
+add a parser, WebIR, renderer, cache, or animation exception.
+
+The pre-fix RED is source-semantic because `<br>` currently enters block layout
+and contributes an extra one-pixel block. Runtime execution remains blocked by
+the deployed pure-Simple signal-139 failure; full bootstrap and Rust-seed
+execution are prohibited substitutes.
+
+## Retained-render TDD matrix (2026-07-29)
+
+Before product edits, extend the existing modern `std.spec.*` specs at
+`test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl`,
+`test/01_unit/os/hosted/hosted_browser_renderer_worker_spec.spl` and
+`test/05_perf/browser/simple_web_browser_engine_production_budget_spec.spl`.
+The system scenario owns the user-visible changed/unchanged-frame flow, the
+worker spec is the deterministic counter/invalidation gate, and the perf spec
+remains fail-fast until real production timing/RSS receipts exist.
+
+| Scenario | Required counter delta |
+|---|---|
+| identical `advance` with no due visual work | reuse +1; serialize/parse/CSS/style/layout/paint +0; composition revision unchanged |
+| timer/JS/Simple Script DOM or title mutation | parse/CSS/style/layout/paint +1 |
+| committed stylesheet or navigation | parse/CSS/style/layout/paint +1; old retained counts replaced |
+| decoded image replacement | paint +1; parse/CSS/style/layout +0 |
+| viewport resize | CSS/style/layout/paint +1; parse +0 |
+| active CSS animation frame | style/layout/paint +1; parse/CSS +0 |
+| scroll or caret/selection overlay | paint +1; parse/CSS/style/layout +0 |
+| repeated navigation/replacement | retained node/style/box/command counts plateau at current-document bounds |
+| explicit worker-session close | all retained counts, hit index, and image revision list equal zero |
+
+Use frozen steps `Reuse parsed layout work across unchanged animation frames`
+and `Close the page and reclaim browser resources`, with
+`_check_budget_row`/`_check_resource_reclaimed`. Assertions read counters from
+the real `SimpleWebRenderSession`; file-content searches and placeholder
+passes are forbidden. The system scenario must compare the actual frame
+composition revision/checksum before and after its mutation, animation,
+scroll, and unchanged steps. The production budget scenarios keep their current
+`fail("NFR-WEB-BROWSER-001..017: ... not implemented")` until one healthy
+pure-Simple target produces changed/unchanged latency, allocation, RSS, and
+10,000-cycle receipts.

@@ -16,6 +16,26 @@ use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererProcess, HostedBrowserRendererResult
 }
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id,
+    simple_web_layout_render_html_draw_ir_with_images,
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images
+}
+use std.common.web.browser_renderer_protocol.{
+    browser_renderer_decoder_feed,
+    browser_renderer_decoder_new,
+    browser_renderer_frame_decode,
+    browser_renderer_frame_encode,
+    browser_text_input_overlay_empty
+}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    simpleos_host_gpu_image_resource
+}
+use common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
 
 val SUBPROCESS_ANIMATION_HTML = (
     "<style>@keyframes Pulse{from{background-color:#ef4444}" +
@@ -27,6 +47,44 @@ val SUBPROCESS_ANIMATION_HTML = (
     "var stage=document.getElementById('stage');" +
     "stage.style.backgroundColor='#2563eb';" +
     "document.title='Animated';});</script>"
+)
+
+val CALLABLE_EVENT_HTML = (
+    "<html><body><div id='outer'><button id='run' " +
+    "onclick=\"document.title=document.title+'inline,'\">Run</button></div>" +
+    "<a id='blocked' href='/escaped'>Blocked</a>" +
+    "<button id='halt'>Halt</button>" +
+    "<script type='text/simple'>title \"simple,\"</script><script>" +
+    "function note(label){return function(event){" +
+    "document.title=document.title+label+',';};}" +
+    "var outer=document.getElementById('outer');" +
+    "var run=document.getElementById('run');" +
+    "var blocked=document.getElementById('blocked');" +
+    "var halt=document.getElementById('halt');" +
+    "window.addEventListener('click',note('window-capture'),true);" +
+    "document.addEventListener('click',note('document-capture'),true);" +
+    "outer.addEventListener('click',note('outer-capture'),true);" +
+    "run.addEventListener('click',note('target-capture'),true);" +
+    "run.addEventListener('click',note('target-bubble'));" +
+    "outer.addEventListener('click',note('outer-bubble'));" +
+    "document.addEventListener('click',note('document-bubble'));" +
+    "window.addEventListener('click',note('window-bubble'));" +
+    "document.addEventListener('docprobe',note('document-target'));" +
+    "window.addEventListener('winprobe',note('window-target'));" +
+    "document.dispatchEvent({type:'docprobe',bubbles:true,cancelable:true});" +
+    "window.dispatchEvent({type:'winprobe',bubbles:true,cancelable:true});" +
+    "var removed=note('removed');var churn=0;" +
+    "while(churn<300){blocked.addEventListener('click',removed);" +
+    "blocked.removeEventListener('click',removed);churn=churn+1;}" +
+    "blocked.addEventListener('click',function(event){" +
+    "document.title=document.title+'cancel,';event.preventDefault();});" +
+    "blocked.addEventListener('click',note('after-cancel'));" +
+    "halt.addEventListener('click',function(event){" +
+    "document.title=document.title+'halt-first,';" +
+    "event.stopImmediatePropagation();});" +
+    "halt.addEventListener('click',note('halt-after'));" +
+    "requestAnimationFrame(function(){" +
+    "document.title=document.title+'raf,';});</script></body></html>"
 )
 
 fn _count_color(pixels: [u32], color: u32) -> i64:
@@ -45,6 +103,35 @@ fn _pixels_equal(left: [u32], right: [u32]) -> bool:
             return false
         index = index + 1
     true
+
+fn _browser_draw_ir_command_index(
+    commands: [DrawIrCommand], component_id: text
+) -> i32:
+    var index: i32 = 0
+    while index < commands.len():
+        if commands[index].component_id == component_id:
+            return index
+        index = index + 1
+    -1
+
+fn _browser_draw_ir_text_index(
+    commands: [DrawIrCommand], value: text
+) -> i32:
+    var index: i32 = 0
+    while index < commands.len():
+        if commands[index].kind == "text" and
+            commands[index].text_value == value:
+            return index
+        index = index + 1
+    -1
+
+fn _browser_draw_ir_style_value(
+    command: DrawIrCommand, key: text
+) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    ""
 
 fn _await_browser_animation(
     renderer: HostedBrowserRendererProcess
@@ -96,6 +183,258 @@ fn _require_production_browser_evidence():
     fail("REQ-WEB-BROWSER-001..009: production browser evidence not implemented")
 
 describe "Production Simple browser user flow":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should anchor fixed CSS image backgrounds to the viewport":
+        step("Render HTML and CSS through canonical Draw IR")
+        val repeat_html = (
+            "<html style='margin:0'><body style='margin:0'>" +
+            "<div id='fixed' style='margin-left:3px;width:4px;height:2px;" +
+            "background-color:#00ff00;background-image:url(image://stripe);" +
+            "background-attachment:fixed;background-repeat:repeat;" +
+            "background-position:left top'></div>" +
+            "<div style='height:8px'></div></body></html>"
+        )
+        val scroll_html = repeat_html.replace(
+            "background-attachment:fixed", "background-attachment:scroll"
+        )
+        val no_repeat_html = repeat_html.replace(
+            "background-repeat:repeat", "background-repeat:no-repeat"
+        )
+        val local_html = repeat_html.replace(
+            "background-attachment:fixed", "background-attachment:local"
+        )
+        val stripe = simpleos_host_gpu_image_resource(
+            "image://stripe", 2, 1, [0xFFFF0000u32, 0xFF0000FFu32]
+        )
+        val images = [stripe]
+        val fixed_composition =
+            simple_web_layout_render_html_draw_ir_with_images(
+                repeat_html, 8, 4, images
+            )
+        val fixed_commands = fixed_composition.batches[0].commands
+        val fixed_index = _browser_draw_ir_command_index(
+            fixed_commands, "fixed_background_image"
+        )
+        expect(fixed_index).to_be_greater_than(-1)
+        val fixed = fixed_commands[fixed_index]
+        expect(fixed.x).to_equal(3)
+        expect(fixed.y).to_equal(0)
+        expect(fixed.width).to_equal(4)
+        expect(fixed.height).to_equal(2)
+        expect(fixed.clip_rect.x).to_equal(3)
+        expect(fixed.clip_rect.width).to_equal(4)
+        expect(_browser_draw_ir_style_value(
+            fixed, "background-tile-x"
+        )).to_equal("0")
+        expect(_browser_draw_ir_style_value(
+            fixed, "background-tile-y"
+        )).to_equal("0")
+
+        step("Scroll the document under the viewport-fixed tile")
+        val scrolled_fixed =
+            simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images(
+                repeat_html, 8, 4, 0, 1,
+                browser_text_input_overlay_empty(), images
+            )
+        expect(scrolled_fixed.resolved_scroll_y).to_equal(1)
+        val scrolled_fixed_commands =
+            scrolled_fixed.composition.batches[0].commands
+        val scrolled_fixed_index = _browser_draw_ir_command_index(
+            scrolled_fixed_commands, "fixed_background_image"
+        )
+        expect(scrolled_fixed_index).to_be_greater_than(-1)
+        val scrolled_fixed_command =
+            scrolled_fixed_commands[scrolled_fixed_index]
+        expect(_browser_draw_ir_style_value(
+            scrolled_fixed_command, "background-tile-y"
+        )).to_equal("0")
+        expect(_browser_draw_ir_style_value(
+            scrolled_fixed_command, "background-shape-y"
+        )).to_equal("-1")
+        val scrolled_element =
+            simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images(
+                scroll_html, 8, 4, 0, 1,
+                browser_text_input_overlay_empty(), images
+            )
+        val scrolled_element_commands =
+            scrolled_element.composition.batches[0].commands
+        val scrolled_element_index = _browser_draw_ir_command_index(
+            scrolled_element_commands, "fixed_background_image"
+        )
+        expect(scrolled_element_index).to_be_greater_than(-1)
+        expect(_browser_draw_ir_style_value(
+            scrolled_element_commands[scrolled_element_index],
+            "background-tile-y"
+        )).to_equal("-1")
+
+        step("Read back fixed repeat and no-repeat edge pixels")
+        val renderer = BrowserRenderer.create(8, 4)
+        val fixed_pixels = renderer.render_html_to_pixels_with_images(
+            repeat_html, images
+        ).pixel_data
+        val scroll_pixels = renderer.render_html_to_pixels_with_images(
+            scroll_html, images
+        ).pixel_data
+        val no_repeat_pixels = renderer.render_html_to_pixels_with_images(
+            no_repeat_html, images
+        ).pixel_data
+        val first_box_pixel = fixed.y * 8 + fixed.x
+        expect(fixed_pixels[first_box_pixel]).to_equal(0xFF0000FFu32)
+        expect(scroll_pixels[first_box_pixel]).to_equal(0xFFFF0000u32)
+        expect(no_repeat_pixels[first_box_pixel]).to_equal(0xFF00FF00u32)
+
+        step("Keep local attachment outside the supported profile")
+        val local_commands =
+            simple_web_layout_render_html_draw_ir_with_images(
+                local_html, 8, 4, images
+            ).batches[0].commands
+        expect(_browser_draw_ir_command_index(
+            local_commands, "fixed_background_image"
+        )).to_equal(-1)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should preserve semantic parentage clipping and stacking in canonical Draw IR":
+        step("Lower web semantic parentage and CSS stacking to canonical Draw IR")
+        val html = (
+            "<html style='margin:0'><body id='page' style='margin:0'>" +
+            "<section id='clip' style='position:relative;overflow:hidden;" +
+            "width:16px;height:12px'>" +
+            "<div id='top' style='position:absolute;left:0;top:0;z-index:3;" +
+            "width:24px;height:12px;background:#f59e0b'></div>" +
+            "<div id='bottom' style='position:absolute;left:0;top:0;z-index:1;" +
+            "width:24px;height:12px;background:#1d4ed8'></div>" +
+            "<div id='middle' style='position:absolute;left:0;top:0;z-index:2;" +
+            "width:24px;height:12px;background:#22c55e'></div>" +
+            "</section></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            html, 32, 24, []
+        )
+        expect(composition.batches.len()).to_be_greater_than(0)
+        val commands = composition.batches[0].commands
+        val page_index = _browser_draw_ir_command_index(commands, "page")
+        val clip_index = _browser_draw_ir_command_index(commands, "clip")
+        val bottom_index = _browser_draw_ir_command_index(commands, "bottom")
+        val middle_index = _browser_draw_ir_command_index(commands, "middle")
+        val top_index = _browser_draw_ir_command_index(commands, "top")
+        if (page_index < 0 or clip_index < 0 or bottom_index < 0 or
+            middle_index < 0 or top_index < 0):
+            fail("REQ-WEB-BROWSER-004: semantic Draw IR command missing")
+
+        step("Inspect stable IDs parent links clip geometry and paint order")
+        expect(commands[clip_index].parent_id).to_equal("page")
+        expect(commands[bottom_index].parent_id).to_equal("clip")
+        expect(commands[middle_index].parent_id).to_equal("clip")
+        expect(commands[top_index].parent_id).to_equal("clip")
+        expect(commands[top_index].clip_rect.x).to_equal(0)
+        expect(commands[top_index].clip_rect.y).to_equal(0)
+        expect(commands[top_index].clip_rect.width).to_equal(16)
+        expect(commands[top_index].clip_rect.height).to_equal(12)
+        expect(_browser_draw_ir_style_value(
+            commands[top_index], "z-index"
+        )).to_equal("3")
+        expect(bottom_index).to_be_less_than(middle_index)
+        expect(middle_index).to_be_less_than(top_index)
+
+        step("Round-trip semantic parent links through the hosted SBRF gate")
+        val wire = browser_renderer_frame_encode(composition, 7, 1)
+        expect(wire.ok).to_equal(true)
+        if not wire.ok:
+            fail("REQ-WEB-BROWSER-004: hosted Draw IR encode rejected")
+        val message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), wire.wire
+        )
+        expect(message.status).to_equal("message")
+        val hosted = browser_renderer_frame_decode(message.message, 32, 24)
+        expect(hosted.ok).to_equal(true)
+        if not hosted.ok:
+            fail("REQ-WEB-BROWSER-004: hosted Draw IR decode rejected")
+        val hosted_commands = hosted.composition.batches[0].commands
+        val hosted_top_index = _browser_draw_ir_command_index(
+            hosted_commands, "top"
+        )
+        if hosted_top_index < 0:
+            fail("REQ-WEB-BROWSER-004: hosted semantic command missing")
+        expect(hosted_commands[hosted_top_index].parent_id).to_equal("clip")
+
+        step("Replay the same canonical composition through Engine2D")
+        val raster = Engine2dCompositorBackend.create_named(32, 24, "software")
+        val rendered = raster.render_draw_ir_composition(composition, [])
+        raster.shutdown()
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(rendered.pixels.len()).to_equal(32 * 24)
+        expect(_count_color(
+            rendered.pixels, 0xFFF59E0Bu32
+        )).to_equal(16 * 12)
+        expect(_count_color(
+            rendered.pixels, 0xFF1D4ED8u32
+        )).to_equal(0)
+        expect(_count_color(
+            rendered.pixels, 0xFF22C55Eu32
+        )).to_equal(0)
+
+    # @manual: show
+    # @capture(text)
+    # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+    it "should deliver retained callable listeners through one DOM event path":
+        step("Deliver JavaScript and Simple Script listeners on the live DOM")
+        var session = BrowserSession.new()
+        match session.open_html(
+            "https://example.test/events", CALLABLE_EVENT_HTML
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("event fixture failed to open: {reason}")
+        expect(session.current_title).to_equal(
+            "simple,document-target,window-target,"
+        )
+
+        step("Dispatch capture target and bubble listeners through window and document")
+        val ordered = session.dispatch_dom_event(
+            "run", "click", true, true
+        )
+        expect(ordered.actions.len()).to_equal(9)
+        expect(session.current_title).to_equal(
+            "simple,document-target,window-target," +
+            "window-capture,document-capture,outer-capture," +
+            "target-capture,inline,target-bubble,outer-bubble," +
+            "document-bubble,window-bubble,"
+        )
+
+        step("Cancel defaults and compact removed listeners")
+        val canceled = session.dispatch_dom_event(
+            "blocked", "click", true, true
+        )
+        expect(canceled.default_action).to_equal("navigate:/escaped")
+        expect(canceled.event.default_prevented).to_equal(true)
+        expect(canceled.default_action_allowed).to_equal(false)
+        expect(session.pending_request_count()).to_equal(0)
+        expect(session.current_title).to_end_with(
+            "window-capture,document-capture,cancel,after-cancel," +
+            "document-bubble,window-bubble,"
+        )
+        val halted = session.dispatch_dom_event(
+            "halt", "click", true, true
+        )
+        expect(halted.actions.len()).to_equal(3)
+        expect(halted.event.immediate_propagation_stopped).to_equal(true)
+        expect(session.current_title).to_end_with(
+            "window-capture,document-capture,halt-first,"
+        )
+        expect(session.dom_callback_count).to_equal(20)
+
+        step("Keep requestAnimationFrame alive beside DOM listener delivery")
+        expect(session.advance_time(16)).to_equal(1)
+        expect(session.current_title).to_end_with("halt-first,raf,")
+
     # @manual: show
     # @capture(html)
     # @capture(text)
@@ -211,3 +550,74 @@ describe "Production Simple browser user flow":
         _production_browser_fixture()
         step("Open unsupported and malformed compatibility fixtures")
         _require_production_browser_evidence()
+
+    # @manual: show
+    # @capture(text)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should render br as one forced inline line break":
+        step("Render forced HTML line breaks through canonical Draw IR")
+        val html = (
+            "<div style='margin:0;padding:0;font-size:16px;line-height:20px'>" +
+            "<span id='alpha'>alpha</span><br id='break'>" +
+            "<span id='beta'>beta</span></div>"
+        )
+        val commands = simple_web_layout_render_html_draw_ir_with_images(
+            html, 160, 64, []
+        ).batches[0].commands
+        val alpha_index = _browser_draw_ir_text_index(commands, "alpha")
+        val beta_index = _browser_draw_ir_text_index(commands, "beta")
+        expect(alpha_index).to_be_greater_than(-1)
+        expect(beta_index).to_be_greater_than(alpha_index)
+        val alpha = commands[alpha_index]
+        val beta = commands[beta_index]
+        expect(_browser_draw_ir_style_value(
+            alpha, "display"
+        )).to_equal("inline")
+        expect(_browser_draw_ir_style_value(
+            beta, "line-height"
+        )).to_equal("20")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "break", "display"
+        )).to_equal("inline")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "break", "w"
+        )).to_equal("0")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "break", "h"
+        )).to_equal("20")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "beta", "x"
+        )).to_equal(simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "alpha", "x"
+        ))
+        val alpha_y = simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "alpha", "y"
+        ).to_i32()
+        val beta_y = simple_web_layout_debug_layout_by_id(
+            html, 160, 64, "beta", "y"
+        ).to_i32()
+        expect(beta_y - alpha_y).to_equal(20)
+        val hidden_break_html = (
+            "<div style='margin:0;padding:0;font-size:16px;line-height:20px'>" +
+            "<span id='hidden-alpha'>alpha</span>" +
+            "<br style='display:none'>" +
+            "<span id='hidden-beta'>beta</span></div>"
+        )
+        val hidden_alpha_y = simple_web_layout_debug_layout_by_id(
+            hidden_break_html, 160, 64, "hidden-alpha", "y"
+        ).to_i32()
+        val hidden_beta_y = simple_web_layout_debug_layout_by_id(
+            hidden_break_html, 160, 64, "hidden-beta", "y"
+        ).to_i32()
+        expect(hidden_beta_y).to_equal(hidden_alpha_y)
+
+        step("Read back the forced-line pixels after semantic geometry")
+        val renderer = BrowserRenderer.create(160, 64)
+        val forced_pixels = renderer.render_html_to_pixels(html).pixel_data
+        val inline_pixels = renderer.render_html_to_pixels(
+            "<div style='margin:0;padding:0;font-size:16px;" +
+            "line-height:20px'>alpha beta</div>"
+        ).pixel_data
+        expect(forced_pixels.len()).to_equal(160 * 64)
+        expect(_pixels_equal(forced_pixels, inline_pixels)).to_equal(false)

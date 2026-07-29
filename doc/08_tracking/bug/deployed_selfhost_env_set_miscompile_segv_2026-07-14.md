@@ -307,3 +307,29 @@ without payload execution, and a missing runtime.
 This prevents an invalid artifact from masquerading as production tooling. It
 does not repair the tracked stale `rt_env_set` ABI or replace the required
 fresh Stage4 build, full candidate admission, and atomic deployment.
+
+## 2026-07-29 browser verification blocker confirmation
+
+The browser-hardening lane reconfirmed the tracked artifact identity without a
+bootstrap or Rust-seed fallback:
+
+- SHA-256: `04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`
+- Build ID: `545d912cac46001892de0d9959e6b0b92497f2b9`
+- focused GDB path:
+  `__strlen_avx2 -> __add_to_environ -> rt_env_set -> expr_count_set ->
+  expr_reset -> ast_reset -> _check_path`
+- valid call registers immediately before `rt_env_set`:
+  key pointer, key length `27`, value pointer, value length `1`
+
+The linked provider still forwards the second register as the `setenv` value,
+while both retained pure-Simple Stage 2/3 binaries under
+`build/browser-full-refresh/` contain the current four-argument Rust provider.
+Current source already has the four-argument native, simple-core, generated
+SFFI, and admission contracts, so no caller/compiler workaround is justified.
+
+Do not rerun the crashing release check. Resume only after a new full
+pure-Simple candidate exists, then run the existing four-argument environment
+admission probe followed by the tiny `p2_add.spl` check and canonical redeploy
+gate listed above. The separate retained Stage-3 streaming-surface crash must
+first gain a focused failing regression and a proven owner fix; do not retry
+the full entry build merely to rediscover its first-surface SIGSEGV.

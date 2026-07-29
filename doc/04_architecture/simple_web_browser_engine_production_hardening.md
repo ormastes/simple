@@ -198,6 +198,31 @@ The string-based UI link parser and target-only event path are retired.
 Add one `SimpleWebRenderSession` beside the existing release-measured Simple Web
 HTML renderer so it can reuse current private stage functions and types.
 
+This is not another Web IR or pixel cache. It lives with
+`simple_web_html_layout_renderer.spl`, retains that renderer's existing
+`HNode`/`Rules`/`HtmlChildIndex`/`Style`/`LayoutResult` values, and still emits
+the canonical `DrawIrComposition`. The hosted browser worker owns exactly one
+session. The compositor's `WebRenderPixelArtifactCache` and
+`simple_web_content_revision_with_theme` are not reusable here: they serve the
+separate WM pixel path, hash/compare serialized content, include scroll in the
+key, and cannot expose semantic-stage invalidation.
+
+`BrowserSession` is the authoritative invalidation owner:
+
+- `BrowserRenderRevisions.document_revision` aliases the existing
+  `ui_access_revision`; the missing mutation sites are repaired instead of
+  adding a competing DOM counter.
+- `style_revision` advances when committed external/inline stylesheet HTML
+  changes.
+- `resource_revision` advances when the bounded decoded-image set changes.
+- `BrowserRenderSnapshot` returns those cheap revisions and serializes HTML
+  only when the caller's document or style revision is stale.
+
+`SimpleWebRenderSession` owns `viewport_revision` and
+`composition_revision`. Scroll, text-overlay, resource, and animation-time
+keys remain inputs to that owner; they do not mutate BrowserSession revisions.
+All counters saturate rather than wrap to a cache-valid old value.
+
 State:
 
 - source/document revision and viewport;
@@ -213,15 +238,26 @@ Invalidation:
 | Change | Work |
 |---|---|
 | navigation/source | parse, CSS, style, layout, paint |
-| structural DOM | child index, style, layout, paint |
-| class/id/style/pseudo | style, then layout only for geometry/font metrics |
-| color/opacity/transform | paint |
-| viewport/media | style, layout, paint |
-| scroll | paint |
-| unchanged frame | reuse composition/pixels |
+| any accepted DOM/title mutation | serialize, parse, CSS, style, layout, paint |
+| committed stylesheet text | serialize, parse, CSS, style, layout, paint |
+| viewport/media | CSS, style, layout, paint; retain parsed nodes |
+| decoded image set | paint only; layout currently does not consume decoded dimensions |
+| active CSS animation sample | animated style, layout, paint; retain parse/CSS/base style |
+| scroll or caret/selection overlay | scroll/hit/paint only; retain raw layout |
+| monotonic time with no due visual change | reuse composition and hit index |
+| unchanged frame | reuse composition and hit index |
 
 Initial production scope may repaint the full dirty frame. Partial damage is
-deferred until profiling proves it necessary.
+deferred until profiling proves it necessary. It may also conservatively
+invalidate all style/layout work for a DOM mutation; node-diff/subtree
+invalidation is not required for the first retained implementation.
+
+The cache is bounded by the already-enforced document and image limits and
+stores one current document stage set, one base-style set, one layout, and one
+composition/hit index. Replacement swaps those values rather than appending.
+`reset()` drops all retained semantic/layout/composition values on navigation;
+`close()` also clears the worker's hit index and image revision list. Process
+exit remains the final sandbox-worker release boundary.
 
 The render session emits Draw IR only. The existing persistent
 `Engine2dCompositorBackend` creates device/font state once, clears/submits on

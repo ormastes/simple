@@ -11,6 +11,49 @@ use std.spec.*
 use std.env.variables.{env_get}
 use std.io_runtime.{file_hash_sha256}
 use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
+use os.hosted.hosted_browser_renderer_registry.{
+    HostedBrowserRendererRegistry
+}
+use os.hosted.browser_profile_store.{BrowserProfileStore}
+use std.gc_async_mut.web.browser_session.{
+    BrowserSession, BrowserResponse, BrowserHstsSnapshot,
+    BrowserHstsSnapshotEntry
+}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    FetchRequest, FetchResponse, RequestMode
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_with_images
+}
+use std.common.image.png_encode.{encode_argb_to_png}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn _csp_alias_png_hex(pixel: u32) -> text:
+    var out = ""
+    for byte in encode_argb_to_png([pixel], 1, 1):
+        val piece = byte.to_i64().to_hex()
+        out = out + if piece.len() == 1: "0{piece}" else: piece
+    out
+
+fn _csp_alias_command_index(
+    commands: [DrawIrCommand], component_id: text
+) -> i32:
+    var index: i32 = 0
+    while index < commands.len():
+        if commands[index].component_id == component_id:
+            return index
+        index = index + 1
+    -1
+
+fn _csp_alias_color_count(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
 
 # @inline
 fn _two_origin_https_fixture():
@@ -28,7 +71,7 @@ fn _check_security_denial():
 fn _platform_evidence_row():
     step("Bind platform sandbox evidence to the production renderer binary")
 
-fn _require_platform_renderer_sandbox_evidence():
+fn _production_browser_artifact() -> text:
     val artifact = env_get("HOSTED_WM_ARTIFACT")
     val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
     if artifact == "":
@@ -36,7 +79,10 @@ fn _require_platform_renderer_sandbox_evidence():
     if expected_artifact_sha.len() != 64 or
         file_hash_sha256(artifact) != expected_artifact_sha:
         fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+    artifact
 
+fn _require_platform_renderer_sandbox_evidence():
+    val artifact = _production_browser_artifact()
     var renderer = HostedBrowserRendererProcess.create(41, 64, 48)
     val started = renderer.start(artifact, 2000)
     if not started.ok:
@@ -63,6 +109,299 @@ fn _require_production_security_evidence():
     fail("REQ-WEB-BROWSER-010..019: production security evidence not implemented")
 
 describe "Production Simple browser security envelope":
+    # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-014
+    # @manual: show
+    # @capture(protocol)
+    it "should share and persist HSTS learned by secondary browser windows":
+        step("Navigate through verified HTTPS")
+        val now_ms: i64 = 100000
+        val artifact = _production_browser_artifact()
+        var initial_entries: [BrowserHstsSnapshotEntry] = []
+        initial_entries.push(BrowserHstsSnapshotEntry(
+            host: "preload.test",
+            received_at_unix_ms: now_ms,
+            expires_at_unix_ms: now_ms + 60000,
+            include_subdomains: true
+        ))
+        var registry = HostedBrowserRendererRegistry.create(
+            artifact, "https://example.com/"
+        )
+        expect(registry.load_hsts_snapshot(
+            BrowserHstsSnapshot.create(initial_entries), now_ms
+        )).to_equal(1)
+        expect(registry.hsts_upgrade_url(
+            "http://sub.preload.test/path"
+        )).to_equal("https://sub.preload.test/path")
+
+        step("Share secondary-window HSTS through the existing registry")
+        var secondary = HostedBrowserRendererProcess.create(42, 64, 48)
+        expect(secondary.load_hsts_snapshot(
+            registry.hsts_snapshot(now_ms), now_ms
+        )).to_equal(1)
+        val learned = secondary._finalize_network(
+            "document",
+            FetchRequest(
+                url: Url.parse_or_opaque(
+                    "https://secondary.test/account"
+                ),
+                method: "GET",
+                headers: "",
+                body: [],
+                mode: RequestMode.Navigate,
+                credentials: "include"
+            ),
+            FetchResponse(
+                status: 200,
+                headers: "Strict-Transport-Security: max-age=60",
+                body: []
+            ),
+            true
+        )
+        expect(learned.error).to_equal("")
+        expect(secondary.hsts_dirty).to_be(true)
+        expect(registry.accept_renderer_hsts_snapshot(
+            secondary.hsts_snapshot(now_ms + 1000), now_ms + 1000
+        )).to_equal(2)
+        expect(registry.hsts_upgrade_url(
+            "http://secondary.test/account"
+        )).to_equal("https://secondary.test/account")
+        expect(registry.hsts_dirty()).to_be(true)
+        expect(registry.hsts_revision()).to_equal(1)
+
+        step("Persist shared HSTS before every browser window closes")
+        val profile_result = BrowserProfileStore.memory()
+        var profile = profile_result.unwrap()
+        expect(profile.save_hsts(
+            registry.hsts_snapshot(now_ms + 1000), now_ms + 1000
+        ).is_ok()).to_be(true)
+        registry.mark_hsts_saved()
+        expect(registry.hsts_dirty()).to_be(false)
+        val persisted_result = profile.load_hsts(now_ms + 2000)
+        val persisted = persisted_result.unwrap()
+        var restarted = HostedBrowserRendererRegistry.create(
+            artifact, "https://example.com/"
+        )
+        expect(restarted.load_hsts_snapshot(
+            persisted, now_ms + 2000
+        )).to_equal(2)
+        expect(restarted.hsts_upgrade_url(
+            "http://secondary.test/account"
+        )).to_equal("https://secondary.test/account")
+        val profile_close = profile.close()
+        expect(profile_close.is_ok()).to_be(true)
+        expect(restarted.accept_renderer_hsts_snapshot(
+            persisted, now_ms + 2000
+        )).to_equal(2)
+        expect(restarted.ensure(
+            84, "<div>secondary</div>", 64, 48, 0, now_ms + 2000
+        )).to_equal("none")
+        expect(restarted.contains(84)).to_be(true)
+        val failed_profile_result = BrowserProfileStore.memory()
+        var failed_profile = failed_profile_result.unwrap()
+        val failed_profile_close = failed_profile.close()
+        expect(failed_profile_close.is_ok()).to_be(true)
+        val failed_save = failed_profile.save_hsts(
+            restarted.hsts_snapshot(now_ms + 2000), now_ms + 2000
+        )
+        expect(failed_save.is_err()).to_be(true)
+        expect(restarted.hsts_dirty()).to_be(true)
+        expect(restarted.remove_window(84)).to_be(true)
+        expect(restarted.contains(84)).to_be(false)
+        expect(restarted.close()).to_be(true)
+
+    # @req REQ-WEB-BROWSER-012
+    # @manual: show
+    # @capture(protocol)
+    it "should apply head meta CSP in source order to every active resource":
+        step("Enforce CSP host paths and head meta policies")
+        var session = BrowserSession.new()
+        session.register_resource(
+            "https://safe.test/before.css",
+            "@import '/before-import.css'; .before{background-image:url('/before-background.png')}"
+        )
+        session.register_resource(
+            "https://safe.test/before-import.css",
+            ".imported{background-image:url('/import-background.png')}"
+        )
+        session.register_resource(
+            "https://safe.test/before.js",
+            "document.title = 'before-meta-script-ran'"
+        )
+        expect(session.begin_network_navigation(
+            "https://safe.test/app", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document.id, "document", document.url, 200,
+            "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'",
+            "<html><head>" +
+            "<link rel='stylesheet' href='/before.css'>" +
+            "<script src='/before.js'></script>" +
+            "<img src='/before-image.png'>" +
+            "<meta http-equiv='Content-Security-Policy' content=\"sandbox allow-scripts; frame-ancestors 'none'; report-uri /report; script-src 'none'; style-src 'unsafe-inline'; img-src 'none'\">" +
+            "<meta http-equiv='content-security-policy' content=\"script-src *; style-src 'unsafe-inline'; img-src *\">" +
+            "<style>.after{background-image:url('/after-background.png')}</style>" +
+            "<link rel='stylesheet' href='/after.css'>" +
+            "<script>document.title='after-inline-ran'</script>" +
+            "<script src='/after.js'></script>" +
+            "<img src='/after-image.png'>" +
+            "</head><body></body></html>",
+            ""
+        )).is_ok()).to_be(true)
+
+        val first_image = session.take_pending_request().unwrap()
+        expect(first_image.kind).to_equal("image")
+        expect(first_image.url).to_equal(
+            "https://safe.test/before-image.png"
+        )
+
+        expect(session.commit_network_response(BrowserResponse.create(
+            first_image.id, "image", first_image.url, 302,
+            "Location: https://evil.test/stolen.png", "", ""
+        )).is_ok()).to_be(true)
+        val linked_background = session.take_pending_request().unwrap()
+        expect(linked_background.url).to_equal(
+            "https://safe.test/before-background.png"
+        )
+        expect(session.commit_network_response(BrowserResponse.create(
+            linked_background.id, "image", linked_background.url,
+            404, "", "", ""
+        )).is_ok()).to_be(true)
+        val imported_background = session.take_pending_request().unwrap()
+        expect(imported_background.url).to_equal(
+            "https://safe.test/import-background.png"
+        )
+        expect(session.commit_network_response(BrowserResponse.create(
+            imported_background.id, "image", imported_background.url,
+            404, "", "", ""
+        )).is_ok()).to_be(true)
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.current_title).to_equal("before-meta-script-ran")
+        val warnings = session.warnings.join("|")
+        expect(warnings).to_contain(
+            "CSP blocked style: https://safe.test/after.css"
+        )
+        expect(warnings).to_contain("CSP blocked inline script")
+        expect(warnings).to_contain(
+            "CSP blocked script: https://safe.test/after.js"
+        )
+        expect(warnings).to_contain(
+            "CSP blocked image: https://safe.test/after-image.png"
+        )
+        expect(warnings).to_contain(
+            "CSP blocked image: https://safe.test/after-background.png"
+        )
+        expect(session.warnings.join("|")).to_contain(
+            "image load error: CSP blocked redirect: https://evil.test/stolen.png"
+        )
+
+    # @req REQ-WEB-BROWSER-012 NFR-WEB-BROWSER-011
+    # @manual: folded
+    it "should bound malformed meta CSP without widening following loads":
+        step("Enforce CSP host paths and head meta policies")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://safe.test/app",
+            "<html><head><meta http-equiv='content-security-policy' content=\"" +
+            "x".repeat(4097) +
+            "\"><script src='/after-limit.js'></script></head></html>"
+        ).is_ok()).to_be(true)
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.warnings.join("|")).to_contain(
+            "meta CSP exceeds 4096-byte limit; following resources blocked"
+        )
+        expect(session.warnings.join("|")).to_contain(
+            "CSP blocked script: https://safe.test/after-limit.js"
+        )
+
+    # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-012
+    # @manual: show
+    it "should apply final document CSP to body inline event handlers":
+        step("Enforce CSP host paths and head meta policies")
+        var denied = BrowserSession.new()
+        expect(denied.open_html(
+            "https://safe.test/app",
+            "<html><head><meta http-equiv='content-security-policy' " +
+            "content=\"script-src 'none'\"></head><body>" +
+            "<a id='denied-handler' href='/default' " +
+            "onclick='prevent-default'>denied</a></body></html>"
+        ).is_ok()).to_be(true)
+        val denied_dispatch = denied.dispatch_dom_event(
+            "denied-handler", "click", true, true
+        )
+        expect(denied_dispatch.actions.len()).to_equal(0)
+        expect(denied_dispatch.event.default_prevented).to_equal(false)
+        expect(denied_dispatch.default_action_allowed).to_equal(true)
+        expect(denied_dispatch.default_action).to_equal("navigate:/default")
+        expect(denied.pending_request_count()).to_equal(1)
+        expect(denied.warnings.join("|")).to_contain(
+            "CSP blocked inline event handler"
+        )
+
+        var allowed = BrowserSession.new()
+        expect(allowed.open_html(
+            "https://safe.test/app",
+            "<html><head><meta http-equiv='content-security-policy' " +
+            "content=\"script-src 'unsafe-inline'\"></head><body>" +
+            "<a id='allowed-handler' href='/default' " +
+            "onclick='prevent-default'>allowed</a></body></html>"
+        ).is_ok()).to_be(true)
+        val allowed_dispatch = allowed.dispatch_dom_event(
+            "allowed-handler", "click", true, true
+        )
+        expect(allowed_dispatch.actions).to_equal(["prevent-default"])
+        expect(allowed_dispatch.event.default_prevented).to_equal(true)
+        expect(allowed_dispatch.default_action_allowed).to_equal(false)
+        expect(allowed.pending_request_count()).to_equal(0)
+
+    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-012
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should bind identical image URLs to each node CSP decision":
+        step("Load the earlier identical image under its source-position CSP")
+        var session = BrowserSession.new()
+        session.register_resource(
+            "https://safe.test/shared.png",
+            _csp_alias_png_hex(0xFFFF00FFu32)
+        )
+        expect(session.open_html(
+            "https://safe.test/app",
+            "<html><head>" +
+            "<style>#allowed{display:block;width:2px;height:2px;" +
+            "background-image:url('/shared.png');background-repeat:no-repeat}" +
+            "</style>" +
+            "<meta http-equiv='content-security-policy' " +
+            "content=\"img-src 'none'; style-src 'unsafe-inline'\">" +
+            "</head><body style='margin:0'>" +
+            "<div id='allowed'></div>" +
+            "<div id='blocked' style=\"display:block;width:2px;height:2px;" +
+            "background-image:url('/shared.png');background-repeat:no-repeat\">" +
+            "</div></body></html>"
+        ).is_ok()).to_be(true)
+        expect(session.image_resources.len()).to_equal(1)
+        expect(session.warnings.join("|")).to_contain(
+            "CSP blocked image: https://safe.test/shared.png"
+        )
+
+        step("Bind each image command to its admitted node identity")
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            session.render_html_document(), 4, 4, session.image_resources
+        )
+        val commands = composition.batches[0].commands
+        expect(_csp_alias_command_index(
+            commands, "allowed_background_image"
+        )).to_be_greater_than(-1)
+        expect(_csp_alias_command_index(
+            commands, "blocked_background_image"
+        )).to_equal(-1)
+
+        step("Render the allowed node without painting the blocked alias")
+        val pixels = session.render_to_pixels(4, 4).pixel_data
+        expect(_csp_alias_color_count(
+            pixels, 0xFFFF00FFu32
+        )).to_equal(4)
+
     # @manual: show
     # @capture(protocol)
     # @capture(log)

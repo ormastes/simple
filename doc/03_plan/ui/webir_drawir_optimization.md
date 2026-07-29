@@ -26,6 +26,24 @@ concrete response to the perf regression exposed in
 - External `<img>` and CSS background lowering cover part of Phase 2. Iframe
   embedding and exact Path-A/Path-B parity remain open.
 
+### Ordered next backlog
+
+1. **Done in source, runtime-blocked:** retain DOM `parent_id` on main HTML
+   commands and owning-element IDs on synthetic image/input overlays; keep the
+   REQ-WEB-BROWSER-003/004 semantic composition oracle before pixels and
+   round-trip it through the existing hosted SBRF/Draw IR v2 codec.
+2. Emit iframe content through the existing embedded `DrawIrBatch` mechanism.
+3. Add authoritative BrowserSession document/style/geometry/resource
+   revisions, then retain private parse/style/layout state.
+4. Run exact Path-A/Path-B corpus parity and only then route production content
+   frames through the existing persistent Engine2D owner.
+5. Consider Draw IR diff/damage only after retained-stage measurements prove
+   unchanged-frame reuse is insufficient.
+
+`simple_web_html_layout_renderer_paint_layout.spl` remains a pre-existing
+>800-line stage-owner exception. Split it only behind the semantic composition
+and pixel-parity gates above; do not mix file movement with fidelity changes.
+
 ### 1.1 The monolith's internal stages (file:line)
 
 `simple_web_html_layout_renderer.spl` runs one parse→style→layout pipeline that

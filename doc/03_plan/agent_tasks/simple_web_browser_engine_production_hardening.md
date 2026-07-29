@@ -107,6 +107,25 @@ default shared by software paint and Draw IR. Author CSS may override it.
 `hidden="until-found"` remains assigned to future find-in-page/`beforematch`
 work and is not counted as supported.
 
+Retained-render delivery is serialized into bounded sub-batches so agents do
+not collide in the worker or renderer:
+
+1. **TDD/revisions:** edit the existing BrowserSession and worker SSpecs first;
+   assert real stage counters for unchanged/mutation/navigation/style/resource
+   transitions. Then repair `ui_access_revision` as the document revision and
+   add only style/resource revisions plus `BrowserRenderSnapshot`.
+2. **Canonical renderer session:** own
+   `simple_web_html_layout_renderer.spl` and its existing private stage files;
+   add `SimpleWebRenderSession` around the current stage values. Do not add
+   WebIR, Draw-IR diffing, or a pixel cache.
+3. **Worker integration:** own
+   `hosted_browser_renderer_worker.spl`; replace `_worker_frame`'s full rebuild,
+   add reset/close release, and expose counters to focused tests/evidence.
+
+Each sub-batch returns to the merge owner before the next begins. The HTML/CSS
+fidelity agent may change the same renderer files, so it must finish before
+sub-batch 2 starts.
+
 ### Lane E — JavaScript/Simple Script clock
 
 Owns:
@@ -146,6 +165,19 @@ Owns:
 - hot-path profiling and minimum root-cause fixes.
 
 Does not add cache layers without measured evidence.
+
+The retained-render counter matrix is the first evidence gate:
+
+- unchanged monotonic advance: only `reuse_count`;
+- CSS animation: style/layout/paint, not parse/CSS;
+- scroll/caret overlay: paint, not parse/CSS/style/layout;
+- DOM/title/style/navigation: exact conservative invalidation;
+- decoded image replacement: paint only;
+- 10,000 replacement/close loop: one retained stage set plateaus and all
+  retained counts reach zero after close.
+
+Production latency/RSS rows remain blocked until the healthy pure-Simple
+Phase 2/3 target can execute; source counters never turn those rows green.
 
 ## Batch order
 

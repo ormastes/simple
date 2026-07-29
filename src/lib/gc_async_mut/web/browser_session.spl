@@ -170,6 +170,7 @@ class BrowserRequest:
     is_top_level_navigation: bool
     script_cookie_writes: [text]
     image_resource_key: text
+    csp_policy: text
 
     static fn create(id: text, kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
         BrowserRequest(
@@ -186,7 +187,8 @@ class BrowserRequest:
             credentials: "include",
             is_top_level_navigation: kind == "document",
             script_cookie_writes: [],
-            image_resource_key: ""
+            image_resource_key: "",
+            csp_policy: ""
         )
 
 class BrowserResponse:
@@ -243,9 +245,14 @@ fn browser_header_content_security_policy(headers: text) -> text:
 class BrowserPendingModuleEval:
     root_url: text
     source: text
+    csp_policy: text
 
-    static fn create(root_url: text, source: text) -> BrowserPendingModuleEval:
-        BrowserPendingModuleEval(root_url: root_url, source: source)
+    static fn create(
+        root_url: text, source: text, csp_policy: text
+    ) -> BrowserPendingModuleEval:
+        BrowserPendingModuleEval(
+            root_url: root_url, source: source, csp_policy: csp_policy
+        )
 
 class BrowserWasmModuleRecord:
     url: text
@@ -262,17 +269,38 @@ class BrowserWasmModuleRecord:
 class BrowserStylesheetSource:
     kind: text
     source: text
+    source_offset: i64
+    csp_policy: text
 
     static fn inline(source: text) -> BrowserStylesheetSource:
-        BrowserStylesheetSource(kind: "inline", source: source)
+        BrowserStylesheetSource(
+            kind: "inline", source: source, source_offset: -1,
+            csp_policy: ""
+        )
 
     static fn external(source: text) -> BrowserStylesheetSource:
-        BrowserStylesheetSource(kind: "external", source: source)
+        BrowserStylesheetSource(
+            kind: "external", source: source, source_offset: -1,
+            csp_policy: ""
+        )
 
     # Already-admitted parent CSS, scheduled after its @import sources so the
     # normal source-order cascade is retained without re-counting its budget.
     static fn deferred(source: text) -> BrowserStylesheetSource:
-        BrowserStylesheetSource(kind: "deferred", source: source)
+        BrowserStylesheetSource(
+            kind: "deferred", source: source, source_offset: -1,
+            csp_policy: ""
+        )
+
+    me with_policy(
+        source_offset: i64, csp_policy: text
+    ) -> BrowserStylesheetSource:
+        BrowserStylesheetSource(
+            kind: self.kind,
+            source: self.source,
+            source_offset: source_offset,
+            csp_policy: csp_policy
+        )
 
 class BrowserStylesheetExpansion:
     html: text
@@ -288,6 +316,8 @@ class BrowserScriptBlock:
     script_type: text
     is_async: bool
     is_defer: bool
+    source_offset: i64
+    csp_policy: text
 
     static fn inline(content: text) -> BrowserScriptBlock:
         BrowserScriptBlock(
@@ -296,7 +326,9 @@ class BrowserScriptBlock:
             src: "",
             script_type: "",
             is_async: false,
-            is_defer: false
+            is_defer: false,
+            source_offset: -1,
+            csp_policy: ""
         )
 
     static fn external(src: text) -> BrowserScriptBlock:
@@ -306,7 +338,9 @@ class BrowserScriptBlock:
             src: src,
             script_type: "",
             is_async: false,
-            is_defer: false
+            is_defer: false,
+            source_offset: -1,
+            csp_policy: ""
         )
 
     static fn with_attrs(kind: text, content: text, src: text, script_type: text, is_async: bool, is_defer: bool) -> BrowserScriptBlock:
@@ -316,7 +350,23 @@ class BrowserScriptBlock:
             src: src,
             script_type: script_type,
             is_async: is_async,
-            is_defer: is_defer
+            is_defer: is_defer,
+            source_offset: -1,
+            csp_policy: ""
+        )
+
+    me with_policy(
+        source_offset: i64, csp_policy: text
+    ) -> BrowserScriptBlock:
+        BrowserScriptBlock(
+            kind: self.kind,
+            content: self.content,
+            src: self.src,
+            script_type: self.script_type,
+            is_async: self.is_async,
+            is_defer: self.is_defer,
+            source_offset: source_offset,
+            csp_policy: csp_policy
         )
 
     me as_ordered_classic() -> BrowserScriptBlock:
@@ -326,13 +376,17 @@ class BrowserScriptBlock:
             src: self.src,
             script_type: self.script_type,
             is_async: false,
-            is_defer: false
+            is_defer: false,
+            source_offset: self.source_offset,
+            csp_policy: self.csp_policy
         )
 
 class BrowserImageSource:
     authored_src: text
     resolved_url: text
     resource_key: text
+    source_offset: i64
+    csp_policy: text
 
     static fn create(
         authored_src: text, resolved_url: text
@@ -347,7 +401,20 @@ class BrowserImageSource:
         BrowserImageSource(
             authored_src: authored_src,
             resolved_url: resolved_url,
-            resource_key: resource_key
+            resource_key: resource_key,
+            source_offset: -1,
+            csp_policy: ""
+        )
+
+    me with_policy(
+        source_offset: i64, csp_policy: text
+    ) -> BrowserImageSource:
+        BrowserImageSource(
+            authored_src: self.authored_src,
+            resolved_url: self.resolved_url,
+            resource_key: self.resource_key,
+            source_offset: source_offset,
+            csp_policy: csp_policy
         )
 
 class BrowserLoadState:
@@ -389,7 +456,8 @@ class BrowserLoadState:
 impl BrowserLoadState:
 
     me _queue_background_image_sources(
-        css_text: text, base_url: text, resolved_resource_key: bool
+        css_text: text, base_url: text, resolved_resource_key: bool,
+        csp_policy: text, source_offset: i64
     ):
         for authored in _css_background_image_urls(css_text):
             val resolved = collapse_url_dot_segments(
@@ -428,9 +496,11 @@ impl BrowserLoadState:
                     "image resource limit reached; additional images ignored"
                 )
                 continue
-            self.image_sources.push(BrowserImageSource.create_keyed(
-                authored, resolved, resource_key
-            ))
+            self.image_sources.push(
+                BrowserImageSource.create_keyed(
+                    authored, resolved, resource_key
+                ).with_policy(source_offset, csp_policy)
+            )
 
     me append_warning(warning: text):
         if self.warnings.len() >= BROWSER_WARNING_MAX_ENTRIES:
@@ -445,7 +515,8 @@ impl BrowserLoadState:
         self.warnings.push(bounded)
 
     me admit_stylesheet(
-        document_url: text, base_url: text, css_text: text
+        document_url: text, base_url: text, css_text: text,
+        csp_policy: text, source_offset: i64
     ) -> BrowserStylesheetExpansion?:
         val source_bytes = css_text.len()
         if (source_bytes > BROWSER_RENDERER_MAX_PAYLOAD_BYTES -
@@ -461,13 +532,22 @@ impl BrowserLoadState:
         val expanded = expand_stylesheet_text(
             document_url, base_url, rewritten_css
         )
-        val ordered = if expanded.sources.len() > 0 and expanded.html != "":
+        var inherited_sources: [BrowserStylesheetSource] = []
+        for source in expanded.sources:
+            inherited_sources.push(
+                source.with_policy(source_offset, csp_policy)
+            )
+        val ordered = if inherited_sources.len() > 0 and expanded.html != "":
             BrowserStylesheetExpansion.create("", insert_stylesheet_sources(
-                expanded.sources, expanded.sources.len(),
-                [BrowserStylesheetSource.deferred(expanded.html)]
+                inherited_sources, inherited_sources.len(),
+                [BrowserStylesheetSource.deferred(
+                    expanded.html
+                ).with_policy(source_offset, csp_policy)]
             ))
         else:
-            expanded
+            BrowserStylesheetExpansion.create(
+                expanded.html, inherited_sources
+            )
         val html_bytes = expanded.html.len()
         if (html_bytes > BROWSER_RENDERER_MAX_PAYLOAD_BYTES -
             self.stylesheet_html_bytes):
@@ -480,7 +560,9 @@ impl BrowserLoadState:
         self.stylesheet_html_bytes = self.stylesheet_html_bytes + html_bytes
         if ordered.html != "":
             self.stylesheet_html_chunks.push(ordered.html)
-        self._queue_background_image_sources(css_text, base_url, true)
+        self._queue_background_image_sources(
+            css_text, base_url, true, csp_policy, source_offset
+        )
         Some(ordered)
 
     fn stylesheet_html() -> text:
@@ -2197,8 +2279,11 @@ impl BrowserSession:
                 "img-src"
             else:
                 "script-src"
+            var applicable_csp_policy = self.content_security_policy
+            if val Some(original) = inflight:
+                applicable_csp_policy = original.csp_policy
             if not browser_csp_allows_after_redirect(
-                self.content_security_policy, csp_directive,
+                applicable_csp_policy, csp_directive,
                 self.document_url, next_url, false
             ):
                 return self._commit_subresource_error(
@@ -2237,6 +2322,7 @@ impl BrowserSession:
             next_request.credentials = redirect_credentials
             next_request.is_top_level_navigation = redirect_is_top_level
             next_request.image_resource_key = response_image_key
+            next_request.csp_policy = applicable_csp_policy
             next_request.headers = self._headers_with_session_cookie(
                 next_request.headers, next_request.url, next_request.method,
                 redirect_site_url, redirect_is_top_level,
@@ -2365,7 +2451,8 @@ impl BrowserSession:
                                pending.root_url == request.redirect_origin_url:
                                 load.pending_module = Some(
                                     BrowserPendingModuleEval.create(
-                                        response.url, ""
+                                        response.url, "",
+                                        pending.csp_policy
                                     )
                                 )
                                 self.active_load = Some(load)
@@ -2510,8 +2597,24 @@ impl BrowserSession:
                 load.append_warning("stylesheet load error: {response.error}")
             else:
                 self._apply_response_headers(response.headers, response.url)
+                val source_index = load.next_style_idx - 1
+                val source_policy = if (
+                    source_index >= 0 and
+                    source_index < load.style_sources.len()
+                ):
+                    load.style_sources[source_index].csp_policy
+                else:
+                    self.content_security_policy
+                val source_offset = if (
+                    source_index >= 0 and
+                    source_index < load.style_sources.len()
+                ):
+                    load.style_sources[source_index].source_offset
+                else:
+                    -1
                 if val Some(expanded) = load.admit_stylesheet(
-                    load.document_url, response.url, response.body
+                    load.document_url, response.url, response.body,
+                    source_policy, source_offset
                 ):
                     if expanded.sources.len() > 0:
                         load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
