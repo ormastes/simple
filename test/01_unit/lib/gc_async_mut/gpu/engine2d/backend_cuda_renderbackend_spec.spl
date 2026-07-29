@@ -21,16 +21,65 @@ describe "CudaBackend RenderBackend facade":
         expect(source).to_contain("font_render_batch_atlas_owner_identity(batch), \"cuda\", device_features")
         expect(source).to_contain("self.session.font_module_identity, dependency_identity")
 
-    it "resynchronizes the device after a failed clear kernel":
+    it "declares explicit CUDA device and mirror authority":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain("device_current: bool")
+        expect(source).to_contain("mirror_current: bool")
+        expect(source).to_contain("device_current: false,\n            mirror_current: true")
+        expect(source).to_contain("me _ensure_device_current() -> bool:")
+        expect(source).to_contain("me _ensure_mirror_current() -> bool:")
+        expect(source).to_contain("me _begin_cpu_path() -> bool:")
+        expect(source).to_contain("me _finish_cpu_path():")
+        expect(source).to_contain("me _mark_device_mutation():")
+
+    it "keeps GPU success and CPU fallback authority transitions explicit":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain("self._mark_device_mutation()")
+        expect(source).to_contain("self._begin_cpu_path()")
+        expect(source).to_contain("self._finish_cpu_path()")
+        expect(source.contains("if rc == CUDA_SUCCESS:\n                self.mirror.")).to_equal(false)
+        expect(source).to_contain(
+            "me _finish_cpu_path():\n" +
+            "        self.cpu_fallback_used = true\n" +
+            "        self.mirror_current = true\n" +
+            "        self.device_current = false"
+        )
+        expect(source).to_contain(
+            "me _mark_device_mutation():\n" +
+            "        self.device_current = true\n" +
+            "        self.mirror_current = false"
+        )
+
+    it "does not fall through to a stale mirror on readback":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain("if self.mirror_current:")
+        expect(source).to_contain("engine2d_readback([], \"readback_failed\")")
+        expect(source.contains("engine2d_readback(self.mirror.read_pixels(), \"cpu_mirror\")")).to_equal(false)
+
+    it "defers device upload after a failed clear kernel":
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
         expect(source).to_contain(
+            "        if not self._begin_cpu_path():\n" +
+            "            return\n" +
             "        self.mirror.clear(color)\n" +
-            "        self._sync_mirror_to_device_after_cpu_path()\n" +
+            "        self._finish_cpu_path()\n" +
             "    me draw_rect("
         )
         expect(source).to_contain(
-            "    me _sync_mirror_to_device_after_cpu_path():\n" +
-            "        self.cpu_fallback_used = true"
+            "    me _ensure_device_current() -> bool:\n" +
+            "        if self.device_current:\n" +
+            "            return true\n" +
+            "        self._copy_mirror_to_device()"
+        )
+
+    it "never promotes an emptied mirror during CUDA surface cleanup":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain(
+            "me _cleanup_cuda_surface():\n" +
+            "        self.cpu_fallback_used = false\n" +
+            "        self.completion_unknown = false\n" +
+            "        self.device_current = false\n" +
+            "        self.mirror_current = false"
         )
 
     it "never labels CPU-rendered fallback pixels as device readback":
@@ -72,6 +121,8 @@ describe "CudaBackend RenderBackend facade":
         )
         expect(source).to_contain(
             "if self.completion_unknown:\n" +
+            "            return\n" +
+            "        if not self._begin_cpu_path():\n" +
             "            return\n" +
             "        self.mirror.draw_image("
         )

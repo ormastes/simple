@@ -371,6 +371,8 @@ class CudaBackend:
     last_image_kernel: text
     cpu_fallback_used: bool
     completion_unknown: bool
+    device_current: bool
+    mirror_current: bool
     last_probe: BackendProbeResult
 
     static fn create() -> CudaBackend:
@@ -395,6 +397,8 @@ class CudaBackend:
             last_image_kernel: "",
             cpu_fallback_used: false,
             completion_unknown: false,
+            device_current: false,
+            mirror_current: true,
             last_probe: BackendProbeResult.unavailable("cuda", "not probed")
         )
 
@@ -463,6 +467,8 @@ class CudaBackend:
             return false
         self.last_probe = _cuda_2d_kernel_ready(cuda_device_name(0))
         self.initialized = true
+        self.device_current = false
+        self.mirror_current = true
         true
 
     me _alloc_launch_buffers(bytes: i64) -> bool:
@@ -516,6 +522,8 @@ class CudaBackend:
     me _cleanup_cuda_surface():
         self.cpu_fallback_used = false
         self.completion_unknown = false
+        self.device_current = false
+        self.mirror_current = false
         self.last_image_kernel = ""
         self._free_launch_buffers()
         if self.d_font_atlas != 0:
@@ -532,6 +540,8 @@ class CudaBackend:
     me _copy_mirror_to_device() -> bool:
         if not self.initialized or not self.session.is_valid() or self.d_framebuffer == 0 or self.framebuffer_bytes <= 0:
             return false
+        if not self._ensure_mirror_current():
+            return false
         val pixels = self.mirror.read_pixels()
         val expected_pixels = self.width() * self.height()
         if pixels.len() != expected_pixels:
@@ -542,11 +552,47 @@ class CudaBackend:
         _write_u32_pixels_to_host(host_pixels, pixels, expected_pixels)
         val upload_rc = cuda_memcpy_htod(self.d_framebuffer, host_pixels, self.framebuffer_bytes)
         cuda_backend_free(host_pixels, self.framebuffer_bytes)
-        upload_rc == CUDA_SUCCESS
+        if upload_rc == CUDA_SUCCESS:
+            self.device_current = true
+            return true
+        false
 
-    me _disable_device_readback_after_mirror_sync_failure():
-        self.last_probe = _cuda_context_failure("CUDA mirror-to-device synchronization failed")
-        self.initialized = false
+    me _ensure_mirror_current() -> bool:
+        if self.mirror_current:
+            return true
+        if not self.initialized or not self.session.is_valid() or self.readback_ptr == 0 or self.d_framebuffer == 0:
+            return false
+        if self.session.sync() != CUDA_SUCCESS:
+            self._quarantine_completion_unknown()
+            return false
+        if cuda_memcpy_dtoh(self.readback_ptr, self.d_framebuffer, self.framebuffer_bytes) != CUDA_SUCCESS:
+            return false
+        val pixels = _read_u32_pixels_from_host(self.readback_ptr, self.width() * self.height())
+        if pixels.len() != self.width() * self.height():
+            return false
+        self.mirror.buf = pixels
+        self.mirror_current = true
+        true
+
+    me _ensure_device_current() -> bool:
+        if self.device_current:
+            return true
+        self._copy_mirror_to_device()
+
+    me _begin_cpu_path() -> bool:
+        if self.completion_unknown or self.session.completion_unknown:
+            self._quarantine_completion_unknown()
+            return false
+        self._ensure_mirror_current()
+
+    me _finish_cpu_path():
+        self.cpu_fallback_used = true
+        self.mirror_current = true
+        self.device_current = false
+
+    me _mark_device_mutation():
+        self.device_current = true
+        self.mirror_current = false
 
     me _quarantine_completion_unknown():
         self.session.quarantine_completion_unknown()
@@ -554,24 +600,18 @@ class CudaBackend:
         self.initialized = false
         self.last_probe = _cuda_context_failure("CUDA kernel completion is unknown")
 
-    me _sync_mirror_to_device_after_cpu_path():
-        self.cpu_fallback_used = true
-        if self.completion_unknown or self.session.completion_unknown:
-            self._quarantine_completion_unknown()
-            return
-        if self.initialized:
-            if not self._copy_mirror_to_device():
-                self._disable_device_readback_after_mirror_sync_failure()
-
     me _draw_image_kernel(kernel_name: text, x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> bool:
         self.last_image_kernel = ""
-        if not self.initialized or not self.session.is_valid():
+        if (not self.initialized or not self.session.is_valid() or
+                self.mirror.clip_enabled or self.mirror.mask_buf.len() != 0):
             return false
         if w <= 0 or h <= 0:
             return true
         val pixel_count = w * h
         val image_bytes = _i64(pixel_count) * 4
         if pixel_count > pixels.len():
+            return false
+        if kernel_name != "simple_2d_copy_u32" and not self._ensure_device_current():
             return false
         val host_pixels = cuda_backend_alloc(image_bytes)
         val d_pixels = self.session.alloc(image_bytes)
@@ -592,6 +632,7 @@ class CudaBackend:
                     val sync_rc = self.session.sync()
                     if sync_rc == CUDA_SUCCESS:
                         self.last_image_kernel = kernel_name
+                        self._mark_device_mutation()
                         cuda_backend_free(host_pixels, image_bytes)
                         self.session.free(d_pixels)
                         return true
@@ -611,12 +652,13 @@ class CudaBackend:
         if w <= 0 or h <= 0:
             return
         if self._draw_image_kernel("kernel_draw_image_blend", x, y, w, h, pixels):
-            self.mirror.draw_image_blend(x, y, w, h, pixels)
             return
         if self.completion_unknown:
             return
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_image_blend(x, y, w, h, pixels)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
 
     me _upload_font_atlas(batch: FontRenderBatch) -> bool:
         if not self.initialized or not self.session.is_valid() or not batch.valid or batch.atlas_width <= 0 or batch.atlas_height <= 0:
@@ -686,6 +728,8 @@ class CudaBackend:
             return 0
         if not self.session.font_module_ready():
             return 0
+        if not self._ensure_device_current():
+            return 0
         if not self._upload_font_atlas(batch):
             return 0
         val dst_count = _i64(self.width()) * _i64(self.height())
@@ -721,7 +765,7 @@ class CudaBackend:
             if self.session.sync() != CUDA_SUCCESS:
                 self._quarantine_completion_unknown()
                 return submitted
-            self.mirror.draw_image_blend(dst_x.?, dst_y.?, quad.width, quad.height, pixels)
+            self._mark_device_mutation()
             submitted = submitted + 1
         submitted
 
@@ -760,13 +804,15 @@ impl RenderBackend for CudaBackend:
             _write_clear_launch_args(self.clear_val_ptr, self.clear_args_ptr, self.d_framebuffer, color, self.width(), self.height())
             val rc = self.session.fill_kernel(_i64(self.width()), _i64(self.height()), self.clear_args_ptr)
             if rc == CUDA_SUCCESS:
-                self.mirror.clear(color)
+                self._mark_device_mutation()
                 return
+        if not self._begin_cpu_path():
+            return
         self.mirror.clear(color)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if (self.initialized and not self.mirror.clip_enabled and
-                self.mirror.mask_buf.len() == 0):
+                self.mirror.mask_buf.len() == 0 and self._ensure_device_current()):
             if w <= 0 or h <= 0:
                 return
             cuda_backend_write_i64(self.rect_val_ptr, 0, self.d_framebuffer)
@@ -781,13 +827,15 @@ impl RenderBackend for CudaBackend:
             val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
             val rc = self.session.launch_kernel_args("kernel_draw_rect_outline", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
             if rc == CUDA_SUCCESS:
-                self.mirror.draw_rect(x, y, w, h, color)
+                self._mark_device_mutation()
                 return
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_rect(x, y, w, h, color)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         if (self.initialized and not self.mirror.clip_enabled and
-                self.mirror.mask_buf.len() == 0):
+                self.mirror.mask_buf.len() == 0 and self._ensure_device_current()):
             if w <= 0 or h <= 0:
                 return
             cuda_backend_write_i64(self.rect_val_ptr, 0, self.d_framebuffer)
@@ -802,13 +850,15 @@ impl RenderBackend for CudaBackend:
             val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
             val rc = self.session.launch_kernel_args("kernel_draw_rect_filled", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
             if rc == CUDA_SUCCESS:
-                self.mirror.draw_rect_filled(x, y, w, h, color)
+                self._mark_device_mutation()
                 return
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_rect_filled(x, y, w, h, color)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         if (self.initialized and thickness > 0 and
-                not self.mirror.clip_enabled and self.mirror.mask_buf.len() == 0):
+                not self.mirror.clip_enabled and self.mirror.mask_buf.len() == 0 and self._ensure_device_current()):
             _write_line_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, x1, y1, x2, y2, color, thickness, self.width(), self.height())
             var dx = x2 - x1
             if dx < 0:
@@ -821,10 +871,12 @@ impl RenderBackend for CudaBackend:
             val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
             val rc = self.session.launch_kernel_args("kernel_draw_line", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
             if rc == CUDA_SUCCESS:
-                self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
+                self._mark_device_mutation()
                 return
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_line(x1, y1, x2, y2, color, thickness)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         # KNOWN PARITY NOTE: kernel_draw_circle uses a per-pixel distance annulus
         # ((r-1)² ≤ dx²+dy² ≤ r²) — a pre-existing semantic mismatch vs the CPU
@@ -836,33 +888,37 @@ impl RenderBackend for CudaBackend:
             self.draw_rect_filled(cx, cy, 1, 1, color)
             return
         if (self.initialized and r > 0 and
-                not self.mirror.clip_enabled and self.mirror.mask_buf.len() == 0):
+                not self.mirror.clip_enabled and self.mirror.mask_buf.len() == 0 and self._ensure_device_current()):
             _write_circle_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, cx, cy, r, color, self.width(), self.height(), 0)
             val diameter = 2 * r + 1
             val total = _i64(diameter) * _i64(diameter)
             val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
             val rc = self.session.launch_kernel_args("kernel_draw_circle", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
             if rc == CUDA_SUCCESS:
-                self.mirror.draw_circle(cx, cy, r, color)
+                self._mark_device_mutation()
                 return
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_circle(cx, cy, r, color)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_circle_filled(cx: i32, cy: i32, r: i32, color: u32):
         if r == 0:
             self.draw_rect_filled(cx, cy, 1, 1, color)
             return
         if (self.initialized and r > 0 and
-                not self.mirror.clip_enabled and self.mirror.mask_buf.len() == 0):
+                not self.mirror.clip_enabled and self.mirror.mask_buf.len() == 0 and self._ensure_device_current()):
             _write_circle_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, cx, cy, r, color, self.width(), self.height(), 1)
             val diameter = 2 * r + 1
             val total = _i64(diameter) * _i64(diameter)
             val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
             val rc = self.session.launch_kernel_args("kernel_draw_circle_filled", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
             if rc == CUDA_SUCCESS:
-                self.mirror.draw_circle_filled(cx, cy, r, color)
+                self._mark_device_mutation()
                 return
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_circle_filled(cx, cy, r, color)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         # KNOWN PARITY NOTE: kernel_draw_rounded_rect is a FILLED interior test
         # (corners excluded via distance check, interior pixels painted). The CPU
@@ -881,22 +937,26 @@ impl RenderBackend for CudaBackend:
         if r > h / 2:
             r = h / 2
         if (self.initialized and not self.mirror.clip_enabled and
-                self.mirror.mask_buf.len() == 0):
+                self.mirror.mask_buf.len() == 0 and self._ensure_device_current()):
             _write_rounded_rect_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, x, y, w, h, r, color, self.width(), self.height())
             val total = _i64(w) * _i64(h)
             val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
             val rc = self.session.launch_kernel_args("kernel_draw_rounded_rect", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
             if rc == CUDA_SUCCESS:
-                self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
+                self._mark_device_mutation()
                 return
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_rounded_rect(x, y, w, h, radius, color)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_triangle_filled(x1, y1, x2, y2, x3, y3, color)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         if (self.initialized and not self.mirror.clip_enabled and
-                self.mirror.mask_buf.len() == 0):
+                self.mirror.mask_buf.len() == 0 and self._ensure_device_current()):
             if w <= 0 or h <= 0:
                 return
             _write_gradient_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, x, y, w, h, top_color, bottom_color, self.width(), self.height())
@@ -904,24 +964,30 @@ impl RenderBackend for CudaBackend:
             val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
             val rc = self.session.launch_kernel_args("kernel_draw_gradient_rect", grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
             if rc == CUDA_SUCCESS:
-                self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
+                self._mark_device_mutation()
                 return
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_gradient_rect(x, y, w, h, top_color, bottom_color)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         if not self.initialized:
+            if not self._begin_cpu_path():
+                return
             self.mirror.draw_text(x, y, text_val, color, font_size)
+            self._finish_cpu_path()
             return
         val text_buf = text_transparent_blit_buffer(text_val, color, font_size)
         if text_buf.is_empty():
             return
         if self._draw_image_kernel("kernel_draw_image_nonzero", x, y, text_buf.width, text_buf.height, text_buf.pixels):
-            self.mirror.draw_text(x, y, text_val, color, font_size)
             return
         if self.completion_unknown:
             return
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_text(x, y, text_val, color, font_size)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if w <= 0 or h <= 0:
             return
@@ -931,12 +997,13 @@ impl RenderBackend for CudaBackend:
         )
         val kernel_name = if full_frame: "simple_2d_copy_u32" else: "kernel_draw_image"
         if self._draw_image_kernel(kernel_name, x, y, w, h, pixels):
-            self.mirror.draw_image(x, y, w, h, pixels)
             return
         if self.completion_unknown:
             return
+        if not self._begin_cpu_path():
+            return
         self.mirror.draw_image(x, y, w, h, pixels)
-        self._sync_mirror_to_device_after_cpu_path()
+        self._finish_cpu_path()
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         self._draw_image_blend_or_fallback(x, y, w, h, pixels)
     me set_clip(x: i32, y: i32, w: i32, h: i32):
@@ -950,7 +1017,7 @@ impl RenderBackend for CudaBackend:
     me present():
         if self.session.completion_unknown:
             self._quarantine_completion_unknown()
-        if self.initialized and not self.completion_unknown:
+        if self.initialized and self.device_current and not self.completion_unknown:
             if self.session.sync() != CUDA_SUCCESS:
                 self._quarantine_completion_unknown()
         self.mirror.present()
@@ -962,7 +1029,7 @@ impl RenderBackend for CudaBackend:
             self._quarantine_completion_unknown()
         if self.completion_unknown:
             return engine2d_readback([], "completion_unknown")
-        if self.initialized and self.readback_ptr > 0 and self.d_framebuffer > 0:
+        if self.device_current and self.initialized and self.readback_ptr > 0 and self.d_framebuffer > 0:
             val sync_rc = self.session.sync()
             if sync_rc != CUDA_SUCCESS:
                 self._quarantine_completion_unknown()
@@ -970,13 +1037,19 @@ impl RenderBackend for CudaBackend:
             val rc = cuda_memcpy_dtoh(self.readback_ptr, self.d_framebuffer, self.framebuffer_bytes)
             if rc == CUDA_SUCCESS:
                 val pixels = _read_u32_pixels_from_host(self.readback_ptr, self.width() * self.height())
+                self.mirror.buf = pixels
+                self.mirror_current = true
                 if self.cpu_fallback_used:
                     return engine2d_readback_with_identity(pixels, "cpu_fallback", 0, 0)
                 val device_identity = cuda_device_identity(self.session.device)
                 if device_identity <= 0:
                     return engine2d_readback([], "device_identity_unknown")
                 return engine2d_readback_with_identity(pixels, "device_readback", self.d_framebuffer, device_identity)
-        engine2d_readback(self.mirror.read_pixels(), "cpu_mirror")
+            return engine2d_readback([], "readback_failed")
+        if self.mirror_current:
+            val source = if self.cpu_fallback_used: "cpu_fallback" else: "cpu_mirror"
+            return engine2d_readback(self.mirror.read_pixels(), source)
+        engine2d_readback([], "readback_failed")
     fn width() -> i32:
         self.mirror.width()
     fn height() -> i32:
