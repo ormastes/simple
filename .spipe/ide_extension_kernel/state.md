@@ -52,7 +52,18 @@ Started: 2026-07-29. Plan landed origin/main e8276bdacbcd.
 ## Contract-change protocol
 Shared files (src/lib/common/sdn/**, src/lib/editor/extensions/{contract,api,registry,host,manifest,manifest_sdn}.spl) are edited ONLY by the foundation owner (this session / delegated S-agents). Lanes file change requests here.
 
-## Lane ownership (plan §3) — starts after Phase S exit gate
-L1 Markdown (controller/shell owner) | L2 Writer | L3 Sheets | L4 Slides |
-L5 Theme lib-side | L6 isolation/security | L7 capability truth + bridges.
-Only ordered cross-lane edge: L5 deletes extensions/theme_manager.spl after L1 drops refs.
+## Lane status (2026-07-29, parallel phase)
+| Lane | Status | Commit | Notes |
+|---|---|---|---|
+| L1 Markdown | verifying | — | new specs 13/13 unit + 5/5 system green; controller baseline 65/92 exact match; final report pending |
+| L2 Writer | RELAUNCHED | — | first agent hit session limit post-implementation; work on disk (writer_ext.spl, word_extension_spec.spl, word_app.spl +349/-102); verification agent running |
+| L3 Sheets | LANDED | 51437cee | function registry + DOUBLE fixture; 1037-case baseline unchanged |
+| L4 Slides | LANDED | de71d056 | layout/element registries; 11/11 new, 133/133 baselines |
+| L5 Theme | verify pending | — | code+report done; specs never reached Results: under load; verification agent running |
+| L6 Security | LANDED | eb170580 | path containment, default-deny, crash-loop; 17/17 |
+| L7 Capability | LANDED | 23b18383 | live states, SDN plugin decoder, vscode check: 35 mismatches (bridge disconnected) |
+Only ordered cross-lane edge: L5 deletes extensions/theme_manager.spl after L1 drops refs
+(L5 found ZERO importers repo-wide; deprecation header added, deletion deferred).
+Landing protocol under WC contention: git-plumbing commits (temp GIT_INDEX_FILE,
+read-tree FETCH_HEAD, update-index only owned paths, commit-tree, SSH push) —
+jj WC is contested by parallel sessions and update-stale WIPES uncommitted files.
