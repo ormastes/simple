@@ -2232,6 +2232,12 @@ class SimpleWindowManager {
       if (!el || !this.taskbar.contains(el)) return;
       this._activateTaskbarItem(el, ev);
     });
+    this.taskbar.addEventListener('contextmenu', (ev) => {
+      const el = ev.target.closest('[data-action]');
+      if (!el || !this.taskbar.contains(el)) return;
+      ev.preventDefault();
+      this._sendHostWmPointer(ev, 'down');
+    });
     this.taskbar.addEventListener('keydown', (ev) => {
       if (ev.key !== 'Enter' && ev.key !== ' ') return;
       const el = ev.target.closest('[data-action]');

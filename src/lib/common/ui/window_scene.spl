@@ -816,11 +816,15 @@ fn _shared_wm_command_lane_dispatch(scene: SharedWmScene, chrome: SharedWmChrome
         return _shared_wm_dispatch_result("command_lane_clock", "clock", "", "", scene)
     _shared_wm_dispatch_result("command_lane", "command_lane", "", "", scene)
 
-fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i32) -> SharedWmDispatchResult:
+fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i32, button: text) -> SharedWmDispatchResult:
     val slot_w = 56
     val slot = x / slot_w
     if slot >= 0 and slot < taskbar.pinned.len():
         val app = taskbar.pinned[slot]
+        if button == "right":
+            return _shared_wm_dispatch_result(
+                "unpin_app", app.app_id, app.app_id, "", scene
+            )
         # Scene z-order is MRU order: both WindowManager and SimpleOS raise a
         # focused window. Keep the scan indexed at this existing by-value
         # boundary for the freestanding native-safe profile.
@@ -845,6 +849,11 @@ fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i
     val running_index = slot - taskbar.pinned.len()
     if running_index >= 0 and running_index < taskbar.running.len():
         val running = taskbar.running[running_index]
+        if button == "right":
+            return _shared_wm_dispatch_result(
+                "pin_app", running.app_id, running.app_id,
+                running.window_id, scene
+            )
         val focused_scene = shared_wm_focus_window_by_window_id(scene, running.window_id)
         return _shared_wm_dispatch_result("focus_window", running.window_id, running.app_id, running.window_id, focused_scene)
     _shared_wm_dispatch_result("taskbar_empty", "taskbar", "", "", scene)
@@ -882,7 +891,7 @@ fn _shared_wm_content_dispatch(scene: SharedWmScene, x: i32, y: i32) -> SharedWm
 fn _shared_wm_component_kind(action: text) -> text:
     if action == "begin_drag_window" or action == "focus_window" or action == "close_window" or action == "minimize_window":
         return "window"
-    if action == "launch_app":
+    if action == "launch_app" or action == "pin_app" or action == "unpin_app":
         return "taskbar"
     if action == "command_lane_clock" or action == "command_lane_icon" or action == "command_lane":
         return "command_lane"
@@ -918,12 +927,16 @@ fn _shared_wm_event_target_translation(scene_key: text, input_key: text, scene: 
 
 fn shared_wm_dispatch_pointer(scene: SharedWmScene, taskbar: TaskbarModel, x: i32, y: i32, button: text, kind: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> SharedWmDispatchResult:
     val chrome = shared_wm_scene_chrome(scene, dpi_scale_milli, clock_label, right_icon_count, taskbar.pinned.len() + taskbar.running.len())
-    if kind != "down" or button != "left":
+    if kind != "down" or (button != "left" and button != "right"):
+        return _shared_wm_dispatch_result("ignored", "", "", "", scene)
+    if button == "right":
+        if _shared_wm_rect_contains(chrome.taskbar, x, y):
+            return _shared_wm_taskbar_dispatch(scene, taskbar, x, button)
         return _shared_wm_dispatch_result("ignored", "", "", "", scene)
     if _shared_wm_rect_contains(chrome.command_lane, x, y):
         return _shared_wm_command_lane_dispatch(scene, chrome, x)
     if _shared_wm_rect_contains(chrome.taskbar, x, y):
-        return _shared_wm_taskbar_dispatch(scene, taskbar, x)
+        return _shared_wm_taskbar_dispatch(scene, taskbar, x, button)
     if _shared_wm_rect_contains(chrome.content_area, x, y):
         return _shared_wm_content_dispatch(scene, x, y)
     _shared_wm_dispatch_result("outside", "", "", "", scene)

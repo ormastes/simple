@@ -1,6 +1,12 @@
 use std.spec
 use app.ui.web.wm_bridge.{WmBridge}
-use app.ui.web.taskbar_runtime.{host_taskbar_runtime_reset, host_taskbar_runtime_enable}
+use app.ui.web.taskbar_runtime.{
+    host_taskbar_runtime_clear_persisted_layout,
+    host_taskbar_runtime_enable,
+    host_taskbar_runtime_pinned_app_count,
+    host_taskbar_runtime_pinned_app_id,
+    host_taskbar_runtime_reset,
+}
 use common.ui.builder.{column, label, build_tree_with_title}
 use nogc_sync_mut.ui.session.{UISession, new_session}
 use common.ui.window_surface_registry.{UI_SURFACE_KIND_SIMPLE_WEB}
@@ -57,3 +63,29 @@ describe "host web WM runtime loop wiring":
             Ok(marker):
                 expect(marker).to_contain("command=ignored")
                 expect(bridge.session.active_surface()).to_equal("surf1")
+
+    it "persists host taskbar secondary-click pin actions":
+        host_taskbar_runtime_clear_persisted_layout()
+        host_taskbar_runtime_reset()
+        host_taskbar_runtime_enable("embedded", false)
+        val baseline = host_taskbar_runtime_pinned_app_count()
+        val removed_app_id = host_taskbar_runtime_pinned_app_id(0)
+        var session = _session_with_two_windows()
+        val bridge = WmBridge.new(session)
+
+        val unpinned = bridge.handle_host_wm_pointer_loop_step(
+            1, 575, "right", "down", 800, 600
+        )
+        expect(unpinned.is_ok()).to_equal(true)
+        expect(host_taskbar_runtime_pinned_app_count()).to_equal(baseline - 1)
+        expect(host_taskbar_runtime_pinned_app_id(0) == removed_app_id).to_equal(false)
+
+        val pinned = bridge.handle_host_wm_pointer_loop_step(
+            (baseline - 1).to_i32() * 56 + 1,
+            575, "right", "down", 800, 600
+        )
+        expect(pinned.is_ok()).to_equal(true)
+        expect(host_taskbar_runtime_pinned_app_count()).to_equal(baseline)
+        expect(
+            host_taskbar_runtime_pinned_app_id(baseline - 1)
+        ).to_equal("demo.one")

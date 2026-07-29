@@ -616,6 +616,17 @@ implementation-in-progress
   `g_mount_table` access; that run is rejected as evidence and leaves the live
   persistence gate red. The no-stub rebuild fails closed on unresolved VFS,
   logging, FAT32, and panic owners.
+- wm-taskbar-secondary-action: Secondary-clicking a pinned taskbar slot now
+  emits `unpin_app`; secondary-clicking a running slot emits `pin_app`. Both
+  carry the authoritative scalar `app_id` through the shared runtime command
+  adapter to host and SimpleOS persistence owners. The browser taskbar now
+  forwards its native `contextmenu` event into that same boundary; SimpleOS
+  already normalizes button code 3 to `right`. Secondary clicks outside the
+  taskbar remain ignored. A no-stub pure-Simple Stage-2 native probe
+  linked with zero unresolved stubs and exited `0`. The wider host `WmBridge`
+  closure compiled but did not link because the selected core runtime capsule
+  intentionally excludes SQLite, so live host persistence remains a runtime
+  gate rather than inferred evidence.
 
 ## Remaining runtime gates
 
