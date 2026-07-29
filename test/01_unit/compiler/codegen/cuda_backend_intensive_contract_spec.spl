@@ -10,6 +10,11 @@ use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalI
 use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, GpuAtomicOpKind}
 use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, MirConstValue, LocalKind, MirTypeDef, MirTypeDefKind, MirFieldDef}
 
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn cuda_i32() -> MirType: MirType(kind: MirTypeKind.I32)
+fn cuda_i64() -> MirType: MirType(kind: MirTypeKind.I64)
 fn cuda_u32() -> MirType: MirType(kind: MirTypeKind.U32)
 fn cuda_u64() -> MirType: MirType(kind: MirTypeKind.U64)
 fn cuda_bool() -> MirType: MirType(kind: MirTypeKind.Bool)
@@ -65,6 +70,81 @@ fn assert_no_placeholder_output(ptx: text):
     expect(ptx.contains("not implemented")).to_equal(false)
 
 describe "CUDA backend intensive MIR contract":
+    it "assembles I64, U64-global, and direct U32 GPU index paths":
+        val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.GpuGlobalId(LocalId(id: 0), 0), span: nil),
+            MirInst(kind: MirInstKind.GpuLocalId(LocalId(id: 1), 1), span: nil),
+            MirInst(kind: MirInstKind.GpuBlockId(LocalId(id: 2), 2), span: nil),
+            MirInst(kind: MirInstKind.GpuBlockDim(LocalId(id: 3), 0), span: nil),
+            MirInst(kind: MirInstKind.GpuGridDim(LocalId(id: 4), 1), span: nil),
+            MirInst(kind: MirInstKind.GpuLocalId(LocalId(id: 5), 0), span: nil),
+            MirInst(kind: MirInstKind.GpuGlobalId(LocalId(id: 6), 2), span: nil)
+        ], terminator: MirTerminator.Ret(nil))
+        val locals = [
+            cuda_temp(0, cuda_i64()), cuda_temp(1, cuda_i64()), cuda_temp(2, cuda_i64()),
+            cuda_temp(3, cuda_i64()), cuda_temp(4, cuda_i64()), cuda_temp(5, cuda_u32()),
+            cuda_temp(6, cuda_u64())
+        ]
+        val fn_ = cuda_function(20, "cuda_i64_indices", [], MirType.unit(), locals, [block], true)
+        val ptx = compile_supported_cuda([fn_])
+        expect(ptx).to_contain("cvt.s64.u32 %r10, %r7;")
+        expect(ptx).to_contain("mul.lo.s64 %r13, %r11, %r12;")
+        expect(ptx).to_contain("add.s64 %r0, %r13, %r10;")
+        expect(ptx).to_contain("mov.u32 %r14, %tid.y;")
+        expect(ptx).to_contain("cvt.s64.u32 %r1, %r14;")
+        expect(ptx).to_contain("mov.u32 %r15, %ctaid.z;")
+        expect(ptx).to_contain("mov.u32 %r16, %ntid.x;")
+        expect(ptx).to_contain("mov.u32 %r17, %nctaid.y;")
+        expect(ptx).to_contain("mov.u32 %r5, %tid.x;")
+        expect(ptx).to_contain("cvt.u64.u32 %r21, %r18;")
+        expect(ptx).to_contain("mul.lo.u64 %r24, %r22, %r23;")
+        expect(ptx).to_contain("add.u64 %r6, %r24, %r21;")
+        expect(ptx.contains(".reg .u32 %r0;")).to_equal(false)
+
+        val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v ptxas >/dev/null 2>&1"])
+        if available == 0:
+            val ptx_path = "/tmp/simple_cuda_i64_indices.ptx"
+            val cubin_path = "/tmp/simple_cuda_i64_indices.cubin"
+            expect(rt_file_write_text(ptx_path, ptx)).to_equal(true)
+            val (_as_out, as_err, as_code) = rt_process_run("ptxas", ["-arch=sm_86", ptx_path, "-o", cubin_path])
+            expect(as_code).to_equal(0)
+            expect(as_err).to_equal("")
+        else:
+            expect(ptx).to_contain(".target sm_86")
+
+    it "keeps U32 dimensions direct and recognizes dimension-only kernels":
+        val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.GpuBlockDim(LocalId(id: 0), 2), span: nil),
+            MirInst(kind: MirInstKind.GpuGridDim(LocalId(id: 1), 0), span: nil)
+        ], terminator: MirTerminator.Ret(nil))
+        val fn_ = cuda_function(
+            21, "cuda_u32_dimensions", [], MirType.unit(),
+            [cuda_temp(0, cuda_u32()), cuda_temp(1, cuda_u32())],
+            [block], false
+        )
+        val ptx = compile_supported_cuda([fn_])
+        expect(ptx).to_contain(".visible .entry cuda_u32_dimensions(")
+        expect(ptx).to_contain("mov.u32 %r0, %ntid.z;")
+        expect(ptx).to_contain("mov.u32 %r1, %nctaid.x;")
+        expect(ptx.contains("cvt.")).to_equal(false)
+
+    it "rejects invalid GPU index dimensions and destination types":
+        val bad_dim_block = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.GpuGlobalId(LocalId(id: 0), 3), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val bad_dim = cuda_function(22, "cuda_bad_index_dim", [], MirType.unit(), [cuda_temp(0, cuda_i64())], [bad_dim_block], true)
+        assert_backend_error_contains(bad_dim, "dimension must be 0, 1, or 2")
+
+        val bad_type_block = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.GpuLocalId(LocalId(id: 0), 0), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val bad_type = cuda_function(23, "cuda_bad_index_type", [], MirType.unit(), [cuda_temp(0, cuda_i32())], [bad_type_block], true)
+        assert_backend_error_contains(bad_type, "destination must be U32, I64, or U64")
+
     it "emits if branches and loop backedges as executable PTX control flow":
         val blocks = [
             MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [], terminator: MirTerminator.If(MirOperand.copy(LocalId(id: 0)), BlockId(id: 1), BlockId(id: 3))),

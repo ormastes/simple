@@ -192,6 +192,9 @@ class CudaBackend:
                 func.signature.return_type
             )
 
+        for local in func.locals:
+            builder.reserve_reg_id(local.id.id)
+
         # Emit register declarations for locals
         for local in func.locals:
             match local.kind:
@@ -245,7 +248,7 @@ class CudaBackend:
         for block in func.blocks:
             for inst in block.instructions:
                 match inst.kind:
-                    case GpuGlobalId(_, _) | GpuLocalId(_, _) | GpuBlockId(_, _) | GpuBarrier(_) | GpuSharedAlloc(_, _, _) | GpuAtomicOp(_, _, _, _) | GpuAtomicCas(_, _, _, _):
+                    case GpuGlobalId(_, _) | GpuLocalId(_, _) | GpuBlockId(_, _) | GpuBlockDim(_, _) | GpuGridDim(_, _) | GpuBarrier(_) | GpuSharedAlloc(_, _, _) | GpuAtomicOp(_, _, _, _) | GpuAtomicCas(_, _, _, _):
                         return true
                     case _:
                         ()
@@ -315,24 +318,19 @@ class CudaBackend:
 
             # GPU-specific instructions
             case GpuGlobalId(dest, dim):
-                val reg = "%r{dest.id}"
-                builder.emit_compute_global_id(reg, dim)
+                return self.compile_gpu_index(builder, dest, dim, func, "global")
 
             case GpuLocalId(dest, dim):
-                val reg = "%r{dest.id}"
-                builder.emit_get_thread_id(reg, dim)
+                return self.compile_gpu_index(builder, dest, dim, func, "local")
 
             case GpuBlockId(dest, dim):
-                val reg = "%r{dest.id}"
-                builder.emit_get_block_id(reg, dim)
+                return self.compile_gpu_index(builder, dest, dim, func, "block")
 
             case GpuBlockDim(dest, dim):
-                val reg = "%r{dest.id}"
-                builder.emit_get_block_dim(reg, dim)
+                return self.compile_gpu_index(builder, dest, dim, func, "block_dim")
 
             case GpuGridDim(dest, dim):
-                val reg = "%r{dest.id}"
-                builder.emit_get_grid_dim(reg, dim)
+                return self.compile_gpu_index(builder, dest, dim, func, "grid_dim")
 
             case GpuBarrier(scope):
                 match scope:
@@ -441,6 +439,80 @@ class CudaBackend:
                 ))
 
         Ok(())
+
+    me compile_gpu_index(builder: PtxBuilder, dest: LocalId, dim: i64, func: MirFunction, intrinsic: text) -> Result<(), CompileError>:
+        if dim < 0 or dim > 2:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA GPU index dimension must be 0, 1, or 2"))
+
+        val dest_ty = self.local_primitive_type(func, dest)?
+        val dest_reg = "%r{dest.id}"
+        if intrinsic == "global":
+            match dest_ty:
+                case U32:
+                    builder.emit_compute_global_id(dest_reg, dim)
+                    return Ok(())
+                case I64 | U64:
+                    self.compile_wide_global_index(builder, dest_reg, dim, dest_ty)
+                    return Ok(())
+                case _:
+                    return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA GPU index destination must be U32, I64, or U64"))
+
+        val value_reg = match dest_ty:
+            case U32:
+                dest_reg
+            case I64 | U64:
+                val widened_source = builder.alloc_reg(PrimitiveType.U32)
+                builder.emit_reg_decl(widened_source, PrimitiveType.U32)
+                widened_source
+            case _:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA GPU index destination must be U32, I64, or U64"))
+
+        match intrinsic:
+            case "local":
+                builder.emit_get_thread_id(value_reg, dim)
+            case "block":
+                builder.emit_get_block_id(value_reg, dim)
+            case "block_dim":
+                builder.emit_get_block_dim(value_reg, dim)
+            case "grid_dim":
+                builder.emit_get_grid_dim(value_reg, dim)
+            case _:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA backend received unknown GPU index intrinsic: {intrinsic}"))
+
+        match dest_ty:
+            case I64:
+                builder.emit_line("cvt.s64.u32 {dest_reg}, {value_reg};")
+            case U64:
+                builder.emit_line("cvt.u64.u32 {dest_reg}, {value_reg};")
+            case _:
+                ()
+        Ok(())
+
+    me compile_wide_global_index(builder: PtxBuilder, dest_reg: text, dim: i64, ty: PrimitiveType):
+        val tid32 = builder.alloc_reg(PrimitiveType.U32)
+        val bid32 = builder.alloc_reg(PrimitiveType.U32)
+        val bdim32 = builder.alloc_reg(PrimitiveType.U32)
+        builder.emit_reg_decl(tid32, PrimitiveType.U32)
+        builder.emit_reg_decl(bid32, PrimitiveType.U32)
+        builder.emit_reg_decl(bdim32, PrimitiveType.U32)
+        builder.emit_get_thread_id(tid32, dim)
+        builder.emit_get_block_id(bid32, dim)
+        builder.emit_get_block_dim(bdim32, dim)
+
+        val tid64 = builder.alloc_reg(ty)
+        val bid64 = builder.alloc_reg(ty)
+        val bdim64 = builder.alloc_reg(ty)
+        val tmp64 = builder.alloc_reg(ty)
+        builder.emit_reg_decl(tid64, ty)
+        builder.emit_reg_decl(bid64, ty)
+        builder.emit_reg_decl(bdim64, ty)
+        builder.emit_reg_decl(tmp64, ty)
+        val suffix = if ty == PrimitiveType.I64: ".s64" else: ".u64"
+        builder.emit_line("cvt{suffix}.u32 {tid64}, {tid32};")
+        builder.emit_line("cvt{suffix}.u32 {bid64}, {bid32};")
+        builder.emit_line("cvt{suffix}.u32 {bdim64}, {bdim32};")
+        builder.emit_line("mul.lo{suffix} {tmp64}, {bid64}, {bdim64};")
+        builder.emit_line("add{suffix} {dest_reg}, {tmp64}, {tid64};")
 
     me compile_const(builder: PtxBuilder, dest: LocalId, value: MirConstValue, ty: MirType):
         """Compile constant load."""
