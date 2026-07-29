@@ -608,6 +608,14 @@ implementation-in-progress
   A pure-Simple Stage-2 native probe linked and exited `0`. An attempted
   aggregate-returning modifier decoder crashed with a nil receiver, so it was
   deleted in favor of scalar inline packing/unpacking.
+- wm-taskbar-persistence-transaction: SimpleOS pin/unpin previously mutated
+  ordered app-id state and returned success even when VFS persistence failed.
+  Both paths now roll back and return false. The focused spec also covers
+  persisted unpin and running-item removal after close. A pure-Simple Stage-2
+  probe compiled only with unresolved stubs and faulted in cross-module
+  `g_mount_table` access; that run is rejected as evidence and leaves the live
+  persistence gate red. The no-stub rebuild fails closed on unresolved VFS,
+  logging, FAT32, and panic owners.
 
 ## Remaining runtime gates
 
