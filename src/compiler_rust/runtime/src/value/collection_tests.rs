@@ -80,6 +80,7 @@ use super::{
     rt_to_string,
     // Index/slice functions
     rt_index_get,
+    rt_index_of,
     rt_index_set,
     rt_slice,
     rt_len,
@@ -1587,6 +1588,29 @@ fn test_to_string_zero() {
 // ============================================================================
 // Index and Slice Function Tests
 // ============================================================================
+
+#[test]
+fn test_index_of_arrays_and_strings() {
+    let array = rt_array_new(3);
+    rt_array_push(array, RuntimeValue::from_int(10));
+    rt_array_push(array, RuntimeValue::from_int(20));
+    rt_array_push(array, RuntimeValue::from_int(30));
+    assert_eq!(rt_index_of(array, RuntimeValue::from_int(20)), 1);
+    assert_eq!(rt_index_of(array, RuntimeValue::from_int(99)), -1);
+
+    let string = rt_string_new("alpha-beta".as_ptr(), 10);
+    let needle = rt_string_new("beta".as_ptr(), 4);
+    assert_eq!(rt_index_of(string, needle), 6);
+    assert_eq!(rt_index_of(string, RuntimeValue::from_int(42)), -1);
+
+    let bytes = rt_byte_array_new(3);
+    rt_array_push(bytes, RuntimeValue::from_int(0x41));
+    rt_array_push(bytes, RuntimeValue::from_int(0x42));
+    rt_array_push(bytes, RuntimeValue::from_int(0x42));
+    assert_eq!(rt_index_of(bytes, RuntimeValue::from_int(0x42)), 1);
+    assert_eq!(rt_array_last_index_of(bytes, RuntimeValue::from_int(0x42)), 2);
+    assert_eq!(rt_index_of(bytes, RuntimeValue::from_int(0x142)), -1);
+}
 
 #[test]
 fn test_index_get_array() {

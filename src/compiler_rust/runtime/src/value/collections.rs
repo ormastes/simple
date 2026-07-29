@@ -2695,6 +2695,16 @@ pub extern "C" fn rt_for_iterable(collection: RuntimeValue) -> RuntimeValue {
     }
 }
 
+/// Find the first index of a value in an array or substring in a string.
+/// Returns -1 when the value is absent or the collection type is unsupported.
+#[no_mangle]
+pub extern "C" fn rt_index_of(collection: RuntimeValue, value: RuntimeValue) -> i64 {
+    match collection.heap_type() {
+        Some(HeapObjectType::Array) => rt_array_index_of(collection, value),
+        _ => rt_string_find(collection, value),
+    }
+}
+
 /// Index into a collection (array, tuple, string, dict)
 /// Returns NIL if out of bounds or wrong type
 #[no_mangle]
@@ -3021,10 +3031,9 @@ pub extern "C" fn rt_array_index_of(array: RuntimeValue, value: RuntimeValue) ->
 
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
-        let slice = (*arr).as_slice();
-        for (i, item) in slice.iter().enumerate() {
-            if rt_value_eq(*item, value) != 0 {
-                return i as i64;
+        for i in 0..(*arr).len as i64 {
+            if rt_value_eq(rt_array_get(array, i), value) != 0 {
+                return i;
             }
         }
         -1
@@ -3039,10 +3048,9 @@ pub extern "C" fn rt_array_last_index_of(array: RuntimeValue, value: RuntimeValu
 
     let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
     unsafe {
-        let slice = (*arr).as_slice();
-        for (i, item) in slice.iter().enumerate().rev() {
-            if rt_value_eq(*item, value) != 0 {
-                return i as i64;
+        for i in (0..(*arr).len as i64).rev() {
+            if rt_value_eq(rt_array_get(array, i), value) != 0 {
+                return i;
             }
         }
         -1
