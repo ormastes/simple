@@ -119,7 +119,7 @@ struct CUuuid {
     bytes: [u8; 16],
 }
 
-fn cuda_device_uuid_identity(bytes: &[u8; 16]) -> i64 {
+pub fn cuda_device_uuid_identity(bytes: &[u8; 16]) -> i64 {
     if bytes.iter().all(|byte| *byte == 0) {
         return 0;
     }

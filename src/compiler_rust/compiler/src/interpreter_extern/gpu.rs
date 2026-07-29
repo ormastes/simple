@@ -267,8 +267,14 @@ mod cuda_dlopen {
     use std::os::raw::c_void;
     use std::ffi::CString;
 
+    #[repr(C)]
+    pub struct CudaUuid {
+        pub bytes: [u8; 16],
+    }
+
     type CuInit = unsafe extern "C" fn(u32) -> i32;
     type CuDeviceGet = unsafe extern "C" fn(*mut i32, i32) -> i32;
+    type CuDeviceGetUuid = unsafe extern "C" fn(*mut CudaUuid, i32) -> i32;
     type CuCtxCreate = unsafe extern "C" fn(*mut *mut c_void, u32, i32) -> i32;
     type CuCtxSetCurrent = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
@@ -300,6 +306,7 @@ mod cuda_dlopen {
     pub struct CudaFns {
         pub init: CuInit,
         pub device_get: CuDeviceGet,
+        pub device_get_uuid: CuDeviceGetUuid,
         pub device_get_count: CuDeviceGetCount,
         pub ctx_create: CuCtxCreate,
         pub ctx_set_current: CuCtxSetCurrent,
@@ -369,9 +376,44 @@ mod cuda_dlopen {
                 std::mem::transmute(p)
             }};
         }
+        macro_rules! sym_alt {
+            ($primary:expr, $fallback:expr) => {{
+                let primary = CString::new($primary).ok()?;
+                let fallback = CString::new($fallback).ok()?;
+                #[cfg(unix)]
+                let mut p = libc::dlsym(handle, primary.as_ptr());
+                #[cfg(windows)]
+                let mut p = {
+                    use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                    match GetProcAddress(handle as _, primary.as_ptr() as *const u8) {
+                        Some(f) => f as *mut c_void,
+                        None => std::ptr::null_mut(),
+                    }
+                };
+                if p.is_null() {
+                    #[cfg(unix)]
+                    {
+                        p = libc::dlsym(handle, fallback.as_ptr());
+                    }
+                    #[cfg(windows)]
+                    {
+                        use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                        p = match GetProcAddress(handle as _, fallback.as_ptr() as *const u8) {
+                            Some(f) => f as *mut c_void,
+                            None => std::ptr::null_mut(),
+                        };
+                    }
+                }
+                if p.is_null() {
+                    return None;
+                }
+                std::mem::transmute(p)
+            }};
+        }
         Some(CudaFns {
             init: sym!("cuInit"),
             device_get: sym!("cuDeviceGet"),
+            device_get_uuid: sym_alt!("cuDeviceGetUuid_v2", "cuDeviceGetUuid"),
             device_get_count: sym!("cuDeviceGetCount"),
             ctx_create: sym!("cuCtxCreate_v2"),
             ctx_set_current: sym!("cuCtxSetCurrent"),
@@ -1073,6 +1115,15 @@ pub fn rt_cuda_device_identity_fn(args: &[Value]) -> Result<Value, CompileError>
     }
     #[cfg(not(feature = "cuda"))]
     {
+        if let Some(fns) = get_cuda_dl() {
+            let mut uuid = cuda_dlopen::CudaUuid { bytes: [0; 16] };
+            let r = unsafe { (fns.device_get_uuid)(&mut uuid, device as i32) };
+            if r == 0 {
+                return Ok(Value::Int(simple_runtime::cuda_runtime::cuda_device_uuid_identity(
+                    &uuid.bytes,
+                )));
+            }
+        }
         Ok(Value::Int(0))
     }
 }
@@ -4367,9 +4418,7 @@ pub fn rt_vulkan_submit_and_wait_fence_fn(args: &[Value]) -> Result<Value, Compi
 pub fn rt_vulkan_accepted_compute_submit_count_fn(_args: &[Value]) -> Result<Value, CompileError> {
     let guard = vulkan_dlopen::VK_STATE.lock().unwrap();
     Ok(Value::Int(
-        guard
-            .as_ref()
-            .map_or(0, |state| state.accepted_compute_submit_count),
+        guard.as_ref().map_or(0, |state| state.accepted_compute_submit_count),
     ))
 }
 
