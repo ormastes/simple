@@ -59,7 +59,6 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
 use compiler.driver.driver_aot_output.*
 use compiler.driver.watcher.watcher_client.{check_shb_freshness}
 use compiler.driver.watcher.watcher_client as nb_watcher_client
-use compiler.driver.cache.cache_validator.{source_to_cache_path}
 # driver_pipeline.spl extends CompilerDriver via `impl CompilerDriver:`
 # (lower_to_mir, jit_compile_and_run, weave_aop, apply_debug_trace, ...). It was
 # imported by nothing, so the interpreter never loaded it and those methods were
@@ -67,14 +66,14 @@ use compiler.driver.cache.cache_validator.{source_to_cache_path}
 # AOT hides this by compiling every .spl by path; the interpreter only loads
 # imported modules. Glob-import to load the file and register its impl methods.
 use compiler.driver.driver_pipeline.*
+use compiler.driver.driver_aot_pipeline.*
 use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
-use compiler.common.driver_core_types.{CompileResult, driver_core_compile_options_default, driver_output_format_is_smf, driver_output_format_is_both, driver_output_format_is_self_contained}
+use compiler.common.driver_core_types.{CompileResult, driver_core_compile_options_default}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_info, log_warn, log_error, log_phase, log_module_surface_released}
 use compiler.driver.driver_bootstrap.{
     bootstrap_native_opt_level, bootstrap_llvm_opt_level,
-    bootstrap_compile_to_native_local, bootstrap_compile_context_to_native_local,
-    bootstrap_lower_to_mir_context, bootstrap_entry_module_name, bootstrap_empty_hir_module,
+    bootstrap_entry_module_name, bootstrap_empty_hir_module,
     bootstrap_lower_hir_globals_to_mir_module_driver,
     bootstrap_function_names, bootstrap_symbol_for_name
 }
@@ -93,7 +92,6 @@ use compiler.driver.driver_source_loading.{
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_append_text(path: text, content: text) -> bool
-extern fn rt_hash_text(s: text) -> i64
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -101,13 +99,6 @@ extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_array_scope_end() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
-
-fn native_build_cache_dir() -> text:
-    val dir = rt_env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
-    if dir == "":
-        "build/native_cache"
-    else:
-        dir
 
 fn _driver_text_list_contains(items: [text], item: text) -> bool:
     var i = 0
@@ -1344,151 +1335,6 @@ impl CompilerDriver:
         if has_result:
             return CompileResult.Success(last_result)
         CompileResult.Success(BackendResult.Unit)
-
-    # --------------------------------------------------------------------------
-    # Mode: AOT Compile
-    # --------------------------------------------------------------------------
-
-    me aot_compile() -> CompileResult:
-        val log = self.ctx.logger
-
-        # Lower to MIR
-        log_phase("aot:lower_to_mir:start")
-        var mir_ok = false
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
-            val (next_ctx, ok) = bootstrap_lower_to_mir_context(self.ctx)
-            self.ctx = next_ctx
-            mir_ok = ok
-        else:
-            mir_ok = self.lower_to_mir()
-        if not mir_ok:
-            for err in self.ctx.errors:
-                log_error("MIR error: {err}")
-            val first_err = self.ctx.errors.first()
-            val msg = if first_err != nil: first_err else: "MIR lowering failed"
-            return CompileResult.CodegenError(msg)
-        log_phase("aot:lower_to_mir:done")
-
-        # Evict HIR modules (no longer needed after MIR lowering)
-        # The VHDL design catalog needs HIR defining-module provenance to
-        # rebase module-local MIR type symbols across the entry closure.
-        if self.ctx.options.low_memory and self.ctx.options.backend != "vhdl":
-            log_debug("low-memory: evicting HIR modules")
-            self.ctx.evict_hir()
-
-        # Bootstrap closure MIR lives in the flat accumulators consumed by the
-        # bootstrap emitter; the wide ctx.mir_modules transport is intentionally
-        # bypassed and cannot feed the ordinary mutation passes below.
-        val bootstrap_flat_aot = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
-        if bootstrap_flat_aot:
-            log_phase("aot:flat_mir_passes:skipped")
-        else:
-            # Borrow checking
-            log_phase("aot:borrow_check:start")
-            if not self.borrow_check():
-                for err in self.ctx.errors:
-                    log_error("Borrow error: {err}")
-                return CompileResult.BorrowError(self.ctx.errors)
-            log_phase("aot:borrow_check:done")
-
-            # Process async functions (generate state machines for await/yield)
-            log_phase("aot:process_async:start")
-            val async_state_machines = self.process_async()
-            log_phase("aot:process_async:done")
-
-            # Optimize MIR (use optimization level from options)
-            log_phase("aot:optimize_mir:start")
-            val skip_mir_opt = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? ""
-            if skip_mir_opt == "1":
-                log_phase("aot:optimize_mir:skipped")
-            else:
-                val mir_opt_level = self.ctx.options.opt_level ?? 0
-                self.optimize_mir_level(mir_opt_level)
-            log_phase("aot:optimize_mir:done")
-
-            # AOP weaving (after optimization, before codegen)
-            log_phase("aot:weave_aop:start")
-            self.weave_aop()
-            log_phase("aot:weave_aop:done")
-
-            # Debug trace injection (after AOP, before codegen)
-            log_phase("aot:debug_trace:start")
-            self.apply_debug_trace()
-            log_phase("aot:debug_trace:done")
-
-        # Determine output file
-        log_phase("aot:output:start")
-        val output = self.ctx.options.output_file ?? "a.out"
-        log_phase("aot:output:done")
-
-        # If backend is C, write C++ source instead of compiling to native
-        log_phase("aot:backend_name:start")
-        val backend_name = self.ctx.options.backend
-        log_phase("aot:backend_name:done")
-        if backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen":
-            return self.compile_to_c(output)
-
-        # If backend is CUDA/PTX, emit PTX assembly
-        if backend_name == "cuda" or backend_name == "ptx":
-            return self.compile_to_cuda(output)
-
-        # If backend is OpenCL, emit OpenCL C source
-        if backend_name == "opencl" or backend_name == "opencl-c" or backend_name == "opencl-spirv" or backend_name == "cl":
-            return self.compile_to_opencl(output)
-
-        # If backend is VHDL, emit VHDL source instead of SMF/native output
-        if backend_name == "vhdl":
-            return self.compile_to_vhdl(output)
-
-        # If backend is WASM, emit WAT text via the pure-Simple WASM backend
-        if backend_name == "wasm" or backend_name == "wasm32":
-            return self.compile_to_wasm(output)
-
-        if (rt_env_get("SIMPLE_BOOTSTRAP_DIRECT_IR") ?? "") == "1":
-            log_phase("aot:bootstrap_native_dispatch")
-            return bootstrap_compile_to_native_local(self.ctx, backend_name, output)
-
-        # Dispatch based on output format
-        log_phase("aot:format:start")
-        val format = self.ctx.options.output_format
-        log_phase("aot:format:done")
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
-            log_phase("aot:bootstrap_native_context_dispatch")
-            return bootstrap_compile_context_to_native_local(self.ctx, backend_name, output)
-        if driver_output_format_is_smf(format):
-            return self.compile_to_smf(output)
-        if driver_output_format_is_self_contained(format):
-            return self.compile_to_self_contained(output)
-        if driver_output_format_is_both(format):
-            # Compile native (LLVM) first, then SMF (Cranelift) to cache
-            val native_result = self.compile_to_native(output)
-            if not native_result.is_success():
-                return native_result
-            # SMF goes to the native-build cache directory.
-            use compiler.driver.cache.cache_validator.{source_to_cache_path}
-            use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
-            val source_path = self.ctx.options.input_files[0]
-            val smf_cache_path = source_to_cache_path(source_path, native_build_cache_dir(), ".smf")
-            val smf_result = self.compile_to_smf(smf_cache_path)
-            if smf_result.is_success():
-                val smf_opt_level = compileoptions_effective_mir_opt_level(self.ctx.options)
-                val src = rt_file_read_text(source_path) ?? ""
-                val src_hash = rt_hash_text(src)
-                update_smf_manifest_entry(
-                    source_path,
-                    smf_cache_path,
-                    src_hash,
-                    self.ctx.options.backend,
-                    smf_opt_level,
-                    self.ctx.options.release,
-                    self.ctx.options.debug_info,
-                    self.ctx.options.gc_off,
-                    self.ctx.options.profile,
-                    self.ctx.options.allowed_families
-                )
-            return CompileResult.Success(output)
-        # Native (default)
-        return self.compile_to_native(output)
 
 pub fn compiler_driver_create(options: CompileOptions) -> CompilerDriver:
     val ctx = CompileContext.create(options)
