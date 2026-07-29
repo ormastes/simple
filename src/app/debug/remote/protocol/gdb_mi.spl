@@ -1,68 +1,63 @@
 # GDB Machine Interface Client
-# Communicates with GDB via MI protocol over process pipes.
+# Communicates with GDB via MI protocol over a real subprocess pipe
+# (std.nogc_sync_mut.io process_spawn_piped/write_stdin/read_stdout) —
+# no fifos, no `sh -c` command lines, no `timeout grep` polling.
 # GDB handles the TCP connection to QEMU's GDB stub.
 
-use std.io.{shell, process_run, ProcessResult}
+use std.io.{shell_bool, shell_output_trimmed, thread_sleep_ms}
+use std.nogc_sync_mut.io.{process_spawn_piped, process_write_stdin, process_read_stdout, process_close_piped}
 use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
-use app.debug.remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord, GdbVariable, parse_hex_value, parse_hex_byte, hex_char_value}
+use app.debug.remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord, GdbVariable, GdbBreakpoint, parse_hex_value, parse_hex_byte, hex_char_value}
 use app.debug.remote.types.{DebugConfig, DebugError}
 
-# GDB MI client controlling a GDB process
+# A single decoded MI result record, keyed by its command token. Filled in
+# by the streaming reader as lines arrive and drained by whichever
+# send_command() call is waiting on that token — this is the "token table"
+# that lets us match asynchronous MI output back to the command that
+# produced it instead of grep-polling for one fixed pattern.
+class GdbMiPendingResult:
+    token: i32
+    cls: text
+    data: Dict<text, text>
+
+# GDB MI client controlling a GDB process over real pipes
 class GdbMiClient:
-    fifo_in: text           # named pipe for GDB stdin
-    fifo_out: text          # named pipe for GDB stdout
-    pid: text               # GDB process PID
-    token_counter: i32      # auto-incrementing command token
+    pid: i64                                # GDB subprocess PID (process_spawn_piped handle)
+    token_counter: i32                      # auto-incrementing command token
     connected: bool
-    program: text           # ELF binary for symbol loading
+    program: text                           # ELF binary for symbol loading
+    read_buf: text                          # unconsumed partial line from the last stdout read
+    pending_results: [GdbMiPendingResult]   # decoded ^result records awaiting pickup
+    last_stop_data: Dict<text, text>        # most recent *stopped async record
+    saw_prompt: bool                        # a "(gdb)" prompt line arrived since last check
+    breakpoints: [GdbBreakpoint]            # rich breakpoint models (cond/hit/location kept)
 
     static fn connect(config: DebugConfig) -> Result<GdbMiClient, text>:
-        # Generate unique FIFO names
-        val ts = shell("date +%s%N").stdout.trim()
-        val fifo_in = "/tmp/simple_gdb_{ts}_in"
-        val fifo_out = "/tmp/simple_gdb_{ts}_out"
-
-        # Create FIFOs
-        val mk1 = shell("mkfifo {fifo_in}")
-        if mk1.exit_code != 0:
-            return Err("failed to create input FIFO: {mk1.stderr}")
-        val mk2 = shell("mkfifo {fifo_out}")
-        if mk2.exit_code != 0:
-            shell("rm -f {fifo_in}")
-            return Err("failed to create output FIFO: {mk2.stderr}")
-
         # Determine GDB binary. RISC-V targets require a target-aware GDB.
         val gdb_bin_result = GdbMiClient.find_gdb_binary(config)
         var gdb_bin = ""
         match gdb_bin_result:
             Err(e):
-                shell("rm -f {fifo_in} {fifo_out}")
                 return Err(e)
             Ok(path):
                 gdb_bin = path
 
-        # Start GDB with MI interface, reading from/writing to FIFOs.
-        # Capture the PID in the same shell that launches the background job.
-        val start_result = shell("sh -c 'exec 3<>\"{fifo_in}\"; exec 4<>\"{fifo_out}\"; {gdb_bin} --interpreter=mi3 -nx <&3 >&4 2>&1 & echo $!'")
-        if start_result.exit_code != 0:
-            shell("rm -f {fifo_in} {fifo_out}")
-            return Err("failed to start GDB: {start_result.stderr}")
-
-        val pid = start_result.stdout.trim()
-        if pid.len() == 0:
-            shell("rm -f {fifo_in} {fifo_out}")
-            return Err("failed to capture GDB pid")
-
-        # Small delay for GDB to start
-        shell("sleep 0.3")
+        # Spawn GDB as a real piped subprocess — argv is passed as an array,
+        # so there is no shell quoting/injection surface at all.
+        val pid = process_spawn_piped(gdb_bin, ["--interpreter=mi3", "-nx"])
+        if pid <= 0:
+            return Err("failed to start GDB (spawn failed for '{gdb_bin}')")
 
         var client = GdbMiClient(
-            fifo_in: fifo_in,
-            fifo_out: fifo_out,
             pid: pid,
             token_counter: 1,
             connected: false,
-            program: config.program
+            program: config.program,
+            read_buf: "",
+            pending_results: [],
+            last_stop_data: {},
+            saw_prompt: false,
+            breakpoints: []
         )
 
         # Read initial GDB banner/prompt
@@ -85,28 +80,33 @@ class GdbMiClient:
 
         Ok(client)
 
-    # Find the best GDB binary available
+    # Find the best GDB binary available.
+    # Uses shell_output_trimmed/shell_bool rather than shell(...).exit_code
+    # — under `bin/simple test`'s interpreter module graph a `shell(...)`
+    # ProcessResult field access can resolve to the wrong same-named
+    # `shell` overload elsewhere in the tree and throw at runtime; the
+    # single-purpose helpers below don't expose struct field access so
+    # they sidestep that collision entirely (see gdb_mi_transport_spec.spl).
     static fn find_gdb_binary(config: DebugConfig) -> Result<text, text>:
         # Try riscv-specific first
-        val rv32 = shell("which riscv32-unknown-elf-gdb 2>/dev/null")
-        if rv32.exit_code == 0:
-            return Ok(rv32.stdout.trim())
+        val rv32 = shell_output_trimmed("which riscv32-unknown-elf-gdb 2>/dev/null", "")
+        if rv32.len() > 0:
+            return Ok(rv32)
 
-        val rvelf = shell("which riscv64-unknown-elf-gdb 2>/dev/null")
-        if rvelf.exit_code == 0:
-            return Ok(rvelf.stdout.trim())
+        val rvelf = shell_output_trimmed("which riscv64-unknown-elf-gdb 2>/dev/null", "")
+        if rvelf.len() > 0:
+            return Ok(rvelf)
 
         # Fall back to gdb-multiarch
-        val multi = shell("which gdb-multiarch 2>/dev/null")
-        if multi.exit_code == 0:
-            return Ok(multi.stdout.trim())
+        val multi = shell_output_trimmed("which gdb-multiarch 2>/dev/null", "")
+        if multi.len() > 0:
+            return Ok(multi)
 
         # Also check user-local installs that may not be on PATH
-        val home = shell("echo $HOME").stdout.trim()
+        val home = shell_output_trimmed("echo $HOME", "").trim()
         if home.len() > 0:
             val local_multi = "{home}/.local/bin/gdb-multiarch"
-            val local_probe = shell("test -x '{local_multi}'")
-            if local_probe.exit_code == 0:
+            if shell_bool("test -x '{local_multi}'"):
                 return Ok(local_multi)
 
         match config.target:
@@ -122,56 +122,105 @@ class GdbMiClient:
         val token = self.token_counter
         self.token_counter = self.token_counter + 1
 
-        # Write command to FIFO
-        val full_cmd = "{token}-{cmd}"
-        val write_result = shell("echo '{full_cmd}' > {self.fifo_in}")
-        if write_result.exit_code != 0:
-            return Err("failed to send command: {write_result.stderr}")
+        # Write command straight to the subprocess's stdin pipe.
+        val full_cmd = "{token}-{cmd}\n"
+        val ok = process_write_stdin(self.pid, full_cmd)
+        if not ok:
+            return Err("failed to send command: process_write_stdin failed (pid={self.pid})")
 
         # Read response lines until we get our result token
         val response = self.read_result(token)?
         Ok(response)
 
-    # Read GDB output until we get a result for our token
-    fn read_result(token: i32) -> Result<Dict<text, text>, text>:
-        # Read only until the matching result record arrives. Using `cat` here
-        # forces every MI command to wait for the timeout because GDB keeps the
-        # FIFO open for the life of the session.
-        val output = shell("timeout 10 grep -m1 '^{token}\\^' {self.fifo_out}")
-        val lines = output.stdout.split("\n")
+    # Non-blocking drain of whatever GDB has written to stdout since the
+    # last call, split into complete lines, and classify each one into the
+    # token table (^result), the last-seen *stopped async record, or
+    # console/target/log stream text. Partial (no trailing newline yet)
+    # data is kept in read_buf for the next call — this is the streaming
+    # part of the streaming MI parser: it never blocks waiting for a full
+    # response, it just consumes whatever bytes are currently available.
+    me _drain_stdout():
+        val chunk = process_read_stdout(self.pid)
+        if chunk.len() == 0:
+            return
+        self.read_buf = self.read_buf + chunk
+        val parts = self.read_buf.split("\n")
+        val n = parts.len()
+        var i = 0
+        while i < n - 1:
+            self._classify_line(parts[i])
+            i = i + 1
+        self.read_buf = parts[n - 1]
 
-        for line in lines:
-            val trimmed = line.trim()
-            if not trimmed.contains("^"):
-                continue
+    # Classify one full line of MI output: ^done/^error/*stopped/=event/~console/(gdb).
+    me _classify_line(raw_line: text):
+        val record = GdbMiParser.parse_line(raw_line)
+        match record:
+            GdbMiRecord.Result(token, cls, data):
+                self.pending_results.push(GdbMiPendingResult(token: token, cls: cls, data: data))
+            GdbMiRecord.Async(cls, data):
+                if cls == "stopped":
+                    self.last_stop_data = data
+            GdbMiRecord.Stream(_, _):
+                pass  # console/target/log text — not needed by current callers
+            GdbMiRecord.Prompt:
+                self.saw_prompt = true
+            GdbMiRecord.Unknown(_):
+                pass
 
-            val caret_parts = trimmed.split("^")
-            if caret_parts.len() < 2:
-                continue
+    # Pop the result record for `token` out of the pending table, if present.
+    me _take_result(token: i32) -> (bool, text, Dict<text, text>):
+        var idx = -1
+        var i = 0
+        while i < self.pending_results.len():
+            if self.pending_results[i].token == token:
+                idx = i
+                break
+            i = i + 1
+        if idx < 0:
+            return (false, "", {})
+        val item = self.pending_results[idx]
+        var remaining: [GdbMiPendingResult] = []
+        var j = 0
+        while j < self.pending_results.len():
+            if j != idx:
+                remaining.push(self.pending_results[j])
+            j = j + 1
+        self.pending_results = remaining
+        (true, item.cls, item.data)
 
-            val token_text = caret_parts[0]
-            val parsed_token = token_text.parse_int() ?? -1
-            if parsed_token != token:
-                continue
-
-            var rest_parts: [text] = []
-            var i = 1
-            while i < caret_parts.len():
-                rest_parts.push(caret_parts[i])
-                i = i + 1
-
-            val rest = rest_parts.join("^")
-            val (cls_val, data) = GdbMiParser.parse_class_and_data(rest)
-            if cls_val == "error":
-                val msg = data.get("msg") ?? "unknown GDB error"
-                return Err("GDB error: {msg}")
-            return Ok(data)
+    # Read GDB output until we get a result for our token (or time out).
+    me read_result(token: i32) -> Result<Dict<text, text>, text>:
+        val deadline_ms: i64 = 10000
+        val poll_interval_ms: i64 = 20
+        var elapsed_ms: i64 = 0
+        while elapsed_ms <= deadline_ms:
+            self._drain_stdout()
+            val (found, cls_val, data) = self._take_result(token)
+            if found:
+                if cls_val == "error":
+                    val msg = data.get("msg") ?? "unknown GDB error"
+                    return Err("GDB error: {msg}")
+                return Ok(data)
+            thread_sleep_ms(poll_interval_ms)
+            elapsed_ms = elapsed_ms + poll_interval_ms
 
         Err("no result received from GDB (timeout?)")
 
-    # Read lines until (gdb) prompt
-    fn read_until_prompt():
-        shell("timeout 5 grep -m1 '^\\\\(gdb\\\\)' {self.fifo_out} > /dev/null 2>&1")
+    # Read lines until a (gdb) prompt is observed (or time out). This is a
+    # best-effort startup sync barrier only — read_result()'s token
+    # matching does not depend on it, so a missed prompt is not fatal.
+    me read_until_prompt():
+        val deadline_ms: i64 = 5000
+        val poll_interval_ms: i64 = 20
+        var elapsed_ms: i64 = 0
+        while elapsed_ms <= deadline_ms:
+            self._drain_stdout()
+            if self.saw_prompt:
+                self.saw_prompt = false
+                return
+            thread_sleep_ms(poll_interval_ms)
+            elapsed_ms = elapsed_ms + poll_interval_ms
 
     # --- Execution Control ---
 
@@ -441,18 +490,55 @@ class GdbMiClient:
 
     # --- Breakpoints ---
 
-    fn set_breakpoint(location: text) -> Result<i32, text>:
-        val data = self.send_command("break-insert {location}")?
+    # Set a plain breakpoint. Public API unchanged (still returns just the
+    # id) but the full bkpt={...} tuple GDB echoes back — condition, hit
+    # count (times), enabled/disposition, file/line/addr, original-location
+    # — is now parsed into a GdbBreakpoint and kept in self.breakpoints
+    # instead of being thrown away. Use get_breakpoint_info(id) to read it.
+    me set_breakpoint(location: text) -> Result<i32, text>:
+        val bp = self.set_breakpoint_full(location, "", -1)?
+        Ok(bp.id)
+
+    # Set a breakpoint with an optional condition and/or ignore (hit-skip)
+    # count, returning the full parsed breakpoint model rather than just
+    # the numeric id. Pass condition: "" / ignore_count: -1 to omit either
+    # flag. This is additive — it does not change any existing signature.
+    me set_breakpoint_full(location: text, condition: text, ignore_count: i32) -> Result<GdbBreakpoint, text>:
+        var cmd = "break-insert"
+        if condition.len() > 0:
+            cmd = cmd + " -c \"{condition}\""
+        if ignore_count >= 0:
+            cmd = cmd + " -i {ignore_count}"
+        cmd = cmd + " {location}"
+        val data = self.send_command(cmd)?
         val bkpt_raw = data.get("bkpt") ?? "{}"
         val bkpt = GdbMiParser.parse_kv_pairs(bkpt_raw)
-        val id = (bkpt.get("number") ?? "0").parse_int() ?? 0
-        Ok(id)
+        val bp = GdbBreakpoint.from_tuple(bkpt)
+        self.breakpoints.push(bp)
+        Ok(bp)
+
+    # Look up the rich breakpoint model (condition, hit count, location,
+    # ...) previously captured by set_breakpoint()/set_breakpoint_full().
+    fn get_breakpoint_info(id: i32) -> Result<GdbBreakpoint, text>:
+        var i = 0
+        while i < self.breakpoints.len():
+            if self.breakpoints[i].id == id:
+                return Ok(self.breakpoints[i])
+            i = i + 1
+        Err("no cached breakpoint info for id {id}")
 
     fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
         self.set_breakpoint("*{GdbMiClient.to_hex_i64(addr)}")
 
-    fn delete_breakpoint(id: i32) -> Result<text, text>:
+    me delete_breakpoint(id: i32) -> Result<text, text>:
         self.send_command("break-delete {id}")?
+        var remaining: [GdbBreakpoint] = []
+        var i = 0
+        while i < self.breakpoints.len():
+            if self.breakpoints[i].id != id:
+                remaining.push(self.breakpoints[i])
+            i = i + 1
+        self.breakpoints = remaining
         Ok("breakpoint {id} deleted")
 
     fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
@@ -472,21 +558,20 @@ class GdbMiClient:
     me disconnect():
         if self.connected:
             # Detach from target
-            shell("echo '-target-detach' > {self.fifo_in}")
-            shell("sleep 0.1")
+            process_write_stdin(self.pid, "-target-detach\n")
+            thread_sleep_ms(100)
             # Exit GDB
-            shell("echo '-gdb-exit' > {self.fifo_in}")
-            shell("sleep 0.2")
+            process_write_stdin(self.pid, "-gdb-exit\n")
+            thread_sleep_ms(200)
             self.connected = false
 
         self.cleanup()
 
     fn cleanup():
-        # Kill GDB process if still running
-        if self.pid.len() > 0:
-            shell("kill {self.pid} 2>/dev/null")
-        # Remove FIFOs
-        shell("rm -f {self.fifo_in} {self.fifo_out}")
+        # Close stdin, SIGTERM the process tree, and reap — no fifo cleanup
+        # needed since there are no fifos anymore.
+        if self.pid > 0:
+            process_close_piped(self.pid)
 
     # --- Hex Helpers ---
 
