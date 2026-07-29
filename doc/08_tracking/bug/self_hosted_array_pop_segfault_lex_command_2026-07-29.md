@@ -7,21 +7,25 @@ real work
 **Status:** MITIGATED (2026-07-29) — `pop`/`push`/`append` added to
 `is_bare_builtin_collection_method`; validated byte-identical-archive on an
 unaffected fixture (PROVED); full self-hosted binary re-run of the original
-`lex` repro was **not achieved** this pass across three attempts, each
+`lex` repro was **not achieved** this pass across five attempts, each
 blocked by a distinct, precisely-diagnosed cause: (1) a monitoring error on
 this session's part — mistook a `native_build_worker` child steadily at
 ~99% CPU for a hang because only the blocked *parent* was checked (corrected
 same day, see "CORRECTION" below); (2) a real pre-existing broken-import
 defect in `src/lib/common/json/{validation,utilities,path_ops,array_ops,object_ops,parser}.spl`
-(fixed upstream same day, commit `ab1ea6fc1a6`); (3) a real, still-open
-`native_build_worker` timeout — the interpreted worker's default 7200s
-(2 CPU-hour) budget for loading the full compiler+LLVM import graph is
-insufficient for the whole CLI entry closure (tool's own diagnostic message,
-`--timeout`/`--source`/in-process-backend are its suggested remedies; not
-attempted this pass, out of scope — compiler-tooling infra, not this fix).
+(fixed upstream same day, commit `ab1ea6fc1a6`); (3) the interpreted
+`native_build_worker`'s default 7200s (2 CPU-hour) timeout, insufficient for
+the whole CLI entry closure's import-graph-loading phase; (4) a real,
+separate, out-of-scope defect where the non-closure `--source` bulk-scan mode
+hits 51 unresolved-import errors across files outside the CLI's actual
+transitive closure (relative-import resolution gap in that mode, not 51
+individual file bugs — not fixed, reported precisely); (5) the same
+`native_build_worker` timeout **still insufficient at 3x budget (21600s / 6
+CPU-hours)**, with a perfectly linear utime curve showing no sign of nearing
+completion — stopped here rather than guessing at a further multiplier.
 The causal link between this fix and the original segfault's disappearance
 therefore remains **INFERRED**, not PROVED end-to-end. See "2026-07-29
-follow-up" below for full detail on each attempt.
+follow-up" below for full detail on each attempt and recommended next steps.
 **Component:** `src/compiler/10.frontend/core/lexer_struct.spl` (`CoreLexer.scan_token`),
 runtime `rt_array_pop` / `spl_array_pop`,
 `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
@@ -366,25 +370,59 @@ not of which seed compiles it), so spending another ~2 CPU-hours to
 reconfirm that was judged not worth it this pass. This is stated as the
 remaining gap rather than silently skipped.
 
-**This means: tier (b) is still NOT ACHIEVED**, now for a third,
-precisely-diagnosed and PROVED reason (worker timeout budget, not a hang,
-not a source defect). Three real blockers were found and reported in
+**Retry 4 (explicit ask to raise the budget via the tool's own documented
+remedy, `--timeout`): two more attempts, one real NEW finding, one confirms
+the timeout wall is not close to 6 hours either.**
+
+Rebased the worktree to the then-current tip (`12788f84d10`, past
+`ab1ea6fc1a6`) and re-ran with a 3x budget (`--timeout 21600`, 6 CPU-hours),
+worker child correctly monitored throughout via `/proc/<pid>/stat` utime
+sampling (PROVED — every sample showed steady ~2800-3000 utime-tick growth
+per 55s, i.e. genuine ~98-100% single-core work, no stall at any point in
+either sub-attempt):
+
+1. `native-build --source src/compiler --source src/app --source src/lib --entry src/app/cli/main.spl --threads 16 --timeout 21600` (the literal recipe requested, matching the non-entry-closure convention `simple_stage2` was built with) — **FAILED with 51 real, distinct `unresolved import`/`empty or excluded` errors** (PROVED, full list captured) across many files that are NOT reached by `src/app/cli/main.spl`'s actual transitive closure: e.g. `src/compiler/35.semantics/semantics/type_coercion.spl` (`semantics.truthiness`), `src/compiler/70.backend/backend/vhdl/vhdl_sim_runner.spl` (`lib.io.vhdl_ffi`), `src/compiler/70.backend/linker/object_provider_adapter.spl` (resolves to an empty/excluded file), `src/compiler/85.mdsoc/weaving/weaving_result.spl`, `src/compiler/90.tools/fix/rules/impl/lint_public_doc.spl`, `src/compiler/90.tools/header_gen/__init__.spl` (3 errors), `src/compiler/90.tools/verify/checker.spl` and `main.spl`, `src/compiler/99.loader/loader/module_loader.spl` and `smf_cache.spl` (4 errors, all relative imports like `..linker.smf_reader`, `...monomorphize.note_sdn`), `src/app/check_dbs/main.spl` (5 errors). **Root cause (INFERRED, not fixed): this is very likely a systemic gap in how the non-closure `--source` bulk-directory-scan mode resolves relative imports (`..x`, `...x`, `super.super.x`), not 51 independent file-level bugs** — the identical entry point (`src/app/cli/main.spl`) compiled with `--entry-closure` hit ZERO of these errors in every other attempt this pass, meaning none of these 51 files are actually in the CLI's real transitive closure; `--source` mode indiscriminately tries to compile every `.spl` file under the three directories regardless of reachability, including orphaned/dead files with their own pre-existing broken relative imports that nothing currently exercises. Per the "report and stop" pattern, this was not chased further or fixed — it is reported here precisely for whoever owns that mode next.
+2. Retried the working recipe instead — `native-build --entry src/app/cli/main.spl --entry-closure --threads 16 --timeout 21600` — ran clean (zero import/parse errors, matching every prior `--entry-closure` attempt) for the **full 21600s (6 CPU-hours)**, utime growing linearly and steadily the entire time with no deceleration near the end (no signal of being "almost done"), then hit the raised timeout and exited with the same diagnostic as the 7200s run, scaled: `[TIMEOUT: Process killed after 21600s]`.
+
+**This means: tier (b) is still NOT ACHIEVED**, and the specific remedy asked
+for (3x the timeout) was tried and was insufficient — the interpreted
+`native_build_worker`'s import-graph-loading phase for the full CLI closure
+does not complete within 6 CPU-hours, with a perfectly linear utime curve
+giving no evidence of proximity to completion. **Stopping the timeout-raising
+approach here** rather than guessing at a further multiplier with no signal
+of how much is actually needed — consistent with the pattern of reporting
+precisely and stopping rather than improvising around a real, unresolved
+blocker. Four real, precisely-diagnosed blockers were found and reported in
 sequence this pass: (1) a monitoring error on my part (corrected same day),
 (2) a real pre-existing json-import bug (fixed upstream same day, commit
-`ab1ea6fc1a6`), (3) this worker-timeout infrastructure limit (unfixed,
-out of scope for this session — a compiler-tooling change, not an array-pop
-fix).
+`ab1ea6fc1a6`), (3) the worker-timeout budget at its 7200s default, (4) the
+same timeout budget still insufficient at 3x (21600s), plus a newly-found,
+separate, out-of-scope defect in the non-closure `--source` mode's relative
+import resolution.
+
+**Recommended path forward for whoever picks up tier (b) next** (not
+attempted this pass, each is a real option per the tool's own diagnostic
+message): (a) a much larger timeout multiplier (10x+) with no guarantee of
+success given the observed linear-with-no-deceleration curve; (b) the
+suggested "in-process backend" for cross-target builds instead of the
+interpreted-worker-subprocess path, which per the tool's message is built
+for exactly this case; (c) add progress instrumentation to
+`native_build_worker.spl`'s import-graph-loading phase so a retry has a
+completion-percentage signal instead of a blind linear utime curve; (d) a
+deliberately narrower entry point that still reaches
+`CoreLexer.scan_token`/`self.indent_stack.pop()` without pulling in the
+entire CLI's LLVM-linked import graph, trading full end-to-end confidence for
+a much faster signal.
 
 Net effect: **the original `lex`-segfault repro was not re-run against a
 freshly built self-hosted binary this pass**, blocked in turn by a monitoring
-error, then a real import bug, then a real worker-timeout budget. The causal
-link between "adding `pop`/`push` to the allowlist" and "the observed
-`spl_array_pop` segfault disappearing" remains **INFERRED** (from the tier
-(a) proof of no collateral damage, the doc-confirmed `push` victim status,
-and the code-level absence of `pop`/`push` from the pre-fix allowlist) but
-**not PROVED** by an end-to-end before/after `lex` run — that would require
-either a much longer `--timeout` budget or a narrower closure that still
-includes the real crash site, neither attempted this pass. This fix is
-landed as a well-evidenced, zero-collateral-risk mitigation consistent with
-the established pattern for this bug class, not as a fully closed-loop
-verified fix.
+error, then a real import bug, then a real worker-timeout budget that held
+even after a 3x raise, plus one more real (separate, out-of-scope) defect
+found and reported along the way. The causal link between "adding
+`pop`/`push` to the allowlist" and "the observed `spl_array_pop` segfault
+disappearing" remains **INFERRED** (from the tier (a) proof of no collateral
+damage, the doc-confirmed `push` victim status, and the code-level absence of
+`pop`/`push` from the pre-fix allowlist) but **not PROVED** by an end-to-end
+before/after `lex` run. This fix is landed as a well-evidenced,
+zero-collateral-risk mitigation consistent with the established pattern for
+this bug class, not as a fully closed-loop verified fix.
