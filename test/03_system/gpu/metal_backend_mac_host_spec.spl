@@ -6,6 +6,8 @@
 
 use std.spec.{describe, it, expect, pending, fail_test}
 use std.io_runtime.{file_exists, file_read, process_run}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
 use std.nogc_sync_mut.env.platform.{is_macos}
 
 val EMITTER = "src/compiler/70.backend/backend/gpu_portable_compute.spl"
@@ -67,3 +69,39 @@ describe "macOS Metal backend host verification":
         expect(receipt).to_contain("metal_generated_2d_readback_copy_checksum=")
         expect(receipt).to_contain("metal_generated_2d_readback_alpha_checksum=")
         expect(receipt).to_contain("metal_generated_2d_readback_scroll_checksum=")
+
+    it "renders exact pixels through production Metal without a CPU mirror":
+        var backend = MetalBackend.create()
+        expect(backend.init(16, 16)).to_equal(true)
+        backend.use_gpu_only()
+
+        val black = rgb(0, 0, 0)
+        val red = rgb(255, 0, 0)
+        backend.clear(black)
+        expect(backend.gpu_frame_complete).to_equal(true)
+        val clear_readback = backend.read_pixels_with_source()
+        expect(clear_readback.source).to_equal("device_readback")
+        expect(clear_readback.backend_handle).to_be_greater_than(0)
+        expect(clear_readback.device_identity).to_be_greater_than(0)
+        expect(clear_readback.pixels.len()).to_equal(16 * 16)
+        var clear_i: i32 = 0
+        while clear_i < 16 * 16:
+            expect(clear_readback.pixels[clear_i]).to_equal(black)
+            clear_i = clear_i + 1
+
+        backend.draw_rect_filled(4, 4, 8, 8, red)
+        expect(backend.gpu_frame_complete).to_equal(true)
+        val rect_readback = backend.read_pixels_with_source()
+        expect(rect_readback.source).to_equal("device_readback")
+        expect(rect_readback.backend_handle).to_equal(clear_readback.backend_handle)
+        expect(rect_readback.device_identity).to_equal(clear_readback.device_identity)
+        expect(rect_readback.pixels.len()).to_equal(16 * 16)
+        var y: i32 = 0
+        while y < 16:
+            var x: i32 = 0
+            while x < 16:
+                val expected = if x >= 4 and x < 12 and y >= 4 and y < 12: red else: black
+                expect(rect_readback.pixels[y * 16 + x]).to_equal(expected)
+                x = x + 1
+            y = y + 1
+        backend.shutdown()

@@ -21,6 +21,63 @@ describe "CudaBackend RenderBackend facade":
         expect(source).to_contain("font_render_batch_atlas_owner_identity(batch), \"cuda\", device_features")
         expect(source).to_contain("self.session.font_module_identity, dependency_identity")
 
+    it "resynchronizes the device after a failed clear kernel":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain(
+            "        self.mirror.clear(color)\n" +
+            "        self._sync_mirror_to_device_after_cpu_path()\n" +
+            "    me draw_rect("
+        )
+        expect(source).to_contain(
+            "    me _sync_mirror_to_device_after_cpu_path():\n" +
+            "        self.cpu_fallback_used = true"
+        )
+
+    it "never labels CPU-rendered fallback pixels as device readback":
+        var backend = CudaBackend.create()
+        if backend.init(4, 4):
+            backend.clear(0xff010203u32)
+            backend.cpu_fallback_used = true
+            val readback = backend.read_pixels_with_source()
+            expect(readback.source).to_equal("cpu_fallback")
+            expect(readback.backend_handle).to_equal(0)
+            expect(readback.pixels.len()).to_equal(16)
+        else:
+            expect(backend.initialized).to_equal(false)
+        backend.shutdown()
+
+    it "keeps CUDA completion failure sticky across readbacks":
+        var backend = CudaBackend.create()
+        backend.completion_unknown = true
+        val first = backend.read_pixels_with_source()
+        val second = backend.read_pixels_with_source()
+        expect(first.source).to_equal("completion_unknown")
+        expect(second.source).to_equal("completion_unknown")
+        expect(first.pixels.len()).to_equal(0)
+        expect(second.pixels.len()).to_equal(0)
+
+    it "propagates CUDA font completion state to facade readback":
+        val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(backend).to_contain(
+            "if self.session.sync() != CUDA_SUCCESS:\n" +
+            "                self.completion_unknown = true\n" +
+            "                return submitted"
+        )
+        val engine = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        expect(engine).to_contain(
+            "quad_index = cuda.draw_font_batch(x, y, batch)\n" +
+            "                    self.cuda_backend = cuda\n" +
+            "                    if self.selected_backend_name == \"cuda\":\n" +
+            "                        self.backend = cuda"
+        )
+        expect(engine).to_contain(
+            "elif self.selected_backend_name == \"cuda\":\n" +
+            "            val cuda = self.cuda_backend.?\n" +
+            "            val readback = cuda.read_pixels_with_source()\n" +
+            "            self.cuda_backend = cuda\n" +
+            "            self.backend = cuda"
+        )
+
     it "reports the cuda backend name":
         val backend = CudaBackend.create()
         expect(backend.name()).to_equal("cuda")

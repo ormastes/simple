@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 ## Purpose
 
@@ -29,6 +29,9 @@ non-empty structured failure and must not select CPU or software.
 An initialized Vulkan probe must preserve Vulkan identity and SPIR-V format,
 then pass strict creation, dispatch, and readback. An unavailable host must
 return a non-empty structured failure and must not select CPU or software.
+The multi-primitive fixture additionally requires full-frame CPU parity, stable
+device identity, a positive backend handle, and device readback without the
+backend's sticky CPU-fallback provenance.
 
 ### Metal
 

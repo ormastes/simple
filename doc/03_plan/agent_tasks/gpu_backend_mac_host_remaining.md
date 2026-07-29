@@ -30,6 +30,10 @@ SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
   sh scripts/check/check-engine2d-cpu-metal-parity-evidence.shs
 
+SIMPLE_LIB=src bin/simple test \
+  test/03_system/gpu/metal_backend_mac_host_spec.spl \
+  --mode=interpreter
+
 GPU_2D_LIVE_BACKEND=metal SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
   sh scripts/check/check-macos-gpu-2d-live-evidence.shs
 
@@ -51,6 +55,9 @@ SIMPLE_LIB=src bin/simple test \
   `fill`, `copy`, `alpha`, and `scroll` checksums.
 - The framebuffer and CPU/Metal parity reports identify a real Metal device
   readback, not a CPU mirror or fallback.
+- The production `MetalBackend` host scenario enables `gpu_only`, renders the
+  16x16 clear/rectangle fixture, and proves exact pixels plus stable positive
+  framebuffer handle and device identity across both device readbacks.
 - The live gate records the native device/queue/submit/readback receipt and
   matching pixels. Linux or unavailable output is not a pass.
 - The Vulkan ProcessingIR receipt records 64 exact values, fixed checksum
