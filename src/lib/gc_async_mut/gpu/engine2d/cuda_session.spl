@@ -93,6 +93,7 @@ class CudaSession:
     stream: i64          # default stream (0 = default CUDA stream)
     ref_count: i64       # reference counting
     is_initialized: bool
+    completion_unknown: bool
     generation: i64      # stale-resource detection; incremented on init and cleanup
     ffi: CudaFfi?
 
@@ -108,6 +109,7 @@ class CudaSession:
             stream: 0,
             ref_count: 0,
             is_initialized: false,
+            completion_unknown: false,
             generation: 0,
             ffi: nil
         )
@@ -131,6 +133,8 @@ class CudaSession:
         Returns 0 (CUDA_SUCCESS) on success.  On failure all handles are zeroed
         and is_initialized remains false.
         """
+        if self.ctx != 0 or self.is_initialized or self.completion_unknown:
+            return 1
         if self.ffi != nil:
             if not self.ffi.init():
                 return 1
@@ -166,6 +170,7 @@ class CudaSession:
         self.stream = 0
         self.ref_count = 1
         self.is_initialized = true
+        self.completion_unknown = false
         self.generation = self.generation + 1
         CUDA_SUCCESS
 
@@ -183,7 +188,11 @@ class CudaSession:
             self._cleanup()
 
     me is_valid() -> bool:
-        self.is_initialized and self.ctx != 0
+        self.is_initialized and self.ctx != 0 and not self.completion_unknown
+
+    me quarantine_completion_unknown():
+        """Reject further context work until cleanup destroys the context."""
+        self.completion_unknown = true
 
     me activate() -> i64:
         if not self.is_valid():
@@ -194,6 +203,8 @@ class CudaSession:
 
     me load_module(ptx: text) -> i64:
         """Load a PTX module and return its handle through the CUDA module facade."""
+        if not self.is_valid():
+            return 0
         if self.ffi != nil:
             val module = self.ffi.module_load_ptx(ptx)
             if module > 0:
@@ -234,11 +245,17 @@ class CudaSession:
 
     me sync() -> i64:
         """Synchronize the default CUDA stream. Returns CUDA error code (0 = success)."""
+        if not self.is_valid():
+            return 1
+        var rc = 1
         if self.ffi != nil:
             if self.ffi.synchronize():
-                return 0
-            return 1
-        cuda_sync()
+                rc = 0
+        else:
+            rc = cuda_sync()
+        if rc != CUDA_SUCCESS:
+            self.quarantine_completion_unknown()
+        rc
 
     me font_module_ready() -> bool:
         self.font_module_cache != 0 and self.font_module_identity.starts_with("generated-ptx:") and self.font_module_identity.len() == 78
@@ -254,7 +271,7 @@ class CudaSession:
 
     me alloc(size: i64) -> i64:
         """Allocate device memory of `size` bytes. Returns device pointer or 0 on failure."""
-        if size <= 0:
+        if size <= 0 or not self.is_valid():
             return 0
         if self.ffi != nil:
             return self.ffi.mem_alloc(size)
@@ -262,7 +279,7 @@ class CudaSession:
 
     me free(ptr: i64):
         """Free device memory previously allocated with alloc()."""
-        if ptr != 0:
+        if ptr != 0 and not self.completion_unknown:
             if self.ffi != nil:
                 self.ffi.mem_free(ptr)
             else:
@@ -275,7 +292,7 @@ class CudaSession:
         backend layer; this shared-session method intentionally fails closed
         until a module has been loaded.
         """
-        if self.module_cache == 0:
+        if not self.is_valid() or self.module_cache == 0:
             return 1
         if self.ffi != nil:
             self.kernel_cache = self.ffi.kernel_get(self.module_cache, name)
@@ -288,7 +305,7 @@ class CudaSession:
 
     me launch_kernel_args(name: text, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, args_ptr: i64) -> i64:
         """Launch a named kernel from the cached module with prepared args."""
-        if self.module_cache == 0:
+        if not self.is_valid() or self.module_cache == 0:
             return 1
         if args_ptr == 0:
             return 1
@@ -304,7 +321,7 @@ class CudaSession:
     me launch_font_kernel_args(gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, args_ptr: i64) -> i64:
         """Launch only the separately installed verified font companion."""
         val module = self.font_module_cache
-        if not self.font_module_ready() or args_ptr == 0:
+        if not self.is_valid() or not self.font_module_ready() or args_ptr == 0:
             return 1
         if self.ffi != nil:
             self.kernel_cache = self.ffi.kernel_get(module, FONT_ATLAS_COMPOSITE_ENTRY)
@@ -392,18 +409,18 @@ class CudaSession:
 
     me _cleanup():
         """Destroy all GPU objects. Called automatically by release() on zero refcount."""
-        if self.module_cache != 0:
+        if self.module_cache != 0 and not self.completion_unknown:
             if self.ffi != nil:
                 self.ffi.module_unload(self.module_cache)
             else:
                 cuda_module_unload(self.module_cache)
-            self.module_cache = 0
-        if self.font_module_cache != 0:
+        self.module_cache = 0
+        if self.font_module_cache != 0 and not self.completion_unknown:
             if self.ffi != nil:
                 self.ffi.module_unload(self.font_module_cache)
             else:
                 cuda_module_unload(self.font_module_cache)
-            self.font_module_cache = 0
+        self.font_module_cache = 0
         self.font_module_identity = ""
         if self.ctx != 0:
             if self.ffi != nil:
@@ -415,6 +432,7 @@ class CudaSession:
         self.kernel_cache = 0
         self.stream = 0
         self.is_initialized = false
+        self.completion_unknown = false
         self.generation = self.generation + 1
 
     fn _evidence(operation: text, success: bool, status_code: text, reason: text, kernel: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> CudaSessionEvidence:
