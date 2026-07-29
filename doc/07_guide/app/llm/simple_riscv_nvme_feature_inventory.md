@@ -106,23 +106,19 @@ the default build remains the internal recovery self-test image.
 `rv32-nvme-qemu-host-parity firmware=real transport=qemu-gdb-mailbox` for the
 same command/recovery sequence. QEMU `virt` has no custom endpoint, so do not
 claim AXI/DMA/IRQ, PCIe enumeration, MSI/PERST, KV260 board acceptance,
-physical NAND, or OpenSSD silicon from that result. The source-matched Stage 3 pure-Simple
-compiler builds the resident service ELF and VHDL generator; SSpec/docgen still
-requires an admitted full CLI. The stale deployed binary is not acceptable
-evidence.
+physical NAND, or OpenSSD silicon from that result. The corrected Retry 15
+Stage 2 pure-Simple compiler builds the restored RAM-NAND firmware, but its
+bootstrap-only CLI cannot run SSpec/docgen. The restored 88,220-byte ELF compile
+is current evidence; the combined AXI/exact-BRAM rerun remains a separate open
+gate.
 
 Current bootstrap admission is tracked in
-`doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`. Retry 14
-used pushed authority `3962be916c9d`, rebuilt the Rust authority, compiled all
-Stage 2 objects, and stopped at the native link after 24m01s on three stale
-symbol groups: an undeclared trait-lowering helper, removed coverage-inventory
-calls, and CUDA sizing lowered to unavailable bare `sum`. Peak RSS was
-2,591,760 KiB with zero swap. The source repairs now materialize imported
-traits through `lower_trait`, remove orphaned coverage calls, and use explicit
-CUDA size accumulation. Retry 15 is the next bounded admission attempt; no
-replacement full CLI is admitted yet. Do not run release SSpec/docgen or claim
-source-matched firmware GHDL evidence with the Rust seed or a stale deployed
-binary.
+`doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`. Retry 15
+admitted Stage 2, found and fixed a Rust runtime NUL panic at the environment
+boundary, then reached the bounded Stage 3 timeout without another diagnostic.
+Stage 2 is sufficient for RV32 native-build and GHDL but not `run`/`test`; no
+replacement full CLI is admitted yet. Do not use the Rust seed or a stale
+deployed binary as release SSpec/docgen evidence.
 
 The current endpoint-wired K26 top also passes full SimpleOS boot with both
 zeroed and garbage-filled DDR. That rehearsal uses a tied-off endpoint and does

@@ -317,18 +317,19 @@ Do not represent these host/ARM results as physical persistence or board proof.
 
 ## Current Software Gate
 
-Do not execute the fourteen-scenario SSpec with a stale binary. The source/manual
-now describe the current runners, but final execution and generated-manual
-evidence are blocked until a current pure-Simple `bin/release/simple` is
-available. The latest unchanged-tree run passed Stage 2/3 sanity, cleared the
-prior parser/HIR crashes. Retry 14 compiled all Stage 2 objects but failed at
-the native link on the three stale symbol groups recorded above. Its peak RSS
-was 2,591,760 KiB with zero swap; Retry 15 remains pending.
+Do not execute the fourteen-scenario SSpec with a stale binary. Retry 15 admitted
+a pure-Simple Stage 2 bootstrap compiler and used it to build the restored
+88,220-byte RV32 RAM-NAND firmware. Stage 2 is sufficient for native-build/GHDL
+but intentionally lacks `run`/`test`; Stage 3 reached its bounded timeout after
+the Rust environment boundary was fixed to reject embedded NULs. Final SSpec
+and generated-manual evidence therefore still require a current full CLI.
 
 Before production can move from **BLOCKED/FAIL**, complete:
 
-1. One current pure-Simple SSpec run/docgen when a current runner is available.
-2. Execute and retain the BT-001..BT-006 board campaign with the pinned package.
+1. One bounded source-matched NAND AXI/exact-BRAM GHDL run against the restored
+   `entry.spl` path.
+2. One current pure-Simple SSpec run/docgen when a current runner is available.
+3. Execute and retain the BT-001..BT-006 board campaign with the pinned package.
    REQ-012 and NFR-011 remain board-only.
 
 After the runner blocker is solved, execute the consolidated host gate:

@@ -189,3 +189,25 @@ self-build before it could qualify as pure-Simple evidence. This observation
 does not validate the proposed fixes above; it records the current silent,
 non-progressing failure mode and prevents font verification from treating the
 installed release image as a self-hosted compiler.
+
+## 2026-07-29 Retry 15 Update
+
+The current LLVM path no longer fails at the historical seed-wrapper guard.
+Retry 15 produced and admitted a pure-Simple Stage 2 compiler. A direct Stage 3
+resume then exposed a different runtime boundary defect:
+
+```text
+failed to set environment variable `"SIMPLE_BOOTSTRAP_EXPR_404_S"` to `"\0"`
+```
+
+`rt_env_set` converted the byte slice to valid UTF-8 but did not reject an
+embedded NUL before calling Rust `std::env::set_var`, which panics on invalid
+environment strings. The owner now rejects empty/`=`/NUL keys and NUL values;
+`env_set_rejects_invalid_input_without_panicking` executes and passes.
+
+After rebuilding only the affected runtime archives and Stage 2 from retained
+caches, Stage 3 cleared the former 5m30s abort and remained CPU-active until its
+45-minute cap. It emitted no diagnostic and no final binary; peak RSS was
+1,567,392 KiB. This supersedes the old claim that the current proximate failure
+is a seed-wrapper fallback. The next evidence action is one Stage 3-only run
+with a 90-minute cap, followed by the full-CLI relink only if Stage 3 succeeds.

@@ -223,6 +223,12 @@ pub unsafe extern "C" fn rt_env_set(name_ptr: *const u8, name_len: u64, value_pt
     let Some(value) = ptr_string_value(value_ptr, value_len, 65535) else {
         return false;
     };
+    if name.is_empty()
+        || name.as_bytes().iter().any(|byte| *byte == b'\0' || *byte == b'=')
+        || value.as_bytes().contains(&b'\0')
+    {
+        return false;
+    }
     std::env::set_var(name, value);
     true
 }
@@ -1721,6 +1727,31 @@ mod tests {
 
             // Clean up
             std::env::remove_var("TEST_VAR_SIMPLE");
+        }
+    }
+
+    #[test]
+    fn env_set_rejects_invalid_input_without_panicking() {
+        unsafe {
+            let value = b"ok";
+            for name in ["", "TEST=INVALID", "TEST\0INVALID"] {
+                let (name_ptr, name_len) = str_to_ptr(name);
+                assert!(!rt_env_set(
+                    name_ptr,
+                    name_len,
+                    value.as_ptr(),
+                    value.len() as u64
+                ));
+            }
+
+            let (name_ptr, name_len) = str_to_ptr("TEST_ENV_NUL_SIMPLE");
+            let invalid_value = b"\0";
+            assert!(!rt_env_set(
+                name_ptr,
+                name_len,
+                invalid_value.as_ptr(),
+                invalid_value.len() as u64
+            ));
         }
     }
 
