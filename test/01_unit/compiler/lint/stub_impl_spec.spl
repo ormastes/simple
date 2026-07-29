@@ -42,7 +42,8 @@ use compiler.semantics.lint.stub_impl.{
     check_stub_impl, StubImplWarning,
     classify_trivial, is_default_value,
     body_has_pass_marker, body_references_any_param,
-    get_single_trivial_expr
+    get_single_trivial_expr,
+    string_lit_references_param
 }
 
 # ============================================================================
@@ -177,6 +178,92 @@ describe "STUB001 — Trivial return with unused params":
             val ws = check_stub_impl([d])
             val stub001 = find_warnings_by_code(ws, "STUB001")
             expect(stub001.len()).to_equal(1)
+
+# ============================================================================
+# Test Group 1b: STUB001 — parameter used only via string interpolation
+# ============================================================================
+#
+# Regression coverage for
+# doc/08_tracking/bug/lint_stub001_false_positive_on_string_interpolation_param_2026-07-29.md:
+# a parameter referenced only inside a `{...}` interpolation hole of the
+# body's string-literal return must count as "used".
+
+describe "STUB001 — parameter used only via string interpolation":
+    """
+    ## Interpolation-Only Parameter Use
+
+    A string-literal AST node stores its raw template text verbatim
+    (`"literal-{x}"` keeps the `{x}` unexpanded). The parameter-usage walk
+    must look inside `{...}` holes, not just at AST child expressions.
+    """
+
+    context "when the only param reference is inside a `{...}` hole":
+        it "does NOT emit STUB001 (param is used via interpolation)":
+            ast_reset()
+            # Built via concatenation (not a single literal token) so the
+            # *outer* compiler compiling THIS spec never sees "{index}" as
+            # its own interpolation hole -- we want the raw, unexpanded
+            # runtime text "SPDXRef-Package-File-{index}" handed to
+            # expr_string_lit, exactly as the parser would store it for the
+            # buggy source `"SPDXRef-Package-File-{index}"`.
+            val raw = "SPDXRef-Package-File-" + "{" + "index" + "}"
+            val e = expr_string_lit(raw, 0)
+            val d = make_fn_with_body("file_package_id", ["index"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(0)
+
+    context "when the param is truly unused (single-statement literal body)":
+        it "still emits STUB001":
+            ast_reset()
+            val e = expr_string_lit("literal", 0)
+            val d = make_fn_with_body("label_for", ["index"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+    context "when the braces are escaped (`{{x}}` is literal, not a hole)":
+        it "still emits STUB001 (x is not counted as used)":
+            ast_reset()
+            # Built char-by-char via concatenation for the same reason as
+            # above: avoid the outer compiler treating "{{x}}" as ITS OWN
+            # interpolation source when compiling this spec file.
+            val escaped = "{" + "{" + "x" + "}" + "}"
+            val e = expr_string_lit(escaped, 0)
+            val d = make_fn_with_body("escaped_literal", ["x"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(1)
+
+    context "when a hole references two identifiers (`{a + b}`)":
+        it "does NOT emit STUB001 (both a and b count as used)":
+            ast_reset()
+            val hole = "{" + "a + b" + "}"
+            val e = expr_string_lit(hole, 0)
+            val d = make_fn_with_body("combine", ["a", "b"], e)
+            val ws = check_stub_impl([d])
+            val stub001 = find_warnings_by_code(ws, "STUB001")
+            expect(stub001.len()).to_equal(0)
+
+        it "string_lit_references_param finds 'a' alone in the hole":
+            ast_reset()
+            val hole = "{" + "a + b" + "}"
+            expect(string_lit_references_param(hole, ["a"])).to_equal(true)
+
+        it "string_lit_references_param finds 'b' alone in the hole":
+            ast_reset()
+            val hole = "{" + "a + b" + "}"
+            expect(string_lit_references_param(hole, ["b"])).to_equal(true)
+
+        it "string_lit_references_param rejects a name not present in the hole":
+            ast_reset()
+            val hole = "{" + "a + b" + "}"
+            expect(string_lit_references_param(hole, ["zzz"])).to_equal(false)
+
+    context "when the literal has no interpolation at all":
+        it "string_lit_references_param returns false for a plain literal":
+            ast_reset()
+            expect(string_lit_references_param("plain text", ["x"])).to_equal(false)
 
 # ============================================================================
 # Test Group 2: STUB002 — Zero-param functions with default values

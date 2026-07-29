@@ -23,6 +23,8 @@ use compiler.core.ast_expr.{
     EXPR_ASSIGN, EXPR_BINARY, EXPR_ARRAY_LIT, EXPR_IDENT,
     EXPR_METHOD_CALL, EXPR_COMPOUND_ASSIGN, EXPR_INDEX,
     EXPR_FIELD_ACCESS, EXPR_FOR, EXPR_LIST_COMP,
+    EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT,
+    EXPR_UNARY, EXPR_INTERPOLATED_STRING,
     expr_tag, expr_i_val, expr_s_val, expr_left, expr_right,
     expr_args, expr_count
 }
@@ -109,6 +111,40 @@ fn desugar_collections_static(start_from: i64, stmt_start: i64):
         j = j + 1
 
 # ============================================================================
+# Scalar-addend gate (bug: collection_desugar_scalar_merge_rewrite_2026-07-29)
+# ============================================================================
+#
+# This pass runs at the AST level, BEFORE type-checking, so it has no type
+# oracle: it cannot ask "is this addend a collection?". What it CAN honestly
+# know is the addend's *syntactic shape*. A handful of shapes are provably
+# NOT a collection value under any type-checked program, because Simple has
+# no `+` overload that takes a bare int/float/bool/string literal, a unary
+# expression, or a nested arithmetic (`Binary`) expression on one side and a
+# collection on the other:
+#   - int/float/bool literal addend  -> can only be scalar arithmetic
+#   - string literal / interpolated-string addend -> can only be text
+#     concatenation (there is no `list.merge("literal")` single-item form;
+#     that sugar is spelled `list = list + [item]`, i.e. Pattern A)
+#   - unary (`-x`, `not x`) or binary (`a + b`) addend -> can only be a
+#     scalar/text arithmetic sub-expression
+# Pattern B is gated on NOT matching any of these shapes. It still fires for
+# identifier / field-access / index / call-result addends (e.g.
+# `a = a + d1`, `buf = buf + mock_u32_to_bytes(...)`) because those shapes
+# are genuinely ambiguous without type info and real collection-merge code
+# in this codebase (e.g. archive_parser_spec.spl byte-array concatenation)
+# depends on the rewrite firing there. That ambiguity is a pre-existing,
+# separate, out-of-scope concern -- this gate only removes the *provably*
+# wrong cases.
+fn is_definite_scalar_addend(e: i64) -> bool:
+    """True when `e`'s AST shape can only ever be a scalar/text value, never
+    a collection -- so rewriting `target = target + e` into a `.merge(e)`
+    MethodCall would be wrong regardless of `target`'s (unknown) type."""
+    val tag = expr_tag[e]
+    tag == EXPR_INT_LIT or tag == EXPR_FLOAT_LIT or tag == EXPR_BOOL_LIT or
+        tag == EXPR_STRING_LIT or tag == EXPR_INTERPOLATED_STRING or
+        tag == EXPR_UNARY or tag == EXPR_BINARY
+
+# ============================================================================
 # Pattern A/B/D/E: x = x + [item] / x = x + arr / dict[k] / x = x.push()
 # ============================================================================
 
@@ -165,6 +201,12 @@ fn try_rewrite_assign(e: i64):
         # (would need multiple push calls or a different pattern)
         return
 
+    # Scalar-addend gate: a literal/unary/binary addend can only ever be a
+    # scalar or text value -- never a collection -- so leave the plain
+    # Assign(Binary(+, ...)) shape alone (e.g. `x = x + 1`, `s = s + "a"`).
+    if is_definite_scalar_addend(rhs_right):
+        return
+
     # Pattern B: x = x + other_arr → x.merge(other_arr)
     expr_tag[e] = EXPR_METHOD_CALL
     expr_left[e] = target
@@ -198,6 +240,11 @@ fn try_rewrite_compound_assign(e: i64):
             expr_right[e] = -1
             _collection_desugar_rewrites = _collection_desugar_rewrites + 1
             return
+        return
+
+    # Scalar-addend gate (same rationale as try_rewrite_assign above): leave
+    # `x += 1` / `s += "a"` as plain CompoundAssign arithmetic.
+    if is_definite_scalar_addend(value):
         return
 
     # x += other_arr → x.merge(other_arr)

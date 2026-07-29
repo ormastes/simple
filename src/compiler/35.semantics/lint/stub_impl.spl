@@ -28,6 +28,7 @@ use compiler.core.ast.{
     decl_tag, decl_name, decl_param_names, decl_body_stmts,
     decl_get_span, span_is_valid, span_line
 }
+use std.string_core.{char_code}
 
 fn stub_expr_get_tag(idx: i64) -> i64:
     if idx >= 0 and idx < expr_tag.len():
@@ -122,7 +123,10 @@ fn int_to_str(n: i64) -> text:
     if n < 0:
         neg = true
         v = 0 - n
-    var result = ""
+    # Collect digits least-significant-first into an array and join once
+    # (rather than `result = ch + result` per digit) to avoid an O(n^2)
+    # string-concat-in-loop (lint COLL006).
+    var digits: [text] = []
     for _ in 0..20:
         if v == 0:
             break
@@ -137,8 +141,14 @@ fn int_to_str(n: i64) -> text:
         if d == 7: ch = "7"
         if d == 8: ch = "8"
         if d == 9: ch = "9"
-        result = ch + result
+        digits.push(ch)
         v = v / 10
+    var reversed: [text] = []
+    var i = digits.len() - 1
+    while i >= 0:
+        reversed.push(digits[i])
+        i = i - 1
+    val result = reversed.join("")
     if neg:
         return "-" + result
     result
@@ -495,6 +505,99 @@ fn expr_has_pass_marker(e: i64) -> bool:
 # Parameter Usage Detection
 # ============================================================================
 
+fn stub_is_ident_char(ch: text) -> bool:
+    """Check if a single character is valid inside an identifier token."""
+    if ch.len() != 1:
+        return false
+    val c = char_code(ch)
+    if c >= 97 and c <= 122:  # a-z
+        return true
+    if c >= 65 and c <= 90:  # A-Z
+        return true
+    if c >= 48 and c <= 57:  # 0-9
+        return true
+    if c == 95:  # _
+        return true
+    false
+
+fn interpolation_hole_references_param(hole: text, params: [text]) -> bool:
+    """Check whether any identifier token inside an interpolation hole's raw
+    text (e.g. "a + b.c()" from "{a + b.c()}") matches a parameter name.
+
+    This is a textual token scan rather than a real sub-parse: it splits the
+    hole on non-identifier characters and compares each run against the
+    parameter names. Good enough to answer "is this param referenced",
+    including compound holes like `{a + b}` where both `a` and `b` matter.
+    """
+    var i = 0
+    val n = hole.len()
+    var start = -1
+    while i < n:
+        val ch = hole.slice(i, i + 1)
+        if stub_is_ident_char(ch):
+            if start < 0:
+                start = i
+        else:
+            if start >= 0:
+                val ident = hole.slice(start, i)
+                for p in params:
+                    if ident == p:
+                        return true
+                start = -1
+        i = i + 1
+    if start >= 0:
+        val ident = hole.slice(start, n)
+        for p in params:
+            if ident == p:
+                return true
+    false
+
+fn string_lit_references_param(s: text, params: [text]) -> bool:
+    """Scan a string literal's raw template text for `{...}` interpolation
+    holes and check whether any of them reference a parameter name.
+
+    Handles escaped braces (`{{` / `}}` render as literal `{` / `}`, not a
+    hole) and holes containing nested braces (brace-depth tracked so e.g.
+    `{a.f({x: 1})}` closes at the matching outer `}`).
+    """
+    if params.len() == 0:
+        return false
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val ch = s.slice(i, i + 1)
+        if ch == "{":
+            if i + 1 < n and s.slice(i + 1, i + 2) == "{":
+                i = i + 2
+                continue
+            # Start of an interpolation hole — scan to the matching close,
+            # tracking nested brace depth, then slice the hole text out in
+            # one shot (no per-character concatenation).
+            var depth = 1
+            val hole_start = i + 1
+            var j = hole_start
+            while j < n and depth > 0:
+                val jch = s.slice(j, j + 1)
+                if jch == "{":
+                    depth = depth + 1
+                elif jch == "}":
+                    depth = depth - 1
+                j = j + 1
+            var hole_end = j
+            if depth == 0:
+                hole_end = j - 1  # exclude the matched closing brace
+            val hole = s.slice(hole_start, hole_end)
+            if interpolation_hole_references_param(hole, params):
+                return true
+            i = j
+            continue
+        if ch == "}":
+            if i + 1 < n and s.slice(i + 1, i + 2) == "}":
+                i = i + 2
+                continue
+        i = i + 1
+    false
+
 fn body_references_any_param(stmts: [i64], params: [text]) -> bool:
     """Check if any statement in the body references any of the given parameter names."""
     for s in stmts:
@@ -540,6 +643,17 @@ fn expr_references_param(e: i64, params: [text]) -> bool:
             if name == p:
                 return true
         return false
+
+    # String literal: params referenced only inside `{...}` interpolation
+    # holes are otherwise invisible to this walk (the raw template text is
+    # stored verbatim, unexpanded, in the literal's s_val — see
+    # doc/08_tracking/bug/lint_stub001_false_positive_on_string_interpolation_param_2026-07-29.md).
+    # Raw strings (i_val == 1, e.g. r"...") never interpolate, so `{...}`
+    # inside them is literal text, not a parameter reference.
+    if tag == 3:
+        if stub_expr_get_int(e) != 1:
+            if string_lit_references_param(stub_expr_get_str(e), params):
+                return true
 
     # Recurse into sub-expressions
     if expr_references_param(stub_expr_get_left(e), params):
