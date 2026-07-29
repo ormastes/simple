@@ -110,15 +110,15 @@ STAGE2_PARENT=<canonical-stage2-simple> \
 STAGE2_PARENT_SHA=<sha256> \
 STAGE2_PROVENANCE_PATH=<canonical-stage2-provenance.env> \
 STAGE2_PROVENANCE_SHA=<sha256> \
-STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-1 \
-STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-1 \
-sh scripts/check/build-stage2-font-scoped-tools.shs write
+STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-<next-number> \
+STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-<next-number> \
+bash scripts/check/build-stage2-font-scoped-tools.shs write
 ```
 
 The writer owns the fresh canonical core-C capsule, current runner/docgen ELF
 builds, separate caches, and one green/deliberate-red/zero-example runner plus
 zero-stub docgen calibration.
-Independent or later audit uses `sh
+Independent or later audit uses `bash
 scripts/check/build-stage2-font-scoped-tools.shs check <attempt-root>`; do not
 rerun a green writer. Stage 3/4 and full bootstrap remain out of scope.
 If a direct lexer probe and parser-facing token stream disagree, capture both
