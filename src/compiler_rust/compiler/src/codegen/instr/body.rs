@@ -225,6 +225,27 @@ pub(super) fn build_vreg_types(
                 {
                     types_map.insert(*d, TypeId::I64);
                 }
+                // F64-returning methods (`to_float`/`to_f64`) were missing from
+                // this arm list, unlike every I8..I64/U8..U64/STRING arm above.
+                // Without a vreg_types entry the dest VReg was untyped, so a
+                // CHAINED `.to_string()` on the result (e.g.
+                // `s.to_float().to_string()`) saw `allow_qualified_builtin =
+                // false` in compile_method_call_static (closures_structs.rs),
+                // fell through to name-suffix symbol resolution instead of the
+                // safe builtin `rt_to_string` dispatch, and printed the raw f64
+                // bit pattern as an int under the JIT. Mirrors the I64 arm just
+                // above. See float print bug (lane FLOATBOX, 2026-07-29).
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "to_float"
+                    || func_name == "to_f64"
+                    || func_name.ends_with(".to_float")
+                    || func_name.ends_with(".to_f64") =>
+                {
+                    types_map.insert(*d, TypeId::F64);
+                }
                 MirInst::MethodCallStatic { .. } => {}
                 MirInst::Call {
                     dest: Some(d), target, ..

@@ -1143,6 +1143,58 @@ fn try_compile_builtin_method_call<M: Module>(
             return Ok(Some(converted));
         }
 
+        // Mirrors the STRING->int branch just above: without this, a STRING
+        // receiver falls into the generic from/to conversion below, which
+        // assumes `receiver_val` is already a raw numeric register and emits
+        // `fcvt_from_uint` on the STRING'S TAGGED POINTER — reinterpreting a
+        // heap address as an integer-to-float conversion instead of parsing
+        // the string. `rt_string_to_float` returns a heap-boxed RuntimeValue
+        // (like `rt_value_float`), so unbox it via `rt_value_as_float` to get
+        // a genuine raw f64 register, matching how `rt_string_to_int` above
+        // already returns a raw native i64. See float print bug (lane
+        // FLOATBOX, 2026-07-29): `s.to_float()` printed/arithmetic'd a
+        // pointer-derived garbage float that changed between runs.
+        if from_ty == TypeId::STRING && matches!(to_ty, TypeId::F32 | TypeId::F64) {
+            let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_float") {
+                fid
+            } else {
+                let mut sig = cranelift_codegen::ir::Signature::new(platform_call_conv());
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                let fid = ctx
+                    .module
+                    .declare_function("rt_string_to_float", cranelift_module::Linkage::Import, &sig)
+                    .map_err(|e| e.to_string())?;
+                ctx.func_ids.insert("rt_string_to_float".to_string(), fid);
+                fid
+            };
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let call = adapted_call(builder, func_ref, &[receiver_val]);
+            let boxed = builder.inst_results(call)[0];
+            let unbox_func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_value_as_float") {
+                fid
+            } else {
+                let mut sig = cranelift_codegen::ir::Signature::new(platform_call_conv());
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::F64));
+                let fid = ctx
+                    .module
+                    .declare_function("rt_value_as_float", cranelift_module::Linkage::Import, &sig)
+                    .map_err(|e| e.to_string())?;
+                ctx.func_ids.insert("rt_value_as_float".to_string(), fid);
+                fid
+            };
+            let unbox_func_ref = ctx.module.declare_func_in_func(unbox_func_id, builder.func);
+            let unbox_call = adapted_call(builder, unbox_func_ref, &[boxed]);
+            let raw_f64 = builder.inst_results(unbox_call)[0];
+            let converted = if to_ty == TypeId::F32 {
+                builder.ins().fdemote(types::F32, raw_f64)
+            } else {
+                raw_f64
+            };
+            return Ok(Some(converted));
+        }
+
         let converted = if from_ty == to_ty {
             receiver_val
         } else {

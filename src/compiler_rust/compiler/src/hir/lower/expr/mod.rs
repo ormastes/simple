@@ -773,6 +773,21 @@ impl Lowerer {
         {
             return TypeId::I64;
         }
+        // Builtin string->float parse methods (`to_float`/`to_f64`) are compiler
+        // intrinsics with no registered `method_return_types` entry (they are not
+        // real user-defined methods), so without this they fall through to ANY
+        // just like `char_code_at` above — except the raw native RETURN VALUE is
+        // an f64 bit pattern, not a tagged RuntimeValue. Downstream code (e.g.
+        // MIR lowering's `needs_float_boxing` in lowering_expr_method.rs) already
+        // boxes an F64-typed receiver correctly via BoxFloat/rt_value_float
+        // before passing it to a chained call like `.to_string()`; it just never
+        // fires because the receiver was mistyped ANY. Typing them F64 here
+        // makes that existing boxing logic take effect. See float print bug
+        // (lane FLOATBOX, 2026-07-29): `s.to_float().to_string()` printed the
+        // raw f64 bit pattern as an int under JIT.
+        if matches!(method, "to_float" | "to_f64") && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY) {
+            return TypeId::F64;
+        }
         TypeId::ANY
     }
 
