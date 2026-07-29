@@ -288,7 +288,15 @@ pub(crate) fn compile_builtin_method<M: Module>(
             let wrapped_key = wrap_value(ctx, builder, args[0], key_val);
             Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_key))
         }
-        ("Dict", "set") | ("dict", "set") => {
+        // `insert` is a synonym for `set` (interpreter_method/collections.rs
+        // handles both under one arm); it was missing from this table, so a
+        // compiled `d.insert(k, v)` fell through to the generic cross-module
+        // fallback below, declared an unresolvable "Dict.insert" import, and
+        // the runtime printed "Function 'Dict.insert' not found" while still
+        // exiting 0. Route it to the same `rt_dict_set` the runtime already
+        // implements (see codegen/instr/calls.rs `sffi_alias_target`, which
+        // aliases the literal SFFI name `rt_dict_insert` to `rt_dict_set`).
+        ("Dict", "set") | ("dict", "set") | ("Dict", "insert") | ("dict", "insert") => {
             let key_val = ctx.get_vreg(&args[0])?;
             let val_val = ctx.get_vreg(&args[1])?;
             let wrapped_key = wrap_value(ctx, builder, args[0], key_val);
