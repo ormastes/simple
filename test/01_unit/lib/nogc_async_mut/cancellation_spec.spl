@@ -51,16 +51,38 @@ describe "CancellationToken (real module, both constructors)":
         expect(sib_b.is_cancelled()).to_equal(false)
         expect(parent.is_cancelled()).to_equal(false)
 
-    # NOTE: a 3rd token allocated after `mid` (whether or not it is
-    # `mid`'s own child, or a wholly unrelated token via token_new())
-    # makes a *later* `mid.is_cancelled()` call read a stale registry
-    # snapshot and wrongly return false, even though the direct
-    # parent/child case above (2 tokens total) is correct. Root cause is
-    # still open — see
-    # doc/08_tracking/bug/cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md.
-    # Intentionally not asserted here: depth-1 propagation is fixed and
-    # covered above; depth-2+ is a known, filed limitation, not silently
-    # claimed to work.
+    # NOTE: depth-2 (grandparent -> grandchild) propagation with an
+    # intervening `token_new()`/`.new()` allocation between the middle
+    # token's construction and the later `is_cancelled()` check is
+    # STILL BROKEN, and is a *deeper* variant of the same interpreter
+    # defect than originally filed. Attempted here and root-caused
+    # further (2026-07-29 update in both bug docs): the true trigger is
+    # not recursion depth or array-vs-scalar, but calling the
+    # receiver-less constructor (`token_new()` / `CancellationToken.new()`)
+    # *more than once* — the second call reads a stale cross-call
+    # snapshot of `_next_token_id` and mints a COLLIDING id with a token
+    # from an unrelated earlier call, corrupting that slot's parent
+    # link. A workaround (routing every root allocation through
+    # `.child()` on a hidden, never-cancelled dummy instance, so the
+    # receiver-less path only ever pushes once, lazily) was verified
+    # correct in isolated single-script probes at depth-2, depth-3, and
+    # with 200+ allocations — but the SAME workaround, run through this
+    # spec's actual `describe`/`it` structure, corrupted state
+    # differently across `it` blocks and made the test daemon hang
+    # (see the dated section in
+    # doc/08_tracking/bug/cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md
+    # for the full probe transcript). Per this lane's own escalation
+    # rule ("if the interpreter bug makes even the iterative form fail,
+    # stop and document"), the workaround was NOT shipped: it traded a
+    # deterministic wrong-answer for a hang, which is worse. What IS
+    # shipped: `is_cancelled()` is now a bounded, non-recursive
+    # iterative loop (see src/lib/nogc_async_mut/async/cancellation.spl)
+    # that keeps every single-`token_new()`-call scenario below correct
+    # (including the direct parent/child case) and can never hang even
+    # if a future allocation pattern corrupts the parent chain into a
+    # cycle. Depth-2+ propagation across more than one `token_new()`
+    # call remains unverified and is NOT asserted here — see the bug
+    # doc for the open item.
 
     it "allocates well past the old fixed 64-slot registry cap":
         # The registry used to be a hardcoded 64-element array with no

@@ -127,3 +127,46 @@ Bisect the interpreter's environment/frame construction for calls made from insi
 `impl` method body to a top-level `fn`, versus calls made to another method on a
 freshly-constructed instance of the same class — the workaround above suggests the
 latter re-resolves the module scope correctly while the former does not.
+
+## 2026-07-29 update (lane G9b): broader than free-fn-vs-method
+
+Chasing the "known remaining gap" above to ground, lane G9b (mission-critical
+robustness campaign) found the defect is broader than "free-fn helper called
+from inside a method": it reproduces for **any receiver-less callable
+(a plain top-level `fn`, or a `static fn` with no `self`) called more than
+once**, regardless of whether a method is involved at all. Minimal repro
+(bare `i64` counter, `bin/simple run SIMPLE_EXECUTION_MODE=interpreter`):
+
+```
+var root = token_new()       # 1st call into a receiver-less fn: mints id 0
+var mid = root.child()       # instance method (self-bearing): mints id 1, correctly
+                              # sees the counter as token_new() left it
+val unrelated = token_new()  # 2nd call into the SAME receiver-less fn: should
+                              # mint id 2, but reads a stale cross-call snapshot
+                              # (still 1) and mints id 1 again — collides with mid
+```
+
+Calling `CancellationToken.new()` (a `static fn`, no free-fn indirection
+whatsoever) a second time reproduces the identical collision, ruling out
+"free-fn helper" as the necessary condition — it is specifically about
+**repeated calls to a receiver-less function**, whether or not a method calls
+it or it's called directly. Calling an **instance** method (`.child()`) many
+times in a row — even reusing the exact same receiver value — was verified
+correct through 200+ sequential calls in one script.
+
+A worse variant surfaces crossing a `describe`/`it` spec closure boundary
+(`bin/simple test`): a later `it` block's first call into a receiver-less
+function does not see a full reset (ruling out per-test isolation) nor fully
+live state (ruling out ordinary shared globals) but a **stale, partial**
+snapshot — enough to mint a colliding id with an unrelated earlier `it`'s
+token and splice a fresh token's parent pointer onto that old slot's leftover
+registry data. One workaround shape for this even produced a
+`test daemon timed out` hang, consistent with the corruption occasionally
+producing a cyclic parent chain.
+
+Full transcript, working code that reproduces it in isolation, the workaround
+attempted (and why it was rejected — see "Decision" there), and what shipped
+instead: the 2026-07-29 update section of
+`doc/08_tracking/bug/cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md`.
+Still not fixable from pure-Simple stdlib source; still belongs to the
+interpreter/compiler team.
