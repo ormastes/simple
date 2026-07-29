@@ -41,6 +41,7 @@ use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
 use compiler.core.ast.{expr_unsafe_block}
 use compiler.frontend.core.lexer.{lex_token_end_get, lex_source_char_at}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args}
+use compiler.core.ast.{expr_get_arg_names, expr_call_args_set}
 use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl}
 use compiler.core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_for_stmt, stmt_while_stmt, stmt_block_stmt}
 use compiler.core.ast.{stmt_match_stmt, stmt_break_stmt, stmt_continue_stmt, stmt_break_labeled, stmt_continue_labeled, stmt_labeled_loop, STMT_LABELED_LOOP}
@@ -180,6 +181,63 @@ fn infer_expr_type_from_parse(expr_id: i64) -> i64:
     0
 
 # ===== Block and Statement Parsing =====
+
+# Trailing colon-block sugar: `callee(args):` / `recv.method(args):` in
+# statement position, with the indented body becoming an implicit zero-arg
+# lambda appended as the call's last argument (`describe("x"): ...` desugars
+# to `describe("x", fn(): ...)`). Mirrors the Rust seed's
+# `try_parse_colon_block` (src/compiler_rust/parser/src/expressions/
+# no_paren.rs) which the pure-Simple frontend never had — see
+# doc/08_tracking/bug/lint_parse001_false_positive_on_spec_files_2026-07-29.md.
+# Callers only invoke this after already confirming `call_expr` is an
+# EXPR_CALL/EXPR_METHOD_CALL AND the current token is TOK_COLON, so this can
+# never intercept an `if cond():`/`while cond():` colon — those consume their
+# own colon via parse_if_stmt/parse_while_stmt, a separate code path that
+# never reaches this statement-expression fallback.
+# `describe "name":` / `it "name":` — a bare identifier IMMEDIATELY followed
+# (same line, no separator) by a string literal. This is the dominant DSL
+# call shape across the spec-file corpus (~24k files use this no-paren form
+# vs ~80 using `describe("name"):`) but the pure-Simple frontend never
+# implemented generic no-paren calls (only "print" got a hand-special-cased
+# one at module level) — see doc/08_tracking/bug/
+# lint_parse001_false_positive_on_spec_files_2026-07-29.md. Without this, the
+# identifier and the string literal were silently accepted as TWO unrelated
+# expression-statements (the module/statement fallback never required a
+# separator between them), so any code relying on `describe`'s block
+# argument actually doing something was already semantically broken under
+# this frontend, just not diagnosed. No other Simple construct places a bare
+# identifier directly adjacent to a string literal with no operator between
+# them, so folding this one shape into a real call cannot shadow any
+# existing meaning. Returns (false, 0) when the lookahead doesn't match,
+# leaving the token stream exactly as found (snapshot-restored).
+fn try_parse_bare_ident_string_call() -> (bool, i64):
+    val bc_name = par_text_get()
+    val (bc_snap_n, bc_snap_t) = lex_snapshot_save()
+    val (bc_tok_n, bc_tok_t) = parser_tok_save()
+    parser_advance()
+    if par_kind_get() != TOK_STRING_LIT:
+        lex_snapshot_restore(bc_snap_n, bc_snap_t)
+        parser_tok_restore(bc_tok_n, bc_tok_t)
+        return (false, 0)
+    val bc_arg = parse_expr()
+    var bc_args: [i64] = []
+    bc_args.push(bc_arg)
+    (true, expr_call(expr_ident(bc_name, 0), bc_args, 0))
+
+fn parse_trailing_colon_block_arg(call_expr: i64) -> i64:
+    parser_expect(TOK_COLON)
+    val body_stmts = parse_block()
+    val block_expr = expr_block(body_stmts, -1, 0)
+    var lambda_body: [i64] = []
+    lambda_body.push(block_expr)
+    var lambda_params: [i64] = []
+    val lambda_idx = expr_lambda(lambda_params, lambda_body, 0)
+    var cb_args = expr_get_args(call_expr)
+    var cb_names = expr_get_arg_names(call_expr)
+    cb_args.push(lambda_idx)
+    cb_names.push("")
+    expr_call_args_set(call_expr, cb_args, cb_names)
+    call_expr
 
 fn parse_block() -> [i64]:
     var stmts: [i64] = []
@@ -607,8 +665,15 @@ fn parse_statement() -> i64:
         val trace_kind = kind
         val trace_text = par_text_get()
         eprint("[parser-block] expr-branch:start kind={trace_kind} text={trace_text} line={par_line_get()} col={par_col_get()}")
-    val expression = parse_expr()
+    var expression = 0
+    if kind == TOK_IDENT:
+        val (bc_matched, bc_call) = try_parse_bare_ident_string_call()
+        expression = if bc_matched: bc_call else: parse_expr()
+    else:
+        expression = parse_expr()
     kind = par_kind_get()
+    if kind == TOK_COLON and (expr_get_tag(expression) == EXPR_CALL or expr_get_tag(expression) == EXPR_METHOD_CALL):
+        return stmt_expr_stmt(parse_trailing_colon_block_arg(expression), 0)
     if kind == TOK_IDENT:
         val lane_name = par_text_get()
         if lane_name == "gpu" or lane_name == "host":
@@ -1691,7 +1756,8 @@ fn parse_gpu_launch_stmt() -> i64:
     stmt_gpu_launch(grid_exprs, block_exprs, body, 0)
 
 # ===== Exports =====
-export parse_block, parse_statement
+export parse_block, parse_statement, parse_trailing_colon_block_arg
+export try_parse_bare_ident_string_call
 export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
 export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
 export parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow

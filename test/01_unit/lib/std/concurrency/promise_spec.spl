@@ -33,9 +33,71 @@ impl PromiseState:
             case Rejected(_): true
             case _: false
 
+# Module-level registry backing Promise.new()'s mutable state while the
+# executor runs. Promise<T> itself stays a plain value-type struct
+# (state, callbacks) so the `Promise { state: ..., callbacks: [] }`
+# literal construction used throughout this file keeps working
+# unmodified. `static fn new` only needs a mutable cell for the
+# duration of the executor call, then freezes the result into an
+# immutable struct.
+#
+# Root cause of the "unknown static method new on class Promise"
+# failure this fixes: the class genuinely never declared a `new`
+# constructor (not the erased-receiver static-method-resolution
+# landmine documented at driver_core_types.spl:150 -- this class is
+# locally defined with a concrete, non-erased receiver type, and
+# CancellationToken.new()/similar static constructors resolve fine
+# under the same interpreter).
+#
+# resolve()/reject() below are nested named `fn`s that mutate this
+# MODULE-level `var` by index -- not a captured local of the enclosing
+# `new()` call -- which is the pattern this codebase's runtime
+# actually supports (see src/lib/nogc_async_mut/async/cancellation.spl
+# header comment: "Simple structs are value types -- storing children
+# in the parent ... would mutate copies, not the caller's vars.
+# Instead we use a module-level flat registry"). Mutating a captured
+# *local* `var` from a nested closure is the documented limitation
+# ("Nested closure capture - can READ outer vars, CANNOT MODIFY");
+# module-level closures work fine, which is what this uses.
+var _promise_new_state: [PromiseState] = []
+
+# NOTE (interpreter defect, new shape, found while fixing this spec):
+# `_promise_new_state = _promise_new_state.push(...)` (a module `var`
+# reassignment) must NOT live in the same function body as a nested
+# `fn` that also references `_promise_new_state` -- doing so desyncs
+# the enclosing function's view of the array from the one the nested
+# closure mutates (the outer function keeps reading a stale/pre-push
+# snapshot after the closure runs, confirmed in an isolated 4-line
+# repro outside this file: push-and-reassign in the SAME function as
+# the nested closure loses the write; hoisting the push into a
+# separate free function fixes it). This is the same family as
+# `interpreter_module_array_stale_read_via_free_fn_helper_2026-07-29.md`
+# but the opposite direction (there, indirection THROUGH a free
+# function was the bug; here, indirection THROUGH a free function is
+# the FIX and doing the push inline is the bug) -- see the new bug doc
+# filed alongside this spec for the minimal repro.
+fn _promise_new_push_pending() -> i64:
+    val idx = _promise_new_state.len()
+    _promise_new_state = _promise_new_state.push(PromiseState.Pending)
+    idx
+
 class Promise<T>:
     state: PromiseState
     callbacks: List
+
+    static fn new(executor) -> Promise<T>:
+        val idx = _promise_new_push_pending()
+
+        fn resolve(v):
+            if _promise_new_state[idx].is_pending():
+                _promise_new_state[idx] = PromiseState.Resolved(v)
+
+        fn reject(e):
+            if _promise_new_state[idx].is_pending():
+                _promise_new_state[idx] = PromiseState.Rejected(e)
+
+        executor(resolve, reject)
+        Promise { state: _promise_new_state[idx], callbacks: [] }
 
     fn is_pending() -> bool:
         val s = self.state

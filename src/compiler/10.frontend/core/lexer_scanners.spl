@@ -8,6 +8,28 @@
 #   lex_pending_dedents_slot, lex_at_line_start_slot, lex_paren_depth_slot,
 #   lex_round_paren_depth_slot, lex_cur_kind_slot, lex_cur_text_slot,
 #   lex_cur_line_slot, lex_cur_col_slot, lex_cur_suffix_slot
+#
+# INVARIANT (LEX1 audit, 2026-07-29, see
+# doc/08_tracking/bug/lexer_position_unification_2026-07-29.md): every
+# function in this file reads/writes the legacy `lex_state_get/set("pos"|
+# "line"|"col", ...)` slot (via lex_pos_get/lex_pos_set/lex_line_get/
+# lex_col_get/lex_peek*/lex_advance/lex_match_char) -- a store that
+# CoreLexer.next_token() (lexer_struct.spl) never writes back to. That is
+# fine ONLY because this file's entire call graph (lex_scan_token() here,
+# and lex_scan_token_local() in lexer.spl which is the only external
+# caller of lex_scan_number/lex_scan_string/lex_scan_ident/lex_skip_spaces/
+# lex_handle_indentation) is currently DEAD CODE: lex_scan_token_local has
+# zero callers outside its own self-recursion, so nothing in the live
+# parse path (which runs through lex_next() -> CoreLexer.next_token() /
+# next_token_after_generic_close(), using the struct's own scan_number/
+# scan_string/scan_ident methods) reaches this file. Do NOT call anything
+# in this file from CoreLexer-driven code -- it would silently read/write
+# the stale legacy slot (the exact "unsafe:"/"asm { }" bug class SF2 fixed
+# point-wise; see lexer.spl's "Live position accessors" note and
+# parser_stmts.spl ~495-518). Confirmed dead by repo-wide caller search on
+# 2026-07-29; recorded as a cleanup candidate rather than deleted in-lane
+# to keep this lane's diff scoped (deleting it also requires updating the
+# two structural-existence specs in test/01_unit/compiler/lexer/).
 
 use compiler.core.tokens.{keyword_lookup, token_requires_rhs}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space, is_octal_digit}
