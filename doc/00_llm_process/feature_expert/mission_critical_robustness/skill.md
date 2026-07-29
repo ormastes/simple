@@ -96,10 +96,22 @@ ctx.add_error; default advisory unchanged).
 2. Another session's `feat(ui)` conflict root (5ff78c368048) — local only,
    never resolve it from this campaign's sessions.
 
-**In flight / next:** SE2 wiring the never-constructed RawPointerOutsideUnsafe
-+ UnsafeFfiOutsideUnsafe rules (only inline-asm fires today). Then DS6 gdb
-transport, DS7 crash capture, DS8 OTLP; Batch 3 (G2 E1047, G7 iterators, G8
-Transfer/Share, G9 cancellation, Miri-mode, editions, SBOM).
+**Batch D COMPLETE (2026-07-29):** DS1-DS8 all pushed. SE1+SE2 landed — the
+safety pass ENFORCES and all three rules fire (SE2b found the third
+silent-pattern-acceptance dead-code defect: `check_stmt` matched nonexistent
+variants `Val`/`Var`/`AssignOp`, so every val/var initializer went unwalked).
+DS6: real subprocess-pipe GDB MI transport + token table + lossless
+breakpoints (seed lacks `rt_process_spawn_piped` — system spec skips honestly,
+filed). DS7: CrashBundleV1 honest subset (signal-context extern gap filed with
+exact rt_* signatures, not stubbed). DS8: OTLP JSON exporter + ObserveContext
+(task/actor ids as plain i64 — real types live a tier up; wiring into std.log
++ scheduler is the named follow-up). Also RT1: a concurrent session's
+monitor-timeout WIP broke EVERY `simple test` (`to_int("")` + interpreter
+evaluates both sides of `and`) — fixed forward at all 4 sites.
+
+**Next:** Batch 3 (G2 E1047, G7 iterators, G8 Transfer/Share, G9 cancellation,
+Miri-mode, editions, SBOM); ObserveContext wiring; signal-capture externs
+(runtime work); PE engine-flag lane.
 
 **New landmines filed today (read before touching these areas):**
 - `interp_lint_main_then_frontend_dict_to_int_2026-07-28.md` — executing
