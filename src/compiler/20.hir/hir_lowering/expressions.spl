@@ -132,6 +132,27 @@ fn _hir_named_type_symbol(type_: HirType) -> SymbolId?:
 
 impl HirLowering:
     me field_module_callable(module_name: text, field_name: text) -> SymbolId?:
+        # NOTE: deliberately does NOT filter candidates by `candidate.kind ==
+        # SymbolKind.Function`. A same-process cross-module symbol-kind
+        # comparison (a value of an enum declared in hir_types.spl, built via
+        # one import spelling, pattern-matched against a case constructed via
+        # a different import spelling of the same symlinked module path --
+        # `src/compiler/hir` -> `src/compiler/20.hir`) was found to NEVER
+        # match here at runtime: `rt_enum_discriminant` returns -1 for every
+        # SymbolKind value reached this way, and a `match candidate.kind:
+        # case SymbolKind.Function:` against a genuinely Function-kind
+        # candidate silently fell to the wildcard arm every time (verified
+        # with an exhaustive per-variant probe: none of the 15 named
+        # SymbolKind cases ever matched). That made this whole function a
+        # dead no-op for every cross-module candidate -- the reason
+        # `provider.answer()` (module-qualified call reached via `import
+        # provider`, not `use provider.*`) silently lowered to a call on a
+        # namespace with no runtime receiver instead of the real function.
+        # (name, defining_module) is already a strong enough pair to
+        # identify the intended symbol without the kind filter: an ordinary
+        # local variable/parameter never has `defining_module` set (nil), so
+        # this loop only ever matches symbols that came from a real cross-
+        # module import registration in the first place.
         val candidate_keys = self.symbols.symbols.keys()
         var index = candidate_keys.len()
         while index > 0:
@@ -139,11 +160,8 @@ impl HirLowering:
             val candidate = self.symbols.symbols[candidate_keys[index]]
             if val candidate_module = candidate.defining_module:
                 if candidate_module == module_name:
-                    match candidate.kind:
-                        case SymbolKind.Function:
-                            if candidate.name == field_name or candidate.name.ends_with("." + field_name):
-                                return candidate.id
-                        case _: ()
+                    if candidate.name == field_name or candidate.name.ends_with("." + field_name):
+                        return candidate.id
         nil
 
     me field_tuple_element_type(base_kind: HirExprKind, index: i64) -> HirType?:
@@ -420,8 +438,60 @@ impl HirLowering:
                             value: self.lower_hir_expr(marg_t.value),
                             span: marg_t.span
                         ))
+                    val mc_lowered_receiver = self.lower_hir_expr(receiver)
+                    # Module-qualified call written in method-call syntax
+                    # (`provider.answer()` reached via `import provider` --
+                    # the parser emits ExprKind.MethodCall for ANY
+                    # `recv.name(args)` form, not just ExprKind.Call(Field(
+                    # ...)); the sibling Field arm above already redirects a
+                    # module-qualified BARE field access to the defining
+                    # function's NamedVar, but this MethodCall arm never
+                    # special-cased a module-namespace receiver at all, so a
+                    # qualified call written with call-parens silently
+                    # lowered to HirExprKind.MethodCall on a Module symbol --
+                    # which has no runtime receiver value and no class
+                    # method named `method`, so MIR method-call lowering can
+                    # never resolve it. The call survives structurally (as
+                    # the block's tail `.value`, so `body.stmts.len()==0` is
+                    # normal tail-value desugaring, not itself a drop) but
+                    # was semantically dead: no diagnostic, no callable code
+                    # emitted. Mirror the Field arm's intent: if the receiver
+                    # is a symbol that came from a cross-module import
+                    # registration (`defining_module` set -- an ordinary
+                    # local variable/parameter never has one) AND that
+                    # module has a matching callable named `method`, lower
+                    # to a plain qualified Call instead.
+                    #
+                    # Deliberately does NOT gate on `receiver symbol.kind ==
+                    # SymbolKind.Module` (unlike a first version of this
+                    # fix): that comparison was found to NEVER match at
+                    # runtime here (see field_module_callable's doc comment
+                    # for the full cross-module symbol-kind investigation),
+                    # so field_module_callable's own (defining_module, name)
+                    # match is the sole -- and sufficient -- gate. Falls
+                    # through to the original MethodCall lowering (no error)
+                    # when no match is found, so ordinary method calls
+                    # (`arr.push(x)`, a struct instance method, ...) are
+                    # unaffected.
+                    val mc_module_base_sym = _hir_expr_symbol(mc_lowered_receiver.kind)
+                    if mc_module_base_sym.?:
+                        val mc_base_sym = mc_module_base_sym.unwrap()
+                        if val mc_base_symbol = self.symbols.get_symbol_raw(mc_base_sym.id):
+                            if val mc_module_name = mc_base_symbol.defining_module:
+                                val mc_module_callable = self.field_module_callable(mc_module_name, method)
+                                if val mc_resolved_callable = mc_module_callable:
+                                    val mc_callable_name = self.symbols.symbol_display_name(mc_resolved_callable, method)
+                                    return HirExpr(
+                                        kind: HirExprKind.Call(
+                                            HirExpr(kind: HirExprKind.NamedVar(mc_resolved_callable, mc_callable_name), type_: nil, span: e.span),
+                                            hir_args,
+                                            []
+                                        ),
+                                        type_: nil,
+                                        span: e.span
+                                    )
                     return HirExpr(
-                        kind: HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, hir_args, MethodResolution.Unresolved),
+                        kind: HirExprKind.MethodCall(mc_lowered_receiver, method, hir_args, MethodResolution.Unresolved),
                         type_: nil,
                         span: e.span
                     )
@@ -454,18 +524,25 @@ impl HirLowering:
                     # Module imports are namespaces, not runtime values. A
                     # qualified imported function must lower to its defining
                     # function symbol before MIR call lowering.
+                    #
+                    # Deliberately does NOT gate on `fld_base_symbol.kind ==
+                    # SymbolKind.Module` (see field_module_callable's doc
+                    # comment): that comparison never matches at runtime for
+                    # a symbol whose SymbolKind value crossed from a
+                    # different module's import spelling of the symlinked
+                    # `compiler.hir` / `compiler.20.hir` path, so this arm
+                    # was silently dead code prior to this fix.
+                    # field_module_callable's own (defining_module, name)
+                    # match is the sole -- and sufficient -- gate.
                     val fld_module_base_sym = _hir_expr_symbol(fld_lowered_base.kind)
                     if fld_module_base_sym.?:
                         val fld_base_sym = fld_module_base_sym.unwrap()
                         if val fld_base_symbol = self.symbols.get_symbol_raw(fld_base_sym.id):
-                            match fld_base_symbol.kind:
-                                case SymbolKind.Module:
-                                    if val module_name = fld_base_symbol.defining_module:
-                                        val module_callable = self.field_module_callable(module_name, fld_name_t)
-                                        if val resolved_callable = module_callable:
-                                            val callable_name = self.symbols.symbol_display_name(resolved_callable, fld_name_t)
-                                            return HirExpr(kind: HirExprKind.NamedVar(resolved_callable, callable_name), type_: nil, span: e.span)
-                                case _: ()
+                            if val module_name = fld_base_symbol.defining_module:
+                                val module_callable = self.field_module_callable(module_name, fld_name_t)
+                                if val resolved_callable = module_callable:
+                                    val callable_name = self.symbols.symbol_display_name(resolved_callable, fld_name_t)
+                                    return HirExpr(kind: HirExprKind.NamedVar(resolved_callable, callable_name), type_: nil, span: e.span)
                     # Numeric tuple positional access (`t.0`, `t.1`, ...):
                     # route through HirExprKind.Index (rt_array_get at
                     # runtime) instead of the generic struct-field path

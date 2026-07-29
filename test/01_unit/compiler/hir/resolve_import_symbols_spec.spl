@@ -247,18 +247,44 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(lowering.errors.len()).to_equal(0)
         for fn_ in hir.functions.values():
             if fn_.name == "main":
-                match fn_.body.stmts[0].kind:
-                    case HirStmtKind.Expr(expr):
-                        match expr.kind:
-                            case HirExprKind.Call(callee, _, _):
-                                match callee.kind:
-                                    case HirExprKind.NamedVar(symbol, _):
-                                        if val callable = hir.symbols.get_symbol(symbol):
-                                            expect(callable.defining_module.unwrap()).to_equal("provider")
-                                        else:
-                                            assert_true(false)
-                                    case _:
-                                        assert_true(false)
+                # `provider.answer()` is the function's SOLE statement, so
+                # `lower_hir_block`'s tail-value desugar (HirBlock.has/.value,
+                # see hir_definitions.spl -- the trailing expression-statement
+                # of a value-returning function body is lifted out of `stmts`
+                # into `value`, exactly like an ordinary non-qualified
+                # single-expression body such as `fn f() -> i64: g()`) leaves
+                # `fn_.body.stmts` EMPTY and carries the call in
+                # `fn_.body.value` instead. Read whichever one is actually
+                # populated -- indexing `stmts[0]` unconditionally on a
+                # value-returning single-statement body is an "index out of
+                # bounds" false negative, not evidence the call was dropped.
+                val main_call_expr: HirExpr = if fn_.body.stmts.len() > 0:
+                    match fn_.body.stmts[0].kind:
+                        case HirStmtKind.Expr(expr):
+                            expr
+                        case _:
+                            assert_true(false)
+                            fn_.body.value
+                elif fn_.body.has:
+                    fn_.body.value
+                else:
+                    assert_true(false)
+                    fn_.body.value
+                match main_call_expr.kind:
+                    case HirExprKind.Call(callee, _, _):
+                        match callee.kind:
+                            case HirExprKind.NamedVar(symbol, _):
+                                # get_symbol_raw (raw-i64 form), not get_symbol
+                                # (SymbolId?-taking form): get_symbol's `case
+                                # SymbolId(raw):` pattern against its Option-
+                                # wrapped parameter has a known match-shape
+                                # landmine on this interpreter (falls through
+                                # for every id). get_symbol_raw sidesteps it
+                                # entirely.
+                                if val callable = hir.symbols.get_symbol_raw(symbol.id):
+                                    expect(callable.defining_module.unwrap()).to_equal("provider")
+                                else:
+                                    assert_true(false)
                             case _:
                                 assert_true(false)
                     case _:

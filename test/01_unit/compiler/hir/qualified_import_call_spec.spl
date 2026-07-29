@@ -1,0 +1,171 @@
+"""
+# Qualified Import Call Statement Unit Spec
+
+Verifies that a module-qualified call reached via `import MODULE` (e.g.
+`provider.answer()`, as opposed to `use provider.*` / `use provider.{answer}`)
+lowers to a real function call instead of being silently discarded.
+
+Bug: doc/08_tracking/bug/hir_qualified_import_call_statement_dropped_2026-07-29.md
+Root cause: `provider.answer()` parses as `ExprKind.MethodCall(receiver:
+Ident("provider"), method: "answer", args: [])`, not `ExprKind.Call(Field(...))`
+-- the MethodCall arm in hir_lowering/expressions.spl never special-cased a
+module-namespace receiver, so it always lowered to `HirExprKind.MethodCall`
+on a Module symbol (no runtime receiver, no class method named `answer`),
+which is semantically dead even though it survives structurally as the
+function body's tail value.
+
+A second, independent finding along the way: a function whose SOLE statement
+is a call (qualified or not) always lowers with `body.stmts.len()==0` --
+`lower_hir_block`'s tail-value desugar (HirBlock.has/.value) lifts the last
+expression-statement of a value-returning function body out of `stmts` into
+`value`. That is normal, general HIR shape (verified here for the
+UNQUALIFIED control case too), not itself evidence of a drop -- MIR's
+`lower_block_expected` reads `block.has`/`block.value` explicitly
+(50.mir/_MirLowering/function_lowering.spl).
+"""
+
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_definitions.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn qics_make_logger() -> Logger:
+    Logger(level: 0)
+
+fn qics_build_surfaces(modules: Dict<text, Module>, sources: [SourceFile]) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(_):
+            assert_true(false)
+            ModuleSurfacesByName(surfaces: [], index_by_name: {})
+
+fn qics_find_fn(hir: HirModule, name: text) -> HirFunction?:
+    for fn_ in hir.functions.values():
+        if fn_.name == name:
+            return Some(fn_)
+    nil
+
+describe "qualified-import call statement lowering":
+    """A module-qualified call reached via `import MODULE` must lower to a
+    real function call, whether it is the sole statement in a value-returning
+    function body or mixed in among other statements."""
+
+    it "qualified call as sole statement lowers to a real call (tail value, not dropped)":
+        val log = qics_make_logger()
+        val src_provider = "pub fn answer() -> i64:\n    42"
+        val provider = parse_full_frontend(src_provider, "provider", "provider", log)
+        val src_consumer = "import provider\nfn main() -> i64:\n    provider.answer()"
+        val consumer = parse_full_frontend(src_consumer, "consumer_qualified_sole", "consumer_qualified_sole", log)
+
+        var modules: Dict<text, Module> = {}
+        modules["provider"] = provider
+        var sources: [SourceFile] = []
+        sources = sources.push(SourceFile(path: "provider", content: src_provider, module_name: "provider"))
+        val surfaces = qics_build_surfaces(modules, sources)
+
+        var lowering = hirlowering_for_module("consumer_qualified_sole", surfaces)
+        val hir = lowering.lower_module(consumer)
+
+        expect(lowering.errors.len()).to_equal(0)
+        if val main_fn = qics_find_fn(hir, "main"):
+            # SOLE statement in a value-returning body -> tail-value desugar:
+            # stmts is empty and the call lives in `.value` instead. This is
+            # normal HIR shape (see the unqualified control example below),
+            # not a drop.
+            expect(main_fn.body.stmts.len()).to_equal(0)
+            expect(main_fn.body.has).to_equal(true)
+            match main_fn.body.value.kind:
+                case HirExprKind.Call(callee, call_args, _):
+                    expect(call_args.len()).to_equal(0)
+                    match callee.kind:
+                        case HirExprKind.NamedVar(symbol, _):
+                            if val callable = hir.symbols.get_symbol_raw(symbol.id):
+                                expect(callable.defining_module.unwrap()).to_equal("provider")
+                            else:
+                                assert_true(false)
+                        case _:
+                            assert_true(false)
+                case _:
+                    # Fix shape B (loud error) would show up as
+                    # HirExprKind.Error here instead of a Call -- fail loudly
+                    # so a regression to the old silent-MethodCall drop (or a
+                    # switch to the loud-error fix shape) is caught either
+                    # way, truthfully reflecting what this fix actually does
+                    # (shape A: correct lowering, not a loud error).
+                    assert_true(false)
+        else:
+            assert_true(false)
+
+    it "qualified call mixed with other statements stays a real call in body.stmts":
+        val log = qics_make_logger()
+        val src_provider = "pub fn answer() -> i64:\n    42"
+        val provider = parse_full_frontend(src_provider, "provider", "provider", log)
+        # `provider.answer()` is NOT the last statement here, so it stays in
+        # `body.stmts` (the trailing `99` is what gets tail-value-desugared).
+        val src_consumer = "import provider\nfn main() -> i64:\n    provider.answer()\n    99"
+        val consumer = parse_full_frontend(src_consumer, "consumer_qualified_mixed", "consumer_qualified_mixed", log)
+
+        var modules: Dict<text, Module> = {}
+        modules["provider"] = provider
+        var sources: [SourceFile] = []
+        sources = sources.push(SourceFile(path: "provider", content: src_provider, module_name: "provider"))
+        val surfaces = qics_build_surfaces(modules, sources)
+
+        var lowering = hirlowering_for_module("consumer_qualified_mixed", surfaces)
+        val hir = lowering.lower_module(consumer)
+
+        expect(lowering.errors.len()).to_equal(0)
+        if val main_fn = qics_find_fn(hir, "main"):
+            expect(main_fn.body.stmts.len()).to_equal(1)
+            expect(main_fn.body.has).to_equal(true)
+            match main_fn.body.stmts[0].kind:
+                case HirStmtKind.Expr(expr):
+                    match expr.kind:
+                        case HirExprKind.Call(callee, _, _):
+                            match callee.kind:
+                                case HirExprKind.NamedVar(symbol, _):
+                                    if val callable = hir.symbols.get_symbol_raw(symbol.id):
+                                        expect(callable.defining_module.unwrap()).to_equal("provider")
+                                    else:
+                                        assert_true(false)
+                                case _:
+                                    assert_true(false)
+                        case _:
+                            assert_true(false)
+                case _:
+                    assert_true(false)
+        else:
+            assert_true(false)
+
+    it "unqualified call regression: sole-statement tail-value shape is unchanged":
+        """Control example: a PLAIN (non-module-qualified) sole-statement
+        call must show the exact same tail-value shape as the qualified
+        case above (stmts empty, has=true, value=Call) -- proving the
+        stmts.len()==0 observation is a general HIR convention, not
+        something this fix introduced or is masking."""
+        val log = qics_make_logger()
+        val src_consumer = "fn answer() -> i64:\n    99\nfn main() -> i64:\n    answer()"
+        val consumer = parse_full_frontend(src_consumer, "consumer_unqualified_control", "consumer_unqualified_control", log)
+
+        var lowering = HirLowering.with_filename("consumer_unqualified_control")
+        val hir = lowering.lower_module(consumer)
+
+        expect(lowering.errors.len()).to_equal(0)
+        if val main_fn = qics_find_fn(hir, "main"):
+            expect(main_fn.body.stmts.len()).to_equal(0)
+            expect(main_fn.body.has).to_equal(true)
+            match main_fn.body.value.kind:
+                case HirExprKind.Call(callee, _, _):
+                    match callee.kind:
+                        case HirExprKind.NamedVar(_, display_name):
+                            expect(display_name).to_equal("answer")
+                        case _:
+                            assert_true(false)
+                case _:
+                    assert_true(false)
+        else:
+            assert_true(false)
