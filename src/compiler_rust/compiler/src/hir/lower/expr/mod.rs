@@ -1113,7 +1113,17 @@ impl Lowerer {
                 // return the bare value V (the erased builtin dict returns the
                 // bare stored word — NOT an Option; see the bug doc iteration
                 // 12). `keys`/`values` return typed arrays.
-                "get" | "remove" => Some(dict_kv.map(|(_, v)| v).unwrap_or(TypeId::ANY)),
+                // `get_or` returns the bare value V (or the caller-supplied
+                // default, itself V-typed) — same shape as `get`/`remove`.
+                // Without this arm the whole `.get_or(...)` expr fell through
+                // to the untyped-ANY default below while the MIR lowering
+                // (lowering_expr_method.rs, task: dict_get_or_jit_not_found)
+                // produces an UNBOXED V-typed result, so `val r =
+                // d.get_or(...)` treated the raw native int as a tagged
+                // RuntimeValue and misdecoded it (nil / <invalid-heap> /
+                // garbage float) under the JIT — the exact ANY/unboxed-V
+                // mismatch class documented just above for `index_of`.
+                "get" | "remove" | "get_or" => Some(dict_kv.map(|(_, v)| v).unwrap_or(TypeId::ANY)),
                 "insert" | "set" | "put" | "clear" => Some(TypeId::VOID),
                 "contains_key" | "has" | "contains" => Some(TypeId::BOOL),
                 // "length" synonym — see the string-methods comment above.

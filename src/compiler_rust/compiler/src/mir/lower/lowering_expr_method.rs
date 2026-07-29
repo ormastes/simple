@@ -392,6 +392,186 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // `d.get_or(k, default)` on a Dict<K, V>: return the value if `k` is
+        // present, else `default` — mirroring the interpreter's
+        // `interpreter_method/collections.rs` "get_or" arm EXACTLY: presence
+        // is decided by `map.get(&key)` (a contains-key test), NOT by
+        // comparing the stored value against a nil sentinel. A present entry
+        // whose value happens to equal the nil-sentinel encoding (3, per the
+        // `char_code_at`/`index_of` tag-collision bug class) must still win
+        // over `default` — so this lowers to a REAL branch on
+        // `rt_dict_contains`, not a "is result == sentinel" check.
+        //
+        // There is NO `rt_dict_get_or` runtime symbol (verified: absent from
+        // both `codegen/runtime_sffi.rs` and `common/src/runtime_symbols.rs`,
+        // and the JIT's import-resolution guard in `codegen/jit.rs` demotes
+        // the WHOLE module to the interpreter — silently — if any declared
+        // import is unresolved). So this expands to two calls that DO already
+        // have real runtime symbols: `rt_contains` (same symbol `.has()` /
+        // `.contains_key()` already route to, see
+        // `codegen/instr/closures_structs.rs` `"contains_key" | "has_key" |
+        // "has" => "rt_contains"`) for the presence test, and `rt_index_get`
+        // (same symbol `d[k]`/`d.get(k)` use, see `lower_index_expr` above)
+        // for the value read — followed by the SAME UnboxInt/UnboxFloat/Cast
+        // tail as `d[k]`/`d.get(k)` via `unbox_dict_read_result`, so int/float
+        // values are correctly unboxed and heap values pass through verbatim.
+        // Both `rt_contains` and `rt_index_get` hash-lookup by the SAME
+        // tagged key (`codegen/instr/closures_structs.rs`
+        // `box_dict_key = matches!(runtime_func, "rt_index_get" |
+        // "rt_dict_remove" | "rt_contains")`), so the int key is boxed ONCE
+        // here and the identical boxed vreg is reused for both calls —
+        // matching `d[k]`/`.get(k)`'s boxing and avoiding a mismatched-hash
+        // miss (task: dict_insert_integer_key_boxing).
+        //
+        // Receiver and key are each evaluated exactly ONCE (into `receiver_reg`
+        // / `key_reg`) and reused across both runtime calls, so a
+        // side-effecting receiver/key expression is not evaluated twice.
+        if method == "get_or" && args.len() == 2 && self.receiver_is_dict(receiver, receiver_local_ty) {
+            use crate::mir::effects::LocalKind;
+            use crate::mir::function::MirLocal;
+
+            fn needs_int_boxing(t: TypeId) -> bool {
+                matches!(
+                    t,
+                    TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                )
+            }
+
+            let value_ty = self
+                .type_registry
+                .and_then(|tr| {
+                    tr.get(receiver.ty)
+                        .or_else(|| receiver_local_ty.and_then(|ty| tr.get(ty)))
+                })
+                .and_then(|ty| match ty {
+                    HirType::Dict { value, .. } => Some(*value),
+                    _ => None,
+                })
+                .unwrap_or(TypeId::ANY);
+
+            let receiver_reg = self.lower_expr(receiver)?;
+
+            let raw_key_reg = self.lower_expr(&args[0])?;
+            let key_reg = if needs_int_boxing(args[0].ty) {
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxInt {
+                        dest: boxed,
+                        value: raw_key_reg,
+                    });
+                    boxed
+                })?
+            } else {
+                raw_key_reg
+            };
+
+            // The interpreter (`interpreter_method/collections.rs` "get_or")
+            // evaluates `default` EAGERLY, unconditionally, before checking
+            // presence — `eval_arg(args, 1, ...)` runs regardless of hit or
+            // miss. Match that exactly: lower `default` here, before the
+            // branch, not lazily inside the else-arm (a lazy default would
+            // skip a side-effecting default expression on a hit, diverging
+            // from the interpreter).
+            let default_reg = self.lower_expr(&args[1])?;
+
+            // cond = rt_contains(dict, key) — u8 0/1, coerced by the Branch
+            // terminator codegen (codegen/instr/body.rs: brif expects i8).
+            let cond_reg = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_contains"),
+                    args: vec![receiver_reg, key_reg],
+                });
+                dest
+            })?;
+
+            // Merge-value temp local, same pattern as `lower_if_expr`.
+            let temp_local_index = self.with_func(|func, _| {
+                let index = func.params.len() + func.locals.len();
+                func.locals.push(MirLocal {
+                    name: format!("$get_or_merge_{}", index),
+                    ty: value_ty,
+                    kind: LocalKind::Local,
+                    is_ghost: false,
+                });
+                index
+            })?;
+            let temp_addr = self.with_func(|func, current_block| {
+                let addr = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::LocalAddr {
+                    dest: addr,
+                    local_index: temp_local_index,
+                });
+                addr
+            })?;
+
+            let (then_id, else_id, merge_id) = self.with_func(|func, current_block| {
+                let then_id = func.new_block();
+                let else_id = func.new_block();
+                let merge_id = func.new_block();
+                let block = func.block_mut(current_block).unwrap();
+                block.terminator = crate::mir::Terminator::Branch {
+                    cond: cond_reg,
+                    then_block: then_id,
+                    else_block: else_id,
+                };
+                (then_id, else_id, merge_id)
+            })?;
+
+            // then: present — read + unbox exactly like `d[k]` / `d.get(k)`.
+            self.set_current_block(then_id)?;
+            let raw_result = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_index_get"),
+                    args: vec![receiver_reg, key_reg],
+                });
+                dest
+            })?;
+            let then_value = self.unbox_dict_read_result(raw_result, value_ty)?;
+            self.with_func(|func, current_block| {
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Store {
+                    addr: temp_addr,
+                    value: then_value,
+                    ty: value_ty,
+                });
+            })?;
+            self.finalize_block_jump(merge_id)?;
+
+            // else: absent — store the already-evaluated `default_reg`
+            // (computed eagerly above, matching the interpreter).
+            self.set_current_block(else_id)?;
+            self.with_func(|func, current_block| {
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Store {
+                    addr: temp_addr,
+                    value: default_reg,
+                    ty: value_ty,
+                });
+            })?;
+            self.finalize_block_jump(merge_id)?;
+
+            // merge: load the result.
+            self.set_current_block(merge_id)?;
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Load {
+                    dest,
+                    addr: temp_addr,
+                    ty: value_ty,
+                });
+                dest
+            });
+        }
+
         // rt_array_push returns bool, not a new pointer — no store-back needed.
         let _receiver_local_index: Option<usize> = None;
 

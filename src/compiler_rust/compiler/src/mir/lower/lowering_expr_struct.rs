@@ -639,4 +639,91 @@ impl<'a> MirLowerer<'a> {
             Ok(raw_result)
         }
     }
+
+    /// Unbox a raw `rt_index_get`-style RuntimeValue result to `element_expr_ty`,
+    /// exactly mirroring the tail of `lower_index_expr` above (int unbox +
+    /// narrow, float unbox, string cast, or heap-value passthrough). Extracted
+    /// so `Dict.get_or` (lowering_expr_method.rs, task:
+    /// dict_get_or_jit_not_found) can reuse the SAME tag-boxing-safe unbox
+    /// logic as `d[k]`/`d.get(k)` instead of hand-duplicating it and risking a
+    /// future tag-box fix landing in only one of the two call sites.
+    pub(super) fn unbox_dict_read_result(
+        &mut self,
+        raw_result: VReg,
+        element_expr_ty: TypeId,
+    ) -> MirLowerResult<VReg> {
+        let needs_int_unbox = matches!(
+            element_expr_ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::BOOL
+        );
+        let needs_float_unbox = matches!(element_expr_ty, TypeId::F32 | TypeId::F64);
+
+        if needs_int_unbox {
+            let (to_bits, signed_opt): (u8, Option<bool>) = match element_expr_ty {
+                TypeId::U8 => (8, Some(false)),
+                TypeId::U16 => (16, Some(false)),
+                TypeId::U32 => (32, Some(false)),
+                TypeId::I8 => (8, Some(true)),
+                TypeId::I16 => (16, Some(true)),
+                TypeId::I32 => (32, Some(true)),
+                // U64/I64/BOOL: keep i64-typed unboxed VReg unchanged.
+                _ => (0, None),
+            };
+            self.with_func(|func, current_block| {
+                let unboxed = func.new_vreg();
+                let narrowed_opt = signed_opt.map(|_| func.new_vreg());
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::UnboxInt {
+                    dest: unboxed,
+                    value: raw_result,
+                });
+                if let (Some(narrowed), Some(signed)) = (narrowed_opt, signed_opt) {
+                    block.instructions.push(MirInst::UnitNarrow {
+                        dest: narrowed,
+                        value: unboxed,
+                        from_bits: 64,
+                        to_bits,
+                        signed,
+                        overflow: UnitOverflowBehavior::Wrap,
+                    });
+                    narrowed
+                } else {
+                    unboxed
+                }
+            })
+        } else if needs_float_unbox {
+            self.with_func(|func, current_block| {
+                let unboxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::UnboxFloat {
+                    dest: unboxed,
+                    value: raw_result,
+                });
+                unboxed
+            })
+        } else if element_expr_ty == TypeId::STRING {
+            self.with_func(|func, current_block| {
+                let typed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Cast {
+                    dest: typed,
+                    source: raw_result,
+                    from_ty: TypeId::STRING,
+                    to_ty: TypeId::STRING,
+                });
+                typed
+            })
+        } else {
+            // Strings, arrays, objects are already usable as pointers
+            Ok(raw_result)
+        }
+    }
 }
