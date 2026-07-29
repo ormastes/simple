@@ -42,7 +42,7 @@ use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_render_snapshot, active_wm_theme_id, WmChromeColors}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use common.color.convert.{int_to_hex}
-use os.compositor.wm_action_lifecycle.{WM_WORK_AREA_TOP, WM_WORK_AREA_BOTTOM, WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
+use os.compositor.wm_action_lifecycle.{HOST_CONTENT_OWNER_LOCAL_WEB, WM_WORK_AREA_TOP, WM_WORK_AREA_BOTTOM, WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, host_content_owner_default, host_content_owner_for_frame, host_content_owner_requires_browser_renderer, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_action.{WmAction}
 use common.window_protocol.compositor_methods.{COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 use common.ui.native_scalar_text.{ui_native_i64_text}
@@ -296,6 +296,7 @@ class HostedWindow:
     content: text
     process_id: i64
     app_id: text
+    content_owner: i32 = HOST_CONTENT_OWNER_LOCAL_WEB
     minimized: bool
     focused: bool
     maximized: bool = false
@@ -667,9 +668,8 @@ class HostCompositor:
 
     fn requires_external_web_frame(window_id: i64) -> bool:
         val index = self._find_window_index(window_id)
-        index >= 0 and (
-            self.windows[index].app_id == "browser" or
-            self.windows[index].owner_port > 0
+        index >= 0 and host_content_owner_requires_browser_renderer(
+            self.windows[index].content_owner
         )
 
     me _drop_external_web_frame(window_id: i64) -> bool:
@@ -762,6 +762,13 @@ class HostCompositor:
 
     me release_external_web_frame(window_id: i64):
         if self._drop_external_web_frame(window_id):
+            val window_index = self._find_window_index(window_id)
+            if window_index >= 0:
+                var window = self.windows[window_index]
+                window.content_owner = host_content_owner_default(
+                    window.owner_port, window.app_id, ""
+                )
+                self.windows[window_index] = window
             self.dirty.add_full_screen(self.width, self.height)
 
     me set_external_web_frame(
@@ -801,6 +808,11 @@ class HostCompositor:
         if aggregate_pixels > HOST_EXTERNAL_WEB_FRAME_MAX_PIXELS:
             return false
         self.external_web_frames[frame_index] = frame
+        var updated_window = self.windows[window_index]
+        updated_window.content_owner = host_content_owner_for_frame(
+            updated_window.app_id, frame.origin_kind
+        )
+        self.windows[window_index] = updated_window
         self.dirty.add_full_screen(self.width, self.height)
         true
 
@@ -1749,7 +1761,7 @@ class HostCompositor:
         self.app_processes[index] = proc
         val id = self.next_window_id
         self.next_window_id = self.next_window_id + 1
-        self.windows.push(HostedWindow(id: id, owner_port: 0, title: proc.title + " failed", x: 40, y: 80, w: 360, h: 180, content: "failed to create a window for " + proc.app_id, process_id: proc.pid, app_id: proc.app_id, minimized: false, focused: true))
+        self.windows.push(HostedWindow(id: id, owner_port: 0, title: proc.title + " failed", x: 40, y: 80, w: 360, h: 180, content: "failed to create a window for " + proc.app_id, process_id: proc.pid, app_id: proc.app_id, content_owner: HOST_CONTENT_OWNER_LOCAL_WEB, minimized: false, focused: true))
         self.dirty.add_rect(40, 80, 360, 180)
 
 # ============================================================================
@@ -2030,10 +2042,10 @@ fn host_compositor_update_window_title(
     out
 
 fn host_window_to_lifecycle_state(win: HostedWindow) -> WmLifecycleWindowState:
-    WmLifecycleWindowState(id: win.id, owner_port: win.owner_port, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h, content: win.content, process_id: win.process_id, app_id: win.app_id, minimized: win.minimized, focused: win.focused)
+    WmLifecycleWindowState(id: win.id, owner_port: win.owner_port, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h, content: win.content, process_id: win.process_id, app_id: win.app_id, content_owner: win.content_owner, minimized: win.minimized, focused: win.focused)
 
 fn host_window_from_lifecycle_state(win: WmLifecycleWindowState) -> HostedWindow:
-    HostedWindow(id: win.id, owner_port: win.owner_port, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h, content: win.content, process_id: win.process_id, app_id: win.app_id, minimized: win.minimized, focused: win.focused)
+    HostedWindow(id: win.id, owner_port: win.owner_port, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h, content: win.content, process_id: win.process_id, app_id: win.app_id, content_owner: win.content_owner, minimized: win.minimized, focused: win.focused)
 
 fn host_windows_to_lifecycle_state(windows: [HostedWindow]) -> [WmLifecycleWindowState]:
     var out: [WmLifecycleWindowState] = []

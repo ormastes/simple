@@ -636,6 +636,15 @@ implementation-in-progress
   admitted core capsule lacks required Web/GPU/SQLite symbols; `simple-core`
   is absent and the bounded Cranelift attempt produced no artifact. Runtime
   evidence remains red.
+- wm-host-content-owner: Host BrowserRenderer eligibility no longer derives
+  from `owner_port`. A scalar content owner is created explicitly, preserved
+  across lifecycle mutations, changed only after validated GUI/pixel frame
+  admission, and restored when the frame is released. This prevents hosted
+  Web frames from overwriting admitted GUI/pixel content. A no-stub
+  pure-Simple Stage-2 scalar probe linked and exited `0`; the real host
+  compositor closure compiled to an archive with zero failures. The deployed
+  remote host bridge and pixel-present protocol remain absent, so remote GUI
+  presentation and event delivery stay red.
 
 ## Remaining runtime gates
 
