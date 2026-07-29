@@ -49,6 +49,7 @@ use compiler.core.types.{dict_type_register}
 use compiler.core.types.{tuple_type_register}
 use compiler.core.types.{array_generic_type_register}
 use compiler.core.types.{result_type_register}
+use compiler.core.types.{isolated_type_register}
 use std.string_core.{char_code}
 
 # Import from split modules
@@ -426,6 +427,28 @@ fn parser_parse_tuple_element_type() -> i64:
 fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     var kind = par_kind_get()
+    # LANE ISO2 (2026-07-29): capability-prefixed type `iso T`. `iso` lexes
+    # as a plain identifier (kind 6) -- it is not a reserved keyword token
+    # (doc/08_tracking/bug/iso_mut_capability_prefix_not_parsed_2026-07-29.md).
+    # Left unhandled, it fell into the named-type branch below, which consumed
+    # `iso` itself as the type name and then failed on whatever real type
+    # followed it (`fn take(a: iso i64)` -> parser error "expected ), got
+    # Ident 'i64'"). Register the inner type in the isolated-type side table
+    # (mirrors the Dict<K,V>/Result<T,E>/array-element registries below --
+    # the flat i64 tag space has no room to carry a wrapped inner type
+    # directly) and encode TYPE_ISOLATED_BASE + id so the AST bridge
+    # (_FlatAstBridge/convert_nodes.spl convert_flat_type) can rebuild the
+    # real TypeKind.Isolated(inner), which HIR lower_type already lowers to
+    # HirTypeKind.Isolated. `mut T` in this same type position is a
+    # different, still-unimplemented capability (no HIR arm consumes it yet)
+    # and is intentionally NOT handled here -- see the bug doc.
+    if kind == 6 and par_text_get() == "iso":
+        parser_advance()
+        val iso_inner = parser_parse_type_impl(allow_spaced_generics)
+        val iso_tag = isolated_type_register(iso_inner)
+        if iso_tag < 0:
+            return iso_inner
+        return iso_tag
     # Prefix optional shorthand `?T` is not documented/legal syntax (the
     # supported spelling is the suffix form `T?`, e.g. `i64?`, `[T]?`, or
     # `Option<T>`). Left unhandled, the leading `?` fell through every type

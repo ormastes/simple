@@ -294,6 +294,16 @@ val TYPE_TUPLE_LIMIT = 4000
 # different element kind without changing this encoding.
 val TYPE_ARRAY_GENERIC_BASE = 4000
 val TYPE_ARRAY_GENERIC_LIMIT = 5000
+# Isolated capability-prefixed type `iso T` (LANE ISO2, doc/08_tracking/bug/
+# iso_mut_capability_prefix_not_parsed_2026-07-29.md): like Dict<K,V>/
+# Result<T,E>/array-element above, the flat i64 tag space has no room to
+# carry a wrapped inner type directly, so `iso T` registers its inner tag
+# here and encodes TYPE_ISOLATED_BASE + id. The AST bridge
+# (_FlatAstBridge/convert_nodes.spl convert_flat_type) rebuilds the real
+# TypeKind.Isolated(inner) from this, which HIR lower_type already lowers to
+# HirTypeKind.Isolated.
+val TYPE_ISOLATED_BASE = 5000
+val TYPE_ISOLATED_LIMIT = 6000
 val TYPE_NAMED_BASE = 10000
 
 # Helper predicates for encoded type tags
@@ -338,6 +348,12 @@ fn is_array_generic_tag(tag: i64) -> bool:
 
 fn array_generic_tag_to_id(tag: i64) -> i64:
     tag - TYPE_ARRAY_GENERIC_BASE
+
+fn is_isolated_tag(tag: i64) -> bool:
+    tag >= TYPE_ISOLATED_BASE and tag < TYPE_ISOLATED_LIMIT
+
+fn isolated_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_ISOLATED_BASE
 
 fn type_tag_name(tag: i64) -> text:
     if tag >= TYPE_NAMED_BASE:
@@ -1062,6 +1078,30 @@ fn array_generic_type_get_elem(arr_id: i64) -> i64:
         return array_generic_elem_tags[arr_id]
     TYPE_ANY
 
+# ===== Isolated Capability Type Registry =====
+# Tracks `iso T` inner types (LANE ISO2, doc/08_tracking/bug/
+# iso_mut_capability_prefix_not_parsed_2026-07-29.md) -- see
+# TYPE_ISOLATED_BASE. Mirrors the array-element registry directly above.
+
+var isolated_inner_tags: [i64] = []
+
+fn isolated_type_register(inner_tag: i64) -> i64:
+    var existing = 0
+    while existing < isolated_inner_tags.len():
+        if isolated_inner_tags[existing] == inner_tag:
+            return TYPE_ISOLATED_BASE + existing
+        existing = existing + 1
+    val idx = isolated_inner_tags.len()
+    if idx >= TYPE_ISOLATED_LIMIT - TYPE_ISOLATED_BASE:
+        return -1
+    isolated_inner_tags.push(inner_tag)
+    TYPE_ISOLATED_BASE + idx
+
+fn isolated_type_get_inner(iso_id: i64) -> i64:
+    if iso_id >= 0 and iso_id < isolated_inner_tags.len():
+        return isolated_inner_tags[iso_id]
+    TYPE_ANY
+
 # ===== Pool Reset =====
 # Call before parsing a new file to reset all pools.
 
@@ -1128,6 +1168,7 @@ fn reset_all_pools():
     result_type_ok = clear_i64_pool(result_type_ok)
     result_type_err = clear_i64_pool(result_type_err)
     array_generic_elem_tags = clear_i64_pool(array_generic_elem_tags)
+    isolated_inner_tags = clear_i64_pool(isolated_inner_tags)
 
 export TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT
 export TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32
@@ -1143,5 +1184,7 @@ export TYPE_RESULT_BASE, is_result_tag, result_tag_to_id
 export result_type_register, result_type_get_ok, result_type_get_err
 export TYPE_ARRAY_GENERIC_BASE, is_array_generic_tag, array_generic_tag_to_id
 export array_generic_type_register, array_generic_type_get_elem
+export TYPE_ISOLATED_BASE, is_isolated_tag, isolated_tag_to_id
+export isolated_type_register, isolated_type_get_inner
 export SYM_UNKNOWN, SYM_FN, SYM_VAL, SYM_VAR, SYM_STRUCT, SYM_ENUM, SYM_CLASS
 export scope_push, scope_pop, scope_depth
