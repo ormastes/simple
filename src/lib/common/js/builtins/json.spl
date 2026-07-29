@@ -5,6 +5,30 @@ use std.js.types.js_types.*
 use std.js.types.pair.{Pair}
 use std.js.engine.js_error.{script_error}
 
+fn _json_hex_digit_slice(c: text) -> i64:
+    """Value of one hex digit character, or -1 if not a hex digit."""
+    if c >= "0" and c <= "9":
+        return c.char_code_at(0) - 48
+    if c >= "a" and c <= "f":
+        return c.char_code_at(0) - 87
+    if c >= "A" and c <= "F":
+        return c.char_code_at(0) - 55
+    -1
+
+fn _json_hex4_slice(input: text, pos: i64) -> i64:
+    """Parse exactly 4 hex digits at byte pos; -1 if short or invalid."""
+    if pos + 4 > input.len():
+        return -1
+    var value = 0
+    var k = 0
+    while k < 4:
+        val d = _json_hex_digit_slice(input[pos + k:pos + k + 1])
+        if d < 0:
+            return -1
+        value = value * 16 + d
+        k = k + 1
+    value
+
 # --- Public API ---
 
 fn json_parse(input: text) -> BrowserResult<JsValue>:
@@ -81,9 +105,35 @@ fn parse_string(input: text, pos: i64) -> Pair<text, i64>:
             else if esc == "f":
                 result = result + "\f"
             else if esc == "u":
-                # Unicode escape \uXXXX — simplified, skip 4 chars
-                result = result + "?"
-                i = i + 4
+                # RFC 8259 \uXXXX decoding: append the codepoint's UTF-8
+                # bytes; a high surrogate followed by \uDC00-\uDFFF combines
+                # to the supplementary-plane codepoint. Lone/invalid
+                # surrogates (and malformed hex) decode to U+FFFD
+                # REPLACEMENT CHARACTER — RFC 8259 leaves those undefined;
+                # we choose replacement over dropping data or erroring.
+                # (Was: literal "?" placeholder — data loss, flagged by
+                # doc/08_tracking/bug/bracket_slice_byte_index_survey_2026-07-29.md)
+                val hi = _json_hex4_slice(input, i + 1)
+                if hi < 0:
+                    result = result + 65533.chr()
+                    i = i + 4
+                else if hi >= 0xD800 and hi <= 0xDBFF:
+                    var lo = -1
+                    if i + 6 < len and input[i + 5:i + 6] == "\\" and input[i + 6:i + 7] == "u":
+                        lo = _json_hex4_slice(input, i + 7)
+                    if lo >= 0xDC00 and lo <= 0xDFFF:
+                        val combined = 0x10000 + ((hi - 0xD800) * 1024) + (lo - 0xDC00)
+                        result = result + combined.chr()
+                        i = i + 10
+                    else:
+                        result = result + 65533.chr()
+                        i = i + 4
+                else if hi >= 0xDC00 and hi <= 0xDFFF:
+                    result = result + 65533.chr()
+                    i = i + 4
+                else:
+                    result = result + hi.chr()
+                    i = i + 4
             else:
                 result = result + esc
         else:

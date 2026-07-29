@@ -1,0 +1,71 @@
+"""
+RFC 8259 \\uXXXX decoding in std.common.json (was: escapes passed through
+as literal backslash-u text — data loss on any \\u-escaped codepoint).
+
+Byte-sequence assertions: Simple text is UTF-8 and text equality is byte
+equality, and .len() is BYTE length — so equality + len together pin the
+exact byte sequence, not just display.
+
+Surrogate policy under test: \\uD800-\\uDBFF followed by \\uDC00-\\uDFFF
+combines to the supplementary-plane codepoint; a lone/invalid surrogate
+decodes to U+FFFD (3 bytes: EF BF BD).
+"""
+
+use std.spec.*
+use std.common.json.parser.{json_parse, json_unescape_string}
+use std.common.json.serializer.{json_serialize}
+
+describe "json unicode escape decoding (std.common.json)":
+    it "decodes ASCII escape to the ASCII byte":
+        val out = json_unescape_string("\\u0041")
+        expect(out).to_equal("A")
+        expect(out.len()).to_equal(1)
+
+    it "decodes BMP escape to 2-byte UTF-8 (e-acute)":
+        val out = json_unescape_string("caf\\u00e9")
+        expect(out).to_equal("café")
+        expect(out.len()).to_equal(5)
+
+    it "decodes CJK escape to 3-byte UTF-8":
+        val out = json_unescape_string("\\u4e2d")
+        expect(out).to_equal("中")
+        expect(out.len()).to_equal(3)
+
+    it "combines a surrogate pair into a 4-byte supplementary codepoint":
+        val out = json_unescape_string("\\ud83d\\ude00")
+        expect(out).to_equal("😀")
+        expect(out.len()).to_equal(4)
+
+    it "decodes a lone high surrogate to U+FFFD":
+        val out = json_unescape_string("\\ud83dX")
+        expect(out).to_equal("�X")
+        expect(out.len()).to_equal(4)
+
+    it "decodes a lone low surrogate to U+FFFD":
+        val out = json_unescape_string("\\udc00")
+        expect(out).to_equal("�")
+        expect(out.len()).to_equal(3)
+
+    it "handles mixed literal and escaped content byte-correctly":
+        val out = json_unescape_string("é\\u4e2dz\\ud83d\\ude00")
+        expect(out).to_equal("é中z😀")
+        expect(out.len()).to_equal(10)
+
+    it "decodes through the json_parse entry point":
+        val v = json_parse("\"caf\\u00e9 \\u4e2d \\ud83d\\ude00\"")
+        expect(v.1).to_equal("café 中 😀")
+
+    it "serializes decoded escapes as raw UTF-8 bytes":
+        # The serializer does not \u-escape non-ASCII, so the serialize
+        # direction must carry the decoded UTF-8 bytes verbatim.
+        # Full parse(serialize(..)) round-trip is blocked by a PRE-EXISTING
+        # tokenizer defect: raw non-ASCII string content is rejected
+        # (char-indexed pos vs byte-indexed len). See
+        # doc/08_tracking/bug/json_tokenizer_rejects_raw_non_ascii_strings_2026-07-29.md
+        val v = json_parse("\"caf\\u00e9\"")
+        val re = json_serialize(v)
+        expect(re).to_equal("\"café\"")
+        expect(re.len()).to_equal(7)
+
+    it "still rejects malformed unicode escapes at the parser level":
+        expect(json_parse("\"\\uZZZZ\"") == nil).to_equal(true)
