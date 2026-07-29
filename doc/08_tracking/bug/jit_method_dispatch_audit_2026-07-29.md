@@ -188,3 +188,31 @@ and the full classified CSV are preserved at `/tmp/jitaudit/` on the host
 that ran this audit (`results.csv`, `out/*.interp.out`, `out/*.jit.out`,
 `array_probes.txt`, `dict_probes.txt`, `text_probes.txt`, `run_audit.sh`) —
 not committed to the repo (scratch, not requested for git).
+
+## 2026-07-29 — root causes established for 3 text value gaps + dispatch batch progress
+
+**Landed this session (JIT dispatch-boxing, verified JIT==interp, [jit-addr]):**
+- 3fbf9c1 — count/drop/entries/insert/max/min/skip/sum/take (9)
+- 7c5792c — array copy/unique/sorted/reversed/flatten/all_truthy/any_truthy/count_of (8)
+- 725337d — text.is_empty typed BOOL (was raw int)
+- ee4800f — Option/Result is_some/is_none/is_ok/is_err for ANY/NIL receivers
+  (guards only fired for statically-resolved enum types; Some(x)/Ok(x) are ANY,
+  None is NIL → fell through to not-found. Backed by existing
+  rt_is_some/rt_is_none/rt_enum_check_discriminant.)
+
+**Text value gaps — precise root causes (NOT quick lowering fixes):**
+- `text.to_float()` → JIT prints the raw f64 **bit pattern** as an int
+  (`"3.14"` → `599357747061063936`). The HIR result-type entry IS already F64
+  (`hir/lower/expr/mod.rs:52,1214`), so unlike the int/bool gaps a result-type
+  entry is NOT sufficient. The F64 result is not heap-boxed (`rt_value_float`)
+  before flowing into `.to_string()`/print — that boxing lives in **codegen**
+  (Cranelift instr emitters), not lowering. Likely SYSTEMIC to every
+  float-returning method. Needs a codegen lane, not a lowering arm.
+  (`rt_string_to_float` runtime symbol exists at collections.rs:2689.)
+- `text.reverse()` → JIT **no-op** (`"Hello"` → `Hello`); `text.reversed()` →
+  **not found**. There is NO `rt_string_reverse`/`rt_string_reversed` runtime
+  symbol (only `rt_array_reversed` at collections.rs:3114). Fixing these needs a
+  NEW runtime Rust function + bootstrap — out of lowering scope.
+
+**Lambda ABI** still blocked — see jit_lambda_abi_scoping_2026-07-29.md
+(rt_closure_new never declared in the runtime-import table).
