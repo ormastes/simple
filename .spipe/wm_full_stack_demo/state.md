@@ -485,6 +485,15 @@ implementation-in-progress
   `common.ui.widget_hit` still contain generic numeric interpolation. They
   remain active event-hardening work, but were not changed speculatively before
   the first-frame producer gate reaches them.
+- phase3-theme-material-to-pixel-boundary: Theme material checksum
+  serialization now uses direct text concatenation and the common native scalar
+  owner for every numeric field, with explicit lowercase booleans. The exact
+  GUI producer probe advances past theme loading without a fault. Its width and
+  height are correct, but the returned pixel array length is invalid (exit
+  `33`). A third-cycle experiment reading pixels directly from `Engine2D`
+  produced the same result and was reverted as ineffective. The remaining
+  focused blocker is the native aggregate/trait pixel-return boundary in the
+  Draw IR renderer, not GLFW presentation; no live retry was run.
 
 ## Remaining runtime gates
 
@@ -495,9 +504,10 @@ implementation-in-progress
   probes. Packed ARGB presentation and title conversion are now independently
   green. The focused native compositor now admits an external pixel frame and
   reaches an exact nonzero framebuffer sample. The richer exact-demo GUI probe
-  now passes Resize token and theme source parsing, then stops in theme material
-  checksum serialization. The full GUI demo remains RED for non-black live
-  presentation and semantic input.
+  now passes Resize token, theme source parsing, and theme material checksum
+  serialization. It preserves frame dimensions but loses the Draw IR pixel
+  array at the GUI producer boundary. The full GUI demo remains RED for
+  non-black live presentation and semantic input.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the

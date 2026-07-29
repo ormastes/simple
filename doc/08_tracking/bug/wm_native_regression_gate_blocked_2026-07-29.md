@@ -252,3 +252,21 @@ rt_to_string
 and shadow-index fields through interpolation. It is the exact next owner; no
 layout-aggregate fix or live GLFW retry is justified before this focused gate
 passes.
+
+The next bounded turn replaced those generic interpolations with direct text
+concatenation, the existing native scalar-text owner, and explicit lowercase
+booleans. The exact GUI producer probe then completed theme loading without a
+fault. Split frame diagnostics show:
+
+```text
+frame.width == 100
+frame.height == 60
+frame.pixels.len() != 6000  # exit 33
+```
+
+The first two builds compiled 3/377 and 2/378 changed/cached modules. A third
+build compiled 3 and reused 377. Reading pixels directly from the concrete
+`Engine2D` owner produced the same exit `33`, so that ineffective experiment
+was reverted. The remaining gate is the native aggregate/trait pixel-return
+boundary in the Draw IR renderer. Per the three-cycle cap, no further repair,
+live GLFW rebuild, or presentation claim was attempted in this turn.
