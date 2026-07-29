@@ -8,6 +8,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.io.mod_stub.{env_get}
+use std.gc_async_mut.io.time_ops.{time_now_micros}
 
 # ---------------------------------------------------------------------------
 # GPU paint flag
@@ -62,6 +63,36 @@ pub class WebGpuPaintEconomics:
     reason: text
     cpu_job_verdict: text
     speed_verdict: text
+
+pub class WebGpuPaintTimingEvidence:
+    backend_name: text
+    available: bool
+    sample_count: i32
+    upload_bound_p50_us: i64
+    upload_bound_p95_us: i64
+    gpu_paint_p50_us: i64
+    gpu_paint_p95_us: i64
+    pixels_match: bool
+    upload_device_proven: bool
+    gpu_device_proven: bool
+    should_offload: bool
+    reason: text
+    speed_verdict: text
+
+class _WebGpuPaintMeasuredChoice:
+    readback: Engine2DReadback
+    evidence: WebGpuPaintTimingEvidence
+
+class _TimedWebGpuPaintRoute:
+    readback: Engine2DReadback
+    elapsed_us: i64
+
+# ponytail: process-local shape cache; move to renderer-owned state if concurrent
+# renderers ever need independent calibration lifetimes.
+var _web_gpu_paint_timing_keys: [text] = []
+var _web_gpu_paint_timing_profiles: [WebGpuPaintTimingEvidence] = []
+val WEB_GPU_PAINT_TIMING_CACHE_MAX: i32 = 16
+val WEB_GPU_PAINT_MIN_MARGIN_US: i64 = 100
 
 # Bounding box of every pixel where the GPU-composited fills differ from the CPU
 # ground-truth framebuffer. If the GPU readback length is wrong (backend cannot
@@ -219,12 +250,60 @@ pub fn web_gpu_paint_economics(frame: WebGpuPaintFrame, base: u32) -> WebGpuPain
     else:
         "cpu-paint-required"
     val speed_verdict = if should:
-        "measured-gpu-faster"
+        "estimated-gpu-faster"
     elif reason == "communication-overhead":
-        "measured-gpu-slower-overhead"
+        "estimated-gpu-slower-overhead"
     else:
         "not-offloaded"
     WebGpuPaintEconomics(frame_pixels: frame_pixels, cpu_paint_pixels: frame.cpu_paint_pixels, fill_op_count: op_count, fill_pixels: fill_pixels, residual_pixels: residual_pixels, upload_bound_transfer_pixels: upload_transfer, gpu_paint_transfer_pixels: gpu_transfer, upload_bound_total_pixels: upload_total, gpu_paint_total_pixels: gpu_total, should_offload: should, reason: reason, cpu_job_verdict: cpu_job_verdict, speed_verdict: speed_verdict)
+
+pub fn web_gpu_paint_timing_evidence(
+    backend_name: text,
+    upload_bound_p50_us: i64,
+    upload_bound_p95_us: i64,
+    gpu_paint_p50_us: i64,
+    gpu_paint_p95_us: i64,
+    sample_count: i32,
+    pixels_match: bool,
+    upload_device_proven: bool,
+    gpu_device_proven: bool
+) -> WebGpuPaintTimingEvidence:
+    val timings_valid = (
+        sample_count >= 3 and upload_bound_p50_us > 0 and upload_bound_p95_us >= upload_bound_p50_us and
+        gpu_paint_p50_us > 0 and gpu_paint_p95_us >= gpu_paint_p50_us
+    )
+    val available = timings_valid and pixels_match and upload_device_proven and gpu_device_proven
+    val should = available and gpu_paint_p95_us + WEB_GPU_PAINT_MIN_MARGIN_US < upload_bound_p95_us
+    val reason = if not timings_valid:
+        "timing-unavailable"
+    elif not pixels_match:
+        "pixel-mismatch"
+    elif not upload_device_proven or not gpu_device_proven:
+        "device-proof-unavailable"
+    elif should:
+        "measured-gpu-faster"
+    else:
+        "measured-gpu-slower-overhead"
+    val speed_verdict = if available: reason else: "measurement-unavailable"
+    WebGpuPaintTimingEvidence(
+        backend_name: backend_name,
+        available: available,
+        sample_count: sample_count,
+        upload_bound_p50_us: upload_bound_p50_us,
+        upload_bound_p95_us: upload_bound_p95_us,
+        gpu_paint_p50_us: gpu_paint_p50_us,
+        gpu_paint_p95_us: gpu_paint_p95_us,
+        pixels_match: pixels_match,
+        upload_device_proven: upload_device_proven,
+        gpu_device_proven: gpu_device_proven,
+        should_offload: should,
+        reason: reason,
+        speed_verdict: speed_verdict
+    )
+
+pub fn web_gpu_paint_timing_cache_reset():
+    _web_gpu_paint_timing_keys = []
+    _web_gpu_paint_timing_profiles = []
 
 fn _should_use_gpu_paint(frame: WebGpuPaintFrame, backend_name: text, base: u32, gpu_paint: bool) -> bool:
     if not gpu_paint:
@@ -331,6 +410,149 @@ fn present_layout_pixels_with_engine2d_readback(pixels: [u32], width: i32, heigh
             engine2d_readback(pixels, "cpu_fallback")
     readback
 
+fn _web_gpu_readback_device_proven(readback: Engine2DReadback, expected_pixels: i32) -> bool:
+    (readback.source == "device_readback" and readback.backend_handle > 0 and
+        readback.device_identity > 0 and readback.pixel_count == expected_pixels)
+
+fn _web_gpu_pixels_equal(left: [u32], right: [u32]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn _web_gpu_timing_p50(samples: [i64]) -> i64:
+    if samples.len() == 0:
+        return 0
+    var sorted = samples
+    sorted.sort()
+    sorted[sorted.len() / 2]
+
+fn _web_gpu_timing_p95(samples: [i64]) -> i64:
+    if samples.len() == 0:
+        return 0
+    var sorted = samples
+    sorted.sort()
+    sorted[sorted.len() - 1]
+
+fn _web_gpu_timing_key(frame: WebGpuPaintFrame, backend_name: text, economics: WebGpuPaintEconomics) -> text:
+    (
+        backend_name + ":" + frame.width.to_text() + "x" + frame.height.to_text() +
+        ":ops=" + economics.fill_op_count.to_text() +
+        ":fill=" + economics.fill_pixels.to_text() +
+        ":residual=" + economics.residual_pixels.to_text() +
+        ":cpu=" + economics.cpu_paint_pixels.to_text() +
+        ":one_upload=" + env_get("SIMPLE_ONE_CALL_UPLOAD") +
+        ":bulk_upload=" + env_get("SIMPLE_BULK_UPLOAD") +
+        ":transfer=" + env_get("SIMPLE_SPL_GPU_TRANSFER_PATH") +
+        ":one_readback=" + env_get("SIMPLE_ONE_CALL_READBACK")
+    )
+
+fn _web_gpu_timing_profile(key: text) -> WebGpuPaintTimingEvidence?:
+    var i = 0
+    while i < _web_gpu_paint_timing_keys.len():
+        if _web_gpu_paint_timing_keys[i] == key:
+            return _web_gpu_paint_timing_profiles[i]
+        i = i + 1
+    nil
+
+fn _web_gpu_timing_store(key: text, profile: WebGpuPaintTimingEvidence):
+    if _web_gpu_paint_timing_keys.len() >= WEB_GPU_PAINT_TIMING_CACHE_MAX:
+        _web_gpu_paint_timing_keys.remove(0)
+        _web_gpu_paint_timing_profiles.remove(0)
+    _web_gpu_paint_timing_keys.push(key)
+    _web_gpu_paint_timing_profiles.push(profile)
+
+fn _time_gpu_paint_route(frame: WebGpuPaintFrame, backend_name: text, base: u32) -> _TimedWebGpuPaintRoute:
+    val start_us = time_now_micros()
+    val readback = present_gpu_paint_readback(frame, backend_name, base)
+    val end_us = time_now_micros()
+    val elapsed_us = if start_us > 0 and end_us > start_us: end_us - start_us else: 0
+    _TimedWebGpuPaintRoute(readback: readback, elapsed_us: elapsed_us)
+
+fn _time_upload_bound_route(frame: WebGpuPaintFrame, backend_name: text, base: u32) -> _TimedWebGpuPaintRoute:
+    val start_us = time_now_micros()
+    val pixels = _cpu_mirror_for_frame(frame, base)
+    val readback = present_layout_pixels_with_engine2d_readback(pixels, frame.width, frame.height, backend_name, base)
+    val end_us = time_now_micros()
+    val elapsed_us = if start_us > 0 and end_us > start_us: end_us - start_us else: 0
+    _TimedWebGpuPaintRoute(readback: readback, elapsed_us: elapsed_us)
+
+fn _measure_web_gpu_paint_choice(frame: WebGpuPaintFrame, backend_name: text, base: u32) -> _WebGpuPaintMeasuredChoice:
+    val economics = web_gpu_paint_economics(frame, base)
+    val key = _web_gpu_timing_key(frame, backend_name, economics)
+    val cached = _web_gpu_timing_profile(key)
+    if cached != nil:
+        val profile = cached.?
+        if profile.should_offload:
+            val gpu_readback = present_gpu_paint_readback(frame, backend_name, base)
+            if (
+                _web_gpu_readback_device_proven(gpu_readback, frame.width * frame.height) and
+                _web_gpu_pixels_equal(gpu_readback.pixels, _cpu_mirror_for_frame(frame, base))
+            ):
+                return _WebGpuPaintMeasuredChoice(readback: gpu_readback, evidence: profile)
+        val upload_readback = present_layout_pixels_with_engine2d_readback(
+            _cpu_mirror_for_frame(frame, base), frame.width, frame.height, backend_name, base)
+        return _WebGpuPaintMeasuredChoice(readback: upload_readback, evidence: profile)
+
+    val expected = _cpu_mirror_for_frame(frame, base)
+    var upload_samples: [i64] = []
+    var gpu_samples: [i64] = []
+    var pixels_match = expected.len() == frame.width * frame.height
+    var upload_device_proven = true
+    var gpu_device_proven = true
+    var last_upload = engine2d_readback([], "not_requested")
+    var last_gpu = engine2d_readback([], "not_requested")
+    var sample = 0
+    while sample < 3:
+        if sample % 2 == 0:
+            val upload = _time_upload_bound_route(frame, backend_name, base)
+            val gpu = _time_gpu_paint_route(frame, backend_name, base)
+            upload_samples.push(upload.elapsed_us)
+            gpu_samples.push(gpu.elapsed_us)
+            last_upload = upload.readback
+            last_gpu = gpu.readback
+        else:
+            val gpu = _time_gpu_paint_route(frame, backend_name, base)
+            val upload = _time_upload_bound_route(frame, backend_name, base)
+            gpu_samples.push(gpu.elapsed_us)
+            upload_samples.push(upload.elapsed_us)
+            last_gpu = gpu.readback
+            last_upload = upload.readback
+        pixels_match = (
+            pixels_match and _web_gpu_pixels_equal(last_upload.pixels, expected) and
+            _web_gpu_pixels_equal(last_gpu.pixels, expected)
+        )
+        upload_device_proven = upload_device_proven and _web_gpu_readback_device_proven(last_upload, frame.width * frame.height)
+        gpu_device_proven = gpu_device_proven and _web_gpu_readback_device_proven(last_gpu, frame.width * frame.height)
+        sample = sample + 1
+    val profile = web_gpu_paint_timing_evidence(
+        backend_name,
+        _web_gpu_timing_p50(upload_samples),
+        _web_gpu_timing_p95(upload_samples),
+        _web_gpu_timing_p50(gpu_samples),
+        _web_gpu_timing_p95(gpu_samples),
+        upload_samples.len(),
+        pixels_match,
+        upload_device_proven,
+        gpu_device_proven
+    )
+    _web_gpu_timing_store(key, profile)
+    print "[web-gpu-paint-measure] backend={backend_name} samples={profile.sample_count} upload_p50_us={profile.upload_bound_p50_us} upload_p95_us={profile.upload_bound_p95_us} gpu_p50_us={profile.gpu_paint_p50_us} gpu_p95_us={profile.gpu_paint_p95_us} pixels_match={profile.pixels_match} upload_device={profile.upload_device_proven} gpu_device={profile.gpu_device_proven} verdict={profile.reason}"
+    val chosen = if not profile.available:
+        engine2d_readback(expected, "cpu_mirror")
+    elif profile.should_offload:
+        last_gpu
+    else:
+        last_upload
+    _WebGpuPaintMeasuredChoice(readback: chosen, evidence: profile)
+
+pub fn web_gpu_paint_measure_frame(frame: WebGpuPaintFrame, backend_name: text, base: u32) -> WebGpuPaintTimingEvidence:
+    _measure_web_gpu_paint_choice(frame, backend_name.trim().lower(), base).evidence
+
 fn present_layout_pixels_with_engine2d(pixels: [u32], width: i32, height: i32, backend_name: text, base: u32) -> [u32]:
     present_layout_pixels_with_engine2d_readback(pixels, width, height, backend_name, base).pixels
 
@@ -361,9 +583,15 @@ pub fn simple_web_layout_render_html_readback_paint(html: text, width: i32, heig
         return present_layout_pixels_with_engine2d_readback(frame.fb, width, height, backend_name, base)
     if gpu_paint and web_gpu_paint_backend_verdict(normalized_backend) == "gpu-paint-candidate":
         val frame = simple_web_layout_render_html_gpu_frame(html, width, height)
-        if _should_use_gpu_paint(frame, normalized_backend, frame.base, true):
-            return present_gpu_paint_readback(frame, normalized_backend, frame.base)
-        return engine2d_readback(_cpu_mirror_for_frame(frame, frame.base), "cpu_mirror")
+        val economics = web_gpu_paint_economics(frame, frame.base)
+        val measurement_eligible = (
+            economics.cpu_paint_pixels < economics.frame_pixels and economics.fill_op_count > 0 and
+            economics.fill_pixels > 0
+        )
+        if measurement_eligible:
+            return _measure_web_gpu_paint_choice(frame, normalized_backend, frame.base).readback
+        val pixels = _cpu_mirror_for_frame(frame, frame.base)
+        return present_layout_pixels_with_engine2d_readback(pixels, width, height, normalized_backend, frame.base)
     val pixels = simple_web_layout_render_html_software_pixels(html, width, height)
     present_layout_pixels_with_engine2d_readback(pixels, width, height, backend_name, base)
 

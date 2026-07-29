@@ -42,7 +42,7 @@ describe "Simple Web GPU paint offload matrix":
             expect(web_gpu_paint_backend_verdict("metal")).to_equal("gpu-paint-candidate")
             expect(web_gpu_paint_backend_verdict("unknown")).to_equal("unknown-backend-not-gpu-offload")
 
-        slow_it "routes only measured winning frames into the GPU paint path":
+        slow_it "routes only estimated winning frames into the GPU paint candidate path":
             expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "cuda", true)).to_be(true)
             expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "vulkan", true)).to_be(true)
             expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "metal", true)).to_be(true)
@@ -51,21 +51,20 @@ describe "Simple Web GPU paint offload matrix":
             expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "vulkan", false)).to_be(false)
 
         slow_it "reports why each backend and flag combination does or does not offload":
-            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "cuda", true)).to_equal("gpu-paint:gpu-paint-transfer-win:cpu-paint-offloaded:measured-gpu-faster")
-            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "vulkan", true)).to_equal("gpu-paint:gpu-paint-transfer-win:cpu-paint-offloaded:measured-gpu-faster")
-            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "metal", true)).to_equal("gpu-paint:gpu-paint-transfer-win:cpu-paint-offloaded:measured-gpu-faster")
-            expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "cuda", true)).to_equal("cpu-mirror:communication-overhead:cpu-paint-offloaded:measured-gpu-slower-overhead")
-            expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "vulkan", true)).to_equal("cpu-mirror:communication-overhead:cpu-paint-offloaded:measured-gpu-slower-overhead")
-            expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "metal", true)).to_equal("cpu-mirror:communication-overhead:cpu-paint-offloaded:measured-gpu-slower-overhead")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "cuda", true)).to_equal("gpu-paint:gpu-paint-transfer-win:cpu-paint-offloaded:estimated-gpu-faster")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "vulkan", true)).to_equal("gpu-paint:gpu-paint-transfer-win:cpu-paint-offloaded:estimated-gpu-faster")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "metal", true)).to_equal("gpu-paint:gpu-paint-transfer-win:cpu-paint-offloaded:estimated-gpu-faster")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "cuda", true)).to_equal("cpu-mirror:communication-overhead:cpu-paint-offloaded:estimated-gpu-slower-overhead")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "vulkan", true)).to_equal("cpu-mirror:communication-overhead:cpu-paint-offloaded:estimated-gpu-slower-overhead")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "metal", true)).to_equal("cpu-mirror:communication-overhead:cpu-paint-offloaded:estimated-gpu-slower-overhead")
             expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "cpu_simd", true)).to_equal("cpu-backend-not-gpu-offload")
             expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "unknown", true)).to_equal("unknown-backend-not-gpu-offload")
             expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "vulkan", false)).to_equal("gpu-paint-disabled")
 
-        slow_it "keeps communication-bound frames off the requested GPU backend":
+        slow_it "keeps exact output regardless of the measured route":
             val html = many_tiny_solid_html_with_canvas()
             val readback = simple_web_layout_render_html_readback_paint(html, 16, 16, "vulkan", true)
             val oracle = simple_web_layout_render_html_readback_paint(html, 16, 16, "cpu", false)
-            expect(readback.source).to_equal("cpu_mirror")
             expect(readback.pixels.len()).to_equal(16 * 16)
             expect(readback.pixels).to_equal(oracle.pixels)
             expect(readback.pixels[readback.pixels.len() - 1]).to_equal(0xFF0F172Au32)
@@ -81,7 +80,7 @@ describe "Simple Web GPU paint offload matrix":
             expect(economics.gpu_paint_total_pixels).to_be_less_than(economics.upload_bound_total_pixels)
             expect(economics.should_offload).to_equal(true)
             expect(economics.cpu_job_verdict).to_equal("cpu-paint-offloaded")
-            expect(economics.speed_verdict).to_equal("measured-gpu-faster")
+            expect(economics.speed_verdict).to_equal("estimated-gpu-faster")
 
         slow_it "offloads when transfer loses but saved CPU paint makes total work win":
             val frame = direct_frame(16, 16, 0, 0, 0, 16, 16)
@@ -92,7 +91,7 @@ describe "Simple Web GPU paint offload matrix":
             expect(economics.should_offload).to_equal(true)
             expect(economics.reason).to_equal("gpu-paint-total-win")
             expect(economics.cpu_job_verdict).to_equal("cpu-paint-offloaded")
-            expect(economics.speed_verdict).to_equal("measured-gpu-faster")
+            expect(economics.speed_verdict).to_equal("estimated-gpu-faster")
 
         slow_it "does not claim offload when CPU ground truth is still required":
             val frame = simple_web_layout_render_html_gpu_frame(text_and_solid_html(), 64, 64)
@@ -112,7 +111,7 @@ describe "Simple Web GPU paint offload matrix":
             expect(economics.gpu_paint_total_pixels).to_equal(economics.upload_bound_total_pixels)
             expect(economics.should_offload).to_equal(false)
             expect(economics.reason).to_equal("communication-overhead")
-            expect(economics.speed_verdict).to_equal("measured-gpu-slower-overhead")
+            expect(economics.speed_verdict).to_equal("estimated-gpu-slower-overhead")
 
         slow_it "keeps exact break-even work on CPU instead of claiming offload":
             val frame = direct_frame(16, 16, 192, 0, 0, 16, 16)
@@ -121,7 +120,7 @@ describe "Simple Web GPU paint offload matrix":
             expect(economics.gpu_paint_total_pixels).to_equal(economics.upload_bound_total_pixels)
             expect(economics.should_offload).to_equal(false)
             expect(economics.reason).to_equal("communication-overhead")
-            expect(economics.speed_verdict).to_equal("measured-gpu-slower-overhead")
+            expect(economics.speed_verdict).to_equal("estimated-gpu-slower-overhead")
 
         slow_it "rejects offload when saved CPU paint is not enough to beat total work":
             val frame = direct_frame(16, 16, 193, 0, 0, 16, 16)
@@ -131,7 +130,7 @@ describe "Simple Web GPU paint offload matrix":
             expect(economics.should_offload).to_equal(false)
             expect(economics.reason).to_equal("communication-overhead")
             expect(economics.cpu_job_verdict).to_equal("cpu-paint-offloaded")
-            expect(economics.speed_verdict).to_equal("measured-gpu-slower-overhead")
+            expect(economics.speed_verdict).to_equal("estimated-gpu-slower-overhead")
 
         slow_it "does not treat skipped CPU work as offload when there are no fill commands":
             val frame = WebGpuPaintFrame(fb: [0xFFFFFFFFu32; 16 * 16], fill_ops: [], width: 16, height: 16, base: 0xFFFFFFFFu32, cpu_paint_pixels: 0)

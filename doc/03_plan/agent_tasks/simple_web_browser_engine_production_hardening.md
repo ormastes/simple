@@ -262,3 +262,13 @@ hosted-WM runtime-provider receipt remain explicit blockers, not exclusions.
 - Root Codex remains merge/manual owner. `browser_surface_adversary` returned
   PASS for the rendering lanes; runtime-provider production admission remains
   FAIL and is not promoted.
+
+## Measured GPU paint follow-up (2026-07-29)
+
+- The presenter path now calibrates paired upload/GPU routes with exact pixels
+  and device provenance; invalid evidence returns the CPU oracle.
+- TODO: move calibration off the first production frame and into renderer-owned
+  state before enabling it by default for dynamic layouts.
+- TODO: apply the measured policy to the generic
+  `simple_web_layout_engine2d_fast` path, then retain end-to-end timing,
+  readback, and fallback evidence for that primary route.

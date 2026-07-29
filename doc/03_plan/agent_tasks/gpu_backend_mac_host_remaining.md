@@ -44,6 +44,10 @@ SIMPLE_LIB=src bin/simple test \
 SIMPLE_LIB=src bin/simple test \
   test/03_system/check/macos_vulkan_processing_ir_live_readback_parity_spec.spl \
   --mode=interpreter
+
+SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND=metal SIMPLE_LIB=src bin/simple test \
+  test/05_perf/web_render_chrome/web_gpu_paint_device_measured_spec.spl \
+  --mode=interpreter
 ```
 
 ## Required evidence
@@ -65,6 +69,9 @@ SIMPLE_LIB=src bin/simple test \
   and `cpu_fallback=false`.
 - The Metal failure spec completes each bounded fault child without a timeout
   marker and preserves typed unavailable/init/submit/readback/mismatch reasons.
+- The web GPU-paint measurement records three paired upload/GPU samples with
+  positive p50/p95 timings, exact pixels, and Metal device provenance. Either
+  measured route may win; unavailable, mismatched, or CPU-backed evidence fails.
 - Add canonical device identity plus exact expected-pixel, mismatch-count, and
   max-channel-delta fields before promoting the Vulkan lane from device-capture
   evidence to exact CPU/Vulkan parity.
