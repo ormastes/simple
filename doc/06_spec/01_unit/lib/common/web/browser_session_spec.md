@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 85 | 85 | 0 | 0 |
+| 86 | 86 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -603,6 +603,58 @@ expect(
     failed_snapshot.revisions.resource_revision
 ).to_equal(before_failed.resource_revision + 1)
 expect(failed.admitted_image_sources.len()).to_equal(0)
+```
+
+</details>
+
+#### keeps repeated same-key image updates bounded across navigation and close
+
+- var session = BrowserSession new
+-  browser image png hex
+   - Expected: session.image_resources.len() equals `1`
+   - Expected: session.image_resources[0].pixels.len() equals `1`
+   - Expected: session.image_resources.len() equals `0`
+   - Expected: session.image_resources.len() equals `1`
+- session close
+   - Expected: session.image_resources.len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var session = BrowserSession.new()
+val response = BrowserResponse.create(
+    "image-soak", "image", "https://example.com/live.png", 200,
+    "Content-Type: image/png",
+    _browser_image_png_hex(0xFF123456u32), ""
+)
+val before_revision = session.render_revisions().resource_revision
+var update = 0
+while update < 256:
+    expect(session._store_image_response(
+        response, "simple-render-image:live"
+    )).to_equal("")
+    expect(session.image_resources.len()).to_equal(1)
+    expect(session.image_resources[0].pixels.len()).to_equal(1)
+    update = update + 1
+expect(session.render_revisions().resource_revision).to_equal(
+    before_revision + 256
+)
+
+expect(session.open_html(
+    "https://example.com/next", "<p>next</p>"
+).is_ok()).to_be(true)
+expect(session.image_resources.len()).to_equal(0)
+expect(session._store_image_response(
+    response, "simple-render-image:live"
+)).to_equal("")
+expect(session.image_resources.len()).to_equal(1)
+session.close()
+expect(session.image_resources.len()).to_equal(0)
 ```
 
 </details>
@@ -4210,8 +4262,8 @@ Tests covering BrowserSession lifecycle, BrowserSession page loading, BrowserSes
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 85 |
-| Active scenarios | 85 |
+| Total scenarios | 86 |
+| Active scenarios | 86 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

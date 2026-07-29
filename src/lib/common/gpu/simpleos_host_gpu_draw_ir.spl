@@ -40,6 +40,12 @@ struct SimpleOsHostGpuImageResourcesPayload:
     checksum: i64
     resource_count: i64
 
+struct SimpleOsHostGpuImageResourcesValidation:
+    ok: bool
+    reason: text
+    total_bytes: i64
+    resource_count: i64
+
 struct SimpleOsHostGpuImageResourcesDecode:
     ok: bool
     reason: text
@@ -100,6 +106,16 @@ fn _simpleos_host_gpu_draw_ir_bytes_equal(left: [u8], right: [u8]) -> bool:
 
 fn _simpleos_host_gpu_image_resources_reject(reason: text) -> SimpleOsHostGpuImageResourcesPayload:
     SimpleOsHostGpuImageResourcesPayload(ok: false, reason: reason, bytes: [], checksum: 0, resource_count: 0)
+
+fn _simpleos_host_gpu_image_resources_validation_reject(
+    reason: text
+) -> SimpleOsHostGpuImageResourcesValidation:
+    SimpleOsHostGpuImageResourcesValidation(
+        ok: false,
+        reason: reason,
+        total_bytes: 0,
+        resource_count: 0
+    )
 
 fn _simpleos_host_gpu_image_resources_decode_reject(reason: text) -> SimpleOsHostGpuImageResourcesDecode:
     SimpleOsHostGpuImageResourcesDecode(ok: false, reason: reason, resources: [])
@@ -182,12 +198,10 @@ fn _simpleos_host_gpu_text_seen(values: [text], value: text) -> bool:
     false
 
 fn _simpleos_host_gpu_image_resource_reason(resource: SimpleOsHostGpuImageResource) -> text:
-    val uri_bytes = text_to_bytes(resource.image_uri)
-    val uri_len = uri_bytes.len()
-    val uri_count = uri_len.to_i64()
+    val uri_count = resource.image_uri.len()
     if resource.image_uri == "":
         return "missing-image-uri"
-    if uri_len == 0 or uri_count > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES or bytes_to_text(uri_bytes) != resource.image_uri:
+    if uri_count > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES:
         return "invalid-image-uri"
     if resource.width <= 0 or resource.height <= 0 or resource.width.to_i64() > SIMPLEOS_HOST_GPU_MAX_WIDTH or resource.height.to_i64() > SIMPLEOS_HOST_GPU_MAX_HEIGHT:
         return "invalid-image-dimensions"
@@ -337,33 +351,60 @@ fn simpleos_host_gpu_image_resource(image_uri: text, width: i32, height: i32, pi
         )
     )
 
-fn simpleos_host_gpu_image_resources_encode(resources: [SimpleOsHostGpuImageResource], max_bytes: i64, max_resources: i64) -> SimpleOsHostGpuImageResourcesPayload:
+fn simpleos_host_gpu_image_resources_validate(
+    resources: [SimpleOsHostGpuImageResource],
+    max_bytes: i64,
+    max_resources: i64
+) -> SimpleOsHostGpuImageResourcesValidation:
     if max_bytes < 0 or max_resources < 0:
-        return _simpleos_host_gpu_image_resources_reject("invalid-limits")
+        return _simpleos_host_gpu_image_resources_validation_reject(
+            "invalid-limits"
+        )
     val resources_len = resources.len()
     val resource_count = resources_len.to_i64()
     if resource_count > max_resources:
-        return _simpleos_host_gpu_image_resources_reject("too-many-resources")
+        return _simpleos_host_gpu_image_resources_validation_reject(
+            "too-many-resources"
+        )
     var total_bytes: i64 = 0
     var resource_index: i64 = 0
     while resource_index < resource_count:
         val resource = resources[resource_index]
         val reason = _simpleos_host_gpu_image_resource_reason(resource)
         if reason != "":
-            return _simpleos_host_gpu_image_resources_reject(reason)
+            return _simpleos_host_gpu_image_resources_validation_reject(
+                reason
+            )
         if _simpleos_host_gpu_resource_uri_seen(resources, resource_index, resource.image_uri):
-            return _simpleos_host_gpu_image_resources_reject("duplicate-image-uri")
-        val uri = text_to_bytes(resource.image_uri)
-        val uri_len = uri.len()
-        val uri_bytes = uri_len.to_i64()
+            return _simpleos_host_gpu_image_resources_validation_reject(
+                "duplicate-image-uri"
+            )
+        val uri_bytes = resource.image_uri.len()
         val pixels_len = resource.pixels.len()
         val pixel_bytes = pixels_len.to_i64() * 4
         val record_bytes = SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES + _simpleos_host_gpu_align8(uri_bytes) + _simpleos_host_gpu_align8(pixel_bytes)
         if record_bytes < SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES or total_bytes > max_bytes - record_bytes:
-            return _simpleos_host_gpu_image_resources_reject("payload-too-large")
+            return _simpleos_host_gpu_image_resources_validation_reject(
+                "payload-too-large"
+            )
         total_bytes = total_bytes + record_bytes
         resource_index = resource_index + 1
+    SimpleOsHostGpuImageResourcesValidation(
+        ok: true,
+        reason: "ok",
+        total_bytes: total_bytes,
+        resource_count: resource_count
+    )
 
+fn simpleos_host_gpu_image_resources_encode(resources: [SimpleOsHostGpuImageResource], max_bytes: i64, max_resources: i64) -> SimpleOsHostGpuImageResourcesPayload:
+    val validation = simpleos_host_gpu_image_resources_validate(
+        resources, max_bytes, max_resources
+    )
+    if not validation.ok:
+        return _simpleos_host_gpu_image_resources_reject(
+            validation.reason
+        )
+    val resource_count = validation.resource_count
     var bytes: [u8] = []
     for resource in resources:
         val uri = text_to_bytes(resource.image_uri)
@@ -757,10 +798,15 @@ fn simpleos_host_gpu_resolve_retained_images(entries: [SimpleOsHostGpuImageResou
     SimpleOsHostGpuRetainedResolution(ok: true, reason: "ok", resolved: resolved, retained: next_retained)
 
 export SimpleOsHostGpuDrawIrPayload, SimpleOsHostGpuDrawIrDecode
-export SimpleOsHostGpuImageResource, SimpleOsHostGpuImageResourcesPayload, SimpleOsHostGpuImageResourcesDecode
+export SimpleOsHostGpuImageResource, SimpleOsHostGpuImageResourcesPayload
+export SimpleOsHostGpuImageResourcesValidation
+export SimpleOsHostGpuImageResourcesDecode
 export SimpleOsHostGpuImageResourceEntry, SimpleOsHostGpuImageResourceEntryDecode, SimpleOsHostGpuImageResourceRevision
 export simpleos_host_gpu_draw_ir_encode, simpleos_host_gpu_draw_ir_decode
-export simpleos_host_gpu_image_resource, simpleos_host_gpu_image_resources_encode, simpleos_host_gpu_image_resources_decode
+export simpleos_host_gpu_image_resource
+export simpleos_host_gpu_image_resources_validate
+export simpleos_host_gpu_image_resources_encode
+export simpleos_host_gpu_image_resources_decode
 export simpleos_host_gpu_image_revision
 export simpleos_host_gpu_image_resource_coverage_reason
 export simpleos_host_gpu_image_resource_full, simpleos_host_gpu_image_resource_ref

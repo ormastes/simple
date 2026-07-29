@@ -2253,3 +2253,11 @@ implementation in progress / target evidence blocked
   `change`, reuse the retained focus for Shift+ArrowRight, and clear selection
   state on blur. Independent review returned PASS. The new modern SSpec manual
   regenerated with 108 authored lines (`1 complete, 0 stubs`, no warnings).
+- image-resource validation tranche (2026-07-29): BrowserSession image admission
+  now calls a shared nonallocating validator instead of encoding, checksumming,
+  and discarding the full retained image wire payload. The encoder reuses the
+  same validation ordering and materializes URI/pixel bytes only for emission;
+  UTF-8 URI length uses the O(1) byte-length path with overflow-safe totals.
+  Validator/encoder rejection parity, a multibyte near-limit URI, 256 same-key
+  replacements, revision bounds, navigation cleanup, and close cleanup passed
+  independent review. Two manuals regenerated (`2 complete, 0 stubs`).

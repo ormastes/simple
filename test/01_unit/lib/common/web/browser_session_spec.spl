@@ -348,6 +348,37 @@ describe "BrowserSession page loading":
         ).to_equal(before_failed.resource_revision + 1)
         expect(failed.admitted_image_sources.len()).to_equal(0)
 
+    it "keeps repeated same-key image updates bounded across navigation and close":
+        var session = BrowserSession.new()
+        val response = BrowserResponse.create(
+            "image-soak", "image", "https://example.com/live.png", 200,
+            "Content-Type: image/png",
+            _browser_image_png_hex(0xFF123456u32), ""
+        )
+        val before_revision = session.render_revisions().resource_revision
+        var update = 0
+        while update < 256:
+            expect(session._store_image_response(
+                response, "simple-render-image:live"
+            )).to_equal("")
+            expect(session.image_resources.len()).to_equal(1)
+            expect(session.image_resources[0].pixels.len()).to_equal(1)
+            update = update + 1
+        expect(session.render_revisions().resource_revision).to_equal(
+            before_revision + 256
+        )
+
+        expect(session.open_html(
+            "https://example.com/next", "<p>next</p>"
+        ).is_ok()).to_be(true)
+        expect(session.image_resources.len()).to_equal(0)
+        expect(session._store_image_response(
+            response, "simple-render-image:live"
+        )).to_equal("")
+        expect(session.image_resources.len()).to_equal(1)
+        session.close()
+        expect(session.image_resources.len()).to_equal(0)
+
     it "invalidates the first frame when linked CSS completes":
         var session = BrowserSession.new()
         expect(session.begin_network_navigation(
