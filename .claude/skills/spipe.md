@@ -991,6 +991,49 @@ test runner can't execute the `it` blocks (e.g. it segfaults importing a heavy
 module graph), run the same assertions through a `bin/simple run …` harness and
 keep the absolute oracle in it — don't downgrade to "files load".
 
+## Source-text assertions are not evidence (grep-a-spec anti-pattern)
+
+A spec that `read_text("src/…/foo.spl")` and asserts the file *contains* a
+symbol name proves only that a string exists. It passes while the function
+returns `[]`, is never called, or is dead code. On 2026-07-29 the IDE
+extension suite's largest "system test" was 159 such assertions — duplicated
+verbatim in two files, 318 total — and every one of them was green while the
+manifest loader discarded themes/keybindings, the debug-adapter parser
+returned a literal `[]`, commands had no handlers, and a flagship command
+(`md.toggleBold`) was declared with **no implementation anywhere in the repo**.
+The suite would also have broken on any refactor with zero behavior change.
+
+Rules:
+- Source-structure claims belong in architecture lint / API-surface lint /
+  generated-code checks — never in a system spec, never as end-to-end evidence.
+- A system spec must *run* the thing: construct the host, dispatch the command,
+  assert on the resulting state or artifact.
+- When you delete such a spec, replace it in the same change with the behavior
+  spec it was pretending to be (here: discover → lazy activate → real handler
+  runs → deactivate disposes everything).
+
+## Running specs on a loaded box (harness truths, 2026-07-29)
+
+Under parallel sessions these look like test failures but are not:
+- **The 60s CPU-spin kill daemon** (`scripts/resource/kill_simple_monitor.shs`)
+  SIGKILLs a cold-recompile run before it reaches `Results:`. Prefix runs with
+  `SIMPLE_TIMEOUT_SECONDS=900`.
+- **Concurrent `bin/simple test` launches self-inflict** `ERROR: test daemon
+  timed out` / `request expired before execution`. Run **one spec at a time**;
+  a "batch of 4 in parallel" turns four healthy specs into four unverifiable
+  ones (F1 lane lost its whole re-verify queue this way).
+- Capture to a file and read the tail — piping eats the authoritative
+  `Results:` line and replaces the exit code (see `.claude/rules/testing.md` F3).
+- `@step "text"` as a decorator does **not** parse (`expected Fn, found
+  FString`) despite appearing in older template text; the in-tree convention is
+  a plain `# @step: text` comment.
+- SDN literals containing `{}` inside double-quoted spec strings trigger string
+  interpolation ("variable x not found") — use raw `'...'` strings.
+
+If a spec genuinely cannot reach `Results:` after retries, say so with the
+attempt count and land it **flagged as probe-validated, not green** — never
+report an unverified spec as passing.
+
 ## Spec-source landmines (the spec fails, the code is fine)
 
 Some spec failures come from how the **spec source itself** is lexed, not from the

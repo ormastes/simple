@@ -33,6 +33,12 @@ line/col, incl. duplicate keys); behavior binds through typed registrations on
 `test/03_system/ide/extension_kernel_walking_skeleton_spec.spl` (discover
 without execution → lazy activation → real handler → disposal).
 
+## Docs
+- Authoring guide: `doc/07_guide/app/ide/extension_authoring.md`
+- Layer view: `doc/00_llm_process/layer_expert/editor_extensions/skill.md`
+- Office suite reality check: `doc/07_guide/app/ide_office_plugin_suite.md`
+  (§Implementation status)
+
 ## Landmines specific to this feature
 - Build manifest structs via `mut` locals — `SdnValue.insert` on
   constructor-returned dicts mutates a dead copy.

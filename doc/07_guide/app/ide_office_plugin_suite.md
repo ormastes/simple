@@ -19,6 +19,37 @@ Required capsules:
 - Math, Mail, Planner, dashboard, and DB admin: feature-check visible capsules
   with declared commands and services.
 
+## Implementation status (2026-07-29)
+
+The contract above was aspirational when written. What is now actually
+implemented, and what is not:
+
+**Real today** — the extension kernel lives in
+`src/lib/editor/extensions/` (not `src/app/ide/`): SDN manifests with typed
+decode and line/col diagnostics, `CommandRegistry` with typed handlers and
+first-wins conflict policy, lazy activation with once-per-activation hooks,
+Disposable lifecycles, default-deny permissions with canonical path
+containment, and the settings/menus/keybindings registries. Writer, Sheets and
+Slides route their toolbar/menu actions through `CommandRegistry` instead of
+literal `match action:` arms; Sheets formula functions and Slides
+layouts/element kinds are extensible registries; Writer saves through a
+`DocumentCodec` and Sheets has a formula-preserving workbook codec. Fourteen
+builtin manifests are indexed, and `ide_capabilities_live()` reports each
+capability's real state (`declared → indexed → activatable → bound`).
+Authoring guide: `doc/07_guide/app/ide/extension_authoring.md`.
+
+**Not yet** — service tokens exist as a type but scoped DI is not wired
+through the Office capsules; AOP hooks are limited to activation observation
+(no third-party command/render/save interceptors); out-of-process (worker/WASM)
+extension hosting is declared in the contract but unimplemented, so all
+extensions run in-process; `src/app/office/plugins.spl` still holds three
+transitional static `PluginEntry` records; and Office capsules still import
+some sibling modules directly. `src/lib/common/ide/` is not the contract home —
+the kernel contracts are in `src/lib/editor/extensions/contract.spl`.
+
+DOCX/XLSX/PPTX compatibility is **not** claimed: the codec trait exists, the
+format work does not.
+
 ## Plugin Rules
 
 - Shared contracts live in `src/lib/common/ide/`.
