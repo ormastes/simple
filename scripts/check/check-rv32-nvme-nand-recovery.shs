@@ -2,11 +2,12 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+. "$ROOT/scripts/check/lib/require-self-hosted.shs"
 ENTRY="$ROOT/examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl"
 LOGIC="$ROOT/examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_nand_read_level.spl"
 BRAM_LD="$ROOT/examples/09_embedded/fpga_riscv/rtl/nvme_fw_rv32_bram.ld"
 QEMU_LD="$ROOT/src/os/kernel/arch/riscv32/linker.ld"
-SIMPLE_BINARY=${SIMPLE_BINARY:-"$ROOT/bin/release/simple"}
+SIMPLE_BINARY=${NVME_RV32_SIMPLE_BIN:-${SIMPLE_BINARY:-"$ROOT/bin/release/simple"}}
 
 fail() {
     echo "STATUS: FAIL rv32-nvme-nand-recovery: $1" >&2
@@ -71,10 +72,22 @@ self_test() {
 }
 
 ghdl_run() {
-    [ -x "$SIMPLE_BINARY" ] || fail "pure-Simple runtime missing: $SIMPLE_BINARY"
+    require_self_hosted "$SIMPLE_BINARY" "rv32-nvme compiler"
+    SIMPLE_BINARY="$SELF_HOSTED_BIN"
     cd "$ROOT"
     NVME_RV32_SIMPLE_BIN="$SIMPLE_BINARY" sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs
-    FW_ELF="$ROOT/build/nvme_fw_rv32.elf" sh scripts/fpga/ghdl_rv32_nvme_fw.shs
+    evidence="$ROOT/build/test-artifacts/nvme_rv32_source_matched"
+    mkdir -p "$evidence"
+    {
+        printf 'compiler=%s\ncompiler_real=%s\n' "$SIMPLE_BINARY" "$SELF_HOSTED_REAL"
+        printf '%s\n' "$SELF_HOSTED_VERSION"
+        sha256sum "$SELF_HOSTED_REAL" "$ENTRY" "$LOGIC" "$ROOT/build/nvme_fw_rv32.elf"
+    } >"$evidence/manifest.txt"
+    if ! FW_ELF="$ROOT/build/nvme_fw_rv32.elf" sh scripts/fpga/ghdl_rv32_nvme_fw.shs >"$evidence/exact-bram.log" 2>&1; then
+        cat "$evidence/exact-bram.log"
+        fail "exact-BRAM GHDL run failed"
+    fi
+    cat "$evidence/exact-bram.log"
     sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
     sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs
     GARBAGE_FILL=1 sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs

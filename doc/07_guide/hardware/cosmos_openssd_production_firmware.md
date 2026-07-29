@@ -181,10 +181,12 @@ Use `bin/release/simple` rebuilt and deployed from the current tree. A stale
 release binary that links the obsolete two-argument `rt_env_set` ABI can crash
 before an SSpec runs and is not evidence. There is currently no accepted
 deployed runner. The unchanged-tree strict run passed Stage 2/3 sanity and
-cleared the prior parser/HIR crashes, then Stage 4 failed on unresolved names
-from partial/header-only import facades. Fix the tracked import-resolution
-defect and complete a clean strict Stage-4 build before using
-`bin/release/simple`.
+cleared the prior parser/HIR crashes. Retry 14 then rebuilt the Rust authority,
+compiled all Stage 2 objects, and failed at the native link after 24m01s on
+three stale symbol groups: an undeclared trait-lowering helper, removed
+coverage-inventory calls, and CUDA sizing lowered to unavailable bare `sum`.
+Its peak RSS was 2,591,760 KiB with zero swap. Retry 15 is the next bounded
+admission attempt; complete it before using `bin/release/simple`.
 
 ## Host Build and QEMU Gate
 
@@ -319,8 +321,9 @@ Do not execute the fourteen-scenario SSpec with a stale binary. The source/manua
 now describe the current runners, but final execution and generated-manual
 evidence are blocked until a current pure-Simple `bin/release/simple` is
 available. The latest unchanged-tree run passed Stage 2/3 sanity, cleared the
-prior parser/HIR crashes, and failed Stage 4 on unresolved names from
-partial/header-only import facades. Its peak RSS was 5,492,252 KiB.
+prior parser/HIR crashes. Retry 14 compiled all Stage 2 objects but failed at
+the native link on the three stale symbol groups recorded above. Its peak RSS
+was 2,591,760 KiB with zero swap; Retry 15 remains pending.
 
 Before production can move from **BLOCKED/FAIL**, complete:
 

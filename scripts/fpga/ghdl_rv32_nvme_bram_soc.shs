@@ -31,7 +31,13 @@ WORK_DIR="$ROOT_DIR/build/ghdl/rv32_nvme_bram_soc"
 FW_ELF="${FW_ELF:-$ROOT_DIR/build/ghdl/rv32_nvme_fw/nvme_fw_rv32_bram.elf}"
 RAM_WORDS="${RAM_WORDS:-16384}"
 RDISK_WORDS="${RDISK_WORDS:-1024}"
+RUN_NAME=clean
+[ "${GARBAGE_FILL:-0}" = "1" ] && RUN_NAME=garbage
+DEFAULT_WORK_DIR="$WORK_DIR/$RUN_NAME"
+WORK_DIR="${WORK_DIR_OVERRIDE:-$DEFAULT_WORK_DIR}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT_DIR/build/test-artifacts/nvme_rv32_bram_soc/$RUN_NAME}"
 LOG="$WORK_DIR/sim.log"
+LEGACY_LOG="$ROOT_DIR/build/ghdl/rv32_nvme_bram_soc/sim.log"
 
 command -v ghdl >/dev/null 2>&1 || { echo "ERROR: ghdl not found in PATH"; exit 1; }
 [ -f "$FW_ELF" ] || {
@@ -41,6 +47,8 @@ command -v ghdl >/dev/null 2>&1 || { echo "ERROR: ghdl not found in PATH"; exit 
 }
 
 mkdir -p "$WORK_DIR"
+mkdir -p "$EVIDENCE_DIR"
+mkdir -p "$(dirname "$LEGACY_LOG")"
 echo "=== GHDL RV32 NVMe firmware on the SYNTH BRAM SoC (rv32_bram_soc) ==="
 
 # 1. Flatten the ELF to the BRAM INIT .mem (32-bit LE words, hex).
@@ -76,19 +84,18 @@ echo "  Firmware image: $IMG_WORDS words (rv32_flat.mem), RAM_WORDS=$RAM_WORDS R
 
 # 3. Analyse + elaborate the EXACT synth RTL + tb.
 printf "  Analysing synth RTL + testbench ... "
-out="$(ghdl -a --std=08 --workdir="$WORK_DIR" \
+if ! ghdl -a --std=08 --workdir="$WORK_DIR" \
   "$RTL_DIR/rv32_exec_core_axi.vhd" \
   "$RTL_DIR/rv32_bram_soc.vhd" \
-  "$RTL_DIR/tb_rv32_nvme_bram_soc.vhd" 2>&1)" || true
-if echo "$out" | grep -q ":error:"; then
-  echo "FAIL"; echo "$out" | tail -40; exit 1
+  "$RTL_DIR/tb_rv32_nvme_bram_soc.vhd" >"$WORK_DIR/analyse.log" 2>&1; then
+  echo "FAIL"; tail -40 "$WORK_DIR/analyse.log"; exit 1
 fi
 echo "OK"
 
 printf "  Elaborating ... "
-out="$(cd "$WORK_DIR" && ghdl -e --std=08 --workdir="$WORK_DIR" tb_rv32_nvme_bram_soc 2>&1)" || true
-if echo "$out" | grep -qi "error"; then
-  echo "FAIL"; echo "$out" | tail -40; exit 1
+if ! (cd "$WORK_DIR" && ghdl -e --std=08 --workdir="$WORK_DIR" tb_rv32_nvme_bram_soc \
+  >"$WORK_DIR/elaborate.log" 2>&1); then
+  echo "FAIL"; tail -40 "$WORK_DIR/elaborate.log"; exit 1
 fi
 echo "OK"
 
@@ -97,6 +104,13 @@ echo "  Running simulation (log: $LOG) ..."
 (cd "$WORK_DIR" && ghdl -r --std=08 --workdir="$WORK_DIR" tb_rv32_nvme_bram_soc \
   -gTINY_RAM_WORDS="$RAM_WORDS" -gTINY_RDISK_WORDS="$RDISK_WORDS" \
   --stop-time=450ms > "$LOG" 2>&1) || true
+cp "$LOG" "$EVIDENCE_DIR/sim.log"
+cp "$WORK_DIR/fw.bin" "$EVIDENCE_DIR/fw.bin"
+cp "$WORK_DIR/rv32_flat.mem" "$EVIDENCE_DIR/rv32_flat.mem"
+cp "$WORK_DIR/rv32_ramdisk.mem" "$EVIDENCE_DIR/rv32_ramdisk.mem"
+cp "$WORK_DIR/analyse.log" "$EVIDENCE_DIR/analyse.log"
+cp "$WORK_DIR/elaborate.log" "$EVIDENCE_DIR/elaborate.log"
+cp "$LOG" "$LEGACY_LOG"
 grep -E "RV32_NVMEBRAM_(UART_LINE|BOOT_DONE|BOOT_STUCK|OBS_MAGIC|OBS_STATUS|OBS_UART_)" "$LOG" | tail -12
 
 for marker in \
