@@ -30,11 +30,16 @@ three-cycle cap.
 
 ## Required Fix
 
-Add an exact producer-owned layout revision for the no-image HTML Draw IR
-result, covering HTML, viewport, layout-affecting font/style state, and ordered
-composition semantics. Cache the canonical key by that exact revision in the
-existing bounded process-local route cache. Do not replace exact identity with
-a probabilistic composition fingerprint.
+Add an opaque producer-owned revision to `SimpleWebLayoutDrawIrResult`, sourced
+from `SimpleWebRenderSession`'s retained composition revision. It must cover
+document/style revisions, viewport width and height, resolved font and registry
+generation, render configuration, asset root, render-budget state, and ordered
+composition semantics. Use a session-owned route cache or key the process-local
+cache by exact session identity plus composition revision; a session-local
+revision alone is not globally unique. Never cache degraded or partial output. Standalone,
+animated, scrolled, overlay, or image-backed callers must retain exact SDN
+keying or disable reuse until they have an owner-scoped revision. Do not replace
+exact identity with a probabilistic composition fingerprint.
 
 Acceptance evidence:
 
