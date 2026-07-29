@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 58 | 58 | 0 | 0 |
+| 59 | 59 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -69,6 +69,33 @@ expect(structure.contains("```latex")).to_equal(false)
 > expect(structure.contains("```latex")).to_equal(false)
 
 </details>
+
+</details>
+
+#### keeps literal CSS identifiers ending in m out of math blocks
+
+- structure contains
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val css = "html,body,form" + 123.to_char() + "margin:0" + 125.to_char()
+val source = "describe \"CSS literal\":\n" +
+    "    it \"keeps the form rule exact\":\n" +
+    "        val html = \"<style>" + css + "</style>\"\n" +
+    "        expect(html).to_contain(\"form\")\n"
+val structure = extract_test_structure(source)
+expect(structure).to_contain(css)
+expect(structure.contains("$margin:0$")).to_equal(false)
+expect(
+    structure.contains("<summary>Rendered scenario source</summary>")
+).to_equal(false)
+```
 
 </details>
 
@@ -1936,8 +1963,8 @@ Tests covering spipe docgen scenario body extraction.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 58 |
-| Active scenarios | 58 |
+| Total scenarios | 59 |
+| Active scenarios | 59 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
