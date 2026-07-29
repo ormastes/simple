@@ -1,14 +1,17 @@
-use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
+use common.ui.widget.{UIEvent}
 use common.ui.window_scene_draw_ir.{
     shared_wm_pixel_buffer_addr,
     shared_wm_pixel_buffer_count,
 }
+use common.ui.wm_full_stack_demo.{wm_full_stack_demo_tree}
+use common.ui.native_scalar_text.{ui_native_i64_text}
 use common.window_protocol.geometry.{Size}
+use nogc_sync_mut.ui.session.{UISession}
 use os.compositor.host_compositor_entry.{HostCompositor}
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+use std.gc_async_mut.ui.gui_content_renderer.{gui_session_content_frame}
 
 extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
-extern fn rt_raw_i64_to_string(value: i64) -> text
 
 fn main() -> i64:
     var compositor = HostCompositor.new_headless(Size.wh(160, 120))
@@ -21,28 +24,24 @@ fn main() -> i64:
     val window_id = compositor.windows[0].id
     if not compositor.require_external_content_frame(window_id):
         return 2
-    var pixels: [u32] = []
-    var i = 0
-    while i < 100 * 60:
-        pixels.push(
-            if i % 100 < 50: 0xff112233u32 else: 0xff445566u32
-        )
-        i = i + 1
-    val frame = pixel_surface_content_frame(
-        rt_raw_i64_to_string(window_id), "", 0, 0, 100, 60,
-        pixels, 1, 1
+    val tree = wm_full_stack_demo_tree("Ready", "Play sound", "")
+    var session = UISession.new(tree)
+    session.dispatch(UIEvent.Resize(100, 60))
+    val frame = gui_session_content_frame(
+        session, ui_native_i64_text(window_id), "", 0, 0,
+        100, 60, 1, 1, []
     )
-    if not compositor.set_external_content_frame(window_id, frame):
+    if (frame.width != 100 or frame.height != 60 or
+        frame.pixels.len() != 100 * 60 or frame.checksum == 0u64):
         return 3
+    if not compositor.set_external_content_frame(window_id, frame):
+        return 4
     compositor.render_frame()
 
     val addr = shared_wm_pixel_buffer_addr()
     if addr == 0 or shared_wm_pixel_buffer_count() != 160 * 120:
-        return 4
-    if ((rt_ptr_read_i64(addr, (44 * 160 + 16) * 4) &
-        0xFFFFFFFF) as u32) != 0xff112233u32:
         return 5
-    if ((rt_ptr_read_i64(addr, (44 * 160 + 80) * 4) &
-        0xFFFFFFFF) as u32) != 0xff445566u32:
+    if ((rt_ptr_read_i64(addr, (98 * 160 + 110) * 4) &
+        0xFFFFFFFF) as u32) != 0xff10151du32:
         return 6
     0

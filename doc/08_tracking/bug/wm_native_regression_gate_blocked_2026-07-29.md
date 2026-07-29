@@ -190,3 +190,35 @@ and then faulted before the two-second capture. Therefore the remaining
 blocker is in the richer GUI/demo route. This checkpoint proves neither the
 final corrected probe assertion nor a live non-black GUI frame, semantic input
 mutation, or clean close.
+
+The first-frame probe was then upgraded from a synthetic PixelSurface to the
+exact demo widget tree, `UISession`, canonical GUI frame producer, compositor
+admission, and raw pixel readback. Its three bounded Phase-3 cycles exposed the
+same generic numeric-format defect at progressively later owners:
+
+```text
+common.ui.builder.with_height()
+nogc_sync_mut.ui.session._ui_draw_ir_session_nonce()
+nogc_sync_mut.ui.session.UISession.dispatch()
+common.ui.event.process_event()  # remaining, viewport tokens at lines 66-67
+```
+
+`common.ui.native_scalar_text` now owns the existing native raw-i64 formatter.
+Builder dimensions, RenderSurface scalar properties, UISession identities and
+selected event receipts, and WM numeric identities route through it. This
+removes the demo/compositor/MDI raw-runtime declarations rather than spreading
+another workaround.
+
+The third probe build completed with 3 compiled and 377 cached modules, then
+exited 139. GDB identifies the remaining first formatter call as:
+
+```text
+rt_to_string
+  <- common.ui.event.process_event
+  <- common.ui.state.update_state
+  <- UISession.dispatch
+```
+
+Per the three-cycle guard, `event.spl:66-67` is recorded for the next bounded
+turn and was not fixed/rebuilt here. The full GLFW demo was not retried behind
+this red focused gate.

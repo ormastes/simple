@@ -450,6 +450,28 @@ implementation-in-progress
   remaining defect to the richer GUI/demo path rather than raw framebuffer
   allocation, external-frame admission, base compositor paint, or GLFW's
   packed-pixel copier.
+- ui-native-scalar-text-owner: The generic tagged `rt_to_string()` route
+  faults on typed `i32`/`i64` values in the Phase-3 native UI path. One
+  `common.ui.native_scalar_text` owner now wraps the runtime's existing raw-i64
+  formatter. Builder dimensions, RenderSurface handles, UISession identities,
+  selected event receipts, and WM numeric IDs reuse that owner; the direct
+  demo/compositor/MDI `rt_*` declarations from the prior checkpoint are
+  removed.
+- ui-native-scalar-runtime-decision: `runtime_need=project typed UI/WM scalar
+  identities without the corrupt tagged formatter`; `facade_checked=no
+  existing common UI scalar-text owner; the runtime already exposes the exact
+  raw-i64 primitive and the stale Phase-3 compiler cannot be refreshed without
+  the prohibited bootstrap`; `chosen_path=add-smallest-owner-facade`;
+  `rejected_shortcuts=no app-side raw externs, no per-widget decimal
+  implementation, no full bootstrap, no feature-only bypass`.
+- phase3-gui-first-frame-probe: The existing native first-frame probe now uses
+  the exact full-stack demo tree, `UISession`, canonical GUI content-frame
+  producer, external-frame admission, and raw compositor readback. Three
+  bounded cycles moved its first fault from `builder.with_height()` to
+  `_ui_draw_ir_session_nonce()`, then `UISession.dispatch()` receipt
+  formatting, and finally `common.ui.event.process_event()` viewport token
+  formatting at `event.spl:66-67`. The final binary still exits 139; no full
+  live retry was run behind a red focused gate.
 
 ## Remaining runtime gates
 
@@ -459,9 +481,10 @@ implementation-in-progress
   GUI-frame admission, scalar pointer-router, and stable-ID widget mutation
   probes. Packed ARGB presentation and title conversion are now independently
   green. The focused native compositor now admits an external pixel frame and
-  reaches an exact nonzero framebuffer sample without the earlier string
-  faults. The full GUI demo still faults after mapping its exact title and
-  before capture; non-black live presentation and semantic input remain RED.
+  reaches an exact nonzero framebuffer sample. The richer exact-demo GUI probe
+  now stops at the remaining Resize token formatter in
+  `common.ui.event.process_event`; the full GUI demo remains RED for non-black
+  live presentation and semantic input.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the
