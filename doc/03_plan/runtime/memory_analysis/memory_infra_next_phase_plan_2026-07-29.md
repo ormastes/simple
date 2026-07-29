@@ -84,3 +84,94 @@ direction; Fil-C capability ideas.
 ## Verification culture
 Each milestone lands with: fixture-backed spec (SSpec), overhead measurement
 (warm run, before/after), and a one-page entry appended to the research doc.
+
+## Overhead measurements (2026-07-29)
+
+Cross-cutting req 2 ("zero-overhead-when-off HARD RULE") measured against the
+landed M1 gate: `SIMPLE_MEM_ATTR` in `src/compiler_rust/runtime/src/value/heap.rs`
+(cached `OnceLock<bool>`, checked at `note_attr_alloc`/`note_attr_free`/
+`set_current_owner`) plus the interpreter hook
+(`rt_mem_attr_enabled()` call sites in
+`compiler/src/interpreter_call/core/function_exec.rs:560,613,1361`).
+
+**Machine:** shared 32-core box, `load average: 38.81, 37.74, 29.69` at
+measurement time (noisy) — medians used throughout, A/B interleaved.
+**Binary:** `src/compiler_rust/target/debug/simple` (debug build, `cargo build
+--bin simple`, this session's build — no source edits made by this lane).
+**Probe:** `/tmp/overhead_probe.spl` — builds a 90,000-element `[text]` array
+via `arr = arr.push(...)`, then sums `.len()` over every element; workload
+time measured in-process via `rt_time_now_unix_micros()` (excludes process
+startup/link overhead).
+
+| Probe | Runs (each) | Median OFF | Median ON | Delta |
+|---|---|---|---|---|
+| 90k-elem text array push+sum, in-process timer, ABBA-interleaved | 20 | 1302.5 ms | 1779.5 ms | **+36.6%** |
+| Same probe, wall-clock (`/usr/bin/time -f %e`), plain interleaved | 7 | 1.42 s | 1.86 s | +31% |
+| OFF, `env -u SIMPLE_MEM_ATTR` (inherits full env) | 7 | 1071 ms | — | — |
+| OFF, `env -i` clean env (`PATH`+`HOME` only) | 7 | 975 ms | — | — |
+
+Raw in-process elapsed_ms samples (ABBA-interleaved, sorted):
+- OFF (n=20): 942, 952, 1002, 1076, 1083, 1122, 1185, 1224, 1260, 1282, 1323,
+  1345, 1392, 1476, 1486, 1489, 1501, 1503, 1590, 1780
+- ON (n=20): 1336, 1386, 1493, 1538, 1580, 1629, 1693, 1694, 1731, 1760, 1799,
+  1806, 1815, 1883, 1919, 1976, 2048, 2079, 2320, 2668
+
+### Findings
+
+1. **OFF is indistinguishable from env-pollution / clean-env baseline.** The
+   `env -u` OFF median (1071 ms) and `env -i` clean-env OFF median (975 ms)
+   differ by ~9%, well inside the ~940-1780 ms noise band the same OFF
+   configuration produces run-to-run on this loaded machine. There is no
+   separate "baseline" binary to diff against (in-flight edits elsewhere in
+   the tree made a pre-feature rebuild unsafe per the task brief), so this
+   lane leans on the code structure instead: the off path is a single cached
+   `OnceLock<bool>` read guarding an early return, added at 3 call sites that
+   did not exist before M1 and cost nothing when the branch isn't taken:
+   ```rust
+   static ATTR_ENABLED: OnceLock<bool> = OnceLock::new();
+   #[inline]
+   fn mem_attr_enabled() -> bool {
+       *ATTR_ENABLED
+           .get_or_init(|| std::env::var("SIMPLE_MEM_ATTR").map(|v| v == "1").unwrap_or(false))
+   }
+   ```
+   and, at each of the three instrumentation points (`note_attr_alloc`,
+   `note_attr_free`, `set_current_owner`, called from the generic alloc/free
+   hot path at `heap.rs:236,253,277`):
+   ```rust
+   fn note_attr_alloc(ptr: usize, bytes: u64) {
+       if !mem_attr_enabled() { return; }
+       ... // Mutex lock + HashMap insert — never reached when OFF
+   }
+   ```
+   No lock, no map, no thread-local write on the OFF path — matches the plan's
+   "cached bool, not a per-alloc env read" requirement. **Verdict: OFF is
+   consistent with zero added overhead; not separately provable from a
+   pre-feature baseline on this measurement pass, but the noise band swallows
+   any OFF-path cost that could exist.**
+
+2. **ON cost is NOT under ~5% on this workload — it is ~31-37%.** This is
+   expected once the code is read, not a surprise: this probe is
+   allocation-heavy (90k array pushes; per the "seed `.push()` always clones"
+   finding, `arr = arr.push(v)` reallocates/copies the whole backing buffer
+   each call, so it's O(N²) allocations), and the ON path takes a global
+   `Mutex` lock plus a `HashMap` insert/lookup on **every** heap alloc and
+   free while enabled. The gate correctly keeps this cost opt-in (`OFF` by
+   default, satisfying the hard rule), but M1's ON-path cost model should be
+   documented as "real, allocation-rate-proportional," not "small" — a
+   lower-allocation-rate workload would show a smaller percentage, but the
+   per-alloc mutex is a real fixed cost per operation, not a rounding error.
+
+### Caveats
+- Debug build (`cargo build`, not `--release`); absolute timings are not
+  representative of production, but the OFF-vs-ON *delta* is what's being
+  measured and both sides ran the same binary/build.
+- Shared machine, `load average ~38` on 32 cores — wall-clock noise band is
+  wide (~840 ms spread on the OFF distribution alone); medians + 20-sample
+  ABBA interleaving used to damp drift, but a fully idle machine would
+  tighten both distributions.
+- No pre-feature (pre-M1) binary was rebuilt for a true baseline diff, per
+  the task brief (avoiding a slow rebuild against a tree with another
+  session's in-flight edits) — the "OFF == pre-feature" claim rests on the
+  code-structure argument above (§ finding 1), corroborated by, not proven
+  by, the clean-env-vs-normal-env OFF comparison.

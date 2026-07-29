@@ -1,0 +1,59 @@
+# M8 CLI skeleton for `simple mem`: post-mortem TSV snapshot inspection
+# (top/diff/help). Exercises src/app/mem/main.spl directly via
+# `simple run <file> <args...>` (no `--` separator: `simple run` forwards a
+# literal "--" token as the first post-separator arg, per
+# app/io/_CliCommands/handler_commands.spl::cli_handle_run, which would land
+# as our verb) — the "simple mem <verb>" dispatch arm in
+# app/cli/_CliMain/main_and_help.spl is source-only until the next binary
+# deploy, so this spec proves the app entry's own logic rather than the
+# dispatch arm (see doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md).
+
+use std.spec.*
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+val SNAP_A = "test/fixture/memstat/snap_a.tsv"
+val SNAP_B = "test/fixture/memstat/snap_b.tsv"
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
+        return configured
+    "/proc/self/exe"
+
+fn run_mem(mem_args: [text]) -> (text, text, i32):
+    var args = ["run", "src/app/mem/main.spl"]
+    for a in mem_args:
+        args.push(a)
+    rt_process_run_timeout(simple_binary(), args, 30000)
+
+describe "simple mem CLI":
+    it "top --profile prints an owner from the fixture snapshot":
+        val (out, _err, code) = run_mem(["top", "--profile", SNAP_A])
+        expect(code).to_equal(0)
+        expect(out).to_contain("app.mem.top")
+
+    it "diff prints the biggest-delta owner before the others":
+        val (out, _err, code) = run_mem(["diff", SNAP_A, SNAP_B])
+        expect(code).to_equal(0)
+        val idx_diff_cmd = out.index_of("app.mem.diff_cmd")
+        val idx_top = out.index_of("app.mem.top")
+        val idx_json = out.index_of("lib.json.parser")
+        expect(idx_diff_cmd >= 0).to_equal(true)
+        expect(idx_top >= 0).to_equal(true)
+        expect(idx_json >= 0).to_equal(true)
+        expect(idx_diff_cmd < idx_top).to_equal(true)
+        expect(idx_diff_cmd < idx_json).to_equal(true)
+
+    it "help exits 0 and prints usage":
+        val (out, _err, code) = run_mem(["help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("simple mem")
+        expect(out).to_contain("Usage:")
+
+    it "unknown verb exits 1 with help":
+        val (out, _err, code) = run_mem(["bogus-verb"])
+        expect(code).to_equal(1)
+        expect(out).to_contain("Usage:")
