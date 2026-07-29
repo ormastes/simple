@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1279,13 +1279,33 @@ expect(
    - Protocol capture: after_step
 - image worker render session composition checksum
    - Protocol capture: after_step
-- Reuse parse and CSS across active animation
+- Reuse parsed layout work across unchanged animation frames
+   - Protocol capture: after_step
+- Render HTML and CSS through canonical Draw IR
    - Protocol capture: after_step
 - var animation worker = HostedBrowserRendererWorkerSession create
    - Protocol capture: after_step
 - animation worker render session composition checksum
    - Protocol capture: after_step
 - animation worker render session composition checksum
+   - Protocol capture: after_step
+- var width worker = HostedBrowserRendererWorkerSession create
+   - Protocol capture: after_step
+- width worker render session current result unwrap
+   - Protocol capture: after_step
+- width worker render session composition checksum
+   - Protocol capture: after_step
+- width worker render session current result unwrap
+   - Protocol capture: after_step
+- width worker render session current result unwrap
+   - Protocol capture: after_step
+- width worker render session current result unwrap
+   - Protocol capture: after_step
+- width raster shutdown
+   - Protocol capture: after_step
+-  pixels equal
+   - Protocol capture: after_step
+- width worker render session composition checksum
    - Protocol capture: after_step
 - Repaint scroll and caret overlays from retained raw layout
    - Protocol capture: after_step
@@ -1318,7 +1338,7 @@ expect(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 209 lines folded for reproduction.
+Runnable source: 252 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1411,7 +1431,8 @@ expect(
     image_worker.render_session.composition_checksum()
 ).to_equal(image_checksum)
 
-step("Reuse parse and CSS across active animation")
+step("Reuse parsed layout work across unchanged animation frames")
+step("Render HTML and CSS through canonical Draw IR")
 var animation_worker = HostedBrowserRendererWorkerSession.create(64, 48)
 expect(animation_worker.handle(BrowserRendererMessage(
     kind: "init", generation: 7, request_id: 2,
@@ -1424,11 +1445,53 @@ expect(animation_worker.handle(BrowserRendererMessage(
     kind: "advance", generation: 7, request_id: 3, payload: "500"
 )).ok).to_be(true)
 _expect_retained_stage_counts(
-    animation_worker.render_session.counters, 1, 1, 1, 2, 2, 2, 2
+    animation_worker.render_session.counters, 1, 1, 1, 2, 1, 2, 2
 )
 expect(
     animation_worker.render_session.composition_checksum() ==
     animation_checksum
+).to_be(false)
+
+var width_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+expect(width_worker.handle(BrowserRendererMessage(
+    kind: "init", generation: 7, request_id: 2,
+    payload: "<style>@keyframes grow{from{width:8px}to{width:32px}}#stage{width:8px;height:24px;background-color:#2563eb;animation:grow 1000ms linear forwards}</style><div id='stage'></div>"
+)).ok).to_be(true)
+val width_raster = Engine2dCompositorBackend.create_named(
+    64, 48, "software"
+)
+val width_before_pixels = width_raster.render_draw_ir_composition(
+    width_worker.render_session.current_result.unwrap().composition,
+    []
+).pixels
+val width_checksum = (
+    width_worker.render_session.composition_checksum()
+)
+expect(simple_web_layout_hit_test_index(
+    width_worker.render_session.current_result.unwrap().hit_index,
+    20, 4
+)).to_equal("path:")
+expect(width_worker.handle(BrowserRendererMessage(
+    kind: "advance", generation: 7, request_id: 3, payload: "500"
+)).ok).to_be(true)
+_expect_retained_stage_counts(
+    width_worker.render_session.counters, 1, 1, 1, 2, 2, 2, 2
+)
+expect(simple_web_layout_hit_test_index(
+    width_worker.render_session.current_result.unwrap().hit_index,
+    20, 4
+)).to_equal("id:stage")
+val width_after_pixels = width_raster.render_draw_ir_composition(
+    width_worker.render_session.current_result.unwrap().composition,
+    []
+).pixels
+width_raster.shutdown()
+expect(
+    _pixels_equal(width_before_pixels, width_after_pixels)
+).to_be(false)
+expect(
+    width_worker.render_session.composition_checksum() ==
+    width_checksum
 ).to_be(false)
 
 step("Repaint scroll and caret overlays from retained raw layout")
@@ -1625,7 +1688,8 @@ expect(
 >     image_worker.render_session.composition_checksum()<br>
 > ).to_equal(image_checksum)<br>
 > <br>
-> step("Reuse parse and CSS across active animation")<br>
+> step("Reuse parsed layout work across unchanged animation frames")<br>
+> step("Render HTML and CSS through canonical Draw IR")<br>
 > var animation_worker = HostedBrowserRendererWorkerSession.create(64, 48)<br>
 > expect(animation_worker.handle(BrowserRendererMessage(<br>
 >     kind: "init", generation: 7, request_id: 2,<br>
@@ -1638,11 +1702,53 @@ expect(
 >     kind: "advance", generation: 7, request_id: 3, payload: "500"<br>
 > )).ok).to_be(true)<br>
 > _expect_retained_stage_counts(<br>
->     animation_worker.render_session.counters, 1, 1, 1, 2, 2, 2, 2<br>
+>     animation_worker.render_session.counters, 1, 1, 1, 2, 1, 2, 2<br>
 > )<br>
 > expect(<br>
 >     animation_worker.render_session.composition_checksum() ==<br>
 >     animation_checksum<br>
+> ).to_be(false)<br>
+> <br>
+> var width_worker = HostedBrowserRendererWorkerSession.create(64, 48)<br>
+> expect(width_worker.handle(BrowserRendererMessage(<br>
+>     kind: "init", generation: 7, request_id: 2,<br>
+>     payload: "<style>@keyframes grow{fro$width$to{width:32px}}#stage{width:8px;height:24px;background-color:#2563eb;animation:grow 1000ms linear forwards}</style><div id='stage'></div>"<br>
+> )).ok).to_be(true)<br>
+> val width_raster = Engine2dCompositorBackend.create_named(<br>
+>     64, 48, "software"<br>
+> )<br>
+> val width_before_pixels = width_raster.render_draw_ir_composition(<br>
+>     width_worker.render_session.current_result.unwrap().composition,<br>
+>     []<br>
+> ).pixels<br>
+> val width_checksum = (<br>
+>     width_worker.render_session.composition_checksum()<br>
+> )<br>
+> expect(simple_web_layout_hit_test_index(<br>
+>     width_worker.render_session.current_result.unwrap().hit_index,<br>
+>     20, 4<br>
+> )).to_equal("path:")<br>
+> expect(width_worker.handle(BrowserRendererMessage(<br>
+>     kind: "advance", generation: 7, request_id: 3, payload: "500"<br>
+> )).ok).to_be(true)<br>
+> _expect_retained_stage_counts(<br>
+>     width_worker.render_session.counters, 1, 1, 1, 2, 2, 2, 2<br>
+> )<br>
+> expect(simple_web_layout_hit_test_index(<br>
+>     width_worker.render_session.current_result.unwrap().hit_index,<br>
+>     20, 4<br>
+> )).to_equal("id:stage")<br>
+> val width_after_pixels = width_raster.render_draw_ir_composition(<br>
+>     width_worker.render_session.current_result.unwrap().composition,<br>
+>     []<br>
+> ).pixels<br>
+> width_raster.shutdown()<br>
+> expect(<br>
+>     _pixels_equal(width_before_pixels, width_after_pixels)<br>
+> ).to_be(false)<br>
+> expect(<br>
+>     width_worker.render_session.composition_checksum() ==<br>
+>     width_checksum<br>
 > ).to_be(false)<br>
 > <br>
 > step("Repaint scroll and caret overlays from retained raw layout")<br>
@@ -2399,12 +2505,97 @@ expect(_pixels_equal(forced_pixels, inline_pixels)).to_equal(false)
 
 </details>
 
+#### should retain the canonical document tree while rendering its body
+
+- Load one explicit head and body through the canonical tree builder
+   - GUI capture: after_step (HTML preferred when available)
+- var session = BrowserSession new
+   - GUI capture: after_step (HTML preferred when available)
+- Ok
+   - GUI capture: after_step (HTML preferred when available)
+-
+   - GUI capture: after_step (HTML preferred when available)
+- Err
+   - GUI capture: after_step (HTML preferred when available)
+- fail
+   - GUI capture: after_step (HTML preferred when available)
+- Retain head metadata and title in the installed semantic document
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 4 expected checks
+   - Expected: heads.len() equals `1`
+   - Expected: be_dom_find_by_tag(heads[0], "meta").len() equals `1`
+   - Expected: be_dom_find_by_tag(heads[0], "title").len() equals `1`
+   - Expected: session.current_title equals `Canonical Tree`
+- Lower the same body through canonical Draw IR
+   - GUI capture: after_step (HTML preferred when available)
+- session render html document
+   - GUI capture: after_step (HTML preferred when available)
+- Execute the same composition through Engine2D pixels
+   - GUI capture: after_step (HTML preferred when available)
+- raster shutdown
+   - GUI capture: after_step (HTML preferred when available)
+   - Evidence: GUI state or HTML text verified by 1 expected check
+   - Expected: rendered.pixels.len() equals `32 * 32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 41 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Load one explicit head and body through the canonical tree builder")
+var session = BrowserSession.new()
+match session.open_html(
+    "https://example.test/canonical-tree",
+    "<!DOCTYPE html><html><head>" +
+    "<meta name='fixture' content='whatwg-tree'>" +
+    "<title>Canonical Tree</title></head>" +
+    "<body style='margin:0'><div id='canonical-tree-visible' " +
+    "style='width:24px;height:24px;background-color:#00ff00'>" +
+    "tree-visible</div></body></html>"
+):
+    Ok(_):
+        ()
+    Err(reason):
+        fail("canonical tree fixture failed to open: {reason}")
+
+step("Retain head metadata and title in the installed semantic document")
+val heads = be_dom_find_by_tag(session.current_dom, "head")
+expect(heads.len()).to_equal(1)
+expect(be_dom_find_by_tag(heads[0], "meta").len()).to_equal(1)
+expect(be_dom_find_by_tag(heads[0], "title").len()).to_equal(1)
+expect(session.current_title).to_equal("Canonical Tree")
+
+step("Lower the same body through canonical Draw IR")
+val composition = simple_web_layout_render_html_draw_ir_with_images(
+    session.render_html_document(), 32, 32, session.image_resources
+)
+expect(_browser_draw_ir_text_index(
+    composition.batches[0].commands, "tree-visible"
+)).to_be_greater_than(-1)
+
+step("Execute the same composition through Engine2D pixels")
+val raster = Engine2dCompositorBackend.create_named(
+    32, 32, "software"
+)
+val rendered = raster.render_draw_ir_composition(composition, [])
+raster.shutdown()
+expect(rendered.pixels.len()).to_equal(32 * 32)
+expect(_count_color(
+    rendered.pixels, 0xFF00FF00u32
+)).to_be_greater_than(0)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

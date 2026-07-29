@@ -10,16 +10,16 @@ describe "JavaScript timer drain limit":
 
     it "mutates the active timer queues without replacement arrays":
         val async_source = rt_file_read_text(
-            "src/lib/gc_async_mut/js/engine/interpreter_async.spl"
+            "src/lib/nogc_sync_mut/js/engine/interpreter_async.spl"
         ) ?? ""
         val native_source = rt_file_read_text(
-            "src/lib/gc_async_mut/js/engine/interpreter_native.spl"
+            "src/lib/nogc_sync_mut/js/engine/interpreter_native.spl"
         ) ?? ""
         expect(async_source).to_contain(
-            "self.pending_timer_tasks.remove(due_index)"
+            "self.pending_timer_tasks.pop()"
         )
         expect(native_source).to_contain(
-            "self.pending_timer_tasks.remove(i)"
+            "self.pending_timer_tasks.pop()"
         )
         expect(async_source.contains(
             "var rest: [PendingTimerTask]"
@@ -100,6 +100,73 @@ describe "JavaScript timer drain limit":
                 expect(order).to_equal("AAB")
             _:
                 fail("Expected interval ordering to remain stable")
+
+    it "runs due timers by deadline instead of insertion order":
+        var runtime = JsRuntime.new_browser(
+            Logger.new("timer-deadline-order", LogLevel.Error)
+        )
+        expect(runtime.eval(
+            "var order = ''; setTimeout(function() { order = order + 'L'; }, 20); setTimeout(function() { order = order + 'E'; }, 10);"
+        ).is_ok()).to_equal(true)
+
+        expect(runtime.drain_due_timers(20)).to_equal(2)
+        match runtime.eval("order"):
+            Ok(JsValue.String(order)):
+                expect(order).to_equal("EL")
+            _:
+                fail("Expected earliest timer deadline first")
+
+    it "runs a Promise microtask checkpoint between timer callbacks":
+        var runtime = JsRuntime.new_browser(
+            Logger.new("timer-microtask-order", LogLevel.Error)
+        )
+        expect(runtime.eval(
+            "var order = ''; setTimeout(function() { order = order + 'A'; Promise.resolve(1).then(function() { order = order + 'M'; }); }, 0); setTimeout(function() { order = order + 'B'; }, 0);"
+        ).is_ok()).to_equal(true)
+
+        expect(runtime.drain_due_timers(0)).to_equal(2)
+        match runtime.eval("order"):
+            Ok(JsValue.String(order)):
+                expect(order).to_equal("AMB")
+            _:
+                fail("Expected a microtask checkpoint between timers")
+
+    it "runs Node nextTick FIFO before Promise microtasks and the next timer":
+        var runtime = JsRuntime.new(
+            Logger.new("timer-next-tick-order", LogLevel.Error)
+        )
+        expect(runtime.eval(
+            "var order = ''; setTimeout(function() { order = order + 'A'; Promise.resolve(1).then(function() { order = order + 'M'; }); process.nextTick(function() { order = order + 'N'; }); }, 0); setTimeout(function() { order = order + 'B'; }, 0);"
+        ).is_ok()).to_equal(true)
+
+        expect(runtime.drain_due_timers(0)).to_equal(3)
+        match runtime.eval("order"):
+            Ok(JsValue.String(order)):
+                expect(order).to_equal("ANMB")
+            _:
+                fail("Expected nextTick then microtask before the next timer")
+
+    it "yields before the next timer when a microtask checkpoint hits its cap":
+        var runtime = JsRuntime.new_browser(
+            Logger.new("timer-microtask-cap", LogLevel.Error)
+        )
+        expect(runtime.eval(
+            "var hits = 0; var second = false; setTimeout(function() { for (var i = 0; i < 1001; i = i + 1) { Promise.resolve(i).then(function() { hits = hits + 1; }); } }, 0); setTimeout(function() { second = true; }, 0);"
+        ).is_ok()).to_equal(true)
+
+        expect(runtime.drain_due_timers(0)).to_equal(1)
+        match runtime.eval("hits + ':' + second"):
+            Ok(JsValue.String(state)):
+                expect(state).to_equal("1000:false")
+            _:
+                fail("Expected the next timer to remain queued at the cap")
+        expect(runtime.drain_pending_microtasks()).to_be(true)
+        expect(runtime.drain_due_timers(0)).to_equal(1)
+        match runtime.eval("hits + ':' + second"):
+            Ok(JsValue.String(state)):
+                expect(state).to_equal("1001:true")
+            _:
+                fail("Expected the yielded checkpoint before the next timer")
 
     it "bounds pending timer tasks per document":
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))

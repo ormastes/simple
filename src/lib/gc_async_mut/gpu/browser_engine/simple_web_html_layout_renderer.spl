@@ -313,6 +313,17 @@ class SimpleWebLayoutDrawIrResult:
     cpu_material_nodes: [i32]
     solid_material_nodes: [i32]
 
+fn _simple_web_root_sticky_admitted(
+    nodes: [HNode], node_index: i32
+) -> bool:
+    var ancestor = nodes[node_index].parent as i32
+    while ancestor >= 0 and ancestor < nodes.len():
+        val tag = nodes[ancestor].tag
+        if tag != "#root" and tag != "html" and tag != "body":
+            return false
+        ancestor = nodes[ancestor].parent as i32
+    true
+
 class _SimpleWebScrolledLayout:
     boxes: LayoutResult
     resolved_scroll_y: i32
@@ -363,19 +374,63 @@ fn _simple_web_scrolled_layout(
     var resolved = if scroll_y > 0: scroll_y.to_i64() else: 0
     if resolved > max_scroll:
         resolved = max_scroll
-    val shifted = if resolved == 0:
-        boxes
+    var has_top_sticky = false
+    var has_top_sticky_index = 0
+    while has_top_sticky_index < styles.len():
+        val style = styles[has_top_sticky_index]
+        if (
+            style.position_sticky and
+            style.top_px != SIMPLE_WEB_STICKY_TOP_AUTO and
+            _simple_web_root_sticky_admitted(nodes, has_top_sticky_index)
+        ):
+            has_top_sticky = true
+        has_top_sticky_index = has_top_sticky_index + 1
+    var shifted_by = if resolved == 0 and not has_top_sticky:
+        boxes.by
     else:
-        LayoutResult(
-            bx: boxes.bx,
-            by: shifted_i32_list(boxes.by, 0 - resolved.to_i32()),
-            bw: boxes.bw,
-            bh: boxes.bh,
-            wrap_starts: boxes.wrap_starts,
-            wrap_ends: boxes.wrap_ends,
-            intrinsic_widths: boxes.intrinsic_widths,
-            height: boxes.height
-        )
+        shifted_i32_list(boxes.by, 0 - resolved.to_i32())
+    if has_top_sticky:
+        # ponytail: root-scroll/top-inset sticky only; add scroll-container
+        # bounds and other inset axes when those conformance slices land.
+        var subtree_delta: [i32] = [0; nodes.len()]
+        var has_sticky_ancestor: [bool] = [false; nodes.len()]
+        var node_index = 0
+        while node_index < styles.len():
+            val parent = nodes[node_index].parent as i32
+            val inherited_delta = if parent >= 0:
+                subtree_delta[parent]
+            else:
+                0
+            val nested = if parent >= 0:
+                has_sticky_ancestor[parent] or styles[parent].position_sticky
+            else:
+                false
+            shifted_by[node_index] = (
+                shifted_by[node_index] + inherited_delta
+            )
+            var own_delta = 0
+            val style = styles[node_index]
+            if (
+                not nested and style.position_sticky and
+                style.top_px != SIMPLE_WEB_STICKY_TOP_AUTO and
+                _simple_web_root_sticky_admitted(nodes, node_index) and
+                shifted_by[node_index] < style.top_px
+            ):
+                own_delta = style.top_px - shifted_by[node_index]
+                shifted_by[node_index] = style.top_px
+            subtree_delta[node_index] = inherited_delta + own_delta
+            has_sticky_ancestor[node_index] = nested
+            node_index = node_index + 1
+    val shifted = LayoutResult(
+        bx: boxes.bx,
+        by: shifted_by,
+        bw: boxes.bw,
+        bh: boxes.bh,
+        wrap_starts: boxes.wrap_starts,
+        wrap_ends: boxes.wrap_ends,
+        intrinsic_widths: boxes.intrinsic_widths,
+        height: boxes.height
+    )
     _SimpleWebScrolledLayout(
         boxes: shifted,
         resolved_scroll_y: resolved.to_i32(),
@@ -1264,6 +1319,20 @@ fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height:
         browser_text_input_overlay_empty(), [], []
     )
 
+pub fn simple_web_layout_animation_needs_layout(
+    prior: SimpleWebLayoutDrawIrResult
+) -> bool:
+    for entry in prior.animation_registry.entries:
+        for frame in entry.frames:
+            for declaration in frame.properties:
+                val property = declaration.property.trim().lower()
+                if (
+                    property != "background-color" and
+                    property != "color" and property != "opacity"
+                ):
+                    return true
+    false
+
 pub fn simple_web_layout_rerender_retained(
     prior: SimpleWebLayoutDrawIrResult,
     dirty_stage: text,
@@ -1319,7 +1388,7 @@ pub fn simple_web_layout_rerender_retained(
             )
 
     var raw_boxes = prior.raw_boxes
-    if dirty_stage != "paint":
+    if dirty_stage != "paint" and dirty_stage != "animation-paint":
         val node_count = nodes.len() as i32
         raw_boxes = layout(
             nodes, styles, child_index, 0, 0, 0, width, height,

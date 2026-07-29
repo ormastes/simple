@@ -1,17 +1,17 @@
-# CSS Sticky Positioning Gap
+# CSS Sticky Positioning
 
-> Records the current truthful static-position fallback at two document scroll
+> Proves bounded root-scroll `position: sticky; top:<px>` through Web layout,
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# CSS Sticky Positioning Gap
+# CSS Sticky Positioning
 
-Records the current truthful static-position fallback at two document scroll
+Proves bounded root-scroll `position: sticky; top:<px>` through Web layout,
 
 ## At a Glance
 
@@ -23,28 +23,29 @@ Records the current truthful static-position fallback at two document scroll
 | Updated | 2026-07-29 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Records the current truthful static-position fallback at two document scroll
-offsets through Web layout, canonical Draw IR, and exact expected-color
-Engine2D coverage/count. Sticky pinning and containing-block constraints remain
-RED because `position: sticky` has no admitted style/layout representation.
+Proves bounded root-scroll `position: sticky; top:<px>` through Web layout,
+canonical Draw IR, and exact expected-color Engine2D coverage/count. Nested
+scrollports, finite wrappers, other inset axes, nested sticky roots, and
+containing-block bottom constraints remain RED.
 
 ## Scenarios
 
-### REQ-WEB-BROWSER-003/004: CSS sticky positioning gap
+### REQ-WEB-BROWSER-003/004: CSS sticky positioning
 
-#### should expose static fallback at two offsets while sticky pinning remains RED
+#### should pin one top-inset sticky subtree during root scrolling
 
-- Resolve the sticky declaration through the current static layout
+- Resolve sticky semantics while preserving its normal-flow layout
    - Artifact capture: after_step
-- Lower the unscrolled and document-scrolled fallback to Draw IR
+- Lower unscrolled and root-scrolled sticky geometry to Draw IR
    - Artifact capture: after_step
 - html, 16, 12, 0, 0, browser text input overlay empty
    - Artifact capture: after_step
 - html, 16, 12, 0, 6, browser text input overlay empty
    - Artifact capture: after_step
-   - Evidence: artifact verified by 2 expected checks
+   - Evidence: artifact verified by 3 expected checks
    - Expected: zero.resolved_scroll_y equals `0`
    - Expected: scrolled.resolved_scroll_y equals `6`
+   - Expected: child.parent_id equals `sticky`
 - Execute both truthful fallback frames through Engine2D
    - Artifact capture: after_step
 - raster shutdown
@@ -57,13 +58,16 @@ RED because `position: sticky` has no admitted style/layout representation.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 74 lines folded for reproduction.
+Runnable source: 91 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = _sticky_html()
 
-step("Resolve the sticky declaration through the current static layout")
+step("Resolve sticky semantics while preserving its normal-flow layout")
+expect(simple_web_layout_debug_style_by_id(
+    html, "sticky", "position"
+)).to_equal("sticky")
 expect(simple_web_layout_debug_layout_by_id(
     html, 16, 12, "sticky", "y"
 )).to_equal("4")
@@ -74,7 +78,7 @@ expect(simple_web_layout_debug_layout_by_id(
     html, 16, 12, "sticky", "h"
 )).to_equal("4")
 
-step("Lower the unscrolled and document-scrolled fallback to Draw IR")
+step("Lower unscrolled and root-scrolled sticky geometry to Draw IR")
 val zero =
     simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
         html, 16, 12, 0, 0, browser_text_input_overlay_empty()
@@ -94,8 +98,12 @@ val zero_index = _sticky_command_index(
 val scrolled_index = _sticky_command_index(
     scrolled.composition.batches[0].commands, "sticky"
 )
+val scrolled_child_index = _sticky_command_index(
+    scrolled.composition.batches[0].commands, "sticky-child"
+)
 expect(zero_index).to_be_greater_than(-1)
 expect(scrolled_index).to_be_greater_than(-1)
+expect(scrolled_child_index).to_be_greater_than(-1)
 if zero_index >= 0:
     val zero_command =
         zero.composition.batches[0].commands[zero_index]
@@ -103,18 +111,28 @@ if zero_index >= 0:
         zero_command.x, zero_command.y,
         zero_command.width, zero_command.height
     ]).to_equal([0, 4, 4, 4])
+    expect(_sticky_style(
+        zero_command, "position"
+    )).to_equal("sticky")
 if scrolled_index >= 0:
     val scrolled_command =
         scrolled.composition.batches[0].commands[scrolled_index]
     expect([
         scrolled_command.x, scrolled_command.y,
         scrolled_command.width, scrolled_command.height
-    ]).to_equal([0, -2, 4, 4])
+    ]).to_equal([0, 0, 4, 4])
     expect([
         scrolled_command.clip_rect.x, scrolled_command.clip_rect.y,
         scrolled_command.clip_rect.width,
         scrolled_command.clip_rect.height
     ]).to_equal([0, 0, 16, 12])
+if scrolled_child_index >= 0:
+    val child =
+        scrolled.composition.batches[0].commands[scrolled_child_index]
+    expect([
+        child.x, child.y, child.width, child.height
+    ]).to_equal([0, 0, 2, 2])
+    expect(child.parent_id).to_equal("sticky")
 
 step("Execute both truthful fallback frames through Engine2D")
 val raster = Engine2dCompositorBackend.create_named(
@@ -134,7 +152,124 @@ expect(_sticky_color_count(
 )).to_equal(16)
 expect(_sticky_color_count(
     scrolled_frame.pixels, 0xFF2563EBu32
-)).to_equal(8)
+)).to_equal(16)
+```
+
+</details>
+
+#### should leave unsupported sticky declarations in normal scrolled flow
+
+- "top:0;transform:translateY
+- "top:0;transform:skewX
+- browser text input overlay empty
+   - Expected: _sticky_style(command, "top") equals `auto`
+- raster shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 42 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+for inset in [
+    "", "top:auto;", "inset:auto;", "inset-block:auto;",
+    "inset-block-start:auto;",
+    "top:0;transform:translateY(2px);",
+    "top:0;transform:skewX(10deg);",
+    "top:0;translate:0 2px;"
+]:
+    val html = (
+        "<style>html,body{margin:0}#spacer{height:4px}" +
+        "#probe{position:sticky;" + inset +
+        "width:4px;height:4px;background:#2563eb}" +
+        "#tail{height:20px}</style><div id='spacer'></div>" +
+        "<div id='probe'></div><div id='tail'></div>"
+    )
+    expect(simple_web_layout_debug_style_by_id(
+        html, "probe", "position"
+    )).to_equal("sticky")
+    val result =
+        simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+            html, 16, 12, 0, 6,
+            browser_text_input_overlay_empty()
+        )
+    val index = _sticky_command_index(
+        result.composition.batches[0].commands, "probe"
+    )
+    expect(index).to_be_greater_than(-1)
+    if index >= 0:
+        val command = result.composition.batches[0].commands[index]
+        expect([command.x, command.y, command.width, command.height]).to_equal(
+            [0, -2, 4, 4]
+        )
+        expect(_sticky_style(command, "top")).to_equal("auto")
+    val raster = Engine2dCompositorBackend.create_named(
+        16, 12, "software"
+    )
+    val frame = raster.render_draw_ir_composition(
+        result.composition, []
+    )
+    raster.shutdown()
+    expect(_sticky_color_count(
+        frame.pixels, 0xFF2563EBu32
+    )).to_equal(8)
+```
+
+</details>
+
+#### should not root-pin sticky nodes inside finite or scrolling wrappers
+
+- browser text input overlay empty
+   - Expected: command.parent_id equals `wrapper`
+- raster shutdown
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 37 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+for wrapper_style in [
+    "height:8px;", "height:8px;overflow-y:scroll;"
+]:
+    val html = (
+        "<style>html,body{margin:0}#wrapper{" + wrapper_style +
+        "}#spacer{height:4px}#probe{position:sticky;top:0;" +
+        "width:4px;height:4px;background:#2563eb}" +
+        "#inner-tail{height:20px}#outer-tail{height:20px}</style>" +
+        "<div id='wrapper'><div id='spacer'></div>" +
+        "<div id='probe'></div><div id='inner-tail'></div></div>" +
+        "<div id='outer-tail'></div>"
+    )
+    val result =
+        simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+            html, 16, 12, 0, 6,
+            browser_text_input_overlay_empty()
+        )
+    val index = _sticky_command_index(
+        result.composition.batches[0].commands, "probe"
+    )
+    expect(index).to_be_greater_than(-1)
+    if index >= 0:
+        val command = result.composition.batches[0].commands[index]
+        expect([command.x, command.y, command.width, command.height]).to_equal(
+            [0, -2, 4, 4]
+        )
+        expect(command.parent_id).to_equal("wrapper")
+    val raster = Engine2dCompositorBackend.create_named(
+        16, 12, "software"
+    )
+    val frame = raster.render_draw_ir_composition(
+        result.composition, []
+    )
+    raster.shutdown()
+    expect(_sticky_color_count(
+        frame.pixels, 0xFF2563EBu32
+    )).to_equal(8)
 ```
 
 </details>
@@ -143,8 +278,8 @@ expect(_sticky_color_count(
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

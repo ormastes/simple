@@ -29,6 +29,7 @@ use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id,
     simple_web_layout_debug_style_by_id,
+    simple_web_layout_hit_test_index,
     simple_web_layout_render_html_draw_ir_with_images,
     simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images
 }
@@ -54,6 +55,7 @@ use std.gc_async_mut.web.browser_session.{
     BrowserBookmarkSnapshot, BrowserSession
 }
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_find_by_tag}
 use std.js.types.js_types.{JsValue}
 use std.js.types.pair.{Pair}
 
@@ -1094,7 +1096,8 @@ describe "Production Simple browser user flow":
             image_worker.render_session.composition_checksum()
         ).to_equal(image_checksum)
 
-        step("Reuse parse and CSS across active animation")
+        step("Reuse parsed layout work across unchanged animation frames")
+        step("Render HTML and CSS through canonical Draw IR")
         var animation_worker = HostedBrowserRendererWorkerSession.create(64, 48)
         expect(animation_worker.handle(BrowserRendererMessage(
             kind: "init", generation: 7, request_id: 2,
@@ -1107,11 +1110,53 @@ describe "Production Simple browser user flow":
             kind: "advance", generation: 7, request_id: 3, payload: "500"
         )).ok).to_be(true)
         _expect_retained_stage_counts(
-            animation_worker.render_session.counters, 1, 1, 1, 2, 2, 2, 2
+            animation_worker.render_session.counters, 1, 1, 1, 2, 1, 2, 2
         )
         expect(
             animation_worker.render_session.composition_checksum() ==
             animation_checksum
+        ).to_be(false)
+
+        var width_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(width_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>@keyframes grow{from{width:8px}to{width:32px}}#stage{width:8px;height:24px;background-color:#2563eb;animation:grow 1000ms linear forwards}</style><div id='stage'></div>"
+        )).ok).to_be(true)
+        val width_raster = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val width_before_pixels = width_raster.render_draw_ir_composition(
+            width_worker.render_session.current_result.unwrap().composition,
+            []
+        ).pixels
+        val width_checksum = (
+            width_worker.render_session.composition_checksum()
+        )
+        expect(simple_web_layout_hit_test_index(
+            width_worker.render_session.current_result.unwrap().hit_index,
+            20, 4
+        )).to_equal("path:")
+        expect(width_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "500"
+        )).ok).to_be(true)
+        _expect_retained_stage_counts(
+            width_worker.render_session.counters, 1, 1, 1, 2, 2, 2, 2
+        )
+        expect(simple_web_layout_hit_test_index(
+            width_worker.render_session.current_result.unwrap().hit_index,
+            20, 4
+        )).to_equal("id:stage")
+        val width_after_pixels = width_raster.render_draw_ir_composition(
+            width_worker.render_session.current_result.unwrap().composition,
+            []
+        ).pixels
+        width_raster.shutdown()
+        expect(
+            _pixels_equal(width_before_pixels, width_after_pixels)
+        ).to_be(false)
+        expect(
+            width_worker.render_session.composition_checksum() ==
+            width_checksum
         ).to_be(false)
 
         step("Repaint scroll and caret overlays from retained raw layout")
@@ -1636,3 +1681,50 @@ describe "Production Simple browser user flow":
         ).pixel_data
         expect(forced_pixels.len()).to_equal(160 * 64)
         expect(_pixels_equal(forced_pixels, inline_pixels)).to_equal(false)
+
+    # @manual: show
+    # @capture(text)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-007
+    it "should retain the canonical document tree while rendering its body":
+        step("Load one explicit head and body through the canonical tree builder")
+        var session = BrowserSession.new()
+        match session.open_html(
+            "https://example.test/canonical-tree",
+            "<!DOCTYPE html><html><head>" +
+            "<meta name='fixture' content='whatwg-tree'>" +
+            "<title>Canonical Tree</title></head>" +
+            "<body style='margin:0'><div id='canonical-tree-visible' " +
+            "style='width:24px;height:24px;background-color:#00ff00'>" +
+            "tree-visible</div></body></html>"
+        ):
+            Ok(_):
+                ()
+            Err(reason):
+                fail("canonical tree fixture failed to open: {reason}")
+
+        step("Retain head metadata and title in the installed semantic document")
+        val heads = be_dom_find_by_tag(session.current_dom, "head")
+        expect(heads.len()).to_equal(1)
+        expect(be_dom_find_by_tag(heads[0], "meta").len()).to_equal(1)
+        expect(be_dom_find_by_tag(heads[0], "title").len()).to_equal(1)
+        expect(session.current_title).to_equal("Canonical Tree")
+
+        step("Lower the same body through canonical Draw IR")
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            session.render_html_document(), 32, 32, session.image_resources
+        )
+        expect(_browser_draw_ir_text_index(
+            composition.batches[0].commands, "tree-visible"
+        )).to_be_greater_than(-1)
+
+        step("Execute the same composition through Engine2D pixels")
+        val raster = Engine2dCompositorBackend.create_named(
+            32, 32, "software"
+        )
+        val rendered = raster.render_draw_ir_composition(composition, [])
+        raster.shutdown()
+        expect(rendered.pixels.len()).to_equal(32 * 32)
+        expect(_count_color(
+            rendered.pixels, 0xFF00FF00u32
+        )).to_be_greater_than(0)

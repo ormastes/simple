@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1172,6 +1172,49 @@ expect(session.address_text()).to_equal(committed_url)
 
 </details>
 
+#### defocuses the hosted address only after a successful submit
+
+- Operate browser navigation controls
+   - Expected: submitted.callback_count equals `1`
+   - Expected: session.chrome_focus equals ``
+   - Expected: rejected.callback_count equals `0`
+   - Expected: session.chrome_focus equals `address`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Operate browser navigation controls")
+var session = HostedWebContentSession.create(
+    20, "<p>ready</p>", 320, 180
+)
+session.browser.register_resource(
+    "https://target.test/",
+    "<html><body><p>target</p></body></html>"
+)
+val _ = session.dispatch_chrome_pointer(10, "address", true)
+val _ = session.dispatch_chrome_pointer(11, "address", false)
+val _ = session.dispatch_text(12, "https://target.test/")
+val submitted = session.dispatch_key(13, 13, true)
+expect(submitted.callback_count).to_equal(1)
+expect(session.chrome_focus).to_equal("")
+expect(session.address_replace_on_text).to_be(false)
+
+val _ = session.dispatch_chrome_pointer(14, "address", true)
+val _ = session.dispatch_chrome_pointer(15, "address", false)
+val _ = session.dispatch_text(16, "javascript:alert(1)")
+val rejected = session.dispatch_key(17, 13, true)
+expect(rejected.callback_count).to_equal(0)
+expect(session.chrome_focus).to_equal("address")
+expect(session.address_replace_on_text).to_be(false)
+```
+
+</details>
+
 #### accepts 2048 UTF-8 address bytes and rejects 2049 without mutation
 
 - Accept the exact UTF-8 byte boundary
@@ -1601,8 +1644,8 @@ Tests covering hosted Web content session.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 23 |
-| Active scenarios | 23 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
