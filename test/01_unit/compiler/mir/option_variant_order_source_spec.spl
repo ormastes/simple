@@ -25,9 +25,20 @@ describe "MIR Option variant order":
 
     it "unwraps the canonical Option handle before exists-check payload binding":
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        val exists_pos = source.index_of("case ExistsCheck(base):") ?? -1
+        val is_some_pos = source.index_of("MirConstValue.Str(\"rt_is_some\")") ?? -1
+        val some_pos = source.index_of("val some_value = self.option_payload_or_self(base_local)") ?? -1
+        val none_pos = source.index_of("b_none.emit_const(result_local, MirConstValue.Int(3), MirType.i64())") ?? -1
 
-        expect(source).to_contain("var some_value = self.option_payload_or_self(base_local)")
-        expect(source).to_contain("and not self.option_value_locals.has(base_local.id)")
+        expect(exists_pos).to_be_greater_than(-1)
+        expect(is_some_pos).to_be_greater_than(exists_pos)
+        expect(some_pos).to_be_greater_than(is_some_pos)
+        expect(none_pos).to_be_greater_than(some_pos)
+        expect(some_pos).to_be_greater_than(exists_pos)
+        expect(source).to_contain("MirConstValue.Str(\"rt_is_some\")")
+        expect(source).to_contain("b_split.new_temp(MirType.i64())")
+        expect(source).to_contain("b_none.emit_const(result_local, MirConstValue.Int(3), MirType.i64())")
+        expect(source.contains("decode_runtime_value(base_local, result_type)")).to_equal(false)
 
     it "unboxes the current function before lowering an explicit return":
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
@@ -72,8 +83,7 @@ describe "MIR Option variant order":
         # ever going through ensure_option_handle).
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
 
-        expect(source).to_contain("val exists_inner_type = self.option_inner_hir_type_for_local(base, base_local)")
-        expect(source).to_contain("val fallback_struct_sym = self.struct_value_syms.get(base_local.id)")
+        expect(source).to_contain("val result_struct_name = self.option_payload_aggregate_name(base, base_local)")
         expect(source).to_contain("if result_struct_name != \"\":")
         expect(source).to_contain("self.struct_value_syms[result_local.id] = result_struct_name")
 
@@ -85,8 +95,9 @@ describe "MIR Option variant order":
         val decode_pos = statements.index_of("val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)") ?? -1
         val restore_pos = statements.index_of("self.local_map[if_val_symbol_id] = if_val_raw_local") ?? -1
 
-        expect(dispatch).to_contain("self.local_hir_types[result_local.id] = found_exists_inner_type")
-        expect(dispatch).to_contain("val result_type = MirType.i64()")
+        expect(dispatch).to_contain("self.remember_local_hir_type(result_local.id, found_payload_type)")
+        expect(dispatch).to_contain("b_none.emit_const(result_local, MirConstValue.Int(3), MirType.i64())")
+        expect(dispatch.contains("enum_payload_value(result_local, result_type)")).to_equal(false)
         expect(decode_pos).to_be_greater_than(cond_pos)
         expect(restore_pos).to_be_greater_than(decode_pos)
         expect(calls).to_contain("case MirTypeKind.F32:")

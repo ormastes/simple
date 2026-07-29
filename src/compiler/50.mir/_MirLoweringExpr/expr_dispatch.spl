@@ -2509,29 +2509,64 @@ impl MirLowering:
                 result_local
 
             case ExistsCheck(base):
+                # `.?` preserves the raw Option payload when present and the
+                # canonical nil sentinel when absent.  Keep the merge slot
+                # i64-wide: Optional values are represented as payload words,
+                # and decoding `base_local` before the presence split loses
+                # the distinction between a boxed handle and its payload.
                 val base_local = self.lower_expr(base)
-                var result_type = MirType.i64()
                 val payload_hir_type = self.option_inner_hir_type_for_local(base, base_local)
-                if val found_payload_type = payload_hir_type:
-                    result_type = self.lower_type(found_payload_type)
-                elif val expr_type = expr_value.type_:
-                    result_type = self.lower_type(expr_type)
-                var result_local = self.option_payload_or_self(base_local)
-                if self.is_runtime_value_local(base_local.id) and not self.option_value_locals.contains(base_local.id):
-                    result_local = self.decode_runtime_value(base_local, result_type)
-                else:
-                    result_local = self.enum_payload_value(result_local, result_type)
-                if self.is_runtime_value_local(base_local.id):
-                    self.mark_runtime_value_local(result_local.id)
-                if self.runtime_array_locals.contains(base_local.id):
-                    self.runtime_array_locals[result_local.id] = true
-                if self.runtime_dict_locals.contains(base_local.id):
-                    self.runtime_dict_locals[result_local.id] = true
                 val result_struct_name = self.option_payload_aggregate_name(base, base_local)
+                var b_ec = self.builder
+                val is_some_func = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_is_some"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+                    )))
+                ))
+                val is_some_res = b_ec.emit_call(is_some_func, [mir_operand_copy(base_local)], MirType.bool())
+                self.builder = b_ec
+                val is_some_local = is_some_res ?? LocalId(id: 0)
+
+                var b_split = self.builder
+                val some_block = b_split.new_block(Some("exists_check_some"))
+                val none_block = b_split.new_block(Some("exists_check_none"))
+                val merge_block = b_split.new_block(Some("exists_check_merge"))
+                val result_local = b_split.new_temp(MirType.i64())
+                b_split.terminate_if(mir_operand_copy(is_some_local), some_block, none_block)
+                self.builder = b_split
+
+                var b_some = self.builder
+                b_some.switch_to_block(some_block)
+                self.builder = b_some
+                # Preserve the payload word exactly; in particular, never
+                # decode the Option carrier itself on this path.
+                val some_value = self.option_payload_or_self(base_local)
+                b_some = self.builder
+                b_some.emit_copy(result_local, some_value)
+                b_some.terminate_goto(merge_block)
+                self.builder = b_some
+
+                var b_none = self.builder
+                b_none.switch_to_block(none_block)
+                b_none.emit_const(result_local, MirConstValue.Int(3), MirType.i64())
+                b_none.terminate_goto(merge_block)
+                self.builder = b_none
+
+                if self.is_runtime_value_local(some_value.id):
+                    self.mark_runtime_value_local(result_local.id)
+                if self.runtime_array_locals.contains(some_value.id):
+                    self.runtime_array_locals[result_local.id] = true
+                if self.runtime_dict_locals.contains(some_value.id):
+                    self.runtime_dict_locals[result_local.id] = true
                 if result_struct_name != "":
                     self.struct_value_syms[result_local.id] = result_struct_name
                 if val found_payload_type = payload_hir_type:
                     self.remember_local_hir_type(result_local.id, found_payload_type)
+
+                var b_merge = self.builder
+                b_merge.switch_to_block(merge_block)
+                self.builder = b_merge
                 result_local
 
             case Try(try_base):

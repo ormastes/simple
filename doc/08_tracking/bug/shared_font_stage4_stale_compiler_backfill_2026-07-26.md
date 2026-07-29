@@ -152,9 +152,10 @@ The historical three-check cap was reached. Its former completion policy under
 `f1bcd0db5be` is superseded: the missing Stage 4 artifact blocks the current
 focused runtime, docgen, native, and surface checks.
 
-The current evidence scope is 32 generated manuals and 37 focused executable
-runs. All require the admitted current-source pure-Simple CLI, retained output,
-and `0 stubs`.
+The historical evidence scope was 32 generated manuals and 37 focused executable
+runs. The 2026-07-29 audited current inventory is 46 focused commands and 42
+font manuals plus four compiler-prerequisite manuals; these counts require the
+admitted current-source pure-Simple CLI, retained output, and `0 stubs`.
 
 ## Superseding current admission attempt
 
@@ -259,7 +260,7 @@ shared-font verification result remains `STATUS: FAIL`.
 
 | TODO | Status | Required change and evidence |
 |---|---|---|
-| `HIR-BOOTSTRAP-NIL-001` | BLOCKING | Produce and hash a current-source pure-Simple Stage 4 CLI/core-C artifact, then pass essential-tools smoke against that exact binary before running the 37 focused executions and generating the 32 manuals. |
+| `HIR-BOOTSTRAP-NIL-001` | BLOCKING | Produce and hash a current-source pure-Simple Stage 4 CLI/core-C artifact, then pass essential-tools smoke against that exact binary before running the 46-command audited inventory and generating the 42 font manuals plus four compiler-prerequisite manuals. The former 37/32 counts are historical only. |
 
 The command below is retained only as historical full-bootstrap context. It is
 superseded by the bounded direct attempt above and must not be repeated in the
