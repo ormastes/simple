@@ -105,31 +105,48 @@ fn _dap_log(message: text):
     rt_stderr_write("[simple-dap] " + message + "\n")
 
 fn _dap_json_escape(s: text) -> text:
+    # slice() is byte-indexed, but char_at() is character-indexed -- on
+    # non-ASCII input the two walk different position spaces, so this must
+    # use slice(i, i+1) (NOT char_at(i)) to stay aligned with the
+    # byte-length loop bound below. Accumulating one raw byte at a time
+    # (the old `result = result + ch`) also shreds multi-byte UTF-8
+    # characters in the DAP-visible value into separate U+FFFD replacement
+    # characters. The escaped bytes are all single ASCII bytes, so
+    # byte-stepping to find them is safe; copy whole runs via slice()
+    # between them instead of rebuilding byte-by-byte.
     var result = ""
+    var seg_start = 0
     var i = 0
     while i < s.len():
-        val ch = s.char_at(i)
+        val ch = s.slice(i, i + 1)
         if ch == "\"":
-            result = result + "\\\""
+            result = result + s.slice(seg_start, i) + "\\\""
+            seg_start = i + 1
         elif ch == "\\":
-            result = result + "\\\\"
+            result = result + s.slice(seg_start, i) + "\\\\"
+            seg_start = i + 1
         elif ch == "\n":
-            result = result + "\\n"
+            result = result + s.slice(seg_start, i) + "\\n"
+            seg_start = i + 1
         elif ch == "\r":
-            result = result + "\\r"
+            result = result + s.slice(seg_start, i) + "\\r"
+            seg_start = i + 1
         elif ch == "\t":
-            result = result + "\\t"
-        else:
-            result = result + ch
+            result = result + s.slice(seg_start, i) + "\\t"
+            seg_start = i + 1
         i = i + 1
-    result
+    result + s.slice(seg_start, s.len())
 
 fn _dap_split_lines(content: text) -> [text]:
+    # slice() is byte-indexed, but char_at() is character-indexed -- on
+    # non-ASCII source content the two walk different position spaces, so
+    # this must use slice(i, i+1) (NOT char_at(i)) to stay aligned with
+    # the byte-length loop bound below.
     var lines: [text] = []
     var start = 0
     var i = 0
     while i < content.len():
-        if content.char_at(i) == "\n":
+        if content.slice(i, i + 1) == "\n":
             lines.push(content.slice(start, i))
             start = i + 1
         i = i + 1
