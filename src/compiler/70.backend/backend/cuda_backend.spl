@@ -13,7 +13,7 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.gpu_codegen_types.{GpuCodegen, GpuBarrierScope}
 use compiler.backend.cuda_type_mapper.{CudaTypeMapper, cuda_type_mapper_create_sm}
 use compiler.backend.cuda.ptx_builder.{PtxBuilder}
-use compiler.hir.hir_types.MemorySpace
+use compiler.hir.hir_types.{MemorySpace, SymbolId}
 use compiler.backend.backend.common.type_mapper.{PrimitiveType}
 
 # ============================================================================
@@ -30,9 +30,11 @@ fn cuda_align_to(offset: i64, align: i64) -> i64:
 fn cuda_mapper_can_size(ty: MirType) -> bool:
     """
     True when CudaTypeMapper.size_of/align_of can compute this type's layout
-    without a symbol table. Struct(SymbolId)/Enum(SymbolId) field types live
-    behind a symbol table the backend does not carry, and the mapper has no
-    size_of arm for Ref/FuncPtr — callers must fall back for those.
+    with no symbol table at all (module-independent primitives/aggregates).
+    Struct(SymbolId)/Enum(SymbolId) are always false here — resolving those
+    needs the MIR module's type table, which only CudaBackend.cuda_can_size
+    carries (via self.type_defs). The mapper also has no size_of arm for
+    Ref/FuncPtr — callers must fall back for those.
     """
     match ty.kind:
         case I64 | U64 | F64 | I32 | U32 | F32 | I16 | U16 | I8 | U8 | Bool | Unit | Ptr(_, _): true
@@ -73,6 +75,11 @@ class CudaBackend:
     compute_capability: (i64, i64)
     options: CompileOptions
     function_signatures: Dict<text, MirSignature>
+    # MIR module's Struct/Enum symbol table, threaded in from compile() so
+    # field_layout/cuda_can_size/cuda_type_size/cuda_type_align can resolve
+    # Struct(SymbolId)/Enum(SymbolId) instead of hitting the legacy 8-byte
+    # WARN fallback. Empty until compile() runs (matches function_signatures).
+    type_defs: Dict<SymbolId, MirTypeDef>
 
     static fn create(compute_cap: (i64, i64)) -> CudaBackend:
         """Create CUDA backend for specific compute capability."""
@@ -82,7 +89,8 @@ class CudaBackend:
             type_mapper: cuda_type_mapper_create_sm(compute_cap.0, compute_cap.1),
             compute_capability: compute_cap,
             options: opts,
-            function_signatures: {}
+            function_signatures: {},
+            type_defs: {}
         )
 
     static fn create_with_options(compute_cap: (i64, i64), opts: CompileOptions) -> CudaBackend:
@@ -91,7 +99,8 @@ class CudaBackend:
             type_mapper: cuda_type_mapper_create_sm(compute_cap.0, compute_cap.1),
             compute_capability: compute_cap,
             options: opts,
-            function_signatures: {}
+            function_signatures: {},
+            type_defs: {}
         )
 
     static fn for_target(target: CodegenTarget) -> Result<CudaBackend, CompileError>:
@@ -125,6 +134,11 @@ class CudaBackend:
         for signature_symbol in module.functions.keys():
             val signature_func: MirFunction = module.functions[signature_symbol]
             self.function_signatures[signature_func.name] = signature_func.signature
+
+        # Carry the module's Struct/Enum symbol table so field/aggregate/GEP
+        # layout can resolve Struct(SymbolId)/Enum(SymbolId) below instead of
+        # falling back to legacy 8-byte slots (see cuda_can_size/cuda_type_size).
+        self.type_defs = module.types
 
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for symbol in module.functions.keys():
@@ -592,16 +606,18 @@ class CudaBackend:
             var stored = false
             match self.operand_mir_type(func, operand):
                 case Ok(field_ty):
-                    if cuda_mapper_can_size(field_ty):
-                        offset = cuda_align_to(offset, self.type_mapper.align_of(field_ty))
+                    if self.cuda_can_size(field_ty):
+                        offset = cuda_align_to(offset, self.cuda_type_align(field_ty))
                         val st_ty = self.ptx_mem_type(field_ty)
                         builder.emit_line("st.local{st_ty} [{dest_reg}+{offset}], {src_reg};")
-                        offset = offset + self.type_mapper.size_of(field_ty)
+                        offset = offset + self.cuda_type_size(field_ty)
                         stored = true
                 case Err(_): ()
             if not stored:
-                # FALLBACK: the operand's MIR type is not resolvable/sizable here
-                # (e.g. Struct(SymbolId) needs a symbol table the backend lacks).
+                # FALLBACK: the operand's MIR type is not resolvable/sizable here.
+                # Known Struct(SymbolId)/Enum(SymbolId) now resolve via
+                # self.cuda_can_size/self.type_defs; this only fires for a
+                # symbol genuinely absent from the module's type table.
                 # Legacy 8-byte slot — WRONG for sub-8-byte fields; kept loud so
                 # bad layout is visible in the emitted PTX.
                 builder.emit_comment("WARN: unresolved aggregate field type; falling back to 8-byte slot")
@@ -619,7 +635,8 @@ class CudaBackend:
                 builder.emit_line("ld.local{ld_ty} {dest_reg}, [{base_reg}+{offset}];")
             case Err(_):
                 # FALLBACK: aggregate layout not resolvable at this call site
-                # (base type opaque or Struct(SymbolId) without a symbol table).
+                # (base type opaque, or a Struct(SymbolId) absent from
+                # self.type_defs — known struct symbols resolve in field_layout).
                 # Legacy 8-byte slots — matches compile_aggregate's fallback path.
                 builder.emit_comment("WARN: unresolved aggregate layout; using legacy 8-byte field slots")
                 val offset = field * 8
@@ -677,20 +694,20 @@ class CudaBackend:
                 case Ok(base_ty):
                     match base_ty.kind:
                         case Ptr(pointee, _):
-                            if cuda_mapper_can_size(pointee):
-                                elem_size = self.type_mapper.size_of(pointee)
+                            if self.cuda_can_size(pointee):
+                                elem_size = self.cuda_type_size(pointee)
                                 resolved = true
                         case Ref(referent, _):
-                            if cuda_mapper_can_size(referent):
-                                elem_size = self.type_mapper.size_of(referent)
+                            if self.cuda_can_size(referent):
+                                elem_size = self.cuda_type_size(referent)
                                 resolved = true
                         case Array(elem, _):
-                            if cuda_mapper_can_size(elem):
-                                elem_size = self.type_mapper.size_of(elem)
+                            if self.cuda_can_size(elem):
+                                elem_size = self.cuda_type_size(elem)
                                 resolved = true
                         case Slice(selem):
-                            if cuda_mapper_can_size(selem):
-                                elem_size = self.type_mapper.size_of(selem)
+                            if self.cuda_can_size(selem):
+                                elem_size = self.cuda_type_size(selem)
                                 resolved = true
                         case _: ()
                 case Err(_): ()
@@ -1121,12 +1138,146 @@ class CudaBackend:
             case Bool: ".u8"  # .pred is not a valid ld/st type
             case _: self.type_mapper.ptx_type(prim)
 
+    me cuda_can_size(ty: MirType) -> bool:
+        """
+        True when this backend can compute ty's layout: either the plain
+        primitive/Array/Tuple rules in cuda_mapper_can_size, or a
+        Struct(SymbolId)/Enum(SymbolId) whose definition is present in
+        self.type_defs — the MIR module's type table, threaded in from
+        compile(). Genuinely-unknown symbols still return false so callers
+        keep emitting the loud WARN fallback for them.
+        """
+        match ty.kind:
+            case Struct(symbol) | Enum(symbol): self.type_defs.contains_key(symbol)
+            case Array(elem, _): self.cuda_can_size(elem)
+            case Tuple(elements):
+                for e in elements:
+                    if not self.cuda_can_size(e):
+                        return false
+                true
+            case _: cuda_mapper_can_size(ty)
+
+    me cuda_type_size(ty: MirType) -> i64:
+        """
+        Byte size of ty for CUDA layout purposes. Struct(SymbolId)/
+        Enum(SymbolId) resolve against self.type_defs; everything else
+        defers to CudaTypeMapper.size_of (which cannot see symbols at all,
+        and whose own Struct arm assumes a different payload shape — never
+        route a Struct/Enum kind into it). Callers must gate on
+        cuda_can_size first; an unresolvable symbol here falls back to a
+        legacy 8-byte slot rather than touching the mapper.
+        """
+        match ty.kind:
+            case Struct(symbol):
+                if self.type_defs.contains_key(symbol):
+                    val type_def: MirTypeDef = self.type_defs[symbol]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields): self.cuda_struct_size(fields)
+                        case _: 8
+                else:
+                    8
+            case Enum(symbol):
+                if self.type_defs.contains_key(symbol):
+                    val type_def: MirTypeDef = self.type_defs[symbol]
+                    match type_def.kind:
+                        case MirTypeDefKind.Enum(variants): self.cuda_enum_size(variants)
+                        case _: 8
+                else:
+                    8
+            case Array(elem, size): self.cuda_type_size(elem) * size
+            case Tuple(elements):
+                var total = 0
+                for e in elements:
+                    total = total + self.cuda_type_size(e)
+                total
+            case _: self.type_mapper.size_of(ty)
+
+    me cuda_type_align(ty: MirType) -> i64:
+        """Alignment in bytes of ty, resolving Struct/Enum the same way as cuda_type_size."""
+        match ty.kind:
+            case Struct(symbol):
+                if self.type_defs.contains_key(symbol):
+                    val type_def: MirTypeDef = self.type_defs[symbol]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields): self.cuda_struct_align(fields)
+                        case _: 8
+                else:
+                    8
+            case Enum(symbol):
+                if self.type_defs.contains_key(symbol):
+                    val type_def: MirTypeDef = self.type_defs[symbol]
+                    match type_def.kind:
+                        case MirTypeDefKind.Enum(variants): self.cuda_enum_align(variants)
+                        case _: 8
+                else:
+                    8
+            case Array(elem, _): self.cuda_type_align(elem)
+            case Tuple(elements):
+                if elements.len() == 0:
+                    1
+                else:
+                    var best = 1
+                    for e in elements:
+                        val a = self.cuda_type_align(e)
+                        if a > best:
+                            best = a
+                    best
+            case _: self.type_mapper.align_of(ty)
+
+    me cuda_struct_size(fields: [MirFieldDef]) -> i64:
+        """
+        Total struct size: the last field's precomputed offset plus its own
+        size, rounded up to the struct's alignment. Offsets are trusted as
+        computed by MIR lowering (compute_struct_layout in module_lowering.spl)
+        rather than re-derived here.
+        """
+        if fields.len() == 0:
+            return 0
+        val last = fields[fields.len() - 1]
+        val end = last.offset + self.cuda_type_size(last.type_)
+        cuda_align_to(end, self.cuda_struct_align(fields))
+
+    me cuda_struct_align(fields: [MirFieldDef]) -> i64:
+        if fields.len() == 0:
+            return 1
+        var best = 1
+        for f in fields:
+            val a = self.cuda_type_align(f.type_)
+            if a > best:
+                best = a
+        best
+
+    me cuda_enum_size(variants: [MirVariantDef]) -> i64:
+        """Tagged-union layout: 8-byte discriminant + largest payload, aligned to the widest member."""
+        var payload_max = 0
+        for v in variants:
+            match v.payload:
+                case Some(p):
+                    val sz = self.cuda_type_size(p)
+                    if sz > payload_max:
+                        payload_max = sz
+                case None: ()
+        cuda_align_to(8 + payload_max, self.cuda_enum_align(variants))
+
+    me cuda_enum_align(variants: [MirVariantDef]) -> i64:
+        var best = 8
+        for v in variants:
+            match v.payload:
+                case Some(p):
+                    val a = self.cuda_type_align(p)
+                    if a > best:
+                        best = a
+                case None: ()
+        best
+
     me field_layout(func: MirFunction, base: MirOperand, field: i64) -> Result<(i64, MirType), CompileError>:
         """
         Compute (byte offset, field type) for field access on the base
-        operand's aggregate type, using CudaTypeMapper size/alignment rules.
-        Errs when the aggregate type is not resolvable at this call site
-        (e.g. Struct(SymbolId) — the backend carries no symbol table).
+        operand's aggregate type. Struct(SymbolId) resolves against
+        self.type_defs (the MIR module's type table); Tuple/Array use
+        CudaTypeMapper size/alignment rules. Errs when the aggregate type
+        is not resolvable at this call site (e.g. a Struct symbol absent
+        from the module's type table).
         """
         val base_ty = self.operand_mir_type(func, base)?
         val agg_ty = match base_ty.kind:
@@ -1134,14 +1285,33 @@ class CudaBackend:
             case Ref(referent, _): referent
             case _: base_ty
         match agg_ty.kind:
+            case Struct(symbol):
+                if self.type_defs.contains_key(symbol):
+                    val type_def: MirTypeDef = self.type_defs[symbol]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields): self.struct_field_layout(fields, field)
+                        case _: Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: type table entry for struct symbol is not a struct"))
+                else:
+                    Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: struct symbol not found in module type table"))
             case Tuple(elements):
                 self.field_offset_in(elements, field)
             case Array(elem, _):
-                if not cuda_mapper_can_size(elem):
+                if not self.cuda_can_size(elem):
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: array element type is not sizable"))
-                Ok((field * self.type_mapper.size_of(elem), elem))
+                Ok((field * self.cuda_type_size(elem), elem))
             case _:
                 Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: aggregate type not resolvable at this call site"))
+
+    me struct_field_layout(fields: [MirFieldDef], field: i64) -> Result<(i64, MirType), CompileError>:
+        """
+        Look up (offset, type) for a struct field by index using the
+        precomputed offsets already carried on MirFieldDef — no
+        re-derivation needed since the module's type table has them.
+        """
+        if field < 0 or field >= fields.len():
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: struct field index {field} out of range"))
+        val f = fields[field]
+        Ok((f.offset, f.type_))
 
     me field_offset_in(elements: [MirType], field: i64) -> Result<(i64, MirType), CompileError>:
         """Walk element types accumulating aligned offsets up to `field`."""
@@ -1151,12 +1321,12 @@ class CudaBackend:
         var i = 0
         while i <= field:
             val ft = elements[i]
-            if not cuda_mapper_can_size(ft):
+            if not self.cuda_can_size(ft):
                 return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field type is not sizable"))
-            offset = cuda_align_to(offset, self.type_mapper.align_of(ft))
+            offset = cuda_align_to(offset, self.cuda_type_align(ft))
             if i == field:
                 return Ok((offset, ft))
-            offset = offset + self.type_mapper.size_of(ft)
+            offset = offset + self.cuda_type_size(ft)
             i = i + 1
         Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field walk failed"))
 

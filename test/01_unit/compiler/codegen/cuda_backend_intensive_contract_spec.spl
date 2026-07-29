@@ -8,7 +8,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_data.{MirFunction, MirModule, MirSignature, BlockId, LocalId}
 use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, GpuAtomicOpKind}
-use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, MirConstValue, LocalKind}
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, MirConstValue, LocalKind, MirTypeDef, MirTypeDefKind, MirFieldDef}
 
 fn cuda_u32() -> MirType: MirType(kind: MirTypeKind.U32)
 fn cuda_u64() -> MirType: MirType(kind: MirTypeKind.U64)
@@ -37,6 +37,11 @@ fn cuda_module(functions: [MirFunction]) -> MirModule:
     var map: Dict<SymbolId, MirFunction> = {}
     for fn_ in functions: map[fn_.symbol] = fn_
     MirModule(name: "cuda_intensive", functions: map, statics: {}, constants: {}, types: {})
+
+fn cuda_module_with_types(functions: [MirFunction], types: Dict<SymbolId, MirTypeDef>) -> MirModule:
+    var map: Dict<SymbolId, MirFunction> = {}
+    for fn_ in functions: map[fn_.symbol] = fn_
+    MirModule(name: "cuda_intensive", functions: map, statics: {}, constants: {}, types: types)
 
 fn compile_supported_cuda(functions: [MirFunction]) -> text:
     val result = CudaBackend.create((8, 6)).compile(cuda_module(functions))
@@ -162,3 +167,45 @@ describe "CUDA backend intensive MIR contract":
         val malformed = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_vec4_load_f32", []), span: nil)], terminator: MirTerminator.Ret(nil))
         val malformed_fn = cuda_function(10, "cuda_bad_intrinsic", [], MirType.unit(), [cuda_temp(0, cuda_u32())], [malformed], true)
         assert_backend_error_contains(malformed_fn, "requires 2 arguments")
+
+    it "resolves Struct(SymbolId) field access to a real offset via the module's type table":
+        # struct Point { a: u32, b: u64 } -- offsets computed by MIR lowering
+        # (compute_struct_layout) and carried on MirFieldDef as-is: a@0, b@8
+        # (u64 needs 8-byte alignment, so a's 4-byte slot is padded).
+        val struct_symbol = SymbolId(id: 100)
+        val struct_ty = MirType(kind: MirTypeKind.Struct(struct_symbol))
+        val types: Dict<SymbolId, MirTypeDef> = {
+            struct_symbol: MirTypeDef(
+                symbol: struct_symbol, name: "Point",
+                kind: MirTypeDefKind.Struct([
+                    MirFieldDef(name: "a", type_: cuda_u32(), offset: 0, has_bits_attr: false, bits_width: 0),
+                    MirFieldDef(name: "b", type_: cuda_u64(), offset: 8, has_bits_attr: false, bits_width: 0)
+                ]),
+                is_export_c: false, export_name: ""
+            )
+        }
+        val ptr_ty = MirType.ptr(struct_ty, true)
+        val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 1), MirOperand.copy(LocalId(id: 0)), 1), span: nil)
+        ], terminator: MirTerminator.Ret(nil))
+        val fn_ = cuda_function(14, "cuda_struct_field", [ptr_ty], MirType.unit(), [cuda_arg(0, 0, "p", ptr_ty), cuda_temp(1, cuda_u64())], [block], true)
+        val result = CudaBackend.create((8, 6)).compile(cuda_module_with_types([fn_], types))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("ld.local.u64 %r1, [%r0+8];")
+        expect(ptx.contains("WARN: unresolved aggregate layout")).to_equal(false)
+        assert_no_placeholder_output(ptx)
+
+    it "still emits the loud WARN fallback for a struct symbol absent from the module's type table":
+        val unknown_symbol = SymbolId(id: 999999)
+        val struct_ty = MirType(kind: MirTypeKind.Struct(unknown_symbol))
+        val ptr_ty = MirType.ptr(struct_ty, true)
+        val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
+            MirInst(kind: MirInstKind.GetField(LocalId(id: 1), MirOperand.copy(LocalId(id: 0)), 0), span: nil)
+        ], terminator: MirTerminator.Ret(nil))
+        val fn_ = cuda_function(15, "cuda_struct_field_unknown", [ptr_ty], MirType.unit(), [cuda_arg(0, 0, "p", ptr_ty), cuda_temp(1, cuda_u64())], [block], true)
+        val result = CudaBackend.create((8, 6)).compile(cuda_module([fn_]))
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("WARN: unresolved aggregate layout; using legacy 8-byte field slots")
+        expect(ptx).to_contain("ld.local.u64 %r1, [%r0+0];")

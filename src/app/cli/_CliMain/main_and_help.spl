@@ -4,6 +4,7 @@ use app.cli._CliMain.args_and_os_commands.{GlobalFlags, get_cli_args, parse_glob
     print_error, print_error_with_help, run_dashboard, run_llm_dashboard}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.env_ops.{env_get, env_set}
+use std.common.mem_infra.config.{resolve_mem_infra, mem_infra_env_assignments}
 use app.io.cli_ops.{cli_file_exists, _cli_eprint}
 use app.io.cli_compile.{cli_compile, cli_native_build}
 use app.io.cli_commands.{cli_run_code, cli_run_file, cli_run_repl,
@@ -30,6 +31,7 @@ use app.ui.cli_entry.{run_ui_cli_entry}
 use app.play.main.{play_cli_main}
 use app.t32_cli.mod.{t32_cli_main}
 use app.stats.doc_coverage_dynamic.{run_doc_coverage}
+use app.cli.sbom_command.{run_sbom}
 use app.stats.dynamic.{run_stats}
 use app.jj.main.{handle_jj}
 use app.devhub.main.{handle_itf}
@@ -61,6 +63,47 @@ fn apply_jit_env_vars(flags: GlobalFlags):
         env_set("SIMPLE_JIT_THRESHOLD", t)
     if not str_eq(flags.backend, "auto"):
         env_set("SIMPLE_JIT_BACKEND", flags.backend)
+
+# The engine actually executing the program, for `--mem-infra=` resolution.
+# `flags.force_interpret`/`flags.backend` already fold in SIMPLE_EXECUTION_MODE
+# (see parse_global_flags), so this is a direct read: interpreter when forced,
+# else the JIT backend name — "cranelift" is the default JIT engine when no
+# explicit --backend/--fixed-be was given.
+fn mem_infra_effective_backend(flags: GlobalFlags) -> text:
+    if flags.force_interpret:
+        return "interpreter"
+    if str_eq(flags.backend, "auto"):
+        return "cranelift"
+    return flags.backend
+
+fn apply_mem_infra_env_assignment(assignment: text):
+    val parts = assignment.split("=")
+    if parts.len() >= 2:
+        val _ = env_set(parts[0], parts[1])
+
+# Resolve `--mem-infra=`/`--mem-infra-strict` against the capability matrix
+# for the engine actually in use, print notices/errors to stderr, and apply
+# the resulting env-var gates before the program executes. `BUILD:*` markers
+# (asan/memprof) have no runtime env knob yet, so they only print a notice.
+# Returns a nonzero exit code on resolution error (caller must abort with it).
+fn apply_mem_infra_flags(flags: GlobalFlags) -> i64:
+    if flags.mem_infra_requested.len() == 0:
+        return 0
+    val backend = mem_infra_effective_backend(flags)
+    val plan = resolve_mem_infra(flags.mem_infra_requested, backend, flags.mem_infra_strict)
+    for notice in plan.notices:
+        _cli_eprint("mem-infra: {notice}")
+    if plan.errors.len() > 0:
+        for err in plan.errors:
+            _cli_eprint("mem-infra: {err}")
+        return 2
+    for assignment in mem_infra_env_assignments(plan):
+        if assignment.starts_with("BUILD:"):
+            val marker = assignment[6:]
+            _cli_eprint("mem-infra: '{marker}' is a build-time flag; deferred to build wiring (no runtime env applied)")
+        else:
+            apply_mem_infra_env_assignment(assignment)
+    return 0
 
 fn run_native_build_bootstrap(args: [text]) -> i64:
     _cli_eprint("Error: native-build requires --backend=llvm-lib|llvm|cranelift in the pure Simple command path")
@@ -127,10 +170,10 @@ fn filter_internal_flags(args: [text]) -> [text]:
     for arg in args:
         if skip_next:
             skip_next = false
-        elif str_eq(arg, "--max-recursion-depth") or str_eq(arg, "--timeout") or str_eq(arg, "--execution-limit") or str_eq(arg, "--interpreter-mode") or str_eq(arg, "--run-config") or str_eq(arg, "--jit-threshold"):
+        elif str_eq(arg, "--max-recursion-depth") or str_eq(arg, "--timeout") or str_eq(arg, "--execution-limit") or str_eq(arg, "--interpreter-mode") or str_eq(arg, "--run-config") or str_eq(arg, "--jit-threshold") or str_eq(arg, "--mem-infra"):
             skip_next = true
-        elif not arg.starts_with("--gc") and not str_eq(arg, "--notui") and not str_eq(arg, "--lang") and not str_eq(arg, "--stack-overflow-detection") and not str_eq(arg, "--no-stack-overflow-detection") and not str_eq(arg, "--interpret") and not str_eq(arg, "--interpret-optimized") and not str_eq(arg, "--no-jit") and not str_eq(arg, "--fixed-be"):
-            if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit=") and not arg.starts_with("--interpreter-mode") and not arg.starts_with("--run-config") and not arg.starts_with("--jit-threshold=") and not arg.starts_with("--fixed-be="):
+        elif not arg.starts_with("--gc") and not str_eq(arg, "--notui") and not str_eq(arg, "--lang") and not str_eq(arg, "--stack-overflow-detection") and not str_eq(arg, "--no-stack-overflow-detection") and not str_eq(arg, "--interpret") and not str_eq(arg, "--interpret-optimized") and not str_eq(arg, "--no-jit") and not str_eq(arg, "--fixed-be") and not str_eq(arg, "--mem-infra-strict"):
+            if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit=") and not arg.starts_with("--interpreter-mode") and not arg.starts_with("--run-config") and not arg.starts_with("--jit-threshold=") and not arg.starts_with("--fixed-be=") and not arg.starts_with("--mem-infra="):
                 # Keep --backend flags (used by both JIT and compile commands)
                 result.push(arg)
     result
@@ -192,6 +235,10 @@ fn main() -> i64:
         return run_native_build_bootstrap(args)
 
     apply_jit_env_vars(flags)
+
+    val mem_infra_exit = apply_mem_infra_flags(flags)
+    if mem_infra_exit != 0:
+        return mem_infra_exit
 
     val filtered_args = filter_internal_flags(args)
 
@@ -283,6 +330,8 @@ fn main() -> i64:
         return run_check(check_args)
     elif str_eq(first, "doc-coverage"):
         return run_doc_coverage(_cli_args_from(filtered_args, 1))
+    elif str_eq(first, "sbom"):
+        return run_sbom(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "check-arch"):
         val arch_args = _cli_args_from(filtered_args, 1)
         return run_arch_check(arch_args)
