@@ -98,6 +98,16 @@ var expr_empty_text: [text] = []
 var expr_count_slot: [i64] = [0]
 var expr_env_mirror_slot: [bool] = []
 
+# ===== Arena Generation Diagnostics (lane L6, 2026-07-29) =====
+# Monotonic generation counter shared by the expr/stmt/decl parallel-array
+# arenas. ast_reset() bumps it BEFORE clearing so an index minted before the
+# reset is detectably stale and reports ONE precise "stale generation" error
+# instead of thousands of secondary OOB / missing-tag diagnostics.
+# Diagnosis only — node ids stay plain i64, no representation change.
+# See doc/03_plan/compiler/bootstrap/stage4_memory_parallel_agent_plan_2026-07-29.md
+var ast_gen_slot: [i64] = [0]
+var ast_gen_last_report_slot: [i64] = [-1]
+
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 
@@ -262,6 +272,50 @@ fn expr_owner_str_set(idx: i64, value: text):
     expr_s_val[idx] = value
 fn expr_owner_extra_set(idx: i64, value: i64):
     expr_extra[idx] = value
+
+# ----- Arena generation diagnostics helpers (lane L6) -----
+
+fn ast_gen_slot_ensure():
+    # Native binaries may zero-initialize module arrays (same limitation the
+    # other *_slot ensure helpers guard against).
+    if ast_gen_slot == nil or ast_gen_slot.len() == 0:
+        ast_gen_slot = [0]
+    if ast_gen_last_report_slot == nil or ast_gen_last_report_slot.len() == 0:
+        ast_gen_last_report_slot = [-1]
+
+fn ast_generation() -> i64:
+    ast_gen_slot_ensure()
+    ast_gen_slot[0]
+
+fn ast_generation_bump() -> i64:
+    ast_gen_slot_ensure()
+    ast_gen_slot[0] = ast_gen_slot[0] + 1
+    ast_gen_slot[0]
+
+fn ast_gen_check_enabled() -> bool:
+    # Default OFF => zero hot-path cost. Enable via the dedicated knob or the
+    # stage-4 bootstrap lane.
+    if (rt_env_get("SIMPLE_AST_GEN_CHECK") ?? "") == "1":
+        return true
+    (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
+
+fn ast_gen_stale_message(kind: text, idx: i64, minted_gen: i64) -> text:
+    "stale " + kind + " " + int_to_str(idx) + ": produced at generation " + int_to_str(minted_gen) + ", arena now at " + int_to_str(ast_generation())
+
+fn ast_gen_check_index(kind: text, idx: i64, minted_gen: i64) -> bool:
+    # Debug-gated stale-index check. Returns true when `idx` was minted at an
+    # older generation than the live arena; reports at most ONCE per current
+    # generation so one stale read does not cascade into a diagnostic flood.
+    # Callers keep their existing fallback behavior (-1 sentinel etc.).
+    if not ast_gen_check_enabled():
+        return false
+    ast_gen_slot_ensure()
+    if minted_gen == ast_gen_slot[0]:
+        return false
+    if ast_gen_last_report_slot[0] != ast_gen_slot[0]:
+        ast_gen_last_report_slot[0] = ast_gen_slot[0]
+        print ast_gen_stale_message(kind, idx, minted_gen)
+    true
 
 fn expr_reset():
     # Allocate nil module arrays once, then retain their storage across files.
