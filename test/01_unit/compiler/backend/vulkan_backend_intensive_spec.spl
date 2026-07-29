@@ -23,6 +23,12 @@ fn vulkan_u32() -> MirType:
 fn vulkan_i64() -> MirType:
     MirType(kind: MirTypeKind.I64)
 
+fn vulkan_ptr_u32() -> MirType:
+    MirType.ptr(vulkan_u32(), true)
+
+fn vulkan_const_ptr_u32() -> MirType:
+    MirType.ptr(vulkan_u32(), false)
+
 fn vulkan_local(id: i64) -> LocalId:
     LocalId(id: id)
 
@@ -34,6 +40,9 @@ fn vulkan_operand(id: i64) -> MirOperand:
 
 fn vulkan_i64_operand(value: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), vulkan_i64()))
+
+fn vulkan_u32_operand(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), vulkan_u32()))
 
 fn vulkan_inst(kind: MirInstKind) -> MirInst:
     MirInst(kind: kind, span: nil)
@@ -80,6 +89,19 @@ fn assert_no_placeholder_output(output: text):
     expect(output.contains("not implemented")).to_equal(false)
     expect(output.contains("; spirv instruction")).to_equal(false)
     expect(output.contains("; atomic op")).to_equal(false)
+
+fn assert_spirv_valid_if_available(output: text, stem: text):
+    val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v spirv-as >/dev/null 2>&1 && command -v spirv-val >/dev/null 2>&1"])
+    expect(available).to_equal(0)
+    val asm_path = "/tmp/{stem}.spvasm"
+    val bin_path = "/tmp/{stem}.spv"
+    expect(rt_file_write_text(asm_path, output)).to_equal(true)
+    val (_as_out, as_err, as_code) = rt_process_run("spirv-as", ["--target-env", "vulkan1.3", asm_path, "-o", bin_path])
+    expect(as_code).to_equal(0)
+    expect(as_err).to_equal("")
+    val (_val_out, val_err, val_code) = rt_process_run("spirv-val", ["--target-env", "vulkan1.3", bin_path])
+    expect(val_code).to_equal(0)
+    expect(val_err).to_equal("")
 
 fn vulkan_function_with_locals(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal]) -> MirFunction:
     MirFunction(
@@ -187,19 +209,7 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
                 vulkan_temp(3, vulkan_i64()), vulkan_temp(4, vulkan_i64())
             ]
         )
-        val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v spirv-as >/dev/null 2>&1 && command -v spirv-val >/dev/null 2>&1"])
-        if available == 0:
-            val asm_path = "/tmp/simple_vulkan_intensive.spvasm"
-            val bin_path = "/tmp/simple_vulkan_intensive.spv"
-            expect(rt_file_write_text(asm_path, output)).to_equal(true)
-            val (_as_out, as_err, as_code) = rt_process_run("spirv-as", ["--target-env", "vulkan1.3", asm_path, "-o", bin_path])
-            expect(as_code).to_equal(0)
-            expect(as_err).to_equal("")
-            val (_val_out, val_err, val_code) = rt_process_run("spirv-val", ["--target-env", "vulkan1.3", bin_path])
-            expect(val_code).to_equal(0)
-            expect(val_err).to_equal("")
-        else:
-            expect(output).to_contain("OpMemoryModel Logical GLSL450")
+        assert_spirv_valid_if_available(output, "simple_vulkan_intensive")
 
     it "rejects non-U32 constants":
         val constant = MirInstKind.Const(vulkan_local(0), MirConstValue.Int(7), vulkan_i32())
@@ -345,10 +355,235 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         val all_error = reject_unsupported_vulkan([vulkan_inst(MirInstKind.GpuMemFence(GpuMemoryScope.All))], MirTerminator.Ret(nil))
         assert_backend_error_contains(all_error, "does not support CrossDevice")
 
-    it "rejects shared memory allocation until Workgroup variables are lowered":
-        val shared = MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_i32(), 16)
-        val error = reject_unsupported_vulkan([vulkan_inst(shared)], MirTerminator.Ret(nil))
-        assert_backend_error_contains(error, "shared memory lowering")
+    it "lowers indexed U32 shared memory through Workgroup pointers":
+        val output = compile_supported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 256)),
+                vulkan_inst(MirInstKind.GpuLocalId(vulkan_local(1), 0)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(2), vulkan_operand(0), [vulkan_operand(1)])),
+                vulkan_inst(MirInstKind.Const(vulkan_local(3), MirConstValue.Int(7), vulkan_u32())),
+                vulkan_inst(MirInstKind.Store(vulkan_operand(2), vulkan_operand(3))),
+                vulkan_inst(MirInstKind.Load(vulkan_local(4), vulkan_operand(2))),
+                vulkan_inst(MirInstKind.BinOp(vulkan_local(5), MirBinOp.Add, vulkan_operand(4), vulkan_u32_operand(1)))
+            ],
+            MirTerminator.Ret(nil),
+            [
+                vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_u32()),
+                vulkan_temp(2, vulkan_ptr_u32()), vulkan_temp(3, vulkan_u32()),
+                vulkan_temp(4, vulkan_u32()), vulkan_temp(5, vulkan_u32())
+            ]
+        )
+        expect(output).to_contain("OpEntryPoint GLCompute %10 \"intensive_vulkan_kernel\" %6 %7 %8 %9")
+        expect(output).to_contain("%16 = OpConstant %2 256")
+        expect(output).to_contain("%19 = OpTypePointer Workgroup %2")
+        expect(output).to_contain("%20 = OpTypeArray %2 %16")
+        expect(output).to_contain("%21 = OpTypePointer Workgroup %20")
+        expect(output).to_contain("%9 = OpVariable %21 Workgroup")
+        expect(output).to_contain("%25 = OpAccessChain %19 %9 %24")
+        expect(output).to_contain("OpStore %25 %17")
+        expect(output).to_contain("%26 = OpLoad %2 %25")
+        expect(output).to_contain("%27 = OpIAdd %2 %26 %18")
+        assert_spirv_valid_if_available(output, "simple_vulkan_shared_u32")
+
+    it "keeps multiple Vulkan shared arrays distinct and deterministic":
+        val output = compile_supported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 256)),
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(1), vulkan_u32(), 512)),
+                vulkan_inst(MirInstKind.GpuLocalId(vulkan_local(6), 0)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(2), vulkan_operand(0), [vulkan_operand(6)])),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(3), vulkan_operand(1), [vulkan_operand(6)])),
+                vulkan_inst(MirInstKind.Store(vulkan_operand(2), vulkan_u32_operand(5))),
+                vulkan_inst(MirInstKind.Store(vulkan_operand(3), vulkan_u32_operand(7))),
+                vulkan_inst(MirInstKind.Load(vulkan_local(4), vulkan_operand(2))),
+                vulkan_inst(MirInstKind.Load(vulkan_local(5), vulkan_operand(3)))
+            ],
+            MirTerminator.Ret(nil),
+            [
+                vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32()),
+                vulkan_temp(2, vulkan_ptr_u32()), vulkan_temp(3, vulkan_ptr_u32()),
+                vulkan_temp(4, vulkan_u32()), vulkan_temp(5, vulkan_u32()),
+                vulkan_temp(6, vulkan_u32())
+            ]
+        )
+        expect(output).to_contain("OpEntryPoint GLCompute %11 \"intensive_vulkan_kernel\" %6 %7 %8 %9 %10")
+        expect(output).to_contain("%9 = OpVariable %23 Workgroup")
+        expect(output).to_contain("%10 = OpVariable %25 Workgroup")
+        expect(output).to_contain("%29 = OpAccessChain %21 %9 %28")
+        expect(output).to_contain("%30 = OpAccessChain %21 %10 %28")
+        expect(output).to_contain("OpStore %29 %19")
+        expect(output).to_contain("OpStore %30 %20")
+        expect(output).to_contain("%31 = OpLoad %2 %29")
+        expect(output).to_contain("%32 = OpLoad %2 %30")
+        assert_spirv_valid_if_available(output, "simple_vulkan_shared_multi")
+
+    it "supports inline I64 shared-memory indices without an I64 local":
+        val output = compile_supported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 4)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(1), vulkan_operand(0), [vulkan_i64_operand(2)])),
+                vulkan_inst(MirInstKind.Store(vulkan_operand(1), vulkan_u32_operand(5)))
+            ],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32())]
+        )
+        expect(output).to_contain("OpCapability Int64")
+        expect(output).to_contain("%3 = OpTypeInt 64 0")
+        expect(output).to_contain("%18 = OpConstant %3 2")
+        expect(output).to_contain("%24 = OpAccessChain %20 %10 %18")
+        expect(output).to_contain("OpStore %24 %19")
+        assert_spirv_valid_if_available(output, "simple_vulkan_shared_i64_index")
+
+    it "rejects invalid Vulkan shared allocation shapes":
+        val bad_type = reject_unsupported_vulkan_with_locals(
+            [vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_i32(), 16))],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_ptr_u32())]
+        )
+        assert_backend_error_contains(bad_type, "element type must be U32")
+
+        val bad_size = reject_unsupported_vulkan_with_locals(
+            [vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 0))],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_ptr_u32())]
+        )
+        assert_backend_error_contains(bad_size, "size must be between")
+
+        val bad_dest = reject_unsupported_vulkan_with_locals(
+            [vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16))],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_i64())]
+        )
+        assert_backend_error_contains(bad_dest, "destination must be a U32 pointer")
+
+        val immutable_dest = reject_unsupported_vulkan_with_locals(
+            [vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16))],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_const_ptr_u32())]
+        )
+        assert_backend_error_contains(immutable_dest, "mutable access")
+
+        val duplicate = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 8)),
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16))
+            ],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_ptr_u32())]
+        )
+        assert_backend_error_contains(duplicate, "may only be declared once")
+
+    it "rejects invalid Vulkan shared pointer and value flow":
+        val use_before_alloc = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(1), vulkan_operand(0), [vulkan_u32_operand(0)])),
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16))
+            ],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32())]
+        )
+        assert_backend_error_contains(use_before_alloc, "base must come from GpuSharedAlloc")
+
+        val bad_arity = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(1), vulkan_operand(0), [
+                    vulkan_u32_operand(0), vulkan_u32_operand(1)
+                ]))
+            ],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32())]
+        )
+        assert_backend_error_contains(bad_arity, "requires exactly one index")
+
+        val bad_base = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(2), vulkan_operand(1), [vulkan_u32_operand(0)]))
+            ],
+            MirTerminator.Ret(nil),
+            [
+                vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32()),
+                vulkan_temp(2, vulkan_ptr_u32())
+            ]
+        )
+        assert_backend_error_contains(bad_base, "base must come from GpuSharedAlloc")
+
+        val bad_index = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(2), vulkan_operand(0), [vulkan_operand(1)]))
+            ],
+            MirTerminator.Ret(nil),
+            [
+                vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_i32()),
+                vulkan_temp(2, vulkan_ptr_u32())
+            ]
+        )
+        assert_backend_error_contains(bad_index, "index must be U32 or I64")
+
+        val unproven_index = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(2), vulkan_operand(0), [vulkan_operand(1)]))
+            ],
+            MirTerminator.Ret(nil),
+            [
+                vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_u32()),
+                vulkan_temp(2, vulkan_ptr_u32())
+            ]
+        )
+        assert_backend_error_contains(unproven_index, "not proven within the allocation")
+
+        val out_of_bounds = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(1), vulkan_operand(0), [vulkan_u32_operand(16)]))
+            ],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32())]
+        )
+        assert_backend_error_contains(out_of_bounds, "not proven within the allocation")
+
+        val stale_proof = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 256)),
+                vulkan_inst(MirInstKind.GpuLocalId(vulkan_local(1), 0)),
+                vulkan_inst(MirInstKind.Const(vulkan_local(1), MirConstValue.Int(256), vulkan_u32())),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(2), vulkan_operand(0), [vulkan_operand(1)]))
+            ],
+            MirTerminator.Ret(nil),
+            [
+                vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_u32()),
+                vulkan_temp(2, vulkan_ptr_u32())
+            ]
+        )
+        assert_backend_error_contains(stale_proof, "not proven within the allocation")
+
+        val bad_load = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(1), vulkan_operand(0), [vulkan_u32_operand(0)])),
+                vulkan_inst(MirInstKind.Load(vulkan_local(2), vulkan_operand(1)))
+            ],
+            MirTerminator.Ret(nil),
+            [
+                vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32()),
+                vulkan_temp(2, vulkan_i64())
+            ]
+        )
+        assert_backend_error_contains(bad_load, "shared U32 element pointer and U32 destination")
+
+        val bad_store = reject_unsupported_vulkan_with_locals(
+            [
+                vulkan_inst(MirInstKind.GpuSharedAlloc(vulkan_local(0), vulkan_u32(), 16)),
+                vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(1), vulkan_operand(0), [vulkan_u32_operand(0)])),
+                vulkan_inst(MirInstKind.Store(vulkan_operand(1), vulkan_i64_operand(7)))
+            ],
+            MirTerminator.Ret(nil),
+            [vulkan_temp(0, vulkan_ptr_u32()), vulkan_temp(1, vulkan_ptr_u32())]
+        )
+        assert_backend_error_contains(bad_store, "type or range does not match")
 
     it "rejects atomic operations and compare-exchange until operands and semantics are lowered":
         val atomic = MirInstKind.GpuAtomicOp(vulkan_local(2), GpuAtomicOpKind.Add, vulkan_operand(0), vulkan_operand(1))
@@ -418,10 +653,10 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         val error = reject_unsupported_vulkan([vulkan_inst(store)], MirTerminator.Ret(nil))
         assert_backend_error_contains(error, "host/device store")
 
-    it "rejects unsupported MIR instructions with the instruction in the error":
+    it "rejects GEPs that do not use lowered shared-memory pointers":
         val unsupported = MirInstKind.GetElementPtr(vulkan_local(2), vulkan_operand(0), [vulkan_operand(1)])
         val error = reject_unsupported_vulkan([vulkan_inst(unsupported)], MirTerminator.Ret(nil))
-        assert_backend_error_contains(error, "does not support instruction")
+        assert_backend_error_contains(error, "GEP destination must be a U32 pointer")
 
     it "rejects unsupported call terminators with a typed Vulkan backend error":
         val term = MirTerminator.CallTerminator(

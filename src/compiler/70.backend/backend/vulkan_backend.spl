@@ -155,11 +155,31 @@ class VulkanBackend:
         val workgroup_id = builder.alloc_id()
         val uses_grid_dim = self.function_uses_grid_dim(func)
         val num_workgroups = if uses_grid_dim: builder.alloc_id() else: 0
+        val uses_shared_memory = self.function_uses_shared_memory(func)
+        var shared_array_ids: Dict<i64, i64> = {}
+        if uses_shared_memory:
+            for block in func.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case GpuSharedAlloc(dest, _, _):
+                            if shared_array_ids.has(dest.id):
+                                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared allocation destination may only be declared once"))
+                            shared_array_ids[dest.id] = builder.alloc_id()
+                        case _:
+                            ()
         val func_id = builder.alloc_id()
 
         var interface_ids = [global_invocation_id, local_invocation_id, workgroup_id]
         if uses_grid_dim:
             interface_ids = interface_ids.push(num_workgroups)
+        if uses_shared_memory:
+            for block in func.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case GpuSharedAlloc(dest, _, _):
+                            interface_ids = interface_ids.push(shared_array_ids[dest.id])
+                        case _:
+                            ()
         builder.emit_entry_point(func.name, func_id, interface_ids)
 
         # Default workgroup size (can be overridden)
@@ -191,6 +211,10 @@ class VulkanBackend:
         val semantics_workgroup = builder.emit_const_int(u32_type, 264)
         val semantics_device = builder.emit_const_int(u32_type, 2376)
         var value_ids: Dict<i64, i64> = {}
+        var pointer_ids: Dict<i64, i64> = {}
+        var live_shared_array_ids: Dict<i64, i64> = {}
+        var shared_array_sizes: Dict<i64, i64> = {}
+        var index_upper_bounds: Dict<i64, i64> = {}
         for block in func.blocks:
             for inst in block.instructions:
                 match inst.kind:
@@ -201,13 +225,47 @@ class VulkanBackend:
                     case BinOp(_, _, left, right):
                         self.predeclare_operand_constant(builder, left, u32_type, i64_type)
                         self.predeclare_operand_constant(builder, right, u32_type, i64_type)
+                    case GetElementPtr(_, _, indices):
+                        for index in indices:
+                            self.predeclare_operand_constant(builder, index, u32_type, i64_type)
+                    case Store(_, value):
+                        self.predeclare_operand_constant(builder, value, u32_type, i64_type)
                     case GpuBlockDim(dest, dim):
                         if dim >= 0 and dim <= 2:
                             val type_id = self.local_int_type_id(func, dest.id, u32_type, i64_type)
                             if type_id != 0:
                                 self.emit_int_constant(builder, type_id, workgroup_size[dim], i64_type)
+                    case GpuSharedAlloc(_, ty, size):
+                        if ty.kind == MirTypeKind.U32 and size > 0 and size <= 4294967295:
+                            builder.emit_const_int(u32_type, size)
                     case _:
                         ()
+        val shared_elem_ptr_type = if uses_shared_memory: builder.emit_type_pointer("Workgroup", u32_type) else: 0
+        var shared_array_ptr_types: Dict<i64, i64> = {}
+        if uses_shared_memory:
+            for block in func.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case GpuSharedAlloc(dest, ty, size):
+                            if ty.kind != MirTypeKind.U32:
+                                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared allocation element type must be U32"))
+                            if size <= 0 or size > 4294967295:
+                                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared allocation size must be between 1 and 4294967295 elements"))
+                            if not self.local_is_u32_ptr(func, dest.id):
+                                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared allocation destination must be a U32 pointer with mutable access"))
+                            val length_id = builder.emit_const_int(u32_type, size)
+                            val array_type = builder.emit_type_array(u32_type, length_id)
+                            shared_array_ptr_types[dest.id] = builder.emit_type_pointer("Workgroup", array_type)
+                            shared_array_sizes[dest.id] = size
+                        case _:
+                            ()
+            for block in func.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case GpuSharedAlloc(dest, _, _):
+                            builder.emit("{builder.id_str(shared_array_ids[dest.id])} = OpVariable {builder.id_str(shared_array_ptr_types[dest.id])} Workgroup")
+                        case _:
+                            ()
         builder.emit("{builder.id_str(global_invocation_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("{builder.id_str(local_invocation_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("{builder.id_str(workgroup_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
@@ -227,7 +285,7 @@ class VulkanBackend:
                 builder.emit_label()
 
             for inst in block.instructions:
-                val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id, num_workgroups, scope_workgroup, scope_subgroup, scope_device, semantics_workgroup, semantics_device), value_ids, func, workgroup_size)
+                val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id, num_workgroups, scope_workgroup, scope_subgroup, scope_device, semantics_workgroup, semantics_device), value_ids, shared_array_ids, live_shared_array_ids, shared_array_sizes, pointer_ids, index_upper_bounds, func, workgroup_size, shared_elem_ptr_type)
                 match result:
                     case Ok(_):
                         ()
@@ -251,8 +309,14 @@ class VulkanBackend:
         inst: MirInst,
         types: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64),  # scalar/vector types, builtin variables, barrier constants
         mut value_ids: Dict<i64, i64>,
+        mut shared_array_ids: Dict<i64, i64>,
+        mut live_shared_array_ids: Dict<i64, i64>,
+        shared_array_sizes: Dict<i64, i64>,
+        mut pointer_ids: Dict<i64, i64>,
+        mut index_upper_bounds: Dict<i64, i64>,
         func: MirFunction,
-        workgroup_size: [i64]
+        workgroup_size: [i64],
+        shared_elem_ptr_type: i64
     ) -> Result<(), CompileError>:
         """Compile a single MIR instruction to SPIR-V."""
         val _destruct_1 = types
@@ -274,6 +338,7 @@ class VulkanBackend:
 
         match inst.kind:
             case Const(dest, Int(value), ty):
+                index_upper_bounds.remove(dest.id)
                 val type_id = self.int_type_id(ty, u32_type, i64_type)
                 if type_id == 0:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V constants currently require U32 or I64"))
@@ -286,22 +351,29 @@ class VulkanBackend:
                 return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V constants currently require U32 or I64 integer values"))
 
             case Copy(dest, src):
+                index_upper_bounds.remove(dest.id)
                 val dest_type = self.local_int_type_id(func, dest.id, u32_type, i64_type)
                 if dest_type == 0 or self.local_int_type_id(func, src.id, u32_type, i64_type) != dest_type:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V copy requires matching U32 or I64 locals"))
                 if not value_ids.has(src.id):
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V copy source _l{src.id} has no value"))
                 value_ids[dest.id] = value_ids[src.id]
+                if index_upper_bounds.has(src.id):
+                    index_upper_bounds[dest.id] = index_upper_bounds[src.id]
 
             case Move(dest, src):
+                index_upper_bounds.remove(dest.id)
                 val dest_type = self.local_int_type_id(func, dest.id, u32_type, i64_type)
                 if dest_type == 0 or self.local_int_type_id(func, src.id, u32_type, i64_type) != dest_type:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V move requires matching U32 or I64 locals"))
                 if not value_ids.has(src.id):
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V move source _l{src.id} has no value"))
                 value_ids[dest.id] = value_ids[src.id]
+                if index_upper_bounds.has(src.id):
+                    index_upper_bounds[dest.id] = index_upper_bounds[src.id]
 
             case BinOp(dest, op, left, right):
+                index_upper_bounds.remove(dest.id)
                 val type_id = self.local_int_type_id(func, dest.id, u32_type, i64_type)
                 if type_id == 0:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V binary operation destination must be U32 or I64"))
@@ -327,13 +399,43 @@ class VulkanBackend:
                 return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V unary operation lowering is not implemented: {op}"))
 
             case Load(dest, ptr):
-                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V host/device load lowering is not implemented"))
+                index_upper_bounds.remove(dest.id)
+                val ptr_id = self.shared_pointer_operand_id(ptr, pointer_ids)
+                if ptr_id == 0 or self.local_int_type_id(func, dest.id, u32_type, i64_type) != u32_type:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V host/device load currently requires a lowered shared U32 element pointer and U32 destination"))
+                value_ids[dest.id] = builder.emit_load(u32_type, ptr_id)
 
             case Store(ptr, value):
-                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V host/device store lowering is not implemented"))
+                val ptr_id = self.shared_pointer_operand_id(ptr, pointer_ids)
+                if ptr_id == 0:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V host/device store currently requires a lowered shared U32 element pointer"))
+                val value_result = self.resolve_int_operand(builder, value, u32_type, value_ids, func, u32_type, i64_type)
+                if value_result.is_err():
+                    return Err(value_result.unwrap_err())
+                builder.emit_store(ptr_id, value_result.unwrap())
+
+            case GetElementPtr(dest, base, indices):
+                if indices.len() != 1:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP requires exactly one index"))
+                if not self.local_is_u32_ptr(func, dest.id):
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP destination must be a U32 pointer with mutable access"))
+                val base_id = self.shared_array_operand_id(base, live_shared_array_ids)
+                if base_id == 0:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP base must come from GpuSharedAlloc"))
+                val allocation_size = self.shared_array_operand_size(base, shared_array_sizes)
+                val index_type = self.operand_int_type_id(func, indices[0], u32_type, i64_type)
+                if index_type == 0:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP index must be U32 or I64"))
+                if not self.shared_index_is_proven_in_bounds(indices[0], allocation_size, index_upper_bounds):
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP index is not proven within the allocation"))
+                val index_result = self.resolve_int_operand(builder, indices[0], index_type, value_ids, func, u32_type, i64_type)
+                if index_result.is_err():
+                    return Err(index_result.unwrap_err())
+                pointer_ids[dest.id] = builder.emit_access_chain(shared_elem_ptr_type, base_id, [index_result.unwrap()])
 
             # GPU-specific instructions
             case GpuGlobalId(dest, dim):
+                index_upper_bounds.remove(dest.id)
                 if dim < 0 or dim > 2:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan invocation ID dimension must be 0, 1, or 2"))
                 val dest_type = self.local_int_type_id(func, dest.id, u32_type, i64_type)
@@ -345,6 +447,7 @@ class VulkanBackend:
                 value_ids[dest.id] = if dest_type == u32_type: component else: builder.emit_uconvert(i64_type, component)
 
             case GpuLocalId(dest, dim):
+                index_upper_bounds.remove(dest.id)
                 if dim < 0 or dim > 2:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan invocation ID dimension must be 0, 1, or 2"))
                 val dest_type = self.local_int_type_id(func, dest.id, u32_type, i64_type)
@@ -353,8 +456,10 @@ class VulkanBackend:
                 val loaded = builder.emit_load(uvec3_type, local_id_var)
                 val component = builder.emit_composite_extract(u32_type, loaded, [dim])
                 value_ids[dest.id] = if dest_type == u32_type: component else: builder.emit_uconvert(i64_type, component)
+                index_upper_bounds[dest.id] = workgroup_size[dim]
 
             case GpuBlockId(dest, dim):
+                index_upper_bounds.remove(dest.id)
                 if dim < 0 or dim > 2:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan invocation ID dimension must be 0, 1, or 2"))
                 val dest_type = self.local_int_type_id(func, dest.id, u32_type, i64_type)
@@ -365,6 +470,7 @@ class VulkanBackend:
                 value_ids[dest.id] = if dest_type == u32_type: component else: builder.emit_uconvert(i64_type, component)
 
             case GpuBlockDim(dest, dim):
+                index_upper_bounds.remove(dest.id)
                 if dim < 0 or dim > 2:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan block dimension must be 0, 1, or 2"))
                 val dest_type = self.local_int_type_id(func, dest.id, u32_type, i64_type)
@@ -373,6 +479,7 @@ class VulkanBackend:
                 value_ids[dest.id] = self.emit_int_constant(builder, dest_type, workgroup_size[dim], i64_type)
 
             case GpuGridDim(dest, dim):
+                index_upper_bounds.remove(dest.id)
                 if dim < 0 or dim > 2:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan grid dimension must be 0, 1, or 2"))
                 val dest_type = self.local_int_type_id(func, dest.id, u32_type, i64_type)
@@ -426,7 +533,9 @@ class VulkanBackend:
                         ))
 
             case GpuSharedAlloc(dest, ty, size):
-                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V shared memory lowering is not implemented"))
+                if not shared_array_ids.has(dest.id):
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V shared allocation was not declared"))
+                live_shared_array_ids[dest.id] = shared_array_ids[dest.id]
 
             case GpuAtomicOp(dest, op, ptr, value):
                 return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V atomic operation lowering is not implemented: {op}"))
@@ -449,6 +558,19 @@ class VulkanBackend:
                     return true
                 case _:
                     ()
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case GetElementPtr(_, _, indices):
+                        for index in indices:
+                            match index.kind:
+                                case Const(_, ty):
+                                    if ty.kind == MirTypeKind.I64:
+                                        return true
+                                case _:
+                                    ()
+                    case _:
+                        ()
         false
 
     fn function_uses_grid_dim(func: MirFunction) -> bool:
@@ -456,6 +578,16 @@ class VulkanBackend:
             for inst in block.instructions:
                 match inst.kind:
                     case GpuGridDim(_, _):
+                        return true
+                    case _:
+                        ()
+        false
+
+    fn function_uses_shared_memory(func: MirFunction) -> bool:
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case GpuSharedAlloc(_, _, _):
                         return true
                     case _:
                         ()
@@ -475,6 +607,53 @@ class VulkanBackend:
             if local.id.id == local_id:
                 return self.int_type_id(local.type_, u32_type, i64_type)
         0
+
+    fn operand_int_type_id(func: MirFunction, operand: MirOperand, u32_type: i64, i64_type: i64) -> i64:
+        match operand.kind:
+            case Copy(local) | Move(local):
+                self.local_int_type_id(func, local.id, u32_type, i64_type)
+            case Const(_, ty):
+                self.int_type_id(ty, u32_type, i64_type)
+
+    fn local_is_u32_ptr(func: MirFunction, local_id: i64) -> bool:
+        for local in func.locals:
+            if local.id.id == local_id:
+                match local.type_.kind:
+                    case Ptr(pointee, is_mutable):
+                        return pointee.kind == MirTypeKind.U32 and is_mutable
+                    case _:
+                        return false
+        false
+
+    fn shared_array_operand_id(operand: MirOperand, shared_array_ids: Dict<i64, i64>) -> i64:
+        match operand.kind:
+            case Copy(local) | Move(local):
+                if shared_array_ids.has(local.id): shared_array_ids[local.id] else: 0
+            case _:
+                0
+
+    fn shared_array_operand_size(operand: MirOperand, shared_array_sizes: Dict<i64, i64>) -> i64:
+        match operand.kind:
+            case Copy(local) | Move(local):
+                if shared_array_sizes.has(local.id): shared_array_sizes[local.id] else: 0
+            case _:
+                0
+
+    fn shared_index_is_proven_in_bounds(operand: MirOperand, allocation_size: i64, index_upper_bounds: Dict<i64, i64>) -> bool:
+        match operand.kind:
+            case Const(Int(value), _):
+                value >= 0 and value < allocation_size
+            case Copy(local) | Move(local):
+                index_upper_bounds.has(local.id) and index_upper_bounds[local.id] <= allocation_size
+            case _:
+                false
+
+    fn shared_pointer_operand_id(operand: MirOperand, pointer_ids: Dict<i64, i64>) -> i64:
+        match operand.kind:
+            case Copy(local) | Move(local):
+                if pointer_ids.has(local.id): pointer_ids[local.id] else: 0
+            case _:
+                0
 
     fn int_constant_in_range(value: i64, ty: MirType) -> bool:
         match ty.kind:
@@ -580,17 +759,6 @@ impl Codegen for VulkanBackend:
 
 impl GpuCodegen for VulkanBackend:
     fn compile_kernel(func_name: text, body: MirBody) -> Result<text, CompileError>:
-        val builder = SpirvBuilder.create(self.vulkan_version)
-        for local in body.locals:
-            match local.type_.kind:
-                case I64:
-                    builder.add_capability("Int64")
-                case _:
-                    ()
-        builder.emit_header()
-        builder.emit_capabilities()
-        builder.emit_extensions()
-        builder.emit_memory_model()
         val mir_body: MirBody = body
         var vk_param_types: [MirType] = []
         var vk_pi = 0
@@ -608,6 +776,13 @@ impl GpuCodegen for VulkanBackend:
             export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
             has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false
         )
+        val builder = SpirvBuilder.create(self.vulkan_version)
+        if self.function_uses_i64(func):
+            builder.add_capability("Int64")
+        builder.emit_header()
+        builder.emit_capabilities()
+        builder.emit_extensions()
+        builder.emit_memory_model()
         val result = self.compile_compute_shader(builder, func)
         match result:
             case Ok(_):
