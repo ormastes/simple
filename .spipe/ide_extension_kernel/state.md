@@ -56,7 +56,7 @@ Shared files (src/lib/common/sdn/**, src/lib/editor/extensions/{contract,api,reg
 | Lane | Status | Commit | Notes |
 |---|---|---|---|
 | L1 Markdown | verifying | — | new specs 13/13 unit + 5/5 system green; controller baseline 65/92 exact match; final report pending |
-| L2 Writer | RELAUNCHED | — | first agent hit session limit post-implementation; work on disk (writer_ext.spl, word_extension_spec.spl, word_app.spl +349/-102); verification agent running |
+| L2 Writer | LANDED | a433ac40 | registry dispatch, codec-backed save, theme lookup; 6/6 new spec; word reds pre-existing (MdBlockResult in non-owned file_formats.spl) |
 | L3 Sheets | LANDED | 51437cee | function registry + DOUBLE fixture; 1037-case baseline unchanged |
 | L4 Slides | LANDED | de71d056 | layout/element registries; 11/11 new, 133/133 baselines |
 | L5 Theme | verify pending | — | code+report done; specs never reached Results: under load; verification agent running |
@@ -67,3 +67,17 @@ Only ordered cross-lane edge: L5 deletes extensions/theme_manager.spl after L1 d
 Landing protocol under WC contention: git-plumbing commits (temp GIT_INDEX_FILE,
 read-tree FETCH_HEAD, update-index only owned paths, commit-tree, SSH push) —
 jj WC is contested by parallel sessions and update-stale WIPES uncommitted files.
+
+## Follow-up lanes (post-L1..L7)
+| Lane | Status | Commit | Notes |
+|---|---|---|---|
+| L0-dupkey | LANDED | 9f69e3c3 | parse_with_spans_and_issues; manifest decode surfaces duplicate_key with line/col; spans 15/15, manifest_sdn 11/11, walking 4/4, 82-gate exact |
+| L6b activation hooks | in flight | — | sheets/slides builtins self-register on activation |
+| L7b vscode generation | LANDED | bea36f79 | hard mismatches 48->0; **spec probe-validated only** — harness re-run pending |
+
+## RE-VERIFY QUEUE (harness timed out under load 26+; run when box quiets)
+- test/01_unit/app/vscode_extension_gen_spec.spl (L7b, 9 cases)
+- test/01_unit/app/ide/capability_truth_spec.spl (regression check for L7b)
+- test/01_unit/lib/common/ui/theme_role_color_spec.spl + test/01_unit/os/services/theme_service_spec.spl (L5)
+Root cause of timeouts: legitimate parallel heavy builds (stage3 bootstrap
+native-build 5h+, worktree native_build_worker) — NOT runaways; do not kill.
