@@ -515,6 +515,22 @@ implementation-in-progress
   overlapping. Native `windowclose` removes the X11 window but does not stop
   the demo loop; it required Ctrl-C. No clean-close or complete widget-layout
   claim is made.
+- phase3-vbox-layout-regression: Two small-model audits traced the visible
+  overlap to `WidgetRect[]` transport, not VBox arithmetic. The exact demo has
+  fixed row Y coordinates (`button=90`, `status=374`) and stable IDs. The
+  extended native first-frame probe finds both IDs but exits `23` because the
+  returned button Y is corrupt. Three bounded cycles showed that moving field
+  reads behind accessors and snapshotting the already-returned array cannot
+  recover the geometry; that ineffective implementation was removed. The
+  retained red regression proves the next repair must write scalar geometry
+  during layout traversal, before any aggregate-array return boundary.
+- host-glfw-close-flag-consumer: The demo now consumes the existing
+  `SimpleGlfw.should_close(host_window)` signal after draining normalized
+  events. The cached full build compiled 2 modules and reused 512. Xvfb `:77`
+  has no window manager, so `xdotool windowclose` destroys the X11 surface
+  without setting GLFW's close flag or producing a valid callback request; the
+  process remained alive and was stopped with Ctrl-C. This environment cannot
+  certify outer close, but real-host close flags will no longer be ignored.
 
 ## Remaining runtime gates
 
@@ -528,8 +544,10 @@ implementation-in-progress
   now passes Resize token, theme source parsing, theme material checksum
   serialization, exact image resolution, GUI frame construction, external
   admission, and raw compositor readback. The exact-title live demo now has a
-  retained non-black screenshot. Widget layout, semantic input, and clean
-  outer-window close remain RED.
+  retained non-black screenshot. The new native regression proves VBox row
+  geometry is corrupted before Draw IR consumes the returned `WidgetRect[]`.
+  Semantic input and clean outer-window close remain RED; Xvfb without a
+  window manager is not valid close-request evidence.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the

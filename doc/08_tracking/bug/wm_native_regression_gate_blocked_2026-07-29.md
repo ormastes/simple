@@ -300,3 +300,30 @@ full-demo capture. It visibly shows WM chrome, client content, and taskbar, but
 the widget layout is collapsed/overlapping. Sending native `windowclose`
 removes the X11 window while the demo loop remains alive, so clean event-driven
 shutdown is still unproven and the process was stopped with Ctrl-C.
+
+The next bounded layout probe made that visual failure executable. For the
+exact demo tree at 480x480, VBox arithmetic specifies `demo-button.y=90` and
+`demo-status.y=374`. Both IDs survive `compute_layout()`, but the Phase-3
+binary exits `23` because the returned button Y is corrupt. Three cycles
+distinguished the boundary:
+
+```text
+cycle 1: direct returned WidgetRect geometry -> grouped exit 21
+cycle 2: post-return scalar snapshot -> grouped exit 21
+cycle 3: split identity/geometry diagnostics -> exit 23 (button Y)
+```
+
+The attempted post-return snapshot and renderer accessors were removed because
+they cannot repair geometry already corrupted by the aggregate-array return.
+The retained regression now fails before the previously green frame checks.
+The next repair must write scalar geometry during layout traversal, before
+recursive or top-level `WidgetRect[]` returns.
+
+The parallel close audit confirmed that runtime GLFW already enqueues close
+callbacks and exposes `rt_glfw_should_close()`, while the demo consumed only
+queued events. It now also checks `SimpleGlfw.should_close(host_window)` after
+polling. The cached full build compiled 2 modules and reused 512. Xvfb `:77`
+runs without a window manager, so `xdotool windowclose` directly removes the
+surface without setting the GLFW close flag; the unchanged process remains
+alive. This is invalid close-request certification rather than proof that the
+fallback is wrong. A real WM_DELETE_WINDOW host smoke remains required.
