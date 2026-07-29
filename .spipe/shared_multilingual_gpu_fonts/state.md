@@ -1505,3 +1505,13 @@ pixels, and performance evidence remain release-blocking.
   and pixel transfers. This is source and mock-ABI evidence only; the current
   host has no AMD device, so retained native pixels and promotion remain
   pending. STATUS: FAIL.
+- rv64-stage2-desktop-parser-window-2026-07-29: Canonical Stage2 attempt 6
+  passed at checkpoint `49673723101b` with binary SHA-256
+  `028f6ccb368a76a5911c07c87563980051418845647280ef7e575e3085043a64`.
+  Three bounded RV64 diagnostics removed the over-broad management-console
+  closure, unused reserved-name `process.spawn`, and obsolete DMA match syntax,
+  then stopped at `src/os/tools/pkg/pkg_repository.spl:158`, where Stage2
+  rejects an uninitialized `Result<text,text>`. No ELF or QEMU crop exists.
+  Attempts 4–6 are retained; the exact resume is tracked in
+  `doc/08_tracking/bug/stage2_rv64_desktop_pkg_repository_result_initializer_2026-07-29.md`.
+  The scoped status remains BLOCKED and 0/10 specs are accepted.

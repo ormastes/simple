@@ -9,6 +9,27 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
+## Current RV64 Stage2 result — 2026-07-29
+
+Canonical pure-Simple Stage2 attempt 6 passed at checkpoint
+`49673723101bfa3950254dbe8bf0008be003ec4b`; binary SHA-256 is
+`028f6ccb368a76a5911c07c87563980051418845647280ef7e575e3085043a64`
+and provenance SHA-256 is
+`8b705d957f084577dea82864e60605bac0088821059185e2b68d5d1d3eeebf82`.
+The RV64 desktop source now bypasses the management-console dependency graph,
+the unused reserved-name `process.spawn` wrapper is removed, and the DMA
+direction match uses Stage2-compatible syntax. The focused RV64 display ABI
+contract passes and independent P0/P1 review accepts those changes.
+
+Three retained diagnostic builds advanced from the former SBI/unsafe-asm
+failure through `process.spawn` and DMA parsing to the current blocker:
+`src/os/tools/pkg/pkg_repository.spl:158` declares an uninitialized
+`Result<text, text>`. Attempt 6 exited `1` without an ELF; the exact resume is
+tracked in
+`doc/08_tracking/bug/stage2_rv64_desktop_pkg_repository_result_initializer_2026-07-29.md`.
+The three-cycle cap is exhausted, so RV64 crop/QEMU evidence, the exact-ten
+run, and manual publication remain pending.
+
 ## Current active delivery scope — SimpleOS Stage 2 (supersedes)
 
 The active delivery goal is `SIMPLEOS_STAGE2_FONT`. It covers exactly the ten
