@@ -1654,19 +1654,16 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
     simple_web_layout_render_html_software_result(html, width, height, budget_ms).pixels
 
-# GPU display-list frame: the CPU ground-truth framebuffer PLUS a list of real
-# per-primitive draw ops (solid opaque background rects) that Engine2D can
-# dispatch as genuine backend kernel calls (draw_rect_filled), instead of
-# uploading one finished CPU bitmap. Non-solid primitives (gradients, borders,
-# rounded corners, text, images) are left out of the op list on purpose and are
-# reconstructed by the presenter as a residual blit taken from `fb`, so the
-# composited GPU frame stays bit-exact with the CPU path. This is consumed by
-# the SIMPLE_WEB_GPU_PAINT presenter path.
+# GPU display-list frame: real solid-fill ops plus a CPU ground-truth
+# framebuffer only when residual paint is required. Solid-only frames leave
+# `fb` empty so successful GPU execution does not first rasterize the same
+# pixels on the CPU. Backend failure reconstructs that mirror lazily.
 class WebGpuPaintFrame:
     fb: [u32]
     fill_ops: [SceneCommand]
     width: i32
     height: i32
+    base: u32
     cpu_paint_pixels: i32
 
 # Emit a fill_rect op for every node whose background is a plain opaque
@@ -1735,16 +1732,6 @@ fn _web_gpu_solid_only_frame(nodes: [HNode], styles: [Style], widget_mode: bool)
             i = i + 1
     true
 
-fn _web_gpu_simulate_fill_ops(fill_ops: [SceneCommand], width: i32, height: i32, base: u32) -> [u32]:
-    var out = browser_layout_framebuffer_filled_serial(base, width, height)
-    var oi: i32 = 0
-    val op_count = fill_ops.len()
-    while oi < op_count:
-        val op = fill_ops[oi]
-        out = fb_rect(out, width, height, op.x, op.y, op.width, op.height, op.color as u32)
-        oi = oi + 1
-    out
-
 pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> WebGpuPaintFrame:
     _web_budget_begin(budget_ms)
     val nodes = parse_html(html)
@@ -1781,13 +1768,12 @@ pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i
     val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
     val fill_ops = _web_gpu_solid_fill_ops(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height, widget_mode)
     if _web_gpu_solid_only_frame(nodes, styles, widget_mode):
-        val gpu_fb = _web_gpu_simulate_fill_ops(fill_ops, width, height, base)
-        return WebGpuPaintFrame(fb: gpu_fb, fill_ops: fill_ops, width: width, height: height, cpu_paint_pixels: 0)
+        return WebGpuPaintFrame(fb: [], fill_ops: fill_ops, width: width, height: height, base: base, cpu_paint_pixels: 0)
     var fb = browser_layout_framebuffer_filled(base, width, height)
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
     var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
     painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
-    WebGpuPaintFrame(fb: painted, fill_ops: fill_ops, width: width, height: height, cpu_paint_pixels: width * height)
+    WebGpuPaintFrame(fb: painted, fill_ops: fill_ops, width: width, height: height, base: base, cpu_paint_pixels: width * height)
 
 # Render at a scroll offset: preserve viewport layout, then shift paint
 # coordinates so allocation stays bounded by WxH.

@@ -35,8 +35,10 @@ pages can lose more time to command/upload/readback traffic than they save on
 device fill work. `web_gpu_paint_economics(frame, base)` is the local decision
 helper: it compares total CPU paint plus upload/readback cost against primitive
 fill commands plus residual upload cost, and only returns an offload win when
-estimated total work is lower. Solid-only pages build the frame from fill ops; mixed pages
-still keep CPU ground truth for residual parity. The forced GPU paint path
+estimated total work is lower. A losing opt-in job returns the CPU mirror
+without initializing the requested GPU backend. Solid-only pages retain only
+fill ops so successful offload does no duplicate CPU framebuffer raster;
+mixed pages still keep CPU ground truth for residual parity. The forced GPU paint path
 predicts the residual from the local fill list, so it avoids an extra full-frame
 GPU readback before the final pixel-returning API readback. The deterministic
 policy gate is
