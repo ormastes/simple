@@ -9,6 +9,7 @@
 use app.office.sheets.cell.{CellValue, CellRef, parse_cell_ref, cell_ref_to_string, cell_display_text, col_to_letter}
 use app.office.sheets.cell_ref.{parse_range, expand_range_refs, CellRange}
 use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.function_registry.{sheet_function_registry_has, sheet_function_registry_evaluate}
 use app.office.sheets.math_bridge.{excel_sin, excel_cos, excel_tan, excel_atan, excel_asin, excel_acos,
                                         excel_sinh, excel_cosh, excel_tanh, excel_ln, excel_log10, excel_log,
                                         excel_exp, excel_sqrt, excel_sqrt_pi, excel_round, excel_trunc,
@@ -3257,8 +3258,49 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return EvalResult(value: CellValue.NumberVal(value: area / 2.0), next_pos: cur_pos)
     EvalResult(value: CellValue.NumberVal(value: area), next_pos: cur_pos)
 
+fn _eval_registry_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """Collect arguments the same way the generic numeric dispatch below does
+    (numbers as [n], ranges flattened to their cell values), then hand off
+    to function_registry.spl instead of the inline big-table dispatch."""
+    var args: [[f64]] = []
+    var cur_pos = pos
+
+    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        if (cur_pos + 2 < tokens.len() and
+            tokens.get(cur_pos + 1) == ":" and
+            _is_cell_ref_token(tokens.get(cur_pos)) and
+            _is_cell_ref_token(tokens.get(cur_pos + 2))):
+            val range_str = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+            val values = _resolve_cell_range(range_str, sheet, depth)
+            args.push(values)
+            cur_pos = cur_pos + 3
+        else:
+            val result = _eval_comparison(tokens, cur_pos, sheet, depth)
+            val num_val = _to_number(result.value)
+            args.push([num_val])
+            cur_pos = result.next_pos
+
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+
+    val outcome = sheet_function_registry_evaluate(name, args, sheet)
+    val result_val = match outcome:
+        Ok(v): v
+        Err(msg): CellValue.ErrorVal(message: msg)
+    EvalResult(value: result_val, next_pos: cur_pos)
+
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a function call. pos points to first token after '('."""
+    # Extension hook (function_registry.spl): a registered name always wins
+    # over the inline dispatch below, so a builtin extension (e.g. the
+    # DOUBLE fixture in builtin/sheets_ext.spl) can add functions without
+    # touching this 9.7k-line file further. Unregistered names fall through
+    # to the existing behavior unchanged.
+    if sheet_function_registry_has(name):
+        return _eval_registry_function(name, tokens, pos, sheet, depth)
     if _is_text_function(name):
         return _eval_text_function(name, tokens, pos, sheet, depth)
     if _is_criteria_function(name):
