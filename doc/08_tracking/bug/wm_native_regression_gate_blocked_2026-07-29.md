@@ -302,7 +302,7 @@ removes the X11 window while the demo loop remains alive, so clean event-driven
 shutdown is still unproven and the process was stopped with Ctrl-C.
 
 The next bounded layout probe made that visual failure executable. For the
-exact demo tree at 480x480, VBox arithmetic specifies `demo-button.y=90` and
+exact demo tree at 480x480, the initial oracle asserted `demo-button.y=90` and
 `demo-status.y=374`. Both IDs survive `compute_layout()`, but the Phase-3
 binary exits `23` because the returned button Y is corrupt. Three cycles
 distinguished the boundary:
@@ -344,3 +344,28 @@ This disproves the narrower theory that only aggregate-array return transport
 corrupts geometry. The next investigation must isolate scalar argument
 evaluation at the VBox-to-recursive-call boundary before attempting another
 renderer or live-window change.
+
+That isolation found the root container is a bordered Panel. Its inner origin
+is `(1,1)`, so the correct button/status Y oracle is `91/375`; the regression
+was corrected. The observed native button Y of `1` therefore identifies the
+failure more precisely: VBox places every child at the unchanged inner origin
+because `cur_y` does not survive the call-bearing child loop.
+
+A fresh existing pure-Simple Stage-2 binary reproduced exit `23`. Converting
+only the VBox measurement and placement loops from `for` to indexed `while`
+also reproduced exit `23`, consistent with the known cross-block scalar spill
+family rather than a `for`-specific lowering bug; that workaround was reverted.
+A scoped compiler refresh was then attempted with the existing Stage-2 binary,
+the persistent cache, and `SIMPLE_NO_STUB_FALLBACK=1`—not a bootstrap. It
+failed before producing an executable:
+
+```text
+GlobalFlags.mem_infra_requested: cannot infer field type
+SdnValue.empty: unknown enum variant or method
+ANY.is_empty: cannot infer field type
+```
+
+Per the three-cycle cap, no raw coordinate stack or live GLFW rebuild was
+attempted in this turn. The next convergent lane is one of those three
+compiler-entry lowering failures, after which the source-fixed scalar-spill
+compiler can rerun the unchanged WM oracle.

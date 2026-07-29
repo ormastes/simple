@@ -541,6 +541,17 @@ implementation-in-progress
   exited `23`. The experiment was reverted: the corruption exists before or
   during the scalar push call, not only in the returned `WidgetRect[]`.
   Per the three-cycle cap, no live rebuild was attempted.
+- phase3-vbox-cursor-and-compiler-isolation: The exact root is a bordered Panel,
+  so the correct button/status Y oracle is `91/375`, not `90/374`; the retained
+  probe was corrected. The observed button Y of `1` is the panel inner origin,
+  proving `cur_y` does not survive the call-bearing child loop. A fresh
+  pure-Simple Stage-2 build of the probe still exited `23`, and changing only
+  the two VBox loops from `for` to indexed `while` also exited `23`; that
+  ineffective source workaround was reverted. A cache-preserving, no-stub
+  compiler refresh from the existing Stage-2 binary was attempted without a
+  bootstrap. It failed closed on `GlobalFlags.mem_infra_requested`,
+  `SdnValue.empty`, and `ANY.is_empty` HIR/MIR lowering errors before producing
+  a compiler executable. No live demo rebuild was justified.
 
 ## Remaining runtime gates
 
@@ -571,5 +582,6 @@ implementation-in-progress
   and board PCM evidence remain open.
 - Compiler: the stale Phase 3 binary still fails the isolated runtime-derived
   `i64 as u32` narrowing probe. Current compiler sources contain the cast
-  bridge/truncation fix; refreshing the compiler remains unattempted under the
-  no-bootstrap constraint.
+  bridge/truncation and cross-block scalar reload fixes. A scoped pure-Simple
+  Stage-2-to-compiler refresh (not a bootstrap) now fails on three unrelated
+  compiler-entry HIR/MIR errors listed above.
