@@ -128,7 +128,7 @@ int64_t rt_audio_sdl2_queue_pcm_f64_raw(
     size_t byte_count;
 
     if (handle == 0 || handle != g_audio_handle || g_audio_device == 0) return 0;
-    if (samples_addr == 0 || sample_count <= 0) return 0;
+    if (samples_addr <= 0 || sample_count <= 0) return 0;
     if (channels != 2 || sample_rate != 48000 || sample_count % channels != 0) return 0;
     if ((uint64_t)sample_count > SIZE_MAX / sizeof(float)) return 0;
     if ((uint64_t)sample_count > UINT32_MAX / sizeof(float)) return 0;
