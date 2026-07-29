@@ -12,7 +12,7 @@ use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPO
 use compiler.core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM, DECL_LAZY_VAL}
 use compiler.core.ast.{DECL_CE, decl_ce_block}
 use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
-use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
+use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding, decl_type_alias}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
 use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args, decl_set_vhdl_generic_args, decl_set_flatten_struct_output}
 use compiler.core.ast.{decl_impl_block}
@@ -42,6 +42,9 @@ use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN}
 # Import from sibling split modules
 use compiler.frontend.core.parser_expr.{parse_expr, parse_int_text}
 use compiler.frontend.core.parser_stmts.{parse_block, parse_if_expr, parse_for_expr, parse_while_expr}
+use compiler.frontend.core.parser_stmts.{parse_trailing_colon_block_arg}
+use compiler.core.ast.{EXPR_CALL, EXPR_METHOD_CALL, expr_get_tag}
+use compiler.core.tokens.{TOK_COLON}
 
 # Re-export use/export/binding/impl declarations (extracted to parser_decls_use.spl)
 use compiler.frontend.core.parser_decls_use.*
@@ -830,9 +833,26 @@ fn parse_module_body():
             parser_advance()
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 35:
-            # Type alias: type X = Y -- skip it
+            # Type alias: type X = Y -- capture name + aliased type into the
+            # arena (bug type_alias_declarations_discarded_at_parse_2026-07-29,
+            # lane TAL1). Pure plumbing: no semantic alias registry yet -- a
+            # later lane consumes module.type_aliases.
             parser_advance()
-            # Skip until newline
+            var ta_name: text = ""
+            if par_kind_get() == 6:
+                ta_name = par_text_get()
+                parser_advance()
+            var ta_type_tag: i64 = 0
+            if par_kind_get() == TOK_ASSIGN:
+                parser_advance()
+                ta_type_tag = parser_parse_type()
+            if ta_name != "":
+                val ta_d = decl_type_alias(ta_name, ta_type_tag, 0)
+                module_add_decl(ta_d)
+            # Defensive skip-to-newline: this minimal capture does not parse
+            # generic type-alias params (`type X<T> = ...`) or where-clauses,
+            # so consume any leftover tokens the same way the old skip loop
+            # did rather than risking a parse desync.
             for j in 0..1000:
                 val type_is_nl: bool = par_kind_get() == 180
                 val type_is_ded: bool = par_kind_get() == 182
@@ -968,14 +988,22 @@ fn parse_module_body():
                     parser_reset_pending_vhdl_decorators()
                     parser_skip_newlines_and_semicolons()
                 else:
-                    val expression = parse_expr()
+                    val expression0 = parse_expr()
+                    # `describe("x"):` / `it "x":` at module level (spec DSL
+                    # top-level calls): trailing colon-block sugar, appended
+                    # as an implicit zero-arg lambda argument. See
+                    # parse_trailing_colon_block_arg's doc comment.
+                    val is_call0 = expr_get_tag(expression0) == EXPR_CALL or expr_get_tag(expression0) == EXPR_METHOD_CALL
+                    val expression = if par_kind_get() == TOK_COLON and is_call0: parse_trailing_colon_block_arg(expression0) else: expression0
                     val d = decl_val_binding("_expr_" + int_to_str(i), -1, expression, -1)
                     module_add_decl(d)
                     parser_reset_pending_vhdl_decorators()
                     parser_skip_newlines_and_semicolons()
             else:
                 # Module-level expression/statement
-                val expression = parse_expr()
+                val expression1 = parse_expr()
+                val is_call1 = expr_get_tag(expression1) == EXPR_CALL or expr_get_tag(expression1) == EXPR_METHOD_CALL
+                val expression = if par_kind_get() == TOK_COLON and is_call1: parse_trailing_colon_block_arg(expression1) else: expression1
                 val d = decl_val_binding("_expr_" + int_to_str(i), -1, expression, -1)
                 module_add_decl(d)
                 parser_reset_pending_vhdl_decorators()

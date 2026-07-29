@@ -155,6 +155,11 @@ fn flat_ast_to_module(path: text) -> Module:
     var di_bindings: [DiBinding] = []
     var arch_rules: [ArchRule] = []
     var bitfields: Dict<text, Bitfield> = {}
+    # TAL1 (bug type_alias_declarations_discarded_at_parse_2026-07-29): the
+    # arena now captures `type X = Y` (decl_type_alias, tag 17). Thread it
+    # through into module.type_aliases instead of the old hardcoded `{}` --
+    # pure plumbing, no semantic alias registry consumes this yet.
+    var type_aliases: Dict<text, TypeAlias> = {}
     # Bare top-level statements (parsed as `_expr_N` val bindings). Collected in
     # source order so they can be wrapped into a synthetic `fn main` when the
     # module defines none (e.g. `-c "print(1+1)"` snippets / script-style files).
@@ -588,6 +593,20 @@ fn flat_ast_to_module(path: text) -> Module:
                 message: ar_message,
                 span: span
             ))
+        elif tag_text == "17":
+            # type X = Y (decl_type_alias). Pure capture: name + aliased type
+            # only -- no type_params/visibility recorded by the parser yet,
+            # so those are left at their defaults.
+            val ta_name = decl_get_name(idx)
+            val ta_type = convert_flat_type(decl_get_ret_type(idx))
+            type_aliases[ta_name] = TypeAlias(
+                name: ta_name,
+                type_params: [],
+                type_: ta_type,
+                visibility: convert_decl_visibility(idx),
+                is_public: decl_get_visibility_text(idx) == "public",
+                span: span
+            )
         di = di + 1
         if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
             eprint("[flat-bridge] decl:done {di}")
@@ -645,7 +664,7 @@ fn flat_ast_to_module(path: text) -> Module:
         bitfields: bitfields,
         traits: traits,
         impls: impls,
-        type_aliases: {},
+        type_aliases: type_aliases,
         constants: constants,
         static_asserts: [],
         aop_advices: aop_advices,
