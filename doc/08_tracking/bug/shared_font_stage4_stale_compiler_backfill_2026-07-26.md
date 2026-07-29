@@ -484,6 +484,39 @@ timeout, absent ELF, unresolved stubs, or missing admission markers. Preserve
 the cache and all logs. No full bootstrap and no Rust-seed acceptance
 substitution.
 
+### P0 e480c48 bounded result — 2026-07-29
+
+The independently reviewed `ExistsCheck` owner repair is committed at
+`e480c48da7137b6a245c19602e863f47ae206c41`.  The fresh retained attempt root
+is `build/native_probe/p0-admission-e480c48d/`; it used the seed SHA-256
+`443ddfeb0cacf815ad213b162213d724d0d67558bd5be151948b4ca6abdc3e64` and
+core-C archive SHA-256
+`12b684a063416c7440cc718aac598b7aaa8a1ffa518a2e712d4a0966f548a3cd`.
+
+Cycle 1's isolated A probe (`Option<Box>` plus `val owned = opt.?`, no field
+read) failed before an output binary with `field access on nil receiver` and
+SIGILL.  Its source SHA-256 is
+`d41b17316262324977566ebcc69b8cf2149d2177e7c6c05ce1a8d4430eea06e5`; its
+log SHA-256 is
+`5be751f2123d19742bc651af4a8de8df5106f58a60537e37e240eebef67f484a`.
+B and C were correctly not run after the first failure.
+
+Cycle 2 built a current temporary Stage 2 successfully: SHA-256
+`e714d284f3b126f88b5ef97b2230feb42938ea1c22565251d086fb2675d74962`, with
+`693 rebuilt / 0 failed`; log SHA-256
+`1b9bf3ca90631a98514b8f41ff48cab15aebec8bc00d1c45ce432baf125119ac`.
+Case 25 then failed once with the same nil-receiver/SIGILL before a binary.
+The Stage 2 is a seed-generated temporary producer, not acceptance evidence.
+
+The permitted one-shot Stage 3 attempt from that temporary producer also
+failed before an output with the same error; log SHA-256
+`dac6c14935953df43b1bf83a677ef069ee62367514d859ed719397b43a0938f0`.
+No Stage 4, essential-tools, calibration, font spec, docgen, hardware, or
+performance row was run or promoted.  Do not rerun this producer chain in this
+window.  The next owner must retain these receipts and localize the bootstrap
+seed/self-host transition that still compiles the compiler's own optional
+metadata path with the pre-repair lowering.
+
 The following is a reconstructed Stage 2 template. It fails closed until the
 operator exports every required path. Record the full source/seed/runtime
 manifest plus command, stdout, stderr, time, exit, cache owner, and output hash:
