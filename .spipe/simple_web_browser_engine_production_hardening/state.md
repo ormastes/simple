@@ -2268,17 +2268,32 @@ implementation in progress / target evidence blocked
   detection unsafe. The concrete root fix and 1,000-dispatch/escaped-identity
   evidence are recorded in
   `doc/09_report/js_event_dispatch_vm_growth_2026-07-29.md`; no unsafe
-  Event-only reuse was accepted.
-- open CSP lifecycle/evidence blocker (2026-07-29): The uncommitted broker CSP
-  patch passed source review for authenticated header+meta intersection,
-  comma/newline policy lists, pre-cookie/network admission, redirects,
-  committed error documents, 304 preservation, directive fallback, and bounded
-  history. Its third/final review found that site-swap evidence still copies
-  state directly instead of driving Registry `advance_window` /
-  `_begin_site_swap`, so the patch was not committed. The exact missing
-  production-path evidence plus separate BrowserSession CSP history growth,
-  budget, and cleanup defects are recorded in
-  `doc/09_report/browser_csp_state_lifecycle_2026-07-29.md`.
+  Event-only reuse was accepted. A reviewed lexical-parent prerequisite remains
+  uncommitted at `/tmp/simple-js-lexical-parent-worktree.P06ifr`: its unit
+  compile passes, but cycle-3 docgen evidence incorrectly reports an
+  unconditional pending reclamation scenario as active and emits code fragments
+  as operator steps. The full 1,000-dispatch reclamation bound remains RED.
+- broker CSP enforcement tranche (2026-07-29): The hosted broker now owns and
+  intersects header/meta CSP, restores committed/pending/history policy through
+  production site swaps, rejects missing/invalid or base-policy-failed requests
+  before navigation, cookie mutation, or transport, rejects opaque-sandbox
+  cookie writes, and keeps top-level document downgrade outside the subresource
+  mixed-content shortcut. Adversarial decoded SBRQ4 evidence traverses the
+  production dispatch path. Independent security and generated-manual reviews
+  passed; commit `5aaa58f02936` is on GitHub.
+- CSS table spacing tranche (2026-07-29): `border-spacing` is parsed, inherited,
+  carried through Web layout/Draw IR, and applied to fixed and constraint-aware
+  automatic tables. Vertical-only `0 3px`, min-width, colspan, row-group,
+  caption, CSS-wide, invalid-negative, oversized containment, and zero-spacing
+  controls passed independent review. Commit `a4e587120b47` is on GitHub.
+- phase-2 docgen runtime repair (2026-07-29): Native `rt_to_string` no longer
+  dereferences boxed integer `2026 << 3` as an array; aggregate dispatch first
+  proves registry membership. The C selfcheck passes, the phase-2 docgen built
+  `69 compiled, 0 failed`, and CSP/JS manuals regenerated with zero stubs. The
+  exact evidence and binary hash are in
+  `doc/08_tracking/bug/native_rt_to_string_boxed_i64_array_probe_sigsegv_2026-07-29.md`;
+  commit `03064ec97087` is on GitHub. No full bootstrap or Rust-seed fallback
+  was used.
 - parser artifact divergence (2026-07-29): Current pure-Simple parser source
   successfully parses bare, field, compound, and walrus assignment RHS
   continuations through a focused compiled parser probe. Deployed Stage2
