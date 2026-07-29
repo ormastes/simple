@@ -25,11 +25,19 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{
+    Logger, BrowserLogLevel
+}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_with_images
 }
 use std.common.image.png_encode.{encode_argb_to_png}
 use common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_attr, be_dom_serialize_html
+}
 
 fn _csp_alias_png_hex(pixel: u32) -> text:
     var out = ""
@@ -54,6 +62,61 @@ fn _csp_alias_color_count(pixels: [u32], color: u32) -> i32:
         if pixel == color:
             count = count + 1
     count
+
+fn _csp_alias_remove_node(node: BeDomNode, id_value: text) -> BeDomNode:
+    var next = node
+    var children: [BeDomNode] = []
+    for child in next.children:
+        if be_dom_get_attr(child, "id") != id_value:
+            children.push(_csp_alias_remove_node(child, id_value))
+    next.children = children
+    next
+
+fn _csp_alias_reverse_pair(
+    node: BeDomNode, first_id: text, second_id: text
+) -> BeDomNode:
+    var next = node
+    var first_index = -1
+    var second_index = -1
+    var index = 0
+    while index < next.children.len():
+        val id_value = be_dom_get_attr(next.children[index], "id")
+        if id_value == first_id:
+            first_index = index
+        elif id_value == second_id:
+            second_index = index
+        index = index + 1
+    if first_index >= 0 and second_index >= 0:
+        val first = next.children[first_index]
+        next.children[first_index] = next.children[second_index]
+        next.children[second_index] = first
+        return next
+    var children: [BeDomNode] = []
+    for child in next.children:
+        children.push(_csp_alias_reverse_pair(
+            child, first_id, second_id
+        ))
+    next.children = children
+    next
+
+fn _csp_alias_inline_session() -> BrowserSession:
+    var session = BrowserSession.new()
+    session.register_resource(
+        "https://safe.test/shared.png",
+        _csp_alias_png_hex(0xFFFF00FFu32)
+    )
+    val result = session.open_html(
+        "https://safe.test/app",
+        "<html><head>" +
+        "<img id='allowed' src='/shared.png' width='2' height='2'>" +
+        "<meta http-equiv='content-security-policy' " +
+        "content=\"img-src 'none'\">" +
+        "</head><body style='margin:0'>" +
+        "<img id='blocked' src='/shared.png' width='2' height='2'>" +
+        "</body></html>"
+    )
+    expect(result.is_ok()).to_be(true)
+    session
 
 # @inline
 fn _two_origin_https_fixture():
@@ -208,6 +271,38 @@ describe "Production Simple browser security envelope":
         expect(restarted.remove_window(84)).to_be(true)
         expect(restarted.contains(84)).to_be(false)
         expect(restarted.close()).to_be(true)
+
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012
+    # @manual: show
+    # @capture(protocol)
+    it "should replace a forged CORS Origin with the requester origin":
+        step("Construct browser-owned CORS request identity")
+        var fetch = FetchEngine.new_for_origin(
+            Logger.new("cors-origin", BrowserLogLevel.Error),
+            "https://app.test"
+        )
+        val request = FetchRequest(
+            url: Url.parse_or_opaque("https://api.test/data"),
+            method: "GET",
+            headers: (
+                "Origin: https://attacker.test\r\n" +
+                "X-Trace: retained\r\n"
+            ),
+            body: [],
+            mode: RequestMode.Cors,
+            credentials: "omit"
+        )
+        match fetch.prepare_single_hop(request):
+            Err(error):
+                fail(error.message)
+            Ok(prepared):
+                expect(prepared.request.headers).to_equal(
+                    "X-Trace: retained\r\n" +
+                    "Origin: https://app.test\r\n"
+                )
+                expect(prepared.request.headers.contains(
+                    "https://attacker.test"
+                )).to_be(false)
 
     # @req REQ-WEB-BROWSER-012
     # @manual: show
@@ -380,13 +475,23 @@ describe "Production Simple browser security envelope":
             "</div></body></html>"
         ).is_ok()).to_be(true)
         expect(session.image_resources.len()).to_equal(1)
+        expect(session.admitted_image_sources.len()).to_equal(2)
+        expect(session.current_body_html).to_contain("/shared.png")
+        expect(session.image_resources[0].image_uri).to_start_with(
+            "simple-render-image:"
+        )
         expect(session.warnings.join("|")).to_contain(
             "CSP blocked image: https://safe.test/shared.png"
         )
 
         step("Bind each image command to its admitted node identity")
+        val render_html = session.render_html_document()
+        expect(render_html).to_contain(
+            session.image_resources[0].image_uri
+        )
+        expect(render_html).to_contain("simple-blocked-image:")
         val composition = simple_web_layout_render_html_draw_ir_with_images(
-            session.render_html_document(), 4, 4, session.image_resources
+            render_html, 4, 4, session.image_resources
         )
         val commands = composition.batches[0].commands
         expect(_csp_alias_command_index(
@@ -401,6 +506,76 @@ describe "Production Simple browser security envelope":
         expect(_csp_alias_color_count(
             pixels, 0xFFFF00FFu32
         )).to_equal(4)
+
+    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-012
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should retain CSP image identity after DOM removal and reorder":
+        step("Keep opaque node bindings out of authored DOM serialization")
+        var removed = _csp_alias_inline_session()
+        val authored = be_dom_serialize_html(removed.current_dom)
+        expect(authored).to_contain("/shared.png")
+        expect(authored.contains("simple-render-image:")).to_be(false)
+        expect(authored.contains("simple-blocked-image:")).to_be(false)
+        expect(removed.current_body_html).to_contain("/shared.png")
+
+        step("Remove the allowed node without admitting the blocked twin")
+        removed.current_dom = _csp_alias_remove_node(
+            removed.current_dom, "allowed"
+        )
+        val removed_commands = (
+            simple_web_layout_render_html_draw_ir_with_images(
+                removed.render_html_document(), 4, 4,
+                removed.image_resources
+            ).batches[0].commands
+        )
+        expect(_csp_alias_command_index(
+            removed_commands, "allowed_image"
+        )).to_equal(-1)
+        expect(_csp_alias_command_index(
+            removed_commands, "blocked_image"
+        )).to_equal(-1)
+
+        step("Reorder both nodes without swapping their CSP decisions")
+        var reordered = _csp_alias_inline_session()
+        reordered.current_dom = _csp_alias_reverse_pair(
+            reordered.current_dom, "allowed", "blocked"
+        )
+        val reordered_commands = (
+            simple_web_layout_render_html_draw_ir_with_images(
+                reordered.render_html_document(), 4, 4,
+                reordered.image_resources
+            ).batches[0].commands
+        )
+        expect(_csp_alias_command_index(
+            reordered_commands, "allowed_image"
+        )).to_be_greater_than(-1)
+        expect(_csp_alias_command_index(
+            reordered_commands, "blocked_image"
+        )).to_equal(-1)
+
+        step("Keep stylesheet-source admission independent of body order")
+        var stylesheet = BrowserSession.new()
+        stylesheet.register_resource(
+            "https://safe.test/shared.png",
+            _csp_alias_png_hex(0xFFFF00FFu32)
+        )
+        expect(stylesheet.open_html(
+            "https://safe.test/app",
+            "<html><head><style>#styled{width:2px;height:2px;" +
+            "background-image:url('/shared.png')}</style>" +
+            "<meta http-equiv='content-security-policy' " +
+            "content=\"img-src 'none';style-src 'unsafe-inline'\">" +
+            "</head><body><div id='styled'></div></body></html>"
+        ).is_ok()).to_be(true)
+        expect(_csp_alias_command_index(
+            simple_web_layout_render_html_draw_ir_with_images(
+                stylesheet.render_html_document(), 4, 4,
+                stylesheet.image_resources
+            ).batches[0].commands,
+            "styled_background_image"
+        )).to_be_greater_than(-1)
 
     # @manual: show
     # @capture(protocol)

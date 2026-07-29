@@ -27,7 +27,8 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_has_attr,
     be_dom_route_identity,
     be_dom_serialize_children,
-    be_dom_serialize_html, be_dom_set_children,
+    be_dom_serialize_html, be_dom_serialize_html_for_render,
+    be_dom_set_children,
     be_dom_submit_form_owner_id, be_dom_keyboard_activation_event_for_target,
     be_dom_reset_form_owner_id,
     be_dom_checked_radio_id_for_target, be_dom_form_owner_id,
@@ -47,12 +48,17 @@ use std.js.types.js_types.{JsValue}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage, BrowserImageSource, browser_history_push_bounded}
 use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
 use std.js.types.pair.{Pair}
-use std.gc_async_mut.web.browser_session_url.{resolve_relative_url, url_protocol, url_pathname, url_origin, url_host, url_search, url_hash}
+use std.gc_async_mut.web.browser_session_url.{
+    resolve_relative_url, collapse_url_dot_segments,
+    url_protocol, url_pathname, url_origin, url_host, url_search, url_hash
+}
 use std.gc_async_mut.web.browser_session_html.{
     extract_title_text, extract_body_inner_html, own_text,
     html_to_text, escape_html_text,
     strip_script_blocks, strip_template_blocks, strip_noscript_blocks,
-    browser_document_resource_plan, _guest_runtime_probe_url
+    browser_document_resource_plan, bind_render_background_url,
+    bind_render_stylesheet_image_urls, _css_background_image_urls,
+    _guest_runtime_probe_url
 }
 use std.gc_async_mut.web.browser_session_form.{
     browser_form_submission, browser_select_has_value,
@@ -85,12 +91,97 @@ fn _queue_inline_style_background_images(
     val inline_style = be_dom_get_attr(node, "style").trim()
     if inline_style != "":
         load._queue_background_image_sources(
-            inline_style, document_url, false, csp_policy, -1
+            inline_style, document_url, false, csp_policy, -1, node.node_id
         )
     for child in node.children:
         _queue_inline_style_background_images(
             child, load, document_url, depth + 1, csp_policy
         )
+
+fn _bind_next_body_image_source(
+    mut sources: [BrowserImageSource], source_index: i64,
+    body_source_start: i64, resolved_url: text, node_id: i64,
+    node_kind: text
+) -> i64:
+    var index = source_index
+    while index < sources.len():
+        val source = sources[index]
+        if (
+            source.source_offset >= body_source_start and
+            source.resolved_url == resolved_url
+        ):
+            sources[index] = source.with_render_node(node_id, node_kind)
+            return index + 1
+        index = index + 1
+    source_index
+
+fn _bind_body_image_source_nodes(
+    node: BeDomNode, document_url: text,
+    mut sources: [BrowserImageSource], source_index: i64,
+    body_source_start: i64
+) -> i64:
+    var next_index = source_index
+    if node.tag_name == "img":
+        val authored = be_dom_get_attr(node, "src").trim()
+        if authored != "":
+            next_index = _bind_next_body_image_source(
+                sources, next_index, body_source_start,
+                collapse_url_dot_segments(
+                    resolve_relative_url(document_url, authored)
+                ),
+                node.node_id, "src"
+            )
+    val inline_style = be_dom_get_attr(node, "style").trim()
+    if inline_style != "":
+        for authored in _css_background_image_urls(inline_style):
+            next_index = _bind_next_body_image_source(
+                sources, next_index, body_source_start,
+                collapse_url_dot_segments(
+                    resolve_relative_url(document_url, authored)
+                ),
+                node.node_id, "background"
+            )
+    for child in node.children:
+        next_index = _bind_body_image_source_nodes(
+            child, document_url, sources, next_index, body_source_start
+        )
+    next_index
+
+fn _set_node_image_render_key(
+    node: BeDomNode, target_node_id: i64, node_kind: text,
+    resolved_url: text, render_resource_key: text, document_url: text
+) -> BeDomNode:
+    var next = node
+    if next.node_id == target_node_id:
+        if node_kind == "src":
+            next.set_attr(
+                "\u0000simple-render-image-src", render_resource_key
+            )
+        elif node_kind == "background":
+            val authored_style = be_dom_get_attr(next, "style")
+            val hidden_style = be_dom_get_attr(
+                next, "\u0000simple-render-image-style"
+            )
+            val render_style = if hidden_style != "":
+                hidden_style
+            else:
+                authored_style
+            next.set_attr(
+                "\u0000simple-render-image-style",
+                bind_render_background_url(
+                    render_style, document_url, resolved_url,
+                    render_resource_key
+                )
+            )
+        return next
+    var children: [BeDomNode] = []
+    for child in next.children:
+        children.push(_set_node_image_render_key(
+            child, target_node_id, node_kind, resolved_url,
+            render_resource_key, document_url
+        ))
+    next.children = children
+    next
 
 fn _browser_session_previous_utf8_boundary(value: text, index: i64) -> i64:
     val bytes = rt_text_to_bytes(value)
@@ -373,9 +464,21 @@ impl BrowserSession:
 
     me _advance_ui_access_revision():
         self.ui_access_revision = if self.ui_access_revision >= 9223372036854775806:
-            1
+            9223372036854775806
         else:
             self.ui_access_revision + 1
+
+    me _advance_style_revision():
+        self.style_revision = if self.style_revision >= 9223372036854775806:
+            9223372036854775806
+        else:
+            self.style_revision + 1
+
+    me _advance_resource_revision():
+        self.resource_revision = if self.resource_revision >= 9223372036854775806:
+            9223372036854775806
+        else:
+            self.resource_revision + 1
 
     me _replace_current_body_children(body_html: text):
         val replacement = form_capture_defaults(html_tree_builder_build(
@@ -589,6 +692,17 @@ impl BrowserSession:
             active.append_warning(warning)
         else:
             self._append_warning(warning)
+
+    me _record_node_image_render_key(
+        source: BrowserImageSource, render_resource_key: text
+    ):
+        if source.render_node_id < 0:
+            return
+        self.current_dom = _set_node_image_render_key(
+            self.current_dom, source.render_node_id,
+            source.render_node_kind, source.resolved_url,
+            render_resource_key, self.document_url
+        )
 
     me _reconcile_dynamic_image_sources(load: BrowserLoadState?):
         val admitted_count = self.admitted_image_sources.len()
@@ -1224,11 +1338,75 @@ impl BrowserSession:
         val title = if self.current_title != "": self.current_title else: self.current_url
         val bodies = be_dom_find_by_tag(self.current_dom, "body")
         val body_html = if bodies.len() > 0:
-            be_dom_serialize_html(bodies[0])
+            be_dom_serialize_html_for_render(bodies[0])
         else:
             "<body>" + self.current_body_html + "</body>"
-        val style_html = self.current_style_html
+        val style_html = bind_render_stylesheet_image_urls(
+            self.current_style_html, self.document_url,
+            self.admitted_image_sources
+        )
         "<!DOCTYPE html><html><head><title>{escape_html_text(title)}</title>{style_html}</head>{body_html}</html>"
+
+    fn render_revisions() -> BrowserRenderRevisions:
+        BrowserRenderRevisions(
+            document_revision: self.ui_access_revision,
+            style_revision: self.style_revision,
+            resource_revision: self.resource_revision
+        )
+
+    me render_snapshot_since(
+        document_revision: i64,
+        style_revision: i64,
+        resource_revision: i64
+    ) -> BrowserRenderSnapshot:
+        val revisions = self.render_revisions()
+        val document_html = if (
+            revisions.document_revision != document_revision or
+            revisions.style_revision != style_revision
+        ):
+            Some(self.render_html_document())
+        else:
+            nil
+        BrowserRenderSnapshot(
+            revisions: revisions,
+            document_html: document_html,
+            resources_changed:
+                revisions.resource_revision != resource_revision
+        )
+
+    me close():
+        self.runtime_state = nil
+        self.active_load = nil
+        self.is_loading = false
+        self.stop_requested = true
+        self.pending_url = ""
+        self.pending_navigation_target_index = -1
+        self.pending_navigation_push_history = true
+        self.pending_requests = []
+        self.pending_request_head = 0
+        self.inflight_requests = []
+        self.subresource_request_count = 0
+        self.module_source_cache = []
+        self.module_redirect_urls = []
+        self.loaded_module_urls = []
+        self.module_eval_stack = []
+        self.wasm_modules = []
+        self.image_resources = []
+        self.admitted_image_sources = []
+        self.resource_overrides = []
+        self.pending_script_cookie_writes = []
+        self.css_animation_instances = []
+        self.css_animation_reconcile_pending = false
+        self.current_body_html = ""
+        self.current_style_html = ""
+        self.source_html = ""
+        self.current_dom = BeDomNode.document()
+        self.history = []
+        self.current_index = -1
+        self.warnings = []
+        self._advance_ui_access_revision()
+        self._advance_style_revision()
+        self._advance_resource_revision()
 
     me _mark_css_animation_reconcile(reset_descendants: bool):
         val elapsed = self.monotonic_time_ms - self.animation_start_time_ms
@@ -1398,11 +1576,16 @@ impl BrowserSession:
         self.source_html = own_text(html)
         self.current_dom = form_capture_defaults(final_parse.doc)
         self._advance_ui_access_revision()
+        self._advance_style_revision()
+        self._advance_resource_revision()
         if val Some(state) = self.runtime_state:
             state.bind_dom(self.current_dom)
             self.runtime_state = Some(state)
 
-        val image_sources = resource_plan.image_sources
+        var image_sources = resource_plan.image_sources
+        val _ = _bind_body_image_source_nodes(
+            self.current_dom, url, image_sources, 0, 0
+        )
 
         var load = BrowserLoadState.create(
             document_url: url,

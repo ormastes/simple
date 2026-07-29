@@ -111,6 +111,16 @@ class BrowserHistoryEntry:
             content_security_policy: policy
         )
 
+pub struct BrowserRenderRevisions:
+    document_revision: i64
+    style_revision: i64
+    resource_revision: i64
+
+pub struct BrowserRenderSnapshot:
+    revisions: BrowserRenderRevisions
+    document_html: text?
+    resources_changed: bool
+
 fn browser_history_push_bounded(
     history: [BrowserHistoryEntry], current_index: i32,
     entry: BrowserHistoryEntry
@@ -385,6 +395,9 @@ class BrowserImageSource:
     authored_src: text
     resolved_url: text
     resource_key: text
+    render_resource_key: text
+    render_node_id: i64
+    render_node_kind: text
     source_offset: i64
     csp_policy: text
 
@@ -402,6 +415,9 @@ class BrowserImageSource:
             authored_src: authored_src,
             resolved_url: resolved_url,
             resource_key: resource_key,
+            render_resource_key: "",
+            render_node_id: -1,
+            render_node_kind: "",
             source_offset: -1,
             csp_policy: ""
         )
@@ -413,8 +429,37 @@ class BrowserImageSource:
             authored_src: self.authored_src,
             resolved_url: self.resolved_url,
             resource_key: self.resource_key,
+            render_resource_key: self.render_resource_key,
+            render_node_id: self.render_node_id,
+            render_node_kind: self.render_node_kind,
             source_offset: source_offset,
             csp_policy: csp_policy
+        )
+
+    me with_render_resource_key(render_resource_key: text) -> BrowserImageSource:
+        BrowserImageSource(
+            authored_src: self.authored_src,
+            resolved_url: self.resolved_url,
+            resource_key: self.resource_key,
+            render_resource_key: render_resource_key,
+            render_node_id: self.render_node_id,
+            render_node_kind: self.render_node_kind,
+            source_offset: self.source_offset,
+            csp_policy: self.csp_policy
+        )
+
+    me with_render_node(
+        render_node_id: i64, render_node_kind: text
+    ) -> BrowserImageSource:
+        BrowserImageSource(
+            authored_src: self.authored_src,
+            resolved_url: self.resolved_url,
+            resource_key: self.resource_key,
+            render_resource_key: self.render_resource_key,
+            render_node_id: render_node_id,
+            render_node_kind: render_node_kind,
+            source_offset: self.source_offset,
+            csp_policy: self.csp_policy
         )
 
 class BrowserLoadState:
@@ -457,7 +502,7 @@ impl BrowserLoadState:
 
     me _queue_background_image_sources(
         css_text: text, base_url: text, resolved_resource_key: bool,
-        csp_policy: text, source_offset: i64
+        csp_policy: text, source_offset: i64, render_node_id: i64 = -1
     ):
         for authored in _css_background_image_urls(css_text):
             val resolved = collapse_url_dot_segments(
@@ -476,20 +521,26 @@ impl BrowserLoadState:
                     "image URI limit reached; background image ignored"
                 )
                 continue
-            var duplicate = false
+            var existing_node_binding = false
+            if render_node_id >= 0:
+                for existing in self.image_sources:
+                    if (
+                        existing.render_node_id == render_node_id and
+                        existing.render_node_kind == "background" and
+                        existing.resolved_url == resolved
+                    ):
+                        existing_node_binding = true
+            if existing_node_binding:
+                continue
             var key_conflict = false
             for existing in self.image_sources:
                 if existing.resource_key == resource_key:
-                    if existing.resolved_url == resolved:
-                        duplicate = true
-                    else:
+                    if existing.resolved_url != resolved:
                         key_conflict = true
             if key_conflict:
                 self.append_warning(
                     "image resource key conflict ignored: {resource_key}"
                 )
-                continue
-            if duplicate:
                 continue
             if self.image_sources.len() >= BROWSER_MAX_IMAGE_RESOURCES:
                 self.append_warning(
@@ -499,7 +550,9 @@ impl BrowserLoadState:
             self.image_sources.push(
                 BrowserImageSource.create_keyed(
                     authored, resolved, resource_key
-                ).with_policy(source_offset, csp_policy)
+                ).with_policy(
+                    source_offset, csp_policy
+                ).with_render_node(render_node_id, "background")
             )
 
     me append_warning(warning: text):
@@ -1491,6 +1544,8 @@ class BrowserSession:
     text_selection_anchor_byte: i64
     text_selection_focus_byte: i64
     ui_access_revision: i64
+    style_revision: i64
+    resource_revision: i64
     dom_callback_count: i64
     monotonic_time_ms: i64
     animation_start_time_ms: i64
@@ -1561,6 +1616,8 @@ class BrowserSession:
             text_selection_anchor_byte: 0,
             text_selection_focus_byte: 0,
             ui_access_revision: 0,
+            style_revision: 0,
+            resource_revision: 0,
             dom_callback_count: 0,
             monotonic_time_ms: 0,
             animation_start_time_ms: 0,

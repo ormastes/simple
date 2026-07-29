@@ -294,6 +294,87 @@ describe "BrowserSession page loading":
             [0xFFCC3020u32]
         )
 
+    it "invalidates render resources on image completion and failure":
+        var loaded = BrowserSession.new()
+        expect(loaded.open_html(
+            "https://example.com/loaded.html",
+            "<div id='stage'></div>"
+        ).is_ok()).to_be(true)
+        expect(loaded.eval_script(
+            "document.getElementById('stage').style.backgroundImage = " +
+            "'url(loaded.png)'"
+        ).is_ok()).to_be(true)
+        val loaded_image = loaded.take_pending_request().unwrap()
+        val before_loaded = loaded.render_revisions()
+        expect(loaded.commit_network_response(BrowserResponse.create(
+            loaded_image.id, "image", loaded_image.url, 200,
+            "Content-Type: image/png",
+            _browser_image_png_hex(0xFF123456u32), ""
+        )).is_ok()).to_be(true)
+        val loaded_snapshot = loaded.render_snapshot_since(
+            before_loaded.document_revision,
+            before_loaded.style_revision,
+            before_loaded.resource_revision
+        )
+        expect(loaded_snapshot.resources_changed).to_be(true)
+        expect(loaded_snapshot.document_html).to_be_nil()
+        expect(
+            loaded_snapshot.revisions.resource_revision
+        ).to_equal(before_loaded.resource_revision + 1)
+
+        var failed = BrowserSession.new()
+        expect(failed.open_html(
+            "https://example.com/failed.html",
+            "<div id='stage'></div>"
+        ).is_ok()).to_be(true)
+        expect(failed.eval_script(
+            "document.getElementById('stage').style.backgroundImage = " +
+            "'url(failed.png)'"
+        ).is_ok()).to_be(true)
+        val failed_image = failed.take_pending_request().unwrap()
+        val before_failed = failed.render_revisions()
+        expect(failed.commit_network_response(BrowserResponse.create(
+            failed_image.id, "image", failed_image.url, 503, "", "", ""
+        )).is_ok()).to_be(true)
+        val failed_snapshot = failed.render_snapshot_since(
+            before_failed.document_revision,
+            before_failed.style_revision,
+            before_failed.resource_revision
+        )
+        expect(failed_snapshot.resources_changed).to_be(true)
+        expect(failed_snapshot.document_html).to_be_nil()
+        expect(
+            failed_snapshot.revisions.resource_revision
+        ).to_equal(before_failed.resource_revision + 1)
+        expect(failed.admitted_image_sources.len()).to_equal(0)
+
+    it "invalidates the first frame when linked CSS completes":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://example.com/index.html", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document.id, "document", document.url, 200, "",
+            "<link rel='stylesheet' href='/late.css'><main>late</main>", ""
+        )).is_ok()).to_be(true)
+        val stylesheet = session.take_pending_request().unwrap()
+        val before = session.render_revisions()
+        expect(session.commit_network_response(BrowserResponse.create(
+            stylesheet.id, "style", stylesheet.url, 200, "",
+            "main { color: #2563eb; }", ""
+        )).is_ok()).to_be(true)
+        val snapshot = session.render_snapshot_since(
+            before.document_revision,
+            before.style_revision,
+            before.resource_revision
+        )
+        expect(snapshot.resources_changed).to_be(false)
+        expect(snapshot.document_html != nil).to_be(true)
+        expect(snapshot.revisions.style_revision).to_equal(
+            before.style_revision + 1
+        )
+
     it "resolves stylesheet and inline background images with stable keys":
         var linked = BrowserSession.new()
         expect(linked.begin_network_navigation(

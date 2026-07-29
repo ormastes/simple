@@ -127,30 +127,35 @@ class FetchEngine:
         is_top_level_navigation: bool = false
     ) -> Result<FetchSingleHopPreparation>:
         self.logger.info("fetch: {request.method.to_upper()} {request.url.to_text()}")
+        val policy_request = self.cors.prepare_actual_request(request)
 
-        match request.mode:
+        match policy_request.mode:
             RequestMode.SameOrigin:
-                if not self.cors.is_same_origin(request.url):
+                if not self.cors.is_same_origin(policy_request.url):
                     return Err(network_error("Same-origin request denied"))
             _:
                 pass_do_nothing
 
         # Step 1: CORS preflight if the request mode is Cors
-        match request.mode:
+        match policy_request.mode:
             RequestMode.Cors:
-                val preflight_result = self.handle_cors_preflight(request)?
+                val preflight_result = self.handle_cors_preflight(
+                    policy_request
+                )?
                 if not preflight_result:
                     return Err(network_error("CORS preflight denied"))
             _:
                 pass_do_nothing
 
         # Step 2: Check the HTTP cache
-        if request_cache_eligible(request):
-            val cached = self.cache.lookup(request.url.to_text())
+        if request_cache_eligible(policy_request):
+            val cached = self.cache.lookup(policy_request.url.to_text())
             if val entry = cached:
-                self.logger.debug("fetch: cache hit for {request.url.to_text()}")
+                self.logger.debug(
+                    "fetch: cache hit for {policy_request.url.to_text()}"
+                )
                 val response = self.validate_response_policy(
-                    request,
+                    policy_request,
                     FetchResponse(
                         status: 200,
                         headers: entry.headers,
@@ -158,13 +163,13 @@ class FetchEngine:
                     )
                 )?
                 return Ok(FetchSingleHopPreparation.complete(
-                    request,
+                    policy_request,
                     response
                 ))
 
         # Step 3: Attach cookies to the request
         val request_with_cookies = self.attach_cookies(
-            request, site_for_cookies_url, is_top_level_navigation
+            policy_request, site_for_cookies_url, is_top_level_navigation
         )
         Ok(FetchSingleHopPreparation.pending(request_with_cookies))
 

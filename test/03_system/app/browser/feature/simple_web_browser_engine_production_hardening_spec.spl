@@ -16,6 +16,12 @@ use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererProcess, HostedBrowserRendererResult
 }
+use os.hosted.hosted_browser_renderer_registry.{
+    HostedBrowserRendererRegistry
+}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id,
@@ -24,6 +30,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_images
 }
 use std.common.web.browser_renderer_protocol.{
+    BrowserRendererMessage,
     browser_renderer_decoder_feed,
     browser_renderer_decoder_new,
     browser_renderer_frame_decode,
@@ -103,6 +110,14 @@ fn _pixels_equal(left: [u32], right: [u32]) -> bool:
             return false
         index = index + 1
     true
+
+fn _repeat_browser_text(value: text, count: i64) -> text:
+    var repeated = ""
+    var index: i64 = 0
+    while index < count:
+        repeated = repeated + value
+        index = index + 1
+    repeated
 
 fn _browser_draw_ir_command_index(
     commands: [DrawIrCommand], component_id: text
@@ -516,6 +531,66 @@ describe "Production Simple browser user flow":
         expect(advanced.next_animation_ms).to_equal(-1)
 
     # @manual: show
+    # @capture(protocol)
+    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-006
+    # @req REQ-WEB-BROWSER-018
+    it "should reuse parsed layout work across unchanged animation frames":
+        step("Reuse parsed layout work across unchanged animation frames")
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        val initial = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main id='stable'>unchanged</main>"
+        ))
+        expect(initial.ok).to_be(true)
+        val counters = worker.render_session.counters
+        val before_serialize = counters.serialize_count
+        val before_parse = counters.parse_count
+        val before_css = counters.css_count
+        val before_style = counters.style_count
+        val before_layout = counters.layout_count
+        val before_paint = counters.paint_count
+        val before_reuse = counters.reuse_count
+        val before_composition_revision = counters.composition_revision
+        expect(before_serialize).to_equal(1)
+        expect(before_parse).to_equal(1)
+        expect(before_css).to_equal(1)
+        expect(before_style).to_equal(1)
+        expect(before_layout).to_equal(1)
+        expect(before_paint).to_equal(1)
+        expect(before_reuse).to_equal(0)
+        expect(before_composition_revision).to_equal(1)
+
+        val unchanged = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        ))
+        expect(unchanged.ok).to_be(true)
+        val after = worker.render_session.counters
+        expect(after.serialize_count).to_equal(before_serialize)
+        expect(after.parse_count).to_equal(before_parse)
+        expect(after.css_count).to_equal(before_css)
+        expect(after.style_count).to_equal(before_style)
+        expect(after.layout_count).to_equal(before_layout)
+        expect(after.paint_count).to_equal(before_paint)
+        expect(after.reuse_count).to_equal(before_reuse + 1)
+        expect(after.composition_revision).to_equal(
+            before_composition_revision
+        )
+        step("Close the page and reclaim browser resources")
+        worker.close()
+        expect(
+            worker.render_session.counters.retained_node_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_style_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_box_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_command_count
+        ).to_equal(0)
+
+    # @manual: show
     # @capture(text)
     # @capture(gui)
     it "should route pointer keyboard focus text and form events in browser order":
@@ -539,11 +614,58 @@ describe "Production Simple browser user flow":
         _operate_browser_navigation()
         _require_production_browser_evidence()
 
-    # @manual: folded
-    it "should reject stale targets invalid addresses and late stopped navigation commits":
+    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010
+    # @manual: show
+    # @capture(protocol)
+    it "should enforce one UTF-8 byte bound for every browser address editor":
         _production_browser_fixture()
-        step("Stop an in-flight navigation before it commits")
-        _require_production_browser_evidence()
+        val artifact = env_get("HOSTED_WM_ARTIFACT")
+        val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+        if artifact == "":
+            fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+        if expected_artifact_sha.len() != 64 or
+            file_hash_sha256(artifact) != expected_artifact_sha:
+            fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+        var registry = HostedBrowserRendererRegistry.create(
+            artifact, "https://example.com/"
+        )
+        expect(registry.ensure(
+            92, "<div>secondary</div>", 64, 48, 0, 100000
+        )).to_equal("none")
+
+        step("Accept an address draft of exactly 2048 UTF-8 bytes")
+        val focused = registry.dispatch_chrome_pointer(
+            1, 92, "address", true
+        )
+        val released = registry.dispatch_chrome_pointer(
+            2, 92, "address", false
+        )
+        val exact = _repeat_browser_text("a", 2048)
+        val accepted = registry.dispatch_text(3, 92, exact)
+        expect(focused.reason).to_equal("chrome-pressed")
+        expect(released.reason).to_equal("address-focused")
+        expect(accepted.callback_count).to_equal(1)
+        expect(accepted.reason).to_equal("")
+        expect(registry.address_text(92)).to_equal(exact)
+        val committed = registry.document_url(92)
+
+        step("Reject a 2049-byte multibyte draft without mutating state")
+        val _ = registry.dispatch_chrome_pointer(
+            4, 92, "address", true
+        )
+        val _ = registry.dispatch_chrome_pointer(
+            5, 92, "address", false
+        )
+        val oversized = _repeat_browser_text("a", 2047) + "é"
+        val rejected = registry.dispatch_text(6, 92, oversized)
+        expect(rejected.semantic_target_id).to_equal(
+            "browser:parent#address"
+        )
+        expect(rejected.callback_count).to_equal(0)
+        expect(rejected.reason).to_equal("address-too-long")
+        expect(registry.address_text(92)).to_equal(exact)
+        expect(registry.document_url(92)).to_equal(committed)
+        expect(registry.close()).to_be(true)
 
     # @manual: folded
     it "should report unsupported content without fake success":

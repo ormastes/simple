@@ -8,6 +8,10 @@ cancellation, RSS, GC/lifecycle, and 10,000-cycle stability without per-frame
 Engine2D/font recreation or unconditional readback.
 """
 use std.spec.*
+use std.common.web.browser_renderer_protocol.{BrowserRendererMessage}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
 
 # @inline
 fn _browser_budget_fixture():
@@ -25,6 +29,46 @@ fn _require_production_budget_evidence():
     fail("NFR-WEB-BROWSER-001..017: production budget evidence not implemented")
 
 describe "Production Simple browser performance and GC budgets":
+    # @manual: show
+    # @capture(log)
+    # @req REQ-WEB-BROWSER-018
+    it "should count unchanged retained-frame reuse without duplicate stage work":
+        step("Reuse parsed layout work across unchanged animation frames")
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main id='stable'>unchanged</main>"
+        )).ok).to_be(true)
+        val counters = worker.render_session.counters
+        val before_serialize = counters.serialize_count
+        val before_parse = counters.parse_count
+        val before_css = counters.css_count
+        val before_style = counters.style_count
+        val before_layout = counters.layout_count
+        val before_paint = counters.paint_count
+        val before_reuse = counters.reuse_count
+        val before_composition_revision = counters.composition_revision
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        val after = worker.render_session.counters
+
+        expect(after.serialize_count).to_equal(before_serialize)
+        expect(after.parse_count).to_equal(before_parse)
+        expect(after.css_count).to_equal(before_css)
+        expect(after.style_count).to_equal(before_style)
+        expect(after.layout_count).to_equal(before_layout)
+        expect(after.paint_count).to_equal(before_paint)
+        expect(after.reuse_count).to_equal(before_reuse + 1)
+        expect(after.composition_revision).to_equal(
+            before_composition_revision
+        )
+        step("Close the page and reclaim browser resources")
+        worker.close()
+        expect(
+            worker.render_session.counters.retained_command_count
+        ).to_equal(0)
+
     # @manual: show
     # @capture(exec)
     # @capture(log)

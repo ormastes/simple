@@ -236,11 +236,12 @@ outside that viewport before Draw IR submission.
 
 ### Exact retained-render contract
 
-The TDD gate lands before implementation. The focused worker/session SSpecs
-must first fail on real counter expectations for unchanged advance,
-navigation, DOM mutation, stylesheet/resource commit, viewport resize, active
-animation, scroll, caret overlay, and close/soak replacement. Source-text
-presence checks do not satisfy this gate.
+The TDD gate lands before each implementation slice. The first focused
+worker/session SSpecs fail on real counter expectations for unchanged advance
+and close reclamation. Later slices add real expectations for navigation, DOM
+mutation, stylesheet/resource commit, viewport resize, active animation,
+scroll, caret overlay, and soak replacement before implementing each row.
+Source-text presence checks do not satisfy those behavior gates.
 
 ```text
 BrowserRenderRevisions
@@ -296,9 +297,10 @@ render_snapshot_since(document_revision, style_revision)
   -> BrowserRenderSnapshot
 ```
 
-The second method increments `serialize_count` and supplies `document_html`
-only when either input revision is stale. Resource-only, scroll, overlay, and
-unchanged frames do not serialize.
+The second method supplies `document_html` only when either input revision is
+stale. The consuming `SimpleWebRenderSession` increments `serialize_count`
+when that snapshot contains HTML. Resource-only, scroll, overlay, and unchanged
+frames do not serialize.
 
 Implementation is split into three conflict-free batches:
 
@@ -313,6 +315,21 @@ Implementation is split into three conflict-free batches:
    `hosted_browser_renderer_worker.spl:153-167` with the one session. Then
    enable parse/CSS/base-style reuse for animation, raw-layout reuse for
    scroll/overlay, and paint-only image invalidation.
+
+Implementation status (2026-07-29): batches 1-3 are complete only for the
+smallest exact unchanged-frame/close slice. The session retains one existing
+combined semantic/layout/Draw IR result and reruns the canonical full render
+for dirty keys. Mutation-site completion and every stage-selective
+invalidation named above remain open and fail-fast.
+
+The batch-one resource contract compares `resource_revision` without forcing
+HTML serialization. Binding add, decoded resource replacement, failed-binding
+removal, pruning, and document replacement advance it. Active and stopped
+stylesheet finalization advance `style_revision`, including completion after
+an earlier network-wait frame. Worker close calls the BrowserSession close
+owner, which drops document source/DOM/history, image resources and bindings,
+pending/inflight/load state, runtime/timers, overrides, and animation state
+before the worker can be retained for inspection.
 
 No batch adds Draw-IR diffing, partial damage, per-node invalidation, or a
 second pixel cache. Those wait for measured retained-session evidence.

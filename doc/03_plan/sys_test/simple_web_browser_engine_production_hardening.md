@@ -318,6 +318,25 @@ remains fail-fast until real production timing/RSS receipts exist.
 | repeated navigation/replacement | retained node/style/box/command counts plateau at current-document bounds |
 | explicit worker-session close | all retained counts, hit index, and image revision list equal zero |
 
+Implementation status (2026-07-29): the identical-advance and explicit-close
+rows are implemented in source through one worker-owned
+`SimpleWebRenderSession`; execution is runtime-blocked. The mutation,
+stylesheet, image, viewport, active-animation, scroll/overlay, and repeated
+replacement rows remain RED/open and must be implemented with exact
+stage-selective counters before any PASS claim.
+
+The revision/lifecycle prerequisite is also implemented in source:
+render-visible image binding add, decoded replacement, failure removal, prune,
+and document replacement advance `resource_revision`; active/stopped
+stylesheet finalization advances `style_revision`.
+`render_snapshot_since` compares all three revisions while serializing HTML
+only for document/style changes. Focused tests require successful image
+completion and failed-image removal to invalidate resources, late linked CSS
+to invalidate the first frame, and worker close to clear the real
+BrowserSession DOM/source/history, image/binding, request/load, runtime/timer,
+and override owners. This is functional invalidation evidence, not
+NFR-WEB-BROWSER-003 timing/RSS evidence.
+
 Use frozen steps `Reuse parsed layout work across unchanged animation frames`
 and `Close the page and reclaim browser resources`, with
 `_check_budget_row`/`_check_resource_reclaimed`. Assertions read counters from

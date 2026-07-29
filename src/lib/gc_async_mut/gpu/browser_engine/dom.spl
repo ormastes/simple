@@ -82,13 +82,51 @@ class BeDomNode:
     event_listener_capture: [bool]
 
     me add_event_listener_with_capture(event_type: text, action: text, capture: bool):
-        """Register a listener, appending to the parallel listener arrays."""
-        self.event_listener_types.push(normalize_dom_event_type(event_type))
+        """Register a listener, reusing a removed listener tombstone."""
+        val normalized = normalize_dom_event_type(event_type)
+        var tombstone = -1
+        var i = 0
+        while i < self.event_listener_types.len():
+            if (
+                self.event_listener_types[i] == normalized and
+                self.event_listener_actions[i] == action and
+                self.event_listener_capture[i] == capture
+            ):
+                return
+            if tombstone < 0 and self.event_listener_types[i] == "":
+                tombstone = i
+            i = i + 1
+        if tombstone >= 0:
+            self.event_listener_types[tombstone] = normalized
+            self.event_listener_actions[tombstone] = action
+            self.event_listener_capture[tombstone] = capture
+            return
+        self.event_listener_types.push(normalized)
         self.event_listener_actions.push(action)
         self.event_listener_capture.push(capture)
 
     me add_event_listener(event_type: text, action: text):
         self.add_event_listener_with_capture(event_type, action, false)
+
+    me remove_event_listener_with_capture(
+        event_type: text, action: text, capture: bool
+    ):
+        val normalized = normalize_dom_event_type(event_type)
+        var i = 0
+        while i < self.event_listener_types.len():
+            if (
+                self.event_listener_types[i] == normalized and
+                self.event_listener_actions[i] == action and
+                self.event_listener_capture[i] == capture
+            ):
+                self.event_listener_types[i] = ""
+                self.event_listener_actions[i] = ""
+                self.event_listener_capture[i] = false
+                return
+            i = i + 1
+
+    me remove_event_listener(event_type: text, action: text):
+        self.remove_event_listener_with_capture(event_type, action, false)
 
 class BeDomEvent:
     event_type: text
@@ -281,9 +319,17 @@ impl BeDomNode:
         self.attributes.has(name)
 
     me set_attr(name: text, value: text):
+        if name == "src":
+            self.attributes.remove("\u0000simple-render-image-src")
+        elif name == "style":
+            self.attributes.remove("\u0000simple-render-image-style")
         self.attributes[name] = value
 
     me remove_attr(name: text):
+        if name == "src":
+            self.attributes.remove("\u0000simple-render-image-src")
+        elif name == "style":
+            self.attributes.remove("\u0000simple-render-image-style")
         self.attributes.remove(name)
 
     me add_child(child: BeDomNode):

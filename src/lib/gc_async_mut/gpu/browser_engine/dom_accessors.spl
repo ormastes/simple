@@ -66,7 +66,7 @@ fn be_dom_insert_before(mut parent: BeDomNode, new_child: BeDomNode, ref_id: i64
 
 fn be_dom_set_attr(mut node: BeDomNode, name: text, value: text):
     """Set an attribute on a node."""
-    node.attributes[name] = value
+    node.set_attr(name, value)
 
 fn be_dom_get_attr(node: BeDomNode, name: text) -> text:
     """Get an attribute value, returning "" if absent."""
@@ -170,23 +170,42 @@ fn _be_dom_void_tag(tag: text) -> bool:
         tag == "track" or tag == "wbr"
     )
 
-fn be_dom_serialize_html(node: BeDomNode) -> text:
+fn _be_dom_serialize_html(node: BeDomNode, render_only: bool) -> text:
     if node.tag_name == "#text":
         return html_escape_core(node.data)
     var children_html = ""
     for child in node.children:
-        children_html = children_html + be_dom_serialize_html(child)
+        children_html = children_html + _be_dom_serialize_html(
+            child, render_only
+        )
     if node.tag_name == "#document":
         return children_html
     var attributes_html = ""
     for name in node.attributes.keys():
         if not name.starts_with("\u0000"):
+            val authored_value = be_dom_get_attr(node, name)
+            val render_value = if render_only and name == "src":
+                node.attributes.get(
+                    "\u0000simple-render-image-src"
+                ) ?? authored_value
+            elif render_only and name == "style":
+                node.attributes.get(
+                    "\u0000simple-render-image-style"
+                ) ?? authored_value
+            else:
+                authored_value
             attributes_html = attributes_html + " " + name + "=\"" +
-                html_escape_core(be_dom_get_attr(node, name)) + "\""
+                html_escape_core(render_value) + "\""
     val open = "<" + node.tag_name + attributes_html + ">"
     if _be_dom_void_tag(node.tag_name):
         return open
     open + children_html + "</" + node.tag_name + ">"
+
+fn be_dom_serialize_html(node: BeDomNode) -> text:
+    _be_dom_serialize_html(node, false)
+
+fn be_dom_serialize_html_for_render(node: BeDomNode) -> text:
+    _be_dom_serialize_html(node, true)
 
 fn be_dom_serialize_children(node: BeDomNode) -> text:
     var out = ""
@@ -434,7 +453,15 @@ fn _be_dom_apply_listener_control(event: BeDomEvent, action: text) -> BeDomEvent
         next.stop_immediate_propagation()
     next
 
-fn _be_dom_append_action(dispatch: BeDomEventDispatch, node: BeDomNode, action: text, phase: text) -> BeDomEventDispatch:
+fn _be_dom_default_listener_executor(
+    event: BeDomEvent, node: BeDomNode, action: text, phase: text
+) -> BeDomEvent:
+    _be_dom_apply_listener_control(event, action)
+
+fn _be_dom_append_action(
+    dispatch: BeDomEventDispatch, node: BeDomNode, action: text, phase: text,
+    executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent
+) -> BeDomEventDispatch:
     var next = dispatch
     next.actions.push(action)
     next.phases.push(phase)
@@ -442,16 +469,22 @@ fn _be_dom_append_action(dispatch: BeDomEventDispatch, node: BeDomNode, action: 
     next.current_target_route_ids.push(be_dom_route_identity(node))
     next.event.current_target_id = be_dom_event_identity(node)
     next.event.current_target_tag = node.tag_name
-    next.event = _be_dom_apply_listener_control(next.event, action)
+    next.event = executor(next.event, node, action, phase)
     next
 
-fn _be_dom_dispatch_node(dispatch: BeDomEventDispatch, node: BeDomNode, phase: text, listener_mode: text, include_inline: bool) -> BeDomEventDispatch:
+fn _be_dom_dispatch_node(
+    dispatch: BeDomEventDispatch, node: BeDomNode, phase: text,
+    listener_mode: text, include_inline: bool,
+    executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent
+) -> BeDomEventDispatch:
     var next = dispatch
     val normalized = next.event.event_type
     if include_inline:
         val inline_action = be_dom_get_attr(node, "on" + normalized)
         if inline_action != "":
-            next = _be_dom_append_action(next, node, inline_action, phase)
+            next = _be_dom_append_action(
+                next, node, inline_action, phase, executor
+            )
             if next.event.immediate_propagation_stopped:
                 return next
     var i = 0
@@ -463,7 +496,9 @@ fn _be_dom_dispatch_node(dispatch: BeDomEventDispatch, node: BeDomNode, phase: t
         elif listener_mode == "bubble":
             phase_matches = node.event_listener_capture[i] == false
         if type_matches and phase_matches:
-            next = _be_dom_append_action(next, node, node.event_listener_actions[i], phase)
+            next = _be_dom_append_action(
+                next, node, node.event_listener_actions[i], phase, executor
+            )
             if next.event.immediate_propagation_stopped:
                 return next
         i = i + 1
@@ -511,9 +546,10 @@ fn _be_dom_finish_default_action(dispatch: BeDomEventDispatch, target: BeDomNode
 fn be_dom_dispatch_event(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
     be_dom_dispatch_event_path([node], event_type, bubbles, cancelable)
 
-fn _be_dom_dispatch_event_path(
+fn _be_dom_dispatch_event_path_with_executor(
     path: [BeDomNode], event_type: text, bubbles: bool, cancelable: bool,
-    include_inline_target: bool
+    include_inline_target: bool,
+    executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent
 ) -> BeDomEventDispatch:
     if path.len() == 0:
         val event = BeDomEvent.create(normalize_dom_event_type(event_type), "", "", "", "", bubbles, cancelable)
@@ -531,7 +567,9 @@ fn _be_dom_dispatch_event_path(
     )
     var i = 0
     while i + 1 < path.len():
-        dispatch = _be_dom_dispatch_node(dispatch, path[i], "capture", "capture", false)
+        dispatch = _be_dom_dispatch_node(
+            dispatch, path[i], "capture", "capture", false, executor
+        )
         if dispatch.event.propagation_stopped:
             return _be_dom_finish_default_action(dispatch, target, event_type)
         i = i + 1
@@ -539,22 +577,34 @@ fn _be_dom_dispatch_event_path(
     # stopPropagation still permits the remaining listeners on this target;
     # only stopImmediatePropagation suppresses that second target pass.
     dispatch = _be_dom_dispatch_node(
-        dispatch, target, "target", "capture", false
+        dispatch, target, "target", "capture", false, executor
     )
     if not dispatch.event.immediate_propagation_stopped:
         dispatch = _be_dom_dispatch_node(
-            dispatch, target, "target", "bubble", include_inline_target
+            dispatch, target, "target", "bubble", include_inline_target,
+            executor
         )
     if dispatch.event.propagation_stopped:
         return _be_dom_finish_default_action(dispatch, target, event_type)
     if bubbles:
         var ancestor = path.len() - 2
         while ancestor >= 0:
-            dispatch = _be_dom_dispatch_node(dispatch, path[ancestor], "bubble", "bubble", false)
+            dispatch = _be_dom_dispatch_node(
+                dispatch, path[ancestor], "bubble", "bubble", false, executor
+            )
             if dispatch.event.propagation_stopped:
                 return _be_dom_finish_default_action(dispatch, target, event_type)
             ancestor = ancestor - 1
     _be_dom_finish_default_action(dispatch, target, event_type)
+
+fn _be_dom_dispatch_event_path(
+    path: [BeDomNode], event_type: text, bubbles: bool, cancelable: bool,
+    include_inline_target: bool
+) -> BeDomEventDispatch:
+    _be_dom_dispatch_event_path_with_executor(
+        path, event_type, bubbles, cancelable, include_inline_target,
+        _be_dom_default_listener_executor
+    )
 
 fn be_dom_dispatch_event_path(
     path: [BeDomNode], event_type: text, bubbles: bool, cancelable: bool
@@ -832,14 +882,16 @@ fn be_dom_form_allows_direct_implicit_submit(
 
 fn be_dom_dispatch_event_to_id(
     root: BeDomNode, target_id: text, event_type: text, bubbles: bool,
-    cancelable: bool, include_inline_target: bool
+    cancelable: bool, include_inline_target: bool,
+    executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent =
+        _be_dom_default_listener_executor
 ) -> BeDomEventDispatch:
     val path = be_dom_find_path_to_id(root, target_id)
     if path.len() == 0:
         val event = BeDomEvent.create(normalize_dom_event_type(event_type), "", "", "", "", bubbles, cancelable)
         return _be_dom_empty_dispatch(event, "")
-    _be_dom_dispatch_event_path(
-        path, event_type, bubbles, cancelable, include_inline_target
+    _be_dom_dispatch_event_path_with_executor(
+        path, event_type, bubbles, cancelable, include_inline_target, executor
     )
 
 fn be_dom_apply_default_action(node: BeDomNode, action: text) -> BeDomNode:
@@ -1029,6 +1081,7 @@ export be_dom_matches_identity
 export be_dom_event_identity_at_element_path
 export be_dom_layout_target_key
 export be_dom_serialize_html, be_dom_serialize_children
+export be_dom_serialize_html_for_render
 export be_dom_set_text_content, be_dom_get_text_content
 export be_dom_find_by_id, be_dom_find_by_tag
 export be_dom_get_tag, be_dom_get_is_text, be_dom_get_text, be_dom_set_children

@@ -71,6 +71,37 @@ now admits that bounded semantic metadata without a protocol fork.
 Execution and doc generation remain blocked by the unhealthy deployed
 pure-Simple runtime; no bootstrap or Rust-seed result is claimed.
 
+## Retained unchanged-frame evidence
+
+REQ-WEB-BROWSER-004/006/018 require the production hosted worker to retain one
+canonical semantic render result without adding a second Web IR, parser,
+renderer, or HTML-string pixel cache.
+
+1. Initialize one `HostedBrowserRendererWorkerSession` with a static document.
+2. Require one document serialization and one parse/CSS/style/layout/paint
+   pass, zero reuse, and composition revision one.
+3. Advance the worker clock to 16 ms with no due timer or animation work.
+4. Require serialize/parse/CSS/style/layout/paint and composition revision to
+   remain unchanged while reuse increments exactly once.
+5. Close the worker session and require retained node, style, box, and command
+   counts to become zero.
+
+The scenario and focused worker/performance assertions were authored before
+the retained-session implementation. Source now provides the first exact
+slice: `BrowserSession.render_snapshot_since` serializes only a stale
+document/style snapshot, and the worker-owned `SimpleWebRenderSession` reuses
+the existing semantic/layout/Draw IR result for a visually unchanged frame.
+DOM/title, stylesheet, image, viewport, active-animation, scroll, overlay, and
+soak invalidation rows remain fail-fast follow-ups; this section does not claim
+their stage-selective reuse or NFR-WEB-BROWSER-003 performance. Execution
+remains blocked by the unhealthy deployed pure-Simple runtime, and no
+bootstrap or Rust-seed result is claimed.
+
+Focused unit prerequisites additionally require image completion and failure
+to change the resource revision without serializing unchanged HTML, linked CSS
+completion to change the style revision, and close to clear real BrowserSession
+resources, bindings, requests, load state, runtime/timers, and overrides.
+
 ## Retained callable DOM event evidence
 
 REQ-WEB-BROWSER-005/006/007/008 require retained JavaScript callables and
@@ -87,12 +118,16 @@ default-action path while preserving Simple Script document state.
 5. Require `stopImmediatePropagation` to suppress the later target listener and
    all bubbling, then require a queued `requestAnimationFrame` callback.
 
-This scenario was authored before implementation and is intentionally RED.
-The current JavaScript runtime exposes host-to-JavaScript `call` only;
-JavaScript `dispatchEvent()` cannot synchronously enter the canonical
-`be_dom_dispatch_event_path`. Doc generation and execution remain blocked by
-the unhealthy deployed pure-Simple runtime. No bootstrap, seed fallback,
-asynchronous event queue, or second JavaScript dispatcher was used.
+This scenario was authored before implementation and remains intentionally
+RED. The foundation now provides `JsRuntime.invoke_callable_with_this`, one
+executor seam inside `be_dom_dispatch_event_path`, and bounded reuse of removed
+listener slots in the existing parallel arrays. BrowserSession does not yet
+retain JavaScript function values for window/document/element listeners,
+materialize one shared host Event object, or route JavaScript
+`dispatchEvent()` into that seam. Simple Script remains command-only rather
+than pretending to retain callables. Doc generation and execution remain
+blocked by the unhealthy deployed pure-Simple runtime. No bootstrap, seed
+fallback, asynchronous event queue, or second JavaScript dispatcher was used.
 
 ## Forced HTML line-break evidence
 
@@ -133,3 +168,25 @@ known unsupported scopes remain in `unsupported_ledger.env`, and
 `receipt_schema.env` only defines a future real receipt. These contracts do not
 satisfy the executable REQ-019 placeholder; it remains fail-fast until a real
 pinned run and retained receipt exist.
+
+## Secondary address UTF-8 byte-bound evidence
+
+REQ-WEB-BROWSER-009/010 require every browser address editor to enforce the
+same bounded input contract without allowing secondary windows to bypass it
+with multibyte text.
+
+1. Start a real hosted secondary renderer registry from the admitted production
+   artifact and focus its address control through chrome pointer dispatch.
+2. Enter exactly 2048 UTF-8 bytes and require one accepted address callback.
+3. Re-focus the address control, then enter 2047 ASCII bytes plus `é`, which is
+   2049 UTF-8 bytes but only 2048 codepoints.
+4. Require the dispatch protocol to return `address-too-long` with no callback.
+5. Require both the accepted draft and the committed document URL to remain
+   unchanged after rejection, then close the real renderer registry.
+
+The scenario was authored before the implementation fix. Its pre-fix RED is
+state/protocol observable: the secondary registry compared codepoint length,
+accepted the multibyte overflow, replaced the draft, and reported one callback,
+while the primary address editor already enforced the UTF-8 byte limit.
+Execution remains blocked by the unhealthy deployed pure-Simple runtime; no
+bootstrap or Rust-seed result is claimed.

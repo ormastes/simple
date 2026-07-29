@@ -1,6 +1,6 @@
 use std.spec.*
 
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomEvent, BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_apply_default_action, be_dom_create_event, be_dom_create_pointer_event,
     be_dom_create_pointer_event_with_modifiers, be_dom_dispatch_event,
@@ -9,6 +9,16 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_dispatch_keyboard_activation_apply_default, be_dom_find_path_to_id,
     be_dom_get_attr, be_dom_get_event_listener_count, be_dom_has_attr,
     be_dom_keyboard_activation_event_for_target}
+
+fn _callable_listener_executor(
+    event: BeDomEvent, node: BeDomNode, action: text, phase: text
+) -> BeDomEvent:
+    var next = event
+    if action == "callable-cancel":
+        next.prevent_default()
+    elif action == "callable-halt":
+        next.stop_immediate_propagation()
+    next
 
 describe "Browser renderer DOM event basics":
 
@@ -19,6 +29,62 @@ describe "Browser renderer DOM event basics":
 
         expect(be_dom_get_event_listener_count(button, "click")).to_equal(2)
         expect(be_dom_get_event_listener_count(button, "onclick")).to_equal(2)
+
+    it "reuses removed listener tombstones without growing the registry":
+        var button = BeDomNode.element("button")
+        var churn = 0
+        while churn < 300:
+            button.add_event_listener("click", "callable")
+            button.remove_event_listener("click", "callable")
+            churn = churn + 1
+        button.add_event_listener("click", "callable")
+
+        expect(button.event_listener_types.len()).to_equal(1)
+        expect(button.event_listener_actions.len()).to_equal(1)
+        expect(button.event_listener_capture.len()).to_equal(1)
+        expect(be_dom_get_event_listener_count(button, "click")).to_equal(1)
+
+    it "executes listener control through the canonical dispatch cursor":
+        var window = BeDomNode.element("window")
+        window.set_attr("id", "window")
+        window.add_event_listener_with_capture(
+            "click", "window-capture", true
+        )
+        window.add_event_listener("click", "window-bubble")
+        var document = BeDomNode.element("document")
+        document.set_attr("id", "document")
+        document.add_event_listener_with_capture(
+            "click", "document-capture", true
+        )
+        document.add_event_listener("click", "document-bubble")
+        var button = BeDomNode.element("button")
+        button.set_attr("id", "save")
+        button.set_attr("onclick", "inline")
+        button.add_event_listener_with_capture(
+            "click", "target-capture", true
+        )
+        button.add_event_listener("click", "callable-cancel")
+        button.add_event_listener("click", "callable-halt")
+        button.add_event_listener("click", "must-not-run")
+        document.add_child(button)
+        window.add_child(document)
+
+        val dispatch = be_dom_dispatch_event_to_id(
+            window, "save", "click", true, true, true,
+            _callable_listener_executor
+        )
+
+        expect(dispatch.actions.len()).to_equal(6)
+        expect(dispatch.actions[0]).to_equal("window-capture")
+        expect(dispatch.actions[1]).to_equal("document-capture")
+        expect(dispatch.actions[2]).to_equal("target-capture")
+        expect(dispatch.actions[3]).to_equal("inline")
+        expect(dispatch.actions[4]).to_equal("callable-cancel")
+        expect(dispatch.actions[5]).to_equal("callable-halt")
+        expect(dispatch.event.default_prevented).to_equal(true)
+        expect(dispatch.event.immediate_propagation_stopped).to_equal(true)
+        expect(dispatch.default_action).to_equal("button-activate")
+        expect(dispatch.default_action_allowed).to_equal(false)
 
     it "dispatches inline handlers before registered target listeners":
         var button = BeDomNode.element("button")

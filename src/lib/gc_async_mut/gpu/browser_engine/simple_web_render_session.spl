@@ -1,0 +1,200 @@
+"""Revision-driven retained owner for canonical Simple Web semantic results."""
+
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResource
+}
+use std.common.web.browser_renderer_protocol.{BrowserTextInputOverlay}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images
+}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{
+    BrowserCssAnimationInstance
+}
+use std.gc_async_mut.web.browser_session.{BrowserRenderSnapshot}
+
+fn _simple_web_render_counter_next(value: i64) -> i64:
+    if value >= 9223372036854775806: 9223372036854775806
+    else: value + 1
+
+fn _simple_web_render_command_count(
+    result: SimpleWebLayoutDrawIrResult
+) -> i64:
+    var count: i64 = 0
+    for batch in result.composition.batches:
+        count = count + batch.commands.len().to_i64()
+    count
+
+pub class SimpleWebRenderCounters:
+    serialize_count: i64
+    parse_count: i64
+    css_count: i64
+    style_count: i64
+    layout_count: i64
+    paint_count: i64
+    reuse_count: i64
+    composition_revision: i64
+    retained_node_count: i64
+    retained_style_count: i64
+    retained_box_count: i64
+    retained_command_count: i64
+
+    static fn create() -> SimpleWebRenderCounters:
+        SimpleWebRenderCounters(
+            serialize_count: 0,
+            parse_count: 0,
+            css_count: 0,
+            style_count: 0,
+            layout_count: 0,
+            paint_count: 0,
+            reuse_count: 0,
+            composition_revision: 0,
+            retained_node_count: 0,
+            retained_style_count: 0,
+            retained_box_count: 0,
+            retained_command_count: 0
+        )
+
+pub class SimpleWebRenderSession:
+    document_revision: i64
+    style_revision: i64
+    resource_revision: i64
+    width: i32
+    height: i32
+    scroll_y: i32
+    overlay_target_key: text
+    overlay_anchor_byte: i64
+    overlay_focus_byte: i64
+    overlay_view_start_byte: i64
+    overlay_caret_visible: bool
+    animation_time_ms: i64
+    document_html: text
+    current_result: SimpleWebLayoutDrawIrResult?
+    counters: SimpleWebRenderCounters
+
+    static fn create() -> SimpleWebRenderSession:
+        SimpleWebRenderSession(
+            document_revision: -1,
+            style_revision: -1,
+            resource_revision: -1,
+            width: 0,
+            height: 0,
+            scroll_y: 0,
+            overlay_target_key: "",
+            overlay_anchor_byte: 0,
+            overlay_focus_byte: 0,
+            overlay_view_start_byte: 0,
+            overlay_caret_visible: false,
+            animation_time_ms: -1,
+            document_html: "",
+            current_result: nil,
+            counters: SimpleWebRenderCounters.create()
+        )
+
+    me render(
+        snapshot: BrowserRenderSnapshot,
+        width: i32,
+        height: i32,
+        animation_time_ms: i64,
+        scroll_y: i32,
+        overlay: BrowserTextInputOverlay,
+        animation_instances: [BrowserCssAnimationInstance],
+        images: [SimpleOsHostGpuImageResource]
+    ) -> SimpleWebLayoutDrawIrResult:
+        val revisions = snapshot.revisions
+        var animation_unchanged = animation_time_ms == self.animation_time_ms
+        if (
+            not animation_unchanged and
+            animation_instances.len() == 0 and
+            self.current_result != nil and
+            self.current_result.unwrap().animation_next_ms < 0
+        ):
+            animation_unchanged = true
+        val reusable = (
+            self.current_result != nil and
+            snapshot.document_html == nil and
+            revisions.document_revision == self.document_revision and
+            revisions.style_revision == self.style_revision and
+            revisions.resource_revision == self.resource_revision and
+            width == self.width and height == self.height and
+            scroll_y == self.scroll_y and
+            overlay.target_key == self.overlay_target_key and
+            overlay.anchor_byte == self.overlay_anchor_byte and
+            overlay.focus_byte == self.overlay_focus_byte and
+            overlay.view_start_byte == self.overlay_view_start_byte and
+            overlay.caret_visible == self.overlay_caret_visible and
+            animation_unchanged
+        )
+        if reusable:
+            self.counters.reuse_count = _simple_web_render_counter_next(
+                self.counters.reuse_count
+            )
+            self.animation_time_ms = animation_time_ms
+            return self.current_result.unwrap()
+
+        if val Some(html) = snapshot.document_html:
+            self.document_html = html
+            self.counters.serialize_count = _simple_web_render_counter_next(
+                self.counters.serialize_count
+            )
+        val result = (
+            simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images(
+                self.document_html,
+                width,
+                height,
+                animation_time_ms,
+                scroll_y,
+                overlay,
+                animation_instances,
+                images
+            )
+        )
+        self.document_revision = revisions.document_revision
+        self.style_revision = revisions.style_revision
+        self.resource_revision = revisions.resource_revision
+        self.width = width
+        self.height = height
+        self.scroll_y = scroll_y
+        self.overlay_target_key = overlay.target_key
+        self.overlay_anchor_byte = overlay.anchor_byte
+        self.overlay_focus_byte = overlay.focus_byte
+        self.overlay_view_start_byte = overlay.view_start_byte
+        self.overlay_caret_visible = overlay.caret_visible
+        self.animation_time_ms = animation_time_ms
+        self.current_result = Some(result)
+        self.counters.parse_count = _simple_web_render_counter_next(
+            self.counters.parse_count
+        )
+        self.counters.css_count = _simple_web_render_counter_next(
+            self.counters.css_count
+        )
+        self.counters.style_count = _simple_web_render_counter_next(
+            self.counters.style_count
+        )
+        self.counters.layout_count = _simple_web_render_counter_next(
+            self.counters.layout_count
+        )
+        self.counters.paint_count = _simple_web_render_counter_next(
+            self.counters.paint_count
+        )
+        self.counters.composition_revision = _simple_web_render_counter_next(
+            self.counters.composition_revision
+        )
+        self.counters.retained_node_count = result.hit_index.nodes.len().to_i64()
+        self.counters.retained_style_count = result.hit_index.styles.len().to_i64()
+        self.counters.retained_box_count = result.hit_index.boxes.bx.len().to_i64()
+        self.counters.retained_command_count = (
+            _simple_web_render_command_count(result)
+        )
+        result
+
+    me close():
+        self.document_revision = -1
+        self.style_revision = -1
+        self.resource_revision = -1
+        self.document_html = ""
+        self.current_result = nil
+        self.counters.retained_node_count = 0
+        self.counters.retained_style_count = 0
+        self.counters.retained_box_count = 0
+        self.counters.retained_command_count = 0

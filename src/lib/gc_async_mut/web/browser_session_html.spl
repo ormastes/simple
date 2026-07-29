@@ -363,12 +363,6 @@ fn _browser_plan_append_image(
     )
     if resolved.len() > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES:
         return out
-    for existing in out:
-        if (
-            existing.authored_src == authored and
-            existing.resolved_url == resolved
-        ):
-            return out
     out.push(
         BrowserImageSource.create(
             authored, resolved
@@ -772,12 +766,7 @@ fn _css_background_image_url_spans(
 fn _css_background_image_urls(css_text: text) -> [text]:
     var urls: [text] = []
     for span in _css_background_image_url_spans(css_text):
-        var duplicate = false
-        for existing in urls:
-            if existing == span.authored:
-                duplicate = true
-        if not duplicate:
-            urls.push(span.authored)
+        urls.push(span.authored)
     urls
 
 fn _css_network_url(url: text) -> bool:
@@ -806,6 +795,108 @@ fn _rewrite_css_background_image_urls(
         copy_start = span.token_end
     if copy_start < css_text.len():
         out.push(css_text.slice(copy_start, css_text.len()))
+    out.build()
+
+fn bind_render_background_url(
+    css_text: text, document_url: text, resolved_url: text,
+    render_resource_key: text
+) -> text:
+    val spans = _css_background_image_url_spans(css_text)
+    for span in spans:
+        val resolved = collapse_url_dot_segments(
+            resolve_relative_url(document_url, span.authored)
+        )
+        if resolved == resolved_url:
+            return (
+                css_text.slice(0, span.token_start) +
+                "url(\"{render_resource_key}\")" +
+                css_text.slice(span.token_end, css_text.len())
+            )
+    css_text
+
+class BrowserRenderImageUrlSpan:
+    authored: text
+    token_start: i64
+    token_end: i64
+
+fn _browser_render_css_image_spans(
+    css_text: text, css_start: i64,
+    spans: [BrowserRenderImageUrlSpan]
+) -> [BrowserRenderImageUrlSpan]:
+    var out = spans
+    for span in _css_background_image_url_spans(css_text):
+        out.push(BrowserRenderImageUrlSpan(
+            authored: span.authored,
+            token_start: css_start + span.token_start,
+            token_end: css_start + span.token_end
+        ))
+    out
+
+fn _browser_render_image_url_spans(
+    html: text
+) -> [BrowserRenderImageUrlSpan]:
+    var spans: [BrowserRenderImageUrlSpan] = []
+    val lower = html.lower()
+    var pos = 0
+    while pos < html.len():
+        val start = find_text(lower, "<", pos)
+        if start < 0:
+            break
+        val tag_end = _browser_html_tag_end(html, start + 1)
+        if tag_end < 0:
+            break
+        val tag_name = html_tag_name(html.slice(start + 1, tag_end))
+        if tag_name == "style":
+            val close = find_text(lower, "</style>", tag_end + 1)
+            if close < 0:
+                break
+            spans = _browser_render_css_image_spans(
+                html.slice(tag_end + 1, close), tag_end + 1, spans
+            )
+            pos = close + 8
+            continue
+        pos = tag_end + 1
+    spans
+
+fn bind_render_stylesheet_image_urls(
+    html: text, document_url: text, bindings: [BrowserImageSource]
+) -> text:
+    if bindings.len() == 0:
+        return html
+    val spans = _browser_render_image_url_spans(html)
+    if spans.len() == 0:
+        return html
+    val out = StringBuilder.new()
+    var copy_start = 0
+    var binding_start = 0
+    for span in spans:
+        val resolved = collapse_url_dot_segments(
+            resolve_relative_url(document_url, span.authored)
+        )
+        var binding_index = binding_start
+        var matched = -1
+        while binding_index < bindings.len() and matched < 0:
+            if (
+                bindings[binding_index].render_node_id < 0 and
+                bindings[binding_index].resolved_url == resolved
+            ):
+                matched = binding_index
+            binding_index = binding_index + 1
+        if matched < 0:
+            continue
+        val admitted_key = bindings[matched].render_resource_key
+        val render_key = if admitted_key != "":
+            admitted_key
+        else:
+            "simple-blocked-image:" + matched.to_text()
+        out.push(html.slice(copy_start, span.token_start))
+        out.push("url(\"{render_key}\")")
+        copy_start = span.token_end
+        binding_start = matched + 1
+    if copy_start == 0:
+        return html
+    if copy_start < html.len():
+        out.push(html.slice(copy_start, html.len()))
     out.build()
 
 fn expand_stylesheet_text(document_url: text, base_url: text, css_text: text) -> BrowserStylesheetExpansion:

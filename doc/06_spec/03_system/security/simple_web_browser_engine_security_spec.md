@@ -31,6 +31,21 @@ blocked production artifact gate.
 
 Source: `test/03_system/security/simple_web_browser_engine_security_spec.spl`
 
+## Browser-owned CORS request identity
+
+REQ-WEB-BROWSER-010/012 require the canonical fetch path to derive the actual
+cross-origin CORS request's `Origin` from its requester, including after a
+redirect. The focused protocol scenario supplies a forged
+`Origin: https://attacker.test` alongside an ordinary retained header. Fetch
+preparation must remove the forged value, emit exactly the canonical
+`Origin: https://app.test`, and preserve the unrelated header.
+
+The scenario was authored before implementation. Pre-fix RED is structural:
+`CorsChecker` adds its origin only to preflight requests, while the actual
+simple CORS request passes caller headers through unchanged. The unhealthy
+pure-Simple runtime prevents executing that RED; no bootstrap or seed fallback
+is used.
+
 ## Ordered head meta CSP
 
 The `should apply head meta CSP in source order to every active resource`
@@ -67,12 +82,34 @@ background is denied by `img-src 'none'`.
 4. Require Engine2D software readback to contain exactly the four pixels of the
    allowed 2x2 background.
 
-The scenario was authored before any implementation. Its RED is
-source-semantic, not an observed run: `BrowserImageSource` carries
-`source_offset`, `csp_policy`, and `resource_key`, but admission currently
-collapses the loaded resource to its URI; `_html_draw_ir_image_index` then
-resolves every matching node by that URI. The unhealthy pure-Simple runtime
-prevents executing the RED, and no bootstrap or seed fallback was used.
+The implementation retains authored DOM/CSS URLs, evaluates CSP before
+deduplicating decoded image data, and records one ordered
+`BrowserImageSource.render_resource_key` binding per occurrence. Render-only
+HTML/CSS lowering replaces allowed occurrences with that opaque key; blocked
+occurrences receive a separate non-resource key, so the existing Draw IR image
+lookup fails closed without a second renderer or pixel store. Static browser
+conformance, rendering-source-coupling, and HTML/CSS traceability gates pass.
+The unhealthy pure-Simple runtime still prevents executing the scenario, and
+no bootstrap or seed fallback was used.
+
+### DOM mutation identity controls
+
+The follow-up control uses two identical image URLs admitted under opposite
+source-position CSP decisions. Their opaque decisions are attached to the
+canonical node through the existing NUL-prefixed hidden-attribute seam.
+Ordinary DOM and body serialization must still contain only the authored URL
+and must not expose either opaque key namespace.
+
+1. Remove the allowed node and require the surviving blocked twin to remain
+   absent from Draw IR.
+2. Reverse the two nodes and require the allowed image command to remain while
+   the blocked command stays absent.
+3. Retain a stylesheet-source control proving that stylesheet admission remains
+   independent of body-node order.
+
+The renderer-only serializer consumes hidden node bindings directly. The
+stylesheet-only binder handles the separate ordered stylesheet source lane; it
+does not rematch body nodes by URL or occurrence index.
 
 ## Platform renderer sandbox
 

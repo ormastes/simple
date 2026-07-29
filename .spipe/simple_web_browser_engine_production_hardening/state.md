@@ -1880,3 +1880,59 @@ implementation in progress / target evidence blocked
   the scenario. When the unhealthy deployed pure-Simple runtime prevents the
   required red run or docgen, record that exact blocker; never invent a RED,
   hand-edit a generated PASS, substitute the Rust seed, or skip the scenario.
+- post-sync production tranche (2026-07-29): Five small guided sidecars own
+  disjoint root gaps: per-node image admission identity; canonical callable
+  JavaScript event entry; exact retained render revisions; real browser chrome
+  control evidence; and one HTTPS/cookie/sandbox adversarial gap. The merge
+  owner, manual reviewer, and final reviewer are highest-capability Codex.
+  Existing owners remain authoritative: `BrowserImageSource` with one
+  `render_resource_key`, `DrawIrCommand.image_uri`,
+  `be_dom_dispatch_event_path`, `JsRuntime.invoke_callable_with_this`,
+  `BrowserRenderRevisions`, `BrowserRenderSnapshot`,
+  `SimpleWebRenderSession`, `HostedBrowserRendererRegistry`, and
+  `BrowserSession`. No second DOM/parser/WebIR/renderer/cache/network stack,
+  listener dispatcher, cookie jar, TLS verifier, or browser controller is
+  permitted. Frozen manual steps are `Bind each image command to its admitted
+  node identity`, `Deliver JavaScript and Simple Script listeners on the live
+  DOM`, `Reuse parsed layout work across unchanged animation frames`,
+  `Operate page and browser controls`, and `Navigate through verified HTTPS`.
+  Existing `_check_canonical_draw_ir`, `_check_event_phase_order`,
+  `_check_budget_row`, `_operate_browser_navigation`, and
+  `_check_security_denial` helpers remain canonical. Every implementation
+  starts with its modern system SSpec and retains `fail("REQ-WEB-BROWSER-NNN:
+  ... not implemented")` for unfinished rows. The deployed CLI exit-139 ABI
+  blocker still forbids fabricated runtime PASS, Rust-seed substitution, or
+  full bootstrap.
+- post-sync tranche implementation (2026-07-29): Image admission now binds one
+  opaque render key to the canonical body node through existing NUL-hidden DOM
+  metadata; authored DOM/CSS serialization omits it, render serialization
+  consumes it, and remove/reorder cannot invert identical-URL CSP decisions.
+  Stylesheet occurrences retain their ordered source binding and allowed
+  identical URLs share the existing decoded pixel resource. The canonical
+  fetch path replaces forged CORS `Origin` headers with the parsed requester
+  origin on each hop. Secondary address input now enforces the same 2048-byte
+  UTF-8 bound as primary chrome. `display:inline-block` retains its computed
+  value and uses one atomic inline-run layout path with Draw-IR and Engine2D
+  absolute oracles; baseline alignment remains explicitly unsupported.
+- retained/event foundation (2026-07-29): `BrowserRenderRevisions`,
+  `BrowserRenderSnapshot`, and one worker-owned `SimpleWebRenderSession` reuse
+  unchanged compositions before serialization/parse/style/layout/paint.
+  Document, stylesheet, and image binding/pixel mutations invalidate exact
+  revisions; worker close delegates to real `BrowserSession.close()` and clears
+  timers, runtime, loads, requests, modules, images, bindings, DOM/style/source,
+  history, overrides, hit state, and retained counters. No timing/RSS/NFR-003
+  claim is attached to the functional reuse counter scenario. The existing JS
+  interpreter exposes direct host callable invocation and the one canonical DOM
+  dispatcher accepts a private executor cursor with bounded listener tombstone
+  reuse. BrowserSession callable-listener integration and JS-originated
+  synchronous `dispatchEvent()` remain RED because active-interpreter re-entry
+  is not implemented.
+- post-sync tranche verification (2026-07-29): Two adversarial review/fix
+  cycles converged to PASS after closing async resource/style invalidation,
+  real lifecycle reclamation, DOM-reorder CSP identity, duplicate dispatcher
+  API, boolean matcher, Engine2D oracle, and conformance-ledger blockers.
+  Conformance contract, rendering-source coupling, direct-env/runtime
+  working+staged, reverse-patch whitespace, conflict/placeholder scan, SPipe
+  wiring, and generated-spec layout (`0`) pass. Executable SSpec/docgen/live
+  animation evidence remains blocked by the recorded deployed pure-Simple
+  exit-139 ABI artifact; no bootstrap or Rust seed was used.

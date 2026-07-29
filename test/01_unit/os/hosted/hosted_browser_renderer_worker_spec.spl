@@ -5,6 +5,7 @@ use std.common.ui.draw_ir.{DrawIrCommand}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     simpleos_host_gpu_image_resource
 }
+use std.common.image.png_encode.{encode_argb_to_png}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_WORKER_ARG,
     BrowserRendererMessage,
@@ -62,6 +63,13 @@ fn _render(html: text, time_ms: i64):
         2
     )
 
+fn _worker_png_hex(pixel: u32) -> text:
+    var out = ""
+    for byte in encode_argb_to_png([pixel], 1, 1):
+        val piece = byte.to_i64().to_hex()
+        out = out + if piece.len() == 1: "0{piece}" else: piece
+    out
+
 fn _worker_command_index(
     commands: [DrawIrCommand], component_id: text
 ) -> i32:
@@ -73,6 +81,80 @@ fn _worker_command_index(
     -1
 
 describe "hosted browser renderer worker":
+
+    it "reuses an unchanged semantic frame without rerunning render stages":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main id='stable'>unchanged</main>"
+        )).ok).to_be(true)
+        val before_composition_revision = (
+            worker.render_session.counters.composition_revision
+        )
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        val after = worker.render_session.counters
+
+        expect(after.serialize_count).to_equal(1)
+        expect(after.parse_count).to_equal(1)
+        expect(after.css_count).to_equal(1)
+        expect(after.style_count).to_equal(1)
+        expect(after.layout_count).to_equal(1)
+        expect(after.paint_count).to_equal(1)
+        expect(after.reuse_count).to_equal(1)
+        expect(after.composition_revision).to_equal(
+            before_composition_revision
+        )
+        expect(after.retained_node_count).to_be_greater_than(0)
+        expect(after.retained_style_count).to_be_greater_than(0)
+        expect(after.retained_box_count).to_be_greater_than(0)
+        expect(after.retained_command_count).to_be_greater_than(0)
+        worker.close()
+        expect(worker.render_session.counters.retained_node_count).to_equal(0)
+        expect(worker.render_session.counters.retained_style_count).to_equal(0)
+        expect(worker.render_session.counters.retained_box_count).to_equal(0)
+        expect(worker.render_session.counters.retained_command_count).to_equal(0)
+
+    it "closes the real browser document resource and runtime owners":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        worker.browser.register_resource(
+            "https://assets.test/pixel.png",
+            _worker_png_hex(0xFF123456u32)
+        )
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<img src='https://assets.test/pixel.png'>"
+        )).ok).to_be(true)
+        expect(worker.browser.eval_script(
+            "setTimeout(function(){ document.title = 'late'; }, 1000)"
+        ).is_ok()).to_be(true)
+        expect(worker.browser.begin_network_navigation(
+            "https://next.test/", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        expect(worker.browser.image_resources.len()).to_equal(1)
+        expect(
+            worker.browser.admitted_image_sources.len()
+        ).to_equal(1)
+        expect(worker.browser.has_pending_requests()).to_be(true)
+        expect(worker.browser.runtime_state != nil).to_be(true)
+        expect(
+            worker.browser.next_script_timer_due_ms()
+        ).to_be_greater_than(-1)
+
+        worker.close()
+        expect(worker.browser.image_resources.len()).to_equal(0)
+        expect(worker.browser.admitted_image_sources.len()).to_equal(0)
+        expect(worker.browser.has_pending_requests()).to_be(false)
+        expect(worker.browser.inflight_requests.len()).to_equal(0)
+        expect(worker.browser.active_load).to_be_nil()
+        expect(worker.browser.runtime_state).to_be_nil()
+        expect(worker.browser.next_script_timer_due_ms()).to_equal(-1)
+        expect(worker.browser.resource_overrides.len()).to_equal(0)
+        expect(worker.browser.current_body_html).to_equal("")
+        expect(worker.browser.current_style_html).to_equal("")
+        expect(worker.browser.source_html).to_equal("")
+        expect(worker.browser.history.len()).to_equal(0)
 
     it "releases retained image pixels when the renderer process closes":
         var process = HostedBrowserRendererProcess.create(19, 64, 48)
@@ -164,18 +246,18 @@ describe "hosted browser renderer worker":
         expect(release_at).to_be_greater_than(-1)
         expect(repaint_at).to_be_greater_than(release_at)
 
-    it "serializes the document once before animation reconciliation and layout":
+    it "routes document snapshots through one retained semantic render session":
         val source = rt_file_read_text(
             "src/os/hosted/hosted_browser_renderer_worker.spl"
         ) ?? ""
         expect(source).to_contain(
-            "val document_html = session.render_html_document()"
+            "val snapshot = session.render_snapshot_since("
         )
         expect(source).to_contain(
             "session.prepare_css_animation_instances_with_html(width, document_html)"
         )
         expect(source).to_contain(
-            "simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images(\n        document_html,"
+            "val layout = render_session.render("
         )
 
     it "rejects hidden worker markers outside the exact spawn shape":

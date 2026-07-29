@@ -163,7 +163,10 @@ fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
                     val glyph_w = style_char_w(styles[c])
                     val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
                     width = width + txt.len() * ink_w
-        elif styles[c].display == "inline":
+        elif (
+            styles[c].display == "inline" or
+            styles[c].display == "inline-block"
+        ):
             val child = intrinsic_text_width(nodes, styles, child_index, c, out_widths)
             out_widths = child.widths
             width = width + child.width
@@ -1236,8 +1239,8 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_wrap_ends = child.wrap_ends
             out_intrinsic_widths = child.intrinsic_widths
         else:
-            if cst.display == "inline":
-                if nodes[c].tag == "br":
+            if cst.display == "inline" or cst.display == "inline-block":
+                if cst.display == "inline" and nodes[c].tag == "br":
                     val break_line_h = style_line_h(cst)
                     if not in_inline_run:
                         inline_line_h = break_line_h
@@ -1255,6 +1258,15 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     child_count = child_count + 1
                     c = child_index.next_sibling[c]
                     continue
+                val inline_block = cst.display == "inline-block"
+                val inline_margin_l = if inline_block:
+                    resolve_horizontal_margin_px(cst.margin_l, iw)
+                else:
+                    0
+                val inline_margin_r = if inline_block:
+                    resolve_horizontal_margin_px(cst.margin_r, iw)
+                else:
+                    0
                 if not in_inline_run:
                     in_inline_run = true
                     inline_x = 0
@@ -1262,6 +1274,17 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 val intrinsic = intrinsic_text_width(nodes, styles, child_index, c, out_intrinsic_widths)
                 out_intrinsic_widths = intrinsic.widths
                 var inline_w = intrinsic.width
+                var resolved_inline_style = cst
+                if inline_block and cst.width_px > 0:
+                    inline_w = css_outer_width(nodes[c], cst, cst.width_px)
+                elif inline_block and cst.width_px < 0:
+                    val percent_content_w = iw * (0 - cst.width_px) / 100
+                    inline_w = css_outer_width(
+                        nodes[c], cst, percent_content_w
+                    )
+                    resolved_inline_style = style_with_width(
+                        cst, percent_content_w
+                    )
                 val text_advance_w = inline_text_advance_width(nodes[c], cst)
                 if text_advance_w > inline_w:
                     inline_w = text_advance_w
@@ -1277,7 +1300,17 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     val avail_inline = iw - inline_x
                     if avail_inline > 0 and inline_w > avail_inline:
                         inline_w = avail_inline
-                val child = layout_with_style(nodes, styles, child_index, c, ix + inline_x, cy, inline_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, cst)
+                val inline_outer_w = (
+                    inline_margin_l + inline_w + inline_margin_r
+                )
+                if (
+                    inline_block and inline_x > 0 and
+                    inline_x + inline_outer_w > iw
+                ):
+                    cy = cy + inline_line_h
+                    inline_x = 0
+                    inline_line_h = style_line_h(cst)
+                val child = layout_with_style(nodes, styles, child_index, c, ix + inline_x + inline_margin_l, cy, inline_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_inline_style)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
@@ -1294,14 +1327,20 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     val wrap_lines = out_wrap_starts[c].len()
                     val text_lines = if wrap_lines > 0: wrap_lines else: 1
                     out_bh[c] = text_lines * style_line_h(cst)
-                elif nodes[c].tag == "span" and out_bh[c] > 1:
+                elif (
+                    cst.display == "inline" and nodes[c].tag == "span" and
+                    out_bh[c] > 1
+                ):
                     out_bh[c] = out_bh[c] - 1
                 var inline_contribution_h = out_bh[c]
                 if nodes[c].tag == "button":
                     inline_contribution_h = inline_contribution_h + 3
                 if inline_contribution_h > inline_line_h:
                     inline_line_h = inline_contribution_h
-                inline_x = inline_x + out_bw[c]
+                inline_x = (
+                    inline_x + inline_margin_l + out_bw[c] +
+                    inline_margin_r
+                )
                 prev_margin_b = 0
                 child_count = child_count + 1
                 c = child_index.next_sibling[c]

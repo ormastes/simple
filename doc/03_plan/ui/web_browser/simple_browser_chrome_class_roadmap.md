@@ -71,7 +71,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 | Flexbox | Full | Partial | 55.6% WPT (10/18) |
 | Grid | Full | Partial | Exists in examples tree, not wired |
 | Colors (hsl, currentColor) | Full | Partial | 30% WPT (3/10) |
-| Display modes | Full | block/inline/flex only | 0% WPT (0/5); no contents, flow-root |
+| Display modes | Full | block/inline/inline-block/flex/contents basics | Focused inline-block semantic/layout/Draw IR oracle; advanced baseline alignment and flow-root remain open |
 | Backgrounds | Full | Partial | 20% WPT (1/5) |
 | Positioning | Full | Partial | 20% WPT (1/5) |
 | Normal flow | Full | Partial | 0% WPT (0/2) |
@@ -263,6 +263,11 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - Port `examples/11_advanced/browser/feature/layout/float.spl` → canonical engine
 - Implement float clearing, float context, float positioning per CSS 2.1 spec
 - Land CSS quick wins: `hsl()`/`hsla()`, `currentColor`, `display: inline-flex`, `display: flow-root`, `display: contents`, `list-style: none`, `flex-flow` shorthand
+- Basic `display:inline-block` now retains its computed value, participates as
+  one atomic box in the existing inline run, respects explicit/percentage
+  content width plus padding/border/margins, wraps between atomic boxes, and
+  lowers exact border boxes to Draw IR. Baseline alignment remains explicit in
+  the unsupported ledger.
 - Add `calc()` for length values
 
 **Gate:** WPT pass rate >= 65% (currently 37.8%). Float category >= 80%. All 132 corpus pages still exact match.

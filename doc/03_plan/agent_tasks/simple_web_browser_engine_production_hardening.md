@@ -126,6 +126,14 @@ Each sub-batch returns to the merge owner before the next begins. The HTML/CSS
 fidelity agent may change the same renderer files, so it must finish before
 sub-batch 2 starts.
 
+Status (2026-07-29): the merge owner authorized the smallest exact first
+slice. Source now has conditional BrowserSession snapshots, one worker-owned
+`SimpleWebRenderSession`, unchanged-frame reuse counters, and close
+reclamation. It retains the existing combined semantic/layout/Draw IR result;
+stage-selective mutation, navigation, stylesheet/resource, viewport,
+animation, scroll/overlay, and soak rows remain separate RED follow-ups.
+Runtime execution is blocked by the unhealthy deployed pure-Simple target.
+
 ### Lane E — JavaScript/Simple Script clock
 
 Owns:

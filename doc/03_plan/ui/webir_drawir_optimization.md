@@ -20,9 +20,12 @@ concrete response to the perf regression exposed in
 - The shared Draw IR contract now owns rectangle translation/intersection, and
   the Engine2D executor reuses it for command clips. This is a bounded,
   behavior-preserving part of Phase 1.
-- Persistent semantic/layout stage reuse remains blocked on authoritative
-  BrowserSession document/style/geometry/resource revisions. Do not add a
-  whole-HTML cache as a substitute.
+- The first retained-render slice is done in source and runtime-blocked:
+  authoritative BrowserSession document/style/resource revisions feed one
+  worker-owned `SimpleWebRenderSession`, and an unchanged frame reuses the
+  existing semantic/layout/Draw IR result. Stage-selective mutation,
+  viewport, animation, scroll, and resource invalidation remain open. No
+  whole-HTML pixel cache was added.
 - External `<img>` and CSS background lowering cover part of Phase 2. Iframe
   embedding and exact Path-A/Path-B parity remain open.
 
@@ -33,8 +36,10 @@ concrete response to the perf regression exposed in
    REQ-WEB-BROWSER-003/004 semantic composition oracle before pixels and
    round-trip it through the existing hosted SBRF/Draw IR v2 codec.
 2. Emit iframe content through the existing embedded `DrawIrBatch` mechanism.
-3. Add authoritative BrowserSession document/style/geometry/resource
-   revisions, then retain private parse/style/layout state.
+3. **Partial, runtime-blocked:** finish authoritative mutation/style/resource
+   revision sites and split the retained owner into stage-selective
+   parse/style/layout/paint invalidation. Exact unchanged reuse and close
+   reclamation are implemented.
 4. Run exact Path-A/Path-B corpus parity and only then route production content
    frames through the existing persistent Engine2D owner.
 5. Consider Draw IR diff/damage only after retained-stage measurements prove

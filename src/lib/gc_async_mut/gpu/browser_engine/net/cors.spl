@@ -9,10 +9,10 @@ per the Fetch specification. No network calls — pure logic.
 This module makes NO origin decisions of its own. Every same-origin test and
 every "may the requester read this body?" test is delegated to
 `security/origin_policy.spl` — `same_origin` and `can_read_response`. The old
-serialized-origin string comparisons (`cors_url_origin`, `self._origin ==
-allowed_origin`) are gone; they treated a malformed origin as same-origin with
-another malformed origin and accepted a literal `Access-Control-Allow-Origin:
-null`.
+serialized-origin string comparisons (`cors_url_origin`, raw requester text
+against `allowed_origin`) are gone; they treated a malformed origin as
+same-origin with another malformed origin and accepted a literal
+`Access-Control-Allow-Origin: null`.
 """
 
 #![allow(REQC001)]
@@ -86,10 +86,9 @@ pub fn create_preflight(original: FetchRequest) -> FetchRequest:
 pub class CorsChecker:
     """Validates CORS preflight responses for a given requester origin.
 
-    `_origin` is the serialized form used for the outgoing `Origin:` header;
-    `_requester` is the parsed origin every decision is actually made on.
+    `_requester` is the parsed origin used for every decision and emitted
+    browser-owned `Origin` header.
     """
-    _origin: text
     _requester: Origin
 
     static fn new(origin: text) -> CorsChecker:
@@ -99,12 +98,10 @@ pub class CorsChecker:
         empty or malformed origin becomes opaque and is refused everywhere.
         """
         return CorsChecker {
-            _origin: origin,
             _requester: origin_from_url_text(origin, "cors-checker:" + origin)
         }
 
     me set_origin(origin: text):
-        self._origin = origin
         self._requester = origin_from_url_text(origin, "cors-checker:" + origin)
 
     me fn requester_origin() -> Origin:
@@ -112,6 +109,43 @@ pub class CorsChecker:
 
     me fn is_same_origin(url: Url) -> bool:
         return same_origin(self._requester, cors_origin_of_url(url))
+
+    me fn prepare_actual_request(request: FetchRequest) -> FetchRequest:
+        """Replace caller-controlled Origin on the actual CORS request.
+
+        The requester origin is browser state. Script and redirect-carried
+        headers cannot override it. Non-CORS requests are unchanged.
+        """
+        match request.mode:
+            RequestMode.Cors:
+                pass_do_nothing
+            _:
+                return request
+
+        var headers = ""
+        for raw_line in request.headers.split("\n"):
+            val line = raw_line.trim()
+            val colon = line.index_of(":")
+            if line != "":
+                val name = if colon > 0:
+                    line.slice(0, colon).trim().to_lower()
+                else:
+                    ""
+                if name != "origin":
+                    headers = headers + line + "\r\n"
+        if not self.is_same_origin(request.url):
+            headers = (
+                headers + "Origin: " + serialize_origin(self._requester) +
+                "\r\n"
+            )
+        FetchRequest(
+            url: request.url,
+            method: request.method,
+            headers: headers,
+            body: request.body,
+            mode: request.mode,
+            credentials: request.credentials
+        )
 
     me fn can_read_body(response_url: Url, response_headers: text, credentials: text) -> bool:
         """May this requester read the body served from `response_url`?
@@ -140,8 +174,10 @@ pub class CorsChecker:
 
     me fn create_preflight(request: FetchRequest) -> FetchRequest:
         var preflight = create_preflight(request)
-        if self._origin != "":
-            preflight.headers = "Origin: {self._origin}\r\n" + preflight.headers
+        preflight.headers = (
+            "Origin: " + serialize_origin(self._requester) + "\r\n" +
+            preflight.headers
+        )
         preflight
 
     me fn validate_response(response_headers: text, credentials: text) -> PreflightResult:

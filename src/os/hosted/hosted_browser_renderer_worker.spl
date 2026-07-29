@@ -37,6 +37,9 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images,
     simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_render_session.{
+    SimpleWebRenderSession
+}
 use std.gc_async_mut.web.browser_session.{
     BrowserBookmarkSnapshot, BrowserResponse, BrowserSession
 }
@@ -138,6 +141,7 @@ fn _worker_diagnostics(session: BrowserSession) -> text:
 
 fn _worker_frame(
     session: BrowserSession,
+    render_session: SimpleWebRenderSession,
     message: BrowserRendererMessage,
     width: i32,
     height: i32,
@@ -153,10 +157,17 @@ fn _worker_frame(
     val document_animation_time_ms = _worker_document_animation_time_ms(
         session, animation_time_ms
     )
-    val document_html = session.render_html_document()
+    val snapshot = session.render_snapshot_since(
+        render_session.document_revision,
+        render_session.style_revision,
+        render_session.resource_revision
+    )
+    val document_html = match snapshot.document_html:
+        Some(html): html
+        nil: render_session.document_html
     session.prepare_css_animation_instances_with_html(width, document_html)
-    val layout = simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images(
-        document_html,
+    val layout = render_session.render(
+        snapshot,
         width,
         height,
         document_animation_time_ms,
@@ -217,6 +228,7 @@ fn _worker_frame(
 
 pub class HostedBrowserRendererWorkerSession:
     browser: BrowserSession
+    render_session: SimpleWebRenderSession
     width: i32
     height: i32
     initialized: bool
@@ -240,6 +252,7 @@ pub class HostedBrowserRendererWorkerSession:
         browser.broker_network_policy = true
         HostedBrowserRendererWorkerSession(
             browser: browser,
+            render_session: SimpleWebRenderSession.create(),
             width: width,
             height: height,
             initialized: false,
@@ -746,7 +759,8 @@ pub class HostedBrowserRendererWorkerSession:
         val caret_due_ms = self._caret_due_ms(overlay)
         self.last_hit_index = nil
         val frame = _worker_frame(
-            self.browser, message, self.width, self.height,
+            self.browser, self.render_session,
+            message, self.width, self.height,
             self.animation_time_ms, response_id, overlay,
             caret_due_ms,
             (self.scroll_milli_y / 1000).to_i32(),
@@ -764,6 +778,12 @@ pub class HostedBrowserRendererWorkerSession:
             self.input_view_start_byte =
                 frame.resolved_input_view_start_byte
         frame
+
+    me close():
+        self.last_hit_index = nil
+        self.image_resource_revisions = []
+        self.render_session.close()
+        self.browser.close()
 
 pub fn hosted_browser_renderer_handle_request(
     session: BrowserSession,
@@ -805,8 +825,10 @@ pub fn hosted_browser_renderer_handle_request(
         val _ = session.advance_time(requested_time_ms)
         next_time_ms = requested_time_ms
 
+    val render_session = SimpleWebRenderSession.create()
     _worker_frame(
-        session, message, width, height, next_time_ms, message.request_id,
+        session, render_session,
+        message, width, height, next_time_ms, message.request_id,
         browser_text_input_overlay_empty(), -1, 0, []
     )
 

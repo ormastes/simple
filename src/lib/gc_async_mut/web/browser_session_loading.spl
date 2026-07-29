@@ -547,6 +547,7 @@ impl BrowserSession:
         if not encoded_resources.ok:
             return "image load error: " + encoded_resources.reason
         self.image_resources = retained
+        self._advance_resource_revision()
         ""
 
     me _remove_failed_image_source(image_uri: text):
@@ -554,37 +555,54 @@ impl BrowserSession:
             if resource.image_uri == image_uri:
                 return
         var retained: [BrowserImageSource] = []
+        var changed = false
         for source in self.admitted_image_sources:
-            if source.resource_key != image_uri:
+            if source.render_resource_key == image_uri:
+                self._record_node_image_render_key(
+                    source, "simple-blocked-image:load-error"
+                )
+                retained.push(source.with_render_resource_key(""))
+                changed = true
+            else:
                 retained.push(source)
         self.admitted_image_sources = retained
+        if changed:
+            self._advance_resource_revision()
 
     me _prune_admitted_image_sources_to_resources():
         var retained: [BrowserImageSource] = []
         for source in self.admitted_image_sources:
-            var loaded = false
+            var loaded = source.render_resource_key == ""
             for resource in self.image_resources:
-                if resource.image_uri == source.resource_key:
+                if resource.image_uri == source.render_resource_key:
                     loaded = true
             if loaded:
                 retained.push(source)
+        val changed = retained.len() != self.admitted_image_sources.len()
         self.admitted_image_sources = retained
+        if changed:
+            self._advance_resource_revision()
+
+    me _record_image_binding(source: BrowserImageSource):
+        var retained: [BrowserImageSource] = []
+        var inserted = false
+        for existing in self.admitted_image_sources:
+            if (
+                not inserted and source.source_offset >= 0 and
+                (existing.source_offset < 0 or
+                 source.source_offset < existing.source_offset)
+            ):
+                retained.push(source)
+                inserted = true
+            retained.push(existing)
+        if not inserted:
+            retained.push(source)
+        self.admitted_image_sources = retained
+        self._advance_resource_revision()
 
     me _start_image_source(
         source: BrowserImageSource
     ) -> Result<bool, text>:
-        for existing in self.admitted_image_sources:
-            if existing.resource_key == source.resource_key:
-                if existing.resolved_url == source.resolved_url:
-                    return Ok(false)
-                return Err(
-                    "image resource key conflict ignored: {source.resource_key}"
-                )
-        if self.admitted_image_sources.len() >= BROWSER_MAX_IMAGE_RESOURCES:
-            return Err(
-                "image resource limit reached; additional images ignored"
-            )
-
         val broker_hsts_candidate = self._broker_hsts_candidate(
             source.resolved_url
         )
@@ -596,8 +614,46 @@ impl BrowserSession:
             source.csp_policy, "img-src",
             self.document_url, csp_target_url, false
         ):
+            self._record_node_image_render_key(
+                source,
+                "simple-blocked-image:" +
+                    self.admitted_image_sources.len().to_text()
+            )
+            self._record_image_binding(source)
             return Err("CSP blocked image: {csp_target_url}")
-        self.admitted_image_sources.push(source)
+
+        for existing in self.admitted_image_sources:
+            if (
+                existing.resolved_url == source.resolved_url and
+                existing.render_resource_key != ""
+            ):
+                self._record_node_image_render_key(
+                    source, existing.render_resource_key
+                )
+                self._record_image_binding(
+                    source.with_render_resource_key(
+                        existing.render_resource_key
+                    )
+                )
+                return Ok(false)
+        if self.image_resources.len() >= BROWSER_MAX_IMAGE_RESOURCES:
+            self._record_node_image_render_key(
+                source, "simple-blocked-image:resource-limit"
+            )
+            self._record_image_binding(source)
+            return Err(
+                "image resource limit reached; additional images ignored"
+            )
+
+        val render_resource_key = (
+            "simple-render-image:" +
+            self.admitted_image_sources.len().to_text()
+        )
+        val bound_source = source.with_render_resource_key(
+            render_resource_key
+        )
+        self._record_node_image_render_key(source, render_resource_key)
+        self._record_image_binding(bound_source)
         if val Some(override_body) = pair_value(
             self.resource_overrides, source.resolved_url
         ):
@@ -611,16 +667,16 @@ impl BrowserSession:
                     body: override_body,
                     error: ""
                 ),
-                source.resource_key
+                render_resource_key
             )
             if warning != "":
-                self._remove_failed_image_source(source.resource_key)
+                self._remove_failed_image_source(render_resource_key)
                 return Err(warning)
             return Ok(false)
         var request = self._build_request(
             "image", source.resolved_url, "GET", "", "", ""
         )
-        request.image_resource_key = source.resource_key
+        request.image_resource_key = render_resource_key
         request.csp_policy = source.csp_policy
         self.pending_requests.push(request)
         Ok(true)
@@ -998,6 +1054,7 @@ impl BrowserSession:
         if _guest_runtime_probe_url(load.document_url):
             self.current_url = load.document_url
             self.current_style_html = load.stylesheet_html()
+            self._advance_style_revision()
             self.animation_start_time_ms = self.monotonic_time_ms
             self.css_animation_instances = []
             self.css_animation_reconcile_pending = true
@@ -1016,6 +1073,7 @@ impl BrowserSession:
             val _ = self.begin_network_navigation(redirected_url, "GET", "", "", "")
             return
         self.current_style_html = load.stylesheet_html()
+        self._advance_style_revision()
         self.animation_start_time_ms = self.monotonic_time_ms
         self.css_animation_instances = []
         self.css_animation_reconcile_pending = true
@@ -1031,6 +1089,7 @@ impl BrowserSession:
         if self.current_url != load.document_url:
             return
         self.current_style_html = load.stylesheet_html()
+        self._advance_style_revision()
         self.animation_start_time_ms = self.monotonic_time_ms
         self.css_animation_instances = []
         self.css_animation_reconcile_pending = true

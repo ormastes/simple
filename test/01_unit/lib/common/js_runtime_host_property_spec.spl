@@ -35,3 +35,53 @@ describe "JS runtime host property object store invariants":
 
         val snapshot = store.get_object(parent_id)
         expect(snapshot.properties.len()).to_equal(2)
+
+    it "invokes a retained callable with host this and arguments":
+        var runtime = JsRuntime.new(
+            Logger.new("host-callable", LogLevel.Error)
+        )
+        expect(runtime.eval(
+            "var frames=0;requestAnimationFrame(function(){" +
+            "frames=frames+1;});function listener(event){" +
+            "return this.label+':'+event.type;}"
+        ).is_ok()).to_be(true)
+        val callable = (
+            runtime.interpreter.lookup_global_value("listener") ??
+            JsValue.Undefined
+        )
+        val receiver_id = runtime.create_host_object()
+        runtime.set_host_property(
+            receiver_id, "label", JsValue.String(v: "button")
+        )
+        val event_id = runtime.create_host_object()
+        runtime.set_host_property(
+            event_id, "type", JsValue.String(v: "click")
+        )
+
+        val result = runtime.invoke_callable_with_this(
+            callable,
+            [JsValue.Object(id: event_id)],
+            JsValue.Object(id: receiver_id)
+        )
+
+        match result:
+            Ok(JsValue.String(v)):
+                expect(v).to_equal("button:click")
+            Ok(_):
+                fail("retained callable returned the wrong value kind")
+            Err(error):
+                fail("retained callable failed: {error.message}")
+        expect(runtime.drain_due_timers(16)).to_equal(1)
+        match runtime.eval("frames"):
+            Ok(JsValue.Number(frames)):
+                expect(frames).to_equal(1.0)
+            _:
+                fail("requestAnimationFrame did not survive host invocation")
+
+    it "rejects a non-callable host value":
+        val runtime = JsRuntime.new(
+            Logger.new("host-non-callable", LogLevel.Error)
+        )
+        expect(runtime.invoke_callable_with_this(
+            JsValue.String(v: "not callable"), [], JsValue.Undefined
+        ).is_err()).to_be(true)

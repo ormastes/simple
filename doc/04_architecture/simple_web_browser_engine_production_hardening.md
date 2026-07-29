@@ -259,6 +259,12 @@ composition/hit index. Replacement swaps those values rather than appending.
 `close()` also clears the worker's hit index and image revision list. Process
 exit remains the final sandbox-worker release boundary.
 
+The first implementation slice retains the existing combined
+`SimpleWebLayoutDrawIrResult` and proves only unchanged-frame reuse plus close
+reclamation. It intentionally reruns the full canonical renderer for every
+dirty key. The stage-selective rows above remain required follow-ups; no
+partial-stage PASS is inferred from the combined-result cache.
+
 The render session emits Draw IR only. The existing persistent
 `Engine2dCompositorBackend` creates device/font state once, clears/submits on
 dirty frames, and shuts down once. The per-call helper that creates and shuts
