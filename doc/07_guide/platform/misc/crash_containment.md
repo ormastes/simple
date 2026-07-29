@@ -156,11 +156,44 @@ Captures: timestamp, PID, message, file:line:col, backtrace. Outputs to stderr +
 
 No restart loops, no quarantine, no process isolation.
 
+## 9b. Crash Bundle (DS7, 2026-07-29)
+
+**File:** `src/lib/nogc_sync_mut/crash/crash_bundle.spl`
+
+`CrashBundleV1` — structured, SDN-serialized crash capture built from a
+panic-adjacent `.spl` call site (message + optional recent log context),
+**not** from a live signal handler:
+
+```simple
+val (ring, backend_id) = crash_ring_register(64)   # once, near process start
+# ... normal execution, logging via std.log ...
+val bundle = CrashBundleV1.capture("panic", msg, source_location, ring)
+bundle.write_to("/var/log/simple_crash.sdn")
+```
+
+Fields: `version`, `build_id` (currently always `""` — no BuildId manifest
+exists anywhere under `src/lib` yet), `timestamp_unix_micros` (`rt_getpid`/
+`rt_time_now_unix_micros`), `pid`, `fault_kind`, `message`,
+`source_location`, and up to N trailing `std.log` ring records (subsys,
+level, resolved text via `log_text_from_handle`). Reuses `std.log`'s
+`RingBackend`, which was module-internal before this lane — see the export
+comment in `src/lib/log.spl`.
+
+**Not covered — needs new runtime externs, filed not stubbed:**
+`doc/08_tracking/bug/crash_signal_bundle_extern_gap_2026-07-29.md`. The C
+runtime's `_spl_crash_handler` (SIGSEGV/SIGBUS, runtime.c:1898) is
+async-signal-safe (raw `write()` + `backtrace_symbols_fd` + `_exit`) but has
+no path into Simple code or into `CrashBundleV1` — calling into the
+interpreter/GC/std.log/std.fs from signal context is unsafe, and the
+handler's `ucontext` (registers) is received but discarded. SIGABRT has no
+handler at all today.
+
 ## 11. Roadmap
 
 | Priority | Feature | Status |
 |---|---|---|
-| P0 | Signal handlers (SIGSEGV/SIGABRT crash logging) | Planned |
+| P0 | Signal handlers (SIGSEGV/SIGABRT crash logging) | **Partial** — SIGSEGV/SIGBUS handler exists in C (runtime.c:1921, always-on since `spl_init_args`) and dumps a raw backtrace to stderr; SIGABRT uncovered; no Simple-reachable hook, no structured bundle from the signal path — see §9b and the filed extern gap |
+| P0 | CrashBundleV1 structured capture (panic-adjacent, not signal-adjacent) | **Done** — `src/lib/nogc_sync_mut/crash/crash_bundle.spl`, spec `test/01_unit/lib/crash/crash_bundle_spec.spl` |
 | P0 | Hard memory limit (`setrlimit` at process start) | Planned |
 | **P1** | **FaultKind: SignalFault, MemoryExceeded, InterruptRequested** | **Done** |
 | **P1** | **Monitor/Link wiring with explicit caller identity** | **Done** |
