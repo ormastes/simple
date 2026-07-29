@@ -61,7 +61,84 @@ forced-interpret test lane.
   self-hosted impact pass first: self-hosted internals were built against
   byte-at behavior, and codepoint-seeking makes every `s[i]` walk O(n^2)
   (lexer-shaped risk; see the char_code_at O(i) family). Flagged, not
-  changed.
+  changed. IMPACT PASS COMPLETED — see the decision brief below.
+
+## Decision brief: `s[i]` / `char_at` unit alignment (2026-07-29 impact pass; NO semantics changed)
+
+### Empirical behavior matrix (probe string "aé🙂z")
+
+| Lane | Binary measured | Unit | Negative index | Status |
+|---|---|---|---|---|
+| Seed default (JIT; Rust runtime crate) | deployed `bin/simple` | CHARACTER (`v[1]`=="é", `v[2]`=="🙂", char_code_at(1)==233) | nil before 2f3de049661, char-from-end after | PROVED |
+| Seed forced interpret | same binary, SIMPLE_EXECUTION_MODE=interpret | CHARACTER (same outputs) | char-from-end | PROVED |
+| AOT / C runtime (`runtime_native.c`) | direct C harness linked against runtime_native.c + runtime.c + runtime_legacy_core.c: `rt_string_len(rt_string_char_at(v, 1))`==1 (one byte, half of é), `(v, 2)`==1, `(v, -2)`→nil | BYTE | nil | PROVED (upgraded from source reading) |
+| Self-hosted (`simple_core/core_string.spl`) | not runnable this pass: stage3 binary was deleted by a parallel session mid-probe, stage2 is compile-only ("unknown command 'run'"), and the native-build worker lane fails (pre-existing) | BYTE | nil | INFERRED (source + its own explicit "byte-indexed" doc comment) |
+
+### Blast radius (owned, non-test)
+
+- `.char_at(` sites: src/lib 868, src/app 203, src/os 70, src/compiler 33
+  — 1,174 total (plus 281 in test/). Same-family `.char_code_at(`:
+  src/lib 225, src/app 60, src/compiler 12.
+- Dual-lane exposure is STRUCTURAL, not a subset: the same `.spl` source
+  runs under seed tools (character lanes) and inside self-hosted / AOT /
+  SimpleOS artifacts (byte lanes). Every site whose receiver can carry
+  non-ASCII behaves differently per lane today.
+- Concrete dual-lane scan sites (from a random 14-site sample):
+  `src/lib/editor/view/md_editing.spl` (`while i < line.len() and
+  line.char_at(i) == " "`), `src/lib/editor/services/diagnostics.spl`
+  (json scans), `src/lib/common/markdown_visual_editor.spl`,
+  `src/lib/nogc_sync_mut/db/dbfs_engine/sql_parser.spl`,
+  `src/app/devhub/cmd_email.spl`,
+  `src/compiler/70.backend/linker/linker_script.spl` — all drive
+  `char_at(i)` from a BYTE-valued `.len()` bound.
+- Index-derivation profile: of 1,104 sites in src/{lib,compiler,app},
+  180 have `.len()` on the same line (the byte-derived loop-bound form)
+  and 67 are `char_at(0)`; the random sample classifies ~10/14 as
+  byte-derived scans and ~2/14 as ASCII-protocol first-char checks
+  (unit-agnostic). The corpus is overwhelmingly written AS IF `char_at`
+  were byte-at.
+
+### Cost model
+
+**Option A — align C + simple_core impls to CHARACTER (documented family rule):**
+- Correctness: matches the docs, both seed lanes, the landed
+  negative-index fix, and `text_negative_single_index_spec`. Zero
+  tool-lane behavior change.
+- Perf: `rt_string_char_at` goes O(1)→O(i) in self-hosted/AOT. The
+  feared O(n^2) LEXER regression is REFUTED: the pure-Simple lexer's
+  hot path reads characters via `source[pos:pos + 1]` byte
+  bracket-slices (`lex_source_char_at`, lexer.spl:200) and its
+  single-index uses are on array slots — zero `char_at`/`char_code_at`
+  in the scan loop. The byte-derived `while i < s.len(): s.char_at(i)`
+  scan sites above DO become O(n^2) under self-hosted/AOT — the same
+  cost those loops already pay in the seed tool lanes today (the Rust
+  impl is `chars().nth`, O(i)).
+- Migration: no call-site edits strictly required; multibyte behavior
+  of the byte-derived scans under self-hosted/AOT changes to match what
+  the tool lanes already do.
+
+**Option B — align Rust runtime + seed interpreter to BYTE (matches how the corpus is written):**
+- Correctness: byte-derived scans become self-consistent in ALL lanes
+  and O(1); genuinely char-reliant sites break on multibyte (rare in
+  the sample; protocol code is ASCII-safe either way).
+- Contradicts: the documented character-semantics family rule,
+  `char_code_at`'s UTF-8 decoding, the just-landed negative-index fix
+  and its spec, and the `value_tests_basic` single-index clauses — all
+  would need re-pinning; `char_code_at` needs the same decision or the
+  family splits internally.
+- Perf: all lanes O(1).
+
+**RECOMMENDATION: Option A** (align the byte-at impls to character),
+because (1) it is the documented family rule, (2) the lexer-perf
+objection is empirically refuted, (3) tool-lane behavior — what tests
+and users actually see — is already character and freshly spec-pinned,
+and (4) Option B silently changes multibyte behavior of the two lanes
+people interact with daily. Separately, the byte-derived
+`.len()`-bounded `char_at(i)` scan family is wrong in the tool lanes
+TODAY under either option (byte bound driving a char index — the
+byte-vs-character bug family again) and should migrate to byte
+bracket-slices (`s[i:i + 1]`) opportunistically. USER DECIDES; nothing
+changed in this pass.
 
 Historical report below (pre-fix):
 
