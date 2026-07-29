@@ -32,13 +32,24 @@
 # coverage); pub-only filtering happens at integration time where
 # decl_get_visibility_text() is available (arena layer).
 #
-# Enum payloads: NOT covered — verified ground truth: the core parser
-# DISCARDS enum variant payload types (parser_decls_types.spl:127-149 parses
-# `Variant(field: type)` and throws the parsed type away;
-# decl_enum_def(name, variant_names, span) stores variant NAMES only, no
-# payload tags — decl_nodes.spl:586). Until lane A4 lands payload metadata,
-# enums emit nothing here; when payload types become available, route each
-# payload type text through check_type_text with MC-API-002 semantics.
+# Enum payloads: NOT covered — lane A4E (2026-07-29) confirmed this is a hard
+# blocker, not a recoverable-tag problem: the core parser DISCARDS enum
+# variant payload types at the token level (parser_decls_types.spl:140,
+# enum_module_body.spl:150/155 call parser_parse_type() only to advance the
+# stream and never store the result), decl_enum_def() has no payload slot at
+# all (decl_nodes.spl:586: name/variant_names/discriminants only), and the
+# ONE production bridge that builds real Enum/Variant AST nodes from parsed
+# source hardcodes `VariantKind.Tuple([])` for every variant
+# (_FlatAstBridge/module_assembly.spl:390, with its own comment confirming
+# "Payload types are not stored in the flat AST"). Even HIR
+# (HirVariantKind.Tuple(types: [HirType]), hir_definitions.spl:198) inherits
+# that same emptiness via declaration_lowering.spl:734-738's lower_variant.
+# So there is no AST layer — flat or HIR — this checker (or any semantic
+# checker) can walk to recover payload types for a real user enum. Full
+# evidence + the actual fix (parser + decl-arena + bridge, out of this
+# module's scope): doc/08_tracking/bug/enum_variant_payload_types_discarded_at_parse_2026-07-29.md.
+# When that lands, route each payload type text through check_type_text with
+# MC-API-002 semantics (mirroring struct/class fields).
 #
 # Standalone library — NOT wired into the live lint pipeline (integration is
 # a later serialized step).
@@ -219,7 +230,9 @@ fn check_module_items(items: [Node]) -> [ApiViolation]:
                 for v in cvs:
                     out.push(v)
             case Enum(_):
-                # Payload types unavailable (parser discards them) — lane A4.
+                # Payload types structurally unavailable — see header comment
+                # and doc/08_tracking/bug/enum_variant_payload_types_discarded_at_parse_2026-07-29.md
+                # (lane A4E, 2026-07-29: confirmed blocker, not a lossy-tag gap).
                 pass
             case Other(line):
                 val evs = check_extern_signature_text(line)

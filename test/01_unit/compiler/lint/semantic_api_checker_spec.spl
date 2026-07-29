@@ -10,7 +10,7 @@ use std.spec.*
 use compiler.semantics.lint.semantic_api.checker.{ApiViolation, check_fn_signature, check_field_texts, check_extern_signature_text, check_module_items}
 use compiler.semantics.lint.semantic_api.type_walk.{semantic_api_primitive_leaves, semantic_api_is_newunit, semantic_api_resolve_alias}
 use compiler.core.types.{newunit_register, TYPE_I64}
-use compiler.frontend.ast.{Node, FunctionDef, StructDef}
+use compiler.frontend.ast.{Node, FunctionDef, StructDef, EnumDef}
 
 describe "semantic_api recursive checker":
     context "fn signatures (MC-API-001)":
@@ -131,3 +131,25 @@ describe "semantic_api recursive checker":
             val vs = check_module_items(items)
             expect(vs.len()).to_equal(1)
             expect(vs[0].code).to_equal("MC-API-003")
+
+    context "enum payloads (lane A4E, 2026-07-29 — confirmed structural blocker)":
+        it "emits nothing for an enum, even one whose variant text encodes a primitive payload":
+            # Ground truth (doc/08_tracking/bug/enum_variant_payload_types_discarded_at_parse_2026-07-29.md):
+            # the core parser discards variant payload types at the token
+            # level (parser_decls_types.spl:140, enum_module_body.spl:150/155)
+            # and the one production flat-AST bridge that builds real
+            # Enum/Variant nodes from parsed source hardcodes an empty
+            # payload for every variant (_FlatAstBridge/module_assembly.spl:390).
+            # There is no AST structure to walk, so check_module_items must
+            # stay silent on Enum nodes -- this pins that honest behavior
+            # rather than leaving it an unverified assumption.
+            val ed = EnumDef(
+                name: "BadEnum",
+                generic_params: [],
+                variants: ["Bad(payload: i64)", "Clean"],
+                is_generic_template: false,
+                specialization_of: "",
+                type_bindings: {}
+            )
+            val vs = check_module_items([Node.Enum(ed)])
+            expect(vs.len()).to_equal(0)
