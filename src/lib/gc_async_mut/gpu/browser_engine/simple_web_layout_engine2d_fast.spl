@@ -115,6 +115,7 @@ fn _web_draw_ir_copy_evidence(value: WebGpuPaintTimingEvidence) -> WebGpuPaintTi
         pixels_match: value.pixels_match,
         upload_device_proven: value.upload_device_proven,
         gpu_device_proven: value.gpu_device_proven,
+        commands_complete: value.commands_complete,
         should_offload: value.should_offload,
         reason: value.reason,
         speed_verdict: value.speed_verdict
@@ -341,25 +342,6 @@ fn _web_draw_ir_gpu_route(
         readback: readback, oracle_pixels: [], elapsed_us: elapsed_us,
         skipped_command_count: render.skipped_command_count)
 
-fn _web_draw_ir_invalidate_state(
-    state: _WebDrawIrRouteState, backend_name: text,
-    pixels_match: bool, gpu_proven: bool
-) -> _WebDrawIrRouteState:
-    state.pixels_match = state.pixels_match and pixels_match
-    state.gpu_device_proven = state.gpu_device_proven and gpu_proven
-    state.complete = true
-    state.evidence = web_gpu_paint_timing_evidence(
-        backend_name,
-        state.evidence.upload_bound_p50_us,
-        state.evidence.upload_bound_p95_us,
-        state.evidence.gpu_paint_p50_us,
-        state.evidence.gpu_paint_p95_us,
-        state.evidence.sample_count,
-        state.pixels_match,
-        state.upload_device_proven,
-        state.gpu_device_proven)
-    state
-
 fn _web_draw_ir_choose_route(
     composition: DrawIrComposition, width: i32, height: i32,
     backend_name: text
@@ -384,13 +366,21 @@ fn _web_draw_ir_choose_route(
             if gpu.skipped_command_count == 0 and gpu_proven and gpu_match:
                 _web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(state.evidence)
                 return gpu.readback.pixels
-            state = _web_draw_ir_invalidate_state(
-                state, backend_name,
-                gpu_match and gpu.skipped_command_count == 0, gpu_proven)
+            val failed_evidence = web_gpu_paint_timing_evidence(
+                backend_name,
+                state.evidence.upload_bound_p50_us,
+                state.evidence.upload_bound_p95_us,
+                state.evidence.gpu_paint_p50_us,
+                state.evidence.gpu_paint_p95_us,
+                state.evidence.sample_count,
+                state.pixels_match and gpu_match,
+                state.upload_device_proven,
+                state.gpu_device_proven and gpu_proven,
+                gpu.skipped_command_count == 0)
             val invalidated = _web_draw_ir_state_index(key)
             if invalidated >= 0:
-                _web_draw_ir_route_states[invalidated] = state
-            _web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(state.evidence)
+                _web_draw_ir_route_states.remove(invalidated)
+            _web_draw_ir_last_evidence = _web_draw_ir_copy_evidence(failed_evidence)
             if gpu.skipped_command_count != 0:
                 return []
             return _web_draw_ir_upload_route(
@@ -425,7 +415,6 @@ fn _web_draw_ir_choose_route(
     state.oracle_fingerprint = _web_draw_ir_pixel_fingerprint(upload.oracle_pixels)
     state.pixels_match = (
         state.pixels_match and
-        gpu.skipped_command_count == 0 and
         _web_draw_ir_pixels_equal(upload.readback.pixels, upload.oracle_pixels) and
         _web_draw_ir_pixels_equal(gpu.readback.pixels, upload.oracle_pixels)
     )
@@ -453,7 +442,8 @@ fn _web_draw_ir_choose_route(
         _web_draw_ir_p50(state.gpu_samples),
         _web_draw_ir_p95(state.gpu_samples),
         state.upload_samples.len(), state.pixels_match,
-        state.upload_device_proven, state.gpu_device_proven)
+        state.upload_device_proven, state.gpu_device_proven,
+        state.commands_complete)
     state.evidence = evidence
     state.complete = evidence.sample_count >= 3
     val state_index = _web_draw_ir_state_index(key)

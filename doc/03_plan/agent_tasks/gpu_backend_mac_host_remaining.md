@@ -48,6 +48,10 @@ SIMPLE_LIB=src bin/simple test \
 SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND=metal SIMPLE_LIB=src bin/simple test \
   test/05_perf/web_render_chrome/web_gpu_paint_device_measured_spec.spl \
   --mode=interpreter
+
+SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND=metal SIMPLE_LIB=src bin/simple test \
+  test/05_perf/web_render_chrome/web_draw_ir_gpu_route_device_measured_spec.spl \
+  --mode=interpreter
 ```
 
 ## Required evidence
@@ -72,6 +76,8 @@ SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND=metal SIMPLE_LIB=src bin/simple test \
 - The web GPU-paint measurement records three paired upload/GPU samples with
   positive p50/p95 timings, exact pixels, and Metal device provenance. Either
   measured route may win; unavailable, mismatched, or CPU-backed evidence fails.
+- The primary Draw IR route records three exact paired samples, then reuses the
+  completed Metal decision without increasing the sample count.
 - Add canonical device identity plus exact expected-pixel, mismatch-count, and
   max-channel-delta fields before promoting the Vulkan lane from device-capture
   evidence to exact CPU/Vulkan parity.
