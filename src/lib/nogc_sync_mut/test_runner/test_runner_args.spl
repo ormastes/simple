@@ -11,6 +11,35 @@ extern fn rt_file_exists(path: text) -> bool
 # Mode String Parsing
 # =========================================================================
 
+# =========================================================================
+# Profile Name Resolution (REQ-MC-012 profile-aware execution)
+# =========================================================================
+#
+# Deliberately self-contained (does NOT import compiler.tools.lint.main or
+# its config_and_model.spl): executing that module's parse_lint_profile in
+# the SAME interpreter session as the frontend parsing `run`/`test` also
+# drive deterministically poisons the later frontend call with
+# "semantic: type mismatch: cannot convert dict to int" — see
+# doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
+# This table mirrors parse_lint_profile in
+# src/compiler/90.tools/lint/_LintMain/config_and_model.spl and the frozen
+# alias table in src/compiler/80.driver/driver_safety_severity.spl instead of
+# calling either. If a new profile name is added there, add it here too.
+fn normalize_profile_name(raw: text) -> text:
+    val lower = raw.lower()
+    if lower == "moderate" or lower == "strict" or lower == "robust" or lower == "critical":
+        return lower
+    if lower == "lib":
+        return "strict"
+    if lower == "reliable":
+        return "robust"
+    if lower == "mission-critical" or lower == "mission_critical":
+        return "critical"
+    ""
+
+fn valid_profile_names_help() -> text:
+    "moderate, strict, robust, critical (deprecated aliases: lib, reliable, mission-critical)"
+
 fn parse_mode_str(m: text) -> TestExecutionMode:
     if m == "native" or m == "binary":
         return TestExecutionMode.Native
@@ -74,7 +103,8 @@ fn test_args_validation_error(args: [text]) -> text:
             arg == "--batch-size" or arg == "--session-kind" or
             arg == "--max-sessions" or arg == "--session-reset" or
             arg == "--sdoctest-env" or arg == "--tag" or arg == "--format" or
-            arg == "--mode" or arg == "--timeout" or arg == "--seed"
+            arg == "--mode" or arg == "--timeout" or arg == "--seed" or
+            arg == "--profile"
         )
         if needs_value:
             if i + 1 >= args.len():
@@ -85,7 +115,16 @@ fn test_args_validation_error(args: [text]) -> text:
                 return "missing value for {arg}"
             if arg == "--format" and value != "text" and value != "json" and value != "doc":
                 return "invalid value for --format: {value}"
+            if arg == "--profile" and normalize_profile_name(value) == "":
+                return "invalid value for --profile: {value} (valid: {valid_profile_names_help()})"
             i = i + 2
+            continue
+
+        if arg.starts_with("--profile="):
+            val value = arg.substring(10)
+            if value == "" or normalize_profile_name(value) == "":
+                return "invalid value for --profile: {value} (valid: {valid_profile_names_help()})"
+            i = i + 1
             continue
 
         val known = (
@@ -218,6 +257,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var batch_size = 0
     var batch_manifest = ""
     var batch_result = ""
+    var profile = ""
 
     var i = 0
     while i < args.len():
@@ -483,6 +523,12 @@ fn parse_test_args(args: [text]) -> TestOptions:
             if i < args.len():
                 seed = to_int(args[i])
                 seed_set = true
+        elif arg == "--profile":
+            i = i + 1
+            if i < args.len():
+                profile = normalize_profile_name(args[i])
+        elif arg.starts_with("--profile="):
+            profile = normalize_profile_name(arg.substring(10))
         elif not arg.starts_with("-") and not path_explicit:
             path = arg
             path_explicit = true
@@ -572,7 +618,8 @@ fn parse_test_args(args: [text]) -> TestOptions:
         no_cover_check: no_cover_check,
         batch_size: batch_size,
         batch_manifest: batch_manifest,
-        batch_result: batch_result
+        batch_result: batch_result,
+        profile: profile
     )
 
 # =========================================================================

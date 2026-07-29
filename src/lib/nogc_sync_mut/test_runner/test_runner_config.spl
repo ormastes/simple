@@ -8,6 +8,7 @@ use std.io.{file_read}
 use std.sffi.cli.{cli_get_args}
 
 use std.test_runner.test_runner_types.{TestExecutionMode, TestOptions}
+use std.test_runner.test_runner_args.{normalize_profile_name}
 
 # =========================================================================
 # CLI Args Helper (inlined to avoid extra module load)
@@ -32,10 +33,66 @@ fn get_cli_args() -> [text]:
 # Environment Variable Propagation
 # =========================================================================
 
+# =========================================================================
+# REQ-MC-012 profile-aware execution: resolve simple.sdn [lints] profile=
+# =========================================================================
+#
+# Minimal, self-contained [lints] section scan (mirrors the format read by
+# LintConfig.from_sdn_string in
+# src/compiler/90.tools/lint/_LintMain/config_and_model.spl) rather than
+# importing that module: importing is harmless on its own, but *executing*
+# any of its module-level init (parse_lint_profile included) in the same
+# interpreter session that also drives `run`/`test`'s frontend parsing
+# deterministically corrupts the later frontend call — see
+# doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
+fn _read_sdn_lints_profile(sdn_path: text) -> text:
+    val content = file_read(sdn_path) ?? ""
+    if content == "":
+        return ""
+    var in_lints = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed == "[lints]":
+            in_lints = true
+            continue
+        if trimmed.starts_with("[") and trimmed.ends_with("]"):
+            in_lints = false
+            continue
+        if in_lints and trimmed.starts_with("profile") and trimmed.contains("="):
+            val parts = trimmed.split("=")
+            if parts.len() >= 2:
+                var val_str = parts[1].trim()
+                val_str = val_str.replace("\"", "")
+                val_str = val_str.replace("'", "")
+                val_str = val_str.trim()
+                return normalize_profile_name(val_str)
+    ""
+
+# Resolution order (REQ-MC-012, highest first): explicit --profile= CLI flag
+# (already normalized onto options.profile by parse_test_args) > simple.sdn
+# [lints] profile= in the current working directory > engine default (unset
+# here -- driver_safety_severity.safety_pass_severity() already treats an
+# unset SIMPLE_SAFETY_PROFILE as Advisory, i.e. today's behavior).
+fn resolve_effective_profile(options: TestOptions) -> text:
+    if options.profile != "":
+        return options.profile
+    _read_sdn_lints_profile("simple.sdn")
+
 fn propagate_env_vars(options: TestOptions):
     # Set SIMPLE_TEST_MODE for child processes
     val mode_str = mode_to_str(options.mode)
     env_set("SIMPLE_TEST_MODE", mode_str)
+
+    # REQ-MC-012: export the resolved profile to the one consumer that
+    # already exists -- driver_safety_severity's safety-pass severity gate
+    # (src/compiler/80.driver/driver_safety_severity.spl reads this exact
+    # env var). Left unset when no CLI flag and no simple.sdn [lints]
+    # profile= are present, preserving prior (Advisory) behavior.
+    val resolved_profile = resolve_effective_profile(options)
+    if resolved_profile != "":
+        env_set("SIMPLE_SAFETY_PROFILE", resolved_profile)
 
     if options.only_slow:
         env_set("SIMPLE_TEST_FILTER", "slow")

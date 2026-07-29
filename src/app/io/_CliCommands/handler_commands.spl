@@ -77,10 +77,79 @@ fn cli_handle_web(args: [text]) -> i64:
 fn cli_handle_diagram(args: [text]) -> i64:
     cli_not_implemented("Diagram generator")
 
+# REQ-MC-012 profile-aware execution: `--profile=<name>` for `bin/simple run`.
+#
+# Deliberately self-contained (does NOT import compiler.tools.lint.main /
+# config_and_model.spl's parse_lint_profile, even though this file already
+# imports LintConfig above for the unrelated `lint` command): *executing*
+# parse_lint_profile in the same interpreter session that later drives
+# frontend parsing (the in-process interpret_file fallback inside
+# cli_run_file) deterministically corrupts that later frontend call with
+# "semantic: type mismatch: cannot convert dict to int" -- see
+# doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md.
+# This table mirrors parse_lint_profile in
+# src/compiler/90.tools/lint/_LintMain/config_and_model.spl and the frozen
+# alias table in src/compiler/80.driver/driver_safety_severity.spl instead of
+# calling either; add new profile names to all three if any are ever added.
+fn _run_normalize_profile_name(raw: text) -> text:
+    val lower = raw.lower()
+    if lower == "moderate" or lower == "strict" or lower == "robust" or lower == "critical":
+        return lower
+    if lower == "lib":
+        return "strict"
+    if lower == "reliable":
+        return "robust"
+    if lower == "mission-critical" or lower == "mission_critical":
+        return "critical"
+    ""
+
+fn _run_valid_profile_names_help() -> text:
+    "moderate, strict, robust, critical (deprecated aliases: lib, reliable, mission-critical)"
+
+# Minimal, self-contained simple.sdn [lints] profile= reader -- mirrors the
+# section format LintConfig.from_sdn_string parses, without importing it
+# (same interpreter-contamination hazard as above).
+fn _run_read_sdn_lints_profile(sdn_path: text) -> text:
+    if not rt_file_exists(sdn_path):
+        return ""
+    val content = rt_file_read_text(sdn_path)
+    if content == "":
+        return ""
+    var in_lints = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed == "[lints]":
+            in_lints = true
+            continue
+        if trimmed.starts_with("[") and trimmed.ends_with("]"):
+            in_lints = false
+            continue
+        if in_lints and trimmed.starts_with("profile") and trimmed.contains("="):
+            val parts = trimmed.split("=")
+            if parts.len() >= 2:
+                var val_str = parts[1].trim()
+                val_str = val_str.replace("\"", "")
+                val_str = val_str.replace("'", "")
+                val_str = val_str.trim()
+                return _run_normalize_profile_name(val_str)
+    ""
+
+# Resolution order (highest first): explicit --profile= CLI flag (already
+# normalized by the caller) > simple.sdn [lints] profile= in the cwd >
+# engine default (unset -- driver_safety_severity.safety_pass_severity()
+# treats an unset SIMPLE_SAFETY_PROFILE as Advisory, i.e. today's behavior).
+fn _run_resolve_profile(cli_value: text) -> text:
+    if cli_value != "":
+        return cli_value
+    _run_read_sdn_lints_profile("simple.sdn")
+
 fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
     if args.len() > 0:
         var program_args: [text] = []
         var result_file = ""
+        var profile_value = ""
         var parse_internal = true
         for arg in args[1:]:
             if parse_internal and arg == "--":
@@ -88,13 +157,27 @@ fn cli_handle_run(args: [text], gc_log: bool, gc_off: bool) -> i64:
                 program_args = program_args.push(arg)
             elif parse_internal and arg.starts_with("--test-result-file="):
                 result_file = arg.substring(19)
+            elif parse_internal and arg.starts_with("--profile="):
+                val raw_profile = arg.substring(10)
+                val normalized = _run_normalize_profile_name(raw_profile)
+                if normalized == "":
+                    _cli_eprint("Error: invalid value for --profile: {raw_profile}")
+                    _cli_eprint("  Valid: {_run_valid_profile_names_help()}")
+                    return 1
+                profile_value = normalized
             else:
                 program_args = program_args.push(arg)
         val previous_result_file = rt_env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
         if result_file != "" and not rt_env_set("SIMPLE_TEST_RESULT_FILE", result_file):
             return 1
+        val resolved_profile = _run_resolve_profile(profile_value)
+        val previous_safety_profile = rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""
+        if resolved_profile != "" and not rt_env_set("SIMPLE_SAFETY_PROFILE", resolved_profile):
+            return 1
         val code = cli_run_file(args[0], program_args, gc_log, gc_off)
         if result_file != "" and not rt_env_set("SIMPLE_TEST_RESULT_FILE", previous_result_file):
+            return 1
+        if resolved_profile != "" and not rt_env_set("SIMPLE_SAFETY_PROFILE", previous_safety_profile):
             return 1
         code
     else:
