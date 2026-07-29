@@ -422,6 +422,8 @@ class CudaBackend:
                 val validation = self.validate_intrinsic(name, dest, args.len())
                 if validation.is_err():
                     return Err(validation.unwrap_err())
+                if name == "bounds_check":
+                    return self.compile_bounds_check(builder, args, func)
                 self.compile_intrinsic(builder, dest, name, args)
 
             # --- Debug ---
@@ -794,6 +796,35 @@ class CudaBackend:
             builder.emit_line("add.u64 {dest_reg}, {base_reg}, {tmp};")
         else:
             builder.emit_line("mov.u64 {dest_reg}, {base_reg};")
+
+    me compile_bounds_check(builder: PtxBuilder, args: [MirOperand], func: MirFunction) -> Result<(), CompileError>:
+        val index_mir_type = self.operand_mir_type(func, args[0])?
+        val length_mir_type = self.operand_mir_type(func, args[1])?
+        match index_mir_type.kind:
+            case I64 | I32 | I16 | I8 | U64 | U32 | U16 | U8:
+                ()
+            case _:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bounds_check index must be an integer"))
+        if length_mir_type.kind != MirTypeKind.I64:
+            return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA bounds_check length must be I64"))
+
+        val index_type = self.mir_type_to_primitive(index_mir_type)
+        var index = self.operand_to_reg(builder, args[0])
+        if index_type != PrimitiveType.I64:
+            val widened = builder.alloc_reg(PrimitiveType.I64)
+            builder.emit_reg_decl(widened, PrimitiveType.I64)
+            builder.emit_convert(widened, PrimitiveType.I64, index, index_type)
+            index = widened
+        val length = self.operand_to_reg(builder, args[1])
+        val negative = builder.alloc_pred_reg()
+        val too_large = builder.alloc_pred_reg()
+        builder.emit_pred_decl(negative)
+        builder.emit_pred_decl(too_large)
+        builder.emit_compare(negative, "lt", PrimitiveType.I64, index, "0")
+        builder.emit_line("@{negative} trap;")
+        builder.emit_compare(too_large, "ge", PrimitiveType.I64, index, length)
+        builder.emit_line("@{too_large} trap;")
+        Ok(())
 
     me compile_intrinsic(builder: PtxBuilder, dest: LocalId?, name: text, args: [MirOperand]):
         """Compile math and GPU intrinsics."""
@@ -1403,6 +1434,12 @@ class CudaBackend:
         Err(compileerror_backend_error(BackendKind.Cuda, "CUDA layout: field walk failed"))
 
     me validate_intrinsic(name: text, dest: LocalId?, arg_count: i64) -> Result<(), CompileError>:
+        if name == "bounds_check":
+            if arg_count != 2:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA intrinsic 'bounds_check' requires exactly 2 arguments"))
+            if dest.?:
+                return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA intrinsic 'bounds_check' does not produce a destination"))
+            return Ok(())
         var required_args = -1
         var requires_dest = true
         match name:

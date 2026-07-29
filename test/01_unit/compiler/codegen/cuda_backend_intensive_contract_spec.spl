@@ -69,6 +69,21 @@ fn assert_no_placeholder_output(ptx: text):
     expect(ptx.contains("placeholder")).to_equal(false)
     expect(ptx.contains("not implemented")).to_equal(false)
 
+fn compile_cuda_bounds_check(index_type: MirType, name: text, id: i64) -> text:
+    val block = MirBlock(
+        id: BlockId.entry(), label: Some("entry"),
+        instructions: [MirInst(kind: MirInstKind.Intrinsic(nil, "bounds_check", [
+            MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))
+        ]), span: nil)],
+        terminator: MirTerminator.Ret(nil)
+    )
+    val fn_ = cuda_function(
+        id, name, [index_type, cuda_i64()], MirType.unit(),
+        [cuda_arg(0, 0, "index", index_type), cuda_arg(1, 1, "length", cuda_i64())],
+        [block], true
+    )
+    compile_supported_cuda([fn_])
+
 describe "CUDA backend intensive MIR contract":
     it "assembles I64, U64-global, and direct U32 GPU index paths":
         val block = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [
@@ -247,6 +262,103 @@ describe "CUDA backend intensive MIR contract":
         val malformed = MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 0)), "gpu_vec4_load_f32", []), span: nil)], terminator: MirTerminator.Ret(nil))
         val malformed_fn = cuda_function(10, "cuda_bad_intrinsic", [], MirType.unit(), [cuda_temp(0, cuda_u32())], [malformed], true)
         assert_backend_error_contains(malformed_fn, "requires 2 arguments")
+
+    it "emits executable signed bounds checks for indexed kernels":
+        val ptx = compile_cuda_bounds_check(cuda_i32(), "cuda_bounds_check", 24)
+        expect(ptx).to_contain("cvt.s64.s32 %r2, %r0;")
+        expect(ptx).to_contain("setp.lt.s64 %p3, %r2, 0;")
+        expect(ptx).to_contain("@%p3 trap;")
+        expect(ptx).to_contain("setp.ge.s64 %p4, %r2, %r1;")
+        expect(ptx).to_contain("@%p4 trap;")
+        assert_no_placeholder_output(ptx)
+
+        val (_which_out, _which_err, available) = rt_process_run("/bin/sh", ["-c", "command -v ptxas >/dev/null 2>&1"])
+        if available == 0:
+            val ptx_path = "/tmp/simple_cuda_bounds_check.ptx"
+            val cubin_path = "/tmp/simple_cuda_bounds_check.cubin"
+            expect(rt_file_write_text(ptx_path, ptx)).to_equal(true)
+            val (_as_out, as_err, as_code) = rt_process_run("ptxas", ["-arch=sm_86", ptx_path, "-o", cubin_path])
+            expect(as_code).to_equal(0)
+            expect(as_err).to_equal("")
+        else:
+            expect(ptx).to_contain(".target sm_86")
+
+    it "normalizes all supported bounds-check index widths to I64":
+        val i64_ptx = compile_cuda_bounds_check(cuda_i64(), "cuda_bounds_i64", 29)
+        expect(i64_ptx).to_contain("setp.lt.s64 %p2, %r0, 0;")
+        expect(i64_ptx.contains("cvt.s64.s64")).to_equal(false)
+
+        val u32_ptx = compile_cuda_bounds_check(cuda_u32(), "cuda_bounds_u32", 30)
+        expect(u32_ptx).to_contain("cvt.s64.u32 %r2, %r0;")
+        expect(u32_ptx).to_contain("setp.ge.s64 %p4, %r2, %r1;")
+
+        val u64_ptx = compile_cuda_bounds_check(cuda_u64(), "cuda_bounds_u64", 31)
+        expect(u64_ptx).to_contain("cvt.s64.u64 %r2, %r0;")
+        expect(u64_ptx).to_contain("setp.lt.s64 %p3, %r2, 0;")
+
+    it "rejects malformed CUDA bounds checks":
+        val bad_arity = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Intrinsic(nil, "bounds_check", [
+                MirOperand.copy(LocalId(id: 0))
+            ]), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val bad_arity_fn = cuda_function(
+            25, "cuda_bounds_arity", [cuda_i64()], MirType.unit(),
+            [cuda_arg(0, 0, "index", cuda_i64())],
+            [bad_arity], true
+        )
+        assert_backend_error_contains(bad_arity_fn, "requires exactly 2 arguments")
+
+        val bad_dest = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 2)), "bounds_check", [
+                MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))
+            ]), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val bad_dest_fn = cuda_function(
+            26, "cuda_bounds_dest", [cuda_i64(), cuda_i64()], MirType.unit(),
+            [cuda_arg(0, 0, "index", cuda_i64()), cuda_arg(1, 1, "length", cuda_i64()), cuda_temp(2, cuda_i64())],
+            [bad_dest], true
+        )
+        assert_backend_error_contains(bad_dest_fn, "does not produce a destination")
+
+        val bad_type = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Intrinsic(nil, "bounds_check", [
+                MirOperand.copy(LocalId(id: 0)), MirOperand.copy(LocalId(id: 1))
+            ]), span: nil)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val bad_type_fn = cuda_function(
+            27, "cuda_bounds_type", [cuda_bool(), cuda_i64()], MirType.unit(),
+            [cuda_arg(0, 0, "index", cuda_bool()), cuda_arg(1, 1, "length", cuda_i64())],
+            [bad_type], true
+        )
+        assert_backend_error_contains(bad_type_fn, "index must be an integer")
+
+        val bad_pointer_fn = cuda_function(
+            28, "cuda_bounds_pointer", [cuda_ptr(), cuda_i64()], MirType.unit(),
+            [cuda_arg(0, 0, "index", cuda_ptr()), cuda_arg(1, 1, "length", cuda_i64())],
+            [bad_type], true
+        )
+        assert_backend_error_contains(bad_pointer_fn, "index must be an integer")
+
+        val bad_unit_fn = cuda_function(
+            29, "cuda_bounds_unit", [MirType.unit(), cuda_i64()], MirType.unit(),
+            [cuda_arg(0, 0, "index", MirType.unit()), cuda_arg(1, 1, "length", cuda_i64())],
+            [bad_type], true
+        )
+        assert_backend_error_contains(bad_unit_fn, "index must be an integer")
+
+        val bad_length_fn = cuda_function(
+            32, "cuda_bounds_length", [cuda_i64(), cuda_u32()], MirType.unit(),
+            [cuda_arg(0, 0, "index", cuda_i64()), cuda_arg(1, 1, "length", cuda_u32())],
+            [bad_type], true
+        )
+        assert_backend_error_contains(bad_length_fn, "length must be I64")
 
     it "resolves Struct(SymbolId) field access to a real offset via the module's type table":
         # struct Point { a: u32, b: u64 } -- offsets computed by MIR lowering
