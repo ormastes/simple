@@ -608,6 +608,62 @@ fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containi
         resolved_child = style_with_height(resolved_child, child_height_px)
     resolved_child
 
+fn grid_track_sizes(raw: text) -> [i32]:
+    var sizes: [i32] = []
+    for part in raw.split(" "):
+        val token = part.trim()
+        if token != "":
+            val size = parse_int(token)
+            if size <= 0:
+                return []
+            sizes.push(size)
+    sizes
+
+fn grid_placement_start(raw: text) -> i32:
+    val value = raw.trim()
+    if value == "":
+        return -1
+    val slash = find_from(value, "/", 0)
+    val first = if slash >= 0:
+        value.substring(0, slash).trim()
+    else:
+        value
+    val line = parse_int(first)
+    if line > 0: line - 1 else: -1
+
+fn grid_placement_span(raw: text) -> i32:
+    val value = raw.trim()
+    val slash = find_from(value, "/", 0)
+    if slash < 0:
+        return 1
+    val start = parse_int(value.substring(0, slash).trim())
+    val tail = value.substring(slash + 1, value.len()).trim()
+    if tail.starts_with("span "):
+        val span = parse_int(tail.substring(5, tail.len()).trim())
+        return if span > 0: span else: 1
+    val end_line = parse_int(tail)
+    if start > 0 and end_line > start: end_line - start else: 1
+
+fn grid_track_offset(sizes: [i32], gap: i32, track: i32) -> i32:
+    var offset = 0
+    var index = 0
+    while index < track and index < sizes.len():
+        offset = offset + sizes[index] + gap
+        index = index + 1
+    offset
+
+fn grid_track_span_size(
+    sizes: [i32], gap: i32, start: i32, span: i32
+) -> i32:
+    var size = 0
+    var index = 0
+    while index < span and start + index < sizes.len():
+        if index > 0:
+            size = size + gap
+        size = size + sizes[start + index]
+        index = index + 1
+    size
+
 fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32]) -> LayoutResult:
     layout_with_style(nodes, styles, child_index, i, x, y, w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, styles[i])
 
@@ -882,6 +938,138 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             child_index, i, st, out_bx, out_by, out_bw, out_bh,
             out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
             table_h
+        )
+    val grid_columns = grid_track_sizes(st.grid_template_columns)
+    if st.display == "grid" and grid_columns.len() > 0:
+        val explicit_rows = grid_track_sizes(st.grid_template_rows)
+        val grid_column_count = grid_columns.len() as i32
+        val grid_child_count = child_index.child_count[i]
+        val grid_row_capacity = (
+            grid_child_count + explicit_rows.len() as i32 + 1
+        )
+        var grid_rows: [i32] = [0; grid_row_capacity]
+        var explicit_row_index = 0
+        while explicit_row_index < explicit_rows.len():
+            grid_rows[explicit_row_index] = explicit_rows[explicit_row_index]
+            explicit_row_index = explicit_row_index + 1
+        var occupied: [bool] = [
+            false; grid_row_capacity * grid_column_count
+        ]
+        var max_grid_row = explicit_rows.len() as i32
+        var grid_child = child_index.first_child[i]
+        while grid_child >= 0:
+            val grid_child_style = styles[grid_child]
+            var grid_column = grid_placement_start(
+                grid_child_style.grid_column
+            )
+            var grid_row = grid_placement_start(grid_child_style.grid_row)
+            var grid_column_span = grid_placement_span(
+                grid_child_style.grid_column
+            )
+            if grid_column_span > grid_column_count:
+                grid_column_span = grid_column_count
+            # A declared line beyond this bounded layout pass cannot index the
+            # occupancy/row arrays. Treat it as auto-placement, preserving the
+            # same fail-closed behavior as unsupported/invalid placement.
+            if grid_row >= grid_row_capacity:
+                grid_row = -1
+            if (
+                grid_column >= grid_column_count or
+                grid_column + grid_column_span > grid_column_count
+            ):
+                grid_column = -1
+            if grid_column < 0 or grid_row < 0:
+                var candidate = 0
+                var placed = false
+                while (
+                    candidate < occupied.len() and not placed
+                ):
+                    val candidate_row = candidate / grid_column_count
+                    val candidate_column = candidate % grid_column_count
+                    var admitted = (
+                        (grid_row < 0 or candidate_row == grid_row) and
+                        (grid_column < 0 or candidate_column == grid_column) and
+                        candidate_column + grid_column_span <=
+                            grid_column_count
+                    )
+                    var span_index = 0
+                    while admitted and span_index < grid_column_span:
+                        if occupied[
+                            candidate_row * grid_column_count +
+                            candidate_column + span_index
+                        ]:
+                            admitted = false
+                        span_index = span_index + 1
+                    if admitted:
+                        grid_row = candidate_row
+                        grid_column = candidate_column
+                        placed = true
+                    candidate = candidate + 1
+            if grid_row < 0:
+                grid_row = 0
+            if grid_column < 0:
+                grid_column = 0
+            var mark_index = 0
+            while mark_index < grid_column_span:
+                occupied[
+                    grid_row * grid_column_count +
+                    grid_column + mark_index
+                ] = true
+                mark_index = mark_index + 1
+            val grid_child_x = (
+                ix + grid_track_offset(
+                    grid_columns, st.column_gap_px, grid_column
+                )
+            )
+            val grid_child_y = (
+                y + st.border_t + st.pad_t +
+                grid_track_offset(grid_rows, st.row_gap_px, grid_row)
+            )
+            val grid_child_width = grid_track_span_size(
+                grid_columns, st.column_gap_px,
+                grid_column, grid_column_span
+            )
+            val grid_result = layout_with_style(
+                nodes, styles, child_index, grid_child,
+                grid_child_x, grid_child_y, grid_child_width, viewport_h,
+                out_bx, out_by, out_bw, out_bh,
+                out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
+                grid_child_style
+            )
+            out_bx = grid_result.bx
+            out_by = grid_result.by
+            out_bw = grid_result.bw
+            out_bh = grid_result.bh
+            out_wrap_starts = grid_result.wrap_starts
+            out_wrap_ends = grid_result.wrap_ends
+            out_intrinsic_widths = grid_result.intrinsic_widths
+            if (
+                grid_row >= explicit_rows.len() and
+                grid_result.height > grid_rows[grid_row]
+            ):
+                grid_rows[grid_row] = grid_result.height
+            if grid_row + 1 > max_grid_row:
+                max_grid_row = grid_row + 1
+            grid_child = child_index.next_sibling[grid_child]
+        var grid_content_height = 0
+        var grid_height_index = 0
+        while grid_height_index < max_grid_row:
+            if grid_height_index > 0:
+                grid_content_height = grid_content_height + st.row_gap_px
+            grid_content_height = (
+                grid_content_height + grid_rows[grid_height_index]
+            )
+            grid_height_index = grid_height_index + 1
+        var grid_height = (
+            grid_content_height + st.pad_t + st.pad_b + border_y
+        )
+        if st.height_px > 0:
+            grid_height = css_outer_height(node, st, st.height_px)
+        out_bh[i] = grid_height
+        return relative_layout_result(
+            child_index, i, st, out_bx, out_by, out_bw, out_bh,
+            out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
+            grid_height
         )
     if st.display == "flex" and st.flex_direction != "column":
         val children_for_i_count = child_index.child_count[i]
