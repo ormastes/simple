@@ -1,0 +1,204 @@
+# SDN Encode — canonical serializer for SdnValue.
+#
+# Provides: sdn_encode_canonical.
+#
+# Canonical form (stable across runs — suitable for hashing manifests):
+#   - dict keys sorted bytewise ascending, dicts/arrays rendered inline
+#     ("{a: 1, b: [2, 3]}"), one space after ":" and ", "
+#   - strings quoted only when required, with \\ \" \n \t \r escapes
+#     (matching the parser's unescape)
+#   - floats always carry a decimal point ("1.0", not "1")
+#   - tables: header line "|h1, h2|" then one comma-joined row per line
+#
+# Round-trip guarantee: parse(sdn_encode_canonical(v)) reproduces v, with
+# these documented caveats:
+#   - Table round-trips at top level only (tables cannot nest inside inline
+#     dicts/arrays in the current grammar)
+#   - floats whose to_text uses exponent notation, and dict keys / table
+#     headers containing structural characters, are emitted best-effort but
+#     may not round-trip
+#
+# Quoting/escaping adapted from the legacy serializer
+# (src/compiler_rust/lib/std/src/sdn/serializer.spl).
+
+use std.common.sdn.value.{SdnValue}
+
+# Serialize an SdnValue to canonical SDN text.
+pub fn sdn_encode_canonical(v: SdnValue) -> text:
+    _sdn_enc(v)
+
+fn _sdn_enc(v: SdnValue) -> text:
+    match v:
+        case SdnValue.Null:
+            "null"
+        case SdnValue.Bool(b):
+            if b: "true" else: "false"
+        case SdnValue.Int(i):
+            i.to_text()
+        case SdnValue.Float(f):
+            _sdn_enc_float(f)
+        case SdnValue.String(s):
+            _sdn_enc_string(s)
+        case SdnValue.Array(items):
+            var parts: [text] = []
+            for item in items:
+                parts.push(_sdn_enc(item))
+            "[" + parts.join(", ") + "]"
+        case SdnValue.Dict(d):
+            var parts: [text] = []
+            for k in _sdn_sorted_keys(d.keys()):
+                parts.push(_sdn_enc_key(k) + ": " + _sdn_enc(d[k]))
+            "{" + parts.join(", ") + "}"
+        case SdnValue.Table(headers, rows):
+            _sdn_enc_table(headers, rows)
+
+fn _sdn_enc_float(f: f64) -> text:
+    val t = f.to_text()
+    if t.contains(".") or t.contains("e") or t.contains("E"):
+        t
+    else:
+        t + ".0"
+
+fn _sdn_enc_string(s: text) -> text:
+    if _sdn_enc_bare_ok(s):
+        s
+    else:
+        "\"" + _sdn_enc_escape(s) + "\""
+
+fn _sdn_enc_key(k: text) -> text:
+    # Keys are emitted bare whenever structurally safe. A pathological key is
+    # quoted so the output stays parseable (documented round-trip caveat).
+    if k != "" and _sdn_enc_all_safe_chars(k):
+        k
+    else:
+        "\"" + _sdn_enc_escape(k) + "\""
+
+fn _sdn_enc_table(headers: [text], rows: [[SdnValue]]) -> text:
+    var out = "|" + headers.join(", ") + "|"
+    for row in rows:
+        var cells: [text] = []
+        for cell in row:
+            cells.push(_sdn_enc(cell))
+        out = out + "\n" + cells.join(", ")
+    out
+
+# ---- quoting decisions ----
+
+# A string may be emitted bare only if the parser will read it back as the
+# same String: not empty, not a keyword, not number-shaped, no structural or
+# whitespace characters, and not starting with a table pipe.
+fn _sdn_enc_bare_ok(s: text) -> bool:
+    if s == "" or s == "null" or s == "true" or s == "false":
+        return false
+    if _sdn_enc_is_int(s) or _sdn_enc_is_float(s):
+        return false
+    _sdn_enc_all_safe_chars(s)
+
+fn _sdn_enc_all_safe_chars(s: text) -> bool:
+    val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-/"
+    var i = 0
+    while i < s.len():
+        if not allowed.contains(s.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+fn _sdn_enc_is_int(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i = 0
+    if s.substring(0, 1) == "-":
+        i = 1
+    if i >= s.len():
+        return false
+    val digits = "0123456789"
+    while i < s.len():
+        if not digits.contains(s.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+fn _sdn_enc_is_float(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i = 0
+    if s.substring(0, 1) == "-":
+        i = 1
+    if i >= s.len():
+        return false
+    val digits = "0123456789"
+    var dots = 0
+    var seen_digit = false
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == ".":
+            dots = dots + 1
+        else:
+            if digits.contains(ch):
+                seen_digit = true
+            else:
+                return false
+        i = i + 1
+    seen_digit and dots == 1
+
+# Escape a string for a quoted SDN literal (mirror of the parser's unescape).
+fn _sdn_enc_escape(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "\\":
+            out = out + "\\\\"
+        else:
+            if ch == "\"":
+                out = out + "\\\""
+            else:
+                if ch == "\n":
+                    out = out + "\\n"
+                else:
+                    if ch == "\t":
+                        out = out + "\\t"
+                    else:
+                        if ch == "\r":
+                            out = out + "\\r"
+                        else:
+                            out = out + ch
+        i = i + 1
+    out
+
+# ---- key ordering ----
+
+# Bytewise text comparison. Deliberately NOT the `<` operator: native codegen
+# compares text by raw pointer, which would make key order nondeterministic.
+fn _sdn_enc_text_lt(a: text, b: text) -> bool:
+    val ab = a.bytes()
+    val bb = b.bytes()
+    var i = 0
+    while i < ab.len() and i < bb.len():
+        val ca = ab[i].to_i64()
+        val cb = bb[i].to_i64()
+        if ca < cb:
+            return true
+        if ca > cb:
+            return false
+        i = i + 1
+    ab.len() < bb.len()
+
+fn _sdn_sorted_keys(keys: [text]) -> [text]:
+    var out: [text] = []
+    for k in keys:
+        out.push(k)
+    var i = 1
+    while i < out.len():
+        val key = out[i]
+        var j = i - 1
+        var moving = true
+        while moving and j >= 0:
+            if _sdn_enc_text_lt(key, out[j]):
+                out[j + 1] = out[j]
+                j = j - 1
+            else:
+                moving = false
+        out[j + 1] = key
+        i = i + 1
+    out
