@@ -17,6 +17,8 @@ pattern — proto3 signed integers are always 10 bytes (two's complement).
 Reference: https://protobuf.dev/programming-guides/encoding/
 """
 
+use std.common.encoding.utf8.{text_codepoints}
+
 # ============================================================================
 # BYTE HELPERS
 # ============================================================================
@@ -64,9 +66,25 @@ fn pb_text_to_bytes(s: text) -> [i64]:
     Non-ASCII codepoints are emitted as raw single bytes — not valid UTF-8
     multi-byte sequences. Pre-encode to UTF-8 via std.common.encoding.utf8
     if you need wire-valid UTF-8 for non-ASCII content."""
+    # Bounded by CHARACTER count (text_codepoints(s).len()), not `s.len()`
+    # (BYTE count). `s[i]` (single-index) is CHARACTER-indexed on this
+    # engine (confirmed: "café"[3] is the whole "é", .ord()=233, not a
+    # byte) -- this function's own documented model already treats each
+    # character as one output unit (`code`), so `s[i]` was always the
+    # right accessor; the bug was bounding that character-indexed loop by
+    # a BYTE count. For "café" (4 characters, 5 bytes) the old bound let
+    # `i` reach 4, one past the last valid character index (0..3),
+    # silently appending a spurious `code=0` from the out-of-range read
+    # instead of stopping -- confirmed: pb_encode_string("café") emitted
+    # length=5 with payload [...,233,0], not the intended length=4 with no
+    # trailing byte. Genuinely fine for any character whose codepoint is
+    # already <=255 (the `code > 255` guard below still rejects the rest,
+    # e.g. CJK, exactly as documented) -- this is a bound fix, not a UTF-8
+    # upgrade, matching this function's stated non-UTF-8 scope.
+    val char_count = text_codepoints(s).len()
     var result = []
     var i = 0
-    while i < s.len():
+    while i < char_count:
         val code = s[i].ord()
         if code < 0 or code > 255:
             return []
@@ -242,8 +260,11 @@ fn pb_encode_bool(field_num: i64, value: bool) -> [i64]:
 
 fn pb_encode_string(field_num: i64, s: text) -> [i64]:
     """Encode a string field (wire type 2, length-delimited UTF-8)."""
+    # Same character-count bound fix as pb_text_to_bytes above (this is a
+    # redundant fail-fast pre-check duplicating that function's own guard).
+    val char_count = text_codepoints(s).len()
     var i = 0
-    while i < s.len():
+    while i < char_count:
         val code = s[i].ord()
         if code < 0 or code > 255:
             return []

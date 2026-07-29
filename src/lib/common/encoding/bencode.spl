@@ -1,3 +1,5 @@
+use std.common.encoding.utf8.{text_codepoints}
+
 # Bencode Encoder / Decoder
 # Implements the BitTorrent Bencode format (BEP 3):
 #   https://www.bittorrent.org/beps/bep_0003.html
@@ -219,11 +221,23 @@ fn bencode_encode_dict(keys: [text], values: [text]) -> text:
 # ============================================================================
 
 fn _benc_text_to_bytes(s: text) -> [u8]:
-    """Convert text to [u8] (UTF-8 byte values, masked to 8 bits)."""
+    """Convert text to [u8] (byte values, masked to 8 bits per character's
+    codepoint -- NOT a real UTF-8 re-encode; see the bound-fix note
+    below)."""
+    # Bounded by CHARACTER count (text_codepoints(s).len()), not
+    # `s.length()` (BYTE count). `s[i]` (single-index) is CHARACTER-indexed
+    # on this engine (confirmed: "café"[3] is the whole "é", not a byte) --
+    # the old byte-length bound let `i` run past the last valid character
+    # index for any multi-byte input (e.g. "café" is 4 characters but 5
+    # bytes), silently appending a spurious extra `ch.ord() & 0xFF` from
+    # the out-of-range read instead of stopping at 4 characters. This is a
+    # bound fix only, matching this function's own pre-existing "masked to
+    # 8 bits" (i.e. not real UTF-8) design -- see
+    # doc/08_tracking/bug/bracket_slice_byte_index_survey_2026-07-29.md.
+    val char_count = text_codepoints(s).len()
     var result: [u8] = []
     var i = 0
-    val slen = s.length()
-    while i < slen:
+    while i < char_count:
         val ch = s[i]
         result.push(ch.ord() & 0xFF)
         i = i + 1
