@@ -415,3 +415,22 @@ The next WM turn should not repeat that unchanged compiler command. The
 shortest remaining route is a native-safe layout cursor owner that does not
 depend on cross-block local scalar reloads, or an independently refreshed
 compiler artifact after the pre-object closure defect is fixed.
+
+A bounded raw cursor owner was then tested directly in `layout_vbox`. It used
+one i64 recursion-stack record per VBox depth, advanced the parent record
+before recursion, and packed child Y/height together to avoid aggregate
+returns and multi-call scalar transport. The exact stale-Phase-3 results were:
+
+```text
+cycle 1: 8 compiled / 372 cached -> exit 23
+cycle 2: 3 compiled / 377 cached -> exit 28
+cycle 3: 2 compiled / 378 cached -> exit 28
+```
+
+Exit `28` means the root raw slot itself did not contain final status Y `375`.
+The third probe also ruled out every expected row origin
+`1/25/61/91/123/195/285`; corruption occurs before the raw cursor can become
+authoritative, not only at recursive argument or `WidgetRect[]` return
+boundaries. The stack and diagnostic hooks were reverted. The retained oracle
+does keep one independent correction: a bordered 480-wide Panel has a
+478-wide client row, so `demo-button.w` must be `478`, not `480`.

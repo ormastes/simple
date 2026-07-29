@@ -576,6 +576,17 @@ implementation-in-progress
   signature, so the scoped process was terminated with exit `130`; its empty
   cache was preserved. No full bootstrap, Rust-seed fallback, or WM claim was
   made.
+- phase3-vbox-raw-cursor-stack-experiment: A bounded raw i64 cursor stack was
+  tested as the smallest layout-local workaround. It advanced each VBox slot
+  before recursion, used a separate depth for the nested scroll VBox, and
+  packed child Y/height into one raw record to avoid aggregate transport.
+  Cycle 1 compiled 8/reused 372 and still exited `23`. Cycle 2 compiled
+  3/reused 377 and exited `28`, proving the root raw slot did not reach the
+  final status Y `375`. Cycle 3 compiled 2/reused 378 and again exited `28`;
+  the raw value matched none of the expected row origins
+  `1/25/61/91/123/195/285/375`. The ineffective production stack and probe
+  hooks were reverted. The exact regression keeps the corrected panel-inner
+  button width `478` instead of `480`.
 
 ## Remaining runtime gates
 
@@ -610,4 +621,5 @@ implementation-in-progress
   Stage-2-to-compiler refresh (not a bootstrap) now compiles the full closure
   after the three source fixes. The supported positional-entry/runtime-capsule
   recipe avoids the prior link mistake but currently runs away before its first
-  cached object.
+  cached object. The attempted raw VBox cursor stack is also corrupted before
+  it can establish an authoritative row position.
