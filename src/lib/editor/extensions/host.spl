@@ -12,7 +12,7 @@ use std.editor.extensions.runtime.{
     runtime_check_permission, runtime_crash_is_disabled,
     runtime_crash_record, runtime_crash_reenable
 }
-use std.editor.extensions.builtin.index.{builtin_manifest_providers}
+use std.editor.extensions.builtin.index.{builtin_manifest_providers, builtin_activation_hooks}
 use std.editor.extensions.builtin.spl_language.*
 use std.editor.extensions.builtin.md_language.*
 use std.editor.core.path_text.*
@@ -55,6 +55,8 @@ class ExtensionHost:
     commands: CommandRegistry
     listeners: EventListenerRegistry
     lifetimes: [ExtensionLifetimeEntry]
+    activation_hooks: [ExtensionActivationHookEntry]
+    activation_diagnostics: [text]
 
 struct ExtensionCommandEntry:
     extension_name: text
@@ -72,6 +74,16 @@ fn extension_command_entry_command_id(entry: ExtensionCommandEntry) -> text:
 struct ExtensionLifetimeEntry:
     owner: text
     disposables: [Disposable]
+
+# Activation entrypoint wiring (L6b). One optional hook per extension name,
+# run exactly once the first time that extension transitions to active
+# (guarded against re-activation across deactivate/activate cycles). Struct,
+# not a class, for the same array-field mutation reason as
+# ExtensionLifetimeEntry above: the host mutates `ran` by index reassignment.
+struct ExtensionActivationHookEntry:
+    owner: text
+    hook: fn(text) -> Result<text, text>
+    ran: bool
 
 struct ExtensionDebugAdapterEntry:
     extension_name: text
@@ -131,7 +143,9 @@ impl ExtensionHost:
             crash_state: [],
             commands: CommandRegistry.new(),
             listeners: EventListenerRegistry.new(),
-            lifetimes: []
+            lifetimes: [],
+            activation_hooks: [],
+            activation_diagnostics: []
         )
 
     me index_extension(path: text):
@@ -184,6 +198,7 @@ impl ExtensionHost:
                 me.extensions[i] = entry
                 me._register_context(entry.manifest, entry.path)
                 me._register_contributions(entry.manifest)
+                me._run_activation_hook(name)
                 return true
             i = i + 1
         false
@@ -223,6 +238,60 @@ impl ExtensionHost:
             if entry.owner == name:
                 return entry.disposables.len()
         0
+
+    # Register (or replace) the activation hook run once when `name` first
+    # transitions to active. In-process builtins only today -- worker/
+    # external entrypoint execution stays future work (see runtime.spl
+    # dispatch seam / .spipe/ide_extension_kernel/state.md).
+    me register_activation_hook(name: text, hook: fn(text) -> Result<text, text>):
+        var i = 0
+        while i < me.activation_hooks.len():
+            if me.activation_hooks[i].owner == name:
+                me.activation_hooks[i] = ExtensionActivationHookEntry(
+                    owner: name, hook: hook, ran: false)
+                return
+            i = i + 1
+        me.activation_hooks.push(ExtensionActivationHookEntry(
+            owner: name, hook: hook, ran: false))
+
+    # Runs `name`'s activation hook exactly once (no-op if none registered or
+    # it already ran). A hook Err becomes a diagnostic and a recorded
+    # crash-state failure instead of propagating -- the host stays
+    # functional and the extension stays active.
+    me _run_activation_hook(name: text):
+        var i = 0
+        while i < me.activation_hooks.len():
+            if me.activation_hooks[i].owner == name:
+                if me.activation_hooks[i].ran:
+                    return
+                val callback = me.activation_hooks[i].hook
+                val result = callback(name)
+                var entry = me.activation_hooks[i]
+                entry.ran = true
+                me.activation_hooks[i] = entry
+                match result:
+                    case Ok(_):
+                        pass_do_nothing
+                    case Err(reason):
+                        me.activation_diagnostics.push(
+                            "activation hook failed for '" + name + "': " + reason)
+                        me.crash_state = runtime_crash_record(me.crash_state, name, false)
+                return
+            i = i + 1
+
+    fn activation_hook_ran(name: text) -> bool:
+        for entry in me.activation_hooks:
+            if entry.owner == name:
+                return entry.ran
+        false
+
+    fn activation_diagnostic_count() -> i64:
+        me.activation_diagnostics.len()
+
+    fn last_activation_diagnostic() -> text:
+        if me.activation_diagnostics.len() == 0:
+            return ""
+        me.activation_diagnostics[me.activation_diagnostics.len() - 1]
 
     # Register a typed command handler. The registration is owned by the
     # extension's lifetime and disposed on deactivation. First registration
@@ -638,6 +707,8 @@ fn extension_host_with_builtins() -> ExtensionHost:
     val builtins = builtin_manifest_providers()
     for manifest in builtins:
         host.register_manifest(manifest, "<builtin>")
+    for hook_entry in builtin_activation_hooks():
+        host.register_activation_hook(hook_entry.name, hook_entry.hook)
     for manifest in builtins:
         host.activate(manifest.name)
     host
