@@ -2,9 +2,29 @@ use simple_compiler::interpreter;
 use simple_parser::Parser;
 use std::collections::HashSet;
 use std::fs;
+use std::sync::{Mutex, MutexGuard};
 use tempfile::tempdir;
 
+/// Serialize all interpreter evaluations in this test binary.
+///
+/// The interpreter's fault-detection counters (RECURSION_DEPTH,
+/// INSTRUCTION_COUNT, TIMEOUT_EXCEEDED) are process-global atomics while the
+/// rest of its state is thread-local. Under the default parallel test
+/// harness, one test's `clear_interpreter_state()` zeroes the shared
+/// recursion depth mid-flight for another test, whose RAII guards then
+/// underflow it — every later `push_call_depth` fails as a phantom
+/// StackOverflow (the reentrant/vmm in-suite flakes). Holding this lock for
+/// the whole clear+evaluate span makes each test's reset-and-run atomic.
+static INTERP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn interp_lock() -> MutexGuard<'static, ()> {
+    // A panicking test (failed assertion inside an evaluation) poisons the
+    // lock; later tests must still run.
+    INTERP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn evaluate_loaded(main_path: &std::path::Path) -> i32 {
+    let _serial = interp_lock();
     interpreter::clear_module_cache();
     interpreter::clear_interpreter_state();
     let module =
@@ -15,7 +35,7 @@ fn evaluate_loaded(main_path: &std::path::Path) -> i32 {
     result.unwrap()
 }
 
-fn evaluate_unflattened(main_path: &std::path::Path) -> i32 {
+fn evaluate_unflattened_locked(main_path: &std::path::Path) -> i32 {
     let source = fs::read_to_string(main_path).unwrap();
     let module = Parser::new(&source).parse().unwrap();
     interpreter::set_current_file(Some(main_path.to_path_buf()));
@@ -24,10 +44,16 @@ fn evaluate_unflattened(main_path: &std::path::Path) -> i32 {
     result.unwrap()
 }
 
+fn evaluate_unflattened(main_path: &std::path::Path) -> i32 {
+    let _serial = interp_lock();
+    evaluate_unflattened_locked(main_path)
+}
+
 fn evaluate_unflattened_clean(main_path: &std::path::Path) -> i32 {
+    let _serial = interp_lock();
     interpreter::clear_module_cache();
     interpreter::clear_interpreter_state();
-    evaluate_unflattened(main_path)
+    evaluate_unflattened_locked(main_path)
 }
 
 #[test]

@@ -507,7 +507,16 @@ impl Drop for RecursionGuard {
     #[inline]
     fn drop(&mut self) {
         if self.active {
-            RECURSION_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            // Saturating decrement: RECURSION_DEPTH is process-global, and a
+            // concurrent `reset_recursion_depth()` (test isolation reset on
+            // another thread) can zero it while this guard is live. A plain
+            // fetch_sub would then wrap to usize::MAX and every subsequent
+            // push_call_depth would fail as a phantom StackOverflow.
+            let _ = RECURSION_DEPTH.fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |d| d.checked_sub(1),
+            );
         }
         if self.stack_active {
             DEBUG_CALL_STACK.with(|cell| {
@@ -547,8 +556,13 @@ pub fn push_call_depth(function_name: &str) -> Result<RecursionGuard, crate::err
     let depth = RECURSION_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let limit = MAX_RECURSION_DEPTH.load(std::sync::atomic::Ordering::Relaxed) as usize;
     if depth >= limit {
-        // Undo the increment since we're about to error
-        RECURSION_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // Undo the increment since we're about to error (saturating: see
+        // RecursionGuard::drop for why a wrapping decrement is dangerous).
+        let _ = RECURSION_DEPTH.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |d| d.checked_sub(1),
+        );
         if stack_active {
             DEBUG_CALL_STACK.with(|cell| {
                 cell.borrow_mut().pop();
@@ -686,9 +700,16 @@ pub fn clear_interpreter_state() {
     BDD_REGISTRY_CONTEXTS.with(|cell| cell.borrow_mut().clear());
     BDD_REGISTRY_SHARED.with(|cell| cell.borrow_mut().clear());
 
-    // Clear module globals (mutable module-level variables)
+    // Clear module globals (mutable module-level variables) and ALL owner
+    // maps. Leaving any owner map behind lets one test's module identities
+    // (`state`, `bridge`, ...) leak into the next test that reuses the same
+    // module names on the same thread (bug: reentrant test order-dependence).
     MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
     MODULE_GLOBALS_BY_OWNER.with(|cell| cell.borrow_mut().clear());
+    MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| cell.borrow_mut().clear());
+    MODULE_ENV_BY_OWNER.with(|cell| cell.borrow_mut().clear());
+    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| cell.borrow_mut().clear());
+    FUNCTION_MODULE_OWNER.with(|cell| cell.borrow_mut().clear());
     CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = None);
 
     // Clear DI singletons
@@ -756,6 +777,10 @@ pub fn clear_interpreter_state() {
     // Reset fault detection counters
     reset_recursion_depth();
     reset_timeout();
+    // INSTRUCTION_COUNT is process-global; without this reset every test in a
+    // suite shares one 10M-op budget and late tests fail with
+    // ExecutionLimitExceeded regardless of their own cost.
+    reset_execution_count();
 
     // Clear resource handles to prevent unbounded growth
     super::interpreter_method::clear_pinned_strings();
