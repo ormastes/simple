@@ -9,19 +9,19 @@
 ## Overview
 
 Regression cover for bug
-`selfhost_two_hop_field_method_mutation_lost_2026-07-27`. `WmService` reaches
-its ECS component stores through `self.world.<store>` — two struct-field hops
-across the imported `WorldBase`/`ComponentStore` types — and those mutating
-calls were silently dropped, collapsing every window onto one entity.
+`selfhost_two_hop_field_method_mutation_lost_2026-07-27`. The WM keeps each
+window in one non-generic row so native builds do not depend on generic
+component-store monomorphization or two-hop component mutations.
 
 The existing `wm_service_*` specs cannot cover this: they drive the service
 through raw IPC payloads and are red at HEAD for an unrelated typing defect
 (`undefined field 'value': cannot access field on value of type 'i64'`). This
-spec exercises the same component stores directly through `WmWorld`, with three
-windows so per-window state isolation is observable.
+spec exercises `WmWorld` directly with three windows so per-window state
+isolation is observable.
 """
 
 use std.spec
+use os.kernel.log.klog_api.{log_set_targets}
 use os.services.wm.wm_world.{WmWorld}
 
 describe "WmWorld multi-window entity identity":
@@ -31,6 +31,7 @@ describe "WmWorld multi-window entity identity":
         """WmWorld pre-sizes its allocator with WorldBase.with_capacity(WM_MAX_WINDOWS)
         (256), so the first three fresh ids are 256, 257 and 258 — distinct, which
         is the whole point of the regression."""
+        log_set_targets(0)
         var world = WmWorld.new()
         world.spawn_window(101, 7001, 900, "calc")
         world.spawn_window(102, 7002, 901, "clock")
@@ -46,6 +47,7 @@ describe "WmWorld multi-window entity identity":
         assert_false(e2.is_null())
 
     it "per-window owner port, process and app id stay isolated":
+        log_set_targets(0)
         var world = WmWorld.new()
         world.spawn_window(101, 7001, 900, "calc")
         world.spawn_window(102, 7002, 901, "clock")
@@ -61,6 +63,7 @@ describe "WmWorld multi-window entity identity":
         expect(world.app_id_for_window(103)).to_equal("hello")
 
     it "counts group windows by port, process and app without cross-talk":
+        log_set_targets(0)
         var world = WmWorld.new()
         world.spawn_window(101, 7001, 900, "calc")
         world.spawn_window(102, 7002, 901, "clock")
@@ -73,6 +76,7 @@ describe "WmWorld multi-window entity identity":
         expect(world.count_for_app("nosuchapp")).to_equal(0)
 
     it "despawning the middle window leaves the two siblings intact":
+        log_set_targets(0)
         var world = WmWorld.new()
         world.spawn_window(101, 7001, 900, "calc")
         world.spawn_window(102, 7002, 901, "clock")
@@ -86,8 +90,13 @@ describe "WmWorld multi-window entity identity":
         expect(world.app_id_for_window(103)).to_equal("hello")
         expect(world.count_for_port(7001)).to_equal(2)
         expect(world.count_for_port(7002)).to_equal(0)
+        world.spawn_window(104, 7004, 904, "files")
+        expect(world.find_entity_for_window(104).id).to_equal(257)
+        expect(world.find_owner_port(104)).to_equal(7004)
+        expect(world.app_id_for_window(104)).to_equal("files")
 
     it "set_identity rewrites only the targeted window":
+        log_set_targets(0)
         var world = WmWorld.new()
         world.spawn_window(101, 7001, 900, "calc")
         world.spawn_window(102, 7002, 901, "clock")

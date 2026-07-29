@@ -31,13 +31,8 @@ use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_CREATE_WEB_WINDOW, COMP_DE
 use os.userlib.syscall_raw.{syscall}
 use common.window_protocol.window_protocol.{WmCreateRequest, WmCreateResponse, WmInputEvent, WmCloseRequest, WmResizeRequest, WmMoveRequest, WmFocusEvent, WM_STATUS_OK, WM_STATUS_ERROR, WM_STATUS_NO_SPACE, WM_EVENT_CLOSE, WM_EVENT_FOCUS, wm_input_event, wm_focus_event}
 use os.services.launcher.launcher.{launcher_get_process_app_id_for_pid}
-use std.ecs.entity.{Entity, EntityAllocator}
-use std.ecs.component_store.{ComponentStore}
-use std.ecs.change_detection.{ChangeTracker}
-use std.ecs.system.{Scheduler}
-use std.ecs.world.{WorldBase}
 
-use os.services.wm.wm_world.{WmAction, wm_action_none, WindowOwner, WinId, OwnerPort, OwnerProcess, WinAppId, Title, Geometry, WindowState, WmWorld, WM_MAX_WINDOWS, WIN_STATE_NORMAL, WIN_STATE_MINIMIZED, WIN_STATE_MAXIMIZED}
+use os.services.wm.wm_world.{WmAction, wm_action_none, WindowOwner, WmWorld, WM_MAX_WINDOWS, WIN_STATE_NORMAL, WIN_STATE_MINIMIZED, WIN_STATE_MAXIMIZED}
 use os.services.wm.wm_codec.{wm_send_create_reply, wm_send_create_response, wm_send_status_reply, wm_send_error_reply, wm_notify_app_launched, _read_u8, _read_u32, _read_u64, _read_i32, _read_text, _push_u32, _push_i32, _push_u64, _ipc_send}
 
 # Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
@@ -269,7 +264,7 @@ impl WmService:
         """Answer the shared /api/test/* introspection surface with live WM
         state instead of a blanket STATUS_INVALID. The window world is
         reachable right here — self.owner_count tracks owned windows and
-        self.world.win_ids holds the active ECS window entities — so callers
+        self.world holds the active window rows — so callers
         get a real reply: status(i32=OK) | window_count(i32) | active_windows(i32).
 
         The IPC reply is emitted only when the service holds a live port
@@ -278,7 +273,7 @@ impl WmService:
         Protocol contract is fixed — see COMP_TEST_API_REQ in
         src/os/userlib/ipc_protocol.spl."""
         val window_count = self.window_count()
-        val active_windows = self.world.win_ids.len()
+        val active_windows = self.world.len()
         log_raw_println("[wm-service] COMP_TEST_API_REQ from port {src_port}: window_count={window_count} active_windows={active_windows} (payload_len={payload_len})")
         if self.initialized:
             var buf: [u8] = []
@@ -296,7 +291,7 @@ impl WmService:
         Payload: title_len(u32) | title(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
                  | process_id(u64)? | app_id_len(u32)? | app_id(bytes)?
         """
-        if self.world.win_ids.len() >= self.max_windows:
+        if self.world.len() >= self.max_windows:
             log_raw_println("[wm-service] Max windows reached, rejecting create")
             self.send_create_response(src_port, WindowId(value: 0), WM_STATUS_NO_SPACE)
             return wm_action_none()
@@ -345,7 +340,7 @@ impl WmService:
         the window to the Simple Web Engine rect renderer; title defaults
         to the URL, app_id falls back to the launcher's record for src_port.
         """
-        if self.world.win_ids.len() >= self.max_windows:
+        if self.world.len() >= self.max_windows:
             log_raw_println("[wm-service] Max windows reached, rejecting create_web")
             self.send_create_response(src_port, WindowId(value: 0), WM_STATUS_NO_SPACE)
             return wm_action_none()
@@ -432,22 +427,9 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        # Wire the resize into the ECS window world so world.geometries
-        # reflects live dimensions (previously only spawn_window ever wrote
-        # this component, leaving it stuck at 0x0 after any resize).
-        val e = self.world.find_entity_for_window(window_id)
-        if not e.is_null():
-            var gx: i32 = 0
-            var gy: i32 = 0
-            val geo_slot = self.world.geometries.get_slot(e)
-            if geo_slot >= 0:
-                gx = self.world.geometries.dense[geo_slot].x
-                gy = self.world.geometries.dense[geo_slot].y
-            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
-            val ecs_tick = self.world.base.now()
-            var geometries_s = self.world.geometries
-            geometries_s.insert(e, Geometry(x: gx, y: gy, w: width, h: height), ecs_tick)
-            self.world.geometries = geometries_s
+        # Keep the live world row in sync with the accepted resize.
+        val ecs_tick = self.world.base.now()
+        self.world.resize_window(window_id, width, height, ecs_tick)
 
         WmAction(kind: "resize", window_id: window_id, title: "", x: 0, y: 0, width: width, height: height, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
@@ -481,10 +463,9 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        # Touch the title component to record change detection tick
-        val e = self.world.find_entity_for_window(window_id)
-        if not e.is_null():
-            self.world.titles.touch(e, self.world.base.now())
+        # Touch the row to preserve the existing change-detection receipt.
+        val ecs_tick = self.world.base.now()
+        self.world.touch_title(window_id, ecs_tick)
 
         WmAction(kind: "set_title", window_id: window_id, title: title, x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
@@ -499,13 +480,8 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        val e = self.world.find_entity_for_window(window_id)
-        if not e.is_null():
-            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
-            val ecs_tick = self.world.base.now()
-            var states_s = self.world.states
-            states_s.insert(e, WindowState(value: WIN_STATE_MINIMIZED), ecs_tick)
-            self.world.states = states_s
+        val ecs_tick = self.world.base.now()
+        self.world.set_state(window_id, WIN_STATE_MINIMIZED, ecs_tick)
 
         WmAction(kind: "minimize", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
@@ -520,13 +496,8 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        val e = self.world.find_entity_for_window(window_id)
-        if not e.is_null():
-            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
-            val ecs_tick = self.world.base.now()
-            var states_s = self.world.states
-            states_s.insert(e, WindowState(value: WIN_STATE_MAXIMIZED), ecs_tick)
-            self.world.states = states_s
+        val ecs_tick = self.world.base.now()
+        self.world.set_state(window_id, WIN_STATE_MAXIMIZED, ecs_tick)
 
         WmAction(kind: "maximize", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
@@ -541,13 +512,8 @@ impl WmService:
             self.send_status_reply(src_port, STATUS_ERR)
             return wm_action_none()
 
-        val e = self.world.find_entity_for_window(window_id)
-        if not e.is_null():
-            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
-            val ecs_tick = self.world.base.now()
-            var states_s = self.world.states
-            states_s.insert(e, WindowState(value: WIN_STATE_NORMAL), ecs_tick)
-            self.world.states = states_s
+        val ecs_tick = self.world.base.now()
+        self.world.set_state(window_id, WIN_STATE_NORMAL, ecs_tick)
 
         WmAction(kind: "restore", window_id: window_id, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: src_port)
 
@@ -810,7 +776,7 @@ impl WmService:
 
     fn stats() -> text:
         """Return service statistics as text."""
-        "WmService: port={self.port_id}, windows={self.world.win_ids.len()}, requests={self.request_count}, running={self.running}"
+        "WmService: port={self.port_id}, windows={self.world.len()}, requests={self.request_count}, running={self.running}"
 
     fn is_initialized() -> bool:
         self.initialized

@@ -63,6 +63,18 @@ Run only this scoped set:
 7. Record `SIMPLEOS_STAGE2_FONT: PASS` only after independent review of
    all scoped evidence.
 
+### Current blocking TODO
+
+- [ ] In a fresh session, preserve and debug the generated executable for
+  `wm_world_multi_window_identity_spec.spl`; three bounded cycles currently
+  native-build cleanly and then exit 139. See
+  `doc/08_tracking/bug/wm_world_spipe_native_exit139_2026-07-29.md`.
+- [ ] After that focused spec is green, commit a clean checkpoint and produce
+  fresh Stage2 provenance. Attempt 8 was intentionally aborted before
+  compilation because its checkpoint became obsolete.
+- [ ] Run scoped-tool attempt 3, the final RV64 build attempt, framebuffer crop,
+  exact ten specs, ten zero-stub manuals, and the final audit.
+
 ### Bounded Stage 2 tool producer
 
 After committing this plan at a clean checkpoint, first run `sh
