@@ -998,6 +998,17 @@ impl Lowerer {
                 "concat" | "slice" | "replace" | "trim" | "trim_start" | "trim_end" => {
                     Some(TypeId::STRING)
                 }
+                // `appended`/`prepended` (= `concat` with swapped operand
+                // order) return a fresh String — same shape as the
+                // `concat`/`slice` entry just above. See the MIR expansion
+                // in lowering_expr_method.rs (lane BATCH3). NOTE: `substr`/
+                // `take` were deliberately NOT added here — `rt_slice`'s
+                // string branch is byte-indexed while the interpreter is
+                // char-indexed, a silent JIT-vs-interpreter divergence on
+                // multi-byte UTF-8 receivers, so those two are reclassified
+                // NEEDS-RUNTIME (need a char-aware slice symbol) rather than
+                // CLEAN-LOWERING.
+                "appended" | "prepended" => Some(TypeId::STRING),
                 "split" => Some(
                     self.module
                         .types
@@ -1141,6 +1152,20 @@ impl Lowerer {
                 // receiver — same shape as `take`/`skip`/`drop`/`insert`
                 // above (see the MIR expansion in lowering_expr_method.rs).
                 "copy" | "clone" | "unique" | "sorted" | "reversed" => Some(receiver.ty),
+                // `sort_desc` (lane BATCH3) is the interpreter's non-mutating
+                // "return a NEW descending-sorted array" sibling — same
+                // shape as `sorted`/`reversed` just above. The MIR lowering
+                // (lowering_expr_method.rs) composes `rt_array_sorted` +
+                // `rt_array_reversed` rather than calling
+                // `rt_array_sort_desc` directly, because that runtime symbol
+                // mutates its argument in place (see the comment there).
+                "sort_desc" => Some(receiver.ty),
+                // `zip(other)` (lane BATCH3) returns an array of
+                // `(a, b)` tuples — no single statically-resolvable element
+                // type (the two arrays may have different element types),
+                // so this falls back to ANY like the `flatten`/dict
+                // `"items" | "entries"` entries below.
+                "zip" => Some(TypeId::ANY),
                 // `flatten` (one level of Array<Array<T>> -> Array<T>) has no
                 // statically-resolvable element type in general (nested
                 // arrays are frequently ANY-typed) — same ANY fallback the

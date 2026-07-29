@@ -755,6 +755,41 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // `s.appended(x)` / `s.prepended(x)` on a String: the interpreter
+        // (interpreter_method/string.rs "appended"/"prepended") is exactly
+        // `concat(s, x)` / `concat(x, s)` — `rt_string_concat` (runtime/
+        // src/value/collections.rs) already exists and already backs the
+        // `"concat"` method (see codegen/instr/methods.rs), so this is just a
+        // second dispatch-arm name over the same existing call with the
+        // operand order swapped for `prepended`. Confirmed live before this
+        // fix: JIT `[jit-addr]` + `Function 'str.appended'/'str.prepended'
+        // not found`; interpreter `"abc".appended("d")` == `"abcd"`,
+        // `"abc".prepended("z")` == `"zabc"`. Result is a fresh string
+        // pointer — no unboxing needed (strings are already valid
+        // RuntimeValue pointers, same as arrays).
+        if matches!(method, "appended" | "prepended")
+            && args.len() == 1
+            && receiver_local_ty.unwrap_or(receiver.ty) == TypeId::STRING
+        {
+            let receiver_reg = self.lower_expr(receiver)?;
+            let arg_reg = self.lower_expr(&args[0])?;
+            let (left, right) = if method == "appended" {
+                (receiver_reg, arg_reg)
+            } else {
+                (arg_reg, receiver_reg)
+            };
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_string_concat"),
+                    args: vec![left, right],
+                });
+                dest
+            });
+        }
+
         // `arr.insert(idx, item)` on an Array<T>: the interpreter
         // (interpreter_method/collections.rs "insert") — `idx <= len` ->
         // insert `item` at `idx` (idx == len means append); `idx > len` ->
@@ -1024,6 +1059,70 @@ impl<'a> MirLowerer<'a> {
                     dest: Some(dest),
                     target: crate::mir::effects::CallTarget::from_name(runtime_fn),
                     args: vec![receiver_reg],
+                });
+                dest
+            });
+        }
+
+        // `arr.sort_desc()` on an Array<T>: the interpreter
+        // (interpreter_method/collections.rs "sort_desc") builds a brand-new
+        // `Vec` via `.to_vec()` then `sort_by` with reversed comparators —
+        // same non-mutating "return a NEW array" shape as `unique`/`sorted`/
+        // `reversed` just above, NOT the in-place mutation `array.fill` was
+        // skipped for. `rt_array_sort_desc` (runtime/src/value/
+        // collections.rs) is NOT 1:1 here: it sorts+reverses the receiver
+        // ARRAY IN PLACE and returns a bool (mirrors `rt_array_reverse`'s
+        // shape, not `rt_array_reversed`'s), which would silently mutate the
+        // caller's array — the exact same mismatch class the guide's
+        // `array.fill` skip note describes. Confirmed live: JIT
+        // `[jit-addr]` + `Function 'Array.sort_desc' not found`; interpreter
+        // on `[3,1,2].sort_desc()` returns a NEW `[3, 2, 1]` and leaves the
+        // original binding usable. Fix: compose two EXISTING non-mutating
+        // calls already used by the arm above — `rt_array_sorted` (ascending
+        // copy) then `rt_array_reversed` (descending copy of that) — giving
+        // the same descending-sorted NEW array with zero new runtime Rust.
+        if method == "sort_desc" && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
+            let receiver_reg = self.lower_expr(receiver)?;
+            return self.with_func(|func, current_block| {
+                let sorted = func.new_vreg();
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(sorted),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_sorted"),
+                    args: vec![receiver_reg],
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_reversed"),
+                    args: vec![sorted],
+                });
+                dest
+            });
+        }
+
+        // `arr.zip(other)` on an Array<T>: the interpreter
+        // (interpreter_method/collections.rs "zip") pairs elements
+        // pointwise into `(a, b)` tuples, truncated to the shorter array's
+        // length. `rt_array_zip` (runtime/src/value/collections.rs) already
+        // exists, takes both arrays directly and returns a fresh
+        // array-of-tuples pointer — no unboxing needed, same shape as
+        // `rt_array_copy`/`rt_array_flatten` above. Known open gap (NOT
+        // fixed here, out of this lane's file-ownership scope): the
+        // resulting tuples share the same JIT nested-tuple Display gap as
+        // `array.enumerate` (jit_method_dispatch_audit_2026-07-29) — `len()`
+        // and indexed element access are correct, only `print()`/
+        // `to_string()` on an individual tuple element is affected.
+        if method == "zip" && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
+            let receiver_reg = self.lower_expr(receiver)?;
+            let other_reg = self.lower_expr(&args[0])?;
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_zip"),
+                    args: vec![receiver_reg, other_reg],
                 });
                 dest
             });
