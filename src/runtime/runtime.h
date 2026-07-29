@@ -997,6 +997,8 @@ int64_t rt_glfw_maximize(int64_t handle);
 int64_t rt_glfw_restore(int64_t handle);
 int64_t rt_glfw_framebuffer_width(int64_t handle);
 int64_t rt_glfw_framebuffer_height(int64_t handle);
+int64_t rt_glfw_window_width(int64_t handle);
+int64_t rt_glfw_window_height(int64_t handle);
 int64_t rt_glfw_content_scale_milli(int64_t handle);
 int64_t rt_glfw_frame_sequence(int64_t handle);
 int64_t rt_glfw_buffer_growth_count(int64_t handle);

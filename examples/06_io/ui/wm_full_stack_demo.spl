@@ -7,6 +7,7 @@ use common.io.window_event.{
     WINDOW_STATUS_OK,
     WINDOW_EVENT_POINTER_BUTTON,
     WINDOW_EVENT_POINTER_MOVE,
+    WINDOW_EVENT_RESIZE,
     WINDOW_EVENT_TEXT,
     WINDOW_EVENT_WHEEL,
     WINDOW_MOD_CTRL,
@@ -88,9 +89,27 @@ fn main() -> i64:
         print "wm-demo:error:create-window"
         return 3
 
+    var screen_width = glfw.framebuffer_width(host_window).to_i32()
+    var screen_height = glfw.framebuffer_height(host_window).to_i32()
+    var logical_width = glfw.window_width(host_window).to_i32()
+    var logical_height = glfw.window_height(host_window).to_i32()
+    var content_scale_milli = glfw.content_scale_milli(host_window)
+    if screen_width <= 0:
+        screen_width = 640
+    if screen_height <= 0:
+        screen_height = 600
+    if logical_width <= 0:
+        logical_width = 640
+    if logical_height <= 0:
+        logical_height = 600
+    if content_scale_milli <= 0:
+        content_scale_milli = screen_width.to_i64() * 1000 /
+            logical_width.to_i64()
     val tree = wm_full_stack_demo_tree("Ready", "Play sound", "")
     var session = UISession.new(tree)
-    var compositor = HostCompositor.new_headless(Size.wh(640, 600))
+    var compositor = HostCompositor.new_headless(
+        Size.wh(screen_width, screen_height)
+    )
     compositor.apply_bridge_request(
         1, 10, COMP_CREATE_WINDOW.to_i64(), 0,
         "Full Stack WM Demo", 20, 20, 488, 516, "",
@@ -183,7 +202,7 @@ fn main() -> i64:
                     host_window,
                     shared_wm_pixel_buffer_addr(),
                     shared_wm_pixel_buffer_count(),
-                    640, 600
+                    screen_width, screen_height
                 ) != 0:
                     print "wm-demo:error:present"
                     running = false
@@ -207,6 +226,41 @@ fn main() -> i64:
                     var committed = ""
                     if kind == WINDOW_EVENT_TEXT:
                         committed = glfw.events.text_value(text_handle)
+                    if kind == WINDOW_EVENT_RESIZE:
+                        val resized_width = glfw.events.polled_width.to_i32()
+                        val resized_height = glfw.events.polled_height.to_i32()
+                        if resized_width > 0 and resized_height > 0:
+                            compositor.resize(
+                                resized_width, resized_height
+                            )
+                            if (compositor.width == resized_width and
+                                compositor.height == resized_height):
+                                screen_width = resized_width
+                                screen_height = resized_height
+                                val next_logical_width = glfw.window_width(
+                                    host_window
+                                ).to_i32()
+                                val next_logical_height = glfw.window_height(
+                                    host_window
+                                ).to_i32()
+                                if next_logical_width > 0:
+                                    logical_width = next_logical_width
+                                if next_logical_height > 0:
+                                    logical_height = next_logical_height
+                                val next_scale = glfw.content_scale_milli(
+                                    host_window
+                                )
+                                if next_scale > 0:
+                                    content_scale_milli = next_scale
+                                else:
+                                    content_scale_milli = (
+                                        resized_width.to_i64() * 1000 /
+                                        logical_width.to_i64()
+                                    )
+                                needs_render = true
+                            else:
+                                print "wm-demo:error:resize-unsupported"
+                                running = false
 
                     if kind == WINDOW_EVENT_KEY and (
                         action == WINDOW_ACTION_PRESS
@@ -269,13 +323,27 @@ fn main() -> i64:
                             consumed_shortcut = true
 
                     if running and not consumed_shortcut:
+                        var routed_x_milli = glfw.events.polled_x_milli
+                        var routed_y_milli = glfw.events.polled_y_milli
+                        if (kind == WINDOW_EVENT_POINTER_MOVE or
+                            kind == WINDOW_EVENT_POINTER_BUTTON):
+                            if logical_width > 0:
+                                routed_x_milli = (
+                                    routed_x_milli * screen_width /
+                                    logical_width
+                                )
+                            if logical_height > 0:
+                                routed_y_milli = (
+                                    routed_y_milli * screen_height /
+                                    logical_height
+                                )
                         router.route_scalar(
                             kind,
                             key,
                             action,
                             modifiers,
-                            glfw.events.polled_x_milli,
-                            glfw.events.polled_y_milli,
+                            routed_x_milli,
+                            routed_y_milli,
                             glfw.events.polled_delta_x_milli,
                             glfw.events.polled_delta_y_milli,
                             compositor,
@@ -416,5 +484,5 @@ fn main() -> i64:
         sound.active_audio_handle_count() == 0
     )
     glfw.terminate()
-    print "wm-demo:closed clean={clean} pcm_frames={sound.mixed_pcm_frames} pcm_checksum={sound.mixed_pcm_checksum} audio_device={audio_device_ready} audio_handles={sound.active_audio_handle_count()}"
+    print "wm-demo:closed clean={clean} framebuffer={screen_width}x{screen_height} logical={logical_width}x{logical_height} scale_milli={content_scale_milli} pcm_frames={sound.mixed_pcm_frames} pcm_checksum={sound.mixed_pcm_checksum} audio_device={audio_device_ready} audio_handles={sound.active_audio_handle_count()}"
     if clean: 0 else: 5

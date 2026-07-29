@@ -37,6 +37,10 @@ runaway guard, neither command is retried in this session.
 loadable GLFW library or live display. This proves fail-closed loading only,
 not the required visual/input runtime evidence.
 
+The resize hardening boundary also compiles with strict C warnings. Two bounded
+Xvfb attempts stopped at `rt_glfw_init` because the host has OpenGL but no
+loadable `libglfw.so`; they are not counted as live resize evidence.
+
 ## Full hosted native entry
 
 The checked hosted entry

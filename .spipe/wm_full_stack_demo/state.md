@@ -282,6 +282,15 @@ implementation-in-progress
   dummy-audio probe passes with strict C warnings enabled. The current native
   compiler still requires the host runtime object to be supplied explicitly;
   demand-selected host provider compilation remains an open compiler lane.
+- host-resize-rendering: The GLFW facade now exposes logical window size
+  separately from framebuffer size and content scale. The live demo renders
+  and presents at current framebuffer dimensions, scales logical pointer
+  coordinates into that pixel space, and consumes normalized framebuffer
+  resize events. Maximized internal windows reflow to the new work area while
+  retaining their exact saved normal rectangle. Oversized framebuffer requests
+  fail closed before pixel-count overflow/allocation. The GLFW C boundary
+  compiles cleanly with strict warnings; live Xvfb execution remains
+  unavailable on this host because no `libglfw.so` is installed.
 - phase3-skia-discovery: The original `ot_layout_shaper.spl` conditional
   dedent was normalized for the older Phase-3 grammar. An isolated shaper
   entry then advanced to `ot_layout_gpos_data.spl`, where the same parser

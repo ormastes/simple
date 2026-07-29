@@ -150,6 +150,12 @@ returns to Maximized before a later restore recovers `normal_rect`.
 `normal_rect` is retained independently from `current_rect`; maximize saves it
 once and restore uses it exactly. Collapse calls minimize.
 
+Host presentation tracks three separate metrics: logical window size,
+framebuffer pixel size, and content scale. The compositor raster target follows
+framebuffer resize events, while GLFW logical pointer coordinates are scaled
+into framebuffer space before the shared WM/client router. A maximized window
+reflows to the resized desktop work area without overwriting `normal_rect`.
+
 Pointer capture is cleared when its target is minimized, closed, or released.
 Taskbar pinned entries are keyed by stable `app_id`; running entries are keyed
 by `window_id`. The ordered pin list uses a bounded versioned text record at

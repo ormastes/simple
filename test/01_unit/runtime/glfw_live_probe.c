@@ -19,6 +19,8 @@ int64_t rt_glfw_event_key(void);
 const char* rt_glfw_event_text(void);
 int64_t rt_glfw_framebuffer_width(int64_t);
 int64_t rt_glfw_framebuffer_height(int64_t);
+int64_t rt_glfw_window_width(int64_t);
+int64_t rt_glfw_window_height(int64_t);
 int64_t rt_glfw_frame_sequence(int64_t);
 int64_t rt_glfw_buffer_growth_count(int64_t);
 int64_t rt_glfw_live_window_count(void);
@@ -48,7 +50,9 @@ int main(void) {
     int64_t window = rt_glfw_create_window("SimpleGLFWProbe", width, height);
     if (!window || rt_glfw_live_window_count() != 1) return 3;
     if (rt_glfw_framebuffer_width(window) <= 0 ||
-        rt_glfw_framebuffer_height(window) <= 0) return 4;
+        rt_glfw_framebuffer_height(window) <= 0 ||
+        rt_glfw_window_width(window) != width ||
+        rt_glfw_window_height(window) != height) return 4;
     if (rt_glfw_present_argb_words_raw(
             window, 0, count, width, height
         ) != 5 ||

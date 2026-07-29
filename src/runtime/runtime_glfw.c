@@ -697,6 +697,20 @@ int64_t rt_glfw_framebuffer_width(int64_t handle) {
     return width;
 }
 
+int64_t rt_glfw_window_width(int64_t handle) {
+    rt_glfw_window_slot* slot = glfw_slot(handle);
+    int width = 0, height = 0;
+    if (slot) p_glfwGetWindowSize(slot->window, &width, &height);
+    return width;
+}
+
+int64_t rt_glfw_window_height(int64_t handle) {
+    rt_glfw_window_slot* slot = glfw_slot(handle);
+    int width = 0, height = 0;
+    if (slot) p_glfwGetWindowSize(slot->window, &width, &height);
+    return height;
+}
+
 int64_t rt_glfw_framebuffer_height(int64_t handle) {
     rt_glfw_window_slot* slot = glfw_slot(handle);
     int width = 0, height = 0;
