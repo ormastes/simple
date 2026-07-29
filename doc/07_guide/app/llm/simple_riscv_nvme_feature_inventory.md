@@ -113,10 +113,13 @@ evidence.
 
 Current bootstrap admission is tracked in
 `doc/08_tracking/todo/cosmos_nvme_firmware_remaining_2026-07-28.md`. Retry 12
-stopped before Stage 3 on four source-shape errors introduced by consolidated
-upstream work; focused repairs and a 3/3 regression exist, but no replacement
-full CLI is admitted yet. Do not run NVMe SSpec/docgen with the Rust seed or a
-stale deployed binary.
+stopped before Stage 3 after consolidation removed six required Stage 2 source
+contracts. The source-shape guard now covers the typed HIR registries, MIR type
+and coverage forms, physical-source key, and enum-discriminant helper. The same
+consolidation also deleted the RAM-NAND/GHDL dependency set; it is restored and
+its host self-test plus mocked AXI endpoint pass. No replacement full CLI is
+admitted yet. Do not run release SSpec/docgen or claim source-matched firmware
+GHDL evidence with the Rust seed or a stale deployed binary.
 
 The current endpoint-wired K26 top also passes full SimpleOS boot with both
 zeroed and garbage-filled DDR. That rehearsal uses a tied-off endpoint and does

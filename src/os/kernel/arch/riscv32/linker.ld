@@ -54,6 +54,12 @@ SECTIONS {
         . += 4;
     } > RAM
 
+    .nandram (NOLOAD) : ALIGN(16) {
+        _nandram_start = .;
+        . += 256;
+        _nandram_end = .;
+    } > RAM
+
     .stack (NOLOAD) : ALIGN(16) {
         _stack_bottom = .;
         . += 32K;

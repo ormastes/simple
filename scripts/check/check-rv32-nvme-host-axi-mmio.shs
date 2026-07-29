@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+RTL="examples/09_embedded/fpga_riscv/rtl/rv32_nvme_axi.vhd"
+FW="examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl"
+TOP="examples/09_embedded/fpga_riscv/rtl/soc_top_rv32_k26_ddr.vhd"
+BUILD="scripts/fpga/build_k26_rv32_ddr_bitstream.shs"
+FW_BUILD="examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs"
+
+for token in 'x"00001000"' 'cmd_pending' 'm_axi_araddr' 'm_axi_awaddr' 'irq_o'; do
+    grep -q "$token" "$RTL" || { echo "FAIL: endpoint missing $token"; exit 1; }
+done
+for token in 'nvme_fw_rv32_service_once' 'rt_rv32_nvme_mmio_load' 'rt_rv32_nvme_mmio_store'; do
+    grep -q "$token" "$FW" || { echo "FAIL: firmware service missing $token"; exit 1; }
+done
+for token in 'u_nvme : entity work.rv32_nvme_axi' 'ddr_mem_req' 'fw_valid <=' 'm_axi_nvme_dma_awaddr' 's_axi_nvme_awaddr' 'nvme_irq'; do
+    grep -q "$token" "$TOP" || { echo "FAIL: K26 top missing $token"; exit 1; }
+done
+for token in 'rv32_nvme_axi.vhd' 'M_AXI_NVME_DMA' 'S_AXI_NVME' '0xA0010000' 'pl_ps_irq0'; do
+    grep -q "$token" "$BUILD" || { echo "FAIL: K26 build missing $token"; exit 1; }
+done
+for token in 'NVME_RV32_SERVICE' 'nvme_fw_rv32_service_once' 'nvme_fw_rv32_service.elf'; do
+    grep -q "$token" "$FW_BUILD" || { echo "FAIL: firmware service build missing $token"; exit 1; }
+done
+
+sh scripts/fpga/ghdl_rv32_nvme_host_axi_mmio.shs
+sh scripts/fpga/ghdl_rv32_nvme_fw_in_loop.shs

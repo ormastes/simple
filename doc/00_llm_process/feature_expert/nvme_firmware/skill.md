@@ -105,3 +105,6 @@ same operator/reviewer, and package/source/board/artifact mismatches.
 - GHDL AXI evidence is not PCIe enumeration, PERST/MSI, or board evidence.
 - Cosmos+ host contracts and a valid package are not physical persistence.
 - A stale or Rust-seed CLI cannot produce release SPipe evidence.
+- Before a retry, verify every guide-listed RV32 NAND/AXI script, linker symbol,
+  RTL endpoint, and SSpec still exists; consolidation once deleted this set
+  while leaving callers and documentation intact.
