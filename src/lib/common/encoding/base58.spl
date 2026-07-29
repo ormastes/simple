@@ -211,42 +211,83 @@ fn base58_decode(input: text) -> Result<[u8], Base58Error>:
     # Build big-endian byte buffer from base58 digits.
     # For each digit: multiply entire work buffer by 58 and add digit.
     # work is an untyped list; each element is 0..255.
+    #
+    # Stored LSB-first (work[0] = least-significant byte). Two distinct
+    # default-engine (JIT/native codegen) miscompiles were root-caused here
+    # (both dodged by this rewrite; interpreter is unaffected by either --
+    # see doc/08_tracking/bug/base58_decode_reversed_polarity_rootcause_2026-07-29.md
+    # for the full 20-variant shrink):
+    #
+    # 1. A `var` first assigned an EMPTY list literal (`var work = []`) gets
+    #    a representation locked in at that first assignment; if the SAME
+    #    variable is later reassigned wholesale to a different, non-empty
+    #    list object (the original MSB-first version of this code did
+    #    exactly that to prepend a new leading byte: `work = new_work`),
+    #    every subsequent bracket-index read through `work` silently
+    #    applies a spurious `<<3` shift (digit 5 reads back as 40; 57 as
+    #    (57<<3) mod 256 = 200). Avoided: `work` is never reassigned to a
+    #    different list object anywhere below, only appended/index-written.
+    #
+    # 2. Independently, growing a list via `.push()` (triggering a backing-
+    #    store reallocation) in one iteration of an enclosing `while` loop,
+    #    then index-reading/writing that SAME list in a LATER iteration of
+    #    that loop, reads back garbage (not simply mis-shifted -- a stale
+    #    base-pointer/spill-slot artifact; e.g. two digit=57 passes through
+    #    the per-digit loop gave [137,103] instead of [35,13]). This is the
+    #    coordinator-named "loop-carried variable spill/clobber" / native
+    #    tuple-spill family. Avoided below by pre-sizing `work` to a safe
+    #    upper bound BEFORE the per-digit loop starts (via a separate, non-
+    #    loop-carried pure-push pre-loop -- proven safe in isolation), so
+    #    the per-digit loop performs ONLY in-place index reads/writes and
+    #    never calls `.push()` -- no reallocation ever happens while the
+    #    per-digit loop is live.
+    #
+    # Upper bound: n base58 digits represent a value < 58^n, needing at most
+    # ceil(n * log2(58)/8) ~= ceil(n*0.733) bytes in base 256 -- `n + 1`
+    # bytes is always comfortably sufficient. Unused high-order (most
+    # significant) slots stay 0 and are trimmed when emitting the result.
     var work = []
+    var pre = 0
+    val max_bytes = indices.len() + 1
+    while pre < max_bytes:
+        work.push(0)
+        pre = pre + 1
 
     var di = 0
     while di < indices.len():
         val digit = indices[di]
-        # Multiply by 58 and add digit (LSB→MSB carry propagation through work)
+        # Multiply by 58 and add digit (carry propagates LSB->MSB, i.e.
+        # increasing index, since work is stored LSB-first here). `work` is
+        # already fully pre-sized to max_bytes, so this loop only ever
+        # index-reads/writes -- it never calls `.push()`.
         var carry: i64 = digit
-        var wi: i64 = work.len() - 1
-        while wi >= 0:
+        var wi: i64 = 0
+        while wi < work.len():
             val x = work[wi] * 58 + carry
             work[wi] = x & 0xFF
             carry = x / 256
-            wi = wi - 1
-        # Prepend any remaining carry bytes (MSB-first)
-        while carry > 0:
-            var new_work = []
-            new_work.push(carry & 0xFF)
-            var ci = 0
-            while ci < work.len():
-                new_work.push(work[ci])
-                ci = ci + 1
-            work = new_work
-            carry = carry / 256
+            wi = wi + 1
         di = di + 1
 
-    # Build result: lz1 zero bytes + work bytes
+    # Find the highest used (nonzero, or within the pre-sized range) byte:
+    # trim unused high-order pre-allocated zero slots that real carry
+    # propagation never reached.
+    var used_len = work.len()
+    while used_len > 0 and (work[used_len - 1] & 0xFF) == 0:
+        used_len = used_len - 1
+
+    # Build result: lz1 zero bytes + work bytes emitted MSB-first (work is
+    # stored LSB-first, so walk it backwards down to used_len).
     var result: [u8] = []
     var z = 0
     while z < lz1:
         result.push(0)
         z = z + 1
-    var wi2 = 0
-    while wi2 < work.len():
+    var wi2 = used_len - 1
+    while wi2 >= 0:
         val wv: i64 = work[wi2]
         result.push(wv.to_u8())
-        wi2 = wi2 + 1
+        wi2 = wi2 - 1
 
     Ok(result)
 
