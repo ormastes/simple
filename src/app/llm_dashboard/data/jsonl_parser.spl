@@ -103,11 +103,7 @@ fn classify_tool_use(agent_id: text, json: text, timestamp: i64) -> DashboardEve
             val query = json_str(input_obj, "query")
             args.push(query)
         "Bash" =>
-            val cmd = json_str(input_obj, "command")
-            if cmd.len() > 60:
-                args.push("{cmd.slice(0, 57)}...")
-            else:
-                args.push(cmd)
+            args.push(truncate_text(json_str(input_obj, "command"), 60))
         "Agent" =>
             val desc = json_str(input_obj, "description")
             val prompt_raw = json_str(input_obj, "prompt")
@@ -213,21 +209,30 @@ fn json_str(json: text, key: text) -> text:
     if rest.len() == 0:
         return ""
     if rest.starts_with("\""):
-        # String value — find closing unescaped quote
+        # String value — find the closing unescaped quote. slice()/
+        # substring() are byte-indexed, so accumulating one raw byte at a
+        # time (the old `result = "{result}{ch}"`) shreds every multi-byte
+        # UTF-8 character in the value into separate U+FFFD replacement
+        # characters. Walk byte-by-byte only to find the ASCII structural
+        # bytes (\, ") -- always safe, since those bytes never occur inside
+        # a multi-byte sequence -- then copy whole runs via slice() so any
+        # non-ASCII content in between is preserved intact.
         var i = 1
+        var seg_start = 1
         var result = ""
         while i < rest.len():
             val ch = rest.slice(i, i + 1)
             if ch == "\\" and i + 1 < rest.len():
+                result = result + rest.slice(seg_start, i)
                 val next_ch = rest.slice(i + 1, i + 2)
                 result = "{result}{next_ch}"
                 i = i + 2
+                seg_start = i
             elif ch == "\"":
-                return result
+                return result + rest.slice(seg_start, i)
             else:
-                result = "{result}{ch}"
                 i = i + 1
-        return result
+        return result + rest.slice(seg_start, i)
     # Not a string — return raw token up to comma/brace
     var end_pos = 0
     while end_pos < rest.len():
