@@ -647,6 +647,15 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
     val window_count = scene.windows.len()
     if window_count == 0:
         return SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: [], background: scene.background)
+    var raised_z = 0
+    var z_index = 0
+    while z_index < window_count:
+        if scene.windows[z_index].z_index > raised_z:
+            raised_z = scene.windows[z_index].z_index
+        z_index = z_index + 1
+    val z_saturated = raised_z == 2147483647
+    if not z_saturated:
+        raised_z = raised_z + 1
     var focused: [SharedWmWindow] = []
     var idx = 0
     while idx < window_count:
@@ -668,10 +677,14 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
                 html: window.html,
                 minimized: false,
                 focused: true,
-                z_index: window.z_index,
+                z_index: raised_z,
                 chrome_kind: window.chrome_kind
             ))
         else:
+            val retained_z = if z_saturated and window.z_index == raised_z:
+                raised_z - 1
+            else:
+                window.z_index
             focused.push(SharedWmWindow(
                 surface_id: window.surface_id,
                 window_id: window.window_id,
@@ -688,7 +701,7 @@ fn shared_wm_focus_window_by_window_id(scene: SharedWmScene, window_id: text) ->
                 html: window.html,
                 minimized: window.minimized,
                 focused: false,
-                z_index: window.z_index,
+                z_index: retained_z,
                 chrome_kind: window.chrome_kind
             ))
         idx = idx + 1
@@ -808,6 +821,26 @@ fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i
     val slot = x / slot_w
     if slot >= 0 and slot < taskbar.pinned.len():
         val app = taskbar.pinned[slot]
+        # Scene z-order is MRU order: both WindowManager and SimpleOS raise a
+        # focused window. Keep the scan indexed at this existing by-value
+        # boundary for the freestanding native-safe profile.
+        var running_window_id = ""
+        var best_z = -1
+        var window_index = 0
+        while window_index < scene.windows.len():
+            val window = scene.windows[window_index]
+            if window.app_id == app.app_id and window.z_index > best_z:
+                running_window_id = window.window_id
+                best_z = window.z_index
+            window_index = window_index + 1
+        if running_window_id != "":
+            val focused_scene = shared_wm_focus_window_by_window_id(
+                scene, running_window_id
+            )
+            return _shared_wm_dispatch_result(
+                "focus_window", running_window_id, app.app_id,
+                running_window_id, focused_scene
+            )
         return _shared_wm_dispatch_result("launch_app", app.app_id, app.app_id, "", scene)
     val running_index = slot - taskbar.pinned.len()
     if running_index >= 0 and running_index < taskbar.running.len():

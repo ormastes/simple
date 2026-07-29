@@ -343,6 +343,21 @@ implementation-in-progress
   and cannot turn a right-button press into a later left click. Its isolated
   production-helper Phase 3 entry probe builds and runs
   (`WEB UI PRIMARY BUTTON PROBE: PASS`).
+- taskbar-running-pin-activation: Shared taskbar dispatch now treats scene
+  z-order as the most-recent-window authority for a stable `app_id`. A pinned
+  running app focuses that window, restores it in the SimpleOS live shell when
+  hidden, and clears stale minimized runtime evidence; launch is emitted only
+  when no matching window exists. The isolated production-path Phase 3 probe
+  builds and runs (`SHARED WM PINNED RESTORE PROBE: PASS`).
+- taskbar-fresh-demo-pin: A fresh host demo layout persists the stable demo
+  launcher before mirroring it into the compositor and before opening audio.
+  Failure exits without acquired PCM/device resources; closing the last window
+  therefore retains the launcher path needed to recreate a newer window ID.
+- host-focus-capture: Host GUI pointer capture is canceled when its internal
+  window loses focus. A later release, even over the old client bounds, is not
+  delivered as a matching client release. The focused router assertion is
+  authored; its full test closure remains behind the recorded renderer
+  discovery blocker.
 
 ## Remaining runtime gates
 

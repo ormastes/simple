@@ -162,11 +162,14 @@ move follows client capture, while left release always cancels the child drag.
 This prevents stale local coordinates from turning titlebar or right-button
 events into child-surface actions.
 
-Pointer capture is cleared when its target is minimized, closed, or released.
+Pointer capture is cleared when its target is minimized, closed, loses focus,
+or is released; a release after focus loss is not delivered to the old client.
 Taskbar pinned entries are keyed by stable `app_id`; running entries are keyed
 by `window_id`. The ordered pin list uses a bounded versioned text record at
 `/SYS/TASKBAR.PIN`; `DesktopShell` is the single load/save owner and the VFS is
-the storage boundary. Closing the last window removes only the running entry.
+the storage boundary. Activating a pinned running app selects its highest-z
+matching window and restores it when minimized; only an app with no matching
+window launches. Closing the last window removes only the running entry.
 
 ## Failure Policy
 
