@@ -89,4 +89,20 @@ ProfileResolver.orientation_changed()
   <- spl_main()
 ```
 
-That aggregate-receiver/compiler fault is the current full hosted WM gate.
+The profile receiver was changed to the established native-safe receiver form,
+and resize dispatch now stores the event dimensions before profile
+recomputation. The focused Phase-3 native probe reproduced the exact
+`ProfileResolver.orientation_changed()` segfault before the change and passes
+afterward with a 40x60 Portrait viewport.
+
+The next full linked host run passed that route and reached the canonical GUI
+renderer:
+
+```text
+common.ui.widget_draw_ir._emit_widget()
+  <- widget_tree_to_draw_ir_with_theme()
+  <- UISession.submit_widget_draw_ir()
+  <- gui_session_content_frame()
+```
+
+The nil-receiver fault in `_emit_widget()` is the current first-frame gate.

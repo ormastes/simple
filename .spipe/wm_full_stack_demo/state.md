@@ -379,13 +379,23 @@ implementation-in-progress
   scalar casts. The third capped live attempt now faults in
   `ProfileResolver.orientation_changed()` from `UISession.dispatch()`, before
   a capturable WM frame.
+- ui-resize-native: `UISession.dispatch(UIEvent.Resize)` now commits the event
+  dimensions to the session viewport before recomputing its profile, and the
+  read-only profile comparison uses the established native-safe receiver form.
+  The focused Phase-3 probe reproduced the exact
+  `ProfileResolver.orientation_changed()` segfault before the change, then
+  passed with a 40x60 Portrait viewport afterward.
+- phase3-gui-render-entry: The next full linked host run passed the repaired
+  resize/profile route and reached
+  `widget_tree_to_draw_ir_with_theme()`. It now fails closed in
+  `common.ui.widget_draw_ir._emit_widget()` before the first capturable frame.
 
 ## Remaining runtime gates
 
 - Host GLFW: the real backend/window/input/presentation boundary is green;
   the full Phase-3 closure and static provider link are green. Live execution
-  reaches `UISession.dispatch()` but the aggregate receiver fault at
-  `ProfileResolver.orientation_changed()` blocks the first scene capture.
+  now reaches canonical GUI widget-to-Draw-IR lowering, where `_emit_widget()`
+  faults on a nil receiver before the first scene capture.
 - SDL2: its focused native event/window boundary probe is green; the shared
   live WM scenario has not run. SDL3 remains unimplemented.
 - QEMU: PS/2, pixel, and HDA controller/stream/IRQ source paths now share the
