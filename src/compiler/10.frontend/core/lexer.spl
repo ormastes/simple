@@ -137,8 +137,10 @@ fn lex_init_with_path(source: text, source_path: text):
     if lexer_array_len(lex_inline_source_slot) == 0:
         lex_inline_source_slot = [""]
     lex_inline_source_slot[0] = core_source
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", core_source)
-    rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", source_path)
+    if env_value_nul_free(core_source):
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", core_source)
+    if env_value_nul_free(source_path):
+        rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", source_path)
     lex_state_set("pos", "0")
     lex_state_set("core_pos", "0")
     lex_state_set("line", "1")
@@ -169,11 +171,28 @@ fn lex_init_with_path(source: text, source_path: text):
     current_core_lexer_slot = [make_core_lexer(core_source)]
     current_core_lexer_reset_file()
 
+# True if `value` holds no embedded NUL byte. rt_env_set (Rust env::set_var)
+# panics on an interior NUL (CString::new failure), so a poisoned value must
+# SKIP the env write instead of aborting the compiler — module state is the
+# real store, readers are env-first/fallback, so skipping is
+# semantics-preserving. Char-by-char via char_code(), not `.contains()`: a
+# NUL-bearing haystack breaks `.contains()` (C-string truncation) — proven by
+# rt_env_set panics on "\033" files (see lexer_struct.spl scan_string).
+fn env_value_nul_free(value: text) -> bool:
+    var i: i64 = 0
+    val n: i64 = value.len()
+    while i < n:
+        if char_code(value[i:i + 1]) == 0:
+            return false
+        i = i + 1
+    true
+
 fn lex_state_get(key: text, fallback: text) -> text:
     rt_env_get("SIMPLE_BOOTSTRAP_STATE_{key}") ?? fallback
 
 fn lex_state_set(key: text, value: text):
-    rt_env_set("SIMPLE_BOOTSTRAP_STATE_{key}", value)
+    if env_value_nul_free(value):
+        rt_env_set("SIMPLE_BOOTSTRAP_STATE_{key}", value)
 
 fn lex_source_len() -> i64:
     current_core_source_get().len()

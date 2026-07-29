@@ -68,15 +68,32 @@ fn core_token_env_save_enabled() -> bool:
         return false
     core_token_env_save_slot[0]
 
+# True if `value` holds no embedded NUL byte. rt_env_set (Rust env::set_var)
+# panics on an interior NUL (CString::new failure), so a poisoned value must
+# SKIP the env write instead of aborting the compiler — module arrays/slots
+# written unconditionally are the real store, readers are env-first/array-
+# fallback, so skipping is semantics-preserving. Char-by-char via char_code(),
+# not `.contains()`: a NUL-bearing haystack breaks `.contains()` (C-string
+# truncation) — proven by rt_env_set panics on "\033" files (see scan_string
+# below).
+fn env_value_nul_free(value: text) -> bool:
+    var i: i64 = 0
+    val n: i64 = value.len()
+    while i < n:
+        if char_code(value[i:i + 1]) == 0:
+            return false
+        i = i + 1
+    true
+
 fn core_token_text_save(value: text):
-    if core_token_env_save_enabled():
+    if core_token_env_save_enabled() and env_value_nul_free(value):
         rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", value)
 
 fn core_token_suffix_save(value: text):
     if rt_array_len_safe(core_last_token_suffix_slot) == 0:
         core_last_token_suffix_slot = [""]
     core_last_token_suffix_slot[0] = value
-    if core_token_env_save_enabled():
+    if core_token_env_save_enabled() and env_value_nul_free(value):
         rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_SUFFIX", value)
 
 fn core_token_capture(tok_text: text, line: i64, col: i64):
