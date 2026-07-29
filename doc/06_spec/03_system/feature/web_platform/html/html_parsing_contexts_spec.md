@@ -389,7 +389,9 @@ expect(_pixels(
 
 #### should keep template content inert despite authored CSS
 
-- Retain inert template semantics in canonical BeDOM
+- Trace inert HTML through semantic state without Draw IR
+   - Protocol capture: after_step
+- path[path len
    - Protocol capture: after_step
 -  expect bedom parent
    - Protocol capture: after_step
@@ -397,9 +399,11 @@ expect(_pixels(
    - Protocol capture: after_step
 - Force template inertness after the authored CSS cascade
    - Protocol capture: after_step
-   - Evidence: protocol response verified by 3 expected checks
+   - Evidence: protocol response verified by 5 expected checks
    - Expected: plan.script_blocks.len() equals `0`
-   - Expected: plan.style_sources.len() equals `1`
+   - Expected: plan.style_sources.len() equals `2`
+   - Expected: plan.style_sources[0].source equals `/active.css`
+   - Expected: plan.style_sources[1].source equals `template{display:block!important}#hidden{display:block!important}`
    - Expected: plan.image_sources.len() equals `0`
 - Omit inert commands and pixels from Draw IR execution
    - Protocol capture: after_step
@@ -413,26 +417,54 @@ expect(_pixels(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 90 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val html = (
-    "<html><body id='body' style='margin:0'>" +
-    "<style>template{display:block!important}" +
+    "<html id='document'><head id='head'>" +
+    "<title id='title'>HIDDEN TITLE</title>" +
+    "<base id='base' href='https://safe.test/'>" +
+    "<meta id='meta' name='description' content='metadata'>" +
+    "<link id='active-link' rel='stylesheet' href='/active.css'>" +
+    "<style id='active-style'>template{display:block!important}" +
     "#hidden{display:block!important}</style>" +
+    "</head><body id='body' style='margin:0'>" +
     "<template id='template' style='display:block!important'>" +
-    "<script src='/hidden.js'></script>" +
+    "<script id='hidden-script' src='/hidden.js'></script>" +
     "<style>#visible{display:none!important}</style>" +
-    "<link rel='stylesheet' href='/hidden.css'>" +
-    "<img src='/hidden.png'>" +
+    "<link id='hidden-link' rel='stylesheet' href='/hidden.css'>" +
+    "<img id='hidden-image' src='/hidden.png'>" +
     "<div id='hidden' style='display:block!important;width:16px;" +
     "height:8px;background:#dc2626'>HIDDEN</div></template>" +
     "<div id='visible' style='width:16px;height:8px;" +
     "background:#16a34a'></div></body></html>"
 )
 
-step("Retain inert template semantics in canonical BeDOM")
+step("Trace inert HTML through semantic state without Draw IR")
+val semantic_ids = [
+    "head", "title", "base", "meta", "active-link", "active-style"
+]
+val semantic_tags = [
+    "head", "title", "base", "meta", "link", "style"
+]
+val semantic_parents = [
+    "document", "head", "head", "head", "head", "head"
+]
+var semantic_index = 0
+while semantic_index < semantic_ids.len():
+    _expect_bedom_parent(
+        html, semantic_ids[semantic_index],
+        semantic_parents[semantic_index]
+    )
+    val path = _path(html, semantic_ids[semantic_index])
+    expect(be_dom_get_tag(
+        path[path.len() - 1]
+    )).to_equal(semantic_tags[semantic_index])
+    expect(simple_web_layout_debug_layout_by_id(
+        html, 16, 8, semantic_ids[semantic_index], "w"
+    )).to_equal("")
+    semantic_index = semantic_index + 1
 _expect_bedom_parent(html, "hidden", "template")
 _expect_bedom_parent(html, "visible", "body")
 
@@ -440,6 +472,20 @@ step("Force template inertness after the authored CSS cascade")
 expect(simple_web_layout_debug_style_by_id(
     html, "template", "display"
 )).to_equal("none")
+expect([
+    simple_web_layout_debug_layout_by_id(
+        html, 16, 8, "template", "w"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 16, 8, "template", "h"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 16, 8, "hidden", "w"
+    ),
+    simple_web_layout_debug_layout_by_id(
+        html, 16, 8, "hidden", "h"
+    )
+]).to_equal(["0", "0", "0", "0"])
 expect(simple_web_layout_debug_layout_by_id(
     html, 16, 8, "visible", "y"
 )).to_equal("0")
@@ -447,7 +493,9 @@ val plan = browser_document_resource_plan(
     html, "https://safe.test/app", ""
 )
 expect(plan.script_blocks.len()).to_equal(0)
-expect(plan.style_sources.len()).to_equal(1)
+expect(plan.style_sources.len()).to_equal(2)
+expect(plan.style_sources[0].source).to_equal("/active.css")
+expect(plan.style_sources[1].source).to_equal("template{display:block!important}#hidden{display:block!important}")
 expect(plan.image_sources.len()).to_equal(0)
 
 step("Omit inert commands and pixels from Draw IR execution")
