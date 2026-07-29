@@ -18,7 +18,7 @@ use std.io_runtime.{get_args}
 use std.test_runner.test_runner_types.{TestExecutionMode, TestFileResult, TestOptions, TestRunResult, TEST_OUTPUT_CAPTURE_BYTES, classify_test_run_result, test_run_outcome_exit_code, test_empty_selection_is_success}
 use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
 use std.test_runner.test_config.{TestConfig, load_test_config}
-use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
+use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode, run_test_file_composite}
@@ -625,6 +625,19 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
             chaos_timeout = 300
         if chaos_timeout > effective_options.timeout:
             effective_options.timeout = chaos_timeout
+    if file_has_slow_test(file_path) and effective_options.timeout < 600:
+        effective_options.timeout = 600
+
+    val monitor_timeout = env_get("SIMPLE_TIMEOUT_SECONDS") ?? ""
+    # to_int("") throws, and the interpreter evaluates both sides of `and`,
+    # so the unset case MUST be split out before any to_int call — the
+    # combined condition broke every `simple test` run when the var was
+    # unset. Unset means the monitor may use a lower default, so set it.
+    if monitor_timeout == "":
+        env_set("SIMPLE_TIMEOUT_SECONDS", "{effective_options.timeout}")
+    elif monitor_timeout != "0":
+        if to_int(monitor_timeout) < effective_options.timeout:
+            env_set("SIMPLE_TIMEOUT_SECONDS", "{effective_options.timeout}")
 
     # G1: Use safe mode with resource limits when enabled
     if effective_options.safe_mode:

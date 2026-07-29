@@ -2,8 +2,30 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** medium — tooling-visible, not runtime-visible
-- **Status:** open
+- **Status:** **not reproducible on HEAD (2026-07-29)** — guard spec added; likely a native `Dict.get()` flake, see below
 - **Found via:** HS1 `hir-span-populate` lane, while writing a guard spec
+
+## 2026-07-29 update — not reproducible; guard landed
+
+The SYM1 lane traced the full path and found it structurally correct on HEAD:
+`declare_module_symbols` (`module_lowering.spl:1690-1712`) pre-declares every
+top-level function in **module scope** with one `define` per function;
+`SymbolTable.define` (`hir_types.spl:219-272`) only short-circuits
+Class/Struct/Enum/Trait kinds — Function always inserts; `lower_function`
+reuses the predeclared id via lookup. The bug-doc scenario was re-run three
+ways (guard spec, 3-fn ad-hoc driver, exact 2-fn repro) across ~6 runs — every
+function resolved to a distinct SymbolId each time.
+
+**Most plausible original cause:** `SymbolTable.lookup` used
+`scope.symbols.get(name)` (`hir_types.spl:286`) — native `Dict.get()` is
+documented-unreliable (`dict_native_pitfalls.md`), and a pre-existing RED spec
+(`symbol_table_dict_get_source_spec.spl`, another lane's, uncommitted) is
+already driving `rt_dict_contains`+index-read hardening on exactly that line.
+SYM1 deliberately did not touch `hir_types.spl` to avoid clobbering that lane.
+
+**Guard now in tree:** `test/01_unit/compiler/hir/hir_symbol_table_all_functions_spec.spl`
+parses real 3-function source through the full pipeline and asserts all three
+resolve — 1/1 green. If the flake recurs, this spec is the tripwire.
 
 ## Symptom
 
