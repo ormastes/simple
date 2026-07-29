@@ -1946,6 +1946,28 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         var candidate_i = 0
         val candidate_count = candidates.len()
         var has_important_candidates = false
+        # Perf: apply_decls unpacks/repacks the ~176-field Style struct and
+        # probes ~283 known property names against the rule's small decl
+        # table on EVERY call (see doc/08_tracking/bug/
+        # web_style_producer_4s_per_node_interpreted_lane_2026-07-29.md,
+        # "Cost center attribution" -- apply_decls is 70-90% of per-node
+        # style-resolution wall time). Instead of calling it once per
+        # candidate rule, accumulate every candidate's decls into one
+        # string (in cascade order) and call it ONCE per node.
+        # Behavior-preserving: decl_table_build()/decl_tbl_last_index()
+        # already implement "last occurrence in the table wins" as the
+        # tie-break for shorthand-vs-longhand and duplicate-property
+        # ordering; string concatenation preserves relative source order
+        # across rules exactly the way it already does within one rule's
+        # decls, so the merged table's "last occurrence" is still the
+        # correct cascade winner. Known accepted narrow edge case: a
+        # single node matching many large rules could push the MERGED
+        # declaration count over apply_decls' internal WEB_RULE_DECL_QUOTA
+        # (256) abuse guard where each rule individually stayed under it --
+        # graceful degradation (some late-cascade properties silently
+        # don't apply on that one pathological node), not a crash or data
+        # corruption, and 256 is deliberately generous for the normal case.
+        var combined_decls = ""
         while candidate_i < candidate_count:
             # Budget guard (inner): this is the apply_decls call site loop where a
             # single node can match thousands of rules (the hostile case). Sample
@@ -1965,10 +1987,12 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                         empty_cells_decl.trim().lower() == "hide"
                     )
                 if rules.decls[r] != "":
-                    st = apply_decls(st, rules.decls[r], em_base)
+                    combined_decls = combined_decls + rules.decls[r] + ";"
                 if rules.important_decls[r] != "":
                     has_important_candidates = true
             candidate_i = candidate_i + 1
+        if combined_decls != "":
+            st = apply_decls(st, combined_decls, em_base)
         if trace_stages:
             print "[layout-trace] style_stage=inline-input index={i} len={nd.style_attr.len()}"
         var inline_normal = ""
@@ -1991,6 +2015,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # specificity/source order as the normal author cascade.
         if has_important_candidates:
             candidate_i = 0
+            var combined_important_decls = ""
             while candidate_i < candidate_count:
                 if (candidate_i & 255) == 0 and _web_budget_expired():
                     break
@@ -2009,10 +2034,12 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                         empty_cells_hide = (
                             important_empty_cells_decl.trim().lower() == "hide"
                         )
-                    st = apply_decls(
-                        st, rules.important_decls[r], em_base
+                    combined_important_decls = (
+                        combined_important_decls + rules.important_decls[r] + ";"
                     )
                 candidate_i = candidate_i + 1
+            if combined_important_decls != "":
+                st = apply_decls(st, combined_important_decls, em_base)
         if inline_important != "":
             val inline_important_empty_cells_decl = decl_get(
                 inline_important, "empty-cells"

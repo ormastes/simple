@@ -135,21 +135,101 @@ expensive is specific to those two nodes' attributes hitting the
 `important_decls`/inline-style/`wm_fallback` path, or a GC pause coinciding
 with them. Not investigated further this pass.
 
-### Fix proposal (not implemented — needs its own scoped change, not a <50-line drive-by)
+### Fix landed 2026-07-29: item 1 (call-count reduction), item 2 deferred
 
-1. Stop doing 176-field struct copy-in/copy-out per `apply_decls` call:
-   either mutate `Style` in place (pass by reference / builder pattern) or
-   batch all candidate rules' declarations into one merged decl table and
+**Landed** (`simple_web_html_layout_renderer_core.spl`, per-node loop): item 1
+above, in its cheaper form -- rather than mutating `Style` in place (a bigger
+API change touching every `apply_decls` call site across the file), the
+per-node loop now accumulates every surviving candidate rule's `decls`
+string into one combined string (in cascade order, each fragment
+`;`-terminated so `decl_table_build` parses the boundary correctly) and
+calls `apply_decls` **once per node** instead of once per candidate rule.
+Same transformation applied to the author-important pass (separately, after
+the normal pass, preserving "important always outranks normal" origin
+order). Inline style handling (already only 1-2 calls, not per-candidate)
+was left untouched.
+
+**Why this is behavior-preserving:** `decl_table_build()`/
+`decl_tbl_last_index()` already implement "last occurrence in the table
+wins" as the cascade tie-break within one rule's decls (the file's own
+comments document this). String concatenation preserves relative source
+order across rules exactly the way it already preserved order within one
+rule, so the merged table's "last occurrence" is still the correct cascade
+winner -- shorthand-vs-longhand ordering included, in **both** directions.
+
+**Known accepted narrow edge case:** a single node matching many large
+rules could push the *merged* declaration count over `apply_decls`'
+internal `WEB_RULE_DECL_QUOTA` (256) abuse guard where each rule
+individually stayed under it. Graceful degradation only (some late-cascade
+properties silently don't apply on that one pathological node), not a
+crash or data corruption; 256 is deliberately generous for the normal
+case, and no such node was observed in the showcase fixture.
+
+**Verified (PROVED):**
+- `test/01_unit/app/ui.chromium/css_spec.spl`: 9/12, identical to the
+  pre-fix baseline (same 3 pre-existing, unrelated failures).
+- New `test/01_unit/lib/gc_async_mut/gpu/browser_engine/
+  apply_decls_merge_probe_spec.spl` (landed as a permanent regression
+  test): 5/5, exercising the exact risk this change carries -- last-wins
+  for a duplicated property, shorthand-after-longhand wins, longhand-
+  after-shorthand wins (both cascade directions), non-ASCII content
+  elsewhere in the merged rules is not corrupted, and ordering survives
+  across 5 merged candidate rules. Ran the identical 5 assertions against
+  the unmodified pre-fix code too -- same 5/5 -- confirming the expected
+  values are genuine pre-existing cascade semantics, not artifacts of this
+  change. Vacuity-probed (corrupted one expected value, confirmed red with
+  the exact expected-vs-actual message, reverted, confirmed green).
+
+**Measured (mixed signal, reported honestly):** Call-count reduction is a
+clean, load-independent, PROVED number: replaying the 8-node profile from
+the "Cost center attribution" section above (candidate counts 1,1,2,3,1,
+1,2,2), the old per-candidate-call code made 13 `apply_decls` calls across
+those 8 nodes; the new per-node-call code makes 8 (1 per node, no
+important-decls triggered in that sample) -- a **38.5% reduction in
+`apply_decls` invocations**, each of which was independently measured at
+~100-150ms in the same profiling section, so this is real, mechanical
+work removed, not a guess.
+
+The wall-clock `budget-break` re-measurement, however, is **not** a clean
+confirmation either way: two back-to-back runs of the exact repro command
+with this fix applied gave budget-break at **29** and **38** of 151 nodes
+(same 120s budget) -- the same range as pre-fix measurements taken at
+different points in this session (29, then later 38, then later still 35
+under a different instrumentation pass). `pgrep` at the time of these runs
+showed **23 concurrent rustc/cargo/bin-simple processes** competing for
+CPU on this shared machine. A wall-clock-budget node count is fundamentally
+unreliable evidence under that level of contention -- it measures how much
+CPU time this process was scheduled, not how efficient the code is. Not
+re-measuring further this pass; the call-count number above is the
+trustworthy evidence for this change's impact. **Do not read the 29/38
+figures here as a regression** -- they are noise, not signal, at this
+contention level.
+
+### Remaining fix proposal (not implemented — needs its own scoped change)
+
+1. ~~Batch all candidate rules' declarations into one merged decl table and
    call `apply_decls`-equivalent logic once per node instead of once per
-   candidate rule.
+   candidate rule.~~ Landed above (the call-batching form of this item;
+   full pass-by-reference/builder-pattern mutation was not attempted).
 2. Replace the ~283 individual `decl_tbl_get(tbl, "prop-name")` linear-scan
    probes with a single pass over `tbl`'s actual entries (typically 5-20)
    dispatching on the property name once, instead of the property list
-   scanning the table up to 283 times.
-3. Profile whether (1) or (2) dominates before committing to a large
-   refactor -- add the same four-point timing probe used here, but INSIDE
+   scanning the table up to 283 times -- this is the loop-inversion
+   proper, deferred because `apply_decls` is 1810 lines covering all ~283
+   properties including intricate shorthand-vs-longhand interactions
+   (`background`, `border`, `font`, `flex`, `padding`/`margin`), too large
+   to rewrite safely in one pass; stage it property-family by
+   property-family, verifying `css_spec.spl` + the merge-probe spec +
+   fresh multi-byte probes after each family, per the original staging
+   guidance.
+3. Profile whether the remaining per-call cost (down from ~100-150ms ×
+   1.6 avg calls/node to ~100-150ms × 1 call/node) is now the 283-probe
+   block or the 176-field copy-in/copy-out -- add the same four-point
+   timing probe used in "Cost center attribution" above, but INSIDE
    `apply_decls` itself (copy-in boundary, lookup-loop boundary,
-   construct-out boundary), to split the ~100-150ms further.
+   construct-out boundary), on a quiet machine (re-run `pgrep` for
+   concurrent heavy processes first and wait for a quiet window, given
+   the wall-clock noise problem documented above).
 4. Investigate the node 5 / node 8 outliers separately -- they are not
    explained by anything in this section and could be a second, unrelated
    defect (GC pressure or a `wm_fallback` code path cost).
