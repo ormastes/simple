@@ -114,7 +114,7 @@ Example: a caller supplies path, SHA, revision, and matrix fields.
 
 Expected result: `trusted-runner-admission-unavailable`.
 
-Example: local CSS contains `color`, `caption-side`, and `property-name`.
+Example: local CSS contains `color`, `quotes`, and `property-name`.
 
 Expected result: denominator `2`; `property-name` is excluded.
 
@@ -158,7 +158,8 @@ scenarios.
 - Complete caller-authored provenance cannot unlock PASS.
 - Executed and implemented counts remain zero while admission is unavailable.
 - `property-name` is excluded before the CSS denominator is counted.
-- The source diagnostic includes `caption-side` but not recognized `color`.
+- The source diagnostic includes unsupported `quotes` but not recognized
+  `color` or `caption-side`.
 - Offline fixture and output paths cannot escape the repository.
 
 ## Scenarios
@@ -207,7 +208,9 @@ expect(_traceability_value(evidence, "html_css_sspec_traceability_receipt_sha256
 - Verify executable HTML and CSS traceability
    - Expected: code equals `1`
    - Expected: _traceability_value(evidence, "html_css_sspec_traceability_css_property_count") equals `2`
-   - Expected: unrecognized contains `caption-side`
+   - Expected: unrecognized count equals `37`
+   - Expected: unrecognized contains `quotes`
+   - Expected: unrecognized does not contain `caption-side`
    - Expected: unrecognized does not contain `color`
    - Expected: unrecognized does not contain `property-name`
    - Expected: _traceability_value(evidence, "html_css_sspec_traceability_implemented_css_property_indexed_count") equals `0`
@@ -229,14 +232,16 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify executable HTML and CSS traceability")
-val command = "rm -rf build/test-html-css-sspec-local-inventory && mkdir -p build/test-html-css-sspec-local-inventory && printf '%s\\n' '<code id=elements-3:the-div-element><a href=x>div</a></code>' > build/test-html-css-sspec-local-inventory/html.html && printf '%s\\n' '<code>color</code><code>caption-side</code><code>property-name</code>' > build/test-html-css-sspec-local-inventory/css.html && BUILD_DIR=build/test-html-css-sspec-local-inventory/out REPORT_PATH=build/test-html-css-sspec-local-inventory/report.md HTML_CSS_SSPEC_FETCH=0 HTML_CSS_SSPEC_HTML_INVENTORY_PATH=build/test-html-css-sspec-local-inventory/html.html HTML_CSS_SSPEC_CSS_INVENTORY_PATH=build/test-html-css-sspec-local-inventory/css.html HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE=build/test-html-css-sspec-local-inventory/missing.env sh scripts/check/check-html-css-sspec-traceability.shs"
+val command = "rm -rf build/test-html-css-sspec-local-inventory && mkdir -p build/test-html-css-sspec-local-inventory && printf '%s\\n' '<code id=elements-3:the-div-element><a href=x>div</a></code>' > build/test-html-css-sspec-local-inventory/html.html && printf '%s\\n' '<code>color</code><code>quotes</code><code>property-name</code>' > build/test-html-css-sspec-local-inventory/css.html && BUILD_DIR=build/test-html-css-sspec-local-inventory/out REPORT_PATH=build/test-html-css-sspec-local-inventory/report.md HTML_CSS_SSPEC_FETCH=0 HTML_CSS_SSPEC_HTML_INVENTORY_PATH=build/test-html-css-sspec-local-inventory/html.html HTML_CSS_SSPEC_CSS_INVENTORY_PATH=build/test-html-css-sspec-local-inventory/css.html HTML_CSS_SSPEC_BEHAVIOR_EVIDENCE=build/test-html-css-sspec-local-inventory/missing.env sh scripts/check/check-html-css-sspec-traceability.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
 val evidence = file_read("build/test-html-css-sspec-local-inventory/out/evidence.env") ?? ""
 val unrecognized = _traceability_value(evidence, "html_css_sspec_traceability_claimed_unrecognized_css_properties")
 expect(_traceability_value(evidence, "html_css_sspec_traceability_css_property_count")).to_equal("2")
-expect(unrecognized.contains("caption-side")).to_equal(true)
+expect(unrecognized.split(",").len()).to_equal(37)
+expect(unrecognized.contains("quotes")).to_equal(true)
+expect(unrecognized.contains("caption-side")).to_equal(false)
 expect(unrecognized.contains("color")).to_equal(false)
 expect(unrecognized.contains("property-name")).to_equal(false)
 expect(_traceability_value(evidence, "html_css_sspec_traceability_implemented_css_property_indexed_count")).to_equal("0")

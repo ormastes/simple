@@ -15,7 +15,7 @@ Canonical plan:
 - `Trace implemented CSS properties through canonical rendering`
 - `Classify unsupported CSS properties without false implementation claims`
 
-## Completed read-only sidecars
+## Completed audit and bounded implementation lanes
 
 | Lane | Result |
 |---|---|
@@ -23,6 +23,9 @@ Canonical plan:
 | Implemented CSS traceability | RED: self-satisfying 284 count, unrecognized and metadata-only claims |
 | Unsupported CSS classification | 92 production, 23 speech/aural, 1 deprecated, 1 false scrape |
 | SSpec/manual quality | FAIL: missing plan/REQs, stale manuals/counts, no executed evidence |
+| Closed checker | Landed in `fc73115d0214`; behavioral counts remain zero without independent admission |
+| Inert/media/form/caption/animation | Bounded source/spec/manual work landed; qualified execution and corpus accounting remain open |
+| Iframe | Design landed in `771dfb23835b`; TDD regeneration and implementation remain open |
 
 ## Safe parallel implementation lanes
 
@@ -43,6 +46,10 @@ Canonical plan:
    - runs qualified pure-Simple docgen only after specs settle;
    - owns canonical mirrored manuals and stale-duplicate deletion;
    - cannot declare executable PASS.
+
+Current next lanes are the independently admitted runner/manual workflow,
+fresh bounded iframe TDD regeneration, and per-row corpus accounting. Do not
+reopen landed bounded behavior unless its focused evidence regresses.
 
 ## Serialized source lanes
 

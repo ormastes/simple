@@ -1,6 +1,6 @@
 # Agent tasks: Web iframe Draw IR embedding
 
-Status: implementation-ready design; no source work admitted
+Status: design landed; lane 1 awaits a fresh bounded docgen/runtime session
 
 Frozen names:
 
@@ -11,7 +11,7 @@ Frozen names:
 
 | Order | Lane | Scope | Dependency |
 |---:|---|---|---|
-| 1 | TDD owner | Modern SSpec/manual with basic/order/clip fail-fast controls | none |
+| 1 | TDD owner | Modern SSpec/manual with basic/order/clip fail-fast controls | Runtime pending accounting landed in `7220a9aa51ef`; regenerate in a fresh session because the prior iframe docgen lane reached its three-cycle cap and Stage2 docgen still segfaults |
 | 2 | Draw IR transform | Rebase offsets/IDs/clips and preserve every other command field | lane 1 |
 | 3 | Web producer | Shared composer, depth/rules/deadline child insertion, and ordered child material-witness folding | lanes 1–2 |
 | 4 | Engine2D evidence | Existing executor closes frozen pixel matrix | lane 3 |

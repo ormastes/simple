@@ -27,12 +27,20 @@ conformance evidence.
 
 ## Landed incremental evidence
 
-Two bounded implementation tranches have landed since the inventory audit:
+The following bounded implementation and evidence tranches have landed since
+the inventory audit:
 
 | Commit | Bounded scope | Independent evidence | Evidence boundary |
 |---|---|---|---|
 | `28f0e779b0d2` | HTML defaults and behavior-first SSpec for `h1`–`h6`, `sub`, `sup`, `selectedcontent`, and `slot` | Independent static review PASS; canonical generated manual present and complete with zero stubs | Source/spec/manual evidence only; no qualified runtime execution is claimed |
 | `b17e868199af` | CSS Grid foundation for explicit pixel tracks, gaps, placement, span, implicit row, block control, and over-quota fail-closed behavior; conformance manifest kept truthful | Independent static review PASS; canonical generated Grid manual and refreshed validator manual are complete with zero stubs | Bounded Grid foundation only; manifest remains `red-not-run`; no qualified runtime execution or full Grid/CSS claim |
+| `b9e03cb9a487` | Inert `head`/`template` resource handling | Strengthened parsing-context SSpec and canonical manual | No qualified runtime execution |
+| `543409eee861` | Safe fallback for ten embedded/media tags other than `iframe` | Semantic/resource/DrawIR/Engine2D control evidence | Bounded fallback only; corpus and qualified execution remain open |
+| `7b3d40761352` | Hosted checkbox focus/input/click rendering | Semantic state, DrawIR geometry, and exact red-to-blue pixel controls | Bounded interaction only; qualified execution remains open |
+| `ec39dc4ef85d` | Canonical `caption-side` declaration, style, table layout, DrawIR, and pixel behavior | Independent static PASS with focused spec/manual | Bounded property only; qualified execution remains open |
+| `fc73115d0214` | Closed traceability gate and `property-name` exclusion | Fail-closed checker SSpec/manual | Behavioral counts remain zero without independent admission |
+| `e62e8f5e9f6c` | Deterministic CSS/JavaScript animation frame trace | Initial/intermediate/pause/resume/completed DrawIR and pixel controls | Stage2 discovery blocked by the recorded parser error |
+| `771dfb23835b` | Canonical iframe Draw IR embedding design | Reviewed architecture/detail/agent plans | Design only; no iframe implementation claim |
 
 These commits correct the named source/spec/manual gaps but do not close the
 overall HTML/CSS traceability goal. The deployed pure-Simple wrapper still
@@ -59,7 +67,7 @@ Full rows currently identified:
 
 `html, head, meta, title, body, main, p, div, section, table, textarea, template`
 
-Unsupported/fail-closed rows:
+Historically unsupported/fail-closed rows:
 
 `area, audio, canvas, embed, iframe, map, object, picture, source, track, video`
 
@@ -77,8 +85,9 @@ source/spec/manual evidence.
 - Functional count: not proven.
 - Existing generated-combination scenarios: 38 source scenarios; retained
   evidence records 13 passing and 25 failing.
-- At least 38 claimed properties are not recognized by canonical renderer
-  declaration owners.
+- Exactly 37 claimed properties are not recognized by canonical renderer
+  declaration owners after counting lookups through every local declaration
+  table variable.
 - Only 42 behavioral cases exist for the 284 claimed names.
 - Several claimed properties are metadata-only and have no layout/raster
   consumer.
@@ -106,17 +115,21 @@ an inventory literal, an `@supports` table, or metadata.
 |---|---|---|---|---|---|---|---|
 | REQ-002/004/019/021 | HTML Full 12: `html,head,meta,title,body,main,p,div,section,table,textarea,template` | Full by static audit | `test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl`; browser production-hardening spec | tokenizer/tree, BrowserSession semantic tree, HTML layout renderer, DrawIR, Engine2D | exact tag/parent/style/geometry/commands/pixels or hidden absence | canonical manuals exist; qualified execution unavailable | Evidence-blocked |
 | REQ-002/004/019/021 | HTML Partial 80 | Partial | grouped text/tag and bitmap matrices; exact scenario mapping missing | same canonical owners | per-group identity, UA defaults, geometry, DrawIR, pixels | new grouped specs/manuals required | RED |
-| REQ-002/019/021 | HTML unsupported 11: `area,audio,canvas,embed,iframe,map,object,picture,source,track,video` | Unsupported/fail-closed | exact grouped scenario missing | tokenizer/tree/resource fallback | semantic fallback plus no unauthorized native/resource/DrawIR path | spec/manual missing | RED |
+| REQ-002/019/021 | HTML embedded/media fallback 10: `area,audio,canvas,embed,map,object,picture,source,track,video` | Bounded fail-closed fallback landed in `543409eee861` | safe embedded/media fallback spec | tokenizer/tree/resource fallback, Web layout, DrawIR, Engine2D | semantic/resource exclusion plus deterministic fallback commands and pixels | canonical spec/manual; qualified execution unavailable | Evidence-blocked |
+| REQ-002/004/019/021 | HTML `iframe` | Design only | modern SSpec/manual regeneration blocked after the bounded docgen cap | canonical child Web composition to DrawIR embedding | order, clip, offsets, materials, exact pixels, deadline/rules | design `771dfb23835b`; implementation/manual absent | RED |
+| REQ-002/019/021 | Inert `head`/`template` resources | Bounded behavior landed in `b9e03cb9a487` | strengthened HTML parsing-context scenario | tokenizer/tree/resource discovery | inert descendants excluded from fetch/resource output | canonical manual; qualified execution unavailable | Evidence-blocked |
+| REQ-002/004/006/021 | Hosted checkbox interaction/rendering | Bounded behavior landed in `7b3d40761352` | hosted form interaction scenario | DOM/event/focus/style/layout/DrawIR/Engine2D | semantic parentage, state transition, geometry, exact red-to-blue pixels | canonical manual; qualified execution unavailable | Evidence-blocked |
 | REQ-002/019/021 | HTML formerly inventory-only 2: `selectedcontent,slot` | Bounded behavior landed in `28f0e779b0d2` | `html_element_traceability_spec.spl`: valid-context fail-closed `selectedcontent` plus visible inline `slot` fallback | tokenizer/tree/template/slot owners | deterministic semantic/fallback behavior, DrawIR, pixels/control | canonical manual complete; independent static PASS; runtime unavailable | Evidence-blocked |
 | REQ-002/019/021 | HTML formerly omitted 8: `h1`–`h6`,`sub`,`sup` | Bounded behavior landed in `28f0e779b0d2` | `html_element_traceability_spec.spl`: headings and inline baseline scenarios | tokenizer/tree/style/layout/DrawIR/Engine2D | UA defaults and exact geometry/pixels | canonical manual complete; independent static PASS; runtime unavailable | Evidence-blocked |
 | REQ-003/004/019/021 | CSS claimed 284 | Functional count unknown | generated-combinations spec has 38 scenarios | declaration/cascade/style/layout/paint/DrawIR/Engine2D | isolated semantic, layout, DrawIR, pixel baseline/control | retained 13 pass/25 fail; manuals stale | FAIL |
 | REQ-003/004/019/021 | CSS Grid bounded foundation | Bounded behavior landed in `b17e868199af` | `test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl` | canonical declaration/style/layout/paint-layout, DrawIR, Engine2D | exact tracks, placement/span/implicit-row geometry and pixels; block and quota controls | canonical manual complete; independent static PASS; manifest `red-not-run`; runtime unavailable | Evidence-blocked |
 | REQ-003/004/005/006/007/017/021 | CSS/JavaScript animation frame trace | Bounded initial/intermediate/completed and pause/resume trace implemented | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl`: `should trace JavaScript pause and resume through deterministic Draw IR frames` | BrowserSession monotonic clock/DOM bridge, CSS animation instances, canonical HTML layout/DrawIR, Engine2D | exact stage geometry, Draw IR color transitions/holds, scheduler state, exact in-rectangle pixels, and zero matching-color pixels outside it | canonical generated manual complete with zero stubs; qualified Stage2 discovery is blocked by a pre-existing parse error in `browser_session.spl:1287` | Evidence-blocked |
-| REQ-003/004/019/021 | CSS claimed but unrecognized, at least 38 | False implemented claim | exact isolated scenarios missing | canonical declaration dispatch and downstream owners | valid/invalid/inherited style plus discriminating render | missing | FAIL |
+| REQ-003/004/019/021 | CSS claimed but unrecognized, 37 source diagnostics | False implemented claim | checker regression records exact source diagnostic; behavioral scenarios missing | canonical declaration dispatch and downstream owners | valid/invalid/inherited style plus discriminating render | checker manual current; behavior evidence missing | FAIL |
+| REQ-003/004/019/021 | CSS `caption-side` | Bounded behavior landed in `ec39dc4ef85d` | focused table caption scenario | canonical declaration/style/table layout/DrawIR/Engine2D | top/bottom geometry and exact pixels with control | canonical manual; independent static PASS; qualified execution unavailable | Evidence-blocked |
 | REQ-003/004/019/021 | CSS unsupported production 92 | Unsupported backlog | inventory spec is name-only | owners named by lane below | executable fail-closed or full four-oracle chain | manual stale; no behavior PASS | RED |
 | REQ-003/019/021 | CSS speech/aural 23 | Explicit scope exclusion | fail-closed/nonvisual scenario missing | future TTS/accessibility owner | no false visual support claim | missing | RED |
 | REQ-003/019/021 | Deprecated `glyph-orientation-vertical` | Unsupported/alias candidate | missing | declaration alias owner if selected | audited equality with `text-orientation` | missing | RED |
-| REQ-003/019/021 | False `property-name` scrape | Nonproperty | checker regression scenario missing | traceability checker | excluded from CSS denominator | missing | FAIL |
+| REQ-003/019/021 | False `property-name` scrape | Nonproperty | closed checker regression in `fc73115d0214` | traceability checker | excluded from CSS denominator and unrecognized list | canonical manual; qualified execution unavailable | Evidence-blocked |
 | AC-3 / REQ-004/019/021 | Generated-GUI HTML/CSS combinations | Partial/failing | `simple_web_generated_html_css_combinations_spec.spl`: `renders generated GUI semantic panels with flex, padding, border, and text styles` plus 37 related scenarios | GUI HTML producer, canonical Web semantic/style/layout, DrawIR, Engine2D | producer HTML identity, semantic parent/style, exact geometry/commands/pixels, block control | canonical manual stale; retained aggregate 13 pass/25 fail | FAIL |
 | NFR-012/017 | Aggregate execution/manual evidence | Evidence-blocked | manifest traceability spec is stale | checker/runner/docgen | qualified SHA, executed/pass/fail, source/manual hashes, zero stubs | absent | FAIL |
 
