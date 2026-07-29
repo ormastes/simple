@@ -1098,6 +1098,27 @@ impl Lowerer {
                         Some(TypeId::ANY)
                     }
                 }
+                // JIT method-dispatch audit batch 2 (jit_method_dispatch_audit_2026-07-29,
+                // lane DISPATCH2). `copy`/`clone`/`unique`/`sorted`/`reversed`
+                // all return a NEW array of the same element type as the
+                // receiver — same shape as `take`/`skip`/`drop`/`insert`
+                // above (see the MIR expansion in lowering_expr_method.rs).
+                "copy" | "clone" | "unique" | "sorted" | "reversed" => Some(receiver.ty),
+                // `flatten` (one level of Array<Array<T>> -> Array<T>) has no
+                // statically-resolvable element type in general (nested
+                // arrays are frequently ANY-typed) — same ANY fallback the
+                // dict `"items" | "entries"` entry below uses.
+                "flatten" => Some(TypeId::ANY),
+                // `all_truthy`/`any_truthy` (interpreter_method/collections.rs)
+                // check truthiness with no predicate lambda and return a raw
+                // i64 0/1 from `rt_array_all_truthy`/`rt_array_any_truthy` —
+                // same "raw i64 needs generic boxing at print/use" gap class
+                // as `index_of` above, typed BOOL instead of I64.
+                "all_truthy" | "any_truthy" => Some(TypeId::BOOL),
+                // `count_of(needle)` (interpreter_method/collections.rs)
+                // counts elements equal to `needle`, a raw i64 from
+                // `rt_array_count` — same raw-i64 gap class as `index_of`.
+                "count_of" => Some(TypeId::I64),
                 _ => None,
             };
 

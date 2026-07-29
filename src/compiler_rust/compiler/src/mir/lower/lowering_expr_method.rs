@@ -973,6 +973,174 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // === JIT method-dispatch audit batch 2 (jit_method_dispatch_audit_2026-07-29,
+        // lane DISPATCH2) === `arr.copy()` / `arr.clone()` on an Array<T>: the
+        // interpreter (interpreter_method/collections.rs `"copy" | "clone"`)
+        // returns a shallow copy — never mutates the receiver.
+        // `rt_array_copy` (runtime/src/value/collections.rs) already exists
+        // and already had a linker manifest entry but no dispatch arm here,
+        // so it fell through to `rt_method_not_found`. Returns a fresh array
+        // pointer of the SAME element type as the receiver — no unboxing
+        // needed, matching the `"slice" | "filter" | "map" =>
+        // Some(receiver.ty)` table entry in hir/lower/expr/mod.rs.
+        if matches!(method, "copy" | "clone")
+            && args.is_empty()
+            && self.receiver_is_array(receiver, receiver_local_ty)
+        {
+            let receiver_reg = self.lower_expr(receiver)?;
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_copy"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            });
+        }
+
+        // `arr.unique()` / `arr.sorted()` / `arr.reversed()` on an Array<T>:
+        // all three are the interpreter's non-mutating "return a NEW array"
+        // siblings of `sort`/`reverse` (which already work OK per the audit —
+        // those mutate in place). `rt_array_unique`/`rt_array_sorted`/
+        // `rt_array_reversed` (runtime/src/value/collections.rs) already
+        // exist, unused by any dispatch arm. Same shape as `arr.copy()` just
+        // above — fresh array pointer, same element type, no unboxing.
+        if matches!(method, "unique" | "sorted" | "reversed")
+            && args.is_empty()
+            && self.receiver_is_array(receiver, receiver_local_ty)
+        {
+            let receiver_reg = self.lower_expr(receiver)?;
+            let runtime_fn = match method {
+                "unique" => "rt_array_unique",
+                "sorted" => "rt_array_sorted",
+                _ => "rt_array_reversed",
+            };
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name(runtime_fn),
+                    args: vec![receiver_reg],
+                });
+                dest
+            });
+        }
+
+        // `arr.flatten()` on an Array<Array<T>>: the interpreter's
+        // (interpreter_method/collections.rs) one-level flatten.
+        // `rt_array_flatten` already exists; result element type is not
+        // statically resolvable from the outer array's declared type in
+        // general (nested arrays are frequently ANY-typed), so this is typed
+        // ANY in hir/lower/expr/mod.rs — matching the existing `"items" |
+        // "entries" => Some(TypeId::ANY)` precedent for a dynamically-shaped
+        // result.
+        if method == "flatten" && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
+            let receiver_reg = self.lower_expr(receiver)?;
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_flatten"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            });
+        }
+
+        // `arr.all_truthy()` / `arr.any_truthy()` on an Array<T>: the
+        // interpreter (interpreter_method/collections.rs) checks truthiness
+        // with no predicate lambda (the lambda-taking `all`/`any` are a
+        // separate, out-of-scope DEMOTED class per the audit).
+        // `rt_array_all_truthy`/`rt_array_any_truthy` already return a raw
+        // (non-tag-boxed) `i64` 0/1 — same raw-representation contract as
+        // `index_of`'s raw i64, which needs no manual boxing in this arm
+        // because the HIR result type (`TypeId::BOOL` here, added to
+        // hir/lower/expr/mod.rs) drives the generic downstream int/bool
+        // boxing at the print/use site.
+        if matches!(method, "all_truthy" | "any_truthy")
+            && args.is_empty()
+            && self.receiver_is_array(receiver, receiver_local_ty)
+        {
+            let receiver_reg = self.lower_expr(receiver)?;
+            let runtime_fn = if method == "all_truthy" {
+                "rt_array_all_truthy"
+            } else {
+                "rt_array_any_truthy"
+            };
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name(runtime_fn),
+                    args: vec![receiver_reg],
+                });
+                dest
+            });
+        }
+
+        // `arr.count_of(needle)` on an Array<T>: the interpreter
+        // (interpreter_method/collections.rs "count_of") counts elements
+        // equal to `needle`. `rt_array_count` (runtime/src/value/
+        // collections.rs) already exists and compares via `rt_value_eq`,
+        // which expects the `needle` argument in the SAME tag-boxed
+        // representation as stored array elements — so `needle` needs the
+        // identical int/float box-before-call step `arr.insert(idx, item)`
+        // above already applies to its inserted item.
+        if method == "count_of" && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
+            let receiver_reg = self.lower_expr(receiver)?;
+            let needle_reg_raw = self.lower_expr(&args[0])?;
+            let needle_ty = args[0].ty;
+            let needs_needle_int_boxing = matches!(
+                needle_ty,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::BOOL
+            );
+            let needs_needle_float_boxing = matches!(needle_ty, TypeId::F32 | TypeId::F64);
+            let needle_reg = if needs_needle_int_boxing || needs_needle_float_boxing {
+                let use_float = needs_needle_float_boxing;
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    if use_float {
+                        block.instructions.push(MirInst::BoxFloat {
+                            dest: boxed,
+                            value: needle_reg_raw,
+                        });
+                    } else {
+                        block.instructions.push(MirInst::BoxInt {
+                            dest: boxed,
+                            value: needle_reg_raw,
+                        });
+                    }
+                    boxed
+                })?
+            } else {
+                needle_reg_raw
+            };
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_array_count"),
+                    args: vec![receiver_reg, needle_reg],
+                });
+                dest
+            });
+        }
+
         // rt_array_push returns bool, not a new pointer — no store-back needed.
         let _receiver_local_index: Option<usize> = None;
 
