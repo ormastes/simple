@@ -1,5 +1,6 @@
 use std.spec
-use std.nogc_async_mut.web_framework.tracing.{TraceContext, TraceId, SpanId, Span, TraceExporter, ObserveContext, observe_context_new, observe_context_with_task, observe_context_with_actor, trace_id_to_hex, span_id_to_hex}
+use std.nogc_async_mut.web_framework.tracing.{TraceContext, TraceId, SpanId, Span, TraceExporter, ObserveContext, observe_context_new, observe_context_with_task, observe_context_with_actor, trace_id_to_hex, span_id_to_hex, observe_context_activate, observe_context_deactivate}
+use std.log.{SyslogRecord, LOG_INFO, log_context_clear, log_context_active}
 
 """
 # Tracing OTLP Export Specification
@@ -116,3 +117,57 @@ describe "web_framework tracing OTLP export":
             nil: fail("observe_context_with_actor dropped the previously attached task_id")
 
         expect(trace_id_to_hex(oc_actor.trace_ctx.trace_id)).to_equal(trace_id_to_hex(ctx.trace_id))
+
+    # ------------------------------------------------------------------
+    # Lane OBS1 — ObserveContext wired into std.log (follow-up to the
+    # ObserveContext type added above). observe_context_activate() stamps
+    # an ObserveContext's ids onto std.log's current-context so the next
+    # SyslogRecord.new() carries the same trace/task/actor correlation ids.
+    # ------------------------------------------------------------------
+
+    it "activating an ObserveContext stamps its ids onto the next std.log record":
+        log_context_clear()
+        val ctx = TraceContext.new()
+        val oc = observe_context_with_actor(observe_context_with_task(observe_context_new(ctx), 42), 7)
+
+        val snap = observe_context_activate(oc)
+        val rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "correlated")
+        expect(rec.trace_id_high).to_equal(ctx.trace_id.high)
+        expect(rec.trace_id_low).to_equal(ctx.trace_id.low)
+        expect(rec.task_id).to_equal(42)
+        expect(rec.actor_id).to_equal(7)
+        observe_context_deactivate(snap)
+
+    it "clearing the context leaves the next std.log record with absent/zero ids":
+        log_context_clear()
+        val rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "no context active")
+        expect(rec.trace_id_high).to_equal(0)
+        expect(rec.trace_id_low).to_equal(0)
+        expect(rec.task_id).to_equal(0)
+        expect(rec.actor_id).to_equal(0)
+        expect(log_context_active()).to_equal(false)
+
+    it "nested activate/deactivate restores the outer context (not cleared)":
+        log_context_clear()
+        val outer_ctx = TraceContext.new()
+        val outer_oc = observe_context_with_task(observe_context_new(outer_ctx), 100)
+        val outer_snap = observe_context_activate(outer_oc)
+
+        val inner_ctx = TraceContext.new()
+        val inner_oc = observe_context_with_actor(observe_context_new(inner_ctx), 9)
+        val inner_snap = observe_context_activate(inner_oc)
+
+        val inner_rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "inner scope")
+        expect(inner_rec.trace_id_high).to_equal(inner_ctx.trace_id.high)
+        expect(inner_rec.actor_id).to_equal(9)
+        expect(inner_rec.task_id).to_equal(0)
+
+        observe_context_deactivate(inner_snap)
+
+        val outer_rec = SyslogRecord.new(LOG_INFO, 0, 1, 0, "outer restored")
+        expect(outer_rec.trace_id_high).to_equal(outer_ctx.trace_id.high)
+        expect(outer_rec.task_id).to_equal(100)
+        expect(outer_rec.actor_id).to_equal(0)
+
+        observe_context_deactivate(outer_snap)
+        expect(log_context_active()).to_equal(false)

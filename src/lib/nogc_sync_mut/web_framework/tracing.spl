@@ -35,6 +35,7 @@ val otlp_json = exporter.export_otlp_json()
 """
 
 use std.http_server.types.{HttpRequestData}
+use std.log.{LogContextSnapshot, log_context_set, log_context_snapshot, log_context_restore}
 
 extern fn rt_random_i64() -> i64
 extern fn rt_time_now_unix_micros() -> i64
@@ -259,6 +260,33 @@ fn observe_context_with_task(ctx: ObserveContext, task_id: i64) -> ObserveContex
 fn observe_context_with_actor(ctx: ObserveContext, actor_id: i64) -> ObserveContext:
     """Return a copy of ctx with actor_id attached."""
     ObserveContext(trace_ctx: ctx.trace_ctx, task_id: ctx.task_id, actor_id: Some(actor_id))
+
+# ----------------------------------------------------------------------
+# std.log wiring (Lane OBS1, follow-up to the OTLP exporter above) — stamp
+# an ObserveContext's ids onto std.log's current-context so log records
+# (SyslogRecord) carry the same trace/task/actor correlation ids the
+# tracing/OTLP side already has. Absent task_id/actor_id become 0 (per
+# std.log's absent/zero convention); ids stay plain i64 the whole way down.
+# ----------------------------------------------------------------------
+
+fn observe_context_activate(ctx: ObserveContext) -> LogContextSnapshot:
+    """Snapshot std.log's current context, then activate ctx's ids onto it.
+
+    Returns the pre-activation snapshot — the caller MUST pass it to
+    observe_context_deactivate() (or log_context_restore() directly) when
+    the scope ends. This is what makes nested set/restore safe: activating
+    a new context inside an already-active one restores the outer context
+    afterward instead of clearing it.
+    """
+    val snap = log_context_snapshot()
+    val task = ctx.task_id ?? 0
+    val actor = ctx.actor_id ?? 0
+    log_context_set(ctx.trace_ctx.trace_id.high, ctx.trace_ctx.trace_id.low, task, actor)
+    snap
+
+fn observe_context_deactivate(snap: LogContextSnapshot):
+    """Restore std.log's context to a snapshot from observe_context_activate()."""
+    log_context_restore(snap)
 
 # ============================================================================
 # Span — timed operation within a trace

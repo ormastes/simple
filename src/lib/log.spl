@@ -755,6 +755,97 @@ fn is_enabled(level: i64, scope: text) -> bool:
     _level_passes(level, subsys_from_scope(scope))
 
 # ---------------------------------------------------------------------------
+# ObserveContext correlation (Lane OBS1, follow-up to DS8's OTLP exporter) —
+# module-level "current context" so the log record path (SyslogRecord, see
+# below) can stamp trace/task/actor correlation ids without every call site
+# threading them through explicitly. Zero behavior change when no context is
+# active: accessors return 0 (absent) and SyslogRecord.new() carries
+# all-zero ids, exactly as before this lane. trace_id halves and
+# task_id/actor_id are plain i64 (never text/struct) — this module is used
+# from kernel/no-alloc tiers that must stay free of text-through-primitive
+# hazards, and callers above the async tier (web_framework.tracing's
+# ObserveContext) convert their own struct/Option-shaped ids to plain i64
+# before calling in here.
+# ---------------------------------------------------------------------------
+var _g_log_ctx_active:     bool = false
+var _g_log_ctx_trace_high: i64 = 0
+var _g_log_ctx_trace_low:  i64 = 0
+var _g_log_ctx_task_id:    i64 = 0
+var _g_log_ctx_actor_id:   i64 = 0
+
+class LogContextSnapshot:
+    """Opaque snapshot of the current log-context state, for nested set/restore."""
+    active:     bool
+    trace_high: i64
+    trace_low:  i64
+    task_id:    i64
+    actor_id:   i64
+
+    static fn new(active: bool, trace_high: i64, trace_low: i64, task_id: i64, actor_id: i64) -> LogContextSnapshot:
+        LogContextSnapshot(active: active, trace_high: trace_high, trace_low: trace_low, task_id: task_id, actor_id: actor_id)
+
+fn log_context_set(trace_high: i64, trace_low: i64, task_id: i64, actor_id: i64):
+    """Activate correlation ids for subsequent SyslogRecord.new() calls.
+
+    Pass 0 for task_id/actor_id when absent — ids are always plain i64,
+    never text (see module note above).
+    """
+    _g_log_ctx_active = true
+    _g_log_ctx_trace_high = trace_high
+    _g_log_ctx_trace_low = trace_low
+    _g_log_ctx_task_id = task_id
+    _g_log_ctx_actor_id = actor_id
+
+fn log_context_clear():
+    """Deactivate the current context. Subsequent SyslogRecord.new() calls
+    carry absent/zero correlation ids again."""
+    _g_log_ctx_active = false
+    _g_log_ctx_trace_high = 0
+    _g_log_ctx_trace_low = 0
+    _g_log_ctx_task_id = 0
+    _g_log_ctx_actor_id = 0
+
+fn log_context_active() -> bool:
+    _g_log_ctx_active
+
+fn log_context_snapshot() -> LogContextSnapshot:
+    """Capture the current context so a caller can restore it later —
+    supports nested set/restore (e.g. an actor handler invoked while a
+    request-scoped context is already active)."""
+    LogContextSnapshot.new(
+        _g_log_ctx_active, _g_log_ctx_trace_high, _g_log_ctx_trace_low,
+        _g_log_ctx_task_id, _g_log_ctx_actor_id
+    )
+
+fn log_context_restore(snap: LogContextSnapshot):
+    """Restore a previously captured snapshot (see log_context_snapshot)."""
+    _g_log_ctx_active = snap.active
+    _g_log_ctx_trace_high = snap.trace_high
+    _g_log_ctx_trace_low = snap.trace_low
+    _g_log_ctx_task_id = snap.task_id
+    _g_log_ctx_actor_id = snap.actor_id
+
+fn log_context_set_actor(actor_id: i64):
+    """Merge-set: activate actor_id while preserving whatever trace/task ids
+    were already active (0 if none). Lets the actor message-processing loop
+    stamp actor_id around a single handler invocation without clobbering an
+    outer request-scoped trace context — pair with log_context_snapshot()/
+    log_context_restore() for the nested set/restore."""
+    log_context_set(_ctx_trace_high(), _ctx_trace_low(), _ctx_task_id(), actor_id)
+
+fn _ctx_trace_high() -> i64:
+    if _g_log_ctx_active: _g_log_ctx_trace_high else: 0
+
+fn _ctx_trace_low() -> i64:
+    if _g_log_ctx_active: _g_log_ctx_trace_low else: 0
+
+fn _ctx_task_id() -> i64:
+    if _g_log_ctx_active: _g_log_ctx_task_id else: 0
+
+fn _ctx_actor_id() -> i64:
+    if _g_log_ctx_active: _g_log_ctx_actor_id else: 0
+
+# ---------------------------------------------------------------------------
 # Structured syslog record (RFC5424-ish) — Lane L observability Phase 1.
 #
 # Field layout mirrors RFC5424 positionally (PRI/VERSION, TIMESTAMP,
@@ -782,6 +873,15 @@ class SyslogRecord:
     subsys:   i64
     msg:      text
     kv:       [SyslogKv]
+    # ObserveContext correlation ids (Lane OBS1) — plain i64, 0 = absent.
+    # Auto-populated from the current log context (log_context_set) at
+    # construction time; untouched (still all-zero) when no context is
+    # active, so this is additive and behavior-preserving for every caller
+    # that predates this lane.
+    trace_id_high: i64
+    trace_id_low:  i64
+    task_id:       i64
+    actor_id:      i64
 
     static fn new(level: i64, facility: i64, pid: i64, subsys: i64, msg: text) -> SyslogRecord:
         SyslogRecord(
@@ -791,7 +891,11 @@ class SyslogRecord:
             pid: pid,
             subsys: subsys,
             msg: msg,
-            kv: []
+            kv: [],
+            trace_id_high: _ctx_trace_high(),
+            trace_id_low: _ctx_trace_low(),
+            task_id: _ctx_task_id(),
+            actor_id: _ctx_actor_id()
         )
 
 fn syslog_record_with_kv(rec: SyslogRecord, key: text, value: text) -> SyslogRecord:
@@ -804,7 +908,11 @@ fn syslog_record_with_kv(rec: SyslogRecord, key: text, value: text) -> SyslogRec
         pid: rec.pid,
         subsys: rec.subsys,
         msg: rec.msg,
-        kv: kv
+        kv: kv,
+        trace_id_high: rec.trace_id_high,
+        trace_id_low: rec.trace_id_low,
+        task_id: rec.task_id,
+        actor_id: rec.actor_id
     )
 
 fn _syslog_format_sd(kv: [SyslogKv]) -> text:
@@ -858,7 +966,14 @@ fn syslog_parse(line: text) -> SyslogRecord:
         pid: p5[0].to_int(),
         subsys: p4[0].to_int(),
         msg: p7[2],
-        kv: _syslog_parse_sd(p7[0])
+        kv: _syslog_parse_sd(p7[0]),
+        # The wire format (syslog_format) does not carry correlation ids —
+        # a parsed record never had an active log context, so these stay
+        # absent/zero. Extending the wire format is a separate decision.
+        trace_id_high: 0,
+        trace_id_low: 0,
+        task_id: 0,
+        actor_id: 0
     )
 
 export log, log_dispatch_text, subsys_from_scope
@@ -871,6 +986,9 @@ export SUBSYS_DRIVER_BLOCK, SUBSYS_DRIVER_NET, SUBSYS_DRIVER_INPUT, SUBSYS_DRIVE
 export SUBSYS_PKG, SUBSYS_CLI, SUBSYS_TEST, SUBSYS_USER_BASE, MAX_SUBSYS, MAX_BACKENDS
 export log_trace, log_debug, log_warn, log_error, log_fatal
 export SyslogKv, SyslogRecord, syslog_format, syslog_parse, syslog_record_with_kv
+# Lane OBS1 — current-context correlation-id API (see block above SyslogRecord)
+export LogContextSnapshot, log_context_set, log_context_clear, log_context_active
+export log_context_snapshot, log_context_restore, log_context_set_actor
 # Previously module-internal — exported for DS7 crash-bundle capture
 # (src/lib/nogc_sync_mut/crash/crash_bundle.spl), which needs to register a
 # RingBackend and read back its buffered records at panic time.

@@ -16,6 +16,8 @@
 #   val worker = spawn_actor(handlers)
 #   worker.send("increment", [])
 
+use std.log.{log_context_snapshot, log_context_restore, log_context_set_actor}
+
 # ================================================================
 # Core Types
 # ================================================================
@@ -429,8 +431,14 @@ impl ActorRuntime:
         if is_stopping:
             return false
 
-        # Dispatch: look up method in handler table and invoke
+        # Dispatch: look up method in handler table and invoke. Wrap with
+        # std.log's current-context so any logging the handler does is
+        # stamped with actor_id (Lane OBS1) — snapshot/restore keeps this
+        # safe to nest inside an already-active request/trace context.
+        val _log_ctx_snap = log_context_snapshot()
+        log_context_set_actor(actor_id)
         val dispatch_result = ctx.handlers.dispatch(the_msg.method, the_msg.args)
+        log_context_restore(_log_ctx_snap)
 
         if dispatch_result.is_ok():
             ctx.processed_count = ctx.processed_count + 1

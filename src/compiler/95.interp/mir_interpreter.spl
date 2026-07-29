@@ -16,12 +16,18 @@
 
 use std.log.{debug}
 use compiler.mir.mir_data.*
+use compiler.common.diagnostics.span.{Span}
 
 # Async runtime SFFI bindings
 extern fn rt_actor_spawn(handler: i64) -> i64
 extern fn rt_actor_send(target: i64, message: i64) -> i64
 extern fn rt_actor_recv(timeout: i64) -> i64
 extern fn rt_thread_yield() -> i64
+
+# Miri-mode: dynamic UB checks too expensive for normal runs, gated behind
+# SIMPLE_STRICT_INTERP=1 so default interpreter perf/behavior is untouched.
+# Read once at interpreter creation (see MirInterpreter.strict_mode).
+extern fn rt_env_get(key: text) -> text
 
 
 # ============================================================================
@@ -88,6 +94,7 @@ class MirInterpreter:
     aggregate_sizes: {i64: i64}  # Aggregate base address -> element count
     string_table: {i64: text}
     next_string_id: i64
+    strict_mode: bool       # Miri-mode: SIMPLE_STRICT_INTERP=1, read once at create()
 
 impl MirInterpreter:
     static fn create() -> MirInterpreter:
@@ -106,7 +113,10 @@ impl MirInterpreter:
             next_aggregate_id: 100000,
             aggregate_sizes: {},
             string_table: {},
-            next_string_id: -1
+            next_string_id: -1,
+            # Read once at startup so default (unset) perf/behavior is untouched;
+            # never re-read per instruction.
+            strict_mode: (rt_env_get("SIMPLE_STRICT_INTERP") ?? "") == "1"
         )
 
     # ========================================================================
@@ -121,6 +131,19 @@ impl MirInterpreter:
         """Get a value from a local variable (0 if not set)."""
         # ponytail: undefined locals fail closed instead of masquerading as zero.
         self.locals[local.id] ?? -1
+
+    fn is_local_set(local: LocalId) -> bool:
+        """Miri-mode helper: has this local ever been written?"""
+        self.locals.contains(local.id)
+
+    fn _format_span(span: Span?) -> text:
+        """Miri-mode helper: render a source span for a loud diagnostic, or
+        'unknown location' when the instruction carries no span."""
+        if span.?:
+            val sp = span.unwrap()
+            "{sp.file}:{sp.line}:{sp.col}"
+        else:
+            "unknown location"
 
     fn get_operand(operand: MirOperand) -> i64:
         """Evaluate an operand to get its value."""
@@ -151,11 +174,17 @@ impl MirInterpreter:
                 nil
 
             case Copy(dest, src):
+                if self.strict_mode and not self.is_local_set(src):
+                    print "PANIC: strict-interp uninitialized-local-read: Copy reads v{src.id} before any write, at {self._format_span(inst.span)}"
+                    return Some(InterpError.RuntimeError(message: "strict-interp:uninitialized-local-read Copy v{src.id} at {self._format_span(inst.span)}"))
                 val value = self.get_local(src)
                 self.set_local(dest, value)
                 nil
 
             case Move(dest, src):
+                if self.strict_mode and not self.is_local_set(src):
+                    print "PANIC: strict-interp uninitialized-local-read: Move reads v{src.id} before any write, at {self._format_span(inst.span)}"
+                    return Some(InterpError.RuntimeError(message: "strict-interp:uninitialized-local-read Move v{src.id} at {self._format_span(inst.span)}"))
                 val value = self.get_local(src)
                 self.set_local(dest, value)
                 # Note: Move semantics not enforced in interpreter
@@ -381,8 +410,12 @@ impl MirInterpreter:
                 nil
 
             case CheckedBinOp(dest, op, left, right):
-                # For now, same as BinOp (no overflow checking)
-                self.execute_binop(dest, op, left, right)
+                # Miri-mode: real overflow checking under SIMPLE_STRICT_INTERP;
+                # default (unset) behavior unchanged (same as plain BinOp).
+                if self.strict_mode:
+                    self._execute_checked_binop(inst.span, dest, op, left, right)
+                else:
+                    self.execute_binop(dest, op, left, right)
 
             case _:
                 Some(InterpError.UnsupportedOperation(op: "unknown instruction"))
@@ -443,6 +476,50 @@ impl MirInterpreter:
 
         self.set_local(dest, result)
         nil
+
+    me _execute_checked_binop(span: Span?, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand) -> InterpError?:
+        """Miri-mode: real i64 overflow detection for Add/Sub/Mul under
+        SIMPLE_STRICT_INTERP. Every other op falls back to plain execute_binop
+        (unchecked, same as default). Too expensive to run unconditionally,
+        hence the env-var gate — see MirInterpreter.strict_mode."""
+        val i64_min = -9223372036854775808
+        match op:
+            case Add:
+                val l = self.get_operand(left)
+                val r = self.get_operand(right)
+                val result = l + r
+                val overflowed = (l > 0 and r > 0 and result <= 0) or (l < 0 and r < 0 and result >= 0)
+                if overflowed:
+                    print "PANIC: strict-interp integer-overflow: {l} + {r} overflows i64, at {self._format_span(span)}"
+                    return Some(InterpError.RuntimeError(message: "strict-interp:integer-overflow Add {l} + {r} at {self._format_span(span)}"))
+                self.set_local(dest, result)
+                nil
+            case Sub:
+                val l = self.get_operand(left)
+                val r = self.get_operand(right)
+                val result = l - r
+                val overflowed = (l >= 0 and r < 0 and result < 0) or (l < 0 and r > 0 and result >= 0)
+                if overflowed:
+                    print "PANIC: strict-interp integer-overflow: {l} - {r} overflows i64, at {self._format_span(span)}"
+                    return Some(InterpError.RuntimeError(message: "strict-interp:integer-overflow Sub {l} - {r} at {self._format_span(span)}"))
+                self.set_local(dest, result)
+                nil
+            case Mul:
+                val l = self.get_operand(left)
+                val r = self.get_operand(right)
+                val edge_overflow = (l == -1 and r == i64_min) or (r == -1 and l == i64_min)
+                if edge_overflow:
+                    print "PANIC: strict-interp integer-overflow: {l} * {r} overflows i64, at {self._format_span(span)}"
+                    return Some(InterpError.RuntimeError(message: "strict-interp:integer-overflow Mul {l} * {r} at {self._format_span(span)}"))
+                val result = l * r
+                val overflowed = l != 0 and (result / l != r)
+                if overflowed:
+                    print "PANIC: strict-interp integer-overflow: {l} * {r} overflows i64, at {self._format_span(span)}"
+                    return Some(InterpError.RuntimeError(message: "strict-interp:integer-overflow Mul {l} * {r} at {self._format_span(span)}"))
+                self.set_local(dest, result)
+                nil
+            case _:
+                self.execute_binop(dest, op, left, right)
 
     me execute_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand) -> InterpError?:
         """Evaluate unary operation."""
