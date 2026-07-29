@@ -118,8 +118,12 @@ Current bootstrap admission is tracked in
 admitted Stage 2, found and fixed a Rust runtime NUL panic at the environment
 boundary, then reached the bounded Stage 3 timeout without another diagnostic.
 Stage 2 is sufficient for RV32 native-build and GHDL but not `run`/`test`; no
-replacement full CLI is admitted yet. Do not use the Rust seed or a stale
-deployed binary as release SSpec/docgen evidence.
+replacement full CLI is admitted yet. A direct Stage-2 native NVMe spec builds
+but currently crashes in `rt_process_run`; the next bounded attempt uses the
+existing test runner with the corrected runtime bundle and `--fork`, as tracked
+in `doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`.
+Do not use the Rust seed or a stale deployed binary as release SSpec/docgen
+evidence.
 
 The current endpoint-wired K26 top also passes full SimpleOS boot with both
 zeroed and garbage-filled DDR. That rehearsal uses a tied-off endpoint and does

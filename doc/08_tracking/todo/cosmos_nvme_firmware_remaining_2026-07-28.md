@@ -3,7 +3,7 @@
 These items are deliberately separate from completed host/ARM contract work.
 Postponed hardware rows remain open and must not be converted into host PASS.
 
-# TODO: [bootstrap][P0] Resume only Stage 3 with one 90-minute bound from the corrected Retry 15 Stage 2 authority; do not rerun a full bootstrap. Retry 15 used pushed authority `bf492d318cf6`: Stage 2 passed and produced an admitted pure-Simple `simple-bootstrap` binary, but the NVMe post-bootstrap gate proved that this intentionally minimal CLI cannot execute `run`/`test`. The first Stage 3-only resume aborted after 5m30s because Rust `rt_env_set` passed an embedded NUL to `std::env::set_var`. The runtime boundary now rejects NUL/invalid keys and its focused Rust regression passes. Targeted runtime archives rebuilt in 4m19s (2,593,232 KiB peak), corrected Stage 2 rebuilt from cache in 1m32s (949,080 KiB peak), and the corrected Stage 3 run cleared the crash but reached its 45m cap CPU-active with no diagnostic or final artifact (1,567,392 KiB peak). A full CLI relink remains necessary only after Stage 3 because Stage 2/3 are bootstrap-only; that full CLI then runs the canonical NVMe SSpec/docgen/GHDL wrapper. Retry 11 remains the last Stage 4 evidence: it passed Stage 2/3 but failed after 1,278 surfaces with 10,292 OOB reads, 5,146 missing tags, `n_modules=0`, and missing streaming surfaces.
+# TODO: [bootstrap][P0] First make one bounded Stage-2-only SSpec runner attempt using `--runtime-bundle core-c-bootstrap`, the corrected `stage2-runtime-authority`, `--mode one-binary`, and runner `--fork`; exact command and evidence are in `doc/08_tracking/bug/stage2_native_sspec_process_run_sigsegv_2026-07-29.md`. The broad runner build without that bundle failed in nine unrelated transitive modules after 52.72s; direct native-build of the NVMe spec succeeded in 10.85s but SIGSEGVed in `rt_process_run`/`memcpy`. If the bounded corrected recipe fails, resume only Stage 3 with one 90-minute cap; do not rerun a full bootstrap. Retry 15 already admitted Stage 2, fixed the Rust environment NUL panic, and reached a 45-minute Stage 3 cap with no further diagnostic. Retry 11 remains the last Stage 4 evidence: it passed Stage 2/3 but failed after 1,278 surfaces with 10,292 OOB reads, 5,146 missing tags, `n_modules=0`, and missing streaming surfaces.
 # DONE: [nvme][P0] Restore the RAM-NAND policy, linker regions, AXI endpoint/testbenches, GHDL runners, K26 NVMe/trace wiring, SSpec/research artifacts, and the 609 deleted lines that implement `entry.spl` startup/queue/erase/program/read/prevention/recovery. The corrected Retry 15 Stage 2 pure-Simple compiler builds the restored 88,220-byte RV32 ELF in 17.56s at 158,580 KiB peak RSS.
 # DONE: [nvme][P0] The source-matched Retry 15 Stage 2 image passes `check-rv32-nvme-nand-recovery.shs --ghdl`: behavioral soft-core, full AXI RAM, and clean plus garbage-filled synthesizable BRAM. The 89,668-byte ELF generated every ordered startup/queue/erase/program/read/prevention/recovery marker, performed 847 reads and 461 writes inside the exact 256-byte `.nandram`, and rejected word-64 access. Each 229-byte BRAM observation capture matched its own live UART stream. The current run retains its v1 source/ELF manifest; the hardened next-run gate binds the freshly built ELF explicitly, validates separate clean/garbage logs, and fail-closed records revision plus transitive source/evidence hashes in manifest v2.
 # DONE: [nvme][P0] GHDL runs host-issued Create CQ/SQ, Identify, Write, Flush, and Read against `build/nvme_fw_rv32_service.elf`, retaining MMIO/DMA/IRQ/recovery/remap evidence.
@@ -15,9 +15,11 @@ Postponed hardware rows remain open and must not be converted into host PASS.
 
 ## Resume Order
 
-1. Fix/admit the Stage-4 full CLI and run SSpec/docgen gates.
-2. Pin the exact identified-board package and run BT-001..BT-006 on Cosmos+ hardware.
-3. Run the optional UNO Q portability lane when its environment exists.
+1. Try the bounded Stage-2 runtime-bundle/fork SSpec runner and separate docgen.
+2. Only if that fails, resume Stage 3 with the existing 90-minute cap.
+3. Run the current SSpec/docgen gates.
+4. Pin the exact identified-board package and run BT-001..BT-006 on Cosmos+ hardware.
+5. Run the optional UNO Q portability lane when its environment exists.
 
 The canonical wrapper is
 `scripts/check/check-nvme-firmware-remaining-gates.shs`. Its host result and
