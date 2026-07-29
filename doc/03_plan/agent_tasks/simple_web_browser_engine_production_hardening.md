@@ -187,6 +187,36 @@ The retained-render counter matrix is the first evidence gate:
 Production latency/RSS rows remain blocked until the healthy pure-Simple
 Phase 2/3 target can execute; source counters never turn those rows green.
 
+Batch-2 functional evidence now mirrors the exact system-test matrix:
+document/title/style/navigation rebuild all stages; viewport retains parse;
+active animation retains parse/CSS/base style; image, scroll, and caret retain
+parse/CSS/style/raw layout and repaint only; unchanged frames increment reuse
+only. Composition revisions increment on every dirty paint. Canonical Draw IR
+checksums change only when Draw IR changes, so title-only and out-of-band image
+pixel replacement deliberately retain the prior checksum. Four same-shape
+navigation replacements must keep retained node/style/box/command counts
+constant, and close must zero them.
+
+| Functional change | serialize | parse | CSS | style | layout | paint | composition |
+|---|---:|---:|---:|---:|---:|---:|---|
+| unchanged | +0 | +0 | +0 | +0 | +0 | +0 | revision/checksum stable; reuse +1 |
+| title or DOM | +1 | +1 | +1 | +1 | +1 | +1 | revision +1; checksum changes only for painted DOM |
+| stylesheet or navigation | +1 | +1 | +1 | +1 | +1 | +1 | revision +1 |
+| image pixels | +0 | +0 | +0 | +0 | +0 | +1 | revision +1; Draw IR checksum stable |
+| viewport | +0 | +0 | +1 | +1 | +1 | +1 | revision +1 |
+| active animation | +0 | +0 | +0 | +1 | +1 | +1 | revision/checksum +1/change |
+| scroll or caret | +0 | +0 | +0 | +0 | +0 | +1 | revision/checksum +1/change |
+| close | — | — | — | — | — | — | retained counts zero |
+
+This closes the source-level functional plan only. The performance lane remains
+fail-fast until a healthy production artifact supplies changed/unchanged
+latency, allocation, RSS, and 10,000-cycle receipts. Do not label the counter
+matrix as NFR-WEB-BROWSER-003 evidence.
+Checksum evidence is explicitly on demand: dirty rendering invalidates the
+cached digest, unchanged reuse preserves it, and only test/report code calls
+the lazy checksum accessor. Draw IR serialization and SHA-256 are forbidden in
+the production frame hot path merely to maintain counters.
+
 ## Batch order
 
 1. A and B start first.

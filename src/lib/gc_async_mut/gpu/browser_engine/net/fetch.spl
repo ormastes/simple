@@ -20,7 +20,9 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types {TlsConfig, TlsVers
 
 use std.gc_async_mut.gpu.browser_engine.net.cache.{HttpCache}
 use std.gc_async_mut.gpu.browser_engine.net.cookie_store.{CookieStore, apply_default_path, parse_set_cookie}
-use std.gc_async_mut.gpu.browser_engine.security.cookie_policy.{apply_max_age}
+use std.gc_async_mut.gpu.browser_engine.security.cookie_policy.{
+    apply_max_age, cookie_partition_key
+}
 use std.io_runtime.{time_now_unix_micros}
 
 # Default maximum number of HTTP redirects to follow before aborting.
@@ -81,6 +83,12 @@ class FetchEngine:
         if headers.len() > 32:
             return false
         val now = time_now_unix_micros() / 1000000
+        val source_origin = Origin.from_url(url)
+        # Partitioned cookies belong to the top-level requester/site owner,
+        # never to the script or subresource URL being processed.
+        val partition_key = cookie_partition_key(
+            self.cors.requester_origin()
+        )
         var cookies: [Cookie] = []
         for header in headers:
             if (header.len() > 4096 or header.contains("\0") or
@@ -94,7 +102,7 @@ class FetchEngine:
                 now
             )
             val verdict = self.cookie_store.validate_from_script(
-                cookie, Origin.from_url(url), now
+                cookie, source_origin, now, partition_key
             )
             if not verdict.accepted:
                 return false
@@ -102,7 +110,7 @@ class FetchEngine:
         var cookie_store = self.cookie_store
         for cookie in cookies:
             val _ = cookie_store.store_from_script(
-                cookie, Origin.from_url(url), now
+                cookie, source_origin, now, partition_key
             )
         self.cookie_store = cookie_store
         true
@@ -184,6 +192,9 @@ class FetchEngine:
             self.cors.is_same_origin(request.url)
         ):
             val target_origin = Origin.from_url(request.url)
+            val partition_key = cookie_partition_key(
+                self.cors.requester_origin()
+            )
             val now = time_now_unix_micros() / 1000000
             var cookie_store = self.cookie_store
             for line in validated.headers.split("\r\n"):
@@ -195,7 +206,9 @@ class FetchEngine:
                             parse_set_cookie(cookie_value), cookie_value, request.url.path
                         ), cookie_value, now
                     )
-                    val _ = cookie_store.store_from_origin(cookie, target_origin, now)
+                    val _ = cookie_store.store_from_origin(
+                        cookie, target_origin, now, partition_key
+                    )
             self.cookie_store = cookie_store
 
         # Step 7: Cache the response if eligible
@@ -314,7 +327,10 @@ class FetchEngine:
             site_for_cookies,
             request.method,
             is_top_level_navigation,
-            time_now_unix_micros() / 1000000
+            time_now_unix_micros() / 1000000,
+            match site_for_cookies:
+                Some(site): cookie_partition_key(site)
+                nil: ""
         )
         if cookie_header.len() == 0:
             return request

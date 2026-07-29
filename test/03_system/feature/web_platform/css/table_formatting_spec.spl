@@ -1,0 +1,209 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-004
+# @evidence-display: links
+"""# Fixed HTML table formatting
+
+Proves the bounded fixed-layout table slice through computed Style, canonical
+Draw IR parentage/geometry, and Engine2D absolute pixels.
+"""
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id,
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_readback_engine2d_result
+}
+
+fn _table_command_index(
+    commands: [DrawIrCommand], component_id: text
+) -> i32:
+    var index = 0
+    while index < commands.len():
+        if commands[index].component_id == component_id:
+            return index
+        index = index + 1
+    -1
+
+fn _table_style(
+    command: DrawIrCommand, property_name: text
+) -> text:
+    for property in command.computed_style:
+        if property.key == property_name:
+            return property.value
+    ""
+
+describe "Fixed HTML table formatting":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should format caption rows cells and colspan through shared layout":
+        step("Render a fixed two-row two-column table")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;background:#ffffff}" +
+            "table{table-layout:fixed;width:40px}" +
+            "caption{background:#ffff00}" +
+            "tr{background:#dddddd}" +
+            "th,td{padding:2px;border:1px solid #000000}" +
+            "#a{background:#ff0000}#b{background:#00ff00}" +
+            "#wide{background:#0000ff}" +
+            "</style></head><body><table id='grid'>" +
+            "<caption id='cap'>T</caption>" +
+            "<tr id='row1'><th id='a'>A</th><td id='b'>B</td></tr>" +
+            "<tr id='row2'><td id='wide' colspan='2'>C</td></tr>" +
+            "</table></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(
+            html, 48, 64
+        )
+        val commands = composition.batches[0].commands
+        val table_index = _table_command_index(commands, "grid")
+        val caption_index = _table_command_index(commands, "cap")
+        val row1_index = _table_command_index(commands, "row1")
+        val row2_index = _table_command_index(commands, "row2")
+        val a_index = _table_command_index(commands, "a")
+        val b_index = _table_command_index(commands, "b")
+        val wide_index = _table_command_index(commands, "wide")
+        expect(table_index).to_be_greater_than(-1)
+        expect(caption_index).to_be_greater_than(-1)
+        expect(row1_index).to_be_greater_than(-1)
+        expect(row2_index).to_be_greater_than(-1)
+        expect(a_index).to_be_greater_than(-1)
+        expect(b_index).to_be_greater_than(-1)
+        expect(wide_index).to_be_greater_than(-1)
+        val table = commands[table_index]
+        val caption = commands[caption_index]
+        val row1 = commands[row1_index]
+        val row2 = commands[row2_index]
+        val a = commands[a_index]
+        val b = commands[b_index]
+        val wide = commands[wide_index]
+
+        step("Expose the HTML table display roles in computed Style")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "grid", "display"
+        )).to_equal("table")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "cap", "display"
+        )).to_equal("table-caption")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "row1", "display"
+        )).to_equal("table-row")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "a", "display"
+        )).to_equal("table-cell")
+        expect(_table_style(table, "display")).to_equal("table")
+        expect(_table_style(caption, "display")).to_equal("table-caption")
+        expect(_table_style(row1, "display")).to_equal("table-row")
+        expect(_table_style(a, "display")).to_equal("table-cell")
+
+        step("Preserve exact table geometry and Draw IR parentage")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 48, 64, "wide", "w"
+        )).to_equal("40")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 48, 64, "row2", "y"
+        )).to_equal("38")
+        expect([table.x, table.y, table.width, table.height]).to_equal(
+            [0, 0, 40, 60]
+        )
+        expect([caption.x, caption.y, caption.width, caption.height]).to_equal(
+            [0, 0, 40, 16]
+        )
+        expect([row1.x, row1.y, row1.width, row1.height]).to_equal(
+            [0, 16, 40, 22]
+        )
+        expect([a.x, a.y, a.width, a.height]).to_equal(
+            [0, 16, 20, 22]
+        )
+        expect([b.x, b.y, b.width, b.height]).to_equal(
+            [20, 16, 20, 22]
+        )
+        expect([row2.x, row2.y, row2.width, row2.height]).to_equal(
+            [0, 38, 40, 22]
+        )
+        expect([wide.x, wide.y, wide.width, wide.height]).to_equal(
+            [0, 38, 40, 22]
+        )
+        expect(table.parent_id).to_equal("page")
+        expect(caption.parent_id).to_equal("grid")
+        expect(row1.parent_id).to_equal("grid")
+        expect(row2.parent_id).to_equal("grid")
+        expect(a.parent_id).to_equal("row1")
+        expect(b.parent_id).to_equal("row1")
+        expect(wide.parent_id).to_equal("row2")
+
+        step("Execute the same table through Engine2D absolute pixels")
+        val pixels = simple_web_layout_render_html_readback_engine2d_result(
+            html, 48, 64, "software"
+        ).readback.pixels
+        expect(pixels[1 * 48 + 1]).to_equal(0xFFFFFF00u32)
+        expect(pixels[18 * 48 + 2]).to_equal(0xFFFF0000u32)
+        expect(pixels[18 * 48 + 22]).to_equal(0xFF00FF00u32)
+        expect(pixels[40 * 48 + 2]).to_equal(0xFF0000FFu32)
+        expect(pixels[16 * 48]).to_equal(0xFF000000u32)
+        expect(pixels[61 * 48 + 1]).to_equal(0xFFFFFFFFu32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should route grouped tbody rows through the table owner":
+        step("Render fixed rows owned by a tbody group")
+        val html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "table{table-layout:fixed;width:40px}" +
+            "caption{background:#ffff00}tbody{background:#eeeeee}" +
+            "tr{background:#dddddd}td{padding:2px;border:1px solid #000}" +
+            "#ga{background:#ff0000}#gb{background:#00ff00}" +
+            "#gc{background:#0000ff}#gd{background:#ff00ff}</style>" +
+            "<table id='grouped'><caption id='gcap'>G</caption>" +
+            "<tbody id='group'><tr id='grow1'>" +
+            "<td id='ga'>A</td><td id='gb'>B</td></tr>" +
+            "<tr id='grow2'><td id='gc'>C</td><td id='gd'>D</td></tr>" +
+            "</tbody></table>"
+        )
+        val commands = simple_web_layout_render_html_draw_ir(
+            html, 48, 64
+        ).batches[0].commands
+        val group_index = _table_command_index(commands, "group")
+        val row_index = _table_command_index(commands, "grow2")
+        val cell_index = _table_command_index(commands, "gd")
+        expect(group_index).to_be_greater_than(-1)
+        expect(row_index).to_be_greater_than(-1)
+        expect(cell_index).to_be_greater_than(-1)
+
+        step("Expose grouped semantics and canonical Draw IR ownership")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "group", "display"
+        )).to_equal("table-row-group")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 48, 64, "grow2", "y"
+        )).to_equal("38")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 48, 64, "gd", "w"
+        )).to_equal("20")
+        val group = commands[group_index]
+        val row = commands[row_index]
+        val cell = commands[cell_index]
+        expect([group.x, group.y, group.width, group.height]).to_equal(
+            [0, 16, 40, 44]
+        )
+        expect([row.x, row.y, row.width, row.height]).to_equal(
+            [0, 38, 40, 22]
+        )
+        expect([cell.x, cell.y, cell.width, cell.height]).to_equal(
+            [20, 38, 20, 22]
+        )
+        expect(group.parent_id).to_equal("grouped")
+        expect(row.parent_id).to_equal("group")
+        expect(cell.parent_id).to_equal("grow2")
+
+        step("Execute grouped rows through Engine2D after semantic checks")
+        val pixels = simple_web_layout_render_html_readback_engine2d_result(
+            html, 48, 64, "software"
+        ).readback.pixels
+        expect(pixels[18 * 48 + 2]).to_equal(0xFFFF0000u32)
+        expect(pixels[18 * 48 + 22]).to_equal(0xFF00FF00u32)
+        expect(pixels[40 * 48 + 2]).to_equal(0xFF0000FFu32)
+        expect(pixels[40 * 48 + 22]).to_equal(0xFFFF00FFu32)

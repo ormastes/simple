@@ -106,6 +106,25 @@ describe "hosted browser renderer worker":
         expect(after.composition_revision).to_equal(
             before_composition_revision
         )
+        expect(worker.render_session.checksum_revision).to_equal(-1)
+        expect(worker.render_session.checksum_cache).to_equal("")
+        val requested_checksum = worker.render_session.composition_checksum()
+        expect(requested_checksum.len()).to_equal(64)
+        expect(worker.render_session.checksum_revision).to_equal(
+            after.composition_revision
+        )
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 4, payload: "32"
+        )).ok).to_be(true)
+        expect(worker.render_session.checksum_revision).to_equal(
+            after.composition_revision
+        )
+        expect(worker.render_session.checksum_cache).to_equal(
+            requested_checksum
+        )
+        expect(
+            worker.render_session.composition_checksum()
+        ).to_equal(requested_checksum)
         expect(after.retained_node_count).to_be_greater_than(0)
         expect(after.retained_style_count).to_be_greater_than(0)
         expect(after.retained_box_count).to_be_greater_than(0)
@@ -115,6 +134,198 @@ describe "hosted browser renderer worker":
         expect(worker.render_session.counters.retained_style_count).to_equal(0)
         expect(worker.render_session.counters.retained_box_count).to_equal(0)
         expect(worker.render_session.counters.retained_command_count).to_equal(0)
+
+    it "selectively invalidates image viewport animation scroll and caret paint":
+        var image_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        image_worker.browser.register_resource(
+            "https://assets.test/pixel.png",
+            _worker_png_hex(0xFF123456u32)
+        )
+        expect(image_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<img src='https://assets.test/pixel.png'>"
+        )).ok).to_be(true)
+        val image_uri = image_worker.browser.image_resources[0].image_uri
+        val image_checksum = (
+            image_worker.render_session.composition_checksum()
+        )
+        image_worker.browser.image_resources = [
+            simpleos_host_gpu_image_resource(
+                image_uri, 1, 1, [0xFFABCDEFu32]
+            )
+        ]
+        image_worker.browser._advance_resource_revision()
+        expect(image_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        val image_after = image_worker.render_session.counters
+        expect(image_after.parse_count).to_equal(1)
+        expect(image_after.css_count).to_equal(1)
+        expect(image_after.style_count).to_equal(1)
+        expect(image_after.layout_count).to_equal(1)
+        expect(image_after.paint_count).to_equal(2)
+        expect(image_after.composition_revision).to_equal(2)
+        expect(image_worker.render_session.checksum_revision).to_equal(-1)
+        expect(image_worker.render_session.checksum_cache).to_equal("")
+        expect(
+            image_worker.render_session.composition_checksum()
+        ).to_equal(image_checksum)
+
+        var viewport_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(viewport_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>@media(min-width:80px){main{width:80px}}main{width:32px;height:8px}</style><main></main>"
+        )).ok).to_be(true)
+        val resize = browser_renderer_resize_encode(7, 3, 96, 48)
+        expect(viewport_worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), resize.wire
+        ).message).ok).to_be(true)
+        val viewport_after = viewport_worker.render_session.counters
+        expect(viewport_after.parse_count).to_equal(1)
+        expect(viewport_after.css_count).to_equal(2)
+        expect(viewport_after.style_count).to_equal(2)
+        expect(viewport_after.layout_count).to_equal(2)
+        expect(viewport_after.paint_count).to_equal(2)
+        expect(viewport_after.composition_revision).to_equal(2)
+
+        var animation_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(animation_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: CSS_ANIMATION_HTML
+        )).ok).to_be(true)
+        val animation_checksum = (
+            animation_worker.render_session.composition_checksum()
+        )
+        expect(animation_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "500"
+        )).ok).to_be(true)
+        val animation_after = animation_worker.render_session.counters
+        expect(animation_after.parse_count).to_equal(1)
+        expect(animation_after.css_count).to_equal(1)
+        expect(animation_after.style_count).to_equal(2)
+        expect(animation_after.layout_count).to_equal(2)
+        expect(animation_after.paint_count).to_equal(2)
+        expect(
+            animation_worker.render_session.composition_checksum() ==
+            animation_checksum
+        ).to_be(false)
+
+        var scroll_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(scroll_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main style='height:160px'>scroll</main>"
+        )).ok).to_be(true)
+        val scroll = browser_renderer_scroll_encode(7, 3, 1, 16000)
+        val scroll_checksum = (
+            scroll_worker.render_session.composition_checksum()
+        )
+        expect(scroll_worker.handle(browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), scroll.wire
+        ).message).ok).to_be(true)
+        val scroll_after = scroll_worker.render_session.counters
+        expect(scroll_after.parse_count).to_equal(1)
+        expect(scroll_after.css_count).to_equal(1)
+        expect(scroll_after.style_count).to_equal(1)
+        expect(scroll_after.layout_count).to_equal(1)
+        expect(scroll_after.paint_count).to_equal(2)
+        expect(scroll_after.composition_revision).to_equal(2)
+        expect(
+            scroll_worker.render_session.composition_checksum() ==
+            scroll_checksum
+        ).to_be(false)
+
+        var caret_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(caret_worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<input id='field' data-focused value='caret'>"
+        )).ok).to_be(true)
+        val caret_checksum = (
+            caret_worker.render_session.composition_checksum()
+        )
+        expect(caret_worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "600"
+        )).ok).to_be(true)
+        val caret_after = caret_worker.render_session.counters
+        expect(caret_after.parse_count).to_equal(1)
+        expect(caret_after.css_count).to_equal(1)
+        expect(caret_after.style_count).to_equal(1)
+        expect(caret_after.layout_count).to_equal(1)
+        expect(caret_after.paint_count).to_equal(2)
+        expect(caret_after.composition_revision).to_equal(2)
+        expect(
+            caret_worker.render_session.composition_checksum() ==
+            caret_checksum
+        ).to_be(false)
+
+    it "replaces document stages without growing retained state":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main id='first'>first</main>"
+        )).ok).to_be(true)
+        val first_checksum = worker.render_session.composition_checksum()
+        val first_commands = (
+            worker.render_session.counters.retained_command_count
+        )
+        expect(worker.browser.eval_script(
+            "document.body.innerHTML = '<main id=\"second\">second</main>'"
+        ).is_ok()).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        worker.browser.current_style_html = (
+            "<style>main { color:#2563eb; }</style>"
+        )
+        worker.browser._advance_style_revision()
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 4, payload: "32"
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "simple-renderer://replacement",
+            "<main id='third'>third</main>"
+        ).is_ok()).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 5, payload: "48"
+        )).ok).to_be(true)
+        val after = worker.render_session.counters
+        expect(after.serialize_count).to_equal(4)
+        expect(after.parse_count).to_equal(4)
+        expect(after.css_count).to_equal(4)
+        expect(after.style_count).to_equal(4)
+        expect(after.layout_count).to_equal(4)
+        expect(after.paint_count).to_equal(4)
+        expect(after.composition_revision).to_equal(4)
+        expect(
+            worker.render_session.composition_checksum() == first_checksum
+        ).to_be(false)
+        expect(
+            after.retained_command_count
+        ).to_be_less_than(first_commands + 2)
+
+    it "invalidates every semantic stage for a title-only mutation":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<title>before</title><main>same pixels</main>"
+        )).ok).to_be(true)
+        val before_checksum = worker.render_session.composition_checksum()
+        expect(worker.browser.eval_script(
+            "document.title = 'after'"
+        ).is_ok()).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        val after = worker.render_session.counters
+        expect(after.serialize_count).to_equal(2)
+        expect(after.parse_count).to_equal(2)
+        expect(after.css_count).to_equal(2)
+        expect(after.style_count).to_equal(2)
+        expect(after.layout_count).to_equal(2)
+        expect(after.paint_count).to_equal(2)
+        expect(after.composition_revision).to_equal(2)
+        expect(
+            worker.render_session.composition_checksum()
+        ).to_equal(before_checksum)
 
     it "closes the real browser document resource and runtime owners":
         var worker = HostedBrowserRendererWorkerSession.create(64, 48)

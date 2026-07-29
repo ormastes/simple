@@ -1936,3 +1936,47 @@ implementation in progress / target evidence blocked
   wiring, and generated-spec layout (`0`) pass. Executable SSpec/docgen/live
   animation evidence remains blocked by the recorded deployed pure-Simple
   exit-139 ABI artifact; no bootstrap or Rust seed was used.
+- live-interaction tranche (2026-07-29): Six small guided sidecars own
+  disjoint next gaps: BrowserSession callable JavaScript listeners; persistent
+  SimpleScript timer/animation callbacks; retained selective invalidation;
+  production chrome navigation evidence; cookie/security enforcement; and one
+  bounded table-formatting HTML/CSS slice. Existing owners remain canonical:
+  `JsRuntime.invoke_callable_with_this`, `be_dom_dispatch_event_to_id`,
+  `BrowserSession`, `SimpleScriptExecutor`, `BrowserRenderRevisions`,
+  `SimpleWebRenderSession`, `HostedBrowserRendererRegistry`, `CookieStore`,
+  and the shared HTML style/layout pipeline. No second interpreter, DOM/event
+  dispatcher, timer queue, render cache, controller, cookie jar, parser, WebIR,
+  or renderer is permitted. Frozen steps are `Deliver JavaScript and Simple
+  Script listeners on the live DOM`, `Run JavaScript and advance the browser
+  clock`, `Reuse parsed layout work across unchanged animation frames`,
+  `Operate browser navigation controls`, `Exercise host-only Secure HttpOnly
+  SameSite path and expiry`, and `Render HTML tables through canonical Draw
+  IR`. Existing `_check_event_phase_order`, `_advance_browser_clock`,
+  `_check_budget_row`, `_operate_browser_navigation`, and
+  `_check_security_denial` helpers remain canonical. Each product edit begins
+  with a modern system RED and mirrored manual; unfinished rows keep their
+  explicit `fail(...)`. No full bootstrap or Rust-seed fallback is permitted.
+- live-interaction implementation (2026-07-29): The canonical BrowserSession
+  dispatcher now delivers retained JavaScript listeners with target fields,
+  cancellation, mutation-during-dispatch, and reset semantics; synchronous
+  JavaScript-origin re-entry remains an explicit fail-closed RED. The existing
+  SimpleScript executor retains bounded timer, interval, and animation-frame
+  callbacks, and load-time style commands join the canonical final stylesheet
+  exactly once. `SimpleWebRenderSession` retains parsed/style/layout material,
+  invalidates by exact revision, and computes Draw-IR evidence hashes lazily.
+  Hosted chrome/page input ownership rejects stale same-window, cross-window,
+  and page/chrome releases. The existing cookie store carries Secure,
+  HttpOnly, SameSite, expiry, and schemeful-site partition keys through real
+  BrowserSession redirect hops. The canonical table owner now collects direct
+  and grouped rows for fixed layout, captions, and bounded colspan lowering.
+- live-interaction verification (2026-07-29): Modern SSpec/manual evidence
+  covers listener fields and mutation ordering, timer/rAF styling and pixels,
+  retained invalidation/reuse and lifecycle plateau, chrome navigation/input
+  replacement, cookie admission/isolation/deletion and observed redirect
+  requests, and table semantic/Draw-IR geometry before Engine2D pixels. Two
+  independent adversarial reviews converged after repairing eager Draw-IR
+  hashing, stale input clearing, direct-only table traversal, incomplete cookie
+  partition plumbing, and overwritten load-time SimpleScript style. Runtime,
+  executable SSpec, docgen, and live animation execution remain blocked by the
+  recorded deployed pure-Simple exit-139 ABI artifact; no bootstrap or Rust
+  seed was used.

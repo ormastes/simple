@@ -301,6 +301,15 @@ class SimpleWebLayoutDrawIrResult:
     resolved_input_view_start_byte: i64
     resolved_scroll_y: i32
     max_scroll_y: i32
+    document_html: text
+    rules: Rules
+    base_styles: [Style]
+    raw_boxes: LayoutResult
+    animation_registry: KeyframeRegistry
+    material_entries: [text]
+    material_counts: [i64]
+    cpu_material_nodes: [i32]
+    solid_material_nodes: [i32]
 
 class _SimpleWebScrolledLayout:
     boxes: LayoutResult
@@ -328,6 +337,7 @@ fn _simple_web_scrolled_layout(
         nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
         viewport_width, extent_height
     )
+
     var content_bottom = viewport_height.to_i64()
     i = 0
     while i < boxes.by.len():
@@ -859,6 +869,96 @@ pub fn simple_web_layout_animation_end_ms(
         styles, -1, [], frame_index
     ).animation_end_ms
 
+fn _simple_web_layout_compose_retained(
+    html: text,
+    nodes: [HNode],
+    rules: Rules,
+    child_index: HtmlChildIndex,
+    base_styles: [Style],
+    styles: [Style],
+    raw_boxes: LayoutResult,
+    animation_registry: KeyframeRegistry,
+    animation_schedule: _SimpleWebAnimationSchedule,
+    material_entries: [text],
+    material_counts: [i64],
+    cpu_material_nodes: [i32],
+    solid_material_nodes: [i32],
+    width: i32,
+    height: i32,
+    vector_fonts: bool,
+    scroll_y: i32,
+    overlay: BrowserTextInputOverlay,
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    val scrolled = _simple_web_scrolled_layout(
+        nodes, styles, raw_boxes, width, height, scroll_y
+    )
+    val boxes = scrolled.boxes
+    val source = draw_ir_source_html_ast(
+        "simple_web_html_layout_renderer", "html", "", "", "",
+        "layout", "1"
+    )
+    val embedding = draw_ir_embedding_config(
+        "html", "document", 0, 0, width, height, 0, 1000, true
+    )
+    val input_hit_build = _simple_web_input_text_hit_build(
+        nodes, styles, child_index, boxes, width, height, overlay
+    )
+    val visible_nodes = _html_draw_ir_visible_nodes(
+        nodes, styles, boxes, width, height
+    )
+    var commands = _html_draw_ir_commands(
+        nodes, styles, boxes, width, height, vector_fonts,
+        input_hit_build.target_keys, overlay, visible_nodes, images
+    )
+    val canvas_color = _web_canvas_background(
+        nodes, styles, argb(255, 255, 255)
+    )
+    commands = [
+        _html_draw_ir_canvas_command(width, height, canvas_color)
+    ] + commands
+    val batch = draw_ir_batch_with_source(
+        "html-layout", DRAW_IR_BACKEND_CPU, embedding, commands, source
+    )
+    val composition = draw_ir_composition(
+        "html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, [batch]
+    )
+    val material_witness = _simple_web_visible_material_witness(
+        material_entries, cpu_material_nodes, solid_material_nodes,
+        visible_nodes
+    )
+    SimpleWebLayoutDrawIrResult(
+        composition: composition,
+        material_fallback: simple_web_layout_material_provenance_after_execution(
+            material_witness, 0, 1, 1, 0
+        ),
+        material_witness: material_witness,
+        animation_end_ms: animation_schedule.animation_end_ms,
+        animation_next_ms: animation_schedule.animation_next_ms,
+        hit_index: SimpleWebLayoutHitIndex(
+            nodes: nodes,
+            styles: styles,
+            child_index: child_index,
+            boxes: boxes,
+            width: width,
+            height: height,
+            input_text_hits: input_hit_build.hits
+        ),
+        resolved_input_view_start_byte:
+            input_hit_build.resolved_view_start_byte,
+        resolved_scroll_y: scrolled.resolved_scroll_y,
+        max_scroll_y: scrolled.max_scroll_y,
+        document_html: html,
+        rules: rules,
+        base_styles: base_styles,
+        raw_boxes: raw_boxes,
+        animation_registry: animation_registry,
+        material_entries: material_entries,
+        material_counts: material_counts,
+        cpu_material_nodes: cpu_material_nodes,
+        solid_material_nodes: solid_material_nodes
+    )
+
 fn _simple_web_layout_render_html_draw_ir_result_at_time(
     html: text, width: i32, height: i32, vector_fonts: bool,
     animation_time_ms: i64, scroll_y: i32,
@@ -946,10 +1046,11 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
     var material_counts: [i64] = [0, 0]
     var cpu_material_nodes: [i32] = []
     var solid_material_nodes: [i32] = []
-    var styles = compute_styles_with_material(
+    val base_styles = compute_styles_with_material(
         nodes, rules, child_index, false, vector_fonts,
         material_entries, material_counts,
         cpu_material_nodes, solid_material_nodes)
+    var styles = base_styles
     val animation_registry = _simple_web_extract_keyframes(html)
     var animation_schedule = _SimpleWebAnimationSchedule(
         animation_end_ms: -1,
@@ -990,57 +1091,89 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
         empty_ends,
         neg_one_i32_list(node_count)
     )
-    val scrolled = _simple_web_scrolled_layout(
-        nodes, styles, raw_boxes, width, height, scroll_y
-    )
-    val boxes = scrolled.boxes
-    val source = draw_ir_source_html_ast("simple_web_html_layout_renderer", "html", "", "", "", "layout", "1")
-    val embedding = draw_ir_embedding_config("html", "document", 0, 0, width, height, 0, 1000, true)
-    val input_hit_build = _simple_web_input_text_hit_build(
-        nodes, styles, child_index, boxes, width, height, overlay
-    )
-    val visible_nodes = _html_draw_ir_visible_nodes(
-        nodes, styles, boxes, width, height
-    )
-    var commands = _html_draw_ir_commands(
-        nodes, styles, boxes, width, height, vector_fonts,
-        input_hit_build.target_keys, overlay, visible_nodes, images
-    )
-    val canvas_color = _web_canvas_background(nodes, styles, argb(255, 255, 255))
-    commands = [_html_draw_ir_canvas_command(width, height, canvas_color)] + commands
-    val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, commands, source)
-    val batches = [batch]
-    val composition = draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches)
-    val material_witness = _simple_web_visible_material_witness(
-        material_entries, cpu_material_nodes, solid_material_nodes,
-        visible_nodes
-    )
-    SimpleWebLayoutDrawIrResult(
-        composition: composition,
-        material_fallback: simple_web_layout_material_provenance_after_execution(
-            material_witness, 0, 1, 1, 0),
-        material_witness: material_witness,
-        animation_end_ms: animation_schedule.animation_end_ms,
-        animation_next_ms: animation_schedule.animation_next_ms,
-        hit_index: SimpleWebLayoutHitIndex(
-            nodes: nodes,
-            styles: styles,
-            child_index: child_index,
-            boxes: boxes,
-            width: width,
-            height: height,
-            input_text_hits: input_hit_build.hits
-        ),
-        resolved_input_view_start_byte:
-            input_hit_build.resolved_view_start_byte,
-        resolved_scroll_y: scrolled.resolved_scroll_y,
-        max_scroll_y: scrolled.max_scroll_y
+    _simple_web_layout_compose_retained(
+        html, nodes, rules, child_index, base_styles, styles, raw_boxes,
+        animation_registry, animation_schedule,
+        material_entries, material_counts, cpu_material_nodes,
+        solid_material_nodes, width, height, vector_fonts, scroll_y,
+        overlay, images
     )
 
 fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result_at_time(
         html, width, height, vector_fonts, -1, 0,
         browser_text_input_overlay_empty(), [], []
+    )
+
+pub fn simple_web_layout_rerender_retained(
+    prior: SimpleWebLayoutDrawIrResult,
+    dirty_stage: text,
+    width: i32,
+    height: i32,
+    animation_time_ms: i64,
+    scroll_y: i32,
+    overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    val nodes = prior.hit_index.nodes
+    val child_index = prior.hit_index.child_index
+    var rules = prior.rules
+    var base_styles = prior.base_styles
+    var material_entries = prior.material_entries
+    var material_counts = prior.material_counts
+    var cpu_material_nodes = prior.cpu_material_nodes
+    var solid_material_nodes = prior.solid_material_nodes
+    if dirty_stage == "css":
+        rules = extract_css_vw(prior.document_html, width, false)
+        material_entries = ["", ""]
+        material_counts = [0, 0]
+        cpu_material_nodes = []
+        solid_material_nodes = []
+        base_styles = compute_styles_with_material(
+            nodes, rules, child_index, false, true,
+            material_entries, material_counts,
+            cpu_material_nodes, solid_material_nodes
+        )
+
+    var styles = if dirty_stage == "paint":
+        prior.hit_index.styles
+    else:
+        base_styles
+    var animation_schedule = _SimpleWebAnimationSchedule(
+        animation_end_ms: prior.animation_end_ms,
+        animation_next_ms: prior.animation_next_ms
+    )
+    if dirty_stage != "paint" and prior.animation_registry.entries.len() > 0:
+        val animation_frame_index = _simple_web_animation_frame_index(
+            styles, nodes, child_index, prior.animation_registry,
+            animation_instances, false
+        )
+        animation_schedule = _simple_web_layout_animation_schedule(
+            styles, animation_time_ms, animation_instances,
+            animation_frame_index
+        )
+        if animation_time_ms >= 0:
+            styles = _apply_css_animations(
+                styles, prior.animation_registry, animation_time_ms,
+                animation_instances, animation_frame_index
+            )
+
+    var raw_boxes = prior.raw_boxes
+    if dirty_stage != "paint":
+        val node_count = nodes.len() as i32
+        raw_boxes = layout(
+            nodes, styles, child_index, 0, 0, 0, width, height,
+            zero_i32_list(node_count), zero_i32_list(node_count),
+            zero_i32_list(node_count), zero_i32_list(node_count),
+            empty_i32_lists(node_count), empty_i32_lists(node_count),
+            neg_one_i32_list(node_count)
+        )
+    _simple_web_layout_compose_retained(
+        prior.document_html, nodes, rules, child_index, base_styles, styles,
+        raw_boxes, prior.animation_registry, animation_schedule,
+        material_entries, material_counts, cpu_material_nodes,
+        solid_material_nodes, width, height, true, scroll_y, overlay, images
     )
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:

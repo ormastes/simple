@@ -32,6 +32,11 @@ use std.common.gpu.simpleos_host_gpu_protocol.{
 }
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.script.simple_script.{
+    SimpleScriptExecutor
+}
+use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
+use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_get_attr, be_dom_get_text_content, be_dom_serialize_children,
     be_dom_set_children
@@ -46,7 +51,7 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance
 }
-use std.js.engine.runtime.{JsRuntime, NATIVE_ARRAY_BUFFER_CONSTRUCTOR, NATIVE_DATA_VIEW_CONSTRUCTOR, NATIVE_FETCH, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_TEXT_DECODER_CONSTRUCTOR, NATIVE_TEXT_ENCODER_CONSTRUCTOR, NATIVE_UINT8_ARRAY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_COMPILE, NATIVE_WEBASSEMBLY_COMPILE_STREAMING, NATIVE_WEBASSEMBLY_GLOBAL_CONSTRUCTOR, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANTIATE_STREAMING, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_EXPORTS, NATIVE_WEBASSEMBLY_MODULE_IMPORTS, NATIVE_WEBASSEMBLY_TABLE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
+use std.js.engine.runtime.{JsRuntime, NATIVE_ARRAY_BUFFER_CONSTRUCTOR, NATIVE_DATA_VIEW_CONSTRUCTOR, NATIVE_DOM_EVENT_TARGET_ADD, NATIVE_DOM_EVENT_TARGET_DISPATCH, NATIVE_DOM_EVENT_TARGET_REMOVE, NATIVE_FETCH, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_TEXT_DECODER_CONSTRUCTOR, NATIVE_TEXT_ENCODER_CONSTRUCTOR, NATIVE_UINT8_ARRAY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_COMPILE, NATIVE_WEBASSEMBLY_COMPILE_STREAMING, NATIVE_WEBASSEMBLY_GLOBAL_CONSTRUCTOR, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANTIATE_STREAMING, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_EXPORTS, NATIVE_WEBASSEMBLY_MODULE_IMPORTS, NATIVE_WEBASSEMBLY_TABLE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
 use std.js.engine.interpreter.{
     JsHostDomElementPlan, JsHostBodyMutationPlan
 }
@@ -69,7 +74,9 @@ use std.gc_async_mut.web.browser_session_storage.{
     blank_page_html
 }
 use std.gc_async_mut.gpu.browser_engine.net.cookie_store.{CookieStore, apply_default_path, parse_set_cookie}
-use std.gc_async_mut.gpu.browser_engine.security.cookie_policy.{apply_max_age}
+use std.gc_async_mut.gpu.browser_engine.security.cookie_policy.{
+    apply_max_age, cookie_partition_key
+}
 use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{origin_from_url_text, same_origin}
 use std.io.{time_now_unix_micros}
 use std.gc_async_mut.web.browser_session_html.{
@@ -85,6 +92,7 @@ use std.gc_async_mut.web.browser_session_context.{
 
 val BROWSER_RUNTIME_FLUSH_ROUND_LIMIT: i32 = 8
 val BROWSER_DOM_BRIDGE_MAX_ELEMENTS: i32 = 4096
+val BROWSER_DOM_CALLABLE_LISTENER_MAX: i32 = 4096
 val BROWSER_DOM_BRIDGE_MAX_PLAN_BYTES: i64 = 64 * 1024 * 1024
 val BROWSER_DOM_BRIDGE_OVERSIZE = "\u0000simple-dom-oversize"
 val BROWSER_HISTORY_MAX_ENTRIES: i32 = 64
@@ -475,6 +483,7 @@ class BrowserLoadState:
     stylesheet_source_bytes: i64
     stylesheet_html_bytes: i64
     stylesheet_html_chunks: [text]
+    simple_script_style_html: text
     image_sources: [BrowserImageSource]
     next_image_idx: i32
     pending_module: BrowserPendingModuleEval?
@@ -493,6 +502,7 @@ class BrowserLoadState:
             stylesheet_source_bytes: 0,
             stylesheet_html_bytes: 0,
             stylesheet_html_chunks: [],
+            simple_script_style_html: "",
             image_sources: image_sources,
             next_image_idx: 0,
             pending_module: nil
@@ -619,7 +629,34 @@ impl BrowserLoadState:
         Some(ordered)
 
     fn stylesheet_html() -> text:
-        self.stylesheet_html_chunks.join("")
+        self.stylesheet_html_chunks.join("") + self.simple_script_style_html
+
+    me set_simple_script_style_html(value: text) -> bool:
+        """Stage the last load-time SimpleScript style in canonical CSS order."""
+        if (
+            value.len() > BROWSER_RENDERER_MAX_PAYLOAD_BYTES -
+                self.stylesheet_html_bytes
+        ):
+            self.append_warning(
+                "simple script stylesheet byte limit reached; style ignored"
+            )
+            return false
+        self.simple_script_style_html = value
+        true
+
+class BrowserDomCallableListener:
+    target_object_id: i64
+    event_type: text
+    callback: JsValue
+    capture: bool
+
+fn _browser_dom_same_callable(left: JsValue, right: JsValue) -> bool:
+    match left:
+        JsValue.Function(left_id):
+            match right:
+                JsValue.Function(right_id): left_id == right_id
+                _: false
+        _: false
 
 class BrowserRuntimeState:
     runtime: JsRuntime
@@ -642,6 +679,7 @@ class BrowserRuntimeState:
     dom_style_snapshots: [text]
     dom_bridge_generation: i64
     dom_mutation_generation: i64
+    dom_callable_listeners: [BrowserDomCallableListener]
 
     static fn create(
         url: text,
@@ -759,6 +797,15 @@ class BrowserRuntimeState:
         runtime.set_host_property(document_id, "URL", JsValue.String(v: url))
         runtime.set_host_property(document_id, "location", JsValue.Object(id: location_id))
         runtime.set_host_property(document_id, "cookie", JsValue.String(v: cookie_text))
+        runtime._define_method_on(
+            document_id, "addEventListener", NATIVE_DOM_EVENT_TARGET_ADD
+        )
+        runtime._define_method_on(
+            document_id, "removeEventListener", NATIVE_DOM_EVENT_TARGET_REMOVE
+        )
+        runtime._define_method_on(
+            document_id, "dispatchEvent", NATIVE_DOM_EVENT_TARGET_DISPATCH
+        )
 
         val window_id = runtime.create_host_object()
         if is_guest_runtime:
@@ -775,6 +822,15 @@ class BrowserRuntimeState:
         runtime.set_host_property(window_id, "sessionStorage", JsValue.Object(id: session_storage_id))
         runtime.set_host_property(window_id, "localStorage", JsValue.Object(id: local_storage_id))
         runtime.set_host_property(window_id, "isSecureContext", JsValue.Boolean(v: is_secure_context))
+        runtime._define_method_on(
+            window_id, "addEventListener", NATIVE_DOM_EVENT_TARGET_ADD
+        )
+        runtime._define_method_on(
+            window_id, "removeEventListener", NATIVE_DOM_EVENT_TARGET_REMOVE
+        )
+        runtime._define_method_on(
+            window_id, "dispatchEvent", NATIVE_DOM_EVENT_TARGET_DISPATCH
+        )
         runtime._define_method_on(window_id, "fetch", NATIVE_FETCH)
         runtime._define_global_native("fetch", NATIVE_FETCH)
         runtime._define_global_native("ArrayBuffer", NATIVE_ARRAY_BUFFER_CONSTRUCTOR)
@@ -902,7 +958,8 @@ class BrowserRuntimeState:
             dom_value_snapshots: [],
             dom_style_snapshots: [],
             dom_bridge_generation: 0,
-            dom_mutation_generation: 0
+            dom_mutation_generation: 0,
+            dom_callable_listeners: []
         )
         state
 
@@ -1144,6 +1201,80 @@ class BrowserDomSyncResult:
 
 impl BrowserRuntimeState:
 
+    me _bind_event_target(runtime: JsRuntime, object_id: i64) -> JsRuntime:
+        var next = runtime
+        next._define_method_on(
+            object_id, "addEventListener", NATIVE_DOM_EVENT_TARGET_ADD
+        )
+        next._define_method_on(
+            object_id, "removeEventListener", NATIVE_DOM_EVENT_TARGET_REMOVE
+        )
+        next._define_method_on(
+            object_id, "dispatchEvent", NATIVE_DOM_EVENT_TARGET_DISPATCH
+        )
+        next
+
+    me drain_dom_callable_listener_ops() -> bool:
+        var runtime = self.runtime
+        var interpreter = runtime.interpreter
+        val count = interpreter.pending_host_event_ops.len()
+        var changed = count > 0
+        var op_index = 0
+        while op_index < count:
+            val operation = interpreter.pending_host_event_ops[op_index]
+            val target_id =
+                interpreter.pending_host_event_target_ids[op_index]
+            val event_type =
+                interpreter.pending_host_event_types[op_index]
+            val callback =
+                interpreter.pending_host_event_callbacks[op_index]
+            val capture =
+                interpreter.pending_host_event_captures[op_index]
+            var matching = -1
+            var tombstone = -1
+            var listener_index = 0
+            while listener_index < self.dom_callable_listeners.len():
+                val listener = self.dom_callable_listeners[listener_index]
+                if (
+                    listener.event_type == event_type and
+                    listener.target_object_id == target_id and
+                    _browser_dom_same_callable(
+                        listener.callback, callback
+                    ) and
+                    listener.capture == capture
+                ):
+                    matching = listener_index
+                if tombstone < 0 and listener.event_type == "":
+                    tombstone = listener_index
+                listener_index = listener_index + 1
+            if operation == "remove" and matching >= 0:
+                self.dom_callable_listeners[matching].event_type = ""
+                self.dom_callable_listeners[matching].callback =
+                    JsValue.Undefined
+            elif operation == "add" and matching < 0:
+                val added = BrowserDomCallableListener(
+                    target_object_id: target_id,
+                    event_type: event_type,
+                    callback: callback,
+                    capture: capture
+                )
+                if tombstone >= 0:
+                    self.dom_callable_listeners[tombstone] = added
+                elif (
+                    self.dom_callable_listeners.len() <
+                    BROWSER_DOM_CALLABLE_LISTENER_MAX
+                ):
+                    self.dom_callable_listeners.push(added)
+            op_index = op_index + 1
+        interpreter.pending_host_event_ops = []
+        interpreter.pending_host_event_target_ids = []
+        interpreter.pending_host_event_types = []
+        interpreter.pending_host_event_callbacks = []
+        interpreter.pending_host_event_captures = []
+        runtime.interpreter = interpreter
+        self.runtime = runtime
+        changed
+
     me _bind_dom_node(node: BeDomNode, element_list_id: i64):
         if self.dom_node_ids.len() >= BROWSER_DOM_BRIDGE_MAX_ELEMENTS:
             return
@@ -1159,6 +1290,7 @@ impl BrowserRuntimeState:
             self.body_id
         else:
             runtime.create_host_object()
+        runtime = self._bind_event_target(runtime, element_id)
         val style_id = runtime.create_host_object()
         val text_content = be_dom_get_text_content(node)
         val inner_html = be_dom_serialize_children(node)
@@ -1519,6 +1651,7 @@ class BrowserSession:
     local_storage_by_origin: [BrowserOriginStorage]
     cookies: CookieStore
     runtime_state: BrowserRuntimeState?
+    simple_script_executor: SimpleScriptExecutor
     pending_requests: [BrowserRequest]
     pending_request_head: i64
     pending_request_tombstone: BrowserRequest
@@ -1589,6 +1722,9 @@ class BrowserSession:
             local_storage_by_origin: [],
             cookies: CookieStore.new(),
             runtime_state: nil,
+            simple_script_executor: SimpleScriptExecutor.new(
+                EventLoop.new(), ConsoleBuffer.new()
+            ),
             pending_requests: [],
             pending_request_head: 0,
             pending_request_tombstone: BrowserRequest.create(
@@ -1669,7 +1805,10 @@ impl BrowserSession:
             )
         true
 
-    me _store_cookie_text(header: text, url: text, from_http: bool):
+    me _store_cookie_text(
+        header: text, url: text, from_http: bool,
+        top_level_site_url: text = ""
+    ):
         if header.len() > 4096 or header.contains("\r") or header.contains("\n"):
             return
         if (not from_http and self.broker_network_policy and
@@ -1683,15 +1822,30 @@ impl BrowserSession:
                 parse_set_cookie(header), header, url_pathname(url)
             ), header, now
         )
+        val site_url = if (
+            top_level_site_url.starts_with("http://") or
+            top_level_site_url.starts_with("https://")
+        ):
+            top_level_site_url
+        elif (
+            self.document_url.starts_with("http://") or
+            self.document_url.starts_with("https://")
+        ):
+            self.document_url
+        else:
+            url
+        val partition_key = cookie_partition_key(
+            self._cookie_origin(site_url)
+        )
         var cookies = self.cookies
         var admitted_from_script = false
         if from_http:
             val _ = cookies.store_from_origin(
-                cookie, self._cookie_origin(url), now
+                cookie, self._cookie_origin(url), now, partition_key
             )
         else:
             val verdict = cookies.store_from_script(
-                cookie, self._cookie_origin(url), now
+                cookie, self._cookie_origin(url), now, partition_key
             )
             admitted_from_script = verdict.accepted
         self.cookies = cookies
@@ -1706,7 +1860,8 @@ impl BrowserSession:
     me _script_cookie_for_url(url: text) -> text:
         self.cookies.script_cookie_header(
             self._cookie_origin(url), url_pathname(url),
-            self._cookie_now_seconds()
+            self._cookie_now_seconds(),
+            cookie_partition_key(self._cookie_origin(self.document_url))
         )
 
     me _cookie_header_for_request_context(
@@ -1721,7 +1876,10 @@ impl BrowserSession:
             nil
         self.cookies.get_header_for_origin(
             self._cookie_origin(url), url_pathname(url), site, method,
-            is_top_level_navigation, self._cookie_now_seconds()
+            is_top_level_navigation, self._cookie_now_seconds(),
+            match site:
+                Some(site_origin): cookie_partition_key(site_origin)
+                nil: ""
         )
 
     me _broker_hsts_candidate(url: text) -> bool:
@@ -2200,6 +2358,21 @@ impl BrowserSession:
             ):
                 drain_rounds = drain_rounds + 1
                 progress = false
+                if val Some(event_state) = self.runtime_state:
+                    if event_state.drain_dom_callable_listener_ops():
+                        self.runtime_state = Some(event_state)
+                        progress = true
+                    var event_runtime = event_state.runtime
+                    var event_interpreter = event_runtime.interpreter
+                    if event_interpreter.host_event_sync_dispatch_blocked:
+                        event_interpreter.host_event_sync_dispatch_blocked =
+                            false
+                        event_runtime.interpreter = event_interpreter
+                        event_state.runtime = event_runtime
+                        self.runtime_state = Some(event_state)
+                        self._append_warning(
+                            "synchronous script dispatchEvent is unsupported"
+                        )
                 if self._drain_runtime_async_requests():
                     progress = true
                 if val Some(loop_state) = self.runtime_state:
@@ -2401,8 +2574,20 @@ impl BrowserSession:
                 self.pending_navigation_push_history = true
                 self.is_loading = false
                 return Err(response.error)
+            val document_site_url = match inflight:
+                Some(original): original.site_for_cookies_url
+                nil:
+                    if (
+                        self.document_url.starts_with("http://") or
+                        self.document_url.starts_with("https://")
+                    ):
+                        self.document_url
+                    else:
+                        response.url
             if browser_status_is_redirect(response.status):
-                self._apply_response_headers(response.headers, response.url)
+                self._apply_response_headers(
+                    response.headers, response.url, true, document_site_url
+                )
                 val location = browser_header_location(response.headers)
                 if location == "":
                     self.stop_loading()
@@ -2474,7 +2659,9 @@ impl BrowserSession:
             self.pending_content_security_policy = browser_header_content_security_policy(
                 response.headers
             )
-            self._apply_response_headers(response.headers, response.url)
+            self._apply_response_headers(
+                response.headers, response.url, true, document_site_url
+            )
             self._trace_guest("document headers applied")
             return self.commit_navigation_html(response.body)
         if response.kind == "style":
@@ -2537,7 +2724,8 @@ impl BrowserSession:
                     response.headers, response.url,
                     self._cookie_credentials_allow(
                         orig_credentials, response.url, orig_site_url
-                    )
+                    ),
+                    orig_site_url
                 )
             if response.error == "" and browser_status_is_redirect(response.status):
                 val location = browser_header_location(response.headers)
@@ -2911,7 +3099,12 @@ impl BrowserSession:
             url, "GET", self.document_url, false, "include"
         )
 
-    me apply_set_cookie_header(header_value: text, response_url: text = ""):
+    me apply_set_cookie_header(
+        header_value: text, response_url: text = "",
+        top_level_site_url: text = ""
+    ):
         val source_url = if response_url != "": response_url else: self.document_url
-        self._store_cookie_text(header_value, source_url, true)
+        self._store_cookie_text(
+            header_value, source_url, true, top_level_site_url
+        )
         self._sync_runtime_cookie_string()

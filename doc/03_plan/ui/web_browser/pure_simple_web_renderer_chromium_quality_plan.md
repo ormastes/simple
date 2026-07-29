@@ -295,7 +295,7 @@ timing counters.
 | P0 | inline formatting | partial: text wrapping exists; `<br>` forced-line semantics are this bounded slice; inline-block/bidi parity remain | shared layout |
 | P0 | block sizing and overflow | partial; overflow/z-index evidence is owned by the DrawIR lane | shared layout/Draw IR |
 | P1 | flex layout | partial row/column/wrap support; full flex sizing parity unproven | shared layout |
-| P1 | grid and table layout | unsupported/incomplete; `display:grid` and table formatting must not be claimed | shared layout |
+| P1 | grid and table layout | fixed direct and row-grouped tables are bounded-supported; grid, auto table layout, rowspan, and border collapse remain unsupported | shared layout |
 | P1 | replaced elements, backgrounds, fonts | partial; fixed single-image background is covered, local/multiple layers remain unsupported | canonical resource/layout/paint owners |
 | P1 | transitions and animations | supported bounded path; preserve the single canonical animation clock | style/layout/paint invalidation |
 | P2 | interactive HTML semantics | partial; details/dialog/forms and complete accessibility semantics remain unproven | DOM/event/accessibility owners |

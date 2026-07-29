@@ -1,13 +1,15 @@
 
 # CSS Table Layout — Structure Helpers
 #
-# DOM-traversal helpers for table layout: finding rows, cells, colspan.
-# Returns only BeDomNode lists and integer values — no LayoutBox dependencies.
-# Called from layout.spl's layout_table implementation.
+# Canonical DOM-traversal helpers for both BeDomNode and HNode table layout:
+# finding row groups, rows, cells, and colspan without LayoutBox dependencies.
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_get_tag,
     be_dom_get_children, be_dom_get_attr}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    HNode, HtmlChildIndex, attr_value, parse_int
+}
 
 fn _find_table_node(node: BeDomNode) -> BeDomNode:
     """Walk into node to find a table element, or return node itself."""
@@ -119,3 +121,68 @@ fn _compute_col_widths(total_w: i32, num_cols: i32, first_row_cells: [BeDomNode]
         widths.push(base + extra)
         i = i + 1
     widths
+
+class SimpleWebTableRows:
+    rows: [i32]
+    groups: [i32]
+
+fn simple_web_collect_table_rows(
+    nodes: [HNode], child_index: HtmlChildIndex, table: i32
+) -> SimpleWebTableRows:
+    var rows: [i32] = []
+    var groups: [i32] = []
+    var child = child_index.first_child[table]
+    while child >= 0:
+        if nodes[child].tag == "tr":
+            rows.push(child)
+            groups.push(-1)
+        elif (
+            nodes[child].tag == "thead" or
+            nodes[child].tag == "tbody" or
+            nodes[child].tag == "tfoot"
+        ):
+            var row = child_index.first_child[child]
+            while row >= 0:
+                if nodes[row].tag == "tr":
+                    rows.push(row)
+                    groups.push(child)
+                row = child_index.next_sibling[row]
+        child = child_index.next_sibling[child]
+    SimpleWebTableRows(rows: rows, groups: groups)
+
+fn simple_web_fixed_table_cell_span(
+    node: HNode, column_count: i32
+) -> i32:
+    var span = parse_int(attr_value(node.attrs_raw, "colspan"))
+    if span < 1:
+        span = 1
+    if span > column_count:
+        span = column_count
+    span
+
+fn simple_web_fixed_table_row_column_count(
+    nodes: [HNode], child_index: HtmlChildIndex, row: i32
+) -> i32:
+    var columns = 0
+    var cell = child_index.first_child[row]
+    while cell >= 0:
+        if nodes[cell].tag == "td" or nodes[cell].tag == "th":
+            val raw_span = parse_int(attr_value(
+                nodes[cell].attrs_raw, "colspan"
+            ))
+            columns = columns + (if raw_span > 0: raw_span else: 1)
+        cell = child_index.next_sibling[cell]
+    if columns > 0: columns else: 1
+
+fn simple_web_fixed_table_column_count(
+    nodes: [HNode], child_index: HtmlChildIndex,
+    rows: SimpleWebTableRows
+) -> i32:
+    var columns = 1
+    for row in rows.rows:
+        val row_columns = simple_web_fixed_table_row_column_count(
+            nodes, child_index, row
+        )
+        if row_columns > columns:
+            columns = row_columns
+    columns

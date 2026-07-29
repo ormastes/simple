@@ -25,6 +25,7 @@ use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{
     is_opaque,
     is_tuple_origin,
     is_potentially_trustworthy,
+    schemeful_site_key,
     same_site
 }
 use std.gc_async_mut.http.types.{is_safe_method}
@@ -119,6 +120,9 @@ pub fn validate_set_cookie(cookie: Cookie, origin: Origin, now: i64) -> CookieVe
     if _same_site_is_none(cookie) and not cookie.secure:
         return CookieVerdict.reject("samesite-none-requires-secure")
 
+    if cookie.partitioned and not cookie.secure:
+        return CookieVerdict.reject("partitioned-requires-secure")
+
     if cookie.secure and not is_potentially_trustworthy(origin):
         return CookieVerdict.reject("secure-attribute-requires-secure-origin")
 
@@ -150,6 +154,12 @@ pub fn validate_set_cookie(cookie: Cookie, origin: Origin, now: i64) -> CookieVe
         return CookieVerdict.reject("already-expired")
 
     return CookieVerdict.accept()
+
+pub fn cookie_partition_key(top_level_origin: Origin) -> text:
+    """Canonical schemeful-site partition key for the top-level owner."""
+    if is_opaque(top_level_origin) or not is_tuple_origin(top_level_origin):
+        return ""
+    return schemeful_site_key(top_level_origin)
 
 pub fn effective_domain(cookie: Cookie, origin: Origin) -> text:
     """Jar key for an accepted cookie: the Domain attribute, else host-only."""
@@ -281,6 +291,8 @@ pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
             secure: cookie.secure,
             http_only: cookie.http_only,
             same_site: cookie.same_site,
+            partitioned: cookie.partitioned,
+            partition_key: cookie.partition_key,
             expires_at: expiry
         }
     if expires_at == cookie.expires_at:
@@ -288,7 +300,8 @@ pub fn apply_max_age(cookie: Cookie, header: text, now: i64) -> Cookie:
     return Cookie {
         name: cookie.name, value: cookie.value, domain: cookie.domain,
         path: cookie.path, secure: cookie.secure, http_only: cookie.http_only,
-        same_site: cookie.same_site, expires_at: expires_at
+        same_site: cookie.same_site, partitioned: cookie.partitioned,
+        partition_key: cookie.partition_key, expires_at: expires_at
     }
 
 fn _month_number(raw: text) -> i64:

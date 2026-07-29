@@ -25,6 +25,42 @@ This is subprocess integration evidence; native artifact admission and
 installed-production proof remain separate release checks. Other scenarios in
 the executable spec retain their explicit fail-closed placeholders.
 
+## Retained Simple Script callback evidence
+
+REQ-WEB-BROWSER-005/006 require `text/simple` callbacks to remain callable
+after document loading without reopening the denied ambient compiler runner.
+
+1. Register four callback identities in one inline `text/simple` program.
+2. Schedule identity 41 through both `requestAnimationFrame` and a timeout,
+   then require the same retained body to run at 5 ms and 10 ms.
+3. Require a second timeout to mutate live body HTML at 10 ms.
+4. Require an interval to mutate the active stylesheet at 15 ms, prove the
+   resulting blue box through canonical renderer pixel output, and repeat at
+   30 ms on the BrowserSession animation clock without invalidating the
+   unchanged stylesheet twice.
+5. Cancel a fourth timeout before it fires and require its title mutation to
+   remain absent.
+6. Require an unsupported `unsafe_eval` command to emit a bounded warning and
+   never enter `ScriptRunner.run_script`.
+
+The scenario was authored before implementation. Source now retains bounded
+callback bodies in `SimpleScriptExecutor`, schedules them only through its
+existing `EventLoop`, and re-enters the constrained BrowserSession evaluator
+when due. Execution remains blocked by the unhealthy deployed pure-Simple
+runtime; no bootstrap or Rust-seed fallback is used.
+
+### Immediate Simple Script stylesheet finalization
+
+The separate immediate-style scenario proves that a load-time `style_html`
+command survives document finalization in the one canonical stylesheet:
+
+1. Load a red author stylesheet before one inline `text/simple` block.
+2. Apply a blue `style_html` override from that block.
+3. Require the finalized stylesheet to retain the author CSS followed exactly
+   once by the script CSS.
+4. Render through the canonical browser renderer and require blue pixels with
+   no red pixels.
+
 ## Fixed CSS image background evidence
 
 REQ-WEB-BROWSER-003/004 require one resolved two-color image to pass through
@@ -102,6 +138,35 @@ to change the resource revision without serializing unchanged HTML, linked CSS
 completion to change the style revision, and close to clear real BrowserSession
 resources, bindings, requests, load state, runtime/timers, and overrides.
 
+The modern production-browser scenario
+`should invalidate only dirty retained browser render stages` records this
+exact functional matrix:
+
+| Change | serialize | parse | CSS | style | layout | paint | composition |
+|---|---:|---:|---:|---:|---:|---:|---|
+| title or DOM | +1 | +1 | +1 | +1 | +1 | +1 | revision +1; title checksum stable, painted DOM checksum changes |
+| stylesheet completion | +1 | +1 | +1 | +1 | +1 | +1 | revision +1 |
+| image pixel replacement | +0 | +0 | +0 | +0 | +0 | +1 | revision +1; Draw IR checksum stable because pixels are retained out of band |
+| viewport resize | +0 | +0 | +1 | +1 | +1 | +1 | revision +1 |
+| active CSS animation | +0 | +0 | +0 | +1 | +1 | +1 | revision +1 and checksum changes |
+| scroll or caret blink | +0 | +0 | +0 | +0 | +0 | +1 | revision +1 and checksum changes |
+| navigation replacement | +1 | +1 | +1 | +1 | +1 | +1 | revision +1; retained counts replace rather than append |
+| unchanged frame | +0 | +0 | +0 | +0 | +0 | +0 | revision/checksum stable; reuse +1 |
+| close | — | — | — | — | — | — | retained node/style/box/command counts zero |
+
+Four same-shape navigation replacements must keep each retained count exactly
+at its initial document bound before close. These are source-level functional
+counter/checksum oracles only. The deployed pure-Simple target remains
+unavailable, so the scenario is runtime RED/unexecuted; no timing, RSS,
+10,000-cycle, NFR-WEB-BROWSER-003, bootstrap, or Rust-seed evidence is claimed.
+
+Composition checksums are evidence-only and lazy. Rendering updates the
+composition revision and invalidates the prior digest but does not serialize or
+hash Draw IR. The scenario explicitly calls
+`SimpleWebRenderSession.composition_checksum()` only at comparison points;
+repeated requests for an unchanged composition reuse the digest cached under
+that composition revision.
+
 ## Retained callable DOM event evidence
 
 REQ-WEB-BROWSER-005/006/007/008 require retained JavaScript callables and
@@ -109,25 +174,41 @@ inline handlers to use one capture, target, bubble, cancellation, and
 default-action path while preserving Simple Script document state.
 
 1. Open a live BrowserSession document seeded by Simple Script.
-2. Dispatch document/window custom events and require their target listeners.
-3. Dispatch a button click and require window/document/ancestor capture,
+2. Dispatch a button click and require window/document/ancestor capture,
    target capture, the inline handler, target bubble, and ancestor/document/
    window bubble in exact order.
-4. Add and remove the same listener 300 times, then require only live listeners,
+3. Add and remove the same listener 300 times, then require only live listeners,
    `preventDefault`, and no link navigation request.
-5. Require `stopImmediatePropagation` to suppress the later target listener and
+4. Require `stopImmediatePropagation` to suppress the later target listener and
    all bubbling, then require a queued `requestAnimationFrame` callback.
+5. Require listener `this`, `currentTarget`, and `eventPhase` to match the
+   current target; require `preventDefault()` to be a no-op when `cancelable`
+   is false; and require `currentTarget == null` with `eventPhase == 0` after
+   dispatch.
+6. Remove a later listener from an earlier callback and require it to be
+   skipped, while a listener added by that callback waits for the next event.
 
-This scenario was authored before implementation and remains intentionally
-RED. The foundation now provides `JsRuntime.invoke_callable_with_this`, one
-executor seam inside `be_dom_dispatch_event_path`, and bounded reuse of removed
-listener slots in the existing parallel arrays. BrowserSession does not yet
-retain JavaScript function values for window/document/element listeners,
-materialize one shared host Event object, or route JavaScript
-`dispatchEvent()` into that seam. Simple Script remains command-only rather
+This scenario was authored before implementation and remains partially RED.
+BrowserSession now retains JavaScript function values for window, document,
+and element listeners in a bounded tombstone-reusing registry. Host-originated
+events materialize one shared Event object and invoke those callables through
+the executor seam in the canonical DOM capture/target/bubble dispatcher;
+cancellation therefore affects the same dispatch and its default action.
+Synchronous JavaScript-originated `dispatchEvent()` remains explicitly
+fail-closed because invoking the host dispatcher from an active interpreter
+would require unsafe re-entry, and Simple Script remains command-only rather
 than pretending to retain callables. Doc generation and execution remain
 blocked by the unhealthy deployed pure-Simple runtime. No bootstrap, seed
 fallback, asynchronous event queue, or second JavaScript dispatcher was used.
+
+### JavaScript-originated synchronous dispatch RED row
+
+The separate `should fail closed for synchronous JavaScript-originated
+dispatchEvent` scenario proves the current boundary without contaminating the
+host-listener PASS evidence. `window.dispatchEvent(...)` returns `false`,
+does not invoke the retained callback, leaves document state unchanged, and
+records an explicit warning. Delivering that event synchronously remains RED
+until the interpreter can enter the host dispatcher without unsafe re-entry.
 
 ## Forced HTML line-break evidence
 
@@ -190,3 +271,34 @@ accepted the multibyte overflow, replaced the draft, and reported one callback,
 while the primary address editor already enforced the UTF-8 byte limit.
 Execution remains blocked by the unhealthy deployed pure-Simple runtime; no
 bootstrap or Rust-seed result is claimed.
+
+## Browser chrome navigation protocol evidence
+
+REQ-WEB-BROWSER-009/010 require browser chrome and page navigation to use one
+parent-owned controller with correlated renderer commands.
+
+1. Arm Back in one secondary window, then arm Address in another window.
+2. Require the old window's late release to emit no callback or navigation,
+   while the current window's matching release focuses its address editor.
+3. Replace Back with Address in the same window and require the late Back
+   release to preserve the newer Address arm.
+4. Replace page press with chrome press and chrome press with page press;
+   require each stale release to preserve the newer owner and matching release.
+5. Edit and cancel the address, requiring the committed startup state to return,
+   then require Favorite to route once to its parent-owned persistence path.
+6. Decode real `open`, `back`, `forward`, `stop`, `reload`, and `home` command
+   wires and require pending history to leave committed history unchanged.
+7. Require Stop to revoke the permit and pending document commit.
+8. Decode the bookmark snapshot and authorize one page-link document request
+   through the existing parent permit.
+9. Feed a command from another renderer generation into the production decoder
+   and require decoder-only protocol denial.
+10. Close an armed registry and require teardown to clear its global press owner.
+
+The scenario was authored before the implementation fix. Its pre-fix RED is
+state/protocol observable: pressing chrome in a second window overwrote the
+global press owner but left the first entry armed, so a late release to the
+first window could still execute its stale control. The registry now has one
+global chrome-press owner and clears stale per-window ownership when that owner
+changes or is torn down. Execution remains blocked by the unhealthy deployed
+pure-Simple runtime; no bootstrap or Rust-seed result is claimed.

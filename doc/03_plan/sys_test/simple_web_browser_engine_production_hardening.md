@@ -337,6 +337,20 @@ BrowserSession DOM/source/history, image/binding, request/load, runtime/timer,
 and override owners. This is functional invalidation evidence, not
 NFR-WEB-BROWSER-003 timing/RSS evidence.
 
+Selective invalidation source status (2026-07-29): the modern system scenario
+and focused worker spec now assert the entire table above, including a
+dedicated title-only full-stage invalidation whose Draw IR checksum remains
+stable, out-of-band image-pixel repaint whose Draw IR checksum remains stable,
+changed viewport/animation/scroll/caret checksums, four exact retained-count
+replacement plateaus, and close-to-zero. The renderer retains the existing
+canonical nodes/rules/base styles/raw layout/composition and shares the normal
+Draw IR composition tail; it adds no parser, WebIR, renderer, or pixel cache.
+Execution remains RED/unavailable because the deployed pure-Simple runtime is
+unhealthy. Static counter assertions are not release performance evidence.
+Draw IR checksums are requested lazily by tests and cached by composition
+revision; the production render path never serializes or hashes Draw IR solely
+to populate evidence.
+
 Use frozen steps `Reuse parsed layout work across unchanged animation frames`
 and `Close the page and reclaim browser resources`, with
 `_check_budget_row`/`_check_resource_reclaimed`. Assertions read counters from

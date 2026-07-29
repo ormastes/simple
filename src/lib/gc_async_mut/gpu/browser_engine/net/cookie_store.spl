@@ -46,7 +46,8 @@ fn _jar_allows_cookie(jar_key: text, cookie: Cookie, origin: Origin) -> bool:
 pub fn parse_set_cookie(header: text) -> Cookie:
     """Parse a Set-Cookie header value into a Cookie struct.
 
-    Handles: name=value; Domain=...; Path=...; Secure; HttpOnly; SameSite=...
+    Handles: name=value; Domain=...; Path=...; Secure; HttpOnly; SameSite=...;
+    Partitioned.
     Defaults: path="/", same_site=Lax, secure=false, http_only=false.
     """
     var name = ""
@@ -56,6 +57,7 @@ pub fn parse_set_cookie(header: text) -> Cookie:
     var secure = false
     var http_only = false
     var same_site = SameSite.Lax
+    var partitioned = false
 
     val parts = header.split(";")
     var i = 0
@@ -82,6 +84,8 @@ pub fn parse_set_cookie(header: text) -> Cookie:
                 secure = true
             elif lowered == "httponly":
                 http_only = true
+            elif lowered == "partitioned":
+                partitioned = true
             elif lowered.starts_with("samesite="):
                 val eq = part.index_of("=")
                 val ss_val = part.slice(eq + 1, part.len()).trim().lower()
@@ -100,6 +104,8 @@ pub fn parse_set_cookie(header: text) -> Cookie:
         secure: secure,
         http_only: http_only,
         same_site: same_site,
+        partitioned: partitioned,
+        partition_key: "",
         expires_at: 0
     }
 
@@ -123,8 +129,18 @@ pub fn apply_default_path(cookie: Cookie, header: text, request_path: text) -> C
     return Cookie {
         name: cookie.name, value: cookie.value, domain: cookie.domain, path: path,
         secure: cookie.secure, http_only: cookie.http_only,
-        same_site: cookie.same_site, expires_at: cookie.expires_at
+        same_site: cookie.same_site, partitioned: cookie.partitioned,
+        partition_key: cookie.partition_key, expires_at: cookie.expires_at
     }
+
+fn _cookie_with_partition(c: Cookie, partition_key: text) -> Cookie:
+    Cookie(
+        name: c.name, value: c.value, domain: c.domain, path: c.path,
+        secure: c.secure, http_only: c.http_only, same_site: c.same_site,
+        partitioned: c.partitioned,
+        partition_key: if c.partitioned: partition_key else: "",
+        expires_at: c.expires_at
+    )
 
 pub class CookieJar:
     """A collection of cookies for a single domain."""
@@ -140,7 +156,8 @@ pub class CookieJar:
         while i < self.cookies.len():
             val existing = self.cookies[i]
             i = i + 1
-            if existing.name == c.name and existing.path == c.path:
+            if (existing.name == c.name and existing.path == c.path and
+                existing.partition_key == c.partition_key):
                 self.cookies[i - 1] = c
                 replaced = true
         if not replaced:
@@ -266,7 +283,8 @@ pub class CookieStore:
         while j < jar.cookies.len():
             val existing = jar.cookies[j]
             j = j + 1
-            if existing.name == c.name and existing.path == c.path:
+            if (existing.name == c.name and existing.path == c.path and
+                existing.partition_key == c.partition_key):
                 is_replace = true
 
         if jar.count() >= self._max_per_domain and not is_replace:
@@ -307,7 +325,8 @@ pub class CookieStore:
                 var jar = self._jars[index]
                 var kept: [Cookie] = []
                 for existing in jar.cookies:
-                    if existing.name != c.name or existing.path != c.path:
+                    if (existing.name != c.name or existing.path != c.path or
+                        existing.partition_key != c.partition_key):
                         kept.push(existing)
                 jar.cookies = kept
                 self._jars[index] = jar
@@ -328,6 +347,7 @@ pub class CookieStore:
             if CookieStore._domains_overlap(self._domains[index], jar_key):
                 for existing in self._jars[index].cookies:
                     if (existing.secure and existing.name == c.name and
+                        existing.partition_key == c.partition_key and
                         policy_path_matches(existing.path, c.path)):
                         return true
             index = index + 1
@@ -341,7 +361,9 @@ pub class CookieStore:
         """
         self._store_under(c.domain, c)
 
-    me fn store_from_origin(c: Cookie, origin: Origin, now: i64) -> CookieVerdict:
+    me fn store_from_origin(
+        c: Cookie, origin: Origin, now: i64, partition_key: text = ""
+    ) -> CookieVerdict:
         """Admit a `Set-Cookie` from `origin`. The enforcing store entrypoint.
 
         The verdict is `cookie_policy.validate_set_cookie`; a rejected cookie
@@ -350,46 +372,60 @@ pub class CookieStore:
         empty string.
         """
         self._prune(now)
-        var admitted = c
-        if is_expired(c, now):
+        if c.partitioned and partition_key == "":
+            return CookieVerdict.reject(
+                "partitioned-cookie-requires-partition-key"
+            )
+        val stored = _cookie_with_partition(c, partition_key)
+        var admitted = stored
+        if is_expired(stored, now):
             admitted = Cookie(
-                name: c.name, value: c.value, domain: c.domain, path: c.path,
-                secure: c.secure, http_only: c.http_only,
-                same_site: c.same_site, expires_at: 0
+                name: stored.name, value: stored.value,
+                domain: stored.domain, path: stored.path,
+                secure: stored.secure, http_only: stored.http_only,
+                same_site: stored.same_site, partitioned: stored.partitioned,
+                partition_key: stored.partition_key, expires_at: 0
             )
         val verdict = validate_set_cookie(admitted, origin, now)
         if not verdict.accepted:
             return verdict
         val jar_key = effective_domain(admitted, origin)
         if (not is_potentially_trustworthy(origin) and
-            self._secure_cookie_collision(jar_key, c)):
+            self._secure_cookie_collision(jar_key, stored)):
             return CookieVerdict.reject("insecure-origin-cannot-replace-secure-cookie")
-        if is_expired(c, now):
-            self._remove_under(jar_key, c)
+        if is_expired(stored, now):
+            self._remove_under(jar_key, stored)
             return verdict
-        self._store_under(jar_key, c)
+        self._store_under(jar_key, stored)
         return verdict
 
     me fn validate_from_script(
-        c: Cookie, origin: Origin, now: i64
+        c: Cookie, origin: Origin, now: i64, partition_key: text = ""
     ) -> CookieVerdict:
         """Validate `document.cookie` without admitting the candidate."""
         self._prune(now)
         if c.http_only:
             return CookieVerdict.reject("script-cannot-set-httponly")
-        var admitted = c
-        if is_expired(c, now):
+        if c.partitioned and partition_key == "":
+            return CookieVerdict.reject(
+                "partitioned-cookie-requires-partition-key"
+            )
+        val stored = _cookie_with_partition(c, partition_key)
+        var admitted = stored
+        if is_expired(stored, now):
             admitted = Cookie(
-                name: c.name, value: c.value, domain: c.domain, path: c.path,
-                secure: c.secure, http_only: c.http_only,
-                same_site: c.same_site, expires_at: 0
+                name: stored.name, value: stored.value,
+                domain: stored.domain, path: stored.path,
+                secure: stored.secure, http_only: stored.http_only,
+                same_site: stored.same_site, partitioned: stored.partitioned,
+                partition_key: stored.partition_key, expires_at: 0
             )
         val verdict = validate_set_cookie(admitted, origin, now)
         if not verdict.accepted:
             return verdict
         val jar_key = effective_domain(admitted, origin)
         if (not is_potentially_trustworthy(origin) and
-            self._secure_cookie_collision(jar_key, c)):
+            self._secure_cookie_collision(jar_key, stored)):
             return CookieVerdict.reject(
                 "insecure-origin-cannot-replace-secure-cookie"
             )
@@ -397,19 +433,22 @@ pub class CookieStore:
         while i < self._domains.len():
             if self._domains[i] == jar_key:
                 for existing in self._jars[i].cookies:
-                    if (existing.http_only and existing.name == c.name and
-                        existing.path == c.path):
+                    if (existing.http_only and existing.name == stored.name and
+                        existing.path == stored.path and
+                        existing.partition_key == stored.partition_key):
                         return CookieVerdict.reject("script-cannot-overwrite-httponly")
             i = i + 1
         verdict
 
-    me fn store_from_script(c: Cookie, origin: Origin, now: i64) -> CookieVerdict:
+    me fn store_from_script(
+        c: Cookie, origin: Origin, now: i64, partition_key: text = ""
+    ) -> CookieVerdict:
         """Admit `document.cookie` without exposing or replacing HttpOnly rows."""
         self._prune(now)
-        val verdict = self.validate_from_script(c, origin, now)
+        val verdict = self.validate_from_script(c, origin, now, partition_key)
         if not verdict.accepted:
             return verdict
-        self.store_from_origin(c, origin, now)
+        self.store_from_origin(c, origin, now, partition_key)
 
     fn count() -> i64:
         return self._total_count()
@@ -420,7 +459,8 @@ pub class CookieStore:
         site_for_cookies: Origin?,
         method: text,
         is_top_level_navigation: bool,
-        now: i64
+        now: i64,
+        partition_key: text = ""
     ) -> text:
         """Cookie header for a network request. Every cookie passes `cookie_applies`.
 
@@ -436,14 +476,19 @@ pub class CookieStore:
             while j < jar.cookies.len():
                 val c = jar.cookies[j]
                 j = j + 1
-                if (_jar_allows_cookie(self._domains[i - 1], c, origin) and
+                if ((c.partition_key == "" or
+                    c.partition_key == partition_key) and
+                    _jar_allows_cookie(self._domains[i - 1], c, origin) and
                     cookie_applies(c, origin, request_path, site_for_cookies, method, is_top_level_navigation, now)):
                     if result != "":
                         result = result + "; "
                     result = result + c.name + "=" + c.value
         return result
 
-    me fn script_cookie_header(origin: Origin, request_path: text, now: i64) -> text:
+    me fn script_cookie_header(
+        origin: Origin, request_path: text, now: i64,
+        partition_key: text = ""
+    ) -> text:
         """The `document.cookie` value visible to script in `origin`.
 
         Same attachment rule as a same-site request, plus
@@ -460,6 +505,7 @@ pub class CookieStore:
                 val c = jar.cookies[j]
                 j = j + 1
                 if (script_visible(c) and
+                    (c.partition_key == "" or c.partition_key == partition_key) and
                     _jar_allows_cookie(self._domains[i - 1], c, origin)):
                     if cookie_applies(c, origin, request_path, Some(origin), "GET", true, now):
                         if result != "":
@@ -479,7 +525,9 @@ pub class CookieStore:
                 secure: false,
                 http_only: false,
                 same_site: SameSite.Lax,
-        expires_at: 0
+                partitioned: false,
+                partition_key: "",
+                expires_at: 0
             }
             self.store(c)
             i = i + 1

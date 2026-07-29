@@ -282,7 +282,9 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - Port `examples/11_advanced/browser/feature/parser/html_tokenizer.spl` + tree builder (5 state files) → canonical engine, replacing the current minimal parser
 - Implement missing insertion modes: in_head, in_select, in_template, after_after_body, foreign_content
 - Complete normal flow: margin collapse, inline formatting context, anonymous block generation
-- Add `<table>` layout (basic — rows, cells, auto column sizing)
+- Fixed `<table>` formatting is implemented for direct and row-grouped cells,
+  captions, padding/borders, and bounded `colspan`; auto column sizing,
+  `rowspan`, and collapsed-border conflict resolution remain.
 
 **Gate:** WHATWG tokenizer test suite >= 90% pass. Normal flow WPT 100% (2/2 → 2/2). Table rendering for Wikipedia-class pages. 132 corpus still green.
 

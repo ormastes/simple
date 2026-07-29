@@ -21,6 +21,10 @@ use std.gc_async_mut.gpu.browser_engine.script.network_api.{ScriptFetchRequest,
     ScriptFetchResponse, fetch_send, script_fetch_to_net_request,
     script_response_from_net}
 
+val SIMPLE_SCRIPT_MAX_CALLBACKS: i64 = 256
+val SIMPLE_SCRIPT_MAX_CALLBACK_SOURCE_BYTES: i64 = 65536
+val SIMPLE_SCRIPT_MAX_PENDING_TASKS: i32 = 256
+
 pub class SimpleScriptExecutor:
     """Executor for Simple language code in the browser.
 
@@ -36,6 +40,9 @@ pub class SimpleScriptExecutor:
     _event_loop: EventLoop
     _console_buf: ConsoleBuffer
     _dom_dirty: bool
+    _callback_ids: [i64]
+    _callback_sources: [text]
+    _callback_count: i64
     fetch_dispatch: FetchDispatch?
     _runner: ScriptRunner
 
@@ -46,9 +53,89 @@ pub class SimpleScriptExecutor:
             _event_loop: event_loop,
             _console_buf: console_buf,
             _dom_dirty: false,
+            _callback_ids: [],
+            _callback_sources: [],
+            _callback_count: 0,
             fetch_dispatch: nil,
             _runner: ScriptRunner.new()
         )
+
+    me reset(dom_root: BeDomNode):
+        """Bind a new document and discard callbacks and work from the old one."""
+        self._dom_root = dom_root
+        self._event_loop = EventLoop.new()
+        self._callback_ids = []
+        self._callback_sources = []
+        self._callback_count = 0
+        self._dom_dirty = false
+
+    me bind_dom(dom_root: BeDomNode):
+        """Update the live DOM binding without discarding retained callbacks."""
+        self._dom_root = dom_root
+
+    me register_callback(callback_id: i64, source: text) -> bool:
+        """Retain one bounded command body under a stable callback identity."""
+        if (callback_id < 0 or source.trim() == "" or
+            source.len() > SIMPLE_SCRIPT_MAX_CALLBACK_SOURCE_BYTES):
+            return false
+        var i = 0
+        while i < self._callback_ids.len():
+            if self._callback_ids[i] == callback_id:
+                self._callback_sources[i] = source
+                return true
+            i = i + 1
+        if self._callback_ids.len() >= SIMPLE_SCRIPT_MAX_CALLBACKS:
+            return false
+        self._callback_ids.push(callback_id)
+        self._callback_sources.push(source)
+        true
+
+    fn has_callback(callback_id: i64) -> bool:
+        """Return whether callback_id names a retained command body."""
+        var i = 0
+        while i < self._callback_ids.len():
+            if self._callback_ids[i] == callback_id:
+                return true
+            i = i + 1
+        false
+
+    me schedule_timeout(callback_id: i64, now_micros: i64, delay_ms: i64) -> i64:
+        """Schedule a retained callback once on the canonical EventLoop."""
+        if self._event_loop.pending_timer_count() >= SIMPLE_SCRIPT_MAX_PENDING_TASKS:
+            return -1
+        val delay = if delay_ms > 0: delay_ms else: 0
+        self._event_loop.schedule_timer(
+            callback_id, now_micros + delay * 1000, 0
+        )
+
+    me schedule_interval(callback_id: i64, now_micros: i64, delay_ms: i64) -> i64:
+        """Schedule a retained callback repeatedly on the canonical EventLoop."""
+        if (delay_ms <= 0 or
+            self._event_loop.pending_timer_count() >=
+                SIMPLE_SCRIPT_MAX_PENDING_TASKS):
+            return -1
+        self._event_loop.schedule_timer(
+            callback_id, now_micros + delay_ms * 1000, delay_ms * 1000
+        )
+
+    me schedule_animation_frame(callback_id: i64) -> bool:
+        """Schedule a retained callback in the canonical next-frame slot."""
+        if self._event_loop.pending_raf_count() >= SIMPLE_SCRIPT_MAX_PENDING_TASKS:
+            return false
+        self._event_loop.schedule_raf(callback_id)
+        true
+
+    me cancel_timer(timer_id: i64):
+        """Cancel a timeout or interval by its canonical EventLoop identity."""
+        self._event_loop.cancel_timer(timer_id)
+
+    fn _callback_source(callback_id: i64) -> text:
+        var i = 0
+        while i < self._callback_ids.len():
+            if self._callback_ids[i] == callback_id:
+                return self._callback_sources[i]
+            i = i + 1
+        ""
 
     me execute(source: text, dom_root: BeDomNode):
         """Parse and execute Simple code against dom_root.
@@ -70,7 +157,7 @@ pub class SimpleScriptExecutor:
             self._console_buf.append("log", stdout, 0)
         self._dom_dirty = true
 
-    me tick(now_micros: i64):
+    me tick(now_micros: i64) -> [text]:
         """Fire expired timers and drain microtasks from event loop.
 
         Callback IDs are owned by the canonical EventLoop. Draining any timer
@@ -78,8 +165,31 @@ pub class SimpleScriptExecutor:
         """
         val timers = self._event_loop.drain_expired(now_micros)
         val raf = self._event_loop.drain_raf()
+        var callbacks: [text] = []
+        for callback_id in timers:
+            val source = self._callback_source(callback_id)
+            if source != "":
+                callbacks.push(source)
+                self._callback_count = self._callback_count + 1
+        for callback_id in raf:
+            val source = self._callback_source(callback_id)
+            if source != "":
+                callbacks.push(source)
+                self._callback_count = self._callback_count + 1
         if timers.len() > 0 or raf.len() > 0:
             self._dom_dirty = true
+        callbacks
+
+    fn callback_count() -> i64:
+        """Return the number of retained callback invocations."""
+        self._callback_count
+
+    fn next_due_ms() -> i64:
+        """Return the next callback deadline on the shared millisecond clock."""
+        val due = self._event_loop.next_due_micros()
+        if due < 0:
+            return -1
+        due / 1000
 
     me inject_dom_event(event: BeDomEvent):
         """Dispatch a DOM event into registered Simple event listeners.

@@ -311,9 +311,16 @@ impl BrowserSession:
             return self._advance_script_loading()
         Err("no active wasm load")
 
+    me _set_simple_script_title(value: text):
+        if self.current_title == value:
+            return
+        self.current_title = value
+        self._advance_ui_access_revision()
+
     me _set_simple_script_body_text(value: text):
         self.current_body_html = escape_html_text(value)
         self._replace_current_body_children(self.current_body_html)
+        self.simple_script_executor.bind_dom(self.current_dom)
         if val Some(state) = self.runtime_state:
             var runtime = state.runtime
             runtime.set_host_property(state.body_id, "textContent", JsValue.String(v: value))
@@ -327,6 +334,7 @@ impl BrowserSession:
     me _set_simple_script_body_html(value: text):
         self.current_body_html = value
         self._replace_current_body_children(value)
+        self.simple_script_executor.bind_dom(self.current_dom)
         if val Some(state) = self.runtime_state:
             var runtime = state.runtime
             runtime.set_host_property(state.body_id, "innerHTML", JsValue.String(v: value))
@@ -342,7 +350,20 @@ impl BrowserSession:
             state.bind_dom(self.current_dom)
             self.runtime_state = Some(state)
 
-    me _execute_simple_script(script_source: text, load: BrowserLoadState):
+    me _set_simple_script_style_html(value: text):
+        if self.current_style_html == value:
+            return
+        self.current_style_html = value
+        self._advance_style_revision()
+        self._mark_css_animation_reconcile(true)
+
+    me _simple_script_warning(load: BrowserLoadState?, warning: text):
+        if val Some(active) = load:
+            active.append_warning(warning)
+        else:
+            self._append_warning(warning)
+
+    me _execute_simple_script(script_source: text, load: BrowserLoadState?):
         var simple2d = canvas_get_context_simple2d(320, 240)
         var simple3d = canvas_get_context_simple3d(320, 240)
         var has_simple2d_commands = false
@@ -353,13 +374,126 @@ impl BrowserSession:
             if line == "" or line.starts_with("#"):
                 continue
             if line.starts_with("title "):
-                self.current_title = _simple_script_unquote(_simple_script_tail(line, "title "))
+                self._set_simple_script_title(
+                    _simple_script_unquote(
+                        _simple_script_tail(line, "title ")
+                    )
+                )
                 continue
             if line.starts_with("body_text "):
                 self._set_simple_script_body_text(_simple_script_unquote(_simple_script_tail(line, "body_text ")))
                 continue
             if line.starts_with("body_html "):
                 self._set_simple_script_body_html(_simple_script_unquote(_simple_script_tail(line, "body_html ")))
+                continue
+            if line.starts_with("style_html "):
+                val style_html = _simple_script_unquote(
+                    _simple_script_tail(line, "style_html ")
+                )
+                if val Some(active) = load:
+                    val _ = active.set_simple_script_style_html(style_html)
+                else:
+                    self._set_simple_script_style_html(style_html)
+                continue
+            if line.starts_with("callback "):
+                val callback = _simple_script_tail(line, "callback ")
+                val separator = callback.index_of("|")
+                if separator <= 0:
+                    self._simple_script_warning(
+                        load,
+                        "simple script error: callback requires id|command"
+                    )
+                    continue
+                val callback_id_text = callback.slice(0, separator).trim()
+                val callback_source = callback.slice(
+                    separator + 1, callback.len()
+                ).trim()
+                if (not _simple_script_int_is_valid(callback_id_text) or
+                    not self.simple_script_executor.register_callback(
+                        _simple_script_int(
+                            callback_id_text, -1
+                        ).to_i64(),
+                        callback_source
+                    )):
+                    self._simple_script_warning(
+                        load,
+                        "simple script error: callback registration rejected"
+                    )
+                continue
+            if line.starts_with("timeout ") or line.starts_with("interval "):
+                val is_interval = line.starts_with("interval ")
+                val prefix = if is_interval: "interval " else: "timeout "
+                val args = _simple_script_tail(line, prefix).split(" ")
+                if args.len() < 2 or not _simple_script_args_are_ints(args, 2):
+                    self._simple_script_warning(
+                        load,
+                        "simple script error: {prefix.trim()} requires callback_id delay_ms"
+                    )
+                    continue
+                val callback_id = _simple_script_int(args[0], -1).to_i64()
+                val delay_ms = _simple_script_int(args[1], -1).to_i64()
+                if (not self.simple_script_executor.has_callback(callback_id) or
+                    delay_ms < 0):
+                    self._simple_script_warning(
+                        load,
+                        "simple script error: {prefix.trim()} callback or delay rejected"
+                    )
+                    continue
+                if is_interval:
+                    if self.simple_script_executor.schedule_interval(
+                        callback_id, self.monotonic_time_ms * 1000, delay_ms
+                    ) < 0:
+                        self._simple_script_warning(
+                            load,
+                            "simple script error: interval delay must be positive"
+                        )
+                else:
+                    if self.simple_script_executor.schedule_timeout(
+                        callback_id, self.monotonic_time_ms * 1000, delay_ms
+                    ) < 0:
+                        self._simple_script_warning(
+                            load,
+                            "simple script error: timeout task limit reached"
+                        )
+                continue
+            if line.starts_with("animation_frame "):
+                val callback_id_text = _simple_script_tail(
+                    line, "animation_frame "
+                )
+                if not _simple_script_int_is_valid(callback_id_text):
+                    self._simple_script_warning(
+                        load,
+                        "simple script error: animation_frame requires callback_id"
+                    )
+                    continue
+                val callback_id = _simple_script_int(
+                    callback_id_text, -1
+                ).to_i64()
+                if not self.simple_script_executor.has_callback(callback_id):
+                    self._simple_script_warning(
+                        load,
+                        "simple script error: animation_frame callback rejected"
+                    )
+                    continue
+                if not self.simple_script_executor.schedule_animation_frame(
+                    callback_id
+                ):
+                    self._simple_script_warning(
+                        load,
+                        "simple script error: animation_frame task limit reached"
+                    )
+                continue
+            if line.starts_with("cancel_timer "):
+                val timer_id = _simple_script_tail(line, "cancel_timer ")
+                if not _simple_script_int_is_valid(timer_id):
+                    self._simple_script_warning(
+                        load,
+                        "simple script error: cancel_timer requires timer_id"
+                    )
+                    continue
+                self.simple_script_executor.cancel_timer(
+                    _simple_script_int(timer_id, -1).to_i64()
+                )
                 continue
             if line.starts_with("simple2d.fill_rect "):
                 val args = _simple_script_tail(line, "simple2d.fill_rect ").split(" ")
@@ -374,9 +508,9 @@ impl BrowserSession:
                         )
                         has_simple2d_commands = true
                     else:
-                        load.append_warning("simple script error: simple2d.fill_rect numeric argument is invalid")
+                        self._simple_script_warning(load, "simple script error: simple2d.fill_rect numeric argument is invalid")
                 else:
-                    load.append_warning("simple script error: simple2d.fill_rect requires x y w h color")
+                    self._simple_script_warning(load, "simple script error: simple2d.fill_rect requires x y w h color")
                 continue
             if line.starts_with("simple2d.text "):
                 val args = _simple_script_tail(line, "simple2d.text ").split("|")
@@ -391,9 +525,9 @@ impl BrowserSession:
                         )
                         has_simple2d_commands = true
                     else:
-                        load.append_warning("simple script error: simple2d.text numeric argument is invalid")
+                        self._simple_script_warning(load, "simple script error: simple2d.text numeric argument is invalid")
                 else:
-                    load.append_warning("simple script error: simple2d.text requires x|y|text|font_size|color")
+                    self._simple_script_warning(load, "simple script error: simple2d.text requires x|y|text|font_size|color")
                 continue
             if line.starts_with("simple3d.clear_color "):
                 val args = _simple_script_tail(line, "simple3d.clear_color ").split(" ")
@@ -402,9 +536,9 @@ impl BrowserSession:
                         simple3d.clear_color(_simple_script_int(args[0], 0))
                         has_simple3d_commands = true
                     else:
-                        load.append_warning("simple script error: simple3d.clear_color numeric argument is invalid")
+                        self._simple_script_warning(load, "simple script error: simple3d.clear_color numeric argument is invalid")
                 else:
-                    load.append_warning("simple script error: simple3d.clear_color requires color")
+                    self._simple_script_warning(load, "simple script error: simple3d.clear_color requires color")
                 continue
             if line.starts_with("simple3d.camera_perspective "):
                 val args = _simple_script_tail(line, "simple3d.camera_perspective ").split(" ")
@@ -417,9 +551,9 @@ impl BrowserSession:
                         )
                         has_simple3d_commands = true
                     else:
-                        load.append_warning("simple script error: simple3d.camera_perspective numeric argument is invalid")
+                        self._simple_script_warning(load, "simple script error: simple3d.camera_perspective numeric argument is invalid")
                 else:
-                    load.append_warning("simple script error: simple3d.camera_perspective requires fov near far")
+                    self._simple_script_warning(load, "simple script error: simple3d.camera_perspective requires fov near far")
                 continue
             if line.starts_with("simple3d.triangle "):
                 val args = _simple_script_tail(line, "simple3d.triangle ").split(" ")
@@ -439,14 +573,14 @@ impl BrowserSession:
                         )
                         has_simple3d_commands = true
                     else:
-                        load.append_warning("simple script error: simple3d.triangle numeric argument is invalid")
+                        self._simple_script_warning(load, "simple script error: simple3d.triangle numeric argument is invalid")
                 else:
-                    load.append_warning("simple script error: simple3d.triangle requires x1 y1 z1 x2 y2 z2 x3 y3 z3 color")
+                    self._simple_script_warning(load, "simple script error: simple3d.triangle requires x1 y1 z1 x2 y2 z2 x3 y3 z3 color")
                 continue
             if line == "simple3d.submit_webgpu":
                 submit_simple3d_webgpu = true
                 continue
-            load.append_warning("simple script unsupported command: {line}")
+            self._simple_script_warning(load, "simple script unsupported command: {line}")
         if has_simple2d_commands:
             self._set_simple_script_body_html(simple2d.to_canvas2d_json())
         if has_simple3d_commands:
@@ -463,7 +597,7 @@ impl BrowserSession:
                 val current_idx = load.next_script_idx - 1
                 if current_idx >= 0 and current_idx < load.script_blocks.len() and load.script_blocks[current_idx].script_type == "text/simple":
                     self._apply_response_headers(response.headers, response.url)
-                    self._execute_simple_script(response.body, load)
+                    self._execute_simple_script(response.body, Some(load))
                 else if val Some(state) = self.runtime_state:
                     self._apply_response_headers(response.headers, response.url)
                     val eval_result = state.runtime.eval(response.body)
@@ -825,7 +959,7 @@ impl BrowserSession:
                     else if _script_type_is_wasm(block.script_type):
                         self._record_wasm_module(load.document_url, block.content, load)
                     else if block.script_type == "text/simple":
-                        self._execute_simple_script(block.content, load)
+                        self._execute_simple_script(block.content, Some(load))
                     else if val Some(state) = self.runtime_state:
                         self._trace_guest("eval inline script start")
                         val script_source = block.content
@@ -877,7 +1011,7 @@ impl BrowserSession:
                         if _script_type_is_wasm(block.script_type):
                             self._record_wasm_module(resolved, override_body, load)
                         else if block.script_type == "text/simple":
-                            self._execute_simple_script(override_body, load)
+                            self._execute_simple_script(override_body, Some(load))
                         else if val Some(state) = self.runtime_state:
                             var runtime = state.runtime
                             val eval_result = runtime.eval(override_body)
@@ -1100,13 +1234,17 @@ impl BrowserSession:
         self._replace_warnings(load.warnings)
 
     me _apply_response_headers(
-        headers: text, response_url: text, accept_cookies: bool = true
+        headers: text, response_url: text, accept_cookies: bool = true,
+        top_level_site_url: text = ""
     ):
         for line in headers.split("\n"):
             val trimmed = line.trim()
             if (accept_cookies and
                 trimmed.lower().starts_with("set-cookie:")):
-                self.apply_set_cookie_header(trimmed.substring(11).trim(), response_url)
+                self.apply_set_cookie_header(
+                    trimmed.substring(11).trim(), response_url,
+                    top_level_site_url
+                )
             elif trimmed.lower().starts_with("strict-transport-security:"):
                 self._apply_hsts_header(
                     trimmed.substring(26).trim(), response_url

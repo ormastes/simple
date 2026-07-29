@@ -194,11 +194,48 @@ closes a fresh admitted renderer. This proves crash and timeout cleanup without
 using raw process APIs or a generic test transport. Memory and restart-rate
 budget evidence remains unsupported.
 
+## Canonical cookie security and partitioning
+
+The cookie scenario exercises the shared `CookieStore`, `cookie_policy`, and
+`FetchEngine` owners directly. It admits a bounded host-only Secure, HttpOnly,
+SameSite=Strict cookie and proves positive same-site network attachment plus
+negative script, plaintext, wrong-path, cross-site, subdomain, and expiry
+outcomes.
+
+A Secure `Domain=example.test; SameSite=None; Partitioned` cookie is keyed by
+the canonical schemeful site of the top-level requester: scheme plus the
+existing public-suffix owner’s registrable domain, ignoring subdomain and port.
+Exact valid IP literals and exact `localhost` use their host directly; other
+single-label, opaque, malformed, and public-suffix-only origins have no key.
+The focused evidence covers ordinary DNS sites, scheme separation, subdomain
+collapse, and port independence. It does not claim localhost subdomains or
+other intranet single-label hosts.
+
+The cookie reaches an eligible subdomain only in its partition. A different
+top-level partition cannot attach or expose it, and `Partitioned` without
+`Secure` is rejected. Partitioned and unpartitioned cookies with the same name
+and path remain distinct during replacement and deletion, while script
+visibility still filters by partition and HttpOnly.
+
+The redirect oracle uses the canonical mock HTTP transport. A redirect response
+sets both ordinary and Partitioned HttpOnly cookies; the same `FetchEngine`
+follows the redirect and reuses its top-level requester partition. The assertion
+reads the final request observed by the HTTP transport itself and requires both
+cookies on that actual hop. Neither cookie is visible to script, and the
+Partitioned cookie is absent under a different top-level key.
+
+The companion `BrowserSession` scenario exercises the production document and
+network paths rather than calling the store directly. HTTP response admission,
+`document.cookie` writes and reads, outgoing request attachment, same-name
+partitioned/unpartitioned deletion, HttpOnly filtering, and top-level site
+changes all use the same canonical partition key. A sibling subdomain on a
+different port reuses the partition; an unrelated top-level site cannot.
+
 ## Still unsupported
 
 All other scenarios in the executable spec intentionally remain explicit
 failure placeholders: TLS and certificate identity, origin/CORS/CSP/redirect
-and mixed-content policy, cookies/storage,
+and mixed-content policy, remaining Web Storage integration,
 data/javascript/custom/external scheme policy, malformed/late/duplicate/
 renderer messages, renderer memory/resource/restart-rate containment, and
 conformance/fuzz corpus accounting.

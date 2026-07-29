@@ -1,4 +1,8 @@
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.*
+use std.gc_async_mut.gpu.browser_engine.layout_table.{
+    simple_web_collect_table_rows, simple_web_fixed_table_cell_span,
+    simple_web_fixed_table_column_count
+}
 
 class LayoutResult:
     bx: [i32]
@@ -635,6 +639,98 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         iw = 1
     val scrollbar_gutter = 15
     val content_height_limit = definite_content_height_limit(node, st)
+    if st.display == "table" and st.table_layout == "fixed":
+        val table_rows = simple_web_collect_table_rows(
+            nodes, child_index, i
+        )
+        val column_count = simple_web_fixed_table_column_count(
+            nodes, child_index, table_rows
+        )
+        var table_y = y + st.border_t + st.pad_t
+        var table_child = child_index.first_child[i]
+        while table_child >= 0:
+            if styles[table_child].display == "table-caption":
+                val caption = layout_with_style(
+                    nodes, styles, child_index, table_child,
+                    ix, table_y, iw, viewport_h,
+                    out_bx, out_by, out_bw, out_bh,
+                    out_wrap_starts, out_wrap_ends,
+                    out_intrinsic_widths, styles[table_child]
+                )
+                out_bx = caption.bx
+                out_by = caption.by
+                out_bw = caption.bw
+                out_bh = caption.bh
+                out_wrap_starts = caption.wrap_starts
+                out_wrap_ends = caption.wrap_ends
+                out_intrinsic_widths = caption.intrinsic_widths
+                table_y = table_y + caption.height
+            table_child = child_index.next_sibling[table_child]
+        var table_row_index = 0
+        while table_row_index < table_rows.rows.len():
+            val table_row = table_rows.rows[table_row_index]
+            val table_group = table_rows.groups[table_row_index]
+            if table_group >= 0 and out_bh[table_group] == 0:
+                out_bx[table_group] = ix
+                out_by[table_group] = table_y
+                out_bw[table_group] = iw
+            out_bx[table_row] = ix
+            out_by[table_row] = table_y
+            out_bw[table_row] = iw
+            var row_h = 1
+            var used_columns = 0
+            var cell = child_index.first_child[table_row]
+            while cell >= 0:
+                if styles[cell].display == "table-cell":
+                    val span = simple_web_fixed_table_cell_span(
+                        nodes[cell], column_count
+                    )
+                    val cell_x = ix + iw * used_columns / column_count
+                    var next_columns = used_columns + span
+                    if next_columns > column_count:
+                        next_columns = column_count
+                    val cell_right = (
+                        ix + iw * next_columns / column_count
+                    )
+                    val cell_result = layout_with_style(
+                        nodes, styles, child_index, cell,
+                        cell_x, table_y, cell_right - cell_x,
+                        viewport_h, out_bx, out_by, out_bw, out_bh,
+                        out_wrap_starts, out_wrap_ends,
+                        out_intrinsic_widths, styles[cell]
+                    )
+                    out_bx = cell_result.bx
+                    out_by = cell_result.by
+                    out_bw = cell_result.bw
+                    out_bh = cell_result.bh
+                    out_wrap_starts = cell_result.wrap_starts
+                    out_wrap_ends = cell_result.wrap_ends
+                    out_intrinsic_widths = cell_result.intrinsic_widths
+                    if cell_result.height > row_h:
+                        row_h = cell_result.height
+                    used_columns = next_columns
+                cell = child_index.next_sibling[cell]
+            cell = child_index.first_child[table_row]
+            while cell >= 0:
+                if styles[cell].display == "table-cell":
+                    out_bh[cell] = row_h
+                cell = child_index.next_sibling[cell]
+            out_bh[table_row] = row_h
+            table_y = table_y + row_h
+            if table_group >= 0:
+                out_bh[table_group] = table_y - out_by[table_group]
+            table_row_index = table_row_index + 1
+        var table_h = (
+            table_y - y + st.pad_b + st.border_b
+        )
+        if st.height_px > 0:
+            table_h = css_outer_height(node, st, st.height_px)
+        out_bh[i] = table_h
+        return relative_layout_result(
+            child_index, i, st, out_bx, out_by, out_bw, out_bh,
+            out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
+            table_h
+        )
     if st.display == "flex" and st.flex_direction != "column":
         val children_for_i_count = child_index.child_count[i]
         if st.flex_wrap != "nowrap":

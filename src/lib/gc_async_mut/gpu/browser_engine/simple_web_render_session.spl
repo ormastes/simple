@@ -6,12 +6,15 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
 use std.common.web.browser_renderer_protocol.{BrowserTextInputOverlay}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     SimpleWebLayoutDrawIrResult,
-    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images,
+    simple_web_layout_rerender_retained
 }
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance
 }
 use std.gc_async_mut.web.browser_session.{BrowserRenderSnapshot}
+use std.common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use std.common.crypto.sha256.{sha256_text}
 
 fn _simple_web_render_counter_next(value: i64) -> i64:
     if value >= 9223372036854775806: 9223372036854775806
@@ -71,6 +74,8 @@ pub class SimpleWebRenderSession:
     document_html: text
     current_result: SimpleWebLayoutDrawIrResult?
     counters: SimpleWebRenderCounters
+    checksum_revision: i64
+    checksum_cache: text
 
     static fn create() -> SimpleWebRenderSession:
         SimpleWebRenderSession(
@@ -88,7 +93,9 @@ pub class SimpleWebRenderSession:
             animation_time_ms: -1,
             document_html: "",
             current_result: nil,
-            counters: SimpleWebRenderCounters.create()
+            counters: SimpleWebRenderCounters.create(),
+            checksum_revision: -1,
+            checksum_cache: ""
         )
 
     me render(
@@ -102,6 +109,23 @@ pub class SimpleWebRenderSession:
         images: [SimpleOsHostGpuImageResource]
     ) -> SimpleWebLayoutDrawIrResult:
         val revisions = snapshot.revisions
+        val has_prior = self.current_result != nil
+        val document_changed = (
+            revisions.document_revision != self.document_revision
+        )
+        val style_changed = revisions.style_revision != self.style_revision
+        val resource_changed = (
+            revisions.resource_revision != self.resource_revision
+        )
+        val viewport_changed = width != self.width or height != self.height
+        val scroll_changed = scroll_y != self.scroll_y
+        val overlay_changed = (
+            overlay.target_key != self.overlay_target_key or
+            overlay.anchor_byte != self.overlay_anchor_byte or
+            overlay.focus_byte != self.overlay_focus_byte or
+            overlay.view_start_byte != self.overlay_view_start_byte or
+            overlay.caret_visible != self.overlay_caret_visible
+        )
         var animation_unchanged = animation_time_ms == self.animation_time_ms
         if (
             not animation_unchanged and
@@ -111,18 +135,11 @@ pub class SimpleWebRenderSession:
         ):
             animation_unchanged = true
         val reusable = (
-            self.current_result != nil and
+            has_prior and
             snapshot.document_html == nil and
-            revisions.document_revision == self.document_revision and
-            revisions.style_revision == self.style_revision and
-            revisions.resource_revision == self.resource_revision and
-            width == self.width and height == self.height and
-            scroll_y == self.scroll_y and
-            overlay.target_key == self.overlay_target_key and
-            overlay.anchor_byte == self.overlay_anchor_byte and
-            overlay.focus_byte == self.overlay_focus_byte and
-            overlay.view_start_byte == self.overlay_view_start_byte and
-            overlay.caret_visible == self.overlay_caret_visible and
+            not document_changed and not style_changed and
+            not resource_changed and not viewport_changed and
+            not scroll_changed and not overlay_changed and
             animation_unchanged
         )
         if reusable:
@@ -137,7 +154,15 @@ pub class SimpleWebRenderSession:
             self.counters.serialize_count = _simple_web_render_counter_next(
                 self.counters.serialize_count
             )
-        val result = (
+        val dirty_stage = if not has_prior or document_changed or style_changed:
+            "full"
+        elif viewport_changed:
+            "css"
+        elif not animation_unchanged:
+            "style"
+        else:
+            "paint"
+        val result = if dirty_stage == "full":
             simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images(
                 self.document_html,
                 width,
@@ -148,7 +173,12 @@ pub class SimpleWebRenderSession:
                 animation_instances,
                 images
             )
-        )
+        else:
+            simple_web_layout_rerender_retained(
+                self.current_result.unwrap(), dirty_stage, width, height,
+                animation_time_ms, scroll_y, overlay, animation_instances,
+                images
+            )
         self.document_revision = revisions.document_revision
         self.style_revision = revisions.style_revision
         self.resource_revision = revisions.resource_revision
@@ -162,24 +192,32 @@ pub class SimpleWebRenderSession:
         self.overlay_caret_visible = overlay.caret_visible
         self.animation_time_ms = animation_time_ms
         self.current_result = Some(result)
-        self.counters.parse_count = _simple_web_render_counter_next(
-            self.counters.parse_count
-        )
-        self.counters.css_count = _simple_web_render_counter_next(
-            self.counters.css_count
-        )
-        self.counters.style_count = _simple_web_render_counter_next(
-            self.counters.style_count
-        )
-        self.counters.layout_count = _simple_web_render_counter_next(
-            self.counters.layout_count
-        )
+        if dirty_stage == "full":
+            self.counters.parse_count = _simple_web_render_counter_next(
+                self.counters.parse_count
+            )
+        if dirty_stage == "full" or dirty_stage == "css":
+            self.counters.css_count = _simple_web_render_counter_next(
+                self.counters.css_count
+            )
+        if (
+            dirty_stage == "full" or dirty_stage == "css" or
+            dirty_stage == "style"
+        ):
+            self.counters.style_count = _simple_web_render_counter_next(
+                self.counters.style_count
+            )
+            self.counters.layout_count = _simple_web_render_counter_next(
+                self.counters.layout_count
+            )
         self.counters.paint_count = _simple_web_render_counter_next(
             self.counters.paint_count
         )
         self.counters.composition_revision = _simple_web_render_counter_next(
             self.counters.composition_revision
         )
+        self.checksum_revision = -1
+        self.checksum_cache = ""
         self.counters.retained_node_count = result.hit_index.nodes.len().to_i64()
         self.counters.retained_style_count = result.hit_index.styles.len().to_i64()
         self.counters.retained_box_count = result.hit_index.boxes.bx.len().to_i64()
@@ -187,6 +225,16 @@ pub class SimpleWebRenderSession:
             _simple_web_render_command_count(result)
         )
         result
+
+    me composition_checksum() -> text:
+        if self.current_result == nil:
+            return ""
+        if self.checksum_revision != self.counters.composition_revision:
+            self.checksum_cache = sha256_text(
+                draw_ir_to_sdn(self.current_result.unwrap().composition)
+            )
+            self.checksum_revision = self.counters.composition_revision
+        self.checksum_cache
 
     me close():
         self.document_revision = -1
@@ -198,3 +246,5 @@ pub class SimpleWebRenderSession:
         self.counters.retained_style_count = 0
         self.counters.retained_box_count = 0
         self.counters.retained_command_count = 0
+        self.checksum_revision = -1
+        self.checksum_cache = ""

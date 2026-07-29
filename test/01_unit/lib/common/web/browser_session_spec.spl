@@ -1431,6 +1431,144 @@ describe "BrowserSession script bridge":
             Err(e) =>
                 fail("Expected eval script document mutations to sync back to session state: {e}")
 
+    it "dispatches retained JavaScript listeners synchronously for host events":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/events",
+            "<html><body><div id='outer'><button id='run' " +
+            "onclick=\"document.title=document.title+'inline,'\">" +
+            "Run</button></div><a id='blocked' href='/escaped'>Blocked</a>" +
+            "<button id='halt'>Halt</button><button id='probe'>Probe</button>" +
+            "<button id='mutate'>Mutate</button></body></html>"
+        ).is_ok()).to_be(true)
+        expect(session.eval_script(
+            "document.title='';" +
+            "function note(label){return function(event){" +
+            "document.title=document.title+label+',';};}" +
+            "var outer=document.getElementById('outer');" +
+            "var run=document.getElementById('run');" +
+            "var blocked=document.getElementById('blocked');" +
+            "var halt=document.getElementById('halt');" +
+            "var probe=document.getElementById('probe');" +
+            "var mutate=document.getElementById('mutate');" +
+            "window.addEventListener('click',note('window-capture'),true);" +
+            "document.addEventListener('click',note('document-capture'),true);" +
+            "outer.addEventListener('click',note('outer-capture'),true);" +
+            "run.addEventListener('click',note('target-capture'),true);" +
+            "run.addEventListener('click',note('target-bubble'));" +
+            "outer.addEventListener('click',note('outer-bubble'));" +
+            "document.addEventListener('click',note('document-bubble'));" +
+            "window.addEventListener('click',note('window-bubble'));" +
+            "var removed=note('removed');var churn=0;" +
+            "while(churn<300){blocked.addEventListener('click',removed);" +
+            "blocked.removeEventListener('click',removed);churn=churn+1;}" +
+            "blocked.addEventListener('click',function(event){" +
+            "document.title=document.title+'cancel,';" +
+            "event.preventDefault();});" +
+            "halt.addEventListener('click',function(event){" +
+            "document.title=document.title+'halt-first,';" +
+            "event.stopImmediatePropagation();});" +
+            "halt.addEventListener('click',note('halt-after'));" +
+            "var lastEvent=null;var semantic='';" +
+            "probe.addEventListener('probe',function(event){" +
+            "semantic=(this===probe)+':'+" +
+            "(event.currentTarget===probe)+':'+event.eventPhase;" +
+            "lastEvent=event;event.preventDefault();});" +
+            "var late=function(event){document.title=document.title+'late,';};" +
+            "var added=function(event){document.title=document.title+'added,';};" +
+            "mutate.addEventListener('mutate',function(event){" +
+            "mutate.removeEventListener('mutate',late);" +
+            "mutate.addEventListener('mutate',added);" +
+            "document.title=document.title+'mutate,';});" +
+            "mutate.addEventListener('mutate',late);" +
+            "requestAnimationFrame(function(){" +
+            "document.title=document.title+'raf,';});"
+        ).is_ok()).to_be(true)
+
+        val ordered = session.dispatch_dom_event(
+            "run", "click", true, true
+        )
+        expect(ordered.actions.len()).to_equal(9)
+        expect(session.current_title).to_equal(
+            "window-capture,document-capture,outer-capture," +
+            "target-capture,inline,target-bubble,outer-bubble," +
+            "document-bubble,window-bubble,"
+        )
+
+        val canceled = session.dispatch_dom_event(
+            "blocked", "click", true, true
+        )
+        expect(canceled.event.default_prevented).to_be(true)
+        expect(canceled.default_action_allowed).to_be(false)
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.current_title).to_end_with(
+            "window-capture,document-capture,cancel," +
+            "document-bubble,window-bubble,"
+        )
+
+        val halted = session.dispatch_dom_event(
+            "halt", "click", true, true
+        )
+        expect(halted.event.immediate_propagation_stopped).to_be(true)
+        expect(session.current_title).to_end_with(
+            "window-capture,document-capture,halt-first,"
+        )
+
+        val semantic = session.dispatch_dom_event(
+            "probe", "probe", false, false
+        )
+        expect(semantic.event.default_prevented).to_be(false)
+        match session.eval_script("semantic"):
+            Ok(value):
+                expect(_display_js(value)).to_equal("true:true:2")
+            Err(e):
+                fail("Expected listener receiver semantics: {e}")
+        match session.eval_script(
+            "lastEvent.currentTarget===null&&lastEvent.eventPhase===0"
+        ):
+            Ok(value):
+                expect(_display_js(value)).to_equal("true")
+            Err(e):
+                fail("Expected post-dispatch Event reset: {e}")
+
+        val mutation_first = session.dispatch_dom_event(
+            "mutate", "mutate", false, true
+        )
+        expect(mutation_first.actions.len()).to_equal(2)
+        expect(session.current_title).to_end_with("mutate,")
+        val mutation_second = session.dispatch_dom_event(
+            "mutate", "mutate", false, true
+        )
+        expect(mutation_second.actions.len()).to_equal(2)
+        expect(session.current_title).to_end_with("mutate,mutate,added,")
+
+        expect(session.advance_time(16)).to_equal(1)
+        expect(session.current_title).to_end_with(
+            "mutate,mutate,added,raf,"
+        )
+
+    it "fails closed for synchronous JavaScript-originated dispatchEvent":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/script-dispatch",
+            "<html><body><button id='run'>Run</button></body></html>"
+        ).is_ok()).to_be(true)
+        val result = session.eval_script(
+            "document.title='unchanged';" +
+            "window.addEventListener('probe',function(event){" +
+            "document.title='unexpected';});" +
+            "window.dispatchEvent({type:'probe',bubbles:true,cancelable:true})"
+        )
+        match result:
+            Ok(value):
+                expect(_display_js(value)).to_equal("false")
+            Err(e):
+                fail("Expected dispatchEvent to fail closed: {e}")
+        expect(session.current_title).to_equal("unchanged")
+        expect(session.warnings.join("|")).to_contain(
+            "synchronous script dispatchEvent is unsupported"
+        )
+
     it "persists storage objects and cookie jar state":
         var session = BrowserSession.new()
         val open_result = session.open_html(

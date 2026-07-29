@@ -221,6 +221,7 @@ pub class HostedBrowserRendererRegistry:
         var entry = self.entries[index]
         if self.pressed_window_id == entry.window_id:
             self.pressed_window_id = 0
+        entry.pressed_control = ""
         if self.pending_cancel_window_id == entry.window_id:
             self.pending_cancel_window_id = 0
             self.pending_cancel_event_id = 0
@@ -527,6 +528,11 @@ pub class HostedBrowserRendererRegistry:
             return _dispatch(event_id, window_id, "", 0, 0,
                 "renderer-unavailable")
         var entry = self.entries[index]
+        if (not pressed and
+            (self.pressed_window_id != window_id or
+             entry.pressed_control != "")):
+            return _dispatch(event_id, window_id, "browser:page", 0,
+                entry.mutation_revision, "pointer-release-target-mismatch")
         if pressed and self.pending_cancel_window_id > 0:
             return _dispatch(event_id, window_id, "browser:page", 0,
                 entry.mutation_revision, "pointer-cancel-pending")
@@ -539,8 +545,13 @@ pub class HostedBrowserRendererRegistry:
                     entry.mutation_revision, reason)
             Ok(_):
                 if pressed:
+                    val prior_index = self._index(self.pressed_window_id)
+                    if prior_index >= 0:
+                        var prior = self.entries[prior_index]
+                        prior.pressed_control = ""
+                        self.entries[prior_index] = prior
                     self.pressed_window_id = window_id
-                elif self.pressed_window_id == window_id:
+                else:
                     self.pressed_window_id = 0
                 _dispatch(event_id, window_id, "browser:page", 1,
                     entry.mutation_revision, "")
@@ -576,6 +587,24 @@ pub class HostedBrowserRendererRegistry:
             if self.pending_cancel_window_id > 0:
                 return _dispatch(event_id, window_id, target, 0,
                     entry.mutation_revision, "pointer-cancel-pending")
+            val prior_index = self._index(self.pressed_window_id)
+            if prior_index >= 0:
+                var prior = self.entries[prior_index]
+                if prior.pressed_control == "" and prior.ready:
+                    self.pending_cancel_window_id = prior.window_id
+                    self.pending_cancel_event_id = event_id
+                    match prior.renderer.begin_pointer(
+                        event_id, -1, -1, false, 2000
+                    ):
+                        Ok(_):
+                            self.pending_cancel_window_id = 0
+                            self.pending_cancel_event_id = 0
+                        Err(_):
+                            pass
+                prior.pressed_control = ""
+                self.entries[prior_index] = prior
+                if prior_index == index:
+                    entry = prior
             entry.pressed_control = control
             self.pressed_window_id = window_id
             if control == "address":
@@ -588,13 +617,11 @@ pub class HostedBrowserRendererRegistry:
             return _dispatch(event_id, window_id, target, 0,
                 entry.mutation_revision, "chrome-pressed")
         val armed = entry.pressed_control
-        entry.pressed_control = ""
-        if self.pressed_window_id == window_id:
-            self.pressed_window_id = 0
-        if armed != control:
-            self.entries[index] = entry
+        if self.pressed_window_id != window_id or armed != control:
             return _dispatch(event_id, window_id, target, 0,
                 entry.mutation_revision, "chrome-release-target-mismatch")
+        entry.pressed_control = ""
+        self.pressed_window_id = 0
         if control == "address":
             entry.address_editing = true
             entry.address_replace_on_text = true
@@ -728,7 +755,11 @@ pub class HostedBrowserRendererRegistry:
             self.pending_cancel_event_id = 0
             return
         var entry = self.entries[index]
+        val page_press = entry.pressed_control == ""
         entry.pressed_control = ""
+        if not page_press:
+            self.entries[index] = entry
+            return
         self.pending_cancel_window_id = armed_window_id
         self.pending_cancel_event_id = event_id
         if entry.ready and entry.renderer.command_deadline_ms <= 0:
