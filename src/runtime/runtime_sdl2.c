@@ -45,7 +45,6 @@ static uint64_t  g_perf_freq = 0;
 static SDL_AudioDeviceID g_audio_device = 0;
 static uint32_t g_audio_generation = 0;
 static int64_t g_audio_handle = 0;
-static int64_t g_audio_last_closed_handle = 0;
 static int64_t g_audio_submitted_frames = 0;
 static int g_audio_owns_subsystem = 0;
 
@@ -177,15 +176,11 @@ int64_t rt_audio_sdl2_live_device_count(void) {
 }
 
 int64_t rt_audio_sdl2_close(int64_t handle) {
-    if (g_audio_handle == 0 &&
-        handle != 0 &&
-        handle == g_audio_last_closed_handle) return 1;
     if (handle == 0 || handle != g_audio_handle || g_audio_device == 0) return 0;
 
     SDL_ClearQueuedAudio(g_audio_device);
     SDL_CloseAudioDevice(g_audio_device);
     g_audio_device = 0;
-    g_audio_last_closed_handle = handle;
     g_audio_handle = 0;
     g_audio_submitted_frames = 0;
     if (g_audio_owns_subsystem) SDL_QuitSubSystem(SDL_INIT_AUDIO);

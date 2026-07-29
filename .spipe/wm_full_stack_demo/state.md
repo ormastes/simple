@@ -278,10 +278,13 @@ implementation-in-progress
   changing its deterministic click PCM producer. The boundary uses a positive
   generation handle, rejects stale handles and format mismatches, clamps
   `f64` to exact 48-kHz stereo `f32`, records submitted frames, closes
-  idempotently, and reports underrun counting as unsupported (`-1`). The live
-  dummy-audio probe passes with strict C warnings enabled. The current native
-  compiler still requires the host runtime object to be supplied explicitly;
-  demand-selected host provider compilation remains an open compiler lane.
+  safely, and reports underrun counting as unsupported (`-1`). Duplicate close
+  is a safe no-op reported as false rather than fabricated success, and PCM
+  lengths beyond SDL's `Uint32` queue boundary are rejected before allocation.
+  The live dummy-audio probe passes with strict C warnings enabled. The current
+  native compiler still requires the host runtime object to be supplied
+  explicitly; demand-selected host provider compilation remains an open
+  compiler lane.
 - audio-handle-truth: SoundEngine cleanup no longer returns a fabricated zero
   after clearing `device_started`. Each miniaudio client now owns a distinct
   generation-counted engine handle; closing one client preserves the shared

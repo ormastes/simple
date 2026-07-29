@@ -13,10 +13,14 @@ int main(void) {
     assert(rt_audio_sdl2_live_device_count() == 1);
     assert(rt_audio_sdl2_queue_pcm_f64_raw(first + 1, (int64_t)(uintptr_t)pcm, 8, 2, 48000) == 0);
     assert(rt_audio_sdl2_queue_pcm_f64_raw(first, (int64_t)(uintptr_t)pcm, 8, 2, 48000) == 4);
+    assert(rt_audio_sdl2_queue_pcm_f64_raw(
+        first, (int64_t)(uintptr_t)pcm,
+        ((int64_t)UINT32_MAX / (int64_t)sizeof(float)) + 1, 2, 48000
+    ) == 0);
     assert(rt_audio_sdl2_submitted_frames(first) == 4);
     assert(rt_audio_sdl2_underrun_count(first) == -1);
     assert(rt_audio_sdl2_close(first) == 1);
-    assert(rt_audio_sdl2_close(first) == 1);
+    assert(rt_audio_sdl2_close(first) == 0);
     assert(rt_audio_sdl2_live_device_count() == 0);
 
     int64_t second = rt_audio_sdl2_init();

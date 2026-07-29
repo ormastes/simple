@@ -58,6 +58,8 @@ main-thread queue device with an exact 48-kHz stereo `f32` format. SoundEngine
 submits its existing scalar-owned `f64` click buffer; the C boundary clamps,
 converts, and queues an owned copy. SDL2 does not expose hardware underrun
 counts through this API, so that query returns `-1` rather than invented data.
+Closed or stale device handles return false, and sample byte counts that cannot
+fit SDL2's `Uint32` queue length are rejected before allocation.
 
 ## Mixer And Parallelism
 Background workers may decode, resample, and prepare buffers. The mixer consumes a deterministic queue:
