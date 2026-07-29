@@ -9,7 +9,7 @@ use std.gc_async_mut.gpu_ffi.{cuda_device_identity}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, backend_probe_initialized}
 use std.gpu.engine2d.backend_cuda_kernels.{cuda_2d_ptx_source}
-use std.gpu.engine2d.backend_cuda_launch_args.{CUDA_FONT_ARG_BYTES, _i64, _i64_from_u32, cuda_launch_args_read_i32, cuda_launch_args_write_i64, _read_u32_pixels_from_host, _write_clear_launch_args, _write_rect_launch_args, _write_image_launch_args, _write_gradient_launch_args, _write_line_launch_args, _write_circle_launch_args, _write_rounded_rect_launch_args, _write_font_atlas_composite_launch_args, _write_u32_pixels_to_host}
+use std.gpu.engine2d.backend_cuda_launch_args.{CUDA_FONT_ARG_BYTES, _i64, _i64_from_u32, cuda_launch_args_read_i32, cuda_launch_args_write_i64, _read_u32_pixels_from_host, _write_clear_launch_args, _write_rect_launch_args, _write_image_launch_args, _write_generated_copy_launch_args, _write_gradient_launch_args, _write_line_launch_args, _write_circle_launch_args, _write_rounded_rect_launch_args, _write_font_atlas_composite_launch_args, _write_u32_pixels_to_host}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
 use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count, cuda_device_name, cuda_memcpy_htod, cuda_memcpy_dtoh, cuda_launch_kernel, CUDA_SUCCESS}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_atlas_subrect_pixels, font_destination_origin}
@@ -368,6 +368,7 @@ class CudaBackend:
     font_atlas_generation: i64
     font_atlas_owner_identity: text
     readback_ptr: i64
+    last_image_kernel: text
     cpu_fallback_used: bool
     completion_unknown: bool
     last_probe: BackendProbeResult
@@ -391,6 +392,7 @@ class CudaBackend:
             font_atlas_generation: -1,
             font_atlas_owner_identity: "",
             readback_ptr: 0,
+            last_image_kernel: "",
             cpu_fallback_used: false,
             completion_unknown: false,
             last_probe: BackendProbeResult.unavailable("cuda", "not probed")
@@ -514,6 +516,7 @@ class CudaBackend:
     me _cleanup_cuda_surface():
         self.cpu_fallback_used = false
         self.completion_unknown = false
+        self.last_image_kernel = ""
         self._free_launch_buffers()
         if self.d_font_atlas != 0:
             self.session.free(self.d_font_atlas)
@@ -552,6 +555,7 @@ class CudaBackend:
                 self._disable_device_readback_after_mirror_sync_failure()
 
     me _draw_image_kernel(kernel_name: text, x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> bool:
+        self.last_image_kernel = ""
         if not self.initialized:
             return false
         if w <= 0 or h <= 0:
@@ -566,13 +570,19 @@ class CudaBackend:
             _write_u32_pixels_to_host(host_pixels, pixels, pixel_count)
             val upload_rc = cuda_memcpy_htod(d_pixels, host_pixels, image_bytes)
             if upload_rc == CUDA_SUCCESS:
-                _write_image_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, d_pixels, x, y, w, h, self.width(), self.height())
                 val total = _i64(w) * _i64(h)
-                val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
-                val rc = self.session.launch_kernel_args(kernel_name, grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+                var rc = 1
+                if kernel_name == "simple_2d_copy_u32":
+                    _write_generated_copy_launch_args(self.rect_val_ptr, self.rect_args_ptr, d_pixels, self.d_framebuffer, total)
+                    rc = self.session.copy_kernel(_i64(w), _i64(h), self.rect_args_ptr)
+                else:
+                    _write_image_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, d_pixels, x, y, w, h, self.width(), self.height())
+                    val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+                    rc = self.session.launch_kernel_args(kernel_name, grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
                 if rc == CUDA_SUCCESS:
                     val sync_rc = self.session.sync()
                     if sync_rc == CUDA_SUCCESS:
+                        self.last_image_kernel = kernel_name
                         cuda_backend_free(host_pixels, image_bytes)
                         self.session.free(d_pixels)
                         return true
@@ -899,7 +909,12 @@ impl RenderBackend for CudaBackend:
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if w <= 0 or h <= 0:
             return
-        if self._draw_image_kernel("kernel_draw_image", x, y, w, h, pixels):
+        val full_frame = (
+            x == 0 and y == 0 and w == self.width() and h == self.height() and
+            not self.mirror.clip_enabled and self.mirror.mask_buf.len() == 0
+        )
+        val kernel_name = if full_frame: "simple_2d_copy_u32" else: "kernel_draw_image"
+        if self._draw_image_kernel(kernel_name, x, y, w, h, pixels):
             self.mirror.draw_image(x, y, w, h, pixels)
             return
         self.mirror.draw_image(x, y, w, h, pixels)
