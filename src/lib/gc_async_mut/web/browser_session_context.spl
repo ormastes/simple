@@ -3,7 +3,9 @@
 # Extracted from browser_session.spl — kept separate so BrowserRuntimeState.create
 # can call it without pulling in the full session module.
 
-use std.gc_async_mut.web.browser_session_url.{url_hostname, url_origin}
+use std.gc_async_mut.web.browser_session_url.{
+    url_hostname, url_origin, url_pathname
+}
 
 fn browser_session_is_loopback_http(url: text) -> bool:
     if not url.starts_with("http://"):
@@ -20,6 +22,60 @@ fn browser_session_is_secure_context(url: text) -> bool:
         return true
     false
 
+fn _browser_csp_normalize_http_scheme(url: text) -> text:
+    val lower = url.lower()
+    if lower.starts_with("https://"):
+        return "https://" + url.slice(8, url.len())
+    if lower.starts_with("http://"):
+        return "http://" + url.slice(7, url.len())
+    url
+
+fn _browser_csp_source_origin_matches_url(
+    source: text, target_url: text
+) -> bool:
+    val source_url = _browser_csp_normalize_http_scheme(source)
+    val target = _browser_csp_normalize_http_scheme(target_url)
+    url_origin(source_url).lower() == url_origin(target).lower()
+
+fn _browser_csp_normalize_path(path: text) -> text:
+    val raw_segments = path.split("/")
+    var segments: [text] = []
+    var segment_index = 0
+    for raw_segment in raw_segments:
+        val dot_segment = raw_segment.lower().replace("%2e", ".")
+        if dot_segment == "..":
+            if segments.len() > 0:
+                segments.pop()
+        elif dot_segment != ".":
+            if segment_index > 0 or raw_segment != "":
+                segments.push(raw_segment)
+        segment_index = segment_index + 1
+    if segments.len() == 0:
+        return "/"
+    var normalized = "/" + segments.join("/")
+    val last_segment = raw_segments[raw_segments.len() - 1]
+    val last_dot_segment = last_segment.lower().replace("%2e", ".")
+    if normalized != "/" and (
+        last_dot_segment == "." or last_dot_segment == ".."
+    ):
+        normalized = normalized + "/"
+    normalized
+
+pub fn browser_csp_source_matches_url(
+    source: text, target_url: text
+) -> bool:
+    val source_url = _browser_csp_normalize_http_scheme(source)
+    val target = _browser_csp_normalize_http_scheme(target_url)
+    if not _browser_csp_source_origin_matches_url(source, target_url):
+        return false
+    val source_path = _browser_csp_normalize_path(url_pathname(source_url))
+    val target_path = _browser_csp_normalize_path(url_pathname(target))
+    if source_path == "" or source_path == "/":
+        return true
+    if source_path.ends_with("/"):
+        return target_path.starts_with(source_path)
+    target_path == source_path
+
 fn browser_csp_allows(
     policy: text,
     directive: text,
@@ -27,11 +83,35 @@ fn browser_csp_allows(
     target_url: text,
     is_inline: bool
 ) -> bool:
+    _browser_csp_allows(
+        policy, directive, document_url, target_url, is_inline, false
+    )
+
+fn browser_csp_allows_after_redirect(
+    policy: text,
+    directive: text,
+    document_url: text,
+    target_url: text,
+    is_inline: bool
+) -> bool:
+    _browser_csp_allows(
+        policy, directive, document_url, target_url, is_inline, true
+    )
+
+fn _browser_csp_allows(
+    policy: text,
+    directive: text,
+    document_url: text,
+    target_url: text,
+    is_inline: bool,
+    after_redirect: bool
+) -> bool:
     if policy.trim() == "":
         return true
     for raw_policy in policy.split("\n"):
         if raw_policy.trim() != "" and not browser_csp_single_policy_allows(
-            raw_policy, directive, document_url, target_url, is_inline
+            raw_policy, directive, document_url, target_url, is_inline,
+            after_redirect
         ):
             return false
     true
@@ -41,7 +121,8 @@ fn browser_csp_single_policy_allows(
     directive: text,
     document_url: text,
     target_url: text,
-    is_inline: bool
+    is_inline: bool,
+    after_redirect: bool
 ) -> bool:
     var sources = ""
     var found = false
@@ -53,7 +134,8 @@ fn browser_csp_single_policy_allows(
             found = true
     if not found and directive != "default-src":
         return browser_csp_single_policy_allows(
-            policy, "default-src", document_url, target_url, is_inline
+            policy, "default-src", document_url, target_url, is_inline,
+            after_redirect
         )
     if not found:
         return true
@@ -78,6 +160,9 @@ fn browser_csp_single_policy_allows(
             return true
         if (lower_source.starts_with("http://") or
             lower_source.starts_with("https://")) and
-           url_origin(lower_source) == url_origin(target_url):
+           ((after_redirect and
+             _browser_csp_source_origin_matches_url(source, target_url)) or
+            (not after_redirect and
+             browser_csp_source_matches_url(source, target_url))):
             return true
     false

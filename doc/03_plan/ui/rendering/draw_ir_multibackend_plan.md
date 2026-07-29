@@ -11,6 +11,14 @@ Six phases. Each is **Sonnet-sized**, **independently landable**, ships an SSpec
 (all existing backends still green); P3+ add capability incrementally. No branches — land each on
 `main`. Reuse `src/lib/gc_async_mut/gpu/engine2d/` (no numbered splits).
 
+**2026-07-29 status:** P5 is still open. A bounded prerequisite refactor moved
+command-clip rectangle translation/intersection into the canonical
+`common.ui.draw_ir` contract and made the Engine2D Draw IR executor reuse it.
+This does not implement the planned clip stack, masks, transforms, or any new
+IR/backend. `draw_ir_adv.spl` remains a pre-existing >800-line exception;
+splitting that stateful executor is deferred until an independently green
+replay/parity gate can protect the move.
+
 ---
 
 ## P1 — Prerequisite harness gate, dead-code retirement, and the shared reference + capability descriptor (refactor, behavior-preserving)

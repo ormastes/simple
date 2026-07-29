@@ -883,8 +883,8 @@ describe "hosted browser renderer entry isolation":
         expect(close_save).to_be_greater_than(-1)
         expect(profile_guard).to_be_greater_than(close_save)
         expect(close_profile).to_be_greater_than(profile_guard)
-        expect(close_body).to_contain("renderer: renderer")
-        expect(close_body).to_contain("raster: browser_raster")
+        expect(close_body).to_contain("renderer: renderer_close.renderer")
+        expect(close_body).to_contain("raster: renderer_close.raster")
 
     # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018
     it "reconciles titlebar keyboard and evidence browser closes":
@@ -906,7 +906,7 @@ describe "hosted browser renderer entry isolation":
             "comp.handle_mouse_button(button, pressed)"
         )
         val mouse_cleanup = mouse.find(
-            "_close_hosted_browser_resources("
+            "_close_hosted_browser_renderer_resources("
         )
         expect(mouse_save).to_be_greater_than(-1)
         expect(mouse_registry_save).to_be_greater_than(mouse_save)
@@ -923,7 +923,7 @@ describe "hosted browser renderer entry isolation":
         expect(mouse).to_contain(
             "browser_raster = browser_closed.raster"
         )
-        expect(mouse).to_contain("browser_profile = nil")
+        expect(mouse.contains("browser_profile = nil")).to_be(false)
         expect(mouse).to_contain(
             "comp.release_external_web_frame("
         )
@@ -937,7 +937,7 @@ describe "hosted browser renderer entry isolation":
             "_save_hosted_browser_hsts("
         )
         val keyboard_cleanup = keyboard.find(
-            "_close_hosted_browser_resources("
+            "_close_hosted_browser_renderer_resources("
         )
         val keyboard_destroy = keyboard.find(
             "comp.destroy_window(focused)"
@@ -945,7 +945,7 @@ describe "hosted browser renderer entry isolation":
         expect(keyboard_save).to_be_greater_than(-1)
         expect(keyboard_cleanup).to_be_greater_than(keyboard_save)
         expect(keyboard_destroy).to_be_greater_than(keyboard_cleanup)
-        expect(keyboard).to_contain("browser_profile = nil")
+        expect(keyboard.contains("browser_profile = nil")).to_be(false)
         expect(keyboard).to_contain(
             "browser_renderer = browser_closed.renderer"
         )
@@ -964,7 +964,7 @@ describe "hosted browser renderer entry isolation":
             "_save_hosted_browser_hsts("
         )
         val evidence_cleanup = evidence.find(
-            "_close_hosted_browser_resources("
+            "_close_hosted_browser_renderer_resources("
         )
         val evidence_destroy = evidence.find(
             "comp.destroy_window(focused)"
@@ -973,7 +973,7 @@ describe "hosted browser renderer entry isolation":
         expect(evidence_cleanup).to_be_greater_than(evidence_save)
         expect(evidence_destroy).to_be_greater_than(evidence_cleanup)
         expect(evidence).to_contain("\"rejected\"")
-        expect(evidence).to_contain("browser_profile = nil")
+        expect(evidence.contains("browser_profile = nil")).to_be(false)
         expect(evidence).to_contain(
             "browser_renderer = browser_closed.renderer"
         )
@@ -993,7 +993,7 @@ describe "hosted browser renderer entry isolation":
             "comp.handle_mouse_button(0, command.down)"
         )
         val left_cleanup = evidence_left.find(
-            "_close_hosted_browser_resources("
+            "_close_hosted_browser_renderer_resources("
         )
         expect(left_save).to_be_greater_than(-1)
         expect(left_dispatch).to_be_greater_than(left_save)
@@ -1011,6 +1011,31 @@ describe "hosted browser renderer entry isolation":
             "comp.release_external_web_frame("
         )
         expect(evidence_left).to_contain("\"rejected\"")
+        expect(entry.contains("browser_profile = nil")).to_be(false)
+        expect(entry).to_contain(
+            "var browser_renderer_close_pending = false"
+        )
+        val retry_gate = entry.find(
+            "if (browser_renderer_close_pending and"
+        )
+        val retry_due = entry.find(
+            "now_micros >= browser_renderer_close_retry_at_micros",
+            retry_gate
+        )
+        val retry_close = entry.find(
+            "if browser_renderer.close():", retry_due
+        )
+        val retry_clear = entry.find(
+            "browser_renderer_close_pending = false", retry_close
+        )
+        val retry_delay = entry.find(
+            "now_micros + 1000000", retry_clear
+        )
+        expect(retry_gate).to_be_greater_than(-1)
+        expect(retry_due).to_be_greater_than(retry_gate)
+        expect(retry_close).to_be_greater_than(retry_due)
+        expect(retry_clear).to_be_greater_than(retry_close)
+        expect(retry_delay).to_be_greater_than(retry_clear)
         val shutdown = entry.slice(
             entry.find("val profile_closed = web_sessions.close("),
             entry.find(

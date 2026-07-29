@@ -77,6 +77,21 @@ fn _count_color(pixels: [u32], color: u32) -> i32:
         idx = idx + 1
     count
 
+fn _count_non_color_rect(
+    pixels: [u32], stride: i32,
+    x0: i32, y0: i32, x1: i32, y1: i32, color: u32
+) -> i32:
+    var count = 0
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            if pixels[y * stride + x] != color:
+                count = count + 1
+            x = x + 1
+        y = y + 1
+    count
+
 fn _pixels_equal(a: [u32], b: [u32]) -> bool:
     if a.len() != b.len():
         return false
@@ -1093,6 +1108,18 @@ describe "SimpleWebRenderer":
         expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(280)
         expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 
+    it "clips canonical Draw IR boxes and text to an overflow hidden ancestor":
+        val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:24px;overflow:hidden;background:#fff}.clip{overflow:hidden;width:16px;height:12px}.wide{width:32px;height:4px;background:#ef4444}.words{display:block;width:40px;height:8px;white-space:nowrap;color:#111827;font-size:8px}</style></head><body><div class='clip'><div class='wide'></div><span class='words'>ABCDEFGHIJK</span></div></body></html>"
+        val execution = simple_web_layout_render_html_readback_engine2d_result(
+            html, 48, 24, "software"
+        )
+        val pixels = execution.readback.pixels
+        expect(pixels.len()).to_equal(48 * 24)
+        expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(16 * 4)
+        expect(_count_non_color_rect(
+            pixels, 48, 16, 0, 48, 12, 0xFFFFFFFFu32
+        )).to_equal(0)
+
     it "clips overflowing descendants for CSS paint containment":
         val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}.shell{contain:paint;background-color:#1d4ed8;width:20px;height:12px}.spill{background-color:#ef4444;width:10px;height:10px;margin-left:24px}</style></head><body><section class='shell'><div class='spill'></div></section></body></html>"
         val pixels = simple_web_render_html_to_pixels(html, 48, 32)
@@ -1201,6 +1228,28 @@ describe "SimpleWebRenderer":
         val pixels = simple_web_render_html_to_pixels(html, 32, 32)
         expect(pixels.len()).to_equal(32 * 32)
         expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(144)
+        expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
+        expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
+
+    it "keeps canonical Draw IR positive z-index order independent of document order":
+        val html = "<html><head><style>html,body{margin:0;padding:0;width:32px;height:32px;overflow:hidden;background:#f8fafc}.shell{position:relative;width:32px;height:32px}.top{position:absolute;left:4px;top:4px;z-index:3;background:#f59e0b;width:12px;height:12px}.bottom{position:absolute;left:4px;top:4px;z-index:1;background:#1d4ed8;width:12px;height:12px}.middle{position:absolute;left:4px;top:4px;z-index:2;background:#22c55e;width:12px;height:12px}</style></head><body><section class='shell'><div class='top'></div><div class='bottom'></div><div class='middle'></div></section></body></html>"
+        val execution = simple_web_layout_render_html_readback_engine2d_result(
+            html, 32, 32, "software"
+        )
+        val pixels = execution.readback.pixels
+        expect(pixels.len()).to_equal(32 * 32)
+        expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(12 * 12)
+        expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
+        expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
+
+    it "sorts nested canonical Draw IR positive stacking siblings":
+        val html = "<html><head><style>html,body{margin:0;padding:0;width:32px;height:32px;overflow:hidden;background:#f8fafc}.outer{position:absolute;left:4px;top:4px;z-index:1;width:16px;height:16px}.top{position:absolute;left:0;top:0;z-index:3;background:#f59e0b;width:12px;height:12px}.bottom{position:absolute;left:0;top:0;z-index:1;background:#1d4ed8;width:12px;height:12px}.middle{position:absolute;left:0;top:0;z-index:2;background:#22c55e;width:12px;height:12px}</style></head><body><section class='outer'><div class='top'></div><div class='bottom'></div><div class='middle'></div></section></body></html>"
+        val execution = simple_web_layout_render_html_readback_engine2d_result(
+            html, 32, 32, "software"
+        )
+        val pixels = execution.readback.pixels
+        expect(pixels.len()).to_equal(32 * 32)
+        expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(12 * 12)
         expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
         expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
 

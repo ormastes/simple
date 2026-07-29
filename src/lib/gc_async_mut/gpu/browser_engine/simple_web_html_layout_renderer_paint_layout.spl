@@ -7,7 +7,7 @@ use std.common.web.browser_renderer_protocol.{
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 use common.ui.draw_ir.{
     DrawIrCommand, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
-    draw_ir_rect_bounds, draw_ir_style_prop
+    draw_ir_rect_bounds, draw_ir_style_prop, draw_ir_text_styled_clipped
 }
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.*
 
@@ -64,7 +64,10 @@ fn content_hidden_by_ancestor(nodes: [HNode], styles: [Style], i: i32) -> bool:
         # any inline children) is NOT laid out or painted in the parent document.
         # The iframe's real content is rendered separately from srcdoc/src and
         # blitted over its box by _web_paint_iframes, so descendants stay hidden.
-        if styles[cur].content_visibility_hidden or nodes[cur].tag == "iframe":
+        if (
+            styles[cur].display == "none" or
+            styles[cur].content_visibility_hidden or nodes[cur].tag == "iframe"
+        ):
             return true
         cur = nodes[cur].parent as i32
     false
@@ -1274,7 +1277,10 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
             ))
     props
 
-fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32, width: i32, height: i32, vector_fonts: bool) -> DrawIrCommand:
+fn _html_draw_ir_command(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
+    clip: ClipRect, vector_fonts: bool
+) -> DrawIrCommand:
     val node = nodes[i]
     val st = styles[i]
     val x = boxes.bx[i]
@@ -1288,7 +1294,9 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
     val border_rect = draw_ir_rect_bounds(x, y, w, h)
     val content_rect = draw_ir_rect_bounds(content_x, content_y, content_w, content_h)
     val hit_rect = draw_ir_rect_bounds(x, y, w, h)
-    val clip_rect = draw_ir_rect_bounds(0, 0, width, height)
+    val clip_rect = draw_ir_rect_bounds(
+        clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
+    )
     val computed_style = _html_draw_ir_style_props(node, st)
     # Text-run nodes carry no background of their own; emitting them as a
     # (transparent) box makes the Draw IR executor paint an opaque zero-color
@@ -1297,13 +1305,14 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
     # mode this routes to the GPU glyph blit) in the node's foreground color.
     if node.tag == "#text" and node.text_trimmed != "":
         if not vector_fonts:
-            return draw_ir_text_styled(
+            return draw_ir_text_styled_clipped(
                 _html_draw_ir_component_id(node, i),
                 content_x,
                 content_y,
                 node.text_trimmed,
                 st.fg,
-                computed_style
+                computed_style,
+                clip_rect
             )
         val metrics = resolve_font_metrics_with_language(st.font_family, node.text_trimmed, st.font_size, _html_text_language(nodes, i, st))
         var resolved = if metrics.shaping_required:
@@ -1319,9 +1328,9 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
                 metrics.line_height, st.font_size
             )
         if resolved.computed_style.len() == 0:
-            return draw_ir_text_styled(
+            return draw_ir_text_styled_clipped(
                 _html_draw_ir_component_id(node, i), content_x, content_y,
-                node.text_trimmed, st.fg, computed_style
+                node.text_trimmed, st.fg, computed_style, clip_rect
             )
         var merged: [DrawIrStyleProp] = []
         for prop in computed_style:
@@ -1332,6 +1341,7 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
         for prop in resolved.computed_style:
             merged.push(prop)
         resolved.computed_style = merged
+        resolved.clip_rect = clip_rect
         return resolved
     val command = draw_ir_box_with_style(
         _html_draw_ir_component_id(node, i),
@@ -1581,10 +1591,10 @@ fn _html_draw_ir_background_image_command(
 
 fn _html_draw_ir_background_border_overlay(
     nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
-    width: i32, height: i32, vector_fonts: bool
+    clip: ClipRect, vector_fonts: bool
 ) -> DrawIrCommand:
     var command = _html_draw_ir_command(
-        nodes, styles, boxes, i, width, height, vector_fonts
+        nodes, styles, boxes, i, clip, vector_fonts
     )
     command.component_id = (
         _html_draw_ir_component_id(nodes[i], i) + "_background_border_overlay"
@@ -1742,6 +1752,53 @@ fn _html_draw_ir_visible_nodes(
         i = i + 1
     visible
 
+fn _html_draw_ir_append_context_paint_order(
+    styles: [Style], members: [[i32]], child_contexts: [[i32]],
+    context_id: i32, order: [i32]
+) -> [i32]:
+    var result = order
+    for member in members[context_id]:
+        result.push(member)
+    val children = _sort_positive_z_indices(
+        child_contexts[context_id],
+        child_contexts[context_id].len(),
+        styles
+    )
+    for child in children:
+        result = _html_draw_ir_append_context_paint_order(
+            styles, members, child_contexts, child + 1, result
+        )
+    result
+
+fn _html_draw_ir_node_paint_order(
+    nodes: [HNode], styles: [Style]
+) -> [i32]:
+    val node_count = nodes.len()
+    # Context zero is the document. Positive positioned nodes use node index + 1
+    # so their ordinary descendants stay grouped while nested positive siblings
+    # are sorted stably inside the nearest supported stacking context.
+    var node_context: [i32] = [0; node_count]
+    var members: [[i32]] = [[]; node_count + 1]
+    var child_contexts: [[i32]] = [[]; node_count + 1]
+    var i: i32 = 0
+    while i < node_count:
+        val parent = nodes[i].parent
+        val parent_context = if parent >= 0 and parent < i:
+            node_context[parent]
+        else:
+            0
+        if styles[i].position_absolute and styles[i].z_index > 0:
+            child_contexts[parent_context].push(i)
+            node_context[i] = i + 1
+            members[i + 1].push(i)
+        else:
+            node_context[i] = parent_context
+            members[parent_context].push(i)
+        i = i + 1
+    _html_draw_ir_append_context_paint_order(
+        styles, members, child_contexts, 0, []
+    )
+
 fn _html_draw_ir_commands(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     width: i32, height: i32, vector_fonts: bool,
@@ -1752,22 +1809,24 @@ fn _html_draw_ir_commands(
         nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
     )
     var commands: [DrawIrCommand] = []
-    var i: i32 = 0
-    val node_count = nodes.len()
-    while i < node_count:
+    val paint_order = _html_draw_ir_node_paint_order(nodes, styles)
+    var paint_index: i32 = 0
+    while paint_index < paint_order.len():
+        val i = paint_order[paint_index]
         if i < visible_nodes.len() and visible_nodes[i]:
+            val node_clip = paint_clip_at(clip_cache, i)
             commands.push(_html_draw_ir_command(
-                nodes, styles, boxes, i, width, height, vector_fonts
+                nodes, styles, boxes, i, node_clip, vector_fonts
             ))
             if val background_command = _html_draw_ir_background_image_command(
-                nodes, styles, boxes, i, images, paint_clip_at(clip_cache, i)
+                nodes, styles, boxes, i, images, node_clip
             ):
                 commands.push(background_command)
                 commands.push(_html_draw_ir_background_border_overlay(
-                    nodes, styles, boxes, i, width, height, vector_fonts
+                    nodes, styles, boxes, i, node_clip, vector_fonts
                 ))
             if val image_command = _html_draw_ir_image_command(
-                nodes, styles, boxes, i, images, paint_clip_at(clip_cache, i)
+                nodes, styles, boxes, i, images, node_clip
             ):
                 commands.push(image_command)
             val overlay_target = (
@@ -1788,7 +1847,7 @@ fn _html_draw_ir_commands(
                 val plan = input_text_paint_plan_with_overlay(
                     nodes[i], styles[i],
                     boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i],
-                    paint_clip_at(clip_cache, i), node_overlay
+                    node_clip, node_overlay
                 )
                 val component_id = _html_draw_ir_component_id(nodes[i], i)
                 if plan.selection_present:
@@ -1809,7 +1868,7 @@ fn _html_draw_ir_commands(
                         plan.caret_color,
                         plan.clip
                     ))
-        i = i + 1
+        paint_index = paint_index + 1
     commands
 
 fn _html_draw_ir_canvas_command(width: i32, height: i32, color: u32) -> DrawIrCommand:

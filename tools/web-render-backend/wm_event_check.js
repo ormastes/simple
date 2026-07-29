@@ -16,7 +16,6 @@ const EXPECTED_RUN_ID = process.env.SIMPLE_WEB_FONT_RUN_ID || '';
 const AETHERIC_PROOF_PATH = process.env.AETHERIC_HOST_WEB_GUI_PROOF || '';
 
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
-app.disableHardwareAcceleration();
 
 function escapeScriptEnd(source) {
   return String(source || '').replace(/<\/script/gi, '<\\/script');
@@ -175,13 +174,26 @@ async function main() {
   const rendererEnvelope = admittedRendererEnvelope(envelope);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'simple-wm-event-check-'));
   const htmlPath = path.join(tmpDir, 'wm_event_check.html');
+  const preloadPath = path.join(tmpDir, 'wm_event_runtime_preload.js');
+  fs.writeFileSync(preloadPath, [
+    "const { contextBridge } = require('electron');",
+    'contextBridge.exposeInMainWorld("__simpleElectronRuntime", Object.freeze({',
+    '  rendererSandboxed: process.sandboxed === true,',
+    '}));',
+  ].join('\n'));
   fs.writeFileSync(htmlPath, makeHtml(root, receipt, envelope));
 
   await app.whenReady();
   const win = new BrowserWindow({
     width: 800,
     show: false,
-    webPreferences: { offscreen: true, sandbox: false },
+    webPreferences: {
+      offscreen: true,
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: preloadPath,
+    },
     backgroundColor: '#ffffff',
   });
   await win.loadFile(htmlPath);
@@ -209,6 +221,7 @@ async function main() {
       proof_source: 'tools/web-render-backend/wm_event_check.js',
       browser_engine: 'chromium',
       electron_user_agent: navigator.userAgent,
+      renderer_sandboxed: window.__simpleElectronRuntime?.rendererSandboxed === true,
       ready: !!window.__wmReady,
       production_envelope_schema: productionEnvelope.schema,
       production_envelope_producer: productionEnvelope.producer,
@@ -513,7 +526,15 @@ async function main() {
   result.font_frame_byte_count = frameBitmap.length;
   result.font_frame_pixel_checksum = frameChecksum;
   result.font_frame_nonbackground_pixels = frameNonBackgroundPixels;
+  const gpuFeatureStatus = app.getGPUFeatureStatus();
+  result.gpu_feature_status = {
+    gpu_compositing: gpuFeatureStatus.gpu_compositing || '',
+    webgl: gpuFeatureStatus.webgl || '',
+  };
   result.pass = result.pass &&
+    result.renderer_sandboxed === true &&
+    result.gpu_feature_status.gpu_compositing === 'enabled' &&
+    result.gpu_feature_status.webgl === 'enabled' &&
     frameSize.width > 0 &&
     frameSize.height > 0 &&
     frameBitmap.length === frameSize.width * frameSize.height * 4 &&

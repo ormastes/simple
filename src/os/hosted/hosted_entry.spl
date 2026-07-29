@@ -295,30 +295,19 @@ struct HostedBrowserResourceClose:
     raster: Engine2dCompositorBackend
     ok: bool
 
-fn _close_hosted_browser_resources(
+fn _browser_renderer_close_retry_due(
+    close_ok: bool, now_micros: i64
+) -> i64:
+    if close_ok: 0 else: now_micros + 1000000
+
+fn _close_hosted_browser_renderer_resources(
     renderer_in: HostedBrowserRendererProcess,
     browser_raster_in: Engine2dCompositorBackend,
-    browser_raster_active: bool,
-    profile_in: BrowserProfileStore?
+    browser_raster_active: bool
 ) -> HostedBrowserResourceClose:
     var renderer = renderer_in
     var browser_raster = browser_raster_in
     var close_ok = true
-    val saved_renderer = _save_hosted_browser_hsts(
-        renderer, profile_in, rt_time_now_unix_micros() / 1000
-    )
-    if saved_renderer == nil:
-        close_ok = false
-    else:
-        renderer = saved_renderer.unwrap()
-    if profile_in != nil:
-        var profile = profile_in.unwrap()
-        match profile.close():
-            Ok(_):
-                pass
-            Err(error):
-                close_ok = false
-                print "ERROR: hosted browser profile close failed reason={error.message()}"
     if not renderer.close():
         close_ok = false
         print "ERROR: hosted browser renderer close failed"
@@ -328,6 +317,38 @@ fn _close_hosted_browser_resources(
         renderer: renderer,
         raster: browser_raster,
         ok: close_ok
+    )
+
+fn _close_hosted_browser_resources(
+    renderer_in: HostedBrowserRendererProcess,
+    browser_raster_in: Engine2dCompositorBackend,
+    browser_raster_active: bool,
+    profile_in: BrowserProfileStore?
+) -> HostedBrowserResourceClose:
+    var renderer = renderer_in
+    var close_ok = true
+    val saved_renderer = _save_hosted_browser_hsts(
+        renderer, profile_in, rt_time_now_unix_micros() / 1000
+    )
+    if saved_renderer == nil:
+        close_ok = false
+    else:
+        renderer = saved_renderer.unwrap()
+    val renderer_close = _close_hosted_browser_renderer_resources(
+        renderer, browser_raster_in, browser_raster_active
+    )
+    if profile_in != nil:
+        var profile = profile_in.unwrap()
+        match profile.close():
+            Ok(_):
+                pass
+            Err(error):
+                close_ok = false
+                print "ERROR: hosted browser profile close failed reason={error.message()}"
+    HostedBrowserResourceClose(
+        renderer: renderer_close.renderer,
+        raster: renderer_close.raster,
+        ok: close_ok and renderer_close.ok
     )
 
 # Dependency-light production event loop. Pure Simple owns scene, Web/GUI/2D
@@ -386,6 +407,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var browser_bookmark_revision: i64 = 0
     var browser_bookmark_applied_revision: i64 = 0
     var browser_resource_close_failed = false
+    var browser_renderer_close_pending = false
+    var browser_renderer_close_retry_at_micros: i64 = 0
     var browser_hsts_save_retry_at_micros: i64 = 0
     if browser_profile_window_id > 0:
         match BrowserProfileStore.open_default():
@@ -476,7 +499,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             print "[hosted-wm] browser-renderer-start-failed reason=external-frame-capacity"
     if browser_profile_window_id <= 0 or not browser_renderer_ready:
         if not browser_renderer.close():
-            browser_resource_close_failed = true
+            browser_renderer_close_pending = true
+            browser_renderer_close_retry_at_micros = (
+                rt_time_now_micros() + 1000000
+            )
         browser_raster.shutdown()
         browser_raster_active = false
     print "[hosted-wm] windows-ready count={comp.windows.len()}"
@@ -588,6 +614,15 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         var evidence_capture_requested = false
         val now_micros = rt_time_now_micros()
         val wall_clock_ms = rt_time_now_unix_micros() / 1000
+        if (browser_renderer_close_pending and
+            now_micros >= browser_renderer_close_retry_at_micros):
+            if browser_renderer.close():
+                browser_renderer_close_pending = false
+                browser_renderer_close_retry_at_micros = 0
+            else:
+                browser_renderer_close_retry_at_micros = (
+                    now_micros + 1000000
+                )
         if browser_renderer_ready:
             val browser_poll = browser_renderer.poll()
             if (browser_renderer.hsts_dirty and browser_profile != nil and
@@ -888,17 +923,20 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         comp, wm_close_window_id
                     ) < 0):
                     if wm_close_window_id == browser_profile_window_id:
-                        val browser_closed = _close_hosted_browser_resources(
+                        val browser_closed = _close_hosted_browser_renderer_resources(
                             browser_renderer, browser_raster,
-                            browser_raster_active, browser_profile
+                            browser_raster_active
                         )
                         browser_renderer = browser_closed.renderer
                         browser_raster = browser_closed.raster
-                        if not browser_closed.ok:
-                            browser_resource_close_failed = true
+                        browser_renderer_close_pending = not browser_closed.ok
+                        browser_renderer_close_retry_at_micros = (
+                            _browser_renderer_close_retry_due(
+                                browser_closed.ok, now_micros
+                            )
+                        )
                         browser_renderer_ready = false
                         browser_raster_active = false
-                        browser_profile = nil
                         comp.release_external_web_frame(
                             browser_profile_window_id
                         )
@@ -1285,19 +1323,24 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                     print "[hosted-wm] browser-window-close-rejected reason=profile-save-failed"
                                 else:
                                     browser_renderer = saved_renderer.unwrap()
-                                    val browser_closed = _close_hosted_browser_resources(
+                                    val browser_closed = _close_hosted_browser_renderer_resources(
                                         browser_renderer, browser_raster,
-                                        browser_raster_active, browser_profile
+                                        browser_raster_active
                                     )
                                     browser_renderer = (
                                         browser_closed.renderer
                                     )
                                     browser_raster = browser_closed.raster
-                                    if not browser_closed.ok:
-                                        browser_resource_close_failed = true
+                                    browser_renderer_close_pending = (
+                                        not browser_closed.ok
+                                    )
+                                    browser_renderer_close_retry_at_micros = (
+                                        _browser_renderer_close_retry_due(
+                                            browser_closed.ok, now_micros
+                                        )
+                                    )
                                     browser_renderer_ready = false
                                     browser_raster_active = false
-                                    browser_profile = nil
                                     comp.release_external_web_frame(focused)
                                     comp.destroy_window(focused)
                                     browser_profile_window_id = 0
@@ -1461,17 +1504,22 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                 close_applied = false
                             else:
                                 browser_renderer = saved_renderer.unwrap()
-                                val browser_closed = _close_hosted_browser_resources(
+                                val browser_closed = _close_hosted_browser_renderer_resources(
                                     browser_renderer, browser_raster,
-                                    browser_raster_active, browser_profile
+                                    browser_raster_active
                                 )
                                 browser_renderer = browser_closed.renderer
                                 browser_raster = browser_closed.raster
-                                if not browser_closed.ok:
-                                    browser_resource_close_failed = true
+                                browser_renderer_close_pending = (
+                                    not browser_closed.ok
+                                )
+                                browser_renderer_close_retry_at_micros = (
+                                    _browser_renderer_close_retry_due(
+                                        browser_closed.ok, now_micros
+                                    )
+                                )
                                 browser_renderer_ready = false
                                 browser_raster_active = false
-                                browser_profile = nil
                                 comp.release_external_web_frame(focused)
                                 comp.destroy_window(focused)
                                 browser_profile_window_id = 0
@@ -1534,17 +1582,20 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             comp, evidence_close_window_id
                         ) < 0 and evidence_close_window_id ==
                         browser_profile_window_id):
-                        val browser_closed = _close_hosted_browser_resources(
+                        val browser_closed = _close_hosted_browser_renderer_resources(
                             browser_renderer, browser_raster,
-                            browser_raster_active, browser_profile
+                            browser_raster_active
                         )
                         browser_renderer = browser_closed.renderer
                         browser_raster = browser_closed.raster
-                        if not browser_closed.ok:
-                            browser_resource_close_failed = true
+                        browser_renderer_close_pending = not browser_closed.ok
+                        browser_renderer_close_retry_at_micros = (
+                            _browser_renderer_close_retry_due(
+                                browser_closed.ok, now_micros
+                            )
+                        )
                         browser_renderer_ready = false
                         browser_raster_active = false
-                        browser_profile = nil
                         comp.release_external_web_frame(
                             browser_profile_window_id
                         )

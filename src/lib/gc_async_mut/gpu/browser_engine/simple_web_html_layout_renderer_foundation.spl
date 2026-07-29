@@ -389,6 +389,15 @@ fn find_from(s: text, needle: text, pos: i32) -> i32:
         i = i + 1
     -1
 
+fn html_attr_name_byte_equal(actual: i64, expected: i64) -> bool:
+    var actual_folded = actual
+    var expected_folded = expected
+    if actual_folded >= 65 and actual_folded <= 90:
+        actual_folded = actual_folded + 32
+    if expected_folded >= 65 and expected_folded <= 90:
+        expected_folded = expected_folded + 32
+    actual_folded == expected_folded
+
 fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
     if key_len == 0:
         return 0
@@ -423,7 +432,7 @@ fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
             quote = ci
             i = i + 1
             continue
-        if ci == first:
+        if html_attr_name_byte_equal(ci, first):
             # Left word-boundary guard: a candidate match is only a real
             # attribute when it starts the inner text or follows ASCII
             # whitespace. Without this, a longer attribute name ending with
@@ -438,7 +447,7 @@ fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
                 var j = 1
                 var matched = true
                 while j < key_len:
-                    if ib[i + j] != kb[j]:
+                    if not html_attr_name_byte_equal(ib[i + j], kb[j]):
                         matched = false
                         break
                     j = j + 1
@@ -446,6 +455,53 @@ fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
                     return i
         i = i + 1
     -1
+
+fn attr_present(inner: text, name: text) -> bool:
+    if name.len() == 0 or inner.len() < name.len():
+        return false
+    val ib = inner.bytes()
+    val nb = name.bytes()
+    val limit = inner.len() - name.len()
+    var quote = 0
+    var i = 0
+    while i <= limit:
+        val current = ib[i]
+        if quote != 0:
+            if current == quote:
+                quote = 0
+            i = i + 1
+            continue
+        if current == 34 or current == 39:
+            quote = current
+            i = i + 1
+            continue
+        var token_start = i == 0
+        if not token_start:
+            val previous = ib[i - 1]
+            token_start = (
+                previous == 32 or previous == 9 or
+                previous == 10 or previous == 13
+            )
+        if token_start:
+            var matched = true
+            var j = 0
+            while j < name.len():
+                if not html_attr_name_byte_equal(ib[i + j], nb[j]):
+                    matched = false
+                    break
+                j = j + 1
+            if matched:
+                val end = i + name.len()
+                if end >= inner.len():
+                    return true
+                val next = ib[end]
+                if (
+                    next == 32 or next == 9 or next == 10 or
+                    next == 13 or next == 47 or next == 61
+                ):
+                    return true
+        i = i + 1
+    false
 
 fn is_void(tag: text) -> bool:
     tag == "meta" or tag == "br" or tag == "img" or tag == "input" or tag == "link" or tag == "hr" or tag == "area" or tag == "base" or tag == "col" or tag == "embed" or tag == "source" or tag == "track" or tag == "wbr"

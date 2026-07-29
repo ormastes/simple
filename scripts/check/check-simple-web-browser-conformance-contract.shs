@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+MANIFEST="$ROOT_DIR/test/fixtures/browser/conformance/pinned_manifest.env"
+LEDGER="$ROOT_DIR/test/fixtures/browser/conformance/unsupported_ledger.env"
+RECEIPT_SCHEMA="$ROOT_DIR/test/fixtures/browser/conformance/receipt_schema.env"
+
+fail() {
+    echo "simple_web_browser_conformance_contract=fail"
+    echo "reason=$1"
+    exit 1
+}
+
+field() {
+    sed -n "s/^$2=//p" "$1"
+}
+
+for artifact in "$MANIFEST" "$LEDGER" "$RECEIPT_SCHEMA"; do
+    [ -s "$artifact" ] || fail "missing-artifact:$artifact"
+done
+
+[ "$(field "$MANIFEST" schema)" = simple-web-browser-conformance-manifest-v1 ] ||
+    fail invalid-manifest-schema
+[ "$(field "$MANIFEST" status)" = not-run ] || fail manifest-must-not-claim-pass
+[ "$(field "$MANIFEST" claimed_case_count)" = 0 ] || fail claimed-cases-must-start-empty
+for key in wpt_revision test262_revision; do
+    revision="$(field "$MANIFEST" "$key")"
+    [ "${#revision}" -eq 40 ] || fail "invalid-pin:$key"
+    case "$revision" in *[!0-9a-f]*) fail "invalid-pin:$key" ;; esac
+done
+
+[ "$(field "$LEDGER" schema)" = simple-web-browser-conformance-unsupported-v1 ] ||
+    fail invalid-ledger-schema
+[ "$(field "$LEDGER" status)" = blocked ] || fail ledger-must-remain-visible
+[ "$(field "$LEDGER" entry_count)" = 4 ] || fail ledger-count-mismatch
+[ "$(field "$RECEIPT_SCHEMA" schema)" = simple-web-browser-conformance-receipt-schema-v1 ] ||
+    fail invalid-receipt-schema
+[ "$(field "$RECEIPT_SCHEMA" status)" = contract-only ] ||
+    fail receipt-schema-must-not-claim-run
+
+echo "simple_web_browser_conformance_contract=pass"

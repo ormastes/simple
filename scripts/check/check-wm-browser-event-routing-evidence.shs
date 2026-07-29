@@ -12,17 +12,30 @@ OUT="$BUILD_DIR/wm-event-check.out"
 RESULT_JSON="$BUILD_DIR/wm-event-check.json"
 VALIDATED_ENV="$BUILD_DIR/wm-event-check.validation.env"
 VALIDATOR="scripts/check/validate-wm-browser-event-routing-proof.js"
+AETHERIC_CHECKER="$ROOT_DIR/scripts/check/check-aetheric-host-web-gui-evidence.shs"
+AETHERIC_VALIDATED_ENV="$BUILD_DIR/aetheric-admission.env"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$OUT" "$RESULT_JSON" "$VALIDATED_ENV" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
+rm -f "$OUT" "$RESULT_JSON" "$VALIDATED_ENV" "$AETHERIC_VALIDATED_ENV" "$BUILD_DIR/evidence.env" "$REPORT_PATH"
 
-fail() {
+emit_unavailable() {
+    evidence_status="$1"
+    shift
     reason="$1"
     {
-        echo "wm_browser_event_routing_status=fail"
+        echo "wm_browser_event_routing_status=$evidence_status"
         echo "wm_browser_event_routing_reason=$reason"
         echo "wm_browser_event_routing_validation_status=fail"
         echo "wm_browser_event_routing_validation_reason=$reason"
+        echo "wm_browser_event_routing_launch_mode=$evidence_status"
+        echo "wm_browser_event_routing_renderer_sandboxed=unavailable"
+        echo "wm_browser_event_routing_gpu_compositing_status=unavailable"
+        echo "wm_browser_event_routing_webgl_status=unavailable"
+        echo "wm_browser_event_routing_aetheric_artifact_sha256="
+        echo "wm_browser_event_routing_aetheric_readback_source="
+        echo "wm_browser_event_routing_aetheric_renderer_producer="
+        echo "wm_browser_event_routing_aetheric_pixel_count="
+        echo "wm_browser_event_routing_aetheric_pixel_checksum="
         echo "wm_browser_event_routing_proof_symlink_status="
         echo "wm_browser_event_routing_proof_hardlink_status="
         echo "wm_browser_event_routing_target="
@@ -113,8 +126,9 @@ fail() {
     {
         echo "# WM Browser Event Routing Evidence"
         echo
-        echo "- status: fail"
+        echo "- status: $evidence_status"
         echo "- reason: $reason"
+        echo "- launch policy: unavailable"
         echo "- proof source artifact:  /  / "
         echo "- blur/tolerance used: false"
         echo
@@ -130,9 +144,22 @@ fail() {
     exit 1
 }
 
+fail() { emit_unavailable fail "$1"; }
+blocked() { emit_unavailable blocked "$1"; }
+
+case "${ELECTRON_DISABLE_SANDBOX:-}" in
+    ""|0|false) ;;
+    *) blocked "diagnostic-electron-sandbox-override-not-production" ;;
+esac
+[ -z "${WM_BROWSER_EVENT_ROUTING_DIAGNOSTIC_FLAGS:-}" ] ||
+    blocked "diagnostic-launch-flags-not-production"
+
 for cmd in node npm; do
     command -v "$cmd" >/dev/null 2>&1 || fail "missing-command:$cmd"
 done
+
+[ "${AETHERIC_HOST_WEB_GUI_CHECK_SCRIPT:-$AETHERIC_CHECKER}" = "$AETHERIC_CHECKER" ] ||
+    fail "aetheric-production-checker-override-not-allowed"
 
 SIMPLE_WEB_FONT_RUN_ID="${SIMPLE_WEB_FONT_RUN_ID:-}"
 [ "$SIMPLE_WEB_FONT_RUN_ID" != "" ] || fail "missing-simple-web-font-run-id"
@@ -140,6 +167,33 @@ case "$SIMPLE_WEB_FONT_RUN_ID" in
     *[!A-Za-z0-9._:-]*) fail "invalid-simple-web-font-run-id" ;;
 esac
 export SIMPLE_WEB_FONT_RUN_ID
+
+AETHERIC_HOST_WEB_GUI_PROOF="${AETHERIC_HOST_WEB_GUI_PROOF:-}"
+[ -s "$AETHERIC_HOST_WEB_GUI_PROOF" ] || fail "missing-aetheric-production-proof"
+[ -f "$AETHERIC_CHECKER" ] || fail "missing-aetheric-production-checker"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+[ -x "$SIMPLE_BIN" ] || fail "missing-aetheric-simple-bin"
+AETHERIC_PROOF_DIR="$(CDPATH= cd -- "$(dirname -- "$AETHERIC_HOST_WEB_GUI_PROOF")" && pwd -P)"
+AETHERIC_REPORT_PATH="$BUILD_DIR/aetheric-admission-report.md"
+set +e
+BUILD_DIR="$AETHERIC_PROOF_DIR" \
+    REPORT_PATH="$AETHERIC_REPORT_PATH" \
+    AETHERIC_HOST_WEB_GUI_PROOF="$AETHERIC_HOST_WEB_GUI_PROOF" \
+    SIMPLE_BIN="$SIMPLE_BIN" \
+    sh "$AETHERIC_CHECKER" >"$AETHERIC_VALIDATED_ENV" 2>&1
+aetheric_code=$?
+set -e
+[ "$aetheric_code" -eq 0 ] ||
+    fail "aetheric-production-admission-failed"
+
+aetheric_field() {
+    sed -n "s/^aetheric_host_web_gui_proof_$1=//p" "$AETHERIC_VALIDATED_ENV" | tail -n 1
+}
+aetheric_artifact_sha256="$(aetheric_field pixel_artifact_sha256)"
+aetheric_readback_source="$(aetheric_field simple_readback_source)"
+aetheric_renderer_producer="$(aetheric_field simple_renderer_producer)"
+aetheric_pixel_count="$(aetheric_field pixel_count)"
+aetheric_pixel_checksum="$(aetheric_field pixel_checksum)"
 
 SIMPLE_WEB_FONT_COMPOSITION_RECEIPT="${SIMPLE_WEB_FONT_COMPOSITION_RECEIPT:-build/test-artifacts/simple-web-font-composition/receipt.env}"
 [ -s "$SIMPLE_WEB_FONT_COMPOSITION_RECEIPT" ] || fail "missing-simple-web-font-composition-receipt"
@@ -155,11 +209,10 @@ resolve_electron_bin || fail "$ELECTRON_RESOLVER_REASON"
 set +e
 if [ -z "${DISPLAY:-}" ] && [ "$(uname -s)" != Darwin ]; then
     command -v xvfb-run >/dev/null 2>&1 || fail "missing-command:xvfb-run"
-    ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a --server-args="-screen 0 1280x720x24" \
-        "$ELECTRON_RESOLVED_BIN" --no-sandbox --disable-gpu tools/web-render-backend/wm_event_check.js >"$OUT" 2>&1
+    xvfb-run -a --server-args="-screen 0 1280x720x24" \
+        "$ELECTRON_RESOLVED_BIN" tools/web-render-backend/wm_event_check.js >"$OUT" 2>&1
 else
-    ELECTRON_DISABLE_SANDBOX=1 "$ELECTRON_RESOLVED_BIN" --no-sandbox --disable-gpu \
-        tools/web-render-backend/wm_event_check.js >"$OUT" 2>&1
+    "$ELECTRON_RESOLVED_BIN" tools/web-render-backend/wm_event_check.js >"$OUT" 2>&1
 fi
 code=$?
 set -e
@@ -265,6 +318,9 @@ browser_engine="$(field browser_engine)"
 electron_user_agent="$(field electron_user_agent)"
 electron_process_version="$(field electron_process_version)"
 chrome_process_version="$(field chrome_process_version)"
+renderer_sandboxed="$(field renderer_sandboxed)"
+gpu_compositing_status="$(field gpu_compositing_status)"
+webgl_status="$(field webgl_status)"
 
 status=pass
 reason=pass
@@ -293,6 +349,15 @@ fi
     echo "wm_browser_event_routing_reason=$reason"
     echo "wm_browser_event_routing_validation_status=$validation_status"
     echo "wm_browser_event_routing_validation_reason=$validation_reason"
+    echo "wm_browser_event_routing_launch_mode=production"
+    echo "wm_browser_event_routing_renderer_sandboxed=$renderer_sandboxed"
+    echo "wm_browser_event_routing_gpu_compositing_status=$gpu_compositing_status"
+    echo "wm_browser_event_routing_webgl_status=$webgl_status"
+    echo "wm_browser_event_routing_aetheric_artifact_sha256=$aetheric_artifact_sha256"
+    echo "wm_browser_event_routing_aetheric_readback_source=$aetheric_readback_source"
+    echo "wm_browser_event_routing_aetheric_renderer_producer=$aetheric_renderer_producer"
+    echo "wm_browser_event_routing_aetheric_pixel_count=$aetheric_pixel_count"
+    echo "wm_browser_event_routing_aetheric_pixel_checksum=$aetheric_pixel_checksum"
     echo "wm_browser_event_routing_proof_symlink_status=$proof_symlink_status"
     echo "wm_browser_event_routing_proof_hardlink_status=$proof_hardlink_status"
     echo "wm_browser_event_routing_target=$target"
@@ -387,6 +452,10 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- runtime sandbox: $renderer_sandboxed"
+    echo "- runtime GPU: compositing=$gpu_compositing_status webgl=$webgl_status"
+    echo "- admitted Aetheric pixel artifact: $aetheric_artifact_sha256"
+    echo "- admitted Aetheric readback: $aetheric_readback_source / $aetheric_renderer_producer"
     echo "- target: $target"
     echo "- surface id: $surface_id"
     echo "- proof source: $proof_source"

@@ -1,7 +1,9 @@
 # Web Semantic/Layout + DrawIR Pipeline — Optimization & Refactoring Plan
 
-Status: draft plan (not yet executed). Scope: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
-(9,456 lines) and its relationship to the existing Draw IR layer
+Status: active, partially implemented. The renderer monolith named by the
+original plan has already been split into stage-owned files; its line references
+are historical and must be refreshed before scheduling later phases. Scope:
+the private web semantic/layout stages and their relationship to the existing Draw IR layer
 (`src/lib/common/ui/draw_ir*.spl`, `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`).
 
 Related: `doc/03_plan/ui/rendering/draw_ir_multibackend_plan.md` (Engine2D backend/op
@@ -10,6 +12,19 @@ concrete response to the perf regression exposed in
 `doc/08_tracking/bug/web_render_full_engine_content_frame_reroute_perf_2026-07-12.md`.
 
 ## 1. Current State
+
+### 2026-07-29 implementation status
+
+- The architectural decision remains unchanged: there is no new `WebIR`;
+  private web semantic/layout state lowers to `DrawIrComposition`.
+- The shared Draw IR contract now owns rectangle translation/intersection, and
+  the Engine2D executor reuses it for command clips. This is a bounded,
+  behavior-preserving part of Phase 1.
+- Persistent semantic/layout stage reuse remains blocked on authoritative
+  BrowserSession document/style/geometry/resource revisions. Do not add a
+  whole-HTML cache as a substitute.
+- External `<img>` and CSS background lowering cover part of Phase 2. Iframe
+  embedding and exact Path-A/Path-B parity remain open.
 
 ### 1.1 The monolith's internal stages (file:line)
 

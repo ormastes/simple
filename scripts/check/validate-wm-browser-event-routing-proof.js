@@ -188,6 +188,10 @@ function proofSourceArtifact() {
     !source.includes("out.input_to_paint_ms = inputToPaintMs") ||
     !source.includes('function loadProductionEnvelope(root)') ||
     !source.includes('data-aetheric-production-surface') ||
+    !source.includes('process.sandboxed === true') ||
+    !source.includes('app.getGPUFeatureStatus()') ||
+    !source.includes("result.gpu_feature_status.gpu_compositing === 'enabled'") ||
+    !source.includes("result.gpu_feature_status.webgl === 'enabled'") ||
     !source.includes("out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse'") ||
     !source.includes("result.font_frame_path = framePath") ||
     !source.includes("result.font_frame_pixel_checksum = frameChecksum")
@@ -332,6 +336,7 @@ try {
 const move = proof.move_payload || {};
 const title = proof.title_payload || {};
 const text = proof.text_payload || {};
+const gpuFeatureStatus = proof.gpu_feature_status || {};
 const proofSource = proofSourceArtifact();
 const productionEnvelope = productionEnvelopeArtifact(proof);
 const fontFrame = fontFrameArtifact(proof);
@@ -357,6 +362,9 @@ const rows = {
   electron_user_agent: proof.electron_user_agent,
   electron_process_version: proof.electron_process_version,
   chrome_process_version: proof.chrome_process_version,
+  renderer_sandboxed: jsonBoolTextOrBlank(proof.renderer_sandboxed),
+  gpu_compositing_status: gpuFeatureStatus.gpu_compositing,
+  webgl_status: gpuFeatureStatus.webgl,
   production_envelope_schema: proof.production_envelope_schema,
   production_envelope_producer: proof.production_envelope_producer,
   production_envelope_path: proof.production_envelope_path,
@@ -476,6 +484,13 @@ if (!boolTrue(proof.pass)) {
   !/^[0-9]+(?:\.[0-9]+)*$/.test(proof.chrome_process_version)
 ) {
   reason = 'event-routing-browser-runtime-missing';
+} else if (!boolTrue(proof.renderer_sandboxed)) {
+  reason = 'event-routing-renderer-sandbox-missing';
+} else if (
+  gpuFeatureStatus.gpu_compositing !== 'enabled' ||
+  gpuFeatureStatus.webgl !== 'enabled'
+) {
+  reason = 'event-routing-gpu-runtime-missing';
 } else if (simpleComposition.status !== 'pass') {
   reason = 'event-routing-simple-composition-artifact-invalid';
 } else if (!boolTrue(proof.ready) || !boolTrue(proof.wm_found)) {

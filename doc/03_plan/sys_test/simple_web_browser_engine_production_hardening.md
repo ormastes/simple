@@ -145,6 +145,38 @@ Unavailable rows remain blocked or unsupported and do not count as PASS.
 6. applicable compiler/lib/UI/whole-release and environment-facade gates.
 
 Each final unchanged green command is recorded once.
+
+## Event and conformance evidence contracts
+
+`scripts/check/check-wm-browser-event-routing-evidence.shs` admits the canonical
+Aetheric proof before launching its Electron event probe. A positive launch
+uses the pinned Electron executable with Chromium sandboxing and GPU defaults
+enabled. `ELECTRON_DISABLE_SANDBOX` or
+`WM_BROWSER_EVENT_ROUTING_DIAGNOSTIC_FLAGS` makes the result blocked;
+diagnostic execution cannot become production PASS evidence.
+
+Launch configuration alone is not evidence. The renderer reports the
+Electron-supported `process.sandboxed` signal through an isolated preload, and
+the main process records `app.getGPUFeatureStatus()`. The validator requires
+`renderer_sandboxed=true`, `gpu_compositing=enabled`, and `webgl=enabled`;
+missing, software, unavailable, or tampered values fail the receipt.
+
+The event receipt joins the admitted Aetheric pixel artifact SHA-256,
+Simple readback source, renderer producer, pixel count, and pixel checksum to
+the existing Simple composition artifact SHA-256 and live event/frame
+correlation. It does not claim BrowserSession provenance unless a canonical
+producer emits and validates that field.
+
+REQ-WEB-BROWSER-019/NFR-WEB-BROWSER-012 use the manifest, unsupported ledger,
+and receipt schema under `test/fixtures/browser/conformance/`. The manifest
+pins WPT and Test262 but records `status=not-run` and zero claimed cases. The
+ledger remains visible and blocked; the receipt file is a schema, not a
+fabricated run. Validate these invariants without downloading either suite:
+
+```bash
+sh scripts/check/check-simple-web-browser-conformance-contract.shs
+```
+
 ## External PNG evidence (2026-07-29)
 
 The focused scenario must prove a real broker HSTS include-subdomains upgrade

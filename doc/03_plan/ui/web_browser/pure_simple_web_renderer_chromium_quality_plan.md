@@ -275,6 +275,17 @@ timing counters.
 - Existing dirty worktree state can make GitHub sync unsafe without isolating
   this plan doc from unrelated changes.
 
+## Bounded HTML progress (2026-07-29)
+
+- Plain `hidden` now enters the canonical cascade as a lowest-priority
+  `display:none` presentational default. The shared style result suppresses the
+  element and subtree in both software paint and Draw IR; later author
+  `display` declarations can override it.
+- Exact attribute detection excludes `data-hidden`, `hiddenx`, and quoted text.
+- `hidden="until-found"` remains unsupported because reveal-until-found needs
+  find-in-page lifecycle and `beforematch` behavior; this slice does not claim
+  it or full HTML compatibility.
+
 ## GitHub Sync Plan
 
 Do not sync this document together with unrelated worktree changes. The current

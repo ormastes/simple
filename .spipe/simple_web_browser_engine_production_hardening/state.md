@@ -1798,3 +1798,54 @@ implementation in progress / target evidence blocked
   layout gates pass. Lightweight LSP diagnostics were unavailable; the bounded
   direct pure-Simple check reproduced the recorded compiler crash (exit 139).
   Per user direction, verification stopped without bootstrap or Rust seed.
+- next production-gap cooperative plan (2026-07-29): Six bounded sidecars own
+  canonical Draw-IR clipping/z-order, CSP source/meta enforcement,
+  scripting/event runtime, chrome/profile/process lifecycle, retained render
+  work, and sandboxed evidence contracts. Merge owner, generated-manual owner,
+  and final reviewer are highest-capability Codex. Shared interfaces are
+  `DrawIrCommand.clip_rect`, `_html_draw_ir_node_paint_order`,
+  `browser_csp_source_matches_url`,
+  `BrowserSession.script_event_listeners`, `browser_script_event_dispatch`,
+  persistent `simple_script_executor`, `SimpleScriptExecutor.tick`,
+  `browser_renderer_close_pending`, `SimpleWebRenderSession`, and its
+  `document_revision`/`style_revision`/`viewport_revision`/
+  `composition_revision`. Frozen manual steps are
+  `Clip canonical Draw IR to ancestor overflow`,
+  `Paint positioned siblings by stable z-index`,
+  `Enforce CSP host paths and head meta policies`,
+  `Deliver JavaScript and Simple Script listeners on the live DOM`,
+  `Reuse parsed layout work across unchanged animation frames`,
+  `Keep secondary chrome usable after primary close`,
+  `Retry renderer cleanup after a transient close failure`, and
+  `Require sandboxed GPU-backed browser event evidence`. Existing production
+  fixture/checker helpers remain canonical; any new temporary helper must
+  `fail(...)`, never silently pass.
+- meta-CSP blocker (2026-07-29): Meta policies cannot be enforced faithfully
+  by a whole-document pre-scan because CSP applies only to following content.
+  The current loader extracts scripts, stylesheets, and images into separate
+  category-ordered collections without source offsets or per-resource policy
+  snapshots. Correct support requires an ordered parser action stream, or
+  source offsets plus applicable-policy snapshots for every static resource
+  and derived import/module/background-image load. Until then, no unused
+  extraction helper is retained and header CSP remains fail-closed.
+- CSP host-path hardening (2026-07-29): Initial resource admission compares
+  canonical paths after removing literal and percent-encoded dot segments,
+  clamps traversal at the URL root, and preserves encoded slashes as data.
+  Redirect admission ignores source paths per CSP3 while still matching origin.
+- optimization baseline: The authoritative performance SSpec remains
+  deliberately fail-fast and the deployed pure-Simple runtime crashes during
+  `check` (139), so numeric baseline execution is blocked. Source tracing proves
+  one full serialization/parse/style/layout/Draw-IR rebuild per frame; the
+  retained-session lane must leave exact stage counters and allocation/RSS
+  evidence ready for the smallest working pure-Simple Phase 2/3 runtime. No
+  bootstrap or Rust-seed evidence is allowed.
+- live script-listener blocker (2026-07-29): Retained JavaScript callables are
+  viable, but `be_dom_dispatch_event_path` owns inline capture/target/bubble
+  ordering before `BrowserSession` can invoke them. A second JS dispatcher
+  breaks mixed-handler ordering and propagation and creates an uncapped
+  retained-listener scan. Correct support must extend the one canonical DOM
+  dispatcher with a bounded, compacting callable registry, shared Event state,
+  and document/window targets. Simple Script callbacks remain separately
+  blocked because `ScriptRunner.run_script` denies host execution and
+  `SimpleScriptExecutor.tick` has IDs but no executable closure registry. No
+  partial listener API was retained.

@@ -102,6 +102,11 @@ Owns:
 
 Must not edit Engine3D or create a font/device path.
 
+Current bounded HTML slice: plain `hidden` is a lowest-priority presentational
+default shared by software paint and Draw IR. Author CSS may override it.
+`hidden="until-found"` remains assigned to future find-in-page/`beforematch`
+work and is not counted as supported.
+
 ### Lane E — JavaScript/Simple Script clock
 
 Owns:

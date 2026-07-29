@@ -738,6 +738,43 @@ describe "hosted browser renderer worker":
         expect(policy.ok).to_be(true)
         expect(policy.consumes_navigation).to_be(true)
 
+    it "activates a focused submit input on Space release":
+        val html = (
+            "<form action='/space' method='post'>" +
+            "<input id='go' type='submit' data-focused value='Go'></form>"
+        )
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: html
+        )).ok).to_be(true)
+        expect(worker.browser.open_html(
+            "https://source.test/page", html
+        ).is_ok()).to_be(true)
+        expect(be_dom_focused_id(worker.browser.dom_root())).to_equal("go")
+
+        val down = worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 3,
+            payload: "K1\t1\t32\t1"
+        ))
+        val down_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), down.wire
+        )
+        expect(down_message.message.kind).to_equal("frame")
+
+        val up = worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 4,
+            payload: "K1\t2\t32\t0"
+        ))
+        val up_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), up.wire
+        )
+        val navigation = browser_renderer_fetch_request_decode(
+            up_message.message
+        )
+        expect(navigation.kind).to_equal("document")
+        expect(navigation.url).to_equal("https://source.test/space")
+        expect(navigation.method).to_equal("POST")
+
     it "fails closed when a script exceeds the cookie write batch":
         var worker = HostedBrowserRendererWorkerSession.create(64, 48)
         expect(worker.handle(BrowserRendererMessage(

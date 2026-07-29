@@ -198,6 +198,41 @@ Host C containment/TLS checks are supporting evidence. Until the pure-Simple
 target runs the affected scenarios, do not claim a browser runtime PASS or
 substitute bootstrap/Rust-seed execution.
 
+### Event-routing proof launch
+
+Run the event proof only with a fresh Aetheric admission receipt and matching
+Simple composition receipt:
+
+```bash
+AETHERIC_HOST_WEB_GUI_PROOF=/absolute/path/aetheric-host-web-gui.env \
+SIMPLE_WEB_FONT_RUN_ID=<fresh-run-id> \
+SIMPLE_WEB_FONT_COMPOSITION_RECEIPT=/absolute/path/receipt.env \
+sh scripts/check/check-wm-browser-event-routing-evidence.shs
+```
+
+The production command keeps Electron's Chromium sandbox and GPU defaults
+enabled. `ELECTRON_DISABLE_SANDBOX` and
+`WM_BROWSER_EVENT_ROUTING_DIAGNOSTIC_FLAGS` are diagnostic-only: the wrapper
+records blocked/unavailable and cannot emit PASS. A successful receipt
+includes the admitted Aetheric artifact SHA-256/readback identity and the
+Simple composition artifact SHA-256, joining event/animation evidence to its
+pixels.
+
+The wrapper does not infer sandbox or GPU state from that command. Its renderer
+preload exposes Electron's `process.sandboxed` value, while the main process
+records `app.getGPUFeatureStatus()`. Production validation requires sandbox
+`true` plus `enabled` GPU compositing and WebGL. Software, unavailable, missing,
+or altered values fail closed.
+
+Pinned WPT/Test262 identity and the visible unsupported ledger live under
+`test/fixtures/browser/conformance/`. Validate their non-PASS metadata with:
+
+```bash
+sh scripts/check/check-simple-web-browser-conformance-contract.shs
+```
+
+This check neither downloads suites nor claims conformance.
+
 ### Current frame and chrome invariants
 
 - CSS background Draw IR includes canonical clip-shape bounds and per-axis radii.
