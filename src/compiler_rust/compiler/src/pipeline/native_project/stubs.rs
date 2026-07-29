@@ -1423,6 +1423,45 @@ mod tests {
     }
 
     #[test]
+    fn ratchet_fires_on_new_symbol_for_baselined_entry_and_passes_on_known() {
+        // End-to-end fire-path probe of check_fabricated_stub_ratchet itself:
+        // a baselined entry with a NEW fabricated symbol must be a hard Err,
+        // and the identical build with only known symbols must pass. This is
+        // the vacuity check for the gate -- the pure helpers are covered
+        // above, but only this function decides pass/fail.
+        let dir = std::env::temp_dir().join(format!(
+            "fabricated_ratchet_fire_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let baseline = dir.join("baseline.sdn");
+        std::fs::write(&baseline, "kernel.elf rt_known\n").unwrap();
+        // Point the checker at the temp baseline. No other test reads these
+        // env vars, so per-process mutation cannot race a parallel test.
+        // Clear the write/strict knobs in case the ambient environment set
+        // them -- either would change the pass/fail decision under test.
+        std::env::remove_var("SIMPLE_FABRICATED_STUB_BASELINE_WRITE");
+        std::env::remove_var("SIMPLE_STRICT_FABRICATED_STUB_RATCHET");
+        std::env::set_var("SIMPLE_FABRICATED_STUB_BASELINE", &baseline);
+
+        let known_only = ["rt_known".to_string()];
+        let ok = check_fabricated_stub_ratchet(&dir, Path::new("kernel.elf"), &known_only);
+
+        let with_new = ["rt_known".to_string(), "rt_probe_new_symbol".to_string()];
+        let fired = check_fabricated_stub_ratchet(&dir, Path::new("kernel.elf"), &with_new);
+
+        std::env::remove_var("SIMPLE_FABRICATED_STUB_BASELINE");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(ok.is_ok(), "known-only fabricated set must pass: {ok:?}");
+        let err = fired.expect_err("a NEW fabricated symbol on a baselined entry must fail the link");
+        assert!(
+            err.contains("rt_probe_new_symbol"),
+            "ratchet error must name the new symbol: {err}"
+        );
+    }
+
+    #[test]
     fn shipped_baseline_file_parses() {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
