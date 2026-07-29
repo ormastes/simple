@@ -33,6 +33,23 @@ fn append_forwarded_env(target: [text], names: [text]):
         if value != "":
             target.push(name + "=" + value)
 
+fn font_host_tool_dir_valid(path: text) -> bool:
+    if path == "":
+        return true
+    if not path.starts_with("/") or path.contains(":") or path.contains("\n"):
+        return false
+    for tool in ["mcopy", "mtype", "mdir", "mformat", "mmd"]:
+        if not file_exists(path + "/" + tool):
+            return false
+    for tool in [
+        "qemu-system-x86_64", "qemu-system-riscv64", "clang", "clang-20",
+        "ld.lld", "ld.lld-20", "llvm-objcopy", "fsck.fat",
+        "grub-mkstandalone", "python3"
+    ]:
+        if file_exists(path + "/" + tool):
+            return false
+    true
+
 fn file_sha256(path: text) -> text:
     val (stdout, _, code) = run_bounded("15s", "/usr/bin/sha256sum", [path])
     if code != 0:
@@ -171,7 +188,11 @@ fn main() -> i64:
     val runtime_dir = args[3]
     val expected_archive_sha = args[4]
     val spec = args[5]
+    val host_tool_dir = env_get("SIMPLE_FONT_HOST_TOOL_DIR") ?? ""
     val archive = runtime_dir + "/libsimple_runtime.a"
+    if not font_host_tool_dir_valid(host_tool_dir):
+        print "font-evidence-runner: invalid font host tool directory"
+        return 1
     if compiler.contains("compiler_rust") or compiler.contains("/target/bootstrap/"):
         print "font-evidence-runner: Rust/bootstrap seed is forbidden: {compiler}"
         return 1
@@ -200,6 +221,8 @@ fn main() -> i64:
     print "font-evidence-runner: compiler-sha256={compiler_sha}"
     print "font-evidence-runner: runtime-archive={archive}"
     print "font-evidence-runner: runtime-sha256={archive_sha}"
+    if host_tool_dir != "":
+        print "font-evidence-runner: host-tool-dir={host_tool_dir}"
 
     val wrapped = preprocess_spipe_native_result_file(spec)
     if wrapped == "":
@@ -288,9 +311,11 @@ fn main() -> i64:
         print "font-evidence-runner: invalid native spec artifact"
         return 1
     print "font-evidence-runner: native-sha256={native_sha}"
+    val system_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    val evidence_path = if host_tool_dir == "": system_path else: host_tool_dir + ":" + system_path
     var run_env_args = [
         "-i",
-        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PATH=" + evidence_path,
         "HOME=/tmp",
         "TMPDIR=/tmp",
         "LANG=C",

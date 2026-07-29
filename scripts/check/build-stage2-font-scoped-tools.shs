@@ -408,6 +408,462 @@ verify_attempt() {
     ! find "$root" "$cache_root" -perm /222 -print -quit | grep -q .
 }
 
+simpleos_stage2_font_specs=(
+    test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl
+    test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl
+    test/01_unit/lib/skia/selected_devanagari_spec.spl
+    test/01_unit/lib/skia/selected_arabic_spec.spl
+    test/01_unit/os/port/simpleos_font_bundle_spec.spl
+    test/02_integration/os/port/simpleos_font_asset_staging_spec.spl
+    test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
+    test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl
+    test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
+    test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl
+)
+
+manual_path_for_spec() {
+    local manual="doc/06_spec/${1#test/}"
+    printf '%s\n' "${manual%.spl}.md"
+}
+
+staged_manual_path_for_spec() {
+    local manual="$2/${1#test/}"
+    printf '%s\n' "${manual%.spl}.md"
+}
+
+manual_receipt_base() {
+    local name=${1#test/}
+    printf '%s/%s\n' "$2" "${name//\//_}"
+}
+
+manual_command_argv() {
+    local tool_root=$1
+    local spec=$2
+    local output_root=$3
+    local -n destination=$4
+    destination=(
+        /usr/bin/timeout --kill-after=15s 120s
+        "$tool_root/bin/spipe_docgen"
+        "$spec"
+        --output "$output_root"
+        --no-index
+    )
+}
+
+manual_attempt_root_valid() {
+    case "$1" in
+        "$repo_root"/build/test-artifacts/shared_multilingual_gpu_fonts/\
+simpleos-stage2-docgen/attempt-[1-3]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+scoped_manual_path() {
+    local path=$1
+    local spec
+    for spec in "${simpleos_stage2_font_specs[@]}"; do
+        [ "$path" = "$(manual_path_for_spec "$spec")" ] && return 0
+    done
+    return 1
+}
+
+git_dirt_is_scoped_manuals_only() {
+    local line
+    while IFS= read -r line; do
+        [ -z "$line" ] || scoped_manual_path "${line:3}" || return 1
+    done < <(git status --porcelain=v1 --untracked-files=normal)
+}
+
+manual_git_state_valid() {
+    local checkpoint=$1
+    local head path
+    head=$(git rev-parse HEAD) || return 1
+    if [ "$head" = "$checkpoint" ]; then
+        git diff --cached --quiet &&
+            git_dirt_is_scoped_manuals_only
+        return
+    fi
+    [ -z "$(git status --porcelain=v1 --untracked-files=normal)" ] &&
+        git merge-base --is-ancestor "$checkpoint" "$head" || return 1
+    while IFS= read -r path; do
+        [ -z "$path" ] || scoped_manual_path "$path" || return 1
+    done < <(git diff --name-only "$checkpoint" "$head")
+}
+
+verify_manuals() {
+    local tool_root=$1
+    local manual_root=$2
+    local identity="$manual_root/identity.env"
+    local summary="$manual_root/summary.env"
+    local tool_identity="$tool_root/identity.env"
+    local tool_cache
+    local staging_root="$manual_root/generated"
+    local before_root="$manual_root/before"
+    local spec manual staged before base spec_sha manual_sha manual_before
+    local checkpoint expected_command
+    local -a command expected_members
+
+    [ "${#simpleos_stage2_font_specs[@]}" -eq 10 ] &&
+        canonical_file "$identity" &&
+        canonical_file "$summary" &&
+        canonical_file "$manual_root/evidence.sha256" &&
+        [ "$(field schema "$identity")" = \
+            simpleos-stage2-font-manuals-identity/v1 ] &&
+        [ "$(field schema "$summary")" = \
+            simpleos-stage2-font-manuals/v1 ] &&
+        [ "$(field status "$summary")" = pass ] &&
+        [ "$(field manual_count "$summary")" = 10 ] &&
+        [ "$(field tool_attempt_root "$identity")" = "$tool_root" ] &&
+        [ "$(field tool_attempt_evidence_sha256 "$identity")" = \
+            "$(hash_file "$tool_root/evidence.sha256")" ] &&
+        [ "$(field docgen_path "$identity")" = \
+            "$tool_root/bin/spipe_docgen" ] &&
+        [ "$(field docgen_sha256 "$identity")" = \
+            "$(hash_file "$tool_root/bin/spipe_docgen")" ] &&
+        [ "$(field checkpoint_sha "$identity")" = \
+            "$(field checkpoint_sha "$tool_identity")" ] &&
+        [ "$(field docgen_sha256 "$identity")" = \
+            "$(field docgen_sha256 "$tool_identity")" ] &&
+        [ "$(field status "$tool_root/summary.env")" = pass ] &&
+        check_hash_manifest "$tool_root" evidence.sha256 ||
+        return 1
+    tool_cache=$(field cache_root "$tool_identity") || return 1
+    checkpoint=$(field checkpoint_sha "$identity") || return 1
+    check_hash_manifest "$tool_cache" \
+        "$tool_root/cache-postinventory.sha256" &&
+        diff -u <(manifest_inventory "$tool_root/evidence.sha256") \
+            <(tree_inventory "$tool_root" './evidence.sha256') >/dev/null &&
+        diff -u \
+            <(manifest_inventory "$tool_root/cache-postinventory.sha256") \
+            <(tree_inventory "$tool_cache") >/dev/null || return 1
+
+    expected_members=(
+        ./identity.env ./summary.env
+        ./tool-check.command ./tool-check.stdout ./tool-check.stderr
+        ./tool-check.exit ./tool-check.git-status
+    )
+    [ "$(field schema "$manual_root/tool-check.command")" = \
+        simpleos-stage2-font-manual-tool-check/v1 ] &&
+        [ "$(field checkpoint_sha "$manual_root/tool-check.command")" = \
+            "$(field checkpoint_sha "$identity")" ] &&
+        [ "$(field tool_attempt_root "$manual_root/tool-check.command")" = \
+            "$tool_root" ] &&
+        [ "$(field tool_attempt_evidence_sha256 \
+            "$manual_root/tool-check.command")" = \
+            "$(hash_file "$tool_root/evidence.sha256")" ] &&
+        [ "$(cat "$manual_root/tool-check.exit")" = 0 ] &&
+        [ ! -s "$manual_root/tool-check.git-status" ] &&
+        [ "$(grep -c '^command ' \
+            "$manual_root/tool-check.command" || true)" -eq 1 ] &&
+        [ "$(grep '^command ' "$manual_root/tool-check.command")" = \
+            "command verify_attempt $tool_root" ] || return 1
+    for spec in "${simpleos_stage2_font_specs[@]}"; do
+        [ -f "$spec" ] || return 1
+        spec_sha=$(hash_file "$spec")
+        manual=$(manual_path_for_spec "$spec")
+        staged=$(staged_manual_path_for_spec "$spec" "$staging_root")
+        before="$before_root/${manual#doc/06_spec/}"
+        [ -f "$manual" ] || return 1
+        canonical_file "$staged" || return 1
+        manual_sha=$(hash_file "$manual")
+        [ "$(hash_file "$staged")" = "$manual_sha" ] || return 1
+        base=$(manual_receipt_base "$spec" "$manual_root")
+        for suffix in command stdout stderr exit manual.sha256; do
+            canonical_file "$base.$suffix" || return 1
+            expected_members+=("./${base#"$manual_root/"}.${suffix}")
+        done
+        expected_members+=("./${staged#"$manual_root/"}")
+        manual_before=$(field manual_before_sha256 "$base.command") ||
+            return 1
+        if [ "$manual_before" = missing ]; then
+            ! git cat-file -e "$checkpoint:$manual" 2>/dev/null ||
+                return 1
+            canonical_file "$before.missing" || return 1
+            expected_members+=("./${before#"$manual_root/"}.missing")
+        else
+            require_sha256 manual_before "$manual_before"
+            [ "$(git show "$checkpoint:$manual" | sha256sum |
+                awk '{print $1}')" = "$manual_before" ] || return 1
+            canonical_file "$before" &&
+                [ "$(hash_file "$before")" = "$manual_before" ] || return 1
+            expected_members+=("./${before#"$manual_root/"}")
+        fi
+        [ "$(cat "$base.exit")" = 0 ] &&
+            [ "$(field schema "$base.command")" = \
+                simpleos-stage2-font-manual-command/v1 ] &&
+            [ "$(field spec "$base.command")" = "$spec" ] &&
+            [ "$(field spec_sha256 "$base.command")" = "$spec_sha" ] &&
+            [ "$(field manual "$base.command")" = "$manual" ] &&
+            [ "$(field staged_manual "$base.command")" = "$staged" ] &&
+            [ "$(field checkpoint_sha "$base.command")" = \
+                "$(field checkpoint_sha "$identity")" ] &&
+            [ "$(field tool_attempt_root "$base.command")" = "$tool_root" ] &&
+            [ "$(field docgen_sha256 "$base.command")" = \
+                "$(field docgen_sha256 "$identity")" ] &&
+            [ "$(field manual_sha256 "$base.manual.sha256")" = \
+                "$manual_sha" ] &&
+            [ "$(grep -Fxc \
+                'DONE Generated 1 docs (1 complete, 0 stubs)' \
+                "$base.stdout")" -eq 1 ] || return 1
+        manual_command_argv "$tool_root" "$spec" "$staging_root" command
+        expected_command=$(
+            printf 'command'
+            printf ' %q' "${command[@]}"
+        )
+        [ "$(grep -c '^command ' "$base.command" || true)" -eq 1 ] &&
+            [ "$(grep '^command ' "$base.command")" = \
+                "$expected_command" ] || return 1
+    done
+    expected_members+=(./evidence.sha256)
+    check_hash_manifest "$manual_root" evidence.sha256 &&
+        diff -u <(printf '%s\n' "${expected_members[@]}" | LC_ALL=C sort) \
+            <(tree_inventory "$manual_root") >/dev/null &&
+        manual_git_state_valid "$checkpoint" &&
+        ! find "$tool_root" "$tool_cache" "$manual_root" \
+            -perm /222 -print -quit |
+            grep -q .
+}
+
+manual_failure_root=
+manual_publication_started=0
+manual_rollback_status=not-required
+manual_rollback_reason=publication-not-started
+
+manual_matches_backup() {
+    local spec=$1
+    local manual before
+    manual=$(manual_path_for_spec "$spec")
+    before="$manual_failure_root/before/${manual#doc/06_spec/}"
+    if [ -f "$before" ]; then
+        [ -f "$manual" ] && cmp -s "$before" "$manual"
+    else
+        [ -f "$before.missing" ] && [ ! -e "$manual" ]
+    fi
+}
+
+atomic_replace_manual() {
+    local source=$1
+    local destination=$2
+    local directory temporary
+    directory=$(dirname "$destination")
+    mkdir -p "$directory" || return 1
+    temporary=$(mktemp "$directory/.stage2-font-manual.XXXXXX") || return 1
+    if cp -p "$source" "$temporary" &&
+        mv -f "$temporary" "$destination"; then
+        return 0
+    fi
+    rm -f "$temporary"
+    return 1
+}
+
+restore_manuals_after_failure() {
+    local spec manual staged before
+    local restored=0
+    [ "$manual_publication_started" -eq 1 ] || return 0
+    for spec in "${simpleos_stage2_font_specs[@]}"; do
+        manual=$(manual_path_for_spec "$spec")
+        staged=$(staged_manual_path_for_spec \
+            "$spec" "$manual_failure_root/generated")
+        before="$manual_failure_root/before/${manual#doc/06_spec/}"
+        if manual_matches_backup "$spec"; then
+            continue
+        fi
+        [ -f "$manual" ] && [ -f "$staged" ] &&
+            cmp -s "$manual" "$staged" || {
+                restored=1
+                continue
+            }
+        if [ -f "$before" ]; then
+            atomic_replace_manual "$before" "$manual" || restored=1
+        elif [ -f "$before.missing" ]; then
+            rm -f "$manual" || restored=1
+        else
+            restored=1
+        fi
+    done
+    for spec in "${simpleos_stage2_font_specs[@]}"; do
+        manual_matches_backup "$spec" || restored=1
+    done
+    return "$restored"
+}
+
+seal_failed_manual_attempt() {
+    local root=$manual_failure_root
+    [ -n "$root" ] && [ -d "$root" ] || return 0
+    chmod -R u+w "$root" 2>/dev/null || true
+    rm -f "$root/evidence.sha256"
+    {
+        echo "schema=simpleos-stage2-font-manuals/v1"
+        echo "status=fail"
+        echo "reason=$failure_reason"
+        echo "rollback_status=$manual_rollback_status"
+        echo "rollback_reason=$manual_rollback_reason"
+        echo "manual_count=10"
+    } >"$root/summary.env"
+    (
+        cd "$root"
+        find . -type f ! -name evidence.sha256 -print0 |
+            LC_ALL=C sort -z | xargs -0 sha256sum >evidence.sha256
+        sha256sum -c evidence.sha256 >/dev/null
+    )
+    chmod -R a-w "$root"
+}
+
+manual_write_exit() {
+    local rc=$?
+    trap - EXIT
+    set +e
+    if [ "$manual_publication_started" -eq 1 ]; then
+        if restore_manuals_after_failure; then
+            manual_rollback_status=pass
+            manual_rollback_reason=all-ten-backups-restored
+        else
+            manual_rollback_status=fail
+            manual_rollback_reason=canonical-manual-changed-or-restore-failed
+        fi
+    fi
+    seal_failed_manual_attempt
+    exit "$rc"
+}
+
+write_manuals() {
+    local tool_root=$1
+    local manual_root=$2
+    local staging_root="$manual_root/generated"
+    local before_root="$manual_root/before"
+    local tool_identity="$tool_root/identity.env"
+    local checkpoint docgen_sha tool_evidence_sha
+    local spec manual staged before base spec_sha manual_before manual_sha rc
+    local -a command
+
+    verify_attempt "$tool_root" || die "manuals-tool-attempt-invalid"
+    checkpoint=$(field checkpoint_sha "$tool_identity")
+    docgen_sha=$(field docgen_sha256 "$tool_identity")
+    tool_evidence_sha=$(hash_file "$tool_root/evidence.sha256")
+    [ ! -e "$manual_root" ] || die "manuals-attempt-root-already-exists" 2
+    mkdir -p "$(dirname "$manual_root")"
+    mkdir "$manual_root"
+    manual_failure_root=$manual_root
+    manual_publication_started=0
+    manual_rollback_status=not-required
+    manual_rollback_reason=publication-not-started
+    trap manual_write_exit EXIT
+    {
+        echo "schema=simpleos-stage2-font-manuals-identity/v1"
+        echo "checkpoint_sha=$checkpoint"
+        echo "tool_attempt_root=$tool_root"
+        echo "tool_attempt_evidence_sha256=$tool_evidence_sha"
+        echo "docgen_path=$tool_root/bin/spipe_docgen"
+        echo "docgen_sha256=$docgen_sha"
+    } >"$manual_root/identity.env"
+
+    for spec in "${simpleos_stage2_font_specs[@]}"; do
+        [ -f "$spec" ] || die "manuals-spec-missing"
+        spec_sha=$(hash_file "$spec")
+        manual=$(manual_path_for_spec "$spec")
+        staged=$(staged_manual_path_for_spec "$spec" "$staging_root")
+        before="$before_root/${manual#doc/06_spec/}"
+        mkdir -p "$(dirname "$before")"
+        manual_before=missing
+        if [ -f "$manual" ]; then
+            manual_before=$(hash_file "$manual")
+            cp "$manual" "$before"
+        else
+            : >"$before.missing"
+        fi
+        base=$(manual_receipt_base "$spec" "$manual_root")
+        manual_command_argv "$tool_root" "$spec" "$staging_root" command
+        {
+            echo "schema=simpleos-stage2-font-manual-command/v1"
+            echo "checkpoint_sha=$checkpoint"
+            echo "tool_attempt_root=$tool_root"
+            echo "docgen_sha256=$docgen_sha"
+            echo "spec=$spec"
+            echo "spec_sha256=$spec_sha"
+            echo "manual=$manual"
+            echo "staged_manual=$staged"
+            echo "manual_before_sha256=$manual_before"
+            printf 'command'
+            printf ' %q' "${command[@]}"
+            printf '\n'
+        } >"$base.command"
+        if "${command[@]}" >"$base.stdout" 2>"$base.stderr"; then
+            rc=0
+        else
+            rc=$?
+        fi
+        printf '%s\n' "$rc" >"$base.exit"
+        [ "$rc" -eq 0 ] &&
+            [ "$(grep -Fxc \
+                'DONE Generated 1 docs (1 complete, 0 stubs)' \
+                "$base.stdout")" -eq 1 ] &&
+            [ -f "$staged" ] &&
+            [ "$(hash_file "$spec")" = "$spec_sha" ] &&
+            [ "$(hash_file "$tool_root/bin/spipe_docgen")" = \
+                "$docgen_sha" ] &&
+            [ "$(git rev-parse HEAD)" = "$checkpoint" ] &&
+            [ -z "$(git status --porcelain --untracked-files=normal)" ] ||
+            die "manuals-docgen-failed"
+        manual_sha=$(hash_file "$staged")
+        echo "manual_sha256=$manual_sha" >"$base.manual.sha256"
+    done
+    {
+        echo "schema=simpleos-stage2-font-manual-tool-check/v1"
+        echo "checkpoint_sha=$checkpoint"
+        echo "tool_attempt_root=$tool_root"
+        echo "tool_attempt_evidence_sha256=$tool_evidence_sha"
+        echo "command verify_attempt $tool_root"
+    } >"$manual_root/tool-check.command"
+    if verify_attempt "$tool_root" \
+        >"$manual_root/tool-check.stdout" \
+        2>"$manual_root/tool-check.stderr"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    printf '%s\n' "$rc" >"$manual_root/tool-check.exit"
+    git status --porcelain=v1 --untracked-files=normal \
+        >"$manual_root/tool-check.git-status"
+    [ "$rc" -eq 0 ] &&
+        [ ! -s "$manual_root/tool-check.git-status" ] ||
+        die "manuals-tool-recheck-failed"
+
+    for spec in "${simpleos_stage2_font_specs[@]}"; do
+        manual_matches_backup "$spec" ||
+            die "manuals-canonical-manual-changed-before-publish"
+    done
+    manual_publication_started=1
+    for spec in "${simpleos_stage2_font_specs[@]}"; do
+        manual_matches_backup "$spec" ||
+            die "manuals-canonical-manual-changed-during-publish"
+        manual=$(manual_path_for_spec "$spec")
+        staged=$(staged_manual_path_for_spec "$spec" "$staging_root")
+        atomic_replace_manual "$staged" "$manual" ||
+            die "manuals-canonical-publish-failed"
+    done
+    git_dirt_is_scoped_manuals_only ||
+        die "manuals-published-worktree-dirt-invalid"
+    {
+        echo "schema=simpleos-stage2-font-manuals/v1"
+        echo "status=pass"
+        echo "manual_count=10"
+    } >"$manual_root/summary.env"
+    (
+        cd "$manual_root"
+        find . -type f ! -name evidence.sha256 -print0 |
+            LC_ALL=C sort -z | xargs -0 sha256sum >evidence.sha256
+        sha256sum -c evidence.sha256 >/dev/null
+    )
+    chmod -R a-w "$manual_root"
+    verify_manuals "$tool_root" "$manual_root" ||
+        die "manuals-final-verification-failed"
+    manual_publication_started=0
+    manual_failure_root=
+    trap - EXIT
+    echo "simpleos_stage2_font_manuals_status=pass"
+    echo "simpleos_stage2_font_manuals_root=$manual_root"
+}
+
 usage() {
     echo "usage:"
     echo "  CHECKPOINT_SHA=... STAGE2_PARENT=... STAGE2_PARENT_SHA=... \\"
@@ -415,6 +871,8 @@ usage() {
     echo "  STAGE2_FONT_TOOL_ATTEMPT_ROOT=... STAGE2_FONT_TOOL_CACHE_ROOT=... \\"
     echo "  bash scripts/check/build-stage2-font-scoped-tools.shs write"
     echo "  bash scripts/check/build-stage2-font-scoped-tools.shs check ATTEMPT_ROOT"
+    echo "  bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write TOOL_ATTEMPT_ROOT MANUAL_ATTEMPT_ROOT"
+    echo "  bash scripts/check/build-stage2-font-scoped-tools.shs manuals-check TOOL_ATTEMPT_ROOT MANUAL_ATTEMPT_ROOT"
 }
 
 mode=${1:-}
@@ -424,6 +882,26 @@ case "$mode" in
         attempt_root=$(readlink -f "$2")
         verify_attempt "$attempt_root" || die "attempt-verification-failed"
         echo "stage2_font_scoped_tools_status=pass"
+        exit 0
+        ;;
+    manuals-check)
+        [ "$#" -eq 3 ] || die "manuals-check-requires-two-roots" 2
+        tool_root=$(readlink -f "$2")
+        manual_root=$(readlink -f "$3")
+        manual_attempt_root_valid "$manual_root" ||
+            die "manuals-attempt-root-invalid" 2
+        verify_manuals "$tool_root" "$manual_root" ||
+            die "manuals-attempt-verification-failed"
+        echo "simpleos_stage2_font_manuals_status=pass"
+        exit 0
+        ;;
+    manuals-write)
+        [ "$#" -eq 3 ] || die "manuals-write-requires-two-roots" 2
+        tool_root=$(readlink -f "$2")
+        manual_root=$(readlink -m "$3")
+        manual_attempt_root_valid "$manual_root" ||
+            die "manuals-attempt-root-invalid" 2
+        write_manuals "$tool_root" "$manual_root"
         exit 0
         ;;
     write)

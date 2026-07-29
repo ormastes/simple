@@ -91,6 +91,36 @@ It seals the attempt and caches read-only. A repeated invocation first verifies
 the complete receipt and then refuses reuse; a repair uses a new attempt/cache
 number and counts toward the three-cycle cap.
 
+Preflight every host/QEMU input, stage the validated mtools commands, and run
+the exact ten specs once in the frozen order. The receipt seals complete
+regular-file copies of both live QEMU output trees, including their reports,
+font crops, and input/frame artifacts:
+
+```bash
+export STAGE2_FONT_SPEC_ATTEMPT=2
+export SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory>
+export BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live
+export REPORT_PATH="$BUILD_DIR/report.md"
+export RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf
+export RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img
+export RV64_WM_FONT_REGION_EXPECTED_SHA256=<independently-reviewed-rv64-crop-sha256>
+bash scripts/check/run-stage2-font-scoped-specs.shs write \
+  "$STAGE2_FONT_TOOL_ATTEMPT_ROOT"
+bash scripts/check/run-stage2-font-scoped-specs.shs check \
+  "$STAGE2_FONT_TOOL_ATTEMPT_ROOT"
+```
+
+After all ten specs are green, generate their canonical manuals exactly once
+and retain the immutable receipts:
+
+```bash
+export STAGE2_FONT_MANUAL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
+bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write \
+  "$STAGE2_FONT_TOOL_ATTEMPT_ROOT" "$STAGE2_FONT_MANUAL_ATTEMPT_ROOT"
+bash scripts/check/build-stage2-font-scoped-tools.shs manuals-check \
+  "$STAGE2_FONT_TOOL_ATTEMPT_ROOT" "$STAGE2_FONT_MANUAL_ATTEMPT_ROOT"
+```
+
 ### Non-blocking warnings and deferred work
 
 The following do not block this scoped goal:

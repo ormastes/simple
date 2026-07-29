@@ -42,6 +42,27 @@ plus zero-stub docgen calibration.
 A later verifier runs `bash scripts/check/build-stage2-font-scoped-tools.shs
 check <attempt-root>` instead of rerunning a green writer. Repairs use a new
 numbered attempt/cache and stop after three cycles; full bootstrap is excluded.
+After the tool attempt passes, execute the exact ten specs with the same
+numbered receipt attempt and validated host/QEMU inputs:
+
+```bash
+STAGE2_FONT_SPEC_ATTEMPT=<next-number> \
+SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory> \
+BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live \
+REPORT_PATH=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live/report.md \
+RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf \
+RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img \
+RV64_WM_FONT_REGION_EXPECTED_SHA256=<independently-reviewed-rv64-crop-sha256> \
+bash scripts/check/run-stage2-font-scoped-specs.shs write <attempt-root>
+STAGE2_FONT_SPEC_ATTEMPT=<same-number> \
+bash scripts/check/run-stage2-font-scoped-specs.shs check <attempt-root>
+```
+
+After the exact ten focused specs pass, the same helper runs
+`bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write
+<attempt-root> <manual-attempt-root>` once; independent review uses `bash
+scripts/check/build-stage2-font-scoped-tools.shs manuals-check <attempt-root>
+<manual-attempt-root>`.
 
 ## Loop
 

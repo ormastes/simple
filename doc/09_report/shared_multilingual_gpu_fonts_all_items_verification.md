@@ -27,9 +27,41 @@ identity, and native-safe fresh-device material gaps. A reviewed
 provenance, source/tool stability, four calibrations, and immutable evidence;
 they have not executed. The next blockers are a clean checkpoint, one fresh
 canonical Stage 2, a sealed runner/docgen, followed by the ten focused
-executions and the x86/RV64 SimpleOS QEMU framebuffer/input evidence. Stage 3,
+executions, `bash scripts/check/build-stage2-font-scoped-tools.shs
+manuals-write <tool-attempt-root>
+build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2`,
+the corresponding independent `manuals-check`, and the
+x86/RV64 SimpleOS QEMU framebuffer/input evidence. Stage 3,
 Stage 4, non-SimpleOS native GPU hosts, and the broader cross-platform matrix
 are deferred from this active delivery scope.
+
+The current exact-ten command remains pending:
+
+```bash
+STAGE2_FONT_SPEC_ATTEMPT=2 \
+SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory> \
+BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live \
+REPORT_PATH=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live/report.md \
+RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf \
+RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img \
+RV64_WM_FONT_REGION_EXPECTED_SHA256=<independently-reviewed-rv64-crop-sha256> \
+bash scripts/check/run-stage2-font-scoped-specs.shs write \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-2
+STAGE2_FONT_SPEC_ATTEMPT=2 \
+bash scripts/check/run-stage2-font-scoped-specs.shs check \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-2
+```
+
+After those ten receipts pass, the exact manual commands are:
+
+```bash
+bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-2 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
+bash scripts/check/build-stage2-font-scoped-tools.shs manuals-check \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-2 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
+```
 
 No scoped execution or manual has yet been accepted, so
 `SIMPLEOS_STAGE2_FONT: BLOCKED`. The broader verification result remains

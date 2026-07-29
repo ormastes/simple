@@ -263,6 +263,34 @@ audit runs `bash scripts/check/build-stage2-font-scoped-tools.shs check
 `SIMPLEOS_STAGE2_FONT` evidence: Stage 3/4, full bootstrap, general `run`/`test`
 qualification, and release remain outside it.
 
+Run the exact ten executable specs once with the same numbered receipt attempt.
+The helper validates and stages the supplied mtools directory, binds all
+x86/RV64 host tools, firmware, sysroot inputs, and optional payload state, and
+creates no receipt root when preflight fails:
+
+```bash
+STAGE2_FONT_SPEC_ATTEMPT=<next-number> \
+SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory> \
+BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live \
+REPORT_PATH=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live/report.md \
+RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf \
+RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img \
+RV64_WM_FONT_REGION_EXPECTED_SHA256=<independently-reviewed-rv64-crop-sha256> \
+bash scripts/check/run-stage2-font-scoped-specs.shs write <attempt-root>
+STAGE2_FONT_SPEC_ATTEMPT=<same-number> \
+bash scripts/check/run-stage2-font-scoped-specs.shs check <attempt-root>
+```
+
+After the exact ten scoped specs pass, generate and check their canonical
+manuals without rebuilding the tools:
+
+```bash
+bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write \
+  <attempt-root> <manual-attempt-root>
+bash scripts/check/build-stage2-font-scoped-tools.shs manuals-check \
+  <attempt-root> <manual-attempt-root>
+```
+
 Stage 3 and Stage 4 may then build incrementally from that admitted parent.
 Stage 4 evidence is written by
 `scripts/check/stage4-provenance-receipt.shs write`, which owns the isolated

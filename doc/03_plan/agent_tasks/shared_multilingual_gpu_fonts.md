@@ -44,7 +44,7 @@ cross-platform matrix or feature status.
 | Shaping | registered-only Hindi, Arabic, and Urdu shaping with handle-free material | shaping acceptance, selected Devanagari, selected Arabic |
 | Material | `SharedWmScene -> DrawIrComposition -> Engine2D -> FontRenderer` identity and nonempty batch | desktop production render contract |
 | QEMU | guest font identity, independent crop, and correlated input/frame receipts | x86 evidence/fullscreen and RV64 input |
-| Manuals | ten scoped manuals with zero stubs | the ten focused specs |
+| Manuals | ten scoped manuals with zero stubs and immutable receipts from `build-stage2-font-scoped-tools.shs manuals-write` | the ten focused specs |
 
 All lanes work in the active isolated font worktree, do not commit or sync, and
 run each acceptance check once with at most three bounded fix cycles. Phase 2
@@ -52,6 +52,23 @@ compiler cleanup, Stage 3/4, hosted desktop, Web-only promotion, Engine3D, and
 the cross-platform GPU/performance matrix are out of scope. A Phase 2 change is
 allowed only when one of the ten focused checks exposes a small direct blocker.
 The primary agent owns merge, independent review, and the done mark.
+
+The merge owner runs the exact set through the sealed standalone runner with
+the same numbered tool/spec attempt:
+
+```bash
+export STAGE2_FONT_SPEC_ATTEMPT=2
+export SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory>
+export BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live
+export REPORT_PATH="$BUILD_DIR/report.md"
+export RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf
+export RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img
+export RV64_WM_FONT_REGION_EXPECTED_SHA256=<independently-reviewed-rv64-crop-sha256>
+bash scripts/check/run-stage2-font-scoped-specs.shs write \
+  "$STAGE2_FONT_TOOL_ATTEMPT_ROOT"
+bash scripts/check/run-stage2-font-scoped-specs.shs check \
+  "$STAGE2_FONT_TOOL_ATTEMPT_ROOT"
+```
 
 ### Superseding P0 admission handoff — 2026-07-29
 
@@ -110,9 +127,14 @@ and 224 are prior fixes, not part of this TODO and must not be redesigned.
 | 6 | `rv64_simpleos_wm_font_input_spec.spl` | RV64 QEMU owner / last, with ELF, 128 MiB font disk, report path, QMP/input evidence, and reviewed crop hash present |
 
 Merge owner is `/root`; the final normal/highest-capability reviewer must be
-independent of each lane's edit/evidence producer. Do not rerun the recorded
-10/10 zero-stub docgen batch. If a focused spec changes after its receipt,
-regenerate only that mirror once after the executable spec is green. Do not
+independent of each lane's edit/evidence producer. The historical 10/10 batch
+is diagnostic only. After the ten focused specs pass, run
+`bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write
+<tool-attempt-root> <manual-attempt-root>` once with the sealed tool attempt and
+`simpleos-stage2-docgen/attempt-2`, then independently run the corresponding
+`manuals-check` command. If a focused spec changes after its accepted receipt,
+invalidate the batch and use a new exact-ten attempt after all ten executable
+specs are green. Do not
 rerun the 59/59 supporting asset checksum unless pinned bytes, hashes, or the
 companion manifest change. An unchanged PASS or unchanged failure is never
 rerun in the fresh session.

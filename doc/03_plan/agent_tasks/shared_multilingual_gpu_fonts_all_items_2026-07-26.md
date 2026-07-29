@@ -42,6 +42,34 @@ only this lane to a new numbered
 attempt, for at most three cycles; it never starts Stage 3/4 or a full
 bootstrap.
 
+Lane E executes the exact-ten receipts only after every x86/RV64 prerequisite
+passes without creating an attempt directory:
+
+```bash
+export STAGE2_FONT_SPEC_ATTEMPT=2
+export SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory>
+export BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live
+export REPORT_PATH="$BUILD_DIR/report.md"
+export RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf
+export RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img
+export RV64_WM_FONT_REGION_EXPECTED_SHA256=<independently-reviewed-rv64-crop-sha256>
+bash scripts/check/run-stage2-font-scoped-specs.shs write \
+  "$STAGE2_FONT_TOOL_ATTEMPT_ROOT"
+bash scripts/check/run-stage2-font-scoped-specs.shs check \
+  "$STAGE2_FONT_TOOL_ATTEMPT_ROOT"
+```
+
+After the ten focused specs pass, Lane F runs the exact-ten manual producer
+once and a later reviewer checks its sealed receipts:
+
+```bash
+export STAGE2_FONT_MANUAL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
+bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write \
+  "$STAGE2_FONT_TOOL_ATTEMPT_ROOT" "$STAGE2_FONT_MANUAL_ATTEMPT_ROOT"
+bash scripts/check/build-stage2-font-scoped-tools.shs manuals-check \
+  "$STAGE2_FONT_TOOL_ATTEMPT_ROOT" "$STAGE2_FONT_MANUAL_ATTEMPT_ROOT"
+```
+
 ## Frozen coordination contract
 
 Use only the interfaces, manual steps, and checker names frozen in the state

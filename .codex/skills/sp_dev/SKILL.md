@@ -120,7 +120,28 @@ builds, separate caches, and one green/deliberate-red/zero-example runner plus
 zero-stub docgen calibration.
 Independent or later audit uses `bash
 scripts/check/build-stage2-font-scoped-tools.shs check <attempt-root>`; do not
-rerun a green writer. Stage 3/4 and full bootstrap remain out of scope.
+rerun a green writer. Execute the exact ten scoped specs through the standalone
+runner only after its complete fail-closed preflight:
+
+```bash
+STAGE2_FONT_SPEC_ATTEMPT=<next-number> \
+SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory> \
+BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live \
+REPORT_PATH=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live/report.md \
+RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf \
+RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img \
+RV64_WM_FONT_REGION_EXPECTED_SHA256=<independently-reviewed-rv64-crop-sha256> \
+bash scripts/check/run-stage2-font-scoped-specs.shs write <attempt-root>
+STAGE2_FONT_SPEC_ATTEMPT=<same-number> \
+bash scripts/check/run-stage2-font-scoped-specs.shs check <attempt-root>
+```
+
+After the exact ten scoped specs pass, run
+`bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write
+<attempt-root> <manual-attempt-root>` once and use `bash
+scripts/check/build-stage2-font-scoped-tools.shs manuals-check <attempt-root>
+<manual-attempt-root>` for independent review.
+Stage 3/4 and full bootstrap remain out of scope.
 If a direct lexer probe and parser-facing token stream disagree, capture both
 streams plus continuation state in one compiled probe. After three distinct
 fix/probe cycles, update the tracked bug and lane state and stop; do not rewrite

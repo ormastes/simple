@@ -1,0 +1,857 @@
+#!/usr/bin/env bash
+# Execute and seal the exact active SimpleOS Stage2 font spec set.
+set -euo pipefail
+
+fixed_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+canonicalize_path() {
+    PATH=$fixed_path
+    export PATH
+}
+canonicalize_path
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$repo_root"
+
+specs=(
+    test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl
+    test/01_unit/os/port/simpleos_font_bundle_spec.spl
+    test/02_integration/os/port/simpleos_font_asset_staging_spec.spl
+    test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl
+    test/01_unit/lib/skia/selected_arabic_spec.spl
+    test/01_unit/lib/skia/selected_devanagari_spec.spl
+    test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl
+    test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
+    test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
+    test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl
+)
+
+die() {
+    echo "stage2_font_scoped_specs_status=fail" >&2
+    echo "stage2_font_scoped_specs_reason=$1" >&2
+    exit "${2:-1}"
+}
+
+hash_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+valid_sha256() {
+    [[ $1 =~ ^[0-9a-f]{64}$ ]]
+}
+
+field() {
+    local key=$1
+    local file=$2
+    local value
+    [ "$(grep -c "^${key}=" "$file" || true)" -eq 1 ] || return 1
+    value=$(sed -n "s/^${key}=//p" "$file")
+    printf '%s\n' "$value"
+}
+
+artifact_name() {
+    local name=${1#test/}
+    printf '%s\n' "${name//\//_}"
+}
+
+record_command() {
+    local output=$1
+    shift
+    {
+        printf 'command'
+        printf ' %q' "$@"
+        printf '\n'
+    } >>"$output"
+}
+
+tree_manifest() {
+    local root=$1
+    (
+        cd "$root"
+        find . -type f ! -path ./evidence.sha256 -print0 |
+            LC_ALL=C sort -z |
+            xargs -0 sha256sum
+    )
+}
+
+complete_tree_manifest() {
+    local root=$1
+    (
+        cd "$root"
+        find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    )
+}
+
+manifest_members() {
+    awk 'NF != 2 { bad = 1 } { print $2 }
+         END { if (bad) exit 1 }' "$1" | LC_ALL=C sort
+}
+
+tree_members() {
+    local root=$1
+    (
+        cd "$root"
+        find . -type f ! -path ./evidence.sha256 -print | LC_ALL=C sort
+    )
+}
+
+complete_tree_members() {
+    local root=$1
+    (
+        cd "$root"
+        find . -type f -print | LC_ALL=C sort
+    )
+}
+
+require_command() {
+    PATH=$fixed_path command -v "$1" >/dev/null 2>&1 ||
+        die "missing-command-$1"
+}
+
+resolve_command() {
+    local found
+    found=$(PATH=$fixed_path command -v "$1") || return 1
+    readlink -f "$found"
+}
+
+resolve_grub() {
+    if PATH=$fixed_path command -v grub-mkstandalone >/dev/null 2>&1; then
+        PATH=$fixed_path command -v grub-mkstandalone
+    else
+        PATH=$fixed_path command -v x86_64-elf-grub-mkstandalone
+    fi
+}
+
+resolve_ovmf_code() {
+    if [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
+        readlink -f /usr/share/OVMF/OVMF_CODE_4M.fd
+    else
+        readlink -f /opt/homebrew/share/qemu/edk2-x86_64-code.fd
+    fi
+}
+
+resolve_ovmf_vars() {
+    if [ -f /usr/share/OVMF/OVMF_VARS_4M.fd ]; then
+        readlink -f /usr/share/OVMF/OVMF_VARS_4M.fd
+    else
+        readlink -f /opt/homebrew/share/qemu/edk2-i386-vars.fd
+    fi
+}
+
+hash_tree() {
+    local root=$1
+    (
+        cd "$root"
+        find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    ) | sha256sum | awk '{print $1}'
+}
+
+resolve_host_inputs() {
+    host_tool_source_dir=$(readlink -f "${SIMPLE_FONT_HOST_TOOL_DIR:-}") ||
+        die "font-host-tool-dir-missing"
+    [ -d "$host_tool_source_dir" ] && [[ $host_tool_source_dir != *:* ]] &&
+        [[ $host_tool_source_dir != *$'\n'* ]] ||
+        die "font-host-tool-dir-invalid"
+    for tool in mcopy mtype mdir mformat mmd; do
+        [ -x "$host_tool_source_dir/$tool" ] ||
+            die "font-host-tool-$tool-missing"
+    done
+    for tool in qemu-system-x86_64 qemu-system-riscv64 clang clang-20 \
+        ld.lld ld.lld-20 llvm-objcopy fsck.fat grub-mkstandalone python3; do
+        [ ! -e "$host_tool_source_dir/$tool" ] ||
+            die "font-host-tool-dir-shadows-$tool"
+    done
+
+    qemu_x86_path=$(resolve_command qemu-system-x86_64) ||
+        die "missing-command-qemu-system-x86_64"
+    qemu_rv64_path=$(resolve_command qemu-system-riscv64) ||
+        die "missing-command-qemu-system-riscv64"
+    clang_path=$(resolve_command clang-20) || die "missing-command-clang-20"
+    if [ -x build/os/llvm/cross-x86_64-unknown-simpleos/bin/ld.lld ]; then
+        linker_path=$(readlink -f \
+            build/os/llvm/cross-x86_64-unknown-simpleos/bin/ld.lld)
+    else
+        linker_path=$(resolve_command ld.lld-20 2>/dev/null ||
+            resolve_command ld.lld) || die "missing-command-ld.lld"
+    fi
+    objcopy_path=
+    for directory in /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin \
+        /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin \
+        /usr/lib/llvm-17/bin; do
+        if [ -x "$directory/llvm-objcopy" ]; then
+            objcopy_path=$(readlink -f "$directory/llvm-objcopy")
+            break
+        fi
+    done
+    [ -n "$objcopy_path" ] || die "missing-command-llvm-objcopy"
+    fsck_path=$(resolve_command fsck.fat 2>/dev/null ||
+        resolve_command dosfsck 2>/dev/null ||
+        resolve_command fsck_msdos) || die "missing-command-fat-fsck"
+    grub_path=$(resolve_grub) || die "missing-command-grub-mkstandalone"
+    grub_path=$(readlink -f "$grub_path")
+    ovmf_code=$(resolve_ovmf_code) || die "missing-ovmf-code"
+    ovmf_vars=$(resolve_ovmf_vars) || die "missing-ovmf-vars"
+}
+
+validate_x86_elf_if_present() {
+    local path=$1
+    [ ! -e "$path" ] && return 0
+    [ -f "$path" ] && [ ! -L "$path" ] &&
+        LC_ALL=C readelf -h "$path" |
+            grep -Eq 'Machine:[[:space:]]+(Advanced Micro Devices X86-64|AMD x86-64)([[:space:]]|$)' ||
+        die "optional-x86-payload-invalid-$path"
+}
+
+write_host_snapshot() {
+    local destination=$1
+    local tool entry target path status
+    {
+        echo "schema=stage2-font-host-inputs/v1"
+        echo "checkpoint_sha=$checkpoint_sha"
+        echo "font_host_tool_source_dir=$host_tool_source_dir"
+        echo "font_host_tool_dir=$host_tool_dir"
+        for tool in mcopy mtype mdir mformat mmd; do
+            entry="$host_tool_source_dir/$tool"
+            target=$(readlink -f "$entry")
+            echo "${tool}_source_entry=$entry"
+            echo "${tool}_source_target=$target"
+            echo "${tool}_source_sha256=$(hash_file "$target")"
+            entry="$host_tool_dir/$tool"
+            target=$(readlink -f "$entry")
+            echo "${tool}_staged_path=$target"
+            echo "${tool}_staged_sha256=$(hash_file "$target")"
+        done
+        for tool in qemu_x86 qemu_rv64 clang linker objcopy fsck grub; do
+            case "$tool" in
+                qemu_x86) path=$qemu_x86_path ;;
+                qemu_rv64) path=$qemu_rv64_path ;;
+                clang) path=$clang_path ;;
+                linker) path=$linker_path ;;
+                objcopy) path=$objcopy_path ;;
+                fsck) path=$fsck_path ;;
+                grub) path=$grub_path ;;
+            esac
+            echo "${tool}_path=$path"
+            echo "${tool}_sha256=$(hash_file "$path")"
+        done
+        echo "ovmf_code_path=$ovmf_code"
+        echo "ovmf_code_sha256=$(hash_file "$ovmf_code")"
+        echo "ovmf_vars_path=$ovmf_vars"
+        echo "ovmf_vars_sha256=$(hash_file "$ovmf_vars")"
+        for path in "${sysroot_inputs[@]}"; do
+            echo "sysroot_input=$path|$(hash_file "$path")"
+        done
+        echo "sysroot_include_fingerprint=$(hash_tree build/os/sysroot/include)"
+        echo "x86_simple_payload=forced-absent"
+        echo "x86_external_kernel=forced-absent"
+        echo "x86_external_disk=forced-absent"
+        for path in "${optional_payloads[@]}"; do
+            status=absent
+            [ ! -e "$path" ] || status="present|$(hash_file "$path")"
+            echo "optional_payload=$path|$status"
+        done
+        echo "x86_wrapper_sha256=$(hash_file \
+            scripts/check/check-simpleos-wm-fullscreen-evidence.shs)"
+        echo "rv64_wrapper_sha256=$(hash_file \
+            scripts/check/check-rv64-display-smoke-qmp-evidence.shs)"
+        echo "rv64_elf=$rv64_elf|$(hash_file "$rv64_elf")"
+        echo "rv64_disk=$rv64_disk|$(hash_file "$rv64_disk")"
+        echo "rv64_crop_sha256=$rv64_crop_sha"
+    } >"$destination"
+}
+
+stage_host_tools() {
+    local tool
+    host_tool_dir="$receipt_root/host-tools"
+    mkdir "$host_tool_dir"
+    for tool in mcopy mtype mdir mformat mmd; do
+        cp -L "$host_tool_source_dir/$tool" "$host_tool_dir/$tool"
+        chmod 555 "$host_tool_dir/$tool"
+    done
+}
+
+qemu_tree_valid() {
+    local name=$1
+    shift
+    local root="$receipt_root/qemu/$name"
+    local manifest="$receipt_root/qemu/$name.tree.sha256"
+    local required
+    [ -d "$root" ] && [ ! -L "$root" ] &&
+        [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+    [ -z "$(find "$root" -mindepth 1 ! \( -type d -o -type f \) \
+        -print -quit)" ] || return 1
+    (
+        cd "$root"
+        sha256sum -c "$manifest" >/dev/null
+    ) || return 1
+    diff -u <(manifest_members "$manifest") \
+        <(complete_tree_members "$root") >/dev/null || return 1
+    for required in "$@"; do
+        [ -f "$root/$required" ] && [ ! -L "$root/$required" ] || return 1
+    done
+}
+
+x86_qemu_tree_valid() {
+    qemu_tree_valid x86 \
+        report.md evidence.env capture.out \
+        font-region.rgb font-region-corrupt-calibration.rgb \
+        baseline.ppm fullscreen.ppm restored.ppm browser-event.ppm
+}
+
+rv64_qemu_tree_valid() {
+    qemu_tree_valid rv64 \
+        report.md rv64-input-correlation.env \
+        rv64-font-region.rgb rv64-font-region-corrupt.rgb \
+        scanout.ppm input-scanout.ppm scanout.raw input-scanout.raw \
+        serial.log qemu.stderr.log
+}
+
+copy_qemu_tree() {
+    local source=$1
+    local name=$2
+    local destination="$receipt_root/qemu/$name"
+    local manifest="$receipt_root/qemu/$name.tree.sha256"
+    [ -d "$source" ] && [ ! -L "$source" ] ||
+        die "$name-qemu-output-root-invalid"
+    [ -z "$(find "$source" -mindepth 1 ! \( -type d -o -type f \) \
+        -print -quit)" ] || die "$name-qemu-output-nonregular"
+    mkdir -p "$receipt_root/qemu"
+    mkdir "$destination"
+    cp -a "$source/." "$destination/"
+    complete_tree_manifest "$source" >"$manifest"
+    diff -u <(complete_tree_members "$source") \
+        <(complete_tree_members "$destination") >/dev/null ||
+        die "$name-qemu-output-members-differ"
+}
+
+preflight_receipt_valid() {
+    local receipt=$1
+    local key tool value
+    for key in checkpoint_sha font_host_tool_source_dir font_host_tool_dir \
+        qemu_x86_path qemu_x86_sha256 qemu_rv64_path qemu_rv64_sha256 \
+        clang_path clang_sha256 linker_path linker_sha256 objcopy_path \
+        objcopy_sha256 fsck_path fsck_sha256 grub_path grub_sha256 \
+        ovmf_code_path ovmf_code_sha256 ovmf_vars_path ovmf_vars_sha256 \
+        sysroot_include_fingerprint x86_simple_payload x86_external_kernel \
+        x86_external_disk x86_wrapper_sha256 rv64_wrapper_sha256 rv64_elf \
+        rv64_disk rv64_crop_sha256; do
+        [ "$(grep -c "^${key}=" "$receipt" || true)" -eq 1 ] || return 1
+    done
+    for tool in mcopy mtype mdir mformat mmd; do
+        for key in source_entry source_target source_sha256 staged_path \
+            staged_sha256; do
+            [ "$(grep -c "^${tool}_${key}=" "$receipt" || true)" -eq 1 ] ||
+                return 1
+        done
+        [ "$(field "${tool}_staged_path" "$receipt")" = \
+            "$receipt_root/host-tools/$tool" ] &&
+            [ "$(field "${tool}_staged_sha256" "$receipt")" = \
+                "$(hash_file "$receipt_root/host-tools/$tool")" ] &&
+            valid_sha256 "$(field "${tool}_source_sha256" "$receipt")" ||
+            return 1
+    done
+    for key in qemu_x86 qemu_rv64 clang linker objcopy fsck grub; do
+        valid_sha256 "$(field "${key}_sha256" "$receipt")" || return 1
+    done
+    for key in ovmf_code ovmf_vars sysroot_include_fingerprint \
+        x86_wrapper rv64_wrapper rv64_crop; do
+        valid_sha256 "$(field "${key}_sha256" "$receipt")" || return 1
+    done
+    [ "$(grep -c '^sysroot_input=' "$receipt" || true)" -eq 5 ] &&
+        [ "$(grep -c '^optional_payload=' "$receipt" || true)" -eq 3 ] &&
+        [ "$(field x86_simple_payload "$receipt")" = forced-absent ] &&
+        [ "$(field x86_external_kernel "$receipt")" = forced-absent ] &&
+        [ "$(field x86_external_disk "$receipt")" = forced-absent ] || return 1
+    for key in sysroot_input rv64_elf rv64_disk; do
+        while IFS= read -r value; do
+            valid_sha256 "${value##*|}" || return 1
+        done < <(sed -n "s/^${key}=//p" "$receipt")
+    done
+    while IFS= read -r value; do
+        case "$value" in
+            *"|absent") ;;
+            *"|present|"*)
+                valid_sha256 "${value##*|}" || return 1
+                ;;
+            *) return 1 ;;
+        esac
+    done < <(sed -n 's/^optional_payload=//p' "$receipt")
+}
+
+check_spec_inventory() {
+    [ "${#specs[@]}" -eq 10 ] || return 1
+    [ "$(printf '%s\n' "${specs[@]}" | sha256sum | awk '{print $1}')" = \
+        b3de23427b0ce6596b28cf945ddda65cf780d79f7bed95ea6c10fd601cc701d3 ] &&
+        [ "$(printf '%s\n' "${specs[@]}" | LC_ALL=C sort -u | wc -l)" -eq 10 ]
+}
+
+preflight() {
+    check_spec_inventory || die "focused-spec-inventory-invalid"
+    [ ! -e "$receipt_root" ] || die "receipt-root-already-exists"
+    [ "$(git rev-parse HEAD)" = "$checkpoint_sha" ] ||
+        die "checkpoint-differs-from-tool-identity"
+    [ -z "$(git status --porcelain --untracked-files=normal)" ] ||
+        die "working-tree-not-clean"
+
+    for spec in "${specs[@]}"; do
+        [ -f "$spec" ] && [ ! -L "$spec" ] || die "missing-or-linked-spec-$spec"
+    done
+    for wrapper in scripts/check/check-simpleos-wm-fullscreen-evidence.shs \
+        scripts/check/check-rv64-display-smoke-qmp-evidence.shs; do
+        [ -f "$wrapper" ] && [ ! -L "$wrapper" ] ||
+            die "missing-or-linked-wrapper-$wrapper"
+    done
+    resolve_host_inputs
+    for command in git sha256sum timeout env python3 readelf; do
+        require_command "$command"
+    done
+    [ -f "$ovmf_code" ] && [ ! -L "$ovmf_code" ] || die "invalid-ovmf-code"
+    [ -f "$ovmf_vars" ] && [ ! -L "$ovmf_vars" ] || die "invalid-ovmf-vars"
+    for path in "$qemu_x86_path" "$qemu_rv64_path" "$clang_path" \
+        "$linker_path" "$objcopy_path" "$fsck_path" "$grub_path" \
+        "${sysroot_inputs[@]}"; do
+        [ -f "$path" ] && [ ! -L "$path" ] || die "host-input-invalid-$path"
+    done
+    [ -d build/os/sysroot/include ] &&
+        [ -n "$(find build/os/sysroot/include -type f -print -quit)" ] ||
+        die "sysroot-include-missing"
+    for path in "${optional_payloads[@]}"; do
+        validate_x86_elf_if_present "$path"
+    done
+
+    local font=assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono\[wdth,wght\].ttf
+    [ -f "$font" ] && [ "$(wc -c <"$font" | tr -d ' ')" = 1708408 ] &&
+        [ "$(hash_file "$font")" = \
+            2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081 ] ||
+        die "pinned-font-asset-invalid"
+
+    rv64_build_dir=${BUILD_DIR:-}
+    rv64_report_path=${REPORT_PATH:-}
+    rv64_elf=${RV64_DISPLAY_SMOKE_ELF:-}
+    rv64_disk=${RV64_WM_FONT_DISK:-}
+    rv64_crop_sha=${RV64_WM_FONT_REGION_EXPECTED_SHA256:-}
+    [ "$rv64_build_dir" = \
+        build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live ] ||
+        die "rv64-build-dir-not-pinned"
+    [ "$rv64_report_path" = "$rv64_build_dir/report.md" ] ||
+        die "rv64-report-path-not-pinned"
+    [ "$rv64_elf" = build/os/simpleos_riscv64_display_smoke.elf ] ||
+        die "rv64-elf-path-not-pinned"
+    [ "$rv64_disk" = build/os/fat32-riscv64-desktop.img ] ||
+        die "rv64-font-disk-path-not-pinned"
+    valid_sha256 "$rv64_crop_sha" || die "rv64-font-crop-sha256-unpinned"
+    [ ! -e "$rv64_build_dir" ] || die "rv64-build-dir-already-exists"
+    [ ! -e build/test-simpleos-wm-fullscreen-live ] ||
+        die "x86-build-dir-already-exists"
+    [ -f "$rv64_elf" ] && [ ! -L "$rv64_elf" ] ||
+        die "rv64-elf-missing-or-linked"
+    LC_ALL=C readelf -h "$rv64_elf" |
+        grep -Eq 'Machine:[[:space:]]+RISC-V([[:space:]]|$)' ||
+        die "rv64-elf-machine-invalid"
+    [ -f "$rv64_disk" ] && [ ! -L "$rv64_disk" ] &&
+        [ "$(wc -c <"$rv64_disk" | tr -d ' ')" = 134217728 ] ||
+        die "rv64-font-disk-invalid"
+
+    local extracted
+    extracted=$(mktemp)
+    if ! "$host_tool_source_dir/mtype" -i "$rv64_disk" \
+        ::/SYS/FONTS/NOTOSANS >"$extracted" 2>/dev/null ||
+        [ "$(wc -c <"$extracted" | tr -d ' ')" != 1708408 ] ||
+        [ "$(hash_file "$extracted")" != \
+            2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081 ]; then
+        rm -f "$extracted"
+        die "rv64-font-disk-asset-invalid"
+    fi
+    rm -f "$extracted"
+}
+
+build_argv() {
+    local ordinal=$1
+    local spec=$2
+    local timeout_seconds=600
+    local -n output=$3
+    local -a environment=(
+        /usr/bin/env -i
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        HOME=/tmp
+        TMPDIR=/tmp
+        LANG=C
+        LC_ALL=C
+        SIMPLE_NO_STUB_FALLBACK=1
+    )
+    if [ "$ordinal" -ge 9 ]; then
+        timeout_seconds=4200
+        environment+=("SIMPLE_FONT_HOST_TOOL_DIR=$host_tool_dir")
+    fi
+    if [ "$ordinal" -eq 10 ]; then
+        environment+=(
+            "BUILD_DIR=$rv64_build_dir"
+            "REPORT_PATH=$rv64_report_path"
+            "RV64_DISPLAY_SMOKE_ELF=$rv64_elf"
+            "RV64_WM_FONT_DISK=$rv64_disk"
+            "RV64_WM_FONT_REGION_EXPECTED_SHA256=$rv64_crop_sha"
+        )
+    fi
+    output=(
+        /usr/bin/timeout --kill-after=15s "${timeout_seconds}s"
+        "${environment[@]}"
+        "$runner_path"
+        "$parent_path"
+        "$parent_sha"
+        "$runtime_dir"
+        "$runtime_sha"
+        "$spec"
+    )
+}
+
+write_identity() {
+    local destination=$1
+    local ordinal=$2
+    local spec=$3
+    local timeout_seconds=600
+    local recorded_build_dir=
+    local recorded_report_path=
+    local recorded_rv64_elf=
+    local recorded_rv64_disk=
+    local recorded_rv64_crop_sha=
+    local recorded_host_tool_dir=
+    [ "$ordinal" -lt 9 ] || timeout_seconds=4200
+    if [ "$ordinal" -ge 9 ]; then
+        recorded_host_tool_dir=$host_tool_dir
+    fi
+    if [ "$ordinal" -eq 10 ]; then
+        recorded_build_dir=$rv64_build_dir
+        recorded_report_path=$rv64_report_path
+        recorded_rv64_elf=$rv64_elf
+        recorded_rv64_disk=$rv64_disk
+        recorded_rv64_crop_sha=$rv64_crop_sha
+    fi
+    {
+        echo "schema=stage2-font-scoped-spec/v1"
+        echo "checkpoint_sha=$checkpoint_sha"
+        echo "checkpoint_clean=true"
+        echo "attempt=$attempt"
+        echo "ordinal=$ordinal"
+        echo "spec=$spec"
+        echo "spec_sha256=$(hash_file "$spec")"
+        echo "tool_attempt_root=$tool_root"
+        echo "tool_identity_sha256=$tool_identity_sha"
+        echo "runner_path=$runner_path"
+        echo "runner_sha256=$runner_sha"
+        echo "compiler_path=$parent_path"
+        echo "compiler_sha256=$parent_sha"
+        echo "core_c_dir=$runtime_dir"
+        echo "core_c_sha256=$runtime_sha"
+        echo "timeout_seconds=$timeout_seconds"
+        echo "SIMPLE_FONT_HOST_TOOL_DIR=$recorded_host_tool_dir"
+        echo "BUILD_DIR=$recorded_build_dir"
+        echo "REPORT_PATH=$recorded_report_path"
+        echo "RV64_DISPLAY_SMOKE_ELF=$recorded_rv64_elf"
+        echo "RV64_WM_FONT_DISK=$recorded_rv64_disk"
+        echo "RV64_WM_FONT_REGION_EXPECTED_SHA256=$recorded_rv64_crop_sha"
+    } >"$destination"
+}
+
+seal_receipts() {
+    local status=$1
+    trap - EXIT
+    [ -d "$receipt_root" ] || return 0
+    if [ ! -f "$receipt_root/summary.env" ]; then
+        {
+            echo "schema=stage2-font-scoped-specs/v1"
+            echo "status=$status"
+            echo "attempt=$attempt"
+            echo "completed=$completed"
+            echo "required=10"
+        } >"$receipt_root/summary.env"
+    fi
+    tree_manifest "$receipt_root" >"$receipt_root/evidence.sha256"
+    chmod -R a-w "$receipt_root"
+}
+
+run_specs() {
+    mkdir -p "$(dirname "$receipt_root")"
+    mkdir "$receipt_root"
+    local ordinal=0
+    local spec name base rc current_snapshot
+    local -a command
+    trap 'seal_receipts fail' EXIT
+    stage_host_tools
+    write_host_snapshot "$receipt_root/preflight.env"
+    for spec in "${specs[@]}"; do
+        ordinal=$((ordinal + 1))
+        name=$(artifact_name "$spec")
+        base="$receipt_root/$name"
+        write_identity "$base.command" "$ordinal" "$spec"
+        build_argv "$ordinal" "$spec" command
+        record_command "$base.command" "${command[@]}"
+        if "${command[@]}" >"$base.stdout" 2>"$base.stderr"; then
+            rc=0
+        else
+            rc=$?
+        fi
+        printf '%s\n' "$rc" >"$base.exit"
+        {
+            echo "stdout_sha256=$(hash_file "$base.stdout")"
+            echo "stderr_sha256=$(hash_file "$base.stderr")"
+            echo "exit_sha256=$(hash_file "$base.exit")"
+        } >>"$base.command"
+        [ "$(git rev-parse HEAD)" = "$checkpoint_sha" ] &&
+            [ -z "$(git status --porcelain --untracked-files=normal)" ] ||
+            die "source-changed-during-$ordinal"
+        [ "$(hash_file "$tool_identity")" = "$tool_identity_sha" ] &&
+            [ "$(hash_file "$runner_path")" = "$runner_sha" ] &&
+            [ "$(hash_file "$parent_path")" = "$parent_sha" ] &&
+            [ "$(hash_file "$runtime_dir/libsimple_runtime.a")" = "$runtime_sha" ] ||
+            die "tool-identity-changed-during-$ordinal"
+        current_snapshot=$(mktemp)
+        write_host_snapshot "$current_snapshot"
+        if ! cmp -s "$receipt_root/preflight.env" "$current_snapshot"; then
+            rm -f "$current_snapshot"
+            die "host-input-changed-during-$ordinal"
+        fi
+        rm -f "$current_snapshot"
+        [ "$rc" -eq 0 ] || die "spec-$ordinal-exit-$rc"
+        [ "$(grep -Fxc 'test-runner: native result wrapper complete' \
+            "$base.stdout")" -eq 1 ] ||
+            die "spec-$ordinal-completion-marker-invalid"
+        [ "$(grep -Ec '^[1-9][0-9]* examples, 0 failures$' \
+            "$base.stdout")" -eq 1 ] ||
+            die "spec-$ordinal-summary-invalid"
+        if [ "$ordinal" -eq 9 ]; then
+            copy_qemu_tree build/test-simpleos-wm-fullscreen-live x86
+            x86_qemu_tree_valid || die "x86-qemu-receipt-invalid"
+        elif [ "$ordinal" -eq 10 ]; then
+            copy_qemu_tree "$rv64_build_dir" rv64
+            rv64_qemu_tree_valid || die "rv64-qemu-receipt-invalid"
+        fi
+        completed=$ordinal
+    done
+    seal_receipts pass
+}
+
+load_tool_identity() {
+    tool_root=$(readlink -f "$1")
+    [ "${tool_root##*/}" = "attempt-$attempt" ] ||
+        die "tool-and-spec-attempt-number-differ"
+    tool_identity="$tool_root/identity.env"
+    [ -f "$tool_identity" ] && [ ! -L "$tool_identity" ] ||
+        die "tool-identity-missing-or-linked"
+    bash scripts/check/build-stage2-font-scoped-tools.shs check "$tool_root" \
+        >/dev/null || die "scoped-tool-attempt-invalid"
+    checkpoint_sha=$(field checkpoint_sha "$tool_identity") ||
+        die "tool-checkpoint-missing"
+    parent_path=$(field parent_path "$tool_identity") || die "tool-parent-missing"
+    parent_sha=$(field parent_sha256 "$tool_identity") ||
+        die "tool-parent-sha-missing"
+    runtime_dir=$(field runtime_dir "$tool_identity") || die "tool-runtime-missing"
+    runtime_sha=$(field runtime_archive_sha256 "$tool_identity") ||
+        die "tool-runtime-sha-missing"
+    runner_path="$tool_root/bin/font_evidence_runner"
+    runner_sha=$(field runner_sha256 "$tool_identity") || die "tool-runner-sha-missing"
+    tool_identity_sha=$(hash_file "$tool_identity")
+}
+
+check_receipts() {
+    [ -d "$receipt_root" ] && [ ! -L "$receipt_root" ] ||
+        die "receipt-root-missing-or-linked"
+    [ -f "$receipt_root/summary.env" ] &&
+        [ "$(field schema "$receipt_root/summary.env")" = \
+            stage2-font-scoped-specs/v1 ] &&
+        [ "$(field status "$receipt_root/summary.env")" = pass ] &&
+        [ "$(field attempt "$receipt_root/summary.env")" = "$attempt" ] &&
+        [ "$(field completed "$receipt_root/summary.env")" = 10 ] &&
+        [ "$(field required "$receipt_root/summary.env")" = 10 ] ||
+        die "receipt-summary-invalid"
+    [ -f "$receipt_root/evidence.sha256" ] ||
+        die "receipt-manifest-missing"
+    (
+        cd "$receipt_root"
+        sha256sum -c evidence.sha256 >/dev/null
+    ) || die "receipt-hash-check-failed"
+    diff -u <(manifest_members "$receipt_root/evidence.sha256") \
+        <(tree_members "$receipt_root") >/dev/null ||
+        die "receipt-member-inventory-invalid"
+    ! find "$receipt_root" -type l -o -perm /222 | grep -q . ||
+        die "receipt-tree-not-immutable"
+    x86_qemu_tree_valid || die "x86-qemu-receipt-invalid"
+    rv64_qemu_tree_valid || die "rv64-qemu-receipt-invalid"
+    [ "$(field schema "$receipt_root/preflight.env")" = \
+        stage2-font-host-inputs/v1 ] &&
+        [ "$(field checkpoint_sha "$receipt_root/preflight.env")" = \
+            "$checkpoint_sha" ] &&
+        preflight_receipt_valid "$receipt_root/preflight.env" ||
+        die "preflight-receipt-invalid"
+    host_tool_dir=$(field font_host_tool_dir "$receipt_root/preflight.env") ||
+        die "preflight-host-tool-dir-missing"
+
+    local ordinal=0
+    local spec name base expected_command actual_command expected_timeout
+    local recorded_host_tool_dir
+    local -a command
+    for spec in "${specs[@]}"; do
+        ordinal=$((ordinal + 1))
+        name=$(artifact_name "$spec")
+        base="$receipt_root/$name"
+        expected_timeout=600
+        [ "$ordinal" -lt 9 ] || expected_timeout=4200
+        for suffix in command stdout stderr exit; do
+            [ -f "$base.$suffix" ] && [ ! -L "$base.$suffix" ] ||
+                die "spec-$ordinal-receipt-$suffix-missing"
+        done
+        [ "$(field schema "$base.command")" = stage2-font-scoped-spec/v1 ] &&
+            [ "$(field checkpoint_sha "$base.command")" = "$checkpoint_sha" ] &&
+            [ "$(field checkpoint_clean "$base.command")" = true ] &&
+            [ "$(field attempt "$base.command")" = "$attempt" ] &&
+            [ "$(field ordinal "$base.command")" = "$ordinal" ] &&
+            [ "$(field spec "$base.command")" = "$spec" ] &&
+            [ "$(field spec_sha256 "$base.command")" = "$(hash_file "$spec")" ] &&
+            [ "$(field tool_attempt_root "$base.command")" = "$tool_root" ] &&
+            [ "$(field tool_identity_sha256 "$base.command")" = \
+                "$tool_identity_sha" ] &&
+            [ "$(field runner_path "$base.command")" = "$runner_path" ] &&
+            [ "$(field runner_sha256 "$base.command")" = "$runner_sha" ] &&
+            [ "$(field compiler_path "$base.command")" = "$parent_path" ] &&
+            [ "$(field compiler_sha256 "$base.command")" = "$parent_sha" ] &&
+            [ "$(field core_c_dir "$base.command")" = "$runtime_dir" ] &&
+            [ "$(field core_c_sha256 "$base.command")" = "$runtime_sha" ] &&
+            [ "$(field timeout_seconds "$base.command")" = "$expected_timeout" ] ||
+            die "spec-$ordinal-identity-invalid"
+        rv64_build_dir=$(field BUILD_DIR "$base.command") ||
+            die "spec-$ordinal-build-dir-field-invalid"
+        rv64_report_path=$(field REPORT_PATH "$base.command") ||
+            die "spec-$ordinal-report-field-invalid"
+        rv64_elf=$(field RV64_DISPLAY_SMOKE_ELF "$base.command") ||
+            die "spec-$ordinal-rv64-elf-field-invalid"
+        rv64_disk=$(field RV64_WM_FONT_DISK "$base.command") ||
+            die "spec-$ordinal-rv64-disk-field-invalid"
+        rv64_crop_sha=$(field RV64_WM_FONT_REGION_EXPECTED_SHA256 "$base.command") ||
+            die "spec-$ordinal-rv64-crop-field-invalid"
+        recorded_host_tool_dir=$(field SIMPLE_FONT_HOST_TOOL_DIR "$base.command") ||
+            die "spec-$ordinal-host-tool-field-invalid"
+        if [ "$ordinal" -lt 9 ] && [ -n "$recorded_host_tool_dir" ]; then
+            die "spec-$ordinal-has-host-tool-directory"
+        fi
+        if [ "$ordinal" -ge 9 ] &&
+            [ "$recorded_host_tool_dir" != "$host_tool_dir" ]; then
+            die "spec-$ordinal-host-tool-directory-invalid"
+        fi
+        if [ "$ordinal" -ne 10 ] &&
+            [ -n "$rv64_build_dir$rv64_report_path$rv64_elf$rv64_disk$rv64_crop_sha" ]; then
+            die "spec-$ordinal-has-rv64-environment"
+        fi
+        build_argv "$ordinal" "$spec" command
+        expected_command=$(
+            printf 'command'
+            printf ' %q' "${command[@]}"
+        )
+        actual_command=$(grep '^command ' "$base.command")
+        [ "$(grep -c '^command ' "$base.command" || true)" -eq 1 ] &&
+            [ "$actual_command" = "$expected_command" ] ||
+            die "spec-$ordinal-command-invalid"
+        [ "$(cat "$base.exit")" = 0 ] &&
+            [ "$(field stdout_sha256 "$base.command")" = \
+                "$(hash_file "$base.stdout")" ] &&
+            [ "$(field stderr_sha256 "$base.command")" = \
+                "$(hash_file "$base.stderr")" ] &&
+            [ "$(field exit_sha256 "$base.command")" = \
+                "$(hash_file "$base.exit")" ] ||
+            die "spec-$ordinal-result-hash-invalid"
+        [ "$(grep -Fxc 'test-runner: native result wrapper complete' \
+            "$base.stdout")" -eq 1 ] &&
+            [ "$(grep -Ec '^[1-9][0-9]* examples, 0 failures$' \
+                "$base.stdout")" -eq 1 ] ||
+            die "spec-$ordinal-result-invalid"
+    done
+}
+
+usage() {
+    echo "usage:"
+    echo "  STAGE2_FONT_SPEC_ATTEMPT=N SIMPLE_FONT_HOST_TOOL_DIR=... \\"
+    echo "  BUILD_DIR=... REPORT_PATH=... \\"
+    echo "  RV64_DISPLAY_SMOKE_ELF=... RV64_WM_FONT_DISK=... \\"
+    echo "  RV64_WM_FONT_REGION_EXPECTED_SHA256=... \\"
+    echo "  bash scripts/check/run-stage2-font-scoped-specs.shs write TOOL_ATTEMPT_ROOT"
+    echo "  STAGE2_FONT_SPEC_ATTEMPT=N \\"
+    echo "  bash scripts/check/run-stage2-font-scoped-specs.shs check TOOL_ATTEMPT_ROOT"
+    echo "  bash scripts/check/run-stage2-font-scoped-specs.shs --self-test"
+}
+
+mode=${1:-}
+if [ "$mode" = --self-test ]; then
+    [ "$#" -eq 1 ] || die "self-test-takes-no-arguments" 2
+    path_shadow_dir=$(mktemp -d)
+    printf '#!/bin/sh\nprintf shadowed\\n\n' >"$path_shadow_dir/sha256sum"
+    chmod 755 "$path_shadow_dir/sha256sum"
+    PATH="$path_shadow_dir:$fixed_path"
+    canonicalize_path
+    resolved_sha256sum=$(command -v sha256sum)
+    rm -r "$path_shadow_dir"
+    [ "$resolved_sha256sum" != "$path_shadow_dir/sha256sum" ] ||
+        die "self-test-path-shadow-accepted"
+    check_spec_inventory || die "self-test-inventory-invalid"
+    [ "$(artifact_name test/a/b_spec.spl)" = a_b_spec.spl ] ||
+        die "self-test-artifact-name-invalid"
+    valid_sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ||
+        die "self-test-sha-invalid"
+    echo "stage2_font_scoped_specs_self_test=pass"
+    exit 0
+fi
+case "$mode" in
+    write|check) ;;
+    --help|-h)
+        usage
+        exit 0
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
+[ "$#" -eq 2 ] || die "$mode-requires-tool-attempt-root" 2
+
+attempt=${STAGE2_FONT_SPEC_ATTEMPT:-1}
+case "$attempt" in
+    1|2|3) ;;
+    *) die "invalid-focused-attempt" 2 ;;
+esac
+receipt_root="$repo_root/build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-specs/attempt-$attempt"
+completed=0
+host_tool_dir=
+host_tool_source_dir=
+grub_path=
+ovmf_code=
+ovmf_vars=
+qemu_x86_path=
+qemu_rv64_path=
+clang_path=
+linker_path=
+objcopy_path=
+fsck_path=
+rv64_build_dir=
+rv64_report_path=
+rv64_elf=
+rv64_disk=
+rv64_crop_sha=
+sysroot_inputs=(
+    build/os/sysroot/share/simpleos/simpleos.ld
+    build/os/sysroot/lib/crt0.o
+    build/os/sysroot/lib/libsimple_runtime_compat.a
+    build/os/sysroot/lib/libsimpleos_c.a
+    build/os/sysroot/lib/simple_entry.o
+)
+optional_payloads=(
+    build/os/clang_static/bin/clang_static
+    build/os/llc_static/bin/llc_static
+    build/os/lld_static/bin/lld_static
+)
+
+load_tool_identity "$2"
+if [ "$mode" = write ]; then
+    preflight
+    run_specs
+else
+    check_receipts
+fi
+
+echo "stage2_font_scoped_specs_status=pass"
+echo "stage2_font_scoped_specs_receipt_root=$receipt_root"
