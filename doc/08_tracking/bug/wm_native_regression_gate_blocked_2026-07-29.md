@@ -391,3 +391,27 @@ No stub fallback was allowed.
 The WM remains blocked on producing a source-current pure-Simple compiler
 artifact, but the blocker has moved from HIR/MIR source compilation to the
 runtime-provider/link contract. No layout-specific workaround was added.
+
+The runtime-provider audit then found the supported smaller route:
+
+```text
+admitted Stage-2
+  native-build
+  positional src/app/cli/bootstrap_main.spl
+  core-c-bootstrap
+  --runtime-path <stage2-runtime-authority>
+```
+
+That route lets the native builder project the required runtime symbols and
+attach `libsimple_compiler_backfill.a`; direct `libsimple_native_all.a`
+injection is intentionally unsupported. The focused build was run with its own
+cache and no stub fallback. After 10m42s at ~100% CPU it still had zero object
+files. A separate identical canonical build already running in the shared
+workspace was 7h45m old at ~99% CPU. This is the known pre-object runaway
+signature, not useful compilation progress, so the scoped process was stopped
+with exit `130` and its cache retained.
+
+The next WM turn should not repeat that unchanged compiler command. The
+shortest remaining route is a native-safe layout cursor owner that does not
+depend on cross-block local scalar reloads, or an independently refreshed
+compiler artifact after the pre-object closure defect is fixed.

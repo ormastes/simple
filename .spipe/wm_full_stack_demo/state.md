@@ -565,6 +565,17 @@ implementation-in-progress
   leaving compiler/host runtime symbols such as `rt_index_of`,
   `rt_cranelift_*`, and `rt_file_stat` unresolved. The source fixes are kept;
   no compiler executable or WM rerun is claimed.
+- phase3-focused-runtime-capsule-build: The next audit corrected the compiler
+  recipe: build the single positional `src/app/cli/bootstrap_main.spl` entry
+  from admitted Stage-2 and supply the authoritative Stage-2 runtime path, so
+  runtime projection plus compiler backfill—not direct `native_all`
+  injection—owns `rt_index_of`, `rt_cranelift_*`, and `rt_file_stat`. That
+  focused build ran for 10m42s at ~100% CPU but produced zero cached objects.
+  A concurrent identical canonical build in the shared workspace was already
+  7h45m old at ~99% CPU. This matches the documented pre-object runaway
+  signature, so the scoped process was terminated with exit `130`; its empty
+  cache was preserved. No full bootstrap, Rust-seed fallback, or WM claim was
+  made.
 
 ## Remaining runtime gates
 
@@ -597,5 +608,6 @@ implementation-in-progress
   `i64 as u32` narrowing probe. Current compiler sources contain the cast
   bridge/truncation and cross-block scalar reload fixes. A scoped pure-Simple
   Stage-2-to-compiler refresh (not a bootstrap) now compiles the full closure
-  after the three source fixes, but its driver cannot link that closure through
-  the minimal `core-c-bootstrap` runtime lane.
+  after the three source fixes. The supported positional-entry/runtime-capsule
+  recipe avoids the prior link mistake but currently runs away before its first
+  cached object.
