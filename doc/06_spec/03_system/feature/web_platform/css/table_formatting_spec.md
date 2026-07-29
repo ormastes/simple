@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -175,6 +175,148 @@ expect(pixels[18 * 48 + 22]).to_equal(0xFF00FF00u32)
 expect(pixels[40 * 48 + 2]).to_equal(0xFF0000FFu32)
 expect(pixels[16 * 48]).to_equal(0xFF000000u32)
 expect(pixels[61 * 48 + 1]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### should place captions from the inherited caption-side value
+
+- Trace implemented CSS properties through canonical rendering
+   - Artifact capture: after_step
+- Preserve the top default and move bottom captions after table rows
+   - Artifact capture: after_step
+- Keep inherited values and ignore invalid caption-side declarations
+   - Artifact capture: after_step
+- Execute bottom caption placement through Engine2D pixels
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 2 expected checks
+   - Expected: pixels[2 * 40 + 2] equals `0xFFEF4444u32`
+   - Expected: pixels[10 * 40 + 2] equals `0xFF1D4ED8u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 116 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Trace implemented CSS properties through canonical rendering")
+val common = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{table-layout:fixed;width:30px}" +
+    "caption{height:6px;background:#1d4ed8}" +
+    "td{height:8px;background:#ef4444}</style>"
+)
+val top_html = (
+    common + "<table><caption id='top-cap'></caption>" +
+    "<tr><td id='top-cell'></td></tr></table>"
+)
+val bottom_html = (
+    common + "<style>caption{caption-side:bottom}</style>" +
+    "<table><caption id='bottom-cap'></caption>" +
+    "<tr><td id='bottom-cell'></td></tr></table>"
+)
+val auto_html = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{width:30px}caption{caption-side:bottom;height:6px;" +
+    "background:#1d4ed8}td{height:8px;background:#ef4444}</style>" +
+    "<table><caption id='auto-cap'></caption>" +
+    "<tr><td id='auto-cell'></td></tr></table>"
+)
+val inherited_html = (
+    common + "<style>table{caption-side:bottom}" +
+    "caption{caption-side:inherit}</style>" +
+    "<table><caption id='inherited-cap'></caption>" +
+    "<tr><td id='inherited-cell'></td></tr></table>"
+)
+val invalid_html = (
+    common + "<style>table{caption-side:bottom}" +
+    "caption{caption-side:sideways}</style>" +
+    "<table><caption id='invalid-cap'></caption>" +
+    "<tr><td id='invalid-cell'></td></tr></table>"
+)
+val explicit_top_html = (
+    common + "<style>table{caption-side:bottom}" +
+    "caption{caption-side:top}</style>" +
+    "<table><caption id='explicit-top-cap'></caption>" +
+    "<tr><td id='explicit-top-cell'></td></tr></table>"
+)
+val initial_html = (
+    common + "<style>table{caption-side:bottom}" +
+    "caption{caption-side:initial}</style>" +
+    "<table><caption id='initial-cap'></caption>" +
+    "<tr><td id='initial-cell'></td></tr></table>"
+)
+
+step("Preserve the top default and move bottom captions after table rows")
+expect(simple_web_layout_debug_style_by_id(
+    top_html, "top-cap", "caption-side"
+)).to_equal("top")
+expect(simple_web_layout_debug_layout_by_id(
+    top_html, 40, 24, "top-cap", "y"
+)).to_equal("0")
+expect(simple_web_layout_debug_layout_by_id(
+    top_html, 40, 24, "top-cell", "y"
+)).to_equal("6")
+expect(simple_web_layout_debug_style_by_id(
+    bottom_html, "bottom-cap", "caption-side"
+)).to_equal("bottom")
+expect(simple_web_layout_debug_layout_by_id(
+    bottom_html, 40, 24, "bottom-cell", "y"
+)).to_equal("0")
+expect(simple_web_layout_debug_layout_by_id(
+    bottom_html, 40, 24, "bottom-cap", "y"
+)).to_equal("8")
+val bottom_commands = simple_web_layout_render_html_draw_ir(
+    bottom_html, 40, 24
+).batches[0].commands
+val bottom_caption_index = _table_command_index(
+    bottom_commands, "bottom-cap"
+)
+expect(bottom_caption_index).to_be_greater_than(-1)
+expect(_table_style(
+    bottom_commands[bottom_caption_index], "caption-side"
+)).to_equal("bottom")
+expect(simple_web_layout_debug_layout_by_id(
+    auto_html, 40, 24, "auto-cell", "y"
+)).to_equal("0")
+expect(simple_web_layout_debug_layout_by_id(
+    auto_html, 40, 24, "auto-cap", "y"
+)).to_equal("8")
+
+step("Keep inherited values and ignore invalid caption-side declarations")
+expect(simple_web_layout_debug_style_by_id(
+    inherited_html, "inherited-cap", "caption-side"
+)).to_equal("bottom")
+expect(simple_web_layout_debug_layout_by_id(
+    inherited_html, 40, 24, "inherited-cap", "y"
+)).to_equal("8")
+expect(simple_web_layout_debug_style_by_id(
+    invalid_html, "invalid-cap", "caption-side"
+)).to_equal("bottom")
+expect(simple_web_layout_debug_layout_by_id(
+    invalid_html, 40, 24, "invalid-cap", "y"
+)).to_equal("8")
+expect(simple_web_layout_debug_style_by_id(
+    explicit_top_html, "explicit-top-cap", "caption-side"
+)).to_equal("top")
+expect(simple_web_layout_debug_layout_by_id(
+    explicit_top_html, 40, 24, "explicit-top-cell", "y"
+)).to_equal("6")
+expect(simple_web_layout_debug_style_by_id(
+    initial_html, "initial-cap", "caption-side"
+)).to_equal("top")
+expect(simple_web_layout_debug_layout_by_id(
+    initial_html, 40, 24, "initial-cell", "y"
+)).to_equal("6")
+
+step("Execute bottom caption placement through Engine2D pixels")
+val pixels = simple_web_layout_render_html_readback_engine2d_result(
+    bottom_html, 40, 24, "software"
+).readback.pixels
+expect(pixels[2 * 40 + 2]).to_equal(0xFFEF4444u32)
+expect(pixels[10 * 40 + 2]).to_equal(0xFF1D4ED8u32)
 ```
 
 </details>
@@ -648,8 +790,8 @@ expect(pixels[2 * 88 + 55]).to_equal(0xFF000000u32)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
