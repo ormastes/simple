@@ -62,6 +62,12 @@ fn engine2d_wm_draw_ir_backend_target(host_gpu_active: bool, host_gpu_backend: t
         return "cpu_simd"
     DRAW_IR_BACKEND_CPU
 
+# A negotiated host target changes the producer's material contract (not just
+# the execution preference).  Rebuilding is required when a failed host frame
+# must be rendered locally under a different concrete target.
+fn engine2d_wm_draw_ir_local_recompose_required(host_target: text, local_target: text) -> bool:
+    host_target != local_target
+
 class Engine2dWmFrameExecutor:
     engine: Engine2D
     framebuffer: FramebufferDriver
@@ -70,6 +76,9 @@ class Engine2dWmFrameExecutor:
     host_gpu_backend: text
     host_gpu_backend_code: i64
     draw_ir_backend_target: text
+    # Immutable local material target. Host negotiation may change only the
+    # host target above; this keeps the CPU/CPU-SIMD fallback contract intact.
+    local_draw_ir_backend_target: text
     # Trusted scanout dims threaded in by the caller. native-build shifts
     # cross-module FramebufferDriver `.width`/`.height` field reads by one slot
     # (the [u32] back_buffer/host_buffer array fields before them mis-size the
@@ -85,7 +94,8 @@ class Engine2dWmFrameExecutor:
     image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
 
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
-        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, draw_ir_backend_target: engine2d_wm_draw_ir_backend_target(false, "", cpu_simd_enabled), fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [])
+        val local_target = engine2d_wm_draw_ir_backend_target(false, "", cpu_simd_enabled)
+        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [])
 
     static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64, fb_height: i64, negotiation_started_us: i64, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
         var executor = Engine2dWmFrameExecutor.create(engine, framebuffer, fb_width, fb_height, cpu_simd_enabled)
@@ -282,8 +292,15 @@ class Engine2dWmFrameExecutor:
                 for frame in good_content_frames:
                     serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=host-gpu window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
                 return scene_revision
+        # The host composition is intentionally not reused after a failed
+        # Metal/Vulkan request: its style metadata asks for that target's
+        # device material receipts. Recompose lazily with the immutable local
+        # CPU/CPU-SIMD target so Engine2D receives honest fallback semantics.
+        var local_composition = composition
+        if engine2d_wm_draw_ir_local_recompose_required(self.draw_ir_backend_target, self.local_draw_ir_backend_target):
+            local_composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames, self.local_draw_ir_backend_target, 1000, clock_label, 0)
         if _WM_TRACE: serial_println("[wm-exec] at=present-begin")
-        val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, composition, false, images)
+        val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, local_composition, false, images)
         if _WM_TRACE: serial_println("[wm-exec] at=present-end rendered={result.rendered_command_count} skipped={result.skipped_command_count}")
         # A partially-unsupported composition (e.g. one taskbar icon whose
         # image never resolved because the backing disk lease is degraded)

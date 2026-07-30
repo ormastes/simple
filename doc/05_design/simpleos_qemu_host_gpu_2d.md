@@ -39,8 +39,13 @@ admission and cached promotion use this owner.
    bounded capabilities through its control header. Mapping evidence must
    precede every negotiation attempt and final decision.
 2. Canonical RECT/TEXT/IMAGE Draw IR semantics and ProcessingIR `FillU32` use the payload area.
-   Production WM frames first form one `DrawIrComposition`; the local fallback
-   resolves checksum-valid top-level `WmContentFrame` pixels as IMAGE resources.
+   Production WM frames first form one host-target `DrawIrComposition`; the
+   local fallback resolves checksum-valid top-level `WmContentFrame` pixels as
+   IMAGE resources. On a failed host attempt, only when the negotiated target
+   differs from the immutable CPU/CPU-SIMD target, the executor lazily
+   recomposes identical filtered scene/taskbar/content inputs for that local
+   target before Engine2D presentation. A local-only or equal-target path
+   builds one local composition and skips recomposition.
    The guest encodes unique referenced top-level IMAGE pixels as bounded,
    checksummed little-endian records in the negotiated readback arena and
    publishes their count, byte length, and checksum with the request. Clipped
@@ -51,7 +56,11 @@ admission and cached promotion use this owner.
    before overwriting the shared arena with result pixels.
 4. The guest validates provenance and exact CPU-oracle parity.
 5. Any unavailable service/backend or invalid receipt returns a stable reason
-   and selects the existing software/CPU path without preventing boot.
+   and selects the existing software/CPU path without preventing boot. The
+   fallback composition carries CPU material capability and receipt semantics;
+   it never reuses Metal device-glass metadata. Vulkan requests
+   CPU-composited material through its host presentation path rather than a
+   Vulkan device-glass receipt.
 
 The RV64 production input loop has no new runtime need. After module
 initialization it calls the existing `serial_init`, polls `serial_read_byte`,
@@ -98,11 +107,14 @@ and GROUP remain rejected. A Vulkan child must return checked device readback an
 is composited through the checked parent src-over path before its retained
 session is released.
 
-One `DRAW_IR_BACKEND_AUTO` production composition feeds both routes. A validated
-host receipt presents through the framebuffer MMIO owner; any host failure falls
-through to `engine2d_draw_ir_adv_composition_present_with_images` without a
-second producer or composition. Local production composition calls
-`engine2d_draw_ir_adv_composition_present_with_images`. The shared internal
+With a negotiated host, one host-target production composition feeds the host
+attempt. A validated host receipt presents through the framebuffer MMIO owner
+and returns. On host failure, a different CPU/CPU-SIMD target causes one lazy
+recomposition from identical filtered inputs before
+`engine2d_draw_ir_adv_composition_present_with_images`; an equal-target or
+local-only path reuses its single local composition. Metal is the only
+device-glass material target. Vulkan requests CPU-composited material through
+its host presentation path. The shared internal
 executor takes independent `present_frame` and `readback_frame` controls:
 regular composition is `(true, true)`, fresh-device execution is
 `(false, true)`, and the production present-only path is `(true, false)`. When

@@ -67,9 +67,11 @@ before another submission.
 
 The executor derives each request generation from an idle wire slot rather than
 mutable executor state, because the baremetal shell passes executor values by
-copy. It builds one `auto` Draw IR composition: a valid correlated host receipt
-is presented synchronously, while unavailable mapping, capacity, negotiation,
-receipt, or presentation selects the existing local Engine2D path. The current
+copy. With a negotiated host, it builds one host-target Draw IR composition and
+presents a valid correlated receipt synchronously. If that attempt fails and
+the host and local targets differ, it lazily recomposes the identical filtered
+inputs for the immutable CPU/CPU-SIMD target before local Engine2D presentation.
+A local-only or equal-target path builds only one local composition. The current
 3840x2160 entry therefore remains local under TODO 552's 8 MiB capacity ceiling.
 For a nonzero production BAR, the executor emits exactly one scoped
 `HOST_GPU_MAP_OK` marker before any negotiation attempt or final decision; the
@@ -240,6 +242,17 @@ top-level attachments as canonical little-endian records in the negotiated
 readback arena. The daemon snapshots and validates them before execution, then
 rechecks request generation before reusing that arena for output. This must not
 be replaced by a producer-specific full-frame copy.
+
+The executor retains an immutable local CPU/CPU-SIMD Draw IR target alongside
+the negotiated host target. It builds the host-target composition once for a
+host attempt and returns immediately on a valid host presentation. If that
+attempt fails and the targets differ, it rebuilds the same filtered scene,
+taskbar, and checksum-valid content frames only for local presentation. This
+lazy recomposition preserves concrete material intent: Metal device-glass
+requests and receipts never masquerade as CPU-composited fallback, while a
+Vulkan target continues to request CPU-composited material through its host
+presentation path. A local-only or equal-target frame builds one local
+composition and does not recompose.
 
 The local fallback uses
 `engine2d_draw_ir_adv_composition_present_with_images`: the existing Draw IR

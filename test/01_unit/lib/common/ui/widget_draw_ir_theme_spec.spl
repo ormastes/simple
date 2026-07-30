@@ -4,9 +4,12 @@ use common.ui.draw_ir.{DrawIrComposition, DRAW_IR_BACKEND_CPU}
 use common.ui.theme_render_snapshot.{
     ThemeMaterialSemantics,
     ThemeRenderSnapshot,
+    theme_role_color,
     theme_material_sha256
 }
+use common.ui.widget.{WidgetNode}
 use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_with_theme}
+use nogc_sync_mut.ui.theme_package.{theme_package_render_snapshot}
 
 fn _theme_snapshot(
     id: text,
@@ -63,6 +66,13 @@ fn _command_color(composition: DrawIrComposition, component_id: text) -> u32:
                 return command.color
     0u32
 
+fn _command_text(composition: DrawIrComposition, component_id: text) -> text:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return command.text_value
+    ""
+
 describe "widget Draw IR semantic theme handoff":
 
     it "projects the selected snapshot surface and accent into the same widget tree":
@@ -89,3 +99,44 @@ describe "widget Draw IR semantic theme handoff":
 
         expect(_command_color(draw, "hover-button")).to_equal(snapshot.material.active_title_fill_rgba)
         expect(_command_color(draw, "pressed-button")).to_equal(snapshot.material.inactive_title_fill_rgba)
+
+    it "projects Aetheric status chip roles and label text through Draw IR":
+        val snapshot = theme_package_render_snapshot("aetheric_dark")
+        var error_chip = WidgetNode.new("error-chip", "status_chip")
+        error_chip = error_chip.set_prop("label", "Failed")
+        error_chip = error_chip.set_prop("status", "error")
+        var success_chip = WidgetNode.new("success-chip", "status_chip")
+        success_chip = success_chip.set_prop("label", "Saved")
+        success_chip = success_chip.set_prop("status", "success")
+        var warning_chip = WidgetNode.new("warning-chip", "status_chip")
+        warning_chip = warning_chip.set_prop("label", "Caution")
+        warning_chip = warning_chip.set_prop("status", "warning")
+        var default_chip = WidgetNode.new("default-chip", "status_chip")
+        default_chip = default_chip.set_prop("label", "Neutral")
+        var unknown_chip = WidgetNode.new("unknown-chip", "status_chip")
+        unknown_chip = unknown_chip.set_prop("label", "Unknown")
+        unknown_chip = unknown_chip.set_prop("status", "other")
+        var info_toast = WidgetNode.new("info-toast", "toast")
+        info_toast = info_toast.set_prop("label", "Ignored label")
+        info_toast = info_toast.set_prop("message", "Informational message")
+        info_toast = info_toast.set_prop("status", "info")
+        val root = panel("status-panel", "", [
+            error_chip,
+            success_chip,
+            warning_chip,
+            default_chip,
+            unknown_chip,
+            info_toast
+        ])
+
+        val draw = widget_tree_to_draw_ir_with_theme(root, 240, 240, DRAW_IR_BACKEND_CPU, snapshot)
+
+        expect(_command_color(draw, "error-chip")).to_equal(theme_role_color(snapshot, "semantic.error").rgba)
+        expect(_command_color(draw, "error-chip") != snapshot.material.window_fill_rgba).to_equal(true)
+        expect(_command_text(draw, "error-chip-label")).to_equal("Failed")
+        expect(_command_color(draw, "success-chip")).to_equal(theme_role_color(snapshot, "semantic.success").rgba)
+        expect(_command_color(draw, "warning-chip")).to_equal(theme_role_color(snapshot, "semantic.warning").rgba)
+        expect(_command_color(draw, "default-chip")).to_equal(theme_role_color(snapshot, "workbench.panel").rgba)
+        expect(_command_color(draw, "unknown-chip")).to_equal(theme_role_color(snapshot, "workbench.panel").rgba)
+        expect(_command_color(draw, "info-toast")).to_equal(theme_role_color(snapshot, "semantic.info").rgba)
+        expect(_command_text(draw, "info-toast-label")).to_equal("Informational message")

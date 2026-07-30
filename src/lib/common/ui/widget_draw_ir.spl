@@ -16,7 +16,7 @@
 #
 use common.ui.layout.{compute_layout, find_rect_index}
 use common.ui.widget.{WidgetNode, WidgetRect}
-use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot, theme_role_color}
 use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_theme}
 use common.ui.draw_ir.{
     DRAW_IR_BACKEND_CPU,
@@ -52,22 +52,29 @@ struct WidgetDrawIrTheme:
     field: u32
     track: u32
     placeholder: u32
+    status_info: u32
+    status_success: u32
+    status_warning: u32
+    status_error: u32
 
 fn widget_draw_ir_theme_from_snapshot(snapshot: ThemeRenderSnapshot) -> WidgetDrawIrTheme:
-    """Resolve renderer-neutral material values into widget semantic roles."""
-    val material = snapshot.material
+    """Resolve the canonical L5 roles once for Draw-IR widget projection."""
     WidgetDrawIrTheme(
-        surface: material.window_fill_rgba,
-        text_primary: material.text_rgba,
-        text_secondary: material.secondary_text_rgba,
-        accent: snapshot.accent_rgba,
-        border: material.border_rgba,
-        control_normal: snapshot.accent_rgba,
-        control_hover: material.active_title_fill_rgba,
-        control_pressed: material.inactive_title_fill_rgba,
-        field: material.solid_fallback_rgba,
-        track: material.inactive_title_fill_rgba,
-        placeholder: snapshot.background_rgba
+        surface: theme_role_color(snapshot, "workbench.panel").rgba,
+        text_primary: theme_role_color(snapshot, "document.text").rgba,
+        text_secondary: theme_role_color(snapshot, "slide.placeholder").rgba,
+        accent: theme_role_color(snapshot, "wm.controls").rgba,
+        border: theme_role_color(snapshot, "wm.border").rgba,
+        control_normal: theme_role_color(snapshot, "wm.controls").rgba,
+        control_hover: theme_role_color(snapshot, "wm.titlebar").rgba,
+        control_pressed: theme_role_color(snapshot, "workbench.tab_bar").rgba,
+        field: theme_role_color(snapshot, "workbench.editor").rgba,
+        track: theme_role_color(snapshot, "workbench.tab_bar").rgba,
+        placeholder: theme_role_color(snapshot, "slide.placeholder").rgba,
+        status_info: theme_role_color(snapshot, "semantic.info").rgba,
+        status_success: theme_role_color(snapshot, "semantic.success").rgba,
+        status_warning: theme_role_color(snapshot, "semantic.warning").rgba,
+        status_error: theme_role_color(snapshot, "semantic.error").rgba
     )
 
 fn _widget_draw_ir_theme_from_wm_chrome(chrome: WmChromeColors) -> WidgetDrawIrTheme:
@@ -84,7 +91,11 @@ fn _widget_draw_ir_theme_from_wm_chrome(chrome: WmChromeColors) -> WidgetDrawIrT
         control_pressed: chrome.title_unfocused,
         field: chrome.host_window_body,
         track: chrome.title_unfocused,
-        placeholder: chrome.compositor_bg
+        placeholder: chrome.compositor_bg,
+        status_info: chrome.accent,
+        status_success: chrome.accent,
+        status_warning: chrome.accent,
+        status_error: chrome.accent
     )
 
 val GLYPH_ADVANCE: i32 = 7
@@ -111,6 +122,25 @@ fn _button_color(node: WidgetNode, theme: WidgetDrawIrTheme) -> u32:
     if node.get_prop("ui_hover") == "true":
         return theme.control_hover
     theme.control_normal
+
+fn _status_color(node: WidgetNode, theme: WidgetDrawIrTheme) -> u32:
+    val status = node.get_prop("status")
+    if status == "info":
+        return theme.status_info
+    if status == "success":
+        return theme.status_success
+    if status == "warning":
+        return theme.status_warning
+    if status == "error":
+        return theme.status_error
+    # Unknown and absent statuses deliberately remain neutral.
+    theme.surface
+
+fn _status_text(node: WidgetNode) -> text:
+    val message = node.get_prop("message")
+    if message != "":
+        return message
+    _label_text(node)
 
 fn _scroll_content_height(node: WidgetNode, viewport_h: i32) -> i32:
     var height = 0
@@ -203,6 +233,11 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
         val lbl = _label_text(node)
         if lbl != "":
             result.push(_default_text_centered(node, rect.id, x + 2, mid_y, y, rect.h, lbl, theme.text_primary))
+    elif kind == "status_chip" or kind == "toast":
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, _status_color(node, theme)))
+        val text = _status_text(node)
+        if text != "":
+            result.push(_default_text_centered(node, "{rect.id}-label", x + 6, mid_y, y, rect.h, text, theme.text_primary))
     elif kind == "scroll":
         result.push(draw_ir_rect("{rect.id}-track", x, y, rect.w, rect.h, theme.track))
         val bar_w = if rect.w >= 12: 8 else: rect.w
