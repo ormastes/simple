@@ -7,9 +7,6 @@ use std.gc_async_mut.web.browser_session.{
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
-use std.gc_async_mut.web.browser_session_url.{
-    browser_address_update
-}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity_at_element_path, be_dom_focused_id
 }
@@ -579,7 +576,7 @@ class HostedWebContentSession:
     me dispatch_text(event_id: i64, value: text) -> HostedWebContentDispatch:
         if self.chrome_focus == "address":
             val current = self.address_text()
-            val updated = match browser_address_update(
+            match self.browser.apply_address_update(
                 current, value, self.address_replace_on_text
             ):
                 Err(reason):
@@ -591,13 +588,18 @@ class HostedWebContentSession:
                         mutation_revision: self.mutation_revision,
                         reason: reason
                     )
-                Ok(next): next
-            val result = self._chrome_action(
-                event_id, "address", "set_value", updated
+                Ok(_): ()
+            self._cancel_orphaned_network_job()
+            self.mutation_revision = self.mutation_revision + 1
+            self.address_replace_on_text = false
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#address",
+                callback_count: 1,
+                mutation_revision: self.mutation_revision,
+                reason: ""
             )
-            if result.callback_count > 0:
-                self.address_replace_on_text = false
-            return result
         if self.last_target_id == "":
             return HostedWebContentDispatch(
                 event_id: event_id,

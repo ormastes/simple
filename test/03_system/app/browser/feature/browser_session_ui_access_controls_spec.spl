@@ -7,6 +7,8 @@ BrowserSession textual UI access control system specification.
 
 This spec exercises browser chrome and DOM controls through the canonical
 textual UI access surface, including bounded address input and rendered state.
+Unicode noncharacters are valid scalar values and remain allowed in drafts;
+malformed UTF-8, C0, DEL, and C1 controls fail closed before mutation.
 
 **Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
 **Plan:** doc/03_plan/sys_test/simple_web_browser_production_hardening.md
@@ -27,7 +29,9 @@ use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_find_by_tag, be_dom_get_attr}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_by_tag, be_dom_focused_id, be_dom_get_attr
+}
 use std.gc_async_mut.web.browser_session_url.{
     BROWSER_ADDRESS_MAX_BYTES, browser_address_input_error,
     browser_address_update
@@ -43,6 +47,7 @@ use os.hosted.hosted_browser_renderer_registry.{
 use std.common.web.browser_renderer_protocol.{BrowserRendererMessage}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
 
 val UI_CAPTURE_PATH: text = "build/test-artifacts/03_system/app/browser/feature/browser_session_ui_access_controls/browser_ui_access_snapshot.txt"
 
@@ -89,6 +94,35 @@ fn _count_pixel(pixels: [u32], expected: u32) -> i64:
         if pixel == expected:
             count = count + 1
     count
+
+fn _address_node_count(session: BrowserSession, value: text) -> i64:
+    ui_access_find_nodes(
+        session.ui_access_snapshot(), "browser:session",
+        "textfield", value, 1
+    ).len()
+
+fn _address_has_submit_action(
+    session: BrowserSession, value: text
+) -> bool:
+    val nodes = ui_access_find_nodes(
+        session.ui_access_snapshot(), "browser:session",
+        "textfield", value, 1
+    )
+    nodes.len() == 1 and nodes[0].action_names.contains("submit")
+
+fn _address_pixels_match(
+    session: BrowserSession, expected: [u32]
+) -> bool:
+    _pixels_equal(session.render_to_pixels(8, 8).pixels, expected)
+
+fn _set_address_scalar_code(
+    session: BrowserSession, code: i64
+) -> text:
+    session.ui_access_act(WinTextActionRequest(
+        target_id: "browser:session#address", action: "set_value",
+        text_value: "https://example.com/" + _scalar_text(code),
+        x: 0, y: 0
+    )).code
 
 fn _snapshot_capture(snapshot) -> text:
     var lines: [text] = []
@@ -207,11 +241,12 @@ describe "BrowserSession primitive controls through textual UI access":
 
     it "bounds UTF-8 address input without partial state or pixel mutation":
         """The address trust boundary checks raw UTF-8 bytes and controls before mutation."""
-        step("Accept exactly 2048 UTF-8 bytes and project the draft accessibly")
+        # @step: Accept exactly 2048 UTF-8 bytes and project the draft accessibly
         var session = BrowserSession.new()
         session.open_html(
             "https://example.com/start",
-            "<html style='background:#ff0000'><body>Start</body></html>"
+            "<html style='background:#ff0000'><body>" +
+            "<input id='keep' data-focused value='Start'></body></html>"
         )
         val exact_draft = _repeat_ascii("a", 2045) + "한"
         val initial_pixels = session.render_to_pixels(8, 8).pixels
@@ -229,20 +264,20 @@ describe "BrowserSession primitive controls through textual UI access":
             text_value: exact_draft, x: 0, y: 0
         ))
         expect(accepted.ok).to_equal(true)
-        val address_nodes = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", exact_draft, 1
-        )
-        expect(address_nodes.len()).to_equal(1)
-        expect(address_nodes[0].action_names).to_contain("submit")
+        expect(_address_node_count(session, exact_draft)).to_equal(1)
+        expect(_address_has_submit_action(
+            session, exact_draft
+        )).to_equal(true)
         val revision_before = session.ui_access_revision
         val history_before = session.history.len()
         val index_before = session.current_index
         val pending_before = session.pending_request_count()
         val pending_url_before = session.pending_url
         val loading_before = session.is_loading
+        val focus_before = be_dom_focused_id(session.dom_root())
+        expect(focus_before).to_equal("keep")
 
-        step("Reject 2049 bytes before trimming and preserve browser state")
+        # @step: Reject 2049 bytes before trimming and preserve browser state
         val leading_overflow = session.ui_access_act(WinTextActionRequest(
             target_id: "browser:session#address", action: "submit",
             text_value: " " + exact_draft, x: 0, y: 0
@@ -260,13 +295,13 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(session.pending_request_count()).to_equal(pending_before)
         expect(session.pending_url).to_equal(pending_url_before)
         expect(session.is_loading).to_equal(loading_before)
+        expect(be_dom_focused_id(session.dom_root())).to_equal(focus_before)
         expect(session.ui_access_revision).to_equal(revision_before)
-        val overflow_pixels_unchanged = _pixels_equal(
-            session.render_to_pixels(8, 8).pixels, initial_pixels
-        )
-        expect(overflow_pixels_unchanged).to_equal(true)
+        expect(_address_pixels_match(
+            session, initial_pixels
+        )).to_equal(true)
 
-        step("Reject C0 DEL and C1 controls before UI projection")
+        # @step: Reject C0 DEL and C1 controls before UI projection
         val leading_newline = session.ui_access_act(WinTextActionRequest(
             target_id: "browser:session#address", action: "submit",
             text_value: "\nhttps://example.com/", x: 0, y: 0
@@ -279,27 +314,18 @@ describe "BrowserSession primitive controls through textual UI access":
             target_id: "browser:session#address", action: "set_value",
             text_value: "https://example.com/\0tail", x: 0, y: 0
         ))
-        val del = session.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#address", action: "set_value",
-            text_value: "https://example.com/" + _scalar_text(127),
-            x: 0, y: 0
-        ))
-        val c1_low = session.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#address", action: "set_value",
-            text_value: "https://example.com/" + _scalar_text(128),
-            x: 0, y: 0
-        ))
-        val c1_high = session.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#address", action: "set_value",
-            text_value: "https://example.com/" + _scalar_text(159),
-            x: 0, y: 0
-        ))
         expect(leading_newline.code).to_equal("address-invalid-control")
         expect(trailing_newline.code).to_equal("address-invalid-control")
         expect(nul.code).to_equal("address-invalid-control")
-        expect(del.code).to_equal("address-invalid-control")
-        expect(c1_low.code).to_equal("address-invalid-control")
-        expect(c1_high.code).to_equal("address-invalid-control")
+        expect(_set_address_scalar_code(
+            session, 127
+        )).to_equal("address-invalid-control")
+        expect(_set_address_scalar_code(
+            session, 128
+        )).to_equal("address-invalid-control")
+        expect(_set_address_scalar_code(
+            session, 159
+        )).to_equal("address-invalid-control")
         expect(session.address_draft).to_equal(exact_draft)
         expect(session.current_url).to_equal("https://example.com/start")
         expect(session.history.len()).to_equal(history_before)
@@ -307,17 +333,14 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(session.pending_request_count()).to_equal(pending_before)
         expect(session.pending_url).to_equal(pending_url_before)
         expect(session.is_loading).to_equal(loading_before)
+        expect(be_dom_focused_id(session.dom_root())).to_equal(focus_before)
         expect(session.ui_access_revision).to_equal(revision_before)
-        expect(ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", exact_draft, 1
-        ).len()).to_equal(1)
-        val control_pixels_unchanged = _pixels_equal(
-            session.render_to_pixels(8, 8).pixels, initial_pixels
-        )
-        expect(control_pixels_unchanged).to_equal(true)
+        expect(_address_node_count(session, exact_draft)).to_equal(1)
+        expect(_address_pixels_match(
+            session, initial_pixels
+        )).to_equal(true)
 
-        step("Submit an exact 2048-byte URL and render the committed page")
+        # @step: Submit an exact 2048-byte URL and render the committed page
         val exact_url = "https://example.com/" + _repeat_ascii("a", 2028)
         expect(text_byte_len(exact_url)).to_equal(2048)
         session.register_resource(
@@ -343,6 +366,54 @@ describe "BrowserSession primitive controls through textual UI access":
     it "keeps hosted worker registry and live-entry address rejection atomic":
         val invalid = "https://example.com/" + _scalar_text(128)
         val exact = _repeat_ascii("a", 2048)
+        var c0: i64 = 0
+        while c0 < 32:
+            expect(browser_address_input_error(
+                rt_bytes_to_text([c0 as u8])
+            )).to_equal("address-invalid-control")
+            c0 = c0 + 1
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0x7Fu8])
+        )).to_equal("address-invalid-control")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xC2u8, 0x80u8])
+        )).to_equal("address-invalid-control")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xC2u8, 0x90u8])
+        )).to_equal("address-invalid-control")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xC2u8, 0x9Fu8])
+        )).to_equal("address-invalid-control")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xC0u8, 0xAFu8])
+        )).to_equal("address-invalid-utf8")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xC2u8])
+        )).to_equal("address-invalid-utf8")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xC2u8, 0x20u8])
+        )).to_equal("address-invalid-utf8")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xEDu8, 0xA0u8, 0x80u8])
+        )).to_equal("address-invalid-utf8")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xF4u8, 0x90u8, 0x80u8, 0x80u8])
+        )).to_equal("address-invalid-utf8")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0x80u8])
+        )).to_equal("address-invalid-utf8")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0x61u8, 0x00u8, 0x62u8])
+        )).to_equal("address-invalid-control")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xEFu8, 0xB7u8, 0x90u8])
+        )).to_equal("")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xEFu8, 0xBFu8, 0xBFu8])
+        )).to_equal("")
+        expect(browser_address_input_error(
+            rt_bytes_to_text([0xF4u8, 0x8Fu8, 0xBFu8, 0xBFu8])
+        )).to_equal("")
         expect(browser_address_input_error("\0")).to_equal(
             "address-invalid-control"
         )
@@ -364,6 +435,19 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(browser_address_update(
             "about:blank", exact, true
         ).unwrap()).to_equal(exact)
+        var live_entry_draft = "about:blank"
+        val live_entry_pending = "pending"
+        var live_entry_replace = true
+        match browser_address_update(
+            live_entry_draft, invalid, live_entry_replace
+        ):
+            Err(_): ()
+            Ok(updated):
+                live_entry_draft = updated
+                live_entry_replace = false
+        expect(live_entry_draft).to_equal("about:blank")
+        expect(live_entry_pending).to_equal("pending")
+        expect(live_entry_replace).to_equal(true)
 
         step("Reject C1 through the hosted semantic web editor")
         var hosted = HostedWebContentSession.create(
@@ -375,6 +459,7 @@ describe "BrowserSession primitive controls through textual UI access":
         val hosted_history = hosted.browser.history.len()
         val hosted_index = hosted.browser.current_index
         val hosted_pending = hosted.browser.pending_request_count()
+        val hosted_loading = hosted.browser.is_loading
         val hosted_revision = hosted.mutation_revision
         val hosted_pixels = hosted.browser.render_to_pixels(8, 8).pixels
         val hosted_rejected = hosted.dispatch_text(3, invalid)
@@ -385,6 +470,7 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(hosted.browser.pending_request_count()).to_equal(
             hosted_pending
         )
+        expect(hosted.browser.is_loading).to_equal(hosted_loading)
         expect(hosted.mutation_revision).to_equal(hosted_revision)
         expect(hosted.chrome_focus).to_equal("address")
         expect(hosted.address_replace_on_text).to_equal(true)
@@ -414,6 +500,8 @@ describe "BrowserSession primitive controls through textual UI access":
         val worker_history = worker.browser.history.len()
         val worker_index = worker.browser.current_index
         val worker_revision = worker.browser.ui_access_revision
+        val worker_pending = worker.browser.pending_request_count()
+        val worker_loading = worker.browser.is_loading
         val worker_pixels = worker.browser.render_to_pixels(8, 8).pixels
         val worker_rejected = worker.handle(BrowserRendererMessage(
             kind: "text", generation: 7, request_id: 3,
@@ -426,6 +514,10 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(worker.browser.history.len()).to_equal(worker_history)
         expect(worker.browser.current_index).to_equal(worker_index)
         expect(worker.browser.ui_access_revision).to_equal(worker_revision)
+        expect(worker.browser.pending_request_count()).to_equal(
+            worker_pending
+        )
+        expect(worker.browser.is_loading).to_equal(worker_loading)
         expect(worker.chrome_focus).to_equal("address")
         expect(worker.address_replace_on_text).to_equal(true)
         expect(ui_access_find_nodes(
@@ -457,6 +549,9 @@ describe "BrowserSession primitive controls through textual UI access":
         )
         val registry_url = registry.document_url(92)
         val registry_revision = registry.entries[0].mutation_revision
+        val registry_pending = registry.entries[0].renderer.pending_operation
+        val registry_state = registry.entries[0].renderer.state
+        val registry_pixels = registry.entries[0].pending_frame.pixels
         val registry_rejected = registry.dispatch_text(3, 92, invalid)
         expect(registry_rejected.reason).to_equal(
             "address-invalid-control"
@@ -466,6 +561,13 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(registry.entries[0].mutation_revision).to_equal(
             registry_revision
         )
+        expect(registry.entries[0].renderer.pending_operation).to_equal(
+            registry_pending
+        )
+        expect(registry.entries[0].renderer.state).to_equal(registry_state)
+        expect(_pixels_equal(
+            registry.entries[0].pending_frame.pixels, registry_pixels
+        )).to_equal(true)
         expect(registry.entries[0].address_editing).to_equal(true)
         expect(registry.entries[0].address_replace_on_text).to_equal(true)
         val registry_exact = registry.dispatch_text(4, 92, exact)

@@ -16,7 +16,7 @@ use std.gc_async_mut.web.browser_session.{
 }
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_url.{
-    browser_address_input_error, resolve_relative_url
+    browser_address_update, resolve_relative_url
 }
 use std.gc_async_mut.web.browser_session_form.{browser_select_value}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
@@ -264,6 +264,15 @@ fn _browser_action_result(ok: bool, code: text, message: text, target_id: text, 
 
 impl BrowserSession:
 
+    me apply_address_update(
+        current: text, value: text, replace: bool
+    ) -> Result<text, text>:
+        val updated = browser_address_update(
+            current, value, replace
+        )?
+        self.address_draft = updated
+        Ok(updated)
+
     me ui_access_snapshot() -> UiAccessSnapshot:
         val surface = UiAccessSurface(
             surface_id: BROWSER_SESSION_SURFACE_ID,
@@ -319,16 +328,19 @@ impl BrowserSession:
             return _browser_action_result(false, "target_not_found", "target not found", request.target_id, request.action)
         if node.widget_id == "address":
             if request.action == "set_value":
-                val address_error = browser_address_input_error(
-                    request.text_value
-                )
-                if address_error != "":
-                    return _browser_action_result(
-                        false, address_error, address_error,
-                        request.target_id, request.action
-                    )
-                self.address_draft = request.text_value
-                return _browser_action_result(true, "ok", "address updated", request.target_id, request.action)
+                match self.apply_address_update(
+                    "", request.text_value, true
+                ):
+                    Err(reason):
+                        return _browser_action_result(
+                            false, reason, reason,
+                            request.target_id, request.action
+                        )
+                    Ok(_):
+                        return _browser_action_result(
+                            true, "ok", "address updated",
+                            request.target_id, request.action
+                        )
             if request.action == "submit":
                 val address = if request.text_value != "": request.text_value else: self.address_draft
                 match self.begin_network_navigation(address, "GET", "", "", ""):
@@ -336,7 +348,8 @@ impl BrowserSession:
                     Err(e):
                         val code = if (
                             e == "address-too-long" or
-                            e == "address-invalid-control"
+                            e == "address-invalid-control" or
+                            e == "address-invalid-utf8"
                         ): e else: "action_failed"
                         return _browser_action_result(
                             false, code, e,
