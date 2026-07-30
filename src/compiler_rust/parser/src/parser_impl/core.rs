@@ -318,6 +318,14 @@ impl<'a> Parser<'a> {
         }
 
         self.debug_trace(&format!("Finished parse(), {} items", items.len()));
+        if std::env::var_os("SIMPLE_TRY_PROBE").is_some() {
+            let dump = format!("{:?}", items);
+            eprintln!(
+                "[parse-out-probe] items={} has_try={}",
+                items.len(),
+                dump.contains("Try(")
+            );
+        }
         Ok(Module { name: None, items })
     }
 

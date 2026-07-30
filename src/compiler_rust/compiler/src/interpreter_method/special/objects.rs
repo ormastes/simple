@@ -361,6 +361,44 @@ pub fn handle_constructor_methods(
             .with_help("check that the method exists and is spelled correctly");
         return Err(CompileError::semantic_with_context(msg, ctx));
     }
+    // No class by this name: before erroring, try qualified ENUM variant
+    // construction (`EnumName.Variant(args)`) against the enum registries —
+    // the same fallback the found-class branch above performs. Without this,
+    // a qualified constructor whose enum has no same-named class (notably the
+    // builtin `Result.Ok(...)` / `Option.Some(...)` inside imported modules,
+    // e.g. bencode_decode_value) died here with "unknown class Result",
+    // making every Result-wrapped API untestable under the forced-interpret
+    // test lane.
+    let enum_def = enums
+        .get(class_name)
+        .cloned()
+        .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()))
+        .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()));
+    if let Some(enum_def) = enum_def {
+        if let Some(variant) = enum_def.variants.iter().find(|v| v.name == method) {
+            // Args are still unevaluated on this no-class path.
+            let mut variant_values: Vec<Value> = Vec::with_capacity(args.len());
+            for arg in args {
+                variant_values.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+            }
+            let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
+            let payload = if !has_fields && variant_values.is_empty() {
+                None
+            } else if variant_values.len() == 1 {
+                Some(Box::new(variant_values[0].clone()))
+            } else if variant_values.is_empty() {
+                None
+            } else {
+                Some(Box::new(Value::Tuple(variant_values)))
+            };
+            return Ok(Some(Value::Enum {
+                enum_name: class_name.to_string(),
+                variant: method.to_string(),
+                payload,
+            }));
+        }
+    }
+
     // Collect available classes for suggestion
     let available: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
     let mut msg = format!("unknown class {class_name}");

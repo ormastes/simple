@@ -1640,11 +1640,29 @@ fn load_module_with_imports_internal(
     // current parser treats as a bare identifier. During early bootstrap we
     // normalize them to `text` so type checking succeeds. Guarded by env to
     // avoid affecting normal builds.
-    if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
-        source = source.replace("text?", "text");
-        source = strip_optionals(source);
-    }
+    //
+    // FALLBACK-ONLY (2026-07-30): the normalization is TEXTUAL — its
+    // `strip_optionals` step deletes `?` before whitespace/delimiters, which
+    // also deleted every try-operator from VALID modern sources
+    // (`val h = f(x)?` matches the `"?\n"` pattern), silently turning `?`
+    // into a no-op whenever SIMPLE_BOOTSTRAP=1 was set. That env var is
+    // routinely set just to suppress the seed banner, so the corruption was
+    // widespread and engine-independent (the JIT then did arithmetic on the
+    // un-unwrapped enum pointer; the interpreter mis-typed it). Parse the
+    // pristine source FIRST and only fall back to the legacy normalization
+    // when the pristine parse fails — a source that parses cleanly is never
+    // rewritten.
     source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, target_arch);
+    if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
+        // Probe-parse the pristine source (throwaway parser); only a source
+        // the current parser genuinely cannot handle gets the legacy
+        // rewrite. The extra parse only happens in bootstrap mode.
+        if simple_parser::Parser::new(&source).parse().is_err() {
+            let mut lenient = source.replace("text?", "text");
+            lenient = strip_optionals(lenient);
+            source = lenient;
+        }
+    }
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()

@@ -352,6 +352,15 @@ pub(crate) fn initialize_extern_functions() {
 /// Main module evaluation implementation.
 /// Processes all top-level items and executes the main function if present.
 pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
+    if std::env::var_os("SIMPLE_TRY_PROBE").is_some() {
+        let dump = format!("{:?}", items);
+        eprintln!(
+            "[mod-probe] items={} has_try={} has_unwrap_or_return={}",
+            items.len(),
+            dump.contains("Try("),
+            dump.contains("UnwrapOrReturn(")
+        );
+    }
     // Clear const names, extern functions, and moved variables from previous runs
     CONST_NAMES.with(|cell| cell.borrow_mut().clear());
     super::clear_moved_vars();
@@ -378,6 +387,33 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
     let mut functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
     let mut classes: HashMap<String, Arc<ClassDef>> = HashMap::new();
     let mut enums: Enums = HashMap::new();
+    // Builtin Option/Result are compiler-special enums with no source
+    // declaration, so they were absent from this registry and every
+    // QUALIFIED construction (`Result.Ok(x)`, `Option.Some(y)`) failed under
+    // the interpreter with "variable `Result` not found" (direct) or
+    // "unknown class Result" (imported-module context) — making every
+    // Result-wrapped API untestable via `bin/simple test`, which forces
+    // SIMPLE_EXECUTION_MODE=interpret. Register synthetic definitions,
+    // parsed from source so the EnumDef shape always matches the AST, and
+    // let the ordinary user-enum machinery construct the values (bare
+    // `Ok(x)` and pattern matching already used these enum names).
+    {
+        let builtin_src = "enum Option:\n    Some(value)\n    None\n\nenum Result:\n    Ok(value)\n    Err(error)\n";
+        if let Ok(module) = simple_parser::Parser::new(builtin_src).parse() {
+            for item in module.items {
+                if let Node::Enum(e) = item {
+                    let def = Arc::new(e);
+                    // GLOBAL_ENUMS too: imported/lazily-loaded module code
+                    // resolves qualified names through the thread-local
+                    // registries, not this module-local map.
+                    super::interpreter_state::GLOBAL_ENUMS.with(|cell| {
+                        cell.borrow_mut().entry(def.name.clone()).or_insert_with(|| Arc::clone(&def));
+                    });
+                    enums.entry(def.name.clone()).or_insert(def);
+                }
+            }
+        }
+    }
     let mut impl_methods: ImplMethods = HashMap::new();
     let mut extern_functions: ExternFunctions = HashMap::new();
     let mut macros: Macros = HashMap::new();
