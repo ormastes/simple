@@ -8,13 +8,15 @@ public debug/render entrypoints rather than private layout helpers.
 @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl 25%
 """
 
-use std.spec.{describe, it, expect}
+use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id,
     simple_web_layout_debug_style_by_id,
     simple_web_layout_render_html_draw_ir,
     simple_web_layout_render_html_software_pixels
 }
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
 
 fn _flat_rows(count: i32) -> text:
     var html = "<html><body>"
@@ -26,6 +28,15 @@ fn _flat_rows(count: i32) -> text:
 
 fn _pixel_at(pixels: [u32], width: i32, x: i32, y: i32) -> u32:
     pixels[(y * width) + x]
+
+fn _draw_ir_command_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> DrawIrCommand:
+    for command in commands:
+        if command.component_id == component_id:
+            return command
+    fail("missing Draw IR command: {component_id}")
+    commands[0]
 
 describe "simple web layout child index":
     it "keeps flat sibling block order stable":
@@ -161,6 +172,56 @@ describe "simple web layout child index":
         val cy = simple_web_layout_debug_layout_by_id(html, 64, 64, "c", "y").to_i32()
         expect(by).to_equal(ay)
         expect(cy).to_be_greater_than(by)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    it "should wrap longhand column gaps consistently through Draw IR and Engine2D":
+        step("Render three fixed items with distinct row and column gaps")
+        val html = "<html><head><style>" +
+            "html,body{margin:0;padding:0;background-color:#ffffff}" +
+            "#wrap{display:flex;flex-wrap:wrap;width:22px;" +
+            "column-gap:4px;row-gap:3px;background-color:#dbeafe}" +
+            ".item{width:10px;height:5px}" +
+            "#a{background-color:#ef4444}#b{background-color:#22c55e}" +
+            "#c{background-color:#2563eb}" +
+            "</style></head><body><section id=\"wrap\">" +
+            "<div id=\"a\" class=\"item\"></div>" +
+            "<div id=\"b\" class=\"item\"></div>" +
+            "<div id=\"c\" class=\"item\"></div>" +
+            "</section></body></html>"
+
+        step("Lower each wrapped item to its exact Draw IR rectangle")
+        val composition = simple_web_layout_render_html_draw_ir(html, 32, 24)
+        val commands = composition.batches[0].commands
+        val wrap = _draw_ir_command_by_id(commands, "wrap")
+        val a = _draw_ir_command_by_id(commands, "a")
+        val b = _draw_ir_command_by_id(commands, "b")
+        val c = _draw_ir_command_by_id(commands, "c")
+        expect(wrap.height).to_equal(21)
+        expect(a.x).to_equal(0)
+        expect(a.y).to_equal(0)
+        expect(a.width).to_equal(10)
+        expect(a.height).to_equal(5)
+        expect(b.x).to_equal(0)
+        expect(b.y).to_equal(8)
+        expect(b.width).to_equal(10)
+        expect(b.height).to_equal(5)
+        expect(c.x).to_equal(0)
+        expect(c.y).to_equal(16)
+        expect(c.width).to_equal(10)
+        expect(c.height).to_equal(5)
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 32, 24, "wrap", "h"
+        )).to_equal("21")
+
+        step("Execute the same composition through Engine2D pixels")
+        val pixels = BrowserRenderer.create(
+            32, 24
+        ).render_html_to_pixels(html).pixel_data
+        expect(_pixel_at(pixels, 32, 14, 2)).to_equal(0xffdbeafeu32)
+        expect(_pixel_at(pixels, 32, 2, 10)).to_equal(0xff22c55eu32)
+        expect(_pixel_at(pixels, 32, 2, 18)).to_equal(0xff2563ebu32)
 
     it "keeps positive z-index absolute paint order stable":
         val html = "<html><head><style>" +

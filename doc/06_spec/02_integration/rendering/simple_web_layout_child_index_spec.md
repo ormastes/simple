@@ -27,7 +27,7 @@ simple_web_layout_child_index_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -355,6 +355,78 @@ expect(cy).to_be_greater_than(by)
 
 </details>
 
+#### should wrap longhand column gaps consistently through Draw IR and Engine2D
+
+1. Render three fixed items with distinct `row-gap` and `column-gap` values.
+2. Lower each wrapped item to its exact Draw IR rectangle.
+3. Execute the same composition through Engine2D and inspect three pixels that
+   distinguish correct wrapping from overflow or an early line.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Reproduction: the folded source includes the complete fail-closed Draw IR
+checker and all three visible scenario steps.
+
+```simple
+fn _draw_ir_command_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> DrawIrCommand:
+    for command in commands:
+        if command.component_id == component_id:
+            return command
+    fail("missing Draw IR command: {component_id}")
+    commands[0]
+
+step("Render three fixed items with distinct row and column gaps")
+val html = "<html><head><style>" +
+    "html,body{margin:0;padding:0;background-color:#ffffff}" +
+    "#wrap{display:flex;flex-wrap:wrap;width:22px;" +
+    "column-gap:4px;row-gap:3px;background-color:#dbeafe}" +
+    ".item{width:10px;height:5px}" +
+    "#a{background-color:#ef4444}#b{background-color:#22c55e}" +
+    "#c{background-color:#2563eb}" +
+    "</style></head><body><section id=\"wrap\">" +
+    "<div id=\"a\" class=\"item\"></div>" +
+    "<div id=\"b\" class=\"item\"></div>" +
+    "<div id=\"c\" class=\"item\"></div>" +
+    "</section></body></html>"
+
+step("Lower each wrapped item to its exact Draw IR rectangle")
+val composition = simple_web_layout_render_html_draw_ir(html, 32, 24)
+val commands = composition.batches[0].commands
+val wrap = _draw_ir_command_by_id(commands, "wrap")
+val a = _draw_ir_command_by_id(commands, "a")
+val b = _draw_ir_command_by_id(commands, "b")
+val c = _draw_ir_command_by_id(commands, "c")
+expect(wrap.height).to_equal(21)
+expect(a.x).to_equal(0)
+expect(a.y).to_equal(0)
+expect(a.width).to_equal(10)
+expect(a.height).to_equal(5)
+expect(b.x).to_equal(0)
+expect(b.y).to_equal(8)
+expect(b.width).to_equal(10)
+expect(b.height).to_equal(5)
+expect(c.x).to_equal(0)
+expect(c.y).to_equal(16)
+expect(c.width).to_equal(10)
+expect(c.height).to_equal(5)
+expect(simple_web_layout_debug_layout_by_id(
+    html, 32, 24, "wrap", "h"
+)).to_equal("21")
+
+step("Execute the same composition through Engine2D pixels")
+val pixels = BrowserRenderer.create(
+    32, 24
+).render_html_to_pixels(html).pixel_data
+expect(_pixel_at(pixels, 32, 14, 2)).to_equal(0xffdbeafeu32)
+expect(_pixel_at(pixels, 32, 2, 10)).to_equal(0xff22c55eu32)
+expect(_pixel_at(pixels, 32, 2, 18)).to_equal(0xff2563ebu32)
+```
+
+</details>
+
 #### keeps positive z-index absolute paint order stable
 
 <details>
@@ -449,7 +521,7 @@ expect(composition.batches[0].commands.len()).to_be_greater_than(0)
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/rendering/simple_web_layout_child_index_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-30 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -461,8 +533,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
