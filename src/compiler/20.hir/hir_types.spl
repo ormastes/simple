@@ -11,6 +11,7 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
+use std.alloc.sffi.{rt_dict_contains}
 
 # ============================================================================
 # HIR Module Structure
@@ -282,24 +283,12 @@ impl SymbolTable:
 
         loop:
             val scope = self.scopes[scope_id.id]
-            # `if scope.symbols.contains(name): return scope.symbols[name]`
-            # tripped the interpreter's known Dict-lookup defect (a `contains`
-            # + bracket-index re-fetch pattern silently yielding nil instead
-            # of the stored value -- see doc/08_tracking/bug/
-            # vhdl_backend_spec_remaining_failures_2026-07-02.md). Use the
-            # plain nil-check idiom on a single `.get()` call instead.
-            val found = scope.symbols.get(name)
-            if found != nil:
-                # Seed stage4 lane hardening: Dict<text,i64>.get returns the
-                # TAGGED stored value on the seed-compiled native path
-                # (raw<<3) while bracket-index takes the type-directed untag
-                # path; and an explicit Some(...) wrap materializes a heap
-                # Option box that `if val` binds un-unwrapped (field reads
-                # then hit the box header, id = 0x100000004). Read the value
-                # via bracket-index and return the bare struct (implicit
-                # lift) so every engine sees a flat SymbolId.
-                val direct: i64 = scope.symbols[name]
-                return SymbolId(id: direct)
+            # Dict.get can falsely report nil for a present tagged integer on
+            # the self-hosted native path. The runtime-owner predicate plus a
+            # bracket read keeps the value type-directed and untagged.
+            if rt_dict_contains(scope.symbols, name):
+                val found: i64 = scope.symbols[name]
+                return SymbolId(id: found)
 
             match scope.parent:
                 case Some(parent):
@@ -315,11 +304,9 @@ impl SymbolTable:
 
         loop:
             val scope = self.scopes[scope_id.id]
-            val found = scope.symbols.get(name)
-            if found != nil:
-                # Same stage4 lane hardening as `lookup` above: bracket-index
-                # read dodges the tagged Dict.get value.
-                return SymbolId(id: scope.symbols[name])
+            if rt_dict_contains(scope.symbols, name):
+                val found: i64 = scope.symbols[name]
+                return SymbolId(id: found)
 
             match scope.parent:
                 case Some(parent):
