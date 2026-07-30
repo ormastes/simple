@@ -121,11 +121,25 @@ use app.ide.plugin_manifest.{ide_plugin_manifest_probe, ide_plugin_manifest_summ
 use app.ide.gui_sanity.{ide_gui_sanity, ide_gui_sanity_summary}
 use app.ide.tui_sanity.{ide_tui_sanity, ide_tui_sanity_summary}
 use app.io.mod.{dir_create_all, file_exists, file_read, file_write}
+use std.io_runtime.{dir_exists}
 use app.office.slides.slide.{SlideElement, SlideElementKind, SlideLayout, add_slide_element, slide_layout_display_name, slide_layout_short_name, slide_with_elements}
 use common.office.number.{office_parse_non_negative_i32, office_parse_signed_decimal_f64, office_parse_unsigned_decimal_f64, office_pow10_f64, office_pow10_i64}
 
 val TUI_CAPTURE_PATH: text = "build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite/feature_check_tui.txt"
 val TUI_CAPTURE_DIR: text = "build/test-artifacts/03_system/app/ide/feature/ide_office_plugin_suite"
+
+# Map a Simple module name onto its source location: std.X -> src/lib/X,
+# app.X -> src/app/X. A package owner (app.office.mail) is a directory; a
+# single-module owner (std.common.math_repr) is a .spl file.
+fn _owner_module_resolves(module_name: text) -> bool:
+    var rel = ""
+    if module_name.starts_with("std."):
+        rel = "src/lib/" + module_name.substring(4).replace(".", "/")
+    elif module_name.starts_with("app."):
+        rel = "src/app/" + module_name.substring(4).replace(".", "/")
+    else:
+        return false
+    file_exists(rel + ".spl") or dir_exists(rel)
 
 fn _max_line_width(lines: [text]) -> i64:
     var max_width = 0
@@ -169,7 +183,17 @@ describe "IDE office plugin suite capabilities":
         expect(ids).to_contain("db-admin")
 
     it "points each capability at an existing implementation owner":
+        # Every declared owner_module must resolve to a real source file or
+        # package directory. Asserting the literal strings alone is what let
+        # "mail" ship pointing at std.hardware.soc_rtl.mailbox (a GHDL SoC test
+        # peripheral) and "planner" at std.nogc_sync_mut.db.query_planner.
         val caps = ide_capabilities()
+        var missing = ""
+        for cap in caps:
+            if not _owner_module_resolves(cap.owner_module):
+                missing = missing + cap.id + "=" + cap.owner_module + " "
+        expect(missing).to_equal("")
+
         var owners = ""
         for cap in caps:
             owners = owners + cap.owner_module + "\n"
@@ -179,7 +203,8 @@ describe "IDE office plugin suite capabilities":
         expect(owners).to_contain("std.editor.services.sdn_graph")
         expect(owners).to_contain("std.common.markdown_visual_editor")
         expect(owners).to_contain("std.common.math_repr")
-        expect(owners).to_contain("std.nogc_sync_mut.db.query_planner")
+        expect(owners).to_contain("app.office.mail")
+        expect(owners).to_contain("app.office.planner")
         expect(owners).to_contain("app.editor.mcp_tools")
         expect(owners).to_contain("std.editor.core.session_db")
 
@@ -197,7 +222,7 @@ describe "IDE office plugin suite capabilities":
         expect(tui_report).to_contain("edit-command: md-edit=true stale-reject=true")
         expect(tui_report).to_contain("edit-command: slide-edit=true stale-reject=true")
         expect(tui_report).to_contain("edit-command: sheet-edit=true stale-reject=true")
-        expect(tui_report).to_contain("agent-dashboard: tools=")
+        expect(tui_report).to_contain("agent-dashboard: app.editor.mcp_tools tools=")
         expect(tui_report).to_contain("modes=3")
 
     it "keeps the feature-check manual surface complete and ordered":
@@ -350,7 +375,7 @@ describe "IDE office plugin suite capabilities":
         assert_true(probe.contains_table)
         assert_true(probe.html_document)
         assert_true(probe.html_heading)
-        expect(summary).to_contain("preview=")
+        expect(summary).to_contain("prev=")
         expect(summary).to_contain("html=true")
 
     it "checks TUI GUI and SDL launch modes through the shared editor launch contract":

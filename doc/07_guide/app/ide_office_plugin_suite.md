@@ -145,12 +145,23 @@ bin/simple run src/app/ide/main.spl --feature-check --tui   # works on a seed
 bin/simple run src/app/ide/main.spl --feature-check --gui
 ```
 
-Verified 2026-07-30: both exit 0 and report 11 capabilities. Note that 6 of the
-11 (`draw-sdd`, `designer`, `base`, `math`, `mail`, `planner`) report only
-`manifest-only service-token=<id>` — no behavioral check runs for them, which is
-why the wrong `owner_module` values on `mail`
-(`std.hardware.soc_rtl.mailbox`) and `planner`
-(`std.nogc_sync_mut.db.query_planner`) go undetected.
+Verified 2026-07-30: both exit 0 and report 11 capabilities. Four of the 11
+(`draw-sdd`, `designer`, `base`, `math`) still report only
+`manifest-only service-token=<id>` — no behavioral check runs for them, so a
+wrong `owner_module` on those rows would go undetected. That is exactly how
+`mail` shipped pointing at `std.hardware.soc_rtl.mailbox` (a GHDL SoC test
+peripheral) and `planner` at `std.nogc_sync_mut.db.query_planner` (a SQL query
+planner). Both were corrected to `app.office.mail` / `app.office.planner` and
+now run real probes:
+
+```text
+mail: app.office.mail emails=5 folders=4 inbox=2 unread=2 read-on-select=true compose=true discard=true
+planner: app.office.planner tasks=0->1 add=true views=4/4 reject-unknown=true default-view=kanban
+```
+
+Note the duplication that hid this: capability rows are declared in
+`src/app/ide/capabilities.spl` **and** hardcoded again as literal strings in
+`src/app/ide/feature_report.spl`. An `owner_module` fix must change both.
 
 ```bash
 bin/simple ide --feature-check --tui   # requires a deployed pure-Simple binary
@@ -163,3 +174,12 @@ find doc/06_spec -name '*_spec.spl' | wc -l
 
 The docgen result must read like an operator manual and report `0 stubs`. The
 final command must print `0`.
+
+The production IDE entrypoint also exposes
+`simple ide --interaction-check [--tui|--gui] [file]`. It opens an editor
+session, performs an in-memory edit, runs Markdown diagnostics, and resolves
+the canonical Office Sheets launcher action without modifying the file.
+`ide_interaction_evidence_spec.spl` verifies this semantic flow through the
+canonical UI-access snapshot/event owners before requesting still or motion
+capture. When no image-backed capture host is configured, it publishes the
+exact `vision.no_image` blocker instead of claiming GUI evidence.
