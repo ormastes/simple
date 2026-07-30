@@ -22,12 +22,15 @@ seed parses the same file fine (it authored/compiled it). 6 occurrences of
 ## Why this matters
 
 Classic bootstrap divergence: code the seed accepts becomes un-self-hostable.
-The file itself (`vhdl_codegen_helpers.spl`) is an in-flight working-copy
-file (not on origin/main as of 38cb691ad082), so origin is currently
-bootstrappable — but the moment such code lands, stage 3 breaks. Per repo
-rule ("when a short, safe grammar form fails, fix it or record a concrete
-bug"), this needs the pure-Simple parser (src/compiler/10.frontend) to accept
-unit `()` as a generic type argument, with a spec locking both parsers.
+**CORRECTION (2026-07-30, L7 run 8):** the file IS on origin — tracked at
+`src/compiler/70.backend/backend/vhdl_codegen_helpers.spl`; the earlier
+"not on origin" verdict was a symlink-spelling miss (`src/compiler/backend`
+→ `70.backend`, so `ls-tree` on the reported path returned nothing).
+**origin/main is currently un-self-hostable**: a hermetic worktree bootstrap
+(pinned 38cb691ad082, isolated build dir, clean status) reproduces the
+stage-3 parse failure. Severity upgraded accordingly. Fix: the pure-Simple
+parser (src/compiler/10.frontend) must accept unit `()` as a generic type
+argument, with a spec locking both parsers.
 
 ## Repro
 
