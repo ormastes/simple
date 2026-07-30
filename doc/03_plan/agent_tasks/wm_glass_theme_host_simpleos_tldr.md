@@ -62,3 +62,15 @@
 admitted runtime -> host semantics/events -> CPU oracle -> Vulkan + Metal
                  -> x86 + ARM QEMU -> aggregate SSpec -> final review
 ```
+
+## 2026-07-30 checkpoint
+
+- Accepted source repair: native-safe theme-material serialization plus exact
+  package-CSS semantic color projection and discriminating Aetheric tests.
+- Runtime/capture status: unverified; the released binary is stale and an
+  external source-matched incremental build remains unresolved.
+- Next: CPU-composited glass for CPU/software/SIMD/Vulkan (Metal alone remains
+  device glass), then typed ordered Web shadows.
+- QEMU stays postponed: current x86 ends in `guest-render-fault`; ARM lacks a
+  current admitted image/capture; the capsule path still has a
+  `Result<(), E>` parser blocker.

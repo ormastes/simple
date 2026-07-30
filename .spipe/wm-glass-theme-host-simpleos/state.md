@@ -1106,3 +1106,24 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   compatibility returned `ENOSYS`. No runtime, SimpleOS, QEMU, bootstrap, or
   fourth cycle exists. Resume through
   `doc/08_tracking/bug/theme_ipc_k2_review_hard_stop_2026-07-27.md`.
+
+- continuation-2026-07-30-native-theme-package-repair: **SOURCE REPAIR /
+  HIGHEST-CAPABILITY ACCEPT / RUNTIME UNVERIFIED.** Audit found that
+  `14ed678bc8` had overwritten the native-safe theme material serializer from
+  `892e467f74`, reopening its native `rt_to_string` failure, and that the
+  installed `ThemePackage` did not project the package CSS semantic
+  info/success/warning/error colors. The scoped repair restores typed native
+  scalar serialization and exact lowercase booleans, projects all four
+  semantic colors from the package CSS with fail-closed parsing, and adds exact
+  Aetheric assertions. Review accepted the corrected patch after CSS fallbacks
+  were changed so the tests discriminate real extraction. No live runtime,
+  host capture, bootstrap, or QEMU claim is made: the released runtime remains
+  stale while an external source-matched incremental build is unresolved.
+- continuation-2026-07-30-rendering-audit: CPU/software/CPU-SIMD/Vulkan glass
+  remains a separate source task. The honest design is CPU-composited material
+  uploaded through those presentation paths, never Vulkan device glass; Metal
+  retains the only device-glass receipt. Web lowering is connected, but ordered
+  multi-shadow and per-corner-radius fidelity remain open. Current x86 QEMU
+  evidence ends in `guest-render-fault`; ARM has no admitted current
+  ELF/FAT/capture, and the source-matched capsule is blocked by the
+  `Result<(), E>` parser gap.

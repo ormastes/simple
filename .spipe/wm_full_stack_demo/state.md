@@ -684,3 +684,11 @@ implementation-in-progress
   recipe avoids the prior link mistake but currently runs away before its first
   cached object. The attempted raw VBox cursor stack is also corrupted before
   it can establish an authoritative row position.
+- 2026-07-30 theme checkpoint: a scoped source repair restores the accepted
+  native-safe material serializer and projects exact package-CSS semantic
+  colors into `ThemePackage`; highest-capability review accepted the corrected
+  patch. Runtime/live-host proof is deliberately not claimed because the
+  released binary is stale and the external source-matched incremental build
+  remains unresolved. CPU/SIMD/Vulkan CPU-composited glass and Web ordered
+  shadows remain the next host lanes; x86/ARM QEMU remains postponed until a
+  current admitted capsule exists.

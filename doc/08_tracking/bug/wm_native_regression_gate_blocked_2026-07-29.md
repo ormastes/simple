@@ -434,3 +434,17 @@ authoritative, not only at recursive argument or `WidgetRect[]` return
 boundaries. The stack and diagnostic hooks were reverted. The retained oracle
 does keep one independent correction: a bordered 480-wide Panel has a
 478-wide client row, so `demo-button.w` must be `478`, not `480`.
+
+## 2026-07-30 source repair checkpoint
+
+A separate source audit found a pre-runtime native regression:
+`14ed678bc8` replaced the typed, native-safe theme material serializer accepted
+in `892e467f74` with generic interpolation. The scoped repair restores the
+wire-compatible typed serializer and also projects exact semantic colors from
+the installed Aetheric package CSS into `ThemePackage`. Discriminating unit
+assertions and highest-capability source review accept this repair.
+
+This does not clear the native gate. The released runtime remains stale and an
+external source-matched incremental build is unresolved, so no fresh host
+capture or runtime PASS is claimed. CPU/SIMD/Vulkan glass, Web ordered-shadow
+fidelity, and x86/ARM QEMU evidence remain separate follow-ups.

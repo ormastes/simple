@@ -804,3 +804,27 @@ admission. ARM is unaffected. Resume x86 with one fresh, source-matched admitted
 OVMF capture that proves the reserved heap covers the entire heap, the VMM root
 lies outside it, and PMM/VMM startup survives. Until then host runtime, x86
 QEMU, and ARM QEMU rows remain postponed rather than passed.
+
+## 2026-07-30 scoped continuation
+
+The first current-host increment repairs two source regressions without a
+bootstrap: restore the native-safe `ThemeMaterialSnapshot` wire serializer and
+populate `ThemePackage.semantic` from the installed package CSS. Exact
+Aetheric semantic-color tests discriminate CSS extraction, and an independent
+highest-capability review accepted the corrected patch. Focused static gates
+are required before integration; runtime and live-capture rows remain
+unverified while the external source-matched incremental build is unresolved.
+
+The remaining host work is divided into bounded follow-ups:
+
+1. Admit CPU, software, CPU-SIMD, and Vulkan presentation targets to honest
+   CPU-composited glass, while keeping Metal as the only device-glass path and
+   AUTO/generic GPU on solid fallback.
+2. Preserve ordered Web shadow layers and per-corner radius through typed
+   lowering, with negative-control tests.
+3. Resume QEMU only after the `Result<(), E>` parser/capsule blocker is fixed
+   and a current admitted artifact exists. x86 currently ends in
+   `guest-render-fault`; ARM has no current admitted ELF/FAT/capture.
+
+Merge owner remains `/root`; each bounded implementation receives independent
+highest-capability review before push.
