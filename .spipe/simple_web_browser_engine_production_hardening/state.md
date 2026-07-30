@@ -2487,3 +2487,12 @@ implementation in progress / target evidence blocked
   retry event ID. The mirrored manuals were updated structurally by hand
   because the deployed binary is not admitted for docgen; executable and
   generated-doc evidence remain pending and no PASS is claimed.
+- parallel HTML/CSS/animation rendering cycle (2026-07-30): commit
+  `fb4050c3d2b` lands the bounded `<article>` block default, width/height-led
+  `aspect-ratio`, canonical CPU DrawIR outline painting, real SimpleScript CSS
+  frame-to-DrawIR/Engine2D evidence, completed-animation frame reuse, and
+  identity-matched font metadata without fixture-text probing. Root review
+  rejected the first font-size inference until it matched the Engine2D-selected
+  face and added an empty-face negative control. Modern SSpecs and complete
+  truthful manual mirrors are present; qualified pure-Simple execution and
+  docgen remain pending, so no runtime PASS or full HTML/CSS claim is made.

@@ -33,7 +33,7 @@ Definition-list bounded lane:
 
 | Lane | Result |
 |---|---|
-| HTML element traceability | RED: 12 Full, 74 Partial remaining, 6 bounded selected-profile rows (`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`), 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
+| HTML element traceability | RED: 12 Full, 73 Partial remaining, 7 bounded selected-profile rows (`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`), 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
 | Implemented CSS traceability | RED: self-satisfying 284 count, unrecognized and metadata-only claims |
 | Unsupported CSS classification | 92 production, 23 speech/aural, 1 deprecated, 1 false scrape |
 | SSpec/manual quality | FAIL: missing plan/REQs, stale manuals/counts, no executed evidence |
@@ -43,6 +43,7 @@ Definition-list bounded lane:
 | HTML `hr` | Current bounded lane: native UA defaults plus exact `0`/`0px`/`none`/`hidden` and mixed-invalid/missing border cascade controls through semantic Web layout, DrawIR, and exact Engine2D pixels; qualified execution remains open |
 | Fieldset/legend selected profile | Current bounded lane: canonical UA defaults, four-side authored border clearing, semantic/style/exact DrawIR/pixel SSpec, and handwritten draft mirror; special legend formatting/cutout, disabled propagation, admitted docgen, and qualified execution remain open |
 | Definition-list selected profile | Current bounded lane: cross-kind omitted-end-tag repair, canonical `dl`/`dt`/`dd` UA defaults and authored overrides, semantic/style/exact DrawIR/pixel SSpec, and handwritten draft mirror; admitted docgen, qualified execution, and corpus accounting remain open |
+| Parallel HTML/CSS/animation cycle | Landed in `fb4050c3d2b`: `article`, width/height-led `aspect-ratio`, CPU outline paint, real SimpleScript/CSS DrawIR frames, completed-animation reuse, and identity-matched font metadata; all remain evidence-blocked pending qualified pure-Simple execution/docgen |
 
 ## Safe parallel implementation lanes
 
