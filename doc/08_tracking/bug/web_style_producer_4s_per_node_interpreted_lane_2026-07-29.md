@@ -1125,6 +1125,172 @@ of ~151`, pre-node-count-shift) as the best completion evidence to date.
 (Both re-run earlier in this pass's `wt-close1` worktree per the prior
 section; not re-run again for this update since no source changed.)
 
+## Module-compile-cost root cause 2026-07-30: no persistent cache, syscall-bound, highly load-scaled
+
+The prior section's "48 minutes, zero progress" finding reframed the cell:
+module compilation, not the style loop, is the dominant blocker in the
+worst case. This section root-causes that cost.
+
+**Tree used:** dedicated disposable worktree `wt-compile` (SSH tip
+`89cdc06d99093f6742e911875b592c13d2c6651f`), never the shared WC.
+`kill_simple_monitor` confirmed live throughout (`pgrep -af
+kill_simple_monitor`, PID `2530172`, running since Jul 28) but did not fire
+on any run in this section -- every run below ended with either a clean
+budget-break or its own internal-watchdog message, never a silent exit 137.
+
+### 1. Compile-phase timing, isolated (PROVED, empirical)
+
+Method: `SIMPLE_WEB_RENDER_BUDGET_MS=1` makes the style loop's own budget
+guard expire on its very first check (`budget-break at=0`), so wall-clock
+time up to that line is compile + startup only, with `time` wrapping the
+whole invocation and `stdbuf -oL -eL` forcing line buffering (the
+already-documented capture-methodology fix from the prior section).
+
+| Run | Load at launch | `real` | `user` | `sys` |
+|---|---|---|---|---|
+| 1 | ~43 (1-min avg) | **1m29.7s** | 0m26.3s | 0m53.8s |
+| 2 | ~52 (1-min avg) | **1m8.0s** | 0m21.1s | 0m46.3s |
+
+Both runs: `sys` time (46-54s) **exceeds** `user` time (21-26s) --
+**more than half the wall-clock cost is kernel/syscall time, not
+CPU-bound parsing/lowering work.** This points at file I/O (open/read/stat
+across the whole transitive module closure) as the dominant cost within
+the compile phase, not compute. `real` is close to `user+sys` in both
+cases (not `real << user+sys`), so there is little/no beneficial
+parallelism in this phase either.
+
+**This directly contradicts the prior section's implicit framing of "48
+minutes" as a representative figure.** At this pass's load (43-52), the
+SAME compile phase that failed to finish even once in 2900s (48 min)
+completed twice in under 90 seconds. **The cost is highly load-scaled, not
+a fixed absolute figure** -- see the ambient-contention finding below for
+why.
+
+### 2. Central caching question (PROVED, via code reading AND empirical check)
+
+`bin/simple run <script.spl>` dispatches to one of two driver entry
+points depending on source content
+(`src/compiler_rust/driver/src/exec_core.rs`):
+`run_file_jit` (attempts JIT, falls back to interpreter on failure) or
+`run_file_interpreted_with_args` (interpreter directly, chosen when the
+source matches `should_prefer_interpreter_for_source` -- confirmed this
+file matches, via the `source_uses_jit_unsafe_graphics_runtime`
+`window_winit`-content heuristic, consistent with the prior section's
+finding that this file never shows a `[jit-fallback]`/`[INFO] JIT
+compilation failed` marker in any run).
+
+**Both entry points call the exact same
+`load_module_with_imports(path, &mut HashSet::new())`
+(`src/compiler_rust/compiler/src/pipeline/module_loader.rs:1249`) on every
+single invocation.** This function parses and lowers the whole reachable
+`use`-import closure from raw `.spl` source, from scratch, every time.
+Read through its body: the only caching present is
+`PIPELINE_DIR_LISTING_CACHE` (a `thread_local!` directory-listing cache)
+and a "module exports cache" -- both explicitly **in-memory, per-process,
+and discarded when the process exits.** No `.smf` reuse, no mtime check,
+no content-hash lookup, no persistent artifact of any kind for this code
+path.
+
+**Empirical confirmation:** after 2 complete runs above (from a freshly
+created worktree, so no pre-existing state), `find wt-compile/.simple -type
+f` returns exactly one file -- a log file. **Zero build/cache artifacts.**
+Nothing to compare mtimes against because nothing persists.
+
+**Answer: there is no cache that "misses every time" -- there is no cache
+mechanism in this code path at all.** This is the highest-value finding:
+it means every `bin/simple run` invocation of this (or any) script pays
+the full parse-the-whole-closure cost, unconditionally, regardless of
+whether the source changed since the last run. This directly contradicts
+the repo's own stated policy ("production wrappers should execute cached
+compiled artifacts, not raw source") for this specific entry point.
+
+### 3. Two known landmines checked -- both ruled out for this path
+
+- **`.simple/` live `*.o.tmp` deletion** (prior incident: startup wiping
+  concurrent build objects): not applicable -- this path produces zero
+  on-disk artifacts of any kind (`.o`, `.o.tmp`, `.smf`), confirmed by the
+  empty `.simple/` directory above. Nothing exists to be deleted.
+- **native-build `--source` silently widening to the whole workspace**:
+  ruled out by code reading -- `run_file_jit`/`run_file_interpreted_with_
+  args` call `load_module_with_imports` with exactly one path (the entry
+  script), no `--source` flag or workspace-wide compilation step is
+  involved anywhere in this call chain. The module closure genuinely comes
+  from following `use`/`export use` imports transitively from one file,
+  not from an accidentally-widened source root.
+
+### 4. Module-set size vs expected closure (INFERRED direction, not exactly counted)
+
+No existing debug flag reports a total module count for the interpreted
+path (`SIMPLE_NATIVE_BUILD_RUST_TRACE=1`'s `[rust-jit] lowered functions=...`
+line only fires on the JIT path, which this file never takes). Proxy counts
+from compiler warnings across this pass's runs (lower bounds only --
+warning-triggering modules are a subset of the true closure): 19-29
+distinct file paths, 19 distinct "Higher-layer module" violations, 18-19
+"Avoid `export use *`" warnings.
+
+**Qualitative signal is strong even without an exact count:** the
+"Higher-layer module" warnings this pass and the prior section's logs
+name, among others, `gpu.engine2d.sffi_cuda`, `gpu.engine2d.sffi_vulkan`,
+`sffi_rocm`, `sffi_opencl`, `io.oneapi_sffi`, `io.metal_sffi`,
+`nogc_sync_mut.database.core`, and `test_runner`/`sdoctest` modules --
+CUDA/Vulkan/ROCm/OpenCL/Metal GPU backends and a database/test-runner
+stack, for a task that parses HTML, resolves CSS, and rasterizes to an
+offscreen pixel buffer. These are reached via wildcard `export use *`
+re-exports (the compiler's own lint already flags ~19+ exact file:line
+sites). Whether trimming them would measurably shrink compile time is
+**not verified this pass** (see ranked fix list).
+
+### 5. Ambient external load (PROVED via direct process inspection, not inferred)
+
+Mid-investigation, `ps aux` showed the shared machine's load spike (peak
+observed **62.3**, 1-min avg) was driven substantially by **other,
+unrelated agent sessions'** concurrent git operations: simultaneous `git
+worktree add`/`git clone --shared`/`git reset --hard` processes for
+`/tmp/simple-html-drawir-element`, `/tmp/simple-navigation-visible`,
+`/tmp/simple-drawir-reuse`, `/tmp/simple-security-fd`, `/tmp/simple-web-
+prod-integration`, `/tmp/simple-https-gap`, `/tmp/simple-evidence-clean`,
+and more -- none of them `simple` compiler processes. One of this
+session's own `git worktree add` invocations stalled in `D` (uninterruptible
+disk-wait) state for several minutes under this contention and had to be
+retried. **This directly answers "is the 48-minute figure load-scaled or
+absolute": yes, load-scaled, and a meaningful fraction of that load is
+inter-session git/disk contention external to anything the Simple compiler
+itself does** -- no code fix in this repository addresses that component.
+
+### Ranked fix list
+
+1. **[Architectural, highest value, NOT attempted]** Add a persistent
+   on-disk compiled-artifact cache (content-hash or mtime keyed) to the
+   `load_module_with_imports` call sites in `run_file_jit`/`run_file_
+   interpreted_with_args`, so a repeat invocation of an unchanged script
+   skips re-parsing its whole closure. This is the single highest-value
+   fix and the one the repo's own policy already calls for -- but it
+   requires cache-invalidation design spanning the whole module-loader
+   pipeline (correctness-critical: a stale hit must never silently serve
+   outdated code). Out of scope for a bounded `.spl`-only pass; this is a
+   Rust driver/pipeline change.
+2. **[Contained candidate, flagged by the compiler's own lint, NOT
+   attempted]** Replace the ~19+ `export use *` wildcard re-exports the
+   compiler already names (exact file:line locations in every run's
+   warning output) with explicit named exports, to test whether it
+   actually shrinks `web_render_file_gui.spl`'s transitive closure below
+   the GPU-backend/database/test-runner modules that look clearly
+   unrelated to HTML rendering. This is the most "shovel-ready" candidate
+   (the compiler already points at every site) but was not attempted this
+   pass: verifying no behavior regression across a large, load-sensitive
+   pipeline needs a controlled before/after compile-time measurement this
+   session's current load conditions do not support reliably, and the
+   true size of the closure reduction (if any) is unverified.
+3. **[Environmental, not a code fix]** Ambient inter-session machine
+   contention is a real, separate contributor to the worst-case (48-
+   minute) timings observed in the prior section. Nothing in this
+   repository addresses it; noted for completeness since it directly
+   answers the "load-scaled or absolute" question.
+
+No code change landed this pass -- this section is a root-cause
+investigation, not a fix; per the instructions, the architectural fix (#1)
+and the unverified contained candidate (#2) are documented, not attempted.
+
 ## bracket-slice (`s[i:j]`) survey gap — enumerated 2026-07-29, not fixed
 
 The original Category B survey (that found the byte/char split, see
