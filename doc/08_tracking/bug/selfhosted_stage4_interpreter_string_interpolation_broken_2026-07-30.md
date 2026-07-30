@@ -106,15 +106,111 @@ neither matches or approaches the scope that would include
 spl`'s own parse defect (separately fixed at `023a60a05aa`, verified
 ancestor of this build's `9ea0b39962d`) was never at issue here regardless.
 
-## Next step (not attempted, root-cause needed)
+## Root cause found 2026-07-30 (PROVED, precisely located; fix not implemented)
 
-Root-cause where string interpolation is lost in the self-hosted
-interpreter path specifically (compiled/native paths appear unaffected --
-the stage4 binary itself, and the seed, both interpolate correctly; only
-running an *interpreted* script through the self-hosted binary's own `run`
-loses it). Likely candidates by file naming convention:
-`src/compiler/95.interp/` (interpreter) or the string-template
-lowering/codegen shared between interpreted and compiled paths, given
-compiled output does not show this bug. Not chased this pass -- this
-report is the deliverable per the "precise account of the wall it hits"
-instruction.
+**Reproduced deterministically, self-hosted status confirmed each time**
+(the "seed sibling not found, skipping delegation" message; rebuilt the
+binary from scratch via a clean cranelift-only seed after the first
+attempt's seed had regained an LLVM feature from unrelated concurrent
+host activity, which itself caused a `LLVM ERROR: inconsistency in
+registered CommandLine options` abort in a native-build invocation --
+worth flagging as its own hazard: a Rust seed with LLVM statically linked
+crashes on `--backend cranelift` native-build under concurrent/threaded
+use; a clean `--backend=cranelift` seed rebuild avoids it entirely).
+
+**Subset test (self-hosted, `run`, no delegation):**
+```
+bare={a}              -- FAILS (want 2)
+expr={a+b}             -- FAILS (want 5)
+literal-only text       -- OK (no braces, unaffected)
+nested {a} and {b}     -- FAILS both (want "nested 2 and 3 together")
+escaped braces: {{}}   -- OK: prints "escaped braces: {not interp}" (the
+                           `{{`->`{` escape decode DOES work)
+hello {name}!           -- FAILS (want "hello world!")
+```
+**Total failure of genuine interpolation, escape decoding unaffected.**
+The escape/substitution split points at two independent mechanisms, not
+one shared broken one -- confirmed by code reading below.
+
+**Localization (PROVED via source reading, not inference):**
+
+1. The lexer (`src/compiler/10.frontend/core/lexer_struct.spl`, the `{`
+   branch of the string-scanning loop, ~line 667) does NOT split `{expr}`
+   at lex time. It brace-depth-tracks to find the matching `}` (handling
+   nested strings/parens so `{xs.join("-")}` lexes correctly) and then
+   copies the ENTIRE `{...}` region -- braces and all -- verbatim into the
+   token's raw text as plain characters. `{{`/`}}` doubled-brace escapes
+   ARE decoded to single braces, but that is a separate, earlier
+   character-level rule in the same scan, not interpolation splitting.
+2. The actual split-into-real-expressions step is
+   `flat_bridge_build_string_interps` in
+   `src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl:601`. Its own
+   header comment names this exact defect as **pre-existing and already
+   tracked ("Bug #136")**: *"the core lexer copies each `{expr}`
+   interpolation region VERBATIM into the string token and never parses
+   the inner expression, so the bridge previously emitted `StringLit(value,
+   nil)` ... `{expr}` printed literally."* It brace-scans the raw text
+   again, and for each top-level `{...}` region calls
+   `flat_bridge_parse_interp_inner(inner)` (same file, line 555) --
+   which re-lexes and parses `inner` as a standalone expression, appending
+   it to the **same shared flat-AST arena** the rest of the compiler uses,
+   returning a real expression id.
+3. **This fix is wired into the HIR/MIR lowering pipeline only**
+   (`src/compiler/20.hir/hir_lowering/expressions.spl` and
+   `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` are the only
+   other callers) -- i.e. it runs when compiling to native code, never
+   when interpreting.
+4. **The tree-walking interpreter's string-literal evaluator never calls
+   it.** `eval_string_lit` (`src/compiler/10.frontend/core/interpreter/
+   eval.spl:379`) is:
+   ```
+   fn eval_string_lit(eid: i64) -> i64:
+       val_make_text(expr_get(eid).s_val)
+   ```
+   -- a direct, unconditional return of the raw token text. It has no
+   brace check, no split, no expression evaluation. `eval_interpolated_
+   string` (`eval_access.spl:496`, duplicated verbatim in `_EvalOps/
+   access_literal_assign_eval.spl:581` -- itself worth a follow-up
+   dedup, though the duplication is not the bug: both copies are
+   identical and correct) DOES correctly evaluate parts and join them --
+   but it is only reachable from an `EXPR_INTERPOLATED_STRING` node, and
+   nothing on the interpreter path ever constructs one from a raw
+   `{expr}`-bearing literal (the parser always emits plain
+   `EXPR_STRING_LIT`; only the HIR/MIR bridge upgrades it, post-parse,
+   pre-codegen -- a stage the interpreter skips entirely).
+
+**This is exactly the failure shape the brief called out**: a special-
+cased execution path (the interpreter, which bypasses HIR/MIR) that never
+inherited a fix applied to a sibling path (native codegen), matching the
+`parse_comparison`/`parse_equality` precedent from earlier in this
+campaign.
+
+**Why the Rust seed doesn't show this:** out of scope to fully confirm,
+but consistent with the seed's parser being a separate Rust implementation
+that (per this file's own header comment) is treated as the interpolation
+*oracle* elsewhere in this codebase ("The seed oracle trims this padding
+before parsing" -- `convert_nodes.spl:583`) -- i.e. the seed's own parser
+evidently performs (or never needed) an equivalent split at parse time, so
+its interpreter never depended on a separate post-parse bridge step the
+way the pure-Simple compiler's does.
+
+**Fix approach identified, not implemented this pass:** make
+`eval_string_lit` detect an unescaped `{` in `expr_get(eid).s_val` and, if
+found, perform the same brace-scan `flat_bridge_build_string_interps`
+does, calling `flat_bridge_parse_interp_inner` per region to get a real
+expr id in the same flat-AST arena, then `eval_expr` each part and
+`val_to_text`+join exactly as `eval_interpolated_string` already does (that
+function's logic can likely be reused almost as-is once given a real parts
+list). `flat_bridge_parse_interp_inner`'s own comment states it is safe to
+call "whenever the lexer is idle," which should hold during evaluation
+(strictly after the whole module is parsed) but was not verified here.
+**Not implemented this pass**: this touches interpreter dispatch for the
+single most common literal kind in the language, the fix needs a rebuild-
+and-reverify cycle (~5-8 minutes each, using the recipe in this document)
+per iteration to validate against escapes/nesting/non-ASCII/format specs
+without regressing the already-correct HIR/MIR path, and the coordinator's
+explicit guidance was to stop and report a precise localization rather
+than rush a fix touching a load-bearing, pervasively-used code path. A
+non-vacuous regression spec (assert interpolated output; prove it fails on
+the current self-hosted binary and passes after) is the natural first step
+for whoever implements the fix.
