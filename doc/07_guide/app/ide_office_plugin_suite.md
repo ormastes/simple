@@ -120,8 +120,28 @@ Formula compatibility includes ordinary multiplication and the pure
 
 ## Verification
 
+The `ide` subcommand exists only in the pure-Simple CLI
+(`src/app/cli/_CliMain/main_and_help.spl`). When the deployed `bin/simple` is a
+Rust bootstrap seed — check with `bin/simple --version`, which then prints
+"this Rust-built Simple binary is a bootstrap seed only" — `bin/simple ide`
+fails with `error: file not found: ide`, because the seed has no `ide` handler
+and treats the word as a filename. That is a **deployment** gap, not a missing
+feature: run the entry point directly until a pure-Simple binary is deployed.
+
 ```bash
-bin/simple ide --feature-check --tui
+bin/simple run src/app/ide/main.spl --feature-check --tui   # works on a seed
+bin/simple run src/app/ide/main.spl --feature-check --gui
+```
+
+Verified 2026-07-30: both exit 0 and report 11 capabilities. Note that 6 of the
+11 (`draw-sdd`, `designer`, `base`, `math`, `mail`, `planner`) report only
+`manifest-only service-token=<id>` — no behavioral check runs for them, which is
+why the wrong `owner_module` values on `mail`
+(`std.hardware.soc_rtl.mailbox`) and `planner`
+(`std.nogc_sync_mut.db.query_planner`) go undetected.
+
+```bash
+bin/simple ide --feature-check --tui   # requires a deployed pure-Simple binary
 bin/simple ide --feature-check --gui
 bin/simple test test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
 bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl

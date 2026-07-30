@@ -29,13 +29,24 @@ fn main():
 
 ## Engine matrix
 
-| Binary | struct-field `pop()` | local `pop()` |
-|---|---|---|
-| `bin/release/x86_64-unknown-linux-gnu/simple` (deployed self-hosted) | correct | correct |
-| `src/compiler_rust/target/debug/simple` (Rust debug) | **len unchanged** | correct |
+| Binary | built | struct-field `pop()` | local `pop()` |
+|---|---|---|---|
+| `bin/release/x86_64-unknown-linux-gnu/simple` (deployed — a **Rust bootstrap seed**, it prints the seed warning banner) | 07-29 06:00 | correct | correct |
+| `src/compiler_rust/target/release/simple` | 07-30 02:33 | correct | correct |
+| `src/compiler_rust/target/debug/simple` | 07-29 16:42 | **len unchanged** | correct |
 
-Both rows measured with `SIMPLE_EXECUTION_MODE=interpreter`, so this is not a
-JIT-vs-interpreter split — it is a per-binary divergence.
+All rows measured with `SIMPLE_EXECUTION_MODE=interpreter`, so this is not a
+JIT-vs-interpreter split. It is also **not** old-vs-new: the newest build
+(release, 07-30) is correct while the older debug build is wrong. The axis is
+**Rust debug vs Rust release** of the same codebase — which for a behavioral
+difference like this points at UB or a `debug_assert`-gated path rather than an
+ordinary logic bug.
+
+Earlier revision of this file labelled the deployed binary "self-hosted" and
+framed the split as self-hosted-vs-seed. That was wrong: `bin/simple` is
+currently a Rust seed (`bin/simple --version` emits
+"this Rust-built Simple binary is a bootstrap seed only"), so every row above is
+a Rust build.
 
 ## Why it matters more than it looks
 
@@ -50,7 +61,7 @@ stay green. This is the same class as
 
 ```bash
 SIMPLE_EXECUTION_MODE=interpreter src/compiler_rust/target/debug/simple run <the probe above>
-SIMPLE_EXECUTION_MODE=interpreter bin/simple run <the probe above>
+SIMPLE_EXECUTION_MODE=interpreter src/compiler_rust/target/release/simple run <the probe above>
 ```
 
 ## Workaround (in use)
