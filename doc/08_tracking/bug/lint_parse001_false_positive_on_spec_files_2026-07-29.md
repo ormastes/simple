@@ -1,7 +1,16 @@
 # lint PARSE001 false positive on `use std.spec.*` describe-specs (2026-07-29)
 
+## Status Update (2026-07-30)
+
+**Item 1 (PARSE001 false positive): FIXED** by commit f4adc39bf39 (2026-07-28).
+The fix introduced `parse_module_silent_checked()` which returns the parse-error
+state by value, avoiding module-boundary flag loss. Verified: valid specs now
+pass lint (0 PARSE001 errors), invalid specs are correctly rejected with PARSE001.
+
+---
+
 Found during lane L5 (stage4 memory gate spec). Three related lint/tooling
-defects, all report-only so far:
+defects, items 2-3 remain report-only:
 
 1. **PARSE001 false positive:** `bin/simple lint` reports
    `error[PARSE001]: Source did not parse` on ANY describe-spec importing
