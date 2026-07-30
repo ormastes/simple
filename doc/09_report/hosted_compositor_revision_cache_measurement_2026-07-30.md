@@ -13,7 +13,7 @@ do not replace source-matched native or prepared-host acceptance evidence.
 | CUDA | 3 smoke | 6,466,705,755 ns | 7,273,005,377 ns | FAIL; hit slower, source `device_identity_unknown`, handle `0`, identity `nil` |
 | Vulkan | 0 | n/a | n/a | FAIL before measurement; cached interpreter lacks `rt_is_interpreter_runtime` |
 | Metal | 0 | n/a | n/a | Postponed to prepared macOS host under TODO 588 |
-| process/pipe | 0 | n/a | n/a | FAIL before measurement; cached runtime parser progressed from the process module into `browser_session.spl` |
+| process/pipe | 0 | n/a | n/a | FAIL before measurement; interpreter executes the example but lacks the sandboxed-process extern, while native mode stops in test-runner compilation |
 
 The CUDA 21-pair run first reached the 300-second bound. The three-pair smoke
 mode then completed and failed the strict device-provenance gate. The process
@@ -31,6 +31,14 @@ repair. Grouping the process redirect condition moved parsing into
 ungrouped header condition did not clear the remaining newline error before the
 three-cycle cap. All three runs executed zero examples, so no timing, pipe, or
 GPU claim is admitted.
+
+A fresh capped cycle normalized the sole split assignment in
+`js/engine/runtime.spl`. Interpreter mode then executed one example and failed
+at `rt_browser_renderer_spawn_sandboxed`, which is intentionally implemented by
+the native C runtime but is absent from the Rust interpreter dispatch. Native
+mode reached compilation and failed on nested `trim_start` calls in the
+pure-Simple test runner; those receiver chains are now staged explicitly but
+were not rerun after the third cycle. No process/pipe measurement is admitted.
 
 ## Required Follow-up
 
