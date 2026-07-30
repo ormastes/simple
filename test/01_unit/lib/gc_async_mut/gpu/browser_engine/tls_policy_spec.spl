@@ -4,12 +4,21 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, 
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
 use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{TlsVersion}
 use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
-use std.gc_async_mut.gpu.browser_engine.net.h1_client.{MockResponseRegistry, set_mock_registry}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    MockResponseRegistry, observed_mock_request, set_mock_registry
+}
 use std.gc_async_mut.gpu.browser_engine.net.tls.{validated_negotiated_tls_version}
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
 use std.js.types.pair.{Pair}
 
 extern fn rt_file_read_text(path: text) -> text
+
+class RedirectExpectation:
+    status: i64
+    method: text
+    expected_method: text
+    expected_body_len: i64
+    keep_body_headers: bool
 
 describe "Browser TLS negotiated protocol policy":
 
@@ -88,6 +97,96 @@ describe "Browser TLS negotiated protocol policy":
         expect(result.unwrap().headers).to_contain(
             "Location: https://secure.test/final"
         )
+        set_mock_registry(MockResponseRegistry.create())
+
+    it "preserves the complete redirect method, body, and header matrix":
+        var registry = MockResponseRegistry.create()
+        val cases = [
+            RedirectExpectation(301, "HEAD", "HEAD", 0, true),
+            RedirectExpectation(301, "GET", "GET", 0, true),
+            RedirectExpectation(301, "POST", "GET", 0, false),
+            RedirectExpectation(301, "PUT", "PUT", 3, true),
+            RedirectExpectation(302, "HEAD", "HEAD", 0, true),
+            RedirectExpectation(302, "GET", "GET", 0, true),
+            RedirectExpectation(302, "POST", "GET", 0, false),
+            RedirectExpectation(302, "PUT", "PUT", 3, true),
+            RedirectExpectation(303, "HEAD", "HEAD", 0, true),
+            RedirectExpectation(303, "GET", "GET", 0, true),
+            RedirectExpectation(303, "POST", "GET", 0, false),
+            RedirectExpectation(303, "PUT", "GET", 0, false),
+            RedirectExpectation(307, "HEAD", "HEAD", 0, true),
+            RedirectExpectation(307, "GET", "GET", 0, true),
+            RedirectExpectation(307, "POST", "POST", 3, true),
+            RedirectExpectation(307, "PUT", "PUT", 3, true),
+            RedirectExpectation(308, "HEAD", "HEAD", 0, true),
+            RedirectExpectation(308, "GET", "GET", 0, true),
+            RedirectExpectation(308, "POST", "POST", 3, true),
+            RedirectExpectation(308, "PUT", "PUT", 3, true)
+        ]
+
+        step("Register the HTTPS redirect matrix")
+        var index = 0
+        for case in cases:
+            registry.register_with_headers(
+                "https://secure.test/{index}-start",
+                case.status,
+                [Pair("Location", "https://secure.test/{index}-final")],
+                ""
+            )
+            registry.register(
+                "https://secure.test/{index}-final", 200, ""
+            )
+            index = index + 1
+        set_mock_registry(registry)
+        val logger = Logger.new("redirect-method-policy", BrowserLogLevel.Error)
+        var fetch = FetchEngine.new_for_origin(
+            logger, "https://secure.test"
+        )
+        val request_headers = (
+            "Content-Type: text/plain\r\n" +
+            "Content-Encoding: identity\r\n" +
+            "Content-Language: en\r\n" +
+            "Content-Location: /source\r\n" +
+            "X-Keep: yes\r\n"
+        )
+        val body_headers = [
+            "Content-Type:", "Content-Encoding:",
+            "Content-Language:", "Content-Location:"
+        ]
+
+        step("Follow every HTTPS redirect case")
+        index = 0
+        for case in cases:
+            val body = if case.method == "HEAD" or case.method == "GET":
+                []
+            else:
+                [112u8, 97u8, 121u8]
+            expect(fetch.fetch(FetchRequest(
+                url: Url.parse_or_opaque(
+                    "https://secure.test/{index}-start"
+                ),
+                method: case.method,
+                headers: request_headers,
+                body: body,
+                mode: RequestMode.SameOrigin,
+                credentials: "omit"
+            )).is_ok()).to_be(true)
+            index = index + 1
+
+        step("Verify redirected methods and bodies")
+        index = 0
+        for case in cases:
+            val observed = observed_mock_request(
+                "https://secure.test/{index}-final"
+            ).unwrap()
+            expect(observed.method).to_equal(case.expected_method)
+            expect(observed.body.len()).to_equal(case.expected_body_len)
+            expect(observed.headers).to_contain("X-Keep: yes")
+            for header in body_headers:
+                expect(observed.headers.contains(header)).to_be(
+                    case.keep_body_headers
+                )
+            index = index + 1
         set_mock_registry(MockResponseRegistry.create())
 
     it "denies cross-origin requests labeled same-origin before transport":

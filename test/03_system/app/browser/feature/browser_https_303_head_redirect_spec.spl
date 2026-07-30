@@ -1,0 +1,41 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-011
+"""# HTTPS 303 HEAD Redirect Semantics
+
+An HTTPS `303 See Other` must preserve a metadata-only `HEAD` navigation.
+The redirected request stays encrypted, carries no body, and does not silently
+become a content-fetching `GET`.
+"""
+
+use std.spec.*
+use std.gc_async_mut.web.browser_session.{BrowserResponse, BrowserSession}
+
+describe "HTTPS 303 HEAD redirect semantics":
+
+    it "should preserve HEAD without a body across a same-origin HTTPS 303":
+        step("Queue an HTTPS HEAD navigation")
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://secure.test/start", "HEAD", "", "", ""
+        ).is_ok()).to_be(true)
+
+        step("Return a same-origin HTTPS 303")
+        val initial = session.take_pending_request().unwrap()
+        expect(initial.method).to_equal("HEAD")
+        expect(session.commit_network_response(BrowserResponse.create(
+            initial.id,
+            "document",
+            initial.url,
+            303,
+            "Location: /final\n",
+            "",
+            ""
+        )).is_ok()).to_be(true)
+
+        step("Take the redirected request")
+        val redirected = session.take_pending_request().unwrap()
+        expect(redirected.url).to_equal("https://secure.test/final")
+
+        step("Preserve HEAD redirect semantics")
+        expect(redirected.method).to_equal("HEAD")
+        expect(redirected.body).to_equal("")

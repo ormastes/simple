@@ -407,21 +407,16 @@ class FetchEngine:
         resolve_fetch_redirect_url(base, location)
 
     # Create a new request for a redirect, adjusting the method per HTTP semantics.
-    # 303 always becomes GET; 301/302 become GET for POST; 307/308 preserve method.
+    # 303 becomes GET except for GET/HEAD; 301/302 rewrite POST; 307/308 preserve.
     # NOTE: FetchRequest.method/headers are declared as raw `text` (see
     # entity/request_types.spl) — compare/rebuild as text, not HttpMethod/Pair.
     fn create_redirect_request(original: FetchRequest, new_url: Url, status: i64) -> FetchRequest:
-        val redirect_method = if status == 303:
-            # 303 See Other: always use GET
+        val rewrites_to_get = fetch_redirect_rewrites_to_get(
+            status, original.method
+        )
+        val redirect_method = if rewrites_to_get:
             "GET"
-        else if status == 301 or status == 302:
-            # 301/302: POST becomes GET (historical browser behavior), others preserved
-            if original.method.to_upper() == "POST":
-                "GET"
-            else:
-                original.method
         else:
-            # 307/308: preserve original method
             original.method
 
         val redirect_body = if redirect_method.to_upper() == "GET" or redirect_method.to_upper() == "HEAD":
@@ -429,7 +424,7 @@ class FetchEngine:
         else:
             original.body
 
-        # Strip sensitive headers on cross-origin redirect
+        # Strip credentials across origins and representation headers on rewrite.
         val original_origin = Origin.from_url(original.url)
         val new_origin = Origin.from_url(new_url)
         val is_cross_origin = (original_origin.to_text() != new_origin.to_text())
@@ -439,10 +434,14 @@ class FetchEngine:
             val colon = line.index_of(":")
             if colon > 0:
                 val name = line.slice(0, colon).trim().to_lower()
-                # Strip Authorization and Cookie headers on cross-origin redirects
-                if is_cross_origin and (name == "authorization" or name == "cookie"):
-                    pass_do_nothing
-                else:
+                val drop_sensitive = (
+                    is_cross_origin and
+                    (name == "authorization" or name == "cookie")
+                )
+                if not drop_sensitive and not (
+                    rewrites_to_get and
+                    fetch_redirect_body_header(name)
+                ):
                     new_headers = new_headers + line.trim() + "\r\n"
 
         FetchRequest(
@@ -529,6 +528,19 @@ pub fn resolve_fetch_redirect_url(base: Url, location: text) -> Option<Url>:
 
 fn should_redirect(status: i64) -> bool:
     status == 301 or status == 302 or status == 303 or status == 307 or status == 308
+
+fn fetch_redirect_rewrites_to_get(status: i64, method: text) -> bool:
+    val normalized = method.to_upper()
+    (
+        (status == 303 and normalized != "GET" and normalized != "HEAD") or
+        ((status == 301 or status == 302) and normalized == "POST")
+    )
+
+fn fetch_redirect_body_header(name: text) -> bool:
+    (
+        name == "content-type" or name == "content-encoding" or
+        name == "content-language" or name == "content-location"
+    )
 
 # Determine whether a response is eligible for HTTP caching.
 # Checks status code, Cache-Control, and Vary headers.
