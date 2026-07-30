@@ -35,6 +35,34 @@ fn compile_and_run_main() {
 }
 
 #[test]
+fn compile_preserves_root_import_types_for_annotated_local_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("receipt_provider");
+    std::fs::create_dir(&package).unwrap();
+    let provider = package.join("__init__.spl");
+    let entry = dir.path().join("main.spl");
+    let output = dir.path().join("main.smf");
+    std::fs::write(
+        provider,
+        "pub struct Receipt:\n    value: i64\n\npub fn make_receipt() -> Receipt:\n    Receipt(value: 7)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &entry,
+        "use receipt_provider.Receipt\nuse receipt_provider.make_receipt\n\nfn main() -> i64:\n    val result: Receipt = make_receipt()\n    result.value\n",
+    )
+    .unwrap();
+
+    let mut compiler = CompilerPipeline::new().unwrap();
+    compiler.compile(&entry, &output).unwrap();
+
+    let loader = ModuleLoader::new();
+    let module = loader.load(&output).unwrap();
+    let main: extern "C" fn() -> i32 = module.entry_point().expect("main symbol");
+    assert_eq!(main(), 7);
+}
+
+#[test]
 fn compile_integer_literal() {
     assert_eq!(compile_and_run("main = 42"), 42);
 }

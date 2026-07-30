@@ -541,12 +541,6 @@ impl CompilerPipeline {
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
-        let ast_module = if source_file.is_some() {
-            strip_flattened_import_nodes(ast_module)
-        } else {
-            ast_module
-        };
-
         // Real (non-interpreted) compilation of bare script entries: a module
         // with no explicit `fn main` and no `main = <expr>` result binding
         // gets a synthesized `main` wrapping its top-level statements -- the
@@ -585,9 +579,8 @@ impl CompilerPipeline {
         // Check if we have a main function. If not, fall back to interpreter mode.
         // This handles file-backed script entry modules like `main = 42`, which
         // remain valid even though they do not lower to a native `fn main`.
-        // Imported items have already been flattened, and synthetic import nodes
-        // stripped, so evaluating the entry module here preserves prior script
-        // compilation behavior for source-file builds too.
+        // Imported items have already been flattened. Keep root import nodes for
+        // HIR registration, but do not evaluate them again in this fallback.
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
         if !has_main_function {
@@ -605,7 +598,12 @@ impl CompilerPipeline {
                 )));
             }
             // Fallback: evaluate via interpreter and wrap result
-            let main_value = self.evaluate_module_with_project(&ast_module.items)?;
+            let evaluation_module = if source_file.is_some() {
+                strip_flattened_import_nodes(ast_module)
+            } else {
+                ast_module
+            };
+            let main_value = self.evaluate_module_with_project(&evaluation_module.items)?;
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
@@ -713,12 +711,6 @@ impl CompilerPipeline {
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
         }
-
-        let ast_module = if source_path.is_some() {
-            strip_flattened_import_nodes(ast_module)
-        } else {
-            ast_module
-        };
 
         // Standalone target SMF artifacts have no embedded interpreter bridge.
         let compilability = analyze_module(&ast_module.items, CompilabilityMode::AotNative);
@@ -951,12 +943,6 @@ impl CompilerPipeline {
         // Monomorphization
         let ast_module = monomorphize_module(&ast_module);
 
-        let ast_module = if source_path.is_some() {
-            strip_flattened_import_nodes(ast_module)
-        } else {
-            ast_module
-        };
-
         // Hoist nested type definitions to module scope (R1).
         let ast_module = crate::hir::module_with_hoisted_defs(&ast_module).unwrap_or(ast_module);
 
@@ -1043,8 +1029,8 @@ impl CompilerPipeline {
             //   - SIMPLE_NATIVE_ALLOW_INTERP_CALLS=1 (explicit debugging opt-in)
             //   - bootstrap mode (SIMPLE_BOOTSTRAP=1), which already tolerates an
             //     incomplete native surface via weak stubs and must not brick.
-            let allow_interp_calls = bootstrap_mode
-                || std::env::var("SIMPLE_NATIVE_ALLOW_INTERP_CALLS").as_deref() == Ok("1");
+            let allow_interp_calls =
+                bootstrap_mode || std::env::var("SIMPLE_NATIVE_ALLOW_INTERP_CALLS").as_deref() == Ok("1");
             let mut flagged: Vec<String> = non_compilable
                 .iter()
                 .map(|name| {
@@ -1069,14 +1055,12 @@ impl CompilerPipeline {
                     non_compilable.len()
                 );
             } else {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::UNSUPPORTED_FEATURE)
-                    .with_help(
-                        "These constructs have no native codegen yet; in a standalone binary, calls \
+                let ctx = ErrorContext::new().with_code(codes::UNSUPPORTED_FEATURE).with_help(
+                    "These constructs have no native codegen yet; in a standalone binary, calls \
                          to the flagged functions would silently return nil (exit 3) instead of \
                          running. Rewrite the flagged constructs, or set \
                          SIMPLE_NATIVE_ALLOW_INTERP_CALLS=1 to build anyway with the old behavior.",
-                    );
+                );
                 return Err(CompileError::semantic_with_context(
                     format!(
                         "cannot compile to standalone native binary: {} function(s) contain \
