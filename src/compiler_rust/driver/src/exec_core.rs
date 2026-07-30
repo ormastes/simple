@@ -728,11 +728,17 @@ impl ExecCore {
         // silently. See
         // doc/08_tracking/bug/jit_drawirrendertarget_moduleresolver_gap_2026-07-30.md.
         let project_hint = simple_compiler::pipeline::native_single_file_project_hint(path);
-        let hir_module = hir::lower_with_context_lenient_and_project_hint(&ast, path, project_hint.as_deref())
-            .map_err(|e| format!("HIR lowering error: {}", e))?;
+        let hir_module = match hir::lower_with_context_lenient_and_project_hint(&ast, path, project_hint.as_deref())
+        {
+            Ok(m) => m,
+            Err(e) => return Err(jit_strict_fallback_error("HIR lowering error", &e)),
+        };
 
         // Lower to MIR
-        let mut mir_module = lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;
+        let mut mir_module = match lower_to_mir(&hir_module) {
+            Ok(m) => m,
+            Err(e) => return Err(jit_strict_fallback_error("MIR lowering error", &e)),
+        };
         if trace {
             eprintln!(
                 "[rust-jit] lowered functions={} externs={}",
@@ -887,6 +893,42 @@ impl ExecCore {
 
         self.collect_gc();
         Ok(exit_code)
+    }
+}
+
+/// Shared helper for the JIT-compile failure paths that represent a genuine
+/// "this module cannot be JIT-compiled" outcome -- currently HIR and MIR
+/// lowering errors (`LowerError::UnknownVariable` and friends). This is
+/// deliberately narrower than every JIT failure reason: known, documented
+/// JIT limitations (lambda/closure ABI mismatch in codegen/jit.rs, the
+/// generator/Yield bail-out above, genuine Cranelift codegen bugs) are NOT
+/// routed through this helper and stay silently lenient by design, matching
+/// the pre-existing scoping discipline recorded at the `SIMPLE_JIT_STRICT
+/// fail-open fix` comment in `run_file_with_args` above.
+///
+/// Mirrors codegen/jit.rs's `first_unresolved_import` convention exactly:
+/// always print a loud, greppable `[jit-fallback]` marker naming the
+/// failure (a whole-module de-JIT is a proven ~100-1000x-cost defect class
+/// here, see the comment on `first_unresolved_import`), then either tag the
+/// returned message so `run_file_with_args`'s existing
+/// `jit_err.contains("SIMPLE_JIT_STRICT:")` check turns it into a hard,
+/// non-zero-exit error, or return the same plain, untagged message as
+/// before so the caller falls back to the interpreter unchanged. Off by
+/// default: SIMPLE_JIT_STRICT unset or "0" is byte-for-byte the pre-existing
+/// lenient behavior (only the message text gained a shared prefix).
+///
+/// What this can NEVER catch: a silent miscompile that links and *runs* to
+/// completion produces no `Err` at all, so there is nothing here to tag.
+/// See doc/08_tracking/bug/jit_strict_coverage_gap_2026-07-30.md.
+fn jit_strict_fallback_error(kind: &str, err: &impl std::fmt::Display) -> String {
+    eprintln!(
+        "[jit-fallback] {kind}: {err}: whole module dropped to the interpreter \
+         (expect ~100-1000x slowdown). Set SIMPLE_JIT_STRICT=1 to turn this into a hard error."
+    );
+    if std::env::var_os("SIMPLE_JIT_STRICT").is_some_and(|v| v != "0") {
+        format!("SIMPLE_JIT_STRICT: {kind}: {err}; refusing to fall back to the interpreter")
+    } else {
+        format!("{kind}: {err}")
     }
 }
 
