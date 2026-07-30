@@ -1,0 +1,144 @@
+"""
+BrowserSession redirect source-scheme security.
+
+The response URL is broker input. Redirect downgrade decisions must use the
+canonical URL of the matched inflight request, while preserving the already
+committed page and history when a document redirect is rejected.
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.js.types.js_types.{JsValue}
+
+describe "BrowserSession redirect source-scheme security":
+    it "should reject a case-variant document downgrade without replacing committed state":
+        step("Commit stable page and history state")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://stable.test/one",
+            "<html><head><title>One</title></head><body>one</body></html>"
+        ).is_ok()).to_be(true)
+        expect(session.open_html(
+            "https://stable.test/two",
+            "<html><head><title>Stable</title></head><body>stable</body></html>"
+        ).is_ok()).to_be(true)
+
+        step("Start a secure document navigation")
+        expect(session.begin_network_navigation(
+            "https://secure.test/start", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val request = session.take_pending_request().unwrap()
+
+        step("Return a case-variant secure response that redirects to HTTP")
+        val blocked = session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: request.kind,
+            url: "HTTPS://secure.test/start",
+            status: 302,
+            headers: "Location: http://secure.test/plain\n",
+            body: "",
+            error: ""
+        ))
+
+        step("Keep the committed page and history after rejecting the downgrade")
+        match blocked:
+            Err(message): expect(message).to_contain("HTTPS downgrade")
+            Ok(_): fail("Expected the case-variant document downgrade to fail")
+        expect(session.can_stop_loading()).to_be(false)
+        expect(session.has_pending_requests()).to_be(false)
+        expect(session.current_url).to_equal("https://stable.test/two")
+        expect(session.current_title).to_equal("Stable")
+        expect(session.current_body_html).to_contain("stable")
+        expect(session.can_go_back()).to_be(true)
+        expect(session.history_back_url()).to_equal("https://stable.test/one")
+        expect(session.can_go_forward()).to_be(false)
+
+    it "should reject a case-variant fetch downgrade":
+        step("Open a secure page that starts a same-origin fetch")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://safe.test/app",
+            "<html><body><script>var outcome = 'pending'; fetch('/start').catch(function(e) { outcome = e; })</script></body></html>"
+        ).is_ok()).to_be(true)
+
+        step("Take the secure fetch request")
+        val request = session.take_pending_request().unwrap()
+        expect(request.kind).to_equal("fetch")
+
+        step("Return a case-variant secure response that redirects to HTTP")
+        expect(session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: request.kind,
+            url: "HTTPS://safe.test/start",
+            status: 302,
+            headers: "Location: http://safe.test/plain\n",
+            body: "",
+            error: ""
+        )).is_ok()).to_be(true)
+
+        step("Reject the fetch without scheduling the HTTP request")
+        expect(session.has_pending_requests()).to_be(false)
+        match session.eval_script("outcome"):
+            Ok(JsValue.String(message)):
+                expect(message).to_contain("redirect-blocked:https-downgrade")
+            _:
+                fail("Expected the downgraded fetch to reject with text")
+
+    it "should reject a case-variant stylesheet downgrade":
+        step("Open a secure page that loads a stylesheet")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://safe.test/app",
+            "<html><head><link rel='stylesheet' href='/theme.css'></head><body>safe</body></html>"
+        ).is_ok()).to_be(true)
+
+        step("Take the secure stylesheet request")
+        val request = session.take_pending_request().unwrap()
+        expect(request.kind).to_equal("style")
+
+        step("Return a case-variant secure response that redirects to HTTP")
+        expect(session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: request.kind,
+            url: "HTTPS://safe.test/theme.css",
+            status: 302,
+            headers: "Location: http://safe.test/theme.css\n",
+            body: "",
+            error: ""
+        )).is_ok()).to_be(true)
+
+        step("Reject the stylesheet without scheduling the HTTP request")
+        expect(session.has_pending_requests()).to_be(false)
+        expect(session.warnings.join("|")).to_contain(
+            "stylesheet load error: redirect blocked HTTPS downgrade"
+        )
+
+    it "should continue following an HTTPS redirect":
+        step("Start an ordinary secure document navigation")
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://secure.test/start", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+
+        step("Take the secure document request")
+        val request = session.take_pending_request().unwrap()
+        expect(request.kind).to_equal("document")
+
+        step("Return a case-variant response with an HTTPS target")
+        expect(session.commit_network_response(BrowserResponse.create(
+            request_id: request.id,
+            kind: request.kind,
+            url: "HTTPS://secure.test/start",
+            status: 302,
+            headers: "Location: https://secure.test/done\n",
+            body: "",
+            error: ""
+        )).is_ok()).to_be(true)
+
+        step("Follow the secure target unchanged")
+        val redirected = session.take_pending_request().unwrap()
+        expect(redirected.url).to_equal("https://secure.test/done")
+        expect(redirected.kind).to_equal("document")
