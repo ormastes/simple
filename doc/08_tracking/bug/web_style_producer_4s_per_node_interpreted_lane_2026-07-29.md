@@ -1440,6 +1440,129 @@ regression-baseline runs, the time budget for this pass was fully consumed
 by the measurement; the trim was not attempted. It remains the most
 shovel-ready candidate from the prior section's ranked fix list.
 
+## 2026-07-30 close-out: measurement blocked by an already-owned parser defect, not by parse cost
+
+Per-the-brief follow-up on whether real-document HTML parsing is quadratic
+(the `char_code_at`/`core_string.spl:282` "ASCII fast path walks from byte
+0" landmine family). Two environment corrections apply retroactively to
+everything measured earlier in this document: the deployed
+`bin/release/x86_64-unknown-linux-gnu/simple` was swapped mid-campaign
+(now 154MB / 617 `llvm::` strings, i.e. LLVM-enabled and canonical; the
+prior binary in the window used for most of this document's measurements
+had **zero** `llvm::` strings, per project memory
+`reference_deployed_binary_lost_llvm_codegen_2026-07-29`), and the host hit
+`ENOSPC` (disk 100% full) around the time of the two 900s/1200s
+zero-output failures in the prior section — since cleared (1.3T free).
+**Both prior zero-output measurement attempts are therefore SUSPECT, not
+informative about parse or style cost specifically** -- disk exhaustion or
+a broken toolchain are at least as plausible an explanation as anything
+about the pipeline's own performance.
+
+**Document size (PROVED, direct measurement, not inferred):**
+`examples/06_io/ui/browser_common_elements_showcase.html` is **4848
+bytes, 4848 characters** (`file` confirms plain ASCII text, `wc -c` ==
+`wc -m`). Small by any measure.
+
+**Cheap check first, per the coordinator's revised brief:** re-ran the
+plain pipeline on the corrected environment (fresh worktree from
+`git ls-remote`'s SHA -- never `FETCH_HEAD`, per this pass's protocol
+correction; canonical LLVM binary; disk healthy; load ~5.7, the lowest
+this whole campaign) with `SIMPLE_WEB_PHASE_TRACE=1 stdbuf -oL -eL`,
+`SIMPLE_WEB_RENDER_BUDGET_MS=900000 SIMPLE_TIMEOUT_SECONDS=1200`.
+
+**Result: the run dies FAST (well under the 1200s budget, reproduced
+twice) with a real compile error, not a timeout, not silence:**
+```
+error: compile failed: parse: in ".../src/lib/common/web/browser_renderer_protocol.spl":
+Unexpected token: expected expression, found Newline
+```
+This is **the same defect an independent lane (ac14) had already
+root-caused and filed** (`doc/08_tracking/bug/
+if_condition_operator_line_continuation_parse_2026-07-30.md`,
+cross-referenced in `doc/09_report/showcase_matrix_census_2026-07-30.md`
+as "wall 8"): operator line-continuation parses inside a `val` binding but
+fails inside an `if` condition (`val x = a +\n   b` parses; `if a >\n
+b:` does not), introduced by `ba0ce4e3c06` "feat(web): add SBR2 command
+capability codec" earlier the same day, confirmed live on the newest
+LLVM-linked seed (not a staleness artifact). **This blocks `web_render_
+file_gui.spl` from compiling at all right now** -- it transitively
+compiles `browser_renderer_protocol.spl` -- confirmed independently from
+this document's own investigation before the coordinator's cross-lane
+notice arrived, and cross-verified via `git show <tip>:<file>` (the
+committed blob parses fine standalone, matching the known "STATE not
+grammar" bug family already on file in this campaign's memory -- a
+whole-tree compile triggers it, an isolated read of the file does not).
+
+**Per explicit instruction: not touched.** ac14 owns the parser fix;
+reformatting the one `if` to dodge it would encode the grammar
+inconsistency rather than fix it, and would silently hide the real bug
+from whoever needs to see it fail. **This is a legitimate stopping point,
+not a stall.** The style-vs-layout/paint completion question from the
+prior section remains genuinely open, now for a different and better-
+understood reason: nothing downstream of compilation can be measured
+until this lands, and that is out of this lane's scope.
+
+**The quadratic-scan hypothesis itself: answered anyway, independent of
+whether the full pipeline compiles (PROVED via a standalone microbenchmark,
+re-run on the corrected canonical binary for validity).** A tiny
+standalone script (not touching `browser_renderer_protocol.spl` or any
+other blocked module) scanned synthetic all-ASCII strings from 500 to
+8000 characters two ways: `.slice(i, i+1)` per position (the exact
+pattern `html_tokenizer.spl`'s `_scan_char_data`/`_split_first_word`/
+`_strip_tag_name`/`_find_raw_end_tag` all use in their hot loops, confirmed
+by reading the source -- none of them use `char_code_at` in a
+document-length loop) and `char_code_at(i)` per position (for direct
+comparison against the `core_string.spl:282` landmine).
+
+| N | slice scan_us | char_code_at scan_us |
+|---|---|---|
+| 500 | 159 | 50 |
+| 1000 | 303 | 94 |
+| 2000 | 607 | 183 |
+| 4000 | 1258 | 391 |
+| 8000 | 2349 | 804 |
+
+Both are **cleanly linear** -- each doubling of N almost exactly doubles
+the time, in every step, for both access patterns. **No quadratic
+blow-up at any tested size**, well above the real document's 4848
+characters. This **kills the quadratic-parse hypothesis for the seed lane**
+(what `bin/simple run` actually executes): `core_string.spl:282`'s "ASCII
+fast-path walks from byte 0 every call" defect is real (per the
+coordinator's own framing and this campaign's prior char_at findings) but
+belongs to a **different lane** -- the freestanding/native-codegen
+runtime's own `rt_string_char_code_at`, which is not what the seed's Rust-
+native string implementation uses. Combined with the tokenizer's own
+slice-based (not char_code_at-heavy) hot-loop pattern, there is no
+evidence of an O(N^2) document-length scan anywhere on this path.
+**Answering the brief's item 3 directly: neither the non-ASCII-`char_code_
+at`-quadratic-on-seed defect nor the ASCII-ffast-path-quadratic-on-native
+defect applies here** -- the seed's tokenizer scan is linear by both
+access patterns, on the canonical binary, confirmed empirically.
+
+**Item 4 (contained vs. architectural fix): moot for the quadratic
+hypothesis (refuted, nothing to fix) -- the real current blocker (the
+parser defect) already has an owner, a filed doc, and two identified fix
+options, per the other lane's own report; correctly not chased here.**
+
+**Sub-phase markers at lines 1191/1197/1258 (`parse_html_total`,
+`extract_css_vw`, plus tokenize/tree-build brackets in
+`html_tree_builder.spl`): prototyped and produced one promising signal
+before this pass's own worktree was lost mid-edit to an unrelated
+disk/session issue** (`parse_tokenize`=102ms, `parse_tree_build`=122ms,
+vs. the outer `phase=parse`=2225ms on that run -- roughly 2 seconds
+unaccounted for between the tokenizer/tree-builder and the full "parse"
+boundary, likely in `extract_css_vw`/`build_child_index`/the HNode-
+conversion loop). **That data point predates the binary-swap correction
+and is not re-verified on the canonical binary or landed this pass**, per
+the coordinator's revised brief ("only if it completes AND the numbers
+are still unexplained do you go back to sub-phase markers") -- the plain
+re-run did not complete, so this was correctly not repeated. Left as the
+documented next step for whoever resumes once ac14's fix lands.
+
+### Regression baselines
+Not re-run this pass -- no source change landed (investigation and
+environment-correction only).
+
 ## bracket-slice (`s[i:j]`) survey gap — enumerated 2026-07-29, not fixed
 
 The original Category B survey (that found the byte/char split, see
