@@ -1371,7 +1371,7 @@ fn test_discover_files_from_entry_excludes_unrelated_source_files() {
 
     std::fs::write(
         &helper_file,
-        "fn helper(value: i64) -> bool:\n    return value ==\n        1 and value >\n        0\n",
+        "fn helper(value: i64) -> bool:\n    return value ==\n        1 and\n    value >\n        0\n",
     )
     .unwrap();
     std::fs::write(&unrelated_file, "fn unrelated() -> i64:\n    return 2\n").unwrap();

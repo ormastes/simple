@@ -437,17 +437,25 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Skip through newlines and indents when we've confirmed a dot follows.
+    /// Skip continuation layout after an operator or before a chained method.
     /// Used for multi-line method chaining and binary operator line continuation.
-    /// Call this AFTER peek_through_newlines_and_indents_is returns true.
+    /// Call after an operator, or after lookahead confirms a chained method.
     /// Returns the number of INDENT tokens skipped (need to consume matching DEDENTs later).
     pub(crate) fn skip_newlines_and_indents_for_method_chain(&mut self) -> usize {
         let mut indent_count = 0;
-        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
-            if matches!(self.current.kind, TokenKind::Indent) {
-                indent_count += 1;
+        loop {
+            match self.current.kind {
+                TokenKind::Newline => self.advance(),
+                TokenKind::Indent => {
+                    indent_count += 1;
+                    self.advance();
+                }
+                TokenKind::Dedent if self.binary_indent_count > 0 => {
+                    self.binary_indent_count -= 1;
+                    self.advance();
+                }
+                _ => break,
             }
-            self.advance();
         }
         indent_count
     }

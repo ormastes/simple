@@ -79,3 +79,11 @@ helper after consuming their operator. The existing native-project discovery
 test uses multiline `==` and `>` expressions and passes. Closure audit found
 21 affected RV64 equality sites covered by this root fix. Closure requires a
 fresh seed and Stage2 before this bug can close.
+
+The first refreshed artifact (RV64 attempt 15) advanced past the newline but
+then exposed its matching `Dedent` at `window_scene.spl:446:1`. The shared
+continuation-layout helper now consumes a `Dedent` only when it balances a
+tracked continuation indent; real block Dedents at count zero remain visible.
+The discovery regression mirrors the `==` RHS ending in `and` before returning
+to the outer continuation indentation. A second refreshed Stage2/RV64 run is
+still required before closing this bug.
