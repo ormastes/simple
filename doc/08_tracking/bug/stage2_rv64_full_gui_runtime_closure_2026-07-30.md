@@ -2,11 +2,13 @@
 
 **ID:** stage2-rv64-full-gui-runtime-closure-2026-07-30
 **Severity:** blocker for `SIMPLEOS_STAGE2_FONT`
-**Checkpoint:** `2a7e354c116ea1d9a948bf94d5a26c4d0238eed6`
+**Checkpoint:** `39c1863426a8c1379ee3c5584bb6c3d3a78f9970`
 
 ## Result
 
-Current-checkpoint Stage2 attempt 24 and scoped-tool attempt 12 are admitted.
+Historical Stage2 attempt 24 and scoped-tool attempt 12 were admitted at
+`2a7e354c116`; their ignored artifacts disappeared with the old temporary
+worktree and cannot admit the current checkpoint.
 RV64 attempt 25 compiles the canonical `_boot_full_gui_runtime.o`, but the
 production `gui_entry_desktop.spl` object graph has a 618-symbol unresolved
 pre-GC surface: 597 raw `rt_*` APIs, six qualified symbols, and fifteen other
@@ -34,9 +36,12 @@ misleading ELF and violate the fail-closed contract. See
 
 ## Resume
 
-After a focused closure/provider gate proves the owner repair, run exactly one
-fresh RV64 attempt 26 with `SIMPLE_NO_STUB_FALLBACK=1`. Only a validated ELF
-unblocks QEMU crop calibration, exact-ten attempt 12, and manual attempt 2.
+After admitting physical current-checkpoint Stage2 attempt 28 and matching
+scoped-tool attempt 13, run exactly one fresh RV64 attempt 26 with
+`SIMPLE_NO_STUB_FALLBACK=1`. Only a validated ELF unblocks QEMU crop
+calibration, exact-ten attempt 13, and manual attempt 13. Stage2 attempt 27 was
+stopped before Stage2 when a competing full bootstrap appeared; retain it and
+do not reuse its path.
 
 ## Owner repair prepared
 
@@ -53,5 +58,5 @@ process-syscall byte copies through validated VMM translation. The focused
 RV64 syscall ABI/provider contract passes after those fixes.
 
 This is source/focused-gate evidence only. It does not close the bug until a
-fresh clean-checkpoint Stage2/tool admission and the single reserved RV64
-attempt 26 produce and validate the canonical ELF.
+fresh clean-checkpoint Stage2 attempt 28/tool attempt 13 admission and the
+single reserved RV64 attempt 26 produce and validate the canonical ELF.

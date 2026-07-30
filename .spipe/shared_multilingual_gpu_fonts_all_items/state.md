@@ -275,3 +275,12 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   syscall ABI/provider contract passes. Stage2 attempt 25 failed before
   compilation from transient filesystem exhaustion; it is retained as a
   failed receipt and does not consume the reserved RV64 attempt 26.
+- restored-worktree-resume-2026-07-30: The pushed source checkpoint
+  `39c1863426a` was restored into `/tmp/simple-font-sync-20260730` after the
+  old temporary worktree and ignored evidence artifacts disappeared. Btrfs
+  recovered, but Stage2 attempt 27 was stopped before Stage2 when an unrelated
+  full bootstrap and two Rust builds appeared after preflight. Its logs remain
+  immutable. The serialized resume chain is physical Stage2 attempt 28,
+  scoped-tool attempt 13, RV64 attempt 26, exact-ten attempt 13, and manual
+  attempt 13. The manual-root validator now accepts any positive attempt number
+  and rejects zero; no admission or PASS is claimed.

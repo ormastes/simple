@@ -70,14 +70,18 @@ Run only this scoped set:
 - [x] Produce and independently admit canonical Stage2 attempt 24 at clean
   checkpoint `2a7e354c116`.
 - [x] Produce scoped-tool attempt 12 and pass its independent canonical
-  receipt checker.
+  receipt checker at the historical `2a7e354c116` checkpoint.
+- [ ] Produce and admit current-checkpoint physical Stage2 attempt 28 and
+  matching scoped-tool attempt 13. Attempt 27 was stopped before Stage2 when
+  an unrelated full bootstrap appeared after host preflight; its immutable
+  logs are retained and it must not be reused.
 - [ ] Produce the canonical desktop ELF from the prepared owner repair. The
   focused Rust closure gate passes 2/2 and the RV64 entry closure is now 45
   modules without `vfs_init`, `vfs_boot_init`, `boot.cpu`, or diagnostic
   logging. First admit a clean current-checkpoint Stage2/tool pair; then use the
   single reserved attempt 26.
 - [ ] Independently review and pin the QEMU framebuffer crop, then run
-  exact-ten attempt 12 and generate ten zero-stub manuals.
+  exact-ten attempt 13 and generate ten zero-stub manuals in manual attempt 13.
 - [ ] Run the final guards and independent evidence/manual review before
   recording `SIMPLEOS_STAGE2_FONT: PASS`.
 
@@ -92,7 +96,10 @@ the producer and standalone manifest verifier exited zero in `28:30.39` at
 `2,438,756 KiB` maximum RSS. Scoped-tool attempt 12 is independently admitted
 with evidence-manifest SHA-256
 `cf7071a12808e862835feaf6a4e6b05b4d17138d3ed35cbb81b22c5f261b23d9`
-and canonical checker marker `stage2_font_scoped_tools_status=pass`.
+and canonical checker marker `stage2_font_scoped_tools_status=pass`. Those
+ignored artifacts disappeared with the old temporary worktree and remain
+historical identity evidence only; current-checkpoint execution requires the
+fresh attempt-28/attempt-13 pair above.
 
 RV64 attempt 25 is retained at
 `/tmp/simple-font-rv64-attempt25-stage/evidence/`. It exited 1 in `3:21.66` at
@@ -120,8 +127,8 @@ export STAGE2_PARENT=<canonical-stage2-simple>
 export STAGE2_PARENT_SHA=<sha256>
 export STAGE2_PROVENANCE_PATH=<canonical-stage2-provenance.env>
 export STAGE2_PROVENANCE_SHA=<sha256>
-export STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-2
-export STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-2
+export STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-13
+export STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-13
 bash scripts/check/build-stage2-font-scoped-tools.shs write
 ```
 
@@ -137,7 +144,7 @@ regular-file copies of both live QEMU output trees, including their reports,
 font crops, and input/frame artifacts:
 
 ```bash
-export STAGE2_FONT_SPEC_ATTEMPT=2
+export STAGE2_FONT_SPEC_ATTEMPT=13
 export SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory>
 export BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live
 export REPORT_PATH="$BUILD_DIR/report.md"
@@ -154,7 +161,7 @@ After all ten specs are green, generate their canonical manuals exactly once
 and retain the immutable receipts:
 
 ```bash
-export STAGE2_FONT_MANUAL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
+export STAGE2_FONT_MANUAL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-13
 bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write \
   "$STAGE2_FONT_TOOL_ATTEMPT_ROOT" "$STAGE2_FONT_MANUAL_ATTEMPT_ROOT"
 bash scripts/check/build-stage2-font-scoped-tools.shs manuals-check \

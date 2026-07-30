@@ -1612,3 +1612,11 @@ pixels, and performance evidence remain release-blocking.
   shims remain rejected. Attempt 26 is reserved until the import/runtime owner
   repair passes focused gates. `SIMPLEOS_STAGE2_FONT: BLOCKED`; broader
   `STATUS: FAIL`.
+- restored-worktree-resume-2026-07-30: Source checkpoint `39c1863426a` is
+  restored in an isolated clean worktree. Historical attempt-24/tool-12
+  artifacts disappeared with the old temporary worktree and are not current
+  admission evidence. Stage2 attempt 27 was stopped before Stage2 after a
+  competing full bootstrap appeared; its path will not be reused. Resume with
+  Stage2 attempt 28, scoped-tool/spec/manual attempt 13, and reserved RV64
+  attempt 26. The manual attempt validator now accepts positive immutable
+  attempt numbers instead of the stale 1–3 cap. No runtime or PASS is claimed.

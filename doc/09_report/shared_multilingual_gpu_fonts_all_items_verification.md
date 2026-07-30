@@ -9,7 +9,23 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
-## 2026-07-30 current-checkpoint Stage2/RV64 result
+## 2026-07-30 restored-worktree execution status
+
+The source checkpoint under execution is
+`39c1863426a8c1379ee3c5584bb6c3d3a78f9970`. The old temporary worktree and
+its ignored Stage2/QEMU/spec/manual artifacts disappeared during the host Btrfs
+failure; the tracked source, plans, historical identities, and pushed branch
+survived. The filesystem has recovered.
+
+Physical Stage2 attempt 27 was stopped before Stage2 after preflight because an
+unrelated full bootstrap and two Rust builds appeared. Its immutable logs are
+retained and its path will not be reused. The next serialized chain is Stage2
+attempt 28, scoped-tool attempt 13, reserved RV64 attempt 26, exact-ten attempt
+13, and manual attempt 13. No new admission or PASS is claimed.
+
+`STATUS: FAIL`
+
+## Historical 2026-07-30 Stage2/RV64 result — checkpoint 2a7e
 
 Clean checkpoint `2a7e354c116` produced admitted Stage2 attempt 24: binary
 SHA-256 `d8c2bee6ad33d58c7fa4aa8e1d8bc1b66fa9e887b920df7b79187757265ff79a`,
@@ -75,17 +91,19 @@ inventory is `0 missing / 9 stale / 1 source-current / 0 accepted receipts`.
 The source-current pair is `selected_arabic_spec`; source currency alone is not
 an accepted zero-stub docgen receipt.
 
-Stage2 attempt 24 and scoped-tool attempt 12 now satisfy the compiler,
-runner/docgen, calibration, provenance, and independent receipt gates. The
+Stage2 attempt 24 and scoped-tool attempt 12 historically satisfied the
+compiler, runner/docgen, calibration, provenance, and independent receipt
+gates at `2a7e354c116`; their ignored artifacts are no longer present and
+cannot satisfy the current checkpoint. The
 transactional 53-file staging, exact 59-source pin-set, Arabic/Hindi batch
 identity, and native-safe fresh-device material changes remain downstream
-behavioral claims until exact-ten runs. The next blocker is the hosted and
-unrelated runtime surface retained by import-level RV64 GUI closure. After the
-owner repair links the canonical desktop ELF,
-run and independently pin the QEMU crop, execute exact-ten attempt 12, then run
+behavioral claims until exact-ten runs. The owner repair is source-complete;
+the next gate is current-checkpoint Stage2/tool admission. After that pair
+links the canonical desktop ELF,
+run and independently pin the QEMU crop, execute exact-ten attempt 13, then run
 `bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write
-build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-12
-build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2`
+build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-13
+build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-13`
 and the corresponding independent `manuals-check`. Stage 3, Stage 4,
 non-SimpleOS native GPU hosts, and the broader cross-platform matrix remain
 deferred from this active delivery scope.
@@ -93,7 +111,7 @@ deferred from this active delivery scope.
 The current exact-ten command remains pending:
 
 ```bash
-STAGE2_FONT_SPEC_ATTEMPT=12 \
+STAGE2_FONT_SPEC_ATTEMPT=13 \
 SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory> \
 BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live \
 REPORT_PATH=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live/report.md \
@@ -101,21 +119,21 @@ RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf \
 RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img \
 RV64_WM_FONT_REGION_EXPECTED_SHA256=<independently-reviewed-rv64-crop-sha256> \
 bash scripts/check/run-stage2-font-scoped-specs.shs write \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-12
-STAGE2_FONT_SPEC_ATTEMPT=12 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-13
+STAGE2_FONT_SPEC_ATTEMPT=13 \
 bash scripts/check/run-stage2-font-scoped-specs.shs check \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-12
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-13
 ```
 
 After those ten receipts pass, the exact manual commands are:
 
 ```bash
 bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-12 \
-  build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-13 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-13
 bash scripts/check/build-stage2-font-scoped-tools.shs manuals-check \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-12 \
-  build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-13 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-13
 ```
 
 No scoped execution or manual has yet been accepted, so
