@@ -931,6 +931,22 @@ events, timing, RSS, browser rendering, or either QEMU row. Host execution
 still requires one admitted exact-current pure-Simple CLI; QEMU remains owned
 by its delegated plan and is not executed by the merge owner.
 
+### Current CLI admission attempt — 2026-07-30
+
+The isolated current-main normal deploy correctly refused to run because the
+Rust seed and runtime archive were absent. This made one
+`bootstrap-from-scratch.sh --full-bootstrap --deploy` essential rather than an
+optional broad check. The first Stage 3 run exposed the missing seed-only
+`std.alloc.sffi` import in `compiler.hir.hir_types`; the accepted repair now
+declares the already-linked `rt_dict_contains` runtime symbol directly and its
+focused source regression rejects only the removed import form. A second full
+bootstrap reached **Stage 2 PASS**, then Stage 3 exited 139 while compiling the
+self-hosted CLI. The bounded log ends in HIR-expression lowering and supplies
+no source-level diagnostic. No third retry was run. The bootstrap correctly
+refused seed fallback, so no CLI manifest, runtime test, host capture, or QEMU
+artifact was admitted. Continue from the Stage 3 native SIGSEGV diagnosis;
+do not reuse the generated Stage 2 binary as verification evidence.
+
 ### GUI root material projection
 
 The 2026-07-30 GUI audit found that the correct selected snapshot reached
