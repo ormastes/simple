@@ -120,7 +120,7 @@ replace their live assertions.
 | `cargo test --offline -p simple-runtime --lib --features runtime-tls 'value::net::platform_trust_tests::platform_verifier_initializes' -- --exact` | PASS | platform verifier initializes |
 | `cargo test --offline -p simple-runtime --lib --features runtime-tls 'value::net::browser_http_job_tests::silent_tls_peer_respects_job_deadline_and_retires_slot' -- --exact` | PASS | TLS deadline and slot retirement |
 | `node scripts/check/check-web-render-backend-chromium-sandbox.js` | PASS | mocked Chromium-helper contract |
-| `xvfb-run -a tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | trusted Electron form events only |
+| `CRB_HTML="$PWD/test/09_baselines/web_html_input/vanillastyle_demo.html" timeout 60 xvfb-run -a tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | trusted Electron form events only |
 | `cargo test --offline --manifest-path src/compiler_rust/runtime/Cargo.toml --lib --no-default-features public_address_policy_rejects_any_mixed_resolution_set` | PASS | mixed-resolution egress policy unit |
 
 These checks do not prove a live HTTPS certificate matrix, a Simple
