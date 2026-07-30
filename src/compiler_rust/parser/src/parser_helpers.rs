@@ -108,18 +108,20 @@ impl<'a> Parser<'a> {
     /// If the next token is NOT a newline, parses a single inline statement.
     /// If the next token IS a newline, delegates to parse_block() for an indented block.
     pub(crate) fn parse_inline_or_block(&mut self) -> Result<Block, ParseError> {
-        if !self.check(&TokenKind::Newline) {
+        let deferred_before = std::mem::take(&mut self.deferred_dedent_count);
+        let block = if !self.check(&TokenKind::Newline) {
             let stmt = self.parse_item()?;
             let span = self.previous.span;
-            let deferred = std::mem::take(&mut self.deferred_dedent_count);
-            self.consume_dedents_for_method_chain(deferred);
-            Ok(Block {
+            Block {
                 span,
                 statements: vec![stmt],
-            })
+            }
         } else {
-            self.parse_block()
-        }
+            self.parse_block()?
+        };
+        let deferred = std::mem::take(&mut self.deferred_dedent_count) + deferred_before;
+        self.consume_dedents_for_method_chain(deferred);
+        Ok(block)
     }
 
     /// Peek at the next token without consuming current

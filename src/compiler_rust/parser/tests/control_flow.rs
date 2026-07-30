@@ -22,7 +22,7 @@ fn parse_if_statement() {
 #[test]
 fn parse_inline_if_with_multiline_condition_preserves_function_boundary() {
     let items = parse(
-        "fn first(a: bool, b: bool, c: bool, d: bool) -> i64:\n    if a or\n        b: return 0\n    elif c or\n        d: return 1\n    2\nfn choose(a: bool, b: bool, c: bool, d: bool) -> i64:\n    if a or\n        b: 1\n    elif c or\n        d: 2\n    else: 3 +\n        0\nfn block(a: bool, b: bool):\n    if a or\n        b:\n        return None\n    Some(Outer(a: 1,\n        b: 2))\nfn sibling() -> i64:\n    4",
+        "fn first(a: bool, b: bool, c: bool, d: bool) -> i64:\n    if a or\n        b: return 0\n    elif c or\n        d: return 1\n    2\nfn choose(a: bool, b: bool, c: bool, d: bool) -> i64:\n    if a or\n        b: 1\n    elif c or\n        d: 2\n    else: 3 +\n        0\nfn block(a: bool, b: bool, c: bool, d: bool):\n    if a or\n        b:\n        return None\n    elif c or\n        d:\n        return None\n    Some(Outer(a: 1,\n        b: 2))\nfn sibling() -> i64:\n    4",
     );
     assert_eq!(items.len(), 4);
 }
