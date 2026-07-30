@@ -83,6 +83,41 @@ overlapping dirty work and remains read-only for this lane.
 | WM glass material projection | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | CPU preserves parent sampling/500/930 opacity; opaque Metal uses session-owned identity and exact per-request receipts; sub-opaque Metal fails before dispatch until a GPU-only delta path exists |
 | Runtime theme switching | PROTOCOL/CACHE + K1 + CANONICAL WIRE SOURCE ACCEPTED; K2/CATALOG/PACKAGE/SOURCE-CAPTURE SERIES STOPPED; fail-fast system contract | `ThemeChangedV1`, BrowserBackend cache identity, K1 copied-payload queues, and canonical `theme-package-install-wire-v1` text are landed. K2 exhausted three cycles on cross-architecture registration/entry stability gaps; generated catalog exhausted three cycles on stale active/frame authority; package transactions remain unintegrated; source-capture design exhausted three cycles on the missing cache-owning wrapper and contradictory strict-versus-legacy missing-core semantics. The proposed parent-owned `HostedThemeRuntime` handoff is specified but not source implemented. ThemeService/consumer wiring remains unsafe; see the linked K2, catalog, package, and source-capture blocker docs |
 
+### Hosted runtime handoff acceptance blockers — 2026-07-30
+
+The first takeover implementation draft is deliberately **unmerged** after
+independent review.  The next bounded owner must address all of these as one
+initial-production handoff, before attempting refresh transactions:
+
+- No `ThemePackageInstallProjection` or `ThemeRenderSnapshot` aggregate may
+  cross a hosted/compositor native boundary.  The package-wire owner explicitly
+  forbids it until its ABI probe is accepted.  Capture one copied
+  `(revision, wire_text)` pair and derive needed scalar fields inside its
+  owning module.
+- The exact snapshot must be resolved from the captured source/registry bytes,
+  not re-resolved through `theme_package_render_snapshot`, active-theme globals,
+  or alias resolution.  The HTML projection emits the accepted ID verbatim.
+- The production primary browser as well as registry windows must use
+  `create_with_theme -> theme_ready -> begin_init(themed_html)`.  A raw
+  `render("init", browser_initial_html)` is forbidden after the theme gate.
+- `theme_ready` validates generation, request, revision, theme ID, source
+  manifest hash and material hash.  Mismatch, stale, duplicate, or out-of-order
+  acknowledgement sends no init/frame and tears the candidate down.
+- Transport admission accounts for the `HTI1` envelope.  A codec-valid 1 MiB
+  wire cannot silently overflow the renderer's same-sized payload bound; use
+  one explicit greatest-constructible transport limit or a checked bounded
+  framing allowance.
+- Theme-bound site swap preserves ordinary navigation: restart with the exact
+  accepted wire and canonical empty themed HTML, finish the handshake, then
+  resume the pending navigation.  It must not fail normal cross-origin swaps as
+  `theme-restart-replay-unavailable`.
+
+Required focused evidence is projection CSS/attributes and global-mutation
+independence; registry and direct-entry ordering; malformed/oversize and exact
+identity protocol rejection; worker no-init-before-theme; primary-browser
+coverage; and restart/replay generation/identity coverage.  Runtime refresh
+remains explicitly unavailable until this initial path is accepted.
+
 ### Hosted theme runtime prerequisite — design handoff (2026-07-27)
 
 Shared interface names are fixed for implementation: `HostedThemeRuntime`,
