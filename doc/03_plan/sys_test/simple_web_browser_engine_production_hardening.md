@@ -681,18 +681,18 @@ present with changed full pixels.
 No executable claim exists until an admitted current full pure-Simple CLI runs
 the focused modern SSpec once.
 
-## Navigation chrome patch gate (HOLD/FAIL)
+## Primary navigation chrome cancellation gate
 
-`/tmp/simple-browser-chrome-state.XRePMs` reached the three-review cap with one
-remaining blocker: `clear_chrome_pressed_controls` clears the host page owner
-but does not send the existing renderer `begin_pointer(..., false)` cancel/up,
-so DOM pressed state can remain stale. The SSpec checks only the integer clear
-and therefore cannot close that behavior.
+The fresh repair in `/tmp/simple-web-pointer-safe` makes
+`HostedBrowserRendererProcess` the primary page-pointer owner. The focused
+modern policy scenarios must prove the press wire, the exact pointer-up wire
+before chrome ownership, a redundant no-op, resource-job retention, and retry
+with the original event ID. The hosted-entry source gate additionally requires
+the primary chrome route to call `cancel_pointer` before arming the control and
+the poll route to flush retained cancellation before lower-priority sync work.
 
-All other state, paint, hit, drain, projection, partial-wire, and lifecycle
-work reviewed sound but remains unpromoted. The patch is unexecuted and
-unmerged; repair the renderer cancellation and exact DOM-state oracle in a
-fresh cycle.
+Execution and docgen remain held until an admitted current full pure-Simple CLI
+is available. Static/manual review cannot promote this row to production PASS.
 
 ## Renderer command capability SSpec (PROPOSED / RED)
 Target a new focused modern scenario at

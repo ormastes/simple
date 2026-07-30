@@ -779,6 +779,11 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         browser_raster.shutdown()
                         browser_raster_active = false
                     print "[hosted-wm] browser-renderer-failed reason={browser_result.reason}"
+            if browser_renderer_ready:
+                if val Err(reason) = browser_renderer.flush_pointer_cancel(
+                    2000
+                ):
+                    print "[hosted-wm] browser-pointer-cancel-failed reason={reason}"
             if (browser_renderer_ready and
                 browser_bookmark_applied_revision <
                     browser_bookmark_revision and
@@ -1107,11 +1112,17 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             browser_renderers.address_text(target.window_id)
                         )
                     elif pressed:
-                        browser_pressed_control = target.control
-                        if target.control == "address":
-                            browser_address_editing = true
-                            browser_address_replace_on_text = true
-                        action_reason = "chrome-pressed"
+                        match browser_renderer.cancel_pointer(
+                            semantic_event_id, 2000
+                        ):
+                            Err(reason):
+                                action_reason = reason
+                            Ok(_):
+                                browser_pressed_control = target.control
+                                if target.control == "address":
+                                    browser_address_editing = true
+                                    browser_address_replace_on_text = true
+                                action_reason = "chrome-pressed"
                     else:
                         val armed = browser_pressed_control
                         browser_pressed_control = ""
@@ -1188,12 +1199,18 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         browser_address_replace_on_text = false
                         var action_reason = ""
                         var callback_count: i64 = 0
-                        match browser_renderer.begin_pointer(
-                            semantic_event_id, target.local_x,
-                            target.local_y, pressed, 2000
-                        ):
-                            Ok(_): callback_count = 1
-                            Err(reason): action_reason = reason
+                        if not pressed and browser_pressed_control != "":
+                            browser_pressed_control = ""
+                            action_reason = "chrome-release-target-mismatch"
+                        else:
+                            if pressed:
+                                browser_pressed_control = ""
+                            match browser_renderer.begin_pointer(
+                                semantic_event_id, target.local_x,
+                                target.local_y, pressed, 2000
+                            ):
+                                Ok(_): callback_count = 1
+                                Err(reason): action_reason = reason
                         input_receipt = host_wm_input_record_semantic(
                             input_receipt, semantic_event_id,
                             target.window_id, "browser:page",
@@ -1236,6 +1253,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 elif button == 0:
                     web_sessions.cancel_pointer_state()
                     semantic_event_id = semantic_event_id + 1
+                    browser_pressed_control = ""
+                    val _ = browser_renderer.cancel_pointer(
+                        semantic_event_id, 2000
+                    )
                     browser_renderers.cancel_pointer_state(semantic_event_id)
                 mouse_button_events = mouse_button_events + 1
                 print "[hosted-wm] event mouse_button count={mouse_button_events} button={button} pressed={pressed}"

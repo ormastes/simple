@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -14,6 +14,72 @@
 ## Scenarios
 
 ### hosted browser renderer entry isolation
+
+#### gates the production registry on exact theme readiness
+
+- Inspect the hosted theme-before-init production route.
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 57 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect the hosted theme-before-init production route")
+val entry = executable_source_lines(
+    rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+)
+val registry = executable_source_lines(
+    rt_file_read_text(
+        "src/os/hosted/hosted_browser_renderer_registry.spl"
+    ) ?? ""
+)
+val process = executable_source_lines(
+    rt_file_read_text(
+        "src/os/hosted/hosted_browser_renderer_process.spl"
+    ) ?? ""
+)
+val create_pos = entry.find(
+    "HostedBrowserRendererRegistry.create_with_theme("
+)
+val accept_start = registry.find("me _accept_polled_result(")
+val accept_end = registry.find("me advance_window(", accept_start)
+val accept = registry.slice(accept_start, accept_end)
+val theme_pos = accept.find("entry.renderer.begin_theme_init(2000)")
+val init_pos = accept.find("entry.renderer.begin_init(")
+val resume_pos = accept.find(
+    "if entry.renderer.site_swap_pending:", init_pos
+)
+val frame_pos = accept.find("self._store_frame(", resume_pos)
+expect(create_pos).to_be_greater_than(-1)
+expect(registry).to_contain(
+    "simple_web_content_full_html_with_install_wire("
+)
+expect(registry).to_contain(
+    "HostedBrowserRendererProcess.create_with_theme("
+)
+expect(theme_pos).to_be_greater_than(-1)
+expect(init_pos).to_be_greater_than(theme_pos)
+expect(resume_pos).to_be_greater_than(init_pos)
+expect(frame_pos).to_be_greater_than(resume_pos)
+expect(process).to_contain("\"await-theme-ready\"")
+expect(process).to_contain("\"theme-ready-mismatch\"")
+expect(registry).to_contain("\"theme-parent-projection-mismatch\"")
+val swap_start = registry.find("me _begin_site_swap(")
+val swap_end = registry.find("me _store_frame(", swap_start)
+val swap = registry.slice(swap_start, swap_end)
+expect(swap).to_contain(
+    "HostedBrowserRendererProcess.create_with_theme("
+)
+expect(swap).to_contain(
+    "simple_web_content_full_html_with_install_wire("
+)
+expect(swap).to_contain("entry.startup_html = restart_html")
+```
+
+</details>
 
 #### keeps secondary hosted navigation public and response-bounded
 
@@ -587,8 +653,12 @@ val poll_frame = poll_body.find("comp.set_external_web_frame(")
 val poll_title = poll_body.find(
     "host_compositor_update_window_title("
 )
+val poll_cancel = poll_body.find(
+    "browser_renderer.flush_pointer_cancel("
+)
 expect(poll_frame).to_be_greater_than(-1)
 expect(poll_title).to_be_greater_than(poll_frame)
+expect(poll_cancel).to_be_greater_than(poll_title)
 
 val pointer_start = run_body.find("elif kind == EVT_MOUSE_BUTTON:")
 val pointer_end = run_body.find("elif kind == EVT_MOUSE_WHEEL:")
@@ -596,6 +666,14 @@ expect(pointer_start).to_be_greater_than(-1)
 expect(pointer_start).to_be_greater_than(renderer_owner)
 expect(pointer_end).to_be_greater_than(pointer_start)
 val pointer_body = run_body.slice(pointer_start, pointer_end)
+val primary_cancel = pointer_body.find(
+    "browser_renderer.cancel_pointer("
+)
+val primary_arm = pointer_body.find(
+    "browser_pressed_control = target.control", primary_cancel
+)
+expect(primary_cancel).to_be_greater_than(-1)
+expect(primary_arm).to_be_greater_than(primary_cancel)
 val page_pointer_start = pointer_body.find(
     "if target.window_id == browser_profile_window_id:"
 )

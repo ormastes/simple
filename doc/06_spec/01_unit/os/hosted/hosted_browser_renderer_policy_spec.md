@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 53 | 53 | 0 | 0 |
+| 54 | 54 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -25,7 +25,7 @@ Treats decoded renderer protocol messages as untrusted input at the hosted brows
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl` |
 | Updated | 2026-07-30 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Generator | Manual mirror; admitted pure-Simple docgen pending |
 
 ## Overview
 
@@ -1761,29 +1761,28 @@ expect(broker.deferred_commands.len()).to_equal(0)
 
 </details>
 
-#### preserves immediate pointer press and release in order
+#### should preserve immediate pointer press and release in order
 
-- var broker = HostedBrowserRendererProcess create
-- browser renderer decoder new
-   - Expected: broker.deferred_commands.len() equals `1`
-   - Expected: broker._activate_deferred_command() equals ``
-- browser renderer decoder new
-   - Expected: released.event_id equals `2`
-   - Expected: broker.deferred_commands.len() equals `0`
+1. Queue a primary page pointer press.
+2. Cancel the page press before chrome takes ownership.
+3. Decode the deferred renderer cancellation.
+4. Ignore a redundant cancellation without queuing a command.
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Queue a primary page pointer press")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 expect(broker.begin_pointer(
     1, 4, 5, true, 1000
 ).is_ok()).to_be(true)
+expect(broker.pointer_pressed).to_be(true)
 val pressed_message = browser_renderer_decoder_feed(
     browser_renderer_decoder_new(1), broker.pending_wire
 )
@@ -1791,10 +1790,14 @@ expect(browser_renderer_action_decode(
     pressed_message.message
 ).pressed).to_be(true)
 
-expect(broker.begin_pointer(
-    2, 4, 5, false, 1000
+step("Cancel the page press before chrome takes ownership")
+expect(broker.cancel_pointer(
+    2, 1000
 ).is_ok()).to_be(true)
+expect(broker.pointer_pressed).to_be(false)
 expect(broker.deferred_commands.len()).to_equal(1)
+
+step("Decode the deferred renderer cancellation")
 broker.pending_wire = ""
 broker.pending_wire_is_command = false
 broker.command_deadline_ms = 0
@@ -1810,6 +1813,97 @@ val released = browser_renderer_action_decode(
 expect(released.event_id).to_equal(2)
 expect(released.pressed).to_be(false)
 expect(broker.deferred_commands.len()).to_equal(0)
+
+step("Ignore a redundant cancellation without queuing a command")
+var idle = HostedBrowserRendererProcess.create(2, 640, 480)
+idle.state = "active"
+match idle.cancel_pointer(3, 1000):
+    Err(reason):
+        fail("redundant pointer cancellation failed: {reason}")
+    Ok(queued):
+        expect(queued).to_be(false)
+expect(idle.pending_wire).to_equal("")
+```
+
+</details>
+
+#### should retry a page pointer cancellation after renderer work drains
+
+1. Queue a page press while a resource job becomes active.
+2. Retain one cancellation while the renderer is busy.
+3. Drain prior work and emit the retained pointer release.
+4. Acknowledge the cancellation before releasing its owner state.
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 63 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Queue a page press while a resource job becomes active")
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.state = "active"
+expect(broker.begin_pointer(
+    1, 4, 5, true, 1000
+).is_ok()).to_be(true)
+broker.network_job_handle = 41
+
+step("Retain the cancellation while the renderer is busy")
+expect(broker.cancel_pointer(
+    2, 1000
+).is_ok()).to_be(true)
+expect(broker.pointer_pressed).to_be(false)
+expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+match broker.cancel_pointer(99, 1000):
+    Err(reason):
+        fail("retained pointer cancellation failed: {reason}")
+    Ok(queued):
+        expect(queued).to_be(false)
+expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+match broker.begin_pointer(3, 5, 5, true, 1000):
+    Err(reason):
+        expect(reason).to_equal("pointer-cancel-pending")
+    Ok(_):
+        fail("page press replaced a retained pointer cancellation")
+
+step("Drain prior work and emit the retained pointer release")
+broker.network_job_handle = 0
+broker.pending_wire = ""
+broker.pending_wire_is_command = false
+broker.command_deadline_ms = 0
+broker.pending_operation = ""
+broker.next_request_id = 3
+expect(broker.flush_pointer_cancel(
+    1000
+).is_ok()).to_be(true)
+val canceled_message = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(1), broker.pending_wire
+)
+val canceled = browser_renderer_action_decode(
+    canceled_message.message
+)
+expect(canceled.event_id).to_equal(2)
+expect(canceled.pressed).to_be(false)
+expect(broker.pointer_pressed).to_be(false)
+expect(broker.pending_operation).to_equal("pointer-cancel")
+expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+
+step("Acknowledge the cancellation before releasing its owner state")
+val ack_wire = browser_renderer_frame_encode_with_state_and_images(
+    draw_ir_composition("", "", "", []),
+    1, 41, 3, -1, 0, "", 0, "", "", "", "", "", []
+)
+val ack = browser_renderer_frame_decode(
+    browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(1), ack_wire.wire
+    ).message,
+    640, 480
+)
+broker.expected_reply_to_request_id = 3
+expect(broker._accept_decoded_frame(ack, 1).ok).to_be(true)
+expect(broker.pending_pointer_cancel_event_id).to_equal(0)
 ```
 
 </details>

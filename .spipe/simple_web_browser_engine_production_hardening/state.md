@@ -2477,3 +2477,13 @@ implementation in progress / target evidence blocked
   The previously recorded SimpleScript PASS and CSS-cascade/bookmark-title
   designs remain unchanged. None of these rows gains executable or merge
   evidence here.
+- primary navigation pointer cancellation repair (2026-07-30): A fresh scoped
+  cycle replaces the rejected host-only clear with broker-owned
+  `pointer_pressed` and `pending_pointer_cancel_event_id` state. Primary chrome
+  press and off-target release now call the existing renderer pointer-up wire;
+  resource-job contention retains the cancellation and the hosted poll loop
+  retries it before bookmark/resize work. The focused modern SSpec asserts the
+  press wire, deferred release wire, redundant no-op, busy retention, and exact
+  retry event ID. The mirrored manuals were updated structurally by hand
+  because the deployed binary is not admitted for docgen; executable and
+  generated-doc evidence remain pending and no PASS is claimed.

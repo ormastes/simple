@@ -467,7 +467,7 @@ implemented, merged, or cited as production evidence.
 | Lane | Bundle | Status | Remaining gate |
 | --- | --- | --- | --- |
 | SimpleScript listeners | `/tmp/simple-simple-script-events.5IEatF` | production + modern SSpec + phase-2 manual + final high review PASS; prior vacuous system claim repaired through canonical `BrowserSession.dispatch_dom_event`, with no `inject_dom_event` path | held, unexecuted, and unmerged until an admitted current full pure-Simple CLI runs the focused SSpec once |
-| navigation chrome | `/tmp/simple-browser-chrome-state.XRePMs` | HOLD/FAIL at the three-review cap: `clear_chrome_pressed_controls` clears the host page owner but omits the existing renderer `begin_pointer(..., false)` cancel/up, leaving possible stale DOM pressed state; SSpec checks only integer clear | repair renderer cancellation and its exact oracle in a fresh cycle; do not merge |
+| primary navigation chrome cancellation | `/tmp/simple-web-pointer-safe` | fresh-cycle implementation records page-pointer ownership in `HostedBrowserRendererProcess`, emits or retains the existing pointer-up cancellation before primary chrome ownership, and adds modern SSpec wire/retry oracles | bounded static review; focused specs/docgen remain held for an admitted current pure-Simple CLI |
 
 The held listener row covers exact UTF-8 target/event/action bounds
 `2048/2049`, `64/65`, `4096/4097`; capacity `256/257`, duplicate identity and

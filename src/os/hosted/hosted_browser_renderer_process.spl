@@ -280,6 +280,8 @@ pub class HostedBrowserRendererProcess:
     deferred_commands: [_HostedBrowserDeferredCommand]
     pending_scroll_event_id: i64
     pending_scroll_delta_milli_y: i64
+    pointer_pressed: bool
+    pending_pointer_cancel_event_id: i64
     document_url: text
     document_origin: text
     site_lock: text
@@ -378,6 +380,8 @@ pub class HostedBrowserRendererProcess:
             deferred_commands: [],
             pending_scroll_event_id: 0,
             pending_scroll_delta_milli_y: 0,
+            pointer_pressed: false,
+            pending_pointer_cancel_event_id: 0,
             document_url: "",
             document_origin: "",
             site_lock: "",
@@ -993,6 +997,8 @@ pub class HostedBrowserRendererProcess:
         self.deferred_commands = []
         self.pending_scroll_event_id = 0
         self.pending_scroll_delta_milli_y = 0
+        self.pointer_pressed = false
+        self.pending_pointer_cancel_event_id = 0
         self.retained_image_resources = []
         self._clear_document_title()
         if self.pid > 0:
@@ -1539,6 +1545,7 @@ pub class HostedBrowserRendererProcess:
         val queueable_pending = (
             self.pending_operation == "advance" or
             self.pending_operation == "pointer" or
+            self.pending_operation == "pointer-cancel" or
             self.pending_operation == "key" or
             self.pending_operation == "text" or
             self.pending_operation == "bookmark-snapshot" or
@@ -1791,12 +1798,18 @@ pub class HostedBrowserRendererProcess:
         if self.pending_operation == "resize":
             self.width = self.pending_resize_width
             self.height = self.pending_resize_height
+        val completed_pointer_cancel = (
+            self.pending_operation == "pointer-cancel"
+        )
         self.pending_resize_width = 0
         self.pending_resize_height = 0
         self.next_animation_ms = frame.next_animation_ms
         self.retained_image_resources = frame.image_resources
         self.command_deadline_ms = 0
         self.pending_operation = ""
+        if completed_pointer_cancel:
+            self.pointer_pressed = false
+            self.pending_pointer_cancel_event_id = 0
         val deferred_reason = self._activate_deferred_command()
         if deferred_reason != "":
             return self.fail(deferred_reason)
@@ -2088,6 +2101,8 @@ pub class HostedBrowserRendererProcess:
             if val Ok(_) = started:
                 self.pending_scroll_event_id = 0
                 self.pending_scroll_delta_milli_y = 0
+                self.pointer_pressed = false
+                self.pending_pointer_cancel_event_id = 0
                 self._clear_document_title()
         started
 
@@ -2354,20 +2369,80 @@ pub class HostedBrowserRendererProcess:
     ) -> HostedBrowserRendererResult:
         if self.state != "active":
             return self.fail("invalid-renderer-state")
-        self._await_frame(browser_renderer_pointer_encode(
+        if pressed and self.pending_pointer_cancel_event_id > 0:
+            return _renderer_result(
+                false, "pointer-cancel-pending", _empty_composition()
+            )
+        if not pressed and not self.pointer_pressed:
+            return _renderer_result(
+                false, "pointer-release-target-mismatch",
+                _empty_composition()
+            )
+        val result = self._await_frame(browser_renderer_pointer_encode(
             self.generation, self.next_request_id,
             event_id, x, y, pressed
         ), timeout_ms)
+        if result.ok:
+            self.pointer_pressed = pressed
+        result
 
     me begin_pointer(
         event_id: i64, x: i64, y: i64, pressed: bool, timeout_ms: i64
     ) -> Result<bool, text>:
         if self.state != "active":
             return Err("invalid-renderer-state")
-        self._begin_after_animation(browser_renderer_pointer_encode(
+        if pressed and self.pending_pointer_cancel_event_id > 0:
+            return Err("pointer-cancel-pending")
+        if not pressed and not self.pointer_pressed:
+            return Err("pointer-release-target-mismatch")
+        val started = self._begin_after_animation(browser_renderer_pointer_encode(
             self.generation, self.next_request_id,
             event_id, x, y, pressed
         ), "pointer", timeout_ms)
+        if val Ok(_) = started:
+            self.pointer_pressed = pressed
+            if not pressed:
+                self.pending_pointer_cancel_event_id = 0
+        started
+
+    me cancel_pointer(
+        event_id: i64, timeout_ms: i64
+    ) -> Result<bool, text>:
+        if not self.pointer_pressed:
+            if self.pending_pointer_cancel_event_id <= 0:
+                return Ok(false)
+            if self.command_deadline_ms > 0 or self.network_job_handle > 0:
+                return Ok(false)
+        val cancel_event_id = if self.pending_pointer_cancel_event_id > 0:
+            self.pending_pointer_cancel_event_id
+        else:
+            event_id
+        val request = browser_renderer_pointer_encode(
+            self.generation, self.next_request_id,
+            cancel_event_id, -1, -1, false
+        )
+        match self._begin_after_animation(
+            request, "pointer-cancel", timeout_ms
+        ):
+            Err(reason):
+                if reason == "renderer-busy":
+                    self.pointer_pressed = false
+                    self.pending_pointer_cancel_event_id = cancel_event_id
+                    return Ok(true)
+                Err(reason)
+            Ok(started):
+                self.pointer_pressed = false
+                self.pending_pointer_cancel_event_id = cancel_event_id
+                Ok(started)
+
+    me flush_pointer_cancel(timeout_ms: i64) -> Result<bool, text>:
+        if self.pending_pointer_cancel_event_id <= 0:
+            return Ok(false)
+        if self.command_deadline_ms > 0 or self.network_job_handle > 0:
+            return Ok(false)
+        self.cancel_pointer(
+            self.pending_pointer_cancel_event_id, timeout_ms
+        )
 
     me queue_scroll(
         event_id: i64, delta_milli_y: i64
