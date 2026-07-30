@@ -1025,3 +1025,120 @@ compilation unit, for both JIT and native builds alike.
 and `module_level_val_from_call.spl` remain in the differential harness
 exactly as before (`known_good: "interpret"`), correctly still failing.
 No source change made this pass for the write side, per instruction.
+
+## 13. AOT/native-build confirmation — PROVED, not inferred: this affects shipped binaries, not just `simple run`
+
+**§12.3's "very unlikely... not verified here" inference is now resolved
+empirically, per explicit instruction not to reason from shared-code-path
+alone.** Both repro forms were built through the real AOT compile path
+and the produced standalone executables were run directly, with no
+`simple run`, no interpreter, and no JIT involved at any point.
+
+### 13.1 Finding a working AOT compile path
+
+`native-build --entry`/`--entry-closure` (the whole-project builder this
+document has been diffing against `run_file_jit` throughout) turned out
+to be **independently broken in this environment** for reasons unrelated
+to gap 8: every invocation attempted (varying `--source`, `--entry-closure`,
+scratch directory vs. in-worktree, deployed binary vs. a freshly built
+candidate) failed with `native-build worker exited with code 1`, tracing
+(with `--verbose`) to parse/lint errors in unrelated compiler-internal
+files (`src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`,
+`src/compiler/80.driver/shb/shb_writer.spl`) that this document's
+two-line repro has no connection to — the worker appears to pull in a
+large, unintended slice of `src/compiler/*` regardless of `--source`/
+`--entry-closure` scoping. This is a real, reproducible tooling defect,
+distinct from and unrelated to gap 8; flagging it here rather than
+silently routing around it, since it blocks the more "canonical" whole-
+program path this document otherwise uses for comparison.
+
+**Routed around it via a different, working command:** `simple compile
+<file.spl> --native --backend cranelift -o <output>` — a genuine
+single-file AOT compiler distinct from `native-build`, unaffected by the
+above. Produced real, standalone, stripped, position-independent ELF
+executables (confirmed via `file`) for both repro forms.
+
+### 13.2 Results — both forms, PROVED
+
+Compiled with this pass's own fixed candidate binary (carrying §11's
+read-side fix), then ran the produced executables directly, no interpreter
+in the loop at all:
+
+```
+$ simple compile aot_test1/main.spl --native --backend cranelift -o aot1
+Compiled ... -> aot1 (11496 bytes, opt-level=aggressive)
+$ file aot1
+aot1: ELF 64-bit LSB pie executable, x86-64, ... stripped
+$ ./aot1
+BASE=10 DERIVED=0
+```
+
+```
+$ simple compile aot_test2/main.spl --native --backend cranelift -o aot2
+Compiled ... -> aot2 (11304 bytes, opt-level=aggressive)
+$ ./aot2
+X=0
+```
+
+Both reproduced 3/3 repeat runs, fully deterministic (this is a
+compile-time codegen omission, not a runtime race — no reason to expect
+otherwise, and confirmed rather than assumed).
+
+**`BASE=10` is correct — §11's read-side fix extends cleanly to AOT.** A
+useful bonus confirmation: `generate_module_init`/`declare_data` and the
+HIR type-inference fixed in §11.2 are shared between the JIT and
+native/AOT codegen paths (as §11.3 already established for the
+architecture question), so the read-side fix benefits both compilation
+modes, not just `run_file_jit`. This was not separately claimed before
+this pass verified it directly.
+
+**`DERIVED=0` and `X=0` are wrong — the write-side defect is confirmed in
+real, shipped, standalone binaries.** Not a `simple run` artifact, not a
+JIT-only defect, not an inference from `generate_module_init` being
+"shared code" — a real executable, run with no Simple toolchain present
+at runtime at all, silently produces a zeroed global exactly as `run_file_jit`
+does.
+
+### 13.3 Independent corroboration already on record
+
+`test/01_unit/compiler/lint/module_init_literal_spec.spl` and
+`src/compiler/35.semantics/lint/module_init_literal.spl` (MODINIT001,
+already landed, pre-dating this pass) exist specifically to catch this
+class of declaration via static text-heuristic analysis ahead of a real
+build. The lint's own file header states directly: *"On `native-build
+--entry`, a module-level `val`/`var` whose initializer is not a bare
+literal may need runtime init code."* Its test spec's header is more
+direct still: *"the bug class where native-build --entry silently skips
+the initializer and the global reads a zero/nil default."* This pass's
+§13.2 result is the first *build-and-run* confirmation of what that
+lint was already written to defend against — the two records now
+corroborate each other rather than one merely assuming the other.
+
+### 13.4 Severity — escalated, explicitly
+
+Every other JIT-only finding in this whole session's chase (all eight
+originally-named gaps, and every candidate this document's sweep
+enumerated) was scoped to `simple run`'s JIT engine: a real defect, but
+one that a compiled, shipped artifact would not carry, and one
+`SIMPLE_JIT_STRICT`/differential-harness-style tooling could in principle
+catch pre-ship. **This one is different in kind.** A module-level global
+whose initializer needs genuine runtime evaluation — any function call,
+any reference to another global, any non-trivial expression — silently
+compiles to a zeroed value in a **shipped, standalone binary**, with no
+interpreter fallback available (native/AOT binaries have no interpreter
+to fall back to) and no runtime signal that anything went wrong. This
+applies to every native/AOT-compiled target this codegen backend serves,
+which per this document's and the wider session's own references
+includes SimpleOS and other compiled targets, not only the interpreter-
+adjacent `run_file_jit` path this whole document otherwise concerns
+itself with.
+
+### 13.5 Still not attempted as a fix
+
+Per instruction, unchanged from §12.4: this needs a new codegen
+capability (lowering an arbitrary initializer expression as real code
+inside the generated module-init function, for both the JIT and
+native/AOT backends that share `generate_module_init`), not a patch, and
+sits alongside gap 9's cross-file-identity question as a second, separate,
+now more clearly consequential architecture decision for whoever picks
+this up next.
