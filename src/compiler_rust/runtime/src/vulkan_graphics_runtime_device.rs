@@ -57,6 +57,16 @@ pub extern "C" fn rt_vulkan_select_device(id: i64) -> i64 {
         state.set_error(format!("Device index {id} out of range (count={dev_count})"));
         return 0;
     }
+    if state.has_device_resources() {
+        state.set_error("Cannot select a Vulkan device while device resources are live".to_string());
+        return 0;
+    }
+    if let Some(device) = state.device.clone() {
+        if let Err(error) = device.wait_idle() {
+            state.set_error(format!("select_device wait_idle: {error}"));
+            return 0;
+        }
+    }
 
     let instance = match &state.instance {
         Some(i) => i.clone(),

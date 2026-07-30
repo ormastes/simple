@@ -47,6 +47,9 @@ pub extern "C" fn rt_vulkan_create_framebuffer(_device: i64, rp: i64, image: i64
         Ok(fb) => {
             let handle = alloc_handle();
             state.framebuffers.insert(handle, fb);
+            state
+                .framebuffer_attachments
+                .insert(handle, vec![img.clone(), depth_img.clone()]);
             handle
         }
         Err(e) => {
@@ -76,6 +79,7 @@ pub extern "C" fn rt_vulkan_create_framebuffer(
 pub extern "C" fn rt_vulkan_destroy_framebuffer(fb: i64) -> i64 {
     let mut state = STATE.lock();
     if state.framebuffers.remove(&fb).is_some() {
+        state.framebuffer_attachments.remove(&fb);
         1
     } else {
         0

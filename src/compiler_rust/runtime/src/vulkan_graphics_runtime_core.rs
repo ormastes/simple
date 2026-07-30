@@ -92,6 +92,48 @@ pub(super) struct QuarantinedComputeSubmission {
     pub owners: ComputeCommandOwners,
 }
 
+#[cfg(feature = "vulkan")]
+pub(super) struct GraphicsCommandOwners {
+    pub device: Arc<VulkanDevice>,
+    pub render_passes: Vec<Arc<RenderPass>>,
+    pub framebuffers: Vec<Arc<Framebuffer>>,
+    pub framebuffer_attachments: Vec<Arc<VulkanImage>>,
+    pub pipelines: Vec<Arc<GraphicsPipeline>>,
+    pub buffers: Vec<Arc<VulkanBuffer>>,
+    pub descriptor_sets: Vec<Arc<DescriptorSet>>,
+    pub descriptor_pools: Vec<Arc<DescriptorPool>>,
+    pub descriptor_set_layouts: Vec<Arc<DescriptorSetLayout>>,
+    pub images: Vec<Arc<VulkanImage>>,
+    pub samplers: Vec<Arc<Sampler>>,
+}
+
+#[cfg(feature = "vulkan")]
+impl GraphicsCommandOwners {
+    pub fn new(device: Arc<VulkanDevice>) -> Self {
+        Self {
+            device,
+            render_passes: Vec::new(),
+            framebuffers: Vec::new(),
+            framebuffer_attachments: Vec::new(),
+            pipelines: Vec::new(),
+            buffers: Vec::new(),
+            descriptor_sets: Vec::new(),
+            descriptor_pools: Vec::new(),
+            descriptor_set_layouts: Vec::new(),
+            images: Vec::new(),
+            samplers: Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+pub(super) struct QuarantinedGraphicsSubmission {
+    pub device: Arc<VulkanDevice>,
+    pub fence: Fence,
+    pub command_buffer: vk::CommandBuffer,
+    pub owners: GraphicsCommandOwners,
+}
+
 pub(super) fn alloc_handle() -> i64 {
     NEXT_HANDLE.fetch_add(1, Ordering::Relaxed)
 }
@@ -111,7 +153,8 @@ pub(super) struct VulkanState {
     pub compute_commands: HashMap<i64, ComputeCommandOwners>,
     pub quarantined_compute: Vec<QuarantinedComputeSubmission>,
     pub accepted_compute_submit_count: i64,
-    pub quarantined_graphics: Vec<(Arc<VulkanDevice>, Fence, vk::CommandBuffer)>,
+    pub graphics_commands: HashMap<i64, GraphicsCommandOwners>,
+    pub quarantined_graphics: Vec<QuarantinedGraphicsSubmission>,
     pub strings: HashMap<String, CString>,
     pub semaphores: HashMap<i64, Semaphore>,
     pub images: HashMap<i64, Arc<VulkanImage>>,
@@ -120,6 +163,7 @@ pub(super) struct VulkanState {
     pub graphics_pipelines: HashMap<i64, Arc<GraphicsPipeline>>,
     pub font_graphics_resources: HashMap<i64, FontGraphicsResources>,
     pub framebuffers: HashMap<i64, Arc<Framebuffer>>,
+    pub framebuffer_attachments: HashMap<i64, Vec<Arc<VulkanImage>>>,
     pub swapchains: HashMap<i64, Arc<VulkanSwapchain>>,
     pub descriptor_pools: HashMap<i64, Arc<DescriptorPool>>,
     pub descriptor_set_layouts: HashMap<i64, Arc<DescriptorSetLayout>>,
@@ -147,6 +191,7 @@ impl VulkanState {
             compute_commands: HashMap::new(),
             quarantined_compute: Vec::new(),
             accepted_compute_submit_count: 0,
+            graphics_commands: HashMap::new(),
             quarantined_graphics: Vec::new(),
             strings: HashMap::new(),
             semaphores: HashMap::new(),
@@ -156,6 +201,7 @@ impl VulkanState {
             graphics_pipelines: HashMap::new(),
             font_graphics_resources: HashMap::new(),
             framebuffers: HashMap::new(),
+            framebuffer_attachments: HashMap::new(),
             swapchains: HashMap::new(),
             descriptor_pools: HashMap::new(),
             descriptor_set_layouts: HashMap::new(),
@@ -182,6 +228,30 @@ impl VulkanState {
             .ok_or_else(|| "Vulkan device not initialised — call rt_vulkan_init() first".to_string())
     }
 
+    pub fn has_device_resources(&self) -> bool {
+        !self.buffers.is_empty()
+            || !self.compute_pipelines.is_empty()
+            || !self.shader_modules.is_empty()
+            || !self.fences.is_empty()
+            || !self.compute_commands.is_empty()
+            || !self.quarantined_compute.is_empty()
+            || !self.graphics_commands.is_empty()
+            || !self.quarantined_graphics.is_empty()
+            || !self.semaphores.is_empty()
+            || !self.images.is_empty()
+            || !self.samplers.is_empty()
+            || !self.render_passes.is_empty()
+            || !self.graphics_pipelines.is_empty()
+            || !self.font_graphics_resources.is_empty()
+            || !self.framebuffers.is_empty()
+            || !self.swapchains.is_empty()
+            || !self.descriptor_pools.is_empty()
+            || !self.descriptor_set_layouts.is_empty()
+            || !self.descriptor_sets.is_empty()
+            || !self.surfaces.is_empty()
+            || self.window_manager.is_some()
+    }
+
     pub fn cached_cstr(&mut self, value: String) -> *const c_char {
         self.strings
             .entry(value.clone())
@@ -204,11 +274,17 @@ impl VulkanState {
     }
 
     pub fn clean_quarantined_graphics(&mut self) {
-        if let Some(device) = self.device.clone() {
-            for (device, _, cmd) in self.quarantined_graphics.drain(..) {
-                let _ = device.free_graphics_command(cmd);
+        let mut pending = Vec::new();
+        for submission in self.quarantined_graphics.drain(..) {
+            if submission
+                .device
+                .free_graphics_command(submission.command_buffer)
+                .is_err()
+            {
+                pending.push(submission);
             }
         }
+        self.quarantined_graphics = pending;
     }
 }
 
@@ -297,13 +373,19 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
         state.clean_quarantined_compute();
         state.clean_quarantined_graphics();
     }
+    if !state.quarantined_compute.is_empty() || !state.quarantined_graphics.is_empty() {
+        state.set_error("shutdown: quarantined command cleanup failed".to_string());
+        return 0;
+    }
     state.descriptor_sets.clear();
     state.descriptor_set_owners.clear();
     state.descriptor_set_buffers.clear();
     state.compute_commands.clear();
+    state.graphics_commands.clear();
     state.descriptor_pools.clear();
     state.descriptor_set_layouts.clear();
     state.framebuffers.clear();
+    state.framebuffer_attachments.clear();
     state.font_graphics_resources.clear();
     state.graphics_pipelines.clear();
     state.render_passes.clear();
@@ -316,8 +398,6 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     state.shader_spirv.clear();
     state.buffers.clear();
     state.fences.clear();
-    state.quarantined_compute.clear();
-    state.quarantined_graphics.clear();
     state.semaphores.clear();
     state.semaphore_pool = None;
     state.window_manager = None;

@@ -1,6 +1,6 @@
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{
-    alloc_handle, vk, ComputeCommandOwners, DescriptorPool, DescriptorSet, DescriptorSetLayout,
+    alloc_handle, vk, ComputeCommandOwners, DescriptorPool, DescriptorSet, DescriptorSetLayout, GraphicsCommandOwners,
     QuarantinedComputeSubmission, STATE,
 };
 #[cfg(feature = "vulkan")]
@@ -19,9 +19,9 @@ use std::sync::Arc;
 pub extern "C" fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64 {
     let mut state = STATE.lock();
     let device = match state.require_device() {
-        Ok(d) => d,
-        Err(e) => {
-            state.set_error(e);
+        Ok(device) => device,
+        Err(error) => {
+            state.set_error(error);
             return 0;
         }
     };
@@ -162,9 +162,9 @@ pub extern "C" fn rt_vulkan_begin_compute() -> i64 {
         return 0;
     }
     let device = match state.require_device() {
-        Ok(d) => d,
-        Err(e) => {
-            state.set_error(e);
+        Ok(device) => device,
+        Err(error) => {
+            state.set_error(error);
             return 0;
         }
     };
@@ -191,6 +191,10 @@ pub extern "C" fn rt_vulkan_begin_compute() -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_begin_graphics() -> i64 {
     let mut state = STATE.lock();
+    if !state.quarantined_graphics.is_empty() {
+        state.set_error("begin_graphics: prior completion is unknown".to_string());
+        return 0;
+    }
     let device = match state.require_device() {
         Ok(d) => d,
         Err(e) => {
@@ -199,7 +203,13 @@ pub extern "C" fn rt_vulkan_begin_graphics() -> i64 {
         }
     };
     match device.begin_graphics_command() {
-        Ok(cmd) => cmd.as_raw() as i64,
+        Ok(cmd) => {
+            let handle = cmd.as_raw() as i64;
+            state
+                .graphics_commands
+                .insert(handle, GraphicsCommandOwners::new(device));
+            handle
+        }
         Err(e) => {
             state.set_error(format!("begin_graphics: {e}"));
             0
@@ -514,9 +524,9 @@ pub extern "C" fn rt_vulkan_end_compute(_cmd: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_end_graphics(cmd: i64) -> i64 {
     let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(device) => device,
-        Err(_) => return 0,
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
     i64::from(
         device
@@ -564,15 +574,16 @@ pub extern "C" fn rt_vulkan_discard_graphics_command(cmd: i64) -> i64 {
     if cmd == 0 {
         return 0;
     }
-    let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(device) => device,
-        Err(_) => return 0,
+    let mut state = STATE.lock();
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
     if device
         .free_graphics_command(vk::CommandBuffer::from_raw(cmd as u64))
         .is_ok()
     {
+        state.graphics_commands.remove(&cmd);
         1
     } else {
         0
@@ -630,9 +641,9 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
         return 0;
     }
     let device = match state.require_device() {
-        Ok(d) => d,
-        Err(e) => {
-            state.set_error(e);
+        Ok(device) => device,
+        Err(error) => {
+            state.set_error(error);
             return 0;
         }
     };
@@ -694,24 +705,26 @@ pub extern "C" fn rt_vulkan_accepted_compute_submit_count() -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_submit_graphics_and_wait_fence(cmd: i64) -> i64 {
-    use super::vulkan_graphics_runtime_core::{alloc_handle, Fence};
+    use super::vulkan_graphics_runtime_core::{alloc_handle, Fence, QuarantinedGraphicsSubmission};
     use crate::vulkan::device::FencedSubmitError;
 
     if cmd == 0 {
         return 0;
     }
     let mut state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(e) => {
-            state.set_error(e);
-            return 0;
-        }
+    if !state.graphics_commands.contains_key(&cmd) {
+        state.set_error("submit_graphics_fence: unknown command handle".to_string());
+        return 0;
+    }
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
     let fence = match Fence::new(device.clone(), false) {
         Ok(fence) => fence,
         Err(e) => {
             let _ = device.free_graphics_command(vk::CommandBuffer::from_raw(cmd as u64));
+            state.graphics_commands.remove(&cmd);
             state.set_error(format!("submit_graphics_fence create: {e}"));
             return 0;
         }
@@ -719,17 +732,27 @@ pub extern "C" fn rt_vulkan_submit_graphics_and_wait_fence(cmd: i64) -> i64 {
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     match device.submit_graphics_command_with_fence(vk_cmd, &fence) {
         Ok(()) => {
+            state.graphics_commands.remove(&cmd);
             let handle = alloc_handle();
             state.fences.insert(handle, fence);
             handle
         }
         Err(FencedSubmitError::NotSubmitted(e)) => {
+            state.graphics_commands.remove(&cmd);
             state.set_error(format!("submit_graphics_fence: {e}"));
             0
         }
         Err(FencedSubmitError::CompletionUnknown(e)) => {
             state.set_error(format!("submit_graphics_fence completion unknown: {e}"));
-            state.quarantined_graphics.push((device, fence, vk_cmd));
+            let Some(owners) = state.graphics_commands.remove(&cmd) else {
+                return 0;
+            };
+            state.quarantined_graphics.push(QuarantinedGraphicsSubmission {
+                device,
+                fence,
+                command_buffer: vk_cmd,
+                owners,
+            });
             -1
         }
     }

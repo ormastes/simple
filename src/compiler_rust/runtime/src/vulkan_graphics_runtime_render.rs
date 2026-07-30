@@ -2,6 +2,8 @@
 use super::vulkan_graphics_runtime_core::{vk, STATE};
 #[cfg(feature = "vulkan")]
 use ash::vk::Handle;
+#[cfg(feature = "vulkan")]
+use std::sync::Arc;
 
 // ============================================================================
 // Graphics Draw Commands
@@ -18,16 +20,19 @@ pub extern "C" fn rt_vulkan_begin_render_pass_gfx(
     cb: f64,
     ca: f64,
 ) -> i64 {
-    let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(_) => return 0,
+    let mut state = STATE.lock();
+    if !state.graphics_commands.contains_key(&cmd) {
+        return 0;
+    }
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
-    let render_pass = match state.render_passes.get(&rp) {
+    let render_pass = match state.render_passes.get(&rp).cloned() {
         Some(r) => r,
         None => return 0,
     };
-    let framebuffer = match state.framebuffers.get(&fb) {
+    let framebuffer = match state.framebuffers.get(&fb).cloned() {
         Some(f) => f,
         None => return 0,
     };
@@ -60,11 +65,20 @@ pub extern "C" fn rt_vulkan_begin_render_pass_gfx(
         .framebuffer(framebuffer.handle())
         .render_area(render_area)
         .clear_values(&clear_values);
+    let framebuffer_attachments = match state.framebuffer_attachments.get(&fb).cloned() {
+        Some(attachments) => attachments,
+        None => return 0,
+    };
 
     unsafe {
         device
             .handle()
             .cmd_begin_render_pass(vk_cmd, &begin_info, vk::SubpassContents::INLINE);
+    }
+    if let Some(owners) = state.graphics_commands.get_mut(&cmd) {
+        owners.render_passes.push(render_pass);
+        owners.framebuffers.push(framebuffer);
+        owners.framebuffer_attachments.extend(framebuffer_attachments);
     }
     1
 }
@@ -89,9 +103,9 @@ pub extern "C" fn rt_vulkan_begin_render_pass_gfx(
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_end_render_pass_gfx(cmd: i64) -> i64 {
     let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(_) => return 0,
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     unsafe {
@@ -111,12 +125,15 @@ pub extern "C" fn rt_vulkan_end_render_pass_gfx(_cmd: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_bind_graphics_pipeline(cmd: i64, pipeline: i64) -> i64 {
-    let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(_) => return 0,
+    let mut state = STATE.lock();
+    if !state.graphics_commands.contains_key(&cmd) {
+        return 0;
+    }
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
-    let pipe = match state.graphics_pipelines.get(&pipeline) {
+    let pipe = match state.graphics_pipelines.get(&pipeline).cloned() {
         Some(p) => p,
         None => return 0,
     };
@@ -125,6 +142,9 @@ pub extern "C" fn rt_vulkan_bind_graphics_pipeline(cmd: i64, pipeline: i64) -> i
         device
             .handle()
             .cmd_bind_pipeline(vk_cmd, vk::PipelineBindPoint::GRAPHICS, pipe.handle());
+    }
+    if let Some(owners) = state.graphics_commands.get_mut(&cmd) {
+        owners.pipelines.push(pipe);
     }
     1
 }
@@ -140,12 +160,15 @@ pub extern "C" fn rt_vulkan_bind_graphics_pipeline(_cmd: i64, _pipeline: i64) ->
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_bind_vertex_buffer(cmd: i64, buffer: i64) -> i64 {
-    let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(_) => return 0,
+    let mut state = STATE.lock();
+    if !state.graphics_commands.contains_key(&cmd) {
+        return 0;
+    }
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
-    let buf = match state.buffers.get(&buffer) {
+    let buf = match state.buffers.get(&buffer).cloned() {
         Some(b) => b,
         None => return 0,
     };
@@ -154,6 +177,9 @@ pub extern "C" fn rt_vulkan_bind_vertex_buffer(cmd: i64, buffer: i64) -> i64 {
         device
             .handle()
             .cmd_bind_vertex_buffers(vk_cmd, 0, &[buf.handle()], &[0]);
+    }
+    if let Some(owners) = state.graphics_commands.get_mut(&cmd) {
+        owners.buffers.push(buf);
     }
     1
 }
@@ -169,12 +195,15 @@ pub extern "C" fn rt_vulkan_bind_vertex_buffer(_cmd: i64, _buffer: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_bind_index_buffer(cmd: i64, buffer: i64) -> i64 {
-    let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(_) => return 0,
+    let mut state = STATE.lock();
+    if !state.graphics_commands.contains_key(&cmd) {
+        return 0;
+    }
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
-    let buf = match state.buffers.get(&buffer) {
+    let buf = match state.buffers.get(&buffer).cloned() {
         Some(b) => b,
         None => return 0,
     };
@@ -183,6 +212,9 @@ pub extern "C" fn rt_vulkan_bind_index_buffer(cmd: i64, buffer: i64) -> i64 {
         device
             .handle()
             .cmd_bind_index_buffer(vk_cmd, buf.handle(), 0, vk::IndexType::UINT32);
+    }
+    if let Some(owners) = state.graphics_commands.get_mut(&cmd) {
+        owners.buffers.push(buf);
     }
     1
 }
@@ -219,29 +251,35 @@ pub extern "C" fn rt_vulkan_bind_texture(_cmd: i64, _slot: i64, _image: i64, _sa
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_bind_font_texture(cmd: i64, pipeline: i64, image: i64, sampler: i64) -> i64 {
-    let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(v) => v,
-        Err(_) => return 0,
+    let mut state = STATE.lock();
+    if !state.quarantined_graphics.is_empty() {
+        state.set_error("bind_font_texture: prior completion is unknown".to_string());
+        return 0;
+    }
+    if !state.graphics_commands.contains_key(&cmd) {
+        return 0;
+    }
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
-    let resources = match state.font_graphics_resources.get(&pipeline) {
+    let (descriptor_set, descriptor_pool, descriptor_set_layout) = match state.font_graphics_resources.get(&pipeline) {
+        Some(v) => (v.set.clone(), v._pool.clone(), v._layout.clone()),
+        None => return 0,
+    };
+    let graphics_pipeline = match state.graphics_pipelines.get(&pipeline).cloned() {
         Some(v) => v,
         None => return 0,
     };
-    let graphics_pipeline = match state.graphics_pipelines.get(&pipeline) {
+    let image = match state.images.get(&image).cloned() {
         Some(v) => v,
         None => return 0,
     };
-    let image = match state.images.get(&image) {
+    let sampler = match state.samplers.get(&sampler).cloned() {
         Some(v) => v,
         None => return 0,
     };
-    let sampler = match state.samplers.get(&sampler) {
-        Some(v) => v,
-        None => return 0,
-    };
-    if resources
-        .set
+    if descriptor_set
         .update_image_sampler(
             0,
             image.view(),
@@ -252,7 +290,17 @@ pub extern "C" fn rt_vulkan_bind_font_texture(cmd: i64, pipeline: i64, image: i6
     {
         return 0;
     }
-    let sets = [resources.set.handle()];
+    for owners in state.graphics_commands.values_mut() {
+        if owners
+            .descriptor_sets
+            .iter()
+            .any(|owner| Arc::ptr_eq(owner, &descriptor_set))
+        {
+            owners.images.push(image.clone());
+            owners.samplers.push(sampler.clone());
+        }
+    }
+    let sets = [descriptor_set.handle()];
     unsafe {
         device.handle().cmd_bind_descriptor_sets(
             vk::CommandBuffer::from_raw(cmd as u64),
@@ -262,6 +310,14 @@ pub extern "C" fn rt_vulkan_bind_font_texture(cmd: i64, pipeline: i64, image: i6
             &sets,
             &[],
         );
+    }
+    if let Some(owners) = state.graphics_commands.get_mut(&cmd) {
+        owners.pipelines.push(graphics_pipeline);
+        owners.descriptor_sets.push(descriptor_set);
+        owners.descriptor_pools.push(descriptor_pool);
+        owners.descriptor_set_layouts.push(descriptor_set_layout);
+        owners.images.push(image);
+        owners.samplers.push(sampler);
     }
     1
 }
@@ -278,9 +334,9 @@ pub extern "C" fn rt_vulkan_bind_font_texture(_cmd: i64, _pipeline: i64, _image:
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_set_viewport(cmd: i64, x: f64, y: f64, w: f64, h: f64) -> i64 {
     let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(_) => return 0,
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     let viewport = vk::Viewport {
@@ -309,9 +365,9 @@ pub extern "C" fn rt_vulkan_set_viewport(_cmd: i64, _x: f64, _y: f64, _w: f64, _
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_set_scissor(cmd: i64, x: i64, y: i64, w: i64, h: i64) -> i64 {
     let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(_) => return 0,
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     let scissor = vk::Rect2D {
@@ -342,9 +398,9 @@ pub extern "C" fn rt_vulkan_set_scissor(_cmd: i64, _x: i64, _y: i64, _w: i64, _h
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_draw(cmd: i64, vertex_count: i64) -> i64 {
     let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(_) => return 0,
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     unsafe {
@@ -365,9 +421,9 @@ pub extern "C" fn rt_vulkan_draw(_cmd: i64, _vertex_count: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_draw_indexed(cmd: i64, index_count: i64) -> i64 {
     let state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(_) => return 0,
+    let device = match state.graphics_commands.get(&cmd) {
+        Some(owners) => owners.device.clone(),
+        None => return 0,
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     unsafe {
