@@ -330,3 +330,19 @@ real nonidentity child and established affine error reasons; Lane 16 still
 admits tautological assertions and lacks a time import; Lane 18 must compare
 10k RSS to the post-warmup baseline and narrow its NFR claims; Lane 19 must
 define one render-receipt return contract and exclude checkout-only EOL churn.
+
+## Production surface audit batch (2026-07-30)
+
+| Surface | Current-main finding | Evidence / patch | Status |
+|---|---|---|---|
+| HTML/CSS rendering | Negative `z-index` parses as positive and has no negative paint bucket | Held renderer RED spec proves signed computed/Draw IR values, ordering, and three pixels | STATIC REVIEW PASS; implementation blocked |
+| JavaScript animation | Production `nogc_sync_mut` JS already implements rAF/cancel/one-shot timing | Held REQ-WEB-BROWSER-006 regression adds cancellation, timestamp, DOM/style, and one-shot coverage | EXPECTED GREEN; checker blocked |
+| Sandbox/network | Literal private destinations lack early broker rejection; runtime still owns post-DNS public-address enforcement | Held policy RED/patch found an IPv4-mapped IPv6 gap at final review | FAIL at three-cycle cap |
+| Events/forms | Label activation does not forward default action to associated controls | Held integration RED covers explicit/nested labels, repeat order, serialization, and reopen reset | STATIC REVIEW PASS; implementation blocked |
+| Navigation/chrome | Address UI retained and submitted unbounded raw input | Held UI-bound 2048-byte patch covers multibyte/pre-trim denial and state preservation | STATIC REVIEW PASS; checker blocked |
+| HTTPS/TLS | Production WM runtime provider omitted Cargo `runtime-tls` | `9ada3ff6face`; TLS-enabled provider build PASS | MERGED; live certificate matrix pending |
+
+Next merge order is address bound, label activation, negative stacking, then
+their manuals. Private-egress classification must first cover IPv4-mapped IPv6
+and preserve connection-time resolution enforcement. No held Simple patch is
+promoted without a current pure-Simple checker.
