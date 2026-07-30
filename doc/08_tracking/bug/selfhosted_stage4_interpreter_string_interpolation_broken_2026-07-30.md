@@ -239,3 +239,95 @@ delegation expected a missing worktree-local `bin/simple`; it is not a PASS.
 Concurrent sessions were already writing the shared bootstrap cache and
 running full bootstrap jobs, so this lane did not start a competing build.
 Qualified phase-2/3 build plus the focused SSpec remain required.
+
+## Verification 2026-07-30 — candidate fix built and run, does NOT resolve the defect
+
+Status: **PHASE-2/3 EXECUTION SUPPLIED. RESULT: FAIL.**
+
+Two things established first, both worth recording on their own:
+
+1. **A commit existing in the shared git object store is not a landed fix.**
+   `d0633b7dad3`/`ae4c3d56ce3` (identical message and diffstat, likely a jj
+   amend pair) are reachable by hash but `git branch --contains ae4c3d56ce3`
+   returns nothing — neither is reachable from the `main` bookmark. They are
+   another session's in-progress working copy, evidenced by a live
+   `.git/index.lock` held by that session at the time of this check.
+2. **A landed fix is not a verified one.** The commit's own note above
+   ("execution pending... not a PASS... phase-2/3 build plus the focused
+   SSpec remain required") already said as much; this section supplies that
+   missing verification.
+
+### What was done
+
+In an isolated worktree, cherry-picked all 10 files changed by `ae4c3d56ce3`
+(`git checkout ae4c3d56ce3 -- <paths>`, valid because the commit object is
+content-addressable regardless of which ref, if any, points at it) on top of
+a clean checkout, then rebuilt self-hosted from scratch:
+
+- Stage2 (`bootstrap_main.spl` entry): 727 compiled, 0 cached, 0 failed.
+- Stage4 (`main.spl` entry, from stage2): 1491 compiled, 0 cached, 0 failed.
+  Binary: `build/bootstrap/stage4-fix3` (26114 KB).
+
+Every run below printed the binary's own
+`simple: seed sibling not found, skipping delegation: ...` line, confirming
+genuine self-hosted execution rather than silent delegation to the Rust seed
+(see the delegation-trap note earlier in this document).
+
+### Result: identical to the unfixed baseline
+
+`interp_matrix.spl` (bare var, expression, named var with surrounding text,
+paren-nested expression, `{{`/`}}` escapes only, mixed escape+real
+interpolation in one string) run under `stage4-fix3`:
+
+```
+hello {name}
+sum is {x + y}
+prefix-{name}-suffix
+nested {(x + y) * 2}
+escaped braces: {not interp}
+mix {{literal}} then {name} then {{end}}
+```
+
+Every case that should interpolate still prints the literal `{...}` text
+unchanged — byte-for-byte the same as the original unfixed binary. The fix
+in `ae4c3d56ce3` makes no observable difference to `print("...{expr}...")`
+under `run`.
+
+### Their own regression spec crashes
+
+```
+$ build/bootstrap/stage4-fix3 run test/01_unit/compiler/interpreter/string_interpolation_spec.spl
+simple: seed sibling not found, skipping delegation: .../build/bootstrap/simple_seed
+runtime error: field access on nil receiver
+timeout: the monitored command dumped core
+```
+
+`test/01_unit/compiler/interpreter/string_interpolation_spec.spl` (added by
+the same commit) does not pass under genuine self-hosted execution — it
+segfaults on a nil field access and dumps core. The frontend wiring
+(`core_frontend_parse` in `src/compiler/10.frontend/core/frontend.spl` calling
+`expand_string_interpolations` after each module parse) looked structurally
+plausible on inspection but was not debugged further — that is explicitly
+out of scope for this pass (see below).
+
+### Reproducible paths
+
+- Worktree: `/tmp/claude-1000/-home-ormastes-dev-pub-simple/0cc17245-8e37-4666-9b9d-9106c84b9a47/scratchpad/wt-fix`
+  (uncommitted; has `ae4c3d56ce3`'s 10 files cherry-picked on top of a clean
+  checkout at `6acd3586345`).
+- Binaries: `build/bootstrap/stage2-fix3`, `build/bootstrap/stage4-fix3`.
+- Matrix probe: `/tmp/claude-1000/-home-ormastes-dev-pub-simple/0cc17245-8e37-4666-9b9d-9106c84b9a47/scratchpad/interp_matrix.spl`.
+- Minimal `literal`-as-identifier repro (a separate, unrelated defect hit
+  while independently implementing this fix, filed on its own — see
+  `doc/08_tracking/bug/seed_lexer_literal_soft_keyword_shadows_identifier_2026-07-30.md`):
+  `repro7.spl`/`repro8.spl`/`repro9.spl` in the same scratchpad directory.
+
+### Disposition
+
+Not deployed. The live `bin/release/x86_64-unknown-linux-gnu/simple` is
+unchanged; rollback remains at
+`bin/release/x86_64-unknown-linux-gnu/simple.rollback-llvm-seed-2026-07-30`.
+Crash debugging on `ae4c3d56ce3`'s `expand_string_interpolations` path is
+being handed to a fresh lane, starting from this localization (frontend
+wiring point identified, failure mode is a nil-receiver field access,
+reproducible via the regression spec above) rather than continued here.
