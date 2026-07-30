@@ -18,6 +18,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_capability_payload_message,
     browser_renderer_fetch_request_encode,
     browser_renderer_frame_encode_with_state_and_images,
+    browser_renderer_frame_encode_with_history_proposal,
     browser_renderer_frame_encode_with_state_and_retained_images_and_title,
     browser_renderer_image_resource_revisions,
     browser_renderer_referenced_image_resources,
@@ -25,6 +26,10 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_navigation_decode,
     browser_renderer_network_response_decode,
     browser_renderer_resize_decode
+}
+use std.common.web.browser_renderer_history_protocol.{
+    browser_renderer_history_proposal_decode,
+    browser_renderer_history_proposal_encode
 }
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResourceRevision
@@ -211,30 +216,77 @@ fn _worker_frame(
         ""
     else:
         browser_bookmark_stored_title(session.current_title)
-    val legacy_encoded = browser_renderer_frame_encode_with_state_and_retained_images_and_title(
-        layout.composition,
-        message.generation,
-        response_request_id,
-        message.request_id,
-        _worker_next_animation_ms(
-            css_animation_next_ms,
-            session.next_script_timer_due_ms(),
-            caret_due_ms,
-            animation_time_ms
-        ),
-        layout.material_witness.cpu_composited_count,
-        layout.material_witness.cpu_composited_sha256,
-        layout.material_witness.solid_material_count,
-        layout.material_witness.solid_material_sha256,
-        _worker_diagnostics(session),
-        session.current_url,
-        _worker_network_history_neighbor(session.history_back_url()),
-        _worker_network_history_neighbor(session.history_forward_url()),
-        document_title,
-        composition_revision,
-        frame_image_resources,
-        prior_image_resource_revisions
-    )
+    var history_proposal = ""
+    if session.history_proposal_action != "":
+        var history_urls: [text] = []
+        for entry in session.history:
+            history_urls.push(entry.url)
+        match browser_renderer_history_proposal_encode(
+            session.history_proposal_action,
+            session.history_proposal_url_kind,
+            session.history_proposal_raw_url,
+            session.current_url,
+            message.command_capability,
+            session.current_index.to_i64(),
+            history_urls
+        ):
+            Err(reason):
+                return _worker_result_reject(
+                    reason, true, animation_time_ms
+                )
+            Ok(value):
+                history_proposal = value
+    val legacy_encoded = if history_proposal != "":
+        browser_renderer_frame_encode_with_history_proposal(
+            layout.composition,
+            message.generation,
+            response_request_id,
+            message.request_id,
+            _worker_next_animation_ms(
+                css_animation_next_ms,
+                session.next_script_timer_due_ms(),
+                caret_due_ms,
+                animation_time_ms
+            ),
+            layout.material_witness.cpu_composited_count,
+            layout.material_witness.cpu_composited_sha256,
+            layout.material_witness.solid_material_count,
+            layout.material_witness.solid_material_sha256,
+            _worker_diagnostics(session),
+            session.current_url,
+            _worker_network_history_neighbor(session.history_back_url()),
+            _worker_network_history_neighbor(session.history_forward_url()),
+            document_title,
+            history_proposal,
+            composition_revision,
+            frame_image_resources,
+            prior_image_resource_revisions
+        )
+    else:
+        browser_renderer_frame_encode_with_state_and_retained_images_and_title(
+            layout.composition,
+            message.generation,
+            response_request_id,
+            message.request_id,
+            _worker_next_animation_ms(
+                css_animation_next_ms,
+                session.next_script_timer_due_ms(),
+                caret_due_ms,
+                animation_time_ms
+            ),
+            layout.material_witness.cpu_composited_count,
+            layout.material_witness.cpu_composited_sha256,
+            layout.material_witness.solid_material_count,
+            layout.material_witness.solid_material_sha256,
+            _worker_diagnostics(session),
+            session.current_url,
+            _worker_network_history_neighbor(session.history_back_url()),
+            _worker_network_history_neighbor(session.history_forward_url()),
+            document_title,
+            composition_revision,
+            frame_image_resources,
+            prior_image_resource_revisions
+        )
     val encoded = browser_renderer_capability_bind_encoded(
         legacy_encoded,
         message.generation,
@@ -246,6 +298,10 @@ fn _worker_frame(
         return _worker_result_reject(
             encoded.reason, true, animation_time_ms
         )
+    if history_proposal != "":
+        session.history_proposal_action = ""
+        session.history_proposal_url_kind = "O"
+        session.history_proposal_raw_url = ""
     HostedBrowserRendererWorkerResult(
         ok: true,
         reason: "ok",
@@ -605,6 +661,19 @@ pub class HostedBrowserRendererWorkerSession:
         val navigation = browser_renderer_navigation_decode(message)
         if not navigation.ok:
             return navigation.reason
+        var joined_history_index: i64 = -1
+        if navigation.history_snapshot != "":
+            val snapshot = browser_renderer_history_proposal_decode(
+                navigation.history_snapshot
+            )
+            if (not snapshot.ok or snapshot.action != "N" or
+                snapshot.authority_capability !=
+                    self.active_command_capability or
+                not self.browser.load_parent_history_snapshot(
+                    snapshot.urls, snapshot.current_index
+                )):
+                return "invalid-history-snapshot"
+            joined_history_index = snapshot.current_index
         if navigation.action == "back":
             if not self.browser.can_go_back():
                 return "cannot go back"
@@ -643,8 +712,30 @@ pub class HostedBrowserRendererWorkerSession:
                 navigation.body,
                 navigation.content_type
             )
+        elif (navigation.action == "back" and
+            joined_history_index >= 0):
+            val started = self.browser.begin_network_navigation(
+                navigation.url, "GET", "", "", ""
+            )
+            if val Ok(_) = started:
+                self.browser.pending_navigation_target_index = (
+                    joined_history_index - 1
+                ).to_i32()
+                self.browser.pending_navigation_push_history = false
+            started
         elif navigation.action == "back":
             self.browser.go_back_to(navigation.url)
+        elif (navigation.action == "forward" and
+            joined_history_index >= 0):
+            val started = self.browser.begin_network_navigation(
+                navigation.url, "GET", "", "", ""
+            )
+            if val Ok(_) = started:
+                self.browser.pending_navigation_target_index = (
+                    joined_history_index + 1
+                ).to_i32()
+                self.browser.pending_navigation_push_history = false
+            started
         elif navigation.action == "forward":
             self.browser.go_forward_to(navigation.url)
         else:
@@ -658,6 +749,9 @@ pub class HostedBrowserRendererWorkerSession:
         if actual_url != navigation.url:
             return "navigation-target-mismatch"
         if navigation.action == "back" or navigation.action == "forward":
+            self.browser.history_proposal_action = "T"
+            self.browser.history_proposal_url_kind = "O"
+            self.browser.history_proposal_raw_url = ""
             self.scroll_milli_y = 0
         ""
 

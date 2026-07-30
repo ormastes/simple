@@ -623,13 +623,42 @@ winning computed value may lower to clip semantics; it must remain distinct
 from `hidden`, `auto`, and `scroll`.
 
 History authority remains parent-owned. The current neighbor snapshot is not a
-security boundary for History API mutation. The renderer protocol must carry a
-bounded complete ledger and current index, with a parent-issued witness binding
-the committed document generation, origin, and effective CSP. The parent must
-validate the complete ledger/index against its authority and commit it
-atomically, rejecting unknown, reordered, over-budget, out-of-range, origin- or
-witness-mismatched state. Until that structural protocol exists, neighbor
-matching does not close the history/CSP row.
+security boundary for History API mutation. The renderer protocol carries a
+bounded complete ledger and current index under the random outer `SBR2`
+capability. A private parent `HistoryAuthority` binds that capability to the
+generation, root request, reply request, canonical origin, effective
+CSP-ready/policy, and sandbox scripts decision.
+
+### SBRHJ1 canonical parent-history protocol (2026-07-30)
+
+Status: **IMPLEMENTED STATIC / EXECUTION HELD**.
+
+`SBRHJ1` is the only renderer history-mutation representation. It carries the
+complete bounded URL ledger, current index, resolved current URL, action, URL
+argument tag, and matching SBR2 capability inside nested `SBRF9`. URL tags are exact:
+`O` is omitted and has the literal wire sentinel `-`; `N` is JavaScript null
+and has the same sentinel but resolves the WebIDL string `null`; `V` is an
+explicit value and always carries canonical base64, including a zero-length
+field for the explicit empty string. Thus omitted, null, and empty can never
+alias. Resolving `V` with an empty field returns the complete committed URL,
+including its query and fragment.
+
+The renderer proposes only `P` push, `R` replace, or parent-commanded `T`
+traversal. The parent validates the admitted private `HistoryAuthority`,
+canonical same-origin resolution, complete ledger, and index. It derives the
+sole legal transition off-side from its own 64-entry ledger, including forward
+truncation and oldest-entry eviction, then performs one swap of URLs, CSP rows,
+index, document URL, and chrome neighbors. Malformed, stale, forged, reordered,
+non-neighbor, over-budget, cross-origin, CSP-unready, or sandbox-script-denied
+proposals never mutate committed state. Renderer failure closes transport but
+preserves established parent chrome/history; explicit close clears it.
+Frames without `SBRHJ1` cannot mutate history; their neighbor strings are
+ignored and parent chrome is derived only from the authoritative ledger.
+
+Site-swap/restart and parent back/forward commands carry a bounded `SBRHJ1`
+`N` snapshot in `SBN2` so a fresh renderer joins authority before navigation.
+Back/forward reload a joined placeholder through the broker and replace the
+parent-selected index; the renderer does not own a private durable ledger.
 
 ### Proposed cascade-owner root fix
 

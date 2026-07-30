@@ -147,6 +147,8 @@ pub struct BrowserRendererFrameDecodeResult:
     history_current_url: text
     history_back_url: text
     history_forward_url: text
+    history_proposal_present: bool
+    history_proposal: text
     document_title_present: bool
     document_title: text
     composition: DrawIrComposition
@@ -179,6 +181,7 @@ pub struct BrowserRendererNavigationDecodeResult:
     headers: text
     body: text
     content_type: text
+    history_snapshot: text
 
 pub struct BrowserRendererBookmarkSnapshotDecodeResult:
     ok: bool
@@ -1041,7 +1044,8 @@ fn _browser_renderer_navigation_reject(
         method: "",
         headers: "",
         body: "",
-        content_type: ""
+        content_type: "",
+        history_snapshot: ""
     )
 
 fn _browser_renderer_navigation_result(
@@ -1050,7 +1054,8 @@ fn _browser_renderer_navigation_result(
     method: text,
     headers: text,
     body: text,
-    content_type: text
+    content_type: text,
+    history_snapshot: text = ""
 ) -> BrowserRendererNavigationDecodeResult:
     BrowserRendererNavigationDecodeResult(
         ok: true,
@@ -1060,7 +1065,8 @@ fn _browser_renderer_navigation_result(
         method: method,
         headers: headers,
         body: body,
-        content_type: content_type
+        content_type: content_type,
+        history_snapshot: history_snapshot
     )
 
 fn _browser_renderer_navigation_fields_valid(
@@ -1113,6 +1119,36 @@ pub fn browser_renderer_navigation_encode(
         action + url + method + headers + body + content_type
     )
 
+pub fn browser_renderer_navigation_encode_with_history(
+    generation: i64,
+    request_id: i64,
+    action: text,
+    url: text,
+    method: text,
+    headers: text,
+    body: text,
+    content_type: text,
+    history_snapshot: text
+) -> BrowserRendererEncodeResult:
+    if (not _browser_renderer_navigation_fields_valid(
+            action, url, method, headers, body, content_type
+        ) or history_snapshot == "" or
+        history_snapshot.len() > BROWSER_RENDERER_MAX_PAYLOAD_BYTES):
+        return _browser_renderer_reject_encode("invalid-navigation")
+    val action_len = text_to_bytes(action).len()
+    val url_len = text_to_bytes(url).len()
+    val method_len = text_to_bytes(method).len()
+    val headers_len = text_to_bytes(headers).len()
+    val body_len = text_to_bytes(body).len()
+    val content_type_len = text_to_bytes(content_type).len()
+    val history_len = text_to_bytes(history_snapshot).len()
+    browser_renderer_message_encode(
+        "navigation", generation, request_id,
+        "SBN2\t{action_len}\t{url_len}\t{method_len}\t{headers_len}\t{body_len}\t{content_type_len}\t{history_len}\n" +
+        action + url + method + headers + body + content_type +
+        history_snapshot
+    )
+
 pub fn browser_renderer_navigation_decode(
     message: BrowserRendererMessage
 ) -> BrowserRendererNavigationDecodeResult:
@@ -1124,7 +1160,8 @@ pub fn browser_renderer_navigation_decode(
     val fields = _browser_renderer_byte_slice(
         message.payload, 0, header_end
     ).split("\t")
-    if fields.len() != 7 or fields[0] != "SBN1":
+    val history_frame = fields.len() == 8 and fields[0] == "SBN2"
+    if not ((fields.len() == 7 and fields[0] == "SBN1") or history_frame):
         return _browser_renderer_navigation_reject("malformed-navigation")
     var lengths: [i64] = []
     var field_index: i64 = 1
@@ -1139,8 +1176,11 @@ pub fn browser_renderer_navigation_decode(
     if (lengths[0] > 16 or lengths[1] > BROWSER_RENDERER_MAX_URL_BYTES or
         lengths[2] > 16 or
         lengths[3] > BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES or
-        lengths[4] > BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES or
-        lengths[5] > 256):
+         lengths[4] > BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES or
+         lengths[5] > 256 or
+         (history_frame and
+            (lengths[6] <= 0 or
+                lengths[6] > BROWSER_RENDERER_MAX_PAYLOAD_BYTES))):
         return _browser_renderer_navigation_reject(
             "navigation-too-large"
         )
@@ -1174,13 +1214,22 @@ pub fn browser_renderer_navigation_decode(
         message.payload, offset, lengths[5]
     )
     offset = offset + lengths[5]
+    val history_snapshot = if history_frame:
+        _browser_renderer_network_piece(
+            message.payload, offset, lengths[6]
+        )
+    else:
+        ""
+    if history_frame:
+        offset = offset + lengths[6]
     if (offset != message.payload.len() or
         not _browser_renderer_navigation_fields_valid(
             action, url, method, headers, body, content_type
         )):
         return _browser_renderer_navigation_reject("invalid-navigation")
     _browser_renderer_navigation_result(
-        action, url, method, headers, body, content_type
+        action, url, method, headers, body, content_type,
+        history_snapshot
     )
 
 fn _browser_renderer_bookmark_snapshot_reject(
@@ -1821,6 +1870,8 @@ fn _browser_renderer_frame_reject(reason: text) -> BrowserRendererFrameDecodeRes
         history_current_url: "",
         history_back_url: "",
         history_forward_url: "",
+        history_proposal_present: false,
+        history_proposal: "",
         document_title_present: false,
         document_title: "",
         composition: draw_ir_composition("", "", "", []),
@@ -2282,7 +2333,9 @@ fn _browser_renderer_frame_encode_with_state_and_images(
     prior_revisions: [SimpleOsHostGpuImageResourceRevision],
     retained_wire: bool,
     document_title: text,
-    title_wire: bool
+    title_wire: bool,
+    history_proposal: text,
+    history_proposal_wire: bool
 ) -> BrowserRendererEncodeResult:
     val current_len = text_to_bytes(history_current_url).len()
     val back_len = text_to_bytes(history_back_url).len()
@@ -2293,6 +2346,10 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         document_title
     ):
         return _browser_renderer_reject_encode("invalid-document-title")
+    if (history_proposal_wire and
+        (history_proposal == "" or
+            history_proposal.len() > BROWSER_RENDERER_MAX_PAYLOAD_BYTES)):
+        return _browser_renderer_reject_encode("invalid-history-proposal")
     if (not _browser_renderer_history_url_valid(
             history_current_url, current_len
         ) or not _browser_renderer_history_url_valid(
@@ -2374,6 +2431,10 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         text_to_bytes(document_title).len().to_i64()
     else:
         0
+    val history_proposal_payload = if history_proposal_wire:
+        base64_encode(history_proposal)
+    else:
+        ""
     val encoded_images = base64url_encode_bytes(image_payload.bytes)
     if encoded_images.len() > (
         BROWSER_RENDERER_MAX_IMAGE_RESOURCE_ENCODED_BYTES
@@ -2386,7 +2447,8 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         BROWSER_RENDERER_MAX_PAYLOAD_BYTES - BROWSER_RENDERER_MAX_HEADER_BYTES -
             diagnostic_payload.len() - current_payload.len() -
             back_payload.len() - forward_payload.len() -
-            title_payload.len() - title_bytes - encoded_images.len(),
+            title_payload.len() - title_bytes -
+            history_proposal_payload.len() - encoded_images.len(),
         BROWSER_RENDERER_MAX_COMMANDS
     )
     if not encoded.ok:
@@ -2400,7 +2462,9 @@ fn _browser_renderer_frame_encode_with_state_and_images(
     else:
         solid_material_sha256
     val revision_frame = composition_revision >= 0
-    val frame_version = if title_wire:
+    val frame_version = if history_proposal_wire:
+        "SBRF8"
+    elif title_wire:
         "SBRF8"
     elif revision_frame:
         "SBRF7"
@@ -2412,6 +2476,10 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         "\t{title_payload.len()}"
     else:
         ""
+    val history_proposal_field = if history_proposal_wire:
+        "\t{history_proposal_payload.len()}"
+    else:
+        ""
     val revision_field = if revision_frame:
         "\t{composition_revision}"
     else:
@@ -2421,11 +2489,12 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         "\t{solid_material_count}\t{solid_digest}\t{next_animation_ms}" +
         "\t{diagnostic_payload.len()}\t{current_payload.len()}" +
         "\t{back_payload.len()}\t{forward_payload.len()}" +
-        title_field +
+        title_field + history_proposal_field +
         "\t{image_payload.resource_count}\t{image_payload.checksum}" +
         "\t{encoded_images.len()}{revision_field}\n" +
         diagnostic_payload + current_payload + back_payload +
-        forward_payload + title_payload + encoded_images +
+        forward_payload + title_payload + history_proposal_payload +
+        encoded_images +
         bytes_to_text(encoded.bytes)
     )
     browser_renderer_message_encode("frame", generation, request_id, payload)
@@ -2451,7 +2520,7 @@ pub fn browser_renderer_frame_encode_with_state_and_images(
         next_animation_ms, cpu_composited_count, cpu_composited_sha256,
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
-        -1, image_resources, [], false, "", false
+        -1, image_resources, [], false, "", false, "", false
     )
 
 pub fn browser_renderer_frame_encode_with_state_and_retained_images(
@@ -2482,7 +2551,7 @@ pub fn browser_renderer_frame_encode_with_state_and_retained_images(
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
         composition_revision, image_resources, prior_revisions, true,
-        "", false
+        "", false, "", false
     )
 
 pub fn browser_renderer_frame_encode_with_state_and_retained_images_and_title(
@@ -2514,7 +2583,40 @@ pub fn browser_renderer_frame_encode_with_state_and_retained_images_and_title(
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
         composition_revision, image_resources, prior_revisions, true,
-        document_title, true
+        document_title, true, "", false
+    )
+
+pub fn browser_renderer_frame_encode_with_history_proposal(
+    composition: DrawIrComposition,
+    generation: i64,
+    request_id: i64,
+    reply_to_request_id: i64,
+    next_animation_ms: i64,
+    cpu_composited_count: i32,
+    cpu_composited_sha256: text,
+    solid_material_count: i32,
+    solid_material_sha256: text,
+    diagnostics: text,
+    history_current_url: text,
+    history_back_url: text,
+    history_forward_url: text,
+    document_title: text,
+    history_proposal: text,
+    composition_revision: i64,
+    image_resources: [SimpleOsHostGpuImageResource],
+    prior_revisions: [SimpleOsHostGpuImageResourceRevision]
+) -> BrowserRendererEncodeResult:
+    if composition_revision < 0:
+        return _browser_renderer_reject_encode(
+            "invalid-composition-revision"
+        )
+    _browser_renderer_frame_encode_with_state_and_images(
+        composition, generation, request_id, reply_to_request_id,
+        next_animation_ms, cpu_composited_count, cpu_composited_sha256,
+        solid_material_count, solid_material_sha256, diagnostics,
+        history_current_url, history_back_url, history_forward_url,
+        composition_revision, image_resources, prior_revisions, true,
+        document_title, true, history_proposal, true
     )
 
 pub fn browser_renderer_frame_reply_to_request_id(
@@ -2534,7 +2636,8 @@ pub fn browser_renderer_frame_reply_to_request_id(
         (fields.len() == 14 and
             (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
         (fields.len() == 15 and fields[0] == "SBRF7") or
-        (fields.len() == 16 and fields[0] == "SBRF8")):
+        (fields.len() == 16 and fields[0] == "SBRF8") or
+        (fields.len() == 17 and fields[0] == "SBRF8")):
         return -1
     val reply_to_request_id = fields[1].to_i64() ?? -1
     if (reply_to_request_id <= 0 or
@@ -2563,27 +2666,41 @@ fn _browser_renderer_frame_decode(
         (fields.len() == 14 and
             (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
         (fields.len() == 15 and fields[0] == "SBRF7") or
-        (fields.len() == 16 and fields[0] == "SBRF8")
+        (fields.len() == 16 and fields[0] == "SBRF8") or
+        (fields.len() == 17 and fields[0] == "SBRF8")
     )
     val image_frame = (
         (fields.len() == 14 and
             (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
         (fields.len() == 15 and fields[0] == "SBRF7") or
-        (fields.len() == 16 and fields[0] == "SBRF8")
+        (fields.len() == 16 and fields[0] == "SBRF8") or
+        (fields.len() == 17 and fields[0] == "SBRF8")
     )
     val retained_frame = (
         (fields.len() == 14 and fields[0] == "SBRF6") or
         (fields.len() == 15 and fields[0] == "SBRF7") or
-        (fields.len() == 16 and fields[0] == "SBRF8")
+        (fields.len() == 16 and fields[0] == "SBRF8") or
+        (fields.len() == 17 and fields[0] == "SBRF8")
     )
-    val title_frame = fields.len() == 16 and fields[0] == "SBRF8"
+    val title_frame = (
+        (fields.len() == 16 and fields[0] == "SBRF8") or
+        (fields.len() == 17 and fields[0] == "SBRF8")
+    )
+    val history_proposal_frame = (
+        fields.len() == 17 and fields[0] == "SBRF8"
+    )
     if not legacy_frame and not diagnostic_frame and not state_frame:
         return _browser_renderer_frame_reject("malformed-material-witness")
     val reply_to_request_id = _browser_renderer_positive_i64(fields[1])
     val cpu_count = fields[2].to_i64() ?? -1
     val solid_count = fields[4].to_i64() ?? -1
     val next_animation_ms = fields[6].to_i64() ?? -2
-    val revision_field_index = if title_frame: 15 else: 14
+    val revision_field_index = if history_proposal_frame:
+        16
+    elif title_frame:
+        15
+    else:
+        14
     val composition_revision = if (
         fields[0] == "SBRF7" or title_frame
     ):
@@ -2608,6 +2725,7 @@ fn _browser_renderer_frame_decode(
     var history_current_url = ""
     var history_back_url = ""
     var history_forward_url = ""
+    var history_proposal = ""
     var document_title = ""
     var image_resources: [SimpleOsHostGpuImageResource] = []
     var draw_ir_start = witness_end + 1
@@ -2691,7 +2809,12 @@ fn _browser_renderer_frame_decode(
                 return _browser_renderer_frame_reject("invalid-frame-state")
             draw_ir_start = history_end
             if image_frame:
-                val resource_field = if title_frame: 12 else: 11
+                val resource_field = if history_proposal_frame:
+                    13
+                elif title_frame:
+                    12
+                else:
+                    11
                 val resource_count = fields[resource_field].to_i64() ?? -1
                 val resource_checksum = fields[
                     resource_field + 1
@@ -2729,6 +2852,40 @@ fn _browser_renderer_frame_decode(
                             "malformed-document-title"
                         )
                     image_start = title_end
+                var history_proposal_end = image_start
+                if history_proposal_frame:
+                    val history_proposal_len = fields[12].to_i64() ?? -1
+                    if (history_proposal_len <= 0 or
+                        history_proposal_len >
+                            BROWSER_RENDERER_MAX_PAYLOAD_BYTES or
+                        str(history_proposal_len) != fields[12]):
+                        return _browser_renderer_frame_reject(
+                            "malformed-history-proposal"
+                        )
+                    history_proposal_end = _browser_renderer_checked_end(
+                        image_start, history_proposal_len,
+                        message.payload.len()
+                    )
+                    if history_proposal_end < 0:
+                        return _browser_renderer_frame_reject(
+                            "malformed-history-proposal"
+                        )
+                    val encoded_history_proposal = (
+                        _browser_renderer_byte_slice(
+                            message.payload, image_start,
+                            history_proposal_end
+                        )
+                    )
+                    history_proposal = base64_decode(
+                        encoded_history_proposal
+                    )
+                    if (history_proposal == "" or
+                        base64_encode(history_proposal) !=
+                            encoded_history_proposal):
+                        return _browser_renderer_frame_reject(
+                            "invalid-history-proposal"
+                        )
+                    image_start = history_proposal_end
                 val image_end = _browser_renderer_checked_end(
                     image_start, encoded_image_len, message.payload.len()
                 )
@@ -2846,6 +3003,8 @@ fn _browser_renderer_frame_decode(
         history_current_url: history_current_url,
         history_back_url: history_back_url,
         history_forward_url: history_forward_url,
+        history_proposal_present: history_proposal_frame,
+        history_proposal: history_proposal,
         document_title_present: title_frame and document_title != "",
         document_title: document_title,
         composition: decoded.composition,

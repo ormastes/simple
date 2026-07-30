@@ -51,7 +51,8 @@ use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, B
 use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
 use std.js.types.pair.{Pair}
 use std.gc_async_mut.web.browser_session_url.{
-    resolve_relative_url, collapse_url_dot_segments,
+    resolve_relative_url, browser_history_resolve_url,
+    collapse_url_dot_segments,
     url_protocol, url_pathname, url_origin, url_host, url_search, url_hash
 }
 use std.gc_async_mut.web.browser_session_html.{
@@ -2350,6 +2351,9 @@ impl BrowserSession:
                         active_document_url, href
                     )
                     if navigation_mode == "pushState" or navigation_mode == "replaceState":
+                        self.history_proposal_action = ""
+                        self.history_proposal_url_kind = ""
+                        self.history_proposal_raw_url = ""
                         var history_url_val = state.runtime.get_host_property(
                             state.location_id,
                             "__simple_history_url"
@@ -2359,27 +2363,57 @@ impl BrowserSession:
                                 state.history_id,
                                 "__simple_url"
                             )
+                        var history_url_kind = "O"
+                        var history_raw_url = ""
                         match history_url_val:
                             JsValue.String(history_url):
-                                if history_url.len() > 0:
-                                    val candidate = resolve_relative_url(
-                                        active_document_url, history_url
-                                    )
-                                    val document_origin = url_origin(active_document_url)
-                                    if (
-                                        document_origin != "" and
-                                        url_origin(candidate) == document_origin and
-                                        rt_text_to_bytes(candidate).len() <= 8192
-                                    ):
-                                        next_href = candidate
-                                    else:
-                                        next_href = active_document_url
-                                        navigation_mode = ""
-                                        self._append_warning(
-                                            "invalid history URL blocked"
-                                        )
-                            _:
+                                history_url_kind = "V"
+                                history_raw_url = history_url
+                            JsValue.Null:
+                                history_url_kind = "N"
+                                history_raw_url = "null"
+                            JsValue.Undefined:
                                 pass_dn
+                            _:
+                                navigation_mode = ""
+                                self._append_warning(
+                                    "invalid history URL blocked"
+                                )
+                        if navigation_mode != "":
+                            val candidate = if history_url_kind == "O":
+                                active_document_url
+                            else:
+                                browser_history_resolve_url(
+                                    active_document_url, history_raw_url
+                                )
+                            val document_origin = url_origin(active_document_url)
+                            if (
+                                document_origin != "" and
+                                url_origin(candidate) == document_origin and
+                                rt_text_to_bytes(candidate).len() <= 8192
+                            ):
+                                next_href = candidate
+                                self.history_proposal_action = if (
+                                    navigation_mode == "pushState"
+                                ):
+                                    "P"
+                                else:
+                                    "R"
+                                self.history_proposal_url_kind = (
+                                    history_url_kind
+                                )
+                                self.history_proposal_raw_url = if (
+                                    history_url_kind == "V"
+                                ):
+                                    history_raw_url
+                                else:
+                                    ""
+                            else:
+                                next_href = active_document_url
+                                navigation_mode = ""
+                                self._append_warning(
+                                    "invalid history URL blocked"
+                                )
                         val history_state_val = state.runtime.get_host_property(
                             state.location_id,
                             "__simple_history_state"
@@ -2423,6 +2457,18 @@ impl BrowserSession:
                         self._push_runtime_history_entry()
                     else if navigation_mode == "pushState":
                         self._push_runtime_history_entry()
+                    else if (navigation_mode == "replaceState" and
+                        self.current_index >= 0 and
+                        self.current_index < self.history.len()):
+                        val current_entry = self.history[self.current_index]
+                        self.history[self.current_index] = (
+                            BrowserHistoryEntry.create_with_policy(
+                                next_href,
+                                self.current_title,
+                                current_entry.source_html,
+                                current_entry.content_security_policy
+                            )
+                        )
             _:
                 pass_dn
 

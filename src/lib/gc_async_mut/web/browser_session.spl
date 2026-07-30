@@ -982,7 +982,7 @@ class BrowserRuntimeState:
         runtime = runtime_after_location_api
         var runtime_after_history_api = runtime
         val _history_api_result = runtime_after_history_api.eval(
-            "history.pushState = function(state, title, url) { location.__simple_navigation_mode = 'pushState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = url; }; history.replaceState = function(state, title, url) { location.__simple_navigation_mode = 'replaceState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = url; };"
+            "history.pushState = function(state, title, url) { location.__simple_navigation_mode = 'pushState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = location.href; }; history.replaceState = function(state, title, url) { location.__simple_navigation_mode = 'replaceState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = location.href; };"
         )
         runtime = runtime_after_history_api
         if is_guest_runtime:
@@ -1684,6 +1684,9 @@ class BrowserSession:
     runtime_enabled: bool
     history: [BrowserHistoryEntry]
     current_index: i32
+    history_proposal_action: text
+    history_proposal_url_kind: text
+    history_proposal_raw_url: text
     is_loading: bool
     pending_url: text
     pending_navigation_target_index: i32
@@ -1756,6 +1759,9 @@ class BrowserSession:
             runtime_enabled: runtime_enabled,
             history: [],
             current_index: -1,
+            history_proposal_action: "",
+            history_proposal_url_kind: "O",
+            history_proposal_raw_url: "",
             is_loading: false,
             pending_url: "",
             pending_navigation_target_index: -1,
@@ -3033,6 +3039,35 @@ impl BrowserSession:
         if not self.can_go_forward():
             return ""
         self.history[self.current_index + 1].url
+
+    me load_parent_history_snapshot(urls: [text], index: i64) -> bool:
+        if (urls.len() <= 0 or urls.len() > BROWSER_HISTORY_MAX_ENTRIES or
+            index < 0 or index >= urls.len().to_i64()):
+            return false
+        var entries: [BrowserHistoryEntry] = []
+        var entry_index: i64 = 0
+        while entry_index < urls.len().to_i64():
+            val raw_url = urls[entry_index]
+            val canonical = match normalize_network_navigation_url(raw_url):
+                Err(_):
+                    return false
+                Ok(value):
+                    value
+            if canonical != raw_url:
+                return false
+            val current_entry = entry_index == index
+            entries.push(BrowserHistoryEntry.create_with_policy(
+                canonical,
+                if current_entry: self.current_title else: canonical,
+                if current_entry: self.source_html else: "",
+                if current_entry: self.content_security_policy else: ""
+            ))
+            entry_index = entry_index + 1
+        self.history = entries
+        self.current_index = index.to_i32()
+        self.current_url = urls[index]
+        self.document_url = urls[index]
+        true
 
     me set_home_url(url: text):
         val _ = self.try_set_home_url(url)

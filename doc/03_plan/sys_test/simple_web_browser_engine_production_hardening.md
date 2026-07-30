@@ -487,11 +487,12 @@ production row remains RED until trusted provider build provenance exists.
   importance, `@layer` order, specificity, source order, shorthand/longhand,
   and CSS-wide values before asserting clip-without-scroll-container pixels.
   Existing flattened-rule evidence cannot prove that contract.
-- History API parent evidence remains structurally RED. A future protocol SSpec
-  must send the bounded complete ledger plus current index and parent-issued CSP
-  witness, then prove atomic rejection of unknown, reordered, oversized,
-  out-of-range, origin-mismatched, or witness-mismatched state. A current/back/
-  forward neighbor tuple is not sufficient evidence.
+- History API parent evidence is implemented statically and execution-held.
+  Its protocol SSpec sends the bounded complete ledger plus current index and
+  random SBR2 capability, then proves atomic rejection of unknown,
+  reordered, oversized, out-of-range, origin-mismatched, or
+  capability-mismatched state. A current/back/forward neighbor tuple is not
+  accepted as authority.
 - Primary renderer close-retry is HOLD/FAIL at the three-review cap. Fatal poll
   can revoke authority inside an already-entered block, after which
   `begin_resize` lacks a fresh authority check and may call the closed/failed
@@ -645,12 +646,40 @@ Rust-seed result is admissible.
 
 - Hosted HTTPS reached the three-review cap: HSTS belongs to the broker, not
   the worker, and renderer launch must unset `LD_LIBRARY_PATH`.
-- Parent history reached the three-review cap: `SBRHJ1` lacks one canonical
-  omitted/null/empty URL representation and an exact fragment-preserving
-  empty-string oracle.
+- Parent history now uses canonical `SBRHJ1`: `O/-` is omitted, `N/-` is
+  JavaScript null, and `V/<canonical-base64>` is an explicit value, including
+  zero-length base64 for empty. The focused SSpec must prove empty `V`
+  preserves the committed fragment.
 
-All other reviewed aspects are sound but unpromoted. Neither failed design is
-an executable or production claim; the history design slot remains pending.
+All other reviewed aspects are sound but unpromoted. Hosted HTTPS remains the
+failed design in this subsection; history is superseded by the canonical
+static contract below and still has no executable production claim.
+
+## Parent-owned History API ledger SSpec (IMPLEMENTED STATIC / EXECUTION HELD)
+
+Target
+`test/03_system/security/browser_parent_history_ledger_spec.spl` and its
+mirrored manual. Expose exactly these four steps:
+
+1. `Stage parent history authority`
+2. `Accept one capability-bound history proposal`
+3. `Reject hostile or stale history proposals`
+4. `Preserve chrome across renderer failure`
+
+Use `make_history_process_fixture` and `expect_history_public_state`.
+
+The folded controls cover pushState, replaceState, back, forward, site swap,
+and generation restart. They distinguish omitted, null, and explicit empty
+URL wire forms; the empty-string case starts at
+`https://history.test/app?q=1#kept` and must retain `#kept`. Public chrome
+evidence asserts the parent current URL, back URL, forward URL, index, complete
+ledger, and unchanged state after stale generation/reply, wrong committed URL,
+wrong SBR2 capability, cross-origin resolution, reordered/unknown/non-neighbor
+entries, malformed lengths/base64, index errors, entry 65, and payload
+overflow. No private renderer ledger or direct runtime symbol is admissible.
+
+Static/manual completion remains HELD until one source-matched pure-Simple
+full CLI runs the focused SSpec and docgen once.
 
 ## Held SimpleScript listener evidence
 

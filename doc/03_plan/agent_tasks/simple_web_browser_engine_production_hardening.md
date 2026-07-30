@@ -375,7 +375,7 @@ pure-Simple full CLI runs the applicable focused SSpec once.
 | `invalid_form_method` | `/tmp/simple-invalid-form-method.M1cWuX` | production + modern SSpec + canonical phase-2 manual + final high review PASS; held and unexecuted | admitted current pure-Simple full CLI; run the focused SSpec once |
 | `maxlength_audit` | current `_browser_session_parse_maxlength` | candidate rejected: leading-digit parsing is the required non-negative-integer behavior, not a browser bug | N/A; add no workaround or bug |
 | `overflow_clip_cascade` | design RED | proposed patch rejected because flattened rules lose cascade origin and `@layer` provenance | carry provenance parser -> `Rules` -> cascade owner before implementing `overflow: clip` |
-| `history_parent_ledger` | design RED | neighbor-only history validation cannot establish a parent-authoritative ledger or CSP witness | bounded full-ledger/current-index protocol and atomic parent validation |
+| `history_parent_ledger` | `/tmp/simple-history-h1.d3de` | random-SBR2-capability-bound full ledger, off-side candidate validation, one-swap parent commit, and fail-close chrome preservation implemented statically | root final review, then run the focused SSpec once on an admitted current pure-Simple CLI |
 | `primary_close_retry` | `/tmp/simple-primary-close-retry.RotRUO` | HOLD/FAIL at the three-review cap: fatal poll revokes authority inside an already-entered block, but `begin_resize` lacks a fresh authority check and may call a closed/failed renderer; other lifecycle work reviewed sound | repair the stale-authority path in a fresh scoped cycle; do not merge |
 | `fractional_animation` | `/tmp/simple-animation-slice2` | HOLD/FAIL at the three-review cap: invalid longhand/shorthand tails erase the earlier valid winner (`2; -1` computes default 1 and an invalid shorthand wipes its predecessor); reconcile/apply retain unchecked timestamp subtraction | preserve last-valid declaration selection and use saturating subtraction with i64-min/boundary evidence in a fresh scoped cycle; do not merge |
 
@@ -453,15 +453,16 @@ reviewer. No lane may commit or push independently, and no production claim is
 allowed before the focused SSpec runs once on an admitted current pure-Simple
 full CLI.
 
-## Rejected design lanes (HOLD/FAIL at three-review cap)
+## Rejected and execution-held design lanes
 
 | Lane | Exact remaining defects | Next |
 | --- | --- | --- |
 | hosted HTTPS | HSTS belongs to the broker, not the worker; renderer launch must unset `LD_LIBRARY_PATH` | discard the failed plan and repair both boundaries in a fresh design cycle |
-| parent history | `SBRHJ1` lacks one canonical omitted/null/empty URL representation and an exact fragment-preserving empty-string oracle | keep the history design slot pending and repair both protocol oracles in a fresh cycle |
+| parent history | canonical `SBRHJ1` uses `O/-`, `N/-`, and `V/<canonical-base64>`; empty `V` preserves the full committed URL fragment | IMPLEMENTED STATIC / EXECUTION HELD; root merge owner and final highest-capability review required |
 
-All other reviewed aspects are sound but unpromoted. Neither failed plan may be
-implemented, merged, or cited as production evidence.
+All other reviewed aspects are sound but unpromoted. The hosted HTTPS plan
+remains rejected; parent history remains execution-held and cannot be cited as
+production evidence before its focused SSpec passes.
 
 ## Held SimpleScript listener bundle
 

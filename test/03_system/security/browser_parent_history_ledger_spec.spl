@@ -1,0 +1,271 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-021
+# @evidence-display: links
+"""# Capability-bound parent browser history
+
+Proves the real SBR2/nested-SBRF9 decode and parent frame-accept boundary.
+The renderer can propose a complete bounded ledger, but only the parent can
+validate and atomically publish it. Static source evidence is not an executed
+browser claim until the admitted pure-Simple runner executes this scenario.
+"""
+
+use std.spec.*
+use std.common.ui.draw_ir.{draw_ir_composition}
+use std.common.web.browser_renderer_history_protocol.{
+    browser_renderer_history_proposal_decode,
+    browser_renderer_history_proposal_encode
+}
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererCapabilityMessage,
+    BrowserRendererFrameDecodeResult,
+    browser_renderer_capability_bind_encoded,
+    browser_renderer_capability_decoder_feed,
+    browser_renderer_capability_decoder_new,
+    browser_renderer_capability_payload_message,
+    browser_renderer_frame_decode,
+    browser_renderer_frame_encode_with_history_proposal,
+    browser_renderer_navigation_decode,
+    browser_renderer_navigation_encode_with_history
+}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess
+}
+
+fn _history_capability() -> text:
+    "11111111111111111111111111111111"
+
+fn make_history_process_fixture() -> HostedBrowserRendererProcess:
+    var parent = HostedBrowserRendererProcess.create(7, 320, 200)
+    parent.state = "active"
+    parent.next_request_id = 42
+    parent.expected_reply_to_request_id = 41
+    parent.document_url = "https://history.test/app?q=1#kept"
+    parent.document_origin = "https://history.test"
+    parent.document_csp_policy = "default-src 'self'"
+    parent.document_csp_ready = true
+    parent.history_urls = [
+        "https://history.test/start",
+        "https://history.test/app?q=1#kept"
+    ]
+    parent.history_csp_policies = [
+        "default-src 'self'",
+        "default-src 'self'"
+    ]
+    parent.history_csp_ready = [true, true]
+    parent.history_index = 1
+    parent.home_url = "https://history.test/home"
+    parent.document_title = "History application"
+    parent.document_title_url = parent.document_url
+    parent.document_title_generation = 7
+    parent.document_title_reply_to_request_id = 41
+    parent._sync_history_neighbors_from_ledger()
+    parent
+
+fn expect_history_public_state(
+    parent: HostedBrowserRendererProcess,
+    current_url: text,
+    back_url: text,
+    forward_url: text,
+    count: i64,
+    index: i64
+):
+    expect(parent.document_url).to_equal(current_url)
+    expect(parent.history_current_url).to_equal(current_url)
+    expect(parent.history_back_url).to_equal(back_url)
+    expect(parent.history_forward_url).to_equal(forward_url)
+    expect(parent.history_urls.len()).to_equal(count)
+    expect(parent.history_index).to_equal(index)
+
+struct _HistoryDecodedFrame:
+    envelope: BrowserRendererCapabilityMessage
+    frame: BrowserRendererFrameDecodeResult
+
+fn _history_frame(
+    parent: HostedBrowserRendererProcess,
+    proposal_wire: text,
+    frame_current_url: text,
+    capability: text = "11111111111111111111111111111111"
+) -> _HistoryDecodedFrame:
+    val legacy = browser_renderer_frame_encode_with_history_proposal(
+        draw_ir_composition("", "", "", []),
+        7, 42, 41, -1, 0, "", 0, "", "",
+        frame_current_url, parent.history_back_url,
+        parent.history_forward_url, "", proposal_wire, 1, [], []
+    )
+    expect(legacy.ok).to_be(true)
+    val outer = browser_renderer_capability_bind_encoded(
+        legacy, 7, 42, 41, capability
+    )
+    expect(outer.ok).to_be(true)
+    expect(outer.wire).to_start_with("SBR2\tframe\t")
+    val decoded = browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(7), outer.wire
+    )
+    expect(decoded.status).to_equal("message")
+    expect(decoded.message.payload).to_start_with("SBRF9\t")
+    val payload = browser_renderer_capability_payload_message(
+        decoded.message
+    )
+    val frame = browser_renderer_frame_decode(payload, 320, 200)
+    expect(frame.ok).to_be(true)
+    expect(frame.history_proposal_present).to_be(true)
+    _HistoryDecodedFrame(envelope: decoded.message, frame: frame)
+
+fn _admit_history_frame(
+    mut parent: HostedBrowserRendererProcess,
+    decoded: _HistoryDecodedFrame,
+    capability: text = "11111111111111111111111111111111"
+):
+    parent.issued_command_capability = capability
+    parent.issued_root_command_request_id = 41
+    parent.issued_wire_request_id = 41
+    parent.issued_history_authority = parent._history_authority(
+        capability, 41, 41
+    )
+    val admitted = parent._require_issued_renderer_reply(
+        decoded.envelope, decoded.frame.reply_to_request_id
+    )
+    expect(admitted.is_ok()).to_be(true)
+
+describe "Capability-bound parent browser history":
+    # @manual: show
+    # @capture(protocol)
+    it "should publish only one complete parent-authorized ledger":
+        step("Stage parent history authority")
+        var staged = make_history_process_fixture()
+        val capability = _history_capability()
+        val current = staged.document_url
+        val explicit_empty = browser_renderer_history_proposal_encode(
+            "P", "V", "", current, capability, 2,
+            [staged.history_urls[0], current, current]
+        )
+        expect(explicit_empty.is_ok()).to_be(true)
+        val empty_decoded = browser_renderer_history_proposal_decode(
+            explicit_empty.unwrap()
+        )
+        expect(empty_decoded.url_kind).to_equal("V")
+        expect(empty_decoded.raw_url).to_equal("")
+        expect(empty_decoded.resolved_url).to_equal(
+            "https://history.test/app?q=1#kept"
+        )
+        val snapshot_wire = staged._history_snapshot_for_command(capability)
+        expect(snapshot_wire.is_ok()).to_be(true)
+        val navigation = browser_renderer_navigation_encode_with_history(
+            7, 41, "back", staged.history_back_url,
+            "GET", "", "", "", snapshot_wire.unwrap()
+        )
+        val outer_navigation = browser_renderer_capability_bind_encoded(
+            navigation, 7, 41, 41, capability
+        )
+        expect(outer_navigation.ok).to_be(true)
+        val decoded_navigation = browser_renderer_capability_decoder_feed(
+            browser_renderer_capability_decoder_new(7),
+            outer_navigation.wire
+        )
+        expect(decoded_navigation.status).to_equal("message")
+        val joined = browser_renderer_navigation_decode(
+            browser_renderer_capability_payload_message(
+                decoded_navigation.message
+            )
+        )
+        expect(joined.ok).to_be(true)
+        expect(browser_renderer_history_proposal_decode(
+            joined.history_snapshot
+        ).authority_capability).to_equal(capability)
+
+        step("Accept one capability-bound history proposal")
+        var accepted = make_history_process_fixture()
+        val next_url = "https://history.test/next#view"
+        val proposal = browser_renderer_history_proposal_encode(
+            "P", "V", "/next#view", next_url, capability, 2,
+            [accepted.history_urls[0], accepted.history_urls[1], next_url]
+        )
+        expect(proposal.is_ok()).to_be(true)
+        val accepted_frame = _history_frame(
+            accepted, proposal.unwrap(), next_url
+        )
+        _admit_history_frame(accepted, accepted_frame)
+        val accepted_result = accepted._accept_decoded_frame(
+            accepted_frame.frame, accepted_frame.envelope.generation
+        )
+        expect(accepted_result.ok).to_be(true)
+        expect_history_public_state(
+            accepted, next_url,
+            "https://history.test/app?q=1#kept", "", 3, 2
+        )
+
+        step("Reject hostile or stale history proposals")
+        var hostile = make_history_process_fixture()
+        val hostile_proposal = browser_renderer_history_proposal_encode(
+            "P", "V", "/next#view", next_url,
+            "22222222222222222222222222222222", 2,
+            [hostile.history_urls[0], hostile.history_urls[1], next_url]
+        )
+        expect(hostile_proposal.is_ok()).to_be(true)
+        val hostile_frame = _history_frame(
+            hostile, hostile_proposal.unwrap(), next_url
+        )
+        _admit_history_frame(hostile, hostile_frame)
+        val hostile_result = hostile._accept_decoded_frame(
+            hostile_frame.frame, hostile_frame.envelope.generation
+        )
+        expect(hostile_result.ok).to_be(false)
+        expect_history_public_state(
+            hostile, "https://history.test/app?q=1#kept",
+            "https://history.test/start", "", 2, 1
+        )
+
+        var stale = make_history_process_fixture()
+        stale.expected_reply_to_request_id = 40
+        val stale_frame = _history_frame(
+            stale, proposal.unwrap(), next_url
+        )
+        _admit_history_frame(stale, stale_frame)
+        expect(stale._accept_decoded_frame(
+            stale_frame.frame, stale_frame.envelope.generation
+        ).ok).to_be(false)
+
+        var denied = make_history_process_fixture()
+        denied.document_csp_policy = "sandbox"
+        denied.history_csp_policies[1] = "sandbox"
+        val denied_proposal = browser_renderer_history_proposal_encode(
+            "P", "V", "/next#view", next_url, capability, 2,
+            [denied.history_urls[0], denied.history_urls[1], next_url]
+        )
+        val denied_frame = _history_frame(
+            denied, denied_proposal.unwrap(), next_url
+        )
+        _admit_history_frame(denied, denied_frame)
+        expect(denied._accept_decoded_frame(
+            denied_frame.frame, denied_frame.envelope.generation
+        ).ok).to_be(false)
+
+        var wrong_url = make_history_process_fixture()
+        val wrong_frame = _history_frame(
+            wrong_url, proposal.unwrap(),
+            "https://history.test/wrong"
+        )
+        _admit_history_frame(wrong_url, wrong_frame)
+        expect(wrong_url._accept_decoded_frame(
+            wrong_frame.frame, wrong_frame.envelope.generation
+        ).ok).to_be(false)
+
+        var overflow = make_history_process_fixture()
+        val overflow_frame = _history_frame(
+            overflow,
+            "SBRHJ1\tP\tV\t0\t65\t-\t-\t-",
+            overflow.document_url
+        )
+        _admit_history_frame(overflow, overflow_frame)
+        expect(overflow._accept_decoded_frame(
+            overflow_frame.frame, overflow_frame.envelope.generation
+        ).ok).to_be(false)
+
+        step("Preserve chrome across renderer failure")
+        expect(hostile.state).to_equal("failed")
+        expect(hostile.home_url).to_equal("https://history.test/home")
+        expect(hostile.document_title).to_equal("History application")
+        expect_history_public_state(
+            hostile, "https://history.test/app?q=1#kept",
+            "https://history.test/start", "", 2, 1
+        )

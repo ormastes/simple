@@ -28,12 +28,18 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_key_encode, browser_renderer_key_with_shift_encode,
     browser_renderer_message_encode,
     browser_renderer_navigation_encode,
+    browser_renderer_navigation_encode_with_history,
     browser_renderer_network_response_encode,
     browser_renderer_pointer_encode, browser_renderer_resize_encode,
     browser_renderer_scroll_encode,
     browser_renderer_text_encode
 }
 use std.nogc_sync_mut.io.crypto_sffi
+use std.common.web.browser_renderer_history_protocol.{
+    BrowserRendererHistoryProposal,
+    browser_renderer_history_proposal_decode,
+    browser_renderer_history_proposal_encode
+}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
 }
@@ -59,6 +65,7 @@ use std.gc_async_mut.web.browser_session_context.{
 use std.gc_async_mut.web.browser_session_html.{
     browser_document_csp_policy
 }
+use std.gc_async_mut.web.browser_session_url.{browser_history_resolve_url}
 use std.nogc_sync_mut.io.process_ops.{
     browser_renderer_spawn_sandboxed,
     process_close_piped, process_is_piped_alive, process_read_stdout,
@@ -265,11 +272,46 @@ struct _HostedBrowserDeferredCommand:
     resize_width: i32
     resize_height: i32
 
+struct _HostedBrowserHistoryAuthority:
+    capability: text
+    generation: i64
+    root_request_id: i64
+    reply_request_id: i64
+    origin: text
+    csp_policy: text
+    csp_ready: bool
+    sandbox_scripts: bool
+
+fn _empty_history_authority() -> _HostedBrowserHistoryAuthority:
+    _HostedBrowserHistoryAuthority(
+        capability: "",
+        generation: 0,
+        root_request_id: 0,
+        reply_request_id: 0,
+        origin: "",
+        csp_policy: "",
+        csp_ready: false,
+        sandbox_scripts: false
+    )
+
 struct _HostedBrowserPreparedCommand:
     wire: text
     capability: text
     root_command_request_id: i64
     wire_request_id: i64
+    history_authority: _HostedBrowserHistoryAuthority
+
+struct _HostedBrowserHistoryCandidate:
+    ok: bool
+    reason: text
+    document_url: text
+    document_origin: text
+    document_csp_policy: text
+    document_csp_ready: bool
+    urls: [text]
+    csp_policies: [text]
+    csp_ready: [bool]
+    index: i64
 
 pub class HostedBrowserRendererProcess:
     pid: i64
@@ -298,9 +340,12 @@ pub class HostedBrowserRendererProcess:
     staged_command_capability: text
     staged_root_command_request_id: i64
     staged_wire_request_id: i64
+    staged_history_authority: _HostedBrowserHistoryAuthority
     issued_command_capability: text
     issued_root_command_request_id: i64
     issued_wire_request_id: i64
+    issued_history_authority: _HostedBrowserHistoryAuthority
+    admitted_history_authority: _HostedBrowserHistoryAuthority
     active_command_capability: text
     active_root_command_request_id: i64
     stop_after_write: bool
@@ -406,9 +451,12 @@ pub class HostedBrowserRendererProcess:
             staged_command_capability: "",
             staged_root_command_request_id: 0,
             staged_wire_request_id: 0,
+            staged_history_authority: _empty_history_authority(),
             issued_command_capability: "",
             issued_root_command_request_id: 0,
             issued_wire_request_id: 0,
+            issued_history_authority: _empty_history_authority(),
+            admitted_history_authority: _empty_history_authority(),
             active_command_capability: "",
             active_root_command_request_id: 0,
             stop_after_write: false,
@@ -464,9 +512,12 @@ pub class HostedBrowserRendererProcess:
         self.staged_command_capability = ""
         self.staged_root_command_request_id = 0
         self.staged_wire_request_id = 0
+        self.staged_history_authority = _empty_history_authority()
         self.issued_command_capability = ""
         self.issued_root_command_request_id = 0
         self.issued_wire_request_id = 0
+        self.issued_history_authority = _empty_history_authority()
+        self.admitted_history_authority = _empty_history_authority()
         self.active_command_capability = ""
         self.active_root_command_request_id = 0
 
@@ -484,9 +535,11 @@ pub class HostedBrowserRendererProcess:
         if (reply_to_request_id != self.issued_wire_request_id or
             self.issued_wire_request_id <= 0):
             return Err("wrong-renderer-wire")
+        self.admitted_history_authority = self.issued_history_authority
         self.issued_command_capability = ""
         self.issued_root_command_request_id = 0
         self.issued_wire_request_id = 0
+        self.issued_history_authority = _empty_history_authority()
         Ok(true)
 
     me _admit_renderer_reply(
@@ -654,6 +707,28 @@ pub class HostedBrowserRendererProcess:
         self._active_document_csp_ready() and
             browser_csp_policy_valid(self._active_document_csp_policy())
 
+    fn _history_authority(
+        capability: text,
+        root_request_id: i64,
+        reply_request_id: i64
+    ) -> _HostedBrowserHistoryAuthority:
+        val csp_policy = self._active_document_csp_policy()
+        val sandbox = browser_csp_header_sandbox(csp_policy)
+        _HostedBrowserHistoryAuthority(
+            capability: capability,
+            generation: self.generation,
+            root_request_id: root_request_id,
+            reply_request_id: reply_request_id,
+            origin: hosted_browser_network_origin(
+                self._active_renderer_document_url()
+            ),
+            csp_policy: csp_policy,
+            csp_ready: self._active_document_csp_ready(),
+            sandbox_scripts: (
+                not sandbox.active or sandbox.allow_scripts
+            )
+        )
+
     me authorize_renderer_navigation(
         request: BrowserRendererNetworkDecodeResult
     ) -> bool:
@@ -775,6 +850,23 @@ pub class HostedBrowserRendererProcess:
             self.history_index < self.history_urls.len() - 1):
             self.history_forward_url = self.history_urls[self.history_index + 1]
 
+    fn _history_snapshot_for_command(
+        capability: text
+    ) -> Result<text, text>:
+        if (self.history_index < 0 or
+            self.history_index >= self.history_urls.len() or
+            not browser_renderer_command_capability_valid(capability)):
+            return Err("history-snapshot-unavailable")
+        browser_renderer_history_proposal_encode(
+            "N",
+            "O",
+            "",
+            self.history_urls[self.history_index],
+            capability,
+            self.history_index,
+            self.history_urls
+        )
+
     fn _history_back_index(url: text) -> i64:
         var index = self.history_index
         if (index >= 0 and index < self.history_urls.len() and
@@ -799,55 +891,298 @@ pub class HostedBrowserRendererProcess:
             index = index + 1
         -1
 
-    fn _history_neighbor_allowed(url: text, current_url: text) -> bool:
-        if url == "":
-            return true
-        val canonical = _hosted_browser_canonical_history_url(url)
-        if canonical == "":
+    fn _history_urls_match(left: [text], right: [text]) -> bool:
+        if left.len() != right.len():
             return false
-        if hosted_browser_network_origin(canonical) == (
-            hosted_browser_network_origin(current_url)
-        ):
-            return true
-        (canonical == self.document_url or
-            canonical == self.history_current_url or
-            canonical == self.history_back_url or
-            canonical == self.history_forward_url or
-            (self.history_index > 0 and
-                self.history_urls[self.history_index - 1] == canonical) or
-            (self.history_index >= 0 and
-                self.history_index < self.history_urls.len() - 1 and
-                self.history_urls[self.history_index + 1] == canonical))
+        var index = 0
+        while index < left.len():
+            if left[index] != right[index]:
+                return false
+            index = index + 1
+        true
 
-    fn _frame_history_state_valid(
-        current_url: text, back_url: text, forward_url: text
+    fn _copy_history_texts(values: [text]) -> [text]:
+        var copied: [text] = []
+        for value in values:
+            copied.push(value)
+        copied
+
+    fn _copy_history_flags(values: [bool]) -> [bool]:
+        var copied: [bool] = []
+        for value in values:
+            copied.push(value)
+        copied
+
+    fn _history_candidate_reject(
+        reason: text
+    ) -> _HostedBrowserHistoryCandidate:
+        _HostedBrowserHistoryCandidate(
+            ok: false,
+            reason: reason,
+            document_url: "",
+            document_origin: "",
+            document_csp_policy: "",
+            document_csp_ready: false,
+            urls: [],
+            csp_policies: [],
+            csp_ready: [],
+            index: -1
+        )
+
+    fn _stage_history_candidate() -> _HostedBrowserHistoryCandidate:
+        val initial_document = (
+            self.history_urls.len() == 0 and
+            self.history_index == -1 and
+            self.pending_document_commit_url != "" and
+            self.pending_history_action == "push"
+        )
+        if (not initial_document and
+            (self.history_index < 0 or
+                self.history_index >= self.history_urls.len())):
+            return self._history_candidate_reject(
+                "history-state-unavailable"
+            )
+        var urls = self._copy_history_texts(self.history_urls)
+        var policies = self._copy_history_texts(
+            self.history_csp_policies
+        )
+        var ready = self._copy_history_flags(self.history_csp_ready)
+        while policies.len() < urls.len():
+            policies.push("")
+        while ready.len() < urls.len():
+            ready.push(false)
+        var index = self.history_index
+        var document_url = self.document_url
+        var document_policy = self.document_csp_policy
+        var document_ready = self.document_csp_ready
+        if self.pending_history_index >= 0:
+            if self.pending_history_index >= urls.len():
+                return self._history_candidate_reject(
+                    "history-index-out-of-range"
+                )
+            index = self.pending_history_index
+            if self.pending_document_commit_url != "":
+                urls[index] = self.pending_document_commit_url
+                policies[index] = self.pending_document_csp_policy
+                ready[index] = self.pending_document_csp_ready
+            document_url = urls[index]
+            document_policy = policies[index]
+            document_ready = ready[index]
+        elif self.pending_document_commit_url != "":
+            document_url = self.pending_document_commit_url
+            document_policy = self.pending_document_csp_policy
+            document_ready = self.pending_document_csp_ready
+            if self.pending_history_action == "push":
+                var pushed_urls: [text] = []
+                var pushed_policies: [text] = []
+                var pushed_ready: [bool] = []
+                var copy_index: i64 = 0
+                while copy_index <= index and copy_index < urls.len():
+                    pushed_urls.push(urls[copy_index])
+                    pushed_policies.push(policies[copy_index])
+                    pushed_ready.push(ready[copy_index])
+                    copy_index = copy_index + 1
+                pushed_urls.push(document_url)
+                pushed_policies.push(document_policy)
+                pushed_ready.push(document_ready)
+                if pushed_urls.len() > 64:
+                    var bounded_urls: [text] = []
+                    var bounded_policies: [text] = []
+                    var bounded_ready: [bool] = []
+                    copy_index = pushed_urls.len() - 64
+                    while copy_index < pushed_urls.len():
+                        bounded_urls.push(pushed_urls[copy_index])
+                        bounded_policies.push(
+                            pushed_policies[copy_index]
+                        )
+                        bounded_ready.push(pushed_ready[copy_index])
+                        copy_index = copy_index + 1
+                    pushed_urls = bounded_urls
+                    pushed_policies = bounded_policies
+                    pushed_ready = bounded_ready
+                urls = pushed_urls
+                policies = pushed_policies
+                ready = pushed_ready
+                index = urls.len() - 1
+            elif self.pending_history_action == "replace":
+                urls[index] = document_url
+                policies[index] = document_policy
+                ready[index] = document_ready
+            elif self.pending_history_action != "":
+                return self._history_candidate_reject(
+                    "invalid-pending-history-action"
+                )
+        _HostedBrowserHistoryCandidate(
+            ok: true,
+            reason: "ok",
+            document_url: document_url,
+            document_origin: hosted_browser_network_origin(document_url),
+            document_csp_policy: document_policy,
+            document_csp_ready: document_ready,
+            urls: urls,
+            csp_policies: policies,
+            csp_ready: ready,
+            index: index
+        )
+
+    fn _history_authority_valid(
+        candidate: _HostedBrowserHistoryCandidate,
+        proposal: BrowserRendererHistoryProposal,
+        producer_generation: i64,
+        reply_to_request_id: i64
     ) -> bool:
-        val current = _hosted_browser_canonical_history_url(current_url)
-        if current == "":
-            return false
-        var trusted_url = self.document_url
-        if self.pending_document_commit_url != "":
-            trusted_url = self.pending_document_commit_url
-        elif self.pending_history_target_url != "":
-            trusted_url = self.pending_history_target_url
-        elif (self.pending_history_index >= 0 and
-            self.pending_history_index < self.history_urls.len()):
-            trusted_url = self.history_urls[self.pending_history_index]
-        val trusted = _hosted_browser_canonical_history_url(trusted_url)
-        if (trusted == "" or hosted_browser_network_origin(current) !=
-            hosted_browser_network_origin(trusted)):
-            return false
-        (self._history_neighbor_allowed(back_url, current) and
-            self._history_neighbor_allowed(forward_url, current))
+        val authority = self.admitted_history_authority
+        val sandbox = browser_csp_header_sandbox(
+            candidate.document_csp_policy
+        )
+        val scripts_allowed = (
+            not sandbox.active or sandbox.allow_scripts
+        )
+        (proposal.ok and
+            producer_generation == self.generation and
+            authority.capability != "" and
+            proposal.authority_capability == authority.capability and
+            authority.generation == producer_generation and
+            authority.root_request_id > 0 and
+            authority.reply_request_id == reply_to_request_id and
+            reply_to_request_id == self.expected_reply_to_request_id and
+            authority.origin == candidate.document_origin and
+            authority.csp_ready and candidate.document_csp_ready and
+            authority.csp_policy == candidate.document_csp_policy and
+            browser_csp_policy_valid(candidate.document_csp_policy) and
+            authority.sandbox_scripts == scripts_allowed and
+            ((proposal.action != "P" and proposal.action != "R") or
+                scripts_allowed))
 
-    me _apply_frame_history_state(
-        current_url: text, back_url: text, forward_url: text
+    fn _history_candidate_with_proposal(
+        candidate: _HostedBrowserHistoryCandidate,
+        proposal: BrowserRendererHistoryProposal,
+        producer_generation: i64,
+        reply_to_request_id: i64
+    ) -> _HostedBrowserHistoryCandidate:
+        if (not candidate.ok or not self._history_authority_valid(
+                candidate, proposal, producer_generation,
+                reply_to_request_id
+            )):
+            return self._history_candidate_reject(
+                "invalid-history-authority"
+            )
+        if (candidate.index < 0 or
+            candidate.index >= candidate.urls.len()):
+            return self._history_candidate_reject(
+                "history-index-out-of-range"
+            )
+        for url in proposal.urls:
+            if _hosted_browser_canonical_history_url(url) != url:
+                return self._history_candidate_reject(
+                    "invalid-history-url"
+                )
+        var expected_url = candidate.document_url
+        if proposal.action == "P" or proposal.action == "R":
+            if proposal.url_kind == "N":
+                expected_url = browser_history_resolve_url(
+                    candidate.document_url, "null"
+                )
+            elif proposal.url_kind == "V":
+                expected_url = browser_history_resolve_url(
+                    candidate.document_url, proposal.raw_url
+                )
+            if (_hosted_browser_canonical_history_url(expected_url) !=
+                    expected_url or
+                hosted_browser_network_origin(expected_url) !=
+                    candidate.document_origin):
+                return self._history_candidate_reject(
+                    "history-origin-mismatch"
+                )
+        elif proposal.action == "T":
+            if (self.pending_history_index < 0 or
+                proposal.current_index != candidate.index):
+                return self._history_candidate_reject(
+                    "history-traversal-mismatch"
+                )
+        else:
+            return self._history_candidate_reject(
+                "invalid-history-action"
+            )
+        if proposal.resolved_url != expected_url:
+            return self._history_candidate_reject(
+                "history-url-mismatch"
+            )
+        var expected_urls = candidate.urls
+        var expected_policies = candidate.csp_policies
+        var expected_ready = candidate.csp_ready
+        var expected_index = candidate.index
+        if proposal.action == "P":
+            var pushed_urls: [text] = []
+            var pushed_policies: [text] = []
+            var pushed_ready: [bool] = []
+            var index: i64 = 0
+            while index <= candidate.index:
+                pushed_urls.push(candidate.urls[index])
+                pushed_policies.push(candidate.csp_policies[index])
+                pushed_ready.push(candidate.csp_ready[index])
+                index = index + 1
+            pushed_urls.push(expected_url)
+            pushed_policies.push(candidate.document_csp_policy)
+            pushed_ready.push(candidate.document_csp_ready)
+            if pushed_urls.len() > 64:
+                var bounded_urls: [text] = []
+                var bounded_policies: [text] = []
+                var bounded_ready: [bool] = []
+                index = pushed_urls.len() - 64
+                while index < pushed_urls.len():
+                    bounded_urls.push(pushed_urls[index])
+                    bounded_policies.push(pushed_policies[index])
+                    bounded_ready.push(pushed_ready[index])
+                    index = index + 1
+                pushed_urls = bounded_urls
+                pushed_policies = bounded_policies
+                pushed_ready = bounded_ready
+            expected_urls = pushed_urls
+            expected_policies = pushed_policies
+            expected_ready = pushed_ready
+            expected_index = expected_urls.len() - 1
+        elif proposal.action == "R":
+            expected_urls[candidate.index] = expected_url
+        if (proposal.current_index != expected_index or
+            not self._history_urls_match(proposal.urls, expected_urls)):
+            return self._history_candidate_reject(
+                "history-ledger-mismatch"
+            )
+        _HostedBrowserHistoryCandidate(
+            ok: true,
+            reason: "ok",
+            document_url: expected_url,
+            document_origin: hosted_browser_network_origin(expected_url),
+            document_csp_policy: candidate.document_csp_policy,
+            document_csp_ready: candidate.document_csp_ready,
+            urls: expected_urls,
+            csp_policies: expected_policies,
+            csp_ready: expected_ready,
+            index: expected_index
+        )
+
+    me _commit_history_candidate(
+        candidate: _HostedBrowserHistoryCandidate
     ):
-        self.document_url = current_url
-        self.document_origin = hosted_browser_network_origin(current_url)
-        self.history_current_url = current_url
-        self.history_back_url = back_url
-        self.history_forward_url = forward_url
+        if not candidate.ok:
+            return
+        self.document_url = candidate.document_url
+        self.document_origin = candidate.document_origin
+        self.document_csp_policy = candidate.document_csp_policy
+        self.document_csp_ready = candidate.document_csp_ready
+        self.history_urls = candidate.urls
+        self.history_csp_policies = candidate.csp_policies
+        self.history_csp_ready = candidate.csp_ready
+        self.history_index = candidate.index
+        self.pending_history_action = ""
+        self.pending_document_commit_url = ""
+        self.pending_document_csp_policy = ""
+        self.pending_document_csp_ready = false
+        self.pending_history_index = -1
+        self.pending_history_target_url = ""
+        self.provisional_document_origin = ""
+        self._sync_history_neighbors_from_ledger()
 
     me _restore_history_document(index: i64):
         self.document_url = self.history_urls[index]
@@ -1008,7 +1343,17 @@ pub class HostedBrowserRendererProcess:
             return Err("site-swap-state")
         if self.state != "active":
             return Err("invalid-renderer-state")
-        val command = browser_renderer_navigation_encode(
+        val capability = match browser_renderer_command_capability_new():
+            Err(reason): return Err(reason)
+            Ok(value): value
+        val history_snapshot = match self._history_snapshot_for_command(
+            capability
+        ):
+            Err(reason):
+                return Err(reason)
+            Ok(value):
+                value
+        val command = browser_renderer_navigation_encode_with_history(
                 self.generation,
                 self.next_request_id,
                 "open",
@@ -1016,9 +1361,14 @@ pub class HostedBrowserRendererProcess:
                 self.navigation_permit.method,
                 self.navigation_permit.headers,
                 self.navigation_permit.body,
-                self.navigation_permit.content_type
+                self.navigation_permit.content_type,
+                history_snapshot
             )
-        val prepared = match self._prepare_renderer_command(command):
+        val prepared = match (
+            self._prepare_renderer_command_with_capability(
+                command, capability
+            )
+        ):
             Err(reason): return Err(reason)
             Ok(value): value
         val started = self._begin_navigation_command(
@@ -1101,7 +1451,7 @@ pub class HostedBrowserRendererProcess:
             Err(reason): reason
             Ok(_): ""
 
-    me close() -> bool:
+    me close(preserve_parent_state: bool = false) -> bool:
         self._cancel_network_job()
         self.command_deadline_ms = 0
         self.pending_operation = ""
@@ -1115,7 +1465,6 @@ pub class HostedBrowserRendererProcess:
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
         self._clear_pending_document_csp()
-        self.site_lock = ""
         self.site_swap_pending = false
         self.site_swap_site = ""
         self.pending_wire = ""
@@ -1130,7 +1479,6 @@ pub class HostedBrowserRendererProcess:
         self.pending_pointer_cancel_event_id = 0
         self._retire_renderer_command_capability()
         self.retained_image_resources = []
-        self._clear_document_title()
         if self.pid > 0:
             if not process_close_piped(self.pid):
                 return false
@@ -1139,28 +1487,30 @@ pub class HostedBrowserRendererProcess:
         self.network = FetchEngine.new(
             Logger.new("browser-renderer-broker", LogLevel.Error)
         )
-        self.history_urls = []
-        self.history_csp_policies = []
-        self.history_csp_ready = []
-        self.history_index = -1
-        self.history_current_url = ""
-        self.history_back_url = ""
-        self.history_forward_url = ""
-        self.document_url = ""
-        self.document_origin = ""
-        self.document_csp_policy = ""
-        self.document_csp_ready = false
-        self._clear_pending_document_csp()
-        self.home_url = ""
-        self.hsts.hsts_policies = []
-        self.hsts_dirty = false
+        if not preserve_parent_state:
+            self.site_lock = ""
+            self.history_urls = []
+            self.history_csp_policies = []
+            self.history_csp_ready = []
+            self.history_index = -1
+            self.history_current_url = ""
+            self.history_back_url = ""
+            self.history_forward_url = ""
+            self.document_url = ""
+            self.document_origin = ""
+            self.document_csp_policy = ""
+            self.document_csp_ready = false
+            self._clear_document_title()
+            self.home_url = ""
+            self.hsts.hsts_policies = []
+            self.hsts_dirty = false
         if self.state != "failed":
             self.state = "closed"
         true
 
     me fail(reason: text) -> HostedBrowserRendererResult:
         self.state = "failed"
-        val close_reason = if self.close():
+        val close_reason = if self.close(true):
             ""
         else:
             ";renderer-close-failed"
@@ -1542,6 +1892,11 @@ pub class HostedBrowserRendererProcess:
             self.active_root_command_request_id
         )
         self.staged_wire_request_id = self.next_request_id
+        self.staged_history_authority = self._history_authority(
+            self.active_command_capability,
+            self.active_root_command_request_id,
+            self.next_request_id
+        )
         self.expected_reply_to_request_id = self.next_request_id
         self.pending_wire = bound_wire.wire
         self.pending_wire_offset = 0
@@ -1576,9 +1931,13 @@ pub class HostedBrowserRendererProcess:
                 self.staged_root_command_request_id
             )
             self.issued_wire_request_id = self.staged_wire_request_id
+            self.issued_history_authority = (
+                self.staged_history_authority
+            )
             self.staged_command_capability = ""
             self.staged_root_command_request_id = 0
             self.staged_wire_request_id = 0
+            self.staged_history_authority = _empty_history_authority()
         self.expected_reply_to_request_id = (
             self.pending_wire_reply_to_request_id
         )
@@ -1667,13 +2026,23 @@ pub class HostedBrowserRendererProcess:
     fn _prepare_renderer_command(
         request: BrowserRendererEncodeResult
     ) -> Result<_HostedBrowserPreparedCommand, text>:
+        val capability = match browser_renderer_command_capability_new():
+            Err(reason): return Err(reason)
+            Ok(value): value
+        self._prepare_renderer_command_with_capability(
+            request, capability
+        )
+
+    fn _prepare_renderer_command_with_capability(
+        request: BrowserRendererEncodeResult,
+        capability: text
+    ) -> Result<_HostedBrowserPreparedCommand, text>:
         if not request.ok:
             return Err(request.reason)
         if self.pending_wire != "" and self.pending_wire_offset > 0:
             return Err("renderer-busy")
-        val capability = match browser_renderer_command_capability_new():
-            Err(reason): return Err(reason)
-            Ok(value): value
+        if not browser_renderer_command_capability_valid(capability):
+            return Err("invalid-command-capability")
         val bound_request = browser_renderer_capability_bind_encoded(
             request,
             self.generation,
@@ -1687,7 +2056,10 @@ pub class HostedBrowserRendererProcess:
             wire: bound_request.wire,
             capability: capability,
             root_command_request_id: self.next_request_id,
-            wire_request_id: self.next_request_id
+            wire_request_id: self.next_request_id,
+            history_authority: self._history_authority(
+                capability, self.next_request_id, self.next_request_id
+            )
         ))
 
     me _begin_prepared_renderer_command(
@@ -1707,6 +2079,7 @@ pub class HostedBrowserRendererProcess:
             prepared.root_command_request_id
         )
         self.staged_wire_request_id = prepared.wire_request_id
+        self.staged_history_authority = prepared.history_authority
         self.expected_reply_to_request_id = prepared.wire_request_id
         self.pending_wire = prepared.wire
         self.pending_wire_offset = 0
@@ -1959,43 +2332,32 @@ pub class HostedBrowserRendererProcess:
         if (self.pending_document_commit_url != "" and
             not frame.history_state_present):
             return self.fail("missing-frame-history")
-        val has_trusted_document = (
-            self.document_url != "" or
-            self.pending_document_commit_url != ""
+        val history_transaction = (
+            self.pending_document_commit_url != "" or
+            self.pending_history_index >= 0 or
+            frame.history_proposal_present
         )
-        val unchanged_history_state = (
-            self.pending_document_commit_url == "" and
-            self.pending_history_target_url == "" and
-            self.pending_history_index < 0 and
-            frame.history_current_url == self.history_current_url and
-            frame.history_back_url == self.history_back_url and
-            frame.history_forward_url == self.history_forward_url
-        )
-        if (frame.history_state_present and has_trusted_document and
-            not unchanged_history_state and
-            not self._frame_history_state_valid(
-                frame.history_current_url,
-                frame.history_back_url,
-                frame.history_forward_url
-            )):
+        if history_transaction:
+            if not frame.history_state_present:
+                return self.fail("missing-frame-history")
+            var candidate = self._stage_history_candidate()
+            if frame.history_proposal_present:
+                candidate = self._history_candidate_with_proposal(
+                    candidate,
+                    browser_renderer_history_proposal_decode(
+                        frame.history_proposal
+                    ),
+                    producer_generation,
+                    frame.reply_to_request_id
+                )
+            if (not candidate.ok or
+                frame.history_current_url != candidate.document_url):
+                return self.fail("invalid-frame-history")
+            self._commit_history_candidate(candidate)
+        elif (frame.history_state_present and
+            frame.history_current_url != self.document_url):
             return self.fail("invalid-frame-history")
-        if self.pending_document_commit_url != "":
-            self._commit_document_url(
-                self.pending_document_commit_url
-            )
-            self.pending_document_commit_url = ""
-            self.provisional_document_origin = ""
-        if self.pending_history_index >= 0:
-            self.history_index = self.pending_history_index
-            self._restore_history_document(self.history_index)
         val committed_title_url = self.document_url
-        if (frame.history_state_present and has_trusted_document and
-            not unchanged_history_state):
-            self._apply_frame_history_state(
-                frame.history_current_url,
-                frame.history_back_url,
-                frame.history_forward_url
-            )
         self._clear_document_title()
         if (frame.document_title_present and
             producer_generation == self.generation and
@@ -2460,17 +2822,39 @@ pub class HostedBrowserRendererProcess:
             ""
         if target_url == "":
             return Err("cannot-go-back")
-        val command = browser_renderer_navigation_encode(
+        val permit = match self._validated_navigation_permit(
+            target_url, "GET", "", "", ""
+        ):
+            nil:
+                return Err("invalid-navigation")
+            Some(value):
+                value
+        val capability = match browser_renderer_command_capability_new():
+            Err(reason): return Err(reason)
+            Ok(value): value
+        val history_snapshot = match self._history_snapshot_for_command(
+            capability
+        ):
+            Err(reason):
+                return Err(reason)
+            Ok(value):
+                value
+        val command = browser_renderer_navigation_encode_with_history(
             self.generation, self.next_request_id,
-            "back", target_url, "GET", "", "", ""
+            "back", target_url, "GET", "", "", "", history_snapshot
         )
         if not command.ok:
             return Err(command.reason)
-        val prepared = match self._prepare_renderer_command(command):
+        val prepared = match (
+            self._prepare_renderer_command_with_capability(
+                command, capability
+            )
+        ):
             Err(reason): return Err(reason)
             Ok(value): value
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
+        self.navigation_permit = permit
         self.pending_history_index = self._history_back_index(target_url)
         self.pending_history_target_url = target_url
         self.provisional_document_origin = hosted_browser_network_origin(
@@ -2481,6 +2865,7 @@ pub class HostedBrowserRendererProcess:
             prepared, "back", "history", timeout_ms
         )
         if val Err(_) = started:
+            self.navigation_permit = hosted_browser_empty_navigation_permit()
             self.pending_history_index = -1
             self.pending_history_target_url = ""
             self.provisional_document_origin = ""
@@ -2499,17 +2884,39 @@ pub class HostedBrowserRendererProcess:
             ""
         if target_url == "":
             return Err("cannot-go-forward")
-        val command = browser_renderer_navigation_encode(
+        val permit = match self._validated_navigation_permit(
+            target_url, "GET", "", "", ""
+        ):
+            nil:
+                return Err("invalid-navigation")
+            Some(value):
+                value
+        val capability = match browser_renderer_command_capability_new():
+            Err(reason): return Err(reason)
+            Ok(value): value
+        val history_snapshot = match self._history_snapshot_for_command(
+            capability
+        ):
+            Err(reason):
+                return Err(reason)
+            Ok(value):
+                value
+        val command = browser_renderer_navigation_encode_with_history(
             self.generation, self.next_request_id,
-            "forward", target_url, "GET", "", "", ""
+            "forward", target_url, "GET", "", "", "", history_snapshot
         )
         if not command.ok:
             return Err(command.reason)
-        val prepared = match self._prepare_renderer_command(command):
+        val prepared = match (
+            self._prepare_renderer_command_with_capability(
+                command, capability
+            )
+        ):
             Err(reason): return Err(reason)
             Ok(value): value
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
+        self.navigation_permit = permit
         self.pending_history_index = self._history_forward_index(target_url)
         self.pending_history_target_url = target_url
         self.provisional_document_origin = hosted_browser_network_origin(
@@ -2520,6 +2927,7 @@ pub class HostedBrowserRendererProcess:
             prepared, "forward", "history", timeout_ms
         )
         if val Err(_) = started:
+            self.navigation_permit = hosted_browser_empty_navigation_permit()
             self.pending_history_index = -1
             self.pending_history_target_url = ""
             self.provisional_document_origin = ""

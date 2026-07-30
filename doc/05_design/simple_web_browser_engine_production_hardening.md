@@ -629,15 +629,45 @@ refresh, bootstrap, or Rust-seed fallback is claimed.
   winner, including CSS-wide values and shorthand/longhand interaction, then
   maps `overflow: clip` to a computed value separate from scroll-container
   modes. Parser flattening that erases this provenance is rejected.
-- Replace the neighbor heuristic only when the wire contract can carry at most
-  the existing 64 history entries, one checked current index, and a
-  parent-issued document/origin/CSP witness. Decode into temporary bounded
-  storage; validate sizes, index, canonical URLs, order, origin permissions,
-  and every witness against the parent ledger; then swap the full ledger and
-  index atomically. Any failure preserves committed chrome/history unchanged.
+- The bounded wire carries at most the existing 64 history entries and one
+  checked current index. A private parent `HistoryAuthority` binds the random
+  outer SBR2 capability to generation, root/reply, canonical origin, effective
+  CSP-ready/policy, and sandbox scripts. Build a candidate off-side, validate
+  it completely, then swap once. Ordinary frames allocate no ledger copy.
 
-Both contracts are RED designs. They authorize no production or conformance
-claim until modern SSpecs and an admitted pure-Simple executable prove them.
+The overflow contract remains RED. History is implemented statically below;
+neither row has an executable production claim until an admitted pure-Simple
+artifact runs its modern SSpec.
+
+### Parent history detail contract (2026-07-30)
+
+Status: **IMPLEMENTED STATIC / EXECUTION HELD**.
+
+The canonical codec is
+`std.common.web.browser_renderer_history_protocol`. `SBRHJ1` fields are
+`action`, `url_kind`, `current_index`, `count`, raw URL, resolved URL, SBR2
+capability, then exactly `count` URL fields. `O` and `N` require raw sentinel `-`;
+`V` requires canonical base64 and its empty base64 field is the only explicit
+empty-string spelling. `P/R + O` resolves to the complete committed URL,
+`P/R + N` resolves relative `null`, and `P/R + V` resolves its decoded value;
+empty `V` preserves the committed fragment.
+
+`HostedBrowserRendererProcess._accept_decoded_frame` validates the decoded
+bounded proposal against the admitted private authority, constructs the full
+candidate without mutating parent state, and swaps once. `SBN2` carries the
+same codec with action `N` and the same outer capability to join a fresh
+worker. The worker may load this snapshot and propose a mutation, but it never
+commits parent chrome/history.
+
+The modern SSpec uses exactly these visible steps:
+
+1. `Stage parent history authority`
+2. `Accept one capability-bound history proposal`
+3. `Reject hostile or stale history proposals`
+4. `Preserve chrome across renderer failure`
+
+Frozen helpers are `make_history_process_fixture` and
+`expect_history_public_state`.
 
 ### Proposed cascade provenance detail (2026-07-30)
 
