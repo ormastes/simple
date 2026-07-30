@@ -372,8 +372,8 @@ so this only affects `SymbolKind` sites for those two specific variants.
 | `Enum` | `ParserEnum` | yes | 11 |
 | `Trait` | `ParserTrait` | yes | 8 |
 | `Const` | `ParserConst` | yes | 9 |
-| `Field` | *(unchanged)* | no — blocked by lint/ scope guard | n/a |
-| `TypeAlias` | *(unchanged)* | no — blocked by lint/ scope guard | n/a |
+| `Field` | `ParserField` | yes (PTR2, see update below) | 11 |
+| `TypeAlias` | `ParserTypeAlias` | yes (PTR2, see update below) | 5 |
 
 30 files touched total (29 with real edits + `parser_factory.spl`, a
 glob-importer with zero actual bare-name usage, edited as a no-op).
@@ -423,6 +423,104 @@ not removed.
 - `capability_system_spec.spl`: 40/40
 - `tuple_destructure_parser_spec.spl`: 16/16
 - `parser_spec.spl`: 40/41 — **1 pre-existing failure, unrelated to this lane**: "parse optional chaining" / "expected 42 to equal true". Confirmed via a HEAD-vs-renamed A/B swap (restore all 30 touched files to `git show HEAD:<path>`, re-run, restore back) that this exact failure reproduces identically on unmodified `HEAD` — not caused by this rename.
+
+No commit/push performed (per campaign rule); changes left in-tree for
+orchestrator review.
+
+## PTR2 update (2026-07-30): the final 2 of 11 colliding structs LANDED — table now 11/11 complete
+
+PTR1 deferred `Field` and `TypeAlias` solely because their only known-at-the-time
+call sites lived inside `35.semantics/lint/` (`primitive_api.spl`,
+`alias_registry.spl`), which was off-limits to that lane. This lane's mandate
+lifted that restriction *only* for the mechanical rename of these two names
+(no lint-logic changes), so the two deferred structs are now renamed to
+`ParserField`/`ParserTypeAlias`, matching PTR1's naming convention.
+
+**Re-census from scratch** (PTR1's own note said only `lint/` had call sites —
+re-verified independently rather than trusted, since a bare `grep -c '\bField\b'`
+across `src/compiler` returns hundreds of hits, the overwhelming majority of
+which are unrelated: a second, distinct `struct Field` in
+`20.hir/inference/types.spl:83`; `HirExprKind.Field`/`ExprKind.Field`/
+`MirInstKind.{GetField,SetField}`/`PlaceElem.Field`/`MirProjection.Field` enum
+variants (payload-carrying field-access nodes, a completely different
+"Field" than the parser's field-declaration struct); `SymbolKind.Field`/
+`SymbolKind.TypeAlias` (the enum side of this very collision, never touched);
+and dozens of unrelated `FieldDef`/`FieldLayout`/`HirField`/`BitfieldField`/
+`SchemaField`/etc. named types. Narrowed to genuine `parser_types.Field`/
+`.TypeAlias` struct usages by cross-referencing every file that (a) explicitly
+imports `Field`/`TypeAlias` from `compiler.frontend.parser_types`, or (b)
+wildcard-imports `compiler.frontend.parser_types.*`, then manually classifying
+every bare hit inside those files by type-annotation/constructor position vs.
+comment vs. unrelated enum pattern.
+
+**11 files touched** (all mechanical, no lint-logic changes):
+
+| File | What changed |
+|---|---|
+| `src/compiler/10.frontend/parser_types.spl` | The two struct definitions themselves (`struct Field:` → `struct ParserField:`, `struct TypeAlias:` → `struct ParserTypeAlias:`) plus their internal self-references (`fields: [Field]` ×3, `Struct([Field])` variant payload, `type_aliases: Dict<text, TypeAlias>` ×2) |
+| `src/compiler/10.frontend/__init__.spl` | Frontend facade re-export list (`export use compiler.frontend.parser_types.{...}`) — a genuine call site missed by a naive per-directory scan since it re-exports under the same bare names |
+| `src/compiler/10.frontend/desugar/state_enum.spl` | `fields: [Field]`, `generate_state_fields` return type, 3 constructor calls (incl. 2 in a docstring example) |
+| `src/compiler/10.frontend/desugar/frame_analysis.spl` | `resolve_field_size`/`resolve_field_type_tag` param types (`field: Field` → `field: ParserField`) — this file has **no** `use compiler.frontend.parser_types` import of its own; it consumes `state_enum.spl`'s already-typed `[Field]` values, confirming Simple's type-name resolution is not strictly gated by per-file imports the way value/function names are (consistent with this whole bug family being a bare-name, not module-qualified, collision) |
+| `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl` | `type_aliases: Dict<text, TypeAlias>` var decl, `fields: [Field]` var decl, 1 `Field(...)` and 1 `TypeAlias(...)` constructor call, plus 2 comment lines that explicitly named "`Field` struct" / "positional `Field(...)` form" |
+| `src/compiler/70.backend/backend/compile_c_entry.spl` | `fields: [Field]` var decl + 1 `Field(...)` constructor call (its `ExprKind.Field(...)` on the same file's line 121 is unrelated and left untouched) |
+| `src/compiler/35.semantics/lint/primitive_api.spl` | Import line only (`{Param, Field}` → `{Param, ParserField}`); the imported name is otherwise unused in this file |
+| `src/compiler/35.semantics/lint/semantic_api/alias_registry.spl` | Import line, the `alias_registry_populate` param type, and a doc comment citing `parser_types.spl:406-413` by old name |
+| `src/compiler/30.types/type_system/module_check.spl` | Import line, `fields_value: [Field]`, `_field_type_or_fresh` param type. **Left untouched:** `case TypeAlias(alias):` at line 141 — confirmed (by tracing the match subject back to its `fn register_definition(checker: TypeChecker, item: Node)` signature) to match `compiler.frontend.ast.Node`'s own `TypeAlias` variant, a wrapper enum unrelated to `parser_types.TypeAlias` |
+| `src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl` | `class_fields`/`struct_fields: [Field]`, `lower_field`'s param type, two `Field`-typed local rebinds (`cf`, `sf`, `fld`), plus 3 comments that named the struct directly (`[Field]`, `` `Field`-typed local ``, `` `Field.default` ``). **Left untouched:** `SymbolKind.Field` at line 662 (the enum side, not touched by design) |
+| `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` | `prescan_composite_field_types`'s `fields: [Field]` param. **Left untouched:** `SymbolKind.TypeAlias` (line 570), `ExprKind.Field`/`HirExprKind.Field` (lines 487, 1871) |
+| `src/compiler/20.hir/hir_lowering/types.spl` | One comment naming `[Field]` directly (an ANY-erased array of the struct) |
+
+**Plus 1 test file** (outside the `src/compiler/**` census scope but a genuine
+consumer, caught by the battery): `test/01_unit/compiler/semantics/semantic_alias_registry_spec.spl`
+imports and constructs `parser_types.TypeAlias` directly (11 occurrences,
+including its own `_alias()` test helper) — renamed to `ParserTypeAlias`
+throughout.
+
+**Deliberately NOT touched** (verified as different types/enums by tracing
+match-subject types or import provenance, not by name alone):
+`hir_types.spl`'s `SymbolKind`/`ScopeKind` enum variant declarations (`Field`,
+`TypeAlias` — the enum side of the very collision this campaign is fixing);
+`20.hir/inference/types.spl`'s own distinct `struct Field` (a second,
+unrelated struct with the same bare name, used by the HIR type-inference
+engine, not the parser); `ExprKind.Field`/`HirExprKind.Field` (payload-carrying
+field-*access* expression nodes); `MirInstKind.{GetField,SetField}`/
+`PlaceElem.Field`/`MirProjection.Field` (MIR/borrow-check field-access
+instructions); `macro_registry.spl`'s `MacroIntroKind`-like enum's own
+`Field`/`TypeAlias` variants; `ast.Node`'s own `TypeAlias` variant
+(`module_check.spl:141`); and prose/comments describing the general concept
+of "a struct field" or "a type alias" rather than naming the struct type
+itself (e.g. `module_assembly.spl`'s "Field default: the flat AST records..."
+comment, `hir_lowering/types.spl`/`module_lowering.spl`'s "Field-expr" comments
+referring to `ExprKind.Field` access nodes). `hir_lowering/expressions.spl` was
+re-confirmed to have zero genuine `parser_types.Field` call sites (all its
+`Field` hits are `ExprKind.Field`/comments about that same expression-node
+family) — consistent with PTR1's decision to exclude this file entirely.
+
+**Probe (deleted after use):** a scratch spec matching a locally-constructed
+`SymbolKind.Field` and `SymbolKind.TypeAlias` value against `case
+SymbolKind.Field:` / `case SymbolKind.TypeAlias:` printed real, distinct
+discriminants (100/101, the probe's own sentinel return values) for both,
+confirming neither is a dead wildcard arm anymore now that no struct named
+`Field`/`TypeAlias` remains in scope anywhere `SymbolKind` is matched.
+
+**Battery, all green, all counts match PTR1's baseline:**
+- `qualified_import_call_spec.spl`: 3/3
+- `resolve_import_symbols_spec.spl`: 8/8
+- `symbol_table_id_zero_spec.spl`: 3/3
+- `enum_payload_capture_spec.spl`: 7/7
+- `type_alias_capture_spec.spl`: 4/4
+- `capability_system_spec.spl`: 40/40
+- `semantic_alias_registry_spec.spl` (nearest semantic_api spec): 10/10 (was 3/10 before the test file itself was updated — the 7 failures were `semantic: function 'TypeAlias' not found`, i.e. the spec's own now-stale constructor call, not a regression in production code)
+- `primitive_api_lint_spec.spl` (nearest lint spec): 9/9
+
+**Rename table is now 11/11 complete.** The bare-name-collision fix for this
+whole `SymbolKind`/`parser_types.spl` family is done: `case SymbolKind.X:` for
+all 11 originally-colliding variants (`Function`, `Module`, `TypeParam`,
+`Class`, `Struct`, `Enum`, `Trait`, `Const`, `Import`, `Field`, `TypeAlias`)
+now matches with a real discriminant wherever `parser_types` is in scope. The
+IMP2 `(defining_module, name)`-keyed workaround in
+`hir_lowering/expressions.spl` was left in place as defense-in-depth, per
+standing instruction — not removed.
 
 No commit/push performed (per campaign rule); changes left in-tree for
 orchestrator review.
