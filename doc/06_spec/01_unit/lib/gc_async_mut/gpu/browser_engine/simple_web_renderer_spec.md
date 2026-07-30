@@ -1618,6 +1618,80 @@ expect(_pixels_equal(lower, upper)).to_equal(false)
 
 </details>
 
+#### lowers text-transform through Draw IR to exact uppercase pixels
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 61 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val common = "<html><head><style>html,body{margin:0;padding:0;background:#fff}.label{color:#111827;font-size:16px}</style></head><body>"
+val transformed_html = common + "<div class='label' style='text-transform:uppercase'>mix-wide</div></body></html>"
+val uppercase_html = common + "<div class='label'>MIX-WIDE</div></body></html>"
+val lowercase_html = common + "<div class='label'>mix-wide</div></body></html>"
+
+step("Compute uppercase CSS on lowercase source")
+val transformed_composition = simple_web_layout_render_html_draw_ir(
+    transformed_html, 96, 32
+)
+val uppercase_composition = simple_web_layout_render_html_draw_ir(
+    uppercase_html, 96, 32
+)
+val transformed = _draw_ir_text_command(
+    transformed_composition.batches[0].commands, "MIX-WIDE"
+)
+val uppercase = _draw_ir_text_command(
+    uppercase_composition.batches[0].commands, "MIX-WIDE"
+)
+expect(_draw_ir_style_value(
+    transformed, "text-transform"
+)).to_equal("uppercase")
+
+step("Lower transformed text through canonical Draw IR")
+expect(transformed.kind).to_equal("text")
+expect(transformed.text_value).to_equal("MIX-WIDE")
+
+step("Match literal-uppercase geometry and font payload")
+expect([
+    transformed.x, transformed.y,
+    transformed.width, transformed.height
+]).to_equal([
+    uppercase.x, uppercase.y, uppercase.width, uppercase.height
+])
+expect(_draw_ir_style_value(
+    transformed, "font-family"
+)).to_equal(_draw_ir_style_value(uppercase, "font-family"))
+expect(_draw_ir_style_value(
+    transformed, "font-identity"
+)).to_equal(_draw_ir_style_value(uppercase, "font-identity"))
+expect(transformed.advance_widths).to_equal(uppercase.advance_widths)
+
+step("Rasterize exact literal-uppercase pixels")
+val transformed_pixels = (
+    simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        transformed_html, 96, 32, "cpu"
+    )
+)
+val uppercase_pixels = (
+    simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        uppercase_html, 96, 32, "cpu"
+    )
+)
+val lowercase_pixels = (
+    simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        lowercase_html, 96, 32, "cpu"
+    )
+)
+expect(transformed_pixels).to_equal(uppercase_pixels)
+expect(_pixels_equal(
+    transformed_pixels, lowercase_pixels
+)).to_equal(false)
+```
+
+</details>
+
 #### renders the text-raster fixture with genuine glyph ink (no memorized Chrome overlay)
 
 <details>
