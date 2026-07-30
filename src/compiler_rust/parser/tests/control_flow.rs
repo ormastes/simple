@@ -20,6 +20,14 @@ fn parse_if_statement() {
 }
 
 #[test]
+fn parse_inline_if_with_multiline_condition_preserves_function_boundary() {
+    let items = parse(
+        "fn first(a: bool, b: bool, c: bool, d: bool) -> i64:\n    if a or\n        b: return 0\n    elif c or\n        d: return 1\n    2\nfn choose(a: bool, b: bool, c: bool, d: bool) -> i64:\n    if a or\n        b: 1\n    elif c or\n        d: 2\n    else: 3 +\n        0\nfn sibling() -> i64:\n    4",
+    );
+    assert_eq!(items.len(), 3);
+}
+
+#[test]
 fn parse_if_else_statement() {
     parse_ok("if x > 0:\n    y = 1\nelse:\n    y = 0");
 }

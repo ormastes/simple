@@ -110,8 +110,11 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_inline_or_block(&mut self) -> Result<Block, ParseError> {
         if !self.check(&TokenKind::Newline) {
             let stmt = self.parse_item()?;
+            let span = self.previous.span;
+            let deferred = std::mem::take(&mut self.deferred_dedent_count);
+            self.consume_dedents_for_method_chain(deferred);
             Ok(Block {
-                span: self.previous.span,
+                span,
                 statements: vec![stmt],
             })
         } else {

@@ -1,8 +1,8 @@
 # `name =` with the RHS on the next line does not parse — took a whole example file down silently
 
 - **ID:** assign_rhs_newline_continuation_parse_2026-07-25
-- **Status:** SOURCE FIXED — focused Rust parser regression passes; refreshed
-  Stage2/RV64 verification pending
+- **Status:** CLOSED — focused regression and RV64 attempt 18 passed the
+  production assignment sites
 - **Severity:** high — the failure is whole-file (nothing in the module loads) and the
   diagnostic names no line, so the cost to locate it is a manual bisect
 
@@ -60,7 +60,12 @@ RV64 attempt 17 reproduced the production failure at
 `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:1067:54` and the same shape
 recurs at line 1071. It exited 1 with no ELF after advancing beyond all earlier
 equality/comparison/Dedent blockers. A refreshed seed, Stage2, and RV64 build
-remain the closure gate.
+were the closure gate.
+
+Verified Stage2 attempt 16 and RV64 attempt 18 advanced beyond both
+`draw_ir_adv.spl` assignment continuations at lines 1067 and 1071. Attempt 18's
+later failure is the distinct inline-`if` deferred-Dedent bug tracked by
+`rust_parser_multiline_inline_if_deferred_dedent_2026-07-29.md`.
 
 ## Remaining diagnostic and coverage work
 

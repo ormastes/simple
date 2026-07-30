@@ -1547,3 +1547,20 @@ pixels, and performance evidence remain release-blocking.
   before admission when this checkpoint dependency was found and is not
   evidence. Fresh Stage2, RV64 attempt 18, scoped tools, crop review, exact ten,
   manuals, and final audits remain pending. STATUS: FAIL.
+- inline-if-deferred-dedent-window-2026-07-30: Verified Stage2 attempt 16 at
+  clean checkpoint `f6d3d23ee86` produced binary SHA-256
+  `99e6d4c0e7a9500a08bb727550ddffec4009aefc4d703c5ae5582def6e12ba0a`;
+  canonical provenance and the receiver gate passed independent review. RV64
+  attempt 18 then cleared both assignment-RHS production sites and exited 1 at
+  `src/lib/skia/feature/shaper/ot_layout_apply.spl:37:1` after 25.02 seconds
+  and 20912 KiB RSS with `expected expression, found Dedent`; no ELF exists.
+  The shared inline body owners now drain recorded condition-continuation
+  Dedents for statement, expression, `elif`, and `else if` paths, and one
+  focused red-to-green regression preserves the sibling function boundary.
+  Scoped-tool attempt 7 produced valid core/build/green/expected-red/empty and
+  zero-stub docgen receipts, but its final live provenance verifier exited 1
+  after 14:01 and 372736 KiB RSS. Its provisional `summary.env=pass` is not
+  authoritative; attempt 7 is unaccepted and 0/10 specs remain accepted.
+  Next: clean commit/push, Stage2 attempt 17, scoped-tool attempt 8 without
+  concurrent source writers, RV64 attempt 19, crop review, exact ten, manuals,
+  and final audits. STATUS: FAIL.

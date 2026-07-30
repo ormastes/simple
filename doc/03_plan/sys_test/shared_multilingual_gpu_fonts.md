@@ -66,13 +66,13 @@ Run only this scoped set:
 ### Current blocking TODO
 
 - [x] Fix the shared Rust assignment parser for an indented RHS after `=` and
-  retain one focused red-to-green field-assignment regression.
-- [ ] Commit/push the final clean parser/evidence-wrapper checkpoint and produce
-  fresh canonical Stage2 provenance. Aborted Stage2 attempt 15 is not evidence.
-- [ ] From that Stage2, run RV64 attempt 18 and scoped-tool attempt 7 in
-  parallel.
+  the inline-`if` deferred-Dedent owner, with focused red-to-green regressions.
+- [ ] Commit/push the final clean parser checkpoint and produce fresh canonical
+  Stage2 provenance. Attempts 15 and 16 are historical, not current evidence.
+- [ ] Run scoped-tool attempt 8 without concurrent source writers, then run
+  RV64 attempt 19 from the same accepted Stage2.
 - [ ] Independently review and pin the QEMU framebuffer crop, then run matching
-  exact-ten attempt 7 and generate ten zero-stub manuals.
+  exact-ten attempt 8 and generate ten zero-stub manuals.
 - [ ] Run the final guards and independent evidence/manual review before
   recording `SIMPLEOS_STAGE2_FONT: PASS`.
 

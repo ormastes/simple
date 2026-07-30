@@ -152,8 +152,11 @@ impl<'a> Parser<'a> {
             if self.is_inline_statement() {
                 // Parse inline statement like match_arm does
                 let stmt = self.parse_item()?;
+                let then_span = self.previous.span;
+                let deferred = std::mem::take(&mut self.deferred_dedent_count);
+                self.consume_dedents_for_method_chain(deferred);
                 let then_block = Block {
-                    span: self.previous.span,
+                    span: then_span,
                     statements: vec![stmt],
                 };
 
@@ -233,6 +236,9 @@ impl<'a> Parser<'a> {
             // or statement (if cond: func_call())
             // Parse the body first, then check if else follows
             let then_expr = self.parse_expression()?;
+            let then_span = self.previous.span;
+            let deferred = std::mem::take(&mut self.deferred_dedent_count);
+            self.consume_dedents_for_method_chain(deferred);
 
             // Peek through newlines/dedents to check for elif/else continuation.
             // Only consume newlines if elif/else actually follows,
@@ -250,7 +256,7 @@ impl<'a> Parser<'a> {
             // If no else clause, treat as statement-form (no else required)
             if !self.check(&TokenKind::Else) && !self.check(&TokenKind::Elif) {
                 let then_block = Block {
-                    span: self.previous.span,
+                    span: then_span,
                     statements: vec![Node::Expression(then_expr)],
                 };
                 return Ok(Node::If(IfStmt {
@@ -416,6 +422,8 @@ impl<'a> Parser<'a> {
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
         let then_expr = self.parse_expression()?;
+        let deferred = std::mem::take(&mut self.deferred_dedent_count);
+        self.consume_dedents_for_method_chain(deferred);
 
         // Skip newlines before checking for else/elif (allows multi-line inline if)
         while self.check(&TokenKind::Newline) {
@@ -432,7 +440,10 @@ impl<'a> Parser<'a> {
                 Some(Box::new(self.parse_if_expr_after_condition()?))
             } else {
                 self.expect(&TokenKind::Colon)?;
-                Some(Box::new(self.parse_expression()?))
+                let else_expr = self.parse_expression()?;
+                let deferred = std::mem::take(&mut self.deferred_dedent_count);
+                self.consume_dedents_for_method_chain(deferred);
+                Some(Box::new(else_expr))
             }
         } else {
             None
