@@ -651,8 +651,9 @@ pixels, and performance evidence remain release-blocking.
   mirrored at
   `doc/06_spec/02_integration/rendering/vulkan_font_composite_classification_spec.md`.
   Automatic docgen and execution are not claimed: the deployed self-hosted
-  compiler exits 139 on the new Vulkan extern surface, while rebuilding the
-  Rust compiler is blocked by missing vendored `vendor/rspirv/dr/build.rs`.
+  compiler exits 139 on the new Vulkan extern surface. The prior missing
+  `vendor/rspirv/dr/build.rs` diagnosis was false; that crate has no build
+  script, and the offline `simple-native-all --features vulkan` check passes.
   Engine3D REQ-012/REQ-013 and native performance NFRs remain open.
 - REQ-008 source completion (2026-07-13): the neutral sfnt owner rejects legacy
   `bdat`/`bloc` strikes with the existing unsupported-table policy and exposes
