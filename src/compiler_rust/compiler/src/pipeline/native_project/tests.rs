@@ -470,29 +470,6 @@ fn simpleos_freestanding_linker_script_defaults_and_overrides() {
     );
 }
 
-#[test]
-fn rv64_gui_uses_canonical_freestanding_runtime() {
-    use simple_common::target::{Target, TargetArch, TargetOS};
-
-    let target = Target::new(TargetArch::Riscv64, TargetOS::None);
-    assert_eq!(
-        NativeProjectBuilder::rv64_gui_freestanding_runtime_source(
-            Path::new("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl"),
-            target,
-        ),
-        Some(PathBuf::from("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"))
-    );
-}
-
-#[test]
-fn rv64_gui_runtime_suppresses_duplicate_entry() {
-    assert_eq!(
-        NativeProjectBuilder::freestanding_boot_c_entry_define("freestanding_runtime"),
-        Some("-DSIMPLE_RUNTIME_NO_ENTRY=1")
-    );
-    assert_eq!(NativeProjectBuilder::freestanding_boot_c_entry_define("baremetal_stubs"), None);
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 fn test_native_all_link_args_include_terminfo() {

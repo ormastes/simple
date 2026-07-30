@@ -50,6 +50,9 @@ typedef struct {
     char data[];
 } RuntimeString;
 
+_Static_assert(offsetof(RuntimeString, len) == 8, "RuntimeString len ABI");
+_Static_assert(offsetof(RuntimeString, data) == 12, "RuntimeString data ABI");
+
 typedef struct {
     HeapHeader hdr;
     uint64_t len;
@@ -244,6 +247,38 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     s->data[len] = 0;
     return ENCODE_PTR(s);
 }
+
+RuntimeValue rt_string_len(RuntimeValue value)
+{
+    RuntimeString *s = IS_HEAP(value) ? (RuntimeString *)DECODE_PTR(value) : 0;
+    return s && s->hdr.type == HEAP_STRING ? (RuntimeValue)s->len : 0;
+}
+
+RuntimeValue rt_string_data(RuntimeValue value)
+{
+    RuntimeString *s = IS_HEAP(value) ? (RuntimeString *)DECODE_PTR(value) : 0;
+    return s && s->hdr.type == HEAP_STRING ? (RuntimeValue)(uintptr_t)s->data : 0;
+}
+
+#if defined(__riscv) && defined(__riscv_xlen) && (__riscv_xlen == 64)
+__asm__(
+    ".section .text,\"ax\",@progbits\n"
+    ".p2align 2\n"
+    ".globl rt_riscv64_syscall\n"
+    ".type rt_riscv64_syscall,@function\n"
+    "rt_riscv64_syscall:\n"
+    "mv a7, a0\n"
+    "mv a0, a1\n"
+    "mv a1, a2\n"
+    "mv a2, a3\n"
+    "mv a3, a4\n"
+    "mv a4, a5\n"
+    "mv a5, a6\n"
+    "ecall\n"
+    "ret\n"
+    ".size rt_riscv64_syscall, .-rt_riscv64_syscall\n"
+);
+#endif
 
 static RuntimeValue rt_string_from_cstr(const char *cstr)
 {

@@ -15,6 +15,10 @@ mkdir -p "$tmp/build/os"
         -DSIMPLE_RUNTIME_NO_WEAK_HEAP=1 \
         "$root/src/os/kernel/arch/riscv64/boot/freestanding_runtime.c" \
         -o runtime.o
+    riscv64-unknown-elf-gcc -c -march=rv64gc -mabi=lp64d -mcmodel=medany \
+        -ffreestanding -nostdlib -ffunction-sections -fdata-sections \
+        "$root/examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c" \
+        -o gui-runtime.o
 )
 
 riscv64-unknown-elf-nm -g --defined-only "$tmp/runtime.o" >"$tmp/symbols"
@@ -26,18 +30,11 @@ grep -Eq ' T rt_string_data$' "$tmp/symbols"
 grep -Eq ' T rt_string_len$' "$tmp/symbols"
 ! grep -Eq ' [TW] _start$' "$tmp/symbols"
 
-riscv64-unknown-elf-objdump -d -M no-aliases "$tmp/runtime.o" |
-    awk '
-        /<rt_riscv64_syscall>:/ { body = 1; next }
-        body && /<[A-Za-z0-9_]+>:/ { exit }
-        body && /^[[:space:]]*[0-9a-f]+:/ {
-            if (NF >= 4) {
-                print $3 "\t" $4
-            } else {
-                print $3
-            }
-        }
-    ' >"$tmp/instructions"
+riscv64-unknown-elf-nm -g --defined-only "$tmp/gui-runtime.o" >"$tmp/gui-symbols"
+grep -Eq ' T rt_riscv64_syscall$' "$tmp/gui-symbols"
+grep -Eq ' T rt_string_data$' "$tmp/gui-symbols"
+grep -Eq ' T rt_string_len$' "$tmp/gui-symbols"
+
 cat >"$tmp/expected-instructions" <<'EOF'
 c.mv	a7,a0
 c.mv	a0,a1
@@ -49,7 +46,27 @@ c.mv	a5,a6
 ecall
 c.jr	ra
 EOF
-diff -u "$tmp/expected-instructions" "$tmp/instructions"
+
+check_syscall_instructions() {
+    object=$1
+    output=$2
+    riscv64-unknown-elf-objdump -d -M no-aliases "$object" |
+        awk '
+            /<rt_riscv64_syscall>:/ { body = 1; next }
+            body && /<[A-Za-z0-9_]+>:/ { exit }
+            body && /^[[:space:]]*[0-9a-f]+:/ {
+                if (NF >= 4) {
+                    print $3 "\t" $4
+                } else {
+                    print $3
+                }
+            }
+        ' >"$output"
+    diff -u "$tmp/expected-instructions" "$output"
+}
+
+check_syscall_instructions "$tmp/runtime.o" "$tmp/runtime-instructions"
+check_syscall_instructions "$tmp/gui-runtime.o" "$tmp/gui-runtime-instructions"
 
 grep -Fq "extern fn rt_riscv64_syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64)" \
     "$root/src/os/userlib/syscall_raw.spl"

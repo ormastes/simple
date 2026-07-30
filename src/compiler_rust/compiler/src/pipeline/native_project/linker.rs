@@ -140,24 +140,6 @@ impl NativeProjectBuilder {
         })
     }
 
-    fn rv64_gui_entry(entry: &Path, target: simple_common::target::Target) -> bool {
-        target.arch == simple_common::target::TargetArch::Riscv64
-            && target.os == simple_common::target::TargetOS::None
-            && entry.file_name().and_then(OsStr::to_str) == Some("gui_entry_desktop.spl")
-    }
-
-    pub(crate) fn rv64_gui_freestanding_runtime_source(
-        entry: &Path,
-        target: simple_common::target::Target,
-    ) -> Option<PathBuf> {
-        Self::rv64_gui_entry(entry, target)
-            .then(|| PathBuf::from("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"))
-    }
-
-    pub(crate) fn freestanding_boot_c_entry_define(stem: &str) -> Option<&'static str> {
-        (stem == "freestanding_runtime").then_some("-DSIMPLE_RUNTIME_NO_ENTRY=1")
-    }
-
     fn freestanding_target_triple(target: simple_common::target::Target) -> Option<&'static str> {
         match (target.arch, target.os) {
             (simple_common::target::TargetArch::Riscv32, simple_common::target::TargetOS::None) => {
@@ -1653,7 +1635,6 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         let mut boot_objects: Vec<PathBuf> = Vec::new();
         let mut boot_compile_failures: usize = 0;
         if let Some(ref entry) = self.entry_file {
-            let rv64_gui_runtime = Self::rv64_gui_freestanding_runtime_source(entry, cross_target);
             let skip_boot_autodiscovery = cross_target.arch == simple_common::target::TargetArch::Riscv64
                 && entry
                     .file_name()
@@ -1761,15 +1742,8 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                     }
                 }
                 if let Ok(entries) = std::fs::read_dir(&boot_dir) {
-                    let mut c_sources: Vec<PathBuf> = entries
-                        .flatten()
-                        .map(|de| de.path())
-                        .filter(|path| path.extension().and_then(OsStr::to_str) == Some("c"))
-                        .collect();
-                    if let Some(runtime) = rv64_gui_runtime {
-                        c_sources.push(runtime);
-                    }
-                    for path in c_sources {
+                    for de in entries.flatten() {
+                        let path = de.path();
                         if path.extension().and_then(|e| e.to_str()) == Some("c") {
                             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                             if skip_boot_autodiscovery && stem != proof_runtime_stem {
@@ -1824,9 +1798,6 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                                     .arg(&out)
                                     .arg(&path)
                                     .arg(format!("--target={}", triple));
-                                if let Some(define) = Self::freestanding_boot_c_entry_define(&stem) {
-                                    c_cmd.arg(define);
-                                }
                                 if stem == "curve25519_ring_helper"
                                     || stem == "ed25519_scalar_helper"
                                     || stem == "ed25519_verify_helper"
