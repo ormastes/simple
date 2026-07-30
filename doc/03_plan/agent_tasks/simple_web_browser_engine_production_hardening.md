@@ -663,6 +663,23 @@ listener prototypes remain HOLD. This batch must not retry them, add a private
 paint path, or treat parsing/source inspection as rendering or animation
 evidence. Root Codex is merge owner and final reviewer; no sidecar pushes.
 
+## Production browser batch 9 (2026-07-30)
+
+| Lane | Bounded owner | Acceptance boundary | Status |
+| --- | --- | --- | --- |
+| `dom_identity_owner_impl` | canonical `dom_identity_index.spl` only | O(N) immutable index, generation routes, duplicate-ID/form-owner rules, four-step RED-first SSpec | IN PROGRESS |
+| `html_css_definition_list` | one uncapped Partial semantic row | canonical WebIR/DrawIR/Engine2D geometry and exact pixels; no private painter | IN PROGRESS |
+| `navigation_controls_batch9` | one uncapped Go/Back/Forward/Stop/Home/URL/Bookmark defect | public actions, lifecycle authority, exact state/UI evidence | IN PROGRESS |
+| `https_sandbox_batch9` | one uncapped HTTPS/sandbox boundary | fail closed with hostile evidence; no provider/runtime shortcut | IN PROGRESS |
+| `pure_simple_receipt_admission` | existing self-hosted artifact/receipt path | SHA-256 + source tree/revision + build mode/command; mtime/version are insufficient | IN PROGRESS |
+| `event_routing_batch9` | one uncapped button/text-input route defect | real pointer/keyboard/input actions and canonical state/pixels | IN PROGRESS |
+
+All lanes start from pushed main `b26c4ae776d`. They may not reopen a
+three-review capped HOLD, run a full bootstrap, use the Rust seed, or claim
+target execution without an admitted pure-Simple receipt. Root Codex remains
+merge owner; independent normal/high-capability review is mandatory before
+integration.
+
 ## Generation-qualified DOM identity implementation lanes
 
 <!-- codex-design -->
