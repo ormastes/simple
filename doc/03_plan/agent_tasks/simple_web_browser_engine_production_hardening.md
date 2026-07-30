@@ -841,3 +841,17 @@ review. Review caught CSP ordering, form `dialog`, correlated pixel evidence,
 summary interactive precedence, rAF deadline/wakeup overflow, and SBR2
 authority-model contradictions before integration. Two combined static guard
 passes succeeded; no bootstrap, seed fallback, or stale runtime was used.
+
+## Production browser batch 16 status (2026-07-30)
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `broker_hsts_policy` | Trusted broker owns HSTS upgrade/learning decisions. | PUSHED `6e7b4517a81`; runtime evidence remains unclaimed |
+| `generated_dom_identity` | Atomic generation-qualified DOM identity contract. | DESIGN PUSHED `ac847fbfb67`; PROPOSED/RED, not implemented |
+| `crash_safe_sbr2` | Renderer traffic is bound to one-use SBR2 capabilities on the SBR2 base. | PUSHED `879f28bc059`; STATIC-ONLY, no 10,000-cycle/runtime PASS |
+| `stage4_admission` | No provenance-qualified current full pure-Simple CLI was admitted. | NONE; available artifacts are stale-lineage |
+| `js_vm_reclamation` | Candidate used reusable raw IDs, non-refcounted escaped roots, and property-name-inferred numeric edges. | REJECTED; requires generation-qualified handles, independent-owner refcounts, and typed mark edges |
+| `parent_history` | Earlier history work does not meet the parent-authoritative protocol contract. | REJECTED; active rework must use SBR2 base `879f28bc059` |
+
+No rejected GC/history patch is mergeable. These rows record integration and
+design state only; they do not claim runtime PASS or implementation completion.

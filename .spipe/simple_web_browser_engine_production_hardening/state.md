@@ -2545,3 +2545,18 @@ implementation in progress / target evidence blocked
   diff/layout/placeholder/direct-environment guard. No provenance-qualified
   current Stage-4 CLI exists, so focused runtime execution and docgen remain
   unclaimed.
+- production browser batch 16 status reconciliation (2026-07-30):
+  broker-owned HSTS policy is pushed at `6e7b4517a81`. Generation-qualified
+  DOM identity is pushed as design at `ac847fbfb67`; it remains PROPOSED/RED
+  and is not implemented. Crash-safe one-use SBR2 renderer capabilities are
+  pushed at `879f28bc059`, but evidence is static-only: no runtime PASS,
+  10,000-cycle PASS, or complete browser claim is made.
+- batch-16 admission and rejected work: Stage-4 admission is NONE; discovered
+  artifacts are stale-lineage and cannot support execution or docgen claims.
+  The JS VM reclamation candidate was rejected because raw reused IDs lack
+  generation-qualified external handles, independent host owners are not
+  reference-counted, and numeric ownership is not represented by typed mark
+  edges. Those are design prerequisites before GC implementation resumes.
+  The prior history candidate/design is rejected; active history rework must
+  start from the crash-safe SBR2 base `879f28bc059`. No rejected history or GC
+  patch is imported and no implementation-complete claim is made.

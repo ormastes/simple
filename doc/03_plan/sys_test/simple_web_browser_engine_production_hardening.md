@@ -1159,3 +1159,22 @@ remains design-only and RED.
 Independent review and one static guard pass per integration tranche succeeded.
 Qualified execution/docgen remain HELD pending a clean provenance-qualified
 current Stage-4 pure-Simple CLI.
+
+## Batch 16 evidence boundary
+
+- Broker-owned HSTS policy is pushed at `6e7b4517a81`.
+- Generation-qualified DOM identity design is pushed at `ac847fbfb67` but
+  remains PROPOSED/RED; no executable identity evidence is admitted.
+- Crash-safe one-use SBR2 capability work is pushed at `879f28bc059`.
+  Review evidence is static-only; the runtime and 10,000-cycle rows remain RED.
+- Stage-4 admission is NONE because available artifacts are stale-lineage.
+  Therefore no focused execution, docgen, runtime PASS, or implementation
+  completion is claimed.
+- JS VM reclamation evidence remains RED. A rejected candidate did not carry
+  generations in external handles, did not reference-count independent escaped
+  owners, and inferred numeric references instead of emitting typed mark edges.
+  Generation-qualified handles, owner refcounts, and typed edges are required
+  before the 1,000-dispatch/lifecycle scenarios can be admitted.
+- The earlier history candidate/design is rejected. Active history rework is
+  based on crash-safe SBR2 revision `879f28bc059`; no rejected history evidence
+  enters this plan.
