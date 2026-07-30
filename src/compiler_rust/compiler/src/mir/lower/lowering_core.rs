@@ -1273,6 +1273,7 @@ impl<'a> MirLowerer<'a> {
         module.global_init_arrays = hir.global_init_arrays.clone();
         module.global_init_structs = hir.global_init_structs.clone();
         module.global_init_functions = hir.global_init_functions.clone();
+        module.dynamic_init_globals = hir.dynamic_init_globals.clone();
 
         // Copy local globals set from HIR to MIR for codegen linkage decisions
         module.local_globals = hir.local_globals.clone();

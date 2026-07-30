@@ -2,13 +2,15 @@ use std::collections::HashMap;
 
 use simple_parser::{self as ast, Expr, Module, Node};
 
+use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    HirAopAdvice, HirArchRule, HirCapabilityItem, HirCapabilityPolicy, HirDiBinding, HirDomainBlock,
-    HirGlobalArrayInit, HirGlobalFieldInit, HirGlobalStructInit, HirImpl, HirInjectGraph, HirInjectItem, HirLeanBlock,
-    HirMockDecl, HirModule, HirSandboxItem, HirSandboxPolicy, HirSecurityGate, HirSecurityItem, HirSecurityPolicy,
-    HirType, HirUiPolicy, HirUiPolicyItem, TypeId,
+    ConcurrencyMode, HirAopAdvice, HirArchRule, HirCapabilityItem, HirCapabilityPolicy, HirDiBinding, HirDomainBlock,
+    HirExpr, HirExprKind, HirFunction, HirGlobalArrayInit, HirGlobalFieldInit, HirGlobalStructInit, HirImpl,
+    HirInjectGraph, HirInjectItem, HirLeanBlock, HirMockDecl, HirModule, HirSandboxItem, HirSandboxPolicy,
+    HirSecurityGate, HirSecurityItem, HirSecurityPolicy, HirStmt, HirType, HirUiPolicy, HirUiPolicyItem, TypeId,
+    VerificationMode,
 };
 
 fn try_const_eval(expr: &Expr) -> Option<i64> {
@@ -1527,6 +1529,93 @@ impl Lowerer {
         self.module.extern_fn_names = self.extern_fn_names.clone();
         self.module.imported_function_names = self.imported_function_names.clone();
 
+        // Module-init dynamic pass: for every module-level val/var/const global
+        // whose initializer needs genuine runtime evaluation (a function call,
+        // or an expression referencing another global) rather than one of the
+        // five const-foldable shapes handled above (global_init_values/
+        // strings/arrays/functions/structs), synthesize a
+        // `__module_init_dynamic` function whose body assigns each such
+        // global from its lowered initializer expression, in source
+        // declaration order. This reuses the ordinary expression-lowering
+        // path (the same `lower_expr` every real function body uses) instead
+        // of adding a sixth hardcoded literal shape -- see
+        // doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md.
+        //
+        // Declaration order is sufficient here, not a topological sort: a
+        // const-foldable global (BASE in `val BASE = 10; val DERIVED = BASE +
+        // 5`) is already resident in static .data before any code runs, so a
+        // dynamic initializer that reads it needs no ordering help. A
+        // dynamic initializer that reads ANOTHER dynamic initializer's global
+        // is only correct if the source declares the producer first -- that
+        // is the bounded case this pass covers, not general dependency
+        // analysis.
+        {
+            let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
+            let mut dyn_body: Vec<HirStmt> = Vec::new();
+            for item in &ast_module.items {
+                let (name, value): (String, &Expr) = match item {
+                    Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
+                        (Some(n), Some(v)) => (n, v),
+                        _ => continue,
+                    },
+                    Node::Static(s) => (s.name.clone(), &s.value),
+                    Node::Const(c) => (c.name.clone(), &c.value),
+                    _ => continue,
+                };
+                let has_static_init = self.global_init_values.contains_key(&name)
+                    || self.global_init_strings.contains_key(&name)
+                    || self.global_init_arrays.contains_key(&name)
+                    || self.global_init_functions.contains_key(&name)
+                    || self.global_init_structs.contains_key(&name);
+                if has_static_init {
+                    continue;
+                }
+                let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
+                let hir_val = self.lower_expr(value, &mut dyn_ctx)?;
+                // Codegen decides whether a global's backing data is writable
+                // by consulting `dynamic_init_globals` (mirrors the same
+                // check for global_init_strings/arrays/functions/structs) --
+                // a `val`-declared global with no other recognized init shape
+                // otherwise gets emitted as read-only data, and the store
+                // below would fault at runtime.
+                self.module.dynamic_init_globals.insert(name.clone());
+                dyn_body.push(HirStmt::Assign {
+                    target: HirExpr {
+                        kind: HirExprKind::Global(name),
+                        ty: global_ty,
+                    },
+                    value: hir_val,
+                });
+            }
+            if std::env::var("SIMPLE_WRITEFIX_DEBUG").is_ok() {
+                eprintln!("[writefix] dyn_body.len()={}", dyn_body.len());
+            }
+            if !dyn_body.is_empty() {
+                dyn_body.push(HirStmt::Return(None));
+                self.module.functions.push(HirFunction {
+                    name: "__module_init_dynamic".to_string(),
+                    span: None,
+                    params: Vec::new(),
+                    locals: dyn_ctx.locals,
+                    return_type: TypeId::VOID,
+                    body: dyn_body,
+                    visibility: ast::Visibility::Internal,
+                    contract: None,
+                    is_pure: false,
+                    inject: false,
+                    concurrency_mode: ConcurrencyMode::Actor,
+                    module_path: self.module.name.clone().unwrap_or_default(),
+                    attributes: Vec::new(),
+                    effects: Vec::new(),
+                    layout_hint: None,
+                    verification_mode: VerificationMode::Unverified,
+                    is_ghost: false,
+                    is_sync: true,
+                    has_suspension: false,
+                });
+            }
+        }
+
         // Third pass: lower AOP constructs (#1000-1050)
         self.lower_aop_constructs(ast_module)?;
 
@@ -1769,6 +1858,93 @@ impl Lowerer {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Module-init dynamic pass: for every module-level val/var/const global
+        // whose initializer needs genuine runtime evaluation (a function call,
+        // or an expression referencing another global) rather than one of the
+        // five const-foldable shapes handled above (global_init_values/
+        // strings/arrays/functions/structs), synthesize a
+        // `__module_init_dynamic` function whose body assigns each such
+        // global from its lowered initializer expression, in source
+        // declaration order. This reuses the ordinary expression-lowering
+        // path (the same `lower_expr` every real function body uses) instead
+        // of adding a sixth hardcoded literal shape -- see
+        // doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md.
+        //
+        // Declaration order is sufficient here, not a topological sort: a
+        // const-foldable global (BASE in `val BASE = 10; val DERIVED = BASE +
+        // 5`) is already resident in static .data before any code runs, so a
+        // dynamic initializer that reads it needs no ordering help. A
+        // dynamic initializer that reads ANOTHER dynamic initializer's global
+        // is only correct if the source declares the producer first -- that
+        // is the bounded case this pass covers, not general dependency
+        // analysis.
+        {
+            let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
+            let mut dyn_body: Vec<HirStmt> = Vec::new();
+            for item in &ast_module.items {
+                let (name, value): (String, &Expr) = match item {
+                    Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
+                        (Some(n), Some(v)) => (n, v),
+                        _ => continue,
+                    },
+                    Node::Static(s) => (s.name.clone(), &s.value),
+                    Node::Const(c) => (c.name.clone(), &c.value),
+                    _ => continue,
+                };
+                let has_static_init = self.global_init_values.contains_key(&name)
+                    || self.global_init_strings.contains_key(&name)
+                    || self.global_init_arrays.contains_key(&name)
+                    || self.global_init_functions.contains_key(&name)
+                    || self.global_init_structs.contains_key(&name);
+                if has_static_init {
+                    continue;
+                }
+                let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
+                let hir_val = self.lower_expr(value, &mut dyn_ctx)?;
+                // Codegen decides whether a global's backing data is writable
+                // by consulting `dynamic_init_globals` (mirrors the same
+                // check for global_init_strings/arrays/functions/structs) --
+                // a `val`-declared global with no other recognized init shape
+                // otherwise gets emitted as read-only data, and the store
+                // below would fault at runtime.
+                self.module.dynamic_init_globals.insert(name.clone());
+                dyn_body.push(HirStmt::Assign {
+                    target: HirExpr {
+                        kind: HirExprKind::Global(name),
+                        ty: global_ty,
+                    },
+                    value: hir_val,
+                });
+            }
+            if std::env::var("SIMPLE_WRITEFIX_DEBUG").is_ok() {
+                eprintln!("[writefix] dyn_body.len()={}", dyn_body.len());
+            }
+            if !dyn_body.is_empty() {
+                dyn_body.push(HirStmt::Return(None));
+                self.module.functions.push(HirFunction {
+                    name: "__module_init_dynamic".to_string(),
+                    span: None,
+                    params: Vec::new(),
+                    locals: dyn_ctx.locals,
+                    return_type: TypeId::VOID,
+                    body: dyn_body,
+                    visibility: ast::Visibility::Internal,
+                    contract: None,
+                    is_pure: false,
+                    inject: false,
+                    concurrency_mode: ConcurrencyMode::Actor,
+                    module_path: self.module.name.clone().unwrap_or_default(),
+                    attributes: Vec::new(),
+                    effects: Vec::new(),
+                    layout_hint: None,
+                    verification_mode: VerificationMode::Unverified,
+                    is_ghost: false,
+                    is_sync: true,
+                    has_suspension: false,
+                });
             }
         }
 

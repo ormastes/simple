@@ -182,6 +182,15 @@ pub struct HirModule {
     /// Struct-literal global initializers (e.g. `var g: S = S(rules: [])`).
     /// Heap-allocated at module init; fields stored at sequential i*8 offsets.
     pub global_init_structs: HashMap<String, HirGlobalStructInit>,
+    /// Globals whose initializer needs genuine runtime evaluation (a function
+    /// call, or an expression referencing another global) and is therefore
+    /// assigned by the synthesized `__module_init_dynamic` function (see
+    /// hir/lower/module_lowering/module_pass.rs) instead of one of the
+    /// const-foldable shapes above. Codegen must treat these as writable
+    /// (Preemptible + writable data), the same as the other four
+    /// global_init_* categories, or the runtime write segfaults into
+    /// read-only JIT-allocated memory.
+    pub dynamic_init_globals: HashSet<String>,
     /// Set of globals that are defined locally in this module (not imported).
     pub local_globals: HashSet<String>,
     /// Set of globals that are immutable (val/const, not var).
@@ -247,6 +256,7 @@ impl HirModule {
             global_init_arrays: HashMap::new(),
             global_init_functions: HashMap::new(),
             global_init_structs: HashMap::new(),
+            dynamic_init_globals: HashSet::new(),
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
             type_invariants: HashMap::new(),

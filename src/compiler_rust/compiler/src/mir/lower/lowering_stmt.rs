@@ -715,15 +715,80 @@ impl<'a> MirLowerer<'a> {
                         }
                     }
 
-                    // Global variable assignment: use GlobalStore directly
+                    // Global variable assignment: use GlobalStore directly.
+                    //
+                    // When the global's declared type is ANY/dynamic but the
+                    // source value is a native int/float/bool (e.g. a
+                    // module-level `val X = get_value()` whose global stayed
+                    // untyped -- see the module-init dynamic pass in
+                    // hir/lower/module_lowering/module_pass.rs), box it first
+                    // so later ANY-typed reads (print, boxing-aware dispatch)
+                    // see a tagged RuntimeValue instead of a raw int
+                    // misread as a pointer -- mirrors the identical
+                    // needs_boxing pattern in lowering_expr_builtin.rs and
+                    // lowering_expr_struct.rs.
                     HirExprKind::Global(name) => {
                         let global_name = name.clone();
+                        let target_is_any = target.ty == TypeId::ANY;
+                        let needs_int_boxing = target_is_any
+                            && matches!(
+                                ty,
+                                TypeId::I8
+                                    | TypeId::I16
+                                    | TypeId::I32
+                                    | TypeId::I64
+                                    | TypeId::U8
+                                    | TypeId::U16
+                                    | TypeId::U32
+                                    | TypeId::U64
+                            );
+                        let needs_float_boxing = target_is_any && matches!(ty, TypeId::F32 | TypeId::F64);
+                        let needs_bool_boxing = target_is_any && ty == TypeId::BOOL;
+                        let stored_val = if needs_bool_boxing {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(boxed),
+                                    target: CallTarget::from_name("rt_value_bool"),
+                                    args: vec![val_reg],
+                                });
+                                boxed
+                            })?
+                        } else if needs_int_boxing {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::BoxInt {
+                                    dest: boxed,
+                                    value: val_reg,
+                                });
+                                boxed
+                            })?
+                        } else if needs_float_boxing {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::BoxFloat {
+                                    dest: boxed,
+                                    value: val_reg,
+                                });
+                                boxed
+                            })?
+                        } else {
+                            val_reg
+                        };
+                        let stored_ty = if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
+                            TypeId::ANY
+                        } else {
+                            ty
+                        };
                         self.with_func(|func, current_block| {
                             let block = func.block_mut(current_block).unwrap();
                             block.instructions.push(MirInst::GlobalStore {
                                 global_name,
-                                value: val_reg,
-                                ty,
+                                value: stored_val,
+                                ty: stored_ty,
                             });
                         })?;
                     }

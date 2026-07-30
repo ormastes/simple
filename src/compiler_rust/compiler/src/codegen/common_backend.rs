@@ -1939,6 +1939,7 @@ impl<M: Module> CodegenBackend<M> {
         runtime_init_globals.extend(mir.global_init_arrays.keys().cloned());
         runtime_init_globals.extend(mir.global_init_functions.keys().cloned());
         runtime_init_globals.extend(mir.global_init_structs.keys().cloned());
+        runtime_init_globals.extend(mir.dynamic_init_globals.iter().cloned());
         self.declare_globals(
             &mir.globals,
             &mir.extern_fn_names,
@@ -2123,16 +2124,29 @@ impl<M: Module> CodegenBackend<M> {
 
         // Generate module initialization function for heap-backed global constants.
         // This allocates runtime strings/arrays and stores their handles in globals.
+        //
+        // `__module_init_dynamic` (if present) is a plain HIR-lowered function
+        // synthesized by hir/lower/module_lowering/module_pass.rs for globals
+        // whose initializer needs genuine runtime evaluation (a function call,
+        // or an expression referencing another global) rather than one of the
+        // const-foldable shapes below. It is compiled through the ordinary
+        // per-function codegen path above (no special-casing needed for its
+        // body); the only wiring generate_module_init does is call it, so it
+        // runs automatically wherever __module_init already does (JIT's
+        // run_module_init_once, and the native binary's startup code).
+        let dynamic_init_func_id = self.func_ids.get("__module_init_dynamic").copied();
         if !mir.global_init_strings.is_empty()
             || !mir.global_init_arrays.is_empty()
             || !mir.global_init_functions.is_empty()
             || !mir.global_init_structs.is_empty()
+            || dynamic_init_func_id.is_some()
         {
             self.generate_module_init(
                 &mir.global_init_strings,
                 &mir.global_init_arrays,
                 &mir.global_init_functions,
                 &mir.global_init_structs,
+                dynamic_init_func_id,
             )?;
         }
 
@@ -2153,6 +2167,7 @@ impl<M: Module> CodegenBackend<M> {
         init_arrays: &std::collections::HashMap<String, crate::hir::HirGlobalArrayInit>,
         init_functions: &std::collections::HashMap<String, String>,
         init_structs: &std::collections::HashMap<String, crate::hir::HirGlobalStructInit>,
+        dynamic_init_func_id: Option<cranelift_module::FuncId>,
     ) -> BackendResult<()> {
         use cranelift_codegen::ir::{types, MemFlags, UserFuncName};
 
@@ -2596,6 +2611,15 @@ impl<M: Module> CodegenBackend<M> {
                     builder.ins().store(MemFlags::new(), struct_ptr, global_addr, 0);
                 }
             }
+        }
+
+        // Call the dynamic-init function (arbitrary runtime-evaluated global
+        // initializers), if the HIR lowering pass synthesized one. It was
+        // already declared/compiled as an ordinary function above, so this is
+        // just an inter-function call, identical to any other call site here.
+        if let Some(dyn_func_id) = dynamic_init_func_id {
+            let dyn_func_ref = self.module.declare_func_in_func(dyn_func_id, builder.func);
+            builder.ins().call(dyn_func_ref, &[]);
         }
 
         builder.ins().return_(&[]);
