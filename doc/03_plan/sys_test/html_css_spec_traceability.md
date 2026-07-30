@@ -49,6 +49,7 @@ the inventory audit:
 | current `header` lane | Selected block default through canonical layout and pixels | Exactly four-step SSpec covers semantic body parentage, `display:block`, exact DrawIR geometry, and exact Engine2D component/control pixels | Source/spec/handwritten-manual evidence only; qualified execution remains open |
 | current `details`/`summary` lane | First-summary disclosure semantics and canonical click default action | Exactly four-step SSpec covers closed/open/nested state, exact geometry, DrawIR command presence/absence, and discriminating Engine2D pixels | Bounded fallback omits the synthesized shadow summary and marker glyph; qualified execution remains open |
 | current `figure` lane | Selected four-side UA margins through canonical layout and pixels | Exactly four-step SSpec covers semantic body parentage, selected UA margins, exact DrawIR geometry, and exact Engine2D component/control pixels | Source/spec/handwritten-manual evidence only; caption semantics and qualified execution remain open |
+| current `menu` lane | Selected LTR list-container spacing through canonical layout and pixels | Exactly four-step SSpec covers semantic body parentage, selected UA padding/margins, exact DrawIR geometry, and exact Engine2D component/control pixels | Source/spec/handwritten-manual evidence only; markers, RTL logical padding, full menu semantics, and qualified execution remain open |
 
 These commits correct the named source/spec/manual gaps but do not close the
 overall HTML/CSS traceability goal. The deployed pure-Simple wrapper still
@@ -60,8 +61,8 @@ runs the scenarios, both tranches remain execution-evidence-blocked.
 
 The source inventory began with 80 Partial rows. The bounded `hr`,
 fieldset/legend, definition-list, `article`, blockquote, `header`,
-`details`/`summary`, and `figure` lanes reclassify those twelve named rows into
-their own fallback rows, leaving 68 in the
+`details`/`summary`, `figure`, and `menu` lanes reclassify those thirteen named
+rows into their own fallback rows, leaving 67 in the
 undifferentiated Partial backlog.
 The two rows called out as
 inventory-only or missing were subsequently covered by `28f0e779b0d2`.
@@ -70,8 +71,8 @@ No named row appears in both a bounded row and the remaining Partial count.
 | Classification | Count | Meaning |
 |---|---:|---|
 | Full | 12 | Direct semantic/tree plus applicable layout/DrawIR/Engine2D or hidden/fail-closed evidence |
-| Partial remaining | 68 | Tag appears in text/grouped render coverage but lacks isolated end-to-end proof; excludes `hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure` |
-| Bounded selected-profile fallback | 12 | `hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`; basic UA/cascade/DrawIR/pixel paths covered, while special formatting and aggregate conformance remain Partial/RED |
+| Partial remaining | 67 | Tag appears in text/grouped render coverage but lacks isolated end-to-end proof; excludes `hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`,`menu` |
+| Bounded selected-profile fallback | 13 | `hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`,`menu`; basic UA/cascade/DrawIR/pixel paths covered, while special formatting and aggregate conformance remain Partial/RED |
 | Unsupported/fail-closed | 11 | Embedded/media/native semantics are not implemented |
 | Inventory-only before landed tranche | 2 | `selectedcontent`, `slot`; bounded behavior landed |
 | Missing before landed tranche | 8 | `h1`–`h6`, `sub`, `sup`; bounded behavior landed |
@@ -127,7 +128,7 @@ an inventory literal, an `@supports` table, or metadata.
 | REQ/NFR | Row/group | Support | Executable spec/scenario | Production owners | Required oracle | Manual/result | Status |
 |---|---|---|---|---|---|---|---|
 | REQ-002/004/019/021 | HTML Full 12: `html,head,meta,title,body,main,p,div,section,table,textarea,template` | Full by static audit | `test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl`; browser production-hardening spec | tokenizer/tree, BrowserSession semantic tree, HTML layout renderer, DrawIR, Engine2D | exact tag/parent/style/geometry/commands/pixels or hidden absence | canonical manuals exist; qualified execution unavailable | Evidence-blocked |
-| REQ-002/004/019/021 | HTML Partial 68 remaining; twelve bounded rows split below | Partial | grouped text/tag and bitmap matrices; exact scenario mapping missing | same canonical owners | per-group identity, UA defaults, geometry, DrawIR, pixels | new grouped specs/manuals required | RED |
+| REQ-002/004/019/021 | HTML Partial 67 remaining; thirteen bounded rows split below | Partial | grouped text/tag and bitmap matrices; exact scenario mapping missing | same canonical owners | per-group identity, UA defaults, geometry, DrawIR, pixels | new grouped specs/manuals required | RED |
 | REQ-002/004/021 | HTML `article` | Bounded block-default behavior landed in `fb4050c3d2b` | `article_element_rendering_spec.spl`: `should lower the article block default through Draw IR to pixels` | tokenizer/tree, canonical UA defaults, Web layout, DrawIR, Engine2D | semantic parentage, `display:block`, exact geometry and component/control pixels | complete handwritten mirror; qualified docgen/execution unavailable | Evidence-blocked |
 | REQ-002/003/004/019/021 | HTML `hr` | Bounded behavior in current lane | `test/03_system/feature/web_platform/html/hr_element_wpt_spec.spl`: `should render hr defaults and author CSS through Engine2D` | canonical tree, tag defaults, shared declaration application, Web layout, DrawIR, Engine2D | void identity, selected 8 px margins and 1 px gray border, exact `border:0`/`0px`/`none`/`hidden` clearing, mixed digit-bearing invalid/missing preservation, authored red geometry, exact component/control pixels | mirrored manual generated in current lane; qualified execution unavailable | Evidence-blocked |
 | REQ-002/019/021 | HTML embedded/media fallback 10: `area,audio,canvas,embed,map,object,picture,source,track,video` | Bounded fail-closed fallback landed in `543409eee861` | safe embedded/media fallback spec | tokenizer/tree/resource fallback, Web layout, DrawIR, Engine2D | semantic/resource exclusion plus deterministic fallback commands and pixels | canonical spec/manual; qualified execution unavailable | Evidence-blocked |
@@ -141,6 +142,7 @@ an inventory literal, an `@supports` table, or metadata.
 | REQ-002/004/021 | HTML `blockquote` selected profile | Bounded UA-default behavior | `blockquote_element_rendering_spec.spl`: `should lower blockquote UA margins through Draw IR to pixels` | tokenizer/tree, canonical UA defaults/layout, DrawIR, Engine2D | semantic body parent, all four selected UA margins, exact geometry, DrawIR, and component/control pixels | handwritten complete mirror; qualified execution unavailable | Evidence-blocked |
 | REQ-002/004/021 | HTML `header` selected profile | Bounded block-default behavior | `header_element_rendering_spec.spl`: `should lower the header block default through Draw IR to pixels` | tokenizer/tree, canonical UA defaults, Web layout, DrawIR, Engine2D | semantic body parent, `display:block`, exact geometry, DrawIR, and component/control pixels | handwritten complete mirror; qualified execution unavailable | Evidence-blocked |
 | REQ-002/004/021 | HTML `figure` selected profile | Bounded UA-default behavior landed in `897368fb592` | `figure_element_rendering_spec.spl`: `should lower figure UA margins through Draw IR to pixels` | tokenizer/tree, canonical UA defaults/layout, DrawIR, Engine2D | semantic body parent, all four selected UA margins, exact geometry, DrawIR, and component/control pixels | complete mirror; static evidence held, caption semantics and qualified execution unavailable | Evidence-blocked |
+| REQ-002/004/021 | HTML `menu` selected profile | Bounded UA-default behavior | `menu_element_rendering_spec.spl`: `should lower menu UA list spacing through Draw IR to pixels` | tokenizer/tree, canonical UA defaults/layout, DrawIR, Engine2D | semantic body parent, selected LTR list padding/margins, exact geometry, DrawIR, and component/control pixels | handwritten complete mirror; markers, RTL logical padding, full menu semantics, and qualified execution unavailable | Evidence-blocked |
 | REQ-003/004/019/021 | CSS claimed 284 | Functional count unknown | generated-combinations spec has 38 scenarios | declaration/cascade/style/layout/paint/DrawIR/Engine2D | isolated semantic, layout, DrawIR, pixel baseline/control | retained 13 pass/25 fail; manuals stale | FAIL |
 | REQ-003/004/019/021 | CSS Grid bounded foundation | Bounded behavior landed in `b17e868199af` | `test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl` | canonical declaration/style/layout/paint-layout, DrawIR, Engine2D | exact tracks, placement/span/implicit-row geometry and pixels; block and quota controls | canonical manual complete; independent static PASS; manifest `red-not-run`; runtime unavailable | Evidence-blocked |
 | REQ-003/004/005/006/007/017/021 | CSS/JavaScript animation frame trace | Bounded initial/intermediate/completed, pause/resume, SimpleScript style-frame, and completed-frame reuse behavior implemented | `browser_session_script_css_animation_spec.spl`: deterministic JavaScript trace plus `applies CSS from a SimpleScript animation frame through Draw IR`; `animations_wpt_spec.spl`: `should reuse the completed animation Draw IR after its final frame` | BrowserSession monotonic clock/DOM bridge, CSS animation instances, render-session cache, canonical HTML layout/DrawIR, Engine2D | exact stage geometry/colors/pixels, scheduler state, and unchanged paint count/checksum after completion | complete manuals; qualified execution/docgen unavailable | Evidence-blocked |
@@ -216,6 +218,17 @@ The bounded `figure` scenario has exactly these four visible steps:
 Its frozen setup/checker helpers are `_figure_html`, `_node_index`, `_command`,
 `_style`, `_geometry`, `_check_figure_semantics`, `_check_figure_ua_style`,
 `_check_figure_draw_ir`, and `_check_figure_pixels`.
+
+The bounded `menu` scenario has exactly these four visible steps:
+
+- `Parse menu as a body child`
+- `Apply selected menu user-agent list spacing`
+- `Lower the menu box to exact Draw IR geometry`
+- `Rasterize the Draw IR menu box`
+
+Its frozen setup/checker helpers are `_menu_html`, `_node_index`, `_command`,
+`_style`, `_geometry`, `_color_count`, `_check_menu_semantics`,
+`_check_menu_ua_style`, `_check_menu_draw_ir`, and `_check_menu_pixels`.
 
 ## Implementation-ready first tranche
 
