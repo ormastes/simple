@@ -364,3 +364,93 @@ Measure cached warm host startup, frame p50/p95/max, input-to-present, QEMU
 launch-to-first-themed-frame, QEMU themed-frame latency and max RSS. Package
 parsing/generation is outside hot paths; frame rendering performs no file scan,
 CSS package load or subprocess.
+
+<!-- codex-design -->
+## Ordered shadow and per-corner detail update (2026-07-30)
+
+### Producer data
+
+Simple Web retains its legacy aggregate shadow and uniform-radius fields for
+compatibility. The extracted
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_css_box_effects.spl` owner
+parses:
+
+- `CssCornerRadii(valid, top_left_px, top_right_px, bottom_right_px,
+  bottom_left_px)` for the supported nonnegative integer-px 1/2/3/4-value
+  shorthand;
+- `WebBoxShadowParseResult(valid, layers)` containing source-ordered
+  `WebBoxShadowLayer(kind, offset_x_px, offset_y_px, blur_radius_px,
+  spread_radius_px, color_rgba)` values.
+
+Elliptical `/` radii, fractional/non-px lengths, invalid colors, overflow,
+partial layers, and more than 24 layers fail closed. `none` is valid and empty.
+Declaration resolution compares authored indices so a later shorthand or
+physical/logical longhand wins; `border_radius_px` remains the top-left
+compatibility value.
+
+### Draw IR wire projection
+
+When the shadow declaration is valid, including `none`, Web appends:
+
+```text
+box-shadow-layer-schema = web-box-shadow-layers-v1
+box-shadow-layer-count = N
+box-shadow-layer-{i}-kind = outer | inset
+box-shadow-layer-{i}-offset-x = signed pixels
+box-shadow-layer-{i}-offset-y = signed pixels
+box-shadow-layer-{i}-blur-radius = nonnegative pixels
+box-shadow-layer-{i}-spread-radius = signed pixels
+box-shadow-layer-{i}-color = canonical decimal ARGB
+```
+
+The producer preserves the existing aggregate/raw/count and four physical
+corner keys. A valid empty list emits count `0`; invalid typed parsing omits
+the schema, so legacy consumers continue through one aggregate path. Corner
+keys are admitted independently from that shadow schema. GUI and WM may emit the same
+producer-neutral keys when their semantic models contain equivalent data; they
+must not call the Web parser.
+
+### Engine2D algorithm
+
+1. Independently validate shadow schema/count `0..24`/unique indexed fields and
+   the four physical corner keys before painting either typed concern.
+2. If shadow validation fails or the schema is absent, execute the bounded
+   legacy aggregate path exactly once; valid corners still remain available.
+3. Paint admitted outer layers from last to first, applying spread to geometry.
+4. Paint the existing background or glass material.
+5. Paint admitted inset layers from last to first through a bounded
+   corner-aware CPU edge-band mask.
+6. Paint borders through the existing uniform primitive; for nonuniform radii
+   use radius `0` rather than falsely claiming one corner value, then paint
+   content/text.
+
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_box_effects.spl` applies the same
+bounds before typed or legacy shadow execution: offsets/spread
+`-65536..65536`, blur `0..65536`, every
+downstream coordinate/dimension representable as signed `i32`, and expanded
+shadow/mask work at most `16,777,216` pixels. Unsafe visible legacy shadows are
+no-ops, not an escape from rejected typed validation.
+
+Uniform radii retain the existing backend fast path. Nonuniform background and
+inset masks use transient Engine2D pixel buffers and `draw_image`; they are not
+cached or serialized. Current outer-shadow silhouettes remain rectangular and
+inset blur is a bounded edge-band approximation. Nonuniform border outlines
+remain an explicit follow-up because the backend has no four-corner outline
+primitive. A material command with unsupported nonuniform device clipping
+stays on the CPU-rendered box path and must not claim device realization.
+
+### Verification boundary
+
+Unit evidence must cover exact two-layer Aetheric projection, valid zero-layer
+schema with no-shadow per-corner pixels, transparent alpha, malformed
+color/overflow rejection, 2/3/4-value radius precedence,
+two colored outer layers and order, inset edge-versus-center pixels,
+four-corner clipping, and malformed-schema single fallback. These prove source
+semantics only. Host captures, events, CPU-SIMD receipts, Vulkan/Metal device
+readback, and QEMU remain separately admitted evidence.
+
+The focused tests live in
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_box_effects_spec.spl`
+and
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_box_effects_spec.spl`; the
+pre-existing renderer/executor monolithic specs remain unchanged.

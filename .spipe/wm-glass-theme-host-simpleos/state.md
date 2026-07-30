@@ -1141,3 +1141,24 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   accepted on cycle 3 after the opacity edge and misleading producer-side
   realized-target key were removed. No current binary/capture/QEMU PASS is
   claimed.
+- continuation-2026-07-30-web-box-effects-cycle-cap: **P1 / NOT COMMITTED /
+  NOT PUSHED.** The GUI/Web/DrawIR/Engine2D ownership and extracted modules
+  passed final architecture review, including zero-layer shadows, independent
+  corners, signed-i32 narrowing, and the 16,777,216-pixel work cap. The third
+  review cycle found one remaining escape:
+  `draw_ir_box_effects.spl::_e2d_box_legacy_shadow` checks signed-i32/work but
+  not the shared legacy offset `-65536..65536` and blur `0..65536` limits.
+  Thus legacy `65537` can execute after the same typed value is rejected.
+  Mandatory cycle cap stops this session. Fresh scoped follow-up: add the exact
+  legacy range guard before `_e2d_box_shadow_call_safe`, with boundary `65536`
+  admission and offset `+/-65537` plus blur `65537` no-op pixel tests. Do not
+  push the Web box-effects increment until that review passes.
+- continuation-2026-07-30-web-box-effects-fresh-review: **SOURCE CONTRACT /
+  HIGHEST-CAPABILITY ACCEPT / RUNTIME UNVERIFIED.** The fresh scoped follow-up
+  now enforces the same inclusive legacy offset `-65536..65536` and blur
+  `0..65536` bounds as typed Web shadows before geometry validation or native
+  narrowing. Discriminating tests admit both offset boundaries, reject
+  `+/-65537` and blur `65537`, and place the unsafe cases so an escaped guard
+  would visibly paint. Independent review accepted the fix. The Web/Engine2D
+  increment is eligible for scoped static integration; no runtime, host
+  capture, or QEMU PASS is claimed.

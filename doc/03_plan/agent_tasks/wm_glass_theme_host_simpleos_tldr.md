@@ -82,3 +82,19 @@ admitted runtime -> host semantics/events -> CPU oracle -> Vulkan + Metal
 - Metal alone requests device glass; AUTO/generic GPU stay opaque solid.
 - Engine2D owns the execution receipt; runtime/capture remains unverified.
 - Next current-host lane: typed ordered Web shadows and per-corner radii.
+
+## Web effects hard stop
+
+- Not committed/pushed: review cycle 3 found legacy offset/blur bounds missing.
+- Fresh fix: enforce offset `-65536..65536`, blur `0..65536` in
+  `_e2d_box_legacy_shadow`; test `65536` and no-op `+/-65537`/blur `65537`.
+- QEMU remains postponed behind current admitted capsule/runtime prerequisites.
+
+## Web effects accepted follow-up
+
+- Fresh independent review accepted the exact legacy range guard and
+  discriminating boundary/no-op render tests.
+- Web/Engine2D source is ready for scoped static integration; runtime/capture
+  remains unverified.
+- QEMU remains a separately assigned agent lane and may start only with a
+  current admitted artifact and exclusive VM ownership.

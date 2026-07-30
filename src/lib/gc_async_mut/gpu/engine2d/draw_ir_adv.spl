@@ -34,6 +34,24 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     engine2d_draw_ir_glass_material_pixels
 }
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
+use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{
+    Engine2dDrawIrCornerRadii,
+    engine2d_draw_ir_has_inset_shadow,
+    engine2d_draw_ir_legacy_shadow_safe,
+    engine2d_draw_ir_legacy_uniform_radius,
+    engine2d_draw_ir_mask_geometry_safe,
+    engine2d_draw_ir_render_legacy_shadow,
+    engine2d_draw_ir_render_typed_background,
+    engine2d_draw_ir_render_typed_inset_shadows,
+    engine2d_draw_ir_render_typed_outer_shadows,
+    engine2d_draw_ir_typed_box_shadows,
+    engine2d_draw_ir_typed_corner_radii,
+    engine2d_draw_ir_typed_shadow_geometry_safe,
+    engine2d_draw_ir_typed_shadow_key_supported,
+    engine2d_draw_ir_clamp_uniform_radius,
+    engine2d_draw_ir_uniform_corner_radius,
+    engine2d_draw_ir_uniform_corners
+}
 
 # Level-gated serial probe for TEXT command dispatch (shaped/resolved/plain
 # branch selection) — doc/08_tracking/bug/native_char_code_at_tag_shift_2026-07-19.md
@@ -541,25 +559,75 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
 fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32) -> Engine2dDrawIrBoxOutcome:
     var eng = engine
     val style: [DrawIrStyleProp] = command.computed_style
-    val shadow = _engine2d_draw_ir_style_value(style, "box-shadow")
-    if shadow != "" and shadow != "none":
-        val sx = _engine2d_draw_ir_nth_int(shadow, 0, 0) as i32
-        val sy = _engine2d_draw_ir_nth_int(shadow, 1, 0) as i32
-        val scolor = _engine2d_draw_ir_nth_int(shadow, 2, 0) as u32
-        val sblur = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "box-shadow-blur-radius"), 0, 0) as i32
-        if _engine2d_draw_ir_has_visible_alpha(scolor):
-            eng.draw_shadow_rect(x, y, w, h, sx, sy, sblur, scolor)
-    val radius = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-radius"), 0, 0) as i32
-    val glass = _engine2d_draw_ir_render_glass_material(
-        eng, command, x, y, w, h, radius)
+    val typed_shadows = engine2d_draw_ir_typed_box_shadows(style)
+    val typed_corners = engine2d_draw_ir_typed_corner_radii(style)
+    var shadow_admitted = (
+        typed_shadows.schema_present and typed_shadows.valid and
+        engine2d_draw_ir_typed_shadow_geometry_safe(
+            typed_shadows.layers, x, y, w, h)
+    )
+    var corner_admitted = typed_corners.valid
+    val decoded_uniform_radius = engine2d_draw_ir_clamp_uniform_radius(
+        engine2d_draw_ir_uniform_corner_radius(typed_corners), w, h)
+    if (corner_admitted and decoded_uniform_radius < 0 and
+        not engine2d_draw_ir_mask_geometry_safe(x, y, w, h)):
+        corner_admitted = false
+    val typed_has_inset = (
+        shadow_admitted and
+        engine2d_draw_ir_has_inset_shadow(typed_shadows.layers)
+    )
+    if (typed_has_inset and
+        not engine2d_draw_ir_mask_geometry_safe(x, y, w, h)):
+        shadow_admitted = false
+    if shadow_admitted:
+        eng = engine2d_draw_ir_render_typed_outer_shadows(
+            eng, typed_shadows.layers, x, y, w, h)
+    else:
+        # Absent, malformed, partial, or unsafe typed shadows fall back once.
+        # The Engine2D effect owner validates legacy geometry before drawing;
+        # an unsafe legacy aggregate is an intentional no-op.
+        eng = engine2d_draw_ir_render_legacy_shadow(
+            eng, style, x, y, w, h)
+    val legacy_radius = engine2d_draw_ir_clamp_uniform_radius(
+        engine2d_draw_ir_legacy_uniform_radius(style), w, h)
+    val typed_nonuniform = corner_admitted and decoded_uniform_radius < 0
+    val radius = if typed_nonuniform:
+        0
+    elif corner_admitted and decoded_uniform_radius >= 0:
+        decoded_uniform_radius
+    else:
+        legacy_radius
+    val effective_corners: Engine2dDrawIrCornerRadii = if corner_admitted:
+        typed_corners
+    else:
+        engine2d_draw_ir_uniform_corners(legacy_radius)
+    # Engine2dGlassMaterialConfig currently carries one uniform radius. A
+    # nonuniform typed box therefore stays on the bounded CPU mask path rather
+    # than claiming a device-glass execution with the wrong clip.
+    val glass = if typed_nonuniform:
+        Engine2dDrawIrGlassOutcome(
+            engine: eng,
+            composited: false,
+            execution: engine2d_glass_execution_unavailable(
+                "nonuniform-corner-device-glass-unavailable")
+        )
+    else:
+        _engine2d_draw_ir_render_glass_material(
+            eng, command, x, y, w, h, radius)
     eng = glass.engine
     if glass.composited:
+        if shadow_admitted:
+            eng = engine2d_draw_ir_render_typed_inset_shadows(
+                eng, typed_shadows.layers, x, y, w, h, effective_corners)
         eng = _engine2d_draw_ir_render_borders(
             eng, style, x, y, w, h, radius)
         return Engine2dDrawIrBoxOutcome(
             engine: eng, glass_execution: glass.execution)
     val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
-    if bg_image.starts_with("linear-gradient(") and radius <= 0:
+    if typed_nonuniform:
+        eng = engine2d_draw_ir_render_typed_background(
+            eng, command, x, y, w, h, effective_corners)
+    elif bg_image.starts_with("linear-gradient(") and radius <= 0:
         val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
         val g_to = _engine2d_draw_ir_nth_int(bg_image, 1, 0) as u32
         eng.draw_gradient_rect(x, y, w, h, g_from, g_to)
@@ -573,13 +641,15 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
             eng.draw_rounded_rect(x, y, w, h, radius, command.color)
         else:
             eng.draw_rect_filled(x, y, w, h, command.color)
+    if shadow_admitted:
+        eng = engine2d_draw_ir_render_typed_inset_shadows(
+            eng, typed_shadows.layers, x, y, w, h, effective_corners)
     eng = _engine2d_draw_ir_render_borders(eng, style, x, y, w, h, radius)
     Engine2dDrawIrBoxOutcome(
         engine: eng,
         glass_execution: engine2d_glass_execution_unavailable(
             "glass-material-fallback-painted")
     )
-
 fn engine2d_resolved_draw_ir_image(image_uri: text, width: i32, height: i32, pixels: [u32]) -> Engine2dResolvedDrawIrImage:
     Engine2dResolvedDrawIrImage(image_uri: image_uri, width: width, height: height, pixels: pixels)
 
@@ -845,8 +915,8 @@ fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp])
         val key = prop.key
         val identity = key == "source" or key == "part" or key == "z-index" or key == "focused" or key == "image-role"
         val background = key == "background-color" or key == "background-image" or key == "background-image-source-css" or key == "background-image-capability" or key == "background-image-composite-mode" or key == "background-image-fallback" or key == "background-image-fallback-reason"
-        val border = key == "border-radius" or key == "border-top-width" or key == "border-right-width" or key == "border-bottom-width" or key == "border-left-width" or key == "border-top-color" or key == "border-right-color" or key == "border-bottom-color" or key == "border-left-color"
-        val shadow = key == "box-shadow" or key == "box-shadow-raw" or key == "box-shadow-layer-count" or key == "box-shadow-blur-radius"
+        val border = key == "border-radius" or key == "border-top-left-radius" or key == "border-top-right-radius" or key == "border-bottom-right-radius" or key == "border-bottom-left-radius" or key == "border-top-width" or key == "border-right-width" or key == "border-bottom-width" or key == "border-left-width" or key == "border-top-color" or key == "border-right-color" or key == "border-bottom-color" or key == "border-left-color"
+        val shadow = key == "box-shadow" or key == "box-shadow-raw" or key == "box-shadow-blur-radius" or engine2d_draw_ir_typed_shadow_key_supported(key)
         val backdrop = key == "backdrop-filter" or key == "backdrop-filter-capability" or key == "backdrop-filter-requested-target" or key == "backdrop-filter-realized" or key == "backdrop-filter-realized-blur-radius-px" or key == "backdrop-filter-realized-saturation-milli" or key == "backdrop-filter-reduction-reason" or key == "backdrop-filter-fallback" or key == "backdrop-filter-fallback-target" or key == "backdrop-filter-fallback-reason" or key == "backdrop-filter-fallback-material-hash"
         val typography = key == "color" or key == "font-family" or key == "font-size" or key == "font-weight"
         val wm_metadata = key == "wm-theme-schema" or key == "wm-theme-id" or key == "wm-theme-family-id" or key == "wm-theme-source-reference" or key == "wm-theme-source-manifest-sha256" or key == "wm-theme-material-sha256" or key == "wm-material-request" or key == "wm-material-surface-alpha-milli"
@@ -874,6 +944,33 @@ fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, imag
         return false
     if command.kind == "rect":
         if not _engine2d_draw_ir_fresh_device_rect_style_supported(command.computed_style):
+            return false
+        val typed_shadows = engine2d_draw_ir_typed_box_shadows(
+            command.computed_style)
+        var typed_shadow_admitted = (
+            typed_shadows.schema_present and typed_shadows.valid and
+            engine2d_draw_ir_typed_shadow_geometry_safe(
+                typed_shadows.layers,
+                command.x,
+                command.y,
+                command.width,
+                command.height)
+        )
+        if (typed_shadow_admitted and
+            engine2d_draw_ir_has_inset_shadow(typed_shadows.layers) and
+            not engine2d_draw_ir_mask_geometry_safe(
+                command.x, command.y, command.width, command.height)):
+            typed_shadow_admitted = false
+        # Match execution: any absent, malformed, or unsafe typed schema uses
+        # the aggregate only when that aggregate passes the same bounded
+        # Engine2D validator. Corners are decoded and admitted independently.
+        if (not typed_shadow_admitted and
+            not engine2d_draw_ir_legacy_shadow_safe(
+                command.computed_style,
+                command.x,
+                command.y,
+                command.width,
+                command.height)):
             return false
         val alpha = (command.color >> 24) & 0xFFu32
         val pixel_work = command.width.to_i64() * command.height.to_i64()

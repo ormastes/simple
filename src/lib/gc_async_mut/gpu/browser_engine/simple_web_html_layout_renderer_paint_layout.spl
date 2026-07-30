@@ -1105,6 +1105,9 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     )
     val realized_blur = backdrop.realized_blur_px
     val realized_saturation = backdrop.realized_saturation_milli
+    val shadow_parse = parse_box_shadow_layers(
+        st.box_shadow_raw, st.fg
+    )
     var props = [
         draw_ir_style_prop("tag", node.tag),
         draw_ir_style_prop("id", node.id_attr),
@@ -1132,8 +1135,8 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("background-image", if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32: "linear-gradient({st.background_gradient_from},{st.background_gradient_to})" else: "none"),
         draw_ir_style_prop("background-layers-raw", st.bg_layers_raw),
         draw_ir_style_prop("background-origin", st.background_origin),
-        # Engine2D consumes a typed first-layer projection. Keep the full
-        # authored CSS in box-shadow-raw for future multi-layer backends.
+        # Preserve the legacy aggregate projection and authored CSS for
+        # consumers that do not admit the ordered typed layer schema below.
         draw_ir_style_prop("box-shadow", if st.box_shadow_color != 0u32: "{st.box_shadow_x_px}px {st.box_shadow_y_px}px {st.box_shadow_color}" else: "none"),
         draw_ir_style_prop("box-shadow-raw", st.box_shadow_raw),
         draw_ir_style_prop("box-shadow-layer-count", "{_html_draw_ir_shadow_layer_count(st.box_shadow_raw)}"),
@@ -1296,6 +1299,39 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("orphans", "{st.orphans}"),
         draw_ir_style_prop("widows", "{st.widows}")
     ]
+    # A malformed or unsupported declaration omits the schema completely so
+    # Engine2D cannot mistake a partial typed projection for authoritative
+    # paint data. The parser preserves CSS source order; consumers paint the
+    # admitted layers in the order required by their box-paint phases.
+    if shadow_parse.valid and shadow_parse.layers.len() <= 24:
+        props.push(draw_ir_style_prop(
+            "box-shadow-layer-schema", "web-box-shadow-layers-v1"
+        ))
+        var shadow_index = 0
+        while shadow_index < shadow_parse.layers.len():
+            val shadow_layer = shadow_parse.layers[shadow_index]
+            val shadow_prefix = "box-shadow-layer-{shadow_index}"
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-kind", shadow_layer.kind
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-offset-x", "{shadow_layer.offset_x_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-offset-y", "{shadow_layer.offset_y_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-blur-radius",
+                "{shadow_layer.blur_radius_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-spread-radius",
+                "{shadow_layer.spread_radius_px}"
+            ))
+            props.push(draw_ir_style_prop(
+                "{shadow_prefix}-color", "{shadow_layer.color_rgba}"
+            ))
+            shadow_index = shadow_index + 1
     if backdrop_requested:
         props.push(draw_ir_style_prop(
             "backdrop-filter-fallback-material-hash", ""

@@ -178,3 +178,22 @@ manual is
 
 These tests verify routing and admission requirements only. They do not turn a
 postponed external-host row into rendering or event evidence.
+
+### 2026-07-30 GUI/Web/2D design checks
+
+| Layer | Focused source evidence | Rejected false claim |
+|---|---|---|
+| Web cascade | 2/3/4-value corners, authored shorthand/longhand order, exact Aetheric outer+inset parse, transparent alpha, malformed color and integer overflow rejection | Device or pixel realization |
+| Web Draw IR | Complete ordered `web-box-shadow-layers-v1` indexed fields; valid `none` emits count `0`; malformed omits schema; legacy keys unchanged | Partial typed admission |
+| Engine2D | Independently admitted zero-shadow four-corner clip, shadow-without-corner ordering, inset edge without center corruption, bounded malformed/legacy fallback | Corner-exact outer silhouette/nonuniform border, GPU/device execution |
+| GUI/WM architecture | Producers use common Draw IR only and do not import Web parsing or Engine2D raster internals | Parallel GUI renderer |
+
+The focused source checks remain unverified until a current admitted
+pure-Simple runtime can execute them. Live GUI/Web captures, event handling,
+CPU-SIMD, Metal/Vulkan readback, and x86/ARM QEMU evidence remain separate
+rows.
+
+Focused unit owners:
+
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_box_effects_spec.spl`
+- `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_box_effects_spec.spl`

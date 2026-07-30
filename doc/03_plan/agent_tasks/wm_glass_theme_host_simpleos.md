@@ -842,3 +842,26 @@ execution result owns actual realization.
 Runtime/capture evidence remains open because no current source-matched runtime
 is admitted. Follow-up 2 (typed ordered Web shadows and per-corner radius) is
 next; follow-up 3 (QEMU) remains postponed behind the capsule blocker.
+
+### Web box-effects hard stop
+
+Follow-up 2 reached the three-review-cycle cap and is not committed or pushed.
+All architecture/module/typed-schema/corner/work-cap findings were corrected,
+but the final review found one P1 in
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_box_effects.spl`:
+`_e2d_box_legacy_shadow` must enforce offset `-65536..65536` and blur
+`0..65536` before its call-safety check. A fresh scoped session must add tests
+for accepted `65536` and no-op offset `+/-65537`/blur `65537`, then perform one
+independent review. QEMU remains separately postponed.
+
+### Web box-effects fresh follow-up
+
+The fresh bounded follow-up is accepted. Legacy shadows now apply the exact
+inclusive offset `-65536..65536` and blur `0..65536` contract before geometry
+validation or narrowing. Direct render tests prove both boundaries remain
+admitted and that offset `+/-65537` or blur `65537` cannot paint even when
+their geometry would otherwise land onscreen.
+
+This source increment is eligible for scoped static integration. Runtime and
+capture evidence remain unverified. The QEMU lane stays assigned separately
+and must not reuse an externally owned or stale live VM/artifact.

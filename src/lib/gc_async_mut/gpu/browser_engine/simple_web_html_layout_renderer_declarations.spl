@@ -1,4 +1,5 @@
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.*
+export use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.*
 
 fn sticky_top_inset_value(
     raw: text, parsed: i32, position_sticky: bool
@@ -319,16 +320,16 @@ val _APPLY_DECLS_DISPATCH_PROPS: [text] = [
     # No Style field exists for border-collapse; both paths intentionally
     # preserve the existing silent no-op.
     "border-collapse",
-    # Stage 2: each of these is independent of every other name in this
-    # list (no shorthand/longhand pair where BOTH sides are dispatched --
-    # e.g. "padding-left" is not in this list, so a call carrying both
-    # "padding" and "padding-left" correctly falls back to the full probe
-    # rather than being handled partially/incorrectly here). Where a
-    # property has a related shorthand that IS in this list ("margin" vs
-    # "margin-left"), the dispatch arms below preserve the full-probe
-    # body's fixed processing order for that pair.
+    # Stage 2: most entries are independent. The border-radius family is the
+    # deliberate exception: both paths call the same authored-order resolver.
+    # Other shorthand/longhand families still fall back to the full probe.
     "justify-content", "align-items", "gap", "text-align", "cursor",
     "outline", "overflow", "box-shadow", "padding", "margin",
+    "border-radius",
+    "border-top-left-radius", "border-top-right-radius",
+    "border-bottom-right-radius", "border-bottom-left-radius",
+    "border-start-start-radius", "border-start-end-radius",
+    "border-end-start-radius", "border-end-end-radius",
 ]
 
 fn _decl_tbl_all_dispatch_handled(decl_tbl: [text]) -> bool:
@@ -362,6 +363,18 @@ fn _apply_decls_dispatch(mut st: Style, decl_tbl: [text], em_base: i32) -> Style
     val box_sizing = decl_tbl_get(decl_tbl, "box-sizing")
     if box_sizing.len() > 0:
         st.border_box = box_sizing == "border-box"
+    val border_radius_shorthand = parse_border_radius_shorthand(
+        decl_tbl_get(decl_tbl, "border-radius"))
+    if border_radius_shorthand.valid:
+        st.border_radius_px = border_radius_shorthand.top_left_px
+    val resolved_radii = resolve_authored_border_radii(
+        decl_tbl, st.border_radius_tl_px, st.border_radius_tr_px,
+        st.border_radius_br_px, st.border_radius_bl_px)
+    if resolved_radii.valid:
+        st.border_radius_tl_px = resolved_radii.top_left_px
+        st.border_radius_tr_px = resolved_radii.top_right_px
+        st.border_radius_br_px = resolved_radii.bottom_right_px
+        st.border_radius_bl_px = resolved_radii.bottom_left_px
     val col = decl_tbl_get(decl_tbl, "color")
     if col.len() > 0:
         val cv = parse_color(col)
@@ -1039,46 +1052,18 @@ fn _apply_decls_without_grid(st: Style, decls: text, em_base: i32) -> Style:
     val box_sizing = decl_tbl_get(decl_tbl, "box-sizing")
     if box_sizing.len() > 0:
         border_box_v = box_sizing == "border-box"
-    val border_radius = decl_tbl_get(decl_tbl, "border-radius")
-    if border_radius.len() > 0:
-        val radius_v = parse_int(border_radius)
-        border_radius_px_v = if radius_v > 0: radius_v else: 0
-        border_radius_tl_px_v = border_radius_px_v
-        border_radius_tr_px_v = border_radius_px_v
-        border_radius_br_px_v = border_radius_px_v
-        border_radius_bl_px_v = border_radius_px_v
-    val border_top_left_radius = decl_tbl_get(decl_tbl, "border-top-left-radius")
-    if border_top_left_radius.len() > 0:
-        val r_tl = parse_int(border_top_left_radius)
-        border_radius_tl_px_v = if r_tl > 0: r_tl else: 0
-    val border_top_right_radius = decl_tbl_get(decl_tbl, "border-top-right-radius")
-    if border_top_right_radius.len() > 0:
-        val r_tr = parse_int(border_top_right_radius)
-        border_radius_tr_px_v = if r_tr > 0: r_tr else: 0
-    val border_bottom_right_radius = decl_tbl_get(decl_tbl, "border-bottom-right-radius")
-    if border_bottom_right_radius.len() > 0:
-        val r_br = parse_int(border_bottom_right_radius)
-        border_radius_br_px_v = if r_br > 0: r_br else: 0
-    val border_bottom_left_radius = decl_tbl_get(decl_tbl, "border-bottom-left-radius")
-    if border_bottom_left_radius.len() > 0:
-        val r_bl = parse_int(border_bottom_left_radius)
-        border_radius_bl_px_v = if r_bl > 0: r_bl else: 0
-    val border_start_start_radius = decl_tbl_get(decl_tbl, "border-start-start-radius")
-    if border_start_start_radius.len() > 0:
-        val r_ss = parse_int(border_start_start_radius)
-        border_radius_tl_px_v = if r_ss > 0: r_ss else: 0
-    val border_start_end_radius = decl_tbl_get(decl_tbl, "border-start-end-radius")
-    if border_start_end_radius.len() > 0:
-        val r_se = parse_int(border_start_end_radius)
-        border_radius_tr_px_v = if r_se > 0: r_se else: 0
-    val border_end_start_radius = decl_tbl_get(decl_tbl, "border-end-start-radius")
-    if border_end_start_radius.len() > 0:
-        val r_es = parse_int(border_end_start_radius)
-        border_radius_bl_px_v = if r_es > 0: r_es else: 0
-    val border_end_end_radius = decl_tbl_get(decl_tbl, "border-end-end-radius")
-    if border_end_end_radius.len() > 0:
-        val r_ee = parse_int(border_end_end_radius)
-        border_radius_br_px_v = if r_ee > 0: r_ee else: 0
+    val border_radius_shorthand = parse_border_radius_shorthand(
+        decl_tbl_get(decl_tbl, "border-radius"))
+    if border_radius_shorthand.valid:
+        border_radius_px_v = border_radius_shorthand.top_left_px
+    val resolved_radii = resolve_authored_border_radii(
+        decl_tbl, border_radius_tl_px_v, border_radius_tr_px_v,
+        border_radius_br_px_v, border_radius_bl_px_v)
+    if resolved_radii.valid:
+        border_radius_tl_px_v = resolved_radii.top_left_px
+        border_radius_tr_px_v = resolved_radii.top_right_px
+        border_radius_br_px_v = resolved_radii.bottom_right_px
+        border_radius_bl_px_v = resolved_radii.bottom_left_px
     val min_width = decl_tbl_get(decl_tbl, "min-width")
     val min_width_pos = decl_tbl_last_index(decl_tbl, "min-width")
     if min_width.len() > 0:

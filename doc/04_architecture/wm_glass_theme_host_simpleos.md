@@ -319,3 +319,68 @@ Migration order is: (1) canonical immutable wire codec and scalar read API;
 revision-keyed caches; (5) transaction refresh plus post-commit notification.
 This is an adapter/lifetime repair, not an MDSOC weave; it preserves package
 authority and avoids a common-to-owner dependency cycle.
+
+<!-- codex-architecture -->
+## GUI/Web/2D rendering ownership update (2026-07-30)
+
+The theme rendering path remains one layered pipeline; ordered shadows and
+per-corner radii do not introduce a second GUI or Web renderer:
+
+```text
+ResolvedThemePackage
+  -> GUI widget semantics --------\
+  -> Web CSS cascade/layout -------+-> DrawIrComposition -> Engine2D
+  -> WM chrome projection --------/                         |
+                                       transient masks/pixels only
+```
+
+- GUI, Web, and WM are semantic producers. They may parse or select theme
+  values and emit producer-neutral `DrawIrStyleProp` values, but they do not
+  import Engine2D or allocate raster effect material.
+- Draw IR is the stable cross-producer contract. Ordered Web shadows use
+  `box-shadow-layer-schema=web-box-shadow-layers-v1`, the existing bounded
+  `box-shadow-layer-count`, and complete indexed layer fields. Existing four
+  physical corner-radius keys remain the shared per-corner representation.
+- Engine2D is the only owner of raster ordering, clipping, background/inset
+  masks, transient pixel buffers, and backend execution receipts. Those transient
+  objects never enter `ThemeRenderSnapshot`, package CSS, Draw IR resources,
+  GUI state, or Web artifacts.
+- Metal remains the only device-glass request. CPU/software/CPU-SIMD/Vulkan
+  presentation may use CPU-composited material, but a Vulkan presentation does
+  not become Vulkan device glass. GUI/Web producer metadata records requests;
+  Engine2D results alone record realization.
+
+Typed shadow admission is all-or-nothing and capped at 24 layers. A valid
+`none`/empty shadow emits the schema with count `0`; malformed input omits it.
+Missing, duplicate, out-of-range, malformed, or unsupported typed fields
+select the legacy aggregate shadow exactly once; they never combine a partial
+typed paint with the aggregate. Shadow admission and four-corner admission are
+independent: a box does not need a shadow to retain its corners, and a shadow
+does not need corner keys to remain ordered. Schema absence preserves old
+producer behavior byte for byte. Outer layers paint behind the background in
+CSS back-to-front order; inset layers paint after the background/material and
+before borders. Uniform radii retain existing fast paths. Nonuniform background
+and inset masks are bounded CPU material owned by Engine2D. Outer-shadow silhouettes and
+nonuniform border outlines remain limited by current rectangular/uniform
+backend primitives; they fail closed rather than claiming corner-exact output.
+Device-glass clipping remains uniform until a backend contract explicitly
+supports four corners.
+
+This is an adapter extension inside the existing layers, not an MDSOC capsule:
+the concerns already have single owners and no sibling-private implementation
+is shared. If GUI later gains authored multi-shadow semantics, it emits this
+same Draw IR schema rather than calling Web parsing or Engine2D internals.
+
+The extracted owner modules keep those boundaries explicit:
+
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_css_box_effects.spl`
+  owns pure CSS radius/shadow parsing and
+  authored-order resolution; it depends only on browser foundation helpers.
+- `src/lib/gc_async_mut/gpu/engine2d/draw_ir_box_effects.spl` owns typed Draw
+  IR decoding, bounded shadow
+  geometry, corner/background/inset masks, safe legacy fallback, and transient
+  Engine2D raster execution.
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl`
+  only projects semantic values, while
+  `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` only orchestrates the
+  Engine2D owner.
