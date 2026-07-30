@@ -295,6 +295,10 @@ pub class HostedBrowserRendererProcess:
     history_current_url: text
     history_back_url: text
     history_forward_url: text
+    document_title: text
+    document_title_url: text
+    document_title_generation: i64
+    document_title_reply_to_request_id: i64
     home_url: text
     pending_history_action: text
     pending_document_commit_url: text
@@ -389,6 +393,10 @@ pub class HostedBrowserRendererProcess:
             history_current_url: "",
             history_back_url: "",
             history_forward_url: "",
+            document_title: "",
+            document_title_url: "",
+            document_title_generation: 0,
+            document_title_reply_to_request_id: 0,
             home_url: "",
             pending_history_action: "",
             pending_document_commit_url: "",
@@ -493,11 +501,26 @@ pub class HostedBrowserRendererProcess:
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
         self._clear_pending_document_csp()
+        self._clear_document_title()
         true
 
     me _clear_pending_document_csp():
         self.pending_document_csp_policy = ""
         self.pending_document_csp_ready = false
+
+    me _clear_document_title():
+        self.document_title = ""
+        self.document_title_url = ""
+        self.document_title_generation = 0
+        self.document_title_reply_to_request_id = 0
+
+    fn bookmark_stored_title() -> text:
+        if (self.document_title_generation != self.generation or
+            self.document_title_reply_to_request_id !=
+                self.expected_reply_to_request_id or
+            self.document_title_url != self.document_url):
+            return ""
+        self.document_title
 
     fn _active_document_csp_policy() -> text:
         if self.provisional_document_origin != "":
@@ -971,6 +994,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_scroll_event_id = 0
         self.pending_scroll_delta_milli_y = 0
         self.retained_image_resources = []
+        self._clear_document_title()
         if self.pid > 0:
             if not process_close_piped(self.pid):
                 return false
@@ -1742,12 +1766,25 @@ pub class HostedBrowserRendererProcess:
         if self.pending_history_index >= 0:
             self.history_index = self.pending_history_index
             self._restore_history_document(self.history_index)
+        val committed_title_url = self.document_url
         if (frame.history_state_present and has_trusted_document and
             not unchanged_history_state):
             self._apply_frame_history_state(
                 frame.history_current_url,
                 frame.history_back_url,
                 frame.history_forward_url
+            )
+        self._clear_document_title()
+        if (frame.document_title_present and
+            producer_generation == self.generation and
+            frame.reply_to_request_id ==
+                self.expected_reply_to_request_id and
+            frame.history_current_url == committed_title_url):
+            self.document_title = frame.document_title
+            self.document_title_url = committed_title_url
+            self.document_title_generation = producer_generation
+            self.document_title_reply_to_request_id = (
+                frame.reply_to_request_id
             )
         self.pending_history_index = -1
         self.pending_history_target_url = ""
@@ -2051,6 +2088,7 @@ pub class HostedBrowserRendererProcess:
             if val Ok(_) = started:
                 self.pending_scroll_event_id = 0
                 self.pending_scroll_delta_milli_y = 0
+                self._clear_document_title()
         started
 
     me begin_navigate(

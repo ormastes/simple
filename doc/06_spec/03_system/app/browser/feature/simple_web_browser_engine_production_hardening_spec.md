@@ -1,17 +1,17 @@
 # Production Simple Browser User Flow
 
-> Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
+> Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event, Draw IR, and Engine2D paths, then drives page controls and browser chrome through structured UI access. Helpers fail closed until production evidence exists.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Production Simple Browser User Flow
 
-Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
+Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event, Draw IR, and Engine2D paths, then drives page controls and browser chrome through structured UI access. Helpers fail closed until production evidence exists.
 
 ## At a Glance
 
@@ -19,14 +19,26 @@ Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
 |-------|-------|
 | Category | Application |
 | Status | Active |
+| Requirements | doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md |
+| Plan | doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md |
+| Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
+| Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-07-30 |
 | Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
 
 Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
 Draw IR, and Engine2D paths, then drives page controls and browser chrome
 through structured UI access. Helpers fail closed until production evidence
 exists.
+
+## Examples
+
+The bookmark-title scenario admits a bounded renderer witness, commits it
+through the parent profile owner, restarts both renderer and profile-backed
+window, and lists the restored title or derived URL fallback.
 
 ## Scenarios
 
@@ -1596,264 +1608,6 @@ expect(
 ).to_equal(0)
 ```
 
-<details>
-<summary>Rendered scenario source</summary>
-
-> step("Invalidate document and title changes conservatively")<br>
-> var document_worker = HostedBrowserRendererWorkerSession.create(64, 48)<br>
-> expect(document_worker.handle(BrowserRendererMessage(<br>
->     kind: "init", generation: 7, request_id: 2,<br>
->     payload: "<title>before</title><main>first</main>"<br>
-> )).ok).to_be(true)<br>
-> val initial_checksum = (<br>
->     document_worker.render_session.composition_checksum()<br>
-> )<br>
-> expect(document_worker.browser.eval_script(<br>
->     "document.title = 'after'"<br>
-> ).is_ok()).to_be(true)<br>
-> expect(document_worker.handle(BrowserRendererMessage(<br>
->     kind: "advance", generation: 7, request_id: 3, payload: "16"<br>
-> )).ok).to_be(true)<br>
-> _expect_retained_stage_counts(<br>
->     document_worker.render_session.counters, 2, 2, 2, 2, 2, 2, 2<br>
-> )<br>
-> expect(<br>
->     document_worker.render_session.composition_checksum()<br>
-> ).to_equal(initial_checksum)<br>
-> expect(document_worker.browser.eval_script(<br>
->     "document.body.innerHTML = '<main>second</main>'"<br>
-> ).is_ok()).to_be(true)<br>
-> expect(document_worker.handle(BrowserRendererMessage(<br>
->     kind: "advance", generation: 7, request_id: 4, payload: "32"<br>
-> )).ok).to_be(true)<br>
-> _expect_retained_stage_counts(<br>
->     document_worker.render_session.counters, 3, 3, 3, 3, 3, 3, 3<br>
-> )<br>
-> expect(<br>
->     document_worker.render_session.composition_checksum() ==<br>
->     initial_checksum<br>
-> ).to_be(false)<br>
-> <br>
-> step("Invalidate stylesheet and viewport stages")<br>
-> var style_worker = HostedBrowserRendererWorkerSession.create(64, 48)<br>
-> expect(style_worker.handle(BrowserRendererMessage(<br>
->     kind: "init", generation: 7, request_id: 2,<br>
->     payload: "<main style='width:32px;height:8px'>style</main>"<br>
-> )).ok).to_be(true)<br>
-> style_worker.browser.current_style_html = (<br>
->     "<style>main{color:#2563eb}</style>"<br>
-> )<br>
-> style_worker.browser._advance_style_revision()<br>
-> expect(style_worker.handle(BrowserRendererMessage(<br>
->     kind: "advance", generation: 7, request_id: 3, payload: "16"<br>
-> )).ok).to_be(true)<br>
-> _expect_retained_stage_counts(<br>
->     style_worker.render_session.counters, 2, 2, 2, 2, 2, 2, 2<br>
-> )<br>
-> val resize = browser_renderer_resize_encode(7, 4, 96, 48)<br>
-> expect(style_worker.handle(browser_renderer_decoder_feed(<br>
->     browser_renderer_decoder_new(7), resize.wire<br>
-> ).message).ok).to_be(true)<br>
-> _expect_retained_stage_counts(<br>
->     style_worker.render_session.counters, 2, 2, 3, 3, 3, 3, 3<br>
-> )<br>
-> <br>
-> step("Repaint changed image pixels without rebuilding semantic stages")<br>
-> var image_worker = HostedBrowserRendererWorkerSession.create(64, 48)<br>
-> image_worker.browser.register_resource(<br>
->     "https://assets.test/pixel.png",<br>
->     _retained_png_hex(0xFF123456u32)<br>
-> )<br>
-> expect(image_worker.handle(BrowserRendererMessage(<br>
->     kind: "init", generation: 7, request_id: 2,<br>
->     payload: "<img src='https://assets.test/pixel.png'>"<br>
-> )).ok).to_be(true)<br>
-> val image_uri = image_worker.browser.image_resources[0].image_uri<br>
-> val image_checksum = (<br>
->     image_worker.render_session.composition_checksum()<br>
-> )<br>
-> image_worker.browser.image_resources = [<br>
->     simpleos_host_gpu_image_resource(<br>
->         image_uri, 1, 1, [0xFFABCDEFu32]<br>
->     )<br>
-> ]<br>
-> image_worker.browser._advance_resource_revision()<br>
-> expect(image_worker.handle(BrowserRendererMessage(<br>
->     kind: "advance", generation: 7, request_id: 3, payload: "16"<br>
-> )).ok).to_be(true)<br>
-> _expect_retained_stage_counts(<br>
->     image_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2<br>
-> )<br>
-> expect(<br>
->     image_worker.render_session.composition_checksum()<br>
-> ).to_equal(image_checksum)<br>
-> <br>
-> step("Reuse parsed layout work across unchanged animation frames")<br>
-> step("Render HTML and CSS through canonical Draw IR")<br>
-> var animation_worker = HostedBrowserRendererWorkerSession.create(64, 48)<br>
-> expect(animation_worker.handle(BrowserRendererMessage(<br>
->     kind: "init", generation: 7, request_id: 2,<br>
->     payload: "<style>@keyframes pulse{fro$background - color$to{background-color:#2563eb}}#stage{width:32px;height:24px;background-color:#ef4444;animation:pulse 1000ms linear forwards}</style><div id='stage'></div>"<br>
-> )).ok).to_be(true)<br>
-> val animation_checksum = (<br>
->     animation_worker.render_session.composition_checksum()<br>
-> )<br>
-> expect(animation_worker.handle(BrowserRendererMessage(<br>
->     kind: "advance", generation: 7, request_id: 3, payload: "500"<br>
-> )).ok).to_be(true)<br>
-> _expect_retained_stage_counts(<br>
->     animation_worker.render_session.counters, 1, 1, 1, 2, 1, 2, 2<br>
-> )<br>
-> expect(<br>
->     animation_worker.render_session.composition_checksum() ==<br>
->     animation_checksum<br>
-> ).to_be(false)<br>
-> <br>
-> var width_worker = HostedBrowserRendererWorkerSession.create(64, 48)<br>
-> expect(width_worker.handle(BrowserRendererMessage(<br>
->     kind: "init", generation: 7, request_id: 2,<br>
->     payload: "<style>@keyframes grow{fro$width$to{width:32px}}#stage{width:8px;height:24px;background-color:#2563eb;animation:grow 1000ms linear forwards}</style><div id='stage'></div>"<br>
-> )).ok).to_be(true)<br>
-> val width_raster = Engine2dCompositorBackend.create_named(<br>
->     64, 48, "software"<br>
-> )<br>
-> val width_before_pixels = width_raster.render_draw_ir_composition(<br>
->     width_worker.render_session.current_result.unwrap().composition,<br>
->     []<br>
-> ).pixels<br>
-> val width_checksum = (<br>
->     width_worker.render_session.composition_checksum()<br>
-> )<br>
-> expect(simple_web_layout_hit_test_index(<br>
->     width_worker.render_session.current_result.unwrap().hit_index,<br>
->     20, 4<br>
-> )).to_equal("path:")<br>
-> expect(width_worker.handle(BrowserRendererMessage(<br>
->     kind: "advance", generation: 7, request_id: 3, payload: "500"<br>
-> )).ok).to_be(true)<br>
-> _expect_retained_stage_counts(<br>
->     width_worker.render_session.counters, 1, 1, 1, 2, 2, 2, 2<br>
-> )<br>
-> expect(simple_web_layout_hit_test_index(<br>
->     width_worker.render_session.current_result.unwrap().hit_index,<br>
->     20, 4<br>
-> )).to_equal("id:stage")<br>
-> val width_after_pixels = width_raster.render_draw_ir_composition(<br>
->     width_worker.render_session.current_result.unwrap().composition,<br>
->     []<br>
-> ).pixels<br>
-> width_raster.shutdown()<br>
-> expect(<br>
->     _pixels_equal(width_before_pixels, width_after_pixels)<br>
-> ).to_be(false)<br>
-> expect(<br>
->     width_worker.render_session.composition_checksum() ==<br>
->     width_checksum<br>
-> ).to_be(false)<br>
-> <br>
-> step("Repaint scroll and caret overlays from retained raw layout")<br>
-> var scroll_worker = HostedBrowserRendererWorkerSession.create(64, 48)<br>
-> expect(scroll_worker.handle(BrowserRendererMessage(<br>
->     kind: "init", generation: 7, request_id: 2,<br>
->     payload: "<main style='height:160px'>scroll</main>"<br>
-> )).ok).to_be(true)<br>
-> val scroll_checksum = (<br>
->     scroll_worker.render_session.composition_checksum()<br>
-> )<br>
-> val scroll = browser_renderer_scroll_encode(7, 3, 1, 16000)<br>
-> expect(scroll_worker.handle(browser_renderer_decoder_feed(<br>
->     browser_renderer_decoder_new(7), scroll.wire<br>
-> ).message).ok).to_be(true)<br>
-> _expect_retained_stage_counts(<br>
->     scroll_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2<br>
-> )<br>
-> expect(<br>
->     scroll_worker.render_session.composition_checksum() ==<br>
->     scroll_checksum<br>
-> ).to_be(false)<br>
-> var caret_worker = HostedBrowserRendererWorkerSession.create(64, 48)<br>
-> expect(caret_worker.handle(BrowserRendererMessage(<br>
->     kind: "init", generation: 7, request_id: 2,<br>
->     payload: "<input id='field' data-focused value='caret'>"<br>
-> )).ok).to_be(true)<br>
-> val caret_checksum = (<br>
->     caret_worker.render_session.composition_checksum()<br>
-> )<br>
-> expect(caret_worker.handle(BrowserRendererMessage(<br>
->     kind: "advance", generation: 7, request_id: 3, payload: "600"<br>
-> )).ok).to_be(true)<br>
-> _expect_retained_stage_counts(<br>
->     caret_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2<br>
-> )<br>
-> expect(<br>
->     caret_worker.render_session.composition_checksum() ==<br>
->     caret_checksum<br>
-> ).to_be(false)<br>
-> <br>
-> step("Replace navigation state without retaining prior documents")<br>
-> var navigation_worker = (<br>
->     HostedBrowserRendererWorkerSession.create(64, 48)<br>
-> )<br>
-> expect(navigation_worker.handle(BrowserRendererMessage(<br>
->     kind: "init", generation: 7, request_id: 2,<br>
->     payload: "<main id='page'>page-0</main>"<br>
-> )).ok).to_be(true)<br>
-> val retained_nodes = (<br>
->     navigation_worker.render_session.counters.retained_node_count<br>
-> )<br>
-> val retained_styles = (<br>
->     navigation_worker.render_session.counters.retained_style_count<br>
-> )<br>
-> val retained_boxes = (<br>
->     navigation_worker.render_session.counters.retained_box_count<br>
-> )<br>
-> val retained_commands = (<br>
->     navigation_worker.render_session.counters.retained_command_count<br>
-> )<br>
-> var replacement: i64 = 1<br>
-> while replacement <= 4:<br>
->     expect(navigation_worker.browser.open_html(<br>
->         "simple-renderer://replacement-{replacement}",<br>
->         "<main id='page'>page-{replacement}</main>"<br>
->     ).is_ok()).to_be(true)<br>
->     expect(navigation_worker.handle(BrowserRendererMessage(<br>
->         kind: "advance", generation: 7,<br>
->         request_id: replacement + 2,<br>
->         payload: (replacement * 16).to_text()<br>
->     )).ok).to_be(true)<br>
->     expect(<br>
->         navigation_worker.render_session.counters.retained_node_count<br>
->     ).to_equal(retained_nodes)<br>
->     expect(<br>
->         navigation_worker.render_session.counters.retained_style_count<br>
->     ).to_equal(retained_styles)<br>
->     expect(<br>
->         navigation_worker.render_session.counters.retained_box_count<br>
->     ).to_equal(retained_boxes)<br>
->     expect(<br>
->         navigation_worker.render_session.counters.retained_command_count<br>
->     ).to_equal(retained_commands)<br>
->     replacement = replacement + 1<br>
-> _expect_retained_stage_counts(<br>
->     navigation_worker.render_session.counters, 5, 5, 5, 5, 5, 5, 5<br>
-> )<br>
-> step("Close the page and reclaim browser resources")<br>
-> navigation_worker.close()<br>
-> expect(<br>
->     navigation_worker.render_session.counters.retained_node_count<br>
-> ).to_equal(0)<br>
-> expect(<br>
->     navigation_worker.render_session.counters.retained_style_count<br>
-> ).to_equal(0)<br>
-> expect(<br>
->     navigation_worker.render_session.counters.retained_box_count<br>
-> ).to_equal(0)<br>
-> expect(<br>
->     navigation_worker.render_session.counters.retained_command_count<br>
-> ).to_equal(0)
-
-</details>
-
 </details>
 
 #### should route pointer keyboard focus text and form events in browser order
@@ -2302,6 +2056,145 @@ expect(registry.pressed_window_id).to_equal(0)
 
 </details>
 
+#### should persist bounded page titles across renderer and profile restart
+
+- Open bounded titled documents through hosted chrome
+   - Text capture: after_step
+- setup hosted bookmark title profile
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
+- file hash sha256
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
+- Commit bookmarks through the parent profile owner
+   - Text capture: after_step
+- Err
+   - Text capture: after_step
+- fail
+   - Text capture: after_step
+- Ok
+   - Text capture: after_step
+- registry bookmark stored title
+   - Text capture: after_step
+- check bookmark title witness admission
+   - Text capture: after_step
+- registry bookmark stored title
+   - Text capture: after_step
+- Restart the renderer generation and profile-backed window
+   - Text capture: after_step
+- profile close
+   - Text capture: after_step
+- BrowserProfileStore open
+   - Text capture: after_step
+- List persisted bookmarks with safe titles
+   - Text capture: after_step
+- check restarted bookmark listing
+   - Text capture: after_step
+- set mock registry
+   - Text capture: after_step
+- rt file delete
+   - Text capture: after_step
+- rt file delete
+   - Text capture: after_step
+- rt file delete
+   - Text capture: after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 82 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Open bounded titled documents through hosted chrome")
+setup_hosted_bookmark_title_profile()
+val artifact = env_get("HOSTED_WM_ARTIFACT")
+val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+if artifact == "":
+    fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+if expected_artifact_sha.len() != 64 or
+    file_hash_sha256(artifact) != expected_artifact_sha:
+    fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+var registry = HostedBrowserRendererRegistry.create(
+    artifact, "https://accepted-title.test/"
+)
+val body_html = "<main>bookmark title witness</main>"
+expect(registry.ensure(
+    93, body_html, 64, 48, 0, 100000
+)).to_equal("none")
+expect(_await_browser_registry_ready(
+    registry, 93, body_html
+)).to_be(true)
+_open_hosted_bookmark_document(
+    registry, 93, "https://accepted-title.test/", 100, body_html
+)
+check_bookmark_title_witness_admission(
+    registry, 93, BOOKMARK_TITLE_512
+)
+
+step("Commit bookmarks through the parent profile owner")
+var profile = match BrowserProfileStore.open(
+    BOOKMARK_TITLE_PROFILE_PATH
+):
+    Err(error):
+        fail(error.message())
+    Ok(opened):
+        opened
+val _ = registry.dispatch_chrome_pointer(
+    110, 93, "favorite", true
+)
+expect(registry.dispatch_chrome_pointer(
+    111, 93, "favorite", false
+).reason).to_equal("favorite-parent")
+expect(profile.toggle_bookmark(
+    "https://accepted-title.test/",
+    registry.bookmark_stored_title(93)
+)?).to_be(true)
+_open_hosted_bookmark_document(
+    registry, 93, "https://fallback-title.test/", 120, body_html
+)
+check_bookmark_title_witness_admission(registry, 93, "")
+val _ = registry.dispatch_chrome_pointer(
+    130, 93, "favorite", true
+)
+expect(registry.dispatch_chrome_pointer(
+    131, 93, "favorite", false
+).reason).to_equal("favorite-parent")
+expect(profile.toggle_bookmark(
+    "https://fallback-title.test/",
+    registry.bookmark_stored_title(93)
+)?).to_be(true)
+
+step("Restart the renderer generation and profile-backed window")
+expect(registry.next_generation).to_be_greater_than(2)
+expect(registry.close()).to_be(true)
+profile.close()?
+var restarted = HostedWebContentRegistry.create_with_bookmark_store(
+    BrowserBookmarkStore.from_profile(
+        BrowserProfileStore.open(BOOKMARK_TITLE_PROFILE_PATH)?
+    )
+)
+val _ = restarted.advance_window(
+    94, "<main>restarted</main>", 64, 48, 100000, true
+)
+
+step("List persisted bookmarks with safe titles")
+check_restarted_bookmark_listing(restarted.profile_bookmarks)
+check_in_process_registry_profile_reopen(
+    restarted.profile_bookmarks
+)
+expect(restarted.close()).to_be(true)
+set_mock_registry(MockResponseRegistry.create())
+rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH)
+rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-wal")
+rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-shm")
+```
+
+</details>
+
 #### should enforce one UTF-8 byte bound for every browser address editor
 
 -  production browser fixture
@@ -2594,11 +2487,19 @@ expect(_count_color(
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** `doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
+- **Plan:** `doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md`
+- **Design:** `doc/05_design/simple_web_browser_engine_production_hardening.md`
+- **Research:** `doc/01_research/local/simple_web_browser_engine_production_hardening.md`
 
 
 </details>

@@ -10,6 +10,9 @@ use os.hosted.browser_profile_store.{
     BrowserBookmarkStore, BrowserProfileStore
 }
 use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    MockResponseRegistry, set_mock_registry
+}
 use common.ui.access.{WinTextActionRequest}
 
 extern fn rt_file_delete(path: text) -> bool
@@ -21,7 +24,97 @@ fn remove_profile_files():
     rt_file_delete(PROFILE_PATH + "-wal")
     rt_file_delete(PROFILE_PATH + "-shm")
 
+fn _open_registry_address(
+    registry: HostedWebContentRegistry,
+    window_id: i64,
+    url: text,
+    event_id: i64,
+    now_ms: i64
+):
+    val _ = registry.dispatch_chrome_pointer(
+        event_id, window_id, "address", true
+    )
+    val _ = registry.dispatch_chrome_pointer(
+        event_id + 1, window_id, "address", false
+    )
+    val _ = registry.dispatch_text(event_id + 2, window_id, url)
+    val _ = registry.dispatch_key(event_id + 3, window_id, 13, true)
+    val _ = registry.advance_window(
+        window_id, "<div>browser</div>", 64, 48, now_ms, true
+    )
+    val _ = registry.advance_window(
+        window_id, "<div>browser</div>", 64, 48, now_ms + 1, true
+    )
+
+fn check_in_process_registry_profile_reopen():
+    remove_profile_files()
+    val title_512 = "a".repeat(510) + "é"
+    val title_513 = "a".repeat(511) + "é"
+    var mocks = MockResponseRegistry.create()
+    mocks.register(
+        "https://title.test/accepted", 200,
+        "<title>{title_512}</title><p>accepted</p>"
+    )
+    mocks.register(
+        "https://title.test/fallback", 200,
+        "<title>{title_513}</title><p>fallback</p>"
+    )
+    set_mock_registry(mocks)
+
+    val first_profile = match BrowserProfileStore.open(PROFILE_PATH):
+        Err(error):
+            fail(error.message())
+        Ok(profile):
+            profile
+    var first = HostedWebContentRegistry.create_with_bookmark_store(
+        BrowserBookmarkStore.from_profile(first_profile)
+    )
+    val _ = first.advance_window(
+        91, "<div>browser</div>", 64, 48, 100000, true
+    )
+    _open_registry_address(
+        first, 91, "https://title.test/accepted", 10, 100001
+    )
+    val _ = first.dispatch_chrome_pointer(20, 91, "favorite", true)
+    expect(first.dispatch_chrome_pointer(
+        21, 91, "favorite", false
+    ).callback_count).to_equal(1)
+    _open_registry_address(
+        first, 91, "https://title.test/fallback", 30, 100003
+    )
+    val _ = first.dispatch_chrome_pointer(40, 91, "favorite", true)
+    expect(first.dispatch_chrome_pointer(
+        41, 91, "favorite", false
+    ).callback_count).to_equal(1)
+    expect(first.close()).to_equal(true)
+
+    val restarted_profile = match BrowserProfileStore.open(PROFILE_PATH):
+        Err(error):
+            fail(error.message())
+        Ok(profile):
+            profile
+    var restarted = HostedWebContentRegistry.create_with_bookmark_store(
+        BrowserBookmarkStore.from_profile(restarted_profile)
+    )
+    expect(restarted.profile_bookmarks.entries.len()).to_equal(2)
+    expect(restarted.profile_bookmarks.entries[0].first).to_equal(
+        "https://title.test/accepted"
+    )
+    expect(restarted.profile_bookmarks.entries[0].second).to_equal(
+        title_512
+    )
+    expect(restarted.profile_bookmarks.entries[1].first).to_equal(
+        "https://title.test/fallback"
+    )
+    expect(restarted.profile_bookmarks.entries[1].second).to_equal("")
+    expect(restarted.close()).to_equal(true)
+    set_mock_registry(MockResponseRegistry.create())
+    remove_profile_files()
+
 describe "hosted browser profile store":
+    it "reopens bounded bookmark titles through public registry actions":
+        check_in_process_registry_profile_reopen()
+
     it "cancels network jobs before fallible profile shutdown":
         var closed_store = BrowserBookmarkStore.memory()?
         closed_store.close()?

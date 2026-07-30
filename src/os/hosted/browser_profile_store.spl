@@ -3,7 +3,8 @@
 use std.database.sql.connection.{Database}
 use std.database.sql.types.{DbValue, DbError}
 use std.gc_async_mut.web.browser_session.{
-    BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserHstsSnapshotEntry
+    BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserHstsSnapshotEntry,
+    browser_bookmark_stored_title
 }
 use std.gc_async_mut.web.browser_session_url.{
     network_navigation_hostname_valid, normalize_network_navigation_url
@@ -101,13 +102,16 @@ impl BrowserProfileStore:
             return Err(DbError.ConstraintViolation("too many browser bookmarks"))
         var normalized: [Pair<text, text>] = []
         for entry in snapshot.entries:
-            if entry.first.len() > 2048 or entry.second.len() > 512:
+            if entry.first.len() > 2048:
                 return Err(DbError.ConstraintViolation("oversized browser bookmark"))
             match normalize_network_navigation_url(entry.first):
                 Err(_):
                     return Err(DbError.ConstraintViolation("invalid browser bookmark URL"))
                 Ok(url):
-                    normalized.push(Pair(first: url, second: entry.second))
+                    normalized.push(Pair(
+                        first: url,
+                        second: browser_bookmark_stored_title(entry.second)
+                    ))
 
         var tx = self.db.begin()?
         if val Err(e) = self.db.exec("DELETE FROM browser_bookmarks", []):
@@ -132,7 +136,7 @@ impl BrowserProfileStore:
     me _change_bookmark(
         raw_url: text, title: text, toggle: bool, requested_enabled: bool
     ) -> Result<bool, DbError>:
-        if raw_url.len() > 2048 or title.len() > 512:
+        if raw_url.len() > 2048:
             return Err(DbError.ConstraintViolation(
                 "oversized browser bookmark"
             ))
@@ -143,6 +147,7 @@ impl BrowserProfileStore:
                 ))
             Ok(value):
                 value
+        val stored_title = browser_bookmark_stored_title(title)
         var tx = self.db.begin()?
         if val Err(e) = self.db.exec(
             "UPDATE browser_profile_meta SET schema_version = " +
@@ -183,7 +188,7 @@ impl BrowserProfileStore:
                         ).unwrap()
                     ),
                     DbValue.Text(value: url),
-                    DbValue.Text(value: title),
+                    DbValue.Text(value: stored_title),
                 ]
             ):
                 tx.rollback()?
@@ -237,7 +242,7 @@ impl BrowserProfileStore:
                         ).unwrap() + 1
                     ),
                     DbValue.Text(value: url),
-                    DbValue.Text(value: title)
+                    DbValue.Text(value: stored_title)
                 ]
             ):
                 tx.rollback()?
@@ -275,11 +280,14 @@ impl BrowserProfileStore:
             val url = row.get_text("url")
             val title = row.get_text("title")
             if url != nil and title != nil:
-                if url.unwrap().len() <= 2048 and title.unwrap().len() <= 512:
+                if url.unwrap().len() <= 2048:
                     match normalize_network_navigation_url(url.unwrap()):
                         Ok(normalized):
                             entries.push(Pair(
-                                first: normalized, second: title.unwrap()
+                                first: normalized,
+                                second: browser_bookmark_stored_title(
+                                    title.unwrap()
+                                )
                             ))
                         Err(_):
                             pass_dn("ignore corrupt bookmark row")

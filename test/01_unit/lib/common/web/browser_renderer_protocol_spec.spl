@@ -15,6 +15,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_frame_encode_with_state,
     browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_frame_encode_with_state_and_retained_images,
+    browser_renderer_frame_encode_with_state_and_retained_images_and_title,
     browser_renderer_frame_encode_with_witness,
     browser_renderer_frame_reply_to_request_id,
     browser_renderer_image_resource_revisions,
@@ -104,6 +105,86 @@ fn _renderer_protocol_dense_image_fixture(
     )
 
 describe "isolated browser renderer protocol":
+    it "round-trips bounded document titles and rejects hostile SBRF8 fields":
+        val title_512 = "a".repeat(510) + "é"
+        val title_513 = "a".repeat(511) + "é"
+        val encoded = (
+            browser_renderer_frame_encode_with_state_and_retained_images_and_title(
+                _renderer_protocol_fixture(),
+                7, 2, 41, -1, 0, "", 0, "", "",
+                "https://title.test/", "", "", title_512,
+                1, [], []
+            )
+        )
+        expect(encoded.ok).to_be(true)
+        val decoded_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), encoded.wire
+        )
+        expect(decoded_message.status).to_equal("message")
+        expect(browser_renderer_frame_reply_to_request_id(
+            decoded_message.message
+        )).to_equal(41)
+        val frame = browser_renderer_frame_decode(
+            decoded_message.message, 64, 48
+        )
+        expect(frame.ok).to_be(true)
+        expect(frame.document_title_present).to_be(true)
+        expect(frame.document_title).to_equal(title_512)
+
+        val oversized = (
+            browser_renderer_frame_encode_with_state_and_retained_images_and_title(
+                _renderer_protocol_fixture(),
+                7, 2, 41, -1, 0, "", 0, "", "",
+                "https://title.test/", "", "", title_513,
+                1, [], []
+            )
+        )
+        expect(oversized.reason).to_equal("invalid-document-title")
+        val noncanonical = BrowserRendererMessage(
+            kind: "frame",
+            generation: decoded_message.message.generation,
+            request_id: decoded_message.message.request_id,
+            payload: decoded_message.message.payload.replace(
+                "\t684\t", "\t0684\t"
+            )
+        )
+        expect(browser_renderer_frame_decode(
+            noncanonical, 64, 48
+        ).reason).to_equal("malformed-document-title")
+        val short_title = (
+            browser_renderer_frame_encode_with_state_and_retained_images_and_title(
+                _renderer_protocol_fixture(),
+                7, 2, 41, -1, 0, "", 0, "", "",
+                "https://title.test/", "", "", "ok",
+                1, [], []
+            )
+        )
+        val short_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), short_title.wire
+        )
+        val nul_title = BrowserRendererMessage(
+            kind: "frame",
+            generation: short_message.message.generation,
+            request_id: short_message.message.request_id,
+            payload: short_message.message.payload.replace(
+                "b2s=", "AA=="
+            )
+        )
+        expect(browser_renderer_frame_decode(
+            nul_title, 64, 48
+        ).reason).to_equal("invalid-document-title")
+        val legacy = browser_renderer_frame_encode_with_state_and_retained_images(
+            _renderer_protocol_fixture(),
+            7, 2, 41, -1, 0, "", 0, "", "",
+            "https://title.test/", "", "", 1, [], []
+        )
+        val legacy_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), legacy.wire
+        )
+        expect(browser_renderer_frame_decode(
+            legacy_message.message, 64, 48
+        ).document_title_present).to_be(false)
+
     it "selects dense image resources once in first-reference order":
         step("Encode a dense frame whose image resources arrive in reverse order")
         val (dense_composition, dense_resources) = (

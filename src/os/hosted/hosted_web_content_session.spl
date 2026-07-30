@@ -1,7 +1,8 @@
 # Hosted-only semantic Web adapter. BrowserSession stays out of compositor core.
 
 use std.gc_async_mut.web.browser_session.{
-    BrowserSession, BrowserBookmarkSnapshot, BrowserRequest, BrowserResponse
+    BrowserSession, BrowserBookmarkSnapshot, BrowserRequest, BrowserResponse,
+    browser_bookmark_stored_title
 }
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
@@ -952,6 +953,18 @@ class HostedWebContentRegistry:
         self._clear_pointer_state_except(index)
         var session = self.sessions[index]
         var bookmarks_before = session.browser.bookmark_snapshot()
+        val committing_favorite = not down and control == "favorite"
+        val current_url = if committing_favorite:
+            session.browser.document_url
+        else:
+            ""
+        val current_title = if (
+            committing_favorite and
+            session.browser.current_title != current_url
+        ):
+            browser_bookmark_stored_title(session.browser.current_title)
+        else:
+            ""
         val revision_before = session.mutation_revision
         if (not down and control == "favorite" and
             session.profile_enabled):
@@ -991,8 +1004,8 @@ class HostedWebContentRegistry:
         self.sessions[index] = session
         if not down and control == "favorite" and receipt.callback_count > 0:
             var bookmark_store = self.bookmark_store.unwrap()
-            val url = session.browser.document_url
-            match bookmark_store.toggle_bookmark(url, url):
+            val url = current_url
+            match bookmark_store.toggle_bookmark(url, current_title):
                 Err(e):
                     val _ = session.browser.load_bookmark_snapshot(
                         bookmarks_before
@@ -1014,7 +1027,7 @@ class HostedWebContentRegistry:
                         bookmarks_before
                     )
                     if enabled:
-                        session.browser.add_favorite(url, url)
+                        session.browser.add_favorite(url, current_title)
                     else:
                         session.browser.remove_favorite(url)
                     self.sessions[index] = session

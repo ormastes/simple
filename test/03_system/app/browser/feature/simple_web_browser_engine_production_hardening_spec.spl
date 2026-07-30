@@ -3,10 +3,23 @@
 # @evidence-display: links
 """# Production Simple Browser User Flow
 
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+**Plan:** doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md
+**Design:** doc/05_design/simple_web_browser_engine_production_hardening.md
+**Research:** doc/01_research/local/simple_web_browser_engine_production_hardening.md
+
+## Overview
+
 Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event,
 Draw IR, and Engine2D paths, then drives page controls and browser chrome
 through structured UI access. Helpers fail closed until production evidence
 exists.
+
+## Examples
+
+The bookmark-title scenario admits a bounded renderer witness, commits it
+through the parent profile owner, restarts both renderer and profile-backed
+window, and lists the restored title or derived URL fallback.
 """
 use std.spec.*
 use std.env.variables.{env_get}
@@ -19,6 +32,10 @@ use os.hosted.hosted_browser_renderer_process.{
 use os.hosted.hosted_browser_renderer_registry.{
     HostedBrowserRendererRegistry
 }
+use os.hosted.browser_profile_store.{
+    BrowserBookmarkStore, BrowserProfileStore
+}
+use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
 use os.hosted.hosted_browser_renderer_worker.{
     HostedBrowserRendererWorkerSession
 }
@@ -52,12 +69,79 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
 use std.common.image.png_encode.{encode_argb_to_png}
 use common.ui.draw_ir.{DrawIrCommand}
 use std.gc_async_mut.web.browser_session.{
-    BrowserBookmarkSnapshot, BrowserSession
+    BrowserBookmarkSnapshot, BrowserSession,
+    browser_bookmark_title_or_url
 }
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_ui_access.*
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    MockResponseRegistry, set_mock_registry
+}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_find_by_tag}
 use std.js.types.js_types.{JsValue}
 use std.js.types.pair.{Pair}
+
+extern fn rt_file_delete(path: text) -> bool
+
+val BOOKMARK_TITLE_PROFILE_PATH = (
+    "/tmp/simple_web_browser_bookmark_title_spec.sqlite3"
+)
+val BOOKMARK_TITLE_512 = "a".repeat(510) + "é"
+val BOOKMARK_TITLE_513 = "a".repeat(511) + "é"
+
+fn setup_hosted_bookmark_title_profile():
+    rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH)
+    rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-wal")
+    rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-shm")
+    var mocks = MockResponseRegistry.create()
+    mocks.register(
+        "https://accepted-title.test/", 200,
+        "<title>{BOOKMARK_TITLE_512}</title><p>accepted</p>"
+    )
+    mocks.register(
+        "https://fallback-title.test/", 200,
+        "<title>{BOOKMARK_TITLE_513}</title><p>fallback</p>"
+    )
+    set_mock_registry(mocks)
+
+fn check_bookmark_title_witness_admission(
+    registry: HostedBrowserRendererRegistry,
+    window_id: i64,
+    expected_title: text
+):
+    expect(registry.bookmark_stored_title(window_id)).to_equal(
+        expected_title
+    )
+
+fn check_restarted_bookmark_listing(
+    snapshot: BrowserBookmarkSnapshot
+):
+    expect(snapshot.entries.len()).to_equal(2)
+    expect(snapshot.entries[0].second).to_equal(BOOKMARK_TITLE_512)
+    expect(snapshot.entries[1].second).to_equal("")
+    var browser = BrowserSession.new_without_runtime()
+    expect(browser.load_bookmark_snapshot(snapshot)).to_equal(2)
+    val ui = browser.ui_access_snapshot()
+    expect(ui.nodes[8].text_value).to_equal(BOOKMARK_TITLE_512)
+    expect(ui.nodes[8].props[2].value).to_equal(
+        "https://accepted-title.test/"
+    )
+    expect(ui.nodes[9].text_value).to_equal(
+        "https://fallback-title.test/"
+    )
+    expect(ui.nodes[9].props[2].value).to_equal(
+        "https://fallback-title.test/"
+    )
+
+fn check_in_process_registry_profile_reopen(
+    snapshot: BrowserBookmarkSnapshot
+):
+    expect(browser_bookmark_title_or_url(
+        snapshot.entries[0].second, snapshot.entries[0].first
+    )).to_equal(BOOKMARK_TITLE_512)
+    expect(browser_bookmark_title_or_url(
+        snapshot.entries[1].second, snapshot.entries[1].first
+    )).to_equal("https://fallback-title.test/")
 
 fn _retained_png_hex(pixel: u32) -> text:
     var out = ""
@@ -254,6 +338,29 @@ fn _await_browser_registry_ready(
         thread_sleep_ms(1)
         attempts = attempts + 1
     false
+
+fn _open_hosted_bookmark_document(
+    registry: HostedBrowserRendererRegistry,
+    window_id: i64,
+    url: text,
+    event_id: i64,
+    body_html: text
+):
+    expect(registry.dispatch_chrome_pointer(
+        event_id, window_id, "address", true
+    ).reason).to_equal("chrome-pressed")
+    expect(registry.dispatch_chrome_pointer(
+        event_id + 1, window_id, "address", false
+    ).reason).to_equal("address-focused")
+    expect(registry.dispatch_text(
+        event_id + 2, window_id, url
+    ).callback_count).to_equal(1)
+    expect(registry.dispatch_key_with_shift(
+        event_id + 3, window_id, 13, true, false
+    ).callback_count).to_equal(1)
+    expect(_await_browser_registry_ready(
+        registry, window_id, body_html
+    )).to_be(true)
 
 fn _close_browser_animation_evidence(
     renderer: HostedBrowserRendererProcess,
@@ -1551,6 +1658,94 @@ describe "Production Simple browser user flow":
         expect(registry.pressed_window_id).to_equal(81)
         expect(registry.close()).to_be(true)
         expect(registry.pressed_window_id).to_equal(0)
+
+    # @manual: show
+    # @capture(protocol)
+    # @capture(text)
+    # @req REQ-WEB-BROWSER-009
+    it "should persist bounded page titles across renderer and profile restart":
+        step("Open bounded titled documents through hosted chrome")
+        setup_hosted_bookmark_title_profile()
+        val artifact = env_get("HOSTED_WM_ARTIFACT")
+        val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+        if artifact == "":
+            fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+        if expected_artifact_sha.len() != 64 or
+            file_hash_sha256(artifact) != expected_artifact_sha:
+            fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+        var registry = HostedBrowserRendererRegistry.create(
+            artifact, "https://accepted-title.test/"
+        )
+        val body_html = "<main>bookmark title witness</main>"
+        expect(registry.ensure(
+            93, body_html, 64, 48, 0, 100000
+        )).to_equal("none")
+        expect(_await_browser_registry_ready(
+            registry, 93, body_html
+        )).to_be(true)
+        _open_hosted_bookmark_document(
+            registry, 93, "https://accepted-title.test/", 100, body_html
+        )
+        check_bookmark_title_witness_admission(
+            registry, 93, BOOKMARK_TITLE_512
+        )
+
+        step("Commit bookmarks through the parent profile owner")
+        var profile = match BrowserProfileStore.open(
+            BOOKMARK_TITLE_PROFILE_PATH
+        ):
+            Err(error):
+                fail(error.message())
+            Ok(opened):
+                opened
+        val _ = registry.dispatch_chrome_pointer(
+            110, 93, "favorite", true
+        )
+        expect(registry.dispatch_chrome_pointer(
+            111, 93, "favorite", false
+        ).reason).to_equal("favorite-parent")
+        expect(profile.toggle_bookmark(
+            "https://accepted-title.test/",
+            registry.bookmark_stored_title(93)
+        )?).to_be(true)
+        _open_hosted_bookmark_document(
+            registry, 93, "https://fallback-title.test/", 120, body_html
+        )
+        check_bookmark_title_witness_admission(registry, 93, "")
+        val _ = registry.dispatch_chrome_pointer(
+            130, 93, "favorite", true
+        )
+        expect(registry.dispatch_chrome_pointer(
+            131, 93, "favorite", false
+        ).reason).to_equal("favorite-parent")
+        expect(profile.toggle_bookmark(
+            "https://fallback-title.test/",
+            registry.bookmark_stored_title(93)
+        )?).to_be(true)
+
+        step("Restart the renderer generation and profile-backed window")
+        expect(registry.next_generation).to_be_greater_than(2)
+        expect(registry.close()).to_be(true)
+        profile.close()?
+        var restarted = HostedWebContentRegistry.create_with_bookmark_store(
+            BrowserBookmarkStore.from_profile(
+                BrowserProfileStore.open(BOOKMARK_TITLE_PROFILE_PATH)?
+            )
+        )
+        val _ = restarted.advance_window(
+            94, "<main>restarted</main>", 64, 48, 100000, true
+        )
+
+        step("List persisted bookmarks with safe titles")
+        check_restarted_bookmark_listing(restarted.profile_bookmarks)
+        check_in_process_registry_profile_reopen(
+            restarted.profile_bookmarks
+        )
+        expect(restarted.close()).to_be(true)
+        set_mock_registry(MockResponseRegistry.create())
+        rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH)
+        rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-wal")
+        rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-shm")
 
     # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010
     # @manual: show

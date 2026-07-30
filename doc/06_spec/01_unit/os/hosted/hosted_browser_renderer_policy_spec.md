@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 52 | 52 | 0 | 0 |
+| 53 | 53 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,7 +24,7 @@ Treats decoded renderer protocol messages as untrusted input at the hosted brows
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-07-30 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -3647,12 +3647,53 @@ expect(stale.decoder.error).to_equal("stale-generation")
 
 </details>
 
+#### binds a bookmark title to generation reply and canonical URL
+
+- var renderer = HostedBrowserRendererProcess create
+   - Expected: renderer.bookmark_stored_title() equals `Bound title`
+   - Expected: renderer.bookmark_stored_title() equals ``
+   - Expected: renderer.bookmark_stored_title() equals ``
+   - Expected: renderer.bookmark_stored_title() equals ``
+   - Expected: renderer.bookmark_stored_title() equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var renderer = HostedBrowserRendererProcess.create(7, 64, 48)
+renderer.expected_reply_to_request_id = 41
+renderer.document_url = "https://title.test/"
+renderer.document_title = "Bound title"
+renderer.document_title_url = "https://title.test/"
+renderer.document_title_generation = 7
+renderer.document_title_reply_to_request_id = 41
+expect(renderer.bookmark_stored_title()).to_equal("Bound title")
+
+renderer.document_title_generation = 6
+expect(renderer.bookmark_stored_title()).to_equal("")
+renderer.document_title_generation = 7
+renderer.document_title_reply_to_request_id = 40
+expect(renderer.bookmark_stored_title()).to_equal("")
+renderer.document_title_reply_to_request_id = 41
+renderer.document_title_url = "https://other.test/"
+expect(renderer.bookmark_stored_title()).to_equal("")
+renderer.document_title_url = renderer.document_url
+expect(renderer.close()).to_be(true)
+expect(renderer.bookmark_stored_title()).to_equal("")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 52 |
-| Active scenarios | 52 |
+| Total scenarios | 53 |
+| Active scenarios | 53 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

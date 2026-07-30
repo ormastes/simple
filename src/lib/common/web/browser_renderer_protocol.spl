@@ -51,6 +51,8 @@ pub val BROWSER_RENDERER_MAX_IMAGE_RESOURCE_BYTES: i64 = 524288
 pub val BROWSER_RENDERER_MAX_IMAGE_RESOURCE_ENCODED_BYTES: i64 = 699051
 pub val BROWSER_RENDERER_MAX_IMAGE_RESOURCES: i64 = 64
 pub val BROWSER_RENDERER_MAX_IMAGE_PIXELS: i64 = 131072
+pub val BROWSER_RENDERER_MAX_DOCUMENT_TITLE_BYTES: i64 = 512
+pub val BROWSER_RENDERER_MAX_DOCUMENT_TITLE_ENCODED_BYTES: i64 = 684
 val BROWSER_RENDERER_MAX_STYLE_PROPS: i64 = 160
 val BROWSER_RENDERER_MAX_STYLE_KEY_BYTES: i64 = 128
 val BROWSER_RENDERER_MAX_STYLE_VALUE_BYTES: i64 = 65536
@@ -143,6 +145,8 @@ pub struct BrowserRendererFrameDecodeResult:
     history_current_url: text
     history_back_url: text
     history_forward_url: text
+    document_title_present: bool
+    document_title: text
     composition: DrawIrComposition
     image_resources: [SimpleOsHostGpuImageResource]
     cpu_composited_count: i32
@@ -1709,6 +1713,8 @@ fn _browser_renderer_frame_reject(reason: text) -> BrowserRendererFrameDecodeRes
         history_current_url: "",
         history_back_url: "",
         history_forward_url: "",
+        document_title_present: false,
+        document_title: "",
         composition: draw_ir_composition("", "", "", []),
         image_resources: [],
         cpu_composited_count: 0,
@@ -1855,6 +1861,48 @@ fn _browser_renderer_material_digest_valid(count: i64, digest: text) -> bool:
             return false
         index = index + 1
     true
+
+fn _browser_renderer_checked_end(
+    start: i64, length: i64, limit: i64
+) -> i64:
+    if start < 0 or length < 0 or start > limit or length > limit - start:
+        return -1
+    start + length
+
+fn _browser_renderer_base64_decoded_length(
+    value: text, start: i64, end: i64
+) -> i64:
+    if start < 0 or end < start or end > value.len():
+        return -1
+    val encoded_len = end - start
+    if encoded_len == 0:
+        return 0
+    if encoded_len % 4 != 0:
+        return -1
+    var padding: i64 = 0
+    var index: i64 = 0
+    while index < encoded_len:
+        val byte = value.byte_at(start + index)
+        val alphabet = (
+            (byte >= 65 and byte <= 90) or
+            (byte >= 97 and byte <= 122) or
+            (byte >= 48 and byte <= 57) or byte == 43 or byte == 47
+        )
+        if byte == 61:
+            if index < encoded_len - 2:
+                return -1
+            padding = padding + 1
+            if padding > 2:
+                return -1
+        elif padding > 0 or not alphabet:
+            return -1
+        index = index + 1
+    encoded_len / 4 * 3 - padding
+
+fn _browser_renderer_document_title_valid(value: text) -> bool:
+    val byte_len = text_to_bytes(value).len().to_i64()
+    (value == value.trim() and not value.contains("\0") and
+        byte_len <= BROWSER_RENDERER_MAX_DOCUMENT_TITLE_BYTES)
 
 pub fn browser_renderer_frame_encode_with_witness(
     composition: DrawIrComposition,
@@ -2121,13 +2169,19 @@ fn _browser_renderer_frame_encode_with_state_and_images(
     composition_revision: i64,
     image_resources: [SimpleOsHostGpuImageResource],
     prior_revisions: [SimpleOsHostGpuImageResourceRevision],
-    retained_wire: bool
+    retained_wire: bool,
+    document_title: text,
+    title_wire: bool
 ) -> BrowserRendererEncodeResult:
     val current_len = text_to_bytes(history_current_url).len()
     val back_len = text_to_bytes(history_back_url).len()
     val forward_len = text_to_bytes(history_forward_url).len()
     if diagnostics.len() > BROWSER_RENDERER_MAX_DIAGNOSTIC_BYTES:
         return _browser_renderer_reject_encode("invalid-frame-diagnostics")
+    if title_wire and not _browser_renderer_document_title_valid(
+        document_title
+    ):
+        return _browser_renderer_reject_encode("invalid-document-title")
     if (not _browser_renderer_history_url_valid(
             history_current_url, current_len
         ) or not _browser_renderer_history_url_valid(
@@ -2164,8 +2218,8 @@ fn _browser_renderer_frame_encode_with_state_and_images(
                     resource.image_uri, resource.width, resource.height,
                     resource.pixels
                 ))
-    # SBRF7 always uses the retained record codec; it accepts both full and
-    # reference entries, so first/changed image frames decode through one path.
+    # Revision frames use the retained codec for both full and reference
+    # entries, so first and changed image frames decode through one path.
     val use_retained_wire = retained_wire and (
         has_reference or composition_revision >= 0
     )
@@ -2201,6 +2255,14 @@ fn _browser_renderer_frame_encode_with_state_and_images(
     val current_payload = base64_encode(history_current_url)
     val back_payload = base64_encode(history_back_url)
     val forward_payload = base64_encode(history_forward_url)
+    val title_payload = if title_wire:
+        base64_encode(document_title)
+    else:
+        ""
+    val title_bytes = if title_wire:
+        text_to_bytes(document_title).len().to_i64()
+    else:
+        0
     val encoded_images = base64url_encode_bytes(image_payload.bytes)
     if encoded_images.len() > (
         BROWSER_RENDERER_MAX_IMAGE_RESOURCE_ENCODED_BYTES
@@ -2213,7 +2275,7 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         BROWSER_RENDERER_MAX_PAYLOAD_BYTES - BROWSER_RENDERER_MAX_HEADER_BYTES -
             diagnostic_payload.len() - current_payload.len() -
             back_payload.len() - forward_payload.len() -
-            encoded_images.len(),
+            title_payload.len() - title_bytes - encoded_images.len(),
         BROWSER_RENDERER_MAX_COMMANDS
     )
     if not encoded.ok:
@@ -2227,12 +2289,18 @@ fn _browser_renderer_frame_encode_with_state_and_images(
     else:
         solid_material_sha256
     val revision_frame = composition_revision >= 0
-    val frame_version = if revision_frame:
+    val frame_version = if title_wire:
+        "SBRF8"
+    elif revision_frame:
         "SBRF7"
     elif use_retained_wire:
         "SBRF6"
     else:
         "SBRF5"
+    val title_field = if title_wire:
+        "\t{title_payload.len()}"
+    else:
+        ""
     val revision_field = if revision_frame:
         "\t{composition_revision}"
     else:
@@ -2242,10 +2310,12 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         "\t{solid_material_count}\t{solid_digest}\t{next_animation_ms}" +
         "\t{diagnostic_payload.len()}\t{current_payload.len()}" +
         "\t{back_payload.len()}\t{forward_payload.len()}" +
+        title_field +
         "\t{image_payload.resource_count}\t{image_payload.checksum}" +
         "\t{encoded_images.len()}{revision_field}\n" +
         diagnostic_payload + current_payload + back_payload +
-        forward_payload + encoded_images + bytes_to_text(encoded.bytes)
+        forward_payload + title_payload + encoded_images +
+        bytes_to_text(encoded.bytes)
     )
     browser_renderer_message_encode("frame", generation, request_id, payload)
 
@@ -2270,7 +2340,7 @@ pub fn browser_renderer_frame_encode_with_state_and_images(
         next_animation_ms, cpu_composited_count, cpu_composited_sha256,
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
-        -1, image_resources, [], false
+        -1, image_resources, [], false, "", false
     )
 
 pub fn browser_renderer_frame_encode_with_state_and_retained_images(
@@ -2300,7 +2370,40 @@ pub fn browser_renderer_frame_encode_with_state_and_retained_images(
         next_animation_ms, cpu_composited_count, cpu_composited_sha256,
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
-        composition_revision, image_resources, prior_revisions, true
+        composition_revision, image_resources, prior_revisions, true,
+        "", false
+    )
+
+pub fn browser_renderer_frame_encode_with_state_and_retained_images_and_title(
+    composition: DrawIrComposition,
+    generation: i64,
+    request_id: i64,
+    reply_to_request_id: i64,
+    next_animation_ms: i64,
+    cpu_composited_count: i32,
+    cpu_composited_sha256: text,
+    solid_material_count: i32,
+    solid_material_sha256: text,
+    diagnostics: text,
+    history_current_url: text,
+    history_back_url: text,
+    history_forward_url: text,
+    document_title: text,
+    composition_revision: i64,
+    image_resources: [SimpleOsHostGpuImageResource],
+    prior_revisions: [SimpleOsHostGpuImageResourceRevision]
+) -> BrowserRendererEncodeResult:
+    if composition_revision < 0:
+        return _browser_renderer_reject_encode(
+            "invalid-composition-revision"
+        )
+    _browser_renderer_frame_encode_with_state_and_images(
+        composition, generation, request_id, reply_to_request_id,
+        next_animation_ms, cpu_composited_count, cpu_composited_sha256,
+        solid_material_count, solid_material_sha256, diagnostics,
+        history_current_url, history_back_url, history_forward_url,
+        composition_revision, image_resources, prior_revisions, true,
+        document_title, true
     )
 
 pub fn browser_renderer_frame_reply_to_request_id(
@@ -2319,7 +2422,8 @@ pub fn browser_renderer_frame_reply_to_request_id(
         (fields.len() == 11 and fields[0] == "SBRF4") or
         (fields.len() == 14 and
             (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
-        (fields.len() == 15 and fields[0] == "SBRF7")):
+        (fields.len() == 15 and fields[0] == "SBRF7") or
+        (fields.len() == 16 and fields[0] == "SBRF8")):
         return -1
     val reply_to_request_id = fields[1].to_i64() ?? -1
     if (reply_to_request_id <= 0 or
@@ -2347,32 +2451,39 @@ fn _browser_renderer_frame_decode(
         (fields.len() == 11 and fields[0] == "SBRF4") or
         (fields.len() == 14 and
             (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
-        (fields.len() == 15 and fields[0] == "SBRF7")
+        (fields.len() == 15 and fields[0] == "SBRF7") or
+        (fields.len() == 16 and fields[0] == "SBRF8")
     )
     val image_frame = (
         (fields.len() == 14 and
             (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
-        (fields.len() == 15 and fields[0] == "SBRF7")
+        (fields.len() == 15 and fields[0] == "SBRF7") or
+        (fields.len() == 16 and fields[0] == "SBRF8")
     )
     val retained_frame = (
         (fields.len() == 14 and fields[0] == "SBRF6") or
-        (fields.len() == 15 and fields[0] == "SBRF7")
+        (fields.len() == 15 and fields[0] == "SBRF7") or
+        (fields.len() == 16 and fields[0] == "SBRF8")
     )
+    val title_frame = fields.len() == 16 and fields[0] == "SBRF8"
     if not legacy_frame and not diagnostic_frame and not state_frame:
         return _browser_renderer_frame_reject("malformed-material-witness")
     val reply_to_request_id = _browser_renderer_positive_i64(fields[1])
     val cpu_count = fields[2].to_i64() ?? -1
     val solid_count = fields[4].to_i64() ?? -1
     val next_animation_ms = fields[6].to_i64() ?? -2
-    val composition_revision = if fields[0] == "SBRF7":
-        fields[14].to_i64() ?? -1
+    val revision_field_index = if title_frame: 15 else: 14
+    val composition_revision = if (
+        fields[0] == "SBRF7" or title_frame
+    ):
+        fields[revision_field_index].to_i64() ?? -1
     else:
         -1
     if (reply_to_request_id < 0 or cpu_count < 0 or solid_count < 0 or
         next_animation_ms < -1 or
-        (fields[0] == "SBRF7" and
+        ((fields[0] == "SBRF7" or title_frame) and
             (composition_revision < 0 or
-             str(composition_revision) != fields[14])) or
+             str(composition_revision) != fields[revision_field_index])) or
         str(cpu_count) != fields[2] or str(solid_count) != fields[4] or
         str(next_animation_ms) != fields[6]):
         return _browser_renderer_frame_reject("malformed-material-witness")
@@ -2386,6 +2497,7 @@ fn _browser_renderer_frame_decode(
     var history_current_url = ""
     var history_back_url = ""
     var history_forward_url = ""
+    var document_title = ""
     var image_resources: [SimpleOsHostGpuImageResource] = []
     var draw_ir_start = witness_end + 1
     if diagnostic_frame or state_frame:
@@ -2424,25 +2536,29 @@ fn _browser_renderer_frame_decode(
                 return _browser_renderer_frame_reject(
                     "malformed-frame-state"
                 )
-            val history_end = (
-                diagnostic_end + current_len + back_len + forward_len
+            val current_end = _browser_renderer_checked_end(
+                diagnostic_end, current_len, message.payload.len()
             )
-            if history_end >= message.payload.len():
+            val back_end = _browser_renderer_checked_end(
+                current_end, back_len, message.payload.len()
+            )
+            val history_end = _browser_renderer_checked_end(
+                back_end, forward_len, message.payload.len()
+            )
+            if history_end < 0 or history_end >= message.payload.len():
                 return _browser_renderer_frame_reject(
                     "malformed-frame-state"
                 )
             val encoded_current_url = _browser_renderer_byte_slice(
                 message.payload, diagnostic_end,
-                diagnostic_end + current_len
+                current_end
             )
-            val history_back_start = diagnostic_end + current_len
+            val history_back_start = current_end
             val encoded_back_url = _browser_renderer_byte_slice(
                 message.payload, history_back_start,
-                history_back_start + back_len
+                back_end
             )
-            val history_forward_start = (
-                history_back_start + back_len
-            )
+            val history_forward_start = back_end
             val encoded_forward_url = _browser_renderer_byte_slice(
                 message.payload, history_forward_start, history_end
             )
@@ -2464,27 +2580,81 @@ fn _browser_renderer_frame_decode(
                 return _browser_renderer_frame_reject("invalid-frame-state")
             draw_ir_start = history_end
             if image_frame:
-                val resource_count = fields[11].to_i64() ?? -1
-                val resource_checksum = fields[12].to_i64() ?? -1
-                val encoded_image_len = fields[13].to_i64() ?? -1
+                val resource_field = if title_frame: 12 else: 11
+                val resource_count = fields[resource_field].to_i64() ?? -1
+                val resource_checksum = fields[
+                    resource_field + 1
+                ].to_i64() ?? -1
+                val encoded_image_len = fields[
+                    resource_field + 2
+                ].to_i64() ?? -1
                 if (resource_count < 0 or
                     resource_count > BROWSER_RENDERER_MAX_IMAGE_RESOURCES or
                     resource_checksum < 0 or encoded_image_len < 0 or
                     encoded_image_len >
                         BROWSER_RENDERER_MAX_IMAGE_RESOURCE_ENCODED_BYTES or
-                    str(resource_count) != fields[11] or
-                    str(resource_checksum) != fields[12] or
-                    str(encoded_image_len) != fields[13]):
+                    str(resource_count) != fields[resource_field] or
+                    str(resource_checksum) != fields[resource_field + 1] or
+                    str(encoded_image_len) != fields[resource_field + 2]):
                     return _browser_renderer_frame_reject(
                         "malformed-image-resources"
                     )
-                val image_end = history_end + encoded_image_len
-                if image_end >= message.payload.len():
+                var image_start = history_end
+                var title_end = history_end
+                if title_frame:
+                    val title_len = fields[11].to_i64() ?? -1
+                    if (title_len < 0 or
+                        title_len >
+                            BROWSER_RENDERER_MAX_DOCUMENT_TITLE_ENCODED_BYTES or
+                        str(title_len) != fields[11]):
+                        return _browser_renderer_frame_reject(
+                            "malformed-document-title"
+                        )
+                    title_end = _browser_renderer_checked_end(
+                        history_end, title_len, message.payload.len()
+                    )
+                    if title_end < 0:
+                        return _browser_renderer_frame_reject(
+                            "malformed-document-title"
+                        )
+                    image_start = title_end
+                val image_end = _browser_renderer_checked_end(
+                    image_start, encoded_image_len, message.payload.len()
+                )
+                if image_end < 0 or image_end >= message.payload.len():
                     return _browser_renderer_frame_reject(
                         "malformed-image-resources"
                     )
+                if title_frame:
+                    val decoded_title_len = (
+                        _browser_renderer_base64_decoded_length(
+                            message.payload, history_end, title_end
+                        )
+                    )
+                    if (decoded_title_len < 0 or
+                        decoded_title_len >
+                            BROWSER_RENDERER_MAX_DOCUMENT_TITLE_BYTES or
+                        message.payload.len() >
+                            BROWSER_RENDERER_MAX_PAYLOAD_BYTES -
+                                decoded_title_len):
+                        return _browser_renderer_frame_reject(
+                            "invalid-document-title"
+                        )
+                    val encoded_title = _browser_renderer_byte_slice(
+                        message.payload, history_end, title_end
+                    )
+                    document_title = base64_decode(encoded_title)
+                    if (text_to_bytes(document_title).len().to_i64() !=
+                            decoded_title_len or
+                        not _browser_renderer_document_title_valid(
+                            document_title
+                        ) or
+                        base64_encode(document_title) != encoded_title):
+                        return _browser_renderer_frame_reject(
+                            "invalid-document-title"
+                        )
                 val encoded_images = _browser_renderer_byte_slice(
-                    message.payload, history_end, image_end
+                    message.payload, image_start, image_end
                 )
                 val image_bytes = base64url_decode_to_bytes(encoded_images)
                 if (image_bytes.len().to_i64() >
@@ -2565,6 +2735,8 @@ fn _browser_renderer_frame_decode(
         history_current_url: history_current_url,
         history_back_url: history_back_url,
         history_forward_url: history_forward_url,
+        document_title_present: title_frame and document_title != "",
+        document_title: document_title,
         composition: decoded.composition,
         image_resources: image_resources,
         cpu_composited_count: cpu_count.to_i32(),

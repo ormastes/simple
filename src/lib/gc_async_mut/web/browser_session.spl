@@ -23,6 +23,7 @@
 # - browser_session_loading.spl   — impl BrowserSession: stylesheet/script loading
 
 use common.string_builder.{StringBuilder}
+use std.common.base_encoding.utilities.{text_to_bytes}
 use common.web.browser_renderer_protocol.{BROWSER_RENDERER_MAX_PAYLOAD_BYTES}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResource
@@ -173,6 +174,19 @@ class BrowserBookmarkSnapshot:
 
     static fn create(entries: [Pair<text, text>]) -> BrowserBookmarkSnapshot:
         BrowserBookmarkSnapshot(entries: entries)
+
+pub fn browser_bookmark_stored_title(raw_title: text) -> text:
+    val title = raw_title.trim()
+    if (title == "" or title.contains("\0") or
+        text_to_bytes(title).len().to_i64() > 512):
+        return ""
+    title
+
+pub fn browser_bookmark_title_or_url(
+    stored_title: text, canonical_url: text
+) -> text:
+    val title = browser_bookmark_stored_title(stored_title)
+    if title != "": title else: canonical_url
 
 class BrowserRequest:
     id: text
@@ -3039,7 +3053,7 @@ impl BrowserSession:
         val _ = self.try_add_favorite(url, title)
 
     me try_add_favorite(url: text, title: text) -> bool:
-        if url.len() > 2048 or title.len() > 512:
+        if url.len() > 2048:
             return false
         match normalize_network_navigation_url(url):
             Err(_):
@@ -3050,7 +3064,7 @@ impl BrowserSession:
                 if self.favorite_links.len() >= 256 and
                    pair_value(self.favorite_links, normalized) == nil:
                     return false
-                val stored_title = if title.trim() != "": title.trim() else: normalized
+                val stored_title = browser_bookmark_stored_title(title)
                 self.favorite_links = upsert_pair(
                     self.favorite_links, normalized, stored_title
                 )
