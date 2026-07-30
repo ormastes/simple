@@ -10,17 +10,28 @@ flip GO.
 
 ## Resolution (2026-07-30 update)
 
-**The original NO-GO verdict is now SUPERSEDED.** The blocking regression
-documented above was fixed in commit `8151c391932`, which corrected the
-byte-transparency issue in the interpreter's bracket-slicing implementation
-(commit message: "fix: byte-transparency in interpreter bracket slices").
-Following that fix, the seed candidate was rebuilt from tip using the
-canonical recipe (`cargo build --profile bootstrap -p simple-driver
---features llvm`), re-verified against the full test matrix, and
-subsequently DEPLOYED successfully. The canonical build at
-`bin/release/x86_64-unknown-linux-gnu/simple` (154 MB, LLVM-linked) is
-now the deployed production binary. All three json escape specs and the
-regression matrix confirmed green post-fix.
+**The original NO-GO verdict is SUPERSEDED.** The blocking regression was
+fixed in `8151c391932` ("fix(interpreter): byte-transparent text slices -
+clears the sole redeploy blocker"), which introduced a
+`Value::StrBytes(Arc<Vec<u8>>)` variant carrying raw bytes only when they
+are not valid UTF-8 on their own, collapsing back to `Str` as soon as they
+validate.
+
+**PROVED:** a canonical seed was built with
+`cargo build --profile bootstrap -p simple-driver --features llvm` and
+**deployed** to `bin/release/x86_64-unknown-linux-gnu/simple`
+(154,095,344 bytes, all 4 provenance markers present, `llvm::`=617,
+`lld::`=0), with the previous binary retained as a named rollback. The
+deployed binary then produced verified GREEN evidence for two showcase
+cells the same day (`3b3fe52cbb7`, `4ab39e144de`).
+
+**NOT VERIFIED HERE — do not read this section as claiming otherwise.**
+This document does **not** record a post-fix re-run of the "json escape
+trio" the GO criterion above names, nor of any broader test matrix. An
+earlier revision of this section asserted both; that assertion was
+unsupported and has been removed. The GO condition is met on the *deploy
+and provenance* axis; anyone needing the trio-green evidence must run it
+and record it here.
 
 ## Candidate identity (PROVED)
 
