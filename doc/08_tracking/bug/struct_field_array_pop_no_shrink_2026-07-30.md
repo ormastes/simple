@@ -1,10 +1,64 @@
 # `.pop()` on a struct-field array does not shrink the array
 
 - **Found:** 2026-07-30, re-verifying `test/01_unit/lib/editor/document_service_spec.spl`
-- **Status:** OPEN, **root-caused** 2026-07-30. Present on current `main`.
+- **Status:** **RESOLVED 2026-07-30 (lane L-R).** The source fix was already in
+  git; the *working copy* had been clobbered back to a pre-fix revision, so every
+  binary built from it reproduced the bug. Restoring the file from `HEAD` and
+  rebuilding makes all probes green. See "CORRECTION (2026-07-30, lane L-R)".
 - **Severity:** silent wrong results. `pop()` returns the correct element, so
   nothing errors — the array just keeps its length.
-- **Root cause:** `src/compiler_rust/compiler/src/interpreter_method/mod.rs:1789-1794`
+- **Mechanism (accurate):** the discriminant gate at
+  `src/compiler_rust/compiler/src/interpreter_method/mod.rs` — but it is *guarded
+  by a `pop` special case in committed source*, which the stale working copy lacked.
+
+## CORRECTION (2026-07-30, lane L-R) — it was a stale working copy, not missing source
+
+The diagnosis of the *mechanism* below is exactly right. The claim that "no
+commit fixes it" is **wrong**. `git log -S 'method == "pop"' -- <that file>`
+shows the `pop` special case landed in **`f119f8b7120` (2026-07-28 23:58,
+`chore: consolidate completed agent session work`)** — a chore-labelled bulk
+commit, the exact hazard `.claude/rules/` warns about.
+
+What actually happened:
+
+- `git cat-file -p HEAD:src/compiler_rust/compiler/src/interpreter_method/mod.rs`
+  contains the `pop` write-back fix **and** `dec6bc3738f`'s
+  `GLOBAL_IMPL_METHODS` enum-static-method fix.
+- The **file on disk** contained neither. `git diff` against the untouched
+  working copy was `20 insertions, 47 deletions` — the WC was a *rewind* of two
+  landed fixes, with nothing new of its own.
+- Cargo builds from the working copy, not from `HEAD`. That fully explains the
+  engine matrix: the deployed seed (07-29 06:00) and the 07-30 02:33 release
+  were built before the clobber and are correct; the 07-29 16:42 debug and the
+  07-30 07:47 release were built after it and are broken. It is neither
+  debug-vs-release nor a source defect.
+
+**Resolution applied:** `git checkout HEAD -- src/compiler_rust/compiler/src/interpreter_method/mod.rs`,
+then `cargo build --bin simple` (debug, 1m17s). No source change was needed or made.
+Writing a *new* fix here would have silently reverted `dec6bc3738f`'s enum fix.
+
+**Verification (debug binary rebuilt from the restored file):**
+
+| probe | expected | observed |
+|---|---|---|
+| `[i64]` field pop | popped=8 len=1 | popped=8 len=1 |
+| `[[i64]]` field pop | len=1 | len=1 |
+| two-hop `o.inner.zs.pop()` | popped=3 len=2 | popped=3 len=2 |
+| local `pop` | popped=3 len=2 | popped=3 len=2 |
+| field `clear` / `remove` / `push` | 0 / 1,first=20 / 2 | same |
+| field `slice`/`filter`/`map` must NOT clobber receiver | recv unchanged | recv unchanged |
+| empty field pop, literal `[10,20,30].pop()` | len=0, popped=30 | same |
+
+`test/01_unit/lib/editor/document_service_spec.spl` → `Results: 15 total, 15 passed, 0 failed`.
+`array_coverage` / `array_list_ops` / `array_search_transform` specs are
+bit-identical before and after (218/10, 19/0, 33/2) — no regression; those
+failures are pre-existing and unrelated.
+
+**Standing lesson:** before diagnosing a Rust-seed behaviour defect, diff the
+working copy against `HEAD` for the file you are about to blame. A clobbered WC
+presents as a source bug that "no commit fixes".
+
+## Original mechanism analysis (retained — accurate, but the source already guards it)
 
 ## Symptom
 
