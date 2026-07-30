@@ -644,3 +644,17 @@ an admitted current pure-Simple artifact supplies focused executable evidence.
 No batch-7 row supplies fresh target-runtime PASS. The integrated source and
 design rows remain execution-held or explicitly RED; bootstrap and Rust-seed
 evidence remain inadmissible.
+
+## Intensive HTML/CSS and animation batch 8 (2026-07-30)
+
+| Lane | Owner | Scope | Status / gate |
+| --- | --- | --- | --- |
+| `dom_identity_core` | `dom_identity_design` | Freeze `DomDocumentGeneration`, `DomNodeRoute`, and one O(N) `DomIdentityIndex` per document generation, including duplicate IDs and mutation/navigation invalidation | DESIGN IN PROGRESS; no label/radio/listener implementation before review |
+| `dom_identity_consumers` | `label_activation` | Append label/radio/listener migration and acceptance criteria after the core names land | WAITING ON CORE; must reuse the same index |
+| `fresh_html_css_row` | `simplescript_listeners_current` | Select one uncapped Partial HTML/CSS row and implement canonical HTML/WebIR -> `DrawIrComposition` -> Engine2D behavior | TDD IN PROGRESS; exactly four modern SSpec steps, CSS application, and real frame/pixel evidence when animation applies |
+| `animation_runtime_evidence` | root merge owner | Admit the current pure-Simple CLI by source receipt before any focused execution | HELD: binary hash exists but no matching source/build receipt has been found |
+
+The capped fractional-animation, negative-z, label, radio, clock, and prior
+listener prototypes remain HOLD. This batch must not retry them, add a private
+paint path, or treat parsing/source inspection as rendering or animation
+evidence. Root Codex is merge owner and final reviewer; no sidecar pushes.
