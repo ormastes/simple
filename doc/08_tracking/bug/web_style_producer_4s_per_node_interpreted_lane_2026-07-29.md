@@ -1118,6 +1118,20 @@ captured; no cell-green evidence exists yet.** The default-budget gap
 number stands at the prior document's `139 of 151` (now known to be `139
 of ~151`, pre-node-count-shift) as the best completion evidence to date.
 
+> **SUPERSEDED 2026-07-30 (see "Module-compile-cost root cause" section
+> below):** the reading above assumed the 48-minute, zero-`[web-style-
+> producer]`-line run meant the STYLE LOOP was stuck. It does not
+> distinguish that from module compilation itself never finishing --
+> `budget-break` was, at the time, the ONLY progress line the whole
+> pipeline ever emitted, so a silent run is equally consistent with
+> "never left compilation" as with "styling hung." The very next section
+> measures compile time in isolation and lands permanent, level-gated
+> phase instrumentation to settle this properly. Short version: compile
+> alone has since been measured taking anywhere from ~70s to more than
+> 1200s on this machine, so the 48-minute figure is not attributable to
+> the style loop specifically without phase-level evidence, which this
+> document did not have at the time this section was written.
+
 ### Regression baselines (re-confirmed on this pass's tip, unchanged)
 - `test/01_unit/app/ui.chromium/css_spec.spl`: 12 total, 9 passed, 3 failed.
 - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/apply_decls_merge_probe_spec.spl`:
@@ -1290,6 +1304,141 @@ itself does** -- no code fix in this repository addresses that component.
 No code change landed this pass -- this section is a root-cause
 investigation, not a fix; per the instructions, the architectural fix (#1)
 and the unverified contained candidate (#2) are documented, not attempted.
+
+## Phase instrumentation landed 2026-07-30: settling style vs. layout/paint -- inconclusive on the cell, conclusive on compile
+
+The "48 minutes, zero progress" finding had exactly one progress marker in
+the whole pipeline (`[web-style-producer] budget-break`), so "silence" was
+consistent with two very different stories: the style loop hanging, or
+styling *completing* with the cost living in layout/shaping/paint instead
+(node 138's 136 characters, and the independently-proven "TTF shaping costs
+minutes under the interpreter" finding, would land there too). This section
+adds permanent instrumentation to tell the two apart and reports what two
+real attempts at settling it found.
+
+### Instrumentation landed (permanent, level-gated, not a probe to revert)
+
+Per the log-retention policy (convert-not-delete), this is landed in the
+tree, default-off:
+
+- `_web_phase_trace_enabled()` (new, `simple_web_html_layout_renderer_
+  foundation.spl`): `(env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"`.
+- `simple_web_html_layout_renderer.spl`
+  (`_simple_web_layout_render_html_draw_ir_result_at_time`, the function
+  the engine2d/`web_render_file_gui.spl` pipeline actually calls): prints
+  `[web-phase] phase=parse|style_start|style_end|layout|compose_shaping
+  elapsed_ms=<cumulative-since-render-start>` at each boundary.
+  `style_end` is the previously-missing marker this campaign has been
+  missing since node 29. `compose_shaping` brackets
+  `_simple_web_layout_compose_retained`, which is where DrawIr command
+  generation happens -- see the redundant-shaping finding below.
+- `simple_web_html_layout_renderer_core.spl`
+  (`compute_styles_with_material`): prints `[web-phase] style_progress
+  i=<n> of=<total> elapsed_ms=<since-loop-start>` every 10 nodes, so a long
+  style pass is observable instead of silent between start and
+  `budget-break`.
+- `simple_web_layout_engine2d_fast.spl`
+  (`_simple_web_layout_render_html_engine2d_execution`): prints
+  `[web-phase] phase=paint elapsed_ms=<paint-phase-local>` bracketing
+  `_simple_web_layout_execute_draw_ir_composition`.
+
+**Verified working end-to-end (PROVED):** a fast sanity run
+(`SIMPLE_WEB_RENDER_BUDGET_MS=1 SIMPLE_WEB_PHASE_TRACE=1`, degenerate --
+style budget expires at node 0) produced a complete phase table in one
+pass: `parse=2423ms` (cumulative, 151 nodes), `style_start=2424ms`,
+`style_end=2754ms` (330ms, degenerate -- budget-broken immediately),
+`layout=2789ms` (35ms), `compose_shaping=3616ms` (827ms even on
+near-default styles -- see below), `paint=4314ms` (self-contained). The
+instrumentation compiles cleanly and the boundaries fire in the expected
+order with sane deltas.
+
+**A code-reading finding surfaced while wiring `compose_shaping`
+(PROVED, not yet measured for wall-clock impact):**
+`_html_draw_ir_command` in `simple_web_html_layout_renderer_paint_layout.
+spl:1397` calls `resolve_font_metrics_with_language(st.font_family,
+node.text_trimmed, st.font_size, ...)` for every `#text` node when
+`vector_fonts` is on -- **a second, independent font-metric resolution
+per `#text` node**, distinct from the one `compute_styles_with_material`
+already performed and stored on `st.resolved_font_advances`/
+`st.resolved_font_identity`/etc. during the style phase. This call does
+not read those already-resolved fields; it recomputes from scratch. The
+wall-clock impact is likely smaller than a fresh computation, because
+`resolve_font_metrics_with_language` has its own whole-string result
+cache (`_resolved_font_metric_cached`/`_resolved_font_metric_store`,
+confirmed elsewhere in this campaign to turn a ~7-9s cold measurement into
+a 27-47ms cache hit) and the second call's `(family, content, font_size,
+identity)` key exactly matches the first's -- **INFERRED, not measured**,
+that this is usually a cache hit, not a second full computation, unless
+the bounded cache was evicted by other content in between (a real page
+this size plausibly exceeds the cache's entry limit). Either way it is a
+genuine redundant-computation code smell worth a follow-up, independent of
+this cell's completion question.
+
+### Two measurement attempts -- both settled compile cost, neither reached style_end
+
+**Attempt 1** (`SIMPLE_WEB_RENDER_BUDGET_MS=900000 SIMPLE_TIMEOUT_SECONDS=
+1200`, `stdbuf -oL -eL`, `SIMPLE_WEB_PHASE_TRACE=1`): a `budget_ms=1` sanity
+check moments before launch showed compile completing in ~71s at load ~19-25.
+The real attempt then ran the full 1200s and died at its own internal
+watchdog (`error: example timed out after 1200s`) having printed **zero**
+`[web-phase]` lines -- confirmed via `ps`/`/proc/<pid>/stat` mid-run: the
+process was genuinely CPU-bound the whole time (utime accumulated almost
+exactly 1:1 with wall-clock elapsed, `Rl` state, 99.5% CPU) -- not blocked,
+not hung, just still compiling after 18+ minutes of continuous CPU burn,
+opposite of the earlier "sys-dominant" finding (here user time dominates).
+
+**Attempt 2** (identical config, launched immediately after a second
+`budget_ms=1` sanity check that again completed in ~71s at load ~18): died
+the same way -- full 1200s consumed, zero `[web-phase]` lines, load
+oscillating 18-40 throughout.
+
+**Reading this honestly:** two back-to-back generous-budget attempts, each
+immediately preceded by a fast (~71s) isolated compile check, both failed
+to get past compilation within 1200s once the FULL run (parse through
+paint through status) was attempted. This is not the same failure mode
+measured in the prior section (that one was syscall/IO-bound, `sys` >
+`user`); attempt 1 here was CPU-bound (`user` >> `sys`). **Two different
+compile-time pathologies have now been observed on this cell, both severe
+enough to consume a 20-minute budget with zero output.** This strengthens,
+rather than settles, the module-compile-cost finding: the cost is not just
+load-scaled in magnitude, it can be dominated by different resources
+(I/O vs CPU) depending on what else is contending at the time, and a quick
+isolated check immediately before a long run is not a reliable predictor
+of the long run's own compile behavior.
+
+**The style-vs-layout/paint question remains open.** Neither attempt
+produced a single phase-boundary line, so this section cannot say whether
+styling completes before the real bottleneck or not -- that determination
+still requires one clean run that gets past compilation. The
+instrumentation is landed and default-off; the next attempt (this session
+or another) only needs `SIMPLE_WEB_PHASE_TRACE=1` set to get the answer
+cheaply, whenever a compile-favorable window occurs.
+
+### Regression baselines (re-confirmed on this pass's tip, unchanged)
+- `test/01_unit/app/ui.chromium/css_spec.spl`: 12 total, 9 passed, 3 failed.
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/apply_decls_merge_probe_spec.spl`:
+  20 total, 20 passed, 0 failed.
+
+### Item 4 restated plainly, per instruction
+
+No persistent compile cache exists for `bin/simple run <script.spl>` (see
+the prior section for the full evidence). This contradicts this repo's own
+stated policy ("production wrappers should execute cached compiled
+artifacts, not raw source") and is worth surfacing as an architectural gap
+beyond this one showcase cell -- every `bin/simple run` invocation of any
+script pays the full whole-closure parse-from-source cost, unconditionally,
+regardless of whether anything changed since the last run. Documented here
+and in the prior section; **not attempted** (a persistent-cache design is
+out of scope for a bounded `.spl`-only pass and belongs with the Rust
+driver/pipeline).
+
+### Item 5 (the ~19+ `export use *` sites) -- not attempted this pass
+
+Per instruction, only if it didn't compete with the phase measurement.
+Between the two long measurement attempts (2 x 20 minutes) and the
+regression-baseline runs, the time budget for this pass was fully consumed
+by the measurement; the trim was not attempted. It remains the most
+shovel-ready candidate from the prior section's ranked fix list.
 
 ## bracket-slice (`s[i:j]`) survey gap — enumerated 2026-07-29, not fixed
 

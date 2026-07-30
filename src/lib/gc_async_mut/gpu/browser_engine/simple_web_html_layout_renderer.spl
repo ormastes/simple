@@ -1181,6 +1181,7 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
     images: [SimpleOsHostGpuImageResource]
 ) -> SimpleWebLayoutDrawIrResult:
     val render_start_us = rt_time_now_micros()
+    val _phase_on = _web_phase_trace_enabled()
     val env_override = _web_render_budget_ms_env_override()
     val area_floor_ms = (width as i64) * (height as i64) / 16
     val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
@@ -1255,15 +1256,21 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
             print "[web-layout] degenerate-part i={part_i} len={part.len()} codes{part_codes}"
             part_i = part_i + 1
     val child_index = build_child_index(nodes)
+    if _phase_on:
+        print "[web-phase] phase=parse elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000} nodes={nodes.len()}"
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
     var material_entries: [text] = ["", ""]
     var material_counts: [i64] = [0, 0]
     var cpu_material_nodes: [i32] = []
     var solid_material_nodes: [i32] = []
+    if _phase_on:
+        print "[web-phase] phase=style_start elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
     val base_styles = compute_styles_with_material(
         nodes, rules, child_index, false, vector_fonts,
         material_entries, material_counts,
         cpu_material_nodes, solid_material_nodes)
+    if _phase_on:
+        print "[web-phase] phase=style_end elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
     var styles = base_styles
     val animation_registry = _simple_web_extract_keyframes(html)
     var animation_schedule = _SimpleWebAnimationSchedule(
@@ -1308,13 +1315,23 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
         empty_ends,
         neg_one_i32_list(node_count)
     )
-    _simple_web_layout_compose_retained(
+    if _phase_on:
+        print "[web-phase] phase=layout elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+    val _phase_composed = _simple_web_layout_compose_retained(
         html, nodes, rules, child_index, base_styles, styles, raw_boxes,
         animation_registry, animation_schedule,
         material_entries, material_counts, cpu_material_nodes,
         solid_material_nodes, width, height, vector_fonts, scroll_y,
         overlay, images
     )
+    if _phase_on:
+        # "compose_shaping" -- _simple_web_layout_compose_retained builds the
+        # DrawIrComposition, which is where per-#text-node glyph shaping
+        # (_html_draw_ir_command's resolve_font_metrics_with_language call in
+        # simple_web_html_layout_renderer_paint_layout.spl) actually runs, a
+        # SECOND font-metric resolution per #text node distinct from style's.
+        print "[web-phase] phase=compose_shaping elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+    _phase_composed
 
 fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result_at_time(
