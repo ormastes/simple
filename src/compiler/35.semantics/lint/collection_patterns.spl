@@ -18,13 +18,13 @@ use compiler.core.ast_expr.{
     EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_INT_LIT, EXPR_IDENT,
     EXPR_COMPOUND_ASSIGN, EXPR_SLICE, EXPR_STRING_LIT,
     EXPR_INTERPOLATED_STRING,
-    expr_tag, expr_i_val, expr_s_val, expr_left, expr_right, expr_args, expr_stmts
+    expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts
 }
 use compiler.core.types.{TYPE_TEXT}
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN,
     STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_COMPOUND_ASSIGN,
-    stmt_tag, stmt_expr, stmt_name, stmt_body, stmt_type_tag
+    stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_body, stmt_get_type
 }
 use compiler.core.ast.{
     DECL_FN, DECL_VAR, decl_get_tag, decl_get_name, decl_get_body,
@@ -84,22 +84,22 @@ fn check_fn_body(stmts: [i64], fn_name: text, text_vars: [text]) -> [CollectionL
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
 
         # Recurse into nested blocks/if/match
         if tag == STMT_IF:
-            val nested = check_fn_body(stmt_body[s], fn_name, text_vars)
+            val nested = check_fn_body(stmt_get_body(s), fn_name, text_vars)
             for w in nested:
                 warnings.push(w)
         elif tag == STMT_BLOCK:
-            val nested = check_fn_body(stmt_body[s], fn_name, text_vars)
+            val nested = check_fn_body(stmt_get_body(s), fn_name, text_vars)
             for w in nested:
                 warnings.push(w)
 
         # Found a loop — check its body for patterns
         if tag == STMT_FOR:
-            val iter_var = stmt_name[s]
-            val loop_body = stmt_body[s]
+            val iter_var = stmt_get_name(s)
+            val loop_body = stmt_get_body(s)
             val loop_warnings = check_loop_body(loop_body, fn_name, iter_var, text_vars)
             for w in loop_warnings:
                 warnings.push(w)
@@ -109,7 +109,7 @@ fn check_fn_body(stmts: [i64], fn_name: text, text_vars: [text]) -> [CollectionL
                 warnings.push(w)
 
         elif tag == STMT_WHILE:
-            val loop_body = stmt_body[s]
+            val loop_body = stmt_get_body(s)
             val loop_warnings = check_loop_body(loop_body, fn_name, "", text_vars)
             for w in loop_warnings:
                 warnings.push(w)
@@ -119,7 +119,7 @@ fn check_fn_body(stmts: [i64], fn_name: text, text_vars: [text]) -> [CollectionL
 
         # Also check expression-level for/while
         if tag == STMT_EXPR:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0:
                 val expr_warnings = check_expr_for_loops(e, fn_name, text_vars)
                 for w in expr_warnings:
@@ -131,11 +131,11 @@ fn check_expr_for_loops(e: i64, fn_name: text, text_vars: [text]) -> [Collection
     var warnings: [CollectionLintWarning] = []
     if e < 0:
         return warnings
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
     if tag == EXPR_FOR:
-        val iter_var = expr_s_val[e]
-        val loop_stmts = expr_stmts[e]
+        val iter_var = expr_get_str(e)
+        val loop_stmts = expr_get_stmts(e)
         val loop_warnings = check_loop_body(loop_stmts, fn_name, iter_var, text_vars)
         for w in loop_warnings:
             warnings.push(w)
@@ -144,7 +144,7 @@ fn check_expr_for_loops(e: i64, fn_name: text, text_vars: [text]) -> [Collection
             warnings.push(w)
 
     elif tag == EXPR_WHILE:
-        val loop_stmts = expr_stmts[e]
+        val loop_stmts = expr_get_stmts(e)
         val loop_warnings = check_loop_body(loop_stmts, fn_name, "", text_vars)
         for w in loop_warnings:
             warnings.push(w)
@@ -164,11 +164,11 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
 
         # COLL001: arr = arr + [x] in loop
         if tag == STMT_ASSIGN:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0:
                 if is_concat_assign_expr(e):
                     warnings.push(CollectionLintWarning(
@@ -199,7 +199,7 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
 
         # Check expression statements
         if tag == STMT_EXPR:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0:
                 # COLL001 via expression-level assign
                 if is_concat_assign_expr(e):
@@ -261,7 +261,7 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
 
         # COLL002/COLL003 in if-condition context
         if tag == STMT_IF:
-            val cond = stmt_expr[s]
+            val cond = stmt_get_expr(s)
             if cond >= 0:
                 if is_contains_call(cond):
                     warnings.push(CollectionLintWarning(
@@ -274,16 +274,16 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
 
         # COLL001 via val/var decl with concat
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val init = stmt_expr[s]
+            val init = stmt_get_expr(s)
             if init >= 0:
-                val init_tag = expr_tag[init]
+                val init_tag = expr_get_tag(init)
                 if init_tag == EXPR_BINARY:
-                    if expr_i_val[init] == TOK_PLUS:
-                        val right = expr_right[init]
-                        if right >= 0 and expr_tag[right] == EXPR_ARRAY_LIT:
-                            val assign_name = stmt_name[s]
-                            val left = expr_left[init]
-                            if left >= 0 and expr_tag[left] == EXPR_IDENT and expr_s_val[left] == assign_name:
+                    if expr_get_int(init) == TOK_PLUS:
+                        val right = expr_get_right(init)
+                        if right >= 0 and expr_get_tag(right) == EXPR_ARRAY_LIT:
+                            val assign_name = stmt_get_name(s)
+                            val left = expr_get_left(init)
+                            if left >= 0 and expr_get_tag(left) == EXPR_IDENT and expr_get_str(left) == assign_name:
                                 warnings.push(CollectionLintWarning(
                                     code: "COLL001",
                                     severity: "CRITICAL",
@@ -302,27 +302,27 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
 fn is_concat_assign_expr(e: i64) -> bool:
     if e < 0:
         return false
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
     # Expression-level assign: EXPR_ASSIGN where value is BINARY(+) with ARRAY_LIT
     if tag == EXPR_ASSIGN:
-        val target = expr_left[e]
-        val value = expr_right[e]
+        val target = expr_get_left(e)
+        val value = expr_get_right(e)
         if target >= 0 and value >= 0:
-            if expr_tag[value] == EXPR_BINARY and expr_i_val[value] == TOK_PLUS:
-                val rhs_right = expr_right[value]
-                if rhs_right >= 0 and expr_tag[rhs_right] == EXPR_ARRAY_LIT:
+            if expr_get_tag(value) == EXPR_BINARY and expr_get_int(value) == TOK_PLUS:
+                val rhs_right = expr_get_right(value)
+                if rhs_right >= 0 and expr_get_tag(rhs_right) == EXPR_ARRAY_LIT:
                     # Check lhs of + matches assign target
-                    val rhs_left = expr_left[value]
-                    if rhs_left >= 0 and expr_tag[rhs_left] == EXPR_IDENT:
-                        if target >= 0 and expr_tag[target] == EXPR_IDENT:
-                            if expr_s_val[rhs_left] == expr_s_val[target]:
+                    val rhs_left = expr_get_left(value)
+                    if rhs_left >= 0 and expr_get_tag(rhs_left) == EXPR_IDENT:
+                        if target >= 0 and expr_get_tag(target) == EXPR_IDENT:
+                            if expr_get_str(rhs_left) == expr_get_str(target):
                                 return true
 
     # Compound assign: arr += [x]
     if tag == EXPR_COMPOUND_ASSIGN:
-        val value = expr_right[e]
-        if value >= 0 and expr_tag[value] == EXPR_ARRAY_LIT:
+        val value = expr_get_right(e)
+        if value >= 0 and expr_get_tag(value) == EXPR_ARRAY_LIT:
             return true
 
     false
@@ -331,8 +331,8 @@ fn is_concat_assign_expr(e: i64) -> bool:
 fn is_contains_call(e: i64) -> bool:
     if e < 0:
         return false
-    if expr_tag[e] == EXPR_METHOD_CALL:
-        if expr_s_val[e] == "contains":
+    if expr_get_tag(e) == EXPR_METHOD_CALL:
+        if expr_get_str(e) == "contains":
             return true
     false
 
@@ -340,13 +340,13 @@ fn is_contains_call(e: i64) -> bool:
 fn is_remove_zero_call(e: i64) -> bool:
     if e < 0:
         return false
-    if expr_tag[e] == EXPR_METHOD_CALL:
-        if expr_s_val[e] == "remove":
-            val call_args = expr_args[e]
+    if expr_get_tag(e) == EXPR_METHOD_CALL:
+        if expr_get_str(e) == "remove":
+            val call_args = expr_get_args(e)
             if call_args.len() == 1:
                 val arg = call_args[0]
-                if arg >= 0 and expr_tag[arg] == EXPR_INT_LIT:
-                    if expr_i_val[arg] == 0:
+                if arg >= 0 and expr_get_tag(arg) == EXPR_INT_LIT:
+                    if expr_get_int(arg) == 0:
                         return true
     false
 
@@ -356,12 +356,12 @@ fn is_remove_zero_call(e: i64) -> bool:
 fn is_loop_invariant_call(e: i64, iter_var: text) -> bool:
     if e < 0:
         return false
-    if expr_tag[e] == EXPR_METHOD_CALL:
-        val method = expr_s_val[e]
+    if expr_get_tag(e) == EXPR_METHOD_CALL:
+        val method = expr_get_str(e)
         if method == "len" or method == "is_empty" or method == "first" or method == "last":
-            val receiver = expr_left[e]
-            if receiver >= 0 and expr_tag[receiver] == EXPR_IDENT:
-                val recv_name = expr_s_val[receiver]
+            val receiver = expr_get_left(e)
+            if receiver >= 0 and expr_get_tag(receiver) == EXPR_IDENT:
+                val recv_name = expr_get_str(receiver)
                 # Only warn if receiver is NOT the loop variable (it's external)
                 if iter_var != "" and recv_name != iter_var:
                     return true
@@ -407,18 +407,18 @@ fn is_text_returning_method(name: text) -> bool:
 fn is_text_valued_expr(e: i64) -> bool:
     if e < 0:
         return false
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
     if tag == EXPR_STRING_LIT:
         return true
     if tag == EXPR_INTERPOLATED_STRING:
         return true
     if tag == EXPR_METHOD_CALL:
-        return is_text_returning_method(expr_s_val[e])
+        return is_text_returning_method(expr_get_str(e))
     if tag == EXPR_BINARY:
-        if expr_i_val[e] == TOK_PLUS:
-            if is_text_valued_expr(expr_left[e]):
+        if expr_get_int(e) == TOK_PLUS:
+            if is_text_valued_expr(expr_get_left(e)):
                 return true
-            if is_text_valued_expr(expr_right[e]):
+            if is_text_valued_expr(expr_get_right(e)):
                 return true
     false
 
@@ -450,32 +450,32 @@ fn collect_text_var_names(stmts: [i64], seed: [text]) -> [text]:
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
 
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val declared = stmt_name[s]
+            val declared = stmt_get_name(s)
             if declared != "" and not name_in_list(names, declared):
-                if stmt_type_tag[s] == TYPE_TEXT:
+                if stmt_get_type(s) == TYPE_TEXT:
                     names.push(declared)
-                elif is_text_valued_expr(stmt_expr[s]):
+                elif is_text_valued_expr(stmt_get_expr(s)):
                     names.push(declared)
 
         if tag == STMT_ASSIGN:
             # stmt_expr holds the whole EXPR_ASSIGN node; unwrap target/value.
-            val ae = stmt_expr[s]
-            var assigned = stmt_name[s]
+            val ae = stmt_get_expr(s)
+            var assigned = stmt_get_name(s)
             var assigned_value = ae
-            if ae >= 0 and expr_tag[ae] == EXPR_ASSIGN:
-                assigned_value = expr_right[ae]
-                val at = expr_left[ae]
-                if at >= 0 and expr_tag[at] == EXPR_IDENT:
-                    assigned = expr_s_val[at]
+            if ae >= 0 and expr_get_tag(ae) == EXPR_ASSIGN:
+                assigned_value = expr_get_right(ae)
+                val at = expr_get_left(ae)
+                if at >= 0 and expr_get_tag(at) == EXPR_IDENT:
+                    assigned = expr_get_str(at)
             if assigned != "" and not name_in_list(names, assigned):
                 if is_text_valued_expr(assigned_value):
                     names.push(assigned)
 
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
-            val nested = collect_text_var_names(stmt_body[s], names)
+            val nested = collect_text_var_names(stmt_get_body(s), names)
             for n in nested:
                 if not name_in_list(names, n):
                     names.push(n)
@@ -488,30 +488,30 @@ fn collect_text_var_names(stmts: [i64], seed: [text]) -> [text]:
 fn is_string_concat_assign_expr(e: i64, text_vars: [text]) -> bool:
     if e < 0:
         return false
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
     if tag == EXPR_ASSIGN:
-        val target = expr_left[e]
-        val value = expr_right[e]
+        val target = expr_get_left(e)
+        val value = expr_get_right(e)
         if target >= 0 and value >= 0:
-            if expr_tag[value] == EXPR_BINARY and expr_i_val[value] == TOK_PLUS:
-                val rhs_right = expr_right[value]
-                val rhs_left = expr_left[value]
+            if expr_get_tag(value) == EXPR_BINARY and expr_get_int(value) == TOK_PLUS:
+                val rhs_right = expr_get_right(value)
+                val rhs_left = expr_get_left(value)
                 # Exclude array concat (COLL001 handles that)
-                if rhs_right >= 0 and rhs_left >= 0 and expr_tag[target] == EXPR_IDENT:
-                    val target_name = expr_s_val[target]
+                if rhs_right >= 0 and rhs_left >= 0 and expr_get_tag(target) == EXPR_IDENT:
+                    val target_name = expr_get_str(target)
                     val target_is_text = name_in_list(text_vars, target_name)
                     # Append form: s = s + x
-                    if expr_tag[rhs_right] != EXPR_ARRAY_LIT and expr_tag[rhs_left] == EXPR_IDENT:
-                        if expr_s_val[rhs_left] == target_name:
+                    if expr_get_tag(rhs_right) != EXPR_ARRAY_LIT and expr_get_tag(rhs_left) == EXPR_IDENT:
+                        if expr_get_str(rhs_left) == target_name:
                             if target_is_text:
                                 return true
                             if is_text_valued_expr(rhs_right):
                                 return true
                     # Prepend form: s = x + s (also O(n^2); previously a false
                     # negative — see config_int_to_text in config_core/schema).
-                    if expr_tag[rhs_left] != EXPR_ARRAY_LIT and expr_tag[rhs_right] == EXPR_IDENT:
-                        if expr_s_val[rhs_right] == target_name:
+                    if expr_get_tag(rhs_left) != EXPR_ARRAY_LIT and expr_get_tag(rhs_right) == EXPR_IDENT:
+                        if expr_get_str(rhs_right) == target_name:
                             if target_is_text:
                                 return true
                             if is_text_valued_expr(rhs_left):
@@ -519,11 +519,11 @@ fn is_string_concat_assign_expr(e: i64, text_vars: [text]) -> bool:
 
     # Compound assign: str += x (non-array, text-typed target)
     if tag == EXPR_COMPOUND_ASSIGN:
-        val target = expr_left[e]
-        val value = expr_right[e]
-        if value >= 0 and expr_tag[value] != EXPR_ARRAY_LIT:
-            if target >= 0 and expr_tag[target] == EXPR_IDENT:
-                if name_in_list(text_vars, expr_s_val[target]):
+        val target = expr_get_left(e)
+        val value = expr_get_right(e)
+        if value >= 0 and expr_get_tag(value) != EXPR_ARRAY_LIT:
+            if target >= 0 and expr_get_tag(target) == EXPR_IDENT:
+                if name_in_list(text_vars, expr_get_str(target)):
                     return true
             if is_text_valued_expr(value):
                 return true
@@ -535,17 +535,17 @@ fn is_string_concat_assign_expr(e: i64, text_vars: [text]) -> bool:
 fn is_array_rebuild_pop(e: i64) -> bool:
     if e < 0:
         return false
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
     if tag == EXPR_ASSIGN:
-        val target = expr_left[e]
-        val value = expr_right[e]
+        val target = expr_get_left(e)
+        val value = expr_get_right(e)
         if target >= 0 and value >= 0:
-            if expr_tag[target] == EXPR_IDENT and expr_tag[value] == EXPR_SLICE:
+            if expr_get_tag(target) == EXPR_IDENT and expr_get_tag(value) == EXPR_SLICE:
                 # Check that the slice receiver matches the assign target
-                val slice_receiver = expr_left[value]
-                if slice_receiver >= 0 and expr_tag[slice_receiver] == EXPR_IDENT:
-                    if expr_s_val[slice_receiver] == expr_s_val[target]:
+                val slice_receiver = expr_get_left(value)
+                if slice_receiver >= 0 and expr_get_tag(slice_receiver) == EXPR_IDENT:
+                    if expr_get_str(slice_receiver) == expr_get_str(target):
                         return true
     false
 
@@ -594,14 +594,14 @@ fn find_pushed_globals(stmts: [i64], globals: [text]) -> [text]:
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
         if tag == STMT_EXPR:
-            val e = stmt_expr[s]
-            if e >= 0 and expr_tag[e] == EXPR_METHOD_CALL:
-                if expr_s_val[e] == "push":
-                    val receiver = expr_left[e]
-                    if receiver >= 0 and expr_tag[receiver] == EXPR_IDENT:
-                        val recv_name = expr_s_val[receiver]
+            val e = stmt_get_expr(s)
+            if e >= 0 and expr_get_tag(e) == EXPR_METHOD_CALL:
+                if expr_get_str(e) == "push":
+                    val receiver = expr_get_left(e)
+                    if receiver >= 0 and expr_get_tag(receiver) == EXPR_IDENT:
+                        val recv_name = expr_get_str(receiver)
                         for g in globals:
                             if g == recv_name:
                                 if not pushed_set.has(recv_name):
@@ -609,7 +609,7 @@ fn find_pushed_globals(stmts: [i64], globals: [text]) -> [text]:
                                     pushed_set[recv_name] = true
         # Recurse into nested blocks
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
-            val nested = find_pushed_globals(stmt_body[s], globals)
+            val nested = find_pushed_globals(stmt_get_body(s), globals)
             for n in nested:
                 if not pushed_set.has(n):
                     pushed.push(n)
@@ -621,28 +621,28 @@ fn find_reset_globals(stmts: [i64], globals: [text]) -> [text]:
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
         # Check for assignment: global = [] (reset to empty)
         if tag == STMT_ASSIGN:
-            val name = stmt_name[s]
+            val name = stmt_get_name(s)
             for g in globals:
                 if g == name:
                     reset.push(name)
         # Check for .clear() method call
         if tag == STMT_EXPR:
-            val e = stmt_expr[s]
-            if e >= 0 and expr_tag[e] == EXPR_METHOD_CALL:
-                val method = expr_s_val[e]
+            val e = stmt_get_expr(s)
+            if e >= 0 and expr_get_tag(e) == EXPR_METHOD_CALL:
+                val method = expr_get_str(e)
                 if method == "clear" or method == "reset" or method == "trim":
-                    val receiver = expr_left[e]
-                    if receiver >= 0 and expr_tag[receiver] == EXPR_IDENT:
-                        val recv_name = expr_s_val[receiver]
+                    val receiver = expr_get_left(e)
+                    if receiver >= 0 and expr_get_tag(receiver) == EXPR_IDENT:
+                        val recv_name = expr_get_str(receiver)
                         for g in globals:
                             if g == recv_name:
                                 reset.push(recv_name)
         # Recurse
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
-            val nested = find_reset_globals(stmt_body[s], globals)
+            val nested = find_reset_globals(stmt_get_body(s), globals)
             for n in nested:
                 reset.push(n)
     reset
@@ -651,11 +651,11 @@ fn find_reset_globals(stmts: [i64], globals: [text]) -> [text]:
 fn is_chained_filter(e: i64) -> bool:
     if e < 0:
         return false
-    if expr_tag[e] == EXPR_METHOD_CALL:
-        if expr_s_val[e] == "filter":
-            val receiver = expr_left[e]
-            if receiver >= 0 and expr_tag[receiver] == EXPR_METHOD_CALL:
-                if expr_s_val[receiver] == "filter":
+    if expr_get_tag(e) == EXPR_METHOD_CALL:
+        if expr_get_str(e) == "filter":
+            val receiver = expr_get_left(e)
+            if receiver >= 0 and expr_get_tag(receiver) == EXPR_METHOD_CALL:
+                if expr_get_str(receiver) == "filter":
                     return true
     false
 
@@ -675,10 +675,10 @@ fn check_stmts_for_chained_filter(stmts: [i64], fn_name: text) -> [CollectionLin
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
 
         if tag == STMT_EXPR:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0 and is_chained_filter(e):
                 warnings.push(CollectionLintWarning(
                     code: "COLL005",
@@ -689,7 +689,7 @@ fn check_stmts_for_chained_filter(stmts: [i64], fn_name: text) -> [CollectionLin
                 ))
 
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0 and is_chained_filter(e):
                 warnings.push(CollectionLintWarning(
                     code: "COLL005",
@@ -701,7 +701,7 @@ fn check_stmts_for_chained_filter(stmts: [i64], fn_name: text) -> [CollectionLin
 
         # Recurse into blocks, loops, ifs
         if tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_IF:
-            val nested = check_stmts_for_chained_filter(stmt_body[s], fn_name)
+            val nested = check_stmts_for_chained_filter(stmt_get_body(s), fn_name)
             for w in nested:
                 warnings.push(w)
     warnings

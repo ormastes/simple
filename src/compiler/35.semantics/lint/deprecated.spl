@@ -21,12 +21,12 @@ use compiler.core.ast_expr.{
     EXPR_ARRAY_LIT, EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE,
     EXPR_BLOCK, EXPR_RETURN, EXPR_LAMBDA, EXPR_ASSIGN,
     EXPR_COMPOUND_ASSIGN, EXPR_STRUCT_LIT, EXPR_DO_BLOCK,
-    expr_tag, expr_s_val, expr_left, expr_right, expr_args, expr_stmts
+    expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts
 }
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_IF, STMT_FOR,
     STMT_WHILE, STMT_BLOCK, STMT_MATCH,
-    stmt_tag, stmt_expr, stmt_body
+    stmt_get_tag, stmt_get_expr, stmt_get_body
 }
 use compiler.core.ast.{
     DECL_FN, DECL_EXTERN_FN, DECL_VAL, DECL_VAR, DECL_LAZY_VAL,
@@ -106,18 +106,18 @@ fn check_stmts_deprecated(stmts: [i64], fn_name: text) -> [DeprecatedWarning]:
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
 
         # Check expression
         if tag == STMT_EXPR:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0:
                 val ws = check_expr_deprecated(e, fn_name)
                 for w in ws:
                     warnings.push(w)
 
         elif tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0:
                 val ws = check_expr_deprecated(e, fn_name)
                 for w in ws:
@@ -125,7 +125,7 @@ fn check_stmts_deprecated(stmts: [i64], fn_name: text) -> [DeprecatedWarning]:
 
         # Recurse into nested blocks
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
-            val nested = check_stmts_deprecated(stmt_body[s], fn_name)
+            val nested = check_stmts_deprecated(stmt_get_body(s), fn_name)
             for w in nested:
                 warnings.push(w)
 
@@ -141,7 +141,7 @@ fn check_expr_deprecated(e: i64, fn_name: text) -> [DeprecatedWarning]:
     if e < 0:
         return warnings
 
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
     # DEPR003: Bare 'pass' — should use pass_do_nothing or pass_todo
     if tag == EXPR_PASS:
@@ -156,10 +156,10 @@ fn check_expr_deprecated(e: i64, fn_name: text) -> [DeprecatedWarning]:
 
     # DEPR001: Type__method() call syntax
     if tag == EXPR_CALL:
-        val callee = expr_left[e]
+        val callee = expr_get_left(e)
         if callee >= 0:
-            if expr_tag[callee] == EXPR_IDENT:
-                val callee_name = expr_s_val[callee]
+            if expr_get_tag(callee) == EXPR_IDENT:
+                val callee_name = expr_get_str(callee)
                 if is_deprecated_double_underscore(callee_name):
                     val parts = split_on_double_underscore(callee_name)
                     val type_name = parts[0]
@@ -189,7 +189,7 @@ fn check_expr_deprecated(e: i64, fn_name: text) -> [DeprecatedWarning]:
                 warnings.push(w)
 
         # Recurse into arguments
-        val call_args = expr_args[e]
+        val call_args = expr_get_args(e)
         for arg in call_args:
             val arg_ws = check_expr_deprecated(arg, fn_name)
             for w in arg_ws:
@@ -198,7 +198,7 @@ fn check_expr_deprecated(e: i64, fn_name: text) -> [DeprecatedWarning]:
 
     # DEPR002: .new() constructor calls
     if tag == EXPR_METHOD_CALL:
-        val method_name = expr_s_val[e]
+        val method_name = expr_get_str(e)
         if method_name == "new":
             warnings.push(DeprecatedWarning(
                 code: "DEPR002",
@@ -209,14 +209,14 @@ fn check_expr_deprecated(e: i64, fn_name: text) -> [DeprecatedWarning]:
             ))
 
         # Recurse into receiver
-        val receiver = expr_left[e]
+        val receiver = expr_get_left(e)
         if receiver >= 0:
             val recv_ws = check_expr_deprecated(receiver, fn_name)
             for w in recv_ws:
                 warnings.push(w)
 
         # Recurse into arguments
-        val call_args = expr_args[e]
+        val call_args = expr_get_args(e)
         for arg in call_args:
             val arg_ws = check_expr_deprecated(arg, fn_name)
             for w in arg_ws:
@@ -232,31 +232,31 @@ fn collect_deprecated_recursive(e: i64, fn_name: text, warnings: [DeprecatedWarn
     if e < 0:
         return
 
-    val left = expr_left[e]
+    val left = expr_get_left(e)
     if left >= 0:
         val ws = check_expr_deprecated(left, fn_name)
         for w in ws:
             warnings.push(w)
 
-    val right = expr_right[e]
+    val right = expr_get_right(e)
     if right >= 0:
         val ws = check_expr_deprecated(right, fn_name)
         for w in ws:
             warnings.push(w)
 
-    for arg in expr_args[e]:
+    for arg in expr_get_args(e):
         val ws = check_expr_deprecated(arg, fn_name)
         for w in ws:
             warnings.push(w)
 
-    for child_stmt in expr_stmts[e]:
+    for child_stmt in expr_get_stmts(e):
         if child_stmt >= 0:
-            val child_e = stmt_expr[child_stmt]
+            val child_e = stmt_get_expr(child_stmt)
             if child_e >= 0:
                 val ws = check_expr_deprecated(child_e, fn_name)
                 for w in ws:
                     warnings.push(w)
-            val child_body = stmt_body[child_stmt]
+            val child_body = stmt_get_body(child_stmt)
             val nested = check_stmts_deprecated(child_body, fn_name)
             for w in nested:
                 warnings.push(w)
