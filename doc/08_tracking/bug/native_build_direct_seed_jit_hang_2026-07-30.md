@@ -1,10 +1,14 @@
-# `native-build` invoked directly against the seed hangs under JIT; `SIMPLE_EXECUTION_MODE=interpret` terminates
+# `native-build` invoked directly against the seed hangs under JIT; `SIMPLE_EXECUTION_MODE=interpret` terminates. Mechanism UNKNOWN — an earlier version of this doc asserted a wrong explanation; see the correction below.
 
-**Status:** open, root-caused to an engine (JIT) not a source or config defect,
-underlying codegen mechanism not traced (belongs to a42f's overload-dispatch
-thread). Filed 2026-07-30, during a self-hosted-interpreter string-
-interpolation fix pass whose own `native-build` verification build never
-completed and triggered this separate investigation.
+**Status:** open. **Confirmed:** default-mode `native-build`, invoked directly
+against the Rust seed binary, never terminates; `SIMPLE_EXECUTION_MODE=interpret`
+terminates on two independent trees. **NOT confirmed:** why. An earlier
+version of this doc claimed the interpret guard in `run_native_build_worker`
+was bypassed on direct-seed invocation. That claim is **retracted** — see
+"Correction" below — and the mechanism is open again. Filed 2026-07-30,
+during a self-hosted-interpreter string-interpolation fix pass whose own
+`native-build` verification build never completed and triggered this
+separate investigation.
 
 See also `doc/08_tracking/bug/native_build_worker_jit_vs_interpret_measurement_2026-07-30.md`
 (sibling finding, same day, independent angle: JIT vs interpret timing on a
@@ -18,7 +22,78 @@ JIT-fallback message or other output at all across six attempts — consistent
 with the same underlying JIT weakness, reached earlier/more severely on a
 larger closure, but not proven to be the identical failure mode.
 
-## The result
+## Correction (2026-07-30, same day): the "guard bypassed" explanation is wrong
+
+The first version of this doc claimed `run_native_build_worker`'s
+`SIMPLE_EXECUTION_MODE=interpret` guard never runs for a direct-seed
+`native-build` invocation — that direct invocation reaches the seed's own
+native subcommand implementation instead, bypassing the guard entirely.
+**That is false, and the evidence that killed it:**
+
+- `native_build_main.spl:258`'s error text —
+  `"error: native-build worker exited with code {code}."` /
+  `"  interpreter: {simple_bin} (exit code {code})"` — is a byte-for-byte
+  match to output actually captured from a direct-seed reproduction in this
+  investigation. That line only executes **inside**
+  `run_native_build_worker`, **after** its guard and its
+  `process_run_timeout` spawn call. If that error text appears, the guard
+  function ran.
+- Tracing `main.rs`'s dispatch: `command_is_pure_simple_tool("native-build")`
+  returns `true`; neither of the two Rust-handler escapes
+  (`SIMPLE_NATIVE_BUILD_RUST=1`, or a `--target` cross-build flag) fires for
+  the plain `--backend cranelift` invocations used throughout this doc. That
+  routes to `dispatch_to_simple_app("src/app/cli/native_build_main.spl",
+  ...)`, which is on the allowed app-path list and runs `native_build_main.spl`
+  in-process. There is no separate "seed's own native `native-build`
+  subcommand implementation" that bypasses this file for a plain
+  `--backend cranelift` call — the earlier doc's central claim was
+  unsupported.
+
+**So: the guard function runs on direct-seed invocations.** The mechanism
+by which default-mode invocations still end up hanging (apparently under
+JIT) is genuinely unknown as of this writing. Two explanations remain live
+and undistinguished:
+
+1. **The guard runs and calls `env_set`, but the mutation doesn't reach the
+   spawned worker.** `rt_process_spawn_async` (`interpreter_extern/
+   system.rs`) uses plain `std::process::Command::new(&*cmd)` with no
+   `.env_clear()` — the only environment manipulation present
+   (`clear_simple_child_stack_env`) only removes `_SIMPLE_STACK_SET`, not
+   `SIMPLE_EXECUTION_MODE`. The actual spawned command is
+   `/bin/sh -c 'exec timeout ... "$simple_bin" run
+   src/app/cli/native_build_worker.spl ...'`, and POSIX `exec` preserves
+   the shell's environment across the replace. **On paper, this should
+   propagate** — `env_set` earlier in the same process should be visible
+   to `Command::new(...).spawn()`, which reads the live process environment
+   at spawn time. Whether it actually does was not verified.
+2. **A decision point upstream of the guard routes default-mode invocations
+   down a different path that never reaches it.** The sibling
+   `native_build_worker_jit_vs_interpret_measurement_2026-07-30.md` doc
+   references a `native_build_should_use_worker` check; if some condition
+   causes that decision (or an equivalent one) to skip the worker-spawn
+   path entirely for a subset of invocations, the guard would never run for
+   those, independent of the `:258` match observed on a *different* run.
+
+**The decisive next step, not yet taken, that would settle this in one
+short run:** instrument `run_native_build_worker` directly — a print
+right after its `env_set("SIMPLE_EXECUTION_MODE", "interpret")` call
+(confirming the guard fires and what it believes it set), plus one inside
+the spawned `native_build_worker.spl` itself reading `SIMPLE_EXECUTION_MODE`
+back (confirming what the child actually received). This does not require
+reproducing the multi-minute hang — the guard and the spawn both happen in
+the first few seconds of any run, hung or not. Costs minutes, not another
+hang-timing cycle.
+
+**Because the mechanism is unknown, the mitigation proposed at the end of
+this doc (making the guard invocation-path-independent) is NOT safe to
+apply yet** — it was designed against the now-retracted bypass explanation,
+and applying it without knowing which of the two explanations above is real
+risks fixing nothing (if explanation 1 is correct, duplicating the same
+`env_set` call elsewhere doesn't help) or fixing the wrong layer (if
+explanation 2 is correct, the real fix is at the decision point, not the
+guard itself).
+
+## The result (unchanged, stands independent of the mechanism question)
 
 `native-build` invoked **directly against the Rust seed binary**
 (`./simple native-build --source src/compiler --source src/app --source
@@ -37,35 +112,9 @@ cranelift -o ...`) **never terminates** under default execution mode:
   completions — the process exits, a diagnostic is printed — not further
   hangs.
 
-**PROVED** (direct observation, both directions): the engine, not the
-source tree or invocation config, is the discriminator.
-
-## Why the existing interpret guard didn't fire
-
-`native_build_main.spl:217-221` (inside `run_native_build_worker`) sets
-`SIMPLE_EXECUTION_MODE=interpret` when the variable is unset or empty:
-
-```
-val mode = env_get("SIMPLE_EXECUTION_MODE")
-if mode == nil or mode == "":
-    env_set("SIMPLE_EXECUTION_MODE", "interpret")
-```
-
-`run_native_build_worker` is **pure-Simple CLI dispatch**, reached only
-when `native-build` is invoked through the pure-Simple
-`bootstrap_main.spl`/`cli_native_build` layer. Invoking `native-build`
-directly against the Rust seed binary (`./simple native-build ...`, as
-every reproduction in this doc did) reaches the seed's own native
-`native-build` subcommand implementation, which spawns
-`simple run src/app/cli/native_build_worker.spl ...` as a child directly —
-**bypassing `run_native_build_worker` and its guard entirely.**
-
-Worth stating explicitly, since it caused six wasted reproduction attempts
-before it was found: **`SIMPLE_EXECUTION_MODE` being unset in the invoking
-shell is not the same as the guard having run.** The guard only fires on
-one specific call path; direct seed invocation is a different path that
-silently lands on whatever the engine default is (JIT, per this campaign's
-existing "deployed `bin/simple run` defaults to JIT" finding).
+**PROVED** (direct observation, both directions): execution mode is the
+discriminator between hanging and terminating. **NOT proved:** the specific
+mechanism by which the mode takes hold or fails to (see Correction above).
 
 ## The signature (for the next person to recognise this in minutes, not hours)
 
@@ -97,7 +146,7 @@ Every hung run showed, without exception:
   regression/bisection theory outright, since an A/B whose control also
   fails is void, not negative evidence.
 
-## Six hypotheses tested and refuted with direct evidence, before the seventh confirmed
+## Six hypotheses tested and refuted with direct evidence, before the seventh (partially) confirmed
 
 1. **Source regression in the tree.** Bisection space between the known-good
    baseline and current `main` was tiny (3 commits touching
@@ -154,14 +203,17 @@ Every hung run showed, without exception:
    all three `--source` roots (0 symlinks remaining anywhere in the closure
    scope), still spun, identical signature. Cleanly refuted, in full, not
    partially.
-7. **JIT miscompile in the seed's own execution of the worker script
-   (CONFIRMED).** See below.
+7. **JIT is the discriminator (execution-mode result CONFIRMED); the
+   "guard bypassed" explanation for WHY was asserted, then itself refuted
+   (see Correction above).** The engine matters — that part stands. The
+   causal chain from "default execution mode" to "the guard's effect not
+   taking hold" is open.
 
-## The confirmed mechanism (engine, not yet traced to a specific defect)
+## The confirmed result and the open mechanism, restated
 
-`SIMPLE_EXECUTION_MODE=interpret`, set explicitly (bypassing the need for
-the CLI-dispatch guard by setting it directly in the environment), was
-tested against two independent trees:
+`SIMPLE_EXECUTION_MODE=interpret`, set explicitly in the invoking shell
+(sidestepping whatever the in-process mechanism is, by fixing the variable
+before the process even starts), was tested against two independent trees:
 
 - A de-symlinked (mutated, from hypothesis 6's test) tree: terminated in
   ~5.5 minutes with `error: native module name collision after path
@@ -179,27 +231,32 @@ tested against two independent trees:
   (see below), but again: **termination**, not a hang.
 
 Two independent trees, two different real errors, one common property:
-**both terminate under `interpret`, where six separate attempts under
-default (JIT-reaching) execution never terminated once across 5-67 minutes
-each.** This is the discriminator.
+**both terminate under `interpret` set externally, where six separate
+attempts under default execution never terminated once across 5-67 minutes
+each.** This remains the strongest available evidence that execution mode
+(not source, not config, not symlinks) is the discriminator. It does NOT
+by itself prove *why* the in-process guard fails to achieve the same effect
+— see Correction above for the two live, undistinguished explanations and
+the one short instrumentation run that would settle it.
 
-### Suspected mechanism, not traced
+### Suspected downstream mechanism, not traced
 
-Not independently traced in this pass (time-boxed; the coordinator
-explicitly asked for a report rather than a fix attempt this session), but
-a concrete, already-proven candidate exists in the campaign's own findings
-from the same day: **a42f found the JIT misreads a struct field on an
-array element** — a two-line repro (an element-tagged struct in an array;
-the field reads correctly under the interpreter and reads empty under
-JIT). A `while i < node.count`-shaped loop (or any loop whose bound or
-advance depends on a struct field read off an array element) would never
-terminate if that read silently returns a wrong/empty value under JIT —
-which reproduces every element of the signature above: 100% CPU on one
-thread, zero I/O (spinning over already-read data), flat RSS (re-walking,
-not accumulating), and — critically — **a defect present in the JIT
-engine itself would affect the known-good baseline identically to current
-`main`**, which is exactly the "control also fails" result that killed
-the regression hypothesis.
+Not independently traced in this pass, but a concrete, already-proven
+candidate exists in the campaign's own findings from the same day: **a42f
+found the JIT misreads a struct field on an array element** — a two-line
+repro (an element-tagged struct in an array; the field reads correctly
+under the interpreter and reads empty under JIT). A `while i < node.count`
+-shaped loop (or any loop whose bound or advance depends on a struct field
+read off an array element) would never terminate if that read silently
+returns a wrong/empty value under JIT — which reproduces every element of
+the signature above: 100% CPU on one thread, zero I/O (spinning over
+already-read data), flat RSS (re-walking, not accumulating), and —
+critically — a defect present in the JIT engine itself would affect the
+known-good baseline identically to current `main`, which is exactly the
+"control also fails" result that killed the regression hypothesis. This is
+a candidate for what JIT does once it's reached (whatever the reason it's
+reached under default mode); it is not itself evidence about why the
+interpret guard's effect doesn't take hold.
 
 **Important qualifier, from the same finding:** a42f's fix for the
 *specific* two-line repro was a **source-level workaround, not a JIT
@@ -227,23 +284,19 @@ likely-separate defect from the JIT hang, surfaced only because interpret
 mode got far enough to hit it. Worth a fresh, targeted investigation of its
 own; not investigated further here given the session's time budget.
 
-## Mitigation, proposed but not applied
+## Mitigation, proposed earlier — NOT safe to apply, pending the mechanism
 
-Make the `SIMPLE_EXECUTION_MODE=interpret` guard in
-`run_native_build_worker` apply **regardless of invocation path** — e.g.
-by moving the env-var-forcing logic (or an equivalent check) into the
-seed's own native `native-build` subcommand implementation, so that
-invoking `native-build` directly against the seed binary cannot silently
-land on the JIT engine.
-
-This is a deliberate speed-for-correctness tradeoff, stated plainly: it
-would make *every* direct-seed `native-build` invocation pay the slower
-interpret-mode cost (as `native_build_worker_jit_vs_interpret_measurement_
-2026-07-30.md` already measured and recommended keeping, for the CLI-
-dispatch path), in exchange for never silently hanging on the JIT hazard
-documented here. Not applied this pass — proposed only, per instruction, so
-the decision to trade speed for correctness globally is made deliberately
-rather than as a side effect of this investigation.
+An earlier version of this doc proposed making the
+`SIMPLE_EXECUTION_MODE=interpret` guard in `run_native_build_worker` apply
+regardless of invocation path. **That proposal presumed the now-retracted
+"guard bypassed" explanation and is not safe to apply as designed.** Until
+the decisive instrumentation run (see Correction above) distinguishes
+between "the guard runs but `env_set` doesn't reach the child" and "a
+decision point upstream skips the guard for some invocations," a fix
+aimed at "apply the guard elsewhere" risks either duplicating an `env_set`
+call that already runs and already doesn't work (explanation 1), or
+missing the actual branch point entirely (explanation 2). Revisit once the
+mechanism is confirmed.
 
 ## Reproduction commands (for whoever picks this up)
 
