@@ -78,15 +78,15 @@ fn constructor_value_matches_type(value: &Value, ty: &Type, type_params: &HashSe
     match ty {
         Type::Generic { name, args } if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 => {
             match value {
-                Value::Array(items) => {
-                    items.iter().all(|item| constructor_value_matches_type(item, &args[0], type_params))
-                }
-                Value::FrozenArray(items) => {
-                    items.iter().all(|item| constructor_value_matches_type(item, &args[0], type_params))
-                }
-                Value::Tuple(items) => {
-                    items.iter().all(|item| constructor_value_matches_type(item, &args[0], type_params))
-                }
+                Value::Array(items) => items
+                    .iter()
+                    .all(|item| constructor_value_matches_type(item, &args[0], type_params)),
+                Value::FrozenArray(items) => items
+                    .iter()
+                    .all(|item| constructor_value_matches_type(item, &args[0], type_params)),
+                Value::Tuple(items) => items
+                    .iter()
+                    .all(|item| constructor_value_matches_type(item, &args[0], type_params)),
                 _ => false,
             }
         }
@@ -94,11 +94,15 @@ fn constructor_value_matches_type(value: &Value, ty: &Type, type_params: &HashSe
             constructor_value_type_matches_name(value, name, type_params)
         }
         Type::Array { element, .. } => match value {
-            Value::Array(items) => items.iter().all(|item| constructor_value_matches_type(item, element, type_params)),
-            Value::FrozenArray(items) => {
-                items.iter().all(|item| constructor_value_matches_type(item, element, type_params))
-            }
-            Value::Tuple(items) => items.iter().all(|item| constructor_value_matches_type(item, element, type_params)),
+            Value::Array(items) => items
+                .iter()
+                .all(|item| constructor_value_matches_type(item, element, type_params)),
+            Value::FrozenArray(items) => items
+                .iter()
+                .all(|item| constructor_value_matches_type(item, element, type_params)),
+            Value::Tuple(items) => items
+                .iter()
+                .all(|item| constructor_value_matches_type(item, element, type_params)),
             _ => false,
         },
         _ => true,
@@ -240,15 +244,32 @@ pub fn handle_constructor_methods(
                     .map(|m| m.as_ref()),
             );
         }
-        if let Some(method_def) = candidates
-            .into_iter()
+        let scored_method = candidates
+            .iter()
+            .copied()
             .filter_map(|candidate| {
                 constructor_overload_score(candidate, &positional_values, &class_def.generic_params)
                     .map(|score| (score, candidate))
             })
             .max_by_key(|(score, _)| *score)
-            .map(|(_, candidate)| candidate)
-        {
+            .map(|(_, candidate)| candidate);
+        let arity_matches: Vec<&FunctionDef> = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                let required = candidate.params.iter().filter(|param| param.default.is_none()).count();
+                required <= positional_values.len() && positional_values.len() <= candidate.params.len()
+            })
+            .collect();
+        if let Some(method_def) = scored_method.or_else(|| {
+            // Runtime aliases and values narrowed from `T?` do not retain enough
+            // nominal metadata for scoring. One distinct arity signature is
+            // unambiguous (the registries may contain the same impl twice).
+            arity_matches
+                .first()
+                .copied()
+                .filter(|first| arity_matches.iter().all(|candidate| candidate.params == first.params))
+        }) {
             // Execute without self - start with empty local_env to avoid shadowing defaults
             let mut local_env: Env = Env::new();
             let mut positional_idx = 0;
@@ -481,6 +502,36 @@ main = Handler.new(Dog(x: 0))
             result, 42,
             "Handler.new(Dog(..)) should resolve via the Speaker trait impl, not fail with unknown static method"
         );
+    }
+
+    #[test]
+    fn static_method_accepts_type_alias_and_narrowed_optional_arguments() {
+        let result = eval_exit(
+            r#"
+type Operation = text
+
+class Descriptor:
+    value: Operation
+
+class Request:
+    descriptor: Descriptor
+    operation: Operation
+
+impl Request:
+    static fn create(descriptor: Descriptor, operation: Operation) -> i64:
+        if descriptor.value == operation: 42 else: 0
+
+fn find_descriptor() -> Descriptor?:
+    Descriptor(value: "list")
+
+val descriptor = find_descriptor()
+if descriptor == nil:
+    main = 0
+else:
+    main = Request.create(descriptor, "list")
+"#,
+        );
+        assert_eq!(result, 42);
     }
 
     // Exact-count call still works and is preferred over default-fill overload.
