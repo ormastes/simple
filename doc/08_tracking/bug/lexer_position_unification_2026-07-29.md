@@ -245,3 +245,127 @@ warning printed on every run, per binary-identity caveat):**
 All nine specs green. No defects found; the only surprises were the two
 items moved to "Kept" above (both corrections to the original follow-up
 note's scope, not regressions caused by this lane).
+
+## Completion: orphaned-accessor deletion finished (2026-07-30, LEXD lane)
+
+Lane `orphaned-accessor-deletion` finished both follow-ups the SCRUB lane
+left open above.
+
+**Follow-up 1 — `lex_pos_get/set`, `lex_line_get/set`, `lex_col_get/set`:**
+`_ParserDecls/enum_module_body.spl` is no longer off-limits (EPA1 finished).
+Its `use compiler.frontend.core.lexer.{...}` import line imported these six
+symbols plus the live `lex_token_start_get`; the six were unused (zero
+call-syntax hits in the file). Trimmed the import to
+`{lex_token_start_get}` only. Independent repo-wide re-verification
+(`grep` for call syntax `<sym>(` across `src/`, `test/`, `scripts/`,
+excluding definitions/comments) found the same three other dead-import
+sites SCRUB had already flagged but left alone —
+`_ParserPrimary/primary_expr.spl:47`, `_ParserPrimary/asm_match_suffix.spl:46`,
+`_ParserDecls/bitfield_aop_arch_decls.spl:51` (each imports exactly these
+six symbols and nothing else on that line) — and confirmed zero live
+callers anywhere in the repo. Removed those three import lines outright
+(deleting the accessor definitions from `lexer.spl` would otherwise break
+compilation there), then deleted all six `fn` definitions from
+`lexer.spl` (lines 251-301 of the pre-edit file).
+
+**Follow-up 2 — indent-stack accessor family:** independently re-verified
+each symbol dead via the same repo-wide call-syntax grep (not just SCRUB's
+narrower scope): `lex_indent_stack_len/top/push/pop`,
+`lex_indent_count_get/set`, `lex_pending_dedents_get/set`,
+`lex_round_paren_depth_get/set`, `lex_paren_depth_get/set`,
+`lex_at_line_start_get/set` all had zero external callers. The only
+internal callers were within the cluster itself (`lex_indent_stack_len`
+called `lex_indent_count_get`; `lex_indent_stack_push`/`_pop` called
+`lex_indent_count_get/set`) — i.e. a mutually-dead group, confirmed by
+deleting the outer `lex_indent_stack_*` functions first and re-grepping:
+`lex_indent_count_get/set` then had zero remaining callers too. Deleted
+the whole cluster from `lexer.spl`. Also dropped the stale
+`__init__.spl` re-export line
+`export lex_indent_stack_len, lex_indent_stack_top, lex_indent_stack_push, lex_indent_stack_pop`
+(no module-level `core.{lex_indent_stack_len, ...}` import pattern found
+anywhere). `lex_state_get`/`lex_state_set` (verified live via
+`lex_init_with_path`) were left untouched, as were `lex_cur_kind_set`/
+`lex_cur_suffix_set` (called from `lex_next()`) and the distinct
+`lex_live_line_get`/`lex_live_col_get`/`lex_force_set_pos` live-position
+accessors a few lines below the deleted indent-stack cluster — none of
+these share a name with anything deleted. Updated the stale
+"Live position accessors" comment header above those live functions,
+which had referred to the just-deleted `lex_pos_get`/etc as "(above)".
+
+**Per-symbol verification table:**
+
+| Symbol | Repo-wide callers found | Disposition |
+|---|---|---|
+| `lex_pos_get` | 0 | deleted |
+| `lex_pos_set` | 0 | deleted |
+| `lex_line_get` | 0 | deleted |
+| `lex_line_set` | 0 | deleted |
+| `lex_col_get` | 0 | deleted |
+| `lex_col_set` | 0 | deleted |
+| `lex_indent_stack_len` | 0 | deleted |
+| `lex_indent_stack_top` | 0 | deleted |
+| `lex_indent_stack_push` | 0 | deleted |
+| `lex_indent_stack_pop` | 0 | deleted |
+| `lex_indent_count_get` | 0 external (only in-cluster) | deleted |
+| `lex_indent_count_set` | 0 external (only in-cluster) | deleted |
+| `lex_pending_dedents_get` | 0 | deleted |
+| `lex_pending_dedents_set` | 0 | deleted |
+| `lex_round_paren_depth_get` | 0 | deleted |
+| `lex_round_paren_depth_set` | 0 | deleted |
+| `lex_paren_depth_get` | 0 | deleted |
+| `lex_paren_depth_set` | 0 | deleted |
+| `lex_at_line_start_get` | 0 | deleted |
+| `lex_at_line_start_set` | 0 | deleted |
+| `lex_state_get`/`lex_state_set` | many (`lex_init_with_path`, etc.) | kept (out of scope, proven live) |
+| `lex_cur_kind_set`/`lex_cur_suffix_set` | live (`lex_next()`) | kept (out of scope, proven live) |
+
+**Files changed:**
+- `src/compiler/10.frontend/core/lexer.spl` — deleted the six pos/line/col
+  wrapper `fn`s and the four-fn indent-stack cluster
+  (`lex_indent_stack_len/top/push/pop`), plus the ten remaining
+  indent/dedent/paren-depth/line-start accessors bundled with them
+  (`lex_indent_count_get/set`, `lex_pending_dedents_get/set`,
+  `lex_round_paren_depth_get/set`, `lex_paren_depth_get/set`,
+  `lex_at_line_start_get/set`); updated the stale "Live position
+  accessors" comment.
+- `src/compiler/10.frontend/core/__init__.spl` — dropped the
+  `lex_indent_stack_len, lex_indent_stack_top, lex_indent_stack_push,
+  lex_indent_stack_pop` re-export line.
+- `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl` —
+  trimmed the dead six-symbol import, kept `lex_token_start_get`.
+- `src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl` —
+  removed the dead six-symbol-only import line.
+- `src/compiler/10.frontend/core/_ParserPrimary/asm_match_suffix.spl` —
+  removed the dead six-symbol-only import line.
+- `src/compiler/10.frontend/core/_ParserDecls/bitfield_aop_arch_decls.spl`
+  — removed the dead six-symbol-only import line.
+
+**Duplicate spec disposition:** `test/unit/compiler/native/inline_asm_core_parser_spec.spl`
+vs. the canonical `test/01_unit/compiler/native/inline_asm_core_parser_spec.spl`
+are **NOT byte-identical** — they diverged. The `test/01_unit` copy (newer,
+2026-07-29) escapes the brace-interpolation landmine noted earlier in this
+doc (`asm \{ cli \}` etc., 4 assertion lines); the `test/unit` copy (older,
+2026-07-01) still has the unescaped form (`asm { cli }`) that trips
+Simple's own `{expr}` string interpolation. Per instructions, divergence
+means **report, do not delete** — left both files in place. Separately:
+`bin/simple test`'s default scan root is `test/` (recursive,
+`test_runner_main.spl:148`), so `test/unit/` **is** reachable by test
+discovery — it is not a dead/unscanned directory. This divergence (and
+whether `test/unit/` should be retired in favor of the numbered
+`test/01_unit/` scheme entirely) is a separate follow-up, out of scope for
+this lane.
+
+**Regressions (foreground, `env -u SIMPLE_TIMEOUT_SECONDS timeout 400
+bin/simple test --no-session-daemon <spec>`, seed binary
+`bin/release/x86_64-unknown-linux-gnu/simple`):**
+- `test/01_unit/compiler/lexer/lexer_spec.spl`: `Results: 2 total, 2 passed, 0 failed`
+- `test/01_unit/compiler/lexer/lexer_comprehensive_spec.spl`: `Results: 2 total, 2 passed, 0 failed`
+- `test/01_unit/compiler/lexer/lexer_import_debug_spec.spl`: `Results: 3 total, 3 passed, 0 failed`
+- `test/01_unit/compiler/frontend/lexer_position_unification_spec.spl`: `Results: 4 total, 4 passed, 0 failed`
+- `test/01_unit/core/parser_unsafe_block_spec.spl`: `Results: 3 total, 3 passed, 0 failed`
+- `test/01_unit/compiler/frontend/type_alias_capture_spec.spl`: `Results: 4 total, 4 passed, 0 failed`
+- `test/01_unit/compiler/frontend/enum_payload_capture_spec.spl`: `Results: 7 total, 7 passed, 0 failed`
+- `test/03_system/feature/usage/capability_system_spec.spl`: `Results: 40 total, 40 passed, 0 failed`
+
+All eight specs green, matching the mandated counts exactly. No defects
+found.

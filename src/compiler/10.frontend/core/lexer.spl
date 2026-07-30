@@ -248,58 +248,6 @@ pub fn lexer_release_parse_source_globals():
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", "")
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", "")
 
-fn lex_pos_get() -> i64:
-    lex_state_get("pos", "0").to_int()
-
-fn lex_pos_set(value: i64):
-    lex_state_set("pos", "{value}")
-
-fn lex_line_get() -> i64:
-    lex_state_get("line", "1").to_int()
-
-fn lex_line_set(value: i64):
-    lex_state_set("line", "{value}")
-
-fn lex_col_get() -> i64:
-    lex_state_get("col", "1").to_int()
-
-fn lex_col_set(value: i64):
-    lex_state_set("col", "{value}")
-
-fn lex_indent_count_get() -> i64:
-    lex_state_get("indent_count", "1").to_int()
-
-fn lex_indent_count_set(value: i64):
-    lex_state_set("indent_count", "{value}")
-
-fn lex_pending_dedents_get() -> i64:
-    lex_state_get("pending_dedents", "0").to_int()
-
-fn lex_pending_dedents_set(value: i64):
-    lex_state_set("pending_dedents", "{value}")
-
-fn lex_at_line_start_get() -> bool:
-    val raw = lex_state_get("at_line_start", "1")
-    raw == "1" or raw == "true"
-
-fn lex_at_line_start_set(value: bool):
-    if value:
-        lex_state_set("at_line_start", "1")
-    else:
-        lex_state_set("at_line_start", "0")
-
-fn lex_paren_depth_get() -> i64:
-    lex_state_get("paren_depth", "0").to_int()
-
-fn lex_paren_depth_set(value: i64):
-    lex_state_set("paren_depth", "{value}")
-
-fn lex_round_paren_depth_get() -> i64:
-    lex_state_get("round_paren_depth", "0").to_int()
-
-fn lex_round_paren_depth_set(value: i64):
-    lex_state_set("round_paren_depth", "{value}")
-
 fn lex_cur_kind_get_slot() -> i64:
     lex_cur_kind_direct[0]
 
@@ -531,42 +479,6 @@ fn lex_next_token_record() -> Token:
     val span = lex_span_new(0, text.len(), line, col)
     Token(kind: kind, span: span, text: text)
 
-fn lex_indent_stack_len() -> i64:
-    lex_indent_count_get()
-
-fn lex_indent_stack_top() -> i64:
-    val stack_text = lex_state_get("indent_stack", "0")
-    if stack_text == "" or stack_text == nil:
-        return 0
-    val parts = stack_text.split(",")
-    if parts.len() <= 0:
-        return 0
-    parts[parts.len() - 1].to_int()
-
-fn lex_indent_stack_push(value: i64):
-    lex_state_set("indent_stack", lex_state_get("indent_stack", "0") + "," + "{value}")
-    lex_indent_count_set(lex_indent_count_get() + 1)
-
-fn lex_indent_stack_pop() -> i64:
-    val stack_text = lex_state_get("indent_stack", "0")
-    if stack_text == "" or stack_text == nil:
-        return 0
-    val parts = stack_text.split(",")
-    if parts.len() <= 1:
-        val value = stack_text.to_int()
-        lex_state_set("indent_stack", "")
-        lex_indent_count_set(0)
-        return value
-    val value = parts[parts.len() - 1].to_int()
-    var new_parts: [text] = []
-    var i = 0
-    while i < parts.len() - 1:
-        new_parts = new_parts.push(parts[i])
-        i = i + 1
-    lex_state_set("indent_stack", new_parts.join(","))
-    lex_indent_count_set(lex_indent_count_get() - 1)
-    value
-
 # ===== Token Construction =====
 #
 # lex_at_end/lex_peek/lex_peek_next/lex_peek_at/lex_advance/lex_match_char/
@@ -637,16 +549,20 @@ fn lex_mark_current_token_as_generic_close():
 
 # ===== Live position accessors (bypass the dead legacy `lex_state` slot) =====
 #
-# `lex_pos_get`/`lex_pos_set`/`lex_line_get`/`lex_line_set`/`lex_col_get`/
-# `lex_col_set` (above) read/write `lex_state_get/set("pos"|"line"|"col", ...)`
-# -- a store that CoreLexer.next_token() (lexer_struct.spl) never writes to.
-# Callers of those accessors (e.g. the raw-brace asm scanner,
+# The old `lex_pos_get`/`lex_pos_set`/`lex_line_get`/`lex_line_set`/
+# `lex_col_get`/`lex_col_set` wrappers read/wrote
+# `lex_state_get/set("pos"|"line"|"col", ...)` -- a store that
+# CoreLexer.next_token() (lexer_struct.spl) never writes to. Callers of
+# those accessors (e.g. the raw-brace asm scanner,
 # _ParserPrimary/asm_raw_parsing.spl) were silently reading a permanently
 # stale position (observed stuck at its "0"/"1" fallback), producing
-# "unterminated asm { ... } block" on real input. `lex_token_end_get()`
-# already exposes the live struct's `pos` (set from `loaded.pos` in
-# `lex_next()` above); these two getters expose the matching live
-# `line`/`col`, and `lex_force_set_pos` lets a caller that hand-scanned raw
+# "unterminated asm { ... } block" on real input. The wrappers themselves
+# had zero remaining callers by 2026-07-30 (LEXD orphaned-accessor-deletion,
+# see doc/08_tracking/bug/lexer_position_unification_2026-07-29.md) and
+# were removed. `lex_token_end_get()` already exposes the live struct's
+# `pos` (set from `loaded.pos` in `lex_next()` above); the two getters
+# below expose the matching live `line`/`col`, and `lex_force_set_pos` lets
+# a caller that hand-scanned raw
 # source (skipping normal tokenization) hand the live position back so the
 # next `lex_next()` resumes from the right place.
 fn lex_live_line_get() -> i64:
