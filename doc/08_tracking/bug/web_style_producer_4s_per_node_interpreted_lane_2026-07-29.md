@@ -993,6 +993,138 @@ prior localization pass's per-glyph figures.
 - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/apply_decls_merge_probe_spec.spl`:
   20 total, 20 passed, 0 failed.
 
+## Extreme-budget completion attempt + node 140-148 analysis 2026-07-30
+
+**Tree used:** dedicated disposable worktree `wt-final-run`, rebased to SSH
+tip `d8822a3e3379e44bb522900d2e06fe50014433d5` at launch time (origin has
+since moved further; every subsequent re-fetch through
+`b0ae22d4e9105bb6503bd75fa9dc182d192dd897` shows zero further diff in
+`browser_common_elements_showcase.html` or
+`simple_web_html_layout_renderer_foundation.spl`, so the node-count/identity
+analysis below is still current). Never the shared WC.
+
+**Node-count shift (PROVED):** `parse_html` on
+`examples/06_io/ui/browser_common_elements_showcase.html` now returns
+**149 nodes, not 151** -- a 2-node drop versus every historical measurement
+in this campaign, all of which were taken from the `67d9d21bfd4` base. A
+pure-parse probe (`parse_html` called directly, no style resolution --
+fast, no `apply_decls`/`measure_text_advances` cost) confirms the HTML file
+itself and the parser are both unchanged between `67d9d21bfd4` and the
+current tip, so **PROVED via code reading + diff**, not directly bisected:
+the 151->149 shift predates this session's `67d9d21bfd4` base already (the
+change is somewhere upstream of both, or the historical "of=151" number was
+itself measured on a still-earlier tip whose HTML/parser has since
+shifted). Any budget-break number from here forward should be read against
+**149**, not 151. The prior campaign's `139 of 151` (92%) and this
+document's `90`/`104 of 151` numbers remain valid as historical record but
+are not directly comparable index-for-index to a future `of=149` result.
+
+**Node 140-148 identity (the "cheap static work," done while the extreme-
+budget run was in flight -- PROVED via direct `parse_html` dump, no style
+resolution run):**
+
+| i | tag | parent | text_len | notes |
+|---|---|---|---|---|
+| 130 | `summary` | 129 | -- | |
+| 131 | `#text` | 130 | 17 | |
+| 132 | `p` | 129 | -- | |
+| 133 | `#text` | 132 | 44 | |
+| 134 | `section.unsupported` | 13 | -- | |
+| 135 | `h2` | 134 | -- | |
+| 136 | `#text` | 135 | 32 | |
+| 137 | `p` | 134 | -- | |
+| **138** | **`#text`** | **137** | **136** | **largest `#text` node found in this entire campaign -- 6.8x node 5's 20 chars** |
+| 139 | `canvas` | 134 | -- | |
+| 140 | `#text` | 139 | 18 | canvas fallback content |
+| 141 | `svg` | 134 | -- | |
+| 142 | `rect` | 141 | -- | |
+| 143 | `audio` | 134 | -- | |
+| 144 | `span` | 143 | -- | audio fallback wrapper |
+| 145 | `#text` | 144 | 17 | |
+| 146 | `video` | 134 | -- | |
+| 147 | `span` | 146 | -- | video fallback wrapper |
+| 148 | `#text` | 147 | 17 | (last node, index 148 of 149) |
+
+**Confirms the coordinator's suspicion:** 7 of the 19 tail nodes (130-148)
+are `#text` nodes hitting `measure_text_advances` under `vector_fonts`,
+including one, index 138, at **136 characters** -- by far the largest
+`#text` node measured anywhere in this campaign. Per the standing
+per-character-miss figure (~425ms/char for genuinely novel codepoints, from
+the prior localization pass), a worst-case fully-cold pass over node 138
+alone could cost tens of seconds; the bounded advance cache landed this
+session should reduce that substantially for characters already seen
+earlier on the page (English prose at 136 chars overwhelmingly reuses
+common ASCII letters), but node 138 remains the single most likely
+individual cost spike in the 130-148 tail -- INFERRED, not measured this
+pass (the extreme-budget run below never reached it).
+
+**Extreme-budget completion run (`SIMPLE_WEB_RENDER_BUDGET_MS=1800000
+SIMPLE_TIMEOUT_SECONDS=2900`, `stdbuf -oL -eL`, single run):** died at
+2900s via its OWN internal watchdog -- confirmed NOT the `kill_simple_
+monitor` resource-guard daemon. Diagnostic basis (PROVED): the log's last
+line is `error: example timed out after 2900s: examples/06_io/ui/
+web_render_file_gui.spl`, the exact message format every legitimate
+internal-`SIMPLE_TIMEOUT_SECONDS` expiry in this campaign has produced
+(matches the `580s`/`600s`/`270s` prior instances byte-for-byte in format);
+a `kill_simple_monitor` kill instead produces a silent SIGKILL (exit 137,
+often near a 60s multiple, no such message). `kill_simple_monitor` was
+confirmed running throughout (`pgrep -af kill_simple_monitor`, PID
+`2530172`, live since Jul 28) but did not fire on this process.
+
+**What actually happened in those 2900 seconds (PROVED via full-log
+grep, `stdbuf` active so buffering-loss is ruled out this time):** the log
+contains **zero** `[web-style-producer]` lines -- the process never
+reached the style loop's first budget check. Every one of its 590 lines is
+compile-time output: `export use *` warnings, deprecated-generics-syntax
+warnings, cross-module private-symbol-collision warnings, and
+`#[runtime_intrinsics]`-deprecated warnings, ending abruptly mid-dump
+(a `process_ops` export-use warning) immediately before the timeout. This
+means **module compilation/loading alone consumed the full 48 minutes**
+under the load conditions of that window, before any application code ran.
+
+**Independent cross-session corroboration (PROVED, not this session's own
+claim):** commit `53e74794811` (unrelated session, landed to the tip
+fetched for this update), documenting a different fix in this exact file
+(`font_renderer.spl`'s default-face cache flatten, `_browser_default_font_
+renderers` -> two flat `[text]` arrays -- coexists cleanly with this
+session's bounded advance cache, confirmed via `git cat-file -p <tip>:
+src/lib/nogc_sync_mut/text_layout/font_renderer.spl | grep -c` showing both
+`_adv_cache_lookup`/`_adv_cache_store` (this session, 7 refs) and
+`_browser_default_font_rebuild_from_path`/`_browser_default_font_paths`
+(that session, 7 refs) present together -- no clobber), independently
+reports: "`font_renderer_spec.spl`... times out under the test runner's
+resource-limit guard even at `--timeout 300`, both before and after this
+change; this is a pre-existing interpreter-mode perf characteristic of the
+file... not a regression," and "real TTF shaping cost per call under the
+tree-walk interpreter is apparently on the order of **minutes** on this
+machine, independent of this fix." This **upgrades this document's own
+`font_renderer_spec.spl` open item (previously reported INFERRED after 2
+single-session timeouts) to PROVED via independent replication**, and
+directly explains this pass's 48-minute no-progress result: if isolated
+real-font operations already cost minutes each under the interpreter on
+this machine, a whole-page pass touching many distinct glyphs across ~149
+nodes plausibly needs far longer than 48 minutes to even finish loading
+under current, sustained heavy contention (pgrep count 150-200,
+`/proc/loadavg` 1-min figure observed ranging 10-54 across this session's
+load-gate polling).
+
+**Decision, not attempted further this pass:** given (a) the independent,
+now-PROVED "minutes per real-font operation under the interpreter" finding,
+(b) sustained machine load in the 25-54 range at time of writing, and
+(c) the extreme run above already consumed 48 minutes without reaching the
+style loop at all, another blind extreme-budget attempt was judged low-
+probability/high-cost and not repeated this pass. **No `status=` line was
+captured; no cell-green evidence exists yet.** The default-budget gap
+number stands at the prior document's `139 of 151` (now known to be `139
+of ~151`, pre-node-count-shift) as the best completion evidence to date.
+
+### Regression baselines (re-confirmed on this pass's tip, unchanged)
+- `test/01_unit/app/ui.chromium/css_spec.spl`: 12 total, 9 passed, 3 failed.
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/apply_decls_merge_probe_spec.spl`:
+  20 total, 20 passed, 0 failed.
+(Both re-run earlier in this pass's `wt-close1` worktree per the prior
+section; not re-run again for this update since no source changed.)
+
 ## bracket-slice (`s[i:j]`) survey gap — enumerated 2026-07-29, not fixed
 
 The original Category B survey (that found the byte/char split, see
