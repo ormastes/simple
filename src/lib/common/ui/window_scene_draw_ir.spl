@@ -583,11 +583,18 @@ fn _wm_draw_ir_opaque(color: u32) -> u32:
     0xFF000000u32 | (color & 0x00FFFFFFu32)
 
 # `backend_target` is an explicit producer contract, not an AUTO/GPU hint.
-# Engine2D currently owns an end-to-end device backdrop-material dispatch only
-# for Metal.  Vulkan has no matching draw_ir_apply_glass_material path, so it
-# must stay on the honest solid fallback until that owner grows one.
+# Engine2D owns an end-to-end device backdrop-material dispatch only for Metal.
+# Other concrete scalar/SIMD/Vulkan presentation targets can still execute the
+# existing bounded CPU compositor before upload. AUTO/GPU remain unresolved
+# hints and therefore stay on the honest solid fallback.
 fn _wm_draw_ir_backend_requests_device_glass(backend_target: text) -> bool:
     backend_target == "metal"
+
+fn _wm_draw_ir_backend_supports_cpu_composited_glass(backend_target: text) -> bool:
+    (backend_target == "cpu" or
+        backend_target == "software" or
+        backend_target == "cpu_simd" or
+        backend_target == "vulkan")
 
 fn _wm_draw_ir_color_alpha_milli(color: u32) -> i32:
     (((color >> 24) & 0xFFu32) as i64 * 1000 / 255) as i32
@@ -621,15 +628,17 @@ fn _wm_draw_ir_window_snapshot_style(snapshot: ThemeRenderSnapshot, window: Shar
     val material = snapshot.material
     val shadows = if window.focused: material.active_shadows else: material.inactive_shadows
     val device_glass_requested = _wm_draw_ir_backend_requests_device_glass(backend_target)
+    val cpu_composited_glass_requested = _wm_draw_ir_backend_supports_cpu_composited_glass(backend_target)
+    val glass_material_requested = device_glass_requested or cpu_composited_glass_requested
     val translucent_surface_color = if part == "body": material.window_fill_rgba else if window.focused: material.active_title_fill_rgba else: material.inactive_title_fill_rgba
-    val surface_color = if device_glass_requested: translucent_surface_color else if part == "body": material.solid_fallback_rgba else: _wm_draw_ir_opaque(translucent_surface_color)
-    val surface_alpha_milli = if device_glass_requested: _wm_draw_ir_color_alpha_milli(translucent_surface_color) else: 1000
+    val surface_color = if glass_material_requested: translucent_surface_color else if part == "body": _wm_draw_ir_opaque(material.solid_fallback_rgba) else: _wm_draw_ir_opaque(translucent_surface_color)
+    val surface_alpha_milli = if glass_material_requested: _wm_draw_ir_color_alpha_milli(translucent_surface_color) else: 1000
     val gradient_requested = part == "body"
     val has_window_gradient = gradient_requested and material.window_gradient_available
     # The admitted Engine2D material path owns its rounded clip, so it can
     # retain the snapshot gradient. Unsupported targets retain the explicit
     # opaque fallback instead of leaking a square gradient outside the radius.
-    val gradient_realized = has_window_gradient and device_glass_requested
+    val gradient_realized = has_window_gradient and glass_material_requested
     val background_image = if gradient_realized: "linear-gradient({material.window_gradient_start_rgba},{material.window_gradient_end_rgba})" else: "none"
     val background_capability = if not gradient_requested: "not-requested" else if gradient_realized: "engine2d-rounded-material-v1" elif has_window_gradient: "unavailable-rounded-clip" else: "unavailable"
     var style = [
@@ -657,16 +666,17 @@ fn _wm_draw_ir_window_snapshot_style(snapshot: ThemeRenderSnapshot, window: Shar
         draw_ir_style_prop("border-bottom-color", material.border_rgba.to_string()),
         draw_ir_style_prop("border-left-color", material.border_rgba.to_string()),
         draw_ir_style_prop("backdrop-filter", "blur({material.backdrop_blur_px}px) saturate({material.backdrop_saturation_milli / 10}%)"),
-        # This is a request, not a device-execution receipt. The existing
-        # Engine2D lowerer first asks Metal to perform its ordered parent
-        # framebuffer snapshot/material dispatch and records any actual result.
-        draw_ir_style_prop("backdrop-filter-capability", if device_glass_requested: "engine2d-composited-glass-material-v1" else: "unavailable"),
-        draw_ir_style_prop("backdrop-filter-requested-target", if device_glass_requested: "metal-device-glass-v1" else: "solid-material"),
-        draw_ir_style_prop("backdrop-filter-fallback", if device_glass_requested: "cpu-composited-material" else: "solid-material"),
-        draw_ir_style_prop("backdrop-filter-fallback-target", if device_glass_requested: "cpu-scalar-glass-v1" else: "solid-material"),
-        draw_ir_style_prop("backdrop-filter-fallback-reason", if device_glass_requested: "metal-device-dispatch-unavailable-at-execution" else: "cpu-raster-backdrop-sampling-unavailable")
+        # These are producer requests, not device-execution receipts. Metal may
+        # dispatch native device glass; concrete CPU/SIMD/Vulkan presentation
+        # targets request the bounded CPU compositor and never claim Vulkan
+        # device glass.
+        draw_ir_style_prop("backdrop-filter-capability", if device_glass_requested: "engine2d-composited-glass-material-v1" elif cpu_composited_glass_requested: "engine2d-cpu-composited-material-v1" else: "unavailable"),
+        draw_ir_style_prop("backdrop-filter-requested-target", if device_glass_requested: "metal-device-glass-v1" elif cpu_composited_glass_requested: "cpu-scalar-glass-v1" else: "solid-material"),
+        draw_ir_style_prop("backdrop-filter-fallback", if glass_material_requested: "cpu-composited-material" else: "solid-material"),
+        draw_ir_style_prop("backdrop-filter-fallback-target", if glass_material_requested: "cpu-scalar-glass-v1" else: "solid-material"),
+        draw_ir_style_prop("backdrop-filter-fallback-reason", if device_glass_requested: "metal-device-dispatch-unavailable-at-execution" elif cpu_composited_glass_requested: "native-device-backdrop-path-pending" else: "cpu-raster-backdrop-sampling-unavailable")
     ]
-    if device_glass_requested:
+    if glass_material_requested:
         val realized_blur_radius_px = _wm_draw_ir_min_i32(material.backdrop_blur_px, 4)
         style.push(draw_ir_style_prop("backdrop-filter-realized", "blur({realized_blur_radius_px}px) saturate({material.backdrop_saturation_milli / 10}%)"))
         style.push(draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", realized_blur_radius_px.to_string()))
@@ -1014,7 +1024,10 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
     if active_wm_theme_snapshot_present():
         val chrome_snapshot = active_wm_theme_snapshot_unchecked()
         val device_glass_requested = _wm_draw_ir_backend_requests_device_glass(backend_target)
-        val body_color = if device_glass_requested: chrome_snapshot.material.window_fill_rgba else: chrome_snapshot.material.solid_fallback_rgba
+        # Non-Metal command colors remain opaque fail-closed pixels. Concrete
+        # CPU/SIMD/Vulkan targets carry their translucent tint in computed
+        # style, where the bounded CPU material compositor owns it.
+        val body_color = if device_glass_requested: chrome_snapshot.material.window_fill_rgba else: _wm_draw_ir_opaque(chrome_snapshot.material.solid_fallback_rgba)
         commands.push(_wm_draw_ir_window_box(chrome_snapshot, window, "{window.window_id}-body", "body", 0, 0, window.width, window.height, body_color, backend_target))
         val translucent_title = if window.focused: chrome_snapshot.material.active_title_fill_rgba else: chrome_snapshot.material.inactive_title_fill_rgba
         val title_color = if device_glass_requested: translucent_title else: _wm_draw_ir_opaque(translucent_title)

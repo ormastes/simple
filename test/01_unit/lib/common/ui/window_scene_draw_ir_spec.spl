@@ -92,6 +92,46 @@ fn _mixed_shadow_snapshot() -> ThemeRenderSnapshot:
         material: material
     )
 
+fn _translucent_fallback_snapshot() -> ThemeRenderSnapshot:
+    val base = aetheric_dark_theme_render_snapshot()
+    val material = ThemeMaterialSemantics(
+        desktop_fill_rgba: base.material.desktop_fill_rgba,
+        window_fill_rgba: base.material.window_fill_rgba,
+        active_title_fill_rgba: base.material.active_title_fill_rgba,
+        inactive_title_fill_rgba: base.material.inactive_title_fill_rgba,
+        surface_alpha_milli: base.material.surface_alpha_milli,
+        backdrop_blur_px: base.material.backdrop_blur_px,
+        backdrop_saturation_milli: base.material.backdrop_saturation_milli,
+        border_width_px: base.material.border_width_px,
+        border_rgba: base.material.border_rgba,
+        corner_radius_px: base.material.corner_radius_px,
+        active_shadows: base.material.active_shadows,
+        inactive_shadows: base.material.inactive_shadows,
+        font_family: base.material.font_family,
+        font_size_px: base.material.font_size_px,
+        font_weight: base.material.font_weight,
+        text_rgba: base.material.text_rgba,
+        secondary_text_rgba: base.material.secondary_text_rgba,
+        solid_fallback_rgba: 0x801F1F21u32,
+        fallback_contrast_milli: base.material.fallback_contrast_milli,
+        window_gradient_available: base.material.window_gradient_available,
+        window_gradient_start_rgba: base.material.window_gradient_start_rgba,
+        window_gradient_end_rgba: base.material.window_gradient_end_rgba,
+        window_gradient_source_css: base.material.window_gradient_source_css
+    )
+    ThemeRenderSnapshot(
+        id: base.id,
+        family_id: base.family_id,
+        source_reference: base.source_reference,
+        source_manifest_sha256: base.source_manifest_sha256,
+        material_sha256: theme_material_sha256(material),
+        composed_css: base.composed_css,
+        background_rgba: base.background_rgba,
+        foreground_rgba: base.foreground_rgba,
+        accent_rgba: base.accent_rgba,
+        material: material
+    )
+
 describe "window scene Draw IR projection":
 
     it "retains readable bitmap text when selected metrics are unavailable":
@@ -268,23 +308,64 @@ describe "window scene Draw IR projection":
         expect(composition.batches[3].source.style_revision).to_contain(snapshot.material_sha256)
         reset_wm_chrome_theme()
 
-    it "keeps AUTO, CPU, software, and Vulkan WM targets on explicit solid material fallback":
-        val snapshot = aetheric_dark_theme_render_snapshot()
+    it "requests honest CPU-composited glass for canonical CPU software SIMD and Vulkan targets":
+        val snapshot = _translucent_fallback_snapshot()
         apply_theme_render_snapshot_to_wm_chrome(snapshot)
-        val auto_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_AUTO, 1000, "09:41", 2)
         val cpu_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_CPU, 1000, "09:41", 2)
         val software_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), "software", 1000, "09:41", 2)
+        val simd_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), "cpu_simd", 1000, "09:41", 2)
         val vulkan_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), "vulkan", 1000, "09:41", 2)
 
-        for composition in [auto_composition, cpu_composition, software_composition, vulkan_composition]:
+        expect(cpu_composition.backend_target).to_equal(DRAW_IR_BACKEND_CPU)
+        expect(software_composition.backend_target).to_equal("software")
+        expect(simd_composition.backend_target).to_equal("cpu_simd")
+        expect(vulkan_composition.backend_target).to_equal("vulkan")
+        for composition in [cpu_composition, software_composition, simd_composition, vulkan_composition]:
             val body = composition.batches[3].commands[0]
             val title = composition.batches[3].commands[1]
-            expect(body.color).to_equal(snapshot.material.solid_fallback_rgba)
-            expect(_style_value(body, "background-color")).to_equal(snapshot.material.solid_fallback_rgba.to_string())
+            expect(body.color).to_equal(0xFF1F1F21u32)
+            expect(_style_value(body, "background-color")).to_equal(snapshot.material.window_fill_rgba.to_string())
+            expect(_style_value(body, "background-image")).to_equal("linear-gradient(352321535,117440511)")
+            expect(_style_value(body, "background-image-capability")).to_equal("engine2d-rounded-material-v1")
+            expect(_style_value(body, "background-image-composite-mode")).to_equal("surface-then-alpha-gradient")
+            expect(_style_value(body, "backdrop-filter-capability")).to_equal("engine2d-cpu-composited-material-v1")
+            expect(_style_value(body, "backdrop-filter-requested-target")).to_equal("cpu-scalar-glass-v1")
+            expect(_style_value(body, "backdrop-filter-fallback-reason")).to_equal("native-device-backdrop-path-pending")
+            expect(_style_value(body, "backdrop-filter-realized")).to_equal("blur(4px) saturate(170%)")
+            expect(_style_value(body, "backdrop-filter-realized-blur-radius-px")).to_equal("4")
+            expect(_style_value(body, "backdrop-filter-realized-saturation-milli")).to_equal("1700")
+            expect(_style_value(body, "backdrop-filter-reduction-reason")).to_equal("cpu-blur-radius-bounded-to-4")
+            expect(_style_value(body, "wm-material-surface-alpha-milli")).to_equal("800")
+            expect(title.color).to_equal(0xFF000000u32 | (snapshot.material.active_title_fill_rgba & 0x00FFFFFFu32))
+            expect(_style_value(title, "background-color")).to_equal(snapshot.material.active_title_fill_rgba.to_string())
+            expect(_style_value(title, "background-image")).to_equal("none")
+            expect(_style_value(title, "background-image-capability")).to_equal("not-requested")
+            expect(_style_value(title, "backdrop-filter-capability")).to_equal("engine2d-cpu-composited-material-v1")
+            expect(_style_value(title, "backdrop-filter-requested-target")).to_equal("cpu-scalar-glass-v1")
+            expect(_style_value(title, "backdrop-filter-fallback-reason")).to_equal("native-device-backdrop-path-pending")
+            expect(_style_value(title, "backdrop-filter-realized")).to_equal("blur(4px) saturate(170%)")
+            expect(_style_value(title, "wm-material-surface-alpha-milli")).to_equal("878")
+        reset_wm_chrome_theme()
+
+    it "keeps AUTO and generic GPU WM targets on explicit solid material fallback":
+        val snapshot = _translucent_fallback_snapshot()
+        val opaque_fallback = 0xFF1F1F21u32
+        apply_theme_render_snapshot_to_wm_chrome(snapshot)
+        val auto_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_AUTO, 1000, "09:41", 2)
+        val gpu_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+
+        for composition in [auto_composition, gpu_composition]:
+            val body = composition.batches[3].commands[0]
+            val title = composition.batches[3].commands[1]
+            expect(body.color).to_equal(opaque_fallback)
+            expect(_style_value(body, "background-color")).to_equal(opaque_fallback.to_string())
             expect(_style_value(body, "backdrop-filter-capability")).to_equal("unavailable")
+            expect(_style_value(body, "backdrop-filter-requested-target")).to_equal("solid-material")
             expect(_style_value(body, "backdrop-filter-fallback")).to_equal("solid-material")
             expect(_style_value(body, "backdrop-filter-fallback-reason")).to_equal("cpu-raster-backdrop-sampling-unavailable")
             expect(_style_value(body, "backdrop-filter-realized")).to_equal("")
+            expect(_style_value(body, "background-image")).to_equal("none")
+            expect(_style_value(body, "background-image-fallback")).to_equal("solid-material")
             expect(title.color).to_equal(0xFF000000u32 | (snapshot.material.active_title_fill_rgba & 0x00FFFFFFu32))
             expect(_style_value(title, "wm-material-surface-alpha-milli")).to_equal("1000")
             expect(_style_value(title, "backdrop-filter-capability")).to_equal("unavailable")

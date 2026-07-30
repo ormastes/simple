@@ -828,3 +828,17 @@ The remaining host work is divided into bounded follow-ups:
 
 Merge owner remains `/root`; each bounded implementation receives independent
 highest-capability review before push.
+
+### CPU-composited glass result
+
+Follow-up 1 is source-complete and accepted: concrete CPU, software, CPU-SIMD,
+and Vulkan presentation targets request the bounded Engine2D CPU compositor.
+Metal alone requests device glass; AUTO/generic GPU stay on opaque solid
+fallback. A deliberately translucent fallback fixture proves that raw command
+pixels remain opaque while the CPU material's computed background remains
+translucent. Producer metadata records a requested target only; the Engine2D
+execution result owns actual realization.
+
+Runtime/capture evidence remains open because no current source-matched runtime
+is admitted. Follow-up 2 (typed ordered Web shadows and per-corner radius) is
+next; follow-up 3 (QEMU) remains postponed behind the capsule blocker.

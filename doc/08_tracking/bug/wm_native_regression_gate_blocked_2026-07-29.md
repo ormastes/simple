@@ -448,3 +448,9 @@ This does not clear the native gate. The released runtime remains stale and an
 external source-matched incremental build is unresolved, so no fresh host
 capture or runtime PASS is claimed. CPU/SIMD/Vulkan glass, Web ordered-shadow
 fidelity, and x86/ARM QEMU evidence remain separate follow-ups.
+
+The CPU/SIMD/Vulkan source follow-up is now accepted: those concrete targets
+request bounded CPU-composited glass while keeping opaque fail-closed command
+pixels; Metal alone requests device glass and Engine2D alone records execution.
+This still does not clear the native gate because no current source-matched
+runtime or capture has verified the path.

@@ -74,3 +74,11 @@ admitted runtime -> host semantics/events -> CPU oracle -> Vulkan + Metal
 - QEMU stays postponed: current x86 ends in `guest-render-fault`; ARM lacks a
   current admitted image/capture; the capsule path still has a
   `Result<(), E>` parser blocker.
+
+## CPU glass update
+
+- Source/tests accepted: CPU, software, CPU-SIMD, and Vulkan request bounded
+  CPU-composited glass; Vulkan does not claim device glass.
+- Metal alone requests device glass; AUTO/generic GPU stay opaque solid.
+- Engine2D owns the execution receipt; runtime/capture remains unverified.
+- Next current-host lane: typed ordered Web shadows and per-corner radii.

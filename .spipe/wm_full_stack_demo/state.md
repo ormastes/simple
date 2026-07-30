@@ -692,3 +692,9 @@ implementation-in-progress
   remains unresolved. CPU/SIMD/Vulkan CPU-composited glass and Web ordered
   shadows remain the next host lanes; x86/ARM QEMU remains postponed until a
   current admitted capsule exists.
+- 2026-07-30 CPU glass checkpoint: source and discriminating unit coverage now
+  admit concrete CPU/software/CPU-SIMD/Vulkan targets to the bounded CPU
+  material compositor. Metal remains the only device-glass request; AUTO/GPU
+  remain opaque solid, and Engine2D's result—not producer metadata—owns the
+  execution receipt. Highest-capability review accepted the contract on cycle
+  3. Live runtime/capture evidence remains unverified.

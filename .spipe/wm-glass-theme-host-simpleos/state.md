@@ -1127,3 +1127,17 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   evidence ends in `guest-render-fault`; ARM has no admitted current
   ELF/FAT/capture, and the source-matched capsule is blocked by the
   `Result<(), E>` parser gap.
+- continuation-2026-07-30-cpu-composited-glass: **SOURCE CONTRACT /
+  HIGHEST-CAPABILITY ACCEPT / RUNTIME UNVERIFIED.** Concrete `cpu`,
+  `software`, `cpu_simd`, and `vulkan` WM targets now request the existing
+  bounded Engine2D CPU compositor through
+  `engine2d-cpu-composited-material-v1`; Metal alone retains device-glass
+  intent, while AUTO/generic GPU remain opaque solid fallbacks. Vulkan never
+  claims device glass, and producer metadata does not claim realization:
+  Engine2D's execution result remains the only execution receipt. Tests cover
+  all four concrete targets, AUTO/GPU negative controls, Vulkan CPU planning,
+  and a translucent custom fallback that proves command/fallback pixels are
+  forced opaque while computed CPU material color stays translucent. Review
+  accepted on cycle 3 after the opacity edge and misleading producer-side
+  realized-target key were removed. No current binary/capture/QEMU PASS is
+  claimed.
