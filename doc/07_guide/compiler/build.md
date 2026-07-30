@@ -308,6 +308,11 @@ capability.
 The canonical entrypoint is the host bootstrap wrapper. Normal runs do not
 rebuild Rust; they reuse the existing seed/runtime and rebuild only
 pure-Simple stages.
+`--jobs=N` bounds both private Rust-authority Cargo builds and pure-Simple
+native builds, so a recovery run does not silently consume all host CPUs.
+When an isolated worktree has lost its ignored Rust seed/runtime tuple, use
+`--full-bootstrap --stop-after-stage2 --jobs=1` to rebuild only that authority
+and stop after verified Stage 2.
 
 ```bash
 # Default fast path: dynload pure-Simple stages, no cargo

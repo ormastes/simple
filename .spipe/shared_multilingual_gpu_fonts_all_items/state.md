@@ -294,3 +294,12 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   `--full-bootstrap --stop-after-stage2` only to build the missing current-input
   Rust authority before the same verified Stage2 stop. It must not continue
   into Stage3/4/full CLI. Status remains FAIL.
+- rust-authority-job-limit-2026-07-30: `--jobs=N` now reaches all private
+  Rust-authority Cargo invocations through Cargo's own `--jobs` option instead
+  of being discarded by `env -i`. The portability contract and compiler build
+  guide record the boundary. Shell syntax, whitespace, direct job-forwarding,
+  and help checks pass; the broader portability wrapper stopped before this
+  assertion on its pre-existing Stage3 source-snapshot symlink prerequisite.
+  Independent review also removed the helper's redundant Windows `--target`;
+  all four callers already supply the canonical target. No producer or PASS is
+  claimed.

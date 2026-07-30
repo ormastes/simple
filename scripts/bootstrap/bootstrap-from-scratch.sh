@@ -792,9 +792,7 @@ run_rust_authority_cargo() {
   rust_authority_log=$1
   rust_authority_lto=$2
   shift 2
-  if [ "${os}" = "windows" ]; then
-    set -- "$@" --target "${PLATFORM}"
-  fi
+  set -- "$@" --jobs "${jobs}"
   prepare_rust_authority_workspace
   if [ "${rust_llvm_status:-disabled}" = enabled ]; then
     if [ "${rust_authority_lto}" = off ]; then

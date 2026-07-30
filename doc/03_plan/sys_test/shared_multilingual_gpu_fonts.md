@@ -78,7 +78,8 @@ Run only this scoped set:
   seed/runtime tuple. Both immutable logs are retained and neither path may be
   reused. Attempt 29 may use `--full-bootstrap --stop-after-stage2` solely to
   rebuild that missing Rust authority and must still stop after verified
-  Stage2.
+  Stage2. Its `--jobs=1` now bounds both the private Cargo authority builds and
+  the pure-Simple native build.
 - [ ] Produce the canonical desktop ELF from the prepared owner repair. The
   focused Rust closure gate passes 2/2 and the RV64 entry closure is now 45
   modules without `vfs_init`, `vfs_boot_init`, `boot.cpu`, or diagnostic

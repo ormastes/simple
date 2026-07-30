@@ -1623,3 +1623,9 @@ pixels, and performance evidence remain release-blocking.
   attempt 29 using `--full-bootstrap --stop-after-stage2` only for the missing
   authority, then scoped-tool/spec/manual attempt 13 and reserved RV64 attempt
   26. No runtime or PASS is claimed.
+- rust-authority-job-limit-2026-07-30: The bootstrap `--jobs` limit now applies
+  to private Rust-authority Cargo builds as well as pure-Simple native builds.
+  Attempt 29 can therefore use `--jobs=1` without silently launching all-core
+  Cargo. The redundant Windows helper `--target` was removed because all four
+  authority callers already supply it. Focused shell/job/help checks pass; no
+  Stage2 admission is claimed.
