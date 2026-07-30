@@ -529,6 +529,151 @@ expect(available[0].selected).to_equal(false)
 
 </details>
 
+#### publishes favorite mutations through exact snapshot revisions
+
+**Requirements exercised:** REQ-WEB-BROWSER-009.
+
+Every logical bookmark-list change invalidates stale UI targets once.
+
+- Capture a bookmarkable page with one existing saved link
+   - Expected: the initial saved link is accepted
+- Add the current page through Favorite and publish one revision
+   - Expected: the action succeeds
+   - Expected: the snapshot revision advances exactly once
+   - Expected: two bookmarks exist and Favorite is selected
+   - Expected: the current page is listed
+- Keep normalized no-ops stable and publish changed title and bulk loads
+   - Expected: identical upsert, missing removal, and normalized-equivalent bulk load keep the revision
+   - Expected: a changed title and changed bulk load each advance exactly once
+- Reject its stale shifted target and open the current bookmark
+   - Expected: the action succeeds
+   - Expected: the snapshot revision advances exactly once
+   - Expected: the stale target is not found and the current target opens
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 112 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Capture a bookmarkable page with one existing saved link")
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/current",
+    "<html><head><title>Current</title></head><body>Page</body></html>"
+)
+expect(session.try_add_favorite(
+    "https://example.com/saved", "Saved"
+)).to_equal(true)
+val before_add = session.ui_access_snapshot()
+
+step("Add the current page through Favorite and publish one revision")
+val added = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#favorite", action: "click",
+    text_value: "", x: 0, y: 0
+))
+val after_add = session.ui_access_snapshot()
+val selected = ui_access_find_nodes(
+    after_add, "browser:session", "button", "Favorite", 1
+)
+expect(added.ok).to_equal(true)
+expect(after_add.snapshot_revision).to_equal(
+    before_add.snapshot_revision + 1
+)
+expect(session.bookmark_snapshot().entries.len()).to_equal(2)
+expect(selected[0].selected).to_equal(true)
+expect(ui_access_find_nodes(
+    after_add, "browser:session", "link", "Current", 1
+).len()).to_equal(1)
+
+step("Keep normalized no-ops stable and publish changed title and bulk loads")
+val stable_revision = session.ui_access_revision
+expect(session.try_add_favorite(
+    "https://example.com/current", "Current"
+)).to_equal(true)
+session.remove_favorite("https://example.com/missing")
+expect(session.load_bookmark_snapshot(
+    BrowserBookmarkSnapshot.create([
+        Pair(
+            first: "https://example.com/saved",
+            second: " Saved "
+        ),
+        Pair(
+            first: "https://example.com/current",
+            second: " Current "
+        )
+    ])
+)).to_equal(2)
+expect(session.ui_access_revision).to_equal(stable_revision)
+val before_title = session.ui_access_revision
+expect(session.try_add_favorite(
+    "https://example.com/current", "Renamed Current"
+)).to_equal(true)
+expect(session.ui_access_revision).to_equal(before_title + 1)
+expect(ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "link", "Renamed Current", 1
+).len()).to_equal(1)
+var expanded = session.bookmark_snapshot().entries
+expanded.push(Pair(
+    first: "https://example.com/third", second: "Third"
+))
+val before_bulk = session.ui_access_revision
+expect(session.load_bookmark_snapshot(
+    BrowserBookmarkSnapshot.create(expanded)
+)).to_equal(3)
+expect(session.ui_access_revision).to_equal(before_bulk + 1)
+expect(session.bookmark_snapshot().entries.len()).to_equal(3)
+
+step("Reject its stale shifted target and open the current bookmark")
+val before_remove = session.ui_access_snapshot()
+val current_before_remove = ui_access_find_nodes(
+    before_remove, "browser:session",
+    "link", "Renamed Current", 1
+)
+expect(current_before_remove.len()).to_equal(1)
+val removed = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#favorite", action: "click",
+    text_value: "", x: 0, y: 0
+))
+val after_remove = session.ui_access_snapshot()
+val unselected = ui_access_find_nodes(
+    after_remove, "browser:session", "button", "Favorite", 1
+)
+expect(removed.ok).to_equal(true)
+expect(after_remove.snapshot_revision).to_equal(
+    before_remove.snapshot_revision + 1
+)
+expect(session.bookmark_snapshot().entries.len()).to_equal(2)
+expect(unselected[0].selected).to_equal(false)
+val stale = session.ui_access_act(WinTextActionRequest(
+    target_id: current_before_remove[0].canonical_id,
+    action: "click", text_value: "", x: 0, y: 0
+))
+expect(stale.ok).to_equal(false)
+expect(stale.code).to_equal("target_not_found")
+expect(session.current_url).to_equal("https://example.com/current")
+val current_third = ui_access_find_nodes(
+    after_remove, "browser:session", "link", "Third", 1
+)
+expect(current_third.len()).to_equal(1)
+session.register_resource(
+    "https://example.com/third",
+    "<html><body>Third bookmark</body></html>"
+)
+val opened = session.ui_access_act(WinTextActionRequest(
+    target_id: current_third[0].canonical_id,
+    action: "click", text_value: "", x: 0, y: 0
+))
+expect(opened.ok).to_equal(true)
+expect(session.current_url).to_equal("https://example.com/third")
+
+```
+
+</details>
+
 #### edits and submits the address through textual UI access
 
 - var session = BrowserSession new

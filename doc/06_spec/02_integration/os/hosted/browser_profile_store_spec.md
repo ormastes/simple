@@ -317,9 +317,15 @@ restarted_session.browser.register_resource(
     "https://restart.test/saved",
     "<html><body>Reopened saved page</body></html>"
 )
+val restored_bookmarks = ui_access_find_nodes(
+    restarted_session.browser.ui_access_snapshot(),
+    "browser:session", "link",
+    "https://restart.test/saved", 1
+)
+expect(restored_bookmarks.len()).to_equal(1)
 val opened = restarted_session.browser.ui_access_act(
     WinTextActionRequest(
-        target_id: "browser:session#bookmark_0",
+        target_id: restored_bookmarks[0].canonical_id,
         action: "click", text_value: "", x: 0, y: 0
     )
 )
@@ -343,6 +349,7 @@ var removed = BrowserProfileStore.open(PROFILE_PATH)?
 expect(removed.load_bookmarks()?.entries.len()).to_equal(0)
 removed.close()?
 remove_profile_files()
+
 ```
 
 </details>

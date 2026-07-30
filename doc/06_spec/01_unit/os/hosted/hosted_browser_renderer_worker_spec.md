@@ -550,7 +550,7 @@ val bookmarks = ui_access_find_nodes(
 )
 expect(bookmarks.len()).to_equal(1)
 expect(bookmarks[0].canonical_id).to_equal(
-    "browser:session#bookmark_0"
+    "browser:session#bookmark_{worker.browser.ui_access_revision}_0"
 )
 worker.browser.register_resource(
     saved_url, "<p>restored bookmark</p>"
@@ -582,6 +582,7 @@ expect(host).to_contain("profile.load_bookmarks()")
 expect(host).to_contain(
     "browser_renderer.begin_bookmark_snapshot("
 )
+
 ```
 
 </details>

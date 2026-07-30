@@ -3150,7 +3150,9 @@ impl BrowserSession:
     me add_favorite(url: text, title: text):
         val _ = self.try_add_favorite(url, title)
 
-    me _favorite_candidate(url: text) -> text?:
+    me _favorite_candidate_for(
+        links: [Pair<text, text>], url: text
+    ) -> text?:
         if url.len() > 2048:
             return nil
         match normalize_network_navigation_url(url):
@@ -3159,10 +3161,26 @@ impl BrowserSession:
             Ok(normalized):
                 if normalized == "about:blank" or normalized.len() > 2048:
                     return nil
-                if self.favorite_links.len() >= 256 and
-                   pair_value(self.favorite_links, normalized) == nil:
+                if links.len() >= 256 and
+                   pair_value(links, normalized) == nil:
                     return nil
                 Some(normalized)
+
+    me _favorite_candidate(url: text) -> text?:
+        self._favorite_candidate_for(self.favorite_links, url)
+
+    fn _favorite_links_equal(
+        left: [Pair<text, text>], right: [Pair<text, text>]
+    ) -> bool:
+        if left.len() != right.len():
+            return false
+        var index = 0
+        while index < left.len():
+            if (left[index].first != right[index].first or
+                left[index].second != right[index].second):
+                return false
+            index = index + 1
+        true
 
     me try_add_favorite(url: text, title: text) -> bool:
         val candidate = self._favorite_candidate(url)
@@ -3170,9 +3188,12 @@ impl BrowserSession:
             return false
         val normalized = candidate.unwrap()
         val stored_title = browser_bookmark_stored_title(title)
-        self.favorite_links = upsert_pair(
+        val updated = upsert_pair(
             self.favorite_links, normalized, stored_title
         )
+        if not self._favorite_links_equal(self.favorite_links, updated):
+            self.favorite_links = updated
+            self._advance_ui_access_revision()
         true
 
     me can_favorite_current_page() -> bool:
@@ -3188,24 +3209,34 @@ impl BrowserSession:
         BrowserBookmarkSnapshot.create(copied)
 
     me load_bookmark_snapshot(snapshot: BrowserBookmarkSnapshot) -> i32:
-        var incoming: [Pair<text, text>] = []
-        for entry in snapshot.entries:
-            incoming.push(Pair(first: entry.first, second: entry.second))
-        self.favorite_links = []
+        var updated: [Pair<text, text>] = []
         var accepted = 0
         var index = 0
-        while index < incoming.len() and accepted < 256:
-            val entry = incoming[index]
-            if self.try_add_favorite(entry.first, entry.second):
+        while index < snapshot.entries.len() and accepted < 256:
+            val entry = snapshot.entries[index]
+            val candidate = self._favorite_candidate_for(
+                updated, entry.first
+            )
+            if candidate != nil:
+                updated = upsert_pair(
+                    updated, candidate.unwrap(),
+                    browser_bookmark_stored_title(entry.second)
+                )
                 accepted = accepted + 1
             index = index + 1
+        if not self._favorite_links_equal(self.favorite_links, updated):
+            self.favorite_links = updated
+            self._advance_ui_access_revision()
         accepted
 
     me remove_favorite(url: text):
         val normalized = normalize_browser_url(url)
         val kept_count = self._favorite_links_except_count(normalized)
+        if kept_count == self.favorite_links.len():
+            return
         if kept_count == 0:
             self.favorite_links = []
+            self._advance_ui_access_revision()
             return
         var kept: [Pair<text, text>] = [self.favorite_links[0]; kept_count]
         var idx = 0
@@ -3218,6 +3249,7 @@ impl BrowserSession:
                 out_idx = out_idx + 1
             idx = idx + 1
         self.favorite_links = kept
+        self._advance_ui_access_revision()
 
     me _favorite_links_except_count(normalized: text) -> i32:
         var count = 0
