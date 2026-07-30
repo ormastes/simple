@@ -716,9 +716,19 @@ impl ExecCore {
         // that runs (bug x64_freestanding_cfg_multivariant_misdispatch).
         simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut ast);
 
-        // Lower to HIR with context so imported types (enums, classes) are resolved
+        // Lower to HIR with context so imported types (enums, classes) are resolved.
+        // Lenient variant: aligns this lane's `Lowerer::with_module_resolver`
+        // memory-safety strictness with the canonical native-build/compile lane
+        // (native_project/compiler.rs sets `set_strict_mode(false)` +
+        // `set_lenient_types(true)` on the identical constructor immediately
+        // after construction). Without this, `run_file_jit` was the only lane
+        // that escalated W1006 (mutation without `mut` capability) to a hard
+        // abort instead of a warning — every other lane (interpreter,
+        // native-build, compile, tests) already tolerates this pattern
+        // silently. See
+        // doc/08_tracking/bug/jit_drawirrendertarget_moduleresolver_gap_2026-07-30.md.
         let project_hint = simple_compiler::pipeline::native_single_file_project_hint(path);
-        let hir_module = hir::lower_with_context_and_project_hint(&ast, path, project_hint.as_deref())
+        let hir_module = hir::lower_with_context_lenient_and_project_hint(&ast, path, project_hint.as_deref())
             .map_err(|e| format!("HIR lowering error: {}", e))?;
 
         // Lower to MIR

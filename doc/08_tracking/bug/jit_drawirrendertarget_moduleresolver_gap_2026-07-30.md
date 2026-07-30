@@ -20,11 +20,22 @@ repro that the safety pass is NOT a hole and NOT a false positive — it
 correctly, uniformly flags class-field mutation via a non-`mut` parameter
 everywhere, but the whole-program lowering pass reports only the single
 earliest-accumulated violation and aborts immediately, so `_take_many`
-(and likely many more sites) are simply never reached.** Fix scope
-assessed as architectural (78+ call sites for `_take`/`gpos_data_take`
-alone) and deliberately not attempted this pass. The JIT-enablement task is
-not fully complete, but has advanced past three real gaps with verified
-fixes, a regression pin, and a fully-diagnosed (if unfixed) fourth gap.
+(and likely many more sites) are simply never reached.** **Resolved as a
+lane-parity fix (not the 78-site refactor): all four other lanes
+(interpreter, native-build, compile, test) silently tolerate this exact
+pattern; `run_file_jit` was the only lane missing the canonical compile
+pipeline's `set_strict_mode(false)`/`set_lenient_types(true)` downgrade
+after the identical `Lowerer::with_module_resolver` constructor. Fixed by
+switching to the already-existing `lower_with_context_lenient_and_project_hint`
+— one line, zero new code, byte-identical-archive-verified safe.** Re-ran
+the full web pipeline JIT repro: **all four HIR-lowering gaps are now
+cleared, zero errors of any kind.** A **fifth**, categorically different
+gap remains: the repro does not complete within the time budgets tried —
+confirmed (via direct utime sampling) to be a **near-zero-CPU hang, not a
+compile error and not slow-but-working computation** — root cause not
+established this pass (a GPU-backend-SFFI-probing lead is noted but
+unproven). The strategic question (does JIT make styling fast enough to
+retire the 900s budget problem) remains open pending gap 5.
 **Component:** `src/compiler_rust/driver/src/exec_core.rs` (`run_file_jit`),
 `src/compiler_rust/compiler/src/module_resolver/*`,
 `src/compiler_rust/compiler/src/hir/lower/type_registration.rs` (`register_trait`),
@@ -584,3 +595,149 @@ follows `_take`) remains unknown until gap 4 is actually resolved.
   underlying assertions independently cross-checked against a raw
   interpreter run showing `nil` for the naked false-branch and `0` for the
   parenthesized one.
+
+## Gap 4 resolved as a lane-parity fix (2026-07-30, fourth follow-up pass) — ALL FOUR HIR-LOWERING GAPS NOW CLEARED
+
+Per instruction, treated gap 4 as a lane-parity question rather than a
+refactor. Probed the exact same minimal single-class repro
+(`class Budget: remaining: i64` / one function mutating `budget.remaining`
+via a non-`mut` parameter) against every other lane:
+
+| Lane | Command | Result |
+|---|---|---|
+| (a) interpreter | `SIMPLE_EXECUTION_MODE=interpreter run` | **silent success**, exit 0, no `W1006` shown |
+| (b) native-build | `native-build --entry-closure --emit-archive` | **silent success**, `Build complete: 1 compiled, 0 failed` |
+| (c) test lane | `simple test <spec>` | **silent success**, 1/1 passed, mutation verified correct (`remaining` 3→2) |
+| (d) plain compile | `simple compile` | **silent success**, `Compiled ... -> ...` |
+
+**All four PROVED silent.** `run_file_jit` (forced JIT) was the only lane
+that aborted.
+
+### Root cause (PROVED by code reading, not inferred) — `run_file_jit` is missing a two-line downgrade the canonical compile lane already applies
+
+`native_project/compiler.rs:383-385` (the pipeline behind native-build,
+`compile`, and — since tests compile through the same pipeline — the test
+lane) does:
+
+```rust
+let mut lowerer = Lowerer::with_module_resolver(resolver, file_path.to_path_buf());
+lowerer.set_strict_mode(false);
+lowerer.set_lenient_types(true);
+```
+
+**`exec_core.rs::run_file_jit` calls the exact same `Lowerer::with_module_resolver`
+constructor** (via `hir::lower_with_context_and_project_hint` →
+`lower_with_context`, `hir/lower/mod.rs:125-140`) **but never applies the
+two-line downgrade.** `Lowerer::with_module_resolver` itself initializes
+`memory_warnings: MemoryWarningCollector::strict()` unconditionally
+(`lowerer.rs:169-187`) — every caller of this constructor is expected to
+immediately decide its own strictness policy, and the canonical compile
+pipeline does; `run_file_jit` simply omitted it.
+
+**This settles the coordinator's branch cleanly: `run_file_jit` is the
+outlier, not the canonical lane.** No canonical lane "should" abort and is
+hiding a bug — all four independently, silently tolerate the pattern by
+design (the codebase's own idiom, used 78+ times just for
+`_take`/`gpos_data_take`, working exactly as every developer using it has
+observed). This is an engine-parity fix, not gate-weakening: the gate that
+must not weaken (the canonical compile lane's policy) was never touched —
+`run_file_jit` is being brought into alignment with it.
+
+### Fix landed (PROVED — minimal, reuses existing code)
+
+`hir/lower/mod.rs` already has a ready-made lenient variant of the exact
+same entry point, `lower_with_context_lenient_and_project_hint`
+(lines 158-169), doing precisely `set_strict_mode(false)` +
+`set_lenient_types(true)` — used nowhere in this exact call chain before.
+Changed `exec_core.rs::run_file_jit`'s single call site from
+`hir::lower_with_context_and_project_hint` to
+`hir::lower_with_context_lenient_and_project_hint`. One line changed (plus
+an explanatory comment), zero new code.
+
+**Validation (PROVED):**
+- `cargo build --release`: clean, same 16 pre-existing warnings, zero new.
+- Byte-identical-archive check on the unaffected fixture
+  (`check4_test.spl`, old vs. new seed): sha256-identical
+  (`a6994edb73067fdd16041e1e41db89e156f4a84029c9658e3a1a01b9a0aca202`) —
+  expected, since native-build already had `strict_mode=false`, unaffected
+  by this change.
+- Isolated repro under `SIMPLE_EXECUTION_MODE=jit`: **no more `[INFO] JIT
+  compilation failed]` fallback message at all** — the program runs
+  directly under JIT, `true` printed, exit 0. Previously this printed the
+  fallback message and the interpreter's result; now JIT itself succeeds.
+
+### Re-ran the full web pipeline JIT repro (PROVED) — all four HIR-lowering gaps are gone
+
+```
+SIMPLE_EXECUTION_MODE=jit SHOWCASE_RESOLUTION=480x360 bin/simple run examples/06_io/ui/web_render_file_gui.spl
+```
+
+**Zero HIR lowering errors of any kind** — no `Unknown type: DrawIrRenderTarget`,
+no `CastElse`, no `Unknown variable: text_align_v`, no `W1006`. The example
+runner's own internal watchdog killed the process after its timeout
+(default 10s, then retried at `SIMPLE_TIMEOUT_SECONDS=270` — also hit) —
+**not a compile failure**.
+
+### Gap 5 — NOT a HIR-lowering gap; a runtime hang, not root-caused this pass
+
+Investigated whether the remaining time was genuine (slow but working)
+compute or a stall, per the coordinator's "strategic prize" framing
+(per-node style timing). **Sampled `/proc/<pid>/stat` utime twice, 30s
+apart, on the actual running process (PROVED, not inferred): utime grew by
+only 2 ticks in 30 seconds** — i.e. **near-zero CPU**, not "slowly
+computing." This is qualitatively different from every prior gap in this
+doc: it is not a HIR-lowering error, and it does not look like genuine
+(if slow) style-loop computation either — it looks like the process is
+blocked (I/O wait, a lock, or a hung backend probe), not busy.
+
+**Not root-caused this pass** — time did not allow tracing the block point.
+**Circumstantial lead, not proved:** immediately before the timeout, the
+log shows dependency-discovery warnings for `sffi_vulkan.spl`,
+`vulkan_sffi.spl`, `sffi_directx.spl`, `sffi_opencl.spl`, `metal_sffi.spl`,
+`sffi_rocm.spl`, `oneapi_sffi.spl`, `oneapi_ffi.spl` — i.e. the whole-program
+JIT closure pulls in **every** GPU backend's SFFI module (this headless
+harness presumably has none of them available), which is consistent with,
+but not proof of, a hang during backend enumeration/probing rather than the
+style loop itself. **This is the natural next gap-5 investigation for
+whoever continues this chase**, but it needs its own dedicated pass (attach
+a debugger or strace to the actual blocked process, not just utime
+sampling) rather than being guessed at here.
+
+**The strategic question (does JIT'd styling make the 900s-budget problem
+moot?) remains genuinely open** — not because JIT compilation failed
+(it now fully succeeds), but because the process never reaches the
+style-producer loop within the time budgets tried this pass. This is real
+progress (four for four HIR-lowering gaps cleared) but not yet the
+strategic prize itself.
+
+### DX defect worth flagging regardless of any policy outcome
+
+Per instruction: the "Eighth pass" in `module_pass.rs` reports only
+`memory_warnings.warnings().first()` and aborts on the very first strict
+violation found anywhere in a whole-program compile. **Diagnostics are
+one-at-a-time by construction** — this doc's own campaign hit this
+directly (`CastElse` sites were discovered one-by-one across 6 locations
+in 3 files via a fix-and-rerun loop; gap 4 itself could easily have looked
+like "just fix `_take`" without the lane-parity check revealing the real
+78-site scope hidden behind the first-only report). Worth a real fix
+independent of whatever else happens with `W1006`/strict-mode policy:
+collect and report **all** accumulated warnings (or at least all `W1006`s)
+in one pass, not just the first, so whole-program strict-mode violations
+are discoverable in one compile instead of N.
+
+## Validation performed this fourth follow-up pass
+
+- Lane-parity probe (4 lanes, 1 minimal repro): PROVED, all four silent.
+- Root cause (`run_file_jit` missing the canonical lane's
+  `set_strict_mode(false)`/`set_lenient_types(true)` downgrade): PROVED by
+  code reading (`native_project/compiler.rs:383-385` vs.
+  `hir/lower/mod.rs:131-140`).
+- Fix (swap to the pre-existing `lower_with_context_lenient_and_project_hint`):
+  PROVED safe (cargo-clean, byte-identical-archive, isolated repro now
+  JIT-succeeds with no fallback) and PROVED to clear the real repro's `W1006`
+  error (re-ran the full web pipeline: zero HIR-lowering errors of any kind).
+- Gap 5 (runtime hang after all compile gaps clear): PROVED to exist
+  (near-zero CPU via direct utime sampling — not a compile error, not
+  slow-but-working computation). Root cause NOT established — reported with
+  a circumstantial, unproven lead (GPU-backend SFFI modules in the closure)
+  for the next pass.
