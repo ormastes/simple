@@ -35,14 +35,26 @@ grep -Eq ' T rt_riscv64_syscall$' "$tmp/gui-symbols"
 grep -Eq ' T rt_string_data$' "$tmp/gui-symbols"
 grep -Eq ' T rt_string_len$' "$tmp/gui-symbols"
 for symbol in \
-    rt_array_repeat rt_byte_array_new rt_bytes_to_text rt_contains \
-    rt_eprintln_str rt_for_iterable rt_pool_safepoint rt_raw_u64_to_string \
-    rt_slice rt_string_bytes rt_string_join rt_text_count_codepoints_cached \
-    rt_text_to_bytes rt_typed_bytes_u8_push rt_typed_words_u32_push \
-    rt_value_as_float rt_value_float
+    rt_array_copy rt_array_repeat rt_byte_array_new rt_bytes_to_text \
+    rt_contains rt_copy_user_byte rt_dict_get rt_dict_keys rt_dict_new \
+    rt_dict_remove rt_dict_set rt_env_get rt_eprintln_str \
+    rt_file_append_text rt_for_iterable rt_memory_barrier \
+    rt_pool_safepoint rt_raw_u64_to_string rt_stderr_write \
+    rt_riscv64_virtio_blk_fat32_capacity_sectors \
+    rt_riscv64_virtio_blk_fat32_init \
+    rt_riscv64_virtio_blk_fat32_read_sector_bytes rt_slice \
+    rt_string_bytes rt_string_char_at rt_string_join rt_string_new_literal \
+    rt_string_replace rt_text_count_codepoints_cached rt_text_to_bytes \
+    rt_text_validate_utf8 rt_time_now_monotonic_ms rt_typed_bytes_u8_push \
+    rt_typed_words_u32_push \
+    rt_volatile_read_u16 rt_volatile_read_u32 rt_volatile_read_u64 \
+    rt_volatile_read_u8 rt_volatile_write_u16 rt_volatile_write_u32 \
+    rt_volatile_write_u64 rt_volatile_write_u8 rt_value_as_float \
+    rt_value_float unsafe_addr_of
 do
     grep -Eq " T ${symbol}$" "$tmp/gui-symbols"
 done
+! grep -Eq ' [TW] rt_port_inb$' "$tmp/gui-symbols"
 for symbol in \
     rt_tls_client_close rt_tls_client_connect rt_tls_client_read rt_tls_client_write
 do
@@ -76,6 +88,75 @@ int main(void) {
 EOF
 cc "$tmp/float-roundtrip.c" -o "$tmp/float-roundtrip"
 "$tmp/float-roundtrip"
+
+cat >"$tmp/runtime-value-selfcheck.c" <<'EOF'
+#include <stdint.h>
+#include <sys/mman.h>
+
+typedef int64_t Value;
+
+extern Value rt_array_copy(Value);
+extern Value rt_array_get(Value, Value);
+extern Value rt_array_len(Value);
+extern Value rt_array_new(Value);
+extern Value rt_array_push(Value, Value);
+extern Value rt_dict_get(Value, Value);
+extern Value rt_dict_keys(Value);
+extern Value rt_dict_new(Value);
+extern Value rt_dict_remove(Value, Value);
+extern Value rt_dict_set(Value, Value, Value);
+extern Value rt_string_char_at(Value, Value);
+extern Value rt_string_data(Value);
+extern Value rt_string_len(Value);
+extern Value rt_string_new_literal(Value, Value);
+extern Value rt_string_replace(Value, Value, Value);
+extern Value rt_text_validate_utf8(Value);
+
+static int same_text(Value value, const char *expected, int64_t len) {
+    const char *data = (const char *)(uintptr_t)rt_string_data(value);
+    if (rt_string_len(value) != len || !data) return 0;
+    for (int64_t i = 0; i < len; i++) {
+        if (data[i] != expected[i]) return 0;
+    }
+    return 1;
+}
+
+int main(void) {
+    void *heap = mmap((void *)0x87000000ULL, 0x01000000ULL,
+        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+        -1, 0);
+    if (heap == MAP_FAILED) return 1;
+
+    Value hello = rt_string_new_literal((Value)(uintptr_t)"hello", 5);
+    Value one = rt_string_char_at(hello, 1);
+    Value old = rt_string_new_literal((Value)(uintptr_t)"ll", 2);
+    Value replacement = rt_string_new_literal((Value)(uintptr_t)"y", 1);
+    Value replaced = rt_string_replace(hello, old, replacement);
+    if (!same_text(one, "e", 1) || !same_text(replaced, "heyo", 4)) return 2;
+    if (rt_text_validate_utf8(hello) != 1) return 3;
+
+    Value array = rt_array_new(2);
+    if (!rt_array_push(array, 8) || !rt_array_push(array, 16)) return 4;
+    Value copy = rt_array_copy(array);
+    if (!rt_array_push(array, 24) || rt_array_len(copy) != 2) return 5;
+    if (rt_array_get(copy, 0) != 8 || rt_array_get(copy, 8) != 16) return 6;
+
+    Value dict = rt_dict_new(0);
+    if (!rt_dict_set(dict, hello, 40) || rt_dict_get(dict, hello) != 40) return 7;
+    if (rt_array_len(rt_dict_keys(dict)) != 1) return 8;
+    if (!rt_dict_remove(dict, hello) || rt_dict_get(dict, hello) != 3) return 9;
+    return 0;
+}
+EOF
+
+(
+    cd "$tmp"
+    cc -std=gnu11 -ffunction-sections -fdata-sections \
+        -DSIMPLE_RUNTIME_NO_ENTRY=1 -DSIMPLE_RUNTIME_NO_WEAK_HEAP=1 \
+        "$root/src/os/kernel/arch/riscv64/boot/freestanding_runtime.c" \
+        runtime-value-selfcheck.c -Wl,--gc-sections -o runtime-value-selfcheck
+    ./runtime-value-selfcheck
+)
 
 cat >"$tmp/expected-instructions" <<'EOF'
 c.mv	a7,a0

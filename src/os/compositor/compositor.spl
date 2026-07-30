@@ -3,16 +3,8 @@ extern fn serial_println(msg: text)
 use os.compositor.cursor.{CursorState}
 use os.compositor.display_backend_core.{CompositorBackend}
 use os.compositor.input_backend.{InputBackend}
-# Import the SAME MouseEvent the InputBackend trait returns
-# (os.drivers.input.ps2_mouse). A second, unrelated `MouseEvent` exists at
-# os.drivers.input.input_event with a different field set (delta_x/abs_x, no
-# edge-triggered button flags). Same-named types collapse in the global
-# registry (first registration wins), so without this explicit import the
-# field accesses below lower against the wrong type and HIR fails with
-# "struct 'ANY' field 'left_just_pressed'".
-use os.drivers.input.ps2_mouse.{MouseEvent}
+use os.gui.input_event.{MouseEvent}
 use os.drivers.framebuffer.fb_driver.{Color}
-use os.kernel.boot.cpu.{port_inb, port_outb}
 use common.window_protocol.geometry.{WindowId}
 use common.ui.window_scene.{SharedWmScene}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
@@ -481,11 +473,11 @@ class Compositor:
     me handle_input():
         if self.input != nil:
             self._handle_input_backend()
-            return
-        self._handle_input_ps2()
+        # PS/2 is an x86-only hardware boundary. Baremetal callers that own
+        # that device inject their port reader explicitly.
 
-    me handle_input_baremetal_ps2():
-        self._handle_input_ps2()
+    me handle_input_baremetal_ps2(port_read: fn(u16) -> u8):
+        self._handle_input_ps2(port_read)
 
     me _handle_input_backend():
         val inp = self.input
@@ -554,16 +546,16 @@ class Compositor:
                 if hit_idx >= 0:
                     self.focus_window(self.surfaces[hit_idx].id)
 
-    me _handle_input_ps2():
+    me _handle_input_ps2(port_read: fn(u16) -> u8):
         var alt_held = false
-        var status = port_inb(0x64)
+        var status = port_read(0x64)
         while ((status as i32) & 1) != 0:
             # AUX bytes belong to the mouse packet decoder below. Consuming
             # them as keyboard scancodes made QMP pointer input disappear
             # before it could reach the shared WM event path.
             if ((status as i32) & 0x20) != 0:
                 break
-            var scancode = port_inb(0x60)
+            var scancode = port_read(0x60)
             var sc = scancode as i32
             if sc == 0x38:
                 alt_held = true
@@ -582,7 +574,7 @@ class Compositor:
             elif sc == 0xD7:
                 self.input_sequence = self.input_sequence + 1
                 self.pending_fullscreen_release_sequence = self.input_sequence
-            var next_status = port_inb(0x64)
+            var next_status = port_read(0x64)
             status = next_status
 
         # PS/2 mouse: drain the whole pending packet burst, then emit ONE
@@ -610,21 +602,21 @@ class Compositor:
             if pointer_drained >= 64:
                 pointer_draining = false
             else:
-                var mstatus = port_inb(0x64)
+                var mstatus = port_read(0x64)
                 if ((mstatus as i32) & 0x21) != 0x21:
                     pointer_draining = false
                 else:
-                    var b0 = port_inb(0x60)
-                    var ms1 = port_inb(0x64)
+                    var b0 = port_read(0x60)
+                    var ms1 = port_read(0x64)
                     if ((ms1 as i32) & 1) == 0:
                         pointer_draining = false
                     else:
-                        var b1 = port_inb(0x60)
-                        var ms2 = port_inb(0x64)
+                        var b1 = port_read(0x60)
+                        var ms2 = port_read(0x64)
                         if ((ms2 as i32) & 1) == 0:
                             pointer_draining = false
                         else:
-                            var b2 = port_inb(0x60)
+                            var b2 = port_read(0x60)
                             var dx = b1 as i32
                             var dy = b2 as i32
                             if ((b0 as i32) & 0x10) != 0:

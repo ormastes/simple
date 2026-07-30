@@ -1,0 +1,47 @@
+# RV64 desktop font media: direct VirtIO-BLK FAT32 mount and reads.
+
+use os.services.vfs.riscv64_virtio_blk_adapter.{Riscv64VirtioBlkAdapter}
+use os.services.fat32.shared_fat32_driver.{SharedFat32Driver as Fat32Core}
+use os.kernel.types.fs_types.{FileFlags}
+use os.kernel.log.klog_api.{log_raw_println}
+
+val RISCV64_FONT_FILE_READ_MAX: u64 = 33554432
+var g_riscv64_font_root: Fat32Core? = nil
+
+pub fn riscv64_font_vfs_mount() -> bool:
+    """Mount the RV64 desktop's read-only VirtIO FAT32 font media."""
+    log_raw_println("[vfs-init] Starting RV64 VirtIO-BLK FAT32 initialization...")
+    g_riscv64_font_root = nil
+    val adapter_result = Riscv64VirtioBlkAdapter.initialize()
+    if adapter_result.is_err():
+        log_raw_println("[vfs-init] RV64 VirtIO-BLK unavailable: {adapter_result.unwrap_err()}")
+        return false
+    var root = Fat32Core.new(adapter_result.unwrap())
+    val mount_result = root.mount("", "")
+    if mount_result.is_err():
+        log_raw_println("[vfs-init] RV64 VirtIO FAT32 mount failed: {mount_result.unwrap_err()}")
+        return false
+    g_riscv64_font_root = Some(root)
+    val font_probe = riscv64_font_vfs_read_file_bytes("/SYS/FONTS/NOTOSANS")
+    if font_probe.len() != 1708408:
+        log_raw_println("[vfs-init] RV64 font load probe failed path=/SYS/FONTS/NOTOSANS bytes={font_probe.len()}")
+        g_riscv64_font_root = nil
+        return false
+    log_raw_println("[vfs-init] RV64 VirtIO FAT32 mounted font bytes={font_probe.len()}")
+    true
+
+pub fn riscv64_font_vfs_read_file_bytes(path: text) -> [u8]:
+    """Read one mounted RV64 font-media file without hosted fallback."""
+    if path == "" or g_riscv64_font_root == nil:
+        return []
+    val flags = FileFlags(read: true, write: false, create: false, append: false, truncate: false)
+    var root = g_riscv64_font_root.unwrap()
+    val open_result = root.open(path, flags)
+    if open_result.is_err():
+        return []
+    val handle = open_result.unwrap()
+    val read_result = root.read(handle, RISCV64_FONT_FILE_READ_MAX)
+    root.close(handle)
+    if read_result.is_err():
+        return []
+    read_result.unwrap()

@@ -43,6 +43,11 @@ Provide one configurable, license-audited multilingual font pipeline shared by S
   2D integration; 3D integration; executable-spec/manual matrix; and
   doc/guide/SPipe freshness.
 - Merge owner and final normal/highest-capability reviewer: primary Codex agent.
+- RV64 closure repair (2026-07-30): dedicated font-VFS, shell, framebuffer,
+  and input-event owners reduce the focused entry closure to 45 modules and
+  exclude legacy VFS, port-I/O, and diagnostic owners. Focused Rust closure
+  tests pass 2/2; fresh clean-checkpoint Stage2/tool admission and RV64 attempt
+  26 remain required before any done mark.
 - Reviewed shared vocabulary: canonical `FontRenderer`; one possible
   `FontRenderBatch`/`prepare_text` material seam only if persistent shared atlas
   evidence requires it. No parallel renderer/emitter hierarchy.
@@ -1598,3 +1603,12 @@ pixels, and performance evidence remain release-blocking.
   stubs, and fake TLS calls. No new RV64 producer ran after the capped attempt
   23, so ELF/QEMU crop/exact-ten/manual evidence remains pending and status
   remains `SIMPLEOS_STAGE2_FONT: BLOCKED`; broader `STATUS: FAIL`.
+- rv64-current-checkpoint-closure-blocker-2026-07-30: Stage2 attempt 24 and
+  scoped-tool attempt 12 are admitted at clean checkpoint `2a7e354c116`.
+  RV64 attempt 25 compiled `_boot_full_gui_runtime.o` but exited 1 with a
+  618-symbol pre-GC unresolved surface, including 597 hosted or unrelated raw
+  runtime APIs; lld proves at least twenty live. Stub fallback, the legacy
+  mixed-ABI runtime, and NIL/no-op
+  shims remain rejected. Attempt 26 is reserved until the import/runtime owner
+  repair passes focused gates. `SIMPLEOS_STAGE2_FONT: BLOCKED`; broader
+  `STATUS: FAIL`.

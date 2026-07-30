@@ -1,0 +1,130 @@
+# RV64 desktop shell: the freestanding Shared WM / Draw IR frame path.
+
+use common.ui.taskbar_model.{TaskbarModel, WindowRef, TrayItem}
+use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, WM_CHROME_KIND_TITLED, shared_wm_background_color}
+use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_id}
+use os.compositor.compositor.{Compositor}
+use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_revision_with_theme}
+use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command}
+use os.desktop.wm_pointer_decode.{wm_pointer_button_from_code, wm_pointer_kind_from_code}
+use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
+
+pub class Riscv64DesktopShell:
+    compositor: Compositor
+    last_wm_loop_marker: text
+    content_cache_ids: [i64]
+    content_caches: [WebRenderPixelArtifactCache]
+
+impl Riscv64DesktopShell:
+    static fn new(compositor: Compositor) -> Riscv64DesktopShell:
+        Riscv64DesktopShell(
+            compositor: compositor,
+            last_wm_loop_marker: "",
+            content_cache_ids: [],
+            content_caches: []
+        )
+
+    me init_baremetal():
+        self.last_wm_loop_marker = "[simpleos-wm] initialized=true"
+
+    fn _scene_revision() -> i64:
+        var revision: i64 = 17
+        var z = 0
+        while z < self.compositor.surfaces.len():
+            val surface = self.compositor.surfaces[z]
+            revision = ((revision * 131 + surface.id.to_i64()) % 2147483647) + 1
+            revision = ((revision * 131 + surface.x.to_i64()) % 2147483647) + 1
+            revision = ((revision * 131 + surface.y.to_i64()) % 2147483647) + 1
+            revision = ((revision * 131 + surface.width.to_i64()) % 2147483647) + 1
+            revision = ((revision * 131 + surface.height.to_i64()) % 2147483647) + 1
+            revision = ((revision * 131 + surface.content_revision) % 2147483647) + 1
+            revision = ((revision * 131 + z.to_i64()) % 2147483647) + 1
+            revision = ((revision * 131 + (if z == self.compositor.focused_idx: 1 else: 0)) % 2147483647) + 1
+            revision = ((revision * 131 + (if surface.visible: 1 else: 0)) % 2147483647) + 1
+            z = z + 1
+        revision
+
+    fn _scene_snapshot() -> SharedWmScene:
+        var windows: [SharedWmWindow] = []
+        var z = 0
+        for surface in self.compositor.surfaces:
+            windows = windows.push(SharedWmWindow(
+                surface_id: "{surface.id}", window_id: "{surface.id}",
+                surface_kind: "simpleos-compositor", process_id: if surface.process_id > 0: surface.process_id.to_u64() else: 0u64,
+                app_id: surface.app_id, title: surface.title, language: "und",
+                x: surface.x, y: surface.y, width: surface.width, height: surface.height,
+                tree: nil, html: "", minimized: not surface.visible,
+                focused: z == self.compositor.focused_idx, z_index: z,
+                chrome_kind: WM_CHROME_KIND_TITLED
+            ))
+            z = z + 1
+        SharedWmScene(width: self.compositor.screen_width, height: self.compositor.screen_height, backend: "simpleos-compositor", windows: windows, background: shared_wm_background_color(wm_chrome_theme().compositor_bg))
+
+    fn _taskbar() -> TaskbarModel:
+        var running: [WindowRef] = []
+        for surface in self.compositor.surfaces:
+            running = running.push(WindowRef(window_id: "{surface.id}", app_id: surface.app_id, title: surface.title, minimized: not surface.visible))
+        TaskbarModel(pinned: [], running: running, tray: [TrayItem(item_id: "clock", label: "00:00", icon: "clock")])
+
+    me _content_frames(scene_revision: i64) -> [WmContentFrame]:
+        var frames: [WmContentFrame] = []
+        for surface in self.compositor.surfaces:
+            val content_w = surface.width - 8
+            val content_h = surface.height - 36
+            if surface.visible and content_w > 0 and content_h > 0:
+                val active_theme = active_wm_theme_id()
+                val theme_id = if active_theme != "": active_theme else: default_theme_id()
+                var cache_index = -1
+                var i = 0
+                while i < self.content_cache_ids.len():
+                    if self.content_cache_ids[i] == surface.id.to_i64():
+                        cache_index = i
+                    i = i + 1
+                var cache = if cache_index >= 0:
+                    self.content_caches[cache_index]
+                else:
+                    WebRenderPixelArtifactCache.create(content_w, content_h, "software")
+                if cache.width != content_w or cache.height != content_h:
+                    cache = WebRenderPixelArtifactCache.create(content_w, content_h, "software")
+                val content_revision = simple_web_content_revision_with_theme(theme_id, surface.title, surface.content_html, content_w, content_h, 0)
+                frames = frames.push(simple_web_content_frame_cached(cache, "{surface.id}", scene_revision, content_revision, theme_id, surface.title, surface.content_html, content_w, content_h, 0))
+                if cache_index >= 0:
+                    self.content_caches[cache_index] = cache
+                else:
+                    self.content_cache_ids = self.content_cache_ids.push(surface.id.to_i64())
+                    self.content_caches = self.content_caches.push(cache)
+        frames
+
+    me render_baremetal_frame(executor: Engine2dWmFrameExecutor) -> i64:
+        val scene = self._scene_snapshot()
+        val taskbar = self._taskbar()
+        val scene_revision = self._scene_revision()
+        executor.render(scene, taskbar, self._content_frames(scene_revision), scene_revision, scene_revision, "00:00")
+
+    me render_baremetal_first_frame(executor: Engine2dWmFrameExecutor) -> i64:
+        self.render_baremetal_frame(executor)
+
+    me handle_pending_wm_pointer_step():
+        var compositor = self.compositor
+        if not compositor.pending_wm_pointer_valid:
+            return
+        val x = compositor.pending_wm_pointer_x
+        val y = compositor.pending_wm_pointer_y
+        val button = wm_pointer_button_from_code(compositor.pending_wm_pointer_button_code)
+        val kind = wm_pointer_kind_from_code(compositor.pending_wm_pointer_kind_code)
+        compositor.clear_pending_wm_pointer_step()
+        self.compositor = compositor
+        val command = simpleos_wm_pointer_runtime_command(self._scene_snapshot(), self._taskbar(), x, y, button, kind, 1000, "00:00", 2)
+        val window_id = command.window_id.to_i64()
+        if command.kind == "window_focus" and window_id > 0:
+            self.compositor.focus_window(window_id.to_i32())
+        elif command.kind == "window_drag_begin" and window_id > 0:
+            self.compositor.focus_window(window_id.to_i32())
+            self.compositor.dragging = true
+            self.compositor.drag_window_id = window_id.to_i32()
+        elif command.kind == "desktop_background":
+            self.compositor.focused_idx = -1
+        val handled_text = if command.handled: "true" else: "false"
+        self.last_wm_loop_marker = "[simpleos-wm] loop-step command={command.kind} target={command.target_id} app={command.app_id} window={command.window_id} handled={handled_text}"

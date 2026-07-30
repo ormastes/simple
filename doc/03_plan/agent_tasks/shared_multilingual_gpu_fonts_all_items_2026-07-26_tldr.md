@@ -13,6 +13,11 @@ reviews, syncs, and pushes.
 
 ## Current Truth
 
+- Stage2 attempt 24 and scoped-tool attempt 12 are independently admitted at
+  `2a7e354c116`. RV64 attempt 25 proves import-level closure pollution: a
+  618-symbol pre-GC unresolved surface includes 597 hosted/unrelated raw
+  runtime APIs, with at least twenty proven live. Attempt
+  26 waits for the owner repair; QEMU/exact-ten/manuals remain blocked.
 - Focused graph: 46 commands (preflight, B6, C18, D12, E9).
 - Manuals: 42 font mirrors (0 current, 19 missing, 23 stale) plus four missing
   compiler-prerequisite mirrors; every canonical mirror needs immutable docgen

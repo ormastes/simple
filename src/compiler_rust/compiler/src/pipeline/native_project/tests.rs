@@ -1663,13 +1663,31 @@ fn test_riscv64_gui_entry_closure_excludes_full_runtime_package_manager_tls() {
     let files = builder.discover_files().unwrap();
     assert!(files
         .iter()
-        .any(|path| same_file_path(path, &repo_root.join("src/os/desktop/shell_ui_builders.spl"))));
+        .any(|path| same_file_path(path, &repo_root.join("src/os/desktop/shell_riscv64.spl"))));
+    assert!(files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/os/desktop/font_bootstrap_riscv64.spl"))));
+    assert!(files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/os/services/vfs/riscv64_font_vfs.spl"))));
     assert!(!files
         .iter()
         .any(|path| same_file_path(path, &repo_root.join("src/os/apps/package_manager/package_manager.spl"))));
     assert!(!files
         .iter()
         .any(|path| same_file_path(path, &repo_root.join("src/app/ui.web/tls_client.spl"))));
+    assert!(!files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/os/services/vfs/vfs_init.spl"))));
+    assert!(!files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/os/services/vfs/vfs_boot_init.spl"))));
+    assert!(!files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/os/desktop/shell.spl"))));
+    assert!(!files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/os/kernel/boot/cpu.spl"))));
 }
 
 #[test]

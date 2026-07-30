@@ -20,6 +20,7 @@ typedef unsigned char spl_u8;
 #define RT_HEAP_STRING 0x01U
 #define RT_HEAP_ARRAY 0x02U
 #define RT_HEAP_TUPLE 0x04U
+#define RT_HEAP_DICT 0x06U
 #define RT_HEAP_ENUM 0x07U
 #define RT_VALUE_HEAP_FLOAT 0x464C5431U
 
@@ -43,6 +44,21 @@ typedef struct RtArray {
     spl_u64 capacity;
     spl_i64 *data;
 } RtArray;
+
+typedef struct RtDictEntry {
+    spl_i64 key;
+    spl_i64 value;
+    spl_u64 hash;
+    signed char occupied;
+} RtDictEntry;
+
+typedef struct RtDict {
+    RtHeapHeader header;
+    spl_u64 capacity;
+    spl_u64 len;
+    spl_u64 tombstones;
+    RtDictEntry *entries;
+} RtDict;
 
 typedef struct RtTuple {
     RtHeapHeader header;
@@ -188,6 +204,7 @@ static spl_i64 rt_heap(void *ptr) {
 
 spl_i64 rt_array_new(spl_i64 capacity_value);
 spl_i64 rt_array_push(spl_i64 array_value, spl_i64 value);
+spl_i64 rt_native_eq(spl_i64 lhs, spl_i64 rhs);
 
 static RtHeapHeader *rt_as_heap(spl_i64 value, spl_u8 kind) {
     spl_u64 raw = (spl_u64)value;
@@ -208,6 +225,10 @@ static RtString *rt_as_string(spl_i64 value) {
 
 static RtArray *rt_as_array(spl_i64 value) {
     return (RtArray *)rt_as_heap(value, RT_HEAP_ARRAY);
+}
+
+static RtDict *rt_as_dict(spl_i64 value) {
+    return (RtDict *)rt_as_heap(value, RT_HEAP_DICT);
 }
 
 static RtTuple *rt_as_tuple(spl_i64 value) {
@@ -262,6 +283,10 @@ spl_i64 rt_string_new(spl_i64 bytes_value, spl_i64 len_value) {
     }
     out->data[len] = 0;
     return rt_heap(out);
+}
+
+spl_i64 rt_string_new_literal(spl_i64 bytes_value, spl_i64 len_value) {
+    return rt_string_new(bytes_value, len_value);
 }
 
 spl_i64 rt_raw_u64_to_string(spl_i64 raw) {
@@ -609,6 +634,228 @@ spl_i64 rt_array_push(spl_i64 array_value, spl_i64 value) {
     return 1;
 }
 
+spl_i64 rt_array_copy(spl_i64 array_value) {
+    RtArray *source = rt_as_array(array_value);
+    spl_i64 out;
+    if (!source) {
+        return array_value;
+    }
+    out = rt_array_new((spl_i64)source->len);
+    for (spl_u64 i = 0; i < source->len; i = i + 1) {
+        if (!rt_array_push(out, source->data[i])) {
+            return rt_nil();
+        }
+    }
+    return out;
+}
+
+static spl_i64 rt_dict_key(spl_i64 key) {
+    spl_u64 tag = ((spl_u64)key) & RT_VALUE_TAG_MASK;
+    if (tag == RT_VALUE_TAG_HEAP) {
+        return key;
+    }
+    if (tag == RT_VALUE_TAG_INT && (key >= 8 || key <= -8)) {
+        return key;
+    }
+    return rt_int(key);
+}
+
+static spl_u64 rt_dict_hash(spl_i64 key) {
+    RtString *string = rt_as_string(key);
+    spl_u64 hash = 1469598103934665603ULL;
+    if (string) {
+        for (spl_u64 i = 0; i < string->len; i = i + 1) {
+            hash ^= (spl_u8)string->data[i];
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    }
+    hash = (spl_u64)key;
+    hash ^= hash >> 33;
+    hash *= 0xff51afd7ed558ccdULL;
+    return hash ^ (hash >> 33);
+}
+
+static spl_i64 rt_dict_key_eq(spl_i64 left, spl_i64 right) {
+    return rt_native_eq(left, right);
+}
+
+static spl_i64 rt_dict_put(RtDict *dict, spl_i64 key, spl_i64 value);
+
+static spl_i64 rt_dict_resize(RtDict *dict, spl_u64 capacity) {
+    RtDictEntry *old = dict->entries;
+    spl_u64 old_capacity = dict->capacity;
+    RtDictEntry *fresh = (RtDictEntry *)rt_alloc((spl_i64)(capacity * sizeof(RtDictEntry)));
+    if (!fresh) {
+        return 0;
+    }
+    rt_memset(fresh, 0, (spl_i64)(capacity * sizeof(RtDictEntry)));
+    dict->entries = fresh;
+    dict->capacity = capacity;
+    dict->len = 0;
+    dict->tombstones = 0;
+    for (spl_u64 i = 0; i < old_capacity; i = i + 1) {
+        if (old[i].occupied == 1) {
+            rt_dict_put(dict, old[i].key, old[i].value);
+        }
+    }
+    return 1;
+}
+
+static spl_i64 rt_dict_put(RtDict *dict, spl_i64 key, spl_i64 value) {
+    spl_i64 canonical;
+    spl_u64 hash;
+    spl_u64 index;
+    spl_i64 tombstone = -1;
+    if (!dict || !dict->entries) {
+        return 0;
+    }
+    if ((dict->len + dict->tombstones + 1) * 10 > dict->capacity * 7 &&
+        !rt_dict_resize(dict, dict->capacity * 2)) {
+        return 0;
+    }
+    canonical = rt_dict_key(key);
+    hash = rt_dict_hash(canonical);
+    index = hash & (dict->capacity - 1);
+    for (;;) {
+        RtDictEntry *entry = &dict->entries[index];
+        if (entry->occupied == 0) {
+            if (tombstone >= 0) {
+                entry = &dict->entries[tombstone];
+                dict->tombstones = dict->tombstones - 1;
+            }
+            entry->key = canonical;
+            entry->value = value;
+            entry->hash = hash;
+            entry->occupied = 1;
+            dict->len = dict->len + 1;
+            return 1;
+        }
+        if (entry->occupied < 0) {
+            if (tombstone < 0) tombstone = (spl_i64)index;
+        } else if (entry->hash == hash && rt_dict_key_eq(entry->key, canonical)) {
+            entry->value = value;
+            return 1;
+        }
+        index = (index + 1) & (dict->capacity - 1);
+    }
+}
+
+spl_i64 rt_dict_new(spl_i64 cap_hint) {
+    RtDict *dict = (RtDict *)rt_alloc((spl_i64)sizeof(RtDict));
+    (void)cap_hint;
+    if (!dict) return rt_nil();
+    dict->entries = (RtDictEntry *)rt_alloc((spl_i64)(8 * sizeof(RtDictEntry)));
+    if (!dict->entries) return rt_nil();
+    rt_memset(dict->entries, 0, (spl_i64)(8 * sizeof(RtDictEntry)));
+    dict->header.object_type = RT_HEAP_DICT;
+    dict->header.gc_flags = 0;
+    dict->header.reserved = 0;
+    dict->header.size = (spl_u32)sizeof(RtDict);
+    dict->capacity = 8;
+    dict->len = 0;
+    dict->tombstones = 0;
+    return rt_heap(dict);
+}
+
+spl_i64 rt_dict_set(spl_i64 dict_value, spl_i64 key, spl_i64 value) {
+    return rt_dict_put(rt_as_dict(dict_value), key, value);
+}
+
+spl_i64 rt_dict_insert(spl_i64 dict_value, spl_i64 key, spl_i64 value) {
+    return rt_dict_set(dict_value, key, value);
+}
+
+spl_i64 rt_dict_get(spl_i64 dict_value, spl_i64 key) {
+    RtDict *dict = rt_as_dict(dict_value);
+    spl_i64 canonical;
+    spl_u64 hash;
+    spl_u64 index;
+    if (!dict || !dict->entries || dict->len == 0) return rt_nil();
+    canonical = rt_dict_key(key);
+    hash = rt_dict_hash(canonical);
+    index = hash & (dict->capacity - 1);
+    for (;;) {
+        RtDictEntry *entry = &dict->entries[index];
+        if (entry->occupied == 0) return rt_nil();
+        if (entry->occupied == 1 && entry->hash == hash && rt_dict_key_eq(entry->key, canonical)) return entry->value;
+        index = (index + 1) & (dict->capacity - 1);
+    }
+}
+
+spl_i64 rt_dict_contains(spl_i64 dict_value, spl_i64 key) {
+    RtDict *dict = rt_as_dict(dict_value);
+    spl_i64 canonical;
+    spl_u64 hash;
+    spl_u64 index;
+    if (!dict || !dict->entries || dict->len == 0) return 0;
+    canonical = rt_dict_key(key);
+    hash = rt_dict_hash(canonical);
+    index = hash & (dict->capacity - 1);
+    for (;;) {
+        RtDictEntry *entry = &dict->entries[index];
+        if (entry->occupied == 0) return 0;
+        if (entry->occupied == 1 && entry->hash == hash && rt_dict_key_eq(entry->key, canonical)) return 1;
+        index = (index + 1) & (dict->capacity - 1);
+    }
+}
+
+spl_i64 rt_dict_remove(spl_i64 dict_value, spl_i64 key) {
+    RtDict *dict = rt_as_dict(dict_value);
+    spl_i64 canonical;
+    spl_u64 hash;
+    spl_u64 index;
+    if (!dict || !dict->entries || dict->len == 0) return 0;
+    canonical = rt_dict_key(key);
+    hash = rt_dict_hash(canonical);
+    index = hash & (dict->capacity - 1);
+    for (;;) {
+        RtDictEntry *entry = &dict->entries[index];
+        if (entry->occupied == 0) return 0;
+        if (entry->occupied == 1 && entry->hash == hash && rt_dict_key_eq(entry->key, canonical)) {
+            entry->occupied = -1;
+            dict->len = dict->len - 1;
+            dict->tombstones = dict->tombstones + 1;
+            return 1;
+        }
+        index = (index + 1) & (dict->capacity - 1);
+    }
+}
+
+spl_i64 rt_dict_len(spl_i64 dict_value) {
+    RtDict *dict = rt_as_dict(dict_value);
+    return dict ? (spl_i64)dict->len : 0;
+}
+
+spl_i64 rt_dict_keys(spl_i64 dict_value) {
+    RtDict *dict = rt_as_dict(dict_value);
+    spl_i64 out = rt_array_new(dict ? (spl_i64)dict->len : 0);
+    if (!dict) return out;
+    for (spl_u64 i = 0; i < dict->capacity; i = i + 1) {
+        if (dict->entries[i].occupied == 1 && !rt_array_push(out, dict->entries[i].key)) return rt_nil();
+    }
+    return out;
+}
+
+spl_i64 rt_dict_values(spl_i64 dict_value) {
+    RtDict *dict = rt_as_dict(dict_value);
+    spl_i64 out = rt_array_new(dict ? (spl_i64)dict->len : 0);
+    if (!dict) return out;
+    for (spl_u64 i = 0; i < dict->capacity; i = i + 1) {
+        if (dict->entries[i].occupied == 1 && !rt_array_push(out, dict->entries[i].value)) return rt_nil();
+    }
+    return out;
+}
+
+spl_i64 rt_dict_clear(spl_i64 dict_value) {
+    RtDict *dict = rt_as_dict(dict_value);
+    if (!dict || !dict->entries) return 0;
+    rt_memset(dict->entries, 0, (spl_i64)(dict->capacity * sizeof(RtDictEntry)));
+    dict->len = 0;
+    dict->tombstones = 0;
+    return 1;
+}
+
 spl_i64 rt_array_concat(spl_i64 left_value, spl_i64 right_value) {
     RtArray *left = rt_as_array(left_value);
     RtArray *right = rt_as_array(right_value);
@@ -629,6 +876,7 @@ spl_i64 rt_array_concat(spl_i64 left_value, spl_i64 right_value) {
 
 spl_i64 rt_index_get(spl_i64 collection, spl_i64 index_value) {
     RtArray *array = rt_as_array(collection);
+    RtDict *dict = rt_as_dict(collection);
     RtTuple *tuple;
     RtString *string;
     spl_i64 index = rt_index_arg(index_value);
@@ -640,6 +888,9 @@ spl_i64 rt_index_get(spl_i64 collection, spl_i64 index_value) {
             return rt_nil();
         }
         return array->data[index];
+    }
+    if (dict) {
+        return rt_dict_get(collection, index_value);
     }
     tuple = rt_as_tuple(collection);
     if (tuple) {
@@ -666,7 +917,11 @@ spl_i64 rt_index_get(spl_i64 collection, spl_i64 index_value) {
 
 spl_i64 rt_index_set(spl_i64 collection, spl_i64 index_value, spl_i64 value) {
     RtArray *array = rt_as_array(collection);
+    RtDict *dict = rt_as_dict(collection);
     spl_i64 index = rt_index_arg(index_value);
+    if (dict) {
+        return rt_dict_set(collection, index_value, value);
+    }
     if (!array) {
         return 0;
     }
@@ -919,6 +1174,66 @@ spl_i64 __simple_rt_string_char_code_at(spl_i64 value, spl_i64 index_value) {
     return rt_string_char_code_at(value, index_value);
 }
 
+spl_i64 rt_string_char_at(spl_i64 value, spl_i64 index_value) {
+    RtString *string = rt_as_string(value);
+    spl_i64 index = index_value;
+    if (!string) {
+        return rt_nil();
+    }
+    if (index < 0 || (spl_u64)index >= string->len) {
+        return rt_nil();
+    }
+    return rt_string_new((spl_i64)(spl_u64)&string->data[index], 1);
+}
+
+static spl_i64 rt_utf8_invalid_at(const spl_u8 *data, spl_u64 len) {
+    spl_u64 i = 0;
+    while (i < len) {
+        spl_u8 byte = data[i];
+        spl_u64 width;
+        spl_u32 codepoint;
+        if (byte < 0x80U) {
+            i = i + 1;
+            continue;
+        }
+        if ((byte & 0xe0U) == 0xc0U) {
+            width = 2;
+            codepoint = byte & 0x1fU;
+            if (codepoint < 2U) return (spl_i64)i;
+        } else if ((byte & 0xf0U) == 0xe0U) {
+            width = 3;
+            codepoint = byte & 0x0fU;
+        } else if ((byte & 0xf8U) == 0xf0U) {
+            width = 4;
+            codepoint = byte & 0x07U;
+        } else {
+            return (spl_i64)i;
+        }
+        if (i + width > len) return (spl_i64)i;
+        for (spl_u64 j = 1; j < width; j = j + 1) {
+            if ((data[i + j] & 0xc0U) != 0x80U) return (spl_i64)i;
+            codepoint = (codepoint << 6) | (data[i + j] & 0x3fU);
+        }
+        if ((width == 3 && codepoint < 0x800U) ||
+            (width == 4 && codepoint < 0x10000U) ||
+            (codepoint >= 0xd800U && codepoint <= 0xdfffU) || codepoint > 0x10ffffU) {
+            return (spl_i64)i;
+        }
+        i = i + width;
+    }
+    return -1;
+}
+
+spl_i64 rt_text_validate_utf8(spl_i64 value) {
+    RtString *string = rt_as_string(value);
+    return !string || rt_utf8_invalid_at((const spl_u8 *)string->data, string->len) < 0 ? 1 : 0;
+}
+
+spl_i64 rt_text_find_invalid_utf8(spl_i64 value) {
+    RtString *string = rt_as_string(value);
+    return string ? rt_utf8_invalid_at((const spl_u8 *)string->data, string->len) : -1;
+}
+
 spl_i64 rt_string_starts_with(spl_i64 value, spl_i64 prefix_value) {
     RtString *string = rt_as_string(value);
     RtString *prefix = rt_as_string(prefix_value);
@@ -958,6 +1273,51 @@ spl_i64 rt_string_find(spl_i64 value, spl_i64 needle_value) {
         }
     }
     return -1;
+}
+
+spl_i64 rt_string_replace(spl_i64 value, spl_i64 old_value, spl_i64 new_value) {
+    RtString *string = rt_as_string(value);
+    RtString *old = rt_as_string(old_value);
+    RtString *replacement = rt_as_string(new_value);
+    spl_u64 count = 0;
+    spl_u64 out_len;
+    spl_u64 in_index = 0;
+    spl_u64 out_index = 0;
+    spl_i64 out_value;
+    RtString *out;
+    if (!string || !old || !replacement || old->len == 0) return value;
+    for (spl_u64 i = 0; i + old->len <= string->len;) {
+        spl_u64 j = 0;
+        while (j < old->len && string->data[i + j] == old->data[j]) j = j + 1;
+        if (j == old->len) {
+            count = count + 1;
+            i = i + old->len;
+        } else {
+            i = i + 1;
+        }
+    }
+    if (count == 0) return value;
+    out_len = string->len + count * replacement->len - count * old->len;
+    out_value = rt_string_new(0, (spl_i64)out_len);
+    out = rt_as_string(out_value);
+    if (!out) return rt_nil();
+    while (in_index < string->len) {
+        spl_u64 j = 0;
+        if (in_index + old->len <= string->len) {
+            while (j < old->len && string->data[in_index + j] == old->data[j]) j = j + 1;
+        }
+        if (j == old->len) {
+            for (j = 0; j < replacement->len; j = j + 1) out->data[out_index + j] = replacement->data[j];
+            out_index = out_index + replacement->len;
+            in_index = in_index + old->len;
+        } else {
+            out->data[out_index] = string->data[in_index];
+            out_index = out_index + 1;
+            in_index = in_index + 1;
+        }
+    }
+    out->data[out_len] = 0;
+    return out_value;
 }
 
 spl_i64 rt_string_trim(spl_i64 value) {
@@ -1240,8 +1600,32 @@ spl_i64 rt_value_as_int(spl_i64 value) {
 spl_i64 rt_volatile_read_u8(spl_i64 addr) {
     return rt_mmio_read_u8(addr);
 }
+spl_i64 rt_volatile_read_u16(spl_i64 addr) {
+    return rt_mmio_read_u16(addr);
+}
+spl_i64 rt_volatile_read_u32(spl_i64 addr) {
+    return rt_mmio_read_u32(addr);
+}
+spl_i64 rt_volatile_read_u64(spl_i64 addr) {
+    return rt_mmio_read_u64(addr);
+}
 void rt_volatile_write_u8(spl_i64 addr, spl_i64 value) {
     rt_mmio_write_u8(addr, value);
+}
+void rt_volatile_write_u16(spl_i64 addr, spl_i64 value) {
+    rt_mmio_write_u16(addr, value);
+}
+void rt_volatile_write_u32(spl_i64 addr, spl_i64 value) {
+    rt_mmio_write_u32(addr, value);
+}
+void rt_volatile_write_u64(spl_i64 addr, spl_i64 value) {
+    rt_mmio_write_u64(addr, value);
+}
+spl_u64 unsafe_addr_of(spl_i64 value) {
+    return (spl_u64)value;
+}
+spl_u8 rt_copy_user_byte(spl_u64 address) {
+    return *(volatile const spl_u8 *)address;
 }
 
 static void uart_put_byte(spl_u8 byte) {
@@ -1259,6 +1643,30 @@ static void uart_write_bytes(const char *data, spl_u64 len) {
     for (spl_u64 i = 0; i < len; i = i + 1) {
         uart_put_byte((spl_u8)data[i]);
     }
+}
+
+spl_i64 rt_env_get(const spl_u8 *key, spl_u64 key_len) {
+    (void)key;
+    (void)key_len;
+    return rt_nil();
+}
+
+spl_i64 rt_stderr_write(const spl_u8 *data, spl_u64 len) {
+    uart_write_bytes((const char *)data, len);
+    return (spl_i64)len;
+}
+
+spl_i64 rt_file_append_text(
+    const spl_u8 *path,
+    spl_u64 path_len,
+    const spl_u8 *content,
+    spl_u64 content_len
+) {
+    (void)path;
+    (void)path_len;
+    (void)content;
+    (void)content_len;
+    return 0;
 }
 
 static void uart_write_hex_byte(spl_u8 value) {
@@ -1541,9 +1949,13 @@ spl_u64 rt_riscv_qemu_heap_size(void) {
 }
 
 spl_i64 rt_time_now_unix_micros(void) {
+#if defined(__riscv)
     spl_u64 cycles;
     __asm__ volatile("rdtime %0" : "=r"(cycles));
     return (spl_i64)(cycles / 10ULL);
+#else
+    return 0;
+#endif
 }
 
 /* Monotonic nanoseconds from the same `time` CSR the micros owner above uses.
@@ -1553,25 +1965,42 @@ spl_i64 rt_time_now_unix_micros(void) {
  * src/lib/common/time_utils.spl; without an owner here the RV64 freestanding
  * link leaves it undefined. */
 spl_i64 rt_time_now_nanos(void) {
+#if defined(__riscv)
     spl_u64 ticks;
     __asm__ volatile("rdtime %0" : "=r"(ticks));
     return (spl_i64)(ticks * 100ULL);
+#else
+    return 0;
+#endif
+}
+
+spl_i64 rt_time_now_micros(void) {
+    return rt_time_now_nanos() / 1000LL;
+}
+
+spl_i64 rt_time_now_monotonic_ms(void) {
+#if defined(__riscv)
+    spl_u64 ticks;
+    __asm__ volatile("rdtime %0" : "=r"(ticks));
+    return (spl_i64)(ticks / 10000ULL);
+#else
+    return 0;
+#endif
 }
 
 void rt_thread_sleep(spl_i64 millis) {
     spl_i64 start;
-    spl_i64 target_delta;
     if (millis <= 0) {
         return;
     }
-    start = rt_time_now_unix_micros();
-    target_delta = millis * 1000LL;
-    while ((rt_time_now_unix_micros() - start) < target_delta) {
+    start = rt_time_now_monotonic_ms();
+    while ((rt_time_now_monotonic_ms() - start) < millis) {
         __asm__ volatile("" ::: "memory");
     }
 }
 
 spl_u64 rt_riscv_seed(void) {
+#if defined(__riscv)
     spl_u64 cycle;
     spl_u64 time;
     spl_u64 instret;
@@ -1579,6 +2008,9 @@ spl_u64 rt_riscv_seed(void) {
     __asm__ volatile("rdtime %0" : "=r"(time));
     __asm__ volatile("rdinstret %0" : "=r"(instret));
     return cycle ^ (time << 21) ^ (time >> 7) ^ (instret << 13) ^ (instret >> 17);
+#else
+    return 0;
+#endif
 }
 
 spl_u64 rt_riscv_read_sstatus(void) {
@@ -4411,7 +4843,11 @@ spl_i64 rt_string_to_upper(spl_i64 value) {
  * (examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c). Without
  * an owner here the RV64 freestanding link leaves it undefined. */
 void rt_memory_barrier(void) {
+#if defined(__riscv)
     __asm__ volatile("fence rw,rw" ::: "memory");
+#else
+    __asm__ volatile("" ::: "memory");
+#endif
 }
 
 /* TLB invalidation. The portable kernel MMIO layer (os.kernel.boot.mmio)
@@ -4420,7 +4856,9 @@ void rt_memory_barrier(void) {
  * is a correct (conservative) superset of invalidating the one address. */
 void rt_invlpg(spl_u64 addr) {
     (void)addr;
+#if defined(__riscv)
     __asm__ volatile("sfence.vma" ::: "memory");
+#endif
 }
 
 spl_i64 rt_check_user_noop(spl_i64 user_val) {

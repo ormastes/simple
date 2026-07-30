@@ -127,24 +127,24 @@ This overlay supersedes only the active SimpleOS Stage2 scheduling fields; the
 umbrella REQ/NFR inventory and deferred Stage3/4/native-GPU lanes remain
 unchanged.
 
-- Stage2 attempt 23 is admitted at clean checkpoint
-  `94370c71ae81160cb4c3bd3c523092e5b12e855f`: binary SHA-256
-  `16bbd646fbb8281d2519db18112665759c8f2320b735cbf51f9071f8c6aa474f`,
+- Stage2 attempt 24 is admitted at clean checkpoint
+  `2a7e354c116ea1d9a948bf94d5a26c4d0238eed6`: binary SHA-256
+  `d8c2bee6ad33d58c7fa4aa8e1d8bc1b66fa9e887b920df7b79187757265ff79a`,
   provenance SHA-256
-  `0fcdb0177678a5ac21e7595a3ee16f755a9e89b80dec90e54d3ec07c6d29594b`,
-  exit 0, `35:06.28`, and `2,439,392 KiB` maximum RSS. The standalone
+  `0bec61d68154e21d9cebb859578be6eb7cbe3dfc0fb6c03c3a222dafa682b83c`,
+  exit 0, `28:30.39`, and `2,438,756 KiB` maximum RSS. The standalone
   manifest verifier exited 0.
-- Scoped-tool attempt 11 passed its independent canonical checker. Its sealed
+- Scoped-tool attempt 12 passed its independent canonical checker. Its sealed
   evidence-manifest SHA-256 is
-  `63a5cc1641fd680ea672f73bb8b4129d22d6cc1fe77f7f59d4f717eaaa0c516f`
+  `cf7071a12808e862835feaf6a4e6b05b4d17138d3ed35cbb81b22c5f261b23d9`
   and the checker printed `stage2_font_scoped_tools_status=pass`.
-- RV64 attempt 23 is the current critical-path blocker. It cleared the prior
-  linker/startup and four earlier runtime symbols, but exited 1 in `4:50.22` at
-  `320,544 KiB` maximum RSS after surfacing 20 live freestanding-runtime
-  symbols before lld's error limit. No ELF exists.
+- RV64 attempt 25 is the current critical-path blocker. It compiled the
+  canonical runtime object, but exited 1 in `3:21.66` at `371,200 KiB` maximum
+  RSS with a 618-symbol pre-GC unresolved surface, including 597 hosted or
+  unrelated raw runtime APIs; lld proves at least twenty live. No ELF exists.
 - `surface_simpleos` resumes only after coherent RV64 freestanding runtime
   ownership produces that ELF; then it owns unpinned QEMU crop calibration,
-  independent crop review/pinning, and exact-ten attempt 11. Manual attempt 2
+  independent crop review/pinning, and exact-ten attempt 12. Manual attempt 2
   and final review remain downstream. No QEMU, exact-ten, or manual command has
   run.
 
@@ -507,7 +507,10 @@ no runtime command or docgen has run.
 
 ## 2026-07-30 RV64 blocker update
 
-The canonical full RV64 GUI runtime and explicit full-runtime Package Manager
-adapter fixes are source-complete with focused C/Rust checks green. A fresh producer
-window must next prove the ELF, then QEMU crop/input, exact-ten, ten manuals,
-and final guards. No attempt-23 retry or status promotion occurred.
+Current-checkpoint Stage2 attempt 24 and scoped-tool attempt 12 are admitted.
+RV64 attempt 25 proves the remaining blocker is import-level closure pollution:
+the pre-GC unresolved surface still includes 597 hosted or unrelated raw
+runtime APIs after the canonical runtime object compiles, with at least twenty
+proven live. Reserve attempt 26 until the owner repair passes a
+focused closure/provider gate; then prove ELF, QEMU crop/input, exact-ten,
+ten manuals, and final guards.

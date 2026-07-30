@@ -533,10 +533,13 @@ guest IRQ-to-WM-to-frame correlation. It captures the RV64-only
 until `RV64_WM_FONT_REGION_EXPECTED_SHA256` contains the genuine RV64 crop hash.
 The x86_64 crop hash is never reused.
 
-This strict mode is currently **BLOCKED**: the production RV64 entry does not
-mount the selected font and does not consume VirtIO input. Its explicit
-`rv64-font-evidence-unavailable` and `rv64-input-evidence-unavailable` markers
-are blockers, not evidence. See
+This strict mode is currently **BLOCKED before QEMU**: Stage2 attempt 24 and
+scoped-tool attempt 12 are admitted, but RV64 attempt 25 cannot link the
+production entry because its pre-GC unresolved surface includes 597 hosted or
+unrelated raw runtime APIs, with at least twenty proven live. Stub fallback is
+not valid evidence. After the closure/runtime
+owner repair, attempt 26 must produce the ELF before crop calibration. See
+`doc/08_tracking/bug/stage2_rv64_full_gui_runtime_closure_2026-07-30.md` and
 `doc/06_spec/03_system/os/wm/rv64_simpleos_wm_font_input_spec.md`.
 
 ## Host-GPU rendering and ProcessingIR

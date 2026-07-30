@@ -5,6 +5,12 @@ All 24 requirement/NFR rows are mapped, but the umbrella result remains
 
 ## Current State
 
+- Current scoped admission: Stage2 attempt 24 and scoped-tool attempt 12 pass
+  independent checks at `2a7e354c116`. RV64 attempt 25 compiles the canonical
+  runtime object but cannot link: its pre-GC unresolved surface is 618 symbols,
+  including 597 hosted/unrelated raw runtime APIs, with at least twenty proven
+  live by lld. Reserve attempt 26
+  for an owner repair; ELF/QEMU/exact-ten/manual evidence remains absent.
 - source/spec lanes and reviewed GSUB/GPOS integration are checkpointed;
 - compiler-enablement fixes do not promote font requirements; the focused
   runner contract remains in-scope evidence infrastructure;

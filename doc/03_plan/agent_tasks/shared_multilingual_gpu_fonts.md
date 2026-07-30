@@ -37,12 +37,14 @@ This campaign follows the active override in the system-test plan. Its strongest
 mark is `SIMPLEOS_STAGE2_FONT: BLOCKED`; it cannot promote the broader
 cross-platform matrix or feature status.
 
-Current admission is complete through clean-checkpoint Stage2 attempt 23 and
-independently checked scoped-tool attempt 11. RV64 attempt 23 cleared the prior
-layout/startup and earlier runtime symbols but produced no ELF after lld
-surfaced 20 live freestanding-runtime symbols. The active owner must supply one
-coherent RV64 freestanding runtime before QEMU crop calibration, exact-ten
-attempt 11, and manual attempt 2 can run. Stage3/4 and the umbrella native-GPU
+Current admission is complete through clean-checkpoint Stage2 attempt 24 and
+independently checked scoped-tool attempt 12. RV64 attempt 25 compiled the
+canonical runtime object but produced no ELF: import-level entry closure still
+has a 618-symbol pre-GC unresolved surface, including 597 hosted or unrelated
+raw runtime APIs, with at least twenty proven live. The active owner must
+localize those imports or provide real current-ABI
+freestanding owners before QEMU crop calibration, exact-ten attempt 12, and
+manual attempt 2 can run. Stage3/4 and the umbrella native-GPU
 matrix remain deferred.
 
 | Small lane | Owned result | Focused specs |

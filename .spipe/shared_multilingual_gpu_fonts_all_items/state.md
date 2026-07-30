@@ -107,12 +107,12 @@ The superseding delivery goal is `SIMPLEOS_STAGE2_FONT`: exactly ten focused
 SimpleOS specs and ten canonical manuals. The current manual inventory is
 `0 missing / 9 stale / 1 source-current / 0 accepted receipts`; only
 `selected_arabic_spec` has a source-current mirror, and that does not replace a
-sealed zero-stub receipt. Canonical Stage2 attempt 23 and scoped-tool attempt 11
-are now admitted at clean checkpoint `94370c71ae8`; the latter passed its
-independent canonical checker. The current blocker is RV64 attempt 23: the
-explicit linker script cleared the prior layout/startup and four earlier
-runtime symbols, but link still stopped at lld's error limit after surfacing 20
-live freestanding-runtime symbols. No ELF exists, so QEMU crop calibration,
+sealed zero-stub receipt. Canonical Stage2 attempt 24 and scoped-tool attempt 12
+are now admitted at clean checkpoint `2a7e354c116`; both passed independent
+canonical checks. The current blocker is RV64 attempt 25: the canonical runtime
+object compiles, but import-level entry closure has a 618-symbol pre-GC
+unresolved surface, including 597 hosted or unrelated raw runtime APIs, with at
+least twenty proven live. No ELF exists, so QEMU crop calibration,
 exact-ten execution, and the ten manual receipts have not run. Stage 3,
 Stage 4, non-SimpleOS GPU hosts, and the broader cross-platform matrix remain
 deferred from this delivery scope. Current status is
@@ -247,3 +247,25 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   were rejected. No capped producer was retried; ELF, QEMU crop, exact-ten,
   manuals, and final admission remain open. `SIMPLEOS_STAGE2_FONT: BLOCKED`;
   overall `STATUS: FAIL`.
+- simpleos-stage2-attempt24-tools12-rv64-attempt25-2026-07-30: Clean
+  checkpoint `2a7e354c116` produced admitted Stage2 attempt 24 (binary SHA-256
+  `d8c2bee6ad33d58c7fa4aa8e1d8bc1b66fa9e887b920df7b79187757265ff79a`,
+  provenance SHA-256
+  `0bec61d68154e21d9cebb859578be6eb7cbe3dfc0fb6c03c3a222dafa682b83c`,
+  exit 0, `28:30.39`, `2,438,756 KiB` maximum RSS) and independently checked
+  scoped-tool attempt 12 (evidence-manifest SHA-256
+  `cf7071a12808e862835feaf6a4e6b05b4d17138d3ed35cbb81b22c5f261b23d9`).
+  RV64 attempt 25 compiled the canonical runtime object but exited 1 in
+  `3:21.66` at `371,200 KiB`: the pre-GC unresolved surface contains 618
+  unique symbols, including 597 hosted/unrelated raw runtime APIs, and lld
+  proves at least twenty live failures.
+  Attempt 26 is reserved for a coherent owner repair; no ELF/QEMU/exact-ten/manual
+  evidence exists. `SIMPLEOS_STAGE2_FONT: BLOCKED`; broader `STATUS: FAIL`.
+- rv64-entry-closure-owner-repair-2026-07-30: Guided parallel owner splits
+  reduced the RV64 GUI entry closure to 45 modules. Dedicated RV64 font-VFS and
+  shell owners plus framebuffer/input dependency splits exclude `vfs_init`,
+  `vfs_boot_init`, `boot.cpu`, and diagnostic logging. The focused Rust
+  closure/selector gate passes 2/2, both direct-runtime guards pass, and the
+  executable-spec layout count is zero. This is source evidence only; a fresh
+  clean-checkpoint Stage2/tool admission and the single reserved RV64 attempt
+  26 remain before QEMU/exact-ten/manual evidence. Status remains FAIL.

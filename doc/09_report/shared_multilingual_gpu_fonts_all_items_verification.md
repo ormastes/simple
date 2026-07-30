@@ -9,19 +9,34 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
-## 2026-07-30 RV64 runtime-owner checkpoint
+## 2026-07-30 current-checkpoint Stage2/RV64 result
 
-The attempt-23 runtime blocker is source-fixed: the production RV64 GUI selects
-the canonical freestanding provider, all 16 surfaced non-TLS runtime symbols
-are owned, and the RV64 base shell no longer pulls the full-runtime Package
-Manager/TLS adapter into the desktop image; x86/ARM keep the real UI. The C
-provider contract and Rust closure/selector tests
-passed once. No new RV64 producer ran, so no ELF, QEMU crop, exact-ten receipt,
-or manual receipt exists.
+Clean checkpoint `2a7e354c116` produced admitted Stage2 attempt 24: binary
+SHA-256 `d8c2bee6ad33d58c7fa4aa8e1d8bc1b66fa9e887b920df7b79187757265ff79a`,
+provenance SHA-256
+`0bec61d68154e21d9cebb859578be6eb7cbe3dfc0fb6c03c3a222dafa682b83c`,
+exit 0, `28:30.39`, and `2,438,756 KiB` maximum RSS. Its standalone manifest
+verifier passed. Scoped-tool attempt 12 and its independent checker also
+passed; evidence-manifest SHA-256 is
+`cf7071a12808e862835feaf6a4e6b05b4d17138d3ed35cbb81b22c5f261b23d9`.
+
+RV64 attempt 25 compiled the canonical full GUI runtime, but exited 1 in
+`3:21.66` at `371,200 KiB`: the pre-GC unresolved surface contains 618 unique
+symbols, including 597 raw hosted or unrelated runtime APIs; lld proves at
+least twenty live failures before its error limit.
+No safe attempt 26 exists until the closure/runtime owner is repaired. No ELF,
+QEMU crop, exact-ten receipt, or manual receipt exists. See
+`doc/08_tracking/bug/stage2_rv64_full_gui_runtime_closure_2026-07-30.md`.
+
+The owner repair is now source-complete and focused-gate green: the RV64 entry
+closure is 45 modules and excludes `vfs_init`, `vfs_boot_init`, `boot.cpu`, and
+diagnostic logging; the focused Rust closure/selector test passes 2/2. This
+does not promote status because the repaired source is not yet bound to a fresh
+clean-checkpoint Stage2/tool admission and RV64 attempt 26 has not run.
 
 `STATUS: FAIL`
 
-## Current Stage2/RV64 result — 2026-07-30
+## Historical Stage2/RV64 result — attempt 23
 
 Canonical pure-Simple Stage2 attempt 23 is admitted at clean checkpoint
 `94370c71ae81160cb4c3bd3c523092e5b12e855f`. Its binary is
@@ -46,7 +61,7 @@ reported 724 unexpected symbols, deferred 717 candidates, and lld surfaced 20
 live runtime symbols before its error limit. No ELF exists. Evidence is
 retained at `/tmp/simple-font-rv64-attempt23-stage/evidence/`.
 
-The current blocker is coherent RV64 freestanding runtime ownership. Without
+The attempt-23 blocker was coherent RV64 freestanding runtime ownership. Without
 the ELF, no QEMU crop calibration, independent crop pin, exact-ten execution,
 or canonical manual generation can run. Stage 3/4 and the umbrella
 cross-platform native-GPU matrix remain deferred from this scoped delivery.
@@ -60,15 +75,16 @@ inventory is `0 missing / 9 stale / 1 source-current / 0 accepted receipts`.
 The source-current pair is `selected_arabic_spec`; source currency alone is not
 an accepted zero-stub docgen receipt.
 
-Stage2 attempt 23 and scoped-tool attempt 11 now satisfy the compiler,
+Stage2 attempt 24 and scoped-tool attempt 12 now satisfy the compiler,
 runner/docgen, calibration, provenance, and independent receipt gates. The
 transactional 53-file staging, exact 59-source pin-set, Arabic/Hindi batch
 identity, and native-safe fresh-device material changes remain downstream
-behavioral claims until exact-ten runs. The next blocker is the coherent RV64
-freestanding runtime needed to link the canonical desktop ELF. After that,
-run and independently pin the QEMU crop, execute exact-ten attempt 11, then run
+behavioral claims until exact-ten runs. The next blocker is the hosted and
+unrelated runtime surface retained by import-level RV64 GUI closure. After the
+owner repair links the canonical desktop ELF,
+run and independently pin the QEMU crop, execute exact-ten attempt 12, then run
 `bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write
-build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-11
+build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-12
 build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2`
 and the corresponding independent `manuals-check`. Stage 3, Stage 4,
 non-SimpleOS native GPU hosts, and the broader cross-platform matrix remain
@@ -77,7 +93,7 @@ deferred from this active delivery scope.
 The current exact-ten command remains pending:
 
 ```bash
-STAGE2_FONT_SPEC_ATTEMPT=11 \
+STAGE2_FONT_SPEC_ATTEMPT=12 \
 SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory> \
 BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live \
 REPORT_PATH=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live/report.md \
@@ -85,20 +101,20 @@ RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf \
 RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img \
 RV64_WM_FONT_REGION_EXPECTED_SHA256=<independently-reviewed-rv64-crop-sha256> \
 bash scripts/check/run-stage2-font-scoped-specs.shs write \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-11
-STAGE2_FONT_SPEC_ATTEMPT=11 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-12
+STAGE2_FONT_SPEC_ATTEMPT=12 \
 bash scripts/check/run-stage2-font-scoped-specs.shs check \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-11
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-12
 ```
 
 After those ten receipts pass, the exact manual commands are:
 
 ```bash
 bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-11 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-12 \
   build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
 bash scripts/check/build-stage2-font-scoped-tools.shs manuals-check \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-11 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-12 \
   build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
 ```
 
