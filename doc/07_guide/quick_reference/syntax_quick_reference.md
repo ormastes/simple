@@ -343,8 +343,16 @@ lst[:-1]                            # [10, 20, 30, 40] (all but last)
 lst[::2]                            # [10, 30, 50] (every other)
 lst[1::2]                           # [20, 40] (odd indices)
 lst[1:5:2]                          # [20, 40] (slice with step)
-lst[::-1]                           # [50, 40, 30, 20, 10] (reversed)
 ```
+
+Negative step (e.g. `lst[::-1]`) is **not supported** — it errors in both
+engines. Use `.reversed()` to reverse a list, string, or tuple:
+
+```simple
+lst.reversed()                      # [50, 40, 30, 20, 10]
+```
+
+See `doc/04_architecture/language/slicing/+adr/negative_step_not_supported_2026-07-30.md`.
 
 ### String Slicing
 

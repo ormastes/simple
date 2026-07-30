@@ -3041,6 +3041,28 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
         return RuntimeValue::NIL;
     }
 
+    // Negative step (Python-style `s[::-1]`/`s[9:0:-1]`) is not part of the
+    // language: negative INDICES (Ruby-style, count from the end) remain
+    // fully supported, but reversal must always be an explicit `.reversed()`
+    // call, never an index trick. See
+    // doc/04_architecture/language/slicing/+adr/negative_step_not_supported_2026-07-30.md.
+    // Before this check, every negative-step form silently returned an EMPTY
+    // result here (the string branch below unconditionally treated any
+    // `step != 1` as "return empty", and the array branch below actually
+    // implemented Python-style negative-step reversal correctly) -- neither
+    // was intentional language behavior, and the two diverged from each
+    // other and from the interpreter (which, before its own companion fix,
+    // silently implemented full Python semantics). A hard abort matches the
+    // established native-lane error-raise idiom (`rt_panic`, same crate) --
+    // there is no `Result`-returning path back through JIT/native-compiled
+    // code to a catchable Simple-level error for this expression form.
+    if step < 0 {
+        eprintln!(
+            "error: negative slice step is not supported -- use .reversed() to reverse a string, array, or tuple"
+        );
+        std::process::abort();
+    }
+
     match collection.heap_type() {
         Some(HeapObjectType::Array) => {
             let Some(arr) = get_typed_ptr::<RuntimeArray>(collection, HeapObjectType::Array) else {

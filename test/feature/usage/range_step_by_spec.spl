@@ -8,16 +8,27 @@
 
 Ranges in Simple can be iterated with custom step values. This is primarily
 used in slice syntax with the `[start:end:step]` notation, allowing iteration
-over every Nth element or reversing sequences.
+over every Nth element.
+
+Negative slice STEP (Python-style `arr[::-1]`) is deliberately **not** part
+of the language -- see
+doc/04_architecture/language/slicing/+adr/negative_step_not_supported_2026-07-30.md.
+Reversal is always the explicit `.reversed()` method call, never an index
+trick, following Ruby's model. Negative slice STEP forms must error, naming
+`.reversed()`; error coverage lives in
+test/03_system/feature/usage/negative_step_slice_spec.spl. Negative slice
+INDICES (Ruby-style, count from the end, e.g. `arr[-3:-1]`) are a completely
+different, fully-supported feature and are unaffected -- see
+test/03_system/feature/usage/advanced_indexing_spec.spl.
 
 ## Syntax
 
 ```simple
-# Slice with step
+# Slice with step (step must be positive)
 arr[::2]       # Every other element (step=2)
 arr[1::2]      # Every other starting from index 1
-arr[::-1]      # Reversed
 arr[1:5:2]     # Slice from 1 to 5 with step 2
+arr.reversed() # Reverse -- NOT arr[::-1] (errors)
 
 # Range iteration (stdlib method)
 for i in (0..10).step_by(2):
@@ -26,11 +37,11 @@ print i    # 0, 2, 4, 6, 8
 
 ## Key Behaviors
 
-- Step value can be positive (forward) or negative (reverse)
+- Step value must be positive; negative step is a hard error (see the ADR)
 - Step of 1 is the default (every element)
-- Step of -1 reverses the sequence
 - Step of 2 selects every other element
 - Works on arrays, strings, and any sliceable type
+- To reverse a sequence, call `.reversed()` explicitly
 """
 
 describe "Range Step (Slicing with Step)":
@@ -40,9 +51,11 @@ describe "Range Step (Slicing with Step)":
     # sequences. This test suite verifies:
     # - Basic step syntax `[::step]` for every Nth element
     # - Slice with start, end, and step `[start:end:step]`
-    # - Reverse iteration with negative step `[::-1]`
     # - Step on arrays and strings
     # - Edge cases with empty results and bounds
+    #
+    # Negative step is NOT covered here -- it is a hard error, tested in
+    # test/03_system/feature/usage/negative_step_slice_spec.spl.
 
     context "basic step on arrays":
         it "selects every other element with step 2":
@@ -83,31 +96,30 @@ describe "Range Step (Slicing with Step)":
             val arr = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
             expect arr[0:5:10] == [0]
 
-    context "negative step (reverse)":
-        it "reverses entire array":
+    context "reversal is .reversed(), not negative step":
+        # Negative slice step is a hard error -- see
+        # test/03_system/feature/usage/negative_step_slice_spec.spl for the
+        # error-asserting coverage. These demonstrate the correct idiom.
+        it "reverses entire array via .reversed()":
             val arr = [1, 2, 3, 4, 5]
-            expect arr[::-1] == [5, 4, 3, 2, 1]
+            expect arr.reversed() == [5, 4, 3, 2, 1]
 
-        it "reverses empty array":
+        it "reverses empty array via .reversed()":
             val arr: [i64] = []
-            expect arr[::-1] == []
+            expect arr.reversed() == []
 
-        it "reverses single element":
+        it "reverses single element via .reversed()":
             val arr = [42]
-            expect arr[::-1] == [42]
-
-        it "reverses with step -2":
-            val arr = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-            expect arr[::-2] == [9, 7, 5, 3, 1]
+            expect arr.reversed() == [42]
 
     context "step on strings":
         it "selects every other character":
             val s = "abcdefgh"
             expect s[::2] == "aceg"
 
-        it "reverses string":
+        it "reverses string via .reversed()":
             val s = "hello"
-            expect s[::-1] == "olleh"
+            expect s.reversed() == "olleh"
 
         it "selects odd-indexed characters":
             val s = "abcdefgh"
@@ -143,10 +155,10 @@ describe "Range Step (Slicing with Step)":
             val data = ["a", "b", "c", "d", "e", "f"]
             expect data[1::2] == ["b", "d", "f"]
 
-        it "reverses for iteration":
+        it "reverses for iteration via .reversed()":
             val nums = [1, 2, 3, 4, 5]
             var sum = 0
-            for n in nums[::-1]:
+            for n in nums.reversed():
                 sum = sum * 10 + n
             expect sum == 54321
 

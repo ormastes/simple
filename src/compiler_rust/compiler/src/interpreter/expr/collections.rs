@@ -891,6 +891,28 @@ pub(super) fn eval_collection_expr(
                 ));
             }
 
+            // Negative step (Python-style `s[::-1]`/`s[9:0:-1]`) is not part of
+            // the language: negative INDICES (Ruby-style, count from the end)
+            // remain fully supported, but reversal must always be an explicit
+            // `.reversed()` call, never an index trick. See
+            // doc/04_architecture/language/slicing/+adr/negative_step_not_supported_2026-07-30.md.
+            // Before this check, this exact `Expr::Slice` path silently
+            // implemented Python semantics for a negative step (reversed the
+            // receiver) instead of erroring, diverging from the default/
+            // native-codegen lane, which silently returned an empty result
+            // for every negative-step form -- neither was intentional
+            // language behavior.
+            if step_val < 0 {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("use .reversed() to reverse a string, array, or tuple; negative step is not supported");
+                return Err(CompileError::semantic_with_context(
+                    "invalid operation: negative slice step is not supported -- use .reversed() to reverse"
+                        .to_string(),
+                    ctx,
+                ));
+            }
+
             let result = match recv_val {
                 Value::Array(arr) => Ok(Value::array(slice_collection(&arr, start_idx, end_idx, step_val))),
                 Value::Str(s) => {
