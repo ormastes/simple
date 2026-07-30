@@ -745,3 +745,19 @@ Recovery used isolated commit trees and one static verification pass. No
 bootstrap, Rust seed, or repeated crashing target command was used. Qualified
 pure-Simple execution/docgen remains blocked by the recorded self-hosted
 interpreter string-interpolation defect.
+
+## Production browser batch 11 (2026-07-30)
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `html_css_rendering` | No remaining uncapped one-defect rendering gap was proven; broader feature rows stay planned. | AUDIT COMPLETE / NO CHANGE |
+| `fieldset_events` | Effective disabled state is propagated during the existing O(N) control traversal, including the first-legend exception. | INTEGRATED `0d6c055a489`; public UI-action SSpec/manual present |
+| `document_redirect` | An unresolved redirect URL is rejected before permit, provisional origin, or pending document commit creation. | INTEGRATED `0d6c055a489`; hostile exact-error SSpec/manual present |
+| `script_body_animation` | Changed SimpleScript body assignments advance the existing single UI revision and reconcile CSS animation instances; identical assignments remain no-ops. | INTEGRATED `0d6c055a489`; timer→DOM→DrawIR discriminator present |
+| `gpu_image_retention` | The retained table now contains only current-frame resources while validated references survive consecutive frames. | INTEGRATED `0d6c055a489`; release/reuse SSpec/manual present |
+| `profile_revocation` | Treating `_ensure(..., false)` as revocation also disabled profile access on ordinary page pointer dispatch. | REJECTED; `2ffa73f48c9` must not merge |
+| `interpreter_interpolation` | Post-parse expansion promotes valid regions to canonical `EXPR_INTERPOLATED_STRING`; evaluation no longer parses source. | INTEGRATED STATIC `ae4c3d56ce3`; phase-2/3 and focused SSpec execution HELD |
+
+The compiler lane used independent static review and did not start another
+bootstrap while concurrent sessions owned the shared cache and full-bootstrap
+processes. Its failed seed delegation probe is recorded as a failure, not PASS.

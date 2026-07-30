@@ -45,6 +45,7 @@ Definition-list bounded lane:
 | Definition-list selected profile | Current bounded lane: cross-kind omitted-end-tag repair, canonical `dl`/`dt`/`dd` UA defaults and authored overrides, semantic/style/exact DrawIR/pixel SSpec, and handwritten draft mirror; admitted docgen, qualified execution, and corpus accounting remain open |
 | Parallel HTML/CSS/animation cycle | Landed in `fb4050c3d2b`: `article`, width/height-led `aspect-ratio`, CPU outline paint, real SimpleScript/CSS DrawIR frames, completed-animation reuse, and identity-matched font metadata; all remain evidence-blocked pending qualified pure-Simple execution/docgen |
 | Animation resource boundary | Landed in `d4ffb28dae4`: the canonical event-loop owner caps both timers and `requestAnimationFrame` at 256 tasks, rejects overflow, and resumes animation after drain; modern SSpec/manual are present and qualified execution/docgen remain held |
+| Scripted body animation reconciliation | Landed in `0d6c055a489`: changed SimpleScript body assignments preserve the single DOM revision owner, reconcile animation instances, and advance timer-driven DrawIR/hit frames; unchanged assignments remain no-ops and qualified execution/docgen remain held |
 
 ## Safe parallel implementation lanes
 

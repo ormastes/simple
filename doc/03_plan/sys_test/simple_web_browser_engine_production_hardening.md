@@ -1023,3 +1023,21 @@ Each scenario has a mirrored manual and a behavioral failure discriminator.
 Static diff/layout/direct-environment guards passed once. Target execution and
 docgen remain HELD; the current pure-Simple interpreter crash is recorded
 separately and neither bootstrap nor the Rust seed is admissible evidence.
+
+## Batch 11 executable evidence
+
+Commit `0d6c055a489` adds requirement-tagged behavioral coverage for:
+
+- disabled fieldset button/text actions and the first-legend exception through
+  public UI access, with unchanged callbacks, DOM state, and pixels;
+- malformed HTTPS document redirects rejected with the exact error before any
+  permit or provisional/pending commit state;
+- a real SimpleScript timer replacing the body and producing exactly one new
+  UI revision plus the next current DrawIR/hit frame; and
+- current-frame-only GPU image retention, omitted-pixel release, and two
+  consecutive validated reference frames.
+
+Commit `ae4c3d56ce3` adds the focused self-hosted interpreter interpolation
+SSpec and manual. Static review passed, but phase-2/3 execution did not run:
+concurrent sessions owned the shared bootstrap cache and the isolated seed
+probe failed delegation before checking source. No target PASS is claimed.
