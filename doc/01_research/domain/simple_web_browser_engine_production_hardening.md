@@ -84,3 +84,37 @@ Sources:
 - https://www.rfc-editor.org/rfc/rfc9525.html
 - https://drafts.csswg.org/css2/#inline-block
 - https://drafts.csswg.org/css-inline/#baseline-alignment
+
+## 2026-07-30 sandbox, mixed-content, and navigation refresh
+
+The current standards review preserves three security boundaries for the next
+implementation lanes:
+
+1. Treat renderer IPC as attacker-controlled capability requests. A renderer
+   may receive only the operation, origin/site lock, request/reply identity,
+   and bounded payload authorized by the broker; stale or replayed authority
+   must fail before network, storage, navigation, or UI mutation.
+2. A trustworthy document must not execute active HTTP subresources. Mixed
+   scripts and fetches fail as network errors; eligible passive content may be
+   upgraded, but an upgrade failure must not fall back to HTTP. Top-level
+   navigation is a separate policy path and must not be confused with a
+   subresource exception.
+3. HSTS is learned only from an error-free authenticated HTTPS response.
+   Known-HSTS hosts terminate on every TLS/service-identity error; neither a
+   redirect, renderer claim, mock response, nor user bypass can authorize an
+   invalid secure transport.
+
+The selected embedded-content profile must also remain fail-closed. If iframe
+sandbox tokens are not fully implemented, the browser must not advertise them
+as enforcement. Where implemented, omitted permissions keep opaque-origin,
+script, form, popup, and top-navigation restrictions; individual `allow-*`
+tokens relax only their named restriction.
+
+Primary sources:
+
+- https://html.spec.whatwg.org/multipage/iframe-embed-object.html
+- https://html.spec.whatwg.org/multipage/browsers.html
+- https://fetch.spec.whatwg.org/
+- https://www.w3.org/TR/mixed-content/
+- https://www.rfc-editor.org/rfc/rfc6797.html
+- https://www.rfc-editor.org/rfc/rfc9525.html
