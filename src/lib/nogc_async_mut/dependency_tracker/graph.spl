@@ -133,14 +133,23 @@ impl ImportGraph:
         # For each module's imports, the TARGET gets an incoming edge
         for module in self.modules():
             for dep in self.imports_of(module):
-                in_degree[dep] = (in_degree.get(dep) ?? 0) + 1
+                # contains_key + index read, not `.get() ?? 0` — native Dict.get
+                # is unreliable; this file uses index reads everywhere else.
+                val cur = if in_degree.has(dep): in_degree[dep] else: 0
+                in_degree[dep] = cur + 1
 
         # Start with modules that have no incoming edges (no dependencies ON them)
-        var queue: [text] = [for m in self.modules() if (in_degree.get(m) ?? 0) == 0: m]
+        # every module() is pre-seeded into in_degree above, so an index read is
+        # safe and correct here — avoid the unreliable native Dict.get + `?? 0`.
+        var queue: [text] = [for m in self.modules() if in_degree[m] == 0: m]
         var result: [text] = []
 
-        while queue.len() > 0:
-            val module = queue.pop_front()
+        # `queue` is a plain [text] array, which has no `pop_front`; walk it with
+        # a head index instead (also O(1) per step, no front-shift).
+        var head: i64 = 0
+        while head < queue.len():
+            val module = queue[head]
+            head = head + 1
             result.push(module)
             for dep in self.imports_of(module):
                 in_degree[dep] = in_degree[dep] - 1
