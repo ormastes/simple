@@ -104,7 +104,16 @@ duplicate that literal or add feature-local/direct `rt_*` conversion calls.
 | Hosted caller migration | Add hosted wrapper/session; migrate `ui.browser`, `ui.electron`, `ui.tauri`, `ui.tui`, and `ui.tui_web`; explicitly exclude non-rendering `wm_daemon` | Implementation sidecar; merge owner `/root` |
 | Worker/frame protocol | Exact init/apply envelopes and ack, explicit browser/WmContentFrame theme fields, parent-owned replay payload, restart/revision fence | Implementation sidecar; independent highest-capability review |
 | Consumers | Migrate WM/GUI/Web off sequential globals to one store projection before parent admission and post-commit `ThemeChangedV1` delivery | Implementation sidecar; independent highest-capability review |
-| Tests/manual | Focused envelope/bounds/frame/restart/admission checks and generated-manual quality | `N/A` until source contracts exist; final reviewer is independent highest-capability reviewer |
+| Tests/manual | Add `hosted_theme_runtime_spec`, `hosted_browser_renderer_theme_protocol_spec`, `hosted_browser_renderer_theme_frame_spec`, and `hosted_browser_renderer_theme_restart_spec` only after their real public runtime/protocol seams exist; generate each manual and retain the aggregate fail-fast scenario | Test-design lane completed 2026-07-30; implementation sidecar owns source-backed tests; final reviewer is independent highest-capability reviewer |
+
+The test-design lane fixes a transport distinction that implementation must
+retain: existing `BrowserRendererMessage` has `(kind, generation, request_id,
+payload)`, where `request_id` is request/reply framing and cannot represent a
+theme revision.  Add deterministic typed codecs for the `theme_init`,
+`theme_apply`, and `theme_ready` payloads; do not overload `request_id`, parse
+delimiter text ad hoc, or expose worker/package private state to tests.  The
+focused API/test matrix is authoritative in
+`doc/03_plan/sys_test/wm_glass_theme_host_simpleos.md#hosted-runtime-implementation-admission-test-seam-2026-07-30`.
 
 Merge only after the detailed contract in
 `doc/04_architecture/wm_glass_theme_host_simpleos.md#hosted-runtime-theme-ownership-proposed-prerequisite`,

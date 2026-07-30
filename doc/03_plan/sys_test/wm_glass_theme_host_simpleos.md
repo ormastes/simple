@@ -82,6 +82,32 @@ frame as a current-revision receipt, or a hand-edited generated manual. The
 aggregate WM glass system spec remains fail-closed until these protocol tests
 and current-source host/QEMU evidence are accepted.
 
+### Hosted runtime implementation-admission test seam (2026-07-30)
+
+The current hosted renderer implements only `ready -> init`; it has no
+`HostedThemeRuntime`, theme envelope codec, or theme-tagged frame fields.
+Consequently this lane deliberately adds no compiling placeholder SSpec.  The
+aggregate system scenario remains fail-fast.  The implementing change must add
+the following focused specs and generate their manuals before it can replace
+that failure:
+
+| Executable spec | Required public test seam | Concrete assertions |
+|---|---|---|
+| `test/01_unit/os/hosted/hosted_theme_runtime_spec.spl` | `HostedThemeRuntime.create_initial(source_reader, registry_path, requested_id)`, `current_wire_copy()`, `current_revision()`, `refresh(expected_revision, source_reader)` | Counting injected reader proves one registry/source capture per construction/refresh attempt; empty requested ID uses captured registry bytes; initial read is revision `1`; copied wire has no transaction revision; stale/invalid/overflow/unmigrated refreshes preserve the exact prior copied pair; identical candidate is `unchanged` with no revision/notification; a valid replacement advances exactly once. |
+| `test/01_unit/os/hosted/hosted_browser_renderer_theme_protocol_spec.spl` | `browser_renderer_theme_init_encode`, `browser_renderer_theme_apply_encode`, `browser_renderer_theme_ready_decode`, and `HostedBrowserRendererWorkerSession.handle` | The outer renderer request id remains framing metadata; the decoded theme envelope exposes exact generation/revision/predecessor scalars.  The worker rejects HTML, resize, input, navigation, and frame production until valid init; it accepts only exact init/apply order; it rejects wrong generation, stale predecessor, duplicate/skip revision, unknown wire, bound failure, and mismatched derived hashes.  Ready echoes all required scalars and the derived theme ID/manifest/material hashes, never the wire. |
+| `test/01_unit/os/hosted/hosted_browser_renderer_theme_frame_spec.spl` | `BrowserRendererFrame.theme_revision`, `BrowserRendererFrame.theme_material_sha256`, `WmContentFrame.theme_revision`, `WmContentFrame.theme_material_sha256`, and parent frame admission | A parent accepts only a frame whose generation, revision, and material hash equal one copied current store projection.  Old generation/revision/hash frames fail closed; `content_revision` remains a distinct content/layout value. |
+| `test/02_integration/os/hosted/hosted_browser_renderer_theme_restart_spec.spl` | `HostedBrowserReplayPayload` plus process start/restart handoff | Replacement generation replays the latest canonical wire before `init`; only an explicit exact HTML replay payload permits document initialization; absent replay, stale acknowledgement, or old frame leaves `web-frame-unavailable`. |
+
+The protocol codec must keep `BrowserRendererMessage.request_id` as transport
+framing metadata: it is not any theme revision.  Theme envelopes are therefore
+explicit typed codec payloads (not delimiter-split ad-hoc text) and must call
+only `theme_package_install_wire_v1_within_bound` for the UTF-8 bound.  The
+implementation must define the listed codec symbols or an equivalently named
+public, deterministic codec before these tests are authored; no test may reach
+private worker/store fields, package filesystem reads, or feature-local `rt_*`
+text conversion.  Each changed executable spec requires a generated Markdown
+manual under `doc/06_spec/` and must use only built-in matchers.
+
 ### 2026-07-25 admission checkpoint
 
 | Evidence | Admission |
