@@ -758,43 +758,34 @@ fn _simpleos_host_gpu_retained_reject(reason: text, retained: [SimpleOsHostGpuIm
 # whose checksum no longer matches what the table holds, fails CLOSED —
 # `ok: false` and the input `retained` table is returned UNCHANGED so the
 # caller can finish the request with a resubmit-requested error instead of
-# ever rendering with a missing or stale resource. A full entry is
-# resolved as given and upserted into the returned table so later frames
-# in the same session can reference it.
+# ever rendering with a missing or stale resource. The returned table contains
+# only this frame's resources: the producer re-sends an omitted resource in
+# full before it can be referenced again, so retaining old frames leaks pixels.
 fn simpleos_host_gpu_resolve_retained_images(entries: [SimpleOsHostGpuImageResourceEntry], retained: [SimpleOsHostGpuImageResource]) -> SimpleOsHostGpuRetainedResolution:
     var resolved: [SimpleOsHostGpuImageResource] = []
-    var next_retained = retained
+    var next_retained: [SimpleOsHostGpuImageResource] = []
     for entry in entries:
         if entry.is_reference:
             var found = false
             var cached_index: i64 = 0
             var i: i64 = 0
-            while i < next_retained.len():
-                if next_retained[i].image_uri == entry.image_uri:
+            while i < retained.len():
+                if retained[i].image_uri == entry.image_uri:
                     found = true
                     cached_index = i
                 i = i + 1
             if not found:
                 return _simpleos_host_gpu_retained_reject("unknown-image-resource", retained)
-            val cached = next_retained[cached_index]
+            val cached = retained[cached_index]
             if (cached.pixel_checksum != entry.pixel_checksum or
                 cached.width != entry.width or cached.height != entry.height):
                 return _simpleos_host_gpu_retained_reject("stale-image-resource", retained)
             resolved.push(cached)
+            next_retained.push(cached)
         else:
             val full = simpleos_host_gpu_image_resource(entry.image_uri, entry.width, entry.height, entry.pixels)
             resolved.push(full)
-            var replaced = false
-            var upserted: [SimpleOsHostGpuImageResource] = []
-            for existing in next_retained:
-                if existing.image_uri == entry.image_uri:
-                    upserted.push(full)
-                    replaced = true
-                else:
-                    upserted.push(existing)
-            if not replaced:
-                upserted.push(full)
-            next_retained = upserted
+            next_retained.push(full)
     SimpleOsHostGpuRetainedResolution(ok: true, reason: "ok", resolved: resolved, retained: next_retained)
 
 export SimpleOsHostGpuDrawIrPayload, SimpleOsHostGpuDrawIrDecode

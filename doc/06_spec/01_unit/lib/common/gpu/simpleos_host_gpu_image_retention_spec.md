@@ -38,8 +38,9 @@ resource on the next submit carries only an id+checksum reference and the
 host resolves it byte-identically from its retained table, (c) a changed
 resource re-sends full bytes and the retained table adopts the new
 content, (d) a reference to an unknown or stale id fails CLOSED — never
-resolved, never rendered, and the retained table stays unchanged — and
-(e) the untouched legacy (non-retained) encode/decode path is unaffected.
+resolved, never rendered, and the retained table stays unchanged, (e) a
+replacement frame retires omitted image pixels before teardown, and (f) the
+untouched legacy (non-retained) encode/decode path is unaffected.
 
 ## Examples
 
@@ -230,7 +231,69 @@ expect(stale_resolution.retained[0].pixels).to_equal(pixels_a)
 
 </details>
 
-#### (e) the untouched legacy (non-retained) codec is unaffected by the retention extension
+#### (e) frame replacement releases omitted image pixels before teardown
+
+- Retain two full image resources for one frame
+  - Expected: the retained table contains exactly two resources.
+- Replace the frame with one active resource and prune the old pixels
+  - Expected: the retained table contains exactly one `asset://replacement`
+    resource with exact replacement pixels.
+- Resolve the remaining resource by reference on the next frame
+  - Expected: the active resource still resolves by reference and the table
+    remains length one.
+- Resolve the same resource by reference for a second consecutive frame
+  - Expected: reference retention remains stable at one exact resource.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Retain two full image resources for one frame")
+val old_pixels = _solid_pixels(4, 0xff112233u32)
+val active_pixels = _solid_pixels(4, 0xff998877u32)
+val first = simpleos_host_gpu_resolve_retained_images([
+    simpleos_host_gpu_image_resource_full("asset://old", 2, 2, old_pixels),
+    simpleos_host_gpu_image_resource_full("asset://active", 2, 2, active_pixels)
+], [])
+expect(first.ok).to_be(true)
+expect(first.retained.len()).to_equal(2)
+
+step("Replace the frame with one active resource and prune the old pixels")
+val replacement_pixels = _solid_pixels(4, 0xff224466u32)
+val replaced = simpleos_host_gpu_resolve_retained_images([
+    simpleos_host_gpu_image_resource_full(
+        "asset://replacement", 2, 2, replacement_pixels
+    )
+], first.retained)
+expect(replaced.ok).to_be(true)
+expect(replaced.resolved.len()).to_equal(1)
+expect(replaced.retained.len()).to_equal(1)
+expect(replaced.retained[0].image_uri).to_equal("asset://replacement")
+expect(replaced.retained[0].pixels).to_equal(replacement_pixels)
+
+step("Resolve the remaining resource by reference on the next frame")
+val checksum = simpleos_host_gpu_image_revision(
+    2, 2, replacement_pixels, replacement_pixels.len().to_i64()
+)
+val reused = simpleos_host_gpu_resolve_retained_images([
+    simpleos_host_gpu_image_resource_ref("asset://replacement", 2, 2, checksum)
+], replaced.retained)
+expect(reused.ok).to_be(true)
+expect(reused.resolved[0].pixels).to_equal(replacement_pixels)
+expect(reused.retained.len()).to_equal(1)
+
+step("Resolve the same resource by reference for a second consecutive frame")
+val reused_again = simpleos_host_gpu_resolve_retained_images([
+    simpleos_host_gpu_image_resource_ref("asset://replacement", 2, 2, checksum)
+], reused.retained)
+expect(reused_again.ok).to_be(true)
+expect(reused_again.resolved[0].pixels).to_equal(replacement_pixels)
+expect(reused_again.retained.len()).to_equal(1)
+```
+
+</details>
+
+#### (f) the untouched legacy (non-retained) codec is unaffected by the retention extension
 
 - Same fixture through the ORIGINAL simpleos_host_gpu_image_resources_encode/decode path
 - Re-encoding the same fixture is deterministic (byte-for-byte stable — no hidden retention state leaks in)
@@ -300,8 +363,8 @@ expect(ref_bytes).to_be_less_than(200)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

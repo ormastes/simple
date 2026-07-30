@@ -946,6 +946,39 @@ describe "hosted browser renderer broker policy":
             "Location: https://secure.test/a\r\nX-Test: yes"
         )
 
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-012
+    it "rejects a malformed HTTPS redirect before creating a navigation permit":
+        step("Receive a hostile redirect location from the authenticated transport")
+        val url = "https://safe.test/start"
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        val request = request("document", url)
+        val policy = HostedBrowserRequestPolicy(
+            ok: true, reason: "ok", mode: RequestMode.Navigate,
+            credentials: "include", canonical_url: url,
+            sanitized_headers: "", consumes_navigation: true
+        )
+        val response = broker._finalize_network(
+            "document",
+            FetchRequest(
+                url: Url.parse_or_opaque(url), method: "GET", headers: "",
+                body: [], mode: RequestMode.Navigate, credentials: "include"
+            ),
+            FetchResponse(
+                status: 302, headers: "Location: https:///missing-host",
+                body: []
+            )
+        )
+
+        step("Reject it without authorizing a follow-up connection")
+        val rejected = broker._record_document_response(
+            request, policy, response, 0
+        )
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal("invalid-navigation-redirect")
+        expect(broker.navigation_permit.active).to_equal(false)
+        expect(broker.pending_document_commit_url).to_equal("")
+        expect(broker.provisional_document_origin).to_equal("")
+
     # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017
     it "never learns HSTS from generic response finalization":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)

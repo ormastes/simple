@@ -68,6 +68,15 @@ fn draw_ir_style_value(
                         return property.value
     ""
 
+fn draw_ir_has_component(
+    composition: DrawIrComposition, component_id: text
+) -> bool:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return true
+    false
+
 describe "hosted Web content session":
 
     it "uses a required external web frame and rejects a missing one":
@@ -530,6 +539,41 @@ describe "hosted Web content session":
         expect(animated.render_session.counters.parse_count).to_equal(1)
         expect(animated.render_session.counters.style_count).to_equal(2)
         expect(animated.render_session.counters.layout_count).to_equal(2)
+
+    # @req REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018 NFR-WEB-BROWSER-006
+    it "advances a SimpleScript timer body mutation into the next Draw IR frame":
+        step("Render the initial retained Draw IR frame before the script timer")
+        var session = HostedWebContentSession.create(
+            93,
+            "<style>#before,#after{position:absolute;left:0;top:0;" +
+            "width:32px;height:24px}#before{background-color:#ef4444}" +
+            "#after{background-color:#2563eb}</style>" +
+            "<div id='before'></div><script type='text/simple'>" +
+            "callback 91|body_html '<div id=\"after\"></div>'\n" +
+            "timeout 91 16</script>",
+            64, 48
+        )
+        expect(session.advance_at(1000)).to_equal(false)
+        val before = session.dispatch_pointer_at(1, 4, 4, true)
+        expect(before.semantic_target_id).to_equal("before")
+        expect(draw_ir_has_component(
+            session.render_session.current_result.unwrap().composition, "before"
+        )).to_equal(true)
+        expect(session.render_session.counters.serialize_count).to_equal(1)
+        val before_revision = session.browser.ui_access_revision
+
+        step("Advance the timer and rebuild one current Draw IR frame")
+        expect(session.advance_at(1016)).to_equal(true)
+        expect(session.browser.ui_access_revision).to_equal(
+            before_revision + 1
+        )
+        val after = session.dispatch_pointer_at(2, 4, 4, true)
+        expect(after.semantic_target_id).to_equal("after")
+        expect(draw_ir_has_component(
+            session.render_session.current_result.unwrap().composition, "after"
+        )).to_equal(true)
+        expect(session.render_session.counters.serialize_count).to_equal(2)
+        expect(session.render_session.counters.parse_count).to_equal(2)
 
     # @req REQ-WEB-BROWSER-008
     it "appends committed text only to the actually focused hosted input":

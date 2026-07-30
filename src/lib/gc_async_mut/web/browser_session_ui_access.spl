@@ -136,25 +136,54 @@ fn _browser_bookmark_nodes(session: BrowserSession) -> [UiAccessNode]:
         index = index + 1
     nodes
 
+class _BrowserPageControl:
+    node: BeDomNode
+    enabled: bool
+
 class _BrowserPageControlBuckets:
-    buttons: [BeDomNode]
-    inputs: [BeDomNode]
-    textareas: [BeDomNode]
-    selects: [BeDomNode]
+    buttons: [_BrowserPageControl]
+    inputs: [_BrowserPageControl]
+    textareas: [_BrowserPageControl]
+    selects: [_BrowserPageControl]
 
 fn _browser_collect_page_controls(
-    node: BeDomNode, buckets: _BrowserPageControlBuckets
+    node: BeDomNode, buckets: _BrowserPageControlBuckets,
+    disabled_by_fieldset: bool
 ):
+    val enabled = (
+        not disabled_by_fieldset and
+        not be_dom_has_attr(node, "disabled")
+    )
+    val control = _BrowserPageControl(node: node, enabled: enabled)
     if node.tag_name == "button":
-        buckets.buttons.push(node)
+        buckets.buttons.push(control)
     elif node.tag_name == "input":
-        buckets.inputs.push(node)
+        buckets.inputs.push(control)
     elif node.tag_name == "textarea":
-        buckets.textareas.push(node)
+        buckets.textareas.push(control)
     elif node.tag_name == "select":
-        buckets.selects.push(node)
+        buckets.selects.push(control)
+    val fieldset_disabled = (
+        node.tag_name == "fieldset" and
+        be_dom_has_attr(node, "disabled")
+    )
+    val first_legend_id = if fieldset_disabled:
+        _browser_fieldset_first_legend_id(node)
+    else:
+        -1
     for child in node.children:
-        _browser_collect_page_controls(child, buckets)
+        _browser_collect_page_controls(
+            child, buckets,
+            (disabled_by_fieldset or (
+                fieldset_disabled and child.node_id != first_legend_id
+            ))
+        )
+
+fn _browser_fieldset_first_legend_id(fieldset: BeDomNode) -> i64:
+    for child in fieldset.children:
+        if child.tag_name == "legend":
+            return child.node_id
+    -1
 
 fn _browser_page_control_nodes(
     dom: BeDomNode, ui_access_revision: i64
@@ -163,17 +192,18 @@ fn _browser_page_control_nodes(
     val buckets = _BrowserPageControlBuckets(
         buttons: [], inputs: [], textareas: [], selects: []
     )
-    _browser_collect_page_controls(dom, buckets)
+    _browser_collect_page_controls(dom, buckets, false)
     val buttons = buckets.buttons
     var button_index = 0
     while button_index < buttons.len():
-        val button = buttons[button_index]
+        val control = buttons[button_index]
+        val button = control.node
         var label = be_dom_get_text_content(button).trim()
         if label == "":
             label = "Button"
         var access_node = _browser_node(
             "page_button_{button_index}", "button", label,
-            be_dom_has_attr(button, "disabled") == false, false, ["click", "key"],
+            control.enabled, false, ["click", "key"],
             _browser_dom_control_props("page_button", button.node_id.to_text())
         )
         access_node.focused = be_dom_has_attr(button, "data-focused")
@@ -183,10 +213,11 @@ fn _browser_page_control_nodes(
     val inputs = buckets.inputs
     var input_index = 0
     while input_index < inputs.len():
-        val input = inputs[input_index]
+        val control = inputs[input_index]
+        val input = control.node
         val declared_type = be_dom_get_attr(input, "type").lower()
         val input_type = if declared_type == "": "text" else: declared_type
-        val enabled = be_dom_has_attr(input, "disabled") == false
+        val enabled = control.enabled
         if input_type == "hidden":
             pass_dn("hidden form state is not an interactive UI node")
         elif input_type == "checkbox" or input_type == "radio":
@@ -220,8 +251,9 @@ fn _browser_page_control_nodes(
     val textareas = buckets.textareas
     var textarea_index = 0
     while textarea_index < textareas.len():
-        val textarea = textareas[textarea_index]
-        val editable = not be_dom_has_attr(textarea, "disabled") and
+        val control = textareas[textarea_index]
+        val textarea = control.node
+        val editable = control.enabled and
             not be_dom_has_attr(textarea, "readonly")
         var access_node = _browser_node(
             "page_textarea_{textarea_index}", "textfield",
@@ -237,8 +269,9 @@ fn _browser_page_control_nodes(
 
     var select_index = 0
     while select_index < buckets.selects.len():
-        val select = buckets.selects[select_index]
-        val enabled = not be_dom_has_attr(select, "disabled")
+        val control = buckets.selects[select_index]
+        val select = control.node
+        val enabled = control.enabled
         var access_node = _browser_node(
             "page_select_{ui_access_revision}_{select.node_id}", "select",
             browser_select_value(select), enabled, false,

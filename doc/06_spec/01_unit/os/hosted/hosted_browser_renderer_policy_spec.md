@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 54 | 54 | 0 | 0 |
+| 55 | 55 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -871,6 +871,16 @@ expect(headers).to_equal(
 ```
 
 </details>
+
+#### rejects a malformed HTTPS redirect before creating a navigation permit
+
+- Receive a hostile `Location: https:///missing-host` response from the
+  authenticated transport.
+- Reject it as `invalid-navigation-redirect` without creating a broker navigation
+  permit, pending document commit, or provisional origin.
+
+Docgen: pending — this reviewed manual mirror reflects the executable SSpec;
+the isolated worktree has no deployed self-hosted runtime.
 
 #### never learns HSTS from generic response finalization
 
