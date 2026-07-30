@@ -7,16 +7,16 @@
 **Design:** doc/05_design/simple_web_browser_engine_production_hardening.md
 **Research:** doc/01_research/local/simple_web_browser_engine_production_hardening.md
 
-Requirement trace: REQ-WEB-BROWSER-003, REQ-WEB-BROWSER-004,
-REQ-WEB-BROWSER-005, REQ-WEB-BROWSER-006, REQ-WEB-BROWSER-007,
-REQ-WEB-BROWSER-017, and REQ-WEB-BROWSER-021.
-
 ## Overview
 
 BrowserSession owns the deterministic CSS/JavaScript animation clock and the
 selected animation instances. The trace scenario proves that its initial,
 intermediate, paused, resumed, and completed states lower through the canonical
 DrawIrComposition and that Engine2D paints the exact command color area.
+
+Requirement trace: REQ-WEB-BROWSER-003, REQ-WEB-BROWSER-004,
+REQ-WEB-BROWSER-005, REQ-WEB-BROWSER-006, REQ-WEB-BROWSER-007,
+REQ-WEB-BROWSER-017, and REQ-WEB-BROWSER-021.
 
 ## Examples
 
@@ -95,10 +95,15 @@ fn _browser_animation_draw_ir_trace(
             session.css_animation_instances, session.image_resources
         )
     )
-    var stage = result.composition.batches[0].commands[0]
+    if result.composition.batches.len() == 0:
+        fail("Expected an HTML Draw IR batch for animation evidence")
+    var stage: DrawIrCommand? = nil
     for command in result.composition.batches[0].commands:
         if command.component_id == "stage":
-            stage = command
+            stage = Some(command)
+    val selected_stage = match stage:
+        Some(command): command
+        nil: fail("Expected Draw IR command for animation stage")
     val raster = Engine2dCompositorBackend.create_named(
         width, height, "software"
     )
@@ -107,13 +112,13 @@ fn _browser_animation_draw_ir_trace(
     )
     raster.shutdown()
     BrowserAnimationDrawIrTrace(
-        command: stage,
+        command: selected_stage,
         next_ms: result.animation_next_ms,
         rect_pixel_count: _count_animation_rect_color(
-            rendered.pixels, width, stage, true
+            rendered.pixels, width, selected_stage, true
         ),
         outside_color_count: _count_animation_rect_color(
-            rendered.pixels, width, stage, false
+            rendered.pixels, width, selected_stage, false
         ),
         skipped_command_count: rendered.skipped_command_count,
         source_kind: result.composition.batches[0].source.source_kind
@@ -129,6 +134,16 @@ fn _expect_browser_animation_draw_ir_frame(
     expect(trace.rect_pixel_count).to_equal(32 * 24)
     expect(trace.outside_color_count).to_equal(0)
     expect(trace.skipped_command_count).to_equal(0)
+
+# @inline
+fn _open_raf_promise_microtask_frame() -> BrowserSession:
+    var session = BrowserSession.new()
+    match session.open_html(
+        "https://example.test/raf-promise-paint",
+        "<html><head><title>Waiting</title><style>#stage { width: 32px; height: 24px; background-color: #ef4444; }</style></head><body><div id='stage'></div><script>var stage = document.getElementById('stage'); requestAnimationFrame(function(){ Promise.resolve().then(function(){ stage.style.backgroundColor = '#2563eb'; document.title = 'microtask'; }); });</script></body></html>"
+    ):
+        Ok(_): session
+        Err(reason): fail("Expected rAF Promise page to open: {reason}")
 
 describe "BrowserSession script CSS animation rendering":
 
@@ -313,6 +328,43 @@ describe "BrowserSession script CSS animation rendering":
 
         expect(session.advance_time(33)).to_equal(1)
         expect(session.current_title).to_equal("33")
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006
+    it "should paint a requestAnimationFrame Promise microtask before advance returns":
+        # @step: Open the red animation frame
+        val session = _open_raf_promise_microtask_frame()
+        val initial = _browser_animation_draw_ir_trace(session, 64, 48)
+        expect(initial.source_kind).to_equal("html_ast")
+        expect(initial.command.component_id).to_equal("stage")
+        expect(initial.command.width).to_equal(32)
+        expect(initial.command.height).to_equal(24)
+        expect(initial.command.color).to_equal(0xFFEF4444u32)
+        expect(initial.rect_pixel_count).to_equal(32 * 24)
+        expect(initial.outside_color_count).to_equal(0)
+        expect(initial.skipped_command_count).to_equal(0)
+
+        # @step: Advance requestAnimationFrame and its Promise microtask
+        val callback_count = session.advance_time(16)
+        expect(callback_count).to_equal(1)
+        expect(session.current_title).to_equal("microtask")
+
+        # @step: Observe the microtask DOM style before returning
+        val rendered_html = session.render_html_document()
+        expect(rendered_html).to_contain("background-color:#2563eb;")
+
+        # @step: Render the changed Draw IR through canonical Engine2D
+        val changed = _browser_animation_draw_ir_trace(session, 64, 48)
+        expect(changed.source_kind).to_equal("html_ast")
+        expect(changed.command.component_id).to_equal("stage")
+        expect(changed.command.width).to_equal(32)
+        expect(changed.command.height).to_equal(24)
+        expect(changed.command.color).to_equal(0xFF2563EBu32)
+        expect(changed.rect_pixel_count).to_equal(32 * 24)
+        expect(changed.outside_color_count).to_equal(0)
+        expect(changed.skipped_command_count).to_equal(0)
 
     it "seeds a new JavaScript runtime from the browser clock":
         var session = BrowserSession.new()

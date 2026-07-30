@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,7 +24,7 @@ BrowserSession owns the deterministic CSS/JavaScript animation clock and the sel
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-07-30 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -382,6 +382,77 @@ expect(session.open_html(
 
 expect(session.advance_time(33)).to_equal(1)
 expect(session.current_title).to_equal("33")
+```
+
+</details>
+
+#### should paint a requestAnimationFrame Promise microtask before advance returns
+
+- Open the red animation frame
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 8 expected checks
+   - Expected: initial.source_kind equals `html_ast`
+   - Expected: initial.command.component_id equals `stage`
+   - Expected: initial.command.width equals `32`
+   - Expected: initial.command.height equals `24`
+   - Expected: initial.command.color equals `0xFFEF4444u32`
+   - Expected: initial.rect_pixel_count equals `32 * 24`
+   - Expected: initial.outside_color_count equals `0`
+   - Expected: initial.skipped_command_count equals `0`
+- Advance requestAnimationFrame and its Promise microtask
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 2 expected checks
+   - Expected: callback_count equals `1`
+   - Expected: session.current_title equals `microtask`
+- Observe the microtask DOM style before returning
+   - Artifact capture: after_step
+- Render the changed Draw IR through canonical Engine2D
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 8 expected checks
+   - Expected: changed.source_kind equals `html_ast`
+   - Expected: changed.command.component_id equals `stage`
+   - Expected: changed.command.width equals `32`
+   - Expected: changed.command.height equals `24`
+   - Expected: changed.command.color equals `0xFF2563EBu32`
+   - Expected: changed.rect_pixel_count equals `32 * 24`
+   - Expected: changed.outside_color_count equals `0`
+   - Expected: changed.skipped_command_count equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val session = _open_raf_promise_microtask_frame()
+val initial = _browser_animation_draw_ir_trace(session, 64, 48)
+expect(initial.source_kind).to_equal("html_ast")
+expect(initial.command.component_id).to_equal("stage")
+expect(initial.command.width).to_equal(32)
+expect(initial.command.height).to_equal(24)
+expect(initial.command.color).to_equal(0xFFEF4444u32)
+expect(initial.rect_pixel_count).to_equal(32 * 24)
+expect(initial.outside_color_count).to_equal(0)
+expect(initial.skipped_command_count).to_equal(0)
+
+val callback_count = session.advance_time(16)
+expect(callback_count).to_equal(1)
+expect(session.current_title).to_equal("microtask")
+
+val rendered_html = session.render_html_document()
+expect(rendered_html).to_contain("background-color:#2563eb;")
+
+val changed = _browser_animation_draw_ir_trace(session, 64, 48)
+expect(changed.source_kind).to_equal("html_ast")
+expect(changed.command.component_id).to_equal("stage")
+expect(changed.command.width).to_equal(32)
+expect(changed.command.height).to_equal(24)
+expect(changed.command.color).to_equal(0xFF2563EBu32)
+expect(changed.rect_pixel_count).to_equal(32 * 24)
+expect(changed.outside_color_count).to_equal(0)
+expect(changed.skipped_command_count).to_equal(0)
 ```
 
 </details>
@@ -1071,8 +1142,8 @@ expect(_count_color(last.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
