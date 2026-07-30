@@ -119,6 +119,32 @@ byte-residue gates, not RSS ceiling alone.
     `src/app/__init__.spl` and `src/compiler/__init__.spl` both sanitize to
     module `__init__`, aborting the multi-root scan. `--entry-closure`
     masks it. Filed in the same bug doc.
+  - Run 10 (2026-07-30, pinned 110f743b2a2, cleared native_cache, gates ON:
+    `SIMPLE_AST_GEN_CHECK=1 SIMPLE_MEM_SNAPSHOT=1 SIMPLE_GEN_ARENA_CHECK=1`):
+    **stage 3 reached and progressing with zero parse errors** — the run-9
+    parse failure did NOT recur, and a separate bisect established it was a
+    STALE `.simple/native_cache` artifact (3/3 clean-cache runs of the exact
+    repro on the exact commit compiled all 1494 modules with 0 parser_error).
+    Run 10 was killed by our own 3h timeout, not by a defect: the stage-3 log
+    was still being appended at the kill instant.
+    Gates at kill: **0 parse errors, 0 stale-generation, 0 OOB** across ~225
+    stage-3 modules. Stage 4 never executed ⇒ **byte gates UNVERIFIED, L7 NOT
+    admissible.**
+  - **The admission criteria as written are self-defeating — amend them.**
+    Run 10 measured the diagnostic gates' cost: ~225 modules in 3h
+    (~48s/module) with gates ON versus 1494 modules in ~7min (~0.28s/module)
+    with gates OFF — a **~170x slowdown**, putting a full gates-on Stage-4 run
+    at an estimated ~20h. Requiring "zero stale-generation diagnostics over a
+    full Stage-4 run" therefore cannot be satisfied in one practical run.
+    Options: (a) sample the generation check instead of validating every AST
+    access; (b) split admission into a gates-ON diagnostic pass over a bounded
+    corpus plus a gates-OFF full pass for the byte gates. Pick one and rewrite
+    the L7 admission line before the next attempt — do not simply re-run with
+    a longer timeout.
+  - Note on run-10 scope: the worktree was pinned at 110f743b2a2, which still
+    carried `ZZZTRACE` debug prints that origin has since removed. The verdict
+    applies to that commit, NOT to current origin or to the memory-infra work
+    landed on 2026-07-30. A confirming run on current origin is still owed.
   - Admission criteria unchanged: zero stale-generation/OOB diagnostics +
     byte gates. Successor plan for the M-milestones:
     doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md.

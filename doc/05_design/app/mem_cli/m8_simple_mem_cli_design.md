@@ -115,7 +115,14 @@ render path — the plain fallback is the TUI's row-formatting logic minus the
 alt-screen/live-refresh wrapper.
 
 ## Open gaps to file as follow-up bugs
-- No SIGUSR2 hook in `signal_handlers.spl` (§2) — blocks `top --pid`.
+- ~~No SIGUSR2 hook in `signal_handlers.spl` (§2) — blocks `top --pid`~~ — the
+  SIGUSR2 hook landed (`install_sigusr2_handler`/`on_sigusr2`), and
+  `top --pid` (2026-07-30) ships as a **/proc-based poll loop**
+  (`src/app/mem/live_poll.spl`) rather than the signal-dump channel, so it
+  works against any pid without requiring the target to have called
+  `install_mem_dump_on_usr2`. The SIGUSR2 dump+read channel still exists in
+  `live_poll.spl` (`--path <file>`) as the OWNER/KIND channel for
+  cooperating Simple processes, just not wired as `top --pid`'s default.
 - No `Table` TUI widget — v1 workaround only (§5).
 - `gpu --sanitize` re-exec, P2 sampled call-stack attribution: out of scope.
 - TODO: wire `simple mem top --tui` into `src/app/mem/main.spl`'s dispatcher
