@@ -52,6 +52,18 @@ SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND=metal SIMPLE_LIB=src bin/simple test \
 SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND=metal SIMPLE_LIB=src bin/simple test \
   test/05_perf/web_render_chrome/web_draw_ir_gpu_route_device_measured_spec.spl \
   --mode=interpreter
+
+SIMPLE_LIB=src bin/simple test \
+  test/05_perf/browser/hosted_browser_revision_wire_perf_spec.spl \
+  --mode=interpreter
+
+SIMPLE_HOSTED_REVISION_CACHE_BACKEND=metal SIMPLE_LIB=src bin/simple test \
+  test/05_perf/browser/hosted_compositor_revision_cache_perf_spec.spl \
+  --mode=interpreter
+
+SIMPLE_HOSTED_REVISION_CACHE_BACKEND=vulkan SIMPLE_LIB=src bin/simple test \
+  test/05_perf/browser/hosted_compositor_revision_cache_perf_spec.spl \
+  --mode=interpreter
 ```
 
 ## Required evidence
@@ -78,6 +90,14 @@ SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND=metal SIMPLE_LIB=src bin/simple test \
   measured route may win; unavailable, mismatched, or CPU-backed evidence fails.
 - The primary Draw IR route records three exact paired samples, then reuses the
   completed Metal decision without increasing the sample count.
+- The hosted response-route benchmark proves exact alternating red/blue pixels,
+  one unchanged reuse after each changed frame, and lower unchanged p50 while
+  including render-session work plus response SBRF7 encode/decode.
+- The hosted compositor revision-cache benchmark records 21 paired forced and
+  unchanged frames for both Metal and Vulkan. Each row must report
+  `device_readback`, positive stable handle and device identity, exact pixels,
+  one admitted reuse per forced render, and
+  `hit_p50_ns * 100 < forced_p50_ns * 95`.
 - Add canonical device identity plus exact expected-pixel, mismatch-count, and
   max-channel-delta fields before promoting the Vulkan lane from device-capture
   evidence to exact CPU/Vulkan parity.
