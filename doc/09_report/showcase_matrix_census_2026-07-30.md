@@ -166,3 +166,105 @@ absence. Settling requirements for #4-#6 are therefore:
 cell moved to GREEN, but three moved from UNKNOWN to BLOCKED-with-a-named
 cause and an actionable provisioning list, and the campaign now knows its
 top gate cannot run on a fresh Linux checkout as shipped.
+
+## Font-asset provisioning: the mechanism was "committed in-repo", and a chore commit removed it TODAY (2026-07-30)
+
+**There is no fetch/submodule/setup mechanism to invoke, because none was
+ever needed: the assets were tracked in git.** PROVED:
+
+- `.gitmodules` declares 4 submodules, all under `examples/` (cuda,
+  deeplearning, trace32, korean_stock) — **no font/assets submodule**.
+- **Nothing** in `scripts/setup/` references `google-fonts`,
+  `font_bundle`, or `assets/fonts`.
+- `assets/fonts` is **not** gitignored — it was meant to be committed.
+- `assets/fonts/**` has **3,787 commits of history**.
+- `doc/03_plan/sys_test/simpleos_font_legal_bundle.md` and
+  `scripts/os/simpleos_font_bundle_companion.sha256` (4,152 bytes, 35
+  pinned companions: `METADATA.pb` + `OFL.txt` per family) are
+  **consumption/verification** artifacts — they pin and stage bytes that
+  are assumed already present. Neither fetches anything.
+
+**Root cause of wall 7 (PROVED):** commit `a4b4c008aff`
+*"chore: clean undeclared root artifacts"* — authored by the repo owner
+(Yoon, `Yoons-MacBook-Air.local`) on **2026-07-30 14:05:23 +0900, today** —
+is **271 deletions and 0 additions**. It deleted **58 files under
+`assets/fonts`**, of which **51 are under
+`assets/fonts/google-fonts`**, including **16 `.ttf` files**. It is the
+**last commit in which the pinned `notosansmono` TTF existed**, and it is
+an ancestor of the current tip. No font-related file was added anywhere
+in that commit, so this was a pure removal, **not** a relocation to a
+bundle.
+
+This is the *"chore-labelled bulk commits hide semantic changes"* pattern
+again: a 273-file cleanup carried a change that silently disabled a
+verification surface.
+
+**Why it was swept (INFERRED, high confidence):** the commit title says
+"undeclared", and `CLAUDE.md` documents the FILE.md manifest policy
+("Each directory can have a FILE.md declaring allowed entries", enforced
+by `scripts/check-workspace-root-guard.shs`). There is **no
+`assets/FILE.md`** and the root `FILE.md` does not mention `assets`, so
+the tree was undeclared and a manifest-driven sweep would remove it. The
+sweep was therefore *policy-correct* and the *gates* were relying on
+undeclared content — two repo policies in direct conflict.
+
+### Blast radius (PROVED)
+
+**34 source consumers reference `google-fonts`** and are unrunnable-as-shipped
+on a fresh checkout:
+
+| Area | Count | Named |
+|---|---|---|
+| `scripts/check` gates | 5 | `check-linux-hosted-wm-live-window-evidence.shs`, `check-simpleos-wm-fullscreen-evidence.shs`, `check-rocm-engine2d-font-readback.shs`, `check-rv64-display-smoke-qmp-evidence.shs`, +1 under `check/lib` |
+| `scripts/os` staging | 2 | incl. `make_os_disk.shs` (FAT32/initramfs staging) |
+| `src` | 6 | font registry / readback harness paths |
+| `test` specs | 21 | incl. `test/02_integration/os/port/simpleos_font_asset_staging_spec.spl` |
+
+So this is not one blocked cell — it is **5 gates, 2 OS-image staging
+owners and 21 specs**, i.e. the font-dependent verification surface
+entirely, plus SimpleOS disk images that stage fonts.
+
+### Verdict: STOPPING — this is a repo-policy decision, not an autonomous fix
+
+Restoring is *mechanically* trivial (`git checkout a4b4c008aff^ --
+assets/fonts/google-fonts`, no network, `curl`/`wget` not needed) but it
+would **directly revert the repo owner's deliberate same-day commit**,
+and it would restore content the FILE.md guard considers undeclared, so
+the next sweep removes it again. Per brief, options with recommendation:
+
+- **Option A (recommended): restore + declare.** Restore the 51
+  google-fonts paths from `a4b4c008aff^` **and** add an `assets/FILE.md`
+  (plus a root-manifest child link) declaring the tree, so the manifest
+  guard stops classifying it as undeclared. Cheapest, no network, keeps
+  gates runnable on a fresh clone, and resolves the policy conflict at
+  its cause. Needs owner sign-off because it reverses today's commit.
+- **Option B: keep the tree out of git; add a sanctioned provisioning
+  step.** New `scripts/setup/` step that materializes the fonts and
+  verifies them against the existing pinned sha256s. Keeps the repo free
+  of vendored binaries (which the cleanup may have intended) but requires
+  inventing a mechanism and a network source — explicitly out of scope
+  for me to author unilaterally.
+- **Option C: re-pin the gates onto a font that is in-repo.** Rejected:
+  the pins are legal-provenance companions (OFL/METADATA) and re-pinning
+  would weaken the licence-attestation the bundle exists to prove.
+
+I did not implement any option, fabricate an asset, or weaken a gate.
+
+### Wall 6 recorded as coupled to the seed-redeploy lane (INFERRED)
+
+`runtime-provider-bootstrap-forbidden` fires because the only
+self-hosted-lineage runtime `.so` on this host is the bootstrap one
+(`src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so`). A
+deployed **non-bootstrap** self-hosted runtime provider would plausibly
+satisfy it, so this wall may resolve itself when the sibling lane's seed
+candidate lands. **Confirmation required:** after redeploy, re-run the
+gate in a clean worktree passing the new provider via
+`SIMPLE_WM_RUNTIME_LIB` + attested `SIMPLE_WM_RUNTIME_LIB_SHA256`, and
+check that `runtime_provider_status=pass` — i.e. that the gate's
+bootstrap-detection does not also reject the redeployed provider. Marked
+INFERRED until that run exists.
+
+**Scoreboard unchanged: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN** — but
+wall 7's cause is now a known, dated, one-commit regression with a named
+owner decision required, and the blast radius is 34 consumers rather than
+3 cells.
