@@ -130,10 +130,10 @@ class VulkanBackend:
     fn compile_compute_shader(builder: SpirvBuilder, func: MirFunction) -> text:
         """Compile a compute shader."""
 
-        if func.signature.params.len() != 0 or func.signature.is_variadic:
+        if func.signature.is_variadic:
             return Err(compileerror_backend_error(
                 BackendKind.Vulkan,
-                "Vulkan compute entry parameters require StorageBuffer interface lowering"
+                "Vulkan compute entry parameters cannot be variadic"
             ))
         if func.signature.return_type.kind != MirTypeKind.Unit:
             return Err(compileerror_backend_error(
@@ -142,11 +142,26 @@ class VulkanBackend:
             ))
         for local in func.locals:
             match local.kind:
-                case LocalKind.Arg(_):
-                    return Err(compileerror_backend_error(
-                        BackendKind.Vulkan,
-                        "Vulkan compute entry argument locals require StorageBuffer interface lowering"
-                    ))
+                case LocalKind.Arg(index):
+                    if index < 0 or index >= func.signature.params.len():
+                        return Err(compileerror_backend_error(
+                            BackendKind.Vulkan,
+                            "Vulkan compute entry argument local index is outside its signature"
+                        ))
+                    match local.type_.kind:
+                        case Ptr(pointee, _) | Ref(pointee, _):
+                            if pointee.kind != MirTypeKind.U32:
+                                return Err(compileerror_backend_error(
+                                    BackendKind.Vulkan,
+                                    "Vulkan StorageBuffer arguments currently require U32 pointers"
+                                ))
+                        case U32:
+                            ()
+                        case _:
+                            return Err(compileerror_backend_error(
+                                BackendKind.Vulkan,
+                                "Vulkan compute entry arguments require U32 pointers or one U32 length"
+                            ))
                 case LocalKind.Return:
                     return Err(compileerror_backend_error(
                         BackendKind.Vulkan,
@@ -154,11 +169,36 @@ class VulkanBackend:
                     ))
                 case _:
                     ()
-        if func.blocks.len() != 1 or func.blocks[0].id.id != 0:
+        if func.blocks.len() == 0 or func.blocks[0].id.id != 0:
             return Err(compileerror_backend_error(
                 BackendKind.Vulkan,
-                "Vulkan SPIR-V currently supports exactly one entry block"
+                "Vulkan SPIR-V requires an entry block with id 0"
             ))
+
+        var storage_arg_bindings: Dict<i64, i64> = {}
+        var push_arg_locals: Dict<i64, i64> = {}
+        var next_binding = 0
+        for local in func.locals:
+            match local.kind:
+                case LocalKind.Arg(index):
+                    match local.type_.kind:
+                        case Ptr(_, _) | Ref(_, _):
+                            storage_arg_bindings[local.id.id] = next_binding
+                            next_binding = next_binding + 1
+                        case U32:
+                            if push_arg_locals.keys().len() > 0:
+                                return Err(compileerror_backend_error(
+                                    BackendKind.Vulkan,
+                                    "Vulkan compute entry supports one U32 length push constant"
+                                ))
+                            push_arg_locals[local.id.id] = index
+                        case _:
+                            ()
+                case _:
+                    ()
+        val uses_storage_buffers = storage_arg_bindings.keys().len() > 0
+        val uses_push_constant = push_arg_locals.keys().len() > 0
+        val uses_bool = self.function_uses_bool(func)
 
         # Allocate IDs first so the module can follow SPIR-V logical layout:
         # entry points and annotations must precede types and global variables.
@@ -166,9 +206,16 @@ class VulkanBackend:
         val u32_type = builder.alloc_id()
         val uses_i64 = self.function_uses_i64(func)
         val i64_type = if uses_i64: builder.alloc_id() else: 0
-        # Scalar lowering is rejected below; keep tuple aliases without
-        # declaring unused capability-bearing scalar types in the module.
-        val bool_type = u32_type
+        val bool_type = if uses_bool: builder.alloc_id() else: u32_type
+        val storage_runtime_array_type = if uses_storage_buffers: builder.alloc_id() else: 0
+        val storage_struct_type = if uses_storage_buffers: builder.alloc_id() else: 0
+        val storage_struct_ptr_type = if uses_storage_buffers: builder.alloc_id() else: 0
+        val storage_elem_ptr_type = if uses_storage_buffers: builder.alloc_id() else: 0
+        val push_struct_type = if uses_push_constant: builder.alloc_id() else: 0
+        val push_struct_ptr_type = if uses_push_constant: builder.alloc_id() else: 0
+        val push_value_ptr_type = if uses_push_constant: builder.alloc_id() else: 0
+        # Scalar lowering remains intentionally narrow: only the real Bool
+        # type needed by bounds checks is emitted.
         val i32_type = u32_type
         val f32_type = u32_type
         val uvec3_type = builder.alloc_id()
@@ -179,6 +226,11 @@ class VulkanBackend:
         val workgroup_id = builder.alloc_id()
         val uses_grid_dim = self.function_uses_grid_dim(func)
         val num_workgroups = if uses_grid_dim: builder.alloc_id() else: 0
+        var storage_variable_ids: Dict<i64, i64> = {}
+        for local in func.locals:
+            if storage_arg_bindings.has(local.id.id):
+                storage_variable_ids[local.id.id] = builder.alloc_id()
+        val push_variable_id = if uses_push_constant: builder.alloc_id() else: 0
         val uses_shared_memory = self.function_uses_shared_memory(func)
         var shared_array_ids: Dict<i64, i64> = {}
         if uses_shared_memory:
@@ -204,6 +256,11 @@ class VulkanBackend:
                             interface_ids = interface_ids.push(shared_array_ids[dest.id])
                         case _:
                             ()
+        for local in func.locals:
+            if storage_variable_ids.has(local.id.id):
+                interface_ids = interface_ids.push(storage_variable_ids[local.id.id])
+        if uses_push_constant:
+            interface_ids = interface_ids.push(push_variable_id)
         builder.emit_entry_point(func.name, func_id, interface_ids)
 
         # Default workgroup size (can be overridden)
@@ -215,6 +272,16 @@ class VulkanBackend:
         builder.emit_decorate_builtin(workgroup_id, SpirvBuiltin.WorkgroupId)
         if uses_grid_dim:
             builder.emit_decorate_builtin(num_workgroups, SpirvBuiltin.NumWorkgroups)
+        if uses_storage_buffers:
+            builder.emit_decorate(storage_struct_type, "Block")
+            builder.emit_decorate_array_stride(storage_runtime_array_type, 4)
+            builder.emit_member_decorate(storage_struct_type, 0, "Offset 0")
+            for local in func.locals:
+                if storage_variable_ids.has(local.id.id):
+                    builder.emit_decorate_binding(storage_variable_ids[local.id.id], 0, storage_arg_bindings[local.id.id])
+        if uses_push_constant:
+            builder.emit_decorate(push_struct_type, "Block")
+            builder.emit_member_decorate(push_struct_type, 0, "Offset 0")
 
         # Decorations section complete
         builder.emit_comment("--- End Decorations ---")
@@ -222,6 +289,8 @@ class VulkanBackend:
 
         builder.emit("{builder.id_str(void_type)} = OpTypeVoid")
         builder.emit("{builder.id_str(u32_type)} = OpTypeInt 32 0")
+        if uses_bool:
+            builder.emit("{builder.id_str(bool_type)} = OpTypeBool")
         if uses_i64:
             # Add/Sub/Mul are sign-agnostic; an unsigned carrier also permits
             # zero-extending Vulkan's U32 invocation IDs.
@@ -229,14 +298,28 @@ class VulkanBackend:
         builder.emit("{builder.id_str(uvec3_type)} = OpTypeVector {builder.id_str(u32_type)} 3")
         builder.emit("{builder.id_str(uvec3_input_ptr)} = OpTypePointer Input {builder.id_str(uvec3_type)}")
         builder.emit("{builder.id_str(func_type)} = OpTypeFunction {builder.id_str(void_type)}")
+        if uses_storage_buffers:
+            builder.emit("{builder.id_str(storage_runtime_array_type)} = OpTypeRuntimeArray {builder.id_str(u32_type)}")
+            builder.emit("{builder.id_str(storage_struct_type)} = OpTypeStruct {builder.id_str(storage_runtime_array_type)}")
+            builder.emit("{builder.id_str(storage_struct_ptr_type)} = OpTypePointer StorageBuffer {builder.id_str(storage_struct_type)}")
+            builder.emit("{builder.id_str(storage_elem_ptr_type)} = OpTypePointer StorageBuffer {builder.id_str(u32_type)}")
+        if uses_push_constant:
+            builder.emit("{builder.id_str(push_struct_type)} = OpTypeStruct {builder.id_str(u32_type)}")
+            builder.emit("{builder.id_str(push_struct_ptr_type)} = OpTypePointer PushConstant {builder.id_str(push_struct_type)}")
+            builder.emit("{builder.id_str(push_value_ptr_type)} = OpTypePointer PushConstant {builder.id_str(u32_type)}")
         val scope_workgroup = builder.emit_const_int(u32_type, 2)
         val scope_subgroup = builder.emit_const_int(u32_type, 3)
         val scope_device = builder.emit_const_int(u32_type, 1)
         val semantics_workgroup = builder.emit_const_int(u32_type, 264)
         val semantics_device = builder.emit_const_int(u32_type, 2376)
+        val storage_zero_index = if uses_storage_buffers or uses_push_constant: builder.emit_const_int(u32_type, 0) else: 0
         val uses_atomic_cas = self.function_uses_atomic_cas(func)
         val semantics_workgroup_unequal = if uses_atomic_cas: builder.emit_const_int(u32_type, 258) else: 0
         var value_ids: Dict<i64, i64> = {}
+        var storage_buffer_ids: Dict<i64, i64> = {}
+        for local in func.locals:
+            if storage_variable_ids.has(local.id.id):
+                storage_buffer_ids[local.id.id] = storage_variable_ids[local.id.id]
         var pointer_ids: Dict<i64, i64> = {}
         var live_shared_array_ids: Dict<i64, i64> = {}
         var shared_array_sizes: Dict<i64, i64> = {}
@@ -297,6 +380,12 @@ class VulkanBackend:
                             builder.emit("{builder.id_str(shared_array_ids[dest.id])} = OpVariable {builder.id_str(shared_array_ptr_types[dest.id])} Workgroup")
                         case _:
                             ()
+        if uses_storage_buffers:
+            for local in func.locals:
+                if storage_variable_ids.has(local.id.id):
+                    builder.emit("{builder.id_str(storage_variable_ids[local.id.id])} = OpVariable {builder.id_str(storage_struct_ptr_type)} StorageBuffer")
+        if uses_push_constant:
+            builder.emit("{builder.id_str(push_variable_id)} = OpVariable {builder.id_str(push_struct_ptr_type)} PushConstant")
         builder.emit("{builder.id_str(global_invocation_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("{builder.id_str(local_invocation_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("{builder.id_str(workgroup_id)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
@@ -304,28 +393,46 @@ class VulkanBackend:
             builder.emit("{builder.id_str(num_workgroups)} = OpVariable {builder.id_str(uvec3_input_ptr)} Input")
         builder.emit("")
 
+        var block_labels: Dict<i64, i64> = {}
+        var block_positions: Dict<i64, i64> = {}
+        var block_position = 0
+        for block in func.blocks:
+            if block_labels.has(block.id.id):
+                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V block ids must be unique"))
+            block_labels[block.id.id] = builder.alloc_id()
+            block_positions[block.id.id] = block_position
+            block_position = block_position + 1
+
         # Emit function
         builder.emit("{builder.id_str(func_id)} = OpFunction {builder.id_str(void_type)} None {builder.id_str(func_type)}")
 
-        # Emit entry block
-        val entry_label = builder.emit_label()
+        # Emit entry block. Labels are allocated before emission so forward
+        # branches can reference their targets without accepting back-edges.
+        builder.emit("{builder.id_str(block_labels[func.blocks[0].id.id])} = OpLabel")
+        if uses_push_constant:
+            for local in func.locals:
+                if push_arg_locals.has(local.id.id):
+                    val push_ptr = builder.emit_access_chain(push_value_ptr_type, push_variable_id, [storage_zero_index])
+                    value_ids[local.id.id] = builder.emit_load(u32_type, push_ptr)
 
         # Compile function body
+        var emitted_block_position = 0
         for block in func.blocks:
-            if block.id.id != 0:  # Skip entry block (already emitted)
-                builder.emit_label()
+            if emitted_block_position > 0:
+                builder.emit("{builder.id_str(block_labels[block.id.id])} = OpLabel")
 
             for inst in block.instructions:
-                val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id, num_workgroups, scope_workgroup, scope_subgroup, scope_device, semantics_workgroup, semantics_device, semantics_workgroup_unequal), value_ids, shared_array_ids, live_shared_array_ids, shared_array_sizes, pointer_ids, index_upper_bounds, func, workgroup_size, shared_elem_ptr_type)
+                val result = self.compile_instruction(builder, inst, (i32_type, u32_type, i64_type, f32_type, bool_type, uvec3_type, global_invocation_id, local_invocation_id, workgroup_id, num_workgroups, scope_workgroup, scope_subgroup, scope_device, semantics_workgroup, semantics_device, semantics_workgroup_unequal), value_ids, shared_array_ids, live_shared_array_ids, shared_array_sizes, pointer_ids, storage_buffer_ids, index_upper_bounds, func, workgroup_size, shared_elem_ptr_type, storage_elem_ptr_type, storage_zero_index)
                 match result:
                     case Ok(_):
                         ()
                     case Err(e):
                         return Err(e)
 
-            val terminator_result = self.compile_terminator(builder, block.terminator)
+            val terminator_result = self.compile_terminator(builder, block.terminator, emitted_block_position, block_positions, block_labels, value_ids, func, bool_type)
             if terminator_result.is_err():
                 return Err(terminator_result.unwrap_err())
+            emitted_block_position = emitted_block_position + 1
 
         builder.emit_function_end()
 
@@ -344,10 +451,13 @@ class VulkanBackend:
         mut live_shared_array_ids: Dict<i64, i64>,
         shared_array_sizes: Dict<i64, i64>,
         mut pointer_ids: Dict<i64, i64>,
+        storage_buffer_ids: Dict<i64, i64>,
         mut index_upper_bounds: Dict<i64, i64>,
         func: MirFunction,
         workgroup_size: [i64],
-        shared_elem_ptr_type: i64
+        shared_elem_ptr_type: i64,
+        storage_elem_ptr_type: i64,
+        storage_zero_index: i64
     ) -> Result<(), CompileError>:
         """Compile a single MIR instruction to SPIR-V."""
         val _destruct_1 = types
@@ -406,6 +516,29 @@ class VulkanBackend:
 
             case BinOp(dest, op, left, right):
                 index_upper_bounds.remove(dest.id)
+                if self.local_is_bool(func, dest.id):
+                    val left_type = self.operand_int_type_id(func, left, u32_type, i64_type)
+                    val right_type = self.operand_int_type_id(func, right, u32_type, i64_type)
+                    if left_type != u32_type or right_type != u32_type:
+                        return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan U32 comparison operands must be U32"))
+                    val left_result = self.resolve_int_operand(builder, left, u32_type, value_ids, func, u32_type, i64_type)
+                    if left_result.is_err():
+                        return Err(left_result.unwrap_err())
+                    val right_result = self.resolve_int_operand(builder, right, u32_type, value_ids, func, u32_type, i64_type)
+                    if right_result.is_err():
+                        return Err(right_result.unwrap_err())
+                    val left_id = left_result.unwrap()
+                    val right_id = right_result.unwrap()
+                    match op:
+                        case Eq:
+                            value_ids[dest.id] = builder.emit_iequal(bool_type, left_id, right_id)
+                        case Ne:
+                            value_ids[dest.id] = builder.emit_inotequal(bool_type, left_id, right_id)
+                        case Lt:
+                            value_ids[dest.id] = builder.emit_uless_than(bool_type, left_id, right_id)
+                        case _:
+                            return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan U32 comparison is not implemented: {op}"))
+                    return Ok(())
                 val type_id = self.local_int_type_id(func, dest.id, u32_type, i64_type)
                 if type_id == 0:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V binary operation destination must be U32 or I64"))
@@ -434,13 +567,15 @@ class VulkanBackend:
                 index_upper_bounds.remove(dest.id)
                 val ptr_id = self.shared_pointer_operand_id(ptr, pointer_ids)
                 if ptr_id == 0 or self.local_int_type_id(func, dest.id, u32_type, i64_type) != u32_type:
-                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V host/device load currently requires a lowered shared U32 element pointer and U32 destination"))
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V load currently requires a lowered U32 storage pointer and U32 destination"))
                 value_ids[dest.id] = builder.emit_load(u32_type, ptr_id)
 
             case Store(ptr, value):
                 val ptr_id = self.shared_pointer_operand_id(ptr, pointer_ids)
                 if ptr_id == 0:
-                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V host/device store currently requires a lowered shared U32 element pointer"))
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V store currently requires a lowered U32 storage pointer"))
+                if not self.operand_is_mutable_u32_pointer(func, ptr):
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V store requires a mutable U32 storage pointer"))
                 val value_result = self.resolve_int_operand(builder, value, u32_type, value_ids, func, u32_type, i64_type)
                 if value_result.is_err():
                     return Err(value_result.unwrap_err())
@@ -448,22 +583,26 @@ class VulkanBackend:
 
             case GetElementPtr(dest, base, indices):
                 if indices.len() != 1:
-                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP requires exactly one index"))
-                if not self.local_is_u32_ptr(func, dest.id):
-                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP destination must be a U32 pointer with mutable access"))
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan U32 storage GEP requires exactly one index"))
+                if not self.local_is_u32_pointer(func, dest.id):
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan U32 storage GEP destination must be a U32 pointer"))
                 val base_id = self.shared_array_operand_id(base, live_shared_array_ids)
-                if base_id == 0:
-                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP base must come from GpuSharedAlloc"))
-                val allocation_size = self.shared_array_operand_size(base, shared_array_sizes)
+                val storage_base_id = self.storage_buffer_operand_id(base, storage_buffer_ids)
+                if base_id == 0 and storage_base_id == 0:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan U32 storage GEP base must come from a StorageBuffer argument or GpuSharedAlloc"))
                 val index_type = self.operand_int_type_id(func, indices[0], u32_type, i64_type)
-                if index_type == 0:
-                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP index must be U32 or I64"))
-                if not self.shared_index_is_proven_in_bounds(indices[0], allocation_size, index_upper_bounds):
-                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP index is not proven within the allocation"))
+                if index_type != u32_type:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan U32 storage GEP index must be U32"))
                 val index_result = self.resolve_int_operand(builder, indices[0], index_type, value_ids, func, u32_type, i64_type)
                 if index_result.is_err():
                     return Err(index_result.unwrap_err())
-                pointer_ids[dest.id] = builder.emit_access_chain(shared_elem_ptr_type, base_id, [index_result.unwrap()])
+                if storage_base_id != 0:
+                    pointer_ids[dest.id] = builder.emit_access_chain(storage_elem_ptr_type, storage_base_id, [storage_zero_index, index_result.unwrap()])
+                else:
+                    val allocation_size = self.shared_array_operand_size(base, shared_array_sizes)
+                    if not self.shared_index_is_proven_in_bounds(indices[0], allocation_size, index_upper_bounds):
+                        return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan shared-memory GEP index is not proven within the allocation"))
+                    pointer_ids[dest.id] = builder.emit_access_chain(shared_elem_ptr_type, base_id, [index_result.unwrap()])
 
             # GPU-specific instructions
             case GpuGlobalId(dest, dim):
@@ -676,6 +815,24 @@ class VulkanBackend:
                         ()
         false
 
+    fn function_uses_bool(func: MirFunction) -> bool:
+        for local in func.locals:
+            if local.type_.kind == MirTypeKind.Bool:
+                return true
+        for block in func.blocks:
+            match block.terminator:
+                case If(_, _, _):
+                    return true
+                case _:
+                    ()
+            for inst in block.instructions:
+                match inst.kind:
+                    case BinOp(_, Eq, _, _) | BinOp(_, Ne, _, _) | BinOp(_, Lt, _, _) | BinOp(_, Le, _, _) | BinOp(_, Gt, _, _) | BinOp(_, Ge, _, _):
+                        return true
+                    case _:
+                        ()
+        false
+
     fn int_type_id(ty: MirType, u32_type: i64, i64_type: i64) -> i64:
         match ty.kind:
             case U32:
@@ -690,6 +847,12 @@ class VulkanBackend:
             if local.id.id == local_id:
                 return self.int_type_id(local.type_, u32_type, i64_type)
         0
+
+    fn local_is_bool(func: MirFunction, local_id: i64) -> bool:
+        for local in func.locals:
+            if local.id.id == local_id:
+                return local.type_.kind == MirTypeKind.Bool
+        false
 
     fn operand_int_type_id(func: MirFunction, operand: MirOperand, u32_type: i64, i64_type: i64) -> i64:
         match operand.kind:
@@ -707,6 +870,30 @@ class VulkanBackend:
                     case _:
                         return false
         false
+
+    fn local_is_u32_pointer(func: MirFunction, local_id: i64) -> bool:
+        for local in func.locals:
+            if local.id.id == local_id:
+                match local.type_.kind:
+                    case Ptr(pointee, _) | Ref(pointee, _):
+                        return pointee.kind == MirTypeKind.U32
+                    case _:
+                        return false
+        false
+
+    fn operand_is_mutable_u32_pointer(func: MirFunction, operand: MirOperand) -> bool:
+        match operand.kind:
+            case Copy(local) | Move(local):
+                for candidate in func.locals:
+                    if candidate.id.id == local.id:
+                        match candidate.type_.kind:
+                            case Ptr(pointee, mutable) | Ref(pointee, mutable):
+                                return pointee.kind == MirTypeKind.U32 and mutable
+                            case _:
+                                return false
+                false
+            case _:
+                false
 
     fn shared_array_operand_id(operand: MirOperand, shared_array_ids: Dict<i64, i64>) -> i64:
         match operand.kind:
@@ -735,6 +922,13 @@ class VulkanBackend:
         match operand.kind:
             case Copy(local) | Move(local):
                 if pointer_ids.has(local.id): pointer_ids[local.id] else: 0
+            case _:
+                0
+
+    fn storage_buffer_operand_id(operand: MirOperand, storage_buffer_ids: Dict<i64, i64>) -> i64:
+        match operand.kind:
+            case Copy(local) | Move(local):
+                if storage_buffer_ids.has(local.id): storage_buffer_ids[local.id] else: 0
             case _:
                 0
 
@@ -785,7 +979,16 @@ class VulkanBackend:
             case Const(_, _):
                 Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V inline operands currently require U32 or I64 integer constants"))
 
-    fn compile_terminator(builder: SpirvBuilder, term: MirTerminator) -> Result<(), CompileError>:
+    fn compile_terminator(
+        builder: SpirvBuilder,
+        term: MirTerminator,
+        current_position: i64,
+        block_positions: Dict<i64, i64>,
+        block_labels: Dict<i64, i64>,
+        value_ids: Dict<i64, i64>,
+        func: MirFunction,
+        bool_type: i64
+    ) -> Result<(), CompileError>:
         """Compile block terminator."""
         match term:
             case Ret(value):
@@ -793,14 +996,59 @@ class VulkanBackend:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan compute entry points cannot return a value"))
                 builder.emit_return()
             case Goto(target):
-                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V loop/goto lowering is not implemented"))
-            case Branch(cond, true_target, false_target):
-                return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V if/branch lowering is not implemented"))
+                if not block_positions.has(target.id):
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V goto target does not exist"))
+                if block_positions[target.id] <= current_position:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V loop back-edges are not supported"))
+                builder.emit_branch(block_labels[target.id])
+            case If(cond, true_target, false_target):
+                val cond_id = self.resolve_bool_operand(builder, cond, value_ids, func, bool_type)
+                if cond_id.is_err():
+                    return Err(cond_id.unwrap_err())
+                if not block_positions.has(true_target.id) or not block_positions.has(false_target.id):
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V branch target does not exist"))
+                if block_positions[true_target.id] <= current_position or block_positions[false_target.id] <= current_position:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V loop back-edges are not supported"))
+                if block_positions[true_target.id] >= block_positions[false_target.id]:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V currently supports only if-without-else control flow"))
+                var true_reaches_merge = false
+                for block in func.blocks:
+                    if block.id.id == true_target.id:
+                        match block.terminator:
+                            case Goto(target):
+                                true_reaches_merge = target.id == false_target.id
+                            case _:
+                                ()
+                if not true_reaches_merge:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V currently supports only if-without-else control flow"))
+                builder.emit("OpSelectionMerge {builder.id_str(block_labels[false_target.id])} None")
+                builder.emit_branch_conditional(cond_id.unwrap(), block_labels[true_target.id], block_labels[false_target.id])
             case Unreachable:
                 builder.emit("OpUnreachable")
             case _:
                 return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan backend does not support terminator: {term}"))
         Ok(())
+
+    fn resolve_bool_operand(
+        builder: SpirvBuilder,
+        operand: MirOperand,
+        value_ids: Dict<i64, i64>,
+        func: MirFunction,
+        bool_type: i64
+    ) -> Result<i64, CompileError>:
+        match operand.kind:
+            case Copy(local) | Move(local):
+                if not self.local_is_bool(func, local.id):
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan branch condition must be Bool"))
+                if value_ids.has(local.id):
+                    return Ok(value_ids[local.id])
+                Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan branch condition has no value"))
+            case Const(Bool(value), ty):
+                if ty.kind != MirTypeKind.Bool:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan branch condition must be Bool"))
+                if value: Ok(builder.emit_const_true(bool_type)) else: Ok(builder.emit_const_false(bool_type))
+            case _:
+                Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan branch condition must be Bool"))
 
 # ============================================================================
 # Vulkan Compilation Results
@@ -845,12 +1093,40 @@ impl Codegen for VulkanBackend:
 impl GpuCodegen for VulkanBackend:
     fn compile_kernel(func_name: text, body: MirBody) -> Result<text, CompileError>:
         val mir_body: MirBody = body
-        if mir_body.arg_count != 0:
+        if mir_body.arg_count < 0:
             return Err(compileerror_backend_error(
                 BackendKind.Vulkan,
-                "Vulkan compute entry parameters require StorageBuffer interface lowering"
+                "Vulkan compute entry argument count cannot be negative"
             ))
-        val vk_sig = MirSignature(params: [], return_type: mir_body.return_ty, is_variadic: false)
+        var params: [MirType] = []
+        var arg_index = 0
+        while arg_index < mir_body.arg_count:
+            var found = false
+            for local in mir_body.locals:
+                match local.kind:
+                    case LocalKind.Arg(index):
+                        if index == arg_index:
+                            params = params.push(local.type_)
+                            found = true
+                    case _:
+                        ()
+            if not found:
+                return Err(compileerror_backend_error(
+                    BackendKind.Vulkan,
+                    "Vulkan compute entry argument local is missing from its signature"
+                ))
+            arg_index = arg_index + 1
+        for local in mir_body.locals:
+            match local.kind:
+                case LocalKind.Arg(index):
+                    if index >= mir_body.arg_count:
+                        return Err(compileerror_backend_error(
+                            BackendKind.Vulkan,
+                            "Vulkan compute entry argument locals require StorageBuffer interface lowering"
+                        ))
+                case _:
+                    ()
+        val vk_sig = MirSignature(params: params, return_type: mir_body.return_ty, is_variadic: false)
         val func = MirFunction(
             symbol: SymbolId(id: 0), name: func_name, signature: vk_sig,
             locals: mir_body.locals, blocks: mir_body.blocks, entry_block: BlockId.entry(), span: Span.empty(),

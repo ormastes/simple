@@ -29,6 +29,9 @@ fn vulkan_ptr_u32() -> MirType:
 fn vulkan_const_ptr_u32() -> MirType:
     MirType.ptr(vulkan_u32(), false)
 
+fn vulkan_mut_ptr_u32() -> MirType:
+    MirType.ptr(vulkan_u32(), true)
+
 fn vulkan_local(id: i64) -> LocalId:
     LocalId(id: id)
 
@@ -57,9 +60,17 @@ fn vulkan_body_with_locals(instructions: [MirInst], terminator: MirTerminator, l
     vulkan_body_with_signature(instructions, terminator, locals, 0, MirType.unit())
 
 fn vulkan_body_with_signature(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal], arg_count: i64, return_ty: MirType) -> MirBody:
+    vulkan_body_with_blocks(
+        [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: instructions, terminator: terminator)],
+        locals,
+        arg_count,
+        return_ty
+    )
+
+fn vulkan_body_with_blocks(blocks: [MirBlock], locals: [MirLocal], arg_count: i64, return_ty: MirType) -> MirBody:
     MirBody(
         name: "intensive_vulkan_kernel",
-        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: instructions, terminator: terminator)],
+        blocks: blocks,
         locals: locals,
         arg_count: arg_count,
         return_ty: return_ty
@@ -77,12 +88,24 @@ fn compile_supported_vulkan_with_locals(instructions: [MirInst], terminator: Mir
     expect(result.is_ok()).to_equal(true)
     result.unwrap()
 
+fn compile_supported_vulkan_body(body: MirBody) -> text:
+    val backend = VulkanBackend.create_with_options([1, 3], compileoptions_default_options())
+    val result = backend.compile_kernel("intensive_vulkan_kernel", body)
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
 fn reject_unsupported_vulkan(instructions: [MirInst], terminator: MirTerminator) -> CompileError:
     reject_unsupported_vulkan_with_locals(instructions, terminator, [])
 
 fn reject_unsupported_vulkan_with_locals(instructions: [MirInst], terminator: MirTerminator, locals: [MirLocal]) -> CompileError:
     val backend = VulkanBackend.create_with_options([1, 3], compileoptions_default_options())
     val result = backend.compile_kernel("intensive_vulkan_kernel", vulkan_body_with_locals(instructions, terminator, locals))
+    expect(result.is_err()).to_equal(true)
+    result.unwrap_err()
+
+fn reject_unsupported_vulkan_body(body: MirBody) -> CompileError:
+    val backend = VulkanBackend.create_with_options([1, 3], compileoptions_default_options())
+    val result = backend.compile_kernel("intensive_vulkan_kernel", body)
     expect(result.is_err()).to_equal(true)
     result.unwrap_err()
 
@@ -421,6 +444,98 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         expect(output).to_contain("%26 = OpIAdd %2 %25 %13")
         assert_spirv_valid_if_available(output, "simple_vulkan_shared_u32")
 
+    it "lowers a bounds-checked U32 storage-buffer elementwise kernel":
+        val body = vulkan_body_with_blocks(
+            [
+                MirBlock(
+                    id: BlockId.entry(), label: Some("entry"),
+                    instructions: [
+                        vulkan_inst(MirInstKind.GpuGlobalId(vulkan_local(3), 0)),
+                        vulkan_inst(MirInstKind.BinOp(vulkan_local(4), MirBinOp.Lt, vulkan_operand(3), vulkan_operand(2)))
+                    ],
+                    terminator: MirTerminator.If(vulkan_operand(4), BlockId.new(1), BlockId.new(2))
+                ),
+                MirBlock(
+                    id: BlockId.new(1), label: Some("body"),
+                    instructions: [
+                        vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(5), vulkan_operand(0), [vulkan_operand(3)])),
+                        vulkan_inst(MirInstKind.Load(vulkan_local(7), vulkan_operand(5))),
+                        vulkan_inst(MirInstKind.Const(vulkan_local(8), MirConstValue.Int(2), vulkan_u32())),
+                        vulkan_inst(MirInstKind.BinOp(vulkan_local(9), MirBinOp.Mul, vulkan_operand(7), vulkan_operand(8))),
+                        vulkan_inst(MirInstKind.GetElementPtr(vulkan_local(6), vulkan_operand(1), [vulkan_operand(3)])),
+                        vulkan_inst(MirInstKind.Store(vulkan_operand(6), vulkan_operand(9)))
+                    ],
+                    terminator: MirTerminator.Goto(BlockId.new(2))
+                ),
+                MirBlock(
+                    id: BlockId.new(2), label: Some("exit"),
+                    instructions: [],
+                    terminator: MirTerminator.Ret(nil)
+                )
+            ],
+            [
+                vulkan_arg(0, 0, vulkan_const_ptr_u32()),
+                vulkan_arg(1, 1, vulkan_mut_ptr_u32()),
+                vulkan_arg(2, 2, vulkan_u32()),
+                vulkan_temp(3, vulkan_u32()), vulkan_temp(4, MirType.bool()),
+                vulkan_temp(5, vulkan_const_ptr_u32()), vulkan_temp(6, vulkan_mut_ptr_u32()),
+                vulkan_temp(7, vulkan_u32()), vulkan_temp(8, vulkan_u32()), vulkan_temp(9, vulkan_u32())
+            ],
+            3,
+            MirType.unit()
+        )
+        val output = compile_supported_vulkan_body(body)
+        expect(output).to_contain("OpTypeRuntimeArray")
+        expect(output).to_contain("OpTypePointer StorageBuffer")
+        expect(output).to_contain("DescriptorSet 0")
+        expect(output).to_contain("Binding 0")
+        expect(output).to_contain("Binding 1")
+        expect(output).to_contain("OpDecorate %17 DescriptorSet 0")
+        expect(output).to_contain("OpDecorate %17 Binding 0")
+        expect(output).to_contain("OpDecorate %18 DescriptorSet 0")
+        expect(output).to_contain("OpDecorate %18 Binding 1")
+        expect(output).to_contain("OpTypeBool")
+        expect(output).to_contain("OpULessThan")
+        expect(output).to_contain("OpSelectionMerge %30 None")
+        expect(output).to_contain("OpBranchConditional %35 %29 %30")
+        expect(output).to_contain("%29 = OpLabel")
+        expect(output).to_contain("OpBranch %30")
+        expect(output).to_contain("%30 = OpLabel")
+        expect(output).to_contain("OpAccessChain %7 %17 %26 %34")
+        expect(output).to_contain("OpAccessChain %7 %18 %26 %34")
+        expect(output).to_contain("OpLoad")
+        expect(output).to_contain("OpIMul")
+        expect(output).to_contain("OpStore")
+        expect(output.contains("OpLoopMerge")).to_equal(false)
+        assert_spirv_valid_if_available(output, "simple_vulkan_storage_u32_elementwise")
+
+    it "rejects a real else branch until general structured CFG lowering exists":
+        val body = vulkan_body_with_blocks(
+            [
+                MirBlock(
+                    id: BlockId.entry(), label: Some("entry"), instructions: [],
+                    terminator: MirTerminator.If(MirOperand.const_bool(true), BlockId.new(1), BlockId.new(2))
+                ),
+                MirBlock(
+                    id: BlockId.new(1), label: Some("then"), instructions: [],
+                    terminator: MirTerminator.Goto(BlockId.new(3))
+                ),
+                MirBlock(
+                    id: BlockId.new(2), label: Some("else"), instructions: [],
+                    terminator: MirTerminator.Goto(BlockId.new(3))
+                ),
+                MirBlock(
+                    id: BlockId.new(3), label: Some("merge"), instructions: [],
+                    terminator: MirTerminator.Ret(nil)
+                )
+            ],
+            [],
+            0,
+            MirType.unit()
+        )
+        val error = reject_unsupported_vulkan_body(body)
+        assert_backend_error_contains(error, "only if-without-else")
+
     it "keeps multiple Vulkan shared arrays distinct and deterministic":
         val output = compile_supported_vulkan_with_locals(
             [
@@ -556,7 +671,7 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
                 vulkan_temp(2, vulkan_ptr_u32())
             ]
         )
-        assert_backend_error_contains(bad_index, "index must be U32 or I64")
+        assert_backend_error_contains(bad_index, "index must be U32")
 
         val unproven_index = reject_unsupported_vulkan_with_locals(
             [
@@ -711,8 +826,8 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
             [], MirTerminator.Ret(nil), [vulkan_arg(0, 0, vulkan_u32())], 1, MirType.unit()
         )
         val parameterized = backend.compile_kernel("parameterized_vulkan", parameter_body)
-        expect(parameterized.is_err()).to_equal(true)
-        assert_backend_error_contains(parameterized.unwrap_err(), "require StorageBuffer interface lowering")
+        expect(parameterized.is_ok()).to_equal(true)
+        expect(parameterized.unwrap()).to_contain("PushConstant")
 
         val value_body = vulkan_body_with_signature(
             [], MirTerminator.Ret(Some(vulkan_u32_operand(1))), [], 0, MirType.unit()
@@ -733,14 +848,14 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
             vulkan_body_with_signature([], MirTerminator.Ret(nil), [], -1, MirType.unit())
         )
         expect(negative_arg_count.is_err()).to_equal(true)
-        assert_backend_error_contains(negative_arg_count.unwrap_err(), "require StorageBuffer interface lowering")
+        assert_backend_error_contains(negative_arg_count.unwrap_err(), "argument count cannot be negative")
 
         val oversized_arg_count = backend.compile_kernel(
             "oversized_arg_count_vulkan",
             vulkan_body_with_signature([], MirTerminator.Ret(nil), [], 1, MirType.unit())
         )
         expect(oversized_arg_count.is_err()).to_equal(true)
-        assert_backend_error_contains(oversized_arg_count.unwrap_err(), "require StorageBuffer interface lowering")
+        assert_backend_error_contains(oversized_arg_count.unwrap_err(), "argument local is missing from its signature")
 
     it "rejects non-unit returns through compile_module":
         val fn_ = vulkan_function_with_signature(
@@ -769,13 +884,13 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
             [], MirTerminator.Ret(nil), [vulkan_arg(0, 0, vulkan_u32())], [vulkan_u32()], MirType.unit()
         )
         val parameter_result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(parameterized))
-        expect(parameter_result.is_err()).to_equal(true)
-        assert_backend_error_contains(parameter_result.unwrap_err(), "require StorageBuffer interface lowering")
+        expect(parameter_result.is_ok()).to_equal(true)
+        expect(parameter_result.unwrap().text_output).to_contain("PushConstant")
 
         val variadic = vulkan_function_with_abi([], MirTerminator.Ret(nil), [], [], MirType.unit(), true, "vulkan", "vulkan")
         val variadic_result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(variadic))
         expect(variadic_result.is_err()).to_equal(true)
-        assert_backend_error_contains(variadic_result.unwrap_err(), "require StorageBuffer interface lowering")
+        assert_backend_error_contains(variadic_result.unwrap_err(), "cannot be variadic")
 
         val return_local = vulkan_function_with_signature(
             [], MirTerminator.Ret(nil), [vulkan_return(0, MirType.unit())], [], MirType.unit()
@@ -800,21 +915,21 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
         )
         val result = VulkanBackend.create_with_options([1, 3], compileoptions_default_options()).compile_module(vulkan_module(bad))
         expect(result.is_err()).to_equal(true)
-        assert_backend_error_contains(result.unwrap_err(), "host/device load")
+        assert_backend_error_contains(result.unwrap_err(), "lowered U32 storage pointer")
 
     it "rejects if and branch control flow with a typed Vulkan backend error":
         val error = reject_unsupported_vulkan(
             [vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup))],
             MirTerminator.If(MirOperand.const_bool(true), BlockId.new(1), BlockId.new(2))
         )
-        assert_backend_error_contains(error, "terminator")
+        assert_backend_error_contains(error, "branch target does not exist")
 
     it "rejects loop and goto control flow with a typed Vulkan backend error":
         val error = reject_unsupported_vulkan(
             [vulkan_inst(MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup))],
             MirTerminator.Goto(BlockId.entry())
         )
-        assert_backend_error_contains(error, "loop/goto")
+        assert_backend_error_contains(error, "loop back-edges")
 
     it "rejects direct calls instead of emitting a successful placeholder":
         val call = MirInstKind.Call(nil, MirOperand.const_int(1), [])
@@ -842,17 +957,17 @@ describe "Vulkan MIR backend intensive supported and fail-closed contract":
     it "rejects host or device loads until pointer lowering is implemented":
         val load = MirInstKind.Load(vulkan_local(1), vulkan_operand(0))
         val error = reject_unsupported_vulkan([vulkan_inst(load)], MirTerminator.Ret(nil))
-        assert_backend_error_contains(error, "host/device load")
+        assert_backend_error_contains(error, "lowered U32 storage pointer")
 
     it "rejects host or device stores until pointer lowering is implemented":
         val store = MirInstKind.Store(vulkan_operand(0), vulkan_operand(1))
         val error = reject_unsupported_vulkan([vulkan_inst(store)], MirTerminator.Ret(nil))
-        assert_backend_error_contains(error, "host/device store")
+        assert_backend_error_contains(error, "lowered U32 storage pointer")
 
-    it "rejects GEPs that do not use lowered shared-memory pointers":
+    it "rejects GEPs that do not use lowered storage or shared-memory pointers":
         val unsupported = MirInstKind.GetElementPtr(vulkan_local(2), vulkan_operand(0), [vulkan_operand(1)])
         val error = reject_unsupported_vulkan([vulkan_inst(unsupported)], MirTerminator.Ret(nil))
-        assert_backend_error_contains(error, "GEP destination must be a U32 pointer")
+        assert_backend_error_contains(error, "storage GEP destination must be a U32 pointer")
 
     it "rejects unsupported call terminators with a typed Vulkan backend error":
         val term = MirTerminator.CallTerminator(
