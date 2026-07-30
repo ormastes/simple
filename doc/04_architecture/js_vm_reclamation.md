@@ -49,7 +49,7 @@ Current implementation map:
 Frozen, non-overlapping APIs:
 
 ```text
-JsHeapHandle(slot:i64,generation:i64)
+JsHeapHandle(store_kind,slot:i64,generation:i64)
 JsExternalRootKey(handle,owner_kind,owner_id)
 JsTypedEdge(kind,handle)
 EnvironmentStack.create_env(parent_env_id)
@@ -82,16 +82,21 @@ marking.
 
 ## Frozen ownership ABI
 
-`JsHeapHandle(slot:i64,generation:i64)` replaces raw reusable IDs at every
-cross-store, metadata, browser, callback, and external-return boundary. The
-slot selects storage; the generation proves which lifetime occupies that
-slot. A slot generation advances before reclamation publishes the slot to its
-free list. Generation exhaustion retires the slot rather than wrapping.
+`JsHeapHandle(store_kind,slot:i64,generation:i64)` replaces raw reusable IDs at
+every cross-store, metadata, browser, callback, and external-return boundary.
+`store_kind` is the closed storage discriminator `object`, `function`, or
+`environment`; `slot` selects storage within that store and `generation`
+proves which lifetime occupies that slot. A slot generation advances before
+reclamation publishes the slot to its free list. Generation exhaustion retires
+the slot rather than wrapping. Unknown store kinds fail closed.
 
 `JsTypedEdge(kind,handle)` is the only VM graph-edge representation outside a
-store's direct `JsValue` variants. `kind` is a closed discriminator that maps
-the handle to exactly one object, function, or environment store and records
-the semantic edge family. The initial closed inventory is: `object`,
+store's direct `JsValue` variants. `kind` is the closed semantic edge-family
+discriminator; `handle.store_kind` alone selects the object, function, or
+environment store. This keeps generic semantic families such as
+`timer_argument` and `temporary_host_return` valid for either object/array or
+function values without property-name inference. The initial closed semantic
+inventory is: `object`,
 `function`, `environment`, `closure_environment`, `timer_callback`,
 `timer_argument`, `promise_task`, `promise_handler`, `promise_registration`,
 `stream_source`, `stream_destination`, `iterator_source`, `wasm_module`,
@@ -145,8 +150,16 @@ fail.
 
 ## Complete typed root inventory
 
-`JsVmRoots` is typed: object, function, environment, symbol, and `JsValue`
-roots are distinct. A raw integer is never guessed to be an object edge.
+`JsVmRoots` is typed: object, function, environment, and `JsValue` roots are
+distinct. A raw integer is never guessed to be an object edge. The operative
+`std.js.types.JsValue` has no `Symbol` variant, so migration must delete stale
+`JsValue.Symbol` match arms in the selected engine/browser surface; it must not
+add a speculative symbol store, root, edge kind, or value variant.
+The frozen deletion inventory is
+`src/lib/nogc_sync_mut/js/engine/interpreter.spl`,
+`src/lib/nogc_sync_mut/js/engine/interpreter_async.spl`, and
+`src/lib/gc_async_mut/web/browser_session_storage.spl`. The static migration
+gate rejects any remaining `JsValue.Symbol` arm in those files.
 
 Strong interpreter roots include:
 

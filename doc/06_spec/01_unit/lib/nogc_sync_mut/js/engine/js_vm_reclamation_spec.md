@@ -20,6 +20,10 @@ release B` must yield A counts `[0,1,2,2,1,0,0]` and B counts
 Trace object, function, environment, closure, timer, Promise, stream, iterator,
 WASM module/import/export/function, DOM node/style, listener target/callback,
 pending event, and temporary host-return edges only through `JsTypedEdge`.
+`JsTypedEdge.kind` remains semantic while `handle.store_kind` selects exactly
+one object, function, or environment store. The operative `JsValue` has no
+Symbol variant; migration deletes stale `JsValue.Symbol` match arms and does
+not add a speculative Symbol store.
 Ordinary numeric values and author-visible property names are negative
 controls.
 
@@ -67,6 +71,8 @@ class GcOwnershipContractFixture:
     frozen_root_allowance: i64
     expected_allocation_scan_count: i64
     required_interfaces: [text]
+    required_store_kinds: [text]
+    required_migration_guards: [text]
     required_edge_kinds: [text]
     ownership_operations: [text]
     same_key_retain_count_oracle: [i64]
@@ -84,9 +90,14 @@ fn make_gc_ownership_fixture(
         frozen_root_allowance: 32,
         expected_allocation_scan_count: 0,
         required_interfaces: [
-            "JsHeapHandle(slot:i64,generation:i64)",
+            "JsHeapHandle(store_kind,slot:i64,generation:i64)",
             "JsExternalRootKey(handle,owner_kind,owner_id)",
             "JsTypedEdge(kind,handle)"
+        ],
+        required_store_kinds: ["object", "function", "environment"],
+        required_migration_guards: [
+            "edge kind is semantic; handle store_kind selects storage",
+            "delete stale JsValue.Symbol match arms; do not add Symbol"
         ],
         required_edge_kinds: [
             "object",

@@ -14,7 +14,7 @@ Changing them requires merge-owner review before parallel work resumes.
 
 Frozen public data contracts:
 
-- `JsHeapHandle(slot:i64,generation:i64)`
+- `JsHeapHandle(store_kind,slot:i64,generation:i64)`
 - `JsExternalRootKey(handle,owner_kind,owner_id)`
 - `JsTypedEdge(kind,handle)`
 
@@ -36,7 +36,7 @@ Incomplete helpers call `fail("RED: generation-safe JS VM reclamation is not imp
 
 | Lane | Scope | Files/ownership boundary | Depends on |
 |---|---|---|---|
-| A: ABI migration | atomically replace raw reusable references with `JsHeapHandle`; prohibit mixed production mode | selected engine/browser reference boundaries | G1 contract |
+| A: ABI migration | atomically replace raw reusable references with `JsHeapHandle`; make `store_kind` select object/function/environment; delete stale `JsValue.Symbol` arms; prohibit mixed production mode | selected engine/browser reference boundaries | G1 contract |
 | B: typed graph stores | `JsTypedEdge` tables for timers, promises, streams, iterators, WASM, DOM/listeners; weak metadata; lockstep sweep | selected engine stores only | A |
 | C: external ownership | `JsExternalRootKey` retain counts, independent owners, stale release rejection | interpreter/runtime host-return API | A |
 | D: safe points + browser roots | root union, inhibit/defer, listener/DOM executor roots, disposal receipt | interpreter/runtime/browser session | B and C |
@@ -67,6 +67,12 @@ inspection.
 - Real lexical-chain semantics pass before collection is enabled.
 - Every cross-store/browser/external reference carries a generation-qualified
   handle; raw reusable IDs cannot enter production tracing or release.
+- Every handle has a valid object/function/environment `store_kind`;
+  `JsTypedEdge.kind` remains semantic, and stale `JsValue.Symbol` match arms are
+  absent without adding a Symbol variant/store.
+- The stale-Symbol deletion inventory is exactly selected-engine
+  `interpreter.spl`, `interpreter_async.spl`, and browser
+  `browser_session_storage.spl`.
 - Independent external owners retain/release by exact key and count.
 - The same-key/independent-key count sequence is
   A=`[0,1,2,2,1,0,0]`, B=`[0,0,0,1,1,1,0]`.

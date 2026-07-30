@@ -14,7 +14,7 @@ completion.
 ## Frozen interfaces
 
 ```text
-JsHeapHandle(slot:i64,generation:i64)
+JsHeapHandle(store_kind,slot:i64,generation:i64)
 JsExternalRootKey(handle,owner_kind,owner_id)
 JsTypedEdge(kind,handle)
 ```
@@ -23,8 +23,9 @@ These names and fields are ABI, not illustrative pseudonyms.
 
 ### `JsHeapHandle`
 
-- `slot` indexes one object, function, or environment store selected by the
-  surrounding `JsTypedEdge.kind`.
+- `store_kind` is the closed `object`/`function`/`environment` store
+  discriminator.
+- `slot` indexes one lifetime within the store selected by `store_kind`.
 - `generation` identifies exactly one lifetime of that slot.
 - Resolution checks bounds, liveness, and exact generation.
 - Reclamation increments generation before publishing a slot to the free list.
@@ -54,10 +55,11 @@ The executable owner sequence is:
 
 ### `JsTypedEdge`
 
-- `kind` is a closed semantic/store discriminator.
+- `kind` is a closed semantic edge-family discriminator.
 - `handle` is generation-qualified.
-- The marker switches only on `kind`; it never parses a JavaScript number or
-  property name to discover ownership.
+- The marker switches on `handle.store_kind` to select storage and preserves
+  `kind` as edge semantics; it never parses a JavaScript number or property
+  name to discover ownership.
 
 The exact initial edge inventory is `object`, `function`, `environment`,
 `closure_environment`, `timer_callback`, `timer_argument`, `promise_task`,
@@ -73,7 +75,9 @@ The implementation change is one atomic migration:
 1. Add generation arrays, O(1) live counters, and free lists to the selected
    `nogc_sync_mut` object, function, and environment stores.
 2. Change internal reference-bearing `JsValue` variants and direct prototype,
-   closure, parent, binding, and metadata references to `JsHeapHandle`.
+   closure, parent, binding, and metadata references to `JsHeapHandle`, and
+   delete stale `JsValue.Symbol` match arms because the operative value ABI has
+   no Symbol variant.
 3. Replace every numeric VM ownership property with a store-owned
    `JsTypedEdge`; preserve proven non-VM scalar IDs as numbers.
 4. Migrate interpreter root tables, timers, Promise/async records, streams,
@@ -149,6 +153,7 @@ does not tag or claim them.
 - Stale release: typed error; no root, count, or occupant mutation.
 - Invalid slot: the same fail-closed operation matrix applies.
 - Unknown edge kind: fail closed before marking or sweep.
+- Unknown handle store kind: fail closed before resolution or enqueue.
 - Missing external root key: stale/foreign release error; no count change.
 - Retain-count underflow: invariant failure; collection remains disabled.
 - Generation exhaustion: retire slot; never wrap or alias.

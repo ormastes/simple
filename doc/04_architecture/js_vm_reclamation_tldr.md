@@ -7,13 +7,17 @@ Status: **PROPOSED / RED — ownership ABI and SSpec contract only.**
   are not implementation owners.
 - Preserve the landed static lexical-parent semantics during handle migration;
   they are a prerequisite, not reclamation evidence.
-- Freeze `JsHeapHandle(slot:i64,generation:i64)`,
+- Freeze `JsHeapHandle(store_kind,slot:i64,generation:i64)`,
   `JsExternalRootKey(handle,owner_kind,owner_id)`, and
   `JsTypedEdge(kind,handle)` before implementation.
 - External roots are independently keyed and reference-counted; stale
   retain/resolve/mark/release operations cannot affect a reused slot.
 - At outermost host-turn safe points, `JsInterpreter` traces typed roots across
   object, function, and environment stores using an iterative worklist.
+- `handle.store_kind` selects the object/function/environment store;
+  `JsTypedEdge.kind` records only the semantic edge family.
+- The operative `JsValue` has no `Symbol`; delete stale `JsValue.Symbol` match
+  arms during migration instead of adding a speculative symbol variant/store.
 - Browser roots include listener callbacks **and `target_object_id`**, all
   `BrowserRuntimeState` IDs, active executor IDs, and temporary returned values.
 - Collection is inhibited/deferred during execution, recursion, async drains,

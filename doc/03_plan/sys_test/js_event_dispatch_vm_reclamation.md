@@ -52,9 +52,16 @@ production RSS/heap/pause evidence remains
 
 The selected-owner unit spec proves:
 
-- the public ABI is exactly `JsHeapHandle(slot:i64,generation:i64)`,
+- the public ABI is exactly
+  `JsHeapHandle(store_kind,slot:i64,generation:i64)`,
   `JsExternalRootKey(handle,owner_kind,owner_id)`, and
   `JsTypedEdge(kind,handle)`;
+- `store_kind` is exactly object/function/environment, edge `kind` remains
+  semantic, and stale `JsValue.Symbol` match arms are deleted without adding a
+  speculative Symbol value/store/root;
+- the stale-Symbol static gate covers exactly
+  `engine/interpreter.spl`, `engine/interpreter_async.spl`, and
+  `web/browser_session_storage.spl`;
 - the executable edge inventory includes `object`, `function`, `environment`,
   `wasm_function`, `pending_event`, `temporary_host_return`, and every listed
   closure/timer/Promise/stream/iterator/WASM/DOM/listener family;
