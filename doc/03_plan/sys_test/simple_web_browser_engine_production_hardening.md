@@ -790,3 +790,16 @@ Rust seed, or bootstrap result may promote the row.
 
 The prior SimpleScript PASS and CSS-cascade/bookmark-title designs remain as
 recorded. None of these rows is executable or merged evidence.
+
+## Batch-5 executable and held evidence (2026-07-30)
+
+- `browser_session_textarea_lifecycle_spec.spl` has four visible steps and
+  final high review PASS at static/manual scope. It proves the shared
+  CR/LF/CRLF-to-CRLF form encoder through both production serializers, exact
+  focus/edit/commit event order, UTF-8 multiline POST encoding, and
+  component-bound Draw IR/Engine2D pixels. Runtime status remains HELD pending
+  one admitted current pure-Simple focused execution.
+- Renderer fd launch, hosted navigation visibility, HTTPS terminal outcomes,
+  native `<progress>`, and unchanged-frame SBRF8 reuse all remain HOLD. Their
+  exact remaining defects are recorded in the agent-task plan; none may be
+  cited as executable or production evidence.

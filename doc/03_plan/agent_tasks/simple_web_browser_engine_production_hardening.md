@@ -527,3 +527,18 @@ focused modern SSpec executes once on an admitted current full pure-Simple CLI.
 
 The prior SimpleScript PASS and existing CSS cascade/bookmark-title designs
 remain unchanged. These status rows add no executable or merge claim.
+
+## Production continuation batch 5 (2026-07-30)
+
+| Lane | Result | Status / next gate |
+| --- | --- | --- |
+| `textarea_event_lifecycle` | shared linear CR/LF/CRLF-to-CRLF form normalization for both BrowserSession and SimpleBrowserPage; exact focus/beforeinput/input/change/blur/focusout ordering, UTF-8 POST body, and component-bound Draw IR/Engine2D pixels | final high review PASS; execution HELD for an admitted current pure-Simple full CLI |
+| `renderer_fd_launch` | open-once/fd-exec prototype closes pathname TOCTOU, but post-admission identity still compares mutable mtime/ctime and rejects a safely renamed admitted inode | HOLD at three-cycle cap; retain dev/inode/mode/uid/gid/size plus SHA-256, drop timestamps, then rerun the C selfcheck in a fresh cycle |
+| `hosted_navigation_visible` | empty executable evidence was removed; the RED plan still lacks an NFR-004 sample/p95 gate, an in-flight delayed Stop fixture, and exact bookmark/compositor/registry/process owners | HOLD at three-cycle cap; repair the contract before creating a hosted SSpec |
+| `https_terminal_outcome` | atomic terminal-winner/provider-binding design remains incomplete: counter baselines conflict, authenticated response bytes are not taken before free, and native fd-admission ownership is unnamed | HOLD at three-cycle cap; repair the contract before implementation |
+| `html_progress_element` | determinate/indeterminate semantics and bounded Draw IR were prototyped, but Style reconstruction loses specifiedness/accent state, UA em sizing is hardcoded, invalid CSS is marked specified, declarations are parsed twice, and fill math quantizes/overflows | HOLD at three-cycle cap; repair Style ownership and ratio math before reuse |
+| `drawir_reuse_wire` | SBRF8 strict-tail/cache/image prototype still revalidates and deep-compares O(commands+resources); final scalar-receipt/skip-submit edit was interrupted uncommitted and statically unverified | HOLD; do not merge `0e2ab0e3ba6` or the uncommitted cycle-3 work; resume from a fresh worktree with constructor/receipt/manual audit |
+
+No batch-5 row promotes full browser production completion. Only the textarea
+slice is integrated; its executable status remains HELD. Bootstrap output and
+the Rust seed are not admissible evidence.
