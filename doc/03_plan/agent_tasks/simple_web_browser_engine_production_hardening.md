@@ -548,3 +548,18 @@ remain unchanged. These status rows add no executable or merge claim.
 No batch-5 row promotes full browser production completion. Only the textarea
 slice is integrated; its executable status remains HELD. Bootstrap output and
 the Rust seed are not admissible evidence.
+
+## Production continuation batch 6 (2026-07-30)
+
+| Lane | Result | Status / next gate |
+| --- | --- | --- |
+| `bookmark_title_transport` | additive bounded SBRF8 title witness, generation/reply/URL trust binding, lifecycle clears, production parent Favorite routing, atomic SQLite mutation+snapshot rollback, restart/UI parity, and forged 513-byte pre-decode rejection | final high review PASS; integrated STATIC / EXECUTION HELD |
+| `command_capability_codec` | opt-in SBR2 framing, bounds, canonical trailer, and resequencing while production SBR1 APIs/callers/wire remain byte-identical | final high review PASS; integrated foundation only; atomic parent/worker/nested migration remains RED |
+| `command_entropy_hardening` | existing `rt_random_hex` now uses portable fallible OS entropy, native/interpreter NIL parity, and guaranteed zeroization; dynamic SFFI is unchanged | final high review PASS; integrated hardening only; exact command-entropy symbol/facade remains intentionally absent |
+| `negative_z_index` | signed/context/paint-hit prototype closes most local defects, but `revert`/`revert-layer` can retain an earlier integer and create a visible stacking regression without cascade provenance | HOLD at three-cycle cap; do not merge `b9ad3eff8f1` |
+| `radio_event_lifecycle` | external form ownership and lifecycle prototype still lacks one O(N) generation-qualified document identity index across events, edits, bridge sync/replacement, grouping, and submission | HOLD at three-cycle cap; do not merge `220355ca427` |
+| `js_property_storage_gc` | indexed property prototype leaves physical-order readers, tombstone roots, arbitrary detached graphs, omitted roots, and stale numeric-ID aliasing | HOLD; do not merge `d2d08cf2eb0`; requires full GC/generation-qualified handle architecture |
+
+No batch-6 static PASS promotes full production completion. Bookmark execution,
+the SBR2 atomic migration, and the exact hosted entropy owner remain RED until
+an admitted current pure-Simple artifact supplies focused executable evidence.

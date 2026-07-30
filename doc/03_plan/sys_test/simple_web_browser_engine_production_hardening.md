@@ -808,3 +808,15 @@ recorded. None of these rows is executable or merged evidence.
   native `<progress>`, and unchanged-frame SBRF8 reuse all remain HOLD. Their
   exact remaining defects are recorded in the agent-task plan; none may be
   cited as executable or production evidence.
+
+## Batch-6 executable and held evidence (2026-07-30)
+
+- Bookmark-title SBRF8 transport and atomic profile persistence have final
+  static/manual review PASS. The system scenario binds the real parent Favorite
+  owner and covers rollback/restart/UI parity plus forged 513-byte rejection;
+  hosted execution remains HELD for an admitted artifact.
+- The opt-in SBR2 codec and portable NIL/zeroize entropy hardening are
+  integrated foundations only. Production remains on SBR1; no exact hosted
+  command-entropy symbol is exported, and no causal capability claim is made.
+- Negative stacking, radio lifecycle, and JavaScript property/GC prototypes
+  remain HOLD at their recorded architecture boundaries and are not merged.
