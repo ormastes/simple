@@ -767,6 +767,24 @@ Required assertions use built-in matchers only:
   identity fails before relocation; a conforming link-map receipt binds the
   owner object, raw symbol, provider content/build and symbol-manifest digests,
   relocation type, and owning address range;
+- the signed/pinned release/build manifest is admitted before provider open;
+  candidate-derived expected values fail
+  `self-derived-runtime-provider-expectation`, while byte, build-ID,
+  symbol-manifest, policy, target, and trusted-manifest digest mismatches each
+  fail before lookup or relocation;
+- `_rt_browser_renderer_command_capability_new`,
+  `__imp_rt_browser_renderer_command_capability_new`,
+  `__imp__rt_browser_renderer_command_capability_new@0`, and
+  `rt_browser_renderer_command_capability_new@0` each fail
+  `privileged-runtime-symbol-alias` before underscore stripping, import-thunk
+  or stdcall undecoration, policy resolution, or OS lookup; case and Unicode
+  lookalikes do not fold to the privileged symbol;
+- `runtime_native.c::spl_dlsym`,
+  `runtime_dynload.c::spl_dlsym`, the runtime loader's
+  `resolve_builtin_runtime_symbol`/`resolve_process_runtime_symbol`, and
+  `runtime_native.c::spl_hosted_provider_i64_probe` each prove classifier
+  execution before `dlsym`/`GetProcAddress`; every other reachable OS lookup
+  has the same receipt, or its object has a negative hosted-closure proof;
 - `rt_actor_spawn`, `rt_actor_send`, and `rt_actor_recv` retain their existing
   generic hosted dynamic fallback, proving the deny is not blanket
   `HostedOnly`;

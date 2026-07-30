@@ -548,8 +548,9 @@ each checker uses
 | Lane | Work | Constraint |
 | --- | --- | --- |
 | `capability_owner_policy` | fatal pure-Simple and mirrored native canonical-path declaration/call admission | interpreter module metadata never grants authority |
-| `capability_provider_identity` | extend `RuntimeSymbolProvider` with static/process/dynamic identity, expected content/build and symbol-manifest digests, privileged-purpose lookup, import note, fail-before-relocation validation, and link-map receipt | expectation comes from the already-opened build input; no env/path trust or chained fallback |
-| `capability_lookup_deny` | exact metadata-driven deny before pure-Simple/Rust interpreter dispatch, dynamic SFFI plugin/main/satellite search, both `spl_dlsym` paths, JIT/ELF/`RTLD_DEFAULT`, and generic provider lookup | narrow row only; preserve actor hosted fallback; never authorize via `CURRENT_EXEC_MODULE` |
+| `capability_provider_identity` | admit a signed/pinned release/build manifest before provider open; extend `RuntimeSymbolProvider` with static/process/dynamic observed identity, trusted expected content/build and symbol-manifest digests, privileged-purpose lookup, import note, fail-before-relocation validation, and link-map/artifact receipt | expectation is independently trusted, never derived from candidate; no env/path trust or chained fallback |
+| `capability_symbol_normalization` | generate one canonical classifier and policy digest for Rust/C; gate every route before underscore/alias transforms; deny leading-underscore, Mach-O/LLVM, Windows import-thunk, and stdcall aliases | generic normalization and actor fallback remain unchanged |
+| `capability_lookup_deny` | exact metadata-driven deny before pure-Simple/Rust interpreter dispatch, dynamic SFFI plugin/main/satellite search, Rust and both C `spl_dlsym` paths, runtime process resolver, JIT/ELF/`RTLD_DEFAULT`, and generic provider lookup | narrow row only; preserve actor hosted fallback; never authorize via `CURRENT_EXEC_MODULE`; closure must gate or exclude every OS lookup |
 | `capability_native_entropy` | zero-arg fallible fill, zeroize, admitted runtime-provider relocation | no crypto facade, interpreter handler, dynamic-SFFI entry, or raw lookup bridge |
 | `capability_parent_worker_atomic` | create-on-activation, SBR2 staging/issuance/echo/consume/retire across command and network wires | one commit; no mixed protocol |
 | `capability_owner_evidence` | legitimate hosted artifact; separate non-owner compile and canonical-owner-forced-interpreter fixtures; direct lookup denial; actor fallback regression; provider/link-map receipts; lifecycle and 10k perf/RSS receipts | capability values redacted; zero entropy calls on every hostile route |
@@ -574,7 +575,13 @@ linking; `reject_privileged_native_only_extern`,
 `dynamic_sffi::try_call_dynamic`/`dlsym_lookup`, both `wsffi::spl_dlsym`
 implementations, all four native-loader provider implementations, provider
 construction for an expectation, and both JIT lookup paths are mandatory
-pre-lookup gates.
+pre-lookup gates. The same rule covers `runtime_native.c::spl_dlsym`,
+`runtime_dynload.c::spl_dlsym`,
+`runtime_native.c::spl_hosted_provider_i64_probe`, and
+`runtime/src/loader/loader.rs::resolve_builtin_runtime_symbol` plus
+`resolve_process_runtime_symbol`. The trusted release/build manifest must be
+admitted before any provider-open call; the final receipt binds its digest and
+the hosted closure's complete gated-or-excluded OS-lookup inventory.
 
 ## Batch-3 held-lane status (2026-07-30)
 

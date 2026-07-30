@@ -1123,17 +1123,43 @@ only and must refuse privileged rows. Privileged lookup requires one provider
 whose identity exactly matches the embedded expectation; a chained provider
 cannot use first-match, process, or static fallback to repair a mismatch.
 
-The expectation comes from the already-opened runtime object/archive or
-dynamic file used by the native build, never an environment variable, path
-string, runtime option, or caller assertion. Native build embeds the versioned
-expectation in `.simple.runtime-provider`; the admitted source/artifact
-manifest covers that section. A static identity is the link-time runtime
-object/archive content/build digest plus its symbol-manifest digest. A process
-identity is the executable content/build identity plus its symbol manifest. A
-dynamic identity hashes the opened file and verifies it before loading or
-symbol lookup; the loader must load from that same admitted file handle/content
-identity rather than reopen a mutable path. Canonical paths remain diagnostics,
-not identity.
+The expectation is independent of the candidate provider. Before opening any
+provider, native build admits a signed release manifest under a pinned release
+key, or a build manifest whose digest is pinned by the already admitted build
+recipe. `TrustedRuntimeProviderManifest` names the required provider kind,
+content digest, build ID, symbol-manifest digest, policy digest, target, and
+release/build identity. Neither a provider scan nor an environment variable,
+path string, runtime option, caller assertion, or generated artifact may
+supply expected values. Only after manifest admission does the build open the
+provider once, derive its *observed* byte digest/build ID/symbol manifest, and
+compare every field to the trusted expectation before lookup. Native build
+embeds the expectation and trusted manifest digest in
+`.simple.runtime-provider`; the artifact receipt binds both. A static identity
+is the link-time runtime object/archive content/build digest plus its
+symbol-manifest digest. A process identity is the executable content/build
+identity plus its symbol manifest. A dynamic identity hashes the opened file
+and verifies it before loading or symbol lookup; the loader must load from
+that same admitted file handle/content identity rather than reopen a mutable
+path. Canonical paths remain diagnostics, not identity. A manifest synthesized
+from the provider being admitted is an explicit
+`self-derived-runtime-provider-expectation` failure.
+
+One canonical symbol-name classifier runs before policy *and* before every
+existing underscore strip, alias mapping, static-table lookup, provider
+lookup, `dlsym`, or `GetProcAddress`. Its source of truth is the privileged
+metadata and generated normalization vectors in
+`src/compiler_rust/common/src/runtime_symbols.rs`; the build emits the same
+policy digest and finite classifier into the C runtime header. Rust
+`canonical_runtime_symbol_name` and C
+`rt_canonical_runtime_symbol_name` are generated bindings to that one contract,
+not independent allowlists. Exact privileged spelling returns
+`PrivilegedCanonical` for purpose-aware policy. Any platform spelling whose
+undecorated key equals a privileged name—including one or more leading
+underscores, Mach-O/LLVM leading decoration, Windows `__imp_`/`__imp__`
+imports, and stdcall `@N` suffixes—returns `PrivilegedAliasDenied`. It is never
+resolved under its undecorated spelling. Case and Unicode lookalikes are not
+folded and remain unknown. Generic names retain their existing platform
+normalization, preserving actor fallback.
 
 Code generation emits `.simple.privileged-imports`, binding symbol, requester
 object, and canonical owner-source digest. Entry-closure aggregation admits
@@ -1179,7 +1205,18 @@ and satellite search never begin. Both interpreter and runtime
 dynamic, and chained providers implement the identity contract through
 `create_runtime_provider_for_expectation`; JIT registration and import
 resolution reject the privileged row before provider, ELF, or
-`RTLD_DEFAULT` fallback.
+`RTLD_DEFAULT` fallback. The same pre-lookup classifier and deny are mandatory
+in `src/runtime/runtime_native.c::spl_dlsym`,
+`src/runtime/runtime_dynload.c::spl_dlsym`, and
+`src/compiler_rust/runtime/src/loader/loader.rs` at both
+`resolve_builtin_runtime_symbol` (before its current `strip_prefix('_')`) and
+`resolve_process_runtime_symbol` (before `dlsym`/`GetProcAddress`).
+`runtime_native.c::spl_hosted_provider_i64_probe` also classifies its fixed
+name before `RTLD_DEFAULT`. The hosted entry-closure receipt enumerates every
+reachable OS symbol-lookup callsite and its classifier gate; an unclassified
+lookup—including another loader/settlement path—fails closure admission. A C
+runtime object omitted from the artifact instead needs a negative object/link
+closure proof; source-tree non-reachability is not enough.
 
 Two hostile fixtures are deliberately separate. A non-owner source that
 declares or calls the raw symbol must fail
@@ -1190,4 +1227,9 @@ entropy calls. The second fixture must never become allowed through
 `CURRENT_EXEC_MODULE`: execution metadata is not authority. Additional exact
 fixtures exercise `spl_dlsym`, plugin, main-runtime, satellite, generic
 static/process provider, JIT, and ELF routes; every route proves denial before
-lookup or relocation.
+lookup or relocation. They also pass
+`_rt_browser_renderer_command_capability_new`,
+`__imp_rt_browser_renderer_command_capability_new`,
+`__imp__rt_browser_renderer_command_capability_new@0`, and
+`rt_browser_renderer_command_capability_new@0`; each fails
+`privileged-runtime-symbol-alias` before undecoration or lookup.
