@@ -366,3 +366,58 @@ host compiler build to finish and for free disk to return to a safe margin
 resume at "Required execution order" step 2 (SIMD prerequisite) followed by
 step 3 (incremental AArch64 desktop artifact build) — do not repeat the disk
 work already known to be blocked.
+
+## 2026-07-30 delegated-task checkpoint — origin/main 7d6cfd0e
+
+Delegation revision:
+`7d6cfd0edd8421664a1ec5a48b4e8a46930fe2d7`.
+
+Ownership:
+
+- The delegated QEMU agent is the sole execution owner for this lane,
+  including its scoped build, launch, evidence, cleanup, and failure report.
+- `/root` is the merge and push owner.
+- No one-time gate has been consumed by this delegated task.
+
+Current external ownership conflicts prevent execution:
+
+- QEMU PID `95929` owns the existing Cocoa/`qmp-final` lane.
+- Bootstrap chain PIDs `99509`, `99657`, `99658`, and `99663` own the
+  competing bootstrap/native-build work.
+- The delegated owner must not stop, inject, reuse, or collide with those
+  processes, their sockets, caches, or evidence paths.
+
+Exact next task after all listed processes clear:
+
+1. Recheck that no external QEMU, bootstrap, or native-build process remains,
+   then refresh the clean isolated QEMU worktree to live `origin/main`.
+2. Run the SIMD prerequisite exactly once:
+
+   ```sh
+   sh scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs
+   ```
+
+3. Only when an admitted current pure-Simple `bin/simple` is available, run
+   the canonical x86 static preflight and its spec exactly once:
+
+   ```sh
+   sh scripts/check/check-simpleos-x86-64-wm-qemu-preflight.shs
+   SIMPLE_LIB=src bin/simple test test/03_system/gui/x86_64_wm_qemu_preflight_spec.spl --mode=interpreter
+   ```
+
+   A Rust seed or stale/unadmitted binary is not an allowed substitute.
+4. Run the aggregate preflight exactly once:
+
+   ```sh
+   sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --preflight
+   ```
+
+5. If admission is blocked, identify and fix one smallest host-independent
+   source/script blocker and add a discriminating focused test. Do not broaden
+   the change or run a full bootstrap.
+6. Launch at most one bounded VM only if the selected artifact, transport,
+   provenance, and ownership gates are all READY. Preserve no-orphan cleanup
+   evidence.
+7. Physical Cocoa click/drag/typing/Ctrl evidence remains a manual user action.
+   Synthetic QMP, AppleScript, or other injected input is diagnostic only and
+   is inadmissible for REQ-QRS-004 through REQ-QRS-007.
