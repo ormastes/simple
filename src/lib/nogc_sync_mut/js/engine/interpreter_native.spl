@@ -8027,12 +8027,7 @@ impl JsInterpreter:
         while i < self.pending_timer_tasks.len():
             val task = self.pending_timer_tasks[i]
             if task.id == timer_id:
-                val last_index = self.pending_timer_tasks.len() - 1
-                if i != last_index:
-                    self.pending_timer_tasks[i] = (
-                        self.pending_timer_tasks[last_index]
-                    )
-                val _ = self.pending_timer_tasks.pop()
+                self._timer_heap_remove_at(i)
                 break
             i = i + 1
 
@@ -8085,11 +8080,11 @@ impl JsInterpreter:
             callback_args.push(arg_vals[arg_i])
             arg_i = arg_i + 1
         if timer_type == "animationFrame":
-            self.pending_timer_tasks.push(PendingTimerTask.create_animation_frame(
+            self._timer_heap_push(PendingTimerTask.create_animation_frame(
                 timer_id, callback_id, delay_ms, self.timer_current_time_ms
             ))
         else:
-            self.pending_timer_tasks.push(PendingTimerTask.create_with_args(
+            self._timer_heap_push(PendingTimerTask.create_with_args(
                 timer_id, callback_id, callback_args, delay_ms,
                 self.timer_current_time_ms, is_interval
             ))
@@ -8221,6 +8216,7 @@ impl JsInterpreter:
                         task.delay_ms, self.timer_current_time_ms,
                         task.is_interval
                     )
+                self._timer_heap_repair(i)
                 refreshed = true
                 break
             i = i + 1
@@ -8256,13 +8252,13 @@ impl JsInterpreter:
                     _:
                         pass_dn
                 if timer_type == "animationFrame":
-                    self.pending_timer_tasks.push(PendingTimerTask.create_animation_frame(
+                    self._timer_heap_push(PendingTimerTask.create_animation_frame(
                         timer_id, callback_id,
                         self._animation_frame_delay_ms(),
                         self.timer_current_time_ms
                     ))
                 else:
-                    self.pending_timer_tasks.push(PendingTimerTask.create_with_args(timer_id, callback_id, callback_args, delay_ms, self.timer_current_time_ms, false))
+                    self._timer_heap_push(PendingTimerTask.create_with_args(timer_id, callback_id, callback_args, delay_ms, self.timer_current_time_ms, false))
                 refreshed = true
             self.set_object_property(handle_id, "refreshed", JsValue.Boolean(v: refreshed))
             self.set_object_property(handle_id, "refreshedAt", JsValue.Number(v: self.timer_current_time_ms.to_f64()))
@@ -8297,7 +8293,7 @@ impl JsInterpreter:
             return JsValue.Undefined
         val timer_id = self.next_timer_id
         self.next_timer_id = self.next_timer_id + 1
-        self.pending_timer_tasks.push(PendingTimerTask.create_next_tick(timer_id, callback_id))
+        self._timer_heap_push(PendingTimerTask.create_next_tick(timer_id, callback_id))
         JsValue.Undefined
 
     me _native_fetch(this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:

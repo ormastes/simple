@@ -259,6 +259,22 @@ pub fn js_timer_deadline_ms(scheduled_at_ms: i64, delay_ms: i64) -> i64:
         return -1
     scheduled_at_ms + delay_ms
 
+fn js_timer_task_precedes(
+    left: PendingTimerTask, right: PendingTimerTask
+) -> bool:
+    """Order ready-queue tasks by nextTick, deadline, then creation id."""
+    if left.is_next_tick != right.is_next_tick:
+        return left.is_next_tick
+    val left_due = left.due_at_ms()
+    val right_due = right.due_at_ms()
+    if left_due < 0:
+        return right_due < 0 and left.id < right.id
+    if right_due < 0:
+        return true
+    left_due < right_due or (
+        left_due == right_due and left.id < right.id
+    )
+
 # ── Interpreter ──────────────────────────────────────────────────────────
 
 val MAX_SCRIPT_EXECUTION_STEPS: i64 = 100000
@@ -496,6 +512,74 @@ class JsInterpreter:
             execution_steps_remaining: MAX_SCRIPT_EXECUTION_STEPS,
             execution_limit_hit: false,
         )
+
+    me _timer_heap_swap(left: i64, right: i64):
+        val task = self.pending_timer_tasks[left]
+        self.pending_timer_tasks[left] = self.pending_timer_tasks[right]
+        self.pending_timer_tasks[right] = task
+
+    me _timer_heap_sift_up(start: i64):
+        var index = start
+        while index > 0:
+            val parent = (index - 1) / 2
+            if not js_timer_task_precedes(
+                self.pending_timer_tasks[index],
+                self.pending_timer_tasks[parent]
+            ):
+                return
+            self._timer_heap_swap(index, parent)
+            index = parent
+
+    me _timer_heap_sift_down(start: i64):
+        var index = start
+        while true:
+            val left = index * 2 + 1
+            if left >= self.pending_timer_tasks.len():
+                return
+            val right = left + 1
+            var first = left
+            if (
+                right < self.pending_timer_tasks.len() and
+                js_timer_task_precedes(
+                    self.pending_timer_tasks[right],
+                    self.pending_timer_tasks[left]
+                )
+            ):
+                first = right
+            if not js_timer_task_precedes(
+                self.pending_timer_tasks[first],
+                self.pending_timer_tasks[index]
+            ):
+                return
+            self._timer_heap_swap(index, first)
+            index = first
+
+    me _timer_heap_repair(index: i64):
+        if index < 0 or index >= self.pending_timer_tasks.len():
+            return
+        if (
+            index > 0 and
+            js_timer_task_precedes(
+                self.pending_timer_tasks[index],
+                self.pending_timer_tasks[(index - 1) / 2]
+            )
+        ):
+            self._timer_heap_sift_up(index)
+        else:
+            self._timer_heap_sift_down(index)
+
+    me _timer_heap_push(task: PendingTimerTask):
+        self.pending_timer_tasks.push(task)
+        self._timer_heap_sift_up(self.pending_timer_tasks.len() - 1)
+
+    me _timer_heap_remove_at(index: i64):
+        if index < 0 or index >= self.pending_timer_tasks.len():
+            return
+        val last = self.pending_timer_tasks.len() - 1
+        if index != last:
+            self.pending_timer_tasks[index] = self.pending_timer_tasks[last]
+        val _ = self.pending_timer_tasks.pop()
+        self._timer_heap_repair(index)
 
 # ── impl extensions (split files) ────────────────────────────────────────
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}

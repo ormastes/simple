@@ -9,24 +9,38 @@ extern fn rt_file_read_text(path: text) -> text
 describe "JavaScript timer drain limit":
 
     it "mutates the active timer queues without replacement arrays":
+        val interpreter_source = rt_file_read_text(
+            "src/lib/nogc_sync_mut/js/engine/interpreter.spl"
+        ) ?? ""
         val async_source = rt_file_read_text(
             "src/lib/nogc_sync_mut/js/engine/interpreter_async.spl"
         ) ?? ""
         val native_source = rt_file_read_text(
             "src/lib/nogc_sync_mut/js/engine/interpreter_native.spl"
         ) ?? ""
-        expect(async_source).to_contain(
-            "self.pending_timer_tasks.pop()"
-        )
-        expect(native_source).to_contain(
-            "self.pending_timer_tasks.pop()"
-        )
         expect(async_source.contains(
             "var rest: [PendingTimerTask]"
         )).to_be(false)
         expect(native_source.contains(
             "var rest: [PendingTimerTask]"
         )).to_be(false)
+        expect(async_source).to_contain(
+            "val task = self.pending_timer_tasks[0]"
+        )
+        expect(interpreter_source).to_contain(
+            "me _timer_heap_remove_at(index: i64)"
+        )
+        expect(interpreter_source).to_contain(
+            "val _ = self.pending_timer_tasks.pop()"
+        )
+        expect(async_source).to_contain(
+            "self._timer_heap_remove_at(0)"
+        )
+        expect(async_source.contains(
+            "while i < self.pending_timer_tasks.len()"
+        )).to_be(false)
+        expect(async_source.contains("better_due_task")).to_be(false)
+        expect(native_source.contains("better_due_task")).to_be(false)
 
     it "does not allocate Node timer handles in browser mode":
         var runtime = JsRuntime.new_browser(
@@ -63,6 +77,28 @@ describe "JavaScript timer drain limit":
         expect(scheduled.is_ok()).to_equal(true)
 
         expect(runtime.drain_due_timers(0)).to_equal(1000)
+
+    it "drains a full due queue in deadline and creation order":
+        var runtime = JsRuntime.new_browser(
+            Logger.new("timer-bulk-order", LogLevel.Error)
+        )
+        val scheduled = runtime.eval(
+            "var fired = 0; var mismatches = 0; function record(expected) { if (expected !== 4095 - fired) { mismatches = mismatches + 1; } fired = fired + 1; } for (var i = 0; i < 4096; i = i + 1) { setTimeout(record, 4095 - i, i); }"
+        )
+        expect(scheduled.is_ok()).to_equal(true)
+        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(4096)
+
+        expect(runtime.drain_due_timers(4095)).to_equal(1000)
+        expect(runtime.drain_due_timers(4095)).to_equal(1000)
+        expect(runtime.drain_due_timers(4095)).to_equal(1000)
+        expect(runtime.drain_due_timers(4095)).to_equal(1000)
+        expect(runtime.drain_due_timers(4095)).to_equal(96)
+        expect(runtime.interpreter.pending_timer_tasks.len()).to_equal(0)
+        match runtime.eval("fired + ':' + mismatches"):
+            Ok(JsValue.String(result)):
+                expect(result).to_equal("4096:0")
+            _:
+                fail("Expected full ordered timer drain result")
 
     it "lets an interval cancel its queued continuation":
         var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))

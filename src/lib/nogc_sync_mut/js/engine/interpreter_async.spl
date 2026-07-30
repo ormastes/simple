@@ -85,40 +85,16 @@ impl JsInterpreter:
             var selected_scheduled_at_ms = 0
             var selected_is_interval = false
             var selected_is_animation_frame = false
-            var selected_index = -1
-            var selected_is_next_tick = false
-            var i = 0
-            # ponytail: one stable minimum scan; use a stable timer heap if
-            # 4096-timer drain latency remains material after swap-pop removal.
-            while i < self.pending_timer_tasks.len():
-                val task = self.pending_timer_tasks[i]
-                val due_at = task.due_at_ms()
-                val better_due_task = (
-                    task.is_due_at(current_time_ms) and (
-                        selected_id < 0 or
-                        (task.is_next_tick and not selected_is_next_tick) or
-                        (
-                            task.is_next_tick == selected_is_next_tick and (
-                                due_at < selected_scheduled_at_ms or
-                                (
-                                    due_at == selected_scheduled_at_ms and
-                                    task.id < selected_id
-                                )
-                            )
-                        )
-                    )
-                )
-                if better_due_task:
+            if self.pending_timer_tasks.len() > 0:
+                val task = self.pending_timer_tasks[0]
+                if task.is_due_at(current_time_ms):
                     selected_id = task.id
                     selected_callback_id = task.callback_id
                     selected_callback_args = task.callback_args
                     selected_delay_ms = task.delay_ms
-                    selected_scheduled_at_ms = due_at
+                    selected_scheduled_at_ms = task.due_at_ms()
                     selected_is_interval = task.is_interval
                     selected_is_animation_frame = task.is_animation_frame
-                    selected_index = i
-                    selected_is_next_tick = task.is_next_tick
-                i = i + 1
             if selected_id < 0:
                 return ran_count
             if selected_id >= 0:
@@ -131,18 +107,14 @@ impl JsInterpreter:
                         selected_handle_id = self.timer_handle_object_ids[handle_i]
                     handle_i = handle_i + 1
                 if selected_is_interval:
-                    self.pending_timer_tasks[selected_index] = PendingTimerTask.create_with_args(
+                    self.pending_timer_tasks[0] = PendingTimerTask.create_with_args(
                         selected_id, selected_callback_id,
                         selected_callback_args, selected_delay_ms,
                         current_time_ms, true
                     )
+                    self._timer_heap_repair(0)
                 else:
-                    val last_index = self.pending_timer_tasks.len() - 1
-                    if selected_index != last_index:
-                        self.pending_timer_tasks[selected_index] = (
-                            self.pending_timer_tasks[last_index]
-                        )
-                    val _ = self.pending_timer_tasks.pop()
+                    self._timer_heap_remove_at(0)
                 if selected_callback_id >= 0:
                     if selected_is_animation_frame:
                         var frame_time_ms = (
@@ -179,17 +151,15 @@ impl JsInterpreter:
                     self._retire_timer_handle_lookup(selected_id)
                 if selected_callback_id >= 0:
                     var due_next_tick = false
-                    if self.node_compat_enabled:
-                        var next_tick_i = 0
-                        while next_tick_i < self.pending_timer_tasks.len():
-                            val next_task = self.pending_timer_tasks[next_tick_i]
-                            if (
-                                next_task.is_next_tick and
-                                next_task.is_due_at(current_time_ms)
-                            ):
-                                due_next_tick = true
-                                break
-                            next_tick_i = next_tick_i + 1
+                    if (
+                        self.node_compat_enabled and
+                        self.pending_timer_tasks.len() > 0
+                    ):
+                        val next_task = self.pending_timer_tasks[0]
+                        due_next_tick = (
+                            next_task.is_next_tick and
+                            next_task.is_due_at(current_time_ms)
+                        )
                     if not due_next_tick:
                         val microtasks_ran = (
                             self._drain_pending_microtasks_up_to(
