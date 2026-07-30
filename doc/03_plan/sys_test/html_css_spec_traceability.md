@@ -438,3 +438,17 @@ segfaulted and must not be promoted to evidence or repeated in this tranche.
 - source/manual/report counts and hashes agree;
 - `find doc/06_spec -name '*_spec.spl'` returns zero;
 - independent highest-capability review returns PASS.
+
+## Generator/WebIR audit gaps
+
+These rows are additive backlog. They do not change any earlier RED, FAIL, or
+evidence-blocked classification. Here WebIR means the existing Web
+semantic/layout layer, not a second drawing IR.
+
+| Work row | Audit gap | Required evidence | Status |
+|---|---|---|---|
+| GEN-WEB-001 generator provenance | `simple_web_generated_html_css_combinations_spec.spl` embeds generated cases without stable generator/schema identity, input hashes, or case IDs | Emit and assert generator identity, schema version, input hashes, and unique case IDs in the executable spec and canonical manual | RED |
+| GEN-WEB-002 fail-closed merge | The manifest/report join lacks executable negative coverage for duplicate IDs, missing records, stale source/manual hashes, and unknown statuses | Add fail-closed scenarios to `html_css_rendering_manifest_traceability_spec.spl` for every rejected merge condition | RED |
+| GEN-WEB-003 retained manifest | The 38 generated scenarios, 50 fixture cases, and element/property rows are not joined by one retained per-case manifest with qualified execution receipts | Retain a versioned manifest that maps each case to requirements, source/manual hashes, oracle class, runner SHA, and result | RED |
+| GEN-WEB-004 canonical WebIR ownership | Generated-combination pixels do not alone prove the canonical Web semantic/style/layout to `DrawIrComposition` to Engine2D route | Add producer identity, semantic/style/layout, exact Draw IR, discriminating pixel, and negative-control assertions without adding a parallel WebIR | RED |
+| GEN-WEB-005 canonical manuals | The canonical generated-combinations manual is stale and a duplicate legacy mirror remains under `doc/06_spec/test/` | Regenerate the canonical manual only after executable rows settle; prove current source hash and zero stubs before deleting the duplicate mirror | RED |
