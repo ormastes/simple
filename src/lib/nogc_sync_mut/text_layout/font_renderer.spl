@@ -258,11 +258,24 @@ fn _resolved_font_metric_store(key: text, metrics: ResolvedFontMetrics):
 # Loaded-default-font cache keyed by resolved family. browser_default_for_family
 # does a real dlopen + TTF parse (the universal sans face is 17MB), so without
 # reuse every #text node reparses the whole font — quadratic for a real page and
-# the dominant web-render cost under the interpreter. Cached renderers are NEVER
-# clear_ttf()'d (see _resolve_font_metrics_with_language_config's guarded calls)
-# so the loaded face stays live for the next node of the same family.
+# the dominant web-render cost under the interpreter.
+#
+# FLATTENED (2026-07-30, see doc/08_tracking/bug/
+# font_renderer_cache_nested_aggregate_loss_2026-07-27.md): this cache used to
+# store a whole `FontRenderer` BY VALUE in `[FontRenderer]`. `FontRenderer`
+# nests `ttf_rasterizer: FontRasterizer?` -> `selected_blob: [u8]`, and that
+# nested aggregate did NOT survive the module-global store/read-back on the
+# cranelift native lane — measured has_ttf=0 on 74/74 observed cache hits
+# (117/118 metric resolves overall). The array itself persisted and was hit;
+# only the nested face payload degraded. Root cause is the compiler's
+# aggregate-return/nested-array-field store/read-back defect (still latent —
+# this is a call-site workaround, not a compiler fix). Do NOT re-nest a
+# FontRenderer/FontRasterizer into a module-global array; cache only flat
+# scalars/text (family key, resolved font path) and reconstruct a fresh
+# FontRenderer from the already-in-memory registered blob on every cache hit
+# via `_browser_default_font_rebuild_from_path`.
 var _browser_default_font_families: [text] = []
-var _browser_default_font_renderers: [FontRenderer] = []
+var _browser_default_font_paths: [text] = []
 var _registered_selected_font_paths: [text] = []
 var _registered_selected_font_blobs: [[u8]] = []
 var _browser_default_font_lock: Mutex? = nil
@@ -309,10 +322,11 @@ fn font_renderer_use_registered_selected_bytes_only():
     # the flag is observable.
     _registered_selected_fonts_only = true
     val browser_lock = _browser_default_font_lock_acquire()
-    for renderer in _browser_default_font_renderers:
-        renderer.clear_ttf()
+    # No cached FontRenderer instances to clear_ttf() any more — the cache is
+    # flat (family, path) text pairs (see the FLATTENED comment above), so
+    # resetting it is just dropping the two arrays.
     _browser_default_font_families = []
-    _browser_default_font_renderers = []
+    _browser_default_font_paths = []
     _browser_default_font_lock_release(browser_lock)
     val metric_lock = _resolved_font_metric_lock_acquire()
     _resolved_font_metric_keys = []
@@ -351,25 +365,74 @@ fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
     _browser_default_font_lock_release(active_lock)
     true
 
+fn _browser_default_font_rebuild_from_path(font_path: text) -> (FontRenderer, bool):
+    """Reconstruct a fresh FontRenderer for a cache hit from the ALREADY
+    in-memory registered blob (no VFS re-read) -- see the FLATTENED comment
+    above `_browser_default_font_families`. Mirrors the two load strategies
+    `_browser_default_font_load_with_path` used the first time this path was
+    resolved: registered bytes first, then (unless registered-bytes-only is
+    active) the runtime/dlopen TTF loader."""
+    val registered = _registered_selected_font_bytes(font_path)
+    val registered_blob = registered.0
+    if registered.1 and registered_blob.len() > 0:
+        var renderer = FontRenderer.new()
+        if renderer.try_load_selected_bytes(font_path, registered_blob):
+            return (renderer, true)
+    if not font_renderer_registered_selected_bytes_only():
+        var renderer = FontRenderer.new()
+        if renderer.try_load_runtime_ttf(font_path):
+            return (renderer, true)
+    (FontRenderer.new(), false)
+
+fn _browser_default_font_load_with_path(family: text) -> (FontRenderer, text, bool):
+    """Same resolution logic as `FontRenderer.browser_default_for_family`, but
+    also returns the resolved font_path so the cache can store a FLAT text
+    path instead of the nested FontRenderer object graph (see the FLATTENED
+    comment above `_browser_default_font_families`)."""
+    val registered_only = font_renderer_registered_selected_bytes_only()
+    val candidates = browser_font_candidates_for_family(family)
+    for font_path in candidates:
+        val registered = _registered_selected_font_bytes(font_path)
+        val registered_blob = registered.0
+        val has_registered_blob = registered_blob.len() > 0
+        if has_registered_blob:
+            var renderer = FontRenderer.new()
+            if renderer.try_load_selected_bytes(font_path, registered_blob):
+                return (renderer, font_path, true)
+        if not registered_only:
+            var renderer = FontRenderer.new()
+            if renderer.try_load_runtime_ttf(font_path):
+                return (renderer, font_path, true)
+    (FontRenderer.new(), "", false)
+
 fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
     val cache_key = _browser_default_font_cache_key(family)
     if cache_key != "":
         val active_lock = _browser_default_font_lock_acquire()
         var index: i64 = 0
+        var hit_path = ""
+        var found = false
         while index < _browser_default_font_families.len():
             if _browser_default_font_families[index] == cache_key:
-                val hit = _browser_default_font_renderers[index]
-                _browser_default_font_lock_release(active_lock)
-                return (hit, true)
-            index = index + 1
+                hit_path = _browser_default_font_paths[index]
+                found = true
+                index = _browser_default_font_families.len()
+            else:
+                index = index + 1
         _browser_default_font_lock_release(active_lock)
-    val loaded = FontRenderer.browser_default_for_family(family)
-    if cache_key != "" and loaded.has_sffi_ttf():
+        if found and hit_path != "":
+            val rebuilt = _browser_default_font_rebuild_from_path(hit_path)
+            if rebuilt.1:
+                return (rebuilt.0, true)
+    val loaded = _browser_default_font_load_with_path(family)
+    val renderer = loaded.0
+    val resolved_path = loaded.1
+    if cache_key != "" and resolved_path != "" and renderer.has_sffi_ttf():
         val store_lock = _browser_default_font_lock_acquire()
         _browser_default_font_families = _browser_default_font_families.push(cache_key)
-        _browser_default_font_renderers = _browser_default_font_renderers.push(loaded)
+        _browser_default_font_paths = _browser_default_font_paths.push(resolved_path)
         _browser_default_font_lock_release(store_lock)
-    (loaded, false)
+    (renderer, false)
 
 # GLYPH-FIX-3 (2026-07-19): gated producer-side atlas probe. Prints the
 # nonzero-coverage-byte count for the first quad's atlas region right before

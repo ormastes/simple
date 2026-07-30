@@ -311,3 +311,58 @@ this plan.
 
 Merge owner and final reviewer: root/high-capability Codex agent. QEMU launch
 owner: one explicitly assigned QEMU agent session only.
+
+## 2026-07-30 sole-owner session 2 (later same day) — fail-closed, no launch
+
+A second sole-owner QEMU session picked up this plan at approximately
+`2026-07-30T04:07Z`. It re-verified environment state before doing anything
+that could start a VM or write large artifacts, per the "Required execution
+order" step 1 gate ("Confirm disk headroom ... confirm exclusive QEMU
+ownership").
+
+Findings:
+
+- **Disk headroom regressed below safe margin.** `df -g /Users/ormastes`
+  reported **3 GiB available** (down from the 8.9 GiB recorded in the
+  preflight earlier the same day). This repo has a documented history of
+  repeated ENOSPC incidents; writing a new QEMU disk image, FAT32 artifact, or
+  running an incremental compiler build at 3 GiB free was judged unsafe.
+- **A host compiler build is still CPU-active**, confirmed via `ps aux`: a
+  `rustc --crate-name simple_compiler ... -C opt-level=z` process (PID 4881)
+  competing for CPU, matching the exact condition the morning preflight
+  already flagged as a reason not to start a competing QEMU run.
+  `build/bootstrap` alone is 7.8 GiB, consistent with the tight remaining
+  headroom.
+- **None of the five canonical artifacts listed as missing in the morning
+  preflight have appeared since**: `build/os/simpleos_x86_64_host_gpu_probe.elf`,
+  `build/os/simpleos_arm64_host_gpu_probe.elf`,
+  `build/os/simpleos_arm64_desktop_engine2d.elf`, the AArch64 desktop build
+  manifest / `fat32-arm64-desktop.img`, and `simpleos_desktop_gui_x86_64.elf`
+  are all still absent from the tree.
+- No `build/evidence/simpleos-qemu-wm-real-screen-*` directory was created —
+  none existed at session start and none was created this session.
+- Per the working-copy state at session start, `jj`'s workspace was **stale**
+  (last synced at an old operation) and the plan file itself was missing from
+  the checked-out working copy until `jj workspace update-stale` +
+  `jj rebase -d main@origin` were run to reach current `origin/main`
+  (`5d6c2259`). This is recorded here because it means any session that
+  skipped that step would have been silently working from a stale tree
+  lacking this very plan.
+
+Decision: **fail closed, do not launch.** Per the plan's own "Required
+execution order" step 1 and the "Fail-closed admission and evidence rules",
+this session did not run the SIMD prerequisite, did not build any AArch64 or
+x86_64 artifact, did not run `check-simpleos-qemu-host-gpu-2d.shs
+--preflight` again (it would not change the disk/CPU-contention verdict and
+the plan caps some of these wrappers to "at most once"), and did not open a
+QEMU process, QMP socket, or new evidence directory. No REQ-QRS row (001
+through 008) was attempted or satisfied this session. Nothing was deleted or
+rebuilt to free space, per the standing instruction not to delete build
+artifacts belonging to other in-flight sessions.
+
+Recommended next step for the next sole-owner session: wait for the active
+host compiler build to finish and for free disk to return to a safe margin
+(the morning run treated 8.9 GiB as marginal; 3 GiB is not workable), then
+resume at "Required execution order" step 2 (SIMD prerequisite) followed by
+step 3 (incremental AArch64 desktop artifact build) — do not repeat the disk
+work already known to be blocked.
