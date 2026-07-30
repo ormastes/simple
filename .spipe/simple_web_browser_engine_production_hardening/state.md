@@ -2438,3 +2438,42 @@ implementation in progress / target evidence blocked
   pressed state can remain stale; its SSpec checks only the integer clear. All
   other state, paint, hit, drain, projection, partial-wire, and lifecycle work
   reviewed sound but remains unpromoted. The patch is unexecuted and unmerged.
+- renderer command capability design (2026-07-30): Origin/main tracing found
+  that numeric generation/reply IDs do not establish causal command issuance.
+  Startup accepts `ready` while retaining later decoder bytes; after predictable
+  init request ID `2` is written, a previously queued valid frame naming reply
+  `2` can pass numeric correlation and move the renderer active without proving
+  it consumed init. Architecture, TLDR, detail, system-test, and agent-plan
+  updates propose fail-closed `SBR2`: one fresh explicit-success
+  platform-CSPRNG 128-bit tail capability per host wire, including every
+  network response, bound with generation and root/immediate request IDs,
+  consumed before broker/frame authority, and retired on every lifecycle exit.
+  Network responses also bind the originating renderer fetch wire. The exact
+  four-step RED scenario requires `unissued-renderer-reply`, cleanup/restart/
+  entropy oracles, a conforming echo control, and ready-buffer defense in
+  depth. Status is PROPOSED/UNIMPLEMENTED/RED; no source, spec, manual, build,
+  commit, push, or acceptance promotion exists.
+  Final cycle-2 freezes common-codec/host-admission/worker-sequencing and
+  existing crypto-facade/native-runtime owners; staged authority becomes issued
+  only after a complete pending-wire write. The same four steps fold in a
+  deterministic split-write oracle, 1 MiB total-budget and canonical i64
+  sequence boundaries, stop-versus-close image lifecycle, per-wire entropy
+  counters/latency, one transient token allocation, and the selected 10,000
+  cycle RSS/latency NFR boundaries. This remains design-only.
+- batch-3 reviewed status (2026-07-30):
+  - durable Home has production, focused SSpec, canonical generated manual, and
+    final normal/high review PASS; it remains held, unexecuted, and unmerged.
+  - nonzero-clock JavaScript timers have production, focused SSpec, generated
+    manual, and final normal/high review PASS; they remain held, unexecuted,
+    and unmerged.
+  - `<mark>` has production/spec high review PASS, but its generated manual
+    remains FAIL at the three-cycle cap because six raw bullets leak from the
+    helper and shutdown text. It is held and unmerged.
+  - text overflow remains HOLD/FAIL because CSS-wide cascade resolution is
+    unresolved; it is not an implementation-ready patch.
+  - iterative DOM tag search has production/spec static high review PASS, but
+    its generated manual remains FAIL at the three-cycle cap: only preorder
+    assertions were folded. It is held and unmerged.
+  The previously recorded SimpleScript PASS and CSS-cascade/bookmark-title
+  designs remain unchanged. None of these rows gains executable or merge
+  evidence here.

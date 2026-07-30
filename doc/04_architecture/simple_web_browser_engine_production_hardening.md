@@ -889,3 +889,116 @@ must produce a newly admitted witness; title state is never copied across the
 generation boundary. Persisted bookmarks remain profile-owned and survive
 window/host restart. The in-process path calls the same validator with
 `current_title` and must not overwrite the accepted title with `(url, url)`.
+
+<!-- codex-architecture -->
+## Renderer command capability boundary (PROPOSED / UNIMPLEMENTED / RED)
+
+Numeric generation and request IDs order renderer traffic, but they do not
+prove that a reply was produced after its host command was issued. During
+startup the decoder can retain a second message after `ready`; request ID `2`
+is predictable, so a syntactically valid frame naming reply `2` can later pass
+the current numeric check after `init` is written. The same causal gap applies
+to later command/fetch/frame chains. This section defines a defensive protocol
+repair only; current production remains RED.
+
+The host creates one opaque `BrowserRendererCommandCapability` for every
+host-to-worker wire, including every `network_response`, rather than reusing a
+root-command token. It is exactly 16 bytes from the hosted platform CSPRNG,
+encoded as 32 lowercase hexadecimal ASCII bytes. Entropy acquisition has an
+explicit success result; short reads, unavailable entropy, all-zero test
+sentinels, or any noncanonical encoding fail renderer startup/command
+admission. The token is never derived from generation, PID, time, or request
+counters and is never logged. The runtime facade, not browser policy code,
+owns Linux `getrandom`, macOS `SecRandomCopyBytes`, and Windows
+`BCryptGenRandom`.
+
+The production wire moves from numeric-only `SBR1` to fail-closed `SBR2`.
+Its bounded header carries only a canonical capability length (`0` for
+`ready`, otherwise `32`); the capability bytes are the final trailer after the
+declared payload. A decoder does not release a message until the complete
+trailer is present. Consequently a worker cannot learn the token until all
+payload bytes for that host wire precede it in the pipe.
+
+The trailer is charged inside, not added above, the existing 1 MiB payload
+budget: checked addition requires
+`payload_bytes + capability_bytes <= BROWSER_RENDERER_MAX_PAYLOAD_BYTES`.
+The streaming decoder retains the existing total cap of
+`BROWSER_RENDERER_MAX_HEADER_BYTES +
+BROWSER_RENDERER_MAX_PAYLOAD_BYTES +
+BROWSER_RENDERER_MAX_READ_CHUNK_BYTES`; SBR2 does not increase it. Generation,
+root-command ID, wire ID, and reply ID use canonical unsigned-decimal text in
+`1..BROWSER_RENDERER_MAX_SEQUENCE_ID`, where the maximum is
+`9223372036854775806`. Zero is admitted only for ready's root ID. Every
+increment uses checked addition; exhaustion fails closed before installing a
+wire or advancing registry generation. Leading signs, leading zeroes,
+`9223372036854775807`, and textual max-plus-one overflow reject.
+
+The root command establishes a stable
+`(generation, root_command_request_id)` chain. Each host wire carries a fresh
+tail capability; the next worker `fetch_request`, `test_hang_ready`, or
+terminal `frame` echoes that one token exactly once. A `network_response`
+revision additionally names the originating renderer fetch wire ID and carries
+a new tail capability. The worker validates that immediate reply ID before
+committing the response, then may echo the new token in its next fetch/frame.
+Fetch and frame payload revisions retain their existing
+`reply_to_request_id`. Thus admission requires all four facts:
+
+1. message generation equals the live renderer generation;
+2. root command request ID equals the host's issued root request ID;
+3. capability exactly equals the host's one live, unconsumed 32-byte hop
+   capability; and
+4. reply ID exactly equals the latest completely written host wire ID.
+
+Capability validation precedes request policy, cookie mutation, network-job
+creation, frame decode, history/title updates, retained-image replacement, and
+renderer state transition. A missing, malformed, retired, or mismatched token
+returns `unissued-renderer-reply` and enters the existing fail/close cleanup
+path. Generation rejection remains earlier and reports `stale-generation`.
+No comparison accepts prefixes or case variants.
+
+The host consumes the live hop capability immediately after one bound worker
+message passes correlation, before broker dispatch or frame decode. A fetch
+therefore retires its token before network work starts; the later
+`network_response` installs a fresh token only when its complete wire becomes
+pending. A terminal frame consumes its token before state transition.
+Cancellation, stop replacement, timeout, decoder violation, network failure,
+renderer failure, site swap, `close`, and registry teardown retire any live
+token. Only failure, close, site swap, and registry teardown clear retained
+display resources; ordinary cancellation/stop preserves the last admitted
+frame. Deferred commands receive a capability only at activation. A
+replacement renderer inherits neither token nor generation.
+
+The host separates staged from issued authority. Encoding/installing a pending
+wire fills
+`staged_generation`, `staged_root_request_id`, `staged_host_wire_request_id`,
+and `staged_hop_capability`; all issued fields remain empty. Only
+`_flush_pending_wire_once`, after checked subtraction proves pending remaining
+bytes reached exactly zero, atomically moves that tuple to the corresponding
+`issued_*` fields and clears `staged_*`. Admission consults only `issued_*`.
+Neither partial write progress nor the staged token can authorize a renderer
+message.
+
+Legacy `SBR1`, legacy fetch/frame schemas without the root command ID, and a
+legacy `network_response` are rejected in the production broker and worker.
+There is no downgrade flag, environment escape hatch, or legacy decoder
+surface.
+
+As defense in depth, startup accepts `ready` only when its payload and
+capability trailer are empty, its request ID is `1`, and the decoder has no
+retained bytes. This check catches same-read protocol overrun, but it is not
+the causal boundary: only the not-yet-disclosed tail capability proves that a
+reply followed a completely delivered host wire.
+
+The exact owners stay narrow: `src/lib/common/web/browser_renderer_protocol.spl`
+owns SBR2 framing and canonical validation;
+`src/os/hosted/hosted_browser_renderer_process.spl` owns staging, issuance,
+admission, broker ordering, and retirement; and
+`src/os/hosted/hosted_browser_renderer_worker.spl` owns complete-wire decode,
+one-use echo, and network-response sequencing. Hosted entropy goes through the
+existing Simple crypto facade owner
+`src/lib/nogc_sync_mut/io/crypto_sffi.spl`, re-exported by
+`src/lib/nogc_sync_mut/io/__init__.spl`; explicit failure and platform fill
+remain owned by
+`src/compiler_rust/runtime/src/value/sffi/random.rs`, with its extern admitted
+through `src/compiler_rust/common/src/runtime_symbols.rs`. Hosted browser code
+adds no private random extern or fallback.

@@ -831,3 +831,153 @@ Hostile document content merely produces an absent title witness and does not
 deny rendering. Profile write/load failure preserves the prior immutable
 snapshot and reports the existing profile error. No error may partially change
 the bookmark URL, title, revision, or UI snapshot.
+
+<!-- codex-design -->
+## RED detail contract: renderer command capabilities (2026-07-30)
+
+**Status: PROPOSED / UNIMPLEMENTED / RED.**
+
+### Frozen interfaces
+
+- `BrowserRendererCommandCapability` stores only canonical 32-byte lowercase
+  hexadecimal text.
+- `browser_renderer_command_capability_new() ->
+  Result<BrowserRendererCommandCapability, text>` obtains exactly 16 bytes
+  from an explicit-success hosted platform CSPRNG facade.
+- `browser_renderer_command_capability_valid(value: text) -> bool` accepts
+  exactly 32 lowercase hexadecimal ASCII bytes.
+- `HostedBrowserRendererProcess` adds the staged fields
+  `staged_generation`, `staged_root_request_id`,
+  `staged_host_wire_request_id`, and `staged_hop_capability`, plus matching
+  `issued_*` fields.
+- `BrowserRendererMessage` adds `root_command_request_id` and
+  `command_capability`.
+- `_require_issued_renderer_reply(message, reply_to_request_id) ->
+  Result<bool, text>` is the single parent-side admission helper.
+- `_retire_renderer_command_capability()` clears the live hop binding without
+  logging its value.
+
+No capability registry, token cache, negotiation service, or public browser API
+is added.
+
+### Wire contract
+
+`SBR2` has the bounded header:
+
+`SBR2 kind generation wire-request-id root-command-request-id payload-bytes capability-bytes`
+
+The wire body is `payload || capability-trailer`. `ready` alone has root ID
+and capability length `0`; every host wire has capability length `32`. A
+decoder bounds the header by 256 bytes, requires canonical decimal IDs and
+lengths, proves `payload-bytes + capability-bytes` with checked addition, and
+does not release the message until both are complete. It accepts only exactly
+32 lowercase hexadecimal trailer bytes for a capability-bearing message.
+
+`payload-bytes + capability-bytes` must be at most the existing
+`BROWSER_RENDERER_MAX_PAYLOAD_BYTES` (1,048,576); the 32 trailer bytes reduce
+available application payload rather than expanding the wire. Header plus
+payload/trailer plus read-ahead remains bounded by the existing
+`256 + 1,048,576 + 8,192` decoder limit. All generation/root/wire/reply IDs are
+canonical decimal integers in `1..9223372036854775806`; ready alone uses root
+ID `0`. Parsing rejects signs, leading zeroes, `9223372036854775807`, and
+max-plus-one text before arithmetic. Registry/request increments are checked
+and fail before mutation on exhaustion.
+
+A root host command sets root ID equal to its wire request ID. Worker
+`fetch_request` and `frame` messages echo that root ID, the immediately prior
+host wire ID, and its one-use capability. `SBRN2 network_response` names both
+the stable root ID and `reply_to_renderer_request_id` for the fetch wire it
+answers, then carries a fresh tail capability for the worker's next
+fetch/frame. Production host and worker reject `SBR1` and all legacy
+request/frame/response revisions; no compatibility switch exists.
+
+### Host algorithm
+
+1. Before encoding any host wire, obtain a fresh capability. Entropy failure
+   returns `renderer-command-entropy-unavailable` before pending state, wire
+   bytes, deadline, or network state changes.
+2. Installing a bounded wire fills only the `staged_*` tuple. The capability
+   is the final trailer. `_flush_pending_wire_once` computes remaining bytes
+   with checked subtraction; only the transition to exactly zero atomically
+   moves staged generation/root/host-wire/capability into `issued_*`, clears
+   `staged_*`, and advances expected reply state. Admission reads only
+   `issued_*`. A partially written wire cannot be replaced or authorize a
+   reply.
+3. On renderer `fetch_request`, validate generation, root ID, one-use
+   capability, and immediate reply ID through
+   `_require_issued_renderer_reply`, then retire that capability. Only
+   afterward may initiator/CSP/network policy run, cookies change, or an HTTP
+   job start. The resulting `network_response` names the accepted fetch wire
+   ID and obtains a fresh capability.
+4. On a frame, perform the same binding check and retire its capability before
+   frame/history/title/image decode or any renderer/registry transition. A
+   deferred command obtains its own fresh capability only at activation.
+5. `_cancel_pending_for_stop`, navigation replacement, timeout, protocol
+   violation, network failure, `fail`, `close`, site swap, registry teardown,
+   and terminal-frame acceptance all call the one retirement helper. Cleanup
+   clears both staged and issued tuples. Stop/cancel preserves the last
+   admitted display frame while retiring both tuples. Failure, close, site
+   swap, and teardown additionally leave pending wire/root IDs empty, network
+   handle zero, deferred commands empty, and retained image resources empty.
+
+### Worker algorithm
+
+The worker has no capability before fully decoding a host wire and its tail.
+It copies that one token into exactly one generated fetch/frame and consumes
+it. It accepts `SBRN2 network_response` only when generation/root ID match the
+root command, `reply_to_renderer_request_id` equals its last fetch wire ID, and
+the host wire ID is the next expected ID. That response supplies a fresh tail
+capability for exactly one later fetch/frame. Tokens are omitted from
+diagnostics and crash output.
+
+### Entropy and lifecycle
+
+The existing owner `src/lib/nogc_sync_mut/io/crypto_sffi.spl` adds
+`secure_random_hex_exact(length: i64) -> Result<text, text>` and exports it
+through `src/lib/nogc_sync_mut/io/__init__.spl`. It wraps the existing
+`rt_random_hex` symbol but converts NIL, wrong length, or noncanonical output
+to explicit failure. Native platform fill remains in
+`src/compiler_rust/runtime/src/value/sffi/random.rs`; the symbol registry is
+`src/compiler_rust/common/src/runtime_symbols.rs`. It returns exactly 16 bytes
+or failure and never falls back to clock, PID, `rt_random_random`, or zeroes.
+
+A separate runtime selfcheck build substitutes a failing fill function behind
+`SIMPLE_RUNTIME_ENTROPY_SELFCHECK`; production has no fault switch. The system
+fake renderer learns a real capability only by reading a complete host wire.
+Restart evidence captures an old command tuple, replaces the renderer
+generation, and proves the old generation is rejected as `stale-generation`.
+A separately rewritten current-generation message carrying the retired old
+capability is rejected as `unissued-renderer-reply`. A conforming control
+reads the issued command, echoes its tuple, and reaches one accepted nonblank
+frame.
+
+### Ready defense in depth
+
+Startup accepts only `SBR2 ready generation 1 0 0 0` and requires
+`decoded.decoder.buffer_len == 0`. Any retained bytes fail with
+`unexpected-ready-buffer`. This is an early diagnostic, not a substitute for
+the per-command capability.
+
+### Performance and observability
+
+The process owns bounded counters only:
+`renderer_capability_issue_count`, `renderer_capability_failure_count`,
+`renderer_capability_staged_count`, `renderer_capability_consumed_count`,
+`renderer_capability_reject_count`, a 64-bucket microsecond histogram, and
+maximum generation latency. No token value is observable.
+
+For warm commands, CSPRNG plus hex generation p95 is at most 1 ms and p99 is
+report-only; total input-to-paint p95 remains the selected 50 ms
+NFR-WEB-BROWSER-004 limit. Relative command-latency regression remains at most
+5% under NFR-WEB-BROWSER-015. A zero-allocation token is not feasible with the
+existing text wire: the selected target is exactly one transient 32-byte token
+text allocation per host wire, zero retained capability allocations after
+retirement, and no new collection or per-command subprocess.
+
+After 10,000 command/fetch/frame cycles and bounded quiescence, staged and
+issued capability counts and bytes are zero, heap/retained resources and RSS
+return within 10% of post-warmup baseline (NFR-WEB-BROWSER-006/014), and browser
+plus one renderer remains at most 384 MiB (NFR-WEB-BROWSER-005). The histogram,
+allocation count, maximum RSS, post-warmup/final RSS, and failure/reject
+counters are retained as evidence; p99 entropy latency is report-only until a
+numeric NFR is selected.

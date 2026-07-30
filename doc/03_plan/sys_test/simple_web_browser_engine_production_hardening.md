@@ -674,3 +674,105 @@ All other state, paint, hit, drain, projection, partial-wire, and lifecycle
 work reviewed sound but remains unpromoted. The patch is unexecuted and
 unmerged; repair the renderer cancellation and exact DOM-state oracle in a
 fresh cycle.
+
+## Renderer command capability SSpec (PROPOSED / RED)
+Target a new focused modern scenario at
+`test/03_system/security/browser_renderer_command_capability_spec.spl`. Its
+mirrored generated manual must expose exactly these four steps:
+
+1. `Queue a reply before its command capability`
+2. `Issue the trusted initialization command`
+3. `Reject the unissued reply capability`
+4. `Retire renderer resources and accept one issued reply`
+
+Frozen setup/checker names are
+`setup_renderer_command_capability_fixture`,
+`check_unissued_renderer_reply_rejected`,
+`check_renderer_capability_cleanup`, and
+`check_issued_renderer_reply_control`. Until implementation, each checker
+must call
+`fail("RED: renderer command capability binding is unimplemented")`.
+
+The fixture launches a bounded fake renderer through the real piped hosted
+process boundary. One mode writes `ready` and a future frame in one write for
+the ready-buffer check. A second controlled mode uses a test-only FIFO path
+embedded in its generated executable: after writing `ready`, it waits for the
+harness release byte, writes the future frame, acknowledges that write through
+the FIFO, and still has not read renderer stdin. Only after that acknowledgement
+does the parent issue `init`, making the separate-read ordering deterministic
+without sleeps. A conforming mode reads the complete init payload and tail,
+echoes its tuple, and proves an accepted nonblank Draw-IR/Engine2D result.
+
+Required assertions use built-in matchers only:
+
+- `ready` plus retained bytes rejects as `unexpected-ready-buffer`;
+- a future reply delivered in a separate read, with the expected numeric IDs
+  but without the issued capability, rejects as
+  `unissued-renderer-reply`;
+- a deterministic split write stages the host tuple, writes payload plus only
+  31 capability bytes, and proves a matching staged capability is
+  inadmissible; only the final byte moves all staged fields to issued fields;
+- rejection occurs before network policy, cookie mutation, HTTP-job start,
+  frame decode, history/title mutation, retained-image replacement, or active
+  state transition;
+- failure cleanup leaves state `failed`, command capability empty, root request
+  ID zero, pending wire empty, command deadline zero, network handle zero,
+  deferred commands empty, and retained image resources empty; the bounded
+  fake child closes successfully;
+- restart rejects the prior tuple first as `stale-generation`; the old
+  capability paired with the new generation rejects as
+  `unissued-renderer-reply`;
+- uppercase, short, long, nonhex, empty, and `-` command capabilities reject;
+  exactly 32 lowercase hexadecimal bytes are accepted;
+- application payload `1,048,544` plus a 32-byte capability is accepted;
+  payload `1,048,545` plus 32 rejects without allocation; the total decoder
+  buffer never exceeds `256 + 1,048,576 + 8,192`;
+- generation/root/wire/reply IDs accept canonical
+  `1..9223372036854775806`; zero is ready-root-only, and signs, leading zeroes,
+  `9223372036854775807`, textual max-plus-one, and checked-increment overflow
+  reject before state mutation;
+- legacy `SBR1` and legacy fetch/frame/network schemas reject in both hosted
+  production directions;
+- the conforming control reads the command, echoes generation/root ID/token
+  and immediate reply ID, reaches `active`, renders exact nonblank pixels, and
+  leaves the capability retired after frame acceptance;
+- stop/cancel retires staged and issued capability fields but preserves the
+  last admitted frame checksum/resources; close, failure, and site swap retire
+  both tuples and clear retained images, pending wire, deferred commands, and
+  network handle.
+
+Separate admissible runtime evidence runs
+`test/01_unit/runtime/run_browser_renderer_command_entropy_test.shs`, whose C
+selfcheck is compiled with `SIMPLE_RUNTIME_ENTROPY_SELFCHECK`. It proves a
+short/unavailable entropy provider returns
+`renderer-command-entropy-unavailable` before browser pending state can be
+created. No production environment fault switch is allowed.
+
+Fold performance evidence into step 4 without adding visible steps: 10,000
+command/fetch/frame cycles report issue/failure/staged/consumed/reject
+counters, bounded entropy-latency histogram, transient token allocation count,
+post-warmup/final/max RSS, and command p95. Acceptance requires zero entropy
+failures, zero staged/issued capability bytes after quiescence, exactly one
+transient 32-byte token allocation per host wire and zero retained token
+allocations, warm capability p95 <=1 ms, total input-to-paint p95 <=50 ms,
+relative command latency regression <=5%, RSS <=384 MiB, and final RSS growth
+<=10%. Entropy p99 is captured report-only.
+
+Protocol captures pair bounded raw header bytes with decoded fields but redact
+the capability value. No source inspection, direct helper-only assertion,
+Rust seed, or bootstrap result may promote the row.
+
+## Batch-3 execution ledger (2026-07-30)
+
+- Durable Home has production/spec/canonical-manual/final-high PASS, held
+  unexecuted and unmerged.
+- Nonzero-clock JavaScript timers have
+  production/spec/manual/final-high PASS, held unexecuted and unmerged.
+- `<mark>` has production/spec high PASS but manual FAIL at the three-cycle cap
+  because six bullets remain visible from helper and shutdown text.
+- Text overflow remains HOLD/FAIL on unresolved CSS-wide cascade behavior.
+- Iterative DOM tag search has production/spec static high PASS but manual FAIL
+  at the three-cycle cap; only preorder assertions are folded.
+
+The prior SimpleScript PASS and CSS-cascade/bookmark-title designs remain as
+recorded. None of these rows is executable or merged evidence.

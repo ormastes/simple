@@ -62,6 +62,21 @@ display time, never by copying it into bounded title storage. Its canonical
 base64 length is prebounded to 684 and charged, encoded plus decoded, to the
 existing 1 MiB frame budget before allocation.
 
+Proposed `SBR2` adds a fresh host-generated 128-bit tail capability to every
+host-to-worker wire, including each network response. The next worker
+fetch/frame may consume it once and must match generation, stable root request
+ID, opaque capability, and immediate reply ID before broker or frame state
+changes. Network responses also name their originating fetch wire. Platform
+entropy failure and all legacy numeric-only production schemas fail closed;
+`ready` must leave no buffered bytes. Status remains UNIMPLEMENTED/RED.
+
+Pending wires stage authority; only a complete write atomically promotes the
+tuple to issued authority. The 32-byte trailer is charged inside the existing
+1 MiB payload and total streaming-buffer caps. Stop/cancel retires authority
+but keeps the last frame; fail/close/site swap clears authority and images.
+Warm capability generation p95 is <=1 ms, total input-to-paint remains <=50 ms,
+and 10,000-cycle RSS growth remains <=10% after quiescence.
+
 Next files:
 
 - `doc/05_design/simple_web_browser_engine_production_hardening.md`

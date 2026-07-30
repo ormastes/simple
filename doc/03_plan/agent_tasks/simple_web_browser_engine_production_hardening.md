@@ -463,3 +463,53 @@ Root Codex remains merge owner and final executable-evidence reviewer.
 
 All other navigation state, paint, hit, drain, projection, partial-wire, and
 lifecycle work reviewed sound but remains unpromoted.
+
+## Renderer command capability lanes (PROPOSED / UNIMPLEMENTED / RED)
+The primary design freezes
+`BrowserRendererCommandCapability`,
+`browser_renderer_command_capability_new`,
+`browser_renderer_command_capability_valid`,
+`_require_issued_renderer_reply`, and
+`_retire_renderer_command_capability`. Manual step and checker names are frozen
+in the system-test plan; incomplete checkers must use its exact `fail(...)`.
+Exact owners are frozen: common codec
+`src/lib/common/web/browser_renderer_protocol.spl`; host staging/admission
+`src/os/hosted/hosted_browser_renderer_process.spl`; worker echo/sequencing
+`src/os/hosted/hosted_browser_renderer_worker.spl`; Simple entropy facade
+`src/lib/nogc_sync_mut/io/crypto_sffi.spl` plus
+`src/lib/nogc_sync_mut/io/__init__.spl`; native entropy implementation
+`src/compiler_rust/runtime/src/value/sffi/random.rs`; runtime symbol registry
+`src/compiler_rust/common/src/runtime_symbols.rs`.
+
+| Lane | Bounded ownership | Handoff |
+| --- | --- | --- |
+| `command_capability_codec` | `SBR2` bounded header plus final 32-byte capability trailer, canonical lowercase-hex validation, root/immediate ID fields, fail-closed legacy policy | no broker/worker lifecycle edits |
+| `command_capability_entropy` | explicit-success 16-byte hosted platform-CSPRNG facade for Linux/macOS/Windows | no fallback and no token logging |
+| `command_capability_parent` | stage tuple on install; issue only at zero remaining bytes; fresh capability per host wire; consume before broker/frame authority; bind network response to fetch; exact lifecycle cleanup | depends on codec and entropy |
+| `command_capability_worker` | learn a hop capability only from a complete host wire; echo once; validate network-response fetch binding; retain root ID separately | depends on codec |
+| `command_capability_sspec` | focused exact-four-step RED spec, FIFO separate-read and split-write staged/issued oracles, numeric/payload maxima, lifecycle cleanup, conforming echo, 10k latency/allocation/RSS receipt | depends on implementation lanes |
+| `command_capability_final_review` | protocol bounds, causal binding, lifecycle cleanup, backward rejection, manual quality | normal/highest-capability reviewer |
+
+Lower-model sidecars may enumerate malformed codec fixtures only after these
+names are frozen. They may not change entropy policy, weaken fail-closed legacy
+admission, introduce negotiation, commit, or push. Root Codex is merge owner;
+a separate normal/highest-capability agent is final reviewer. Merge order is
+codec → entropy → parent/worker → SSpec/manual. No lane is accepted before the
+focused modern SSpec executes once on an admitted current full pure-Simple CLI.
+
+## Batch-3 held-lane status (2026-07-30)
+
+- Durable Home: production, focused SSpec, canonical generated manual, and
+  final normal/high review PASS; held unexecuted and unmerged.
+- Nonzero-clock JavaScript timers: production, focused SSpec, generated manual,
+  and final normal/high review PASS; held unexecuted and unmerged.
+- `<mark>`: production/spec high review PASS, but generated-manual FAIL at the
+  three-cycle cap because six raw bullets leak from helper and shutdown text;
+  held and unmerged.
+- Text overflow: HOLD/FAIL on unresolved CSS-wide cascade behavior.
+- Iterative DOM tag search: production/spec static high review PASS, but
+  generated-manual FAIL at the three-cycle cap; only preorder assertions were
+  folded. It is held and unmerged.
+
+The prior SimpleScript PASS and existing CSS cascade/bookmark-title designs
+remain unchanged. These status rows add no executable or merge claim.
