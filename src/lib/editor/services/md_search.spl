@@ -540,71 +540,76 @@ fn _md_search_count_occurrences(haystack: text, needle: text) -> i64:
     count
 
 fn _md_search_cache_escape(value: text) -> text:
+    # Flush whole SPANS between specials, never single bytes (the
+    # interpreter's Rust-String values turn a mid-codepoint 1-byte slice
+    # into U+FFFD; specials are ASCII so spans are whole codepoints).
     var out = ""
     var i = 0
+    var run_start = 0
     while i < value.len():
-        val ch = value.char_at(i)
-        if ch == "\\":
-            out = out + "\\\\"
-        elif ch == "\n":
-            out = out + "\\n"
-        elif ch == "\t":
-            out = out + "\\t"
-        elif ch == "\r":
-            out = out + "\\r"
-        else:
-            out = out + ch
+        val ch = value[i:i + 1]
+        if ch == "\\" or ch == "\n" or ch == "\t" or ch == "\r":
+            out = out + value[run_start:i]
+            if ch == "\\":
+                out = out + "\\\\"
+            elif ch == "\n":
+                out = out + "\\n"
+            elif ch == "\t":
+                out = out + "\\t"
+            else:
+                out = out + "\\r"
+            run_start = i + 1
         i = i + 1
-    out
+    out + value[run_start:i]
 
 fn _md_search_cache_unescape(value: text) -> text:
+    # Span-append between escapes (same interpreter U+FFFD hazard as the
+    # escape helper above; a lossy fragment never equals "\\", so the
+    # byte-slice COMPARES in the scan are safe).
     var out = ""
     var i = 0
+    var run_start = 0
     while i < value.len():
-        val ch = value.char_at(i)
+        val ch = value[i:i + 1]
         if ch == "\\" and i + 1 < value.len():
-            val next = value.char_at(i + 1)
-            if next == "n":
-                out = out + "\n"
+            val next = value[i + 1:i + 1 + 1]
+            if next == "n" or next == "t" or next == "r" or next == "\\":
+                out = out + value[run_start:i]
+                if next == "n":
+                    out = out + "\n"
+                elif next == "t":
+                    out = out + "\t"
+                elif next == "r":
+                    out = out + "\r"
+                else:
+                    out = out + "\\"
                 i = i + 2
+                run_start = i
                 continue
-            if next == "t":
-                out = out + "\t"
-                i = i + 2
-                continue
-            if next == "r":
-                out = out + "\r"
-                i = i + 2
-                continue
-            if next == "\\":
-                out = out + "\\"
-                i = i + 2
-                continue
-        out = out + ch
         i = i + 1
-    out
+    out + value[run_start:i]
 
 # --- internal helpers ---
 
 fn _md_search_is_ordered_item(line: text) -> bool:
     var i = 0
-    while i < line.len() and line.char_at(i) >= "0" and line.char_at(i) <= "9":
+    while i < line.len() and line[i:i + 1] >= "0" and line[i:i + 1] <= "9":
         i = i + 1
     if i == 0:
         return false
     if i >= line.len():
         return false
-    val ch = line.char_at(i)
+    val ch = line[i:i + 1]
     ch == "." or ch == ")"
 
 fn _md_search_line_has_link_match(line: text, query: text) -> bool:
     # Check if query appears inside a [text](url) link text, URL, or [[wikilink]]
     var i = 0
     while i < line.len():
-        val ch = line.char_at(i)
+        val ch = line[i:i + 1]
         if ch == "[":
             # wikilink [[...]]
-            if i + 1 < line.len() and line.char_at(i + 1) == "[":
+            if i + 1 < line.len() and line[i + 1:i + 1 + 1] == "[":
                 val close = _md_search_find_str(line, "]]", i + 2)
                 if close >= 0:
                     val inner = line.slice(i + 2, close)
@@ -616,7 +621,7 @@ fn _md_search_line_has_link_match(line: text, query: text) -> bool:
             # standard link [text](url) or image ![alt](url)
             val close_bracket = _md_search_find_char(line, "]", i + 1)
             if close_bracket > 0 and close_bracket + 1 < line.len():
-                if line.char_at(close_bracket + 1) == "(":
+                if line[close_bracket + 1:close_bracket + 1 + 1] == "(":
                     val close_paren = _md_search_find_char(line, ")", close_bracket + 2)
                     if close_paren > 0:
                         val link_text = line.slice(i + 1, close_bracket)
@@ -633,7 +638,7 @@ fn _md_search_line_has_link_match(line: text, query: text) -> bool:
 fn _md_search_find_char(haystack: text, needle: text, start: i64) -> i64:
     var i = start
     while i < haystack.len():
-        if haystack.char_at(i) == needle:
+        if haystack[i:i + 1] == needle:
             return i
         i = i + 1
     -1

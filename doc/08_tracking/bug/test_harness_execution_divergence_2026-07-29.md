@@ -140,6 +140,42 @@ byte-vs-character bug family again) and should migrate to byte
 bracket-slices (`s[i:i + 1]`) opportunistically. USER DECIDES; nothing
 changed in this pass.
 
+## Byte-bounded char_at scan migration — campaign CLOSED (2026-07-30)
+
+Four batches migrated every high-exposure `.len()`-bounded char_at scan
+to byte bracket-slices, with the SPAN-APPEND RULE (mandatory since
+batch 2) for accumulation loops: byte-slice COMPARES are safe, but
+APPENDS must flush whole spans between ASCII boundaries — the
+interpreter's Rust-String values turn a mid-codepoint 1-byte slice into
+U+FFFD (PROVED: per-byte accumulation of a 12-byte multi-byte string
+yields 36 bytes under the interpreter, exact 12 under JIT/native).
+
+| Batch | Commit | Files | char_at sites | Notes |
+|---|---|---|---|---|
+| 1 | f8595a57cd9 | md_editing, diagnostics, markdown_visual_editor, sql_parser, cmd_email, linker_script | 70 | shape probe old-wrong/new-right, ASCII pinned |
+| 2 | 2d70e40905f | lsp_result_panel, md_lsp_handler, json/parser, md_doc_stats, completion (+ span hardening of batch-1 diagnostics, sql_parser) | 45 | span rule discovered via json_unicode_escape_spec regression; failing set restored to pristine's 5 pre-existing |
+| 3 | 38eab98f352 | mcp/resource_utils, dap_protocol, gui_backend, editor_json_helpers, formula, md_wiki_index, md_language, md_renderer, editor_markdown_helpers | 142 | escape round-trip probe byte-identical both engines |
+| 4 | (this commit) | browser renderer core, debug_session_registry, md_search, md_diagnostics, document, block_model | 100 | label/url/alt extraction span-hardened |
+
+Same-line `.len()`-bounded site count: ~180 at survey -> 166 -> 121 ->
+61 -> ~36 after batch 4.
+
+STOP RULE: the remaining tail is ASCII-protocol scanners where the unit
+provably never matters (lsp_transport framing headers, llm_runtime API
+probes, hex/digit scanners) plus 1-2-site stragglers. These are handled
+by (a) the pending char_at unit-alignment decision above and (b) the
+documented span/byte-slice rule applied opportunistically when a file
+is touched. No further dedicated batches.
+
+POST-SEED-REDEPLOY RE-VERIFICATION: the probes in this campaign ran on
+tip-built seeds; after the next seed/self-hosted redeploy, re-run
+test/01_unit/bugs/text_bracket_slice_byte_index_spec.spl,
+text_negative_single_index_spec.spl, text_index_of_start_spec.spl and
+test/01_unit/lib/common/json/json_unicode_escape_spec.spl under
+bin/simple test (forced-interpret lane) — they pin every semantics this
+campaign relies on. The 5 json_unicode_escape reds that predate the
+campaign remain open (interp-lane byte-exactness, tracked separately).
+
 Historical report below (pre-fix):
 
 **Status (superseded):** ROOT-CAUSED (2026-07-29, follow-up pass). **Severity:** every
