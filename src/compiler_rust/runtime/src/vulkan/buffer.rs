@@ -231,6 +231,7 @@ impl VulkanBuffer {
         if data.is_empty() {
             return Ok(());
         }
+        self.device.ensure_transfer_available()?;
         // Create staging buffer
         let staging = StagingBuffer::new(self.device.clone(), data.len() as u64)?;
         staging.write(data)?;
@@ -243,6 +244,7 @@ impl VulkanBuffer {
 
     /// Download data from this buffer
     pub fn download(&self, size: u64) -> VulkanResult<Vec<u8>> {
+        self.device.ensure_transfer_available()?;
         let staging = StagingBuffer::new(self.device.clone(), size)?;
         self.copy_to_staging(&staging, size)?;
         staging.read(size as usize)
@@ -334,6 +336,13 @@ impl VulkanBuffer {
 
 impl Drop for VulkanBuffer {
     fn drop(&mut self) {
+        if self.device.transfer_completion_unknown() {
+            if let Some(allocation) = self.allocation.take() {
+                std::mem::forget(allocation);
+            }
+            tracing::error!("Leaking Vulkan buffer after unknown transfer completion");
+            return;
+        }
         unsafe {
             self.device.handle().destroy_buffer(self.buffer, None);
         }
@@ -434,6 +443,13 @@ impl StagingBuffer {
 
 impl Drop for StagingBuffer {
     fn drop(&mut self) {
+        if self.device.transfer_completion_unknown() {
+            if let Some(allocation) = self.allocation.take() {
+                std::mem::forget(allocation);
+            }
+            tracing::error!("Leaking Vulkan staging buffer after unknown transfer completion");
+            return;
+        }
         unsafe {
             self.device.handle().destroy_buffer(self.buffer, None);
         }

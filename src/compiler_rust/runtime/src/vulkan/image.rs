@@ -232,6 +232,7 @@ impl VulkanImage {
             return Err(VulkanError::BufferTooSmall);
         }
 
+        self.device.ensure_transfer_available()?;
         let staging = StagingBuffer::new(self.device.clone(), data.len() as u64)?;
         staging.write(data)?;
 
@@ -334,6 +335,7 @@ impl VulkanImage {
             return Err(VulkanError::BufferTooSmall);
         }
 
+        self.device.ensure_transfer_available()?;
         let staging = StagingBuffer::new(self.device.clone(), data.len() as u64)?;
 
         let cmd = self.device.begin_transfer_command()?;
@@ -457,6 +459,13 @@ impl VulkanImage {
 
 impl Drop for VulkanImage {
     fn drop(&mut self) {
+        if self.device.transfer_completion_unknown() {
+            if let Some(allocation) = self.allocation.take() {
+                std::mem::forget(allocation);
+            }
+            tracing::error!("Leaking Vulkan image after unknown transfer completion");
+            return;
+        }
         unsafe {
             self.device.handle().destroy_image_view(self.view, None);
             self.device.handle().destroy_image(self.image, None);

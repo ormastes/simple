@@ -1,0 +1,29 @@
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "Vulkan transfer completion ownership contract":
+    it "uses a real fence and poisons transfer cleanup after an unknown wait":
+        val device = file_read("src/compiler_rust/runtime/src/vulkan/device.rs")
+
+        expect(device).to_contain("fn submit_transfer_command_with_fence")
+        expect(device).to_contain("let fence = match Fence::new(Arc::clone(self), false)")
+        expect(device).to_contain("fence.handle()")
+        expect(device).to_contain("fence.wait(u64::MAX)")
+        expect(device).to_contain("if let Err(error) = fence.wait(u64::MAX) {\n            self.transfer_completion_unknown.store(true, Ordering::Release);\n            return Err(FencedSubmitError::CompletionUnknown(error));")
+        expect(device).to_contain("std::mem::forget(fence)")
+        expect(device).to_contain("let queue = self.compute_queue.lock();\n        if let Err(error) = self.ensure_transfer_available()")
+        expect(device).to_contain("self.transfer_completion_unknown.store(true, Ordering::Release);\n            return Err(FencedSubmitError::CompletionUnknown(VulkanError::CommandBufferError")
+
+    it "retains transfer resources and rejects before new staging allocation":
+        val buffer = file_read("src/compiler_rust/runtime/src/vulkan/buffer.rs").replace("\r\n", "\n")
+        val image = file_read("src/compiler_rust/runtime/src/vulkan/image.rs").replace("\r\n", "\n")
+
+        expect(buffer).to_contain("Leaking Vulkan buffer after unknown transfer completion")
+        expect(buffer).to_contain("Leaking Vulkan staging buffer after unknown transfer completion")
+        expect(buffer).to_contain("if self.device.transfer_completion_unknown()")
+        expect(buffer).to_contain("std::mem::forget(allocation)")
+        expect(buffer).to_contain("self.device.ensure_transfer_available()?\n        // Create staging buffer")
+        expect(image).to_contain("Leaking Vulkan image after unknown transfer completion")
+        expect(image).to_contain("if self.device.transfer_completion_unknown()")
+        expect(image).to_contain("std::mem::forget(allocation)")
+        expect(image).to_contain("self.device.ensure_transfer_available()?\n        let staging = StagingBuffer::new")

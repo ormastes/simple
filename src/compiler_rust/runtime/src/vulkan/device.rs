@@ -9,6 +9,7 @@ use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use parking_lot::Mutex;
 use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(feature = "vulkan")]
 use std::sync::Weak;
@@ -51,6 +52,8 @@ pub struct VulkanDevice {
     // Swapchain loader (for presentation)
     #[cfg(feature = "vulkan")]
     swapchain_loader: Option<ash::khr::swapchain::Device>,
+
+    transfer_completion_unknown: AtomicBool,
 }
 
 pub enum FencedSubmitError {
@@ -312,6 +315,7 @@ impl VulkanDevice {
             graphics_pool: graphics_pool.map(Mutex::new),
             #[cfg(feature = "vulkan")]
             swapchain_loader,
+            transfer_completion_unknown: AtomicBool::new(false),
         }))
     }
 
@@ -428,6 +432,7 @@ impl VulkanDevice {
 
     /// Begin a transfer command buffer
     pub fn begin_transfer_command(&self) -> VulkanResult<vk::CommandBuffer> {
+        self.ensure_transfer_available()?;
         let pool = self.transfer_pool.lock();
 
         let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -452,38 +457,67 @@ impl VulkanDevice {
     }
 
     /// Submit and wait for a transfer command buffer
-    pub fn submit_transfer_command(&self, cmd: vk::CommandBuffer) -> VulkanResult<()> {
-        unsafe {
-            self.device
-                .end_command_buffer(cmd)
-                .map_err(|e| VulkanError::CommandBufferError(format!("End: {:?}", e)))?;
+    pub fn submit_transfer_command(self: &Arc<Self>, cmd: vk::CommandBuffer) -> VulkanResult<()> {
+        if let Err(e) = unsafe { self.device.end_command_buffer(cmd) } {
+            unsafe { self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
+            return Err(VulkanError::CommandBufferError(format!("End: {:?}", e)));
         }
 
+        let fence = match Fence::new(Arc::clone(self), false) {
+            Ok(fence) => fence,
+            Err(error) => {
+                unsafe { self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
+                return Err(error);
+            }
+        };
+        match self.submit_transfer_command_with_fence(cmd, &fence) {
+            Ok(()) => Ok(()),
+            Err(FencedSubmitError::NotSubmitted(error)) => Err(error),
+            Err(FencedSubmitError::CompletionUnknown(error)) => {
+                std::mem::forget(fence);
+                Err(error)
+            }
+        }
+    }
+
+    fn submit_transfer_command_with_fence(
+        &self,
+        cmd: vk::CommandBuffer,
+        fence: &Fence,
+    ) -> Result<(), FencedSubmitError> {
         let cmd_buffers = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
-
-        // Both command roles use the same VkQueue, which requires one shared lock.
         let queue = self.compute_queue.lock();
-
-        unsafe {
-            if let Err(e) = self.device.queue_submit(*queue, &[submit_info], vk::Fence::null()) {
-                drop(queue);
-                self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]);
-                return Err(VulkanError::CommandBufferError(format!("Submit: {:?}", e)));
-            }
-
-            self.device
-                .queue_wait_idle(*queue)
-                .map_err(|e| VulkanError::SyncError(format!("{:?}", e)))?;
+        if let Err(error) = self.ensure_transfer_available() {
+            unsafe { self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
+            return Err(FencedSubmitError::NotSubmitted(error));
         }
-
-        // Free command buffer
-        let pool = self.transfer_pool.lock();
-        unsafe {
-            self.device.free_command_buffers(*pool, &[cmd]);
+        if let Err(e) = unsafe { self.device.queue_submit(*queue, &[submit_info], fence.handle()) } {
+            self.transfer_completion_unknown.store(true, Ordering::Release);
+            return Err(FencedSubmitError::CompletionUnknown(VulkanError::CommandBufferError(
+                format!("Submit transfer: {:?}", e),
+            )));
         }
-
+        if let Err(error) = fence.wait(u64::MAX) {
+            self.transfer_completion_unknown.store(true, Ordering::Release);
+            return Err(FencedSubmitError::CompletionUnknown(error));
+        }
+        unsafe { self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
         Ok(())
+    }
+
+    pub fn transfer_completion_unknown(&self) -> bool {
+        self.transfer_completion_unknown.load(Ordering::Acquire)
+    }
+
+    pub fn ensure_transfer_available(&self) -> VulkanResult<()> {
+        if self.transfer_completion_unknown() {
+            Err(VulkanError::SyncError(
+                "transfer queue completion is unknown".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// Begin a compute command buffer
@@ -544,11 +578,10 @@ impl VulkanDevice {
         }
     }
 
-    /// Submit and wait for a compute command buffer
+    /// Submit and wait for a compute command buffer.
     pub fn submit_compute_command(&self, cmd: vk::CommandBuffer) -> VulkanResult<()> {
         let cmd_buffers = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
-
         let queue = self.compute_queue.lock();
 
         unsafe {
@@ -557,18 +590,11 @@ impl VulkanDevice {
                 self.device.free_command_buffers(*self.compute_pool.lock(), &[cmd]);
                 return Err(VulkanError::CommandBufferError(format!("Submit: {:?}", e)));
             }
-
             self.device
                 .queue_wait_idle(*queue)
                 .map_err(|e| VulkanError::SyncError(format!("{:?}", e)))?;
+            self.device.free_command_buffers(*self.compute_pool.lock(), &[cmd]);
         }
-
-        // Free command buffer
-        let pool = self.compute_pool.lock();
-        unsafe {
-            self.device.free_command_buffers(*pool, &[cmd]);
-        }
-
         Ok(())
     }
 
