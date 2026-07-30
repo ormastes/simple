@@ -1098,3 +1098,96 @@ migrates every host command/network response and worker fetch/frame echo, and
 installs every retirement path in the same commit. Partial direction changes,
 a callable entropy facade, interpreter parity, legacy negotiation, and mixed
 SBR1/SBR2 deployments are rejected.
+
+#### Privileged runtime-symbol admission (frozen Cycle 2 contract)
+
+`HostedOnly` is not an authorization class. The deny applies only to an exact
+row in privileged-symbol metadata; ordinary hosted externs, including
+`rt_actor_spawn`, `rt_actor_send`, and `rt_actor_recv`, retain their existing
+generic dynamic fallback. This actor regression is release-blocking because a
+blanket hosted deny would appear secure while breaking supported code.
+
+`src/compiler_rust/common/src/runtime_symbols.rs` owns these shared types:
+`PrivilegedRuntimeSymbol` (exact symbol, canonical owner-source digest,
+native-only flag), `RuntimeProviderKind` (`StaticImage`, `ProcessImage`, or
+`DynamicFile`), `RuntimeProviderIdentity` (kind, content/build digest and
+symbol-manifest digest), `RuntimeProviderExpectation`,
+`RuntimeSymbolLookupPurpose` (`Generic` or `PrivilegedAot`),
+`RuntimeSymbolRequest`, `ResolvedRuntimeSymbol`, and
+`RuntimeSymbolResolutionError`. It also owns
+`privileged_runtime_symbol` and `runtime_symbol_lookup_allowed`.
+`RuntimeSymbolProvider` freezes `identity() -> RuntimeProviderIdentity` and
+`resolve(request: RuntimeSymbolRequest) -> Result<ResolvedRuntimeSymbol,
+RuntimeSymbolResolutionError>`; its legacy `get_symbol` is generic-purpose
+only and must refuse privileged rows. Privileged lookup requires one provider
+whose identity exactly matches the embedded expectation; a chained provider
+cannot use first-match, process, or static fallback to repair a mismatch.
+
+The expectation comes from the already-opened runtime object/archive or
+dynamic file used by the native build, never an environment variable, path
+string, runtime option, or caller assertion. Native build embeds the versioned
+expectation in `.simple.runtime-provider`; the admitted source/artifact
+manifest covers that section. A static identity is the link-time runtime
+object/archive content/build digest plus its symbol-manifest digest. A process
+identity is the executable content/build identity plus its symbol manifest. A
+dynamic identity hashes the opened file and verifies it before loading or
+symbol lookup; the loader must load from that same admitted file handle/content
+identity rather than reopen a mutable path. Canonical paths remain diagnostics,
+not identity.
+
+Code generation emits `.simple.privileged-imports`, binding symbol, requester
+object, and canonical owner-source digest. Entry-closure aggregation admits
+exactly one owner object. Before final relocation,
+`validate_privileged_runtime_relocations` verifies that note and the expected
+provider, then emits a link-map receipt binding requester, symbol, provider
+identity, relocation type, and owning address range. A post-link inspection
+confirms the same mapping. No privileged request may reach generic provider
+lookup, `elf_utils`, JIT fallback, plugin-manifest lookup, main-runtime
+`dlsym`, satellite lookup, `RTLD_DEFAULT`, `spl_dlsym`, or process/static
+fallback. Hashing and path normalization occur only at compile/load admission,
+never per wire or frame.
+
+The exact pure-Simple hooks are:
+
+- `src/compiler/35.semantics/privileged_host_imports.spl`:
+  `PrivilegedHostImport`, `privileged_host_import_owner`,
+  `privileged_host_import_allowed`, and
+  `check_privileged_host_import_module`;
+- `src/compiler/80.driver/driver_hir_pipeline_passes.spl`:
+  `run_privileged_host_import_pass`, an unconditional fatal pass;
+- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`:
+  `validate_privileged_host_import_call` inside `lower_call`;
+- `src/compiler/80.driver/driver_source_pipeline_loading.spl`:
+  `_driver_validate_privileged_entry_closure`;
+- `src/compiler/70.backend/backend/native_codegen_adapter.spl`:
+  `emit_privileged_import_note`;
+- `src/compiler/70.backend/backend/llvm_native_link.spl`:
+  `validate_privileged_runtime_relocations`; and
+- `src/compiler/70.backend/backend/interpreter_calls.spl`:
+  `reject_privileged_native_only_call` before builtin or local resolution.
+
+The mirrored Rust hooks are
+`native_project::discovery::validate_privileged_entry_closure`,
+`native_project::validate_privileged_host_imports` before parallel
+compilation, `common_backend::emit_privileged_import_note`, and
+`native_project::linker::validate_privileged_runtime_relocations`.
+`interpreter_extern::reject_privileged_native_only_extern` runs before static
+dispatch, evaluation, or dynamic fallback. `dynamic_sffi` rejects at
+`try_call_dynamic` and before every `dlsym_lookup`, so plugin, main-runtime,
+and satellite search never begin. Both interpreter and runtime
+`wsffi::spl_dlsym` reject before the OS lookup. Native-loader static, process,
+dynamic, and chained providers implement the identity contract through
+`create_runtime_provider_for_expectation`; JIT registration and import
+resolution reject the privileged row before provider, ELF, or
+`RTLD_DEFAULT` fallback.
+
+Two hostile fixtures are deliberately separate. A non-owner source that
+declares or calls the raw symbol must fail
+`privileged-host-import-owner` before object emission and observe zero entropy
+calls. The exact canonical owner source forced through each interpreter must
+fail `privileged-host-import-native-only` before dispatch and also observe zero
+entropy calls. The second fixture must never become allowed through
+`CURRENT_EXEC_MODULE`: execution metadata is not authority. Additional exact
+fixtures exercise `spl_dlsym`, plugin, main-runtime, satellite, generic
+static/process provider, JIT, and ELF routes; every route proves denial before
+lookup or relocation.

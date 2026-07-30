@@ -80,10 +80,19 @@ and 10,000-cycle RSS growth remains <=10% after quiescence.
 Token creation is native-only and private to
 `hosted_browser_renderer_process.spl`. One fatal compiler policy binds its raw
 import to that canonical physical source path; interpreters and dynamic SFFI
-have no handler, and the raw ABI binds only through the admitted runtime
-provider. Existing hosted-entry source/runtime receipts bind the owner, policy,
-closure, runtime, and artifact digests. Codec, entropy, parent, worker, and
-cleanup migrate atomically—no public entropy facade or mixed SBR1/SBR2 state.
+have no handler. An exact privileged-symbol metadata row—not blanket
+`HostedOnly` policy—denies generic provider, JIT/ELF, plugin/main/satellite
+`dlsym`, `spl_dlsym`, and interpreter routes before lookup. The native build
+embeds the digest identity of its already-opened runtime provider and emits
+owner/import plus relocation receipts before final link; chained fallback
+cannot repair a mismatch. Static, process, and dynamic providers have explicit
+identity semantics. Existing actor hosted-extern fallback remains a frozen
+regression. Non-owner compilation and the canonical owner forced through an
+interpreter are separate hostile fixtures; both observe zero entropy calls,
+and `CURRENT_EXEC_MODULE` never authorizes either. Existing hosted-entry
+source/runtime receipts bind owner, policy, closure, provider, relocation, and
+artifact digests. Codec, entropy, parent, worker, and cleanup migrate
+atomically—no public entropy facade or mixed SBR1/SBR2 state.
 
 Next files:
 

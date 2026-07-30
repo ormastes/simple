@@ -548,9 +548,11 @@ each checker uses
 | Lane | Work | Constraint |
 | --- | --- | --- |
 | `capability_owner_policy` | fatal pure-Simple and mirrored native canonical-path declaration/call admission | interpreter module metadata never grants authority |
+| `capability_provider_identity` | extend `RuntimeSymbolProvider` with static/process/dynamic identity, expected content/build and symbol-manifest digests, privileged-purpose lookup, import note, fail-before-relocation validation, and link-map receipt | expectation comes from the already-opened build input; no env/path trust or chained fallback |
+| `capability_lookup_deny` | exact metadata-driven deny before pure-Simple/Rust interpreter dispatch, dynamic SFFI plugin/main/satellite search, both `spl_dlsym` paths, JIT/ELF/`RTLD_DEFAULT`, and generic provider lookup | narrow row only; preserve actor hosted fallback; never authorize via `CURRENT_EXEC_MODULE` |
 | `capability_native_entropy` | zero-arg fallible fill, zeroize, admitted runtime-provider relocation | no crypto facade, interpreter handler, dynamic-SFFI entry, or raw lookup bridge |
 | `capability_parent_worker_atomic` | create-on-activation, SBR2 staging/issuance/echo/consume/retire across command and network wires | one commit; no mixed protocol |
-| `capability_owner_evidence` | legitimate hosted artifact, hostile native compile, interpreter/SFFI denial, lifecycle and 10k perf/RSS receipts | capability values redacted |
+| `capability_owner_evidence` | legitimate hosted artifact; separate non-owner compile and canonical-owner-forced-interpreter fixtures; direct lookup denial; actor fallback regression; provider/link-map receipts; lifecycle and 10k perf/RSS receipts | capability values redacted; zero entropy calls on every hostile route |
 | `capability_owner_final_review` | threat model, physical-owner proof, atomicity, generated-manual quality | normal/highest-capability reviewer |
 
 Lower-model sidecars: N/A until the owner policy and exact checker names above
@@ -558,6 +560,21 @@ exist. Codex is merge owner; a separate normal/highest-capability agent is
 final reviewer. No sidecar may add an allowlist row, facade, interpreter
 handler, dynamic-SFFI entry, raw lookup bridge, compatibility switch, commit,
 or push.
+
+Frozen implementation hooks for the owner lanes are
+`check_privileged_host_import_module`,
+`run_privileged_host_import_pass`,
+`validate_privileged_host_import_call`,
+`_driver_validate_privileged_entry_closure`,
+`emit_privileged_import_note`,
+`validate_privileged_runtime_relocations`, and
+`reject_privileged_native_only_call` in pure Simple. Rust mirrors them in
+native-project discovery/pipeline, common-backend emission, and native-project
+linking; `reject_privileged_native_only_extern`,
+`dynamic_sffi::try_call_dynamic`/`dlsym_lookup`, both `wsffi::spl_dlsym`
+implementations, all four native-loader provider implementations, provider
+construction for an expectation, and both JIT lookup paths are mandatory
+pre-lookup gates.
 
 ## Batch-3 held-lane status (2026-07-30)
 

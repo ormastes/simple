@@ -753,6 +753,23 @@ Required assertions use built-in matchers only:
   reject before state mutation;
 - legacy `SBR1` and legacy fetch/frame/network schemas reject in both hosted
   production directions;
+- a non-owner declaration/call of the raw entropy symbol fails
+  `privileged-host-import-owner` before object emission and records zero
+  entropy calls;
+- the exact canonical owner source forced through both the pure-Simple and
+  Rust interpreters fails `privileged-host-import-native-only` before dispatch,
+  records zero entropy calls, and receives no allowance from
+  `CURRENT_EXEC_MODULE`;
+- direct `spl_dlsym`, plugin-manifest, main-runtime, satellite, generic
+  static/process provider, JIT, ELF, and `RTLD_DEFAULT` routes deny the exact
+  privileged metadata row before lookup or relocation;
+- a tampered, missing, wrong-kind, or multiply matching runtime-provider
+  identity fails before relocation; a conforming link-map receipt binds the
+  owner object, raw symbol, provider content/build and symbol-manifest digests,
+  relocation type, and owning address range;
+- `rt_actor_spawn`, `rt_actor_send`, and `rt_actor_recv` retain their existing
+  generic hosted dynamic fallback, proving the deny is not blanket
+  `HostedOnly`;
 - the conforming control reads the command, echoes generation/root ID/token
   and immediate reply ID, reaches `active`, renders exact nonblank pixels, and
   leaves the capability retired after frame acceptance;
@@ -788,12 +805,17 @@ correlation, and no parent mutation on entropy failure.
 Step 3 compiles a fixture whose non-owner module declares and calls
 `rt_browser_renderer_command_capability_new`; native object emission must fail
 with `privileged-host-import-owner` and the entropy-call counter must remain
-zero. The same source through every supported interpreted entry and a dynamic
-SFFI method lookup must fail with
-`privileged-host-import-native-only` before dispatch. A forged module name,
-symlink to different content, absent current-module identity, direct raw call,
-private-wrapper import, and runtime-symbol-name coincidence all deny. There is
-no allow environment variable or test-only production symbol.
+zero. A separate fixture forces the exact canonical owner source through every
+supported interpreted entry; it must fail
+`privileged-host-import-native-only` before dispatch with zero entropy calls,
+even when `CURRENT_EXEC_MODULE` names the owner. Direct dynamic-SFFI method
+lookup, `spl_dlsym`, plugin/main/satellite, provider, JIT, and ELF routes also
+deny before lookup. A forged module name, symlink to different content, absent
+current-module identity, direct raw call, private-wrapper import, and
+runtime-symbol-name coincidence all deny. There is no allow environment
+variable or test-only production symbol. A separate actor control proves
+`rt_actor_spawn`, `rt_actor_send`, and `rt_actor_recv` still use ordinary
+hosted fallback.
 
 Step 4 consumes the legitimate echo, then covers command replacement,
 stop/cancel, timeout, entropy failure, network failure, renderer failure, site
