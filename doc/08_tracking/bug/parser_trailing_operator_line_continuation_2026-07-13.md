@@ -87,3 +87,11 @@ tracked continuation indent; real block Dedents at count zero remain visible.
 The discovery regression mirrors the `==` RHS ending in `and` before returning
 to the outer continuation indentation. A second refreshed Stage2/RV64 run is
 still required before closing this bug.
+
+RV64 attempt 16 advanced past that mid-expression Dedent and stopped at the
+next boundary, `simple_web_window_renderer.spl:237:1`, where block-form
+`if` expected its branch `Indent` before consuming the condition's deferred
+continuation `Dedent`. `parse_if_expr` now drains only the recorded deferred
+continuation layout after the header newline and before the branch indent. The
+focused block-if parser regression passes; one final refreshed Stage2/RV64
+build remains the closure gate.

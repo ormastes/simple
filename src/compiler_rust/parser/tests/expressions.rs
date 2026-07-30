@@ -166,6 +166,7 @@ fn parse_field_access_expression() {
 fn parse_if_expression() {
     parse_ok("let x = if true: 1 else: 0");
     parse_ok("let x = if a > b: a else: b");
+    parse_ok("let x = if a ==\n        b:\n    1\nelse:\n    0");
 }
 
 // Path expression

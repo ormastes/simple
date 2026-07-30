@@ -179,6 +179,8 @@ impl<'a> Parser<'a> {
         } else if self.check(&TokenKind::Newline) {
             // Block-form: parse as DoBlock expression
             self.advance(); // consume Newline
+            let deferred = std::mem::take(&mut self.deferred_dedent_count);
+            self.consume_dedents_for_method_chain(deferred);
 
             // Empty then-branch: `if cond:\nelse: ...` or `if cond:\nelif ...:`
             if self.check(&TokenKind::Else) || self.check(&TokenKind::Elif) {
