@@ -310,17 +310,23 @@ an active owner remain patch-only until merge-owner handoff.
 
 | Lane | Owner | Scope | Acceptance / dependency | Initial status |
 |---|---|---|---|---|
-| 11 | `affine_schema_policy` | Decide Draw IR affine wire compatibility | Explicit schema/version policy and hostile legacy/current fixtures | READY |
-| 12 | `affine_legacy_fixture` | Add legacy hosted payload compatibility RED coverage | Identity defaults or explicit version rejection; no ambiguous v2 decode | BLOCKED on 11 |
-| 13 | `multibatch_protocol_security` | Specify hostile multi-batch browser protocol validation | Root ownership, unique IDs, aggregate budgets, affine/singular/overflow rejection | READY |
-| 14 | `content_visibility_gpu_fix` | Repair the two GPU visibility predicates behind Lane 6 RED | Canonical ancestor-only semantics; no parallel renderer owner | PATCH-ONLY; owner handoff required |
-| 15 | `traceability_additive_repair` | Preserve origin RED matrix and append generator/WebIR work | Zero deleted authoritative rows; every new claim names evidence or stays RED | READY |
-| 16 | `spec_to_sspec_fail_closed` | Harden generator metadata and generated-region merge | Required tags, exact outside-byte preservation, duplicate/malformed rejection, idempotence | READY |
-| 17 | `spec_to_sspec_integration_manifest` | Design update-mode integration and HTML/CSS manifest evidence | Executable integration SSpec, generated manual path, drift/support manifests | BLOCKED on 16 |
-| 18 | `browser_budget_harness` | Replace perf placeholder with a realistic lifecycle RED harness | Child PID timing/RSS, warm samples, 10k plateau, close/replacement receipts | BLOCKED on checker |
-| 19 | `paint_ancestor_complexity` | Bound repeated ancestor walks before adding a cache | Depth fixture and stage timing first; root-cause-only optimization | READY |
-| 20 | `electron_exact_argb_gate` | Keep one exact external CSS/animation bitmap gate current | No silent fallback, exact proof paths/checksums, obsolete wrapper retired or repaired | BLOCKED on checker/runtime |
+| 11 | `affine_schema_policy` | Decide Draw IR affine wire compatibility | Explicit schema/version policy and hostile legacy/current fixtures | POLICY PASS: retain v2, omit identity fields |
+| 12 | `affine_legacy_fixture` | Add legacy hosted payload compatibility RED coverage | Identity defaults or explicit version rejection; no ambiguous v2 decode | STATIC REVIEW PASS; execution blocked |
+| 13 | `multibatch_protocol_security` | Specify hostile multi-batch browser protocol validation | Root ownership, unique IDs, aggregate budgets, affine/singular/overflow rejection | FAIL at three-cycle cap |
+| 14 | `content_visibility_gpu_fix` | Repair the two GPU visibility predicates behind Lane 6 RED | Canonical paint-ancestor semantics; no parallel renderer owner | STATIC REVIEW PASS; execution blocked |
+| 15 | `traceability_additive_repair` | Preserve origin RED matrix and append generator/WebIR work | Zero deleted authoritative rows; every new claim names evidence or stays RED | PUSHED `e20ba58a3c85` |
+| 16 | `spec_to_sspec_fail_closed` | Harden generator metadata and generated-region merge | Required tags, exact outside-byte preservation, duplicate/malformed rejection, idempotence | FAIL at three-cycle cap |
+| 17 | `spec_to_sspec_integration_manifest` | Design update-mode integration and HTML/CSS manifest evidence | Executable integration SSpec, generated manual path, drift/support manifests | DESIGN COMPLETE; blocked on 16 |
+| 18 | `browser_budget_harness` | Replace perf placeholder with a realistic lifecycle RED harness | Child PID timing/RSS, warm samples, 10k plateau, close/replacement receipts | FAIL at three-cycle cap |
+| 19 | `paint_ancestor_complexity` | Bound repeated ancestor walks before adding a cache | Depth fixture and deterministic work counters first; root-cause-only optimization | FAIL at three-cycle cap |
+| 20 | `electron_exact_argb_gate` | Keep one exact external CSS/animation bitmap gate current | No silent fallback, exact proof paths/checksums, obsolete wrapper retired or repaired | PUSHED `ea63b6e2ec36` |
 
 Merge order is 11, 12, 13, 14, 15, 16, 17, then evidence lanes 18–20.
 Lanes 12–14 must be reviewed together before affine or transform production
 work proceeds.
+
+Three-cycle blockers are retained, not normalized away: Lane 13 still needs a
+real nonidentity child and established affine error reasons; Lane 16 still
+admits tautological assertions and lacks a time import; Lane 18 must compare
+10k RSS to the post-warmup baseline and narrow its NFR claims; Lane 19 must
+define one render-receipt return contract and exclude checkout-only EOL churn.
