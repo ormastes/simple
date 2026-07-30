@@ -1206,3 +1206,95 @@ confirms the write-side defect (already proved to affect real AOT
 binaries in §13) is not just a synthetic-fixture concern — it is the
 actual, real-world blocker in the code that motivated the whole
 investigation.
+
+## 16. Gap 8's write-side defect — FIXED, commit `48af531ce0e`
+
+§12.4 scoped the write-side fix out as an architecture decision. Revisited
+under explicit authorization once it was the sole remaining blocker: "a
+bounded feature addition, not an open-ended redesign."
+
+### 16.1 The fix
+
+`hir/lower/module_lowering/module_pass.rs` (both `lower_module` and
+`lower_module_with_warnings` — there are two independent, near-duplicate
+copies of the whole pass structure in this file; the first attempt landed
+only in the one `run_file_jit` does *not* call, see 16.2) synthesizes a
+`__module_init_dynamic` HIR function: one `HirStmt::Assign` per
+module-level `val`/`var`/`const` whose initializer isn't one of the five
+const-foldable shapes (checked by testing membership in
+`global_init_values/strings/arrays/functions/structs`), built by calling
+the ordinary `lower_expr` on the initializer's raw AST expression, in
+source declaration order. It is pushed into `self.module.functions` like
+any real function — no new HIR/MIR expression-lowering machinery, no
+synthetic AST. `common_backend.rs`'s `generate_module_init` looks up
+`__module_init_dynamic` in `self.func_ids` and, if present, emits one
+`call` to it at the end of `__module_init`'s body — so it runs wherever
+`__module_init` already does (JIT's `run_module_init_once`, and the AOT
+binary's startup code), with zero changes to that dispatch mechanism.
+
+Ordering: declaration order sufficed for every case tested (the two
+fixtures, and the real `SHOWCASE_DIMS` → `RW`/`RH` chain). No topological
+sort was needed — a const-foldable global is already resident in static
+`.data` before any code runs, so it's never a dependency-order problem;
+a dynamic global that depends on another dynamic global is only correct
+if the producer is declared first in source, which held in every case
+encountered. This is the bounded case the scope-change instruction asked
+for, not the open-ended one.
+
+### 16.2 Two premise-check misses along the way (both caught by testing, not assumed)
+
+1. **Wrong function edited first.** `module_pass.rs` has two independent
+   `lower_module*` methods with near-duplicate bodies (`lower_module`,
+   called by `run_file_jit`'s `hir::lower_with_context_lenient_and_project_hint`,
+   and `lower_module_with_warnings`, called only by tests and
+   `gen_lean.rs`). The first attempt landed the pass into the latter;
+   `SIMPLE_WRITEFIX_DEBUG=1` trace showed the new debug line never fired.
+   Fixed by adding the identical block to the actually-used function too.
+2. **Two follow-on defects, not one clean pass.** Once the function
+   synthesized and got called: (a) a raw int stored into an ANY-typed
+   global (`val X = get_value()`, X never explicitly typed) misread as a
+   pointer on next read — fixed by boxing in `lowering_stmt.rs`'s
+   `HirExprKind::Global` assign arm, mirroring the existing
+   `needs_boxing` pattern from builtin-call-arg and struct-field lowering.
+   (b) writing to a purely-dynamic global segfaulted — `gdb` showed the
+   write target address in the same memory region as JIT *code*, not
+   data: `runtime_init_globals` (which controls whether a global's data
+   is declared writable) only unions the four const-foldable maps, so a
+   global with no other init shape was declared read-only. Fixed with a
+   fifth field, `dynamic_init_globals` (`HirModule` and `MirModule`,
+   mirroring the existing four), unioned into `runtime_init_globals`.
+
+### 16.3 Non-vacuous proof, in the required order
+
+1. `scripts/check/check_jit_interpreter_differential.spl`, all 9
+   fixtures + reverse control: 2 flip from known-bug to
+   "APPEARS FIXED" (`module_level_val_from_call`,
+   `module_global_from_fn_call_reads_zero`), 0 regressions, 1 known
+   unrelated bug (`struct_field_compound_assign`) still present as
+   expected.
+2. `val BASE = 10; val DERIVED = BASE + 5` and `val X = get_value()`:
+   correct (`10`/`15`, `42`) under `run_file_jit` AND under
+   `simple compile --native` (standalone AOT binary, exit 0).
+3. The isolated struct-return + field-derivation repro from
+   `doc/08_tracking/bug/web_showcase_repro_rerun_after_read_side_fix_2026-07-30.md`
+   (`DIMS = resolve_dims(); RW = DIMS.w; RH = DIMS.h`): JIT now matches
+   interpret exactly (`RW=480 RH=360 product=172800` both engines).
+4. Real web showcase (`examples/06_io/ui/web_render_file_gui.spl`,
+   `SHOWCASE_RESOLUTION=480x360`, `SIMPLE_TIMEOUT_SECONDS=0`, 57-file
+   `assets/fonts` worktree): no longer fails at
+   `reason=blank-or-uniform pixels=0 nonzero=0 checksum=0`. It now
+   proceeds past global init into actual rendering and fails at a
+   **different, later, unrelated** check:
+   `reason=vector-font-evidence ... expected_pixels=100 pixels=16`. This
+   is real progress (the write-side defect no longer blocks this cell)
+   but not a fully green run — the vector-font-evidence mismatch is a
+   separate, out-of-scope defect for a follow-up pass.
+
+`native-build` (the pure-Simple self-hosted compiler) was not touched —
+confirmed earlier in this campaign to already lower these initializers
+correctly via its own, independent pipeline.
+
+Landed via git plumbing (fresh SSH `ls-remote`, exact-SHA `read-tree`,
+6-file scoped commit, conflict-tree and marker guards clean) at
+`48af531ce0eca62c47787394016aa73d55294d5c`, parent
+`ef90c16b1949f393068e64be2da9a5c5661262a9`.
