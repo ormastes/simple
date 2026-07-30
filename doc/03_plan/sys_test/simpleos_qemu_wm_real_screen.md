@@ -636,3 +636,57 @@ Q-NIL. Q-LIVE starts only after the applicable artifacts and blocker repairs
 are reviewed and the selected preflight row is READY. Exactly one Q-LIVE
 session owns every VM launch, port, capture, input interval, shutdown, and
 no-orphan proof.
+
+## 2026-07-30 delegated-lane execution checkpoint
+
+### Q-TRANSPORT — completed and reviewed
+
+The non-launch transport review is published at commit
+`49052de2284972e24a1b437f60936286a8da81d4`:
+
+```text
+doc/08_tracking/bug/simpleos_qemu_virtio_serial_host_gpu_transport_2026-07-30.md
+```
+
+The QEMU acceleration self-test passed once. The interpreter system spec was
+not executed because the isolated checkout intentionally had no admitted
+`bin/simple`; no bootstrap or retry was used. The report keeps x86_64 and
+RISC-V `virtio-serial-unimplemented`, defines the missing 64-byte framed
+transport, socket endpoint, correlation/deadline policy, per-ISA queue/IRQ
+ownership, and implementation/test decomposition. It does not authorize a VM
+launch or claim AArch64 evidence for another ISA.
+
+### Q-NIL — preserved, blocked before probe execution
+
+The retained serial checksum matches this plan. `llvm-addr2line` maps RIP
+`0x086cf92a` to `FontRenderer.has_sffi_ttf+0x32`, its explicit nil-receiver
+trap path. The two direct callers pass tuple-extracted receiver stack slots.
+
+The assigned agent prepared this exact-shaped non-QEMU regression:
+
+```text
+/private/tmp/simple-q-nil-20260730.YDdE5k/test/02_integration/rendering/font_renderer_receiver_native_probe.spl
+SHA-256 2257670baf4a416a6d9f08061e27dbe64912c2f1907e0a011df6fe718eae7f78
+```
+
+It covers both retained consumer shapes: `(FontRenderer,text,bool)` and
+`(FontRenderer,bool)` returns/extractions, handle placement, and
+`has_sffi_ttf`. The probe is deliberately uncommitted and is not PASS evidence
+because its single allowed native build stopped before probe code generation.
+
+Attempted once:
+
+```sh
+env SIMPLE_NO_STUB_FALLBACK=1 /Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple native-build --source src/lib --source test/02_integration/rendering --backend cranelift --entry-closure --entry test/02_integration/rendering/font_renderer_receiver_native_probe.spl --output build/q_nil/font_renderer_receiver_native_probe
+```
+
+The July 25 deployed compiler cannot parse current-origin
+`src/lib/skia/feature/shaper/ot_layout_gpos.spl` multiline forms at lines 268,
+289, 395, 452, and 687. No binary was produced. The retry was preserved rather
+than wasted with the same stale compiler.
+
+Q-NIL may resume only after a current-origin self-hosted compiler is admitted.
+It must then execute this hashed probe once before any source fix or Q-FONT
+claim. Q-FONT remains waiting; A-GUEST also remains waiting for the admitted
+compiler. Q-LIVE remains unauthorized and no QEMU/QMP process was launched by
+these delegated lanes.
