@@ -669,7 +669,7 @@ evidence. Root Codex is merge owner and final reviewer; no sidecar pushes.
 | --- | --- | --- | --- |
 | `dom_identity_owner_impl` | canonical `dom_identity_index.spl` only | O(N) immutable index, generation routes, duplicate-ID/form-owner rules, four-step RED-first SSpec | HOLD: `a20520e28a7` adds an always-failing active spec, boolean-wrapper assertions, and incorrect `img` form association; do not merge |
 | `html_css_definition_list` | one uncapped Partial semantic row | canonical WebIR/DrawIR/Engine2D geometry and exact pixels; no private painter | FINAL STATIC REVIEW PASS; integrated, target execution HELD |
-| `navigation_controls_batch9` | one uncapped Go/Back/Forward/Stop/Home/URL/Bookmark defect | public actions, lifecycle authority, exact state/UI evidence | FAIL: `a17e0d65dde` admits `about:blank`, overclaims durable commit, and deletes concurrent plan rows; do not merge |
+| `navigation_controls_batch9` | one uncapped Go/Back/Forward/Stop/Home/URL/Bookmark defect | public actions, lifecycle authority, exact state/UI evidence | STATIC REVIEW PASS: one candidate rule rejects `about:blank`/capacity overflow and keeps Favorite enablement/action results truthful; durable profile commit remains separate |
 | `https_sandbox_batch9` | one uncapped HTTPS/sandbox boundary | fail closed with hostile evidence; no provider/runtime shortcut | STATIC REVIEW PASS: shared origin gate rejects duplicate headers and ports outside 1..65535; target execution HELD |
 | `pure_simple_receipt_admission` | existing self-hosted artifact/receipt path | SHA-256 + source tree/revision + build mode/command; mtime/version are insufficient | AUDIT COMPLETE: deployed hash `79ca755d...5173a7` has no matching receipt; deploy drops/invalidates Stage4 provenance |
 | `event_routing_batch9` | one uncapped button/text-input route defect | real pointer/keyboard/input actions and canonical state/pixels | CRASHED BEFORE DEFECT SELECTION; no production claim |
@@ -718,3 +718,13 @@ Lanes 1-4 compile together. The merge deletes NUL legacy route parsing, bare
 `pressed_target_id`/`last_target_id`, recursive hot-path lookup, and prototype
 registries. Label, radio, and SimpleScript HOLDs remain non-mergeable until
 this prerequisite lands.
+
+## Production navigation batch 9 (2026-07-30)
+
+| Lane | Root cause and bounded fix | Status / gate |
+| --- | --- | --- |
+| `favorite_mutation_truth` | `BrowserSession.add_current_favorite` discarded the admission result while UI access always exposed Favorite as enabled, so a fresh session could store the non-network `about:blank` URL and report success. One shared candidate rule now rejects it and capacity overflow; the public UI route disables or rejects impossible session-local mutations. | STATIC TDD COMPLETE; exactly four public UI-access steps and mirrored manual; durable profile commit is a separate owner; execution HELD for a source-admitted current pure-Simple CLI |
+
+The capped history-ledger, primary-close, stale-pressed navigation chrome, and
+hosted-navigation-visible lanes were not retried. Page Draw IR pixels are not
+claimed for the parent-owned textual chrome control.

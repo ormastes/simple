@@ -986,3 +986,21 @@ The executable spec uses built-in matchers and fail-fast placeholders until
 production exists. Its generated manual hides setup mechanics, keeps these
 four steps visible, and links typed protocol/text/performance captures. Rust
 seed, bootstrap, helper-only, and source-scan evidence are inadmissible.
+
+## Favorite mutation truth scenario
+
+The navigation batch-9 scenario extends the existing canonical browser textual
+UI-access SSpec with exactly four visible steps:
+
+1. `Inspect Favorite before a network document is open`
+2. `Attempt Favorite through the public textual action`
+3. `Open a network document and add it through the same action`
+4. `Remove the saved page and retain an enabled truthful control`
+
+It invokes only `BrowserSession.ui_access_snapshot` and
+`BrowserSession.ui_access_act`, proves a fresh `about:blank` session exposes a
+disabled Favorite control, proves the rejected click leaves the bookmark
+snapshot empty, and proves add/remove success against one canonical HTTPS
+document. The page renderer does not own this parent chrome control, so this
+scenario makes no Draw IR or Engine2D pixel claim. Runtime status remains HELD
+until the current source has an admitted pure-Simple build receipt.

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -205,6 +205,87 @@ expect(session.current_url).to_equal("https://example.com/home")
 val reload = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#reload", action: "click", text_value: "", x: 0, y: 0))
 expect(reload.ok).to_equal(true)
 expect(session.current_url).to_equal("https://example.com/home")
+```
+
+</details>
+
+#### reports favorite availability and mutation truthfully
+
+The public chrome route reports only session-local favorite mutations.
+
+- Inspect Favorite before a network document is open
+   - Expected: unavailable.len() equals `1`
+   - Expected: unavailable[0].enabled equals `false`
+   - Expected: session.bookmark_snapshot().entries.len() equals `0`
+- Attempt Favorite through the public textual action
+   - Expected: denied.ok equals `false`
+   - Expected: denied.code equals `disabled`
+   - Expected: session.bookmark_snapshot().entries.len() equals `0`
+- Open a network document and add it through the same action
+   - Expected: added.ok equals `true`
+   - Expected: session.bookmark_snapshot().entries.len() equals `1`
+   - Expected: session.is_favorite("https://example.com/bookmarkable") equals `true`
+- Remove the saved page and retain an enabled truthful control
+   - Expected: removed.ok equals `true`
+   - Expected: session.bookmark_snapshot().entries.len() equals `0`
+   - Expected: available[0].enabled equals `true`
+   - Expected: available[0].selected equals `false`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 48 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect Favorite before a network document is open")
+var session = BrowserSession.new()
+val unavailable = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "button", "Favorite", 1
+)
+expect(unavailable.len()).to_equal(1)
+expect(unavailable[0].enabled).to_equal(false)
+expect(session.bookmark_snapshot().entries.len()).to_equal(0)
+
+step("Attempt Favorite through the public textual action")
+val denied = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#favorite", action: "click",
+    text_value: "", x: 0, y: 0
+))
+expect(denied.ok).to_equal(false)
+expect(denied.code).to_equal("disabled")
+expect(session.bookmark_snapshot().entries.len()).to_equal(0)
+
+step("Open a network document and add it through the same action")
+session.open_html(
+    "https://example.com/bookmarkable",
+    "<html><head><title>Bookmarkable</title></head><body>Page</body></html>"
+)
+val added = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#favorite", action: "click",
+    text_value: "", x: 0, y: 0
+))
+expect(added.ok).to_equal(true)
+expect(session.bookmark_snapshot().entries.len()).to_equal(1)
+expect(session.is_favorite(
+    "https://example.com/bookmarkable"
+)).to_equal(true)
+
+step("Remove the saved page and retain an enabled truthful control")
+val removed = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#favorite", action: "click",
+    text_value: "", x: 0, y: 0
+))
+val available = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "button", "Favorite", 1
+)
+expect(removed.ok).to_equal(true)
+expect(session.bookmark_snapshot().entries.len()).to_equal(0)
+expect(available[0].enabled).to_equal(true)
+expect(available[0].selected).to_equal(false)
 ```
 
 </details>
