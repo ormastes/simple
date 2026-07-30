@@ -2,10 +2,43 @@
 # Backend records stop here; common owns grammar, query, and rendering.
 
 use std.nogc_sync_mut.io_runtime.{getpid, time_now_unix_micros}
-use common.ui.access.*
+use common.ui.access_cli_grammar.{
+    AccessCommandDescriptor,
+    AccessError,
+    AccessOperation,
+    AccessOutputMode,
+    AccessRequest,
+    AccessResult,
+    AccessSafety,
+    ACCESS_OPERATION_ACT,
+    ACCESS_OPERATION_FIND,
+    ACCESS_OPERATION_HISTORY,
+    ACCESS_OPERATION_LIST,
+    ACCESS_OPERATION_SNAPSHOT,
+    ACCESS_OUTPUT_JSON,
+    access_find_descriptor,
+    access_render_human,
+    access_render_json,
+    access_result_from_snapshot,
+    access_validate_request,
+    access_validate_snapshot_action
+}
+use common.ui.access.{
+    UiAccessEvent,
+    UiAccessSnapshot,
+    WinTextSnapshot,
+    ui_access_events_to_json,
+    ui_access_find_node,
+    ui_access_query_result,
+    ui_access_query_to_json,
+    ui_access_snapshot_to_json,
+    win_text_find_nodes,
+    win_text_host_wm_single_window_snapshot,
+    win_text_merge_snapshots
+}
 use std.play.types.{WindowInfo, PlayError}
 use std.play.wm.mod.{wm_list_windows_until, wm_focus_window_checked_until, wm_type_text_window_checked_until}
-use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open}
+use nogc_sync_mut.ui.access_store.{UiAccessStore, ui_access_store_runtime_open}
 
 val WM_ACCESS_SOURCE = "host_wm"
 val WM_ACCESS_MAX_AGE_MS: i64 = 5000
@@ -210,7 +243,7 @@ fn _wm_access_fail(request_id: text, access_error: AccessError) -> Result<text, 
     Err(access_error)
 
 fn _wm_access_history(output_mode: AccessOutputMode) -> Result<text, AccessError>:
-    var store = ui_access_store_runtime_open("wm_access", WM_ACCESS_SOURCE)
+    var store: UiAccessStore? = ui_access_store_runtime_open("wm_access", WM_ACCESS_SOURCE)
     if store == nil:
         return Err(AccessError.create("source_unavailable", "WM access history store is unavailable"))
     val events = match store.list_events("", 64):
@@ -223,7 +256,7 @@ fn _wm_access_history(output_mode: AccessOutputMode) -> Result<text, AccessError
     Ok(_wm_access_render(result, output_mode))
 
 fn _wm_access_record(request_id: text, phase: text, code: text) -> bool:
-    var store = ui_access_store_runtime_open("wm_access", WM_ACCESS_SOURCE)
+    var store: UiAccessStore? = ui_access_store_runtime_open("wm_access", WM_ACCESS_SOURCE)
     if store == nil: return false
     val event = UiAccessEvent(surface_id: WM_ACCESS_SOURCE, widget_id: "", canonical_id: "", event_kind: "access_" + phase, payload: "request_id=" + request_id + ";code=" + code, sequence: _wm_access_now_ms())
     val recorded = match store.insert_event(event):
