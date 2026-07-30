@@ -65,9 +65,9 @@ extern fn serial_println(msg: text)
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_byte_array_new(cap: i64) -> [u8]
 extern fn rt_typed_bytes_u8_push(array: [u8], value: i64) -> bool
 extern fn rt_bytes_u8_at(array: [u8], index: i64) -> i64
-extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 
 # ============================================================================
 # Module-Level State
@@ -865,10 +865,9 @@ fn _vfs_boot_read_short_name_from_dir_raw(start_cluster: u32, short_name: text) 
     []
 
 fn _vfs_boot_read_cluster_to_scratch(cluster: u32) -> bool:
-    serial_println("[vfs-init] scalar scratch read begin cluster={cluster}")
     val byte_len = g_boot_fat32_sectors_per_cluster.to_u64() * g_boot_fat32_bytes_per_sector.to_u64()
     if g_boot_fat32_scratch_cpu_addr == 0u64 or g_boot_fat32_scratch_phys_addr == 0u64 or g_boot_fat32_scratch_byte_len < byte_len:
-        serial_println("[vfs-init] cluster scratch invalid")
+        serial_println("[vfs-init] scalar scratch invalid cluster={cluster} bytes={byte_len}")
         return false
     val scratch = SharedDmaBuffer(
         cpu_virt_addr: g_boot_fat32_scratch_cpu_addr,
@@ -881,9 +880,8 @@ fn _vfs_boot_read_cluster_to_scratch(cluster: u32) -> bool:
     )
     val read = g_nvme.read_shared_dma_in_namespace_on_queue(1u32, SIMPLEOS_NVME_SYSTEM_QUEUE_ID, _vfs_boot_fat32_cluster_lba(cluster), g_boot_fat32_sectors_per_cluster, scratch)
     if read.is_err():
-        serial_println("[vfs-init] scalar scratch read failed")
+        serial_println("[vfs-init] scalar scratch read failed cluster={cluster}")
         return false
-    serial_println("[vfs-init] scalar scratch read ok cluster={cluster}")
     true
 
 fn _vfs_boot_read_file_chain_raw(first_cluster: u32, size: u32) -> [u8]:
@@ -902,8 +900,15 @@ fn _vfs_boot_read_file_chain_raw(first_cluster: u32, size: u32) -> [u8]:
     """
     if first_cluster < 2u32 or size == 0u32:
         return []
-    var out: [u8] = []
+    # Keep the output in the packed-byte representation and mutate it through
+    # the proven freestanding typed-byte ABI. Generic `out.push` failed to
+    # advance the observable packed length reliably, so a 1.7MiB font walked
+    # 41,314 clusters and consumed the entire 512MiB bump heap. The generic
+    # rt_array_new_with_cap is also wrong here: it reserves 8-byte tagged slots
+    # and made large boot files consume roughly 8x their byte size.
+    var out: [u8] = rt_byte_array_new(size as i64)
     var cluster = first_cluster
+    var cluster_reads: i64 = 0
     # `as` casts, NOT bare `.to_uXX()` on the chained out.len() receiver: the
     # freestanding bare->qualified alias bridge can resolve a bare conversion
     # on an erased/chained receiver to another struct's method (C7 defect,
@@ -911,13 +916,20 @@ fn _vfs_boot_read_file_chain_raw(first_cluster: u32, size: u32) -> [u8]:
     val cluster_bytes = g_boot_fat32_sectors_per_cluster.to_u64() * g_boot_fat32_bytes_per_sector.to_u64()
     while cluster >= 2u32 and cluster < 0x0FFFFFF8u32 and (out.len() as u32) < size:
         if not _vfs_boot_read_cluster_to_scratch(cluster):
+            serial_println("[vfs-init] file chain read failed first_cluster={first_cluster} cluster={cluster} clusters={cluster_reads} bytes={out.len()} requested={size}")
             return out
+        cluster_reads = cluster_reads + 1
         val remaining = (size as u64) - (out.len() as u64)
         val copy_len = if remaining < cluster_bytes: remaining else: cluster_bytes
-        val chunk = rt_bytes_from_raw(g_boot_fat32_scratch_cpu_addr as i64, copy_len as i64)
-        for b in chunk:
-            out.push(b)
+        var copied: u64 = 0u64
+        while copied < copy_len:
+            val byte_value = (_vfs_boot_mem_byte(g_boot_fat32_scratch_cpu_addr, copied) & 0xFFu32).to_i64()
+            if not rt_typed_bytes_u8_push(out, byte_value):
+                serial_println("[vfs-init] file chain append failed first_cluster={first_cluster} cluster={cluster} clusters={cluster_reads} bytes={out.len()} requested={size}")
+                return out
+            copied = copied + 1u64
         cluster = _vfs_boot_fat32_next_cluster(cluster)
+    serial_println("[vfs-init] file chain read complete first_cluster={first_cluster} clusters={cluster_reads} bytes={out.len()} requested={size}")
     out
 
 fn _vfs_boot_dirent_name11_raw(base: u64, off: u64, e0: u32, e1: u32, e2: u32, e3: u32, e4: u32, e5: u32, e6: u32, e7: u32, e8: u32, e9: u32, e10: u32) -> bool:

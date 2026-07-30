@@ -29,6 +29,13 @@ another run.
 
 ## Manual real-screen acceptance bar
 
+- QEMU process and port discovery;
+- guest image/kernel selection and construction;
+- SIMD prerequisite execution;
+- QEMU launch, diagnostic QMP input injection, physical-input evidence,
+  capture, shutdown, and cleanup;
+- evidence correlation and the final PASS/FAIL report.
+
 | ID | Required proof |
 |---|---|
 | REQ-QRS-001 | Current integrated x86_64 WM reaches a guest WM-ready marker in a visible Cocoa QEMU window; retain clean source revision, ELF/EFI hashes, exact argv and PID. |
@@ -45,6 +52,11 @@ source-only assertions, or an unsupported human assertion are never manual
 acceptance evidence.  Automated wrappers and QMP input are useful diagnostic
 or automated lanes only; their events may not be relabeled as physical Cocoa
 input.  This plan does not claim that a physical action occurred.
+
+QMP input injection is diagnostic coverage only. Final real-screen acceptance
+uses physical input performed by the user in the visible Cocoa window; QMP is
+used for framebuffer capture and correlation, not to manufacture the accepted
+click, drag, text, or modifier events.
 
 ## 2026-07-30 sole-owner preflight
 
@@ -221,3 +233,81 @@ transport and every identity are READY.
 - `test/03_system/os/qemu/qmp_screendump_spec.spl` — QMP screendump failure
   contract.  `test/03_system/gui/wm_input_qemu_smoke_spec.spl` is a separate
   synthetic smoke and must not be relabeled as manual input evidence.
+8. Preserve all serial, QMP, argv, manifest, capture, checksum, timing, and
+   process-cleanup evidence. Stop after the first real failure; do not retry or
+   replace a failed backend with software.
+
+## 2026-07-30 physical real-screen and performance amendment
+
+The current x86_64 run established a measured before-fix baseline:
+
+- a 1,708,408-byte font load produced 41,314 scalar scratch-cluster reads;
+- serial output grew to 1.77 MiB;
+- the guest bump heap reached `0x1ffff7a0` of its `0x20000000` limit and
+  panicked before a complete frame;
+- visible output was a partial baremetal framebuffer, without positive
+  `cpu_simd` execution counters.
+
+The packed-byte VFS correction reduced serial output to 10.8 KiB and first-frame
+heap use to approximately 193 MiB without increasing the heap or removing the
+font. That improvement is accepted as a focused boot-I/O/memory result, but the
+run remains a render FAIL because `FontRenderer.has_sffi_ttf` then encountered
+a nil receiver before complete-frame, SIMD, or physical-input evidence.
+
+The next authorized live run must also satisfy:
+
+- boot-to-paint-complete <=30 seconds (`NFR-E2D-QEMU-001`);
+- font data-cluster reads equal
+  `ceil(font_bytes / cluster_bytes)`, plus bounded FAT/directory metadata reads;
+- one file-chain summary and failure-only detail, with no per-cluster success
+  logging;
+- guest heap high-water <=256 MiB before the first complete frame and no
+  positive growth across ten changed interaction frames;
+- after one warm-up, ten changed frames report render/present p50 and p95, with
+  p95 <=33.4 ms (30 FPS);
+- no filesystem scan, font reload, or fresh framebuffer-sized allocation in
+  the input/redraw loop.
+
+## Acceptance gates
+
+A target passes only when one correlated run proves all of the following:
+
+- the selected backend and guest transport are real and fail closed;
+- the captured screen is produced by the canonical WM -> Draw IR -> Engine2D
+  guest path, not by a synthetic image or CPU/software fallback;
+- a positive initial frame ID, checksum, dimensions, and presentation receipt
+  agree across guest serial, host/QEMU evidence, and capture;
+- the physical ordered event sequence contains
+  `focus,pointer_move,pointer_down,pointer_move,pointer_up,key_down,key_up,`
+  `text_commit,ctrl_down,ctrl_up`; diagnostic QMP events are labeled separately
+  and cannot satisfy this row;
+- each accepted semantic action advances the expected state/frame generation;
+- before/after captures differ at the expected semantic region;
+- vector-font identity and glyph material are accepted rather than silently
+  replaced with a bitmap fallback;
+- SIMD prerequisites pass for the guest architecture, while the live render
+  independently proves the pixels;
+- QEMU argv, accelerator, guest artifact hashes, revision, timing, maximum RSS,
+  guest heap high-water, boot-I/O counts, frame p50/p95, and clean shutdown are
+  retained;
+- no orphan QEMU process or reserved port remains.
+
+`BLOCKED`, `unsupported`, compile-only output, source inspection, screenshots
+without receipts, software fallback, and historical captures do not satisfy
+this plan.
+
+## Immediate remaining work
+
+1. Let the active host compiler build release CPU and disk pressure.
+2. Have the sole QEMU owner construct and attest the missing AArch64 artifacts
+   incrementally.
+3. Fix or formally retain the x86_64/RISC-V VirtIO-serial transport blocker;
+   do not claim those rows from AArch64 evidence.
+4. Diagnose the retained `FontRenderer.has_sffi_ttf` nil receiver and
+   vector-font rejection without another live launch; authorize a new bounded
+   run only after focused native evidence identifies and fixes that owner.
+5. Execute the AArch64/HVF render-and-event run and publish its correlated
+   evidence.
+
+Merge owner and final reviewer: root/high-capability Codex agent. QEMU launch
+owner: one explicitly assigned QEMU agent session only.
