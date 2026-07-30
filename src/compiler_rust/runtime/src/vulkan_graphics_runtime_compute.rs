@@ -417,12 +417,7 @@ pub extern "C" fn rt_vulkan_end_compute(cmd: i64) -> i64 {
         Err(_) => return 0,
     };
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
-    unsafe {
-        if device.handle().end_command_buffer(vk_cmd).is_err() {
-            return 0;
-        }
-    }
-    1
+    i64::from(device.end_compute_command(vk_cmd).is_ok())
 }
 
 #[no_mangle]

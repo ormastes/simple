@@ -69,6 +69,17 @@ class, function, and `describe` placement assertions postdate the earlier 1/1
 pass and remain unrun. The benchmark was not rerun after the three-cycle cap.
 No timing or process/pipe acceptance is claimed.
 
+The following capped cycle cleared generated declaration placement and reached
+the native HIR. All three runs failed before execution because imported class
+construction left the renderer receiver as `ANY`, so `started.ok` could not be
+lowered even when each method result had an explicit
+`HostedBrowserRendererResult` annotation. The retained third wrapper at
+`/tmp/spipe_wrapped__home_ormastes_dev_pub_simple-gpu-goal_test_05_perf_browser_hosted_browser_process_pipe_perf_spec_native.spl`
+confirms only those earlier method-result annotations survived preprocessing.
+Renderer and compositor receivers plus all aggregate render results are now
+explicitly typed, but that later strengthening is unrun after the three-cycle
+cap. No samples or timing claim were produced.
+
 ## Required Follow-up
 
 1. Run the 21-pair CUDA and Vulkan rows with the admitted source-matched

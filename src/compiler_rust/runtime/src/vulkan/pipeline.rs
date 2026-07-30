@@ -1,11 +1,14 @@
 //! Compute pipeline management
 
 use super::buffer::VulkanBuffer;
-use super::device::VulkanDevice;
+use super::device::{FencedSubmitError, VulkanDevice};
 use super::error::{VulkanError, VulkanResult};
+use super::sync::Fence;
 use ash::vk;
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::ffi::CString;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 fn compute_entry_name(entry_name: &str) -> VulkanResult<CString> {
@@ -111,6 +114,8 @@ pub struct ComputePipeline {
     descriptor_pool: vk::DescriptorPool,
     descriptor_binding_count: u32,
     push_constant_size: u32,
+    execution_lock: Mutex<()>,
+    completion_unknown: AtomicBool,
 }
 
 struct ComputePipelineBuildGuard {
@@ -320,13 +325,25 @@ impl ComputePipeline {
             descriptor_pool,
             descriptor_binding_count: bindings.len() as u32,
             push_constant_size,
+            execution_lock: Mutex::new(()),
+            completion_unknown: AtomicBool::new(false),
         };
         build.disarm();
         Ok(result)
     }
 
+    fn reset_descriptor_pool(&self) -> VulkanResult<()> {
+        unsafe {
+            self.device
+                .handle()
+                .reset_descriptor_pool(self.descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+                .map_err(|error| VulkanError::ExecutionFailed(format!("Reset pool: {:?}", error)))
+        }
+    }
+
     /// Execute the kernel with given buffers
     pub fn execute(&self, buffers: &[&VulkanBuffer], global_size: [u32; 3], local_size: [u32; 3]) -> VulkanResult<()> {
+        let _execution = self.execution_lock.lock();
         // Allocate descriptor set
         let set_layouts = [self.descriptor_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
@@ -391,15 +408,34 @@ impl ComputePipeline {
                 .cmd_dispatch(cmd, group_count_x, group_count_y, group_count_z);
         }
 
-        self.device.submit_compute_command(cmd)?;
+        if let Err(error) = self.device.end_compute_command(cmd) {
+            self.device.free_compute_command(cmd);
+            self.reset_descriptor_pool()?;
+            return Err(error);
+        }
+        let fence = match Fence::new(self.device.clone(), false) {
+            Ok(fence) => fence,
+            Err(error) => {
+                self.device.free_compute_command(cmd);
+                self.reset_descriptor_pool()?;
+                return Err(error);
+            }
+        };
+        match self.device.submit_compute_command_with_fence(cmd, &fence) {
+            Ok(()) => {}
+            Err(FencedSubmitError::NotSubmitted(error)) => {
+                self.reset_descriptor_pool()?;
+                return Err(error);
+            }
+            Err(FencedSubmitError::CompletionUnknown(error)) => {
+                self.completion_unknown.store(true, Ordering::Release);
+                std::mem::forget(fence);
+                return Err(error);
+            }
+        }
 
         // Free descriptor set (pool reset would be more efficient for multiple executions)
-        unsafe {
-            self.device
-                .handle()
-                .reset_descriptor_pool(self.descriptor_pool, vk::DescriptorPoolResetFlags::empty())
-                .map_err(|e| VulkanError::ExecutionFailed(format!("Reset pool: {:?}", e)))?;
-        }
+        self.reset_descriptor_pool()?;
 
         Ok(())
     }
@@ -565,6 +601,10 @@ mod tests {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
+        if self.completion_unknown.load(Ordering::Acquire) {
+            tracing::error!("Leaking Vulkan pipeline resources after unknown GPU completion");
+            return;
+        }
         unsafe {
             self.device.handle().destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.handle().destroy_pipeline(self.pipeline, None);

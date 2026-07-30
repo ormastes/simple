@@ -24,9 +24,9 @@ pub struct VulkanDevice {
     present_queue_family: Option<u32>,
 
     // Queues
-    compute_queue: Mutex<vk::Queue>,
+    compute_queue: Arc<Mutex<vk::Queue>>,
     #[cfg(feature = "vulkan")]
-    graphics_queue: Option<Mutex<vk::Queue>>,
+    graphics_queue: Option<Arc<Mutex<vk::Queue>>>,
     #[cfg(feature = "vulkan")]
     present_queue: Option<Mutex<vk::Queue>>,
 
@@ -158,7 +158,16 @@ impl VulkanDevice {
 
         #[cfg(feature = "vulkan")]
         let present_queue = present_family.map(|family| unsafe { device.get_device_queue(family, 0) });
-
+        let compute_queue_lock = Arc::new(Mutex::new(compute_queue));
+        #[cfg(feature = "vulkan")]
+        let graphics_queue_lock = graphics_queue.map(|queue| {
+            if queue == compute_queue {
+                Arc::clone(&compute_queue_lock)
+            } else {
+                Arc::new(Mutex::new(queue))
+            }
+        });
+        #[cfg(feature = "vulkan")]
         // Create allocator
         let allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.instance().clone(),
@@ -229,9 +238,9 @@ impl VulkanDevice {
             graphics_queue_family: graphics_family,
             #[cfg(feature = "vulkan")]
             present_queue_family: present_family,
-            compute_queue: Mutex::new(compute_queue),
+            compute_queue: compute_queue_lock,
             #[cfg(feature = "vulkan")]
-            graphics_queue: graphics_queue.map(Mutex::new),
+            graphics_queue: graphics_queue_lock,
             #[cfg(feature = "vulkan")]
             present_queue: present_queue.map(Mutex::new),
             allocator: Mutex::new(ManuallyDrop::new(allocator)),
@@ -322,7 +331,7 @@ impl VulkanDevice {
     /// Get graphics queue (if available, requires lock)
     #[cfg(feature = "vulkan")]
     pub fn graphics_queue(&self) -> Option<&Mutex<vk::Queue>> {
-        self.graphics_queue.as_ref()
+        self.graphics_queue.as_deref()
     }
 
     /// Get present queue (if available, requires lock)
@@ -364,10 +373,9 @@ impl VulkanDevice {
 
         let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-        unsafe {
-            self.device
-                .begin_command_buffer(cmd, &begin_info)
-                .map_err(|e| VulkanError::CommandBufferError(format!("Begin: {:?}", e)))?;
+        if let Err(e) = unsafe { self.device.begin_command_buffer(cmd, &begin_info) } {
+            unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+            return Err(VulkanError::CommandBufferError(format!("Begin: {:?}", e)));
         }
 
         Ok(cmd)
@@ -388,9 +396,11 @@ impl VulkanDevice {
         let queue = self.compute_queue.lock();
 
         unsafe {
-            self.device
-                .queue_submit(*queue, &[submit_info], vk::Fence::null())
-                .map_err(|e| VulkanError::CommandBufferError(format!("Submit: {:?}", e)))?;
+            if let Err(e) = self.device.queue_submit(*queue, &[submit_info], vk::Fence::null()) {
+                drop(queue);
+                self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]);
+                return Err(VulkanError::CommandBufferError(format!("Submit: {:?}", e)));
+            }
 
             self.device
                 .queue_wait_idle(*queue)
@@ -423,10 +433,9 @@ impl VulkanDevice {
 
         let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-        unsafe {
-            self.device
-                .begin_command_buffer(cmd, &begin_info)
-                .map_err(|e| VulkanError::CommandBufferError(format!("Begin: {:?}", e)))?;
+        if let Err(e) = unsafe { self.device.begin_command_buffer(cmd, &begin_info) } {
+            unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+            return Err(VulkanError::CommandBufferError(format!("Begin: {:?}", e)));
         }
 
         Ok(cmd)
@@ -450,12 +459,19 @@ impl VulkanDevice {
                 .map_err(|e| VulkanError::CommandBufferError(format!("Allocate graphics: {:?}", e)))?[0]
         };
         let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        unsafe {
-            self.device
-                .begin_command_buffer(cmd, &begin_info)
-                .map_err(|e| VulkanError::CommandBufferError(format!("Begin graphics: {:?}", e)))?;
+        if let Err(e) = unsafe { self.device.begin_command_buffer(cmd, &begin_info) } {
+            unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+            return Err(VulkanError::CommandBufferError(format!("Begin graphics: {:?}", e)));
         }
         Ok(cmd)
+    }
+
+    pub fn end_compute_command(&self, cmd: vk::CommandBuffer) -> VulkanResult<()> {
+        unsafe {
+            self.device
+                .end_command_buffer(cmd)
+                .map_err(|e| VulkanError::CommandBufferError(format!("End: {:?}", e)))
+        }
     }
 
     /// Submit and wait for a compute command buffer
@@ -466,9 +482,11 @@ impl VulkanDevice {
         let queue = self.compute_queue.lock();
 
         unsafe {
-            self.device
-                .queue_submit(*queue, &[submit_info], vk::Fence::null())
-                .map_err(|e| VulkanError::CommandBufferError(format!("Submit: {:?}", e)))?;
+            if let Err(e) = self.device.queue_submit(*queue, &[submit_info], vk::Fence::null()) {
+                drop(queue);
+                self.device.free_command_buffers(*self.compute_pool.lock(), &[cmd]);
+                return Err(VulkanError::CommandBufferError(format!("Submit: {:?}", e)));
+            }
 
             self.device
                 .queue_wait_idle(*queue)

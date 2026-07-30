@@ -87,3 +87,103 @@ describe "Metal macOS host resume contract":
             "expect(receipt.source).to_equal(\"device_readback\")")
         expect(readback_spec).to_contain(
             "expect(receipt.pixels[0]).to_equal(0xff808080u32)")
+
+    it "pins generated Metal submission, download, and exact checksum gates":
+        val generated = file_read(
+            "scripts/check/metal_generated_2d_readback_harness.spl")
+        val gate = file_read(
+            "scripts/check/check-metal-generated-2d-readback.shs")
+        expect(generated).to_contain("rt_metal_create_device(0)")
+        expect(generated).to_contain("rt_metal_create_compute_pipeline")
+        expect(generated).to_contain("rt_metal_dispatch_compute")
+        expect(generated).to_contain("rt_metal_commit_command_buffer")
+        expect(generated).to_contain("rt_metal_wait_completed")
+        expect(generated).to_contain("rt_metal_buffer_download")
+        expect(generated).to_contain("print(\"submit_attempted=")
+        expect(generated).to_contain("print(\"readback_available=")
+        expect(gate).to_contain(
+            "MTLDevice -> host upload -> compute pipeline -> submit -> wait -> host download")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_module_verified=$module_verified")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_submit_attempted=$h_submit")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_readback_available=$h_readback")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_expected_checksum=$h_expected")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_actual_checksum=$h_actual")
+        expect(gate).to_contain(
+            "metal_generated_2d_readback_mismatch_count=$h_mismatch_count")
+        for op in ["fill", "copy", "alpha", "scroll"]:
+            expect(gate).to_contain("metal_generated_2d_readback_{op}_checksum=")
+            expect(gate).to_contain("metal_generated_2d_readback_{op}_expected=")
+        expect(gate).to_contain("reason=\"gpu-readback-verified\"")
+        expect(gate).to_contain(
+            "elif [ \"$h_actual\" != \"$h_expected\" ]; then")
+
+    it "pins device-origin framebuffer, parity, and no-fallback gates":
+        val framebuffer = file_read(
+            "scripts/check/check-metal-engine2d-framebuffer-readback-evidence.shs")
+        val parity_gate = file_read(
+            "scripts/check/check-engine2d-cpu-metal-parity-evidence.shs")
+        val parity_harness = file_read(
+            "test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl")
+        val live = file_read("scripts/check/check-macos-gpu-2d-live-evidence.shs")
+        val processing = file_read(
+            "test/03_system/check/macos_vulkan_processing_ir_live_readback_parity_spec.spl")
+        expect(framebuffer).to_contain(
+            "metal_buffer_download_ptr(host, self.d_framebuffer")
+        expect(framebuffer).to_contain("gpu_frame_complete")
+        expect(framebuffer).to_contain("raw-metal-framebuffer-download-proven")
+        expect(framebuffer).to_contain(
+            "metal_engine2d_framebuffer_exact_gpu_claimed=$read_pixels_gpu_download")
+        expect(framebuffer).to_contain(
+            "metal_engine2d_framebuffer_blur_or_tolerance_used=false")
+        expect(parity_harness).to_contain("gpu_frame_complete")
+        expect(parity_harness).to_contain(
+            "metal-fell-back-to-cpu-mirror gpu_ok=false")
+        expect(parity_harness).to_contain("MATCH mismatches=0/")
+        expect(parity_harness).to_contain("gpu_ok=true")
+        expect(parity_harness).to_contain("PARITY: pass")
+        expect(parity_gate).to_contain("reason=cpu-metal-bitexact")
+        expect(parity_gate).to_contain("reason=pixel-divergence")
+        expect(parity_gate).to_contain(
+            "engine2d_cpu_metal_parity_policy=exact-bitmap-no-blur-no-tolerance")
+        expect(live).to_contain("device_readback")
+        expect(live).to_contain("gpu_2d_live_draw_ir_fallback_required")
+        expect(live).to_contain("processing_ir_cpu_fallback")
+        expect(live).to_contain("processing-ir-receipt-cpu-fallback")
+        expect(live).to_contain("positive_integer \"$processing_ir_handle\"")
+        expect(live).to_contain("positive_integer \"$processing_ir_identity\"")
+        expect(live).to_contain("capture-header-mismatch")
+        expect(live).to_contain("pixel-sha256-invalid")
+        expect(processing).to_contain("require_processing_ir_receipt(receipt)")
+        expect(processing).to_contain("PROCESSING_IR_EXPECTED_CHECKSUM")
+        expect(processing).to_contain("PROCESSING_IR_ACTUAL_CHECKSUM")
+        expect(processing).to_contain("PROCESSING_IR_VALUES_EXACT")
+        expect(processing).to_contain("PROCESSING_IR_MISMATCH_COUNT")
+        expect(processing).to_contain("PROCESSING_IR_CPU_FALLBACK")
+
+    it "pins the prepared 21-pair revision-cache speed and provenance gate":
+        val cache_plan = file_read(
+            "doc/03_plan/agent_tasks/gpu_backend_mac_host_remaining.md")
+        val cache = file_read(
+            "test/05_perf/browser/hosted_compositor_revision_cache_perf_spec.spl")
+        expect(cache_plan).to_contain("SIMPLE_HOSTED_REVISION_CACHE_BACKEND=metal")
+        expect(cache_plan).to_contain("SIMPLE_HOSTED_REVISION_CACHE_BACKEND=vulkan")
+        expect(cache_plan).to_contain(
+            "hosted compositor revision-cache benchmark records 21 paired forced and unchanged frames for both Metal and Vulkan.")
+        expect(cache_plan).to_contain("hit_p50_ns * 100 < forced_p50_ns * 95")
+        expect(cache_plan).to_contain("not a CPU mirror or fallback")
+        expect(cache).to_contain("val TIMED_PAIRS: i64 = 21")
+        expect(cache).to_contain("if (forced.pixels != expected_pixels or")
+        expect(cache).to_contain("provenance_mismatches")
+        expect(cache).to_contain("expect(mismatches).to_equal(0)")
+        expect(cache).to_contain("expect(provenance_mismatches).to_equal(0)")
+        expect(cache).to_contain(
+            "expect(hit_p50_ns * 100).to_be_less_than(forced_p50_ns * 95)")
+        expect(cache).to_contain("expect(readback_source).to_equal(\"device_readback\")")
+        expect(cache).to_contain("expect(backend_handle).to_be_greater_than(0)")
+        expect(cache).to_contain("expect(device_identity).to_be_greater_than(0)")
+        expect(cache).to_contain("expect(raster.revision_reuse_count).to_equal(")
