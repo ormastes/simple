@@ -862,3 +862,167 @@ yet, per instruction.
   nowhere. Not fixed (unclear intended replacement, out of scope).
 - Strategic per-node JIT timing: NOT captured — gap 5 still blocks reaching
   real JIT'd execution of the style loop in this run.
+
+
+## Sixth follow-up pass (2026-07-30) — gap 5 fixed, spec landed, gap 6 found (`min`)
+
+### Fix applied to `jwt/encode.spl` (PROVED)
+
+`json_encode_object` (the confirmed gap-5 locus) had **two** independent
+defects, not one — both fixed in the same change:
+
+1. `var value_str = text.from_any(value)` (line 273) — `text.from_any` is
+   implemented nowhere in this codebase (no Rust intrinsic, no `.spl`
+   function; exhaustive grep confirms). Replaced with `.to_text()`, the
+   canonical any-to-text conversion already used throughout this codebase —
+   PROVED by grep that `.to_text()`, `.to_string()`, and `str()` all
+   dispatch to the same `rt_to_string` runtime formatter
+   (`codegen/instr/mod.rs:766-774`, `codegen/instr/core.rs:670-680`,
+   `codegen/llvm/functions/calls.rs:1940,2098`,
+   `codegen/instr/closures_structs.rs:1454`).
+2. `tuples.at(i)` / `tuple.at(0)` / `tuple.at(1)` — `.at()` is **not** a
+   valid array/list method anywhere in this codebase; the only `.at()`
+   registered anywhere is `text.at`/`char_at` (PROVED by grep across
+   `codegen/instr/calls.rs`, `codegen/llvm/functions.rs`,
+   `codegen/llvm/emitter.rs`, `codegen/instr/closures_structs.rs`,
+   `pipeline/native_project/mangle.rs` — all list `text`/`char_at` only).
+   PROVED directly: a standalone probe calling `tuples.at(i)` on an array
+   literal fails with `error: semantic: method \`at\` not found on type
+   \`array\``. Replaced with index access (`tuples[i]`, `tuple[0]`,
+   `tuple[1]`), which the interpreter and JIT both accept and this same
+   `encode.spl` file already uses elsewhere (`data[i]` in
+   `base64url_encode_bytes`).
+
+A separate, real runtime bug was also worked around rather than fixed:
+`.to_text()` on a `bool` value read back through this function's
+`Any`-typed `value` parameter is itself corrupted under the interpreter
+(`true` → `"nil"`, `false` → `"0"`; confirmed via standalone probes
+`any_to_text_probe.spl` / `bool_direct_probe.spl` — directly-typed,
+non-erased bools are unaffected). Equality comparison on the same erased
+value (`value == true` / `value == false`) is unaffected and is used
+instead (`bool_any_test2.spl` confirms `TRUE-MATCH`/`FALSE-MATCH`). JSON
+booleans are also given a dedicated branch so they're emitted unquoted
+(`true`/`false`), not digit-sniffed like numbers.
+
+**End-to-end correctness, PROVED** under
+`SIMPLE_EXECUTION_MODE=interpreter` with a probe exercising text, a large
+int, a negative int, and both booleans together:
+
+```
+{"sub":"user123","exp":1735689600,"admin":true,"banned":false,"neg":-7}
+```
+
+Text quoted, integers unquoted (including negative), booleans unquoted
+`true`/`false` — matches the correctness bar in the brief.
+
+### JIT-only divergence found and NOT fixed (PROVED, out of scope for this fix)
+
+Under `SIMPLE_EXECUTION_MODE=jit`, the same `is_bool_true`/`is_bool_false`
+equality-based branch does **not** reliably fire when the erased `Any`
+value is read out of an array **inside a `while` loop** (`value = tuples[i]`
+pattern) — booleans then fall through to the digit-check branch and get
+quoted (`"admin":"true"` instead of `"admin":true`), even though the
+identical equality-comparison pattern works correctly under JIT when there
+is no enclosing loop (isolated repro `bool_var_reuse_probe.spl`: correct
+`UNQUOTED:true`/`UNQUOTED:false`) or when reading from a fixed local
+variable per call rather than through loop-indexed array access
+(`bool_any_test2.spl`: correct `TRUE-MATCH`/`FALSE-MATCH`). A further
+minimal repro reading directly-indexed single-value arrays inside a loop
+(`bool_loop_probe2.spl`, no tuple/double-indirection) reproduces the same
+class of divergence with data-position-dependent results, not merely
+boolean-specific corruption. This matches the previously-catalogued
+"Native list rebind + loop-spill miscompiles" / "Neither engine
+trustworthy" JIT bug family (see project memory) — a pre-existing,
+general JIT array/loop-read miscompile, **not specific to `jwt/encode.spl`
+and out of scope for this fix.** `json_encode_object` is not invoked
+anywhere in JIT-compiled reachable code today (see next section), so this
+divergence has no live production impact yet, but is flagged here since it
+was discovered in the course of this work. Repro files under
+`/tmp/.../scratchpad/bool_loop_probe.spl`, `bool_loop_probe2.spl`,
+`bool_var_reuse_probe.spl` (not committed — scratch probes).
+
+### Spec coverage finding (instruction 3, PROVED)
+
+**No existing JWT spec reaches `json_encode_object`/`json_encode` at all.**
+Read `test/01_unit/lib/common/jwt_spec.spl` directly: every test goes
+through `jwt_sign_hs256`/`jwt_sign_hs256_bytes`/`jwt_sign_rs256`/
+`jwt_sign_es256`, all of which take an **already-built** `payload_json:
+text` parameter directly (e.g. `jwt_sign_hs256("{\"hello\":\"world\"}",
+key)`) — none of them accept a claims list and route it through
+`json_encode`. A repo-wide grep for callers of `json_encode_object`,
+`json_encode` (from `jwt.encode`, disambiguated from same-named functions
+in unrelated `json`/`js` modules), `claims_to_json`, and `json_stringify`
+(the jwt module's own alias) turns up **zero** call sites anywhere in
+`src/` or `test/` — the only reference to `common.jwt.encode` outside the
+jwt module itself is `browser_renderer_protocol.spl`, which imports only
+`base64url_decode_to_bytes`/`base64url_encode_bytes`, not the JSON
+functions. This confirms the coordinator's prediction precisely: these
+functions are exported dead code that has never been exercised by any spec
+or any live caller — the interpreter never got a chance to fail on
+`from_any`/`.at()` because nothing ever called this path.
+
+Landed a vacuity-probe spec,
+`test/01_unit/lib/common/jwt/json_claim_encoding_spec.spl` (5 examples:
+text quoting, int quoting incl. negative, bool unquoting, a mixed claim
+set, and the `json_encode` alias). **Vacuity confirmed by direct
+before/after run against the exact same spec file:** against the
+pre-fix `encode.spl` (restored from `git show HEAD:...` for this check,
+then reverted back to the fix), all 5 examples fail (`5 examples, 5
+failures`); against the fix, all 5 pass (`5 examples, 0 failures`).
+
+### The prize, attempted: gap 6 found — `min` unresolved external symbol (PROVED)
+
+Re-ran the exact assigned repro with the fix in place and
+`SIMPLE_JIT_STRICT=1`:
+
+```
+SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 SHOWCASE_RESOLUTION=480x360 \
+SIMPLE_WEB_RENDER_BUDGET_MS=120000 SIMPLE_TIMEOUT_SECONDS=280 \
+simple run examples/06_io/ui/web_render_file_gui.spl
+```
+
+**Gap 5 (`text_dot_from_any`) is confirmed gone** — no `[jit-fallback]` or
+error mentioning `from_any`/`text.from_any` anywhere in the run log. This
+is direct evidence the fix works in the real pipeline, not just the
+isolated probe.
+
+The run now fails one step further, at a **different** unresolved external
+symbol, under `SIMPLE_JIT_STRICT=1` (hard error, exactly as designed,
+instead of a silent fallback):
+
+```
+[jit-fallback] unresolved external symbol 'min': whole module dropped to the interpreter (expect ~100-1000x slowdown). Set SIMPLE_JIT_STRICT=1 to turn this into a hard error.
+error: Cranelift JIT compile: Module error: SIMPLE_JIT_STRICT: unresolved external symbol 'min' would NULL-jump in JIT; refusing to fall back to the interpreter
+```
+
+**Root cause (PROVED by code reading, same reporting style as gap 5):**
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:886`
+calls a bare free function, `return min(current_time_ms + 16, end_ms)`.
+HIR lowering (`hir/lower/expr/calls.rs:507`) recognizes `"abs" | "min" |
+"max" | "sqrt" | "floor" | "ceil" | "pow"` as builtins and lowers all seven
+identically via `lower_builtin_call(name, args, TypeId::I64, ctx)` into a
+`BuiltinCall { name, args }` HIR node. But `sqrt`/`floor`/`ceil`/`pow` are
+real libm symbols the linker/JIT can resolve, while `min`/`max`/`abs` are
+**not** libc/libm functions — grepping the codegen backends
+(`codegen/cranelift_emitter.rs`, `codegen/cranelift.rs`) for a dedicated
+`"min"`/`"max"`/`"abs"` case in `BuiltinCall` lowering finds none; unlike
+the `.min()`/`.max()` **methods** (which do have dedicated
+compare-and-select codegen — `codegen/llvm/functions/calls.rs:2017`,
+`codegen/llvm/emitter.rs:1366`), the bare-function form falls through to
+whatever generic path emits a call to an external symbol literally named
+after the builtin (`"min"`), which no runtime or libc symbol satisfies.
+This is a distinct, pre-existing compiler-lowering gap — unrelated to JWT
+or this fix, and out of scope for this task; **not fixed here**, reported
+per instruction 4 in the same style as gap 5.
+
+**Strategic per-node JIT timing: still NOT captured** — gap 6 blocks
+reaching the style loop before real JIT'd execution timing could be
+measured. This is now the narrowest next blocker for the "prize" (the
+JIT-vs-interpreted style-loop timing comparison).
+
+### Heuristic-flip question (instruction 5): still not evaluated
+
+Same reasoning as the fifth pass — cannot responsibly assess whether
+`exec_core.rs`'s force-interpret heuristic should change for this example
+until a JIT run actually completes the style loop, which gap 6 still
+blocks.

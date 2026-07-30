@@ -263,32 +263,66 @@ fn json_encode_object(tuples: list) -> text:
     var len = tuples.length()
 
     while i < len:
-        var tuple = tuples.at(i)
-        var key = tuple.at(0)
-        var value = tuple.at(1)
+        # Index access, not `.at()`: `.at()` is not a valid array/list method
+        # in this codebase (only `text.at`/`char_at` exists — see
+        # codegen/instr/calls.rs and interpreter_method/string.rs); the
+        # original `.at()` calls here would themselves error out
+        # ("method `at` not found on type `array`"), a second, independent
+        # defect from the `text.from_any` one, confirmed via a standalone
+        # probe before this fix.
+        var tuple = tuples[i]
+        var key = tuple[0]
+        var value = tuple[1]
 
         var escaped_key = json_escape_string(key)
 
-        # Encode value based on type
-        var value_str = text.from_any(value)
+        # Encode value based on type. `.to_text()` (-> `rt_to_string`, the
+        # universal Any-to-text runtime formatter that `to_string`/`str()`
+        # also dispatch to throughout this codebase — see
+        # codegen/instr/core.rs and codegen/llvm/functions/calls.rs) is the
+        # canonical conversion here; `text.from_any` (the previous call)
+        # does not exist anywhere as a Rust intrinsic or `.spl` function, so
+        # this whole encoding path has never worked.
+        #
+        # Booleans need a dedicated branch: `.to_text()` on a `bool` read
+        # back through this `Any`-typed `value` is itself corrupted by a
+        # separate, real runtime bug (`true` renders as `"nil"`, `false` as
+        # `"0"` — confirmed via a standalone probe; not present for direct
+        # equality comparison on the same erased value, which is what the
+        # `is_bool_true`/`is_bool_false` checks below use instead of
+        # `.to_text()`). JSON booleans must also be emitted unquoted
+        # (`true`/`false`), not as a numeric-vs-text digit-sniffed string,
+        # so they get their own branch below rather than flowing through
+        # the existing digit check.
+        var is_bool_true = value == true
+        var is_bool_false = value == false
+        var value_str = ""
+        if is_bool_true:
+            value_str = "true"
+        elif is_bool_false:
+            value_str = "false"
+        else:
+            value_str = value.to_text()
 
-        # Check if value is numeric
-        var is_numeric = false
-        var first_char = ""
-        if value_str.length() > 0:
-            first_char = value_str.substring(0, 1)
-
-        var is_digit = first_char == "0" or first_char == "1" or first_char == "2"
-        is_digit = is_digit or first_char == "3" or first_char == "4"
-        is_digit = is_digit or first_char == "5" or first_char == "6"
-        is_digit = is_digit or first_char == "7" or first_char == "8"
-        is_digit = is_digit or first_char == "9" or first_char == "-"
-
-        if is_digit:
+        if is_bool_true or is_bool_false:
             parts.push("\"" + escaped_key + "\":" + value_str)
         else:
-            var escaped_value = json_escape_string(value_str)
-            parts.push("\"" + escaped_key + "\":\"" + escaped_value + "\"")
+            # Check if value is numeric
+            var first_char = ""
+            if value_str.length() > 0:
+                first_char = value_str.substring(0, 1)
+
+            var is_digit = first_char == "0" or first_char == "1" or first_char == "2"
+            is_digit = is_digit or first_char == "3" or first_char == "4"
+            is_digit = is_digit or first_char == "5" or first_char == "6"
+            is_digit = is_digit or first_char == "7" or first_char == "8"
+            is_digit = is_digit or first_char == "9" or first_char == "-"
+
+            if is_digit:
+                parts.push("\"" + escaped_key + "\":" + value_str)
+            else:
+                var escaped_value = json_escape_string(value_str)
+                parts.push("\"" + escaped_key + "\":\"" + escaped_value + "\"")
 
         i = i + 1
 
