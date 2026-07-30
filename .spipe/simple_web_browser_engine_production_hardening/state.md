@@ -2326,3 +2326,13 @@ implementation in progress / target evidence blocked
   environment/cwd/inherited-FD sanitization and Landlock/seccomp/rlimit
   containment/limits. It does not admit a hosted renderer artifact, prove
   broker/CSP or Electron containment, or promote a SANDBOX production row.
+- held browser bundle (2026-07-30): Four isolated patches remain unmerged.
+  DrawIR canonical oracle (`/tmp/simple-drawir-canonical-oracle.VBRqIv`),
+  content-visibility GPU guard (`/tmp/simple-content-visibility-gpu-guard-20260730`),
+  and address bound (`/tmp/simple-address-bound.Qw0wSt/worktree`) each have
+  static, phase-2 manual, and high-capability review PASS, but no executable
+  proof. EventLoop idle drain (`/tmp/simple-eventloop-idle-drain`) is HOLD/FAIL:
+  its future-timer case is vacuous, it has no performance discriminator, and
+  its tick wording is stale; review/docgen reached the cycle cap. Resume only
+  with an admitted current pure-Simple full CLI, running each focused spec once;
+  no seed or bootstrap substitute. Root Codex is merge owner and final reviewer.

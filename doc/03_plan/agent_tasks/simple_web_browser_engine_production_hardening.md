@@ -346,3 +346,16 @@ Next merge order is address bound, label activation, negative stacking, then
 their manuals. Private-egress classification must first cover IPv4-mapped IPv6
 and preserve connection-time resolution enforcement. No held Simple patch is
 promoted without a current pure-Simple checker.
+
+## Held-bundle tranche (2026-07-30)
+
+| Lane | Held worktree | Status | Resume gate |
+| --- | --- | --- | --- |
+| `drawir_canonical_oracle` | `/tmp/simple-drawir-canonical-oracle.VBRqIv` | static + phase-2 manual + high review PASS; unmerged | admitted current pure-Simple full CLI; run focused spec once |
+| `content_visibility_gpu_guard` | `/tmp/simple-content-visibility-gpu-guard-20260730` | static + phase-2 manual + high review PASS; unmerged | admitted current pure-Simple full CLI; run focused spec once |
+| `address_bound` | `/tmp/simple-address-bound.Qw0wSt/worktree` | static + phase-2 manual + high review PASS; unmerged | admitted current pure-Simple full CLI; run focused spec once |
+| `eventloop_idle_drain` | `/tmp/simple-eventloop-idle-drain` | HOLD/FAIL: vacuous future timer, no performance discriminator, stale tick wording; review/docgen cap reached | redesign evidence before any executable attempt |
+
+Root Codex is merge owner and final reviewer. No seed or bootstrap output may
+admit or merge these patches; this tranche does not change phase or acceptance
+criterion completion.

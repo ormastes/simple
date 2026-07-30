@@ -132,6 +132,20 @@ DrawIR, Engine2D, an admitted hosted renderer artifact, broker/CSP enforcement,
 Electron, or Chromium process sandboxing. They do not promote any TLS or
 SANDBOX production row.
 
+## Held bundle status (2026-07-30)
+
+| Held patch | Location | Review state | Executable state |
+| --- | --- | --- | --- |
+| DrawIR canonical oracle | `/tmp/simple-drawir-canonical-oracle.VBRqIv` | static + phase-2 manual + high review PASS | blocked |
+| Content-visibility GPU guard | `/tmp/simple-content-visibility-gpu-guard-20260730` | static + phase-2 manual + high review PASS | blocked |
+| Address bound | `/tmp/simple-address-bound.Qw0wSt/worktree` | static + phase-2 manual + high review PASS | blocked |
+| EventLoop idle drain | `/tmp/simple-eventloop-idle-drain` | HOLD/FAIL: vacuous future timer, no perf discriminator, stale tick wording; review/docgen cycle cap | do not merge |
+
+All remain unmerged. Exact resume: use an admitted current pure-Simple full CLI
+and run each focused spec once. Seed and bootstrap output are not substitutes.
+Root Codex is merge owner and final reviewer. This table changes no production
+phase or acceptance-criterion status.
+
 ## False-green repairs
 
 Before reuse, `test/03_system/gui/browser_interaction_spec.spl` must fail when
