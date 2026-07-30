@@ -192,3 +192,21 @@ loading completed 402 unique sources in 6.9 seconds, but seed-interpreted
 parsing took 179 seconds for the 25 KB entry and remained on the 67 KB driver
 module when the ten-minute cap expired. Closure discovery is no longer the
 build blocker; parser performance is. No fourth build cycle was started.
+
+## 2026-07-30 current self-hosted host-WM regression
+
+A clean current-main host-WM build reused a 317-object cache and invoked the
+release pure-Simple compiler with Cranelift, entry closure, eight threads, and
+stub fallback disabled. After 15 minutes the native-build log was still empty,
+the cache still contained exactly 317 objects, and no output binary existed.
+The process remained CPU-active until the bounded attempt was terminated
+cleanly with exit 143.
+
+A one-second process sample placed all 822 samples below
+`CompilerDriver.parse_all_impl`, through `parse_full_frontend`,
+`parse_module_body`, `parse_fn_decl`, and expression parsing. This is not the
+fixed closure-scanner defect above and not 2D runtime compilation: current
+self-hosted parsing failed to reach object-cache or link work. The same
+317-module WM target completed in 22.5 seconds on 2026-07-27, so this is a
+concrete parser/front-end performance regression. No bootstrap, seed fallback,
+source workaround, or retry was used.
