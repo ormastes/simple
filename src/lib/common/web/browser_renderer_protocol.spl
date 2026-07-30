@@ -100,6 +100,8 @@ pub struct BrowserRendererEncodeResult:
     ok: bool
     reason: text
     wire: text
+    kind: text = ""
+    payload: text = ""
 
 pub struct BrowserRendererDecoder:
     parts: [text]
@@ -355,7 +357,13 @@ pub fn browser_renderer_message_encode(kind: text, generation: i64, request_id: 
     val header = "SBR1\t{kind}\t{generation}\t{request_id}\t{payload_bytes.len()}\n"
     if text_to_bytes(header).len().to_i64() > BROWSER_RENDERER_MAX_HEADER_BYTES:
         return _browser_renderer_reject_encode("header-too-large")
-    BrowserRendererEncodeResult(ok: true, reason: "ok", wire: header + payload)
+    BrowserRendererEncodeResult(
+        ok: true,
+        reason: "ok",
+        wire: header + payload,
+        kind: kind,
+        payload: payload
+    )
 
 pub fn browser_renderer_message_resequence(
     wire: text, generation: i64, request_id: i64
@@ -549,6 +557,8 @@ pub fn browser_renderer_capability_message_encode(
          root_command_request_id > BROWSER_RENDERER_MAX_SEQUENCE_ID or
          not browser_renderer_command_capability_valid(command_capability))):
         return _browser_renderer_reject_encode("invalid-command-capability")
+    if not _browser_renderer_capability_payload_schema_valid(kind, payload):
+        return _browser_renderer_reject_encode("legacy-nested-schema")
     if payload.contains("\0"):
         return _browser_renderer_reject_encode("nul-payload")
     val payload_bytes = text_to_bytes(payload)
@@ -569,7 +579,9 @@ pub fn browser_renderer_capability_message_encode(
         return _browser_renderer_reject_encode("header-too-large")
     BrowserRendererEncodeResult(
         ok: true, reason: "ok",
-        wire: header + payload + command_capability
+        wire: header + payload + command_capability,
+        kind: kind,
+        payload: payload
     )
 
 pub fn browser_renderer_capability_message_resequence(
@@ -588,6 +600,79 @@ pub fn browser_renderer_capability_message_resequence(
     browser_renderer_capability_message_encode(
         decoded.message.kind, generation, request_id,
         root_command_request_id, decoded.message.payload,
+        command_capability
+    )
+
+fn _browser_renderer_capability_wire_payload(
+    kind: text, payload: text
+) -> text:
+    if kind == "fetch_request" and payload.starts_with("SBRQ4\t"):
+        return "SBRQ5\t" + payload.slice(6, payload.len())
+    if kind == "network_response" and payload.starts_with("SBRN1\t"):
+        return "SBRN2\t" + payload.slice(6, payload.len())
+    if kind == "frame" and payload.starts_with("SBRF8\t"):
+        return "SBRF9\t" + payload.slice(6, payload.len())
+    payload
+
+fn _browser_renderer_capability_decode_payload(
+    kind: text, payload: text
+) -> text:
+    if kind == "fetch_request":
+        if not payload.starts_with("SBRQ5\t"):
+            return ""
+        return "SBRQ4\t" + payload.slice(6, payload.len())
+    if kind == "network_response":
+        if not payload.starts_with("SBRN2\t"):
+            return ""
+        return "SBRN1\t" + payload.slice(6, payload.len())
+    if kind == "frame":
+        if not payload.starts_with("SBRF9\t"):
+            return ""
+        return "SBRF8\t" + payload.slice(6, payload.len())
+    payload
+
+fn _browser_renderer_capability_payload_schema_valid(
+    kind: text, payload: text
+) -> bool:
+    if kind == "fetch_request":
+        return payload.starts_with("SBRQ5\t")
+    if kind == "network_response":
+        return payload.starts_with("SBRN2\t")
+    if kind == "frame":
+        return payload.starts_with("SBRF9\t")
+    true
+
+pub fn browser_renderer_capability_payload_message(
+    message: BrowserRendererCapabilityMessage
+) -> BrowserRendererMessage:
+    BrowserRendererMessage(
+        kind: message.kind,
+        generation: message.generation,
+        request_id: message.request_id,
+        payload: _browser_renderer_capability_decode_payload(
+            message.kind, message.payload
+        )
+    )
+
+pub fn browser_renderer_capability_bind_encoded(
+    encoded: BrowserRendererEncodeResult,
+    generation: i64,
+    request_id: i64,
+    root_command_request_id: i64,
+    command_capability: text
+) -> BrowserRendererEncodeResult:
+    if not encoded.ok:
+        return encoded
+    if encoded.kind == "":
+        return _browser_renderer_reject_encode("invalid-message")
+    browser_renderer_capability_message_encode(
+        encoded.kind,
+        generation,
+        request_id,
+        root_command_request_id,
+        _browser_renderer_capability_wire_payload(
+            encoded.kind, encoded.payload
+        ),
         command_capability
     )
 
@@ -740,6 +825,17 @@ pub fn browser_renderer_capability_decoder_feed(
         return _browser_renderer_capability_violation(
             decoder, "malformed-command-capability"
         )
+    val payload = _browser_renderer_byte_slice(
+        buffer,
+        payload_start,
+        expected_total - pending_capability_bytes
+    )
+    if not _browser_renderer_capability_payload_schema_valid(
+        pending_kind, payload
+    ):
+        return _browser_renderer_capability_violation(
+            decoder, "legacy-nested-schema"
+        )
     val next_buffer = _browser_renderer_byte_slice(
         buffer, expected_total, buffer_len
     )
@@ -767,10 +863,7 @@ pub fn browser_renderer_capability_decoder_feed(
             request_id: pending_request_id,
             root_command_request_id: pending_root_command_request_id,
             command_capability: capability,
-            payload: _browser_renderer_byte_slice(
-                buffer, payload_start,
-                expected_total - pending_capability_bytes
-            )
+            payload: payload
         )
     )
 
@@ -1594,6 +1687,21 @@ pub fn browser_renderer_fetch_request_decode(
         request_id, kind, url, method, headers, body, content_type,
         credentials, initiator_origin, decoded_cookie_writes.writes, 0, ""
     )
+
+pub fn browser_renderer_fetch_request_reply_to_request_id(
+    message: BrowserRendererMessage
+) -> i64:
+    if message.kind != "fetch_request":
+        return -1
+    val header_end = _browser_renderer_header_end(message.payload)
+    if header_end < 0 or header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return -1
+    val fields = _browser_renderer_byte_slice(
+        message.payload, 0, header_end
+    ).split("\t")
+    if fields.len() != 12 or fields[0] != "SBRQ4":
+        return -1
+    _browser_renderer_positive_i64(fields[1])
 
 pub fn browser_renderer_network_response_encode(
     generation: i64,

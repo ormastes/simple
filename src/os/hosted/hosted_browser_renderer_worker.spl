@@ -6,11 +6,16 @@ use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI,
     BROWSER_RENDERER_MAX_VIEWPORT,
     BROWSER_RENDERER_WORKER_ARG,
-    BrowserRendererEncodeResult, BrowserRendererMessage,
+    BrowserRendererCapabilityMessage, BrowserRendererEncodeResult,
+    BrowserRendererMessage,
     BrowserTextInputOverlay, browser_text_input_overlay_empty,
     browser_renderer_action_decode,
     browser_renderer_bookmark_snapshot_decode,
-    browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_capability_bind_encoded,
+    browser_renderer_capability_decoder_feed,
+    browser_renderer_capability_decoder_new,
+    browser_renderer_capability_message_encode,
+    browser_renderer_capability_payload_message,
     browser_renderer_fetch_request_encode,
     browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_frame_encode_with_state_and_retained_images_and_title,
@@ -160,7 +165,7 @@ fn _worker_diagnostics(session: BrowserSession) -> text:
 fn _worker_frame(
     session: BrowserSession,
     render_session: SimpleWebRenderSession,
-    message: BrowserRendererMessage,
+    message: BrowserRendererCapabilityMessage,
     width: i32,
     height: i32,
     animation_time_ms: i64,
@@ -206,7 +211,7 @@ fn _worker_frame(
         ""
     else:
         browser_bookmark_stored_title(session.current_title)
-    val encoded = browser_renderer_frame_encode_with_state_and_retained_images_and_title(
+    val legacy_encoded = browser_renderer_frame_encode_with_state_and_retained_images_and_title(
         layout.composition,
         message.generation,
         response_request_id,
@@ -229,6 +234,13 @@ fn _worker_frame(
         composition_revision,
         frame_image_resources,
         prior_image_resource_revisions
+    )
+    val encoded = browser_renderer_capability_bind_encoded(
+        legacy_encoded,
+        message.generation,
+        response_request_id,
+        message.root_command_request_id,
+        message.command_capability
     )
     if not encoded.ok:
         return _worker_result_reject(
@@ -275,6 +287,8 @@ pub class HostedBrowserRendererWorkerSession:
     pressed_pointer_default_prevented: bool
     scroll_milli_y: i64
     image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
+    active_root_command_request_id: i64
+    active_command_capability: text
 
     static fn create(width: i32, height: i32) -> HostedBrowserRendererWorkerSession:
         HostedBrowserRendererWorkerSession._create(
@@ -316,7 +330,9 @@ pub class HostedBrowserRendererWorkerSession:
             caret_blink_epoch_ms: 0,
             pressed_pointer_default_prevented: false,
             scroll_milli_y: 0,
-            image_resource_revisions: []
+            image_resource_revisions: [],
+            active_root_command_request_id: 0,
+            active_command_capability: ""
         )
 
     me _target_at(x: i64, y: i64) -> text:
@@ -675,20 +691,48 @@ pub class HostedBrowserRendererWorkerSession:
             return "invalid-bookmark-snapshot"
         ""
 
-    me handle(message: BrowserRendererMessage) -> HostedBrowserRendererWorkerResult:
+    me handle(
+        message: BrowserRendererCapabilityMessage
+    ) -> HostedBrowserRendererWorkerResult:
         if message.request_id != self.expected_request_id:
             return _worker_result_reject(
                 "unexpected-request-id",
                 self.initialized,
                 self.animation_time_ms
             )
+        val nested_response = message.kind == "network_response"
+        if nested_response:
+            if (self.active_command_capability == "" or
+                message.root_command_request_id !=
+                    self.active_root_command_request_id or
+                message.command_capability !=
+                    self.active_command_capability):
+                return _worker_result_reject(
+                    "unissued-network-response",
+                    self.initialized,
+                    self.animation_time_ms
+                )
+        else:
+            if message.root_command_request_id != message.request_id:
+                return _worker_result_reject(
+                    "invalid-command-root",
+                    self.initialized,
+                    self.animation_time_ms
+                )
+            self.active_root_command_request_id = (
+                message.root_command_request_id
+            )
+            self.active_command_capability = message.command_capability
+        val payload_message = (
+            browser_renderer_capability_payload_message(message)
+        )
         if self.theme_required and not self.theme_initialized:
             if message.kind != "theme_init":
                 return _worker_result_reject(
                     "expected-theme-init", false, self.animation_time_ms
                 )
-            val revision = hosted_theme_init_revision(message.payload)
-            val wire_text = hosted_theme_init_wire(message.payload)
+            val revision = hosted_theme_init_revision(payload_message.payload)
+            val wire_text = hosted_theme_init_wire(payload_message.payload)
             val ready = hosted_theme_ready_encode(revision, wire_text)
             if revision <= 0 or wire_text == "":
                 return _worker_result_reject(
@@ -702,11 +746,18 @@ pub class HostedBrowserRendererWorkerSession:
                     )
                 Ok(value):
                     value
-            val encoded = browser_renderer_message_encode(
+            val legacy_encoded = browser_renderer_message_encode(
                 "theme_ready",
                 message.generation,
                 message.request_id,
                 ready_payload
+            )
+            val encoded = browser_renderer_capability_bind_encoded(
+                legacy_encoded,
+                message.generation,
+                message.request_id,
+                message.root_command_request_id,
+                message.command_capability
             )
             if not encoded.ok:
                 return _worker_result_reject(
@@ -716,6 +767,8 @@ pub class HostedBrowserRendererWorkerSession:
             self.theme_revision = revision
             self.theme_wire_text = wire_text
             self.expected_request_id = self.expected_request_id + 1
+            self.active_root_command_request_id = 0
+            self.active_command_capability = ""
             return HostedBrowserRendererWorkerResult(
                 ok: true,
                 reason: "ok",
@@ -738,7 +791,7 @@ pub class HostedBrowserRendererWorkerSession:
                     simple_web_content_full_html_matches_install_wire(
                         self.theme_wire_text,
                         self.theme_revision,
-                        message.payload
+                        payload_message.payload
                     )
                 ):
                     return _worker_result_reject(
@@ -747,7 +800,7 @@ pub class HostedBrowserRendererWorkerSession:
                         self.animation_time_ms
                     )
             if val Err(reason) = self.browser.open_html(
-                "simple-renderer://document", message.payload
+                "simple-renderer://document", payload_message.payload
             ):
                 return _worker_result_reject(
                     reason, false, self.animation_time_ms
@@ -757,7 +810,7 @@ pub class HostedBrowserRendererWorkerSession:
         else:
             var reason = ""
             if message.kind == "advance":
-                val action = browser_renderer_action_decode(message)
+                val action = browser_renderer_action_decode(payload_message)
                 if not action.ok:
                     reason = action.reason
                 elif action.now_ms < self.animation_time_ms:
@@ -766,9 +819,9 @@ pub class HostedBrowserRendererWorkerSession:
                     val _ = self.browser.advance_time(action.now_ms)
                     self.animation_time_ms = action.now_ms
             elif message.kind == "pointer":
-                reason = self._dispatch_pointer(message)
+                reason = self._dispatch_pointer(payload_message)
             elif message.kind == "scroll":
-                val action = browser_renderer_action_decode(message)
+                val action = browser_renderer_action_decode(payload_message)
                 if not action.ok:
                     reason = action.reason
                 else:
@@ -779,17 +832,17 @@ pub class HostedBrowserRendererWorkerSession:
                         next_scroll = BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI
                     self.scroll_milli_y = next_scroll
             elif message.kind == "text":
-                reason = self._dispatch_text(message)
+                reason = self._dispatch_text(payload_message)
             elif message.kind == "key":
-                reason = self._dispatch_key(message)
+                reason = self._dispatch_key(payload_message)
             elif message.kind == "chrome":
-                reason = self._dispatch_chrome(message)
+                reason = self._dispatch_chrome(payload_message)
             elif message.kind == "navigation":
-                reason = self._dispatch_navigation(message)
+                reason = self._dispatch_navigation(payload_message)
             elif message.kind == "bookmark-snapshot":
-                reason = self._dispatch_bookmark_snapshot(message)
+                reason = self._dispatch_bookmark_snapshot(payload_message)
             elif message.kind == "resize":
-                val resize = browser_renderer_resize_decode(message)
+                val resize = browser_renderer_resize_decode(payload_message)
                 if not resize.ok:
                     reason = resize.reason
                 else:
@@ -797,7 +850,7 @@ pub class HostedBrowserRendererWorkerSession:
                     self.height = resize.height
             elif message.kind == "network_response":
                 val response = browser_renderer_network_response_decode(
-                    message
+                    payload_message
                 )
                 if not response.ok:
                     reason = response.reason
@@ -833,7 +886,7 @@ pub class HostedBrowserRendererWorkerSession:
         val response_id = self.next_outbound_id
         self.next_outbound_id = self.next_outbound_id + 1
         if val Some(request) = self.browser.take_pending_request():
-            val encoded = browser_renderer_fetch_request_encode(
+            val legacy_encoded = browser_renderer_fetch_request_encode(
                 message.generation,
                 response_id,
                 message.request_id,
@@ -847,6 +900,13 @@ pub class HostedBrowserRendererWorkerSession:
                 request.credentials,
                 request.script_cookie_writes,
                 request.initiator_origin
+            )
+            val encoded = browser_renderer_capability_bind_encoded(
+                legacy_encoded,
+                message.generation,
+                response_id,
+                message.root_command_request_id,
+                message.command_capability
             )
             if not encoded.ok:
                 return _worker_result_reject(
@@ -878,6 +938,8 @@ pub class HostedBrowserRendererWorkerSession:
         )
         if frame.ok:
             self.image_resource_revisions = frame.image_resource_revisions
+            self.active_root_command_request_id = 0
+            self.active_command_capability = ""
         if frame.hit_index != nil:
             self.last_hit_index = frame.hit_index
             val max_scroll_milli_y = frame.max_scroll_y.to_i64() * 1000
@@ -892,6 +954,8 @@ pub class HostedBrowserRendererWorkerSession:
     me close():
         self.last_hit_index = nil
         self.image_resource_revisions = []
+        self.active_root_command_request_id = 0
+        self.active_command_capability = ""
         self.render_session.close()
         self.browser.close()
 
@@ -936,9 +1000,18 @@ pub fn hosted_browser_renderer_handle_request(
         next_time_ms = requested_time_ms
 
     val render_session = SimpleWebRenderSession.create()
+    val capability_message = BrowserRendererCapabilityMessage(
+        kind: message.kind,
+        generation: message.generation,
+        request_id: message.request_id,
+        root_command_request_id: message.request_id,
+        command_capability: "11111111111111111111111111111111",
+        payload: message.payload
+    )
     _worker_frame(
         session, render_session,
-        message, width, height, next_time_ms, message.request_id,
+        capability_message, width, height, next_time_ms,
+        message.request_id,
         browser_text_input_overlay_empty(), -1, 0, []
     )
 
@@ -1028,11 +1101,13 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
     if not browser_renderer_sandbox_enter():
         return 70
 
-    val ready = browser_renderer_message_encode("ready", generation, 1, "")
+    val ready = browser_renderer_capability_message_encode(
+        "ready", generation, 1, 0, "", ""
+    )
     if not ready.ok or not _worker_write(ready.wire):
         return 71
 
-    var decoder = browser_renderer_decoder_new(generation)
+    var decoder = browser_renderer_capability_decoder_new(generation)
     var session = if themed:
         HostedBrowserRendererWorkerSession.create_for_theme_protocol(
             width_i64.to_i32(), height_i64.to_i32()
@@ -1045,7 +1120,9 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
         val chunk = rt_browser_renderer_read_stdin_some(_WORKER_READ_BYTES)
         if chunk == "":
             return if decoder.buffer_len == 0: 0 else: 72
-        var decoded = browser_renderer_decoder_feed(decoder, chunk)
+        var decoded = browser_renderer_capability_decoder_feed(
+            decoder, chunk
+        )
         var drain_buffer = true
         var drained_messages: i64 = 0
         while drain_buffer:
@@ -1067,9 +1144,16 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
                     if not session.initialized or
                         decoded.message.request_id != session.expected_request_id:
                         return 74
-                    val acknowledged = browser_renderer_message_encode(
+                    val legacy_acknowledged = browser_renderer_message_encode(
                         "test_hang_ready", decoded.message.generation,
                         decoded.message.request_id, ""
+                    )
+                    val acknowledged = browser_renderer_capability_bind_encoded(
+                        legacy_acknowledged,
+                        decoded.message.generation,
+                        decoded.message.request_id,
+                        decoded.message.root_command_request_id,
+                        decoded.message.command_capability
                     )
                     if not acknowledged.ok or not _worker_write(
                         acknowledged.wire
@@ -1085,6 +1169,8 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
                 if not frame.ok or not _worker_write(frame.wire):
                     return 74
                 if decoder.buffer_len > 0:
-                    decoded = browser_renderer_decoder_feed(decoder, "")
+                    decoded = browser_renderer_capability_decoder_feed(
+                        decoder, ""
+                    )
                 else:
                     drain_buffer = false

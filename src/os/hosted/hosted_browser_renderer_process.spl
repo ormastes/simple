@@ -8,26 +8,32 @@ use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI,
     BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES,
     BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES,
-    BrowserRendererDecoder, BrowserRendererEncodeResult,
+    BrowserRendererCapabilityDecoder, BrowserRendererCapabilityMessage,
+    BrowserRendererEncodeResult,
     BrowserRendererFrameDecodeResult,
     BrowserRendererMessage,
     BrowserRendererNetworkDecodeResult,
     browser_renderer_advance_encode,
     browser_renderer_bookmark_snapshot_encode,
     browser_renderer_chrome_encode,
-    browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_capability_bind_encoded,
+    browser_renderer_capability_decoder_feed,
+    browser_renderer_capability_decoder_new,
+    browser_renderer_command_capability_valid,
+    browser_renderer_capability_payload_message,
     browser_renderer_fetch_request_decode,
+    browser_renderer_fetch_request_reply_to_request_id,
     browser_renderer_frame_decode_with_retained_images,
     browser_renderer_frame_reply_to_request_id,
     browser_renderer_key_encode, browser_renderer_key_with_shift_encode,
     browser_renderer_message_encode,
-    browser_renderer_message_resequence,
     browser_renderer_navigation_encode,
     browser_renderer_network_response_encode,
     browser_renderer_pointer_encode, browser_renderer_resize_encode,
     browser_renderer_scroll_encode,
     browser_renderer_text_encode
 }
+use std.nogc_sync_mut.io.crypto_sffi
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
 }
@@ -239,6 +245,12 @@ fn _deadline_ms(timeout_ms: i64) -> i64:
 val BROWSER_RENDERER_MAX_DEFERRED_COMMANDS: i32 = 64
 pub val HOSTED_BROWSER_SITE_SWAP_REQUIRED: text = "site-swap-required"
 
+fn browser_renderer_command_capability_new() -> Result<text, text>:
+    val capability = crypto_sffi.random_hex(16)
+    if not browser_renderer_command_capability_valid(capability):
+        return Err("renderer-command-entropy-unavailable")
+    Ok(capability)
+
 fn _hosted_browser_schemeful_site(url: text) -> text:
     val parsed = Url.parse(url)
     if not parsed.?:
@@ -246,11 +258,18 @@ fn _hosted_browser_schemeful_site(url: text) -> text:
     schemeful_site_key(Origin.from_url(parsed!))
 
 struct _HostedBrowserDeferredCommand:
-    wire: text
+    kind: text
+    payload: text
     operation: text
     timeout_ms: i64
     resize_width: i32
     resize_height: i32
+
+struct _HostedBrowserPreparedCommand:
+    wire: text
+    capability: text
+    root_command_request_id: i64
+    wire_request_id: i64
 
 pub class HostedBrowserRendererProcess:
     pid: i64
@@ -265,7 +284,7 @@ pub class HostedBrowserRendererProcess:
     next_animation_ms: i64
     pending_resize_width: i32
     pending_resize_height: i32
-    decoder: BrowserRendererDecoder
+    decoder: BrowserRendererCapabilityDecoder
     network: FetchEngine
     network_job_handle: i64
     network_job_fetch: BrowserRendererNetworkDecodeResult?
@@ -276,6 +295,14 @@ pub class HostedBrowserRendererProcess:
     pending_wire_offset: i64
     pending_wire_reply_to_request_id: i64
     pending_wire_is_command: bool
+    staged_command_capability: text
+    staged_root_command_request_id: i64
+    staged_wire_request_id: i64
+    issued_command_capability: text
+    issued_root_command_request_id: i64
+    issued_wire_request_id: i64
+    active_command_capability: text
+    active_root_command_request_id: i64
     stop_after_write: bool
     deferred_commands: [_HostedBrowserDeferredCommand]
     pending_scroll_event_id: i64
@@ -363,7 +390,7 @@ pub class HostedBrowserRendererProcess:
             next_animation_ms: -1,
             pending_resize_width: 0,
             pending_resize_height: 0,
-            decoder: browser_renderer_decoder_new(generation),
+            decoder: browser_renderer_capability_decoder_new(generation),
             network: FetchEngine.new(
                 Logger.new("browser-renderer-broker", LogLevel.Error)
             ),
@@ -376,6 +403,14 @@ pub class HostedBrowserRendererProcess:
             pending_wire_offset: 0,
             pending_wire_reply_to_request_id: 0,
             pending_wire_is_command: false,
+            staged_command_capability: "",
+            staged_root_command_request_id: 0,
+            staged_wire_request_id: 0,
+            issued_command_capability: "",
+            issued_root_command_request_id: 0,
+            issued_wire_request_id: 0,
+            active_command_capability: "",
+            active_root_command_request_id: 0,
             stop_after_write: false,
             deferred_commands: [],
             pending_scroll_event_id: 0,
@@ -425,6 +460,53 @@ pub class HostedBrowserRendererProcess:
         self.hsts_dirty = false
         self.hsts.load_hsts_snapshot(snapshot, wall_clock_ms)
 
+    me _retire_renderer_command_capability():
+        self.staged_command_capability = ""
+        self.staged_root_command_request_id = 0
+        self.staged_wire_request_id = 0
+        self.issued_command_capability = ""
+        self.issued_root_command_request_id = 0
+        self.issued_wire_request_id = 0
+        self.active_command_capability = ""
+        self.active_root_command_request_id = 0
+
+    me _require_issued_renderer_reply(
+        message: BrowserRendererCapabilityMessage,
+        reply_to_request_id: i64
+    ) -> Result<bool, text>:
+        if message.generation != self.generation:
+            return Err("stale-generation")
+        if (self.issued_command_capability == "" or
+            message.command_capability != self.issued_command_capability or
+            message.root_command_request_id !=
+                self.issued_root_command_request_id):
+            return Err("unissued-renderer-reply")
+        if (reply_to_request_id != self.issued_wire_request_id or
+            self.issued_wire_request_id <= 0):
+            return Err("wrong-renderer-wire")
+        self.issued_command_capability = ""
+        self.issued_root_command_request_id = 0
+        self.issued_wire_request_id = 0
+        Ok(true)
+
+    me _admit_renderer_reply(
+        message: BrowserRendererCapabilityMessage,
+        reply_to_request_id: i64,
+        future_reason: text
+    ) -> Result<text, text>:
+        match self._poll_renderer_reply(
+            reply_to_request_id, future_reason
+        ):
+            Err(reason): return Err(reason)
+            Ok(current):
+                if not current:
+                    return Ok("stale")
+        match self._require_issued_renderer_reply(
+            message, reply_to_request_id
+        ):
+            Err(reason): Err(reason)
+            Ok(_): Ok("current")
+
     me hsts_snapshot(wall_clock_ms: i64) -> BrowserHstsSnapshot:
         val _ = self.hsts.advance_time(rt_time_now_monotonic_ms())
         self.hsts.hsts_snapshot(wall_clock_ms)
@@ -450,6 +532,7 @@ pub class HostedBrowserRendererProcess:
     me _document_site_swap_required(url: text) -> bool:
         val site = _hosted_browser_schemeful_site(url)
         if site == "":
+            self._retire_renderer_site_swap()
             self.site_swap_pending = true
             self.site_swap_site = ""
             return true
@@ -458,9 +541,26 @@ pub class HostedBrowserRendererProcess:
             return false
         if site == self.site_lock:
             return false
+        self._retire_renderer_site_swap()
         self.site_swap_pending = true
         self.site_swap_site = site
         true
+
+    me _retire_renderer_site_swap():
+        self._retire_renderer_command_capability()
+        self.pending_wire = ""
+        self.pending_wire_offset = 0
+        self.pending_wire_reply_to_request_id = 0
+        self.pending_wire_is_command = false
+        self.deferred_commands = []
+        self.command_deadline_ms = 0
+        self.pending_operation = ""
+        self.network_job_handle = 0
+        self.network_job_fetch = nil
+        self.network_job_policy = nil
+        self.network_job_request = nil
+        self.network_job_redirect_count = 0
+        self.retained_image_resources = []
 
     me _validated_navigation_permit(
         url: text,
@@ -906,8 +1006,9 @@ pub class HostedBrowserRendererProcess:
         if (not self.site_swap_pending or
             not self.navigation_permit.active):
             return Err("site-swap-state")
-        val started = self._begin_navigation_command(
-            browser_renderer_navigation_encode(
+        if self.state != "active":
+            return Err("invalid-renderer-state")
+        val command = browser_renderer_navigation_encode(
                 self.generation,
                 self.next_request_id,
                 "open",
@@ -916,7 +1017,12 @@ pub class HostedBrowserRendererProcess:
                 self.navigation_permit.headers,
                 self.navigation_permit.body,
                 self.navigation_permit.content_type
-            ),
+            )
+        val prepared = match self._prepare_renderer_command(command):
+            Err(reason): return Err(reason)
+            Ok(value): value
+        val started = self._begin_navigation_command(
+            prepared,
             "open",
             "navigation",
             timeout_ms
@@ -968,6 +1074,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_document_commit_url = ""
         self.provisional_document_origin = ""
         self._clear_pending_document_csp()
+        self._retire_renderer_command_capability()
         true
 
     me _begin_stop_after_write() -> text:
@@ -976,14 +1083,18 @@ pub class HostedBrowserRendererProcess:
         val remaining_ms = (
             self.command_deadline_ms - rt_time_now_monotonic_ms()
         )
+        val command = browser_renderer_navigation_encode(
+            self.generation, self.next_request_id,
+            "stop", "", "", "", "", ""
+        )
+        val prepared = match self._prepare_renderer_command(command):
+            Err(reason): return reason
+            Ok(value): value
         self.stop_after_write = false
         if not self._cancel_pending_for_stop():
             return "renderer-busy"
         match self._begin_navigation_command(
-            browser_renderer_navigation_encode(
-                self.generation, self.next_request_id,
-                "stop", "", "", "", "", ""
-            ),
+            prepared,
             "stop", "stop",
             if remaining_ms > 0: remaining_ms else: 1
         ):
@@ -1017,13 +1128,14 @@ pub class HostedBrowserRendererProcess:
         self.pending_scroll_delta_milli_y = 0
         self.pointer_pressed = false
         self.pending_pointer_cancel_event_id = 0
+        self._retire_renderer_command_capability()
         self.retained_image_resources = []
         self._clear_document_title()
         if self.pid > 0:
             if not process_close_piped(self.pid):
                 return false
         self.pid = 0
-        self.decoder = browser_renderer_decoder_new(self.generation)
+        self.decoder = browser_renderer_capability_decoder_new(self.generation)
         self.network = FetchEngine.new(
             Logger.new("browser-renderer-broker", LogLevel.Error)
         )
@@ -1411,9 +1523,27 @@ pub class HostedBrowserRendererProcess:
         )
         if not wire.ok:
             return wire.reason
+        if (self.active_command_capability == "" or
+            self.active_root_command_request_id <= 0):
+            return "renderer-command-capability-missing"
+        val bound_wire = browser_renderer_capability_bind_encoded(
+            wire,
+            self.generation,
+            self.next_request_id,
+            self.active_root_command_request_id,
+            self.active_command_capability
+        )
+        if not bound_wire.ok:
+            return bound_wire.reason
         if self.pending_wire != "":
             return "renderer-write-state"
-        self.pending_wire = wire.wire
+        self.staged_command_capability = self.active_command_capability
+        self.staged_root_command_request_id = (
+            self.active_root_command_request_id
+        )
+        self.staged_wire_request_id = self.next_request_id
+        self.expected_reply_to_request_id = self.next_request_id
+        self.pending_wire = bound_wire.wire
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = self.next_request_id
         self.pending_wire_is_command = false
@@ -1438,6 +1568,17 @@ pub class HostedBrowserRendererProcess:
         )
 
     me _complete_pending_wire_write():
+        if self.staged_command_capability != "":
+            self.issued_command_capability = (
+                self.staged_command_capability
+            )
+            self.issued_root_command_request_id = (
+                self.staged_root_command_request_id
+            )
+            self.issued_wire_request_id = self.staged_wire_request_id
+            self.staged_command_capability = ""
+            self.staged_root_command_request_id = 0
+            self.staged_wire_request_id = 0
         self.expected_reply_to_request_id = (
             self.pending_wire_reply_to_request_id
         )
@@ -1523,17 +1664,51 @@ pub class HostedBrowserRendererProcess:
             fetch, policy, response, redirect_count
         )
 
-    me _begin_frame_request(
-        request: BrowserRendererEncodeResult,
+    fn _prepare_renderer_command(
+        request: BrowserRendererEncodeResult
+    ) -> Result<_HostedBrowserPreparedCommand, text>:
+        if not request.ok:
+            return Err(request.reason)
+        if self.pending_wire != "" and self.pending_wire_offset > 0:
+            return Err("renderer-busy")
+        val capability = match browser_renderer_command_capability_new():
+            Err(reason): return Err(reason)
+            Ok(value): value
+        val bound_request = browser_renderer_capability_bind_encoded(
+            request,
+            self.generation,
+            self.next_request_id,
+            self.next_request_id,
+            capability
+        )
+        if not bound_request.ok:
+            return Err(bound_request.reason)
+        Ok(_HostedBrowserPreparedCommand(
+            wire: bound_request.wire,
+            capability: capability,
+            root_command_request_id: self.next_request_id,
+            wire_request_id: self.next_request_id
+        ))
+
+    me _begin_prepared_renderer_command(
+        prepared: _HostedBrowserPreparedCommand,
         operation: text,
         timeout_ms: i64
     ) -> Result<bool, text>:
         if self.command_deadline_ms > 0:
             return Err("renderer-busy")
-        if not request.ok:
-            return Err(request.reason)
         val deadline = _deadline_ms(timeout_ms)
-        self.pending_wire = request.wire
+        self.active_command_capability = prepared.capability
+        self.active_root_command_request_id = (
+            prepared.root_command_request_id
+        )
+        self.staged_command_capability = prepared.capability
+        self.staged_root_command_request_id = (
+            prepared.root_command_request_id
+        )
+        self.staged_wire_request_id = prepared.wire_request_id
+        self.expected_reply_to_request_id = prepared.wire_request_id
+        self.pending_wire = prepared.wire
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = self.next_request_id
         self.pending_wire_is_command = true
@@ -1541,6 +1716,20 @@ pub class HostedBrowserRendererProcess:
         self.pending_operation = operation
         self.hang_acknowledged = false
         Ok(true)
+
+    me _begin_frame_request(
+        request: BrowserRendererEncodeResult,
+        operation: text,
+        timeout_ms: i64
+    ) -> Result<bool, text>:
+        if self.command_deadline_ms > 0:
+            return Err("renderer-busy")
+        val prepared = match self._prepare_renderer_command(request):
+            Err(reason): return Err(reason)
+            Ok(value): value
+        self._begin_prepared_renderer_command(
+            prepared, operation, timeout_ms
+        )
 
     me _begin_after_animation(
         request: BrowserRendererEncodeResult,
@@ -1550,10 +1739,13 @@ pub class HostedBrowserRendererProcess:
         resize_height: i32 = 0
     ) -> Result<bool, text>:
         if self.command_deadline_ms <= 0:
+            val prepared = match self._prepare_renderer_command(request):
+                Err(reason): return Err(reason)
+                Ok(value): value
             self.pending_resize_width = resize_width
             self.pending_resize_height = resize_height
-            return self._begin_frame_request(
-                request, operation, timeout_ms
+            return self._begin_prepared_renderer_command(
+                prepared, operation, timeout_ms
             )
         if not request.ok:
             return Err(request.reason)
@@ -1577,16 +1769,20 @@ pub class HostedBrowserRendererProcess:
             self.pending_wire != "" and self.pending_wire_is_command and
             self.pending_wire_offset <= 0
         ):
+            val prepared = match self._prepare_renderer_command(request):
+                Err(reason): return Err(reason)
+                Ok(value): value
             self.pending_wire = ""
             self.pending_wire_offset = 0
             self.pending_wire_reply_to_request_id = 0
             self.pending_wire_is_command = false
             self.command_deadline_ms = 0
             self.pending_operation = ""
+            self._retire_renderer_command_capability()
             self.pending_resize_width = resize_width
             self.pending_resize_height = resize_height
-            return self._begin_frame_request(
-                request, operation, timeout_ms
+            return self._begin_prepared_renderer_command(
+                prepared, operation, timeout_ms
             )
         if operation == "resize" and self.deferred_commands.len() > 0:
             val newest_index = self.deferred_commands.len() - 1
@@ -1597,7 +1793,8 @@ pub class HostedBrowserRendererProcess:
                     return Ok(false)
                 self.deferred_commands[newest_index] = (
                     _HostedBrowserDeferredCommand(
-                        wire: request.wire,
+                        kind: request.kind,
+                        payload: request.payload,
                         operation: operation,
                         timeout_ms: timeout_ms,
                         resize_width: resize_width,
@@ -1610,7 +1807,8 @@ pub class HostedBrowserRendererProcess:
         ):
             return Err("renderer-input-queue-full")
         self.deferred_commands.push(_HostedBrowserDeferredCommand(
-            wire: request.wire,
+            kind: request.kind,
+            payload: request.payload,
             operation: operation,
             timeout_ms: timeout_ms,
             resize_width: resize_width,
@@ -1622,35 +1820,31 @@ pub class HostedBrowserRendererProcess:
         if self.deferred_commands.len() == 0:
             return ""
         # ponytail: O(n) shift is bounded at 64; use a ring only if this grows.
-        val deferred = self.deferred_commands.remove(0)
-        val request = browser_renderer_message_resequence(
-            deferred.wire, self.generation, self.next_request_id
+        val deferred = self.deferred_commands[0]
+        val request = BrowserRendererEncodeResult(
+            ok: true,
+            reason: "ok",
+            wire: "",
+            kind: deferred.kind,
+            payload: deferred.payload
         )
-        if not request.ok:
-            return request.reason
-        self.pending_wire = request.wire
-        self.pending_wire_offset = 0
-        self.pending_wire_reply_to_request_id = self.next_request_id
-        self.pending_wire_is_command = true
-        self.command_deadline_ms = _deadline_ms(deferred.timeout_ms)
-        self.pending_operation = deferred.operation
+        val prepared = match self._prepare_renderer_command(request):
+            Err(reason): return reason
+            Ok(value): value
+        val _ = self.deferred_commands.remove(0)
         self.pending_resize_width = deferred.resize_width
         self.pending_resize_height = deferred.resize_height
-        ""
+        match self._begin_prepared_renderer_command(
+            prepared, deferred.operation, deferred.timeout_ms
+        ):
+            Err(reason): reason
+            Ok(_): ""
 
     me _dispatch_renderer_fetch(
         fetch: BrowserRendererNetworkDecodeResult
     ) -> HostedBrowserRendererResult?:
         if not fetch.ok:
             return Some(self.fail(fetch.reason))
-        match self._poll_renderer_reply(
-            fetch.reply_to_request_id, "stale-renderer-request"
-        ):
-            Err(reason):
-                return Some(self.fail(reason))
-            Ok(current):
-                if not current:
-                    return nil
         if not self._renderer_initiator_valid(fetch):
             return Some(self.fail("invalid-renderer-initiator"))
         var renderer_navigation = false
@@ -1752,6 +1946,7 @@ pub class HostedBrowserRendererProcess:
         self.command_deadline_ms = 0
         self.pending_operation = ""
         self.expected_reply_to_request_id = 0
+        self._retire_renderer_command_capability()
         self.state = "await-init"
         _renderer_result(true, "theme-ready", _empty_composition())
 
@@ -1827,6 +2022,7 @@ pub class HostedBrowserRendererProcess:
         self.retained_image_resources = frame.image_resources
         self.command_deadline_ms = 0
         self.pending_operation = ""
+        self._retire_renderer_command_capability()
         if completed_pointer_cancel:
             self.pointer_pressed = false
             self.pending_pointer_cancel_event_id = 0
@@ -1859,7 +2055,9 @@ pub class HostedBrowserRendererProcess:
             return Some(self.fail("renderer-timeout"))
         if self.state == "starting":
             val chunk = process_read_stdout(self.pid)
-            val decoded = browser_renderer_decoder_feed(self.decoder, chunk)
+            val decoded = browser_renderer_capability_decoder_feed(
+                self.decoder, chunk
+            )
             self.decoder = decoded.decoder
             if decoded.status == "violation":
                 return Some(self.fail(decoded.decoder.error))
@@ -1868,6 +2066,8 @@ pub class HostedBrowserRendererProcess:
                     decoded.message.request_id != 1 or
                     decoded.message.payload != ""):
                     return Some(self.fail("expected-ready"))
+                if decoded.decoder.buffer_len != 0:
+                    return Some(self.fail("unexpected-ready-buffer"))
                 self.command_deadline_ms = 0
                 self.pending_operation = ""
                 self.state = if self.requires_theme_handshake:
@@ -1899,14 +2099,25 @@ pub class HostedBrowserRendererProcess:
                 return Some(self.fail(reason))
             return nil
         val chunk = process_read_stdout(self.pid)
-        val decoded = browser_renderer_decoder_feed(self.decoder, chunk)
+        val decoded = browser_renderer_capability_decoder_feed(
+            self.decoder, chunk
+        )
         self.decoder = decoded.decoder
         if decoded.status == "violation":
             return Some(self.fail(decoded.decoder.error))
         if decoded.status == "message":
+            val payload_message = (
+                browser_renderer_capability_payload_message(decoded.message)
+            )
             if self.state == "await-theme-ready":
+                match self._require_issued_renderer_reply(
+                    decoded.message, decoded.message.request_id
+                ):
+                    Err(reason):
+                        return Some(self.fail(reason))
+                    Ok(_): ()
                 return Some(self._accept_theme_ready_message(
-                    decoded.message
+                    payload_message
                 ))
             if decoded.message.kind == "test_hang_ready":
                 if (self.pending_operation != "test_hang_after_ready" or
@@ -1915,25 +2126,54 @@ pub class HostedBrowserRendererProcess:
                         self.expected_reply_to_request_id
                     ) or decoded.message.payload != ""):
                     return Some(self.fail("unexpected-test-hang-ready"))
+                match self._require_issued_renderer_reply(
+                    decoded.message, decoded.message.request_id
+                ):
+                    Err(reason):
+                        return Some(self.fail(reason))
+                    Ok(_): ()
                 self.hang_acknowledged = true
                 return nil
             if decoded.message.kind == "fetch_request":
-                val fetch = browser_renderer_fetch_request_decode(
-                    decoded.message
+                val fetch_reply_to_request_id = (
+                    browser_renderer_fetch_request_reply_to_request_id(
+                        payload_message
+                    )
                 )
+                if fetch_reply_to_request_id <= 0:
+                    return Some(self.fail(
+                        "malformed-network-request"
+                    ))
+                match self._admit_renderer_reply(
+                    decoded.message,
+                    fetch_reply_to_request_id,
+                    "stale-renderer-request"
+                ):
+                    Err(reason):
+                        return Some(self.fail(reason))
+                    Ok(disposition):
+                        if disposition == "stale":
+                            return nil
+                val fetch = browser_renderer_fetch_request_decode(
+                    payload_message
+                )
+                if not fetch.ok:
+                    return Some(self.fail(fetch.reason))
                 return self._dispatch_renderer_fetch(fetch)
             val frame_reply_to_request_id = (
-                browser_renderer_frame_reply_to_request_id(decoded.message)
+                browser_renderer_frame_reply_to_request_id(payload_message)
             )
             if frame_reply_to_request_id <= 0:
                 return Some(self.fail("malformed-material-witness"))
-            match self._poll_renderer_reply(
-                frame_reply_to_request_id, "stale-renderer-frame"
+            match self._admit_renderer_reply(
+                decoded.message,
+                frame_reply_to_request_id,
+                "stale-renderer-frame"
             ):
                 Err(reason):
                     return Some(self.fail(reason))
-                Ok(current):
-                    if not current:
+                Ok(disposition):
+                    if disposition == "stale":
                         return nil
             val decode_width = if self.pending_operation == "resize":
                 self.pending_resize_width
@@ -1944,7 +2184,7 @@ pub class HostedBrowserRendererProcess:
             else:
                 self.height
             val frame = browser_renderer_frame_decode_with_retained_images(
-                decoded.message, decode_width, decode_height,
+                payload_message, decode_width, decode_height,
                 self.retained_image_resources
             )
             return Some(self._accept_decoded_frame(
@@ -2107,15 +2347,15 @@ pub class HostedBrowserRendererProcess:
         )
 
     me _begin_navigation_command(
-        request: BrowserRendererEncodeResult,
+        prepared: _HostedBrowserPreparedCommand,
         action: text,
         operation: text,
         timeout_ms: i64
     ) -> Result<bool, text>:
         if self.state != "active":
             return Err("invalid-renderer-state")
-        val started = self._begin_frame_request(
-            request, operation, timeout_ms
+        val started = self._begin_prepared_renderer_command(
+            prepared, operation, timeout_ms
         )
         if action != "stop":
             if val Ok(_) = started:
@@ -2155,6 +2395,9 @@ pub class HostedBrowserRendererProcess:
         )
         if not command.ok:
             return Err(command.reason)
+        val prepared = match self._prepare_renderer_command(command):
+            Err(reason): return Err(reason)
+            Ok(value): value
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
         self.navigation_permit = permit
@@ -2163,7 +2406,7 @@ pub class HostedBrowserRendererProcess:
         self.provisional_document_origin = ""
         self._clear_pending_document_csp()
         val started = self._begin_navigation_command(
-            command, "open", "navigation", timeout_ms
+            prepared, "open", "navigation", timeout_ms
         )
         if val Err(_) = started:
             self.navigation_permit = hosted_browser_empty_navigation_permit()
@@ -2188,6 +2431,9 @@ pub class HostedBrowserRendererProcess:
         )
         if not command.ok:
             return Err(command.reason)
+        val prepared = match self._prepare_renderer_command(command):
+            Err(reason): return Err(reason)
+            Ok(value): value
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
         self.navigation_permit = permit
@@ -2196,7 +2442,7 @@ pub class HostedBrowserRendererProcess:
         self.provisional_document_origin = ""
         self._clear_pending_document_csp()
         val started = self._begin_navigation_command(
-            command, "home", "navigation", timeout_ms
+            prepared, "home", "navigation", timeout_ms
         )
         if val Err(_) = started:
             self.navigation_permit = hosted_browser_empty_navigation_permit()
@@ -2220,6 +2466,9 @@ pub class HostedBrowserRendererProcess:
         )
         if not command.ok:
             return Err(command.reason)
+        val prepared = match self._prepare_renderer_command(command):
+            Err(reason): return Err(reason)
+            Ok(value): value
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
         self.pending_history_index = self._history_back_index(target_url)
@@ -2229,7 +2478,7 @@ pub class HostedBrowserRendererProcess:
         )
         self._stage_history_document_csp(self.pending_history_index)
         val started = self._begin_navigation_command(
-            command, "back", "history", timeout_ms
+            prepared, "back", "history", timeout_ms
         )
         if val Err(_) = started:
             self.pending_history_index = -1
@@ -2256,6 +2505,9 @@ pub class HostedBrowserRendererProcess:
         )
         if not command.ok:
             return Err(command.reason)
+        val prepared = match self._prepare_renderer_command(command):
+            Err(reason): return Err(reason)
+            Ok(value): value
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
         self.pending_history_index = self._history_forward_index(target_url)
@@ -2265,7 +2517,7 @@ pub class HostedBrowserRendererProcess:
         )
         self._stage_history_document_csp(self.pending_history_index)
         val started = self._begin_navigation_command(
-            command, "forward", "history", timeout_ms
+            prepared, "forward", "history", timeout_ms
         )
         if val Err(_) = started:
             self.pending_history_index = -1
@@ -2292,6 +2544,9 @@ pub class HostedBrowserRendererProcess:
         )
         if not command.ok:
             return Err(command.reason)
+        val prepared = match self._prepare_renderer_command(command):
+            Err(reason): return Err(reason)
+            Ok(value): value
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
         self.navigation_permit = permit
@@ -2300,7 +2555,7 @@ pub class HostedBrowserRendererProcess:
         self.provisional_document_origin = ""
         self._clear_pending_document_csp()
         val started = self._begin_navigation_command(
-            command, "reload", "history", timeout_ms
+            prepared, "reload", "history", timeout_ms
         )
         if val Err(_) = started:
             self.navigation_permit = hosted_browser_empty_navigation_permit()
@@ -2317,6 +2572,14 @@ pub class HostedBrowserRendererProcess:
                 self.command_deadline_ms = _deadline_ms(timeout_ms)
                 self.stop_after_write = true
                 return Ok(true)
+        val command = browser_renderer_navigation_encode(
+            self.generation, self.next_request_id,
+            "stop", "", "", "", "", ""
+        )
+        val prepared = match self._prepare_renderer_command(command):
+            Err(reason): return Err(reason)
+            Ok(value): value
+        if self.command_deadline_ms > 0:
             if not self._cancel_pending_for_stop():
                 return Err("renderer-busy")
         else:
@@ -2326,10 +2589,7 @@ pub class HostedBrowserRendererProcess:
         self.provisional_document_origin = ""
         self._clear_pending_document_csp()
         self._begin_navigation_command(
-            browser_renderer_navigation_encode(
-                self.generation, self.next_request_id,
-                "stop", "", "", "", "", ""
-            ),
+            prepared,
             "stop", "stop", timeout_ms
         )
 
