@@ -43,6 +43,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir,
     simple_web_layout_render_html_draw_ir_with_images,
     simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_debug_gpu_paint_state_visits,
+    simple_web_layout_render_html_gpu_frame,
     simple_web_layout_render_html_software_pixels,
     simple_web_layout_hit_test_target_at_time,
     simple_web_layout_uses_legacy_widget_chrome,
@@ -50,6 +52,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_style_by_id}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_readback_engine2d_result}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_readback_paint}
 use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{
     simple_web_render_html_to_pixels_with_corpus_fixtures}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
@@ -1230,14 +1234,98 @@ describe "SimpleWebRenderer":
         expect(_count_color(pixels, 0xFF7F1D1Du32)).to_equal(0)
 
     it "renders content visibility hidden containers while suppressing descendants":
+        step("Compute hidden content-visibility semantics")
         val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}#panel{display:block;content-visibility:hidden;width:24px;height:16px;background-color:#1d4ed8}#child{display:block;width:20px;height:12px;background-color:#ef4444}</style></head><body><section id='panel'><div id='child'></div></section></body></html>"
-        val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+        val partial_html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;background:#fff}#group{opacity:.5;width:24px;height:16px;background:#1d4ed8}#partial-child{width:20px;height:12px;background:#ef4444}</style></head><body><section id='group'><div id='partial-child'></div></section></body></html>"
+        val visibility_override_html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;background:#fff}#hidden-parent{visibility:hidden;width:24px;height:16px;background:#ef4444}#visible-child{visibility:visible;width:20px;height:12px;background:#1d4ed8}</style></head><body><section id='hidden-parent'><div id='visible-child'></div></section></body></html>"
+        step("Render CPU and canonical Draw IR pixels")
+        val cpu_pixels = simple_web_layout_render_html_software_pixels(
+            html, 48, 32
+        )
+        val draw_ir_readback = simple_web_layout_render_html_readback_engine2d_result(
+            html, 48, 32, "software"
+        )
+        val draw_ir_pixels = draw_ir_readback.readback.pixels
+        val presented = simple_web_layout_render_html_readback_paint(
+            html, 48, 32, "cpu_simd", true
+        )
+        val partial_cpu = simple_web_layout_render_html_software_pixels(
+            partial_html, 48, 32
+        )
+        val partial_presented = simple_web_layout_render_html_readback_paint(
+            partial_html, 48, 32, "cpu_simd", true
+        )
+        val visibility_override_cpu = (
+            simple_web_layout_render_html_software_pixels(
+                visibility_override_html, 48, 32
+            )
+        )
+        val visibility_override_presented = (
+            simple_web_layout_render_html_readback_paint(
+                visibility_override_html, 48, 32, "cpu_simd", true
+            )
+        )
         val composition = simple_web_layout_render_html_draw_ir(html, 48, 32)
         val batch = composition.batches[0]
         val panel = _draw_ir_command_by_id(batch.commands, "panel")
-        expect(pixels.len()).to_equal(48 * 32)
-        expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
-        expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+        step("Inspect the GPU fill operations")
+        val gpu_frame = simple_web_layout_render_html_gpu_frame(html, 48, 32)
+        val partial_frame = simple_web_layout_render_html_gpu_frame(
+            partial_html, 48, 32
+        )
+        var gpu_blue_ops = 0
+        var gpu_blue_panel_ops = 0
+        var gpu_red_ops = 0
+        for op in gpu_frame.fill_ops:
+            if op.color == 0xFF1D4ED8u32 as i32:
+                gpu_blue_ops = gpu_blue_ops + 1
+                if op.x == 0 and op.y == 0 and op.width == 24 and op.height == 16:
+                    gpu_blue_panel_ops = gpu_blue_panel_ops + 1
+            if op.color == 0xFFEF4444u32 as i32:
+                gpu_red_ops = gpu_red_ops + 1
+        var shallow_html = "<html><body style='margin:0'>"
+        var deep_html = "<html><body style='margin:0'>"
+        var depth = 0
+        while depth < 256:
+            deep_html = deep_html + "<div>"
+            if depth < 64:
+                shallow_html = shallow_html + "<div>"
+            depth = depth + 1
+        depth = 0
+        while depth < 256:
+            deep_html = deep_html + "</div>"
+            if depth < 64:
+                shallow_html = shallow_html + "</div>"
+            depth = depth + 1
+        shallow_html = shallow_html + "</body></html>"
+        deep_html = deep_html + "</body></html>"
+        val shallow_visits = simple_web_layout_debug_gpu_paint_state_visits(
+            shallow_html, 8
+        )
+        val deep_visits = simple_web_layout_debug_gpu_paint_state_visits(
+            deep_html, 8
+        )
+        step("Verify panel paint and descendant suppression")
+        expect(cpu_pixels.len()).to_equal(48 * 32)
+        expect(draw_ir_pixels.len()).to_equal(48 * 32)
+        expect(gpu_frame.cpu_paint_pixels).to_equal(0)
+        expect(partial_frame.cpu_paint_pixels).to_equal(48 * 32)
+        expect(gpu_frame.fill_ops.len()).to_be_greater_than(0)
+        expect(gpu_blue_ops).to_equal(1)
+        expect(gpu_blue_panel_ops).to_equal(1)
+        expect(gpu_red_ops).to_equal(0)
+        expect(deep_visits - shallow_visits).to_equal(192)
+        expect(_count_color(cpu_pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+        expect(_count_color(draw_ir_pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+        expect(_count_color(cpu_pixels, 0xFFEF4444u32)).to_equal(0)
+        expect(_count_color(draw_ir_pixels, 0xFFEF4444u32)).to_equal(0)
+        expect(_pixels_equal(cpu_pixels, draw_ir_pixels)).to_equal(true)
+        expect(_pixels_equal(cpu_pixels, presented.pixels)).to_equal(true)
+        expect(_pixels_equal(partial_cpu, partial_presented.pixels)).to_equal(true)
+        expect(_pixels_equal(visibility_override_cpu, visibility_override_presented.pixels)).to_equal(true)
+        expect(_count_color(visibility_override_presented.pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+        expect(_count_color(visibility_override_presented.pixels, 0xFFEF4444u32)).to_equal(0)
+        expect(_draw_ir_command_index(batch.commands, "child")).to_equal(-1)
         expect(_draw_ir_style_value(panel, "content-visibility")).to_equal("hidden")
 
     it "matches Chrome display contents wrapper suppression":

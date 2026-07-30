@@ -1666,6 +1666,45 @@ class WebGpuPaintFrame:
     base: u32
     cpu_paint_pixels: i32
 
+fn _web_gpu_paint_state(
+    nodes: [HNode], styles: [Style]
+) -> ([bool], [bool], i32):
+    val node_count = nodes.len() as i32
+    var visible: [bool] = [false; node_count]
+    var opaque: [bool] = [false; node_count]
+    var subtree_allowed: [bool] = [false; node_count]
+    var visits = 0
+    var i: i32 = 0
+    while i < node_count:
+        val parent = nodes[i].parent as i32
+        val ancestor_allowed = parent < 0 or subtree_allowed[parent]
+        val ancestor_opaque = parent < 0 or opaque[parent]
+        val st = styles[i]
+        visible[i] = (
+            ancestor_allowed and st.display != "none" and
+            not st.visibility_hidden
+        )
+        opaque[i] = ancestor_opaque and st.opacity_pct == 100
+        subtree_allowed[i] = (
+            ancestor_allowed and st.display != "none" and
+            not st.content_visibility_hidden and
+            nodes[i].tag != "iframe"
+        )
+        visits = visits + 1
+        i = i + 1
+    (visible, opaque, visits)
+
+pub fn simple_web_layout_debug_gpu_paint_state_visits(
+    html: text, width: i32
+) -> i32:
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val styles = compute_styles(
+        nodes, rules, build_child_index(nodes), false, true
+    )
+    val (_, _, visits) = _web_gpu_paint_state(nodes, styles)
+    visits
+
 # Emit a fill_rect op for every node whose background is a plain opaque
 # border-box rectangle — i.e. exactly the case where paint() writes a flat
 # `st.bg | 0xFF000000` slab over (bx,by,bw,bh) with no rounding/opacity/gradient.
@@ -1673,7 +1712,7 @@ class WebGpuPaintFrame:
 # (parent before child). Anything ambiguous is skipped and handled by the
 # presenter's residual blit, so this walk is conservative: skipping a node only
 # reduces GPU offload, it never breaks parity.
-fn _web_gpu_solid_fill_ops(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], width: i32, height: i32, widget_mode: bool) -> [SceneCommand]:
+fn _web_gpu_solid_fill_ops(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], width: i32, height: i32, widget_mode: bool, paint_visible: [bool], paint_opaque: [bool]) -> [SceneCommand]:
     var ops: [SceneCommand] = []
     if widget_mode:
         return ops
@@ -1686,7 +1725,7 @@ fn _web_gpu_solid_fill_ops(nodes: [HNode], styles: [Style], bx: [i32], by: [i32]
         val y = by[i]
         val w = bw[i]
         val h = bh[i]
-        val visible = st.display != "none" and not st.visibility_hidden and not st.content_visibility_hidden
+        val visible = paint_visible[i] and paint_opaque[i]
         val is_text = nd.tag == "#text"
         val solid_alpha = ((st.bg >> 24) & 255u32)
         val no_gradient = st.background_gradient_from == 0u32 or st.background_gradient_to == 0u32
@@ -1699,7 +1738,7 @@ fn _web_gpu_solid_fill_ops(nodes: [HNode], styles: [Style], bx: [i32], by: [i32]
         i = i + 1
     ops
 
-fn _web_gpu_solid_only_frame(nodes: [HNode], styles: [Style], widget_mode: bool) -> bool:
+fn _web_gpu_solid_only_frame(nodes: [HNode], styles: [Style], widget_mode: bool, paint_visible: [bool], paint_opaque: [bool]) -> bool:
     if widget_mode:
         return false
     val node_count = nodes.len() as i32
@@ -1707,8 +1746,10 @@ fn _web_gpu_solid_only_frame(nodes: [HNode], styles: [Style], widget_mode: bool)
     while i < node_count:
         val nd = nodes[i]
         val st = styles[i]
-        val visible = st.display != "none" and not st.visibility_hidden and not st.content_visibility_hidden
+        val visible = paint_visible[i]
         if visible:
+            if not paint_opaque[i]:
+                return false
             if nd.tag == "iframe":
                 # Iframe content is a blitted child bitmap, not a solid fill op;
                 # force the full CPU paint path so _web_paint_iframes can run.
@@ -1766,8 +1807,16 @@ pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i
     val white = argb(255, 255, 255)
     val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
     val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
-    val fill_ops = _web_gpu_solid_fill_ops(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height, widget_mode)
-    if _web_gpu_solid_only_frame(nodes, styles, widget_mode):
+    val (paint_visible, paint_opaque, _) = (
+        _web_gpu_paint_state(nodes, styles)
+    )
+    val fill_ops = _web_gpu_solid_fill_ops(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
+        width, height, widget_mode, paint_visible, paint_opaque
+    )
+    if _web_gpu_solid_only_frame(
+        nodes, styles, widget_mode, paint_visible, paint_opaque
+    ):
         return WebGpuPaintFrame(fb: [], fill_ops: fill_ops, width: width, height: height, base: base, cpu_paint_pixels: 0)
     var fb = browser_layout_framebuffer_filled(base, width, height)
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)

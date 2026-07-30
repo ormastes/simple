@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 95 | 95 | 0 | 0 |
+| 109 | 109 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,7 +24,7 @@ This unit spec covers the pure-Simple web renderer path used by browser, web, an
 | Design | doc/04_architecture/ui/simple_gui_stack.md |
 | Research | doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-07-30 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -370,6 +370,416 @@ expect(_draw_ir_style_value(card, "backdrop-filter-realized-saturation-milli")).
 
 </details>
 
+#### lowers a resolved img through Draw IR and Engine2D with object fit
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+    "<img id='photo' src='image://photo' " +
+    "style='display:block;width:8px;height:8px;" +
+    "object-fit:contain;object-position:right bottom'>" +
+    "</body></html>"
+)
+val image = simpleos_host_gpu_image_resource(
+    "image://photo", 4, 2, [0xFFFF0000u32; 8]
+)
+val composition = simple_web_layout_render_html_draw_ir_with_images(
+    html, 12, 12, [image]
+)
+val commands = composition.batches[0].commands
+val box = _draw_ir_command_by_id(commands, "photo")
+val draw = _draw_ir_command_by_id(commands, "photo_image")
+val renderer = BrowserRenderer.create(12, 12)
+val rendered = renderer.render_html_to_pixels_with_images(
+    html, [image]
+)
+
+expect(box.kind).to_equal("rect")
+expect(draw.kind).to_equal("image")
+expect(draw.image_uri).to_equal("image://photo")
+expect(draw.x).to_equal(box.content_rect.x)
+expect(draw.y).to_equal(box.content_rect.y + 4)
+expect(draw.width).to_equal(8)
+expect(draw.height).to_equal(4)
+expect(draw.clip_rect.present).to_be(true)
+expect(rendered.pixel_data.len()).to_equal(12 * 12)
+expect(_count_color(
+    rendered.pixel_data, 0xFFFF0000u32
+)).to_equal(8 * 4)
+```
+
+</details>
+
+#### lowers one exact CSS background image with typed tile geometry and border order
+
+- "border:1px solid #123456;background-image:url
+   - Expected: draw.kind equals `image`
+   - Expected: draw.x equals `box.x + 1`
+   - Expected: draw.y equals `box.y + 1`
+   - Expected: draw.width equals `box.width - 2`
+   - Expected: draw.height equals `box.height - 2`
+   - Expected: _draw_ir_style_value(draw, "image-role") equals `css-background`
+   - Expected: _draw_ir_style_value(draw, "background-repeat") equals `no-repeat`
+   - Expected: _draw_ir_style_value(draw, "background-tile-width") equals `4`
+   - Expected: _draw_ir_style_value(draw, "background-tile-height") equals `2`
+   - Expected: _draw_ir_style_value(draw, "background-tile-x") equals `{expected_tile_x}`
+   - Expected: _draw_ir_style_value(draw, "background-tile-y") equals `{expected_tile_y}`
+   - Expected: _draw_ir_style_value(overlay, "image-role") equals `css-background-border-overlay`
+-  draw ir command index
+-  draw ir command index
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 40 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+    "<div id='tile' style='width:8px;height:8px;padding:1px;" +
+    "border:1px solid #123456;background-image:url(image://tile);" +
+    "background-repeat:no-repeat;background-size:4px auto;" +
+    "background-position:right bottom;background-origin:content-box;" +
+    "background-clip:padding-box'></div></body></html>"
+)
+val image = simpleos_host_gpu_image_resource(
+    "image://tile", 4, 2, [0xFFFF0000u32; 8]
+)
+val commands = simple_web_layout_render_html_draw_ir_with_images(
+    html, 20, 20, [image]
+).batches[0].commands
+val box = _draw_ir_command_by_id(commands, "tile")
+val draw = _draw_ir_command_by_id(commands, "tile_background_image")
+val overlay = _draw_ir_command_by_id(
+    commands, "tile_background_border_overlay"
+)
+val expected_tile_x = box.x + box.width - 2 - 4
+val expected_tile_y = box.y + box.height - 2 - 2
+
+expect(draw.kind).to_equal("image")
+expect(draw.x).to_equal(box.x + 1)
+expect(draw.y).to_equal(box.y + 1)
+expect(draw.width).to_equal(box.width - 2)
+expect(draw.height).to_equal(box.height - 2)
+expect(_draw_ir_style_value(draw, "image-role")).to_equal("css-background")
+expect(_draw_ir_style_value(draw, "background-repeat")).to_equal("no-repeat")
+expect(_draw_ir_style_value(draw, "background-tile-width")).to_equal("4")
+expect(_draw_ir_style_value(draw, "background-tile-height")).to_equal("2")
+expect(_draw_ir_style_value(draw, "background-tile-x")).to_equal("{expected_tile_x}")
+expect(_draw_ir_style_value(draw, "background-tile-y")).to_equal("{expected_tile_y}")
+expect(_draw_ir_style_value(overlay, "image-role")).to_equal("css-background-border-overlay")
+expect(_draw_ir_command_index(commands, "tile")).to_be_less_than(
+    _draw_ir_command_index(commands, "tile_background_image")
+)
+expect(_draw_ir_command_index(commands, "tile_background_image")).to_be_less_than(
+    _draw_ir_command_index(commands, "tile_background_border_overlay")
+)
+```
+
+</details>
+
+#### lowers two URL CSS backgrounds back to front through canonical Draw IR
+
+- "background-image:url
+   - Expected: _draw_ir_style_value(back_draw, "background-layer-index") equals `1`
+   - Expected: _draw_ir_style_value(front_draw, "background-layer-index") equals `0`
+-  draw ir command index
+   - Expected: pixels[0] equals `0xFFFF0000u32`
+   - Expected: pixels[1] equals `0xFF0000FFu32`
+- "url
+- "url
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 74 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+    "<div id='layers' style='width:4px;height:2px;background-color:#00ff00;" +
+    "background-image:url(image://front),url(image://back);" +
+    "background-repeat:repeat;background-size:2px 1px;" +
+    "background-position:left top'></div></body></html>"
+)
+val front = simpleos_host_gpu_image_resource(
+    "image://front", 2, 1, [0xFFFF0000u32, 0u32])
+val back = simpleos_host_gpu_image_resource(
+    "image://back", 2, 1, [0xFF0000FFu32, 0xFF0000FFu32])
+val images = [front, back]
+val commands = simple_web_layout_render_html_draw_ir_with_images(
+    html, 8, 4, images
+).batches[0].commands
+val back_draw = _draw_ir_command_by_id(
+    commands, "layers_background_image_1")
+val front_draw = _draw_ir_command_by_id(
+    commands, "layers_background_image_0")
+expect(_draw_ir_style_value(back_draw, "background-layer-index")).to_equal("1")
+expect(_draw_ir_style_value(front_draw, "background-layer-index")).to_equal("0")
+expect(_draw_ir_command_index(
+    commands, "layers_background_image_1")).to_be_less_than(
+    _draw_ir_command_index(commands, "layers_background_image_0"))
+expect(_draw_ir_command_index(
+    commands, "layers_background_image_0")).to_be_less_than(
+    _draw_ir_command_index(
+        commands, "layers_background_border_overlay"))
+
+val pixels = BrowserRenderer.create(8, 4).render_html_to_pixels_with_images(
+    html, images
+).pixel_data
+expect(pixels[0]).to_equal(0xFFFF0000u32)
+expect(pixels[1]).to_equal(0xFF0000FFu32)
+
+val rejected = simple_web_layout_render_html_draw_ir_with_images(
+    html.replace(
+        "url(image://front),url(image://back)",
+        "url(image://front),url(image://back),url(image://front)"
+    ), 8, 4, images
+).batches[0].commands
+expect(_draw_ir_command_index(
+    rejected, "layers_background_image_1"
+)).to_equal(-1)
+expect(_draw_ir_command_index(
+    rejected, "layers_background_image_0"
+)).to_equal(-1)
+
+val missing = simple_web_layout_render_html_draw_ir_with_images(
+    html, 8, 4, [front]
+).batches[0].commands
+expect(_draw_ir_command_index(
+    missing, "layers_background_image_1"
+)).to_equal(-1)
+expect(_draw_ir_command_index(
+    missing, "layers_background_image_0"
+)).to_equal(-1)
+expect(_draw_ir_command_index(
+    missing, "layers_background_border_overlay"
+)).to_equal(-1)
+
+val listed = simple_web_layout_render_html_draw_ir_with_images(
+    html.replace(
+        "background-repeat:repeat",
+        "background-repeat:no-repeat,repeat"
+    ),
+    8, 4, images
+).batches[0].commands
+expect(_draw_ir_command_index(
+    listed, "layers_background_image_1"
+)).to_equal(-1)
+expect(_draw_ir_command_index(
+    listed, "layers_background_image_0"
+)).to_equal(-1)
+```
+
+</details>
+
+#### retains the unclipped rounded CSS background shape
+
+- "background-image:url
+   - Expected: background.width equals `8`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+    "<div style='width:8px;height:8px;overflow:hidden'>" +
+    "<div id='rounded' style='width:12px;height:8px;border-radius:4px;" +
+    "background-image:url(image://tile)'></div></div></body></html>"
+)
+val image = simpleos_host_gpu_image_resource(
+    "image://tile", 2, 2, [0xFFFF0000u32; 4]
+)
+val commands = simple_web_layout_render_html_draw_ir_with_images(
+    html, 20, 20, [image]
+).batches[0].commands
+
+expect(_draw_ir_command_index(commands, "rounded")).to_be_greater_than(-1)
+val background = _draw_ir_command_by_id(
+    commands, "rounded_background_image")
+expect(background.width).to_equal(8)
+expect(_draw_ir_style_value(
+    background, "background-shape-width")).to_equal("12")
+expect(_draw_ir_style_value(
+    background, "background-radius-tl-x")).to_equal("4")
+expect(_draw_ir_command_index(
+    commands, "rounded_background_border_overlay"
+)).to_be_greater_than(-1)
+```
+
+</details>
+
+#### subtracts content clip insets from each CSS background radius axis
+
+- "background-clip:content-box;background-image:url
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+    "<div id='inset' style='width:8px;height:8px;border-radius:10px;" +
+    "border-left:2px solid;border-top:3px solid;border-right:4px solid;" +
+    "border-bottom:1px solid;padding:1px 2px 4px 5px;" +
+    "background-clip:content-box;background-image:url(image://tile)'>" +
+    "</div></body></html>"
+)
+val image = simpleos_host_gpu_image_resource(
+    "image://tile", 1, 1, [0xFFFF0000u32])
+val commands = simple_web_layout_render_html_draw_ir_with_images(
+    html, 32, 32, [image]).batches[0].commands
+val background = _draw_ir_command_by_id(
+    commands, "inset_background_image")
+
+expect(_draw_ir_style_value(
+    background, "background-radius-tl-x")).to_equal("3")
+expect(_draw_ir_style_value(
+    background, "background-radius-tl-y")).to_equal("6")
+expect(_draw_ir_style_value(
+    background, "background-radius-br-x")).to_equal("4")
+expect(_draw_ir_style_value(
+    background, "background-radius-br-y")).to_equal("5")
+```
+
+</details>
+
+#### lowers the common single-layer background shorthand into the image and fallback color
+
+- "<div id='tile' style='width:8px;height:8px;background:url
+   - Expected: box.color equals `0xFF00FF88u32`
+   - Expected: draw.kind equals `image`
+   - Expected: draw.image_uri equals `image://tile`
+   - Expected: _draw_ir_style_value(draw, "background-repeat") equals `no-repeat`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+    "<div id='tile' style='width:8px;height:8px;background:url(image://tile) #0f8 no-repeat'></div>" +
+    "</body></html>"
+)
+val image = simpleos_host_gpu_image_resource(
+    "image://tile", 4, 2, [0xFFFF0000u32; 8]
+)
+val commands = simple_web_layout_render_html_draw_ir_with_images(
+    html, 20, 20, [image]
+).batches[0].commands
+val box = _draw_ir_command_by_id(commands, "tile")
+val draw = _draw_ir_command_by_id(commands, "tile_background_image")
+
+expect(box.color).to_equal(0xFF00FF88u32)
+expect(draw.kind).to_equal("image")
+expect(draw.image_uri).to_equal("image://tile")
+expect(_draw_ir_style_value(draw, "background-repeat")).to_equal("no-repeat")
+```
+
+</details>
+
+#### lowers positioned sized and boxed background shorthand geometry
+
+- "background:url
+   - Expected: _draw_ir_style_value(box, "background-origin") equals `content-box`
+   - Expected: _draw_ir_style_value(box, "background-clip") equals `padding-box`
+   - Expected: _draw_ir_style_value(draw, "background-tile-width") equals `4`
+   - Expected: _draw_ir_style_value(draw, "background-tile-height") equals `2`
+   - Expected: _draw_ir_style_value(draw, "background-tile-x") equals `{expected_tile_x}`
+   - Expected: _draw_ir_style_value(draw, "background-tile-y") equals `{expected_tile_y}`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html style='margin:0;padding:0'><body style='margin:0;padding:0'>" +
+    "<div id='tile' style='width:8px;height:8px;padding:1px;border:1px solid #123456;" +
+    "background:url(image://tile) no-repeat right bottom / 4px 2px content-box padding-box scroll'></div>" +
+    "</body></html>"
+)
+val image = simpleos_host_gpu_image_resource(
+    "image://tile", 4, 2, [0xFFFF0000u32; 8]
+)
+val commands = simple_web_layout_render_html_draw_ir_with_images(
+    html, 20, 20, [image]
+).batches[0].commands
+val box = _draw_ir_command_by_id(commands, "tile")
+val draw = _draw_ir_command_by_id(commands, "tile_background_image")
+val expected_tile_x = box.x + box.width - 2 - 4
+val expected_tile_y = box.y + box.height - 2 - 2
+
+expect(_draw_ir_style_value(box, "background-origin")).to_equal("content-box")
+expect(_draw_ir_style_value(box, "background-clip")).to_equal("padding-box")
+expect(_draw_ir_style_value(draw, "background-tile-width")).to_equal("4")
+expect(_draw_ir_style_value(draw, "background-tile-height")).to_equal("2")
+expect(_draw_ir_style_value(draw, "background-tile-x")).to_equal("{expected_tile_x}")
+expect(_draw_ir_style_value(draw, "background-tile-y")).to_equal("{expected_tile_y}")
+```
+
+</details>
+
+#### fails closed for unknown background shorthand tokens
+
+- "background:url
+   - Expected: _draw_ir_command_index(commands, "tile_background_image") equals `-1`
+- "url
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html><body><div id='tile' style='width:8px;height:8px;" +
+    "background:url(image://tile) unsupported'></div></body></html>"
+)
+val image = simpleos_host_gpu_image_resource(
+    "image://tile", 4, 2, [0xFFFF0000u32; 8]
+)
+val commands = simple_web_layout_render_html_draw_ir_with_images(
+    html, 20, 20, [image]
+).batches[0].commands
+val box = _draw_ir_command_by_id(commands, "tile")
+
+expect(_draw_ir_command_index(commands, "tile_background_image")).to_equal(-1)
+expect(_draw_ir_style_value(box, "background-layers-raw")).to_equal(
+    "url(image://tile) unsupported"
+)
+```
+
+</details>
+
 #### projects a complete WM Web material request with explicit bounded realization
 
 <details>
@@ -495,6 +905,62 @@ expect(layout.material_witness.cpu_composited_sha256.len()).to_equal(64)
 expect(execution.readback.pixels.len()).to_equal(32 * 20)
 expect(execution.material_fallback.kind).to_equal("cpu-composited-material")
 expect(execution.material_fallback.material_sha256).to_equal(layout.material_witness.cpu_composited_sha256)
+```
+
+</details>
+
+#### excludes offscreen material commands from the frame witness
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val attrs = " data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456'"
+val material = "background:rgba(31,31,33,0.80);backdrop-filter:blur(4px) saturate(120%)"
+val html = "<html><body><section id='visible'" + attrs + " style='position:absolute;top:0;width:12px;height:8px;" + material + "'></section><section id='offscreen'" + attrs + " style='position:absolute;top:200px;width:12px;height:8px;" + material + "'></section></body></html>"
+val layout = simple_web_layout_render_html_draw_ir_result(
+    html, 32, 20
+)
+
+expect(_draw_ir_command_by_id(
+    layout.composition.batches[0].commands, "visible"
+).component_id).to_equal("visible")
+expect(_draw_ir_command_by_id(
+    layout.composition.batches[0].commands, "offscreen"
+).component_id == "offscreen").to_be(false)
+expect(layout.material_witness.cpu_composited_count).to_equal(1)
+expect(layout.material_witness.cpu_composited_sha256.len()).to_equal(64)
+```
+
+</details>
+
+#### culls dense offscreen raw shadows before the frame command cap
+
+- layout composition batches[0] commands len
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var html = "<style>.off{position:absolute;top:200px;width:8px;height:8px;box-shadow:2px 3px 6px #000}</style>"
+var i = 0
+while i < 1100:
+    html = html + "<div class='off'></div>"
+    i = i + 1
+val layout = simple_web_layout_render_html_draw_ir_result(
+    html, 32, 20
+)
+
+expect(
+    layout.composition.batches[0].commands.len()
+).to_be_less_than(1024)
 ```
 
 </details>
@@ -737,20 +1203,6 @@ expect(_draw_ir_style_value(stack, "display")).to_equal("flex")
 expect(_draw_ir_style_value(stack, "flex-direction")).to_equal("column")
 expect(_draw_ir_style_value(stack, "flex-wrap")).to_equal("wrap")
 ```
-
-<details>
-<summary>Rendered scenario source</summary>
-
-> val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#stack{display:flex;flex-flow:column wrap;width:32px;height:24px;gap:2px}.ite$width$</style></head><body><section id='stack'><div class='item'></div><div class='item'></div></section></body></html>"<br>
-> val composition = simple_web_layout_render_html_draw_ir(html, 80, 48)<br>
-> val batch = composition.batches[0]<br>
-> val stack = _draw_ir_command_by_id(batch.commands, "stack")<br>
-> <br>
-> expect(_draw_ir_style_value(stack, "display")).to_equal("flex")<br>
-> expect(_draw_ir_style_value(stack, "flex-direction")).to_equal("column")<br>
-> expect(_draw_ir_style_value(stack, "flex-wrap")).to_equal("wrap")
-
-</details>
 
 </details>
 
@@ -1006,7 +1458,7 @@ expect(_pixels_equal(normal_pixels, shorthand_pixels)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1026,12 +1478,11 @@ expect(_draw_ir_style_value(shorthand, "line-height")).to_equal("20")
 expect(_draw_ir_style_value(shorthand, "font-style")).to_equal("italic")
 expect(_draw_ir_style_value(shorthand, "font-weight")).to_equal("bold")
 val identity = _draw_ir_style_value(inherited, "font-identity")
-val advances = _draw_ir_style_value(inherited, "font-advance-widths")
 if identity != "":
-    expect(advances).to_contain(",")
+    expect(inherited.advance_widths.len()).to_be_greater_than(0)
 else:
     # Font runtime absence keeps the established bitmap metrics path.
-    expect(advances).to_equal("")
+    expect(inherited.advance_widths.len()).to_equal(0)
 ```
 
 </details>
@@ -1409,6 +1860,29 @@ expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 
 </details>
 
+#### clips canonical Draw IR boxes and text to an overflow hidden ancestor
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:24px;overflow:hidden;background:#fff}.clip{overflow:hidden;width:16px;height:12px}.wide{width:32px;height:4px;background:#ef4444}.words{display:block;width:40px;height:8px;white-space:nowrap;color:#111827;font-size:8px}</style></head><body><div class='clip'><div class='wide'></div><span class='words'>ABCDEFGHIJK</span></div></body></html>"
+val execution = simple_web_layout_render_html_readback_engine2d_result(
+    html, 48, 24, "software"
+)
+val pixels = execution.readback.pixels
+expect(pixels.len()).to_equal(48 * 24)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(16 * 4)
+expect(_count_non_color_rect(
+    pixels, 48, 16, 0, 48, 12, 0xFFFFFFFFu32
+)).to_equal(0)
+```
+
+</details>
+
 #### clips overflowing descendants for CSS paint containment
 
 <details>
@@ -1488,21 +1962,128 @@ expect(_count_color(pixels, 0xFF7F1D1Du32)).to_equal(0)
 
 #### renders content visibility hidden containers while suppressing descendants
 
+- Compute hidden content-visibility semantics
+- Render CPU and canonical Draw IR pixels
+- Inspect the GPU fill operations
+- Verify panel paint and descendant suppression
+   - Expected: cpu_pixels.len() equals `48 * 32`
+   - Expected: draw_ir_pixels.len() equals `48 * 32`
+   - Expected: gpu_frame.cpu_paint_pixels equals `0`
+   - Expected: partial_frame.cpu_paint_pixels equals `48 * 32`
+   - Expected: gpu_blue_ops equals `1`
+   - Expected: gpu_blue_panel_ops equals `1`
+   - Expected: gpu_red_ops equals `0`
+   - Expected: deep_visits - shallow_visits equals `192`
+   - Expected: _count_color(cpu_pixels, 0xFFEF4444u32) equals `0`
+   - Expected: _count_color(draw_ir_pixels, 0xFFEF4444u32) equals `0`
+   - Expected: _pixels_equal(cpu_pixels, draw_ir_pixels) is true
+   - Expected: _pixels_equal(cpu_pixels, presented.pixels) is true
+   - Expected: _pixels_equal(partial_cpu, partial_presented.pixels) is true
+   - Expected: _pixels_equal(visibility_override_cpu, visibility_override_presented.pixels) is true
+   - Expected: _count_color(visibility_override_presented.pixels, 0xFFEF4444u32) equals `0`
+   - Expected: _draw_ir_command_index(batch.commands, "child") equals `-1`
+   - Expected: _draw_ir_style_value(panel, "content-visibility") equals `hidden`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 93 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Compute hidden content-visibility semantics")
 val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}#panel{display:block;content-visibility:hidden;width:24px;height:16px;background-color:#1d4ed8}#child{display:block;width:20px;height:12px;background-color:#ef4444}</style></head><body><section id='panel'><div id='child'></div></section></body></html>"
-val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+val partial_html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;background:#fff}#group{opacity:.5;width:24px;height:16px;background:#1d4ed8}#partial-child{width:20px;height:12px;background:#ef4444}</style></head><body><section id='group'><div id='partial-child'></div></section></body></html>"
+val visibility_override_html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;background:#fff}#hidden-parent{visibility:hidden;width:24px;height:16px;background:#ef4444}#visible-child{visibility:visible;width:20px;height:12px;background:#1d4ed8}</style></head><body><section id='hidden-parent'><div id='visible-child'></div></section></body></html>"
+step("Render CPU and canonical Draw IR pixels")
+val cpu_pixels = simple_web_layout_render_html_software_pixels(
+    html, 48, 32
+)
+val draw_ir_readback = simple_web_layout_render_html_readback_engine2d_result(
+    html, 48, 32, "software"
+)
+val draw_ir_pixels = draw_ir_readback.readback.pixels
+val presented = simple_web_layout_render_html_readback_paint(
+    html, 48, 32, "cpu_simd", true
+)
+val partial_cpu = simple_web_layout_render_html_software_pixels(
+    partial_html, 48, 32
+)
+val partial_presented = simple_web_layout_render_html_readback_paint(
+    partial_html, 48, 32, "cpu_simd", true
+)
+val visibility_override_cpu = (
+    simple_web_layout_render_html_software_pixels(
+        visibility_override_html, 48, 32
+    )
+)
+val visibility_override_presented = (
+    simple_web_layout_render_html_readback_paint(
+        visibility_override_html, 48, 32, "cpu_simd", true
+    )
+)
 val composition = simple_web_layout_render_html_draw_ir(html, 48, 32)
 val batch = composition.batches[0]
 val panel = _draw_ir_command_by_id(batch.commands, "panel")
-expect(pixels.len()).to_equal(48 * 32)
-expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
-expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+step("Inspect the GPU fill operations")
+val gpu_frame = simple_web_layout_render_html_gpu_frame(html, 48, 32)
+val partial_frame = simple_web_layout_render_html_gpu_frame(
+    partial_html, 48, 32
+)
+var gpu_blue_ops = 0
+var gpu_blue_panel_ops = 0
+var gpu_red_ops = 0
+for op in gpu_frame.fill_ops:
+    if op.color == 0xFF1D4ED8u32 as i32:
+        gpu_blue_ops = gpu_blue_ops + 1
+        if op.x == 0 and op.y == 0 and op.width == 24 and op.height == 16:
+            gpu_blue_panel_ops = gpu_blue_panel_ops + 1
+    if op.color == 0xFFEF4444u32 as i32:
+        gpu_red_ops = gpu_red_ops + 1
+var shallow_html = "<html><body style='margin:0'>"
+var deep_html = "<html><body style='margin:0'>"
+var depth = 0
+while depth < 256:
+    deep_html = deep_html + "<div>"
+    if depth < 64:
+        shallow_html = shallow_html + "<div>"
+    depth = depth + 1
+depth = 0
+while depth < 256:
+    deep_html = deep_html + "</div>"
+    if depth < 64:
+        shallow_html = shallow_html + "</div>"
+    depth = depth + 1
+shallow_html = shallow_html + "</body></html>"
+deep_html = deep_html + "</body></html>"
+val shallow_visits = simple_web_layout_debug_gpu_paint_state_visits(
+    shallow_html, 8
+)
+val deep_visits = simple_web_layout_debug_gpu_paint_state_visits(
+    deep_html, 8
+)
+step("Verify panel paint and descendant suppression")
+expect(cpu_pixels.len()).to_equal(48 * 32)
+expect(draw_ir_pixels.len()).to_equal(48 * 32)
+expect(gpu_frame.cpu_paint_pixels).to_equal(0)
+expect(partial_frame.cpu_paint_pixels).to_equal(48 * 32)
+expect(gpu_frame.fill_ops.len()).to_be_greater_than(0)
+expect(gpu_blue_ops).to_equal(1)
+expect(gpu_blue_panel_ops).to_equal(1)
+expect(gpu_red_ops).to_equal(0)
+expect(deep_visits - shallow_visits).to_equal(192)
+expect(_count_color(cpu_pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+expect(_count_color(draw_ir_pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+expect(_count_color(cpu_pixels, 0xFFEF4444u32)).to_equal(0)
+expect(_count_color(draw_ir_pixels, 0xFFEF4444u32)).to_equal(0)
+expect(_pixels_equal(cpu_pixels, draw_ir_pixels)).to_equal(true)
+expect(_pixels_equal(cpu_pixels, presented.pixels)).to_equal(true)
+expect(_pixels_equal(partial_cpu, partial_presented.pixels)).to_equal(true)
+expect(_pixels_equal(visibility_override_cpu, visibility_override_presented.pixels)).to_equal(true)
+expect(_count_color(visibility_override_presented.pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+expect(_count_color(visibility_override_presented.pixels, 0xFFEF4444u32)).to_equal(0)
+expect(_draw_ir_command_index(batch.commands, "child")).to_equal(-1)
 expect(_draw_ir_style_value(panel, "content-visibility")).to_equal("hidden")
 ```
 
@@ -1575,22 +2156,6 @@ expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(128)
 expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(120)
 ```
 
-<details>
-<summary>Rendered scenario source</summary>
-
-> val html = "<html><head><style>html,body{margin:0;padding:0;width:96px;height:64px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;background-color:#e5e7eb;border:2px solid #0f172a;padding:4px;width:60px;height:42px}.flow{background-color:#22c55e;width:18px;height:8px}.right{position:absolute;right:6px;top:6px;background-color:#1d4ed8;width:12px;height:10px}.botto$position$.next{background-color:#334155;width:24px;height:8px;margin-top:4px}</style></head><body><section class='shell'><div class='flow'></div><div class='right'></div><div class='bottom'></div><div class='next'></div></section></body></html>"<br>
-> val pixels = simple_web_render_html_to_pixels(html, 96, 64)<br>
-> expect(pixels.len()).to_equal(96 * 64)<br>
-> expect(_count_color(pixels, 0xFFE5E7EBu32)).to_equal(2816)<br>
-> expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(2256)<br>
-> expect(_count_color(pixels, 0xFF0F172Au32)).to_equal(488)<br>
-> expect(_count_color(pixels, 0xFF334155u32)).to_equal(192)<br>
-> expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(144)<br>
-> expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(128)<br>
-> expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(120)
-
-</details>
-
 </details>
 
 #### matches Chrome positioned absolute paint order over normal-flow siblings
@@ -1655,17 +2220,49 @@ expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
 expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
 ```
 
-<details>
-<summary>Rendered scenario source</summary>
+</details>
 
-> val html = "<html><head><style>html,body{margin:0;padding:0;width:32px;height:32px;overflow:hidden;background-color:#f8fafc}.shell{position:relative;width:32px;height:32px}.top{position:absolute;left:4px;top:4px;z-index:3;background-color:#f59e0b;width:12px;height:12px}.botto$position$.middle{position:absolute;left:4px;top:4px;z-index:2;background-color:#22c55e;width:12px;height:12px}</style></head><body><section class='shell'><div class='top'></div><div class='bottom'></div><div class='middle'></div></section></body></html>"<br>
-> val pixels = simple_web_render_html_to_pixels(html, 32, 32)<br>
-> expect(pixels.len()).to_equal(32 * 32)<br>
-> expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(144)<br>
-> expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)<br>
-> expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
+#### keeps canonical Draw IR positive z-index order independent of document order
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:32px;height:32px;overflow:hidden;background:#f8fafc}.shell{position:relative;width:32px;height:32px}.top{position:absolute;left:4px;top:4px;z-index:3;background:#f59e0b;width:12px;height:12px}.bottom{position:absolute;left:4px;top:4px;z-index:1;background:#1d4ed8;width:12px;height:12px}.middle{position:absolute;left:4px;top:4px;z-index:2;background:#22c55e;width:12px;height:12px}</style></head><body><section class='shell'><div class='top'></div><div class='bottom'></div><div class='middle'></div></section></body></html>"
+val execution = simple_web_layout_render_html_readback_engine2d_result(
+    html, 32, 32, "software"
+)
+val pixels = execution.readback.pixels
+expect(pixels.len()).to_equal(32 * 32)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(12 * 12)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
+```
 
 </details>
+
+#### sorts nested canonical Draw IR positive stacking siblings
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:32px;height:32px;overflow:hidden;background:#f8fafc}.outer{position:absolute;left:4px;top:4px;z-index:1;width:16px;height:16px}.top{position:absolute;left:0;top:0;z-index:3;background:#f59e0b;width:12px;height:12px}.bottom{position:absolute;left:0;top:0;z-index:1;background:#1d4ed8;width:12px;height:12px}.middle{position:absolute;left:0;top:0;z-index:2;background:#22c55e;width:12px;height:12px}</style></head><body><section class='outer'><div class='top'></div><div class='bottom'></div><div class='middle'></div></section></body></html>"
+val execution = simple_web_layout_render_html_readback_engine2d_result(
+    html, 32, 32, "software"
+)
+val pixels = execution.readback.pixels
+expect(pixels.len()).to_equal(32 * 32)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(12 * 12)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
+```
 
 </details>
 
@@ -1704,6 +2301,41 @@ expect(_count_color(pixels, 0xFFF8FAFCu32)).to_equal(5776)
 expect(_count_color(pixels, 0xFF8BA4EAu32)).to_equal(240)
 expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(128)
 expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+```
+
+</details>
+
+#### suppresses an opacity zero element and its entire subtree
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html style='margin:0;padding:0;background:#fff'>" +
+    "<body style='margin:0;padding:0'>" +
+    "<section id='hidden' style='opacity:0;background:#ef4444;" +
+    "border:2px solid #1d4ed8;width:16px;height:16px'>" +
+    "<div id='child' style='background:#22c55e;width:8px;height:8px'>" +
+    "hidden text</div></section></body></html>"
+)
+val pixels = simple_web_render_html_to_pixels(html, 32, 32)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(0)
+val commands = simple_web_layout_render_html_draw_ir(
+    html, 32, 32).batches[0].commands
+expect(_draw_ir_command_index(commands, "hidden")).to_equal(-1)
+expect(_draw_ir_command_index(commands, "child")).to_equal(-1)
+val target = simple_web_layout_hit_test_target_at_time(
+    "<html style='margin:0'><body style='margin:0'>" +
+    "<button id='invisible-button' style='opacity:0;width:16px;" +
+    "height:16px'>click</button></body></html>",
+    32, 32, 4, 4, 0)
+expect(target).to_equal("id:invisible-button")
 ```
 
 </details>
@@ -2294,8 +2926,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 95 |
-| Active scenarios | 95 |
+| Total scenarios | 109 |
+| Active scenarios | 109 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
