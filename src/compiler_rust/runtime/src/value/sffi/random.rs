@@ -1,6 +1,6 @@
 //! Random number generation SFFI.
 
-use std::io::Read;
+use rand::RngCore;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -96,12 +96,27 @@ pub extern "C" fn rt_random_hex(len: i64) -> crate::value::RuntimeValue {
         hex[idx * 2] = DIGITS[(byte >> 4) as usize];
         hex[idx * 2 + 1] = DIGITS[(byte & 0x0f) as usize];
     }
+    bytes.fill(0);
     unsafe { crate::value::collections::rt_string_new(hex.as_ptr(), hex.len() as u64) }
 }
 
 fn fill_random_bytes(buf: &mut [u8]) -> std::io::Result<()> {
-    let mut file = std::fs::File::open("/dev/urandom")?;
-    file.read_exact(buf)
+    fill_random_bytes_with(buf, |dest| {
+        rand::rngs::OsRng
+            .try_fill_bytes(dest)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))
+    })
+}
+
+fn fill_random_bytes_with<F>(buf: &mut [u8], fill: F) -> std::io::Result<()>
+where
+    F: FnOnce(&mut [u8]) -> std::io::Result<()>,
+{
+    let result = fill(buf);
+    if result.is_err() {
+        buf.fill(0);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -131,5 +146,32 @@ mod tests {
         let data = rt_string_data(value);
         assert_eq!(len, 16);
         assert!(!data.is_null());
+    }
+
+    #[test]
+    fn capability_entropy_provider_returns_exactly_sixteen_bytes() {
+        let mut bytes = [0u8; 16];
+        fill_random_bytes_with(&mut bytes, |dest| {
+            assert_eq!(dest.len(), 16);
+            dest.fill(0xa5);
+            Ok(())
+        })
+        .expect("deterministic entropy provider");
+        assert_eq!(bytes.len(), 16);
+        bytes.fill(0);
+    }
+
+    #[test]
+    fn capability_entropy_provider_failure_erases_transient_material() {
+        let mut bytes = [0xa5u8; 16];
+        let result = fill_random_bytes_with(&mut bytes, |dest| {
+            dest[0] = 0x5a;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "deterministic provider failure",
+            ))
+        });
+        assert!(result.is_err());
+        assert!(bytes.iter().all(|byte| *byte == 0));
     }
 }
