@@ -451,6 +451,23 @@ fn _decl_tbl_all_dispatch_handled(decl_tbl: [text]) -> bool:
         i = i + 2
     true
 
+fn _decl_tbl_resolve_writing_mode(current: text, decl_tbl: [text]) -> text:
+    val raw = decl_tbl_get(decl_tbl, "writing-mode")
+    if raw.len() == 0:
+        return current
+    val value = raw.trim().lower()
+    if value == "horizontal-tb" or value == "vertical-rl" or value == "vertical-lr" or value == "sideways-rl" or value == "sideways-lr":
+        return value
+    current
+
+fn resolve_writing_mode_decls(current: text, decls: text) -> text:
+    if (
+        decls.len() == 0 or not decls.contains("writing-mode") or
+        _decl_over_quota(decls)
+    ):
+        return current
+    _decl_tbl_resolve_writing_mode(current, decl_table_build(decls))
+
 fn _apply_decls_dispatch(mut st: Style, decl_tbl: [text], em_base: i32) -> Style:
     # apply_decls' Style(...) reconstruction always resets these four
     # resolved-font-cache fields, unconditionally, on every successful
@@ -509,6 +526,7 @@ fn _apply_decls_dispatch(mut st: Style, decl_tbl: [text], em_base: i32) -> Style
         if min_height.contains("vh"):
             st.min_height_vh = true
         else:
+            st.min_height_vh = false
             st.min_height_px = parse_int(min_height)
     # "margin" (shorthand) must be applied BEFORE "margin-left" (longhand)
     # to match the full-probe body's fixed processing order (margin's
@@ -670,7 +688,9 @@ fn _apply_decls_dispatch(mut st: Style, decl_tbl: [text], em_base: i32) -> Style
         st.margin_b_auto = false
     st
 
-fn _apply_decls_without_grid(st: Style, decls: text, em_base: i32) -> Style:
+fn _apply_decls_without_grid(
+    st: Style, decls: text, em_base: i32, logical_writing_mode: text
+) -> Style:
     if decls.len() == 0:
         return st
     # Per-rule declaration quota: a rule carrying more than the cap is dropped
@@ -1099,6 +1119,16 @@ fn _apply_decls_without_grid(st: Style, decls: text, em_base: i32) -> Style:
         val parsed_line_height = parse_line_height_value(line_height)
         if parsed_line_height != 0:
             line_height_v = parsed_line_height
+    writing_mode_v = _decl_tbl_resolve_writing_mode(
+        writing_mode_v, decl_tbl
+    )
+    val sizing_writing_mode = (
+        if logical_writing_mode.len() > 0:
+            logical_writing_mode
+        else:
+            writing_mode_v
+    )
+    val logical_inline_is_height = sizing_writing_mode != "horizontal-tb"
     val width = decl_tbl_get(decl_tbl, "width")
     val width_pos = decl_tbl_last_index(decl_tbl, "width")
     if width.len() > 0:
@@ -1125,20 +1155,22 @@ fn _apply_decls_without_grid(st: Style, decls: text, em_base: i32) -> Style:
             height_v = parse_int(height)
     val inline_size = decl_tbl_get(decl_tbl, "inline-size")
     val inline_size_pos = decl_tbl_last_index(decl_tbl, "inline-size")
-    if inline_size.len() > 0 and inline_size_pos > width_pos:
-        if inline_size.ends_with("%"):
-            val isp = parse_int(inline_size)
-            width_v = if isp > 0: 0 - isp else: 0
-        else:
-            width_v = parse_int(inline_size)
+    if inline_size.len() > 0:
+        val isp = parse_int(inline_size)
+        val inline_size_v = if inline_size.ends_with("%") and isp > 0: 0 - isp else: isp
+        if logical_inline_is_height and inline_size_pos > height_pos:
+            height_v = inline_size_v
+        elif not logical_inline_is_height and inline_size_pos > width_pos:
+            width_v = inline_size_v
     val block_size = decl_tbl_get(decl_tbl, "block-size")
     val block_size_pos = decl_tbl_last_index(decl_tbl, "block-size")
-    if block_size.len() > 0 and block_size_pos > height_pos:
-        if block_size.ends_with("%"):
-            val bsp = parse_int(block_size)
-            height_v = if bsp > 0: 0 - bsp else: 0
-        else:
-            height_v = parse_int(block_size)
+    if block_size.len() > 0:
+        val bsp = parse_int(block_size)
+        val block_size_v = if block_size.ends_with("%") and bsp > 0: 0 - bsp else: bsp
+        if logical_inline_is_height and block_size_pos > width_pos:
+            width_v = block_size_v
+        elif not logical_inline_is_height and block_size_pos > height_pos:
+            height_v = block_size_v
     val aspect_ratio = decl_tbl_get(decl_tbl, "aspect-ratio")
     if aspect_ratio.len() > 0:
         val ar_num = parse_aspect_ratio_numerator(aspect_ratio)
@@ -1177,26 +1209,48 @@ fn _apply_decls_without_grid(st: Style, decls: text, em_base: i32) -> Style:
         if min_height.contains("vh"):
             min_height_vh_v = true
         else:
+            min_height_vh_v = false
             min_height_v = parse_int(min_height)
     val max_height = decl_tbl_get(decl_tbl, "max-height")
     val max_height_pos = decl_tbl_last_index(decl_tbl, "max-height")
     if max_height.len() > 0:
         max_height_v = parse_int(max_height)
     val min_inline_size = decl_tbl_get(decl_tbl, "min-inline-size")
-    if min_inline_size.len() > 0 and decl_tbl_last_index(decl_tbl, "min-inline-size") > min_width_pos:
-        min_width_v = parse_int(min_inline_size)
+    val min_inline_size_pos = decl_tbl_last_index(decl_tbl, "min-inline-size")
+    if min_inline_size.len() > 0:
+        if logical_inline_is_height and min_inline_size_pos > min_height_pos:
+            if min_inline_size.contains("vh"):
+                min_height_vh_v = true
+            else:
+                min_height_vh_v = false
+                min_height_v = parse_int(min_inline_size)
+        elif not logical_inline_is_height and min_inline_size_pos > min_width_pos:
+            min_width_v = parse_int(min_inline_size)
     val max_inline_size = decl_tbl_get(decl_tbl, "max-inline-size")
-    if max_inline_size.len() > 0 and decl_tbl_last_index(decl_tbl, "max-inline-size") > max_width_pos:
-        max_width_v = parse_int(max_inline_size)
+    val max_inline_size_pos = decl_tbl_last_index(decl_tbl, "max-inline-size")
+    if max_inline_size.len() > 0:
+        if logical_inline_is_height and max_inline_size_pos > max_height_pos:
+            max_height_v = parse_int(max_inline_size)
+        elif not logical_inline_is_height and max_inline_size_pos > max_width_pos:
+            max_width_v = parse_int(max_inline_size)
     val min_block_size = decl_tbl_get(decl_tbl, "min-block-size")
-    if min_block_size.len() > 0 and decl_tbl_last_index(decl_tbl, "min-block-size") > min_height_pos:
-        if min_block_size.contains("vh"):
-            min_height_vh_v = true
-        else:
-            min_height_v = parse_int(min_block_size)
+    val min_block_size_pos = decl_tbl_last_index(decl_tbl, "min-block-size")
+    if min_block_size.len() > 0:
+        if logical_inline_is_height and min_block_size_pos > min_width_pos:
+            min_width_v = parse_int(min_block_size)
+        elif not logical_inline_is_height and min_block_size_pos > min_height_pos:
+            if min_block_size.contains("vh"):
+                min_height_vh_v = true
+            else:
+                min_height_vh_v = false
+                min_height_v = parse_int(min_block_size)
     val max_block_size = decl_tbl_get(decl_tbl, "max-block-size")
-    if max_block_size.len() > 0 and decl_tbl_last_index(decl_tbl, "max-block-size") > max_height_pos:
-        max_height_v = parse_int(max_block_size)
+    val max_block_size_pos = decl_tbl_last_index(decl_tbl, "max-block-size")
+    if max_block_size.len() > 0:
+        if logical_inline_is_height and max_block_size_pos > max_width_pos:
+            max_width_v = parse_int(max_block_size)
+        elif not logical_inline_is_height and max_block_size_pos > max_height_pos:
+            max_height_v = parse_int(max_block_size)
     val flex = decl_tbl_get(decl_tbl, "flex")
     if flex.len() > 0:
         val flex_grow_raw = parse_nth_int(flex, 0)
@@ -1724,11 +1778,6 @@ fn _apply_decls_without_grid(st: Style, decls: text, em_base: i32) -> Style:
             direction_rtl_v = true
         elif direction_norm == "ltr":
             direction_rtl_v = false
-    val writing_mode_decl = decl_tbl_get(decl_tbl, "writing-mode")
-    if writing_mode_decl.len() > 0:
-        val writing_mode_norm = writing_mode_decl.trim().lower()
-        if writing_mode_norm == "horizontal-tb" or writing_mode_norm == "vertical-rl" or writing_mode_norm == "vertical-lr" or writing_mode_norm == "sideways-rl" or writing_mode_norm == "sideways-lr":
-            writing_mode_v = writing_mode_norm
     val text_orientation_decl = decl_tbl_get(decl_tbl, "text-orientation")
     if text_orientation_decl.len() > 0:
         val text_orientation_norm = text_orientation_decl.trim().lower()
@@ -2724,7 +2773,9 @@ fn apply_grid_decls(mut st: Style, decls: text):
     if row != "":
         st.grid_row = row
 
-fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
+fn apply_decls_on_writing_mode(
+    st: Style, decls: text, em_base: i32, logical_writing_mode: text
+) -> Style:
     # Preserve the declaration trust boundary before the Grid side path.
     if decls.len() == 0 or _decl_over_quota(decls):
         return st
@@ -2735,18 +2786,25 @@ fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
         decls.contains("grid-column") or decls.contains("grid-row")
     )
     if not has_grid_declaration:
-        return _apply_decls_without_grid(st, decls, em_base)
+        return _apply_decls_without_grid(
+            st, decls, em_base, logical_writing_mode
+        )
     val columns = st.grid_template_columns
     val rows = st.grid_template_rows
     val column = st.grid_column
     val row = st.grid_row
-    var result = _apply_decls_without_grid(st, decls, em_base)
+    var result = _apply_decls_without_grid(
+        st, decls, em_base, logical_writing_mode
+    )
     result.grid_template_columns = columns
     result.grid_template_rows = rows
     result.grid_column = column
     result.grid_row = row
     apply_grid_decls(result, decls)
     result
+
+fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
+    apply_decls_on_writing_mode(st, decls, em_base, "")
 
 # default per-tag tweaks (block/inline, heading sizes, spacing)
 fn tag_defaults(st: Style, tag: text) -> Style:

@@ -2582,8 +2582,6 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 if rules.important_decls[r] != "":
                     has_important_candidates = true
             candidate_i = candidate_i + 1
-        if combined_decls != "":
-            st = apply_decls(st, combined_decls, em_base)
         if trace_stages:
             print "[layout-trace] style_stage=inline-input index={i} len={nd.style_attr.len()}"
         var inline_normal = ""
@@ -2594,23 +2592,12 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             inline_important = inline_priority.important
         if env_get("SIMPLE_TRACE_FONT_STYLE") != nil and nd.style_attr.len() > 0:
             print "[font-inline-trace] index={i} raw_style_attr_len={nd.style_attr.len()} inline_normal_len={inline_normal.len()}"
-        if inline_normal != "":
-            val inline_empty_cells_decl = decl_get(
-                inline_normal, "empty-cells"
-            )
-            if inline_empty_cells_decl != "":
-                empty_cells_hide = (
-                    inline_empty_cells_decl.trim().lower() == "hide"
-                )
-            st = apply_decls(st, inline_normal, em_base)
-            if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
-                print "[font-inline-trace] index={i} post_inline_apply_font_family={st.font_family} post_inline_apply_font_size={st.font_size}"
         # Author-important declarations outrank every author-normal declaration,
         # including inline style. Within the important origin, retain the same
         # specificity/source order as the normal author cascade.
+        var combined_important_decls = ""
         if has_important_candidates:
             candidate_i = 0
-            var combined_important_decls = ""
             while candidate_i < candidate_count:
                 if (candidate_i & 255) == 0 and _web_budget_expired():
                     break
@@ -2622,19 +2609,56 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                     rule_specificities[r] >= 0 and
                     rules.important_decls[r] != ""
                 ):
-                    val important_empty_cells_decl = decl_get(
-                        rules.important_decls[r], "empty-cells"
-                    )
-                    if important_empty_cells_decl != "":
-                        empty_cells_hide = (
-                            important_empty_cells_decl.trim().lower() == "hide"
-                        )
                     combined_important_decls = (
                         combined_important_decls + rules.important_decls[r] + ";"
                     )
                 candidate_i = candidate_i + 1
-            if combined_important_decls != "":
-                st = apply_decls(st, combined_important_decls, em_base)
+
+        # Resolve the final inherited/normal/inline/important writing-mode once.
+        # Every logical-size declaration then maps on that final axis even when
+        # its own cascade phase ran before the winning writing-mode declaration.
+        var logical_writing_mode = st.writing_mode
+        logical_writing_mode = resolve_writing_mode_decls(
+            logical_writing_mode, combined_decls
+        )
+        logical_writing_mode = resolve_writing_mode_decls(
+            logical_writing_mode, inline_normal
+        )
+        logical_writing_mode = resolve_writing_mode_decls(
+            logical_writing_mode, combined_important_decls
+        )
+        logical_writing_mode = resolve_writing_mode_decls(
+            logical_writing_mode, inline_important
+        )
+
+        if combined_decls != "":
+            st = apply_decls_on_writing_mode(
+                st, combined_decls, em_base, logical_writing_mode
+            )
+        if inline_normal != "":
+            val inline_empty_cells_decl = decl_get(
+                inline_normal, "empty-cells"
+            )
+            if inline_empty_cells_decl != "":
+                empty_cells_hide = (
+                    inline_empty_cells_decl.trim().lower() == "hide"
+                )
+            st = apply_decls_on_writing_mode(
+                st, inline_normal, em_base, logical_writing_mode
+            )
+            if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+                print "[font-inline-trace] index={i} post_inline_apply_font_family={st.font_family} post_inline_apply_font_size={st.font_size}"
+        if combined_important_decls != "":
+            val important_empty_cells_decl = decl_get(
+                combined_important_decls, "empty-cells"
+            )
+            if important_empty_cells_decl != "":
+                empty_cells_hide = (
+                    important_empty_cells_decl.trim().lower() == "hide"
+                )
+            st = apply_decls_on_writing_mode(
+                st, combined_important_decls, em_base, logical_writing_mode
+            )
         if inline_important != "":
             val inline_important_empty_cells_decl = decl_get(
                 inline_important, "empty-cells"
@@ -2643,7 +2667,9 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 empty_cells_hide = (
                     inline_important_empty_cells_decl.trim().lower() == "hide"
                 )
-            st = apply_decls(st, inline_important, em_base)
+            st = apply_decls_on_writing_mode(
+                st, inline_important, em_base, logical_writing_mode
+            )
         # Disclosure state is structural and author CSS cannot reveal closed
         # content. Apply it after the author cascade and before layout/paint.
         if details_hidden[i]:
