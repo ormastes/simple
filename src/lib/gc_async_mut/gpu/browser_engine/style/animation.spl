@@ -334,13 +334,21 @@ fn interpolate(from: CSSValue, to: CSSValue, progress: f64) -> CSSValue:
                 CSSValue.Length(tv, tu):
                     val result = interpolate_length(fv, tv, progress)
                     CSSValue.Length(v: result, unit: fu)
-                _: to
+                _:
+                    if progress < 0.5:
+                        CSSValue.Length(v: fv, unit: fu)
+                    else:
+                        to
         CSSValue.Number(fv):
             match to:
                 CSSValue.Number(tv):
                     val result = interpolate_length(fv, tv, progress)
                     CSSValue.Number(v: result)
-                _: to
+                _:
+                    if progress < 0.5:
+                        CSSValue.Number(v: fv)
+                    else:
+                        to
         CSSValue.Color(color):
             match to:
                 CSSValue.Color(to_color):
@@ -349,13 +357,21 @@ fn interpolate(from: CSSValue, to: CSSValue, progress: f64) -> CSSValue:
                         to_color.r, to_color.g, to_color.b, to_color.a,
                         progress
                     )
-                _: to
+                _:
+                    if progress < 0.5:
+                        CSSValue.Color(color: color)
+                    else:
+                        to
         CSSValue.Percentage(fv):
             match to:
                 CSSValue.Percentage(tv):
                     val result = interpolate_length(fv, tv, progress)
                     CSSValue.Percentage(v: result)
-                _: to
+                _:
+                    if progress < 0.5:
+                        CSSValue.Percentage(v: fv)
+                    else:
+                        to
         _:
             if progress < 0.5:
                 from
@@ -466,6 +482,43 @@ pub fn sample_keyframes(node_id: i64, keyframes: [Keyframe], progress: f64) -> [
                 val interp = interpolate(from_decl.value, to_decl.value, local_t)
                 updates.push(StyleUpdate.create(node_id, from_decl.property, interp))
 
+    updates
+
+pub fn sample_keyframes_with_underlying(
+    node_id: i64, keyframes: [Keyframe], progress: f64,
+    underlying: [CSSDeclaration]
+) -> [StyleUpdate]:
+    var updates = sample_keyframes(node_id, keyframes, progress)
+    for base in underlying:
+        var property_frames: [Keyframe] = []
+        for keyframe in keyframes:
+            for declaration in keyframe.properties:
+                if declaration.property == base.property:
+                    property_frames.push(Keyframe.create(
+                        keyframe.offset, [declaration]
+                    ))
+        if property_frames.len() > 0:
+            var frames: [Keyframe] = []
+            if property_frames[0].offset > 0.0:
+                frames.push(Keyframe.create(0.0, [base]))
+            for keyframe in property_frames:
+                frames.push(keyframe)
+            if property_frames[property_frames.len() - 1].offset < 1.0:
+                frames.push(Keyframe.create(1.0, [base]))
+            val sampled = sample_keyframes(node_id, frames, progress)
+            if sampled.len() > 0:
+                var replaced = false
+                var update_index = 0
+                while update_index < updates.len():
+                    if updates[update_index].property == base.property:
+                        updates[update_index] = sampled[0]
+                        replaced = true
+                    update_index = update_index + 1
+                if (
+                    not replaced and
+                    updates.len() < MAX_STYLE_UPDATES_PER_TICK
+                ):
+                    updates.push(sampled[0])
     updates
 
 pub fn animation_css_value_text(value: CSSValue) -> text:

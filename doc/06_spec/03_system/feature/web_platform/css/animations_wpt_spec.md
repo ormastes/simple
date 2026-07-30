@@ -1,18 +1,18 @@
 # CSS Animation Frame Preservation
 
-> Proves fractional winners, bounded clocks, start, signed-delay seek, midpoint, and filled-end frames
+> Proves implicit endpoints, fractional winners, bounded clocks, signed-delay seek, and filled-end frames
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # CSS Animation Frame Preservation
 
-Proves fractional winners, bounded clocks, start, signed-delay seek, midpoint,
-and filled-end animation frames
+Proves implicit underlying endpoints, fractional winners, bounded clocks,
+signed-delay seek, midpoint, and filled-end animation frames
 
 ## At a Glance
 
@@ -33,6 +33,77 @@ compositing and unsupported properties remain outside this bounded profile.
 ## Scenarios
 
 ### REQ-WEB-BROWSER-003/004/006: CSS animation frames
+
+#### should synthesize implicit underlying endpoints for one midpoint keyframe
+
+- Open a one-midpoint keyframe animation over a red underlying style
+  - Fixture: `_single_midpoint_keyframe_html`
+  - Unrelated opacity declarations own 0% and 100%; the midpoint independently
+    authors background color and width
+  - The computed underlying background is exact opaque red `#ef4444`
+- Render the implicit start endpoint through canonical Draw IR and Engine2D
+  - Checker: `_single_midpoint_animation_command_color`
+  - Exact Draw IR: one 8×8 red box at (0,0)
+  - Exact Engine2D: 64 red pixels and zero skipped commands
+- Advance to the authored midpoint without changing scheduler cadence
+  - Exact Draw IR: authored `width:auto` fills the 32×8 row in `#2563eb`
+  - Exact Engine2D: 256 blue pixels and zero skipped commands
+  - The next scheduled frame remains 516 ms
+- Fill and reuse the implicit end endpoint after completion
+  - Checker: `_expect_completed_animation_reuse`
+  - Exact Draw IR and Engine2D return to the underlying red endpoint
+  - The terminal frame schedules no successor
+  - Advancing to 1016 ms preserves paint count and composition checksum
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = _single_midpoint_keyframe_html()
+step("Open a one-midpoint keyframe animation over a red underlying style")
+expect(simple_web_layout_debug_style_by_id(
+    html, "box", "background_color"
+)).to_equal("4293870660")
+
+step("Render the implicit start endpoint through canonical Draw IR and Engine2D")
+expect(_single_midpoint_animation_command_color(
+    html, 0
+)).to_equal(0xFFEF4444u32)
+expect(_animation_frame_fingerprint(
+    html, 0, 0xFFEF4444u32
+)).to_equal(
+    "peak,1000,forwards|8,8|html_ast|box:0,0,8,8|" +
+    "peak,1000ms,4293870660|16|0|64"
+)
+
+step("Advance to the authored midpoint without changing scheduler cadence")
+expect(_single_midpoint_animation_command_color(
+    html, 500
+)).to_equal(0xFF2563EBu32)
+expect(_animation_frame_fingerprint(
+    html, 500, 0xFF2563EBu32
+)).to_equal(
+    "peak,1000,forwards|8,8|html_ast|box:0,0,32,8|" +
+    "peak,1000ms,4280640491|516|0|256"
+)
+
+step("Fill and reuse the implicit end endpoint after completion")
+expect(_single_midpoint_animation_command_color(
+    html, 1000
+)).to_equal(0xFFEF4444u32)
+expect(_animation_frame_fingerprint(
+    html, 1000, 0xFFEF4444u32
+)).to_equal(
+    "peak,1000,forwards|8,8|html_ast|box:0,0,8,8|" +
+    "peak,1000ms,4293870660|-1|0|64"
+)
+_expect_completed_animation_reuse(html, 0xFFEF4444u32)
+```
+
+</details>
 
 #### should preserve the fractional winner across clock bounds
 

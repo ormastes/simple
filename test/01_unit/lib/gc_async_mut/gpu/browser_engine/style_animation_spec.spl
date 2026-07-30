@@ -3,10 +3,12 @@ use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     Animation, AnimationEngine, CSSDeclaration, CSSValue, Keyframe, Transition,
-    sample_keyframes, style_animation_capacity_available
+    interpolate, sample_keyframes, sample_keyframes_with_underlying,
+    style_animation_capacity_available
 }
 use std.gc_async_mut.gpu.browser_engine.style_block_parse.{extract_keyframes}
 use std.common.animation.timing.{TimingFunction}
+use std.common.color.types.{from_rgba}
 
 describe "Browser CSS animation target identity":
 
@@ -100,6 +102,146 @@ describe "Browser CSS animation target identity":
                 expect(v).to_equal(0.5)
             _:
                 expect(false).to_equal(true)
+
+    it "uses the underlying value for omitted keyframe endpoints":
+        val registry = extract_keyframes("""
+            @keyframes peak {
+                50% { background-color: #2563eb; }
+            }
+        """)
+        val underlying = [CSSDeclaration.create(
+            "background-color",
+            CSSValue.Color(color: from_rgba(239, 68, 68, 255))
+        )]
+        val start = sample_keyframes_with_underlying(
+            42, registry.entries[0].frames, 0.0, underlying
+        )
+        val midpoint = sample_keyframes_with_underlying(
+            42, registry.entries[0].frames, 0.5, underlying
+        )
+        val finish = sample_keyframes_with_underlying(
+            42, registry.entries[0].frames, 1.0, underlying
+        )
+
+        match start[0].value:
+            CSSValue.Color(color):
+                expect(color.r).to_equal(239)
+                expect(color.g).to_equal(68)
+                expect(color.b).to_equal(68)
+            _:
+                fail("Expected implicit start color")
+        match midpoint[0].value:
+            CSSValue.Color(color):
+                expect(color.r).to_equal(37)
+                expect(color.g).to_equal(99)
+                expect(color.b).to_equal(235)
+            _:
+                fail("Expected authored midpoint color")
+        match finish[0].value:
+            CSSValue.Color(color):
+                expect(color.r).to_equal(239)
+                expect(color.g).to_equal(68)
+                expect(color.b).to_equal(68)
+            _:
+                fail("Expected implicit end color")
+
+    it "samples mixed midpoint properties independently":
+        val registry = extract_keyframes("""
+            @keyframes peak {
+                50% { background-color: #2563eb; width: auto; }
+            }
+        """)
+        val underlying = [
+            CSSDeclaration.create(
+                "background-color",
+                CSSValue.Color(color: from_rgba(239, 68, 68, 255))
+            ),
+            CSSDeclaration.create(
+                "width", CSSValue.Length(v: 8.0, unit: "px")
+            )
+        ]
+        val start = sample_keyframes_with_underlying(
+            42, registry.entries[0].frames, 0.0, underlying
+        )
+        val midpoint = sample_keyframes_with_underlying(
+            42, registry.entries[0].frames, 0.5, underlying
+        )
+        val finish = sample_keyframes_with_underlying(
+            42, registry.entries[0].frames, 1.0, underlying
+        )
+        expect(start.len()).to_equal(2)
+        match start[0].value:
+            CSSValue.Color(color):
+                expect(color.r).to_equal(239)
+                expect(color.g).to_equal(68)
+                expect(color.b).to_equal(68)
+            _:
+                fail("Expected independently sampled start color")
+        match start[1].value:
+            CSSValue.Length(v, unit):
+                expect(v).to_equal(8.0)
+                expect(unit).to_equal("px")
+            _:
+                fail("Expected implicit start width")
+        match midpoint[1].value:
+            CSSValue.Keyword(v):
+                expect(v).to_equal("auto")
+            _:
+                fail("Expected authored discrete midpoint width")
+        match finish[1].value:
+            CSSValue.Length(v, unit):
+                expect(v).to_equal(8.0)
+                expect(unit).to_equal("px")
+            _:
+                fail("Expected implicit end width")
+
+    it "interpolates incompatible percentage and length values discretely":
+        val early = interpolate(
+            CSSValue.Percentage(v: 50.0),
+            CSSValue.Length(v: 8.0, unit: "px"),
+            0.25
+        )
+        val late = interpolate(
+            CSSValue.Percentage(v: 50.0),
+            CSSValue.Length(v: 8.0, unit: "px"),
+            0.5
+        )
+        match early:
+            CSSValue.Percentage(v):
+                expect(v).to_equal(50.0)
+            _:
+                fail("Expected early percentage value")
+        match late:
+            CSSValue.Length(v, unit):
+                expect(v).to_equal(8.0)
+                expect(unit).to_equal("px")
+            _:
+                fail("Expected late length value")
+
+    it "samples background around unrelated endpoint properties":
+        val registry = extract_keyframes("""
+            @keyframes peak {
+                0% { opacity: 1; }
+                50% { background-color: #2563eb; }
+                100% { opacity: 1; }
+            }
+        """)
+        val underlying = [CSSDeclaration.create(
+            "background-color",
+            CSSValue.Color(color: from_rgba(239, 68, 68, 255))
+        )]
+        val updates = sample_keyframes_with_underlying(
+            42, registry.entries[0].frames, 0.25, underlying
+        )
+        expect(updates.len()).to_equal(1)
+        expect(updates[0].property).to_equal("background-color")
+        match updates[0].value:
+            CSSValue.Color(color):
+                expect(color.r).to_equal(138)
+                expect(color.g).to_equal(83)
+                expect(color.b).to_equal(151)
+            _:
+                fail("Expected background independent of opacity endpoints")
 
     it "sorts reversed keyframes and caps hostile frame counts":
         val reversed = extract_keyframes("""

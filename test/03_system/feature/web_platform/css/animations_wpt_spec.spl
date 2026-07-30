@@ -57,6 +57,16 @@ fn _animation_html() -> text:
         "<div id='box'></div>"
     )
 
+fn _single_midpoint_keyframe_html() -> text:
+    (
+        "<style>html,body{margin:0}@keyframes peak{" +
+        "0%{opacity:1}50%{background-color:#2563eb;width:auto}" +
+        "100%{opacity:1}" +
+        "#box{width:8px;height:8px;background-color:#ef4444;" +
+        "animation:peak 1000ms linear forwards}</style>" +
+        "<div id='box'></div>"
+    )
+
 fn _negative_delay_animation_html(delay: text) -> text:
     (
         "<style>html,body{margin:0}@keyframes preserve{" +
@@ -66,6 +76,64 @@ fn _negative_delay_animation_html(delay: text) -> text:
         "animation:preserve 1s linear {delay} forwards}</style>" +
         "<div id='box'></div>"
     )
+
+fn _single_midpoint_animation_command_color(
+    html: text, time_ms: i64
+) -> u32:
+    val result = simple_web_layout_render_html_draw_ir_result_at_time(
+        html, WIDTH, HEIGHT, time_ms
+    )
+    for command in result.composition.batches[0].commands:
+        if command.component_id == "box":
+            return command.color
+    0u32
+
+fn _expect_completed_animation_reuse(html: text, expected_color: u32):
+    var worker = HostedBrowserRendererWorkerSession.create(WIDTH, HEIGHT)
+    expect(worker.handle(BrowserRendererMessage(
+        kind: "init", generation: 8, request_id: 2, payload: html
+    )).ok).to_be(true)
+    val completed = worker.handle(BrowserRendererMessage(
+        kind: "advance", generation: 8, request_id: 3, payload: "1000"
+    ))
+    expect(completed.ok).to_be(true)
+    val completed_message = browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(8), completed.wire
+    )
+    expect(completed_message.status).to_equal("message")
+    val completed_frame = browser_renderer_frame_decode(
+        completed_message.message, WIDTH, HEIGHT
+    )
+    expect(completed_frame.ok).to_be(true)
+    expect(completed_frame.next_animation_ms).to_equal(-1)
+    var completed_color = 0u32
+    for command in completed_frame.composition.batches[0].commands:
+        if command.component_id == "box":
+            completed_color = command.color
+    expect(completed_color).to_equal(expected_color)
+    val completed_paints = worker.render_session.counters.paint_count
+    val completed_checksum = worker.render_session.composition_checksum()
+
+    val later = worker.handle(BrowserRendererMessage(
+        kind: "advance", generation: 8, request_id: 4, payload: "1016"
+    ))
+    expect(later.ok).to_be(true)
+    val later_message = browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(8), later.wire
+    )
+    expect(later_message.status).to_equal("message")
+    val later_frame = browser_renderer_frame_decode(
+        later_message.message, WIDTH, HEIGHT
+    )
+    expect(later_frame.ok).to_be(true)
+    expect(later_frame.next_animation_ms).to_equal(-1)
+    expect(worker.render_session.counters.paint_count).to_equal(
+        completed_paints
+    )
+    expect(worker.render_session.composition_checksum()).to_equal(
+        completed_checksum
+    )
+    worker.close()
 
 fn _animation_color_count(pixels: [u32], color: u32) -> i32:
     var count = 0
@@ -462,6 +530,50 @@ fn check_bounded_animation_frame(html: text):
     )).to_equal(64)
 
 describe "REQ-WEB-BROWSER-003/004/006: CSS animation frames":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should synthesize implicit underlying endpoints for one midpoint keyframe":
+        val html = _single_midpoint_keyframe_html()
+        step("Open a one-midpoint keyframe animation over a red underlying style")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "box", "background_color"
+        )).to_equal("4293870660")
+
+        step("Render the implicit start endpoint through canonical Draw IR and Engine2D")
+        expect(_single_midpoint_animation_command_color(
+            html, 0
+        )).to_equal(0xFFEF4444u32)
+        expect(_animation_frame_fingerprint(
+            html, 0, 0xFFEF4444u32
+        )).to_equal(
+            "peak,1000,forwards|8,8|html_ast|box:0,0,8,8|" +
+            "peak,1000ms,4293870660|16|0|64"
+        )
+
+        step("Advance to the authored midpoint without changing scheduler cadence")
+        expect(_single_midpoint_animation_command_color(
+            html, 500
+        )).to_equal(0xFF2563EBu32)
+        expect(_animation_frame_fingerprint(
+            html, 500, 0xFF2563EBu32
+        )).to_equal(
+            "peak,1000,forwards|8,8|html_ast|box:0,0,32,8|" +
+            "peak,1000ms,4280640491|516|0|256"
+        )
+
+        step("Fill and reuse the implicit end endpoint after completion")
+        expect(_single_midpoint_animation_command_color(
+            html, 1000
+        )).to_equal(0xFFEF4444u32)
+        expect(_animation_frame_fingerprint(
+            html, 1000, 0xFFEF4444u32
+        )).to_equal(
+            "peak,1000,forwards|8,8|html_ast|box:0,0,8,8|" +
+            "peak,1000ms,4293870660|-1|0|64"
+        )
+        _expect_completed_animation_reuse(html, 0xFFEF4444u32)
+
     # @manual: show
     # @capture(html)
     # @capture(artifact)
