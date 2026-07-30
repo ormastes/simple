@@ -180,6 +180,24 @@ impl NativeProjectBuilder {
         }
     }
 
+    pub(crate) fn uses_rv64_gui_runtime(entry: &Path, arch: simple_common::target::TargetArch) -> bool {
+        arch == simple_common::target::TargetArch::Riscv64
+            && entry.file_name().and_then(|name| name.to_str()) == Some("gui_entry_desktop.spl")
+    }
+
+    pub(crate) fn rv64_gui_boot_source_allowed(stem: &str) -> bool {
+        matches!(
+            stem,
+            "full_gui_runtime"
+                | "curve25519_ring_helper"
+                | "ed25519_scalar_helper"
+                | "ed25519_sha512_helper"
+                | "tls13_aes256_gcm_helper"
+                | "tls13_sha256_helper"
+                | "ed25519_verify_helper"
+        )
+    }
+
     fn simpleos_sysroot_dir(arch: simple_common::target::TargetArch) -> PathBuf {
         if let Ok(explicit) = std::env::var("SIMPLEOS_SYSROOT") {
             return PathBuf::from(explicit);
@@ -1647,6 +1665,7 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                     .and_then(|name| name.to_str())
                     .map(|name| name == "desktop_service_entry.spl")
                     .unwrap_or(false);
+            let rv64_gui_desktop_boot = Self::uses_rv64_gui_runtime(entry, cross_target.arch);
             let boot_dir = entry.parent().unwrap_or(std::path::Path::new(".")).join("boot");
             let debug_boot_sources = self.config.verbose || std::env::var("SIMPLE_LINKER_DEBUG").is_ok();
             if skip_boot_autodiscovery && debug_boot_sources {
@@ -1762,11 +1781,15 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                             {
                                 continue;
                             }
+                            if rv64_gui_desktop_boot && !Self::rv64_gui_boot_source_allowed(&stem) {
+                                continue;
+                            }
                             if ssh_live_boot && stem == "baremetal_stubs" {
                                 continue;
                             }
                             if minimal_boot
                                 && !skip_boot_autodiscovery
+                                && !rv64_gui_desktop_boot
                                 && stem != "baremetal_stubs"
                                 && stem != "freestanding_runtime"
                                 && !(ssh_live_boot && stem == "full_networking_runtime")

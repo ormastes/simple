@@ -17,7 +17,7 @@ mkdir -p "$tmp/build/os"
         -o runtime.o
     riscv64-unknown-elf-gcc -c -march=rv64gc -mabi=lp64d -mcmodel=medany \
         -ffreestanding -nostdlib -ffunction-sections -fdata-sections \
-        "$root/examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c" \
+        "$root/examples/09_embedded/simple_os/arch/riscv64/boot/full_gui_runtime.c" \
         -o gui-runtime.o
 )
 
@@ -34,6 +34,48 @@ riscv64-unknown-elf-nm -g --defined-only "$tmp/gui-runtime.o" >"$tmp/gui-symbols
 grep -Eq ' T rt_riscv64_syscall$' "$tmp/gui-symbols"
 grep -Eq ' T rt_string_data$' "$tmp/gui-symbols"
 grep -Eq ' T rt_string_len$' "$tmp/gui-symbols"
+for symbol in \
+    rt_array_repeat rt_byte_array_new rt_bytes_to_text rt_contains \
+    rt_eprintln_str rt_for_iterable rt_pool_safepoint rt_raw_u64_to_string \
+    rt_slice rt_string_bytes rt_string_join rt_text_count_codepoints_cached \
+    rt_text_to_bytes rt_typed_bytes_u8_push rt_typed_words_u32_push \
+    rt_value_as_float rt_value_float
+do
+    grep -Eq " T ${symbol}$" "$tmp/gui-symbols"
+done
+for symbol in \
+    rt_tls_client_close rt_tls_client_connect rt_tls_client_read rt_tls_client_write
+do
+    ! grep -Eq " [TW] ${symbol}$" "$tmp/gui-symbols"
+done
+
+cat >"$tmp/float-roundtrip.c" <<EOF
+typedef long long spl_i64;
+typedef unsigned long long spl_u64;
+typedef unsigned int spl_u32;
+#define RT_VALUE_TAG_MASK 0x7ULL
+#define RT_VALUE_TAG_HEAP 0x1ULL
+#define RT_VALUE_HEAP_FLOAT 0x464C5431U
+#include "$root/src/os/kernel/arch/riscv64/boot/freestanding_float_value.h"
+
+static unsigned char heap[64];
+static unsigned long long heap_offset;
+
+static void *test_alloc(spl_i64 size) {
+    void *result = heap + heap_offset;
+    heap_offset += (unsigned long long)size;
+    return heap_offset <= sizeof(heap) ? result : (void *)0;
+}
+
+int main(void) {
+    union { double value; unsigned long long bits; } before, after;
+    before.value = 0.1;
+    after.value = rt_float_unbox_value(rt_float_box_value(before.value, test_alloc));
+    return before.bits == after.bits ? 0 : 1;
+}
+EOF
+cc "$tmp/float-roundtrip.c" -o "$tmp/float-roundtrip"
+"$tmp/float-roundtrip"
 
 cat >"$tmp/expected-instructions" <<'EOF'
 c.mv	a7,a0

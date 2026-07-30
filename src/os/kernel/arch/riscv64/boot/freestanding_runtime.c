@@ -21,6 +21,7 @@ typedef unsigned char spl_u8;
 #define RT_HEAP_ARRAY 0x02U
 #define RT_HEAP_TUPLE 0x04U
 #define RT_HEAP_ENUM 0x07U
+#define RT_VALUE_HEAP_FLOAT 0x464C5431U
 
 typedef struct RtHeapHeader {
     spl_u8 object_type;
@@ -55,6 +56,8 @@ typedef struct RtEnum {
     spl_u32 discriminant;
     spl_i64 payload;
 } RtEnum;
+
+#include "freestanding_float_value.h"
 
 #ifndef SIMPLE_RUNTIME_NO_ENTRY
 __asm__(
@@ -154,6 +157,14 @@ double spl_bits_to_f64(spl_i64 bits) {
     } converted;
     converted.bits = (spl_u64)bits;
     return converted.value;
+}
+
+spl_i64 rt_value_float(double value) {
+    return rt_float_box_value(value, rt_alloc);
+}
+
+double rt_value_as_float(spl_i64 value) {
+    return rt_float_unbox_value(value);
 }
 
 static spl_i64 rt_special(spl_u64 payload) {
@@ -1297,6 +1308,20 @@ spl_i64 rt_string_data(spl_i64 value) {
         return 0;
     }
     return (spl_i64)(spl_u64)string->data;
+}
+
+spl_i64 rt_text_count_codepoints_cached(spl_i64 value) {
+    RtString *string = rt_as_string(value);
+    spl_i64 count = 0;
+    if (!string) {
+        return 0;
+    }
+    for (spl_u64 i = 0; i < string->len; i = i + 1) {
+        if ((((spl_u8)string->data[i]) & 0xC0U) != 0x80U) {
+            count = count + 1;
+        }
+    }
+    return count;
 }
 
 spl_i64 rt_byte_array_new(spl_i64 capacity_value) {

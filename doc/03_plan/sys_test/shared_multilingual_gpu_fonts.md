@@ -509,3 +509,8 @@ An unavailable Vulkan device or an unbootable QEMU image remains an explicit
 failed/unavailable row. Software fallback, a compatibility renderer, serial
 markers without pixels, or pixels without correlated events cannot satisfy the
 row.
+
+The 2026-07-30 source checkpoint selects one canonical RV64 runtime and proves
+the RV entry closure excludes hosted TLS. These focused checks are prerequisites
+only; they do not replace the required ELF, QEMU crop, or correlated input/frame
+evidence.

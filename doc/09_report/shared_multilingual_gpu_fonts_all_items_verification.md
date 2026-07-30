@@ -9,6 +9,18 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
+## 2026-07-30 RV64 runtime-owner checkpoint
+
+The attempt-23 runtime blocker is source-fixed: the production RV64 GUI selects
+the canonical freestanding provider, all 16 surfaced non-TLS runtime symbols
+are owned, and the RV64 base shell no longer pulls the full-runtime Package
+Manager/TLS adapter into the desktop image; x86/ARM keep the real UI. The C
+provider contract and Rust closure/selector tests
+passed once. No new RV64 producer ran, so no ELF, QEMU crop, exact-ten receipt,
+or manual receipt exists.
+
+`STATUS: FAIL`
+
 ## Current Stage2/RV64 result — 2026-07-30
 
 Canonical pure-Simple Stage2 attempt 23 is admitted at clean checkpoint

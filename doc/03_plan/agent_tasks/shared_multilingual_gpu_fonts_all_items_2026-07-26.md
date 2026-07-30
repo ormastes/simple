@@ -504,3 +504,10 @@ HUD/material contract, and hosted focus/provenance contract. The added
 therefore 48 commands: preflight, B6, C19, D13, and E9. Every added
 command uses the existing immutable focused-attempt root and `/root` reviewer;
 no runtime command or docgen has run.
+
+## 2026-07-30 RV64 blocker update
+
+The canonical full RV64 GUI runtime and explicit full-runtime Package Manager
+adapter fixes are source-complete with focused C/Rust checks green. A fresh producer
+window must next prove the ELF, then QEMU crop/input, exact-ten, ten manuals,
+and final guards. No attempt-23 retry or status promotion occurred.

@@ -1581,3 +1581,20 @@ pixels, and performance evidence remain release-blocking.
   and manual attempt 2 have not run. Stage3/4 and the umbrella native-GPU
   matrix remain deferred; `SIMPLEOS_STAGE2_FONT: BLOCKED` and broader
   `STATUS: FAIL` remain.
+- rv64-canonical-runtime-and-tls-pruning-2026-07-30: The post-attempt-23
+  owner fix is source-complete and focused-check green. `gui_entry_desktop`
+  now selects one canonical `freestanding_runtime.c` provider through
+  `full_gui_runtime.c`; that provider owns all 16 surfaced non-TLS symbols,
+  including lossless heap-float boxing/unboxing and UTF-8 codepoint counting. Package
+  Manager construction now lives in an explicitly imported full-runtime
+  adapter; the RV64 shell uses the base unavailable-profile tree, so its entry
+  closure excludes hosted `ui.web.tls_client` and the four `rt_tls_client_*`
+  calls while x86/ARM retain the real Package Manager UI. The C ABI
+  contract, real entry-closure regression, and runtime-selector unit test each
+  passed once. `runtime_need`: full RV64 GUI value/string/collection runtime.
+  `facade_checked`: existing canonical freestanding provider and shell builder
+  seam. `chosen_path`: one canonical provider plus explicit full-runtime UI
+  adapter. `rejected_shortcuts`: mixed legacy/canonical providers, 724 weak
+  stubs, and fake TLS calls. No new RV64 producer ran after the capped attempt
+  23, so ELF/QEMU crop/exact-ten/manual evidence remains pending and status
+  remains `SIMPLEOS_STAGE2_FONT: BLOCKED`; broader `STATUS: FAIL`.

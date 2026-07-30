@@ -305,3 +305,18 @@ post-scale pixels. Packed Device deltas remain post-scale pixels;
 VariationIndex deltas remain design units. GDEF ItemVariationStore rejects the
 reserved `LONG_WORDS` bit. Runtime execution and manual regeneration remain
 open until a pure-Simple full CLI passes admission.
+
+## RV64 continuation after attempt 23 — 2026-07-30
+
+The runtime-owner and hosted-TLS closure fixes are implemented and focused
+tests pass. The next fresh producer window is strictly ordered:
+
+1. produce one RV64 GUI ELF from the canonical full runtime;
+2. run unpinned QEMU calibration and independently review the raw BGRA 56x48
+   bottom-right crop;
+3. run the pinned QEMU evidence pass;
+4. execute exact-ten against the newly admitted scoped-tool checkpoint;
+5. generate ten zero-stub manuals and run the final guards/review.
+
+Stage3/4 and the broad native-GPU matrix remain deferred for this scoped
+SimpleOS Stage2 goal.

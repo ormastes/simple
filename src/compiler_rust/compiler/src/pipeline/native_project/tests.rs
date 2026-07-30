@@ -1639,6 +1639,61 @@ fn test_bootstrap_entry_closure_avoids_driver_package_hub() {
 }
 
 #[test]
+fn test_riscv64_gui_entry_closure_excludes_full_runtime_package_manager_tls() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let entry = repo_root.join("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl");
+    let builder = NativeProjectBuilder::new(repo_root.clone(), repo_root.join("bin/rv64-gui-closure-test"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(repo_root.join("src/os"))
+        .source_dir(repo_root.join("src/app"))
+        .source_dir(repo_root.join("src/lib"))
+        .entry_file(entry);
+
+    let files = builder.discover_files().unwrap();
+    assert!(files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/os/desktop/shell_ui_builders.spl"))));
+    assert!(!files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/os/apps/package_manager/package_manager.spl"))));
+    assert!(!files
+        .iter()
+        .any(|path| same_file_path(path, &repo_root.join("src/app/ui.web/tls_client.spl"))));
+}
+
+#[test]
+fn test_riscv64_gui_entry_selects_canonical_full_runtime() {
+    use simple_common::target::TargetArch;
+
+    assert!(NativeProjectBuilder::uses_rv64_gui_runtime(
+        Path::new("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl"),
+        TargetArch::Riscv64,
+    ));
+    assert!(!NativeProjectBuilder::uses_rv64_gui_runtime(
+        Path::new("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"),
+        TargetArch::Aarch64,
+    ));
+    assert!(!NativeProjectBuilder::uses_rv64_gui_runtime(
+        Path::new("examples/09_embedded/simple_os/arch/riscv64/desktop_service_entry.spl"),
+        TargetArch::Riscv64,
+    ));
+    assert!(NativeProjectBuilder::rv64_gui_boot_source_allowed("full_gui_runtime"));
+    assert!(!NativeProjectBuilder::rv64_gui_boot_source_allowed("baremetal_stubs"));
+    assert!(!NativeProjectBuilder::rv64_gui_boot_source_allowed("full_networking_runtime"));
+}
+
+#[test]
 fn test_discover_files_from_entry_uses_matching_source_root() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("project");
