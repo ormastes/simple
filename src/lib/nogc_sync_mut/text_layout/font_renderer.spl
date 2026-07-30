@@ -1,3 +1,71 @@
+# ----------------------------------------------------------------------------
+# Bounded glyph-advance cache (2026-07-29) -- module-level, keyed by
+# (loaded-face identity, font_size, codepoint), so it is valid across EVERY
+# FontRenderer instance sharing the same loaded face, not just the one that
+# first measured a given character. get_glyph_advance's per-instance
+# self.cache already caches full CachedGlyph entries (with pixels) inserted
+# by get_glyph, but only the SFFI-dylib-with-selected_outline_blob and
+# legacy-ttf-handle backends have a genuine metrics-only path; the SFFI
+# dylib-without-selected-blob backend (used by every browser_default_for_family
+# font, i.e. every plain #text node under vector_fonts) has none and falls
+# through to a full pixel rasterize (get_glyph) just to read `.advance`
+# (doc/08_tracking/bug/web_style_producer_4s_per_node_interpreted_lane_
+# 2026-07-29.md). This cache short-circuits that fallthrough on a repeat
+# (codepoint, font_size, identity) triple without touching the rasterize
+# path at all. ASCII 32-126 (the overwhelming common case for UI text) gets
+# a direct array-indexed O(1) bucket; everything else (non-ASCII, or a
+# second concurrently-live face/size) uses a small bounded overflow list
+# (native Dict.get()/.len() are unreliable per doc/07_guide/language/
+# dict_native_pitfalls.md -- plain arrays + counters only).
+val _ADV_ASCII_LO: i32 = 32
+val _ADV_ASCII_HI: i32 = 126
+val _ADV_ASCII_SPAN: i32 = 95
+var _adv_ascii_identity: text = ""
+var _adv_ascii_size: i32 = -1
+var _adv_ascii_vals: [i32] = [-1; 95]
+var _adv_overflow_identity: [text] = []
+var _adv_overflow_size: [i32] = []
+var _adv_overflow_cp: [i32] = []
+var _adv_overflow_val: [i32] = []
+val _ADV_OVERFLOW_CAP: i32 = 1024
+var _adv_overflow_cursor: i32 = 0
+
+fn _adv_cache_lookup(identity: text, font_size: i32, codepoint: i32) -> i32:
+    if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
+        if identity == _adv_ascii_identity and font_size == _adv_ascii_size:
+            return _adv_ascii_vals[codepoint - _ADV_ASCII_LO]
+        return -1
+    var i: i32 = 0
+    while i < _adv_overflow_cp.len():
+        if (_adv_overflow_cp[i] == codepoint and _adv_overflow_size[i] == font_size and
+            _adv_overflow_identity[i] == identity):
+            return _adv_overflow_val[i]
+        i = i + 1
+    -1
+
+fn _adv_cache_store(identity: text, font_size: i32, codepoint: i32, advance: i32):
+    if advance <= 0:
+        return
+    if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
+        if identity != _adv_ascii_identity or font_size != _adv_ascii_size:
+            _adv_ascii_identity = identity
+            _adv_ascii_size = font_size
+            _adv_ascii_vals = [-1; 95]
+        _adv_ascii_vals[codepoint - _ADV_ASCII_LO] = advance
+        return
+    if _adv_overflow_cp.len() < _ADV_OVERFLOW_CAP:
+        _adv_overflow_identity = _adv_overflow_identity.push(identity)
+        _adv_overflow_size = _adv_overflow_size.push(font_size)
+        _adv_overflow_cp = _adv_overflow_cp.push(codepoint)
+        _adv_overflow_val = _adv_overflow_val.push(advance)
+        return
+    # Bounded ring-buffer overwrite once full -- same pattern as
+    # _resolved_font_metric_store above, never grows unbounded.
+    _adv_overflow_identity[_adv_overflow_cursor] = identity
+    _adv_overflow_size[_adv_overflow_cursor] = font_size
+    _adv_overflow_cp[_adv_overflow_cursor] = codepoint
+    _adv_overflow_val[_adv_overflow_cursor] = advance
+    _adv_overflow_cursor = (_adv_overflow_cursor + 1) % _ADV_OVERFLOW_CAP
 use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer, GlyphBitmap, LayoutGlyph, SubpixelGlyphBitmap}
 use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_dylib_candidates,
@@ -1196,11 +1264,23 @@ class FontRenderer:
             return 0
         var cache = self.cache
         val active_rasterizer = self.ttf_rasterizer
+        val _adv_identity: text = if active_rasterizer != nil: active_rasterizer.cache_identity() else: ""
+        # Bounded advance-cache fast path (2026-07-29): short-circuits the
+        # per-instance GlyphCache lookup AND, on the SFFI-dylib-without-
+        # selected-blob backend, the full pixel rasterize that backend's
+        # get_glyph_advance fallthrough otherwise pays just to read
+        # `.advance` (see the module-level comment above). Valid across
+        # every FontRenderer instance sharing the same loaded face.
+        if _adv_identity != "":
+            val _adv_fast = _adv_cache_lookup(_adv_identity, font_size, codepoint)
+            if _adv_fast > 0:
+                return _adv_fast
         if active_rasterizer != nil:
-            cache.sync_face_identity(active_rasterizer.cache_identity_generation(), active_rasterizer.cache_identity())
+            cache.sync_face_identity(active_rasterizer.cache_identity_generation(), _adv_identity)
         val cached = cache.lookup(codepoint, font_size)
         self.cache = cache
         if cached != nil:
+            _adv_cache_store(_adv_identity, font_size, codepoint, cached.advance)
             return cached.advance
 
         val rast_has_glyph = active_rasterizer != nil and active_rasterizer.has_glyph(codepoint.to_i64())
@@ -1211,13 +1291,19 @@ class FontRenderer:
                 if direct_meta[7] == 310031:
                     val direct_width = direct_meta[0] as i32
                     val direct_advance_raw = direct_meta[2] as i32
-                    return if direct_advance_raw > 0: direct_advance_raw else: direct_width + 1
+                    val _adv_direct = if direct_advance_raw > 0: direct_advance_raw else: direct_width + 1
+                    _adv_cache_store(_adv_identity, font_size, codepoint, _adv_direct)
+                    return _adv_direct
             # SFFI dylib backend (or a measure failure on the selected blob):
             # no metrics-only entry point exists, fall back unchanged.
-            return self.get_glyph(codepoint, font_size).advance
+            val _gfp_result = self.get_glyph(codepoint, font_size).advance
+            _adv_cache_store(_adv_identity, font_size, codepoint, _gfp_result)
+            return _gfp_result
 
         if self.has_ttf():
-            return rt_font_glyph_advance(self.ttf_handle, codepoint.to_i64(), font_size.to_f64()).to_i32()
+            val _gfp_result2 = rt_font_glyph_advance(self.ttf_handle, codepoint.to_i64(), font_size.to_f64()).to_i32()
+            _adv_cache_store(_adv_identity, font_size, codepoint, _gfp_result2)
+            return _gfp_result2
         if self.use_vector:
             val vector_cmds = vf_glyph_commands(codepoint)
             if vector_cmds.len() > 0:

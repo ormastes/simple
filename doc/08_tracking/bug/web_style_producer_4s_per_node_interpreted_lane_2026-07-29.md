@@ -690,6 +690,166 @@ why the individual native calls cost ~200ms+ each regardless of
 optimization stages have already reduced to single-digit-millisecond-scale
 per node.
 
+## Stage A/B 2026-07-29: root cause = whole-program interpreted execution (PROVED) + no metrics-only glyph path (PROVED); fix landed, break-point 38 -> 90/104
+
+**Stage A -- root-causing the ~425ms/char anomaly.** Bracketed inside
+`get_glyph_advance`'s implementation (`src/lib/nogc_sync_mut/text_layout/
+font_renderer.spl`) with temporary `rt_time_now_micros()` timers (reverted,
+diff-verified before landing) plus a discriminator standalone script
+(`bin/simple run` on a tiny probe importing only
+`font_renderer.resolve_font_metrics_with_language`, same family/size as the
+outlier nodes) versus the full pipeline.
+
+- **Which native path this lane takes (PROVED via code reading):**
+  `get_glyph_advance` on the SFFI-dylib backend (every `browser_default_for_family`
+  font, i.e. every plain `#text` node) has NO metrics-only entry point --
+  its own comment says so ("no metrics-only entry point exists, fall back
+  unchanged") -- and falls through to the FULL `get_glyph()` call, which
+  calls `rast.rasterize()` (a complete pixel-bitmap rasterize, O(font_size^2))
+  just to read `.advance`. This is real and secondary, not the primary
+  multiplier (below).
+- **Silent-dispatch/interpreted-execution theory (PROVED, not inferred):**
+  `examples/06_io/ui/web_render_file_gui.spl` matches the driver's
+  `should_prefer_interpreter_for_source` heuristic
+  (`src/compiler_rust/driver/src/exec_core.rs`) and is therefore **always
+  run under the interpreter by deliberate design** -- it never even
+  attempts JIT in the default configuration (confirmed: zero
+  `[INFO] JIT compilation failed` or `[jit-fallback] unresolved external
+  symbol` markers in any of 6 independent pipeline runs this campaign).
+  Forcing `SIMPLE_EXECUTION_MODE=jit` makes the driver attempt JIT anyway --
+  and it fails, with a genuine, unrelated HIR-lowering gap
+  (`Unknown type: DrawIrRenderTarget`), falling back to the interpreter
+  regardless. A minimal standalone repro (importing only
+  `font_renderer.resolve_font_metrics_with_language`) independently hits
+  the SAME class of failure via a DIFFERENT unrelated construct
+  (`HIR lowering error: Unsupported feature: CastElse` on a `read_u32_be`
+  call in `src/lib/skia/feature/glyph/ot_parser_layout.spl:280`, reached
+  only because `font_renderer.spl` transitively `use`s
+  `std.skia.feature.glyph.ot_parser.{parse_offset_table}` -- that OT-shaping
+  code is never actually CALLED for plain-Latin/`complex_script=0` content,
+  but JIT compiles the whole reachable program up front, so one unreached
+  function's unsupported HIR feature still de-JITs everything). Both paths
+  land in the SAME place: **the entire font/style code runs interpreted**,
+  at the ~100-1000x overhead this repo has hit before (see
+  `reference_silent_interpreted_fallback_hir_unknown_variable` in project
+  memory) -- generalized here from "one unresolvable name" to "one
+  unreached function anywhere in the whole-program JIT unit."
+  **Magnitude match (PROVED):** the standalone interpreted repro measured
+  8.98s for a fresh 20-char string and 1.27s for a fresh 4-char string --
+  closely matching the pipeline's own 8.5-12s (node 5, 20 chars) and
+  1.7-2.4s (node 8, 4 chars) from the prior localization pass. This is the
+  primary multiplier; the full-pixel-rasterize gap above is a secondary,
+  compounding one.
+- **What this changes vs the coordinator's fix hypotheses:** this is not a
+  per-callsite dispatch de-optimization on an otherwise-JIT'd receiver (the
+  `f2f64a137bd` engine2d-vtable precedent does not apply -- there is no
+  vtable/erased-receiver mismatch here); it is a blanket, source-content-
+  triggered interpreter routing decision plus real JIT/HIR-lowering gaps.
+  Fixing either (the `window_winit`-class heuristic, or the two named
+  HIR-lowering gaps in the Rust JIT backend) is a Rust-seed-compiler change,
+  explicitly out of scope for this pass (`.claude/rules/*`: fix `.spl`, not
+  Rust) and far larger than a bounded probe -- **filed as a follow-up**, not
+  attempted.
+
+**Stage B -- fix landed: bounded, array-backed glyph-advance cache**
+(matches the coordinator's third authorized pattern, "if the extern itself
+is slow"). `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`: a
+module-level cache keyed by `(loaded-face identity, font_size, codepoint)`,
+consulted at the top of `get_glyph_advance` before either the per-instance
+`GlyphCache` lookup or the full-rasterize fallthrough. ASCII 32-126 gets a
+direct array-indexed O(1) bucket (single active `(identity, font_size)`
+slot, reset on face/size change); everything else uses a small bounded
+overflow list (ring-buffer eviction at 1024 entries) -- plain arrays and
+counters throughout, no `Dict` (native `Dict.get()`/`.len()` are unreliable
+per `doc/07_guide/language/dict_native_pitfalls.md`). Valid across every
+`FontRenderer` instance sharing the same loaded face, not just the instance
+that first measured a given character -- so it helps across DIFFERENT
+`#text` nodes on the same page, not only repeated characters within one
+node's string.
+
+Why this (not hoisting, not receiver retyping): per-call font/blob
+re-resolution was checked and is not the cost (`sync_us`/`lookup_us` were
+consistently 300-800us in the bracketed runs, not multi-second); there is
+no dispatch-retyping fix available because the interpreted-execution
+routing is structural, not a per-call vtable miss (see above). A cache that
+short-circuits the expensive path on any repeat is the only fix available
+at this layer that is both safe and mechanical.
+
+**Before/after (standalone repro, both interpreted -- same execution mode,
+isolating the fix's own effect):**
+
+| Case | Before | After | Speedup |
+|---|---|---|---|
+| Fresh 20-char string (first occurrence of every glyph) | 8.98s | 5.90-7.61s | ~1.2-1.5x (residual first-occurrence cost, expected -- no prior cache entry to hit) |
+| Same 20-char string repeated 5x | 27-34ms | 42-47ms | unchanged (pre-existing whole-string cache in `resolve_font_metrics_with_language`, not this fix's mechanism; +load noise) |
+| Fresh 4-char string, no character overlap with prior content | 1.27s | 1.43s | unchanged (expected -- genuinely novel glyphs still pay the real rasterize cost) |
+| **New string sharing ASCII letters with prior content** ("Simmer" after "Simple Web Renderer!") | N/A (not measurable before -- this is exactly the case the fix adds) | **47-54ms** | **~140-190x vs an equivalent fresh string's ~7-9s** |
+| 100x near-fresh short strings (`"X0".."X99"`, shared leading char) | 1,094,228us/call avg | 108,624us/call avg | **10.1x** |
+
+**Full-pipeline A/B, default execution mode, same env vars as every
+historical break-point measurement this campaign**
+(`SHOWCASE_RESOLUTION=480x360 SIMPLE_WEB_RENDER_BUDGET_MS=120000
+SIMPLE_TIMEOUT_SECONDS=270`), load-checked before and after (pgrep count
+152-181 concurrent `simple` processes throughout; load average ranged
+12-51 across this session's runs -- both after-fix runs specifically
+started at 33-39 and dropped mid-run to 14-30):
+
+- Historical series (pre-fix, 3 apply_decls optimization stages, this
+  campaign): 29 -> 38 -> 38 -> 38 -> 38 -> 38 (never moved past 38/151
+  across 6 independent measurements spanning 3 code-landing stages).
+- **After this fix, two independent runs: budget-break at=90 of=151, then
+  budget-break at=104 of=151.** Neither run reached full completion (no
+  `status=` line in either log) -- the budget-break ceiling moved
+  substantially but the page still does not finish styling within the
+  120s budget. Given the historical stuck-at-38 baseline was itself
+  measured under comparable-or-lower contention on 6 prior occasions and
+  never moved, a >2x movement reproduced twice on the first pass with this
+  fix is not plausibly explained by load variance alone -- **the
+  coordinator's success metric ("the stuck-at-38 break point must move")
+  is met.**
+
+**Regression baseline (unchanged from historical, no new failures):**
+- `test/01_unit/app/ui.chromium/css_spec.spl`: 12 total, 9 passed, 3 failed
+  -- identical to the documented pre-existing baseline (same 3 unrelated
+  failures: `resolves border-color: currentColor...`, `accepts the
+  mixed-case spelling 'currentColor'`, `accepts the full panel property set
+  without losing values`).
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/apply_decls_merge_probe_spec.spl`:
+  20 total, 20 passed, 0 failed -- identical to the documented baseline.
+- `test/01_unit/lib/common/text_layout/font_renderer_spec.spl` (this
+  file's own existing unit suite): attempted twice (200s and 350s budgets)
+  and both timed out before reaching a `Results:` line -- **INFERRED, not
+  proven**, that this is a pre-existing heavy-compile characteristic of
+  that spec file (its own warning dump shows it transitively pulls in the
+  entire test_runner/sdoctest/database dependency tree, unrelated to this
+  ~90-line, array/text-only change) rather than a regression -- **flagged
+  as an open item**, not verified clean this pass.
+
+**Probes reverted:** the `rt_time_now_micros()` timing brackets and
+`[gfp-probe]`/print instrumentation added to `get_glyph_advance`/`get_glyph`
+for Stage A were fully removed before landing; the standalone discriminator
+scripts (`_font_perf_probe_tmp.spl`, `_font_perf_verify_tmp.spl`) were
+temporary and deleted. Diff-verified: `git diff --stat` against the fetch
+base shows only the landed cache addition in `font_renderer.spl` (the fix
+itself, not a probe) and this doc update.
+
+### Next fix candidates (not attempted this pass)
+1. The interpreter-routing heuristic and the two named HIR-lowering gaps
+   (`Unknown type: DrawIrRenderTarget`; `CastElse` on `read_u32_be` in
+   `ot_parser_layout.spl:280`) are the real, structural, primary multiplier
+   -- fixing either requires a Rust-seed-compiler change (JIT HIR lowering
+   support, or narrowing `should_prefer_interpreter_for_source`), well
+   outside this pass's `.spl`-only, bounded-probe scope. This is now the
+   single highest-leverage remaining fix: it would remove the ~100-1000x
+   interpreter tax from the ENTIRE pipeline, not just the font path.
+2. A genuine metrics-only native entry point for the SFFI-dylib backend
+   (avoiding `rast.rasterize()`'s full pixel-bitmap generation for
+   advance-only queries) would close the secondary gap this pass's cache
+   works around rather than eliminates -- first-occurrence glyphs still pay
+   the full rasterize cost even with the cache landed.
+3. Verify `font_renderer_spec.spl` cleanly (larger timeout budget or a
+   lower-load window) to close the open regression-baseline item above.
+
 ## bracket-slice (`s[i:j]`) survey gap — enumerated 2026-07-29, not fixed
 
 The original Category B survey (that found the byte/char split, see
