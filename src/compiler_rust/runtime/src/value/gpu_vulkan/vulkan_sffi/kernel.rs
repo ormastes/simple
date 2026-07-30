@@ -147,15 +147,17 @@ pub extern "C" fn rt_vk_kernel_launch(
             return VulkanFfiError::InvalidParameter as i32;
         }
 
+        let pipeline = {
         let pipeline_registry = PIPELINE_REGISTRY.lock();
-        if let Some(pipeline) = pipeline_registry.get(&pipeline_handle) {
-            // Get buffer handles array
+            match pipeline_registry.get(&pipeline_handle).cloned() {
+                Some(pipeline) => pipeline,
+                None => return VulkanFfiError::InvalidHandle as i32,
+            }
+        };
             let handle_slice = unsafe { std::slice::from_raw_parts(buffer_handles, buffer_count as usize) };
-
-            // Look up buffers from registry
+        let buffers = {
             let buffer_registry = BUFFER_REGISTRY.lock();
             let mut buffers: Vec<Arc<crate::vulkan::VulkanBuffer>> = Vec::with_capacity(buffer_count as usize);
-
             for &handle in handle_slice {
                 if let Some(buffer) = buffer_registry.get(&handle) {
                     buffers.push(buffer.clone());
@@ -164,16 +166,10 @@ pub extern "C" fn rt_vk_kernel_launch(
                     return VulkanFfiError::InvalidHandle as i32;
                 }
             }
+            buffers
+        };
 
-            // Convert Arc<VulkanBuffer> to &VulkanBuffer for execute()
-            let buffer_refs: Vec<&crate::vulkan::VulkanBuffer> = buffers.iter().map(|b| b.as_ref()).collect();
-
-            // Execute kernel
-            match pipeline.execute(
-                &buffer_refs,
-                [global_x, global_y, global_z],
-                [local_x, local_y, local_z],
-            ) {
+        match pipeline.execute(&buffers, [global_x, global_y, global_z], [local_x, local_y, local_z]) {
                 Ok(()) => {
                     tracing::debug!(
                         "Kernel {} executed: global=[{},{},{}] local=[{},{},{}] buffers={}",
@@ -190,9 +186,6 @@ pub extern "C" fn rt_vk_kernel_launch(
                 }
                 Err(e) => VulkanFfiError::from(e) as i32,
             }
-        } else {
-            VulkanFfiError::InvalidHandle as i32
-        }
     }
     #[cfg(not(feature = "vulkan"))]
     {

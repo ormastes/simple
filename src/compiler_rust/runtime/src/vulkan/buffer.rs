@@ -228,10 +228,11 @@ impl VulkanBuffer {
     /// Upload data at a byte offset (creates staging buffer internally).
     pub fn upload_at(&self, data: &[u8], offset: u64) -> VulkanResult<()> {
         checked_upload_end(self.size, data.len(), offset)?;
+        let _direct_compute = self.device.direct_compute_gate().lock();
+        self.device.ensure_buffer_io_available()?;
         if data.is_empty() {
             return Ok(());
         }
-        self.device.ensure_transfer_available()?;
         // Create staging buffer
         let staging = StagingBuffer::new(self.device.clone(), data.len() as u64)?;
         staging.write(data)?;
@@ -244,7 +245,8 @@ impl VulkanBuffer {
 
     /// Download data from this buffer
     pub fn download(&self, size: u64) -> VulkanResult<Vec<u8>> {
-        self.device.ensure_transfer_available()?;
+        let _direct_compute = self.device.direct_compute_gate().lock();
+        self.device.ensure_buffer_io_available()?;
         let staging = StagingBuffer::new(self.device.clone(), size)?;
         self.copy_to_staging(&staging, size)?;
         staging.read(size as usize)

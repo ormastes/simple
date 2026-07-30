@@ -232,7 +232,8 @@ impl VulkanImage {
             return Err(VulkanError::BufferTooSmall);
         }
 
-        self.device.ensure_transfer_available()?;
+        let _direct_compute = self.device.direct_compute_gate().lock();
+        self.device.ensure_buffer_io_available()?;
         let staging = StagingBuffer::new(self.device.clone(), data.len() as u64)?;
         staging.write(data)?;
 
@@ -335,7 +336,8 @@ impl VulkanImage {
             return Err(VulkanError::BufferTooSmall);
         }
 
-        self.device.ensure_transfer_available()?;
+        let _direct_compute = self.device.direct_compute_gate().lock();
+        self.device.ensure_buffer_io_available()?;
         let staging = StagingBuffer::new(self.device.clone(), data.len() as u64)?;
 
         let cmd = self.device.begin_transfer_command()?;

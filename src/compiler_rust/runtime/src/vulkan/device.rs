@@ -1,7 +1,9 @@
 //! Logical device and queue management
 
+use super::buffer::VulkanBuffer;
 use super::error::{VulkanError, VulkanResult};
 use super::instance::{VulkanInstance, VulkanPhysicalDevice};
+use super::pipeline::ComputePipeline;
 use super::sync::Fence;
 #[cfg(feature = "vulkan")]
 use super::surface::Surface;
@@ -54,6 +56,15 @@ pub struct VulkanDevice {
     swapchain_loader: Option<ash::khr::swapchain::Device>,
 
     transfer_completion_unknown: AtomicBool,
+    direct_compute_gate: Mutex<()>,
+    direct_compute_quarantine: Mutex<Vec<DirectComputeSubmission>>,
+}
+
+struct DirectComputeSubmission {
+    pipeline: Arc<ComputePipeline>,
+    fence: Fence,
+    command_buffer: vk::CommandBuffer,
+    buffers: Vec<Arc<VulkanBuffer>>,
 }
 
 pub enum FencedSubmitError {
@@ -323,6 +334,8 @@ impl VulkanDevice {
             #[cfg(feature = "vulkan")]
             swapchain_loader,
             transfer_completion_unknown: AtomicBool::new(false),
+            direct_compute_gate: Mutex::new(()),
+            direct_compute_quarantine: Mutex::new(Vec::new()),
         }))
     }
 
@@ -429,12 +442,73 @@ impl VulkanDevice {
 
     /// Wait for device to be idle
     pub fn wait_idle(&self) -> VulkanResult<()> {
+        let _direct_compute = self.direct_compute_gate.lock();
         unsafe {
             self.device
                 .device_wait_idle()
                 .map_err(|e| VulkanError::SyncError(format!("{:?}", e)))?;
         }
+        if !self.reap_direct_compute_submissions() {
+            return Err(VulkanError::SyncError(
+                "direct compute descriptor recovery failed".to_string(),
+            ));
+        }
         Ok(())
+    }
+
+    pub fn direct_compute_completion_unknown(&self) -> bool {
+        !self.direct_compute_quarantine.lock().is_empty()
+    }
+
+    pub(super) fn direct_compute_gate(&self) -> &Mutex<()> {
+        &self.direct_compute_gate
+    }
+
+    pub fn ensure_direct_compute_available(&self) -> VulkanResult<()> {
+        if self.direct_compute_completion_unknown() {
+            Err(VulkanError::SyncError(
+                "direct compute completion is unknown".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn ensure_buffer_io_available(&self) -> VulkanResult<()> {
+        self.ensure_direct_compute_available()?;
+        self.ensure_transfer_available()
+    }
+
+    pub fn quarantine_direct_compute_submission(
+        self: &Arc<Self>,
+        pipeline: Arc<ComputePipeline>,
+        fence: Fence,
+        command_buffer: vk::CommandBuffer,
+        buffers: Vec<Arc<VulkanBuffer>>,
+    ) {
+        self.direct_compute_quarantine.lock().push(DirectComputeSubmission {
+            pipeline,
+            fence,
+            command_buffer,
+            buffers,
+        });
+    }
+
+    fn reap_direct_compute_submissions(&self) -> bool {
+        let submissions = std::mem::take(&mut *self.direct_compute_quarantine.lock());
+        let mut pending = Vec::new();
+        for submission in submissions {
+            if !submission.pipeline.recover_after_device_idle() {
+                pending.push(submission);
+                continue;
+            }
+            self.free_compute_command(submission.command_buffer);
+            drop(submission.buffers);
+            drop(submission.fence);
+            drop(submission.pipeline);
+        }
+        *self.direct_compute_quarantine.lock() = pending;
+        !self.direct_compute_completion_unknown()
     }
 
     /// Begin a transfer command buffer

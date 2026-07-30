@@ -342,8 +342,15 @@ impl ComputePipeline {
     }
 
     /// Execute the kernel with given buffers
-    pub fn execute(&self, buffers: &[&VulkanBuffer], global_size: [u32; 3], local_size: [u32; 3]) -> VulkanResult<()> {
+    pub fn execute(
+        self: &Arc<Self>,
+        buffers: &[Arc<VulkanBuffer>],
+        global_size: [u32; 3],
+        local_size: [u32; 3],
+    ) -> VulkanResult<()> {
+        let _device_execution = self.device.direct_compute_gate().lock();
         let _execution = self.execution_lock.lock();
+        self.device.ensure_direct_compute_available()?;
         // Allocate descriptor set
         let set_layouts = [self.descriptor_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
@@ -429,7 +436,12 @@ impl ComputePipeline {
             }
             Err(FencedSubmitError::CompletionUnknown(error)) => {
                 self.completion_unknown.store(true, Ordering::Release);
-                std::mem::forget(fence);
+                self.device.quarantine_direct_compute_submission(
+                    Arc::clone(self),
+                    fence,
+                    cmd,
+                    buffers.to_vec(),
+                );
                 return Err(error);
             }
         }
@@ -438,6 +450,15 @@ impl ComputePipeline {
         self.reset_descriptor_pool()?;
 
         Ok(())
+    }
+
+    pub(super) fn recover_after_device_idle(&self) -> bool {
+        if let Err(error) = self.reset_descriptor_pool() {
+            tracing::error!("Leaking Vulkan pipeline resources after descriptor reset failure: {error}");
+            return false;
+        }
+        self.completion_unknown.store(false, Ordering::Release);
+        true
     }
 
     /// Get pipeline handle
@@ -601,7 +622,7 @@ mod tests {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
-        if self.completion_unknown.load(Ordering::Acquire) {
+        if self.completion_unknown.load(Ordering::Acquire) && self.device.direct_compute_completion_unknown() {
             tracing::error!("Leaking Vulkan pipeline resources after unknown GPU completion");
             return;
         }
