@@ -8,19 +8,204 @@ use super::sync::Fence;
 #[cfg(feature = "vulkan")]
 use super::surface::Surface;
 use ash::vk;
-use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
+use gpu_allocator::vulkan::{Allocation, Allocator, AllocatorCreateDesc};
 use parking_lot::Mutex;
 use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-#[cfg(feature = "vulkan")]
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
+
+pub(super) struct DeviceLifetime {
+    _instance: Arc<VulkanInstance>,
+    device: ash::Device,
+    allocator: Mutex<ManuallyDrop<Allocator>>,
+    transfer_gate: Mutex<RecoveryGate<TransferOwner>>,
+}
+
+impl DeviceLifetime {
+    pub(super) fn handle(&self) -> &ash::Device {
+        &self.device
+    }
+
+    pub(super) fn allocator(&self) -> &Mutex<ManuallyDrop<Allocator>> {
+        &self.allocator
+    }
+
+    fn transfer_completion_unknown(&self) -> bool {
+        self.transfer_gate.lock().is_blocked()
+    }
+
+    pub(super) fn admit_or_release_resource(&self, owner: TransferOwner) {
+        let mut gate = self.transfer_gate.lock();
+        let owner = match gate.retain_if_closed(owner) {
+            Ok(()) => return,
+            Err(owner) => owner,
+        };
+        if let Err(poison) = self.release_resource_owner(owner) {
+            gate.poison(poison);
+        }
+    }
+
+    fn release_resource_owner(&self, owner: TransferOwner) -> Result<(), TransferOwner> {
+        let allocation = unsafe {
+            match owner {
+                TransferOwner::Buffer { buffer, allocation } => {
+                    self.handle().destroy_buffer(buffer, None);
+                    allocation
+                }
+                TransferOwner::Image {
+                    image,
+                    view,
+                    allocation,
+                } => {
+                    self.handle().destroy_image_view(view, None);
+                    self.handle().destroy_image(image, None);
+                    allocation
+                }
+                TransferOwner::PoisonedAllocation => {
+                    return Err(TransferOwner::PoisonedAllocation);
+                }
+                owner @ TransferOwner::Submission { .. } => return Err(owner),
+            }
+        };
+        if let Some(allocation) = allocation {
+            if let Err(error) = self.allocator().lock().free(allocation) {
+                tracing::error!("Vulkan allocation cleanup is irrecoverable; poisoning transfer gate: {error:?}");
+                return Err(TransferOwner::PoisonedAllocation);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DeviceLifetime {
+    fn drop(&mut self) {
+        let transfer_gate = self.transfer_gate.get_mut();
+        if transfer_gate.is_blocked() {
+            tracing::error!("Leaking poisoned Vulkan lifetime with unreleased transfer owners");
+            transfer_gate.leak_all();
+            std::mem::forget(Arc::clone(&self._instance));
+            return;
+        }
+        unsafe {
+            ManuallyDrop::drop(&mut *self.allocator.lock());
+            self.device.destroy_device(None);
+        }
+        tracing::info!("Vulkan device destroyed");
+    }
+}
+
+struct RecoveryQueue<T> {
+    owners: Vec<T>,
+}
+
+impl<T> Default for RecoveryQueue<T> {
+    fn default() -> Self {
+        Self { owners: Vec::new() }
+    }
+}
+
+impl<T> RecoveryQueue<T> {
+    fn is_blocked(&self) -> bool {
+        !self.owners.is_empty()
+    }
+
+    fn push(&mut self, owner: T) {
+        self.owners.push(owner);
+    }
+
+    fn take_if_ready(&mut self, ready: impl FnMut(&T) -> bool) -> Option<Vec<T>> {
+        if self.owners.iter().all(ready) {
+            Some(std::mem::take(&mut self.owners))
+        } else {
+            None
+        }
+    }
+
+    fn leak_all(&mut self) {
+        for owner in std::mem::take(&mut self.owners) {
+            std::mem::forget(owner);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryPhase {
+    Open,
+    Blocked,
+    Recovering,
+    Poisoned,
+}
+
+struct RecoveryGate<T> {
+    phase: RecoveryPhase,
+    owners: Vec<T>,
+}
+
+impl<T> Default for RecoveryGate<T> {
+    fn default() -> Self {
+        Self {
+            phase: RecoveryPhase::Open,
+            owners: Vec::new(),
+        }
+    }
+}
+
+impl<T> RecoveryGate<T> {
+    fn is_blocked(&self) -> bool {
+        self.phase != RecoveryPhase::Open
+    }
+
+    fn admit_unknown(&mut self, owner: T) {
+        self.owners.push(owner);
+        if self.phase == RecoveryPhase::Open {
+            self.phase = RecoveryPhase::Blocked;
+        }
+    }
+
+    fn retain_if_closed(&mut self, owner: T) -> Result<(), T> {
+        if self.is_blocked() {
+            self.owners.push(owner);
+            Ok(())
+        } else {
+            Err(owner)
+        }
+    }
+
+    fn begin_recovery(&mut self) -> Option<Vec<T>> {
+        if self.phase == RecoveryPhase::Poisoned {
+            return None;
+        }
+        self.phase = RecoveryPhase::Recovering;
+        Some(std::mem::take(&mut self.owners))
+    }
+
+    fn take_recovery_batch(&mut self) -> Option<Vec<T>> {
+        if self.phase != RecoveryPhase::Recovering {
+            return None;
+        }
+        if self.owners.is_empty() {
+            self.phase = RecoveryPhase::Open;
+            None
+        } else {
+            Some(std::mem::take(&mut self.owners))
+        }
+    }
+
+    fn poison(&mut self, owner: T) {
+        self.owners.push(owner);
+        self.phase = RecoveryPhase::Poisoned;
+    }
+
+    fn leak_all(&mut self) {
+        for owner in std::mem::take(&mut self.owners) {
+            std::mem::forget(owner);
+        }
+    }
+}
 
 /// Vulkan logical device with queues and allocator
 pub struct VulkanDevice {
-    instance: Arc<VulkanInstance>,
+    lifetime: Arc<DeviceLifetime>,
     physical_device: VulkanPhysicalDevice,
-    device: ash::Device,
 
     // Queue families
     compute_queue_family: u32,
@@ -39,9 +224,6 @@ pub struct VulkanDevice {
     #[cfg(feature = "vulkan")]
     present_queue: Option<Arc<Mutex<vk::Queue>>>,
 
-    // Memory allocator (ManuallyDrop to ensure it's dropped before device destruction)
-    allocator: Mutex<ManuallyDrop<Allocator>>,
-
     // Pipeline cache
     pipeline_cache: vk::PipelineCache,
 
@@ -55,9 +237,8 @@ pub struct VulkanDevice {
     #[cfg(feature = "vulkan")]
     swapchain_loader: Option<ash::khr::swapchain::Device>,
 
-    transfer_completion_unknown: AtomicBool,
     direct_compute_gate: Mutex<()>,
-    direct_compute_quarantine: Mutex<Vec<DirectComputeSubmission>>,
+    direct_compute_quarantine: Mutex<RecoveryQueue<DirectComputeSubmission>>,
 }
 
 struct DirectComputeSubmission {
@@ -67,9 +248,97 @@ struct DirectComputeSubmission {
     buffers: Vec<Arc<VulkanBuffer>>,
 }
 
+pub(super) enum TransferOwner {
+    Submission {
+        fence: vk::Fence,
+        command_buffer: vk::CommandBuffer,
+    },
+    Buffer {
+        buffer: vk::Buffer,
+        allocation: Option<Allocation>,
+    },
+    Image {
+        image: vk::Image,
+        view: vk::ImageView,
+        allocation: Option<Allocation>,
+    },
+    // gpu-allocator consumes Allocation on error; this marker keeps the gate closed and lifetime leaked.
+    PoisonedAllocation,
+}
+
 pub enum FencedSubmitError {
     NotSubmitted(VulkanError),
     CompletionUnknown(VulkanError),
+}
+
+struct VulkanDeviceBuildGuard {
+    device: Option<ash::Device>,
+    allocator: Option<Allocator>,
+    pipeline_cache: Option<vk::PipelineCache>,
+    compute_pool: Option<vk::CommandPool>,
+    transfer_pool: Option<vk::CommandPool>,
+    #[cfg(feature = "vulkan")]
+    graphics_pool: Option<vk::CommandPool>,
+}
+
+impl VulkanDeviceBuildGuard {
+    fn new(device: ash::Device) -> Self {
+        Self {
+            device: Some(device),
+            allocator: None,
+            pipeline_cache: None,
+            compute_pool: None,
+            transfer_pool: None,
+            #[cfg(feature = "vulkan")]
+            graphics_pool: None,
+        }
+    }
+
+    fn handle(&self) -> &ash::Device {
+        self.device.as_ref().expect("Vulkan build guard is armed")
+    }
+
+    fn finish(mut self) -> (ash::Device, Allocator) {
+        self.pipeline_cache = None;
+        self.compute_pool = None;
+        self.transfer_pool = None;
+        #[cfg(feature = "vulkan")]
+        {
+            self.graphics_pool = None;
+        }
+        let allocator = self.allocator.take().expect("Vulkan allocator was initialized");
+        let device = self.device.take().expect("Vulkan device was initialized");
+        (device, allocator)
+    }
+}
+
+impl Drop for VulkanDeviceBuildGuard {
+    fn drop(&mut self) {
+        let Some(device) = self.device.as_ref() else {
+            return;
+        };
+        unsafe {
+            #[cfg(feature = "vulkan")]
+            if let Some(pool) = self.graphics_pool.take() {
+                device.destroy_command_pool(pool, None);
+            }
+            if let Some(pool) = self.transfer_pool.take() {
+                device.destroy_command_pool(pool, None);
+            }
+            if let Some(pool) = self.compute_pool.take() {
+                device.destroy_command_pool(pool, None);
+            }
+            if let Some(cache) = self.pipeline_cache.take() {
+                device.destroy_pipeline_cache(cache, None);
+            }
+        }
+        drop(self.allocator.take());
+        if let Some(device) = self.device.take() {
+            unsafe {
+                device.destroy_device(None);
+            }
+        }
+    }
 }
 
 pub(crate) fn submit_definitely_not_accepted(error: vk::Result) -> bool {
@@ -216,6 +485,8 @@ impl VulkanDevice {
                 .create_device(physical_device.handle, &create_info, None)
                 .map_err(|e| VulkanError::DeviceCreationFailed(format!("{:?}", e)))?
         };
+        let mut build = VulkanDeviceBuildGuard::new(device);
+        let device = build.handle().clone();
 
         // Get queues
         let compute_queue = unsafe { device.get_device_queue(compute_family, 0) };
@@ -258,6 +529,7 @@ impl VulkanDevice {
             allocation_sizes: Default::default(),
         })
         .map_err(|e| VulkanError::AllocationFailed(format!("{:?}", e)))?;
+        build.allocator = Some(allocator);
 
         // Create pipeline cache
         let cache_info = vk::PipelineCacheCreateInfo::default();
@@ -266,6 +538,7 @@ impl VulkanDevice {
                 .create_pipeline_cache(&cache_info, None)
                 .map_err(|e| VulkanError::DeviceCreationFailed(format!("Pipeline cache: {:?}", e)))?
         };
+        build.pipeline_cache = Some(pipeline_cache);
 
         // Create command pools
         let compute_pool_info = vk::CommandPoolCreateInfo::default()
@@ -276,6 +549,7 @@ impl VulkanDevice {
                 .create_command_pool(&compute_pool_info, None)
                 .map_err(|e| VulkanError::DeviceCreationFailed(format!("Compute pool: {:?}", e)))?
         };
+        build.compute_pool = Some(compute_pool);
 
         let transfer_pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(transfer_family)
@@ -285,6 +559,7 @@ impl VulkanDevice {
                 .create_command_pool(&transfer_pool_info, None)
                 .map_err(|e| VulkanError::DeviceCreationFailed(format!("Transfer pool: {:?}", e)))?
         };
+        build.transfer_pool = Some(transfer_pool);
 
         // Create graphics command pool if graphics queue exists
         #[cfg(feature = "vulkan")]
@@ -297,6 +572,7 @@ impl VulkanDevice {
                     .create_command_pool(&graphics_pool_info, None)
                     .map_err(|e| VulkanError::DeviceCreationFailed(format!("Graphics pool: {:?}", e)))?
             };
+            build.graphics_pool = Some(pool);
             Some(pool)
         } else {
             None
@@ -306,12 +582,19 @@ impl VulkanDevice {
         #[cfg(feature = "vulkan")]
         let swapchain_loader = Some(ash::khr::swapchain::Device::new(instance.instance(), &device));
 
+        let (device, allocator) = build.finish();
+        let lifetime = Arc::new(DeviceLifetime {
+            _instance: Arc::clone(&instance),
+            device,
+            allocator: Mutex::new(ManuallyDrop::new(allocator)),
+            transfer_gate: Mutex::new(RecoveryGate::default()),
+        });
+
         tracing::info!("Vulkan device created successfully");
 
         Ok(Arc::new(Self {
-            instance,
+            lifetime,
             physical_device,
-            device,
             compute_queue_family: compute_family,
             transfer_queue_family: transfer_family,
             #[cfg(feature = "vulkan")]
@@ -325,7 +608,6 @@ impl VulkanDevice {
             graphics_queue: graphics_queue_lock,
             #[cfg(feature = "vulkan")]
             present_queue: present_queue_lock,
-            allocator: Mutex::new(ManuallyDrop::new(allocator)),
             pipeline_cache,
             compute_pool: Mutex::new(compute_pool),
             transfer_pool: Mutex::new(transfer_pool),
@@ -333,9 +615,8 @@ impl VulkanDevice {
             graphics_pool: graphics_pool.map(Mutex::new),
             #[cfg(feature = "vulkan")]
             swapchain_loader,
-            transfer_completion_unknown: AtomicBool::new(false),
             direct_compute_gate: Mutex::new(()),
-            direct_compute_quarantine: Mutex::new(Vec::new()),
+            direct_compute_quarantine: Mutex::new(RecoveryQueue::default()),
         }))
     }
 
@@ -364,7 +645,11 @@ impl VulkanDevice {
 
     /// Get device handle
     pub fn handle(&self) -> &ash::Device {
-        &self.device
+        self.lifetime.handle()
+    }
+
+    pub(super) fn lifetime(&self) -> Arc<DeviceLifetime> {
+        Arc::clone(&self.lifetime)
     }
 
     /// Get physical device
@@ -374,7 +659,7 @@ impl VulkanDevice {
 
     /// Get allocator (requires lock)
     pub fn allocator(&self) -> &Mutex<ManuallyDrop<Allocator>> {
-        &self.allocator
+        self.lifetime.allocator()
     }
 
     /// Get pipeline cache
@@ -443,10 +728,32 @@ impl VulkanDevice {
     /// Wait for device to be idle
     pub fn wait_idle(&self) -> VulkanResult<()> {
         let _direct_compute = self.direct_compute_gate.lock();
-        self.wait_hardware_idle()?;
-        if !self.reap_direct_compute_submissions() {
+        let mut transfer_gate = self.lifetime.transfer_gate.lock();
+        if transfer_gate.phase == RecoveryPhase::Poisoned {
             return Err(VulkanError::SyncError(
-                "direct compute descriptor recovery failed".to_string(),
+                "transfer cleanup is irrecoverably poisoned".to_string(),
+            ));
+        }
+        self.wait_hardware_idle()?;
+        let direct_submissions = self
+            .direct_compute_quarantine
+            .lock()
+            .take_if_ready(|submission| submission.pipeline.recover_after_device_idle())
+            .ok_or_else(|| VulkanError::SyncError("direct compute descriptor recovery failed".to_string()))?;
+        let transfer_owners = transfer_gate
+            .begin_recovery()
+            .ok_or_else(|| VulkanError::SyncError("transfer cleanup is irrecoverably poisoned".to_string()))?;
+        drop(transfer_gate);
+
+        for submission in direct_submissions {
+            self.free_compute_command(submission.command_buffer);
+            drop(submission.buffers);
+            drop(submission.fence);
+            drop(submission.pipeline);
+        }
+        if !self.finish_transfer_recovery(transfer_owners) {
+            return Err(VulkanError::SyncError(
+                "transfer cleanup failed; device remains quarantined".to_string(),
             ));
         }
         Ok(())
@@ -471,7 +778,7 @@ impl VulkanDevice {
             })
             .map(|queue| queue.lock());
         unsafe {
-            self.device
+            self.handle()
                 .device_wait_idle()
                 .map_err(|e| VulkanError::SyncError(format!("{:?}", e)))?;
         }
@@ -479,7 +786,7 @@ impl VulkanDevice {
     }
 
     pub fn direct_compute_completion_unknown(&self) -> bool {
-        !self.direct_compute_quarantine.lock().is_empty()
+        self.direct_compute_quarantine.lock().is_blocked()
     }
 
     pub(super) fn direct_compute_gate(&self) -> &Mutex<()> {
@@ -516,21 +823,37 @@ impl VulkanDevice {
         });
     }
 
-    fn reap_direct_compute_submissions(&self) -> bool {
-        let submissions = std::mem::take(&mut *self.direct_compute_quarantine.lock());
-        let mut pending = Vec::new();
-        for submission in submissions {
-            if !submission.pipeline.recover_after_device_idle() {
-                pending.push(submission);
-                continue;
+    fn destroy_transfer_owner(&self, owner: TransferOwner) -> Result<(), TransferOwner> {
+        match owner {
+            TransferOwner::Submission { fence, command_buffer } => {
+                unsafe {
+                    self.handle().destroy_fence(fence, None);
+                    self.handle()
+                        .free_command_buffers(*self.transfer_pool.lock(), &[command_buffer]);
+                }
+                Ok(())
             }
-            self.free_compute_command(submission.command_buffer);
-            drop(submission.buffers);
-            drop(submission.fence);
-            drop(submission.pipeline);
+            owner => self.lifetime.release_resource_owner(owner),
         }
-        *self.direct_compute_quarantine.lock() = pending;
-        !self.direct_compute_completion_unknown()
+    }
+
+    fn finish_transfer_recovery(&self, mut owners: Vec<TransferOwner>) -> bool {
+        loop {
+            let mut pending = owners.into_iter();
+            while let Some(owner) = pending.next() {
+                if let Err(failed) = self.destroy_transfer_owner(owner) {
+                    let mut gate = self.lifetime.transfer_gate.lock();
+                    gate.poison(failed);
+                    gate.owners.extend(pending);
+                    return false;
+                }
+            }
+            let mut gate = self.lifetime.transfer_gate.lock();
+            match gate.take_recovery_batch() {
+                Some(next) => owners = next,
+                None => return gate.phase == RecoveryPhase::Open,
+            }
+        }
     }
 
     /// Begin a transfer command buffer
@@ -544,15 +867,15 @@ impl VulkanDevice {
             .command_buffer_count(1);
 
         let cmd = unsafe {
-            self.device
+            self.handle()
                 .allocate_command_buffers(&alloc_info)
                 .map_err(|e| VulkanError::CommandBufferError(format!("Allocate: {:?}", e)))?[0]
         };
 
         let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-        if let Err(e) = unsafe { self.device.begin_command_buffer(cmd, &begin_info) } {
-            unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+        if let Err(e) = unsafe { self.handle().begin_command_buffer(cmd, &begin_info) } {
+            unsafe { self.handle().free_command_buffers(*pool, &[cmd]) };
             return Err(VulkanError::CommandBufferError(format!("Begin: {:?}", e)));
         }
 
@@ -561,62 +884,71 @@ impl VulkanDevice {
 
     /// Submit and wait for a transfer command buffer
     pub fn submit_transfer_command(self: &Arc<Self>, cmd: vk::CommandBuffer) -> VulkanResult<()> {
-        if let Err(e) = unsafe { self.device.end_command_buffer(cmd) } {
-            unsafe { self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
+        let mut transfer_gate = self.lifetime.transfer_gate.lock();
+        if transfer_gate.is_blocked() {
+            unsafe {
+                self.handle().free_command_buffers(*self.transfer_pool.lock(), &[cmd]);
+            }
+            return Err(VulkanError::SyncError(
+                "transfer queue completion is unknown".to_string(),
+            ));
+        }
+        if let Err(e) = unsafe { self.handle().end_command_buffer(cmd) } {
+            unsafe { self.handle().free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
             return Err(VulkanError::CommandBufferError(format!("End: {:?}", e)));
         }
 
         let fence = match Fence::new(Arc::clone(self), false) {
             Ok(fence) => fence,
             Err(error) => {
-                unsafe { self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
+                unsafe { self.handle().free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
                 return Err(error);
             }
         };
-        match self.submit_transfer_command_with_fence(cmd, &fence) {
+        match self.submit_transfer_command_with_fence(cmd, fence, &mut transfer_gate) {
             Ok(()) => Ok(()),
             Err(FencedSubmitError::NotSubmitted(error)) => Err(error),
-            Err(FencedSubmitError::CompletionUnknown(error)) => {
-                std::mem::forget(fence);
-                Err(error)
-            }
+            Err(FencedSubmitError::CompletionUnknown(error)) => Err(error),
         }
     }
 
     fn submit_transfer_command_with_fence(
         &self,
         cmd: vk::CommandBuffer,
-        fence: &Fence,
+        fence: Fence,
+        transfer_gate: &mut RecoveryGate<TransferOwner>,
     ) -> Result<(), FencedSubmitError> {
         let cmd_buffers = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
         let queue = self.compute_queue.lock();
-        if let Err(error) = self.ensure_transfer_available() {
-            unsafe { self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
-            return Err(FencedSubmitError::NotSubmitted(error));
-        }
-        if let Err(e) = unsafe { self.device.queue_submit(*queue, &[submit_info], fence.handle()) } {
+        if let Err(e) = unsafe { self.handle().queue_submit(*queue, &[submit_info], fence.handle()) } {
             if submit_definitely_not_accepted(e) {
-                unsafe { self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
+                unsafe { self.handle().free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
                 return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
                     format!("Submit transfer: {:?}", e),
                 )));
             }
-            self.transfer_completion_unknown.store(true, Ordering::Release);
+            transfer_gate.admit_unknown(TransferOwner::Submission {
+                fence: fence.into_raw(),
+                command_buffer: cmd,
+            });
             return Err(FencedSubmitError::CompletionUnknown(VulkanError::CommandBufferError(
                 format!("Submit transfer: {:?}", e),
             )));
         }
         if let Err(error) = fence.wait(u64::MAX) {
-            self.transfer_completion_unknown.store(true, Ordering::Release);
+            transfer_gate.admit_unknown(TransferOwner::Submission {
+                fence: fence.into_raw(),
+                command_buffer: cmd,
+            });
             return Err(FencedSubmitError::CompletionUnknown(error));
         }
-        unsafe { self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
+        unsafe { self.handle().free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
         Ok(())
     }
 
     pub fn transfer_completion_unknown(&self) -> bool {
-        self.transfer_completion_unknown.load(Ordering::Acquire)
+        self.lifetime.transfer_completion_unknown()
     }
 
     pub fn ensure_transfer_available(&self) -> VulkanResult<()> {
@@ -639,15 +971,15 @@ impl VulkanDevice {
             .command_buffer_count(1);
 
         let cmd = unsafe {
-            self.device
+            self.handle()
                 .allocate_command_buffers(&alloc_info)
                 .map_err(|e| VulkanError::CommandBufferError(format!("Allocate: {:?}", e)))?[0]
         };
 
         let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-        if let Err(e) = unsafe { self.device.begin_command_buffer(cmd, &begin_info) } {
-            unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+        if let Err(e) = unsafe { self.handle().begin_command_buffer(cmd, &begin_info) } {
+            unsafe { self.handle().free_command_buffers(*pool, &[cmd]) };
             return Err(VulkanError::CommandBufferError(format!("Begin: {:?}", e)));
         }
 
@@ -667,13 +999,13 @@ impl VulkanDevice {
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         let cmd = unsafe {
-            self.device
+            self.handle()
                 .allocate_command_buffers(&alloc_info)
                 .map_err(|e| VulkanError::CommandBufferError(format!("Allocate graphics: {:?}", e)))?[0]
         };
         let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        if let Err(e) = unsafe { self.device.begin_command_buffer(cmd, &begin_info) } {
-            unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+        if let Err(e) = unsafe { self.handle().begin_command_buffer(cmd, &begin_info) } {
+            unsafe { self.handle().free_command_buffers(*pool, &[cmd]) };
             return Err(VulkanError::CommandBufferError(format!("Begin graphics: {:?}", e)));
         }
         Ok(cmd)
@@ -681,7 +1013,7 @@ impl VulkanDevice {
 
     pub fn end_compute_command(&self, cmd: vk::CommandBuffer) -> VulkanResult<()> {
         unsafe {
-            self.device
+            self.handle()
                 .end_command_buffer(cmd)
                 .map_err(|e| VulkanError::CommandBufferError(format!("End: {:?}", e)))
         }
@@ -694,15 +1026,15 @@ impl VulkanDevice {
         let queue = self.compute_queue.lock();
 
         unsafe {
-            if let Err(e) = self.device.queue_submit(*queue, &[submit_info], vk::Fence::null()) {
+            if let Err(e) = self.handle().queue_submit(*queue, &[submit_info], vk::Fence::null()) {
                 drop(queue);
-                self.device.free_command_buffers(*self.compute_pool.lock(), &[cmd]);
+                self.handle().free_command_buffers(*self.compute_pool.lock(), &[cmd]);
                 return Err(VulkanError::CommandBufferError(format!("Submit: {:?}", e)));
             }
-            self.device
+            self.handle()
                 .queue_wait_idle(*queue)
                 .map_err(|e| VulkanError::SyncError(format!("{:?}", e)))?;
-            self.device.free_command_buffers(*self.compute_pool.lock(), &[cmd]);
+            self.handle().free_command_buffers(*self.compute_pool.lock(), &[cmd]);
         }
         Ok(())
     }
@@ -720,11 +1052,11 @@ impl VulkanDevice {
         let cmd_buffers = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
         let queue = self.compute_queue.lock();
-        let submit_result = unsafe { self.device.queue_submit(*queue, &[submit_info], fence.handle()) };
+        let submit_result = unsafe { self.handle().queue_submit(*queue, &[submit_info], fence.handle()) };
         if let Err(e) = submit_result {
             if submit_definitely_not_accepted(e) {
                 let pool = self.compute_pool.lock();
-                unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+                unsafe { self.handle().free_command_buffers(*pool, &[cmd]) };
                 return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
                     format!("Submit: {:?}", e),
                 )));
@@ -740,7 +1072,7 @@ impl VulkanDevice {
         }
 
         let pool = self.compute_pool.lock();
-        unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+        unsafe { self.handle().free_command_buffers(*pool, &[cmd]) };
         Ok(())
     }
 
@@ -759,9 +1091,9 @@ impl VulkanDevice {
         let cmd_buffers = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
         let queue = queue.lock();
-        if let Err(e) = unsafe { self.device.queue_submit(*queue, &[submit_info], fence.handle()) } {
+        if let Err(e) = unsafe { self.handle().queue_submit(*queue, &[submit_info], fence.handle()) } {
             if submit_definitely_not_accepted(e) {
-                unsafe { self.device.free_command_buffers(*pool.lock(), &[cmd]) };
+                unsafe { self.handle().free_command_buffers(*pool.lock(), &[cmd]) };
                 return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
                     format!("Submit graphics: {:?}", e),
                 )));
@@ -774,13 +1106,13 @@ impl VulkanDevice {
         if let Err(e) = fence.wait(u64::MAX) {
             return Err(FencedSubmitError::CompletionUnknown(e));
         }
-        unsafe { self.device.free_command_buffers(*pool.lock(), &[cmd]) };
+        unsafe { self.handle().free_command_buffers(*pool.lock(), &[cmd]) };
         Ok(())
     }
 
     pub fn free_compute_command(&self, cmd: vk::CommandBuffer) {
         let pool = self.compute_pool.lock();
-        unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+        unsafe { self.handle().free_command_buffers(*pool, &[cmd]) };
     }
 
     #[cfg(feature = "vulkan")]
@@ -789,15 +1121,39 @@ impl VulkanDevice {
             .graphics_pool
             .as_ref()
             .ok_or_else(|| VulkanError::CommandBufferError("graphics pool unavailable".into()))?;
-        unsafe { self.device.free_command_buffers(*pool.lock(), &[cmd]) };
+        unsafe { self.handle().free_command_buffers(*pool.lock(), &[cmd]) };
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{resource_queue_families, submit_definitely_not_accepted};
+    use super::{resource_queue_families, submit_definitely_not_accepted, RecoveryGate, RecoveryPhase, RecoveryQueue};
     use ash::vk;
+    use parking_lot::Mutex;
+    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    struct Owner {
+        id: usize,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn owner(id: usize, drops: &Arc<AtomicUsize>) -> Owner {
+        Owner {
+            id,
+            drops: Arc::clone(drops),
+        }
+    }
 
     #[test]
     fn resource_queue_families_are_deduplicated() {
@@ -812,32 +1168,157 @@ mod tests {
         assert!(!submit_definitely_not_accepted(vk::Result::ERROR_DEVICE_LOST));
         assert!(!submit_definitely_not_accepted(vk::Result::ERROR_UNKNOWN));
     }
+
+    #[test]
+    fn failed_readiness_preserves_every_direct_owner() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut queue = RecoveryQueue::default();
+        queue.push(owner(1, &drops));
+        queue.push(owner(2, &drops));
+
+        assert!(queue.take_if_ready(|owner| owner.id != 2).is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(queue.is_blocked());
+
+        drop(queue.take_if_ready(|_| true).unwrap());
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert!(!queue.is_blocked());
+    }
+
+    #[test]
+    fn successful_recovery_reopens_gate_for_later_admission() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut gate = RecoveryGate::default();
+        gate.admit_unknown(owner(1, &drops));
+        assert_eq!(gate.phase, RecoveryPhase::Blocked);
+        drop(gate.begin_recovery().unwrap());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(gate.take_recovery_batch().is_none());
+        assert_eq!(gate.phase, RecoveryPhase::Open);
+
+        gate.admit_unknown(owner(2, &drops));
+        drop(gate.begin_recovery().unwrap());
+        assert!(gate.take_recovery_batch().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        assert_eq!(gate.phase, RecoveryPhase::Open);
+    }
+
+    #[test]
+    fn failed_release_poison_preserves_all_owned_entries() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut gate = RecoveryGate::default();
+        gate.admit_unknown(owner(1, &drops));
+        gate.admit_unknown(owner(2, &drops));
+        let mut drained = gate.begin_recovery().unwrap().into_iter();
+
+        gate.poison(drained.next().unwrap());
+        gate.owners.extend(drained);
+
+        assert_eq!(gate.phase, RecoveryPhase::Poisoned);
+        assert_eq!(gate.owners.len(), 2);
+        assert!(gate.begin_recovery().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn blocked_lifetime_gate_never_enters_normal_device_destruction() {
+        let source = include_str!("device.rs");
+        let lifetime_drop = source
+            .split("impl Drop for DeviceLifetime")
+            .nth(1)
+            .unwrap()
+            .split("struct RecoveryQueue")
+            .next()
+            .unwrap();
+        let blocked = lifetime_drop.find("if transfer_gate.is_blocked()").unwrap();
+        let leaked_instance = lifetime_drop
+            .find("std::mem::forget(Arc::clone(&self._instance))")
+            .unwrap();
+        let early_return = lifetime_drop[leaked_instance..].find("return;").unwrap() + leaked_instance;
+        let destroy = lifetime_drop.find("self.device.destroy_device(None)").unwrap();
+        assert!(blocked < leaked_instance && leaked_instance < early_return && early_return < destroy);
+    }
+
+    #[test]
+    fn stale_idle_admission_waits_for_the_shared_recovery_lock() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Mutex::new(RecoveryGate::default()));
+        let mut recovery = gate.lock();
+        recovery.phase = RecoveryPhase::Recovering;
+        let (started_tx, started_rx) = mpsc::channel();
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let worker_gate = Arc::clone(&gate);
+        let worker_drops = Arc::clone(&drops);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            worker_gate.lock().retain_if_closed(owner(1, &worker_drops)).unwrap();
+            admitted_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(admitted_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(recovery);
+        admitted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+        assert_eq!(gate.lock().owners.len(), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn quarantined_graph_has_no_strong_path_to_vulkan_device() {
+        let device = include_str!("device.rs");
+        let pipeline = include_str!("pipeline.rs");
+        let buffer = include_str!("buffer.rs");
+        let sync = include_str!("sync.rs");
+        let transfer_owner = device
+            .split("pub(super) enum TransferOwner")
+            .nth(1)
+            .unwrap()
+            .split("pub enum FencedSubmitError")
+            .next()
+            .unwrap();
+
+        assert!(!transfer_owner.contains("Arc<"));
+        assert!(pipeline.contains("device: Weak<VulkanDevice>"));
+        assert!(pipeline.contains("lifetime: Arc<DeviceLifetime>"));
+        assert!(buffer.contains("device: Weak<VulkanDevice>"));
+        assert!(buffer.contains("lifetime: Arc<DeviceLifetime>"));
+        assert!(sync.contains("pub struct Fence {\n    lifetime: Arc<DeviceLifetime>"));
+    }
+
+    #[test]
+    fn build_guard_owns_partial_children_before_device_lifetime() {
+        let source = include_str!("device.rs");
+        let guard = source
+            .find("let mut build = VulkanDeviceBuildGuard::new(device);")
+            .unwrap();
+        let pools = source.find("build.transfer_pool = Some(transfer_pool);").unwrap();
+        let finish = source.find("let (device, allocator) = build.finish();").unwrap();
+        let lifetime = source.find("let lifetime = Arc::new(DeviceLifetime").unwrap();
+        assert!(guard < pools && pools < finish && finish < lifetime);
+    }
 }
 
 impl Drop for VulkanDevice {
     fn drop(&mut self) {
+        if let Err(error) = self.wait_idle() {
+            tracing::error!("Leaking Vulkan device after failed idle recovery: {error}");
+            self.direct_compute_quarantine.get_mut().leak_all();
+            std::mem::forget(Arc::clone(&self.lifetime));
+            return;
+        }
         unsafe {
-            let _ = self.device.device_wait_idle();
-
             // Destroy command pools
-            self.device.destroy_command_pool(*self.transfer_pool.lock(), None);
-            self.device.destroy_command_pool(*self.compute_pool.lock(), None);
+            self.handle().destroy_command_pool(*self.transfer_pool.lock(), None);
+            self.handle().destroy_command_pool(*self.compute_pool.lock(), None);
 
             // Destroy graphics pool if it exists
             #[cfg(feature = "vulkan")]
             if let Some(ref pool) = self.graphics_pool {
-                self.device.destroy_command_pool(*pool.lock(), None);
+                self.handle().destroy_command_pool(*pool.lock(), None);
             }
 
-            self.device.destroy_pipeline_cache(self.pipeline_cache, None);
-
-            // IMPORTANT: Drop allocator BEFORE destroying the device
-            // The allocator holds internal references to the device and must be
-            // cleaned up while the device is still valid
-            ManuallyDrop::drop(&mut *self.allocator.lock());
-
-            self.device.destroy_device(None);
+            self.handle().destroy_pipeline_cache(self.pipeline_cache, None);
         }
-        tracing::info!("Vulkan device destroyed");
     }
 }

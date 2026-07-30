@@ -1,7 +1,7 @@
 //! Vulkan image and sampler management
 
 use super::buffer::StagingBuffer;
-use super::device::VulkanDevice;
+use super::device::{TransferOwner, VulkanDevice};
 use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
@@ -461,24 +461,12 @@ impl VulkanImage {
 
 impl Drop for VulkanImage {
     fn drop(&mut self) {
-        if self.device.transfer_completion_unknown() {
-            if let Some(allocation) = self.allocation.take() {
-                std::mem::forget(allocation);
-            }
-            tracing::error!("Leaking Vulkan image after unknown transfer completion");
-            return;
-        }
-        unsafe {
-            self.device.handle().destroy_image_view(self.view, None);
-            self.device.handle().destroy_image(self.image, None);
-        }
-        if let Some(allocation) = self.allocation.take() {
-            self.device
-                .allocator()
-                .lock()
-                .free(allocation)
-                .unwrap_or_else(|e| tracing::error!("Failed to free image allocation: {:?}", e));
-        }
+        let owner = TransferOwner::Image {
+            image: self.image,
+            view: self.view,
+            allocation: self.allocation.take(),
+        };
+        self.device.lifetime().admit_or_release_resource(owner);
         tracing::trace!("Image destroyed");
     }
 }

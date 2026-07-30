@@ -1,7 +1,7 @@
 //! Compute pipeline management
 
 use super::buffer::VulkanBuffer;
-use super::device::{FencedSubmitError, VulkanDevice};
+use super::device::{DeviceLifetime, FencedSubmitError, VulkanDevice};
 use super::error::{VulkanError, VulkanResult};
 use super::sync::Fence;
 use ash::vk;
@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 fn compute_entry_name(entry_name: &str) -> VulkanResult<CString> {
     if entry_name.is_empty() {
@@ -106,7 +106,8 @@ fn storage_binding_numbers(spirv_code: &[u8]) -> VulkanResult<Vec<u32>> {
 
 /// Compute pipeline with shader and layout
 pub struct ComputePipeline {
-    device: Arc<VulkanDevice>,
+    device: Weak<VulkanDevice>,
+    lifetime: Arc<DeviceLifetime>,
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     descriptor_set_layout: vk::DescriptorSetLayout,
@@ -317,7 +318,8 @@ impl ComputePipeline {
         tracing::info!("Compute pipeline created with {} bindings", bindings.len());
 
         let result = Self {
-            device,
+            device: Arc::downgrade(&device),
+            lifetime: device.lifetime(),
             pipeline,
             pipeline_layout,
             descriptor_set_layout,
@@ -334,7 +336,7 @@ impl ComputePipeline {
 
     fn reset_descriptor_pool(&self) -> VulkanResult<()> {
         unsafe {
-            self.device
+            self.lifetime
                 .handle()
                 .reset_descriptor_pool(self.descriptor_pool, vk::DescriptorPoolResetFlags::empty())
                 .map_err(|error| VulkanError::ExecutionFailed(format!("Reset pool: {:?}", error)))
@@ -348,9 +350,13 @@ impl ComputePipeline {
         global_size: [u32; 3],
         local_size: [u32; 3],
     ) -> VulkanResult<()> {
-        let _device_execution = self.device.direct_compute_gate().lock();
+        let device = self
+            .device
+            .upgrade()
+            .ok_or_else(|| VulkanError::SyncError("Vulkan device owner has been released".to_string()))?;
+        let _device_execution = device.direct_compute_gate().lock();
         let _execution = self.execution_lock.lock();
-        self.device.ensure_direct_compute_available()?;
+        device.ensure_direct_compute_available()?;
         // Allocate descriptor set
         let set_layouts = [self.descriptor_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
@@ -358,7 +364,7 @@ impl ComputePipeline {
             .set_layouts(&set_layouts);
 
         let descriptor_sets = unsafe {
-            self.device
+            device
                 .handle()
                 .allocate_descriptor_sets(&alloc_info)
                 .map_err(|e| VulkanError::ExecutionFailed(format!("Allocate descriptors: {:?}", e)))?
@@ -382,21 +388,21 @@ impl ComputePipeline {
 
             let writes = [write];
             unsafe {
-                self.device.handle().update_descriptor_sets(&writes, &[]);
+                device.handle().update_descriptor_sets(&writes, &[]);
             }
         }
 
         // Record and submit command buffer
-        let cmd = self.device.begin_compute_command()?;
+        let cmd = device.begin_compute_command()?;
 
         unsafe {
             // Bind pipeline
-            self.device
+            device
                 .handle()
                 .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
 
             // Bind descriptor sets
-            self.device.handle().cmd_bind_descriptor_sets(
+            device.handle().cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
                 self.pipeline_layout,
@@ -410,25 +416,25 @@ impl ComputePipeline {
             let group_count_y = (global_size[1] + local_size[1] - 1) / local_size[1];
             let group_count_z = (global_size[2] + local_size[2] - 1) / local_size[2];
 
-            self.device
+            device
                 .handle()
                 .cmd_dispatch(cmd, group_count_x, group_count_y, group_count_z);
         }
 
-        if let Err(error) = self.device.end_compute_command(cmd) {
-            self.device.free_compute_command(cmd);
+        if let Err(error) = device.end_compute_command(cmd) {
+            device.free_compute_command(cmd);
             self.reset_descriptor_pool()?;
             return Err(error);
         }
-        let fence = match Fence::new(self.device.clone(), false) {
+        let fence = match Fence::new(Arc::clone(&device), false) {
             Ok(fence) => fence,
             Err(error) => {
-                self.device.free_compute_command(cmd);
+                device.free_compute_command(cmd);
                 self.reset_descriptor_pool()?;
                 return Err(error);
             }
         };
-        match self.device.submit_compute_command_with_fence(cmd, &fence) {
+        match device.submit_compute_command_with_fence(cmd, &fence) {
             Ok(()) => {}
             Err(FencedSubmitError::NotSubmitted(error)) => {
                 self.reset_descriptor_pool()?;
@@ -436,12 +442,7 @@ impl ComputePipeline {
             }
             Err(FencedSubmitError::CompletionUnknown(error)) => {
                 self.completion_unknown.store(true, Ordering::Release);
-                self.device.quarantine_direct_compute_submission(
-                    Arc::clone(self),
-                    fence,
-                    cmd,
-                    buffers.to_vec(),
-                );
+                device.quarantine_direct_compute_submission(Arc::clone(self), fence, cmd, buffers.to_vec());
                 return Err(error);
             }
         }
@@ -622,18 +623,22 @@ mod tests {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
-        if self.completion_unknown.load(Ordering::Acquire) && self.device.direct_compute_completion_unknown() {
+        if self.completion_unknown.load(Ordering::Acquire) {
             tracing::error!("Leaking Vulkan pipeline resources after unknown GPU completion");
             return;
         }
         unsafe {
-            self.device.handle().destroy_descriptor_pool(self.descriptor_pool, None);
-            self.device.handle().destroy_pipeline(self.pipeline, None);
-            self.device.handle().destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device
+            self.lifetime
+                .handle()
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+            self.lifetime.handle().destroy_pipeline(self.pipeline, None);
+            self.lifetime
+                .handle()
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.lifetime
                 .handle()
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            self.device.handle().destroy_shader_module(self.shader_module, None);
+            self.lifetime.handle().destroy_shader_module(self.shader_module, None);
         }
         tracing::debug!("Compute pipeline destroyed");
     }

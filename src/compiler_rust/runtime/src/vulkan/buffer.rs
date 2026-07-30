@@ -1,11 +1,11 @@
 //! Vulkan buffer management
 
-use super::device::VulkanDevice;
+use super::device::{DeviceLifetime, TransferOwner, VulkanDevice};
 use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use gpu_allocator::MemoryLocation;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// Buffer usage flags
 #[derive(Debug, Clone, Copy)]
@@ -156,7 +156,8 @@ mod tests {
 
 /// Vulkan buffer (device-local)
 pub struct VulkanBuffer {
-    device: Arc<VulkanDevice>,
+    device: Weak<VulkanDevice>,
+    lifetime: Arc<DeviceLifetime>,
     buffer: vk::Buffer,
     allocation: Option<Allocation>,
     size: u64,
@@ -202,7 +203,8 @@ impl VulkanBuffer {
         }
 
         Ok(Self {
-            device,
+            device: Arc::downgrade(&device),
+            lifetime: device.lifetime(),
             buffer,
             allocation: Some(allocation),
             size,
@@ -220,6 +222,12 @@ impl VulkanBuffer {
         self.size
     }
 
+    fn device(&self) -> VulkanResult<Arc<VulkanDevice>> {
+        self.device
+            .upgrade()
+            .ok_or_else(|| VulkanError::SyncError("Vulkan device owner has been released".to_string()))
+    }
+
     /// Upload data to this buffer (creates staging buffer internally)
     pub fn upload(&self, data: &[u8]) -> VulkanResult<()> {
         self.upload_at(data, 0)
@@ -228,37 +236,45 @@ impl VulkanBuffer {
     /// Upload data at a byte offset (creates staging buffer internally).
     pub fn upload_at(&self, data: &[u8], offset: u64) -> VulkanResult<()> {
         checked_upload_end(self.size, data.len(), offset)?;
-        let _direct_compute = self.device.direct_compute_gate().lock();
-        self.device.ensure_buffer_io_available()?;
+        let device = self.device()?;
+        let _direct_compute = device.direct_compute_gate().lock();
+        device.ensure_buffer_io_available()?;
         if data.is_empty() {
             return Ok(());
         }
         // Create staging buffer
-        let staging = StagingBuffer::new(self.device.clone(), data.len() as u64)?;
+        let staging = StagingBuffer::new(Arc::clone(&device), data.len() as u64)?;
         staging.write(data)?;
 
         // Copy from staging to device buffer
-        self.copy_from_staging(&staging, data.len() as u64, offset)?;
+        self.copy_from_staging(&device, &staging, data.len() as u64, offset)?;
 
         Ok(())
     }
 
     /// Download data from this buffer
     pub fn download(&self, size: u64) -> VulkanResult<Vec<u8>> {
-        let _direct_compute = self.device.direct_compute_gate().lock();
-        self.device.ensure_buffer_io_available()?;
-        let staging = StagingBuffer::new(self.device.clone(), size)?;
-        self.copy_to_staging(&staging, size)?;
+        let device = self.device()?;
+        let _direct_compute = device.direct_compute_gate().lock();
+        device.ensure_buffer_io_available()?;
+        let staging = StagingBuffer::new(Arc::clone(&device), size)?;
+        self.copy_to_staging(&device, &staging, size)?;
         staging.read(size as usize)
     }
 
-    fn copy_from_staging(&self, staging: &StagingBuffer, size: u64, dst_offset: u64) -> VulkanResult<()> {
-        let cmd = self.device.begin_transfer_command()?;
+    fn copy_from_staging(
+        &self,
+        device: &Arc<VulkanDevice>,
+        staging: &StagingBuffer,
+        size: u64,
+        dst_offset: u64,
+    ) -> VulkanResult<()> {
+        let cmd = device.begin_transfer_command()?;
 
         let region = vk::BufferCopy::default().dst_offset(dst_offset).size(size);
 
         unsafe {
-            self.device
+            device
                 .handle()
                 .cmd_copy_buffer(cmd, staging.handle(), self.buffer, &[region]);
 
@@ -287,7 +303,7 @@ impl VulkanBuffer {
                 .buffer(self.buffer)
                 .offset(dst_offset)
                 .size(size);
-            self.device.handle().cmd_pipeline_barrier(
+            device.handle().cmd_pipeline_barrier(
                 cmd,
                 vk::PipelineStageFlags::TRANSFER,
                 dst_stage,
@@ -298,12 +314,12 @@ impl VulkanBuffer {
             );
         }
 
-        self.device.submit_transfer_command(cmd)?;
+        device.submit_transfer_command(cmd)?;
         Ok(())
     }
 
-    fn copy_to_staging(&self, staging: &StagingBuffer, size: u64) -> VulkanResult<()> {
-        let cmd = self.device.begin_transfer_command()?;
+    fn copy_to_staging(&self, device: &Arc<VulkanDevice>, staging: &StagingBuffer, size: u64) -> VulkanResult<()> {
+        let cmd = device.begin_transfer_command()?;
 
         let region = vk::BufferCopy::default().size(size);
         let (src_stage, src_access, dst_stage, dst_access) = download_barrier_masks(self.usage);
@@ -317,7 +333,7 @@ impl VulkanBuffer {
                 .buffer(self.buffer)
                 .offset(0)
                 .size(size);
-            self.device.handle().cmd_pipeline_barrier(
+            device.handle().cmd_pipeline_barrier(
                 cmd,
                 src_stage,
                 dst_stage,
@@ -326,35 +342,23 @@ impl VulkanBuffer {
                 &[barrier],
                 &[],
             );
-            self.device
+            device
                 .handle()
                 .cmd_copy_buffer(cmd, self.buffer, staging.handle(), &[region]);
         }
 
-        self.device.submit_transfer_command(cmd)?;
+        device.submit_transfer_command(cmd)?;
         Ok(())
     }
 }
 
 impl Drop for VulkanBuffer {
     fn drop(&mut self) {
-        if self.device.transfer_completion_unknown() {
-            if let Some(allocation) = self.allocation.take() {
-                std::mem::forget(allocation);
-            }
-            tracing::error!("Leaking Vulkan buffer after unknown transfer completion");
-            return;
-        }
-        unsafe {
-            self.device.handle().destroy_buffer(self.buffer, None);
-        }
-        if let Some(allocation) = self.allocation.take() {
-            self.device
-                .allocator()
-                .lock()
-                .free(allocation)
-                .unwrap_or_else(|e| tracing::error!("Failed to free buffer allocation: {:?}", e));
-        }
+        let owner = TransferOwner::Buffer {
+            buffer: self.buffer,
+            allocation: self.allocation.take(),
+        };
+        self.lifetime.admit_or_release_resource(owner);
     }
 }
 
@@ -445,22 +449,10 @@ impl StagingBuffer {
 
 impl Drop for StagingBuffer {
     fn drop(&mut self) {
-        if self.device.transfer_completion_unknown() {
-            if let Some(allocation) = self.allocation.take() {
-                std::mem::forget(allocation);
-            }
-            tracing::error!("Leaking Vulkan staging buffer after unknown transfer completion");
-            return;
-        }
-        unsafe {
-            self.device.handle().destroy_buffer(self.buffer, None);
-        }
-        if let Some(allocation) = self.allocation.take() {
-            self.device
-                .allocator()
-                .lock()
-                .free(allocation)
-                .unwrap_or_else(|e| tracing::error!("Failed to free staging allocation: {:?}", e));
-        }
+        let owner = TransferOwner::Buffer {
+            buffer: self.buffer,
+            allocation: self.allocation.take(),
+        };
+        self.device.lifetime().admit_or_release_resource(owner);
     }
 }

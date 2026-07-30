@@ -1,13 +1,13 @@
 //! Vulkan synchronization primitives (Fences, Semaphores)
 
-use super::device::VulkanDevice;
+use super::device::{DeviceLifetime, VulkanDevice};
 use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use std::sync::Arc;
 
 /// Fence wrapper for CPU-GPU synchronization
 pub struct Fence {
-    device: Arc<VulkanDevice>,
+    lifetime: Arc<DeviceLifetime>,
     fence: vk::Fence,
 }
 
@@ -29,7 +29,10 @@ impl Fence {
                 .map_err(|e| VulkanError::SyncError(format!("Create fence: {:?}", e)))?
         };
 
-        Ok(Self { device, fence })
+        Ok(Self {
+            lifetime: device.lifetime(),
+            fence,
+        })
     }
 
     /// Get the Vulkan fence handle
@@ -40,7 +43,7 @@ impl Fence {
     /// Wait for the fence to be signaled
     pub fn wait(&self, timeout_ns: u64) -> VulkanResult<()> {
         unsafe {
-            self.device
+            self.lifetime
                 .handle()
                 .wait_for_fences(&[self.fence], true, timeout_ns)
                 .map_err(|e| VulkanError::SyncError(format!("Wait fence: {:?}", e)))?;
@@ -51,7 +54,7 @@ impl Fence {
     /// Reset the fence to unsignaled state
     pub fn reset(&self) -> VulkanResult<()> {
         unsafe {
-            self.device
+            self.lifetime
                 .handle()
                 .reset_fences(&[self.fence])
                 .map_err(|e| VulkanError::SyncError(format!("Reset fence: {:?}", e)))?;
@@ -62,18 +65,24 @@ impl Fence {
     /// Check if the fence is signaled (non-blocking)
     pub fn is_signaled(&self) -> VulkanResult<bool> {
         unsafe {
-            self.device
+            self.lifetime
                 .handle()
                 .get_fence_status(self.fence)
                 .map_err(|e| VulkanError::SyncError(format!("Get fence status: {:?}", e)))
         }
     }
+
+    pub(super) fn into_raw(mut self) -> vk::Fence {
+        std::mem::replace(&mut self.fence, vk::Fence::null())
+    }
 }
 
 impl Drop for Fence {
     fn drop(&mut self) {
-        unsafe {
-            self.device.handle().destroy_fence(self.fence, None);
+        if self.fence != vk::Fence::null() {
+            unsafe {
+                self.lifetime.handle().destroy_fence(self.fence, None);
+            }
         }
     }
 }
