@@ -1,7 +1,7 @@
 # @cover src/os/hosted/hosted_browser_renderer_worker.spl 80%
 
 use std.spec.*
-use std.common.ui.draw_ir.{DrawIrCommand}
+use std.common.ui.draw_ir.{DrawIrCommand, draw_ir_composition}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     simpleos_host_gpu_image_resource
 }
@@ -14,6 +14,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_fetch_request_decode,
     browser_renderer_frame_decode,
+    browser_renderer_frame_decode_with_retained_images,
     browser_renderer_message_encode,
     browser_renderer_navigation_decode,
     browser_renderer_navigation_encode,
@@ -33,7 +34,11 @@ use os.hosted.hosted_browser_renderer_policy.{
     hosted_browser_renderer_request_policy
 }
 use os.hosted.hosted_browser_renderer_process.{
-    HostedBrowserRendererProcess
+    HostedBrowserRendererProcess,
+    HostedBrowserRendererResult
+}
+use os.hosted.hosted_browser_renderer_registry.{
+    HostedBrowserRendererRegistry
 }
 use os.hosted.hosted_theme_runtime.{
     hosted_theme_init_encode,
@@ -95,6 +100,22 @@ fn _worker_command_index(
             return i
         i = i + 1
     -1
+
+fn _ok_renderer_result(generation: i64) -> HostedBrowserRendererResult:
+    HostedBrowserRendererResult(
+        ok: true,
+        reason: "ok",
+        next_animation_ms: -1,
+        producer_generation: generation,
+        composition_revision: 0,
+        composition: draw_ir_composition("", "", "auto", []),
+        image_resources: [],
+        cpu_composited_count: 0,
+        cpu_composited_sha256: "",
+        solid_material_count: 0,
+        solid_material_sha256: "",
+        diagnostics: ""
+    )
 
 describe "hosted browser renderer worker":
 
@@ -189,10 +210,21 @@ describe "hosted browser renderer worker":
         )
 
         val target_url = "https://account.victim.test/private"
-        var replacement = HostedBrowserRendererProcess.create_with_theme(
+        var registry = HostedBrowserRendererRegistry.create_with_theme(
+            "/definitely/missing/simple-browser-renderer",
+            "https://home.test/",
+            4,
+            wire
+        )
+        expect(registry.ensure(
+            91, "", 64, 48, 1000, 1000
+        )).to_equal("failed")
+        var entry = registry.entries[0]
+        entry.renderer = HostedBrowserRendererProcess.create_with_theme(
             8, 64, 48, 4, wire
         )
-        replacement.navigation_permit = HostedBrowserNavigationPermit(
+        entry.renderer.state = "await-theme-init"
+        entry.renderer.navigation_permit = HostedBrowserNavigationPermit(
             active: true,
             url: target_url,
             method: "GET",
@@ -201,55 +233,84 @@ describe "hosted browser renderer worker":
             content_type: "",
             redirect_count: 0
         )
-        replacement.site_lock = "https://victim.test"
-        replacement.site_swap_pending = true
-        replacement.site_swap_site = "https://victim.test"
-        expect(replacement.generation).to_equal(8)
-        expect(replacement.requires_theme_handshake).to_be(true)
-        expect(replacement.theme_revision).to_equal(4)
-        expect(replacement.theme_wire_text).to_equal(wire)
+        entry.renderer.site_lock = "https://victim.test"
+        entry.renderer.site_swap_pending = true
+        entry.renderer.site_swap_site = "https://victim.test"
+        entry.renderer_closed = false
+        entry.failure_reason = ""
+        entry.failure_published = false
+        entry.startup_html = restart_html
+        registry.entries[0] = entry
+        expect(entry.renderer.generation).to_equal(8)
+        expect(entry.renderer.requires_theme_handshake).to_be(true)
+        expect(entry.renderer.theme_revision).to_equal(4)
+        expect(entry.renderer.theme_wire_text).to_equal(wire)
 
         var worker = (
             HostedBrowserRendererWorkerSession.create_for_theme_protocol(
                 64, 48
             )
         )
-        val ready = worker.handle(BrowserRendererMessage(
-            kind: "theme_init",
-            generation: replacement.generation,
-            request_id: 2,
-            payload: hosted_theme_init_encode(4, wire).unwrap()
-        ))
+        expect(registry._accept_polled_result(
+            0, _ok_renderer_result(8), "", "", 1000, 1000
+        )).to_equal("none")
+        entry = registry.entries[0]
+        val theme_init_wire = entry.renderer.pending_wire
+        entry.renderer._complete_pending_wire_write()
+        val theme_init_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(8), theme_init_wire
+        ).message
+        val ready = worker.handle(theme_init_message)
         expect(ready.ok).to_be(true)
         expect(ready.initialized).to_be(false)
         val ready_message = browser_renderer_decoder_feed(
-            browser_renderer_decoder_new(replacement.generation),
+            browser_renderer_decoder_new(8),
             ready.wire
         ).message
         expect(hosted_theme_ready_payload_matches(
-            replacement.theme_revision,
-            replacement.theme_wire_text,
+            entry.renderer.theme_revision,
+            entry.renderer.theme_wire_text,
             ready_message.payload
         )).to_be(true)
+        val ready_result = entry.renderer._accept_theme_ready_message(
+            ready_message
+        )
+        registry.entries[0] = entry
+        expect(registry._accept_polled_result(
+            0, ready_result, "", "", 1001, 1001
+        )).to_equal("none")
 
-        val bootstrap = worker.handle(BrowserRendererMessage(
-            kind: "init",
-            generation: replacement.generation,
-            request_id: 3,
-            payload: restart_html
-        ))
+        entry = registry.entries[0]
+        val init_wire = entry.renderer.pending_wire
+        entry.renderer._complete_pending_wire_write()
+        val init_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(8), init_wire
+        ).message
+        val bootstrap = worker.handle(init_message)
         expect(bootstrap.ok).to_be(true)
         expect(bootstrap.initialized).to_be(true)
-
-        replacement.state = "active"
-        match replacement.begin_resume_site_swap(2000):
-            Err(reason):
-                fail("themed restart did not resume: {reason}")
-            Ok(started):
-                expect(started).to_be(true)
+        val bootstrap_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(8), bootstrap.wire
+        ).message
+        val bootstrap_frame = (
+            browser_renderer_frame_decode_with_retained_images(
+                bootstrap_message, 64, 48, []
+            )
+        )
+        val bootstrap_result = entry.renderer._accept_decoded_frame(
+            bootstrap_frame, 8
+        )
+        registry.entries[0] = entry
+        expect(registry._accept_polled_result(
+            0, bootstrap_result, "", "", 1002, 1002
+        )).to_equal("none")
+        entry = registry.entries[0]
+        expect(entry.pending_frame.checksum).to_equal(0u64)
+        expect(entry.pending_frame.pixels.len()).to_equal(0)
+        expect(entry.ready).to_be(false)
         val resumed = browser_renderer_decoder_feed(
-            browser_renderer_decoder_new(replacement.generation),
-            replacement.pending_wire
+            browser_renderer_decoder_new(8),
+            entry.renderer.pending_wire
         )
         expect(resumed.status).to_equal("message")
         val navigation = browser_renderer_navigation_decode(
@@ -258,7 +319,7 @@ describe "hosted browser renderer worker":
         expect(navigation.ok).to_be(true)
         expect(navigation.action).to_equal("open")
         expect(navigation.url).to_equal(target_url)
-        expect(replacement.site_swap_pending).to_be(false)
+        expect(entry.renderer.site_swap_pending).to_be(false)
 
     it "reserves theme envelope bytes below the codec maximum":
         expect(HOSTED_THEME_INIT_MAX_WIRE_BYTES).to_be_less_than(

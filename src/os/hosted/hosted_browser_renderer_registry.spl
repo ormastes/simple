@@ -483,6 +483,9 @@ pub class HostedBrowserRendererRegistry:
             simple_web_external_content_frame_with_theme_receipt(
                 entry.window_id.to_text(),
                 revision,
+                self.theme_revision,
+                entry.renderer.theme_revision,
+                self.theme_wire_text,
                 theme,
                 self.theme_source_manifest_sha256,
                 self.theme_material_sha256,
@@ -592,6 +595,52 @@ pub class HostedBrowserRendererRegistry:
             Ok(_):
                 "none"
 
+    me _accept_polled_result(
+        index: i32,
+        result: HostedBrowserRendererResult,
+        title: text,
+        body_html: text,
+        now_micros: i64,
+        wall_clock_ms: i64
+    ) -> text:
+        var entry = self.entries[index]
+        val was_ready = entry.ready
+        if not result.ok:
+            if result.reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
+                return self._begin_site_swap(index, wall_clock_ms)
+            return self._fail(index, result.reason)
+        if entry.renderer.state == "await-theme-init":
+            val theme_started = entry.renderer.begin_theme_init(2000)
+            self.entries[index] = entry
+            match theme_started:
+                Err(reason):
+                    return self._fail(index, reason)
+                Ok(_):
+                    return "none"
+        if entry.renderer.state == "await-init":
+            val initialized = entry.renderer.begin_init(
+                entry.startup_html, 2000
+            )
+            self.entries[index] = entry
+            match initialized:
+                Err(reason):
+                    return self._fail(index, reason)
+                Ok(_):
+                    return "none"
+        if entry.renderer.site_swap_pending:
+            val resumed = entry.renderer.begin_resume_site_swap(2000)
+            self.entries[index] = entry
+            match resumed:
+                Err(reason):
+                    return self._fail(index, reason)
+                Ok(_):
+                    return "none"
+        entry.ready = true
+        if not was_ready:
+            entry.animation_origin_micros = now_micros
+        self.entries[index] = entry
+        self._store_frame(index, result, title, body_html)
+
     me advance_window(
         window_id: i64,
         title: text,
@@ -620,7 +669,6 @@ pub class HostedBrowserRendererRegistry:
             return if entry.failure_published: "none" else: "failed"
         if entry.renderer_closed or entry.failure_reason != "":
             return if entry.failure_published: "none" else: "failed"
-        val was_ready = entry.ready
         val polled = entry.renderer.poll()
         self.entries[index] = entry
         if entry.renderer.hsts_dirty:
@@ -630,41 +678,14 @@ pub class HostedBrowserRendererRegistry:
             )
             entry = self.entries[index]
         if val Some(result) = polled:
-            if not result.ok:
-                if result.reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
-                    return self._begin_site_swap(index, wall_clock_ms)
-                return self._fail(index, result.reason)
-            if entry.renderer.state == "await-theme-init":
-                val theme_started = entry.renderer.begin_theme_init(2000)
-                self.entries[index] = entry
-                match theme_started:
-                    Err(reason):
-                        return self._fail(index, reason)
-                    Ok(_):
-                        return "none"
-            if entry.renderer.state == "await-init":
-                val initialized = entry.renderer.begin_init(
-                    entry.startup_html, 2000
-                )
-                self.entries[index] = entry
-                match initialized:
-                    Err(reason):
-                        return self._fail(index, reason)
-                    Ok(_):
-                        return "none"
-            if entry.renderer.site_swap_pending:
-                val resumed = entry.renderer.begin_resume_site_swap(2000)
-                self.entries[index] = entry
-                match resumed:
-                    Err(reason):
-                        return self._fail(index, reason)
-                    Ok(_):
-                        return "none"
-            entry.ready = true
-            if not was_ready:
-                entry.animation_origin_micros = now_micros
-            self.entries[index] = entry
-            return self._store_frame(index, result, title, body_html)
+            return self._accept_polled_result(
+                index,
+                result,
+                title,
+                body_html,
+                now_micros,
+                wall_clock_ms
+            )
         if not entry.ready:
             return "none"
         if (entry.bookmark_revision < self.bookmark_revision and
