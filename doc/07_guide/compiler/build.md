@@ -263,7 +263,8 @@ audit runs `bash scripts/check/build-stage2-font-scoped-tools.shs check
 `SIMPLEOS_STAGE2_FONT` evidence: Stage 3/4, full bootstrap, general `run`/`test`
 qualification, and release remain outside it.
 
-Run the exact ten executable specs once with the same numbered receipt attempt.
+Run the exact ten executable specs once with the same positive-decimal receipt
+attempt as the scoped tools; consumed attempt numbers are never reused.
 The helper validates and stages the supplied mtools directory, binds all
 x86/RV64 host tools, firmware, sysroot inputs, and optional payload state, and
 creates no receipt root when preflight fails:

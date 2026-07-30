@@ -65,15 +65,16 @@ Run only this scoped set:
 
 ### Current blocking TODO
 
-- [ ] In a fresh session, preserve and debug the generated executable for
-  `wm_world_multi_window_identity_spec.spl`; three bounded cycles currently
-  native-build cleanly and then exit 139. See
-  `doc/08_tracking/bug/wm_world_spipe_native_exit139_2026-07-29.md`.
-- [ ] After that focused spec is green, commit a clean checkpoint and produce
-  fresh Stage2 provenance. Attempt 8 was intentionally aborted before
-  compilation because its checkpoint became obsolete.
-- [ ] Run scoped-tool attempt 3, the final RV64 build attempt, framebuffer crop,
-  exact ten specs, ten zero-stub manuals, and the final audit.
+- [x] Fix the shared Rust assignment parser for an indented RHS after `=` and
+  retain one focused red-to-green field-assignment regression.
+- [ ] Commit/push the final clean parser/evidence-wrapper checkpoint and produce
+  fresh canonical Stage2 provenance. Aborted Stage2 attempt 15 is not evidence.
+- [ ] From that Stage2, run RV64 attempt 18 and scoped-tool attempt 7 in
+  parallel.
+- [ ] Independently review and pin the QEMU framebuffer crop, then run matching
+  exact-ten attempt 7 and generate ten zero-stub manuals.
+- [ ] Run the final guards and independent evidence/manual review before
+  recording `SIMPLEOS_STAGE2_FONT: PASS`.
 
 ### Bounded Stage 2 tool producer
 

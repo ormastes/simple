@@ -1531,3 +1531,19 @@ pixels, and performance evidence remain release-blocking.
   `doc/08_tracking/bug/stage2_rv64_desktop_stage2_nil_receiver_2026-07-29.md`.
   Crop/QEMU, exact-ten, and manual evidence remain absent; the scoped status
   remains BLOCKED and 0/10 specs are accepted.
+- assignment-rhs-continuation-window-2026-07-30: At clean checkpoint
+  `4a449991e9c`, canonical Stage2 attempt 14 passed and RV64 attempts 15–17
+  advanced through the equality/comparison, balanced-Dedent, and block-header
+  boundaries. Attempt 17 then exited 1 at
+  `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:1067:54` with
+  `expected expression, found Newline` after `font_receipt.advance_digest =`;
+  no ELF was produced and 0/10 scoped specs are accepted. Commit
+  `5144488444d` fixes the shared assignment owner for all assignment operators,
+  balances only its continuation Dedents before bitfield early returns, and
+  retains a focused red-to-green field-assignment sibling regression.
+  Independent review accepted the root fix. The exact-ten wrapper now accepts
+  any positive decimal attempt so consumed attempts are not reused; attempt 7
+  remains bound to scoped-tool attempt 7. Stage2 attempt 15 was interrupted
+  before admission when this checkpoint dependency was found and is not
+  evidence. Fresh Stage2, RV64 attempt 18, scoped tools, crop review, exact ten,
+  manuals, and final audits remain pending. STATUS: FAIL.
