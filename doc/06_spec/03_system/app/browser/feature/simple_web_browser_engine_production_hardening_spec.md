@@ -2142,6 +2142,8 @@ expect(registry.pressed_window_id).to_equal(0)
 
 #### should persist bounded page titles across renderer and profile restart
 
+**Requirements:** `REQ-WEB-BROWSER-009`, `REQ-WEB-BROWSER-021`
+
 - setup hosted bookmark title profile
    - Text capture: after_step
 - fail
@@ -2185,25 +2187,33 @@ expect(registry.pressed_window_id).to_equal(0)
    - Expected: restarted.profile_bookmarks.entries[1].second equals ``
 - check restarted bookmark listing
    - Text capture: after_step
+   - Evidence: restarted BrowserSession UI nodes resolved by canonical href, independent of bookmark order
+   - Expected: accepted bookmark label equals `BOOKMARK_TITLE_512`
+   - Expected: accepted bookmark href equals `https://accepted-title.test/`
+   - Expected: fallback bookmark label equals `https://fallback-title.test/`
+   - Expected: fallback bookmark href equals `https://fallback-title.test/`
+- check in process registry profile reopen
+   - Text capture: after_step
+   - Evidence: bookmark mutations, canonical remove/re-add, and restart use HostedWebContentRegistry public actions with URL-keyed comparison
+   - Expected: remove leaves `1` bookmark
+   - Expected: re-add restores `2` bookmarks
+   - Expected: both canonical URLs occur exactly once with their safe labels
 - List persisted bookmarks with safe titles
    - Text capture: after_step
-   - Evidence: text output verified by 2 expected checks
+   - Evidence: canonical URL lookup verified by 4 expected checks
+   - Expected: each canonical URL occurs exactly once
    - Expected: restored_title equals `BOOKMARK_TITLE_512`
    - Expected: restored_fallback equals ``
 - set mock registry
    - Text capture: after_step
-- rt file delete
-   - Text capture: after_step
-- rt file delete
-   - Text capture: after_step
-- rt file delete
+- remove bookmark title profile
    - Text capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 121 lines folded for reproduction.
+Runnable source: 124 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2308,26 +2318,29 @@ expect(registry.next_generation).to_be_greater_than(2)
 expect(restarted_count).to_equal(2)
 
 expect(restarted.profile_bookmarks.entries.len()).to_equal(2)
-expect(restarted.profile_bookmarks.entries[0].second).to_equal(
-    BOOKMARK_TITLE_512
-)
-expect(restarted.profile_bookmarks.entries[1].second).to_equal("")
-check_restarted_bookmark_listing(restarted.profile_bookmarks)
+check_restarted_bookmark_listing(restarted)
 check_in_process_registry_profile_reopen(
     restarted.profile_bookmarks
 )
-val restored_title = restarted.profile_bookmarks.entries[0].second
-val restored_fallback = (
-    restarted.profile_bookmarks.entries[1].second
-)
+var restored_title = ""
+var restored_fallback = ""
+var restored_accepted_count = 0
+var restored_fallback_count = 0
+for entry in restarted.profile_bookmarks.entries:
+    if entry.first == "https://accepted-title.test/":
+        restored_accepted_count = restored_accepted_count + 1
+        restored_title = entry.second
+    elif entry.first == "https://fallback-title.test/":
+        restored_fallback_count = restored_fallback_count + 1
+        restored_fallback = entry.second
 step("List persisted bookmarks with safe titles")
+expect(restored_accepted_count).to_equal(1)
+expect(restored_fallback_count).to_equal(1)
 expect(restored_title).to_equal(BOOKMARK_TITLE_512)
 expect(restored_fallback).to_equal("")
 expect(restarted.close()).to_be(true)
 set_mock_registry(MockResponseRegistry.create())
-rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH)
-rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-wal")
-rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-shm")
+_remove_bookmark_title_profile(BOOKMARK_TITLE_PROFILE_PATH)
 ```
 
 </details>

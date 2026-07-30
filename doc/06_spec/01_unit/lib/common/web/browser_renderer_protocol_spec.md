@@ -17,6 +17,11 @@
 
 #### round-trips bounded document titles and rejects hostile SBRF8 fields
 
+**Requirements:** `REQ-WEB-BROWSER-009`, `REQ-WEB-BROWSER-021`
+
+- hosted browser title is valid
+   - Expected: hosted_browser_title_is_valid(title_512) is `true`
+   - Expected: hosted_browser_title_is_valid(title_513) is `false`
 -  renderer protocol fixture
 - browser renderer decoder new
    - Expected: decoded_message.status equals `message`
@@ -35,12 +40,14 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 130 lines folded for reproduction.
+Runnable source: 132 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val title_512 = "a".repeat(510) + "é"
 val title_513 = "a".repeat(511) + "é"
+expect(hosted_browser_title_is_valid(title_512)).to_be(true)
+expect(hosted_browser_title_is_valid(title_513)).to_be(false)
 val encoded = (
     browser_renderer_frame_encode_with_state_and_retained_images_and_title(
         _renderer_protocol_fixture(),

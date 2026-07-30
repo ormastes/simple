@@ -72,6 +72,15 @@ static int remove_sysv_objects(int shmid, int msgid, int semid) {
 
 static int sandbox_pre_main_denials;
 
+static const char* representative_hostile_loader_env_names[] = {
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_DEBUG",
+    "LD_DEBUG_OUTPUT",
+    "LD_LIBRARY_PATH",
+    "LD_ORIGIN_PATH",
+};
+
 #ifdef __linux__
 extern bool rt_browser_renderer_preinit_active_for_test(void);
 
@@ -102,6 +111,14 @@ static int sandbox_probe(int argc, char** argv) {
     if (argc != 7 || strcmp(argv[0], "simple-browser-renderer") != 0 ||
         getenv("SIMPLE_BROWSER_RENDERER_SECRET") != NULL) {
         return 10;
+    }
+    for (size_t i = 0;
+         i < sizeof(representative_hostile_loader_env_names) /
+             sizeof(representative_hostile_loader_env_names[0]);
+         i++) {
+        if (getenv(representative_hostile_loader_env_names[i]) != NULL) {
+            return 30;
+        }
     }
     if (!sandbox_pre_main_denials) return 29;
     char cwd[8];
@@ -324,7 +341,25 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
     args[5] = mutation_path;
     test_args = args;
     test_arg_count = 6;
-    if (setenv("SIMPLE_BROWSER_RENDERER_SECRET", "must-not-leak", 1) != 0) {
+    int loader_env_ready = 1;
+    for (size_t i = 0;
+         i < sizeof(representative_hostile_loader_env_names) /
+             sizeof(representative_hostile_loader_env_names[0]);
+         i++) {
+        if (setenv(
+                representative_hostile_loader_env_names[i],
+                "/hostile/loader", 1) != 0) {
+            loader_env_ready = 0;
+        }
+    }
+    if (!loader_env_ready ||
+        setenv("SIMPLE_BROWSER_RENDERER_SECRET", "must-not-leak", 1) != 0) {
+        for (size_t i = 0;
+             i < sizeof(representative_hostile_loader_env_names) /
+                 sizeof(representative_hostile_loader_env_names[0]);
+             i++) {
+            unsetenv(representative_hostile_loader_env_names[i]);
+        }
         close(inherited_fd);
         unlink(mutation_path);
         remove_sysv_objects(shmid, msgid, semid);
@@ -336,6 +371,12 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         "/proc/self/exe", &placeholder);
     close(inherited_fd);
     unsetenv("SIMPLE_BROWSER_RENDERER_SECRET");
+    for (size_t i = 0;
+         i < sizeof(representative_hostile_loader_env_names) /
+             sizeof(representative_hostile_loader_env_names[0]);
+         i++) {
+        unsetenv(representative_hostile_loader_env_names[i]);
+    }
     if (first_pid <= 0 || second_pid <= 0) {
         if (first_pid > 0) rt_process_close_piped(first_pid);
         if (second_pid > 0) rt_process_close_piped(second_pid);

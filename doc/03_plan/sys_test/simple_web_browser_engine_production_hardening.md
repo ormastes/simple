@@ -588,7 +588,7 @@ must show reuse. This design cites
 <https://www.w3.org/TR/css-cascade-5/> and
 <https://www.w3.org/TR/css-overflow-3/>; it creates no production claim.
 
-## Bookmark title persistence SSpec (PROPOSED / RED)
+## Bookmark title persistence SSpec (IMPLEMENTED STATIC / EXECUTION HELD)
 
 Target the existing modern scenario at
 `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl`.
@@ -635,7 +635,7 @@ Required assertions use built-in matchers only:
 - legacy `SBRF7` renders with no title witness and cannot reuse a prior
   generation's title.
 
-The pre-fix RED is the hosted `(url, url)` persistence call: even the valid
+The original RED was the hosted `(url, url)` persistence call: even the valid
 512-byte document title becomes the URL in both the sandbox parent and
 `HostedWebContentRegistry` reconciliation. Source inspection or direct
 BrowserSession-only coverage cannot promote this scenario. No bootstrap or

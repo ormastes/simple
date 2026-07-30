@@ -1,0 +1,48 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-021
+"""Hostile loader-environment isolation at the production renderer spawn."""
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn check_renderer_loader_env_absent():
+    val runtime = rt_file_read_text(
+        "src/runtime/runtime_process.c"
+    ) ?? ""
+    val probe = rt_file_read_text(
+        "test/01_unit/runtime/process_piped_write_test.c"
+    ) ?? ""
+    expect(runtime).to_contain("char* empty_environment[] = {NULL};")
+    expect(runtime).to_contain(
+        "execve(cmd, argv, empty_environment)"
+    )
+    expect(probe).to_contain(
+        "representative_hostile_loader_env_names"
+    )
+    expect(probe).to_contain(
+        "getenv(representative_hostile_loader_env_names[i])"
+    )
+    for name in [
+        "LD_PRELOAD",
+        "LD_AUDIT",
+        "LD_DEBUG",
+        "LD_DEBUG_OUTPUT",
+        "LD_LIBRARY_PATH",
+        "LD_ORIGIN_PATH"
+    ]:
+        expect(probe).to_contain("\"{name}\"")
+
+describe "Hosted renderer loader environment":
+    # @manual: show
+    # @capture(protocol)
+    # @req REQ-WEB-BROWSER-014 REQ-WEB-BROWSER-021
+    it "should reject inherited loader authority before renderer exec":
+        step("Launch the isolated site renderer")
+        val broker = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_process.spl"
+        ) ?? ""
+        expect(broker).to_contain("browser_renderer_spawn_sandboxed(")
+
+        step("Reject inherited loader authority")
+        check_renderer_loader_env_absent()

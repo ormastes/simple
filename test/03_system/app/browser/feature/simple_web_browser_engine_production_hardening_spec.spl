@@ -71,8 +71,7 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
 use std.common.image.png_encode.{encode_argb_to_png}
 use common.ui.draw_ir.{DrawIrCommand}
 use std.gc_async_mut.web.browser_session.{
-    BrowserBookmarkSnapshot, BrowserSession,
-    browser_bookmark_title_or_url
+    BrowserBookmarkSnapshot, BrowserSession
 }
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
@@ -92,13 +91,20 @@ extern fn rt_file_delete(path: text) -> bool
 val BOOKMARK_TITLE_PROFILE_PATH = (
     "/tmp/simple_web_browser_bookmark_title_spec.sqlite3"
 )
+val BOOKMARK_TITLE_IN_PROCESS_PROFILE_PATH = (
+    "/tmp/simple_web_browser_bookmark_title_in_process_spec.sqlite3"
+)
 val BOOKMARK_TITLE_512 = "a".repeat(510) + "é"
 val BOOKMARK_TITLE_513 = "a".repeat(511) + "é"
 
+fn _remove_bookmark_title_profile(path: text):
+    rt_file_delete(path)
+    rt_file_delete(path + "-wal")
+    rt_file_delete(path + "-shm")
+
 fn setup_hosted_bookmark_title_profile():
-    rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH)
-    rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-wal")
-    rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-shm")
+    _remove_bookmark_title_profile(BOOKMARK_TITLE_PROFILE_PATH)
+    _remove_bookmark_title_profile(BOOKMARK_TITLE_IN_PROCESS_PROFILE_PATH)
     var mocks = MockResponseRegistry.create()
     mocks.register(
         "https://accepted-title.test/", 200,
@@ -120,34 +126,161 @@ fn check_bookmark_title_witness_admission(
     )
 
 fn check_restarted_bookmark_listing(
-    snapshot: BrowserBookmarkSnapshot
+    registry: HostedWebContentRegistry
 ):
+    val snapshot = registry.profile_bookmarks
     expect(snapshot.entries.len()).to_equal(2)
-    expect(snapshot.entries[0].second).to_equal(BOOKMARK_TITLE_512)
-    expect(snapshot.entries[1].second).to_equal("")
+    var accepted_profile_count = 0
+    var fallback_profile_count = 0
+    for entry in snapshot.entries:
+        if entry.first == "https://accepted-title.test/":
+            accepted_profile_count = accepted_profile_count + 1
+            expect(entry.second).to_equal(BOOKMARK_TITLE_512)
+        elif entry.first == "https://fallback-title.test/":
+            fallback_profile_count = fallback_profile_count + 1
+            expect(entry.second).to_equal("")
+    expect(accepted_profile_count).to_equal(1)
+    expect(fallback_profile_count).to_equal(1)
     var browser = BrowserSession.new_without_runtime()
     expect(browser.load_bookmark_snapshot(snapshot)).to_equal(2)
     val ui = browser.ui_access_snapshot()
-    expect(ui.nodes[8].text_value).to_equal(BOOKMARK_TITLE_512)
-    expect(ui.nodes[8].props[2].value).to_equal(
-        "https://accepted-title.test/"
+    var accepted_ui_count = 0
+    var fallback_ui_count = 0
+    for node in ui.nodes:
+        for prop in node.props:
+            if (prop.key == "href" and
+                prop.value == "https://accepted-title.test/"):
+                accepted_ui_count = accepted_ui_count + 1
+                expect(node.text_value).to_equal(BOOKMARK_TITLE_512)
+                expect(prop.value).to_equal(
+                    "https://accepted-title.test/"
+                )
+            elif (prop.key == "href" and
+                  prop.value == "https://fallback-title.test/"):
+                fallback_ui_count = fallback_ui_count + 1
+                expect(node.text_value).to_equal(
+                    "https://fallback-title.test/"
+                )
+                expect(prop.value).to_equal(
+                    "https://fallback-title.test/"
+                )
+    expect(accepted_ui_count).to_equal(1)
+    expect(fallback_ui_count).to_equal(1)
+
+fn _open_in_process_bookmark_document(
+    registry: HostedWebContentRegistry,
+    url: text,
+    event_id: i64,
+    now_ms: i64
+):
+    val _ = registry.dispatch_chrome_pointer(
+        event_id, 95, "address", true
     )
-    expect(ui.nodes[9].text_value).to_equal(
-        "https://fallback-title.test/"
+    val _ = registry.dispatch_chrome_pointer(
+        event_id + 1, 95, "address", false
     )
-    expect(ui.nodes[9].props[2].value).to_equal(
-        "https://fallback-title.test/"
+    val _ = registry.dispatch_text(event_id + 2, 95, url)
+    val _ = registry.dispatch_key(event_id + 3, 95, 13, true)
+    val _ = registry.advance_window(
+        95, "<main>in-process bookmark</main>", 64, 48, now_ms, true
+    )
+    val _ = registry.advance_window(
+        95, "<main>in-process bookmark</main>", 64, 48, now_ms + 1, true
     )
 
 fn check_in_process_registry_profile_reopen(
-    snapshot: BrowserBookmarkSnapshot
+    sandbox_snapshot: BrowserBookmarkSnapshot
 ):
-    expect(browser_bookmark_title_or_url(
-        snapshot.entries[0].second, snapshot.entries[0].first
-    )).to_equal(BOOKMARK_TITLE_512)
-    expect(browser_bookmark_title_or_url(
-        snapshot.entries[1].second, snapshot.entries[1].first
-    )).to_equal("https://fallback-title.test/")
+    val profile = match BrowserProfileStore.open(
+        BOOKMARK_TITLE_IN_PROCESS_PROFILE_PATH
+    ):
+        Err(error):
+            fail(error.message())
+        Ok(opened):
+            opened
+    var first = HostedWebContentRegistry.create_with_bookmark_store(
+        BrowserBookmarkStore.from_profile(profile)
+    )
+    val _ = first.advance_window(
+        95, "<main>in-process bookmark</main>", 64, 48, 200000, true
+    )
+    _open_in_process_bookmark_document(
+        first, "https://accepted-title.test/", 200, 200001
+    )
+    val _ = first.dispatch_chrome_pointer(210, 95, "favorite", true)
+    expect(first.dispatch_chrome_pointer(
+        211, 95, "favorite", false
+    ).reason).to_equal("")
+    _open_in_process_bookmark_document(
+        first, "https://fallback-title.test/", 220, 200003
+    )
+    val _ = first.dispatch_chrome_pointer(230, 95, "favorite", true)
+    expect(first.dispatch_chrome_pointer(
+        231, 95, "favorite", false
+    ).reason).to_equal("")
+    expect(first.close()).to_be(true)
+
+    val restarted_profile = match BrowserProfileStore.open(
+        BOOKMARK_TITLE_IN_PROCESS_PROFILE_PATH
+    ):
+        Err(error):
+            fail(error.message())
+        Ok(opened):
+            opened
+    var restarted = HostedWebContentRegistry.create_with_bookmark_store(
+        BrowserBookmarkStore.from_profile(restarted_profile)
+    )
+    val _ = restarted.advance_window(
+        95, "<main>in-process bookmark</main>", 64, 48, 200010, true
+    )
+    _open_in_process_bookmark_document(
+        restarted, "https://accepted-title.test/", 240, 200011
+    )
+    val _ = restarted.dispatch_chrome_pointer(
+        250, 95, "favorite", true
+    )
+    expect(restarted.dispatch_chrome_pointer(
+        251, 95, "favorite", false
+    ).reason).to_equal("")
+    expect(restarted.profile_bookmarks.entries.len()).to_equal(1)
+    val _ = restarted.dispatch_chrome_pointer(
+        252, 95, "favorite", true
+    )
+    expect(restarted.dispatch_chrome_pointer(
+        253, 95, "favorite", false
+    ).reason).to_equal("")
+    expect(restarted.profile_bookmarks.entries.len()).to_equal(2)
+    var accepted_count = 0
+    var fallback_count = 0
+    var accepted_title = ""
+    var fallback_title = ""
+    for entry in restarted.profile_bookmarks.entries:
+        if entry.first == "https://accepted-title.test/":
+            accepted_count = accepted_count + 1
+            accepted_title = entry.second
+        elif entry.first == "https://fallback-title.test/":
+            fallback_count = fallback_count + 1
+            fallback_title = entry.second
+    expect(accepted_count).to_equal(1)
+    expect(fallback_count).to_equal(1)
+    expect(restarted.profile_bookmarks.entries.len()).to_equal(
+        sandbox_snapshot.entries.len()
+    )
+    var sandbox_accepted_count = 0
+    var sandbox_fallback_count = 0
+    for entry in sandbox_snapshot.entries:
+        if entry.first == "https://accepted-title.test/":
+            sandbox_accepted_count = sandbox_accepted_count + 1
+            expect(accepted_title).to_equal(entry.second)
+        elif entry.first == "https://fallback-title.test/":
+            sandbox_fallback_count = sandbox_fallback_count + 1
+            expect(fallback_title).to_equal(entry.second)
+    expect(sandbox_accepted_count).to_equal(1)
+    expect(sandbox_fallback_count).to_equal(1)
+    expect(restarted.close()).to_be(true)
+    _remove_bookmark_title_profile(
+        BOOKMARK_TITLE_IN_PROCESS_PROFILE_PATH
+    )
 
 fn _retained_png_hex(pixel: u32) -> text:
     var out = ""
@@ -1764,7 +1897,7 @@ describe "Production Simple browser user flow":
     # @manual: show
     # @capture(protocol)
     # @capture(text)
-    # @req REQ-WEB-BROWSER-009
+    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
     it "should persist bounded page titles across renderer and profile restart":
         setup_hosted_bookmark_title_profile()
         val artifact = env_get("HOSTED_WM_ARTIFACT")
@@ -1867,26 +2000,29 @@ describe "Production Simple browser user flow":
         expect(restarted_count).to_equal(2)
 
         expect(restarted.profile_bookmarks.entries.len()).to_equal(2)
-        expect(restarted.profile_bookmarks.entries[0].second).to_equal(
-            BOOKMARK_TITLE_512
-        )
-        expect(restarted.profile_bookmarks.entries[1].second).to_equal("")
-        check_restarted_bookmark_listing(restarted.profile_bookmarks)
+        check_restarted_bookmark_listing(restarted)
         check_in_process_registry_profile_reopen(
             restarted.profile_bookmarks
         )
-        val restored_title = restarted.profile_bookmarks.entries[0].second
-        val restored_fallback = (
-            restarted.profile_bookmarks.entries[1].second
-        )
+        var restored_title = ""
+        var restored_fallback = ""
+        var restored_accepted_count = 0
+        var restored_fallback_count = 0
+        for entry in restarted.profile_bookmarks.entries:
+            if entry.first == "https://accepted-title.test/":
+                restored_accepted_count = restored_accepted_count + 1
+                restored_title = entry.second
+            elif entry.first == "https://fallback-title.test/":
+                restored_fallback_count = restored_fallback_count + 1
+                restored_fallback = entry.second
         step("List persisted bookmarks with safe titles")
+        expect(restored_accepted_count).to_equal(1)
+        expect(restored_fallback_count).to_equal(1)
         expect(restored_title).to_equal(BOOKMARK_TITLE_512)
         expect(restored_fallback).to_equal("")
         expect(restarted.close()).to_be(true)
         set_mock_registry(MockResponseRegistry.create())
-        rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH)
-        rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-wal")
-        rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH + "-shm")
+        _remove_bookmark_title_profile(BOOKMARK_TITLE_PROFILE_PATH)
 
     # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010
     # @manual: show

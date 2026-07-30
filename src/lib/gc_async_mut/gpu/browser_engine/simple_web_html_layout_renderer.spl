@@ -646,6 +646,63 @@ fn _css_animation_signature(st: Style) -> text:
         st.animation_fill_mode
     )
 
+val CSS_ANIMATION_MAX_TIME_MS: i64 = 9223372036854775807
+val CSS_ANIMATION_MIN_TIME_MS: i64 = -9223372036854775808
+
+fn _css_animation_iteration_count(raw: text) -> f64:
+    if raw == "infinite":
+        return -1.0
+    if val parsed = parse_animation_iteration_number_token(raw):
+        return parsed
+    1.0
+
+fn _css_animation_add_ms_no_wrap(base_ms: i64, delta_ms: i64) -> i64:
+    if (
+        delta_ms > 0 and
+        base_ms > CSS_ANIMATION_MAX_TIME_MS - delta_ms
+    ):
+        return CSS_ANIMATION_MAX_TIME_MS
+    if (
+        delta_ms < 0 and
+        base_ms < CSS_ANIMATION_MIN_TIME_MS - delta_ms
+    ):
+        return CSS_ANIMATION_MIN_TIME_MS
+    base_ms + delta_ms
+
+fn _css_animation_sub_ms_no_wrap(base_ms: i64, delta_ms: i64) -> i64:
+    if (
+        delta_ms > 0 and
+        base_ms < CSS_ANIMATION_MIN_TIME_MS + delta_ms
+    ):
+        return CSS_ANIMATION_MIN_TIME_MS
+    if (
+        delta_ms < 0 and
+        base_ms > CSS_ANIMATION_MAX_TIME_MS + delta_ms
+    ):
+        return CSS_ANIMATION_MAX_TIME_MS
+    base_ms - delta_ms
+
+fn _css_animation_active_duration_ms(
+    duration_ms: i64, iteration_count: f64
+) -> i64:
+    if iteration_count < 0.0:
+        return -1
+    val active_duration = duration_ms.to_f64() * iteration_count
+    if (
+        active_duration != active_duration or
+        active_duration > CSS_ANIMATION_MAX_FINITE_ITERATIONS
+    ):
+        return CSS_ANIMATION_MAX_TIME_MS
+    if active_duration <= 0.0:
+        return 0
+    active_duration.ceil().to_i64()
+
+fn _css_animation_next_frame_ms(current_time_ms: i64) -> i64:
+    val next_ms = _css_animation_add_ms_no_wrap(current_time_ms, 16)
+    if next_ms <= current_time_ms:
+        return -1
+    next_ms
+
 fn _simple_web_animation_frame_index(
     styles: [Style], nodes: [HNode], child_index: HtmlChildIndex,
     registry: KeyframeRegistry,
@@ -727,13 +784,9 @@ pub fn simple_web_layout_reconcile_animation_instances(
                 val paused = st.animation_play_state == "paused"
                 val duration_ms = st.animation_duration_ms.to_i64()
                 val delay_ms = st.animation_delay_ms.to_i64()
-                val iteration_count = if (
-                    st.animation_iteration_count == "infinite"
-                ):
-                    -1_i64
-                else:
-                    val parsed = parse_int(st.animation_iteration_count)
-                    if parsed > 0: parsed.to_i64() else: 1_i64
+                val iteration_count = _css_animation_iteration_count(
+                    st.animation_iteration_count
+                )
                 val old_index = (
                     frame_index.instances_by_target.get(target_key) ?? -1
                 )
@@ -744,7 +797,9 @@ pub fn simple_web_layout_reconcile_animation_instances(
                 ):
                     val old = previous[old_index]
                     if paused and not old.paused:
-                        val elapsed = current_time_ms - old.start_time_ms
+                        val elapsed = _css_animation_sub_ms_no_wrap(
+                            current_time_ms, old.start_time_ms
+                        )
                         val paused_elapsed = if elapsed > 0:
                             elapsed
                         else:
@@ -763,8 +818,9 @@ pub fn simple_web_layout_reconcile_animation_instances(
                         reconciled.push(BrowserCssAnimationInstance(
                             target_key: target_key,
                             signature: signature,
-                            start_time_ms:
-                                current_time_ms - old.paused_elapsed_ms,
+                            start_time_ms: _css_animation_sub_ms_no_wrap(
+                                current_time_ms, old.paused_elapsed_ms
+                            ),
                             paused: false,
                             paused_elapsed_ms: old.paused_elapsed_ms,
                             duration_ms: duration_ms,
@@ -790,22 +846,49 @@ pub fn simple_web_layout_reconcile_animation_instances(
 fn _animation_progress(st: Style, animation_time_ms: i64) -> f64?:
     if st.animation_name == "none" or st.animation_duration_ms <= 0:
         return nil
-    val elapsed = animation_time_ms - st.animation_delay_ms.to_i64()
+    val elapsed = _css_animation_sub_ms_no_wrap(
+        animation_time_ms, st.animation_delay_ms.to_i64()
+    )
     if elapsed < 0:
         if st.animation_fill_mode == "backwards" or st.animation_fill_mode == "both":
             return Some(_animation_direction_progress(0.0, st.animation_direction, 0))
         return nil
-    val iteration_count = if st.animation_iteration_count == "infinite":
-        -1
-    else:
-        val parsed = parse_int(st.animation_iteration_count).to_i64()
-        if parsed > 0: parsed else: 1
+    val iteration_count = _css_animation_iteration_count(
+        st.animation_iteration_count
+    )
+    if iteration_count == 0.0:
+        if (
+            st.animation_fill_mode == "forwards" or
+            st.animation_fill_mode == "both"
+        ):
+            return Some(_animation_direction_progress(
+                0.0, st.animation_direction, 0
+            ))
+        return nil
     val duration = st.animation_duration_ms.to_i64()
-    if iteration_count > 0 and elapsed >= duration * iteration_count:
+    val active_duration = duration.to_f64() * iteration_count
+    if (
+        iteration_count > 0.0 and
+        elapsed.to_f64() >= active_duration
+    ):
         if st.animation_fill_mode != "forwards" and st.animation_fill_mode != "both":
             return nil
-        return Some(_animation_direction_progress(
-            1.0, st.animation_direction, iteration_count - 1
+        val whole_iterations = iteration_count.floor()
+        val fractional_iteration = iteration_count - whole_iterations
+        val terminal_iteration = if fractional_iteration > 0.0:
+            whole_iterations.to_i64()
+        else:
+            whole_iterations.to_i64() - 1
+        val terminal_progress = if fractional_iteration > 0.0:
+            fractional_iteration
+        else:
+            1.0
+        val directed_terminal = _animation_direction_progress(
+            terminal_progress, st.animation_direction, terminal_iteration
+        )
+        return Some(evaluate_timing(
+            parse_timing_function(st.animation_timing_function),
+            directed_terminal
         ))
     val iteration = elapsed / duration
     val local = (elapsed % duration).to_f64() / duration.to_f64()
@@ -841,7 +924,9 @@ fn _apply_css_animations(
                 if instance.paused:
                     instance.paused_elapsed_ms
                 else:
-                    animation_time_ms - instance.start_time_ms
+                    _css_animation_sub_ms_no_wrap(
+                        animation_time_ms, instance.start_time_ms
+                    )
             elif st.animation_play_state == "paused":
                 0
             else:
@@ -875,16 +960,26 @@ fn _simple_web_css_animation_instance_next_ms(
         return -1
     if instance.duration_ms <= 0:
         return -1
-    val start_ms = instance.start_time_ms + instance.delay_ms
+    val start_ms = _css_animation_add_ms_no_wrap(
+        instance.start_time_ms, instance.delay_ms
+    )
     if current_time_ms < start_ms:
         return start_ms
-    if instance.iteration_count < 0:
-        return current_time_ms + 16
+    if instance.iteration_count < 0.0:
+        return _css_animation_next_frame_ms(current_time_ms)
     val end_ms = (
-        start_ms + instance.duration_ms * instance.iteration_count
+        _css_animation_add_ms_no_wrap(
+            start_ms,
+            _css_animation_active_duration_ms(
+                instance.duration_ms, instance.iteration_count
+            )
+        )
     )
     if current_time_ms < end_ms:
-        return min(current_time_ms + 16, end_ms)
+        val next_frame_ms = _css_animation_next_frame_ms(current_time_ms)
+        if next_frame_ms < 0:
+            return -1
+        return min(next_frame_ms, end_ms)
     -1
 
 pub fn simple_web_layout_animation_instances_next_ms(
@@ -931,18 +1026,24 @@ fn _simple_web_layout_animation_schedule(
             else:
                 0
             val animation_start = (
-                start_time_ms + st.animation_delay_ms.to_i64()
+                _css_animation_add_ms_no_wrap(
+                    start_time_ms, st.animation_delay_ms.to_i64()
+                )
             )
-            val infinite = st.animation_iteration_count == "infinite"
+            val iteration_count = _css_animation_iteration_count(
+                st.animation_iteration_count
+            )
+            val infinite = iteration_count < 0.0
             var animation_end: i64 = -1
             if infinite:
                 if not paused:
                     latest_end = -2
             else:
-                val iterations = parse_int(st.animation_iteration_count)
-                val count = if iterations > 0: iterations else: 1
-                animation_end = animation_start + (
-                    st.animation_duration_ms.to_i64() * count.to_i64()
+                animation_end = _css_animation_add_ms_no_wrap(
+                    animation_start,
+                    _css_animation_active_duration_ms(
+                        st.animation_duration_ms.to_i64(), iteration_count
+                    )
                 )
                 if animation_end < 0:
                     animation_end = 0
@@ -958,9 +1059,13 @@ fn _simple_web_layout_animation_schedule(
                 elif current_time_ms < animation_start:
                     candidate = animation_start
                 elif infinite:
-                    candidate = current_time_ms + 16
+                    candidate = _css_animation_next_frame_ms(
+                        current_time_ms
+                    )
                 elif current_time_ms < animation_end:
-                    candidate = current_time_ms + 16
+                    candidate = _css_animation_next_frame_ms(
+                        current_time_ms
+                    )
                     if candidate > animation_end:
                         candidate = animation_end
                 if candidate >= 0 and (

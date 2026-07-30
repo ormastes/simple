@@ -424,9 +424,10 @@ or push. Merge order is parser/layers → cascade inputs → winner/defaulting �
 overflow/lowering → evidence/perf, with high-capability review after each
 handoff.
 
-## Bookmark title witness lane (PROPOSED / UNIMPLEMENTED)
+## Bookmark title witness lane (IMPLEMENTED STATIC / EXECUTION HELD)
 
 The primary design pass freezes these shared names before implementation:
+`hosted_browser_title_is_valid`,
 `browser_bookmark_stored_title`,
 `browser_bookmark_title_or_url`,
 `BrowserRendererFrameDecodeResult.document_title_present`, and the four manual

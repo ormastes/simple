@@ -1274,7 +1274,16 @@ fn parse_css_time_ms(raw: text) -> i32:
 
 fn transition_token_is_time(token: text) -> bool:
     val t = token.trim().lower()
-    t.ends_with("ms") or t.ends_with("s")
+    var unit_len = 0
+    if t.ends_with("ms"):
+        unit_len = 2
+    elif t.ends_with("s"):
+        unit_len = 1
+    if unit_len == 0 or t.len() <= unit_len:
+        return false
+    animation_number_token_is_valid(
+        t.substring(0, t.len() - unit_len)
+    )
 
 fn parse_transition_nth_time_ms(raw: text, target: i32) -> i32:
     val normalized = raw.replace(",", " ")
@@ -1298,30 +1307,125 @@ fn parse_transition_property_name(raw: text) -> text:
     "all"
 
 fn parse_transition_timing(raw: text) -> text:
-    val lowered = raw.lower()
-    if text_index_of(lowered, "ease-in-out") >= 0:
-        return "ease-in-out"
-    if text_index_of(lowered, "ease-in") >= 0:
-        return "ease-in"
-    if text_index_of(lowered, "ease-out") >= 0:
-        return "ease-out"
-    if text_index_of(lowered, "linear") >= 0:
-        return "linear"
+    for token in ws_tokens(raw.replace(",", " ").lower()):
+        if (
+            token == "ease" or token == "linear" or
+            token == "ease-in" or token == "ease-out" or
+            token == "ease-in-out"
+        ):
+            return token
     "ease"
 
 fn animation_token_is_reserved(token: text) -> bool:
     val t = token.trim().lower()
     transition_token_is_time(t) or t == "ease" or t == "linear" or t == "ease-in" or t == "ease-out" or t == "ease-in-out" or t == "infinite" or t == "normal" or t == "reverse" or t == "alternate" or t == "alternate-reverse" or t == "none" or t == "forwards" or t == "backwards" or t == "both" or t == "running" or t == "paused"
 
+val CSS_ANIMATION_MAX_FINITE_ITERATIONS: f64 = 9223372036854774784.0
+
+fn animation_number_token_is_valid(raw: text) -> bool:
+    val token = raw.trim().lower()
+    if token.len() == 0:
+        return false
+    val number_start = if (
+        token.starts_with("+") or token.starts_with("-")
+    ): 1 else: 0
+    if number_start >= token.len():
+        return false
+    var exponent_at = -1
+    var scan = number_start
+    while scan < token.len():
+        val c = token.char_at(scan)
+        if c == "e":
+            if exponent_at >= 0:
+                return false
+            exponent_at = scan
+        scan = scan + 1
+    val number_end = if exponent_at >= 0: exponent_at else: token.len()
+    if exponent_at >= 0:
+        var exponent_i = exponent_at + 1
+        if exponent_i >= token.len():
+            return false
+        if (
+            token.char_at(exponent_i) == "+" or
+            token.char_at(exponent_i) == "-"
+        ):
+            exponent_i = exponent_i + 1
+        if exponent_i >= token.len():
+            return false
+        while exponent_i < token.len():
+            val digit = dec_val(token.char_at(exponent_i))
+            if digit >= 10:
+                return false
+            exponent_i = exponent_i + 1
+
+    var saw_digit = false
+    var saw_dot = false
+    var digit_after_dot = false
+    var i = number_start
+    while i < number_end:
+        val c = token.char_at(i)
+        if c == "." and not saw_dot:
+            saw_dot = true
+        else:
+            val digit = dec_val(c)
+            if digit >= 10:
+                return false
+            saw_digit = true
+            if saw_dot:
+                digit_after_dot = true
+        i = i + 1
+    saw_digit and (not saw_dot or digit_after_dot)
+
+fn parse_animation_iteration_number_token(raw: text) -> f64?:
+    if not animation_number_token_is_valid(raw):
+        return nil
+    val token = raw.trim().lower()
+    if token.starts_with("-"):
+        var mantissa_i = 1
+        while (
+            mantissa_i < token.len() and
+            token.char_at(mantissa_i) != "e"
+        ):
+            val digit = dec_val(token.char_at(mantissa_i))
+            if digit > 0 and digit < 10:
+                return nil
+            mantissa_i = mantissa_i + 1
+    if val parsed = token.parse_f64():
+        if (
+            parsed == parsed and parsed >= 0.0 and
+            parsed <= CSS_ANIMATION_MAX_FINITE_ITERATIONS
+        ):
+            return Some(parsed)
+    nil
+
+fn animation_token_looks_numeric(token: text) -> bool:
+    if token.len() == 0:
+        return false
+    val first = token.char_at(0)
+    if first == "." or first == "+" or dec_val(first) < 10:
+        return true
+    (
+        first == "-" and token.len() > 1 and
+        (token.char_at(1) == "." or dec_val(token.char_at(1)) < 10)
+    )
+
 fn parse_animation_name(raw: text) -> text:
     val normalized = raw.replace(",", " ")
     val parts = normalized.split(" ")
+    for part in parts:
+        val token = part.trim().lower()
+        if (
+            animation_token_looks_numeric(token) and
+            not transition_token_is_time(token) and
+            parse_animation_iteration_number_token(token) == nil
+        ):
+            return "none"
     for part in parts:
         val token = part.trim()
         val lowered = token.lower()
         if (
             token.len() > 0 and not animation_token_is_reserved(lowered) and
-            parse_int(lowered) == 0
+            parse_animation_iteration_number_token(lowered) == nil
         ):
             return token
     "none"
@@ -1333,35 +1437,180 @@ fn parse_animation_iteration_count(raw: text) -> text:
         val token = part.trim().lower()
         if token == "infinite":
             return "infinite"
-        if token.len() > 0 and parse_int(token) > 0 and not transition_token_is_time(token):
+        if (
+            token.len() > 0 and
+            parse_animation_iteration_number_token(token) != nil and
+            not transition_token_is_time(token)
+        ):
             return token
     "1"
 
 fn parse_animation_direction(raw: text) -> text:
-    val lowered = raw.lower()
-    if text_index_of(lowered, "alternate-reverse") >= 0:
-        return "alternate-reverse"
-    if text_index_of(lowered, "alternate") >= 0:
-        return "alternate"
-    if text_index_of(lowered, "reverse") >= 0:
-        return "reverse"
+    for token in ws_tokens(raw.replace(",", " ").lower()):
+        if (
+            token == "normal" or token == "reverse" or
+            token == "alternate" or token == "alternate-reverse"
+        ):
+            return token
     "normal"
 
 fn parse_animation_fill_mode(raw: text) -> text:
-    val lowered = raw.lower()
-    if text_index_of(lowered, "forwards") >= 0:
-        return "forwards"
-    if text_index_of(lowered, "backwards") >= 0:
-        return "backwards"
-    if text_index_of(lowered, "both") >= 0:
-        return "both"
+    for token in ws_tokens(raw.replace(",", " ").lower()):
+        if (
+            token == "none" or token == "forwards" or
+            token == "backwards" or token == "both"
+        ):
+            return token
     "none"
 
 fn parse_animation_play_state(raw: text) -> text:
-    val lowered = raw.lower()
-    if text_index_of(lowered, "paused") >= 0:
-        return "paused"
+    for token in ws_tokens(raw.replace(",", " ").lower()):
+        if token == "paused" or token == "running":
+            return token
     "running"
+
+fn animation_time_token_is_valid(raw: text, allow_negative: bool) -> bool:
+    val token = raw.trim().lower()
+    val unit_len = if token.ends_with("ms"): 2 else: 1
+    if (
+        token.len() <= unit_len or
+        (unit_len == 1 and not token.ends_with("s"))
+    ):
+        return false
+    val number = token.substring(0, token.len() - unit_len)
+    if not animation_number_token_is_valid(number):
+        return false
+    if val parsed = number.parse_f64():
+        val milliseconds = if unit_len == 2:
+            parsed
+        else:
+            parsed * 1000.0
+        if (
+            parsed == parsed and milliseconds == milliseconds and
+            milliseconds >= -2147483648.0 and
+            milliseconds <= 2147483647.0 and
+            (allow_negative or parsed >= 0.0)
+        ):
+            return true
+    false
+
+fn animation_shorthand_is_valid(raw: text) -> bool:
+    if text_index_of(raw, ",") >= 0:
+        return false
+    var time_count = 0
+    var name_count = 0
+    var timing_count = 0
+    var iteration_count = 0
+    var direction_count = 0
+    var fill_count = 0
+    var play_count = 0
+    for part in ws_tokens(raw.trim().lower()):
+        if transition_token_is_time(part):
+            if (
+                time_count >= 2 or
+                not animation_time_token_is_valid(part, time_count == 1)
+            ):
+                return false
+            time_count = time_count + 1
+        elif (
+            part == "ease" or part == "linear" or part == "ease-in" or
+            part == "ease-out" or part == "ease-in-out"
+        ):
+            timing_count = timing_count + 1
+            if timing_count > 1:
+                return false
+        elif part == "infinite" or animation_token_looks_numeric(part):
+            if (
+                iteration_count > 0 or
+                (
+                    part != "infinite" and
+                    parse_animation_iteration_number_token(part) == nil
+                )
+            ):
+                return false
+            iteration_count = iteration_count + 1
+        elif (
+            part == "normal" or part == "reverse" or
+            part == "alternate" or part == "alternate-reverse"
+        ):
+            direction_count = direction_count + 1
+            if direction_count > 1:
+                return false
+        elif (
+            part == "none" or part == "forwards" or
+            part == "backwards" or part == "both"
+        ):
+            fill_count = fill_count + 1
+            if fill_count > 1:
+                return false
+        elif part == "running" or part == "paused":
+            play_count = play_count + 1
+            if play_count > 1:
+                return false
+        else:
+            name_count = name_count + 1
+            if name_count > 1:
+                return false
+    true
+
+fn animation_declaration_value_is_valid(prop: text, raw: text) -> bool:
+    val value = raw.trim().lower()
+    if value.len() == 0:
+        return false
+    if prop == "animation":
+        return animation_shorthand_is_valid(value)
+    if prop == "animation-name":
+        return (
+            text_index_of(value, ",") < 0 and
+            ws_tokens(value).len() == 1 and
+            not animation_token_looks_numeric(value)
+        )
+    if prop == "animation-duration":
+        return animation_time_token_is_valid(value, false)
+    if prop == "animation-delay":
+        return animation_time_token_is_valid(value, true)
+    if prop == "animation-timing-function":
+        return (
+            value == "ease" or value == "linear" or value == "ease-in" or
+            value == "ease-out" or value == "ease-in-out"
+        )
+    if prop == "animation-iteration-count":
+        return (
+            value == "infinite" or
+            parse_animation_iteration_number_token(value) != nil
+        )
+    if prop == "animation-direction":
+        return (
+            value == "normal" or value == "reverse" or
+            value == "alternate" or value == "alternate-reverse"
+        )
+    if prop == "animation-fill-mode":
+        return (
+            value == "none" or value == "forwards" or
+            value == "backwards" or value == "both"
+        )
+    if prop == "animation-play-state":
+        return value == "running" or value == "paused"
+    false
+
+fn decl_tbl_last_valid_animation_index(
+    tbl: [text], prop: text
+) -> i32:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if (
+            tbl[i] == prop and
+            animation_declaration_value_is_valid(prop, tbl[i + 1])
+        ):
+            return i / 2
+        i = i - 2
+    -1
+
+fn decl_tbl_get_last_valid_animation(tbl: [text], prop: text) -> text:
+    val index = decl_tbl_last_valid_animation_index(tbl, prop)
+    if index < 0:
+        return ""
+    tbl[index * 2 + 1]
 
 fn parse_aspect_ratio_numerator(raw: text) -> i32:
     val value = raw.trim().lower()

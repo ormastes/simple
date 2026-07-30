@@ -752,6 +752,8 @@ Normative references:
 
 ### Shared interfaces
 
+- `hosted_browser_title_is_valid(value: text) -> bool` is the single NUL,
+  trim, nonempty, and 512-byte validator used by transport and persistence.
 - `browser_bookmark_stored_title(raw_title: text) -> text` trims the title and
   returns it only when nonempty, NUL-free, and at most 512 UTF-8 bytes;
   otherwise it returns the existing empty-title sentinel.

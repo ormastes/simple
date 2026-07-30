@@ -884,9 +884,10 @@ a cached title. Production Favorite may still use the canonical-URL fallback,
 so compatibility does not create stale-title authority.
 
 Bookmark title handling remains in the existing BrowserSession/profile
-capsule—no new service or storage schema. One shared validator preserves a
-trimmed, nonempty title only when its UTF-8 size is at most 512 bytes; otherwise
-the stored title is the existing empty sentinel. One shared display helper uses
+capsule—no new service or storage schema. The shared
+`hosted_browser_title_is_valid` validator admits a trimmed, nonempty title only
+when its UTF-8 size is at most 512 bytes; otherwise the stored title is the
+existing empty sentinel. One shared display helper uses
 that stored title or the separately bounded canonical URL. The URL fallback is
 derived, not copied into the 512-byte title column or snapshot field. Profile
 schema version 1 therefore remains valid, old URL-as-title rows remain readable,
