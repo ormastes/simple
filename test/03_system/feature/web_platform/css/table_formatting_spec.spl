@@ -8,10 +8,15 @@ through computed Style, canonical Draw IR geometry, and Engine2D pixels.
 """
 use std.spec.*
 use common.ui.draw_ir.{DrawIrCommand}
+use common.web.browser_renderer_protocol.{
+    browser_text_input_overlay_empty
+}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id,
     simple_web_layout_debug_style_by_id,
     simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_rerender_retained,
     simple_web_layout_render_html_readback_engine2d_result
 }
 
@@ -148,6 +153,274 @@ describe "HTML table formatting":
     # @manual: show
     # @capture(html)
     # @capture(artifact)
+    it "should resolve one-row two-cell collapse and fail closed otherwise":
+        step("Parse the table structure")
+        val value_html = (
+            "<style>#scope{border-collapse:collapse}" +
+            "#inherit{border-collapse:inherit}" +
+            "#unset{border-collapse:unset}" +
+            "#initial{border-collapse:initial}</style>" +
+            "<div id='scope'><table id='inherit'></table>" +
+            "<table id='unset'></table><table id='initial'></table></div>"
+        )
+        expect(simple_web_layout_debug_style_by_id(
+            value_html, "inherit", "border-collapse"
+        )).to_equal("collapse")
+        expect(simple_web_layout_debug_style_by_id(
+            value_html, "unset", "border-collapse"
+        )).to_equal("collapse")
+        expect(simple_web_layout_debug_style_by_id(
+            value_html, "initial", "border-collapse"
+        )).to_equal("separate")
+        val html = (
+            "<style>html,body{margin:0;background:#ffffff}" +
+            "table{table-layout:fixed;width:40px;border-collapse:collapse;" +
+            "border-spacing:7px}" +
+            "td{height:8px;background:#ffffff}" +
+            "@keyframes promote-left{from{border-right-width:1px}" +
+            "to{border-right-width:4px}}" +
+            "#left{border-right:1px solid #ef4444;" +
+            "animation-name:promote-left;animation-duration:1000ms;" +
+            "animation-timing-function:linear;animation-fill-mode:forwards}" +
+            "#right{border-left:3px solid #1d4ed8}</style>" +
+            "<table id='table'><tr id='row'><td id='left'></td>" +
+            "<td id='right'></td></tr></table>"
+        )
+        expect(simple_web_layout_debug_style_by_id(
+            html, "table", "border-collapse"
+        )).to_equal("collapse")
+
+        step("Resolve collapsed border ownership")
+        val commands = simple_web_layout_render_html_draw_ir(
+            html, 48, 16
+        ).batches[0].commands
+        val table = commands[_table_command_index(commands, "table")]
+        val left = commands[_table_command_index(commands, "left")]
+        val right = commands[_table_command_index(commands, "right")]
+        val collapsed_spacing = _table_style(table, "border-spacing")
+        val losing_right_edge_width = _table_style(
+            left, "border-right-width"
+        )
+        val winning_left_edge_width = _table_style(
+            right, "border-left-width"
+        )
+        val admitted_collapse = [
+            collapsed_spacing, losing_right_edge_width,
+            winning_left_edge_width
+        ]
+        val span_html = (
+            "<style>table{table-layout:fixed;width:40px;" +
+            "border-collapse:collapse;border-spacing:5px}</style>" +
+            "<table id='span-table'><tr><td colspan='2'></td>" +
+            "<td></td></tr></table>"
+        )
+        val span_commands = simple_web_layout_render_html_draw_ir(
+            span_html, 48, 16
+        ).batches[0].commands
+        val span_table = span_commands[_table_command_index(
+            span_commands, "span-table"
+        )]
+        val colspan_control_spacing = _table_style(
+            span_table, "border-spacing"
+        )
+        val row_span_html = (
+            "<style>table{table-layout:fixed;width:40px;" +
+            "border-collapse:collapse;border-spacing:6px}</style>" +
+            "<table id='row-span-table'><tr><td rowspan='2'></td>" +
+            "<td></td></tr><tr><td></td></tr></table>"
+        )
+        val row_span_commands = simple_web_layout_render_html_draw_ir(
+            row_span_html, 48, 32
+        ).batches[0].commands
+        val row_span_table = row_span_commands[_table_command_index(
+            row_span_commands, "row-span-table"
+        )]
+        val rowspan_control_spacing = _table_style(
+            row_span_table, "border-spacing"
+        )
+        val two_row_html = (
+            "<style>table{table-layout:fixed;width:40px;" +
+            "border-collapse:collapse;border-spacing:4px}</style>" +
+            "<table id='two-row-table'><tr><td></td><td></td></tr>" +
+            "<tr><td></td><td></td></tr></table>"
+        )
+        val two_row_commands = simple_web_layout_render_html_draw_ir(
+            two_row_html, 48, 32
+        ).batches[0].commands
+        val two_row_table = two_row_commands[_table_command_index(
+            two_row_commands, "two-row-table"
+        )]
+        val two_row_control_spacing = _table_style(
+            two_row_table, "border-spacing"
+        )
+        val equal_width_html = (
+            "<style>table{table-layout:fixed;width:40px;" +
+            "border-collapse:collapse;border-spacing:9px}" +
+            "#equal-left{border-right:2px solid #ef4444}" +
+            "#equal-right{border-left:2px solid #1d4ed8}</style>" +
+            "<table id='equal-table'><tr><td id='equal-left'></td>" +
+            "<td id='equal-right'></td></tr></table>"
+        )
+        val equal_commands = simple_web_layout_render_html_draw_ir(
+            equal_width_html, 48, 16
+        ).batches[0].commands
+        val equal_table = equal_commands[_table_command_index(
+            equal_commands, "equal-table"
+        )]
+        val equal_left = equal_commands[_table_command_index(
+            equal_commands, "equal-left"
+        )]
+        val equal_right = equal_commands[_table_command_index(
+            equal_commands, "equal-right"
+        )]
+        val equal_width_control = [
+            _table_style(equal_table, "border-spacing"),
+            _table_style(equal_left, "border-right-width"),
+            _table_style(equal_right, "border-left-width"),
+            _table_style(equal_left, "border-right-style"),
+            _table_style(equal_right, "border-left-style")
+        ]
+        val hidden_html = (
+            "<style>table{table-layout:fixed;width:40px;" +
+            "border-collapse:collapse;border-spacing:10px}" +
+            "#hidden-left{border-right:8px hidden #ef4444}" +
+            "#hidden-right{border-left:2px solid #1d4ed8}</style>" +
+            "<table id='hidden-table'><tr><td id='hidden-left'></td>" +
+            "<td id='hidden-right'></td></tr></table>"
+        )
+        val hidden_commands = simple_web_layout_render_html_draw_ir(
+            hidden_html, 48, 16
+        ).batches[0].commands
+        val hidden_table = hidden_commands[_table_command_index(
+            hidden_commands, "hidden-table"
+        )]
+        val hidden_left = hidden_commands[_table_command_index(
+            hidden_commands, "hidden-left"
+        )]
+        val hidden_right = hidden_commands[_table_command_index(
+            hidden_commands, "hidden-right"
+        )]
+        val hidden_suppression = [
+            _table_style(hidden_table, "border-spacing"),
+            _table_style(hidden_left, "border-right-width"),
+            _table_style(hidden_right, "border-left-width"),
+            _table_style(hidden_left, "border-right-style"),
+            _table_style(hidden_right, "border-left-style")
+        ]
+        val style_rank_html = (
+            "<style>table{table-layout:fixed;width:40px;" +
+            "border-collapse:collapse;border-spacing:11px}" +
+            "#rank-left{border-right:5px dotted #ef4444}" +
+            "#rank-right{border-left:1px solid #1d4ed8}</style>" +
+            "<table id='rank-table'><tr><td id='rank-left'></td>" +
+            "<td id='rank-right'></td></tr></table>"
+        )
+        val style_rank_commands = simple_web_layout_render_html_draw_ir(
+            style_rank_html, 48, 16
+        ).batches[0].commands
+        val style_rank_table = style_rank_commands[_table_command_index(
+            style_rank_commands, "rank-table"
+        )]
+        val style_rank_left = style_rank_commands[_table_command_index(
+            style_rank_commands, "rank-left"
+        )]
+        val style_rank_right = style_rank_commands[_table_command_index(
+            style_rank_commands, "rank-right"
+        )]
+        val style_rank_precedence = [
+            _table_style(style_rank_table, "border-spacing"),
+            _table_style(style_rank_left, "border-right-width"),
+            _table_style(style_rank_right, "border-left-width"),
+            _table_style(style_rank_left, "border-right-style"),
+            _table_style(style_rank_right, "border-left-style")
+        ]
+        val non_row_html = (
+            "<style>table{table-layout:fixed;width:40px;" +
+            "border-collapse:collapse;border-spacing:8px}" +
+            "#not-row{display:block}" +
+            "#non-row-left{border-right:1px solid #ef4444}" +
+            "#non-row-right{border-left:3px solid #1d4ed8}</style>" +
+            "<table id='non-row-table'><tr id='not-row'>" +
+            "<td id='non-row-left'></td><td id='non-row-right'></td>" +
+            "</tr></table>"
+        )
+        val non_row_commands = simple_web_layout_render_html_draw_ir(
+            non_row_html, 48, 16
+        ).batches[0].commands
+        val non_row_table = non_row_commands[_table_command_index(
+            non_row_commands, "non-row-table"
+        )]
+        val unsupported_structure_spacing = [
+            colspan_control_spacing, rowspan_control_spacing,
+            two_row_control_spacing,
+            _table_style(non_row_table, "border-spacing")
+        ]
+        expect(admitted_collapse).to_equal(["0px", "0", "3"])
+        expect(unsupported_structure_spacing).to_equal(
+            ["5px", "6px", "4px", "8px"]
+        )
+        expect(equal_width_control).to_equal(
+            ["0px", "2", "0", "solid", "solid"]
+        )
+        expect(hidden_suppression).to_equal(
+            ["0px", "0", "0", "hidden", "solid"]
+        )
+        expect(style_rank_precedence).to_equal(
+            ["0px", "0", "1", "dotted", "solid"]
+        )
+
+        step("Emit canonical Draw IR")
+        val collapsed_parentage = [left.parent_id, right.parent_id]
+        val collapsed_geometry = [
+            left.x, left.width, right.x, right.width
+        ]
+        val initial = simple_web_layout_render_html_draw_ir_result(
+            html, 48, 16
+        )
+        val retained = simple_web_layout_rerender_retained(
+            initial, "style", 48, 16, 1000, 0,
+            browser_text_input_overlay_empty(), [], []
+        )
+        val retained_commands = retained.composition.batches[0].commands
+        val retained_table = retained_commands[_table_command_index(
+            retained_commands, "table"
+        )]
+        val retained_left = retained_commands[_table_command_index(
+            retained_commands, "left"
+        )]
+        val retained_right = retained_commands[_table_command_index(
+            retained_commands, "right"
+        )]
+        val retained_collapse = [
+            _table_style(retained_table, "border-spacing"),
+            _table_style(retained_left, "border-right-width"),
+            _table_style(retained_right, "border-left-width"),
+            _table_style(retained_left, "border-right-style"),
+            _table_style(retained_right, "border-left-style")
+        ]
+        expect(collapsed_parentage).to_equal(["row", "row"])
+        expect(collapsed_geometry).to_equal(
+            [0, 20, 20, 20]
+        )
+        expect(retained_collapse).to_equal(
+            ["0px", "4", "0", "solid", "solid"]
+        )
+
+        step("Verify absolute pixels")
+        val pixels = simple_web_layout_render_html_readback_engine2d_result(
+            html, 48, 16, "software"
+        ).readback.pixels
+        val pixel_before_shared_border = pixels[4 * 48 + 19]
+        val pixel_at_shared_border_start = pixels[4 * 48 + 20]
+        val pixel_at_shared_border_center = pixels[4 * 48 + 21]
+        val pixel_at_shared_border_end = pixels[4 * 48 + 22]
+        val pixel_after_shared_border = pixels[4 * 48 + 23]
+        expect(pixel_before_shared_border).to_equal(0xFFFFFFFFu32)
+        expect(pixel_at_shared_border_start).to_equal(0xFF1D4ED8u32)
+        expect(pixel_at_shared_border_center).to_equal(0xFF1D4ED8u32)
+        expect(pixel_at_shared_border_end).to_equal(0xFF1D4ED8u32)
+        expect(pixel_after_shared_border).to_equal(0xFFFFFFFFu32)
+
     it "should separate fixed table cells with authored border spacing":
         step("Render two fixed columns with horizontal and vertical spacing")
         val spaced_html = (

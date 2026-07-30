@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -20,7 +20,7 @@ Proves bounded fixed-layout and explicit-width automatic-layout table slices
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/table_formatting_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-07-30 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Proves bounded fixed-layout and explicit-width automatic-layout table slices
@@ -179,49 +179,651 @@ expect(pixels[61 * 48 + 1]).to_equal(0xFFFFFFFFu32)
 
 </details>
 
-#### should separate fixed table cells with authored border spacing
+#### should resolve one-row two-cell collapse and fail closed otherwise
 
-- Render two fixed columns with horizontal and vertical spacing
-   - Artifact capture: after_step
-- Expose normalized spacing and exact Draw IR table geometry
-   - Artifact capture: after_step
-   - Evidence: artifact verified by exact computed-style, geometry, and parentage checks
-   - Expected: table `border-spacing` equals `4px 3px`
-   - Expected: table geometry equals `[0, 0, 40, 14]`
-   - Expected: row geometry equals `[4, 3, 32, 8]`
-   - Expected: first cell geometry equals `[4, 3, 14, 8]`
-   - Expected: second cell geometry equals `[22, 3, 14, 8]`
-- Rasterize outer and inter-cell gaps through Engine2D
-   - Artifact capture: after_step
-   - Evidence: outer and inter-cell pixels retain the table background
-   - Expected: red and green cells do not paint into the authored gaps
-- Keep zero spacing as the adjacent-cell control
-   - Artifact capture: after_step
-   - Expected: normalized control value equals `0px`
-   - Expected: control cells remain adjacent at x `0` and x `20`
-- Preserve the same gaps in explicit-width automatic layout
-   - Artifact capture: after_step
-   - Expected: explicit single-span cells retain `[4, 3, 14, 8]` and `[22, 3, 14, 8]`
-- Keep gaps through constrained rows groups spans and captions
-   - Artifact capture: after_step
-   - Expected: constrained automatic cells retain the horizontal gap
-   - Expected: the row group spans both rows and their internal vertical gap
-   - Expected: a colspan cell includes the internal horizontal gap
-   - Expected: the bottom caption follows the final outer vertical gap
-- Expand a narrow fixed table to contain valid large spacing
-   - Artifact capture: after_step
-   - Expected: a 40px authored table expands to 302px for two 1px tracks and three 100px gaps
-- Handle inherited CSS-wide values and reject negative spacing
-   - Artifact capture: after_step
-   - Expected: `inherit`, `unset`, `revert`, `revert-layer`, and an invalid negative value retain `6px 2px`
-   - Expected: `initial` resets to `0px`
+- Parse the table structure
+  - `inherit` and `unset` retain collapsed inheritance; `initial` resets to separate.
+- Resolve collapsed border ownership
+  - Admit exactly one LTR table row with two direct cells.
+  - Fail closed for colspan, rowspan, multiple rows, and non-table-row structure.
+  - Resolve equal edges by LTR origin, suppress a solid edge with `hidden`, and rank `solid` above wider `dotted`.
+- Emit canonical Draw IR
+  - Preserve row parentage and exact two-column geometry.
+  - Re-resolve style identity and ownership after the retained animation promotes the left edge.
+- Verify absolute pixels
+  - Confirm the selected blue shared border and adjacent white pixels through Engine2D readback.
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: the complete executable scenario is retained in
-`test/03_system/feature/web_platform/css/table_formatting_spec.spl`.
+Runnable source: 266 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Parse the table structure")
+val value_html = (
+    "<style>#scope{border-collapse:collapse}" +
+    "#inherit{border-collapse:inherit}" +
+    "#unset{border-collapse:unset}" +
+    "#initial{border-collapse:initial}</style>" +
+    "<div id='scope'><table id='inherit'></table>" +
+    "<table id='unset'></table><table id='initial'></table></div>"
+)
+expect(simple_web_layout_debug_style_by_id(
+    value_html, "inherit", "border-collapse"
+)).to_equal("collapse")
+expect(simple_web_layout_debug_style_by_id(
+    value_html, "unset", "border-collapse"
+)).to_equal("collapse")
+expect(simple_web_layout_debug_style_by_id(
+    value_html, "initial", "border-collapse"
+)).to_equal("separate")
+val html = (
+    "<style>html,body{margin:0;background:#ffffff}" +
+    "table{table-layout:fixed;width:40px;border-collapse:collapse;" +
+    "border-spacing:7px}" +
+    "td{height:8px;background:#ffffff}" +
+    "@keyframes promote-left{from{border-right-width:1px}" +
+    "to{border-right-width:4px}}" +
+    "#left{border-right:1px solid #ef4444;" +
+    "animation-name:promote-left;animation-duration:1000ms;" +
+    "animation-timing-function:linear;animation-fill-mode:forwards}" +
+    "#right{border-left:3px solid #1d4ed8}</style>" +
+    "<table id='table'><tr id='row'><td id='left'></td>" +
+    "<td id='right'></td></tr></table>"
+)
+expect(simple_web_layout_debug_style_by_id(
+    html, "table", "border-collapse"
+)).to_equal("collapse")
+
+step("Resolve collapsed border ownership")
+val commands = simple_web_layout_render_html_draw_ir(
+    html, 48, 16
+).batches[0].commands
+val table = commands[_table_command_index(commands, "table")]
+val left = commands[_table_command_index(commands, "left")]
+val right = commands[_table_command_index(commands, "right")]
+val collapsed_spacing = _table_style(table, "border-spacing")
+val losing_right_edge_width = _table_style(
+    left, "border-right-width"
+)
+val winning_left_edge_width = _table_style(
+    right, "border-left-width"
+)
+val admitted_collapse = [
+    collapsed_spacing, losing_right_edge_width,
+    winning_left_edge_width
+]
+val span_html = (
+    "<style>table{table-layout:fixed;width:40px;" +
+    "border-collapse:collapse;border-spacing:5px}</style>" +
+    "<table id='span-table'><tr><td colspan='2'></td>" +
+    "<td></td></tr></table>"
+)
+val span_commands = simple_web_layout_render_html_draw_ir(
+    span_html, 48, 16
+).batches[0].commands
+val span_table = span_commands[_table_command_index(
+    span_commands, "span-table"
+)]
+val colspan_control_spacing = _table_style(
+    span_table, "border-spacing"
+)
+val row_span_html = (
+    "<style>table{table-layout:fixed;width:40px;" +
+    "border-collapse:collapse;border-spacing:6px}</style>" +
+    "<table id='row-span-table'><tr><td rowspan='2'></td>" +
+    "<td></td></tr><tr><td></td></tr></table>"
+)
+val row_span_commands = simple_web_layout_render_html_draw_ir(
+    row_span_html, 48, 32
+).batches[0].commands
+val row_span_table = row_span_commands[_table_command_index(
+    row_span_commands, "row-span-table"
+)]
+val rowspan_control_spacing = _table_style(
+    row_span_table, "border-spacing"
+)
+val two_row_html = (
+    "<style>table{table-layout:fixed;width:40px;" +
+    "border-collapse:collapse;border-spacing:4px}</style>" +
+    "<table id='two-row-table'><tr><td></td><td></td></tr>" +
+    "<tr><td></td><td></td></tr></table>"
+)
+val two_row_commands = simple_web_layout_render_html_draw_ir(
+    two_row_html, 48, 32
+).batches[0].commands
+val two_row_table = two_row_commands[_table_command_index(
+    two_row_commands, "two-row-table"
+)]
+val two_row_control_spacing = _table_style(
+    two_row_table, "border-spacing"
+)
+val equal_width_html = (
+    "<style>table{table-layout:fixed;width:40px;" +
+    "border-collapse:collapse;border-spacing:9px}" +
+    "#equal-left{border-right:2px solid #ef4444}" +
+    "#equal-right{border-left:2px solid #1d4ed8}</style>" +
+    "<table id='equal-table'><tr><td id='equal-left'></td>" +
+    "<td id='equal-right'></td></tr></table>"
+)
+val equal_commands = simple_web_layout_render_html_draw_ir(
+    equal_width_html, 48, 16
+).batches[0].commands
+val equal_table = equal_commands[_table_command_index(
+    equal_commands, "equal-table"
+)]
+val equal_left = equal_commands[_table_command_index(
+    equal_commands, "equal-left"
+)]
+val equal_right = equal_commands[_table_command_index(
+    equal_commands, "equal-right"
+)]
+val equal_width_control = [
+    _table_style(equal_table, "border-spacing"),
+    _table_style(equal_left, "border-right-width"),
+    _table_style(equal_right, "border-left-width"),
+    _table_style(equal_left, "border-right-style"),
+    _table_style(equal_right, "border-left-style")
+]
+val hidden_html = (
+    "<style>table{table-layout:fixed;width:40px;" +
+    "border-collapse:collapse;border-spacing:10px}" +
+    "#hidden-left{border-right:8px hidden #ef4444}" +
+    "#hidden-right{border-left:2px solid #1d4ed8}</style>" +
+    "<table id='hidden-table'><tr><td id='hidden-left'></td>" +
+    "<td id='hidden-right'></td></tr></table>"
+)
+val hidden_commands = simple_web_layout_render_html_draw_ir(
+    hidden_html, 48, 16
+).batches[0].commands
+val hidden_table = hidden_commands[_table_command_index(
+    hidden_commands, "hidden-table"
+)]
+val hidden_left = hidden_commands[_table_command_index(
+    hidden_commands, "hidden-left"
+)]
+val hidden_right = hidden_commands[_table_command_index(
+    hidden_commands, "hidden-right"
+)]
+val hidden_suppression = [
+    _table_style(hidden_table, "border-spacing"),
+    _table_style(hidden_left, "border-right-width"),
+    _table_style(hidden_right, "border-left-width"),
+    _table_style(hidden_left, "border-right-style"),
+    _table_style(hidden_right, "border-left-style")
+]
+val style_rank_html = (
+    "<style>table{table-layout:fixed;width:40px;" +
+    "border-collapse:collapse;border-spacing:11px}" +
+    "#rank-left{border-right:5px dotted #ef4444}" +
+    "#rank-right{border-left:1px solid #1d4ed8}</style>" +
+    "<table id='rank-table'><tr><td id='rank-left'></td>" +
+    "<td id='rank-right'></td></tr></table>"
+)
+val style_rank_commands = simple_web_layout_render_html_draw_ir(
+    style_rank_html, 48, 16
+).batches[0].commands
+val style_rank_table = style_rank_commands[_table_command_index(
+    style_rank_commands, "rank-table"
+)]
+val style_rank_left = style_rank_commands[_table_command_index(
+    style_rank_commands, "rank-left"
+)]
+val style_rank_right = style_rank_commands[_table_command_index(
+    style_rank_commands, "rank-right"
+)]
+val style_rank_precedence = [
+    _table_style(style_rank_table, "border-spacing"),
+    _table_style(style_rank_left, "border-right-width"),
+    _table_style(style_rank_right, "border-left-width"),
+    _table_style(style_rank_left, "border-right-style"),
+    _table_style(style_rank_right, "border-left-style")
+]
+val non_row_html = (
+    "<style>table{table-layout:fixed;width:40px;" +
+    "border-collapse:collapse;border-spacing:8px}" +
+    "#not-row{display:block}" +
+    "#non-row-left{border-right:1px solid #ef4444}" +
+    "#non-row-right{border-left:3px solid #1d4ed8}</style>" +
+    "<table id='non-row-table'><tr id='not-row'>" +
+    "<td id='non-row-left'></td><td id='non-row-right'></td>" +
+    "</tr></table>"
+)
+val non_row_commands = simple_web_layout_render_html_draw_ir(
+    non_row_html, 48, 16
+).batches[0].commands
+val non_row_table = non_row_commands[_table_command_index(
+    non_row_commands, "non-row-table"
+)]
+val unsupported_structure_spacing = [
+    colspan_control_spacing, rowspan_control_spacing,
+    two_row_control_spacing,
+    _table_style(non_row_table, "border-spacing")
+]
+expect(admitted_collapse).to_equal(["0px", "0", "3"])
+expect(unsupported_structure_spacing).to_equal(
+    ["5px", "6px", "4px", "8px"]
+)
+expect(equal_width_control).to_equal(
+    ["0px", "2", "0", "solid", "solid"]
+)
+expect(hidden_suppression).to_equal(
+    ["0px", "0", "0", "hidden", "solid"]
+)
+expect(style_rank_precedence).to_equal(
+    ["0px", "0", "1", "dotted", "solid"]
+)
+
+step("Emit canonical Draw IR")
+val collapsed_parentage = [left.parent_id, right.parent_id]
+val collapsed_geometry = [
+    left.x, left.width, right.x, right.width
+]
+val initial = simple_web_layout_render_html_draw_ir_result(
+    html, 48, 16
+)
+val retained = simple_web_layout_rerender_retained(
+    initial, "style", 48, 16, 1000, 0,
+    browser_text_input_overlay_empty(), [], []
+)
+val retained_commands = retained.composition.batches[0].commands
+val retained_table = retained_commands[_table_command_index(
+    retained_commands, "table"
+)]
+val retained_left = retained_commands[_table_command_index(
+    retained_commands, "left"
+)]
+val retained_right = retained_commands[_table_command_index(
+    retained_commands, "right"
+)]
+val retained_collapse = [
+    _table_style(retained_table, "border-spacing"),
+    _table_style(retained_left, "border-right-width"),
+    _table_style(retained_right, "border-left-width"),
+    _table_style(retained_left, "border-right-style"),
+    _table_style(retained_right, "border-left-style")
+]
+expect(collapsed_parentage).to_equal(["row", "row"])
+expect(collapsed_geometry).to_equal(
+    [0, 20, 20, 20]
+)
+expect(retained_collapse).to_equal(
+    ["0px", "4", "0", "solid", "solid"]
+)
+
+step("Verify absolute pixels")
+val pixels = simple_web_layout_render_html_readback_engine2d_result(
+    html, 48, 16, "software"
+).readback.pixels
+val pixel_before_shared_border = pixels[4 * 48 + 19]
+val pixel_at_shared_border_start = pixels[4 * 48 + 20]
+val pixel_at_shared_border_center = pixels[4 * 48 + 21]
+val pixel_at_shared_border_end = pixels[4 * 48 + 22]
+val pixel_after_shared_border = pixels[4 * 48 + 23]
+expect(pixel_before_shared_border).to_equal(0xFFFFFFFFu32)
+expect(pixel_at_shared_border_start).to_equal(0xFF1D4ED8u32)
+expect(pixel_at_shared_border_center).to_equal(0xFF1D4ED8u32)
+expect(pixel_at_shared_border_end).to_equal(0xFF1D4ED8u32)
+expect(pixel_after_shared_border).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### should separate fixed table cells with authored border spacing
+
+- Render two fixed columns with horizontal and vertical spacing
+- Expose normalized spacing and exact Draw IR table geometry
+   - Expected: spaced_row.parent_id equals `spaced`
+   - Expected: spaced_a.parent_id equals `spaced-row`
+   - Expected: spaced_b.parent_id equals `spaced-row`
+- Rasterize outer and inter-cell gaps through Engine2D
+   - Expected: spaced_pixels[1 * 48 + 1] equals `0xFF112233u32`
+   - Expected: spaced_pixels[4 * 48 + 5] equals `0xFFFF0000u32`
+   - Expected: spaced_pixels[4 * 48 + 19] equals `0xFF112233u32`
+   - Expected: spaced_pixels[4 * 48 + 23] equals `0xFF00FF00u32`
+   - Expected: spaced_pixels[12 * 48 + 1] equals `0xFF112233u32`
+   - Expected: spaced_pixels[14 * 48 + 1] equals `0xFFFFFFFFu32`
+- Keep zero spacing as the adjacent-cell control
+   - Expected: control_pixels[4 * 48 + 19] equals `0xFFFF0000u32`
+   - Expected: control_pixels[4 * 48 + 20] equals `0xFF00FF00u32`
+- Preserve the same gaps in explicit-width automatic layout
+   - Expected: auto_pixels[4 * 48 + 19] equals `0xFF112233u32`
+- Keep gaps through constrained rows groups spans and captions
+   - Expected: grouped_pixels[4 * 48 + 33] equals `0xFF112233u32`
+   - Expected: grouped_pixels[11 * 48 + 3] equals `0xFF0000FFu32`
+   - Expected: grouped_pixels[17 * 48 + 1] equals `0xFFFFFF00u32`
+- Expand a narrow fixed table to contain valid large spacing
+   - Expected: [large_table.x, large_table.width] equals `[0, 302]`
+   - Expected: [large_a.x, large_a.width] equals `[100, 1]`
+   - Expected: [large_b.x, large_b.width] equals `[201, 1]`
+- Handle inherited CSS-wide values and reject negative spacing
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 315 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render two fixed columns with horizontal and vertical spacing")
+val spaced_html = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{table-layout:fixed;width:40px;border-spacing:4px 3px;" +
+    "background:#112233}td{height:8px}" +
+    "#spaced-a{background:#ff0000}" +
+    "#spaced-b{background:#00ff00}</style>" +
+    "<table id='spaced'><tr id='spaced-row'>" +
+    "<td id='spaced-a'></td><td id='spaced-b'></td>" +
+    "</tr></table>"
+)
+val spaced_commands = simple_web_layout_render_html_draw_ir(
+    spaced_html, 48, 24
+).batches[0].commands
+val spaced_table_index = _table_command_index(
+    spaced_commands, "spaced"
+)
+val spaced_row_index = _table_command_index(
+    spaced_commands, "spaced-row"
+)
+val spaced_a_index = _table_command_index(
+    spaced_commands, "spaced-a"
+)
+val spaced_b_index = _table_command_index(
+    spaced_commands, "spaced-b"
+)
+expect(spaced_table_index).to_be_greater_than(-1)
+expect(spaced_row_index).to_be_greater_than(-1)
+expect(spaced_a_index).to_be_greater_than(-1)
+expect(spaced_b_index).to_be_greater_than(-1)
+val spaced_table = spaced_commands[spaced_table_index]
+val spaced_row = spaced_commands[spaced_row_index]
+val spaced_a = spaced_commands[spaced_a_index]
+val spaced_b = spaced_commands[spaced_b_index]
+
+step("Expose normalized spacing and exact Draw IR table geometry")
+expect(simple_web_layout_debug_style_by_id(
+    spaced_html, "spaced", "border-spacing"
+)).to_equal("4px 3px")
+expect(_table_style(
+    spaced_table, "border-spacing"
+)).to_equal("4px 3px")
+expect([spaced_table.x, spaced_table.y,
+        spaced_table.width, spaced_table.height]).to_equal(
+    [0, 0, 40, 14]
+)
+expect([spaced_row.x, spaced_row.y,
+        spaced_row.width, spaced_row.height]).to_equal(
+    [4, 3, 32, 8]
+)
+expect([spaced_a.x, spaced_a.y,
+        spaced_a.width, spaced_a.height]).to_equal(
+    [4, 3, 14, 8]
+)
+expect([spaced_b.x, spaced_b.y,
+        spaced_b.width, spaced_b.height]).to_equal(
+    [22, 3, 14, 8]
+)
+expect(spaced_row.parent_id).to_equal("spaced")
+expect(spaced_a.parent_id).to_equal("spaced-row")
+expect(spaced_b.parent_id).to_equal("spaced-row")
+
+step("Rasterize outer and inter-cell gaps through Engine2D")
+val spaced_pixels = (
+    simple_web_layout_render_html_readback_engine2d_result(
+        spaced_html, 48, 24, "software"
+    ).readback.pixels
+)
+expect(spaced_pixels[1 * 48 + 1]).to_equal(0xFF112233u32)
+expect(spaced_pixels[4 * 48 + 5]).to_equal(0xFFFF0000u32)
+expect(spaced_pixels[4 * 48 + 19]).to_equal(0xFF112233u32)
+expect(spaced_pixels[4 * 48 + 23]).to_equal(0xFF00FF00u32)
+expect(spaced_pixels[12 * 48 + 1]).to_equal(0xFF112233u32)
+expect(spaced_pixels[14 * 48 + 1]).to_equal(0xFFFFFFFFu32)
+
+step("Keep zero spacing as the adjacent-cell control")
+val control_html = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{table-layout:fixed;width:40px;border-spacing:0;" +
+    "background:#112233}td{height:8px}" +
+    "#control-a{background:#ff0000}" +
+    "#control-b{background:#00ff00}</style>" +
+    "<table id='control'><tr id='control-row'>" +
+    "<td id='control-a'></td><td id='control-b'></td>" +
+    "</tr></table>"
+)
+val control_commands = simple_web_layout_render_html_draw_ir(
+    control_html, 48, 24
+).batches[0].commands
+val control_table_index = _table_command_index(
+    control_commands, "control"
+)
+val control_a_index = _table_command_index(
+    control_commands, "control-a"
+)
+val control_b_index = _table_command_index(
+    control_commands, "control-b"
+)
+expect(control_table_index).to_be_greater_than(-1)
+expect(control_a_index).to_be_greater_than(-1)
+expect(control_b_index).to_be_greater_than(-1)
+val control_table = control_commands[control_table_index]
+val control_a = control_commands[control_a_index]
+val control_b = control_commands[control_b_index]
+expect(_table_style(
+    control_table, "border-spacing"
+)).to_equal("0px")
+expect([control_table.x, control_table.y,
+        control_table.width, control_table.height]).to_equal(
+    [0, 0, 40, 8]
+)
+expect([control_a.x, control_a.y,
+        control_a.width, control_a.height]).to_equal(
+    [0, 0, 20, 8]
+)
+expect([control_b.x, control_b.y,
+        control_b.width, control_b.height]).to_equal(
+    [20, 0, 20, 8]
+)
+val control_pixels = (
+    simple_web_layout_render_html_readback_engine2d_result(
+        control_html, 48, 24, "software"
+    ).readback.pixels
+)
+expect(control_pixels[4 * 48 + 19]).to_equal(0xFFFF0000u32)
+expect(control_pixels[4 * 48 + 20]).to_equal(0xFF00FF00u32)
+
+step("Preserve the same gaps in explicit-width automatic layout")
+val auto_html = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{width:40px;border-spacing:4px 3px;background:#112233}" +
+    "td{width:10px;height:8px}" +
+    "#auto-a{background:#ff0000}#auto-b{background:#00ff00}" +
+    "</style><table id='auto-spaced'><tr>" +
+    "<td id='auto-a'></td><td id='auto-b'></td></tr></table>"
+)
+val auto_commands = simple_web_layout_render_html_draw_ir(
+    auto_html, 48, 24
+).batches[0].commands
+val auto_a_index = _table_command_index(auto_commands, "auto-a")
+val auto_b_index = _table_command_index(auto_commands, "auto-b")
+expect(auto_a_index).to_be_greater_than(-1)
+expect(auto_b_index).to_be_greater_than(-1)
+val auto_a = auto_commands[auto_a_index]
+val auto_b = auto_commands[auto_b_index]
+expect([auto_a.x, auto_a.y, auto_a.width, auto_a.height]).to_equal(
+    [4, 3, 14, 8]
+)
+expect([auto_b.x, auto_b.y, auto_b.width, auto_b.height]).to_equal(
+    [22, 3, 14, 8]
+)
+val auto_pixels = (
+    simple_web_layout_render_html_readback_engine2d_result(
+        auto_html, 48, 24, "software"
+    ).readback.pixels
+)
+expect(auto_pixels[4 * 48 + 19]).to_equal(0xFF112233u32)
+
+step("Keep gaps through constrained rows groups spans and captions")
+val grouped_html = (
+    "<style>html,body{margin:0;background:#fff}" +
+    "table{width:40px;border-spacing:2px 3px;background:#112233}" +
+    "caption{caption-side:bottom;height:2px;background:#ffff00}" +
+    "td{height:4px}#group-a{width:10px;min-width:30px;" +
+    "background:#ff0000}#group-b{width:10px;background:#00ff00}" +
+    "#group-wide{background:#0000ff}</style>" +
+    "<table id='grouped'><caption id='group-caption'></caption>" +
+    "<tbody id='group'><tr id='group-row-a'>" +
+    "<td id='group-a'></td><td id='group-b'></td></tr>" +
+    "<tr id='group-row-b'><td id='group-wide' colspan='2'></td>" +
+    "</tr></tbody></table>"
+)
+val grouped_commands = simple_web_layout_render_html_draw_ir(
+    grouped_html, 48, 24
+).batches[0].commands
+val grouped_table_index = _table_command_index(
+    grouped_commands, "grouped"
+)
+val group_index = _table_command_index(grouped_commands, "group")
+val group_row_a_index = _table_command_index(
+    grouped_commands, "group-row-a"
+)
+val group_row_b_index = _table_command_index(
+    grouped_commands, "group-row-b"
+)
+val group_a_index = _table_command_index(
+    grouped_commands, "group-a"
+)
+val group_b_index = _table_command_index(
+    grouped_commands, "group-b"
+)
+val group_wide_index = _table_command_index(
+    grouped_commands, "group-wide"
+)
+val group_caption_index = _table_command_index(
+    grouped_commands, "group-caption"
+)
+expect(grouped_table_index).to_be_greater_than(-1)
+expect(group_index).to_be_greater_than(-1)
+expect(group_row_a_index).to_be_greater_than(-1)
+expect(group_row_b_index).to_be_greater_than(-1)
+expect(group_a_index).to_be_greater_than(-1)
+expect(group_b_index).to_be_greater_than(-1)
+expect(group_wide_index).to_be_greater_than(-1)
+expect(group_caption_index).to_be_greater_than(-1)
+val grouped_table = grouped_commands[grouped_table_index]
+val group = grouped_commands[group_index]
+val group_row_a = grouped_commands[group_row_a_index]
+val group_row_b = grouped_commands[group_row_b_index]
+val group_a = grouped_commands[group_a_index]
+val group_b = grouped_commands[group_b_index]
+val group_wide = grouped_commands[group_wide_index]
+val group_caption = grouped_commands[group_caption_index]
+expect([grouped_table.x, grouped_table.y,
+        grouped_table.width, grouped_table.height]).to_equal(
+    [0, 0, 46, 19]
+)
+expect([group.x, group.y, group.width, group.height]).to_equal(
+    [2, 3, 42, 11]
+)
+expect([group_row_a.x, group_row_a.y,
+        group_row_a.width, group_row_a.height]).to_equal(
+    [2, 3, 42, 4]
+)
+expect([group_row_b.x, group_row_b.y,
+        group_row_b.width, group_row_b.height]).to_equal(
+    [2, 10, 42, 4]
+)
+expect([group_a.x, group_a.y, group_a.width, group_a.height]).to_equal(
+    [2, 3, 30, 4]
+)
+expect([group_b.x, group_b.y, group_b.width, group_b.height]).to_equal(
+    [34, 3, 10, 4]
+)
+expect([group_wide.x, group_wide.y,
+        group_wide.width, group_wide.height]).to_equal(
+    [2, 10, 42, 4]
+)
+expect([group_caption.x, group_caption.y,
+        group_caption.width, group_caption.height]).to_equal(
+    [0, 17, 46, 2]
+)
+val grouped_pixels = (
+    simple_web_layout_render_html_readback_engine2d_result(
+        grouped_html, 48, 24, "software"
+    ).readback.pixels
+)
+expect(grouped_pixels[4 * 48 + 33]).to_equal(0xFF112233u32)
+expect(grouped_pixels[11 * 48 + 3]).to_equal(0xFF0000FFu32)
+expect(grouped_pixels[17 * 48 + 1]).to_equal(0xFFFFFF00u32)
+
+step("Expand a narrow fixed table to contain valid large spacing")
+val large_html = (
+    "<style>html,body{margin:0}table{table-layout:fixed;" +
+    "width:40px;border-spacing:100px 0}td{height:1px}</style>" +
+    "<table id='large'><tr><td id='large-a'></td>" +
+    "<td id='large-b'></td></tr></table>"
+)
+val large_commands = simple_web_layout_render_html_draw_ir(
+    large_html, 320, 8
+).batches[0].commands
+val large_table_index = _table_command_index(
+    large_commands, "large"
+)
+val large_a_index = _table_command_index(
+    large_commands, "large-a"
+)
+val large_b_index = _table_command_index(
+    large_commands, "large-b"
+)
+expect(large_table_index).to_be_greater_than(-1)
+expect(large_a_index).to_be_greater_than(-1)
+expect(large_b_index).to_be_greater_than(-1)
+val large_table = large_commands[large_table_index]
+val large_a = large_commands[large_a_index]
+val large_b = large_commands[large_b_index]
+expect([large_table.x, large_table.width]).to_equal([0, 302])
+expect([large_a.x, large_a.width]).to_equal([100, 1])
+expect([large_b.x, large_b.width]).to_equal([201, 1])
+
+step("Handle inherited CSS-wide values and reject negative spacing")
+val value_html = (
+    "<style>#scope{border-spacing:6px 2px}" +
+    "#inherited{border-spacing:inherit}" +
+    "#initial{border-spacing:initial}" +
+    "#unset{border-spacing:unset}" +
+    "#revert{border-spacing:revert}" +
+    "#revert-layer{border-spacing:revert-layer}" +
+    "#invalid{border-spacing:-1px}</style>" +
+    "<div id='scope'>" +
+    "<table id='inherited'></table>" +
+    "<table id='initial'></table>" +
+    "<table id='unset'></table>" +
+    "<table id='revert'></table>" +
+    "<table id='revert-layer'></table>" +
+    "<table id='invalid'></table></div>"
+)
+expect(simple_web_layout_debug_style_by_id(
+    value_html, "inherited", "border-spacing"
+)).to_equal("6px 2px")
+expect(simple_web_layout_debug_style_by_id(
+    value_html, "initial", "border-spacing"
+)).to_equal("0px")
+expect(simple_web_layout_debug_style_by_id(
+    value_html, "unset", "border-spacing"
+)).to_equal("6px 2px")
+expect(simple_web_layout_debug_style_by_id(
+    value_html, "revert", "border-spacing"
+)).to_equal("6px 2px")
+expect(simple_web_layout_debug_style_by_id(
+    value_html, "revert-layer", "border-spacing"
+)).to_equal("6px 2px")
+expect(simple_web_layout_debug_style_by_id(
+    value_html, "invalid", "border-spacing"
+)).to_equal("6px 2px")
+```
 
 </details>
 
@@ -231,16 +833,53 @@ Runnable source: the complete executable scenario is retained in
    - Artifact capture: after_step
 - Keep constrained and colspan cells non-overlapping and contained
    - Artifact capture: after_step
-   - Expected: the 30px minimum-width cell ends where its 10px sibling begins
-   - Expected: the sibling and colspan cell end at the 40px table edge
-   - Expected: vertical spacing remains 3px while horizontal spacing stays zero
+   - Evidence: artifact verified by 5 expected checks
+   - Expected: [a.x, a.y, a.width, a.height] equals `[0, 3, 30, 4]`
+   - Expected: [b.x, b.y, b.width, b.height] equals `[30, 3, 10, 4]`
+   - Expected: a.x + a.width equals `b.x`
+   - Expected: b.x + b.width equals `table.x + table.width`
+   - Expected: wide.x + wide.width equals `table.x + table.width`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: the complete executable scenario is retained in
-`test/03_system/feature/web_platform/css/table_formatting_spec.spl`.
+Runnable source: 31 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Lay out a constrained auto table with vertical-only spacing")
+val html = (
+    "<style>html,body{margin:0}table{width:40px;" +
+    "border-spacing:0 3px}td{width:10px;height:4px}" +
+    "#vertical-a{min-width:30px}</style>" +
+    "<table id='vertical-table'><tr>" +
+    "<td id='vertical-a'></td><td id='vertical-b'></td></tr>" +
+    "<tr><td id='vertical-wide' colspan='2'></td></tr></table>"
+)
+val commands = simple_web_layout_render_html_draw_ir(
+    html, 48, 24
+).batches[0].commands
+val table = commands[_table_command_index(
+    commands, "vertical-table"
+)]
+val a = commands[_table_command_index(commands, "vertical-a")]
+val b = commands[_table_command_index(commands, "vertical-b")]
+val wide = commands[_table_command_index(commands, "vertical-wide")]
+
+step("Keep constrained and colspan cells non-overlapping and contained")
+expect([table.x, table.y, table.width, table.height]).to_equal(
+    [0, 0, 40, 17]
+)
+expect([a.x, a.y, a.width, a.height]).to_equal([0, 3, 30, 4])
+expect([b.x, b.y, b.width, b.height]).to_equal([30, 3, 10, 4])
+expect([wide.x, wide.y, wide.width, wide.height]).to_equal(
+    [0, 10, 40, 4]
+)
+expect(a.x + a.width).to_equal(b.x)
+expect(b.x + b.width).to_equal(table.x + table.width)
+expect(wide.x + wide.width).to_equal(table.x + table.width)
+```
 
 </details>
 
@@ -855,8 +1494,8 @@ expect(pixels[2 * 88 + 55]).to_equal(0xFF000000u32)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
