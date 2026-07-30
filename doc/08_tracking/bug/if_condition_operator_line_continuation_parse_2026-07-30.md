@@ -1,84 +1,104 @@
-# Operator line-continuation fails inside an `if` condition (parses fine in a binding)
+# Trailing-operator line continuation rejected for comparison/equality operators (seed parser only)
 
-**Status:** OPEN, unfixed. **Found:** 2026-07-30, while running
+**Status:** FIXED for comparison and equality (2026-07-30). One sub-case
+remains open: `elif` conditions — see "Remaining gap" below.
+**Found:** while running
 `scripts/check/check-linux-hosted-wm-live-window-evidence.shs`.
-**Severity:** a file at origin tip does not parse with the current
-toolchain, so every consumer of it fails at discovery.
 
-## Minimal repro (PROVED)
+## Corrected diagnosis — the defect is OPERATOR-scoped, not `if`-scoped
 
-```simple
-# FAILS: continuation after a comparison operator in an `if` condition
-fn f(a: i64, b: i64) -> bool:
-    if a >
-       b:
-        return true
-    false
-```
-```
-Unexpected token: expected expression, found Newline
-```
+The first report framed this as "continuation fails inside an `if`
+condition but parses in a `val` binding". **That framing was wrong**, and
+it was wrong because the original repro pair changed two variables at
+once: it used `+` in the binding and `>` in the condition. Controlling for
+that shows the context is irrelevant and the operator is everything —
+comparison/equality continuation fails in a `val` binding just as it does
+in an `if`:
 
-```simple
-# PARSES: the same continuation style in a `val` binding
-fn g(a: i64, b: i64) -> i64:
-    val x = a +
-       b
-    x
-```
+| Form | Old seed |
+|---|---|
+| `val x = a +` ⏎ `b` | PARSES |
+| `if a and` ⏎ `b:` | PARSES |
+| `val x = a >` ⏎ `b` | **FAILS** |
+| `val x = a ==` ⏎ `b` | **FAILS** |
+| `if a >` ⏎ `b:` | **FAILS** |
+| `while a >` ⏎ `b:` | **FAILS** |
 
-So operator line-continuation **is** supported in expression/binding
-position but **not** inside an `if` condition. This is the "short, safe
-grammar form fails" case CLAUDE.md says to record rather than silently
-normalize — the workaround (join the condition onto one line) should not
-be applied without a decision, because the grammar is inconsistent
-between the two positions.
+## Root cause (PROVED)
 
-## Real-world impact (PROVED)
+`src/compiler_rust/parser/src/expressions/binary.rs` generates most binary
+operator parsers with `parse_binary_single!` / `parse_binary_multi!`, and
+those macros handle line continuation (both trailing-operator and
+leading-operator forms) by calling
+`skip_newlines_and_indents_for_method_chain()`.
 
-`src/lib/common/web/browser_renderer_protocol.spl:559` uses the failing
-form:
+Two parsers are **hand-written** and therefore never inherited it:
+
+- `parse_comparison` — hand-written to support chaining (`a < b < c`);
+- `parse_equality` — hand-written to support `not in`.
+
+Both did `self.advance()` past the operator and immediately called the
+next precedence level, so a newline after the operator hit the expression
+parser directly: *"expected expression, found Newline"*.
+
+## Engine scope: seed parser ONLY (PROVED)
+
+- **Rust seed parser: BROKEN** (all comparison/equality forms above).
+- **Pure-Simple parser (`src/compiler/10.frontend/core/parser_expr.spl`):
+  NOT affected** — `build/redeploy_out/simple_stage2` parses every form
+  above, including the exact real-world construct.
+
+So there is a real engine divergence, and no pure-Simple change is needed.
+
+This also explains how the offending source got committed: it parses fine
+under the pure-Simple parser, and only the seed rejects it.
+
+Note on how it surfaced: the host-WM gate ran with `SIMPLE_BIN=stage2`,
+yet the parse error came from the seed — `native-build` spawns a worker
+that uses the **deployed** `bin/simple` regardless of `SIMPLE_BIN`.
+
+## Real-world impact
+
+`src/lib/common/web/browser_renderer_protocol.spl:559`, introduced by
+`ba0ce4e3c06` *"feat(web): add SBR2 command capability codec"*
+(2026-07-30):
 
 ```simple
     if payload_bytes.len().to_i64() >
        BROWSER_RENDERER_MAX_PAYLOAD_BYTES - capability_bytes:
 ```
 
-Introduced by `ba0ce4e3c06` *"feat(web): add SBR2 command capability
-codec"* (2026-07-30) — `git log -L 558,560:` on that file.
+This blocked `check-linux-hosted-wm-live-window-evidence.shs` at
+`reason=production-native-build-failed` (walls 1-7 otherwise passing), and
+would block any lane compiling that file with the seed.
 
-The file therefore **fails to parse at origin tip** with:
+## Fix
 
-- the newest deployed seed
-  (`bin/release/x86_64-unknown-linux-gnu/simple`, 154,094,616 bytes,
-  sha256 `79ca755d…`, LLVM-linked, deployed 2026-07-30 09:08), and
-- the newest self-hosted binary on this host
-  (`build/redeploy_out/simple_stage2`, 2026-07-28).
+Added the same trailing-operator continuation skip the macros use to both
+hand-written parsers, immediately after the operator is consumed. The fix
+is confined to those two functions; no statement-level or lexer change.
 
-Both fail with the same `expected expression, found Newline`, so this is
-**NOT** a stale-binary problem — it is a genuine grammar/source
-incompatibility at tip.
+**The source file was deliberately NOT edited** — per CLAUDE.md, a short
+safe grammar form that fails is a parser bug to fix, not something to
+normalize away in the caller.
 
-## How it surfaced
+Tests: `comparison_continuation_tests` in the same file — comparison
+(`<`, `>`, `<=`, `>=`) and equality (`==`, `!=`) continuations in both
+binding and `if` position, `while` conditions, the exact real-world
+construct, and a guard that the already-working arithmetic/logical forms
+keep parsing. Full parser suite: 240/240 pass.
 
-It is the current blocker of the host-WM evidence gate: with walls 1-7
-satisfied, `check-linux-hosted-wm-live-window-evidence.shs` now fails at
-`reason=production-native-build-failed`, whose
-`native-build.log` reads:
+## Remaining gap: `elif` (open, deliberately not chased)
 
-```
-Build failed: failed to parse .../src/lib/common/web/browser_renderer_protocol.spl
-at 559:38 during discovery: Unexpected token: expected expression, found Newline
-```
+`elif a >` ⏎ `b:` still fails. After the expression-level fix its error
+**moves** from `expected expression, found Newline` to
+`found Indent` (continuation indented deeper) or `found Dedent`
+(continuation aligned) — i.e. it is no longer an expression-parsing
+problem at all, but `elif`'s own statement-level indent bookkeeping.
 
-## Fix options (not applied here — needs a decision)
-
-1. **Extend the parser** so an `if` condition accepts continuation after a
-   trailing binary operator, matching binding position. Preferred: keeps
-   the grammar consistent and needs no source churn.
-2. **Normalize the source** at `browser_renderer_protocol.spl:559` onto
-   one line. Cheap and unblocks the gate immediately, but encodes the
-   grammar inconsistency rather than fixing it, and CLAUDE.md explicitly
-   warns against silently normalizing such workarounds.
-
-Not chased in this pass (gate work was scoped to characterize, not fix).
+Fixing it means touching the statement/expression boundary, which carries
+real regression risk for all indentation-sensitive parsing, so it is left
+open rather than rushed. It was already broken before this fix, so nothing
+regressed. The behaviour is pinned by
+`elif_condition_continuation_is_still_unsupported`, which asserts the
+current failure and tells whoever fixes it to flip the assertion.
