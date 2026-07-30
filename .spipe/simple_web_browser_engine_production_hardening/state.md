@@ -2345,3 +2345,23 @@ implementation in progress / target evidence blocked
   SSpec, N/2N performance gate, implementation, and production receipt remain
   RED/open. Detail:
   `doc/08_tracking/bug/js_vm_dom_bridge_retention_quadratic_2026-07-30.md`.
+- intensive HTML/CSS and animation held tranche (2026-07-30):
+  CSP-clock (`/tmp/simple-animation-csp-clock`) has production, spec, phase-2
+  manual, and high-review PASS. Table collapse
+  (`/tmp/simple-table-collapse-slice`) has cycle-2 production, spec, manual,
+  and high-review PASS. Both remain unexecuted and unmerged. Object-fit
+  inheritance (`/tmp/simple-object-fit-inheritance.w2dMXw`) has production and
+  spec high-review PASS, but its generated manual failed because it exposes a
+  fifth cleanup action; the three-cycle cap is exhausted. rAF frame alignment
+  (`/tmp/simple-raf-frame-align-clean.gdkM4F`) has production, spec, phase-2
+  manual, and final high-review PASS, but remains unexecuted and held for an
+  admitted current pure-Simple full CLI. The animation
+  layout-classification cache
+  (`/tmp/simple-animation-layout-cache.Fh8uZo`) has production and spec
+  high-review PASS, but its phase-2 manual failed on a raw inline-CSS payload
+  bullet at the regeneration cap.
+  Fractional-opacity group compositing has a high-review-PASS
+  architecture/design/system-test proposal but remains unimplemented. No
+  target behavior or executable PASS is claimed: an admitted current
+  pure-Simple full CLI remains unavailable, and each applicable focused SSpec
+  must run once after admission. No bootstrap or seed substitute is authorized.

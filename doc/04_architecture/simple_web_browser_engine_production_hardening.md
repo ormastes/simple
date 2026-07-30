@@ -571,8 +571,26 @@ bootstrap or Rust-seed result is production browser evidence.
 ## Shared-state and frame-work convergence (2026-07-29)
 
 - `opacity: 0` suppresses the element and its entire descendant subtree before
-  paint/Draw-IR emission. Fractional opacity remains incomplete until bounded group
-  compositing can apply one alpha to a subtree without double blending.
+  paint/Draw-IR emission. **PROPOSED / UNIMPLEMENTED:** fractional opacity is a
+  proven structural gap: flat
+  commands or an adjacent helper batch cannot preserve the parent's exact paint
+  slot while applying alpha once to the whole subtree. The composition must
+  remain flat, with one `group` command referencing a child batch at that slot.
+  Engine2D must recursively execute the referenced batch into transient
+  premultiplied material, then source-over composite it once. Before allocating
+  that material, admission must reject unknown, orphan, or duplicate batch IDs,
+  multiply referenced children, cycles, and depth above the existing
+  `HTML_MAX_TREE_DEPTH` of 512. The existing browser limits remain authoritative:
+  at most 1,024 commands across every batch (groups included), therefore at most
+  1,025 batches, at most 1,048,576 encoded payload bytes, and at most
+  `viewport_pixels * 16` painted or transient pixels. Each clipped group-bounds
+  pixel must be charged once to that same frame pixel counter; no second budget
+  will be added. The root must remain the one opaque HTML batch. CSS lowering
+  must keep `css_opacity_pct` separate from `filter_opacity_pct`; filter opacity
+  must stay unsupported rather than being silently treated as subtree opacity.
+  The nested pixel oracle must use a blue box at 50% inside a same-bounds,
+  transparent/no-paint parent at 50%, over white: only blue has effective 25%
+  alpha, yielding `0xFFBFBFFF`.
 - `BrowserProfileStore` remains the sole bookmark persistence owner. The host
   publishes one immutable snapshot plus monotonic revision to the primary
   renderer and keyed secondary registry; existing and newly admitted windows

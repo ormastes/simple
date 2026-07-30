@@ -355,7 +355,14 @@ promoted without a current pure-Simple checker.
 | `content_visibility_gpu_guard` | `/tmp/simple-content-visibility-gpu-guard-20260730` | static + phase-2 manual + high review PASS; unmerged | admitted current pure-Simple full CLI; run focused spec once |
 | `address_bound` | `/tmp/simple-address-bound.Qw0wSt/worktree` | static + phase-2 manual + high review PASS; unmerged | admitted current pure-Simple full CLI; run focused spec once |
 | `eventloop_idle_drain` | `/tmp/simple-eventloop-idle-drain` | HOLD/FAIL: vacuous future timer, no performance discriminator, stale tick wording; review/docgen cap reached | redesign evidence before any executable attempt |
+| `animation_csp_clock` | `/tmp/simple-animation-csp-clock` | production + spec + phase-2 manual + high review PASS; unexecuted/unmerged | admitted current pure-Simple full CLI; run focused spec once |
+| `table_collapse` | `/tmp/simple-table-collapse-slice` | cycle-2 production + spec + manual + high review PASS; unexecuted/unmerged | admitted current pure-Simple full CLI; run focused spec once |
+| `object_fit_inheritance` | `/tmp/simple-object-fit-inheritance.w2dMXw` | production + spec high review PASS; generated manual FAIL on a fifth cleanup action at the three-cycle cap | repair manual in a fresh scoped cycle before execution |
+| `raf_frame_alignment` | `/tmp/simple-raf-frame-align-clean.gdkM4F` | production + spec + phase-2 manual + final high review PASS; unexecuted/unmerged | admitted current pure-Simple full CLI; run focused spec once |
+| `animation_layout_classification_cache` | `/tmp/simple-animation-layout-cache.Fh8uZo` | production + spec high review PASS; phase-2 manual FAIL on a raw inline-CSS payload bullet at the regeneration cap | repair manual in a fresh scoped cycle before execution |
+| `fractional_opacity_group_design` | `/tmp/simple-css-opacity-design.CqGpJo` | architecture/design/system-test proposal high review PASS; unimplemented | implement bounded Draw IR group contract, then executable evidence |
 
 Root Codex is merge owner and final reviewer. No seed or bootstrap output may
 admit or merge these patches; this tranche does not change phase or acceptance
-criterion completion.
+criterion completion. No target behavior is claimed until an admitted current
+pure-Simple full CLI runs the applicable focused SSpec once.

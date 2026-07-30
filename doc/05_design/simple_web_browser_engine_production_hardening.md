@@ -548,8 +548,36 @@ refresh, bootstrap, or Rust-seed fallback is claimed.
   charges successful command area against a single `framebuffer width * height`
   composition budget.
 - `content_paint_hidden_by_ancestor` rejects a zero-opacity node and descendants of
-  any zero-opacity ancestor during paint emission. Fractional opacity remains unsupported until one
-  bounded offscreen group can be composited once.
+  any zero-opacity ancestor during paint emission. **PROPOSED / UNIMPLEMENTED:**
+  computed style must retain independent `css_opacity_pct` and
+  `filter_opacity_pct` integers. CSS opacity must be in `0..100`: zero must use
+  the existing subtree suppression, 100 must stay inline, and only `1..99` may
+  emit `group(child_batch_id, css_opacity_pct)`. Paint must put the element
+  subtree in one child batch and insert that command at its original paint
+  position. Every non-root batch must have exactly one incoming reference.
+  Encode/decode/protocol admission must validate the complete graph and checked
+  sums before transient allocation: one root, unique IDs, known targets, no
+  orphan or multiply referenced child, no cycle, depth at most 512, aggregate
+  commands at most 1,024, batches at most 1,025, payload at most 1,048,576
+  bytes, and command plus clipped-group areas at most
+  `viewport_pixels * 16`.
+
+  Alpha conversion and blending must be integer-exact. Let
+  `round255(x) = (x + 127) / 255`. The group alpha byte must be
+  `(css_opacity_pct * 255 + 50) / 100`. Applying a group must use
+  `src_a = round255(child_a * group_alpha)` and
+  `src_p = round255(child_p * group_alpha)` for each already-premultiplied
+  channel. Premultiplied source-over must then use
+  `out_a = src_a + round255(dst_a * (255 - src_a))` and
+  `out_p = src_p + round255(dst_p * (255 - src_a))`, with nearest-integer
+  unpremultiplication
+  `(out_p * 255 + out_a / 2) / out_a` (or zero when `out_a == 0`) only when a
+  straight-ARGB consumer requires it. No sibling helper batch, private web
+  compositor, second pixel budget, or
+  `filter_opacity_pct` fallback must be added. The nested oracle must place a
+  blue box at 50% inside a same-bounds transparent/no-paint parent at 50%, over
+  white; only blue must receive the effective 25% alpha and the result must be
+  `0xFFBFBFFF`.
 - Bookmark persistence is read once through `BrowserProfileStore`. A host
   snapshot revision is applied independently to the primary renderer and
   `HostedBrowserRendererRegistry`; new entries start at revision zero and

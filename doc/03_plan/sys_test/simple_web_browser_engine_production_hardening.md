@@ -333,7 +333,27 @@ Focused checks must retain:
    fail-closed behavior after aggregate CSS-background command area consumes
    one framebuffer;
 2. no Draw IR for an `opacity: 0` element or descendant; fractional subtree
-   opacity stays an explicitly documented incomplete case;
+   opacity stays RED until
+   `browser_css_opacity_subtree_draw_ir_spec.spl` proves these four visible
+   steps:
+   `Compute inherited subtree opacity`,
+   `Emit one composited Draw IR group`,
+   `Render through canonical Engine2D`, and
+   `Verify source-over pixels`.
+   With alpha byte `(pct * 255 + 50) / 100` and premultiplied source-over
+   rounding `(x + 127) / 255`, three separate fixtures must yield:
+   `0xFFFF7F7F` for a parent-only red box in one 50% group over white,
+   `0xFF7F7FFF` for an opaque blue child fully covering its red parent inside
+   one 50% group, and `0xFFBFBFFF` for a blue box at 50% inside a same-bounds
+   transparent/no-paint parent at 50%, over white. In that nested fixture only
+   blue has effective 25% alpha.
+   The scenario also requires one opaque HTML root and one child reference at
+   the exact parent paint slot. Hostile fixtures must reject an unknown child
+   target, a child referenced by two group commands, duplicate/orphan/cyclic
+   IDs, depth 513, aggregate command 1,025, aggregate batch 1,026, encoded
+   payload 1,048,577 bytes, and clipped command-plus-group pixel work above
+   `viewport_pixels * 16`, all before transient allocation. A
+   `filter: opacity(...)` control must not emit a CSS-opacity group;
 3. one persisted bookmark toggle becoming the same revisioned snapshot in the
    primary renderer, an existing secondary renderer, and a newly admitted one;
 4. address edit then Escape restoring `about:network` before a commit and the
