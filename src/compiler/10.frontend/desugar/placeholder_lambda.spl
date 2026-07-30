@@ -35,6 +35,44 @@ use compiler.core.ast_expr.{
 
 var _ph_counter: i64 = 0
 
+# ===== Interpolation-region suppression =====
+#
+# Bug (2026-07-30, wildcard_import_c_backend_stubs_function_to_int bonus-find):
+# a string-template interpolation region (`{...}`) is sub-parsed standalone via
+# a fresh parse_expr() call -- see
+# _FlatAstBridge/convert_nodes.spl: flat_bridge_parse_interp_inner. Within such
+# a region, a bare `_` already has a fixed meaning: the value bound by the
+# enclosing call (e.g. `.map("{_.0}: {self.map_type(_.1)}")` -- `_` is the
+# current tuple element). But parse_call_arg() unconditionally applies the
+# `_`-placeholder-shorthand transform to EVERY call/method-call argument
+# anywhere in the language, including a nested call parsed while sub-parsing an
+# interpolation region (e.g. `self.map_type(_.1)`'s argument `_.1`, reached
+# because flat_bridge_parse_interp_inner's parse_expr() descends into
+# parse_postfix -> parse_call_arg for that nested call). That turned `_.1`
+# into an unapplied `\__p0: __p0.1` closure instead of leaving it as a plain
+# field access on the template's already-bound `_`, so the nested call
+# received a function value instead of the intended field value (surfacing as
+# "cannot access field on value of type 'function'" or "cannot convert
+# function to int").
+#
+# Suppress the transform while such interpolation-region mini-parses are in
+# flight; the caller sets this around its parse_expr() call and restores the
+# previous value afterward (so interpolation-in-interpolation, however
+# unlikely, still nests correctly).
+var _ph_suppress_transform: bool = false
+
+fn placeholder_transform_suppressed() -> bool:
+    """Whether transform_placeholder_lambda is currently suppressed (no-op)."""
+    _ph_suppress_transform
+
+fn set_placeholder_transform_suppressed(value: bool) -> bool:
+    """Set suppression on/off. Returns the PREVIOUS value so callers can
+    restore it (supports nested suppression scopes).
+    """
+    val prev = _ph_suppress_transform
+    _ph_suppress_transform = value
+    prev
+
 # ===== Helper: Check if identifier is a numbered placeholder =====
 
 fn is_numbered_placeholder(name: text) -> bool:
@@ -212,6 +250,9 @@ fn transform_placeholder_lambda(eid: i64) -> i64:
 
     Returns the original expression unchanged if no placeholders are found.
     """
+    if _ph_suppress_transform:
+        return eid
+
     # Detect mode
     _ph_has_unnumbered = false
     _ph_has_numbered = false

@@ -3,7 +3,7 @@ use compiler.frontend.flat_ast_bridge.*
 # Flat AST Bridge
 #
 # Converts the core parser's flat, index-based AST into the richer frontend
-# Module shape expected by HIR lowering. This is used as the bootstrap-safe
+# ParserModule shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
 use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_advance, par_kind_get, parser_set_had_error}
@@ -12,6 +12,7 @@ use compiler.core.parser.{parser_diagnostics_suppressed_get, parser_diagnostics_
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.frontend.core.parser_expr.{parse_expr}
 use compiler.frontend.core.lexer.{lex_init_with_path}
+use compiler.frontend.desugar.placeholder_lambda.{set_placeholder_transform_suppressed}
 use compiler.core.tokens.{TOK_EOF}
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
@@ -96,7 +97,7 @@ fn flat_bootstrap_function_count() -> i64:
         eprint("[flat-bridge] fn-count:done {count}")
     count
 
-fn flat_bootstrap_function_at(index: i64) -> Function:
+fn flat_bootstrap_function_at(index: i64) -> ParserFunction:
     if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
         eprint("[flat-bridge] fn-at:start {index}")
     var seen = 0
@@ -108,7 +109,7 @@ fn flat_bootstrap_function_at(index: i64) -> Function:
             if seen == index:
                 if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
                     eprint("[flat-bridge] fn-at:decl {decl_idx}")
-                val fn_: Function = convert_decl_fn(decl_idx)
+                val fn_: ParserFunction = convert_decl_fn(decl_idx)
                 if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
                     eprint("[flat-bridge] fn-at:done")
                 return fn_
@@ -198,7 +199,7 @@ fn decl_span_for(idx: i64) -> Span:
     val e = span_end(span_id)
     Span(start: s, end: e, line: span_line(span_id), col: span_col(span_id), file: "", length: e - s)
 
-fn flat_empty_module(path: text) -> Module:
+fn flat_empty_module(path: text) -> ParserModule:
     parser_module_new(
         name: path,
         imports: [],
@@ -573,6 +574,20 @@ fn flat_bridge_parse_interp_inner(inner: text) -> i64:
     val had_error_before = parser_has_errors()
     val diagnostics_suppressed_before = parser_diagnostics_suppressed_get()
     parser_diagnostics_suppressed_set(true)
+    # Bug wildcard_import_c_backend_stubs_function_to_int (bonus-find,
+    # 2026-07-30): a bare `_` inside an interpolation region already has a
+    # fixed meaning -- the value bound by the enclosing call (e.g.
+    # `.map("{_.0}: {self.map_type(_.1)}")` -- `_` is the current tuple
+    # element). But parse_call_arg() unconditionally applies the
+    # `_`-placeholder-shorthand transform to EVERY call/method-call argument
+    # anywhere in the language, so a nested call parsed while sub-parsing this
+    # region (e.g. `self.map_type(_.1)`'s argument `_.1`) got hijacked into an
+    # unapplied `\__p0: __p0.1` closure instead of staying a plain field
+    # access on the template's `_`. Suppress the placeholder-shorthand
+    # transform for the duration of this mini-parse; restore the previous
+    # value on every return path (nested interpolation regions still work
+    # since this saves/restores rather than hardcoding false).
+    val ph_suppress_before = set_placeholder_transform_suppressed(true)
     # Bug interp_brace_literal_collides_with_string_interpolation: a
     # placeholder written with padding spaces (e.g. `{ x }`, the common style
     # for JSON/SDN-shaped text) previously sub-lexed the RAW inner text
@@ -589,13 +604,16 @@ fn flat_bridge_parse_interp_inner(inner: text) -> i64:
     if idx < 0:
         parser_set_had_error(had_error_before)
         parser_diagnostics_suppressed_set(diagnostics_suppressed_before)
+        set_placeholder_transform_suppressed(ph_suppress_before)
         return -1
     if par_kind_get() != TOK_EOF:
         parser_set_had_error(had_error_before)
         parser_diagnostics_suppressed_set(diagnostics_suppressed_before)
+        set_placeholder_transform_suppressed(ph_suppress_before)
         return -1
     parser_set_had_error(had_error_before)
     parser_diagnostics_suppressed_set(diagnostics_suppressed_before)
+    set_placeholder_transform_suppressed(ph_suppress_before)
     idx
 
 fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
@@ -1097,7 +1115,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val range_inclusive = expr_get_int(idx) != 0
         return Expr(kind: ExprKind.Range(range_start, range_end, range_inclusive, nil), span: span)
     elif tag == EXPR_SPREAD:
-        # Struct-update/construct spread (`Ctor(..base, field: val)`) parses
+        # ParserStruct-update/construct spread (`Ctor(..base, field: val)`) parses
         # to a dedicated flat EXPR_SPREAD node (core/_AstExpr/nodes.spl's
         # expr_spread, tag 46) via parser_expr.spl's parse_call_arg_raw --
         # but this bridge had NO case for it, so every spread argument fell
@@ -1150,8 +1168,8 @@ fn convert_flat_expr(idx: i64) -> Expr:
 fn convert_flat_pattern(pat_eid: i64) -> Pattern:
     """Convert a match-arm 'pattern' (parsed as an EXPRESSION in the flat AST)
     into a structured Pattern. `Shape.Circle(x)` is EXPR_CALL over an
-    EXPR_FIELD_ACCESS -> Enum(Shape, Circle, Tuple([Binding x])); bare
-    `Shape.Red` -> unit Enum; `_` -> Wildcard; other ident -> Binding;
+    EXPR_FIELD_ACCESS -> ParserEnum(Shape, Circle, Tuple([Binding x])); bare
+    `Shape.Red` -> unit ParserEnum; `_` -> Wildcard; other ident -> Binding;
     literal -> Literal."""
     val pspan = make_span()
     if pat_eid < 0:
@@ -1553,7 +1571,7 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         flat_bridge_report_unhandled_node("stmt", tag)
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
 
-fn convert_decl_fn(idx: i64) -> Function:
+fn convert_decl_fn(idx: i64) -> ParserFunction:
     val name = decl_get_name(idx)
     if (flat_bridge_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and flat_bridge_trace_enabled():
         eprint("[flat-bridge] fn:start {name}")
@@ -1675,17 +1693,17 @@ fn convert_decl_fn(idx: i64) -> Function:
     # decl_get_type_params returns the `<T, U, ...>` names captured by
     # parse_type_params() at parse time. This bridge previously discarded
     # them entirely -- `parser_function_new` below was always called with a
-    # hardcoded `[]`, so `Function.type_params` was empty by the time HIR
+    # hardcoded `[]`, so `ParserFunction.type_params` was empty by the time HIR
     # (and every downstream check gated on it) ever saw the function, turning
     # `fn id<T>(x: T) -> T` into a silent-wrong native build (bug: generic
     # functions on the native --entry path return 0 instead of the argument).
-    # Thread the real names through as `[TypeParam]` so HIR lowering can see
+    # Thread the real names through as `[ParserTypeParam]` so HIR lowering can see
     # (and reject) generic functions instead of erasing them.
     val tp_names = decl_get_type_params(idx)
-    var fn_type_params: [TypeParam] = []
+    var fn_type_params: [ParserTypeParam] = []
     var tpi = 0
     while tpi < tp_names.len():
-        fn_type_params.push(TypeParam(
+        fn_type_params.push(ParserTypeParam(
             name: tp_names[tpi],
             bounds: [],
             has_default: false,
@@ -1736,7 +1754,7 @@ fn convert_decl_fn(idx: i64) -> Function:
             for clocked_name in clocked_names:
                 clocked_args.push(Expr(kind: ExprKind.Ident(clocked_name), span: span))
             fn_attributes.push(Attribute(name: "clocked", args: clocked_args, span: span))
-    val converted: Function = parser_function_new(
+    val converted: ParserFunction = parser_function_new(
         name,
         fn_type_params,
         fn_params,
@@ -1761,12 +1779,12 @@ fn convert_decl_fn(idx: i64) -> Function:
         eprint("[flat-bridge] fn:done {name}")
     converted
 
-fn convert_decl_method_fn(idx: i64, target_name: text) -> Function:
+fn convert_decl_method_fn(idx: i64, target_name: text) -> ParserFunction:
     # NOTE: must use field access, not a positional `case Function(...)`
     # destructure — wide positional class matches silently fail to match in
     # the interpreter and SIGSEGV in cranelift-compiled binaries (see
     # doc/08_tracking/bug/positional_class_match_wide_destructure_2026-06-11.md).
-    val base: Function = convert_decl_fn(idx)
+    val base: ParserFunction = convert_decl_fn(idx)
     val method_mode = decl_get_is_async(idx)
     val prefix = target_name + "__"
     val method_name = if base.name.starts_with(prefix):
@@ -1795,7 +1813,7 @@ fn convert_decl_method_fn(idx: i64, target_name: text) -> Function:
         base.span
     )
 
-fn convert_decl_extern_fn(idx: i64) -> Function:
+fn convert_decl_extern_fn(idx: i64) -> ParserFunction:
     val name = decl_get_name(idx)
     val p_names = decl_get_param_names(idx)
     val p_types = decl_get_param_types(idx)
@@ -1820,7 +1838,7 @@ fn convert_decl_extern_fn(idx: i64) -> Function:
     # declared). This was previously fetched into `ret` and then discarded --
     # every extern function was constructed with has_return_type=false and an
     # Infer return type, silently dropping the declared return type. Downstream,
-    # the symbol's Function type then carried a Unit return (module_lowering),
+    # the symbol's ParserFunction type then carried a Unit return (module_lowering),
     # so MIR lowered any extern call in value position as void (dest=None),
     # emitting `call void @f()` plus an orphaned `bitcast void %l to T` that
     # llc rejects ("void type only allowed for function results"). Mirror the

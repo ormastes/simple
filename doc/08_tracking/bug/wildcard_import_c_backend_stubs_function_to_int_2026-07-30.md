@@ -171,6 +171,69 @@ in a fresh scratch spec with zero backend imports). Filed only as a note
 here since it was found alongside; not investigated further and no fix
 attempted — worth its own bug doc if picked up.
 
+#### UPDATE 2026-07-30 (lane TMF1) — root-caused and fixed for the nested-call shape
+
+Bisected the minimal failing combination: tuple-indexing alone (`_.0` or
+`_.1` used once, bare or wrapped in a call) works fine; the break needs a
+placeholder used a SECOND time in the same template where that second use is
+itself a call/method-call argument (e.g. `{_.0}: {self.map_type(_.1)}` or the
+smaller repro `{_.0}: {double(_.1)}`), evaluating to a bare unapplied
+function ("cannot access field on value of type 'function'" /
+"cannot convert function to int") instead of the field value.
+
+Root cause: a `"{...}"` interpolation region is sub-parsed standalone via a
+fresh `parse_expr()` call
+(`src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl:flat_bridge_parse_interp_inner`).
+Inside such a region a bare `_` already has a fixed meaning (the value bound
+by the enclosing `.map()`/etc. call), but `parse_call_arg()`
+(`src/compiler/10.frontend/core/parser_expr.spl:657`) unconditionally applies
+the `_`-placeholder-shorthand transform
+(`src/compiler/10.frontend/desugar/placeholder_lambda.spl:transform_placeholder_lambda`)
+to EVERY call/method-call argument anywhere in the language — including a
+nested call parsed while sub-parsing an interpolation region. So
+`self.map_type(_.1)`'s argument `_.1` got hijacked into its own unapplied
+`\__p0: __p0.1` closure instead of staying a plain field access on the
+template's already-bound `_`.
+
+Fix (pure Simple, frontend/desugar layer only, no lexer.spl touched): added a
+save/restore suppression flag
+(`placeholder_transform_suppressed`/`set_placeholder_transform_suppressed` in
+`placeholder_lambda.spl`) that `transform_placeholder_lambda` checks first and
+no-ops on; `flat_bridge_parse_interp_inner` sets it around its `parse_expr()`
+call and restores the previous value on every return path. This is contained
+to the interpolation-region mini-parse and does not change ordinary
+`_`-shorthand behavior anywhere else (verified: all 22 pre-existing cases in
+`test/feature/usage/placeholder_lambda_spec.spl` are unaffected).
+
+Regression coverage added: `test/feature/usage/placeholder_lambda_spec.spl`
+(+ byte-identical `test/03_system/` twin), new context "string template
+placeholder scoping" — plain-function and method-call nested-argument shapes.
+
+**Not yet verified against the deployed binary**: `bin/simple test` executes
+the pre-built self-hosted `bin/release/x86_64-unknown-linux-gnu/simple`
+artifact, which only picks up `src/compiler/**.spl` changes after a
+self-hosting rebuild (`bin/simple build bootstrap`). Per standing repo
+guidance ("no bootstrap unless essential"), that rebuild was not run in this
+contained lane — the two new regression `it` blocks and
+`type_mapper_spec.spl`'s "handles composite types using each backend
+strategy" case are confirmed still red against the current (pre-fix) binary
+(matches the trace above exactly: "cannot convert function to int"). The fix
+should turn all three green once the compiler is next rebuilt from this
+source.
+
+**A second, separate issue found while bisecting, NOT fixed**: two BARE
+(non-call) placeholder uses in one template, e.g. `"{_.0}: {_.1}"` with no
+nested call at all, ALSO fails, with `semantic: variable `__p1` not found` —
+reproduced standalone in a fresh single-`it` spec file, so it is not test-state
+leakage. This does NOT go through the nested-call path above (no call
+argument is involved), and despite an exhaustive repo-wide grep (the string
+`__p` and the pattern `__p{i}`/`"__p" + ...` appear ONLY in
+`placeholder_lambda.spl`, so the naming can only originate there, yet no
+static call-graph path from `flat_bridge_parse_interp_inner`'s bare-`_`
+regions reaches `transform_placeholder_lambda`), the exact mechanism was not
+pinned down in this contained lane. Filed separately:
+`doc/08_tracking/bug/string_template_multi_placeholder_slot_not_found_2026-07-30.md`.
+
 ### Real specs confirmed currently affected and fixed (same workaround as
 ### the original `backend_capability_spec.spl` fix: drop the `.*`)
 
