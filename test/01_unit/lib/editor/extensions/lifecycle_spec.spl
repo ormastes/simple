@@ -80,3 +80,44 @@ describe "extension lifecycle: activate -> dispatch -> deactivate":
         expect(host.is_active("sdn-graph-language")).to_equal(true)
         expect(host.command_registered("markdown.toggle_bold")).to_equal(true)
         expect(host.find_language_for_ext(".md")).to_equal("markdown")
+
+    # --- the lazy half of the builtin seam -------------------------------
+    # extension_host_with_builtins() = extension_host_with_builtins_indexed()
+    # + an explicit activate-all loop. These pin what the indexed half really
+    # does, so the eventual lazy switch has a green contract to land against.
+    # See doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
+
+    it "the indexed builtin host activates nothing and registers no contributions":
+        val host = extension_host_with_builtins_indexed()
+        expect(host.extension_count()).to_be_greater_than(2)
+        expect(host.active_count()).to_equal(0)
+        expect(host.is_active("markdown-language")).to_equal(false)
+        expect(host.is_active("simple-language")).to_equal(false)
+        expect(host.command_registered("markdown.toggle_bold")).to_equal(false)
+        expect(host.find_language_for_ext(".md")).to_equal("")
+
+    it "an indexed builtin activates lazily through its declared onLanguage event":
+        val host = extension_host_with_builtins_indexed()
+        expect(host.activate_language("markdown")).to_equal(1)
+        expect(host.is_active("markdown-language")).to_equal(true)
+        expect(host.command_registered("markdown.toggle_bold")).to_equal(true)
+        expect(host.find_language_for_ext(".md")).to_equal("markdown")
+        # idempotent: the same event has nothing left to activate
+        expect(host.activate_language("markdown")).to_equal(0)
+        # and it did NOT drag its neighbours up with it
+        expect(host.is_active("simple-language")).to_equal(false)
+        expect(host.active_count()).to_equal(1)
+
+    it "an indexed builtin activates lazily through its declared onCommand event":
+        val host = extension_host_with_builtins_indexed()
+        expect(host.is_active("writer")).to_equal(false)
+        expect(host.activate_command("writer.save")).to_equal(1)
+        expect(host.is_active("writer")).to_equal(true)
+        expect(host.command_registered("writer.format_bold")).to_equal(true)
+
+    it "eager and indexed builtin hosts index the same manifests":
+        val eager = extension_host_with_builtins()
+        val indexed = extension_host_with_builtins_indexed()
+        expect(indexed.extension_count()).to_equal(eager.extension_count())
+        expect(eager.active_count()).to_equal(eager.extension_count())
+        expect(indexed.active_count()).to_equal(0)

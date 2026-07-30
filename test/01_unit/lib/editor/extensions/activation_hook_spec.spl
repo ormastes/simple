@@ -123,3 +123,46 @@ describe "extension activation hooks (L6b)":
         val host = extension_host_with_builtins()
         expect(host.is_active("slides-layout-registry-demo")).to_equal(true)
         expect(slide_layout_registry_has("title_diagram")).to_equal(true)
+
+describe "builtin hooks are eager only because the registry builtins are lazily unreachable (2026-07-30)":
+
+    # These pin the CONCRETE blocker to dropping the eager activate-all loop in
+    # extension_host_with_builtins(). They are not aspiration -- they assert the
+    # real, currently-shipping semantics so the blocker cannot rot silently.
+    # doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
+
+    it "the indexed builtin host runs no activation hook: DOUBLE and title_diagram stay unregistered":
+        sheet_function_registry_reset()
+        slide_layout_registry_reset()
+        val host = extension_host_with_builtins_indexed()
+        expect(host.active_count()).to_equal(0)
+        expect(host.activation_hook_ran("sheets-function-registry-demo")).to_equal(false)
+        expect(host.activation_hook_ran("slides-layout-registry-demo")).to_equal(false)
+        expect(sheet_function_registry_has("DOUBLE")).to_equal(false)
+        expect(slide_layout_registry_has("title_diagram")).to_equal(false)
+
+    it "no activation event can reach the sheets/slides registry builtins -- the reason the eager loop stays":
+        sheet_function_registry_reset()
+        slide_layout_registry_reset()
+        val host = extension_host_with_builtins_indexed()
+        # Their sole declared events are onFunctionRegistry:/onLayoutRegistry:,
+        # which nothing emits; activate_event is only ever reached via
+        # activate_language / activate_command, and neither manifest lists its
+        # own contributed command id as an activation event.
+        expect(host.activate_command("sheets.function.double")).to_equal(0)
+        expect(host.activate_command("slides.layout.titleDiagram")).to_equal(0)
+        expect(host.is_active("sheets-function-registry-demo")).to_equal(false)
+        expect(host.is_active("slides-layout-registry-demo")).to_equal(false)
+        expect(sheet_function_registry_has("DOUBLE")).to_equal(false)
+        # Direct activation by name still works -- which is exactly what the
+        # eager loop in extension_host_with_builtins() does on their behalf.
+        expect(host.activate("sheets-function-registry-demo")).to_equal(true)
+        expect(sheet_function_registry_has("DOUBLE")).to_equal(true)
+
+    it "a lazily-reachable builtin runs its hook only once its own event fires":
+        sheet_function_registry_reset()
+        val host = extension_host_with_builtins_indexed()
+        # Activating an unrelated language must not wake the sheets builtin.
+        expect(host.activate_language("markdown")).to_equal(1)
+        expect(host.is_active("sheets-function-registry-demo")).to_equal(false)
+        expect(sheet_function_registry_has("DOUBLE")).to_equal(false)
