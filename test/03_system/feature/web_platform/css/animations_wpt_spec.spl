@@ -2,10 +2,10 @@
 # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-006
 """# CSS Animation Frame Preservation
 
-Proves the supported keyframe subset at its start, midpoint, and filled end
-through web semantics, layout, canonical Draw IR, and exact expected-color
-Engine2D coverage/count. Web Animations compositing and unsupported properties
-remain outside this bounded profile.
+Proves the supported keyframe subset at its start, negative-delay seek,
+midpoint, and filled end through web semantics, layout, canonical Draw IR, and
+exact expected-color Engine2D coverage/count. Web Animations compositing and
+unsupported properties remain outside this bounded profile.
 """
 
 use std.spec.*
@@ -53,6 +53,16 @@ fn _animation_html() -> text:
         "<div id='box'></div>"
     )
 
+fn _negative_delay_animation_html(delay: text) -> text:
+    (
+        "<style>html,body{margin:0}@keyframes preserve{" +
+        "from{width:4px;height:4px;background-color:#dc2626}" +
+        "to{width:12px;height:4px;background-color:#2563eb}}" +
+        "#box{width:4px;height:4px;background-color:#dc2626;" +
+        "animation:preserve 1s linear {delay} forwards}</style>" +
+        "<div id='box'></div>"
+    )
+
 fn _animation_color_count(pixels: [u32], color: u32) -> i32:
     var count = 0
     for pixel in pixels:
@@ -61,9 +71,8 @@ fn _animation_color_count(pixels: [u32], color: u32) -> i32:
     count
 
 fn _animation_frame_fingerprint(
-    time_ms: i64, expected_color: u32
+    html: text, time_ms: i64, expected_color: u32
 ) -> text:
-    val html = _animation_html()
     val semantic = (
         simple_web_layout_debug_style_by_id(
             html, "box", "animation_name"
@@ -130,7 +139,7 @@ describe "REQ-WEB-BROWSER-003/004/006: CSS animation frames":
         step("Resolve the animation start in canonical web semantic and layout state")
         step("Render the animation start through canonical Draw IR and Engine2D")
         expect(_animation_frame_fingerprint(
-            0, 0xFFDC2626u32
+            _animation_html(), 0, 0xFFDC2626u32
         )).to_equal(
             "preserve,1000,forwards|4,4|html_ast|box:0,0,4,4|" +
             "preserve,1000ms,4292617766|16|0|16"
@@ -143,7 +152,7 @@ describe "REQ-WEB-BROWSER-003/004/006: CSS animation frames":
         step("Resolve the animation midpoint in canonical web semantic and layout state")
         step("Render the animation midpoint through canonical Draw IR and Engine2D")
         expect(_animation_frame_fingerprint(
-            500, 0xFF804488u32
+            _animation_html(), 500, 0xFF804488u32
         )).to_equal(
             "preserve,1000,forwards|4,4|html_ast|box:0,0,8,4|" +
             "preserve,1000ms,4286596232|516|0|32"
@@ -156,11 +165,50 @@ describe "REQ-WEB-BROWSER-003/004/006: CSS animation frames":
         step("Resolve the animation end in canonical web semantic and layout state")
         step("Render the animation end through canonical Draw IR and Engine2D")
         expect(_animation_frame_fingerprint(
-            1000, 0xFF2563EBu32
+            _animation_html(), 1000, 0xFF2563EBu32
         )).to_equal(
             "preserve,1000,forwards|4,4|html_ast|box:0,0,12,4|" +
             "preserve,1000ms,4280640491|-1|0|48"
         )
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should seek a fractional negative delay before consecutive frames":
+        val html = _negative_delay_animation_html("-0.5s")
+        step("Resolve the signed fractional delay in canonical web semantic state")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "box", "animation_delay_ms"
+        )).to_equal("-500")
+        expect(simple_web_layout_debug_style_by_id(
+            _negative_delay_animation_html("-1.5s"),
+            "box", "animation_delay_ms"
+        )).to_equal("-1500")
+        expect(simple_web_layout_debug_style_by_id(
+            _negative_delay_animation_html("-500ms"),
+            "box", "animation_delay_ms"
+        )).to_equal("-500")
+        expect(simple_web_layout_debug_style_by_id(
+            _negative_delay_animation_html("-0.5ms"),
+            "box", "animation_delay_ms"
+        )).to_equal("-1")
+
+        step("Render consecutive sought frames through canonical Draw IR and Engine2D")
+        val midpoint = _animation_frame_fingerprint(
+            html, 0, 0xFF804488u32
+        )
+        val next = _animation_frame_fingerprint(
+            html, 16, 0xFF7D458Bu32
+        )
+        expect(midpoint).to_equal(
+            "preserve,1000,forwards|4,4|html_ast|box:0,0,8,4|" +
+            "preserve,1000ms,4286596232|16|0|32"
+        )
+        expect(next).to_equal(
+            "preserve,1000,forwards|4,4|html_ast|box:0,0,8,4|" +
+            "preserve,1000ms,4286399883|32|0|32"
+        )
+        expect(next == midpoint).to_equal(false)
 
     # @manual: show
     # @capture(protocol)

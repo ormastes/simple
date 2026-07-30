@@ -1,17 +1,17 @@
 # CSS Animation Frame Preservation
 
-> Proves the supported keyframe subset at its start, midpoint, and filled end
+> Proves start, signed-delay seek, midpoint, and filled-end animation frames
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # CSS Animation Frame Preservation
 
-Proves the supported keyframe subset at its start, midpoint, and filled end
+Proves start, signed-delay seek, midpoint, and filled-end animation frames
 
 ## At a Glance
 
@@ -23,10 +23,10 @@ Proves the supported keyframe subset at its start, midpoint, and filled end
 | Updated | 2026-07-30 |
 | Generator | Manual mirror; qualified docgen pending |
 
-Proves the supported keyframe subset at its start, midpoint, and filled end
-through web semantics, layout, canonical Draw IR, and exact expected-color
-Engine2D coverage/count. Web Animations compositing and unsupported properties
-remain outside this bounded profile.
+Proves the supported keyframe subset at its start, negative-delay seek,
+midpoint, and filled end through web semantics, layout, canonical Draw IR, and
+exact expected-color Engine2D coverage/count. Web Animations compositing and
+unsupported properties remain outside this bounded profile.
 
 ## Scenarios
 
@@ -50,7 +50,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("Resolve the animation start in canonical web semantic and layout state")
 step("Render the animation start through canonical Draw IR and Engine2D")
 expect(_animation_frame_fingerprint(
-    0, 0xFFDC2626u32
+    _animation_html(), 0, 0xFFDC2626u32
 )).to_equal(
     "preserve,1000,forwards|4,4|html_ast|box:0,0,4,4|" +
     "preserve,1000ms,4292617766|16|0|16"
@@ -77,7 +77,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("Resolve the animation midpoint in canonical web semantic and layout state")
 step("Render the animation midpoint through canonical Draw IR and Engine2D")
 expect(_animation_frame_fingerprint(
-    500, 0xFF804488u32
+    _animation_html(), 500, 0xFF804488u32
 )).to_equal(
     "preserve,1000,forwards|4,4|html_ast|box:0,0,8,4|" +
     "preserve,1000ms,4286596232|516|0|32"
@@ -104,11 +104,63 @@ Reproduction: this block contains the complete executable scenario source.
 step("Resolve the animation end in canonical web semantic and layout state")
 step("Render the animation end through canonical Draw IR and Engine2D")
 expect(_animation_frame_fingerprint(
-    1000, 0xFF2563EBu32
+    _animation_html(), 1000, 0xFF2563EBu32
 )).to_equal(
     "preserve,1000,forwards|4,4|html_ast|box:0,0,12,4|" +
     "preserve,1000ms,4280640491|-1|0|48"
 )
+```
+
+</details>
+
+#### should seek a fractional negative delay before consecutive frames
+
+- Resolve the signed fractional delay in canonical web semantic state
+   - HTML capture: after_step
+- Render consecutive sought frames through canonical Draw IR and Engine2D
+   - Artifact capture: after_step
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = _negative_delay_animation_html("-0.5s")
+step("Resolve the signed fractional delay in canonical web semantic state")
+expect(simple_web_layout_debug_style_by_id(
+    html, "box", "animation_delay_ms"
+)).to_equal("-500")
+expect(simple_web_layout_debug_style_by_id(
+    _negative_delay_animation_html("-1.5s"),
+    "box", "animation_delay_ms"
+)).to_equal("-1500")
+expect(simple_web_layout_debug_style_by_id(
+    _negative_delay_animation_html("-500ms"),
+    "box", "animation_delay_ms"
+)).to_equal("-500")
+expect(simple_web_layout_debug_style_by_id(
+    _negative_delay_animation_html("-0.5ms"),
+    "box", "animation_delay_ms"
+)).to_equal("-1")
+
+step("Render consecutive sought frames through canonical Draw IR and Engine2D")
+val midpoint = _animation_frame_fingerprint(
+    html, 0, 0xFF804488u32
+)
+val next = _animation_frame_fingerprint(
+    html, 16, 0xFF7D458Bu32
+)
+expect(midpoint).to_equal(
+    "preserve,1000,forwards|4,4|html_ast|box:0,0,8,4|" +
+    "preserve,1000ms,4286596232|16|0|32"
+)
+expect(next).to_equal(
+    "preserve,1000,forwards|4,4|html_ast|box:0,0,8,4|" +
+    "preserve,1000ms,4286399883|32|0|32"
+)
+expect(next == midpoint).to_equal(false)
 ```
 
 </details>
@@ -316,8 +368,8 @@ expect(registry.entries.len()).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

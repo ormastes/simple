@@ -1238,28 +1238,39 @@ fn parse_css_time_ms(raw: text) -> i32:
     val t = raw.trim().lower()
     if t.len() == 0:
         return 0
-    if t.ends_with("ms"):
-        return parse_int(t)
-    if t.ends_with("s"):
-        val dot = text_index_of(t, ".")
-        if dot < 0:
-            return parse_int(t) * 1000
-        var whole = 0
-        if dot > 0:
-            whole = parse_int(t.substring(0, dot))
-        var frac = 0
-        var scale = 1
-        var i = dot + 1
-        val t_len = t.len()
-        while i < t_len:
-            val c = t.char_at(i)
-            if c < "0" or c > "9":
-                break
-            frac = frac * 10 + dec_val(c)
-            scale = scale * 10
-            i = i + 1
-        return whole * 1000 + ((frac * 1000 + scale / 2) / scale)
-    parse_int(t)
+    var sign = 1
+    var magnitude = t
+    if magnitude.starts_with("-"):
+        sign = -1
+        magnitude = magnitude.substring(1, magnitude.len())
+    elif magnitude.starts_with("+"):
+        magnitude = magnitude.substring(1, magnitude.len())
+    var unit_ms = 0
+    if magnitude.ends_with("ms"):
+        unit_ms = 1
+    elif magnitude.ends_with("s"):
+        unit_ms = 1000
+    else:
+        return sign * parse_int(magnitude)
+    val dot = text_index_of(magnitude, ".")
+    if dot < 0:
+        return sign * parse_int(magnitude) * unit_ms
+    var whole = 0
+    if dot > 0:
+        whole = parse_int(magnitude.substring(0, dot))
+    var frac = 0
+    var scale = 1
+    var i = dot + 1
+    val magnitude_len = magnitude.len()
+    while i < magnitude_len:
+        val c = magnitude.char_at(i)
+        if c < "0" or c > "9":
+            break
+        frac = frac * 10 + dec_val(c)
+        scale = scale * 10
+        i = i + 1
+    # The render clock stores integer milliseconds, rounded symmetrically.
+    sign * (whole * unit_ms + ((frac * unit_ms + scale / 2) / scale))
 
 fn transition_token_is_time(token: text) -> bool:
     val t = token.trim().lower()
@@ -1605,15 +1616,25 @@ fn parse_decimal_x10(raw: text) -> i32:
         m10 = whole * 10 + parse_int(raw.substring(dot + 1, dot + 2))
     m10
 
-# Split on ASCII whitespace, dropping empty tokens (collapses runs of spaces).
+# Split on ASCII whitespace, dropping empty tokens.
 fn ws_tokens(s: text) -> [text]:
     var out: [text] = []
-    val parts = s.split(" ")
+    # Byte offsets compose with substring and avoid O(N²) UTF-8 indexing.
+    val bytes = s.bytes()
     var i = 0
-    while i < parts.len():
-        val t = parts[i].trim()
-        if t.len() > 0:
-            out.push(t)
+    var start = -1
+    while i <= bytes.len():
+        val code = if i < bytes.len(): bytes[i] else: 32
+        val whitespace = (
+            code == 9 or code == 10 or code == 12 or
+            code == 13 or code == 32
+        )
+        if whitespace:
+            if start >= 0:
+                out.push(s.substring(start, i))
+                start = -1
+        elif start < 0:
+            start = i
         i = i + 1
     out
 

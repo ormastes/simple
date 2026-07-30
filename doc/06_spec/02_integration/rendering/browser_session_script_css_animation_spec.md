@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -652,6 +652,64 @@ val animated = _browser_animation_draw_ir_trace(session, 64, 48)
 _expect_browser_animation_draw_ir_frame(animated)
 expect(animated.command.color).to_equal(0xFF2563EBu32)
 expect(animated.command.color == initial.command.color).to_equal(false)
+```
+
+</details>
+
+#### should preserve an active animation across an unrelated SimpleScript stylesheet update
+
+- Render the active animation before the SimpleScript timer
+   - Expected: initial.command.color equals `0xFFEF4444u32`
+- Apply an unrelated stylesheet rule from the SimpleScript timer
+   - Expected: session.advance_time(500) equals `1`
+   - Expected: session.style_revision equals `prior_style_revision + 1`
+   - Expected: session.current_style_html contains `#other{color:#16a34a}`
+- Keep the animation midpoint in canonical Draw IR and Engine2D pixels
+   - Expected: midpoint.command.color equals `0xFF8A5397u32`
+   - Expected: midpoint.rect_pixel_count equals `32 * 24`
+   - Expected: midpoint.skipped_command_count equals `0`
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 40 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render the active animation before the SimpleScript timer")
+val animation_css = (
+    "@keyframes Pulse{from{background-color:#ef4444}" +
+    "to{background-color:#2563eb}}" +
+    "#stage{width:32px;height:24px;" +
+    "animation:Pulse 1000ms linear forwards}"
+)
+var session = BrowserSession.new()
+expect(session.open_html(
+    "https://example.test/simple-script-stylesheet-animation",
+    "<style>{animation_css}</style><div id='stage'></div>" +
+    "<script type='text/simple'>" +
+    "callback 51|style_html '<style>{animation_css}" +
+    "#other{color:#16a34a}</style>'\n" +
+    "timeout 51 500</script>"
+).is_ok()).to_be(true)
+val initial = _browser_animation_draw_ir_trace(session, 64, 48)
+_expect_browser_animation_draw_ir_frame(initial)
+expect(initial.command.color).to_equal(0xFFEF4444u32)
+val prior_style_revision = session.style_revision
+
+step("Apply an unrelated stylesheet rule from the SimpleScript timer")
+expect(session.advance_time(500)).to_equal(1)
+expect(session.style_revision).to_equal(prior_style_revision + 1)
+expect(session.current_style_html).to_contain(
+    "#other{color:#16a34a}"
+)
+val midpoint = _browser_animation_draw_ir_trace(session, 64, 48)
+
+step("Keep the animation midpoint in canonical Draw IR and Engine2D pixels")
+_expect_browser_animation_draw_ir_frame(midpoint)
+expect(midpoint.command.color).to_equal(0xFF8A5397u32)
+expect(midpoint.rect_pixel_count).to_equal(32 * 24)
+expect(midpoint.skipped_command_count).to_equal(0)
 ```
 
 </details>

@@ -80,6 +80,110 @@ fn _background_exact_single_url(raw: text) -> text:
         return ""
     uri
 
+fn _padding_integer_px(token: text) -> i32:
+    val value = token.trim().lower()
+    if value == "0":
+        return 0
+    if not value.ends_with("px") or value.len() <= 2:
+        return -1
+    val digits = value.substring(0, value.len() - 2)
+    var number = 0
+    var index = 0
+    while index < digits.len():
+        val digit = dec_val(digits.char_at(index))
+        if digit >= 10 or number > (1000000 - digit) / 10:
+            return -1
+        number = number * 10 + digit
+        index = index + 1
+    number
+
+fn _padding_integer_px_values(raw: text, maximum: i32) -> [i32]:
+    val tokens = ws_tokens(raw.trim().lower())
+    var values: [i32] = []
+    if tokens.len() == 0 or tokens.len() > maximum:
+        return values
+    for token in tokens:
+        val value = _padding_integer_px(token)
+        if value < 0:
+            return []
+        values.push(value)
+    values
+
+fn _resolve_authored_padding(
+    decl_tbl: [text], initial_top: i32, initial_right: i32,
+    initial_bottom: i32, initial_left: i32
+) -> (i32, i32, i32, i32):
+    var top = initial_top
+    var right = initial_right
+    var bottom = initial_bottom
+    var left = initial_left
+    var index = 0
+    while index < decl_tbl.len():
+        val name = decl_tbl[index]
+        val raw = decl_tbl[index + 1]
+        if name == "padding":
+            val values = _padding_integer_px_values(raw, 4)
+            if values.len() > 0:
+                top = values[0]
+                right = values[0]
+                bottom = values[0]
+                left = values[0]
+                if values.len() == 2:
+                    right = values[1]
+                    left = values[1]
+                elif values.len() == 3:
+                    right = values[1]
+                    left = values[1]
+                    bottom = values[2]
+                elif values.len() == 4:
+                    right = values[1]
+                    bottom = values[2]
+                    left = values[3]
+        elif name == "padding-top":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                top = values[0]
+        elif name == "padding-right":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                right = values[0]
+        elif name == "padding-bottom":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                bottom = values[0]
+        elif name == "padding-left":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                left = values[0]
+        elif name == "padding-block":
+            val values = _padding_integer_px_values(raw, 2)
+            if values.len() > 0:
+                top = values[0]
+                bottom = if values.len() == 2: values[1] else: values[0]
+        elif name == "padding-block-start":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                top = values[0]
+        elif name == "padding-block-end":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                bottom = values[0]
+        elif name == "padding-inline":
+            val values = _padding_integer_px_values(raw, 2)
+            if values.len() > 0:
+                left = values[0]
+                right = if values.len() == 2: values[1] else: values[0]
+        elif name == "padding-inline-start":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                left = values[0]
+        elif name == "padding-inline-end":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                right = values[0]
+        index = index + 2
+    (top, right, bottom, left)
+
 fn _background_exact_url_value(raw: text) -> text:
     val value = raw.trim()
     val lower = value.lower()
@@ -510,24 +614,13 @@ fn _apply_decls_dispatch(mut st: Style, decl_tbl: [text], em_base: i32) -> Style
                 st.box_shadow_blur_px = agg.blur
                 st.box_shadow_alpha = agg.alpha
                 st.box_shadow_color = agg.color
-    val pad = decl_tbl_get(decl_tbl, "padding")
-    if pad.len() > 0:
-        val p0 = parse_nth_int(pad, 0)
-        val p1 = parse_nth_int(pad, 1)
-        val p2 = parse_nth_int(pad, 2)
-        val p3 = parse_nth_int(pad, 3)
-        if p0 >= 0:
-            st.pad_t = p0
-            st.pad_r = p0
-            st.pad_b = p0
-            st.pad_l = p0
-            if p1 >= 0:
-                st.pad_r = p1
-                st.pad_l = p1
-            if p2 >= 0:
-                st.pad_b = p2
-            if p3 >= 0:
-                st.pad_l = p3
+    val (resolved_pad_t, resolved_pad_r, resolved_pad_b, resolved_pad_l) = _resolve_authored_padding(
+        decl_tbl, st.pad_t, st.pad_r, st.pad_b, st.pad_l
+    )
+    st.pad_t = resolved_pad_t
+    st.pad_r = resolved_pad_r
+    st.pad_b = resolved_pad_b
+    st.pad_l = resolved_pad_l
     val display_decl = decl_tbl_get(decl_tbl, "display")
     if display_decl.len() > 0:
         if display_decl == "none":
@@ -1908,66 +2001,13 @@ fn _apply_decls_without_grid(st: Style, decls: text, em_base: i32) -> Style:
             bold_v = false
         elif fw == "bold" or fw == "700" or fw == "600" or fw == "800":
             bold_v = true
-    val pad = decl_tbl_get(decl_tbl, "padding")
-    if pad.len() > 0:
-        val p0 = parse_nth_int(pad, 0)
-        val p1 = parse_nth_int(pad, 1)
-        val p2 = parse_nth_int(pad, 2)
-        val p3 = parse_nth_int(pad, 3)
-        if p0 >= 0:
-            pad_t_v = p0
-            pad_r_v = p0
-            pad_b_v = p0
-            pad_l_v = p0
-            if p1 >= 0:
-                pad_r_v = p1
-                pad_l_v = p1
-            if p2 >= 0:
-                pad_b_v = p2
-            if p3 >= 0:
-                pad_l_v = p3
-    val pl = decl_tbl_get(decl_tbl, "padding-left")
-    if pl.len() > 0:
-        pad_l_v = parse_int(pl)
-    val pt = decl_tbl_get(decl_tbl, "padding-top")
-    if pt.len() > 0:
-        pad_t_v = parse_int(pt)
-    val pr = decl_tbl_get(decl_tbl, "padding-right")
-    if pr.len() > 0:
-        pad_r_v = parse_int(pr)
-    val pb = decl_tbl_get(decl_tbl, "padding-bottom")
-    if pb.len() > 0:
-        pad_b_v = parse_int(pb)
-    val padding_block = decl_tbl_get(decl_tbl, "padding-block")
-    if padding_block.len() > 0:
-        val pb0 = parse_nth_int(padding_block, 0)
-        val pb1 = parse_nth_int(padding_block, 1)
-        if pb0 >= 0:
-            pad_t_v = pb0
-            pad_b_v = pb0
-            if pb1 >= 0:
-                pad_b_v = pb1
-    val padding_block_start = decl_tbl_get(decl_tbl, "padding-block-start")
-    if padding_block_start.len() > 0:
-        pad_t_v = parse_int(padding_block_start)
-    val padding_block_end = decl_tbl_get(decl_tbl, "padding-block-end")
-    if padding_block_end.len() > 0:
-        pad_b_v = parse_int(padding_block_end)
-    val padding_inline = decl_tbl_get(decl_tbl, "padding-inline")
-    if padding_inline.len() > 0:
-        val pi0 = parse_nth_int(padding_inline, 0)
-        val pi1 = parse_nth_int(padding_inline, 1)
-        if pi0 >= 0:
-            pad_l_v = pi0
-            pad_r_v = pi0
-            if pi1 >= 0:
-                pad_r_v = pi1
-    val padding_inline_start = decl_tbl_get(decl_tbl, "padding-inline-start")
-    if padding_inline_start.len() > 0:
-        pad_l_v = parse_int(padding_inline_start)
-    val padding_inline_end = decl_tbl_get(decl_tbl, "padding-inline-end")
-    if padding_inline_end.len() > 0:
-        pad_r_v = parse_int(padding_inline_end)
+    val (resolved_pad_t, resolved_pad_r, resolved_pad_b, resolved_pad_l) = _resolve_authored_padding(
+        decl_tbl, pad_t_v, pad_r_v, pad_b_v, pad_l_v
+    )
+    pad_t_v = resolved_pad_t
+    pad_r_v = resolved_pad_r
+    pad_b_v = resolved_pad_b
+    pad_l_v = resolved_pad_l
     val gap = decl_tbl_get(decl_tbl, "gap")
     if gap.len() > 0:
         val gv = parse_int(gap)

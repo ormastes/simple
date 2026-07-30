@@ -11,6 +11,7 @@ use common.ui.draw_ir.{
     draw_ir_batch_with_source,
     draw_ir_composition,
     draw_ir_embedding_config,
+    draw_ir_rect_translate,
     draw_ir_source_html_ast
 }
 use std.common.web.browser_renderer_protocol.{
@@ -990,73 +991,103 @@ pub fn simple_web_layout_animation_end_ms(
         styles, -1, [], frame_index
     ).animation_end_ms
 
-fn _simple_web_node_in_subtree(
-    nodes: [HNode], node_index: i32, root_index: i32
-) -> bool:
-    var current = node_index
-    var depth = 0
-    while current >= 0 and current < nodes.len() and depth < nodes.len():
-        if current == root_index:
-            return true
-        current = nodes[current].parent as i32
-        depth = depth + 1
-    false
-
-fn _simple_web_single_fractional_opacity_root(
-    nodes: [HNode], styles: [Style]
-) -> i32:
-    # ponytail: one viewport-bounded group; add a nested surface tree only
-    # when multiple or interleaved opacity contexts enter the supported slice.
-    var root = -1
+fn _simple_web_fractional_opacity_command_roots(
+    nodes: [HNode], styles: [Style], owner_nodes: [i32]
+) -> (bool, [i32], i32):
+    if nodes.len() != styles.len():
+        return (false, [], 0)
+    var node_roots: [i32] = [-1; nodes.len()]
+    var has_root = false
     var i: i32 = 0
-    while i < styles.len():
+    while i < nodes.len():
+        val parent = nodes[i].parent as i32
+        val parent_root = if parent >= 0 and parent < i:
+            node_roots[parent]
+        else:
+            -1
         val opacity = styles[i].opacity_pct
         if opacity > 0 and opacity < 100:
+            # ponytail: nested opacity needs a surface tree; independent
+            # sibling surfaces stay flat and preserve canonical paint order.
             if (
-                root >= 0 or nodes[i].tag == "#root" or
+                parent_root >= 0 or nodes[i].tag == "#root" or
                 nodes[i].tag == "html" or nodes[i].tag == "body"
             ):
-                return -1
-            root = i
-        i = i + 1
-    root
-
-fn _simple_web_fractional_opacity_partition(
-    nodes: [HNode], styles: [Style], commands: [DrawIrCommand],
-    owner_nodes: [i32], root: i32
-) -> (bool, [DrawIrCommand], [DrawIrCommand], [DrawIrCommand]):
-    if root < 0 or commands.len() != owner_nodes.len():
-        return (false, [], [], [])
-    var i: i32 = 0
-    while i < styles.len():
+                return (false, [], 0)
+            node_roots[i] = i
+            has_root = true
+        else:
+            node_roots[i] = parent_root
         if (
-            _simple_web_node_in_subtree(nodes, i, root) and
+            node_roots[i] >= 0 and
             styles[i].backdrop_filter_raw != ""
         ):
-            return (false, [], [], [])
+            return (false, [], 0)
         i = i + 1
-    var before: [DrawIrCommand] = []
-    var group: [DrawIrCommand] = []
-    var after: [DrawIrCommand] = []
-    var phase = 0
-    i = 0
-    while i < commands.len():
-        val in_group = _simple_web_node_in_subtree(
-            nodes, owner_nodes[i], root
-        )
-        if in_group:
-            if phase == 2:
-                return (false, [], [], [])
-            phase = 1
-            group.push(commands[i])
-        else:
-            if phase == 0:
-                before.push(commands[i])
-            else:
-                phase = 2
-                after.push(commands[i])
-        i = i + 1
-    (group.len() > 0, before, group, after)
+    if not has_root:
+        return (false, [], 0)
+    var command_roots: [i32] = []
+    var closed: [bool] = [false; nodes.len()]
+    var previous = -1
+    var root_count = 0
+    for owner in owner_nodes:
+        if owner < 0 or owner >= node_roots.len():
+            return (false, [], 0)
+        val root = node_roots[owner]
+        if root != previous:
+            if previous >= 0:
+                closed[previous] = true
+            if root >= 0 and closed[root]:
+                return (false, [], 0)
+            if root >= 0:
+                root_count = root_count + 1
+            previous = root
+        command_roots.push(root)
+    (root_count > 0, command_roots, root_count)
+
+fn _simple_web_fractional_opacity_root_bounded(
+    styles: [Style], boxes: LayoutResult, root: i32,
+    width: i32, height: i32
+) -> bool:
+    if root < 0 or root >= styles.len():
+        return false
+    val st = styles[root]
+    val x = boxes.bx[root].to_i64()
+    val y = boxes.by[root].to_i64()
+    val w = boxes.bw[root].to_i64()
+    val h = boxes.bh[root].to_i64()
+    (
+        st.overflow_hidden and st.outline_w == 0 and
+        st.box_shadow_raw == "" and st.box_shadow_color == 0u32 and
+        x >= 0 and y >= 0 and w > 0 and h > 0 and
+        x + w <= width.to_i64() and y + h <= height.to_i64()
+    )
+
+fn _simple_web_draw_ir_css_background(command: DrawIrCommand) -> bool:
+    for prop in command.computed_style:
+        if prop.key == "image-role" and prop.value == "css-background":
+            return true
+    false
+
+fn _simple_web_draw_ir_translate_command(
+    command: DrawIrCommand, dx: i32, dy: i32
+) -> DrawIrCommand:
+    var translated = command
+    translated.x = translated.x + dx
+    translated.y = translated.y + dy
+    translated.border_rect = draw_ir_rect_translate(
+        translated.border_rect, dx, dy
+    )
+    translated.content_rect = draw_ir_rect_translate(
+        translated.content_rect, dx, dy
+    )
+    translated.hit_rect = draw_ir_rect_translate(
+        translated.hit_rect, dx, dy
+    )
+    translated.clip_rect = draw_ir_rect_translate(
+        translated.clip_rect, dx, dy
+    )
+    translated
 
 fn _simple_web_layout_compose_retained(
     html: text,
@@ -1105,29 +1136,107 @@ fn _simple_web_layout_compose_retained(
     )
     val canvas = _html_draw_ir_canvas_command(width, height, canvas_color)
     var batches: [DrawIrBatch] = []
-    val opacity_root = _simple_web_single_fractional_opacity_root(nodes, styles)
-    val (opacity_supported, opacity_before, opacity_group, opacity_after) = _simple_web_fractional_opacity_partition(
-        nodes, styles, commands, command_owner_nodes, opacity_root
+    val (opacity_found, opacity_command_roots, opacity_root_count) = (
+        _simple_web_fractional_opacity_command_roots(
+            nodes, styles, command_owner_nodes)
     )
+    var opacity_supported = (
+        opacity_found and opacity_command_roots.len() == commands.len()
+    )
+    if opacity_supported and opacity_root_count > 1:
+        var admission_index = 0
+        var admitted_root = -1
+        var surface_pixel_work: i64 = 0
+        val viewport_pixel_work = width.to_i64() * height.to_i64()
+        var pooled_width = -1
+        var pooled_height = -1
+        while admission_index < commands.len():
+            val root = opacity_command_roots[admission_index]
+            if root >= 0 and (
+                not _simple_web_fractional_opacity_root_bounded(
+                    styles, boxes, root, width, height
+                ) or _simple_web_draw_ir_css_background(
+                    commands[admission_index]
+                )
+            ):
+                opacity_supported = false
+            if root >= 0 and root != admitted_root:
+                if pooled_width < 0:
+                    pooled_width = boxes.bw[root]
+                    pooled_height = boxes.bh[root]
+                elif (
+                    boxes.bw[root] != pooled_width or
+                    boxes.bh[root] != pooled_height
+                ):
+                    opacity_supported = false
+                surface_pixel_work = surface_pixel_work + (
+                    boxes.bw[root].to_i64() * boxes.bh[root].to_i64()
+                )
+                if surface_pixel_work > viewport_pixel_work:
+                    opacity_supported = false
+                admitted_root = root
+            admission_index = admission_index + 1
     if opacity_supported:
-        batches.push(draw_ir_batch_with_source(
-            "html-layout", DRAW_IR_BACKEND_CPU, embedding,
-            [canvas] + opacity_before, source
-        ))
-        val opacity_embedding = draw_ir_embedding_config(
-            "html-opacity-{opacity_root}",
-            _html_draw_ir_component_id(nodes[opacity_root], opacity_root),
-            0, 0, width, height, 0,
-            styles[opacity_root].opacity_pct * 10, true
-        )
-        batches.push(draw_ir_batch_with_source(
-            "html-layout-opacity", DRAW_IR_BACKEND_CPU, opacity_embedding,
-            opacity_group, source
-        ))
-        if opacity_after.len() > 0:
+        var run_root = -1
+        var run_commands: [DrawIrCommand] = [canvas]
+        var command_index = 0
+        while command_index < commands.len():
+            val next_root = opacity_command_roots[command_index]
+            if next_root != run_root:
+                if run_root >= 0:
+                    val bounded = opacity_root_count > 1
+                    val surface_x = if bounded: boxes.bx[run_root] else: 0
+                    val surface_y = if bounded: boxes.by[run_root] else: 0
+                    val surface_w = if bounded: boxes.bw[run_root] else: width
+                    val surface_h = if bounded: boxes.bh[run_root] else: height
+                    val opacity_embedding = draw_ir_embedding_config(
+                        "html-opacity-{run_root}",
+                        _html_draw_ir_component_id(
+                            nodes[run_root], run_root
+                        ),
+                        surface_x, surface_y, surface_w, surface_h, 0,
+                        styles[run_root].opacity_pct * 10, true
+                    )
+                    batches.push(draw_ir_batch_with_source(
+                        "html-layout-opacity", DRAW_IR_BACKEND_CPU,
+                        opacity_embedding, run_commands, source
+                    ))
+                elif run_commands.len() > 0:
+                    batches.push(draw_ir_batch_with_source(
+                        "html-layout", DRAW_IR_BACKEND_CPU, embedding,
+                        run_commands, source
+                    ))
+                run_root = next_root
+                run_commands = []
+            if run_root >= 0 and opacity_root_count > 1:
+                run_commands.push(_simple_web_draw_ir_translate_command(
+                    commands[command_index],
+                    0 - boxes.bx[run_root],
+                    0 - boxes.by[run_root]
+                ))
+            else:
+                run_commands.push(commands[command_index])
+            command_index = command_index + 1
+        if run_root >= 0:
+            val bounded = opacity_root_count > 1
+            val surface_x = if bounded: boxes.bx[run_root] else: 0
+            val surface_y = if bounded: boxes.by[run_root] else: 0
+            val surface_w = if bounded: boxes.bw[run_root] else: width
+            val surface_h = if bounded: boxes.bh[run_root] else: height
+            val opacity_embedding = draw_ir_embedding_config(
+                "html-opacity-{run_root}",
+                _html_draw_ir_component_id(nodes[run_root], run_root),
+                surface_x, surface_y, surface_w, surface_h, 0,
+                styles[run_root].opacity_pct * 10, true
+            )
+            batches.push(draw_ir_batch_with_source(
+                "html-layout-opacity", DRAW_IR_BACKEND_CPU,
+                opacity_embedding, run_commands, source
+            ))
+        elif run_commands.len() > 0:
             batches.push(draw_ir_batch_with_source(
                 "html-layout-after", DRAW_IR_BACKEND_CPU, embedding,
-                opacity_after, source
+                run_commands, source
             ))
     else:
         batches.push(draw_ir_batch_with_source(
