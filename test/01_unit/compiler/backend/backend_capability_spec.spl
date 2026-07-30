@@ -1,5 +1,5 @@
 use compiler.backend.backend.c_backend_translate.{MirToC}
-use compiler.backend.backend.c_backend_stubs.*
+use compiler.backend.backend.c_backend_stubs
 use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
 use compiler.backend.backend.vhdl_process.{vhdl_compile_match_u8, vhdl_compile_clocked_process}
 use compiler.backend.backend.backend_types.{CodegenTarget}
@@ -14,7 +14,15 @@ fn c_output_for(block: fn(MirToC)) -> text:
 fn llvm_output_for(block: fn(MirToLlvm)) -> text:
     val translator = MirToLlvm.create("test.backend.capability", CodegenTarget.X86_64, nil)
     block(translator)
-    translator.builder.build()
+    # emit_unsupported_panic() registers the panic message as a deferred
+    # LLVM string-global (LLVM IR requires globals to be predeclared) rather
+    # than inlining it at the call site the way the C backend does. The real
+    # pipeline (MirToLlvm.translate_module) flushes string_global_text into
+    # the builder right before returning; this helper only invokes a single
+    # instruction-level translate_* method, so it must flush the same way or
+    # the panic text never reaches the returned output. See BCAP triage
+    # 2026-07-30.
+    translator.builder.build() + "\n" + translator.string_global_text
 
 describe "Backend Capability":
     it "names the backend and unsupported async operation in C lowering":
@@ -91,6 +99,54 @@ describe "Backend Capability":
         expect(vhdl_compile_match_u8()).to_contain("case opcode is")
         expect(vhdl_compile_clocked_process()).to_contain("rising_edge(clk)")
 
+
+# ============================================================================
+# Triage (lane BCAP `backend-capability-spec-triage`, 2026-07-30)
+# ============================================================================
+#
+# The 34 `it` blocks below have been commented out since the file's ORIGINAL
+# scaffold commit (97a9358145f, 2026-07-01) -- they were never active, never
+# passing, and their being commented is not a regression. Re-enabling them
+# was investigated and is blocked by two independent, permanent gaps,
+# neither fixable within this triage lane's spec+bugdoc-only scope (no
+# production-src additions allowed here beyond message-verification
+# probes), and no runner-recognized "skip status" exists for interpreter
+# BDD specs (the `skip()` in std.spec is a platform/hardware decorator that
+# still requires a real passing `expect()`, not a pass/fail override --
+# confirmed against test/03_system/app/hardware/feature/
+# kv260_simpleos_boot_silicon_spec.spl -- so converting these to it-blocks
+# with a bare skip() call is not available here; see the attempted-and-
+# reverted approach in the BCAP report):
+#
+# 1. (Test Groups 1/3/4 below: "Backend Capability Detection Accuracy",
+#    "Backend Selection Logic", "Backend Fallback Behavior" -- 14 tests)
+#    They import `compiler.backend.mir_test_builder.{MirTestBuilder,
+#    BackendTarget}` and call `builder.vreg()/.const_int()/.is_supported()/
+#    .instruction_count()`. That module was NEVER implemented -- there is
+#    no `compiler/backend/mir_test_builder.spl` anywhere in the tree. The
+#    only sibling that exists, `compiler.backend.backend.mir_test_builder_full`
+#    (used successfully by test/01_unit/compiler/backend/backend_basic_spec.spl),
+#    has a materially different, lower-level API (`add_const_int(dest:i32,
+#    value)`, no `.vreg()`, no `.gpu_barrier()`/`.actor_spawn()`/`.block()`)
+#    and its `MirTestCase`/`MirTestBuilder` classes expose NO capability-
+#    check method at all: `.is_supported()` and `.instruction_count()` do
+#    not exist ANYWHERE in the codebase. These tests assume a real backend
+#    capability-verification API that was designed on paper (this file's
+#    own "Overview" comment above) but never built. Implementing it is
+#    production src work, out of scope for this triage lane.
+# 2. (Test Groups 2/5/6 below: "Backend Error Messages", "Backend
+#    Capability Matrix", "Capability Documentation" -- 20 tests) Bodies are
+#    bare `pass` with no `expect`/`assert` at all -- by original design
+#    ("This would need actual backend execution" / "Would need actual
+#    backend capability query here") they never verified anything. They are
+#    not failing tests that were silenced; they are unwritten tests that
+#    were scaffolded and never implemented.
+#
+# Per the no-silent-skip policy, these stay commented ONLY with this
+# explicit, dated triage note (never a bare commented block with no
+# explanation) and are tracked as an honest gap, not a hidden pass:
+# doc/08_tracking/bug/backend_capability_spec_fictional_test_builder_api_2026-07-30.md
+#
 # # # Backend Capability Detection Specification
 # #
 # # **Feature IDs:** #900-920
