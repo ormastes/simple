@@ -480,8 +480,9 @@ Root Codex remains merge owner and final executable-evidence reviewer.
 All other navigation state, paint, hit, drain, projection, partial-wire, and
 lifecycle work reviewed sound but remains unpromoted.
 
-## Renderer command capability lanes (PROPOSED / UNIMPLEMENTED / RED)
-The primary design freezes
+## Renderer command capability lanes (IMPLEMENTED STATIC / EXECUTION RED)
+Commit `879f28bc059` implements the atomic production SBR2 graph and its
+focused modern SSpec/manual. The accepted design freezes
 `BrowserRendererCommandCapability`,
 `browser_renderer_command_capability_new`,
 `browser_renderer_command_capability_valid`,
@@ -497,15 +498,14 @@ provider, interpreter, dynamic-SFFI, or raw-runtime-symbol lane is added.
 
 | Lane | Bounded ownership | Handoff |
 | --- | --- | --- |
-| `command_capability_atomic_activation` | in one commit promote the existing SBR2 codec; add the private parent validator over `crypto_sffi.random_hex(16)`; stage/issue/consume/retire the tuple; migrate every command, `network_response`, fetch, and frame direction; reject all legacy schemas | no partial direction, compatibility flag, fallback, or mixed SBR1/SBR2 state |
-| `command_capability_sspec` | focused exact-four-step RED spec, deterministic parent creator/conversion unchanged-state errors, FIFO separate-read and split-write staged/issued oracles, numeric/payload maxima, lifecycle cleanup, conforming echo, 10k latency/allocation/RSS receipt | depends on atomic activation |
+| `command_capability_atomic_activation` | one commit promotes the existing SBR2 codec; adds the private parent validator over `crypto_sffi.random_hex(16)`; stages/issues/consumes/retires the tuple; migrates every command, `network_response`, fetch, and frame direction; rejects all legacy schemas | INTEGRATED `879f28bc059`; static-only, with no compatibility flag, fallback, or mixed SBR1/SBR2 state |
+| `command_capability_sspec` | focused exact-four-step spec, deterministic parent creator/conversion unchanged-state errors, FIFO separate-read and split-write staged/issued oracles, numeric/payload maxima, lifecycle cleanup, conforming echo, 10k latency/allocation/RSS receipt | source/manual integrated; runtime and 10,000-cycle receipts remain RED |
 | `command_capability_final_review` | protocol bounds, causal binding, lifecycle cleanup, backward rejection, manual quality | normal/highest-capability reviewer |
 
-The codec foundation is opt-in only. Production remains on its current
-`SBR1`/`SBRN1`/`SBRF7` path until one atomic migration changes the parent,
-worker, nested response/frame schemas, and their callers together. No commit
-may point either production direction at the opt-in `SBR2` helpers by itself,
-and no mixed-version production deployment is an accepted intermediate state.
+Production source now uses the atomic all-direction SBR2 graph from
+`879f28bc059`; legacy production schemas remain fail-closed. This is a
+static-source integration statement only. No admitted current full pure-Simple
+CLI has supplied runtime or 10,000-cycle evidence.
 
 Lower-model sidecars may enumerate malformed codec fixtures only after these
 names are frozen. They may not change entropy policy, weaken fail-closed legacy
@@ -525,7 +525,7 @@ Frozen interfaces:
 - `_require_issued_renderer_reply`
 - `_retire_renderer_command_capability`
 
-The future manual exposes exactly
+The integrated manual exposes exactly
 `Admit the trusted capability owner`, `Issue one fresh command token`,
 `Reject an unissued command token`, and
 `Retire all capability material`. Setup/checker names are
@@ -533,9 +533,8 @@ The future manual exposes exactly
 `check_trusted_capability_owner_admitted`,
 `check_fresh_command_token_issued`,
 `check_unissued_command_token_rejected`, and
-`check_all_capability_material_retired`. Until the atomic implementation,
-each checker uses
-`fail("RED: trusted renderer capability owner is unimplemented")`.
+`check_all_capability_material_retired`. Future incomplete replacement helpers
+must fail explicitly; they cannot replace the integrated static scenarios.
 
 Security evidence proves page, SimpleScript, JavaScript, common-codec, and
 worker paths cannot install or consume parent authority. Codec and worker do
@@ -583,15 +582,15 @@ the Rust seed are not admissible evidence.
 | Lane | Result | Status / next gate |
 | --- | --- | --- |
 | `bookmark_title_transport` | additive bounded SBRF8 title witness, generation/reply/URL trust binding, lifecycle clears, production parent Favorite routing, atomic SQLite mutation+snapshot rollback, restart/UI parity, and forged 513-byte pre-decode rejection | final high review PASS; integrated STATIC / EXECUTION HELD |
-| `command_capability_codec` | opt-in SBR2 framing, bounds, canonical trailer, and resequencing while production SBR1 APIs/callers/wire remain byte-identical | final high review PASS; integrated foundation only; atomic parent/worker/nested migration remains RED |
+| `command_capability_codec` | SBR2 framing, bounds, canonical trailer, resequencing, and atomic parent/worker/nested production migration | INTEGRATED `879f28bc059`; STATIC-ONLY, runtime and 10,000-cycle evidence remain RED |
 | `command_entropy_hardening` | existing `rt_random_hex` now uses portable fallible OS entropy, native/interpreter NIL parity, and guaranteed zeroization; dynamic SFFI is unchanged | final high review PASS; the existing `crypto_sffi.random_hex(16)` facade is the selected SBR2 entropy seam |
 | `negative_z_index` | signed/context/paint-hit prototype closes most local defects, but `revert`/`revert-layer` can retain an earlier integer and create a visible stacking regression without cascade provenance | HOLD at three-cycle cap; do not merge `b9ad3eff8f1` |
 | `radio_event_lifecycle` | external form ownership and lifecycle prototype still lacks one O(N) generation-qualified document identity index across events, edits, bridge sync/replacement, grouping, and submission | HOLD at three-cycle cap; do not merge `220355ca427` |
 | `js_property_storage_gc` | indexed property prototype leaves physical-order readers, tombstone roots, arbitrary detached graphs, omitted roots, and stale numeric-ID aliasing | HOLD; do not merge `d2d08cf2eb0`; requires full GC/generation-qualified handle architecture |
 
 No batch-6 static PASS promotes full production completion. Bookmark execution
-and the atomic all-direction SBR2 migration remain RED until an admitted
-current pure-Simple artifact supplies focused executable evidence.
+and SBR2 runtime/10,000-cycle evidence remain RED until an admitted current
+pure-Simple artifact supplies focused executable evidence.
 
 ## Production continuation batch 7 (2026-07-30)
 
@@ -834,7 +833,7 @@ No bootstrap, seed fallback, stale artifact, or runtime PASS was used.
 | `canonical_drawir_upload` | Web upload and comparison consume the identical composition through the shared Engine2D helper with real result receipt and full-frame absolute oracle. | INTEGRATED `b0f47f6aac0`; private CPU route removed |
 | `details_summary` | Omitted-p parsing, first-summary visibility, nested/interactive activation, cancellation, and post-animation suppression are O(N) and canonical. | INTEGRATED `d25b474cf0f`; HTML bounded rows now 11 |
 | `raf_alignment` | rAF deadlines align to document origin, nested callbacks defer, refresh metadata remains aligned, and capped wakeups saturate safely at i64 bounds. | INTEGRATED `d25b474cf0f`; exact callback/frame evidence |
-| `sbr2_capability` | Existing entropy facade + common validator + private parent issuance are reconciled across architecture/TLDR/detail/agent/system-test docs. | DESIGN PASS `d25b474cf0f`; atomic production migration remains RED |
+| `sbr2_capability` | Existing entropy facade + common validator + private parent issuance are reconciled across architecture/TLDR/detail/agent/system-test docs. | DESIGN `d25b474cf0f`, production integrated `879f28bc059`; STATIC-ONLY, runtime/10,000-cycle RED |
 | `stage4_admission` | No clean full CLI includes current compiler/browser source. | HELD; no runtime/docgen PASS |
 
 All implementation lanes received independent normal/high-capability static
@@ -852,7 +851,22 @@ passes succeeded; no bootstrap, seed fallback, or stale runtime was used.
 | `crash_safe_sbr2` | Renderer traffic is bound to one-use SBR2 capabilities on the SBR2 base. | PUSHED `879f28bc059`; STATIC-ONLY, no 10,000-cycle/runtime PASS |
 | `stage4_admission` | No provenance-qualified current full pure-Simple CLI was admitted. | NONE; available artifacts are stale-lineage |
 | `js_vm_reclamation` | Candidate used reusable raw IDs, non-refcounted escaped roots, and property-name-inferred numeric edges. | REJECTED; requires generation-qualified handles, independent-owner refcounts, and typed mark edges |
-| `parent_history` | Earlier history work does not meet the parent-authoritative protocol contract. | REJECTED; active rework must use SBR2 base `879f28bc059` |
+| `parent_history` | Capability-bound parent ledger builds on the SBR2 base. | INTEGRATED `2e188a745d9`; STATIC/EVIDENCE-HELD, no runtime PASS |
 
-No rejected GC/history patch is mergeable. These rows record integration and
+The rejected pre-SBR2 history candidate remains non-mergeable; the superseding
+parent history integration is `2e188a745d9`. These rows record integration and
 design state only; they do not claim runtime PASS or implementation completion.
+
+## Production browser batch 17 reconciliation (2026-07-30)
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `html_figure` | Selected-profile figure UA margins lower through canonical Web layout, Draw IR, and Engine2D evidence. | INTEGRATED `897368fb592`; STATIC/EVIDENCE-HELD |
+| `js_vm_reclamation_design` | Generation-qualified external handles, independent-owner refcounts, and typed mark edges are frozen. | DESIGN `ef90c16b194`; PROPOSED/RED, not implemented |
+| `live_post_listener_activation` | Default actions revalidate live node identity after listener dispatch. | INTEGRATED `ca4769405d6`; STATIC/EVIDENCE-HELD |
+| `stage4_provenance_real_motion` | Provenance and real-motion wrappers reject stale/noncurrent evidence. | `6c76b8ac0c0` wrapper self-tests PASS; no target runtime execution |
+| `parent_history` | Parent-authoritative history is capability-bound to the production SBR2 graph. | INTEGRATED `2e188a745d9`; STATIC/EVIDENCE-HELD |
+| `stage4_admission` | Audit at `/tmp/simple-history-h1.d3de` and the active build found no provenance-qualified current full CLI. | NONE; active build remains stale-lineage |
+
+No Batch-17 row supplies runtime, docgen, 10,000-cycle, or full-browser
+completion evidence.

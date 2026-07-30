@@ -2538,9 +2538,10 @@ implementation in progress / target evidence blocked
   plans now reuse the existing `crypto_sffi.random_hex(16)` facade while the
   private hosted parent alone validates with the common protocol validator and
   installs staged/issued authority. Arbitrary random hex grants no authority.
-  One future atomic change must migrate every parent/worker command, network,
-  fetch, and frame direction with no mixed SBR1/SBR2 production fallback.
-  This is design-only; SBR2 production and its 10,000-cycle evidence remain RED.
+  The subsequent atomic `879f28bc059` change migrates every parent/worker
+  command, network, fetch, and frame direction with no mixed SBR1/SBR2
+  production fallback. Production source is integrated static-only; runtime
+  and 10,000-cycle evidence remain RED.
 - batch-15 verification boundary: both integration tranches passed one static
   diff/layout/placeholder/direct-environment guard. No provenance-qualified
   current Stage-4 CLI exists, so focused runtime execution and docgen remain
@@ -2557,6 +2558,19 @@ implementation in progress / target evidence blocked
   generation-qualified external handles, independent host owners are not
   reference-counted, and numeric ownership is not represented by typed mark
   edges. Those are design prerequisites before GC implementation resumes.
-  The prior history candidate/design is rejected; active history rework must
-  start from the crash-safe SBR2 base `879f28bc059`. No rejected history or GC
-  patch is imported and no implementation-complete claim is made.
+  The prior pre-SBR2 history candidate/design remains rejected. Superseding
+  parent history is integrated at `2e188a745d9` on the crash-safe SBR2 base,
+  with static/held evidence only. No rejected history or GC patch is imported
+  and no implementation-complete claim is made.
+- production browser batch 17 reconciliation (2026-07-30): figure UA-margin
+  behavior is integrated at `897368fb592` with static/held semantic, Draw IR,
+  and pixel evidence. Generation-safe JS reclamation is frozen at
+  `ef90c16b194` as PROPOSED/RED design only. Live post-listener default-action
+  validation is integrated at `ca4769405d6` with static/held evidence.
+  The Stage-4 provenance and real-motion wrapper at `6c76b8ac0c0` passes its
+  self-tests, but no target runtime is claimed. Capability-bound parent history
+  is integrated at `2e188a745d9` with static/held evidence.
+- batch-17 admission boundary: Stage-4 admission remains NONE at
+  `/tmp/simple-history-h1.d3de` and for the active build, which remains
+  stale-lineage. No focused runtime, docgen, 10,000-cycle, implementation
+  completion, or full-browser PASS is admitted.

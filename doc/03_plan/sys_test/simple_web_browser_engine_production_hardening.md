@@ -723,8 +723,8 @@ the poll route to flush retained cancellation before lower-priority sync work.
 Execution and docgen remain held until an admitted current full pure-Simple CLI
 is available. Static/manual review cannot promote this row to production PASS.
 
-## Renderer command capability SSpec (PROPOSED / RED)
-Target a new focused modern scenario at
+## Renderer command capability SSpec (IMPLEMENTED STATIC / EXECUTION RED)
+The focused modern scenario is
 `test/03_system/security/browser_renderer_command_capability_spec.spl`. Its
 mirrored generated manual must expose exactly these four steps:
 
@@ -738,9 +738,10 @@ Frozen setup/checker names are
 `check_trusted_capability_owner_admitted`,
 `check_fresh_command_token_issued`,
 `check_unissued_command_token_rejected`, and
-`check_all_capability_material_retired`. Until implementation, each checker
-must call
-`fail("RED: trusted renderer capability owner is unimplemented")`.
+`check_all_capability_material_retired`. Commit `879f28bc059` integrates the
+production graph plus source/manual scenarios. Runtime and 10,000-cycle
+receipts remain RED; future incomplete replacement helpers must fail
+explicitly.
 
 The fixture launches a bounded fake renderer through the real piped hosted
 process boundary. One mode writes `ready` and a future frame in one write for
@@ -889,10 +890,9 @@ recorded. None of these rows is executable or merged evidence.
   static/manual review PASS. The system scenario binds the real parent Favorite
   owner and covers rollback/restart/UI parity plus forged 513-byte rejection;
   hosted execution remains HELD for an admitted artifact.
-- The opt-in SBR2 codec and portable NIL/zeroize entropy hardening are
-  integrated foundations only. Production remains on SBR1; the selected
-  `crypto_sffi.random_hex(16)` facade is not yet wired into parent-issued
-  causal authority.
+- SBR2 production activation is integrated at `879f28bc059` with the selected
+  `crypto_sffi.random_hex(16)` facade wired into parent-issued causal
+  authority. This is static-only; runtime and 10,000-cycle evidence remain RED.
 - Negative stacking, radio lifecycle, and JavaScript property/GC prototypes
   remain HOLD at their recorded architecture boundaries and are not merged.
 
@@ -903,9 +903,9 @@ recorded. None of these rows is executable or merged evidence.
   and state-atomic rejection; Home coverage binds profile restart and both
   hosted owners. Focused execution remains HELD for an admitted pure-Simple
   artifact.
-- Hosted-parent capability issuance remains PROPOSED / UNIMPLEMENTED / RED;
-  it reuses the existing crypto facade and promotes only with the atomic
-  all-direction SBR2 migration.
+- Hosted-parent capability issuance and atomic all-direction SBR2 production
+  migration are integrated at `879f28bc059`; runtime and 10,000-cycle evidence
+  remain RED.
 - Shared-clock, label activation, and SimpleScript listener prototypes remain
   HOLD at their exact recorded defects and are not merged.
 
@@ -1180,10 +1180,11 @@ manuals for:
   pending/completed refresh metadata, overflow-safe timer math, and a
   1,001-task `i64.max` wakeup boundary.
 
-The same tranche reconciles the SBR2 design contract around the existing
+The same tranche reconciled the SBR2 design contract around the existing
 entropy facade, common capability validator, private parent issuance, atomic
 all-direction activation, and retained 1 MiB/i64/10,000-cycle gates. SBR2
-remains design-only and RED.
+production is subsequently integrated at `879f28bc059`; only static evidence is
+admitted, so runtime and 10,000-cycle gates remain RED.
 
 Independent review and one static guard pass per integration tranche succeeded.
 Qualified execution/docgen remain HELD pending a clean provenance-qualified
@@ -1204,6 +1205,23 @@ current Stage-4 pure-Simple CLI.
   owners, and inferred numeric references instead of emitting typed mark edges.
   Generation-qualified handles, owner refcounts, and typed edges are required
   before the 1,000-dispatch/lifecycle scenarios can be admitted.
-- The earlier history candidate/design is rejected. Active history rework is
-  based on crash-safe SBR2 revision `879f28bc059`; no rejected history evidence
-  enters this plan.
+- The earlier pre-SBR2 history candidate/design remains rejected. Its
+  superseding capability-bound parent ledger is integrated at `2e188a745d9`
+  with static evidence only; no runtime history evidence enters this plan.
+
+## Batch 17 evidence reconciliation
+
+- Figure UA-margin behavior is integrated at `897368fb592`; its semantic,
+  Draw IR, and pixel evidence is static/evidence-held.
+- Generation-safe JS reclamation is frozen at `ef90c16b194` as
+  PROPOSED/RED design only; no GC implementation or runtime evidence is
+  admitted.
+- Live post-listener default-action validation is integrated at
+  `ca4769405d6`; evidence is static/held.
+- The Stage-4 provenance and real-motion wrapper at `6c76b8ac0c0` passes its
+  own self-tests, but no target runtime execution is claimed.
+- Capability-bound parent history is integrated at `2e188a745d9`; evidence is
+  static/held.
+- Stage-4 admission remains NONE at `/tmp/simple-history-h1.d3de` and for the
+  active build, which remains stale-lineage. No focused runtime, docgen,
+  10,000-cycle, or full-browser PASS is admitted.

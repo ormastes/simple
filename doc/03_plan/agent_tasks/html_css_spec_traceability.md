@@ -33,7 +33,7 @@ Definition-list bounded lane:
 
 | Lane | Result |
 |---|---|
-| HTML element traceability | RED: 12 Full, 71 Partial remaining, 9 bounded selected-profile rows (`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`), 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
+| HTML element traceability | RED: 12 Full, 68 Partial remaining, 12 bounded selected-profile rows (`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`), 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
 | Implemented CSS traceability | RED: self-satisfying 284 count, unrecognized and metadata-only claims |
 | Unsupported CSS classification | 92 production, 23 speech/aural, 1 deprecated, 1 false scrape |
 | SSpec/manual quality | FAIL: missing plan/REQs, stale manuals/counts, no executed evidence |
@@ -48,6 +48,7 @@ Definition-list bounded lane:
 | Scripted body animation reconciliation | Landed in `0d6c055a489`: changed SimpleScript body assignments preserve the single DOM revision owner, reconcile animation instances, and advance timer-driven DrawIR/hit frames; unchanged assignments remain no-ops and qualified execution/docgen remain held |
 | HTML `blockquote` selected profile | Landed in `8f2ae532371`: canonical semantic parentage and UA block margins lower through Web layout to exact DrawIR geometry and Engine2D pixels; complete mirrored manual present, qualified execution/docgen remain held |
 | HTML `header` selected profile | Landed in `9f720c62c72`: canonical semantic parentage and UA block behavior lower through Web layout to exact DrawIR geometry and Engine2D pixels; complete mirrored manual present, qualified execution/docgen remain held |
+| HTML `figure` selected profile | Landed in `897368fb592`: selected UA margins lower through canonical Web layout to exact DrawIR geometry and Engine2D pixels; static evidence is held and qualified execution/docgen remain unavailable |
 | Padding cascade order | Landed in `9f720c62c72`: one linear declaration-family resolver preserves authored shorthand, physical, and horizontal-LTR logical order while ignoring malformed values; exact semantic-to-pixel evidence present |
 | Fractional opacity siblings | Landed in `9f720c62c72`: same-size clipped sibling roots use viewport-area-bounded cropped Draw IR batches; backdrop and differing-size cases fail closed, preserving the single Engine2D offscreen pool |
 | Signed animation time and script epoch | Landed in `9f720c62c72`: negative second/millisecond parsing reaches exact consecutive frames, and unrelated SimpleScript stylesheet replacement preserves an unchanged animation signature |
