@@ -1,13 +1,55 @@
-# BrowserSession Redirect Source-Scheme Security
+# BrowserSession Redirect Security
 
-The response URL is broker input. Redirect downgrade decisions use the
-canonical URL of the matched inflight request, and a rejected document
-redirect leaves the already committed page and history intact.
+Only top-level document downgrade policy uses the canonical scheme of the
+matched inflight request. Active-subresource and fetch redirects are rechecked
+against the secure client context and target trustworthiness. Fetch scenarios
+enable `broker_network_policy` to model the trusted transport boundary. A
+rejected redirect leaves the already committed page and history intact, while
+loopback and HTTPS targets remain trustworthy.
 
 Executable specification:
 `test/01_unit/lib/common/web/browser_session_redirect_scheme_security_spec.spl`
 
 ## Scenarios
+
+### Reject a loopback stylesheet redirect to ordinary HTTP without replacing committed state
+
+1. Commit two stable HTTPS pages, with the second requesting a loopback
+   stylesheet.
+2. Take and verify the allowed loopback stylesheet request.
+3. Return a redirect from loopback to an ordinary HTTP stylesheet.
+4. Require no pending request, a mixed-content warning, and exact preservation
+   of URL, title, body, back target, and forward availability.
+
+### Reject a loopback fetch redirect to ordinary HTTP without replacing committed state
+
+1. Commit two stable HTTPS pages, with the second starting a loopback fetch.
+2. Take and verify the allowed loopback fetch request.
+3. Return a redirect from loopback to an ordinary HTTP resource.
+4. Require fetch rejection, no pending request, and exact preservation of URL,
+   title, body, back target, and forward availability.
+
+### Continue following a brokered loopback fetch redirect to loopback
+
+1. Open a secure page that starts a loopback fetch through the trusted broker
+   transport boundary.
+2. Take the allowed loopback fetch request.
+3. Redirect it to another loopback URL.
+4. Require the trustworthy loopback target to be scheduled unchanged.
+
+### Continue following a loopback stylesheet redirect to loopback
+
+1. Open a secure page that requests a loopback stylesheet.
+2. Take the allowed loopback stylesheet request.
+3. Redirect it to another loopback URL.
+4. Require the trustworthy loopback target to be scheduled unchanged.
+
+### Continue following a loopback stylesheet redirect to HTTPS
+
+1. Open a secure page that requests a loopback stylesheet.
+2. Take the allowed loopback stylesheet request.
+3. Redirect it to an HTTPS URL.
+4. Require the secure target to be scheduled unchanged.
 
 ### Reject a case-variant document downgrade without replacing committed state
 
