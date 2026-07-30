@@ -29,11 +29,26 @@ Definition-list bounded lane:
 - `Lower authored definition-list boxes to exact Draw IR geometry`
 - `Rasterize exact definition-list pixels against a plain control`
 
+Small-element bounded lane:
+
+- `Parse small as an inline body child`
+- `Apply the small user-agent font size`
+- `Lower small text to exact Draw IR geometry`
+- `Rasterize absolute small-element pixels`
+
+Frozen helpers:
+
+- `_small_node_index`
+- `_small_command`
+- `_small_text_command`
+- `_small_style`
+- `_small_geometry`
+
 ## Completed audit and bounded implementation lanes
 
 | Lane | Result |
 |---|---|
-| HTML element traceability | RED: 12 Full, 68 Partial remaining, 12 bounded selected-profile rows (`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`), 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
+| HTML element traceability | RED: 12 Full, 66 Partial remaining, 14 bounded selected-profile rows (`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`,`menu`,`small`), 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
 | Implemented CSS traceability | RED: self-satisfying 284 count, unrecognized and metadata-only claims |
 | Unsupported CSS classification | 92 production, 23 speech/aural, 1 deprecated, 1 false scrape |
 | SSpec/manual quality | FAIL: missing plan/REQs, stale manuals/counts, no executed evidence |
@@ -49,6 +64,8 @@ Definition-list bounded lane:
 | HTML `blockquote` selected profile | Landed in `8f2ae532371`: canonical semantic parentage and UA block margins lower through Web layout to exact DrawIR geometry and Engine2D pixels; complete mirrored manual present, qualified execution/docgen remain held |
 | HTML `header` selected profile | Landed in `9f720c62c72`: canonical semantic parentage and UA block behavior lower through Web layout to exact DrawIR geometry and Engine2D pixels; complete mirrored manual present, qualified execution/docgen remain held |
 | HTML `figure` selected profile | Landed in `897368fb592`: selected UA margins lower through canonical Web layout to exact DrawIR geometry and Engine2D pixels; static evidence is held and qualified execution/docgen remain unavailable |
+| HTML `menu` selected profile | Landed in `b107a4e2a9e`: selected LTR UA list spacing lowers through canonical Web layout to exact DrawIR geometry and Engine2D pixels; static evidence is held and qualified execution/docgen remain unavailable |
+| HTML `small` selected profile | Current lane: selected medium-UA `smaller` maps inherited 16 px text to 13 px through semantic style, baseline layout, DrawIR text, and absolute Engine2D pixel discriminators; qualified execution/docgen remain unavailable |
 | Padding cascade order | Landed in `9f720c62c72`: one linear declaration-family resolver preserves authored shorthand, physical, and horizontal-LTR logical order while ignoring malformed values; exact semantic-to-pixel evidence present |
 | Fractional opacity siblings | Landed in `9f720c62c72`: same-size clipped sibling roots use viewport-area-bounded cropped Draw IR batches; backdrop and differing-size cases fail closed, preserving the single Engine2D offscreen pool |
 | Signed animation time and script epoch | Landed in `9f720c62c72`: negative second/millisecond parsing reaches exact consecutive frames, and unrelated SimpleScript stylesheet replacement preserves an unchanged animation signature |
