@@ -1076,8 +1076,30 @@ impl Lowerer {
                             // see the binding's scalar type, apply `UnboxInt` to the
                             // heap pointer, and produce garbage. See
                             // doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md.
+                            //
+                            // `Some` needs dual-representation handling: `T?`
+                            // optionals are either a boxed Some enum (literal
+                            // `Some(x)` construction) or the "raw migration form"
+                            // — the bare payload, which is what natively compiled
+                            // `T?`-returning functions produce. `rt_enum_payload`
+                            // returns NIL (TAG_SPECIAL = 3) for any non-enum
+                            // value, so every `Some(x)` binding over a raw
+                            // optional read the nil sentinel (match arms bound
+                            // x = 3). The two forms also need DIFFERENT
+                            // post-processing (boxed int payloads are BoxInt'd
+                            // and rely on the name-keyed UnboxInt in
+                            // `lower_builtin_call_expr`; raw values must pass
+                            // through untouched), so the discrimination must be
+                            // a runtime branch, not a different builtin:
+                            //   if rt_enum_id(subj) >= 0: rt_enum_payload(subj)
+                            //   else: subj
+                            // The then-branch is the byte-identical legacy path
+                            // (same builtin, same expr type, same unboxing); the
+                            // else-branch reinterprets the raw payload as the
+                            // binding type. See
+                            // doc/08_tracking/bug/native_optional_tuple_payload_extraction_broken_2026-07-29.md.
                             let payload_expr_ty = payload_array_ty.unwrap_or(binding_ty);
-                            let payload_expr = HirExpr {
+                            let legacy_payload_expr = HirExpr {
                                 kind: HirExprKind::BuiltinCall {
                                     name: "rt_enum_payload".to_string(),
                                     args: vec![HirExpr {
@@ -1086,6 +1108,40 @@ impl Lowerer {
                                     }],
                                 },
                                 ty: payload_expr_ty,
+                            };
+                            let payload_expr = if enum_variant == "Some" && payload_patterns.len() == 1 {
+                                HirExpr {
+                                    kind: HirExprKind::If {
+                                        condition: Box::new(HirExpr {
+                                            kind: HirExprKind::Binary {
+                                                op: BinOp::GtEq,
+                                                left: Box::new(HirExpr {
+                                                    kind: HirExprKind::BuiltinCall {
+                                                        name: "rt_enum_id".to_string(),
+                                                        args: vec![HirExpr {
+                                                            kind: HirExprKind::Local(subject_idx),
+                                                            ty: subject_ty,
+                                                        }],
+                                                    },
+                                                    ty: TypeId::I64,
+                                                }),
+                                                right: Box::new(HirExpr {
+                                                    kind: HirExprKind::Integer(0),
+                                                    ty: TypeId::I64,
+                                                }),
+                                            },
+                                            ty: TypeId::BOOL,
+                                        }),
+                                        then_branch: Box::new(legacy_payload_expr),
+                                        else_branch: Some(Box::new(HirExpr {
+                                            kind: HirExprKind::Local(subject_idx),
+                                            ty: payload_expr_ty,
+                                        })),
+                                    },
+                                    ty: payload_expr_ty,
+                                }
+                            } else {
+                                legacy_payload_expr
                             };
 
                             if payload_patterns.len() == 1 {
@@ -1162,7 +1218,17 @@ impl Lowerer {
                         // the nested struct so FieldAccess below reads the
                         // struct's own sequential 8-byte-per-field layout
                         // instead of being (un)boxed as a scalar.
-                        let base_payload_expr = HirExpr {
+                        // Same Some-vs-raw dual-representation rule as the
+                        // Identifier extraction path above: a raw-form optional
+                        // holds the struct pointer directly, a boxed Some holds
+                        // it in the enum payload slot. Struct pointers need no
+                        // unboxing, so both arms are plain value reads.
+                        let nested_payload_ty = if payload_patterns.len() == 1 {
+                            struct_ty
+                        } else {
+                            payload_array_ty.unwrap_or(TypeId::ANY)
+                        };
+                        let nested_legacy_expr = HirExpr {
                             kind: HirExprKind::BuiltinCall {
                                 name: "rt_enum_payload".to_string(),
                                 args: vec![HirExpr {
@@ -1170,11 +1236,41 @@ impl Lowerer {
                                     ty: subject_ty,
                                 }],
                             },
-                            ty: if payload_patterns.len() == 1 {
-                                struct_ty
-                            } else {
-                                payload_array_ty.unwrap_or(TypeId::ANY)
-                            },
+                            ty: nested_payload_ty,
+                        };
+                        let base_payload_expr = if enum_variant == "Some" && payload_patterns.len() == 1 {
+                            HirExpr {
+                                kind: HirExprKind::If {
+                                    condition: Box::new(HirExpr {
+                                        kind: HirExprKind::Binary {
+                                            op: BinOp::GtEq,
+                                            left: Box::new(HirExpr {
+                                                kind: HirExprKind::BuiltinCall {
+                                                    name: "rt_enum_id".to_string(),
+                                                    args: vec![HirExpr {
+                                                        kind: HirExprKind::Local(subject_idx),
+                                                        ty: subject_ty,
+                                                    }],
+                                                },
+                                                ty: TypeId::I64,
+                                            }),
+                                            right: Box::new(HirExpr {
+                                                kind: HirExprKind::Integer(0),
+                                                ty: TypeId::I64,
+                                            }),
+                                        },
+                                        ty: TypeId::BOOL,
+                                    }),
+                                    then_branch: Box::new(nested_legacy_expr),
+                                    else_branch: Some(Box::new(HirExpr {
+                                        kind: HirExprKind::Local(subject_idx),
+                                        ty: nested_payload_ty,
+                                    })),
+                                },
+                                ty: nested_payload_ty,
+                            }
+                        } else {
+                            nested_legacy_expr
                         };
                         let struct_payload_expr = if payload_patterns.len() == 1 {
                             base_payload_expr

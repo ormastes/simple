@@ -1,6 +1,56 @@
 # Native lane: optional-tuple payload extraction is broken in every consumption form
 
-**Status:** open — isolated with a 30-line repro while typing the MQTT packet
+**Status:** ROOT-CAUSED and FIXED in the seed's HIR lowering (pending seed
+redeploy to take effect in the deployed binary).
+
+**Root cause (not tuple-specific — ALL cross-function optionals):** natively
+compiled `T?`-returning functions produce the optional in the "raw migration
+form" — the bare payload value, not a boxed Some enum (discriminator probe:
+an `i64?` holding 41 prints wholesale as `invalid-heap:0x29`, i.e. the raw
+untagged 41; a `(i64,i64)?` prints as a plain tuple pointer). The
+Some-pattern CONDITION side already handles this (`rt_is_some` sniffs both
+forms), but the BINDING side in `build_pattern_binding_stmts`
+(`src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs`) extracted
+payloads with `rt_enum_payload`, which returns NIL for any non-heap-enum
+value — and NIL's runtime representation is `TAG_SPECIAL = 0b011 = 3`
+(`runtime/src/value/tags.rs`), which is exactly why every corrupted binding
+read `3`, the familiar nil-sentinel. This whole family (`Some(i64)` reads 3,
+optional-tuple fields read 3 3) is one bug.
+
+**Fix:** for single-payload `Some` patterns, `build_pattern_binding_stmts`
+now emits a runtime discrimination branch instead of a bare
+`rt_enum_payload` call:
+
+```
+if rt_enum_id(subject) >= 0:  rt_enum_payload(subject)   # boxed Some
+else:                          subject                    # raw form
+```
+
+A different builtin alone (e.g. `rt_unwrap_or_self`) is NOT sufficient:
+the two forms need different post-processing. Boxed int payloads are
+BoxInt'd and rely on the name-keyed UnboxInt special case in MIR's
+`lower_builtin_call_expr` (validated: swapping the builtin regressed a
+literal `Some(99)` binding to 792 = 99<<3), while raw values must pass
+through untouched. The branch keeps the boxed arm byte-identical to the
+legacy path (same builtin, same expr type, same unboxing) and adds the
+raw arm. Applied at both extraction sites (identifier bindings and
+nested struct patterns); match arms and if-val flow through the same
+helper.
+
+**Validation (patched debug seed):** repro flips correct
+(`Some(i64?)` binds 41, was 3; optional-tuple match binds 5 9, was 3 3;
+boxed `Some(99)` still 99; real-enum single/multi-payload matches
+unchanged), and the MQTT integration proof passes natively:
+`mqtt_decode_string` round-trips cafe-accent to the exact decoded text
+on the default engine. The decoded CONSUMED count check is blocked by a
+separate, pre-existing mixed-tuple defect (field 1 of a `(text, i64)`
+tuple — see
+doc/08_tracking/bug/native_mixed_tuple_field1_statement_drop_2026-07-29.md).
+Regression specs cannot cover this until the test harness has a native
+lane — the spec lane runs the interpreter, where the bug never
+reproduced; the repro drivers are inlined above for re-verification.
+
+Originally: open — isolated with a 30-line repro while typing the MQTT packet
 module (`mqtt/packet.spl`) for native compilation.
 **Severity:** silent wrong results / silently skipped control flow on the
 DEFAULT engine (`bin/simple run`, JIT/native — no interpreter fallback and no
