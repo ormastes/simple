@@ -1,7 +1,19 @@
 # Deployed `bin/simple` refuses `test`/`lint`/`fmt` — all spec verification blocked
 
 **Found:** 2026-07-30 ~12:30 UTC, mid-session, on a shared working copy.
-**Severity:** BLOCKER for every workflow that verifies anything. No spec can be
+**RESOLVED / NOT REPRODUCIBLE as of 2026-07-30 ~15:20 UTC.** Plain
+`bin/simple test <spec>` dispatches to the pure-Simple app and runs specs
+normally (`test/03_system/app/mem_cli_spec.spl` → 7 examples, 0 failures,
+exit 0), with no override and no refusal. Verification is NOT blocked.
+Two lessons kept below: (1) the refusal fires only when Simple-app dispatch
+fails, so it is a symptom, not the bug; (2) **do not reach for
+`SIMPLE_TEST_RUNNER_RUST=1`** — it short-circuits to the seed's compiled-in Rust
+runner *before* Simple-app dispatch and is therefore blind to `.spl` edits. It
+was adopted here in error and produced one misleading measurement. Retest the
+ordinary invocation before adopting any override; a concurrent session's push
+can change this under you. Original severity line follows.
+
+~~**Severity:** BLOCKER for every workflow that verifies anything. No spec can be
 run repo-wide until this is resolved.
 **Status:** Open. Not root-caused. Deliberately NOT "fixed" by swapping
 binaries — see "Why nothing was swapped".
