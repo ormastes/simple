@@ -11,7 +11,7 @@
 
 use std.js.types.pair.{Pair}
 use std.js.types.js_types.{JsValue}
-use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserImageSource, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord, BrowserHstsPolicy, BrowserHstsSnapshot, BrowserHstsSnapshotEntry, BROWSER_MAX_IMAGE_RESOURCES, BROWSER_MAX_IMAGE_PIXELS, browser_header_value, browser_history_push_bounded}
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserImageSource, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord, BrowserHstsPolicy, BrowserHstsSnapshot, BrowserHstsSnapshotEntry, BROWSER_MAX_IMAGE_RESOURCES, BROWSER_MAX_IMAGE_PIXELS, browser_header_media_type, browser_header_is_javascript, browser_header_has_nosniff, browser_history_push_bounded}
 use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
 use std.gc_async_mut.web.browser_session_url.{
     network_navigation_hostname_valid, normalize_network_navigation_url,
@@ -90,8 +90,7 @@ fn _image_hex_bytes(canonical_hex: text) -> Result<[u8], text>:
     bytes
 
 fn _image_content_type_is_png(headers: text) -> bool:
-    val value = browser_header_value(headers, "content-type").lower()
-    value.split(";")[0].trim() == "image/png"
+    browser_header_media_type(headers) == "image/png"
 
 fn _image_png_signature_valid(bytes: [u8]) -> bool:
     bytes.len() >= 8 and
@@ -607,7 +606,18 @@ impl BrowserSession:
                 load.append_warning("external script error: {response.error}")
             else:
                 val current_idx = load.next_script_idx - 1
-                if current_idx >= 0 and current_idx < load.script_blocks.len() and load.script_blocks[current_idx].script_type == "text/simple":
+                val simple_script = (
+                    current_idx >= 0 and
+                    current_idx < load.script_blocks.len() and
+                    load.script_blocks[current_idx].script_type == "text/simple"
+                )
+                if (not simple_script and
+                    browser_header_has_nosniff(response.headers) and
+                    not browser_header_is_javascript(response.headers)):
+                    load.append_warning(
+                        "external script error: blocked response MIME type"
+                    )
+                elif simple_script:
                     self._apply_response_headers(response.headers, response.url)
                     self._execute_simple_script(response.body, Some(load))
                 else if val Some(state) = self.runtime_state:
@@ -621,6 +631,15 @@ impl BrowserSession:
                             load.append_warning("external script error: {e.message}")
             return self._advance_script_loading()
         Err("no active script load")
+
+    me _reject_module_response_mime() -> Result<bool, text>:
+        if val Some(load) = self.active_load:
+            load.append_warning(
+                "module load error: blocked response MIME type"
+            )
+            load.pending_module = nil
+            return self._advance_script_loading()
+        Err("no active module load")
 
     me _commit_module_response(response: BrowserResponse) -> Result<bool, text>:
         if val Some(load) = self.active_load:

@@ -873,3 +873,14 @@ design state only; they do not claim runtime PASS or implementation completion.
 No Batch-17 row supplies runtime, docgen, 10,000-cycle, or full-browser
 completion evidence. Generation-safe GC design `ef90c16b194` remains
 PROPOSED/RED; neither the G2 lane nor this addendum completes the goal.
+
+## Production browser batch 18 candidate (2026-07-30)
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `script_mime_boundary` | One canonical header/media-type path normalizes parameters and case; classic scripts honor `nosniff`, while modules require selected JavaScript MIME before redirect alias/cache mutation. Rejection warns and advances without evaluating or publishing hostile response state. | CANDIDATE from exact `f156e55efe9`; modern four-step SBR2 SSpec/manual added, target execution/docgen HELD |
+
+Merge owner and final reviewer: root production-browser coordinator. No
+sidecar owns implementation files. Static review must confirm the module gate
+precedes every redirect alias/cache write and the rejection path applies no
+response headers. Runtime/bootstrap work is explicitly out of scope.

@@ -266,6 +266,20 @@ fn browser_header_value(headers: text, expected_name: text) -> text:
             return line.slice(colon + 1, line.len()).trim()
     ""
 
+fn browser_header_media_type(headers: text) -> text:
+    val value = browser_header_value(headers, "content-type").lower()
+    value.split(";")[0].trim()
+
+fn browser_header_is_javascript(headers: text) -> bool:
+    val media_type = browser_header_media_type(headers)
+    media_type == "text/javascript" or
+        media_type == "application/javascript"
+
+fn browser_header_has_nosniff(headers: text) -> bool:
+    browser_header_value(
+        headers, "x-content-type-options"
+    ).lower().trim() == "nosniff"
+
 pub fn browser_header_content_security_policy(headers: text) -> text:
     var policies = ""
     for raw_line in headers.split("\n"):
@@ -2734,6 +2748,9 @@ impl BrowserSession:
                 response.url
             return self._commit_image_response(response, resource_key)
         if response.kind == "module":
+            if (response.error == "" and
+                not browser_header_is_javascript(response.headers)):
+                return self._reject_module_response_mime()
             if val Some(request) = inflight:
                 if request.redirect_origin_url != response.url:
                     self.module_redirect_urls = upsert_pair(

@@ -1235,3 +1235,20 @@ current Stage-4 pure-Simple CLI.
   precede executable implementation.
 - Generation-safe GC design `ef90c16b194` remains PROPOSED/RED. No G2
   executable evidence, goal completion, or runtime PASS is admitted.
+
+## Batch 18 candidate executable evidence
+
+`test/03_system/security/browser_renderer_script_mime_boundary_spec.spl`
+adds one modern four-step SBR2 scenario for REQ-WEB-BROWSER-005/010/012/021:
+
+- mixed-case, parameterized canonical JavaScript MIME admission plus classic
+  non-`nosniff` compatibility;
+- classic `nosniff` rejection for a non-JavaScript MIME;
+- redirected module final-MIME rejection before alias/source-cache mutation;
+- deterministic warning plus loader advance with no hostile body evaluation,
+  cookie write, DOM marker, global side effect, or module cache publication.
+
+The paired manual is
+`doc/06_spec/03_system/security/browser_renderer_script_mime_boundary_spec.md`.
+The row remains PENDING: static guards are the only admitted checks, and no
+runtime, bootstrap, seed fallback, stale artifact, or docgen result is claimed.
