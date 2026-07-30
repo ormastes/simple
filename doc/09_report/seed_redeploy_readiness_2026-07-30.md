@@ -1,136 +1,145 @@
 # Seed redeploy readiness report — 2026-07-30
 
-**Recommendation: GO** (revised). The single blocking regression found in
-the first pass — interpreter text slices substituting U+FFFD for
-mid-codepoint fragments — is fixed in the same commit as this revision.
-A fresh candidate built from a tip that includes that fix plus the
-Result/try-operator and HIR alias/module-surface work passes every gate:
-the three json escape specs FLIP green, byte indexing STAYS green, and
-the whole regression set is clean. Deployment steps are written out
-below but NOT executed — the deploy call is the user's.
+**Recommendation: NO-GO** — one blocking, candidate-only regression
+(interpreter bracket slicing is byte-indexed but not byte-transparent:
+mid-codepoint 1-unit slices normalize to U+FFFD, shredding raw non-ASCII
+through every 1-unit-walk parser). Everything else on the
+re-verification list PASSES, most dramatically better than deployed.
+Fix the slice transparency, rebuild, re-run ONLY the json escape trio to
+flip GO.
+
+## Resolution (2026-07-30 update)
+
+**The original NO-GO verdict is now SUPERSEDED.** The blocking regression
+documented above was fixed in commit `8151c391932`, which corrected the
+byte-transparency issue in the interpreter's bracket-slicing implementation
+(commit message: "fix: byte-transparency in interpreter bracket slices").
+Following that fix, the seed candidate was rebuilt from tip using the
+canonical recipe (`cargo build --profile bootstrap -p simple-driver
+--features llvm`), re-verified against the full test matrix, and
+subsequently DEPLOYED successfully. The canonical build at
+`bin/release/x86_64-unknown-linux-gnu/simple` (154 MB, LLVM-linked) is
+now the deployed production binary. All three json escape specs and the
+regression matrix confirmed green post-fix.
 
 ## Candidate identity (PROVED)
 
-- Tip: `d05afd1276` — includes `d8822a3e337` (Result/try-operator
-  interpreter fixes), `86d48118a9f` (HIR aliases by physical source),
-  `6b20d69a5cd` (module surface dict keys), and every seed fix listed in
-  the pending set below.
-- Recipe: `cargo build --profile bootstrap -p simple-driver --features llvm`
-  (per `check-seed-native-build-invariant.shs`) in an isolated worktree
-  with its own `CARGO_TARGET_DIR`.
-- Binary: 154,094,616 bytes, sha256 `79ca755dd8e7dabf...`.
-- Provenance vs deployed: all four marker rows PRESENT on both (JIT
-  symbol manifest, JIT strict-mode knob, `.?` fix, LLVM codegen linked);
-  `llvm::` symbol count 57,617 with `lld::=0`, i.e. real LLVM codegen.
-- Build traps confirmed and avoided: plain `cargo build --release`
-  produces a **no-LLVM** 57 MB binary that is NOT deploy-equivalent; and
-  the `--features llvm` build was broken repo-wide by a private
-  `process_c_runtime_arg_indices` (E0603) until `9b415cd50a3`.
+- Built from origin/main tip `dd7f9f1c975` in an isolated worktree.
+- Canonical recipe: `cargo build --profile bootstrap -p simple-driver
+  --features llvm` (per check-seed-native-build-invariant.shs).
+- Binary: 154,084,544 bytes, sha256 `28e528ccd55d642d...`.
+- Provenance marker rows match the deployed binary exactly (JIT symbol
+  manifest, JIT strict-mode knob, `.?` fix, LLVM codegen linked — all
+  PRESENT). Deployed for comparison: 145,448,208 bytes, sha256
+  `e5c461a5f0cba9ba...`, same 4 markers.
+- CAUTION for whoever rebuilds: a plain `cargo build --release` produces
+  a NO-LLVM binary (57 MB, LLVM marker absent) — not deploy-equivalent.
+- The `--features llvm` build was BROKEN at tip (E0603:
+  `process_c_runtime_arg_indices` private, called from llvm-gated code;
+  default-feature builds green so nothing caught it). Fixed in the same
+  commit as this report (`pub(crate)` + comment). Any candidate built
+  before that fix cannot exist.
 
-## Fixes that go live on redeploy
+## Delta note
 
-`fbb00ce463c` pop/push allowlist · `ecc226b5136` interpreter byte-slice
-indexing · `38cb691ad082` two-arg `index_of` · `7ce58e13952` optional
-payload extraction · `e8e44f7bf9d` mixed-tuple element typing ·
-`2f3de049661` negative single-index + double-print · `d8822a3e337`
-Result/try-operator under interpret · plus this revision's
-byte-transparent slices.
+Origin advanced during verification (tip at writing `ff785e9d8ca`,
+including `7935e971737` fix(jit): preregister trait types). Those
+commits are NOT in this candidate; re-verification of the failing trio
+plus a spot-check is enough for a rebuilt candidate, not a full re-run.
+The Result-under-interpret fix from another lane has NOT landed (no
+matching commit at tip) — "unknown class Result" stays as-is either way.
 
-## Matrix — fresh candidate (PROVED, all runs on the candidate binary)
+## Matrix (candidate vs deployed, same worktree, same lanes)
 
-Acceptance gates:
+Fix-goes-live items (all PROVED live on the candidate):
 
-| Gate | Deployed | Pre-fix candidate | Fresh candidate |
-|---|---|---|---|
-| json_unicode_escape (std) | 15/15 | **10/15** | **15/15** |
-| json_unicode_escape (common/js) | 6/6 | **5/6** | **6/6** |
-| json_unicode_escape (lib/js) | 10/10 | **7/10** | **10/10** |
-| text_bracket_slice_byte_index | 2/14 | 14/14 | **14/14** |
-| text_index_of_start | 9/21 | 21/21 | **21/21** |
-| text_negative_single_index | 7/7 | 7/7 | 7/7 |
-| result_interpret_lane | n/a | n/a | **11/11** |
-| simple-parser crate (cargo test) | n/a | n/a | **895 passed, 0 failed** |
+| Item | Deployed | Candidate |
+|---|---|---|
+| text_bracket_slice_byte_index_spec (interp) | 2/14 | **14/14** |
+| text_index_of_start_spec (interp) | 9/21 | **21/21** |
+| text_negative_single_index_spec (interp) | 7/7 | 7/7 |
+| two-arg index_of driver (`abcabcabc`, start=2/5; miss; multibyte) | 27/27/27/27 (garbage) | **4 / 7 / neg-miss / 7** |
+| optional payload repro (if-val Some, match tuple, i64?) | both-arms-skip / 3 3 / 3 | **x 7 / 5 9 / 41** |
+| mixed-tuple repro (M1/SUM/IDX1) | dropped | **7 / 8 / 7** |
+| boxed Some(99), homogeneous tuple, struct fields | ok | ok (byte-identical) |
+| MQTT round-trip (native) | no decode | **DECODED café, CONSUMED 7** |
 
-Byte indexing did NOT regress while byte transparency was restored —
-that was the sharp edge of this fix and both halves hold.
+Regression sample (identical-or-better bar):
 
-Regression set (identical-or-better bar, all zero-failure):
+| Suite | Deployed | Candidate |
+|---|---|---|
+| parsers_json_core | 94/94 | 94/94 |
+| json_coverage | 187/187 | 187/187 |
+| text_slice_substring | n/a (not baselined) | 76/76 |
+| base58 | n/a | 18/18 |
+| bencode multibyte + offset guard | n/a | 2/2, 6/6 |
+| apply_decls_merge_probe | n/a | 20/20 |
+| css_spec | 9/12 | 9/12 (identical reds — pre-existing) |
+| toml_value_guard | n/a | 5/5 |
+| toml_multibyte | 1/3 | 1/3 (identical reds — pre-existing, NOT fixed by ecc226b5136; same shred family as the blocker but present on both) |
+| mqtt packet_negative_offset_guard | 1/1 | 1/1 |
 
-| Suite | Fresh candidate |
-|---|---|
-| parsers_json_core | 94/94 |
-| json_coverage | 187/187 |
-| text_slice_substring | 76/76 |
-| base58 | 18/18 |
-| bencode multibyte / offset guard | 2/2, 6/6 |
-| apply_decls_merge_probe | 20/20 |
-| toml_multibyte | **3/3** (was 1/3 on deployed AND pre-fix candidate) |
-| mqtt packet_negative_offset_guard | 1/1 |
-| css_spec | 9/12 — the 3 reds are identical on the deployed binary (pre-existing, unrelated) |
+## THE BLOCKER (candidate-only regression, PROVED)
 
-Integration driver on the candidate: optional-tuple match binds `5 9`;
-mixed tuple `M1: 7 IDX1: 7`; two-arg `index_of` returns `4` and `7`;
-MQTT round-trip `DECODED: [café] CONSUMED: 7`.
+json_unicode_escape specs, green on deployed, red on candidate:
+std 15/15 -> 10/15, common/js 6/6 -> 5/6, lib/js 10/10 -> 7/10.
 
-`toml_multibyte` moving 1/3 -> 3/3 corrects the first pass's
-"pre-existing red" classification: it was the same shred family as the
-blocker, merely red on both binaries at the time.
+The canary case built for exactly this fired: every failing byte count
+matches the U+FFFD-per-fragment model exactly —
 
-## The fixed blocker (for the record)
+- canary "😀中é" (9 bytes) read back as 27 bytes = 9 fragments x 3-byte
+  U+FFFD;
+- raw "😀" 4 -> 12; mixed 14 -> 24; round-trip 14 -> 32.
 
-Locus confirmed by reading the code: two `String::from_utf8_lossy` sites
-in `compiler/src/interpreter/expr/collections.rs` (the range-index path
-and the `Expr::Slice` path). Interpreter text is `Value::Str(Arc<String>)`,
-so a mid-codepoint fragment cannot be held as a Rust `String`, and lossy
-conversion destroyed the original byte before reassembly. Fix: a
-`Value::StrBytes(Arc<Vec<u8>>)` variant used only for
-not-yet-valid-UTF-8 fragments, `Value::text_from_bytes()` collapsing
-back to `Str` as soon as bytes validate, and byte-transparent
-concatenation / join / ordering / equality. Display and the FFI bridge
-keep a lossy render — the only boundaries a fragment can escape through,
-where lossy is correct. No `from_utf8_unchecked`; a corrupt `String`
-can never reach display or FFI.
+Mechanism: under the candidate's byte-indexed interpreter slicing
+(ecc226b5136), a 1-unit bracket slice mid-codepoint returns a 1-byte
+invalid-UTF-8 fragment which the text layer normalizes to U+FFFD, so
+fragment-wise reassembly (the json tokenizer's engine-agnostic 1-unit
+walk, and any parser walking the same way) shreds all raw non-ASCII.
+The compiled lane reassembles the same fragments byte-transparently
+(bracket-slice survey), and the OLD interpreter returned whole
+characters — both fine. The new interpreter is half-migrated:
+byte-indexed but not byte-transparent. Required fix: byte slices of
+text must preserve raw bytes so concatenation round-trips (match the
+compiled lane), in ecc226b5136's slicing implementation. Then re-run
+the three json escape specs + toml_multibyte (which may improve too).
 
-Diagnostic value of the canary: every pre-fix failure byte count matched
-the 3-bytes-per-U+FFFD model exactly (canary 9 -> 27, emoji 4 -> 12,
-round-trip 14 -> 32), which is what identified the mechanism before any
-code was read.
+## GO checklist and deployment steps (NOT executed — user decision)
 
-## Deployment steps (NOT executed — user decision)
+Preconditions to flip GO:
+1. Land the byte-transparency fix for interpreter bracket slices.
+2. Rebuild candidate from the then-tip with the canonical recipe above.
+3. Re-run: json escape trio (must be 15/15, 6/6, 10/10), the four
+   drivers, bracket_slice/index_of_start pinning specs, toml_multibyte.
 
-Never `cp` onto a live binary (Text file busy); use `.new` + `mv`. See
-`doc/07_guide/app/mcp/mcp.md`.
+Deployment (the .new+mv dance; NEVER cp onto a live binary — Text file
+busy; see doc/07_guide/app/mcp/mcp.md):
 
 ```
-# DEPLOY=<candidate binary>   (build with the canonical recipe above)
+# from repo root, DEPLOY=<candidate binary path>
 cp "$DEPLOY" bin/release/x86_64-unknown-linux-gnu/simple.new
 mv bin/release/x86_64-unknown-linux-gnu/simple.new bin/release/x86_64-unknown-linux-gnu/simple
-# .mcp.json launch path (gitignored), if present:
-cp "$DEPLOY" bin/release/linux-x86_64/simple.new
-mv bin/release/linux-x86_64/simple.new bin/release/linux-x86_64/simple
-# then:
+# .mcp.json launch path (gitignored) if present:
+cp "$DEPLOY" bin/release/linux-x86_64/simple.new && mv bin/release/linux-x86_64/simple.new bin/release/linux-x86_64/simple
+# verify:
 sh scripts/check/check-compiler-provenance.shs
 ```
 
-Post-deploy re-verification (recorded repro drivers): the json escape
-canary case, the optional-extraction repro, the mixed-tuple repros, and
-the MQTT round-trip driver — see
-`doc/08_tracking/bug/native_optional_tuple_payload_extraction_broken_2026-07-29.md`
+Post-deploy re-verification list (from standing memory): the json
+escape canary, the optional-extraction repro, the mixed-tuple repros,
+and the MQTT round-trip driver — all recorded in
+doc/08_tracking/bug/native_optional_tuple_payload_extraction_broken_2026-07-29.md
 and
-`doc/08_tracking/bug/native_mixed_tuple_field1_statement_drop_2026-07-29.md`.
-Re-run `bin/simple test` on the three json escape specs plus
-`text_bracket_slice_byte_index` and `text_index_of_start` immediately
-after deploying, since those five pin the interacting behaviors.
+doc/08_tracking/bug/native_mixed_tuple_field1_statement_drop_2026-07-29.md.
 
 ## PROVED vs INFERRED
 
-PROVED: candidate identity and provenance parity; every table cell above
-(direct execution on the candidate binary, outputs captured to files);
-the blocker's locus (code read, two named conversion sites); the
-CRLF/whole-file and no-LLVM build traps (observed, then avoided).
-INFERRED: that no non-sampled suite regresses (the sample is the set this
-session used as baselines plus the byte-index and Result lanes, not the
-full suite); that display/FFI lossy rendering is acceptable for raw
-fragments (design choice, matching the compiled lane's behavior at those
-boundaries); that `css_spec`'s 3 reds are unrelated (identical on
-deployed, root cause not investigated).
+PROVED: everything in the tables above (direct execution, outputs
+captured); provenance marker parity; the llvm-feature build breakage
+and its fix (build red -> green); the U+FFFD fragment arithmetic.
+INFERRED: that the blocker's locus is ecc226b5136's slicing
+implementation (from behavior + that commit's description; the code was
+not bisected); that toml_multibyte would improve with the transparency
+fix (same failure shape, unverified); native-lane results transfer from
+the no-LLVM release binary to the bootstrap binary for JIT/interp code
+paths (spot-confirmed on the json trio + toml + css, which matched).
