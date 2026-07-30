@@ -73,6 +73,25 @@ pub(super) struct FontGraphicsResources {
     pub set: Arc<DescriptorSet>,
 }
 
+#[cfg(feature = "vulkan")]
+#[derive(Default)]
+pub(super) struct ComputeCommandOwners {
+    pub bound_pipeline: Option<Arc<ComputePipeline>>,
+    pub pipelines: Vec<Arc<ComputePipeline>>,
+    pub descriptor_sets: Vec<Arc<DescriptorSet>>,
+    pub descriptor_pools: Vec<Arc<DescriptorPool>>,
+    pub descriptor_set_layouts: Vec<Arc<DescriptorSetLayout>>,
+    pub buffers: Vec<Arc<VulkanBuffer>>,
+}
+
+#[cfg(feature = "vulkan")]
+pub(super) struct QuarantinedComputeSubmission {
+    pub device: Arc<VulkanDevice>,
+    pub fence: Fence,
+    pub command_buffer: vk::CommandBuffer,
+    pub owners: ComputeCommandOwners,
+}
+
 pub(super) fn alloc_handle() -> i64 {
     NEXT_HANDLE.fetch_add(1, Ordering::Relaxed)
 }
@@ -84,14 +103,15 @@ pub(super) struct VulkanState {
     pub instance: Option<Arc<VulkanInstance>>,
     pub device: Option<Arc<VulkanDevice>>,
 
-    pub buffers: HashMap<i64, VulkanBuffer>,
-    pub compute_pipelines: HashMap<i64, ComputePipeline>,
+    pub buffers: HashMap<i64, Arc<VulkanBuffer>>,
+    pub compute_pipelines: HashMap<i64, Arc<ComputePipeline>>,
     pub shader_modules: HashMap<i64, Arc<ShaderModule>>,
     pub shader_spirv: HashMap<i64, Vec<u8>>,
     pub fences: HashMap<i64, Fence>,
-    pub quarantined_compute: Vec<(Fence, vk::CommandBuffer)>,
+    pub compute_commands: HashMap<i64, ComputeCommandOwners>,
+    pub quarantined_compute: Vec<QuarantinedComputeSubmission>,
     pub accepted_compute_submit_count: i64,
-    pub quarantined_graphics: Vec<(Fence, vk::CommandBuffer)>,
+    pub quarantined_graphics: Vec<(Arc<VulkanDevice>, Fence, vk::CommandBuffer)>,
     pub strings: HashMap<String, CString>,
     pub semaphores: HashMap<i64, Semaphore>,
     pub images: HashMap<i64, Arc<VulkanImage>>,
@@ -105,7 +125,7 @@ pub(super) struct VulkanState {
     pub descriptor_set_layouts: HashMap<i64, Arc<DescriptorSetLayout>>,
     pub descriptor_sets: HashMap<i64, Arc<DescriptorSet>>,
     pub descriptor_set_owners: HashMap<i64, (i64, i64)>,
-    pub active_compute_layout: Option<vk::PipelineLayout>,
+    pub descriptor_set_buffers: HashMap<i64, HashMap<u32, Arc<VulkanBuffer>>>,
     pub semaphore_pool: Option<SemaphorePool>,
     pub window_manager: Option<WindowManager>,
     pub surfaces: HashMap<i64, Arc<Surface>>,
@@ -124,6 +144,7 @@ impl VulkanState {
             shader_modules: HashMap::new(),
             shader_spirv: HashMap::new(),
             fences: HashMap::new(),
+            compute_commands: HashMap::new(),
             quarantined_compute: Vec::new(),
             accepted_compute_submit_count: 0,
             quarantined_graphics: Vec::new(),
@@ -140,7 +161,7 @@ impl VulkanState {
             descriptor_set_layouts: HashMap::new(),
             descriptor_sets: HashMap::new(),
             descriptor_set_owners: HashMap::new(),
-            active_compute_layout: None,
+            descriptor_set_buffers: HashMap::new(),
             semaphore_pool: None,
             window_manager: None,
             surfaces: HashMap::new(),
@@ -169,16 +190,22 @@ impl VulkanState {
     }
 
     pub fn clean_quarantined_compute(&mut self) {
-        if let Some(device) = self.device.clone() {
-            for (_, cmd) in self.quarantined_compute.drain(..) {
-                device.free_compute_command(cmd);
-            }
+        for submission in self.quarantined_compute.drain(..) {
+            let QuarantinedComputeSubmission {
+                device,
+                fence,
+                command_buffer,
+                owners,
+            } = submission;
+            device.free_compute_command(command_buffer);
+            drop(owners);
+            drop(fence);
         }
     }
 
     pub fn clean_quarantined_graphics(&mut self) {
         if let Some(device) = self.device.clone() {
-            for (_, cmd) in self.quarantined_graphics.drain(..) {
+            for (device, _, cmd) in self.quarantined_graphics.drain(..) {
                 let _ = device.free_graphics_command(cmd);
             }
         }
@@ -272,7 +299,8 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
     }
     state.descriptor_sets.clear();
     state.descriptor_set_owners.clear();
-    state.active_compute_layout = None;
+    state.descriptor_set_buffers.clear();
+    state.compute_commands.clear();
     state.descriptor_pools.clear();
     state.descriptor_set_layouts.clear();
     state.framebuffers.clear();

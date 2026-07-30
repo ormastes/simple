@@ -8,6 +8,8 @@ use crate::value::{byte_array_bytes, rt_interp_cstr, HeapObjectType, RuntimeStri
 use std::ffi::CStr;
 #[cfg(feature = "vulkan")]
 use std::os::raw::c_char;
+#[cfg(feature = "vulkan")]
+use std::sync::Arc;
 
 #[cfg(feature = "vulkan")]
 fn runtime_entry_name(value_raw: i64) -> Result<String, String> {
@@ -260,7 +262,7 @@ pub extern "C" fn rt_vulkan_create_compute_pipeline(shader: i64, entry: i64, pus
     match ComputePipeline::new(device, &spirv_owned, &entry_name, push_size as u32) {
         Ok(pipe) => {
             let h = alloc_handle();
-            state.compute_pipelines.insert(h, pipe);
+            state.compute_pipelines.insert(h, Arc::new(pipe));
             h
         }
         Err(e) => {

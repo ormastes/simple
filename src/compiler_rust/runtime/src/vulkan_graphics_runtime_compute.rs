@@ -1,9 +1,14 @@
 #[cfg(feature = "vulkan")]
-use super::vulkan_graphics_runtime_core::{alloc_handle, DescriptorPool, DescriptorSet, DescriptorSetLayout, vk, STATE};
+use super::vulkan_graphics_runtime_core::{
+    alloc_handle, vk, ComputeCommandOwners, DescriptorPool, DescriptorSet, DescriptorSetLayout,
+    QuarantinedComputeSubmission, STATE,
+};
 #[cfg(feature = "vulkan")]
 use ash::vk::Handle;
 #[cfg(feature = "vulkan")]
 use crate::value::{byte_array_bytes, RuntimeValue};
+#[cfg(feature = "vulkan")]
+use std::sync::Arc;
 
 // ============================================================================
 // Descriptor Sets
@@ -73,19 +78,38 @@ pub extern "C" fn rt_vulkan_create_descriptor_set(_pipe: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_bind_buffer(desc_set: i64, binding: i64, buf: i64) -> i64 {
-    let state = STATE.lock();
-    let ds = match state.descriptor_sets.get(&desc_set) {
+    if binding < 0 || binding > u32::MAX as i64 {
+        return 0;
+    }
+    let mut state = STATE.lock();
+    if !state.quarantined_compute.is_empty() {
+        state.set_error("bind_buffer: prior completion is unknown".to_string());
+        return 0;
+    }
+    let ds = match state.descriptor_sets.get(&desc_set).cloned() {
         Some(d) => d,
         None => return 0,
     };
-    let buffer = match state.buffers.get(&buf) {
+    let buffer = match state.buffers.get(&buf).cloned() {
         Some(b) => b,
         None => return 0,
     };
 
     let size = buffer.size();
-    match ds.update_storage_buffer(binding as u32, buffer, 0, size) {
-        Ok(()) => 1,
+    match ds.update_storage_buffer(binding as u32, &buffer, 0, size) {
+        Ok(()) => {
+            for owners in state.compute_commands.values_mut() {
+                if owners.descriptor_sets.iter().any(|owner| Arc::ptr_eq(owner, &ds)) {
+                    owners.buffers.push(buffer.clone());
+                }
+            }
+            state
+                .descriptor_set_buffers
+                .entry(desc_set)
+                .or_default()
+                .insert(binding as u32, buffer);
+            1
+        }
         Err(e) => {
             tracing::error!("bind_buffer: {e}");
             0
@@ -106,6 +130,7 @@ pub extern "C" fn rt_vulkan_bind_buffer(_desc_set: i64, _binding: i64, _buf: i64
 pub extern "C" fn rt_vulkan_destroy_descriptor_set(desc_set: i64) -> i64 {
     let mut state = STATE.lock();
     if state.descriptor_sets.remove(&desc_set).is_some() {
+        state.descriptor_set_buffers.remove(&desc_set);
         if let Some((layout, pool)) = state.descriptor_set_owners.remove(&desc_set) {
             state.descriptor_pools.remove(&pool);
             state.descriptor_set_layouts.remove(&layout);
@@ -132,6 +157,10 @@ pub extern "C" fn rt_vulkan_destroy_descriptor_set(_desc_set: i64) -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_begin_compute() -> i64 {
     let mut state = STATE.lock();
+    if !state.quarantined_compute.is_empty() {
+        state.set_error("begin_compute: prior completion is unknown".to_string());
+        return 0;
+    }
     let device = match state.require_device() {
         Ok(d) => d,
         Err(e) => {
@@ -140,7 +169,11 @@ pub extern "C" fn rt_vulkan_begin_compute() -> i64 {
         }
     };
     match device.begin_compute_command() {
-        Ok(cmd) => cmd.as_raw() as i64,
+        Ok(cmd) => {
+            let handle = cmd.as_raw() as i64;
+            state.compute_commands.insert(handle, ComputeCommandOwners::default());
+            handle
+        }
         Err(e) => {
             state.set_error(format!("begin_compute: {e}"));
             0
@@ -186,22 +219,28 @@ pub extern "C" fn rt_vulkan_begin_graphics() -> i64 {
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> i64 {
     let mut state = STATE.lock();
+    if !state.compute_commands.contains_key(&cmd) {
+        return 0;
+    }
     let device = match state.require_device() {
         Ok(d) => d,
         Err(_) => return 0,
     };
-    let pipeline = match state.compute_pipelines.get(&pipe) {
+    let pipeline = match state.compute_pipelines.get(&pipe).cloned() {
         Some(p) => p,
         None => return 0,
     };
-    let layout = pipeline.layout();
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     unsafe {
         device
             .handle()
             .cmd_bind_pipeline(vk_cmd, vk::PipelineBindPoint::COMPUTE, pipeline.pipeline());
     }
-    state.active_compute_layout = Some(layout);
+    let Some(owners) = state.compute_commands.get_mut(&cmd) else {
+        return 0;
+    };
+    owners.bound_pipeline = Some(pipeline.clone());
+    owners.pipelines.push(pipeline);
     1
 }
 
@@ -216,29 +255,60 @@ pub extern "C" fn rt_vulkan_bind_pipeline(_cmd: i64, _pipe: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_bind_descriptors(cmd: i64, desc_set: i64) -> i64 {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(d) => d,
         Err(_) => return 0,
     };
 
-    let ds = match state.descriptor_sets.get(&desc_set) {
+    let ds = match state.descriptor_sets.get(&desc_set).cloned() {
         Some(d) => d,
         None => return 0,
     };
-
-    let layout = match state.active_compute_layout {
-        Some(layout) => layout,
+    let (descriptor_set_layout, descriptor_pool) = match state.descriptor_set_owners.get(&desc_set) {
+        Some((layout, pool)) => (
+            state.descriptor_set_layouts.get(layout).cloned(),
+            state.descriptor_pools.get(pool).cloned(),
+        ),
         None => return 0,
     };
+    let (Some(descriptor_set_layout), Some(descriptor_pool)) = (descriptor_set_layout, descriptor_pool) else {
+        return 0;
+    };
+    let pipeline = match state
+        .compute_commands
+        .get(&cmd)
+        .and_then(|owners| owners.bound_pipeline.clone())
+    {
+        Some(pipeline) => pipeline,
+        None => return 0,
+    };
+    let buffers: Vec<_> = state
+        .descriptor_set_buffers
+        .get(&desc_set)
+        .into_iter()
+        .flat_map(|bindings| bindings.values().cloned())
+        .collect();
 
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     let sets = [ds.handle()];
     unsafe {
-        device
-            .handle()
-            .cmd_bind_descriptor_sets(vk_cmd, vk::PipelineBindPoint::COMPUTE, layout, 0, &sets, &[]);
+        device.handle().cmd_bind_descriptor_sets(
+            vk_cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            pipeline.layout(),
+            0,
+            &sets,
+            &[],
+        );
     }
+    let Some(owners) = state.compute_commands.get_mut(&cmd) else {
+        return 0;
+    };
+    owners.descriptor_sets.push(ds);
+    owners.descriptor_pools.push(descriptor_pool);
+    owners.descriptor_set_layouts.push(descriptor_set_layout);
+    owners.buffers.extend(buffers);
     1
 }
 
@@ -262,12 +332,15 @@ pub extern "C" fn rt_vulkan_push_constants(cmd: i64, pipeline_handle: i64, data:
 #[cfg(feature = "vulkan")]
 fn push_constants_bytes(cmd: i64, pipeline_handle: i64, data: &[u8]) -> i64 {
     let len = data.len();
-    let state = STATE.lock();
+    let mut state = STATE.lock();
+    if !state.compute_commands.contains_key(&cmd) {
+        return 0;
+    }
     let device = match state.require_device() {
         Ok(d) => d,
         Err(_) => return 0,
     };
-    let pipeline = match state.compute_pipelines.get(&pipeline_handle) {
+    let pipeline = match state.compute_pipelines.get(&pipeline_handle).cloned() {
         Some(p) => p,
         None => return 0,
     };
@@ -287,6 +360,9 @@ fn push_constants_bytes(cmd: i64, pipeline_handle: i64, data: &[u8]) -> i64 {
             0,
             &data[..size as usize],
         );
+    }
+    if let Some(owners) = state.compute_commands.get_mut(&cmd) {
+        owners.pipelines.push(pipeline);
     }
     1
 }
@@ -357,7 +433,11 @@ fn dispatch_memory_barrier() -> (
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> i64 {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
+    if !state.compute_commands.contains_key(&cmd) {
+        state.set_error("dispatch: unknown command handle".to_string());
+        return 0;
+    }
     let device = match state.require_device() {
         Ok(d) => d,
         Err(_) => return 0,
@@ -411,7 +491,11 @@ mod dispatch_barrier_tests {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_end_compute(cmd: i64) -> i64 {
-    let state = STATE.lock();
+    let mut state = STATE.lock();
+    if !state.compute_commands.contains_key(&cmd) {
+        state.set_error("end_compute: unknown command handle".to_string());
+        return 0;
+    }
     let device = match state.require_device() {
         Ok(d) => d,
         Err(_) => return 0,
@@ -429,7 +513,16 @@ pub extern "C" fn rt_vulkan_end_compute(_cmd: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_end_graphics(cmd: i64) -> i64 {
-    rt_vulkan_end_compute(cmd)
+    let state = STATE.lock();
+    let device = match state.require_device() {
+        Ok(device) => device,
+        Err(_) => return 0,
+    };
+    i64::from(
+        device
+            .end_compute_command(vk::CommandBuffer::from_raw(cmd as u64))
+            .is_ok(),
+    )
 }
 
 #[no_mangle]
@@ -446,11 +539,15 @@ pub extern "C" fn rt_vulkan_discard_command(cmd: i64) -> i64 {
     if cmd == 0 {
         return 0;
     }
-    let state = STATE.lock();
+    let mut state = STATE.lock();
     let device = match state.require_device() {
         Ok(device) => device,
         Err(_) => return 0,
     };
+    if state.compute_commands.remove(&cmd).is_none() {
+        state.set_error("discard_command: unknown command handle".to_string());
+        return 0;
+    }
     device.free_compute_command(vk::CommandBuffer::from_raw(cmd as u64));
     1
 }
@@ -493,22 +590,12 @@ pub extern "C" fn rt_vulkan_discard_graphics_command(_cmd: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_submit_and_wait(cmd: i64) -> i64 {
-    let mut state = STATE.lock();
-    let device = match state.require_device() {
-        Ok(d) => d,
-        Err(_) => return 0,
-    };
-    let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
-    match device.submit_compute_command(vk_cmd) {
-        Ok(()) => {
-            state.accepted_compute_submit_count += 1;
-            1
-        }
-        Err(e) => {
-            tracing::error!("submit_and_wait: {e}");
-            0
-        }
+    let fence = rt_vulkan_submit_and_wait_fence(cmd);
+    if fence <= 0 {
+        return 0;
     }
+    STATE.lock().fences.remove(&fence);
+    1
 }
 
 #[no_mangle]
@@ -538,6 +625,10 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
         return 0;
     }
     let mut state = STATE.lock();
+    if !state.compute_commands.contains_key(&cmd) {
+        state.set_error("submit_and_wait_fence: unknown command handle".to_string());
+        return 0;
+    }
     let device = match state.require_device() {
         Ok(d) => d,
         Err(e) => {
@@ -549,6 +640,7 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
         Ok(fence) => fence,
         Err(e) => {
             device.free_compute_command(vk::CommandBuffer::from_raw(cmd as u64));
+            state.compute_commands.remove(&cmd);
             state.set_error(format!("submit_and_wait_fence create: {e}"));
             return 0;
         }
@@ -556,21 +648,26 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(cmd: i64) -> i64 {
     let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
     match device.submit_compute_command_with_fence(vk_cmd, &fence) {
         Ok(()) => {
+            state.compute_commands.remove(&cmd);
             state.accepted_compute_submit_count += 1;
             let handle = alloc_handle();
             state.fences.insert(handle, fence);
             handle
         }
         Err(FencedSubmitError::NotSubmitted(e)) => {
+            state.compute_commands.remove(&cmd);
             state.set_error(format!("submit_and_wait_fence: {e}"));
             0
         }
         Err(FencedSubmitError::CompletionUnknown(e)) => {
-            state.accepted_compute_submit_count += 1;
             state.set_error(format!("submit_and_wait_fence completion unknown: {e}"));
-            // A wait error can leave the command in flight. Keep the fence alive so
-            // its native handle cannot be destroyed while the queue may still use it.
-            state.quarantined_compute.push((fence, vk_cmd));
+            let owners = state.compute_commands.remove(&cmd).unwrap_or_default();
+            state.quarantined_compute.push(QuarantinedComputeSubmission {
+                device,
+                fence,
+                command_buffer: vk_cmd,
+                owners,
+            });
             -1
         }
     }
@@ -632,7 +729,7 @@ pub extern "C" fn rt_vulkan_submit_graphics_and_wait_fence(cmd: i64) -> i64 {
         }
         Err(FencedSubmitError::CompletionUnknown(e)) => {
             state.set_error(format!("submit_graphics_fence completion unknown: {e}"));
-            state.quarantined_graphics.push((fence, vk_cmd));
+            state.quarantined_graphics.push((device, fence, vk_cmd));
             -1
         }
     }

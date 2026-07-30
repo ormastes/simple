@@ -61,6 +61,13 @@ pub enum FencedSubmitError {
     CompletionUnknown(VulkanError),
 }
 
+fn submit_definitely_not_accepted(error: vk::Result) -> bool {
+    matches!(
+        error,
+        vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY
+    )
+}
+
 fn resource_queue_families(compute: u32, transfer: u32, graphics: Option<u32>) -> Vec<u32> {
     let mut families = vec![compute];
     if transfer != compute {
@@ -493,6 +500,12 @@ impl VulkanDevice {
             return Err(FencedSubmitError::NotSubmitted(error));
         }
         if let Err(e) = unsafe { self.device.queue_submit(*queue, &[submit_info], fence.handle()) } {
+            if submit_definitely_not_accepted(e) {
+                unsafe { self.device.free_command_buffers(*self.transfer_pool.lock(), &[cmd]) };
+                return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
+                    format!("Submit transfer: {:?}", e),
+                )));
+            }
             self.transfer_completion_unknown.store(true, Ordering::Release);
             return Err(FencedSubmitError::CompletionUnknown(VulkanError::CommandBufferError(
                 format!("Submit transfer: {:?}", e),
@@ -601,8 +614,8 @@ impl VulkanDevice {
     /// Submit a compute command buffer with a real fence and wait for completion.
     ///
     /// The command buffer is freed exactly once after a successful infinite wait.
-    /// If the wait fails after queue submission, it is intentionally left allocated:
-    /// freeing a potentially in-flight command buffer would violate Vulkan lifetime rules.
+    /// If submission or its wait fails, it is intentionally left allocated because
+    /// the driver may have accepted the command before reporting the error.
     pub fn submit_compute_command_with_fence(
         &self,
         cmd: vk::CommandBuffer,
@@ -613,9 +626,14 @@ impl VulkanDevice {
         let queue = self.compute_queue.lock();
         let submit_result = unsafe { self.device.queue_submit(*queue, &[submit_info], fence.handle()) };
         if let Err(e) = submit_result {
-            let pool = self.compute_pool.lock();
-            unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
-            return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
+            if submit_definitely_not_accepted(e) {
+                let pool = self.compute_pool.lock();
+                unsafe { self.device.free_command_buffers(*pool, &[cmd]) };
+                return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
+                    format!("Submit: {:?}", e),
+                )));
+            }
+            return Err(FencedSubmitError::CompletionUnknown(VulkanError::CommandBufferError(
                 format!("Submit: {:?}", e),
             )));
         }
@@ -646,8 +664,13 @@ impl VulkanDevice {
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
         let queue = queue.lock();
         if let Err(e) = unsafe { self.device.queue_submit(*queue, &[submit_info], fence.handle()) } {
-            unsafe { self.device.free_command_buffers(*pool.lock(), &[cmd]) };
-            return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
+            if submit_definitely_not_accepted(e) {
+                unsafe { self.device.free_command_buffers(*pool.lock(), &[cmd]) };
+                return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
+                    format!("Submit graphics: {:?}", e),
+                )));
+            }
+            return Err(FencedSubmitError::CompletionUnknown(VulkanError::CommandBufferError(
                 format!("Submit graphics: {:?}", e),
             )));
         }
@@ -677,12 +700,21 @@ impl VulkanDevice {
 
 #[cfg(test)]
 mod tests {
-    use super::resource_queue_families;
+    use super::{resource_queue_families, submit_definitely_not_accepted};
+    use ash::vk;
 
     #[test]
     fn resource_queue_families_are_deduplicated() {
         assert_eq!(resource_queue_families(2, 2, Some(2)), vec![2]);
         assert_eq!(resource_queue_families(2, 5, Some(7)), vec![2, 5, 7]);
+    }
+
+    #[test]
+    fn submit_oom_is_definitely_not_accepted() {
+        assert!(submit_definitely_not_accepted(vk::Result::ERROR_OUT_OF_HOST_MEMORY));
+        assert!(submit_definitely_not_accepted(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+        assert!(!submit_definitely_not_accepted(vk::Result::ERROR_DEVICE_LOST));
+        assert!(!submit_definitely_not_accepted(vk::Result::ERROR_UNKNOWN));
     }
 }
 

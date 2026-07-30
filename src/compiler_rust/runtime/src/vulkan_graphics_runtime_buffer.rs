@@ -1,5 +1,7 @@
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffer, STATE};
+#[cfg(feature = "vulkan")]
+use std::sync::Arc;
 use crate::value::{byte_array_bytes, byte_array_write, rt_byte_array_new, rt_byte_array_new_len, RuntimeValue};
 
 // ============================================================================
@@ -40,7 +42,7 @@ pub extern "C" fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64 {
     match VulkanBuffer::new(device, size as u64, buf_usage) {
         Ok(buf) => {
             let h = alloc_handle();
-            state.buffers.insert(h, buf);
+            state.buffers.insert(h, Arc::new(buf));
             h
         }
         Err(e) => {
