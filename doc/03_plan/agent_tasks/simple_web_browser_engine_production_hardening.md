@@ -282,17 +282,22 @@ deploy an unqualified binary, or merge static-only evidence.
 
 | Lane | Owner | Scope | Acceptance / dependency | Status |
 |---|---|---|---|---|
-| 1 | `stage23_cranelift_recovery` | Recover an isolated pure-Simple Stage2/3 checker with the supported dynload wrapper and Cranelift | Stage2/3 provenance and sanity PASS; no Stage4/5 or deploy | ACTIVE, batch 1 |
-| 2 | `pending_classifier_validation` | Validate the canonical terminal-`pending(...)` parser fix and regenerated manual | Focused source check and unit/system SSpecs pass with Lane 1 artifact | BLOCKED on 1 |
-| 3 | `grid_gap_alias_validation` | Validate `grid-gap`, `grid-row-gap`, and `grid-column-gap` canonical lowering | Changed-source checks plus new and unchanged-control SSpecs pass | BLOCKED on 1 |
-| 4 | `drawir_affine_validation` | Validate held Draw IR affine embedding, transport, Engine2D lowering, and four manuals | All changed sources check and four focused SSpecs pass | BLOCKED on 1 |
-| 5 | `js_lexical_parent_validation` | Validate the held JavaScript lexical-parent collector and full 1,000-dispatch scenario | Focused check and collector SSpecs pass; no fake manual steps | BLOCKED on 1, batch 1 |
-| 6 | `content_visibility_gpu_paint` | TDD the GPU container-paint/descendant-suppression mismatch without editing an owned dirty renderer | RED spec and exact shared-owner patch proposal; implementation waits for ownership | ACTIVE, batch 1 |
-| 7 | `css_transform_drawir_producer` | Lower CSS transforms through Web semantic/layout into canonical Draw IR affine data | No Style geometry mutation; sibling layout stable; animation pixels change | BLOCKED on 4, batch 2 |
-| 8 | `html_css_traceability` | Reconcile `html_css_spec_traceability.md` against executable modern SSpecs/manuals | Every claimed row names executable evidence or remains RED with owner | READY, batch 2 |
-| 9 | `browser_perf_memory` | Profile retained rendering, animation, close/replacement roots, latency, and max RSS | Real workload receipts; root-cause-only fix; no speculative cache | BLOCKED on 1, batch 2 |
-| 10 | `live_css_animation_evidence` | Run existing CSS+rAF+Engine2D pixel and external bitmap evidence | `browser_session_script_css_animation_spec.spl` plus smallest external bitmap script PASS | BLOCKED on 1 and merged 2–7 |
+| 1 | `stage23_cranelift_recovery` | Recover an isolated pure-Simple Stage2/3 checker with the supported dynload wrapper and Cranelift | Stage2/3 provenance and sanity PASS; no Stage4/5 or deploy | READY; execution deferred by three-cycle cap |
+| 2 | `pending_classifier_validation` | Validate the canonical terminal-`pending(...)` parser fix and regenerated manual | Focused source check and unit/system SSpecs pass with Lane 1 artifact | READINESS PASS; blocked on 1 |
+| 3 | `grid_gap_alias_validation` | Validate `grid-gap`, `grid-row-gap`, and `grid-column-gap` canonical lowering | Changed-source checks plus new and unchanged-control SSpecs pass | READINESS PASS; blocked on 1 |
+| 4 | `drawir_affine_validation` | Validate held Draw IR affine embedding, transport, Engine2D lowering, and four manuals | Source/spec/native checks plus route-key budget and explicit schema/legacy-hosted fixture policy | BLOCKED on 1 and schema policy |
+| 5 | `js_lexical_parent_validation` | Validate the held JavaScript lexical-parent collector and full 1,000-dispatch scenario | Focused check and collector SSpecs pass; no fake manual steps | READINESS PASS; blocked on 1 and 2 |
+| 6 | `content_visibility_gpu_paint` | TDD the GPU container-paint/descendant-suppression mismatch without editing an owned dirty renderer | RED CPU/DrawIR/GPU parity spec; implementation waits for owner handoff | RED patch ready; owner blocked |
+| 7 | `css_transform_drawir_producer` | Lower CSS transforms through Web semantic/layout into canonical Draw IR affine data | Zero relayout, exact sampled/sibling pixels, ordered nested batches, strict multi-batch protocol, native/JIT proof | BLOCKED on 4, 6, and owner handoff |
+| 8 | `html_css_traceability` | Reconcile `html_css_spec_traceability.md` against executable modern SSpecs/manuals | Preserve every origin RED row; append generator/WebIR work without destructive replacement | AUDIT COMPLETE; repair blocked on dirty owner |
+| 9 | `browser_perf_memory` | Profile retained rendering, animation, close/replacement roots, latency, and max RSS | Real child-process receipts and 10k plateau; stage O(N²) ancestor walks/serialization first | AUDIT COMPLETE; harness blocked on 1 |
+| 10 | `live_css_animation_evidence` | Run existing CSS+rAF+Engine2D pixel and external bitmap evidence | Animation spec plus image-taskbar exact-ARGB Electron wrapper PASS | PREFLIGHT PASS; blocked on 1 and merged 2–7 |
 
 Merge order is 2, 3, 4, 5, 6, 7, then evidence lanes 8–10. Root Codex is
 merge owner and final reviewer. Lanes with file overlap return patches instead
 of rebasing or editing shared owners.
+
+The working replacement of `html_css_spec_traceability.md` is rejected because
+it deletes the authoritative RED/FAIL matrix. Restore the origin matrix before
+adding generator metadata, fail-closed merge tests, manifests, explicit WebIR
+ownership, or regenerated manuals.
