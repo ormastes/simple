@@ -203,3 +203,191 @@ this verification.
   `lint` CLI path specifically.
 - Re-run `bin/simple lint` on a trivial file after whichever fix lands to
   confirm the command no longer crashes at all.
+
+## 2026-07-30 (later session): Bug 2 fixed — root cause confirmed and refined, `bin/simple lint` now completes end-to-end
+
+### Root cause: confirmed as cross-module, but refined to the exact mechanism
+
+The previous session's "cross-module global-`var` visibility gap" attribution
+is **confirmed correct**, with the precise mechanism pinned down empirically
+(not just asserted):
+
+The arena arrays (`decl_tag`, `decl_name`, `decl_param_names`,
+`decl_body_stmts`, `decl_field_names`, `decl_imports`, `decl_params`,
+`decl_param_types`, and the sibling `stmt_tag`/`stmt_expr`/`stmt_body`/
+`stmt_name`/`stmt_type_tag` and `expr_tag`/`expr_left`/`expr_right`/
+`expr_args`/`expr_stmts`/`expr_s_val`/`expr_i_val`/`expr_extra` arrays) are
+`var`-declared in their *owning* file (`decl_nodes.spl`, `ast_stmt.spl`,
+`_AstExpr/nodes.spl`). Every one of the ~15 affected lint files in
+`src/compiler/35.semantics/lint/*.spl` imported these by **name**, e.g.
+`use compiler.core.ast.{decl_tag, decl_name, ...}`. Under this interpreter, a
+named `use` import of a plain module-level `var` binds a value that is
+**not a live alias to the writer's storage cell** — reading it from the
+importing file's own scope sees a stale/disconnected copy (observed
+concretely as always length 0, i.e. whatever the array's value was before any
+`push()` in the owning file ever ran), even though the SAME name read
+*inside* the owning file (e.g. `decl_get` before this session's fix, or
+`decl_alloc` itself) sees every write immediately.
+
+This was **ruled out** as being about `ast_reset()` timing, a second reset
+path, a shadowing local, or a re-import creating a fresh module instance:
+`SIMPLE_TRACE_AST_RESET=1` showed exactly one reset before parsing began, and
+`decl_get`'s own guard (`idx >= decl_tag.len()`) fired even on `idx=0` right
+after a single decl was allocated in the same call chain — the array wasn't
+merely short, it was reading as empty from every file except the one that
+wrote it.
+
+**Strong existing evidence read correctly this time:** `ast_decl_prefer_arena()`
+in `decl_nodes.spl` and its env-var mirror fallback (`ast_decl_i64_get`/
+`ast_decl_text_get` etc.) exist for exactly this reason ("Interpreter module
+variables may not persist between calls"), but that mirror is legacy-bootstrap
+gated (`SIMPLE_BOOTSTRAP=1`) and off in the lint CLI path, so it did not apply
+here. The REAL, already-established, always-on fix pattern in this codebase
+is the **owning-module accessor function** — `decl_get_tag`, `decl_get_name`,
+`decl_get_param_names`, `decl_get_body`, `decl_get_fields`, `decl_get_imports`,
+`decl_get_param_types`, `stmt_get_tag`, `stmt_get_expr`, `stmt_get_body`,
+`stmt_get_name`, `stmt_get_type`, `expr_get_tag`, `expr_get_left`,
+`expr_get_right`, `expr_get_args`, `expr_get_stmts`, `expr_get_str`,
+`expr_get_int`, `expr_get_extra` — all of which already existed in
+`decl_nodes.spl` / `ast_stmt.spl` / `_AstExpr/accessors.spl` before this
+session, are already used by other cross-module callers (e.g.
+`enum_discriminant_eval.spl`, `call_edge_utils.spl`), and are already
+bounds-guarded. Calling a *function* across the module boundary works
+correctly under this interpreter (only bare `var` name-binding is broken) —
+the function body executes with the owning module's own live scope, so its
+read of the array is never stale. This matches the task brief's predicted
+fix lever exactly.
+
+### Enumerated call sites (all fixed)
+
+15 lint files read the raw `decl_*` arena arrays directly:
+`argument_count.spl`, `collection_patterns.spl`, `closure_capture.spl`,
+`match_exhaustiveness.spl`, `ignored_return.spl`, `duplicate_typed_args.spl`,
+`unused_vars.spl`, `star_import.spl`, `deprecated.spl`, `use_resolution.spl`,
+`primitive_api_arena.spl`, `stub_impl.spl`, `required_comment.spl`,
+`concurrency_share_nothing.spl`, `unreachable_code.spl` (~35 individual
+`decl_tag[idx]`/`decl_name[idx]`/`decl_param_names[idx]`/
+`decl_body_stmts[idx]`/`decl_field_names[idx]`/`decl_imports[idx]`/
+`decl_params[idx]`/`decl_param_types[idx]` read sites across them).
+
+After fixing those, the crash recurred one arena family down at
+`stmt_tag[s]` (same "index 0, length 0" signature, same mechanism). 11 of
+those same files (all but `argument_count.spl`, `primitive_api_arena.spl`,
+`star_import.spl`, `use_resolution.spl`, which don't walk statement/expr
+bodies) also directly imported and indexed `stmt_tag`/`stmt_expr`/
+`stmt_body`/`stmt_name`/`stmt_type_tag` and `expr_tag`/`expr_left`/
+`expr_right`/`expr_args`/`expr_stmts`/`expr_s_val`/`expr_i_val`/`expr_extra`
+(roughly 270 more read sites, mechanically the same bug).
+
+### Fix applied
+
+Per the task brief's explicit preference, **not** a 300-site bounds-guard
+sweep (which would have converted the crash into silent "lint sees zero
+declarations/statements" — a worse, invisible defect). Instead:
+
+1. Added the one missing accessor, `decl_get_params(idx)`, to `decl_nodes.spl`
+   (mirroring the existing `decl_get_*` guard pattern) — `decl_params` (the
+   raw parameter-id list) had no accessor yet; every other array used already
+   had one.
+2. In all 15 (`decl_*`) + 11 (`stmt_*`/`expr_*`) lint files: changed the
+   `use compiler.core.ast{,_stmt,_expr}.{...}` import lists to import the
+   `*_get_*` accessor functions instead of the raw arrays, and replaced every
+   `array[idx]` read with the matching `accessor(idx)` call.
+3. Three files (`stub_impl.spl`, `required_comment.spl`,
+   `concurrency_share_nothing.spl`) had their own local `*_get_tag`/
+   `*_get_name`/etc. wrapper functions that re-implemented the same
+   bounds-guard on top of the (stale) raw import — those wrappers now simply
+   delegate to the owning-module accessor (e.g. `stub_decl_get_tag(idx):
+   decl_get_tag(idx)`), keeping their call sites unchanged.
+
+This is a **correctness fix**, not a silent-skip guard: the lint checks now
+see the real declaration/statement/expression data (verified below), not an
+empty array masquerading as "nothing to check."
+
+### `SIMPLE_AST_GEN_CHECK`/arena-harden subsystem: evaluated, not the right lever here
+
+The 2026-07-29 "arena harden" / generation-diagnostics subsystem
+(`module_state.spl:48-170`, `SIMPLE_AST_GEN_HARDEN`/`SIMPLE_AST_GEN_CHECK`)
+retires a poisoned snapshot of `decl_tag` into a small ring on `ast_reset()`,
+so a caller holding a *stale-generation* index gets a detectable poison value
+instead of misreading fresh data. That solves a different problem: an index
+from a **previous parse** being read after the arena was legitimately reused.
+Here the index (`idx=0`) was **current-generation** and valid — the bug was
+that the read happened from the wrong module's *copy* of the array, not that
+the arena had rotated underneath it. Wiring the harden ring into `decl_get`
+would not have helped (there was no generation mismatch to detect); routing
+through the owning module's accessor is the correct, and much simpler, lever.
+
+### Verification — REAL, end-to-end, live source (no rebuild)
+
+`bin/simple` is confirmed to interpret `.spl` source directly from disk on
+every invocation (per the earlier verification note), so all of the
+following are live results from the edited source, no redeploy:
+
+```
+$ bin/simple lint /tmp/triv.spl        # val x = 1
+... (unrelated info/warning noise from other files pulled in by lint's own imports)
+Lint passed: all files clean
+$ echo $?
+0
+
+$ bin/simple lint /tmp/triv2.spl       # fn main(): pass
+...
+Lint passed: all files clean
+$ echo $?
+0
+
+$ bin/simple lint src/compiler/35.semantics/lint/_SimdOpportunityLint/byte_checks.spl
+...
+Lint passed: all files clean
+$ echo $?
+0
+
+$ bin/simple lint src/compiler/35.semantics/lint/collection_patterns.spl
+...
+Found 0 error(s), 1 warning(s), 0 auto-fix(es) available
+Lint passed: all files clean
+$ echo $?
+0
+```
+
+`SIMPLE_INTERP_OOB_DEBUG=1` on the same repro after the fix shows **no**
+`[oob-debug]` line at all (previously it fired at `decl_tag[idx]`, then after
+the first fix at `stmt_tag[s]`; now neither fires).
+
+**Confirms the fix produces real answers, not a silent skip:** a synthetic
+8-parameter function (`fn too_many(a,b,c,d,e,f,g,h): ...`) correctly triggers
+`ARG001: Function has 8 parameters (recommended max: 7)` — i.e.
+`check_argument_count` is genuinely walking real declaration data through
+`decl_get_tag`/`decl_get_name`/`decl_get_param_names`, not returning an empty
+list.
+
+### Residual/known-latent scope
+
+- The underlying interpreter defect (a named `use` import of a plain `var`
+  not aliasing the writer's storage across module boundaries) is still
+  **latent** — it was worked around here at the ~300 lint call sites, not
+  fixed at the interpreter level. Any *new* code that imports a raw
+  arena/global `var` by name into a different `.spl` file (instead of calling
+  an owning-module accessor) will hit the same class of bug. This is squarely
+  in `src/compiler_rust/` (interpreter global-variable binding), out of scope
+  for this pure-Simple change per the task brief, and not separately filed as
+  a fresh bug since it is the same mechanism the repo's existing
+  `ast_decl_prefer_arena()`/env-mirror comments already document — the fix
+  here is the accessor-routing pattern the codebase already prescribes for
+  it.
+- Only the arena arrays actually read from `src/compiler/35.semantics/lint/`
+  were converted. Other cross-module raw-array imports elsewhere in the
+  compiler (if any still exist) were not audited or touched — out of scope
+  for this task (unblocking `bin/simple lint`).
+
+### Commits
+
+- `0ecac7798b` (cherry-picked to `main` as `485c705542`): decl-arena family fix
+  (15 lint files + `decl_get_params` accessor).
+- `8b1d14a24f` (cherry-picked to `main` as `d52d73b3b7`): stmt/expr-arena
+  family fix (11 lint files).
+
+Both content-verified landed on `origin/main` via
+`git show origin/main:<path> | grep decl_get_tag` /
+`grep -c "decl_get_tag\|expr_get_tag\|stmt_get_tag"` after push.
