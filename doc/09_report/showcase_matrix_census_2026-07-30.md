@@ -598,3 +598,82 @@ is a one-file, two-line source form with an identified introducing commit
 that compiles `browser_renderer_protocol.spl`, not just this gate.
 
 **Scoreboard: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN.**
+
+## Canonical deploy + parser fix verified; wall 8 traced to a THIRD parser surface (2026-07-30)
+
+### Deployment record #2 (canonical recipe)
+
+| Field | Value |
+|---|---|
+| Recipe | `cargo build --profile bootstrap -p simple-driver --features llvm` (6 min) |
+| Artifact | 154,095,344 B, sha256 `ea4af9a4498297e3…`, built from tip `9ea0b39962d` (contains parser fix `023a60a05aa`) |
+| Pre-deploy gates | all 4 markers PRESENT (2/5/5/1); `llvm::`=617, `lld::`=0; size in the ~154 MB band; `--version` sane; **parser fix confirmed present before deploying** |
+| Deployed to | `bin/release/x86_64-unknown-linux-gnu/simple` via `.new` + `mv` |
+| Rollback | `simple.pre-parserfix-79ca755d-2026-07-30.bak` (154,094,616 B) |
+| Post-deploy provenance | `backends: llvm::=57617 lld::=0`, all 4 markers PRESENT |
+
+LLVM remains restored; this deploy swapped one LLVM build for a newer
+LLVM build that additionally carries the parser fix.
+
+### The parser fix WORKS — PROVED end-to-end
+
+Running the gate's exact `native-build` command with the newly deployed
+seed:
+
+- **before:** failed in ~1 s with
+  `failed to parse …/browser_renderer_protocol.spl at 559:38 during
+  discovery: Unexpected token: expected expression, found Newline`;
+- **after:** **zero** occurrences of that error and zero `during
+  discovery` failures — it progressed past discovery into real
+  compilation and was still compiling at the 10-minute mark.
+
+So wall 8's source cause is genuinely fixed.
+
+### But the GATE is still blocked — by a THIRD parser surface (PROVED)
+
+The gate must pass a **non-seed** `SIMPLE_BIN` (wall 3), so it runs
+`build/redeploy_out/simple_stage2`. Reproducing the gate's exact
+`native-build --source … --entry …` invocation *outside* the gate:
+
+| Binary running native-build | Discovery result |
+|---|---|
+| deployed seed (fixed, today) | **passes discovery** |
+| `simple_stage2` (2026-07-28) | **still fails** at 559:38 |
+
+And stage2's *other* path disagrees with its own build path:
+`stage2 compile --format=smf` **accepts** the continuation (both the
+minimal repro and the real file), while `stage2 native-build` **rejects**
+it. The error text comes from
+`src/compiler_rust/compiler/src/pipeline/native_project/discovery.rs:904`
+— i.e. **Rust** code — so `simple_stage2` is a hybrid that embeds its own
+copy of the Rust pipeline, compiled 2026-07-28, with the pre-fix parser.
+My fix cannot reach it: it is baked into that binary.
+
+**Consequence:** wall 8 for the gate is no longer a source defect (fixed)
+nor the deployed toolchain (fixed) — it is **stale embedded Rust code
+inside `simple_stage2`**. Clearing it requires a fresh self-hosted /
+stage2 build produced from current source, which the bootstrap-redeploy
+lane owns. That rebuild is now *unblocked* by the parser fix: the seed can
+finally parse the offending file, which it could not do this morning.
+
+### Also confirmed: the `--source` widening hazard is real
+
+The gate's `native-build --source "$ENTRY"` with `SIMPLE_LIB=src` emits
+`[memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider
+narrowing scope`, and the run exceeded **10 minutes** without finishing.
+So even once stage2 is rebuilt, this gate's build step is a ~10 min+
+operation, not a quick check — budget accordingly.
+
+### Cells #4-#6
+
+**BLOCKED**, unchanged in status but with the barrier reduced again and
+now owned elsewhere: walls 1-7 pass, wall 8's source and toolchain causes
+are both fixed, and the only remaining blocker is a stale `simple_stage2`.
+
+Two claims kept separate, as required: this host now runs a **canonical
+LLVM-linked seed**, which is *not* the same as running the pure-Simple
+tool. The deployed binary still self-identifies as a bootstrap seed, and
+the gate still rejects seeds; a pure-Simple self-hosted `SIMPLE_BIN` is a
+separate open problem.
+
+**Scoreboard: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN.**
