@@ -58,3 +58,39 @@ investigation: not "all fn-param calls" but something particular to this
 function/callsite (candidates: the `ui.standalone` dotted package-name path, the
 specific fn-type param signature `fn(UIEvent)`, or this module's discovery/export
 into the closure). One symbol from a clean full-CLI link + deploy.
+
+## Update 2026-07-30 (new pair, same mangler class — worked around)
+
+Two more undefined symbols surfaced at the link stage, same bare-extern class:
+
+```
+"_extract_compiler_coverage_manifest_sdn", referenced from:
+    _nogc_sync_mut__test_runner__test_runner_execute__run_test_file_interpreter (mod_1370.o)
+    _nogc_sync_mut__test_runner__test_runner_execute__run_test_file_native (mod_1370.o)
+"_strip_compiler_coverage_manifest_blocks", referenced from:
+    _nogc_sync_mut__test_runner__test_runner_execute__run_test_file_interpreter (mod_1370.o)
+```
+
+Both are called from `run_test_file_interpreter` / `run_test_file_native` in
+`src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl`, and both are
+genuinely defined and exported in the sibling module
+`src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl` (lines 489 and
+511; exported at line 585/592). Not a stale reference — both names exist with
+matching signatures.
+
+Root: `test_runner_execute.spl` imported them (among many other names) via the
+`std.test_runner.test_executor_parsing` variant-resolution facade (`std.` strips
+to a per-family lookup rather than the concrete `nogc_sync_mut` tree), the same
+facade-indirection shape as the already-fixed
+`run_test_api_server_with_inject` case (`app.ui.standalone` → `app.ui.standalone.bootstrap`,
+commit `b51e19436d`). Applied the same source-level workaround: pulled these two
+symbols out of the `std.test_runner.test_executor_parsing` import block and out
+of the file's `export use std.test_runner.test_executor_parsing.{...}`
+re-export line, and added a dedicated
+`export use nogc_sync_mut.test_runner.test_executor_parsing.{extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_blocks}`
+pointing straight at the concrete defining module (also preserves the existing
+re-export of these two names to consumers of `test_runner_execute.spl`). This is
+a workaround for the Rust-seed mangler bare-extern-on-facade-re-export defect in
+`src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`, not a
+source-level bug fix — the underlying mangler defect is still open and will
+presumably recur for the next facade-crossing peer call.
