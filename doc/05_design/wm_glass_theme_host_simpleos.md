@@ -234,8 +234,8 @@ surface, and alpha-composites the translucent `background-color`
 transport; it is not the selected glass tint. Requested blur `30px` is
 explicitly realized as blur `4px`, with realized blur/saturation keys and a
 reduction reason. `draw_ir_adv` then paints the existing border logic. The WM
-body is the requested material surface; the titlebar remains `not-requested`
-for backdrop material in this slice. The fallback witness
+body and titlebar are requested material surfaces when the selected backend
+policy admits them. The fallback witness
 `cpu-composited-material` with reason `native-device-backdrop-path-pending`
 means CPU realization exists while native device realization is still pending;
 it must never be reported as a device fallback/readback receipt.
