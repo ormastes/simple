@@ -1612,8 +1612,9 @@ pixels, and performance evidence remain release-blocking.
   shims remain rejected. Attempt 26 is reserved until the import/runtime owner
   repair passes focused gates. `SIMPLEOS_STAGE2_FONT: BLOCKED`; broader
   `STATUS: FAIL`.
-- restored-worktree-resume-2026-07-30: Source checkpoint `39c1863426a` is
-  restored in an isolated clean worktree. Historical attempt-24/tool-12
+- restored-worktree-resume-2026-07-30: The RV64 source repair introduced at
+  `39c1863426a` is restored in an isolated clean worktree; attempt 28 must bind
+  the exact clean `HEAD` at producer launch. Historical attempt-24/tool-12
   artifacts disappeared with the old temporary worktree and are not current
   admission evidence. Stage2 attempt 27 was stopped before Stage2 after a
   competing full bootstrap appeared; its path will not be reused. Resume with

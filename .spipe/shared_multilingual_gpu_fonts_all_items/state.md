@@ -108,12 +108,13 @@ SimpleOS specs and ten canonical manuals. The current manual inventory is
 `0 missing / 9 stale / 1 source-current / 0 accepted receipts`; only
 `selected_arabic_spec` has a source-current mirror, and that does not replace a
 sealed zero-stub receipt. Canonical Stage2 attempt 24 and scoped-tool attempt 12
-are now admitted at clean checkpoint `2a7e354c116`; both passed independent
-canonical checks. The current blocker is RV64 attempt 25: the canonical runtime
-object compiles, but import-level entry closure has a 618-symbol pre-GC
-unresolved surface, including 597 hosted or unrelated raw runtime APIs, with at
-least twenty proven live. No ELF exists, so QEMU crop calibration,
-exact-ten execution, and the ten manual receipts have not run. Stage 3,
+were historically admitted at clean checkpoint `2a7e354c116`; their ignored
+artifacts disappeared with the old temporary worktree and cannot admit current
+source. The RV64 owner repair introduced at `39c1863426a` is source-complete.
+The current blocker is a fresh physical Stage2 attempt 28 bound to the exact
+clean producer `HEAD`, followed by scoped-tool attempt 13. No ELF exists, so
+reserved RV64 attempt 26, QEMU crop calibration, exact-ten attempt 13, and the
+ten manual attempt-13 receipts have not run. Stage 3,
 Stage 4, non-SimpleOS GPU hosts, and the broader cross-platform matrix remain
 deferred from this delivery scope. Current status is
 `SIMPLEOS_STAGE2_FONT: BLOCKED`; the broader `STATUS: FAIL` is unchanged.

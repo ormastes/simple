@@ -11,11 +11,13 @@ Final done-mark owner: highest-capability `/root`
 
 ## 2026-07-30 restored-worktree execution status
 
-The source checkpoint under execution is
-`39c1863426a8c1379ee3c5584bb6c3d3a78f9970`. The old temporary worktree and
-its ignored Stage2/QEMU/spec/manual artifacts disappeared during the host Btrfs
-failure; the tracked source, plans, historical identities, and pushed branch
-survived. The filesystem has recovered.
+The RV64 source repair was introduced at
+`39c1863426a8c1379ee3c5584bb6c3d3a78f9970`. Stage2 attempt 28 and every
+downstream receipt must instead bind the exact clean `HEAD` observed when its
+producer starts. The old temporary worktree and its ignored
+Stage2/QEMU/spec/manual artifacts disappeared during the host Btrfs failure;
+the tracked source, plans, historical identities, and pushed branch survived.
+Filesystem allocation is usable again.
 
 Physical Stage2 attempt 27 was stopped before Stage2 after preflight because an
 unrelated full bootstrap and two Rust builds appeared. Its immutable logs are

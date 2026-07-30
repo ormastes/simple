@@ -2,14 +2,16 @@
 
 **ID:** stage2-rv64-full-gui-runtime-closure-2026-07-30
 **Severity:** blocker for `SIMPLEOS_STAGE2_FONT`
-**Checkpoint:** `39c1863426a8c1379ee3c5584bb6c3d3a78f9970`
+**Source repair commit:** `39c1863426a8c1379ee3c5584bb6c3d3a78f9970`
+**Admission checkpoint:** exact clean `HEAD` at Stage2 attempt-28 launch
 
 ## Result
 
 Historical Stage2 attempt 24 and scoped-tool attempt 12 were admitted at
 `2a7e354c116`; their ignored artifacts disappeared with the old temporary
 worktree and cannot admit the current checkpoint.
-RV64 attempt 25 compiles the canonical `_boot_full_gui_runtime.o`, but the
+Historical RV64 attempt 25 compiled the canonical `_boot_full_gui_runtime.o`,
+but the
 production `gui_entry_desktop.spl` object graph has a 618-symbol unresolved
 pre-GC surface: 597 raw `rt_*` APIs, six qualified symbols, and fifteen other
 symbols. lld proves at least twenty are live before its error limit. The raw
