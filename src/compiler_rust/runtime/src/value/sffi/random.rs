@@ -98,19 +98,7 @@ pub extern "C" fn rt_random_hex(len: i64) -> crate::value::RuntimeValue {
     value
 }
 
-#[no_mangle]
-pub extern "C" fn rt_random_hex_exact(len: i64) -> crate::value::RuntimeValue {
-    let value = secure_random_hex_exact_with(len, |dest| fill_random_bytes(dest));
-    match value {
-        Some(mut hex) => {
-            let value = unsafe { crate::value::collections::rt_string_new(hex.as_ptr(), hex.len() as u64) };
-            secure_wipe(&mut hex);
-            value
-        }
-        None => crate::value::RuntimeValue::NIL,
-    }
-}
-
+#[cfg(test)]
 fn secure_random_hex_exact_with<F, E>(len: i64, fill: F) -> Option<Vec<u8>>
 where
     F: FnOnce(&mut [u8]) -> Result<(), E>,
@@ -221,7 +209,6 @@ mod tests {
     fn secure_entropy_policy_rejects_provider_failure_and_wrong_length() {
         assert!(secure_random_hex_exact_with(16, |_dest| Err::<(), ()>(())).is_none());
         assert!(secure_random_hex_exact_with(15, |_dest| Ok::<(), ()>(())).is_none());
-        assert!(rt_random_hex_exact(15).is_nil());
     }
 
     #[test]
@@ -240,8 +227,5 @@ mod tests {
             Ok::<(), ()>(())
         })
         .is_none());
-        let live = rt_random_hex_exact(16);
-        assert!(!live.is_nil());
-        assert_eq!(rt_string_len(live), 32);
     }
 }

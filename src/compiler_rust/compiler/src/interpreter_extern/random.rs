@@ -125,24 +125,6 @@ pub fn rt_random_hex_fn(args: &[Value]) -> Result<Value, CompileError> {
     )
 }
 
-pub fn rt_random_hex_exact_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let len = args
-        .first()
-        .ok_or_else(|| {
-            CompileError::semantic_with_context(
-                "rt_random_hex_exact expects 1 argument".to_string(),
-                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
-            )
-        })?
-        .as_int()?;
-    Ok(
-        match secure_random_hex_exact_with(len, |dest| rand::rngs::OsRng.try_fill_bytes(dest)) {
-            Some(hex) => Value::text(hex),
-            None => Value::Nil,
-        },
-    )
-}
-
 fn random_hex_with<F, E>(len: usize, fill: F) -> Option<String>
 where
     F: FnOnce(&mut [u8]) -> Result<(), E>,
@@ -157,6 +139,7 @@ where
     Some(hex)
 }
 
+#[cfg(test)]
 fn secure_random_hex_exact_with<F, E>(len: i64, fill: F) -> Option<String>
 where
     F: FnOnce(&mut [u8]) -> Result<(), E>,

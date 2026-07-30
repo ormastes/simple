@@ -979,7 +979,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_driver_supports_zero_copy",
     // Random operations
     "rt_random_hex",
-    "rt_random_hex_exact",
     // Hash operations
     "rt_sha1_new",
     "rt_sha1_write",
@@ -2140,12 +2139,8 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_string_trim_start"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_time_now_unix_micros"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_random_hex"));
-        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_random_hex_exact"));
+        assert!(!RUNTIME_SYMBOL_NAMES.contains(&"rt_random_hex_exact"));
         assert_eq!(symbol_tier_of("rt_random_hex"), RuntimeSymbolTier::Sys);
-        assert_eq!(
-            symbol_tier_of("rt_random_hex_exact"),
-            RuntimeSymbolTier::Sys
-        );
         assert_eq!(symbol_class_of("rt_random_hex"), RuntimeSymbolClass::HostedOnly);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_volatile_read_u64"));
