@@ -2,7 +2,7 @@
 # SFFI pattern for cryptographic operations
 # Dependencies: ring, argon2 (Rust crates)
 
-use std.nogc_sync_mut.io.sffi_common.{SffiResult, sffi_success, sffi_error, is_empty_string, is_valid_hex}
+use std.nogc_sync_mut.io.sffi_common.{SffiResult, sffi_success, sffi_error, is_empty_string}
 
 # ============================================================================
 # Tier 1: Extern Function Declarations (Raw SFFI)
@@ -48,6 +48,7 @@ extern fn rt_derive_key_pbkdf2(password: text, salt: text, iterations: i64, leng
 
 extern fn rt_random_bytes(length: i64) -> text
 extern fn rt_random_hex(length: i64) -> text?
+extern fn rt_random_hex_exact(length: i64) -> text?
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
@@ -320,12 +321,22 @@ fn secure_random_hex_exact(length: i64) -> Result<text, text>:
     """Return one canonical 16-byte platform-CSPRNG value as lowercase hex."""
     if length != 16:
         return Err("secure entropy length must be exactly 16 bytes")
-    val entropy = rt_random_hex(length) ?? ""
-    if entropy.len() != 32 or not is_valid_hex(entropy) or entropy.lower() != entropy:
-        return Err("secure entropy provider failed")
-    if entropy.replace("0", "").len() == 0:
+    val entropy = rt_random_hex_exact(length) ?? ""
+    if not _secure_entropy_hex_valid(entropy):
         return Err("secure entropy provider failed")
     Ok(entropy)
+
+fn _secure_entropy_hex_valid(value: text) -> bool:
+    if value.len() != 32:
+        return false
+    var saw_nonzero = false
+    for i in 0..value.len():
+        val byte = value.byte_at(i)
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+            return false
+        if byte != 48:
+            saw_nonzero = true
+    saw_nonzero
 
 fn random_salt() -> text:
     """Generate random salt for password hashing (16 bytes, hex)

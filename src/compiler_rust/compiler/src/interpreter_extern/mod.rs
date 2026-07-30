@@ -1513,6 +1513,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ptr_write_u8", memory::rt_ptr_write_u8);
     insert_simple!("rt_random_getstate", random::rt_random_getstate_fn);
     insert_simple!("rt_random_hex", random::rt_random_hex_fn);
+    insert_simple!(
+        "rt_random_hex_exact",
+        random::rt_random_hex_exact_fn
+    );
     insert_simple!("rt_random_i64", random::rt_random_i64_fn);
     insert_simple!("rt_random_next", random::rt_random_next_fn);
     insert_simple!("rt_random_randint", random::rt_random_randint_fn);
@@ -2580,6 +2584,11 @@ mod tests {
     #[test]
     fn dispatch_registers_scalar_stage4_test_bridge() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cli_run_tests_process_args"));
+    }
+
+    #[test]
+    fn dispatch_registers_trusted_secure_entropy_owner() {
+        assert!(EXTERN_DISPATCH.contains_key("rt_random_hex_exact"));
     }
 
     /// Guard for #159: a deployed seed binary built before commit

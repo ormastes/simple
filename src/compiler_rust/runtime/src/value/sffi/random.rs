@@ -3,6 +3,7 @@
 use rand::RngCore;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroize;
 
 const LCG_A: u64 = 1_664_525;
 const LCG_C: u64 = 1_013_904_223;
@@ -90,14 +91,55 @@ pub extern "C" fn rt_random_hex(len: i64) -> crate::value::RuntimeValue {
     if fill_random_bytes(&mut bytes).is_err() {
         return crate::value::RuntimeValue::NIL;
     }
-    let mut hex = vec![0u8; n * 2];
+    let mut hex = encode_hex(&bytes);
+    secure_wipe(&mut bytes);
+    let value = unsafe { crate::value::collections::rt_string_new(hex.as_ptr(), hex.len() as u64) };
+    secure_wipe(&mut hex);
+    value
+}
+
+#[no_mangle]
+pub extern "C" fn rt_random_hex_exact(len: i64) -> crate::value::RuntimeValue {
+    let value = secure_random_hex_exact_with(len, |dest| fill_random_bytes(dest));
+    match value {
+        Some(mut hex) => {
+            let value = unsafe { crate::value::collections::rt_string_new(hex.as_ptr(), hex.len() as u64) };
+            secure_wipe(&mut hex);
+            value
+        }
+        None => crate::value::RuntimeValue::NIL,
+    }
+}
+
+fn secure_random_hex_exact_with<F, E>(len: i64, fill: F) -> Option<Vec<u8>>
+where
+    F: FnOnce(&mut [u8]) -> Result<(), E>,
+{
+    if len != 16 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    if fill(&mut bytes).is_err() || bytes.iter().all(|byte| *byte == 0) {
+        secure_wipe(&mut bytes);
+        return None;
+    }
+    let hex = encode_hex(&bytes);
+    secure_wipe(&mut bytes);
+    Some(hex)
+}
+
+fn encode_hex(bytes: &[u8]) -> Vec<u8> {
+    let mut hex = vec![0u8; bytes.len() * 2];
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     for (idx, byte) in bytes.iter().enumerate() {
         hex[idx * 2] = DIGITS[(byte >> 4) as usize];
         hex[idx * 2 + 1] = DIGITS[(byte & 0x0f) as usize];
     }
-    bytes.fill(0);
-    unsafe { crate::value::collections::rt_string_new(hex.as_ptr(), hex.len() as u64) }
+    hex
+}
+
+fn secure_wipe(bytes: &mut [u8]) {
+    bytes.zeroize();
 }
 
 fn fill_random_bytes(buf: &mut [u8]) -> std::io::Result<()> {
@@ -114,7 +156,7 @@ where
 {
     let result = fill(buf);
     if result.is_err() {
-        buf.fill(0);
+        secure_wipe(buf);
     }
     result
 }
@@ -158,7 +200,7 @@ mod tests {
         })
         .expect("deterministic entropy provider");
         assert_eq!(bytes.len(), 16);
-        bytes.fill(0);
+        secure_wipe(&mut bytes);
     }
 
     #[test]
@@ -173,5 +215,33 @@ mod tests {
         });
         assert!(result.is_err());
         assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn secure_entropy_policy_rejects_provider_failure_and_wrong_length() {
+        assert!(secure_random_hex_exact_with(16, |_dest| Err::<(), ()>(())).is_none());
+        assert!(secure_random_hex_exact_with(15, |_dest| Ok::<(), ()>(())).is_none());
+        assert!(rt_random_hex_exact(15).is_nil());
+    }
+
+    #[test]
+    fn secure_entropy_policy_accepts_exact_lowercase_hex_and_rejects_zero() {
+        let exact = secure_random_hex_exact_with(16, |dest| {
+            dest.fill(0xab);
+            Ok::<(), ()>(())
+        })
+        .expect("nonzero deterministic provider");
+        assert_eq!(exact.len(), 32);
+        assert!(exact
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)));
+        assert!(secure_random_hex_exact_with(16, |dest| {
+            dest.fill(0);
+            Ok::<(), ()>(())
+        })
+        .is_none());
+        let live = rt_random_hex_exact(16);
+        assert!(!live.is_nil());
+        assert_eq!(rt_string_len(live), 32);
     }
 }

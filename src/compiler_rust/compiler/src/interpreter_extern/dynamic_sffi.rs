@@ -28,6 +28,7 @@
 use crate::error::CompileError;
 use crate::plugin_manifest;
 use crate::value::Value;
+use simple_common::{symbol_class_of, RuntimeSymbolClass, RUNTIME_SYMBOL_NAMES};
 use simple_simd::{active_simd_tier, SimdTier};
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -809,6 +810,13 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
         }
     }
 
+    if !dynamic_runtime_symbol_allowed(name) {
+        return Some(Err(CompileError::runtime(format!(
+            "dynamic SFFI dispatch denied hosted runtime symbol '{}'",
+            name
+        ))));
+    }
+
     // --- Step 1: Try the main runtime library ---
     let runtime_result = {
         let active_tier = active_simd_tier();
@@ -864,6 +872,13 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
     }
 
     None
+}
+
+fn dynamic_runtime_symbol_allowed(name: &str) -> bool {
+    if !name.starts_with("rt_") {
+        return true;
+    }
+    RUNTIME_SYMBOL_NAMES.contains(&name) && symbol_class_of(name) == RuntimeSymbolClass::CoreRequired
 }
 
 #[cfg(test)]
@@ -938,5 +953,13 @@ mod tests {
                 runtime_variant_library_name(SimdTier::X86_64Sse2)
             ))
         );
+    }
+
+    #[test]
+    fn dynamic_runtime_denies_hosted_symbols_but_keeps_core_and_unknown_paths() {
+        assert!(!dynamic_runtime_symbol_allowed("rt_random_hex_exact"));
+        assert!(!dynamic_runtime_symbol_allowed("rt_unregistered_host_call"));
+        assert!(dynamic_runtime_symbol_allowed("rt_alloc"));
+        assert!(dynamic_runtime_symbol_allowed("plugin_manifest_owned_symbol"));
     }
 }
