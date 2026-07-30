@@ -677,3 +677,50 @@ the gate still rejects seeds; a pure-Simple self-hosted `SIMPLE_BIN` is a
 separate open problem.
 
 **Scoreboard: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN.**
+
+## Cell #1 `widget × headless (interpreted)` verified GREEN (2026-07-30)
+
+Full evidence: `doc/09_report/showcase_cell_widget_headless_green_2026-07-30.md`.
+
+Pass criteria were declared **before** the first run, because this cell's
+claim is more diffuse than cell #2's single checksum. All matched exactly,
+first properly-configured attempt:
+
+| Criterion | Claimed | Observed |
+|---|---|---|
+| 640×480 P6 PPM artifact | `P6 640 480 255` | `P6 640 480 255` |
+| nonzero pixels | 921,600 / 921,600 | 921,600 / 921,600 |
+| distinct byte values | 74 | 74 |
+| widget types | 24 | 24 |
+| font cold / warm-hits | 10 / 20 | 10 / 20 |
+| 320×240 repeat, distinct bytes | 64 | 64 |
+
+`showcase_font_loaded=true`, font identity equals the expected identity
+(`sha256=c4f5361c…;axes=static`), software offscreen lane, entry
+`examples/06_io/ui/widget_showcase_gui.spl` (the true `examples/` path).
+Binary: canonical `ea4af9a4498297e3…` (154,095,344 B, 4/4 markers,
+`llvm::`=617). Source commit `a7a5bb3c0f2`. 95 s at 640×480, 46 s at
+320×240. PPM payload sha256 `9c6b02ff035fcaa23c6956a4…`.
+
+Two notes for whoever re-runs it:
+- `SHOWCASE_PPM` is **required** to get an artifact at all — without it the
+  run ends "No GUI requested … headless only." and writes no file, so the
+  nonzero/distinct criteria cannot be evaluated (the other three are still
+  visible in the trace).
+- The claim's "921,600 nonzero px" counts **RGB bytes**; the program prints
+  `rendered 307200 px`, and 307,200 × 3 = 921,600. Consistent, not a
+  discrepancy — worth stating so nobody reads it as a mismatch.
+
+The font-tree trap from cell #2 was avoided by construction: the run used a
+worktree at the target commit with `find assets/fonts -type f | wc -l` = 57
+verified beforehand, never the shared working copy (whose HEAD predates the
+restore `cdadda01da2` and which has `core.sparseCheckout=true`, so
+`assets/fonts` is empty under a completely clean `git status`).
+
+**Scoreboard: 2 GREEN, 0 CLAIMED, 5 BLOCKED, 0 UNKNOWN.**
+
+Both headless cells are now verified on linux-x86_64 with today's canonical
+binary: `2D × headless` (landed `3b3fe52cbb7`) and `widget × headless`
+(this pass). No cell remains in CLAIMED — every remaining cell is BLOCKED
+with a named cause, and the campaign's top line is, for the first time,
+backed by artifacts produced on this host rather than by inherited reports.
