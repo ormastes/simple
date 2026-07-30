@@ -916,3 +916,28 @@ Root remains merge owner and final reviewer. Batch 19 does not change existing
 inventory/scenario accounting except where the canonical HTML/CSS plan
 explicitly reclassifies `<abbr>` and extends the animation row. No runtime,
 docgen, performance, full-browser, goal, or aggregate HTML/CSS PASS is claimed.
+
+## Production browser batch 20/21 reconciliation (2026-07-30)
+
+Exact repository HEAD:
+`08de37b0902b3d703f3d1731ba2f44dc6c18b1a9`.
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `stop_pointer_retirement` | Stop retires parent pointer ownership only after command admission, retains committed content/resources, and rejects a stale release. | INTEGRATED `a05a0e96e3e`; STATIC/UNEXECUTED |
+| `css_implicit_keyframe_endpoints` | Per-property omitted keyframe endpoints synthesize the underlying value; incompatible values interpolate discretely. | INTEGRATED `0e4b75b167b`; STATIC/UNEXECUTED |
+| `html_time_inline_flow` | Native `<time>` matches `<span>` inline geometry, Draw IR text, and pixels while a forced block remains the negative control. | INTEGRATED `7b290473ae6`; STATIC/UNEXECUTED |
+| `js_microtask_fifo` | Promise microtasks drain through a FIFO cursor and compact once at the callback cap instead of copying every remaining prefix. | INTEGRATED `055605e866c`; STATIC/UNEXECUTED, PERFORMANCE UNMEASURED |
+| `disabled_control_pointer` | Hosted pointer input suppresses effectively disabled controls, including disabled-fieldset ancestry, while retaining the first-legend exception. | INTEGRATED `55a5e9552b2`; STATIC/UNEXECUTED |
+| `history_form_state` | Back/Forward restores bounded serialized edited controls while Reload rebuilds committed source. | INTEGRATED `d78e613f3d2`; STATIC/UNEXECUTED |
+| `js_timer_heap` | Pending timers use nextTick, deadline, and creation-id heap order while preserving cancellation, interval, and 4,096-task ordering. | INTEGRATED `cbb8027d556`; STATIC/UNEXECUTED, PERFORMANCE UNMEASURED |
+| `https_303_head` | HTTPS 303 preserves GET/HEAD, rewrites other methods to GET, and strips representation headers only on rewrite. | INTEGRATED `fb451aa9914`; STATIC/UNEXECUTED |
+| `bookmark_snapshot_revision` | Logical bookmark changes advance one revision, no-ops remain stable, and revision-qualified target IDs reject stale shifted bookmarks. | INTEGRATED `a95537545d3`; STATIC/UNEXECUTED |
+| `logical_sizing_writing_mode` | Logical size/min/max declarations map through the final inherited/important writing-mode axis with authored-order, Draw IR, and Engine2D controls. | INTEGRATED `08de37b0902`; STATIC/UNEXECUTED |
+| `D3` | Generation-qualified DOM dispatch has one remaining `document_route` optional/non-optional type blocker. | HELD / STOPPED / UNCOMMITTED; no SSpec/manual/merge/PASS |
+| `security_authority_921fd1` | The renderer authority candidate permits renewable authority instead of one-use consumption. | REJECTED / P0; not pending or accepted |
+| `stage4_admission` | No provenance-qualified current full CLI has been admitted for this tranche. | NONE; no runtime/docgen/performance admission |
+
+Root remains merge owner and final reviewer. These static integrations do not
+supply a target-runtime, docgen, performance, aggregate HTML/CSS, full-browser,
+or goal PASS.

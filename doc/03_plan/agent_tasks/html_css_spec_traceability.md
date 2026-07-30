@@ -48,7 +48,7 @@ Frozen helpers:
 
 | Lane | Result |
 |---|---|
-| HTML element traceability | RED: 12 Full, 66 Partial remaining, 14 bounded selected-profile rows (`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`,`menu`,`small`), 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
+| HTML element traceability | RED: 12 Full, 64 Partial remaining, 16 bounded selected-profile rows (`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`,`menu`,`small`,`abbr`,`time`), 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
 | Implemented CSS traceability | RED: self-satisfying 284 count, unrecognized and metadata-only claims |
 | Unsupported CSS classification | 92 production, 23 speech/aural, 1 deprecated, 1 false scrape |
 | SSpec/manual quality | FAIL: missing plan/REQs, stale manuals/counts, no executed evidence |
@@ -66,7 +66,11 @@ Frozen helpers:
 | HTML `figure` selected profile | Landed in `897368fb592`: selected UA margins lower through canonical Web layout to exact DrawIR geometry and Engine2D pixels; static evidence is held and qualified execution/docgen remain unavailable |
 | HTML `menu` selected profile | Landed in `b107a4e2a9e`: selected LTR UA list spacing lowers through canonical Web layout to exact DrawIR geometry and Engine2D pixels; static evidence is held and qualified execution/docgen remain unavailable |
 | HTML `small` selected profile | Landed in `b9e1a0e6707`: selected medium-UA `smaller` maps inherited 16 px text to 13 px through semantic style, baseline layout, DrawIR text, and absolute Engine2D pixel discriminators; static evidence is held and qualified execution/docgen remain unavailable |
+| HTML `abbr` selected profile | Landed in `8beb64585b2`: native `<abbr>` remains in inline flow with exact semantic/style/layout/DrawIR/pixel controls; static evidence is held and qualified execution/docgen remain unavailable |
+| HTML `time` selected profile | Landed in `7b290473ae6`: native `<time>` matches `<span>` inline geometry, DrawIR text advances, and pixels while a forced block remains the negative control; static evidence is held and qualified execution/docgen remain unavailable |
 | CSS `text-transform` DrawIR parity | Landed in `e7af94e921c`: the canonical DrawIR text owner applies the computed transform and existing RTL reversal before metrics and every fallback/shaped/resolved text command; literal-uppercase command geometry/font payload and full CPU-DrawIR pixels are the exact control; static evidence is held |
+| CSS implicit keyframe endpoints | Landed in `0e4b75b167b`: omitted per-property endpoints synthesize the underlying value, incompatible values interpolate discretely, and the four-step scenario traces exact scheduler, DrawIR, and Engine2D results; static evidence is held and qualified execution/docgen remain unavailable |
+| CSS logical sizing and writing mode | Landed in `08de37b0902`: logical size/min/max declarations map through final horizontal, vertical, and sideways writing-mode winners with authored-order, DrawIR, and Engine2D pixel controls; static evidence is held and qualified execution/docgen remain unavailable |
 | Padding cascade order | Landed in `9f720c62c72`: one linear declaration-family resolver preserves authored shorthand, physical, and horizontal-LTR logical order while ignoring malformed values; exact semantic-to-pixel evidence present |
 | Fractional opacity siblings | Landed in `9f720c62c72`: same-size clipped sibling roots use viewport-area-bounded cropped Draw IR batches; backdrop and differing-size cases fail closed, preserving the single Engine2D offscreen pool |
 | Signed animation time and script epoch | Landed in `9f720c62c72`: negative second/millisecond parsing reaches exact consecutive frames, and unrelated SimpleScript stylesheet replacement preserves an unchanged animation signature |

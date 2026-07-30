@@ -2583,3 +2583,27 @@ implementation in progress / target evidence blocked
   Resumption requires the repository-wide A-through-E migration. The
   `ef90c16b194` generation-safe GC design remains PROPOSED/RED. No goal
   completion or runtime PASS is claimed.
+- production browser batch 20/21 reconciliation (2026-07-30): exact source
+  HEAD `08de37b0902b3d703f3d1731ba2f44dc6c18b1a9` includes ten bounded
+  static/TDD repairs. Stop retires parent pointer ownership after command
+  admission (`a05a0e96e3e`); CSS animation synthesis uses the underlying value
+  for omitted per-property endpoints (`0e4b75b167b`); `<time>` remains in
+  canonical inline flow (`7b290473ae6`); JavaScript Promise microtasks drain
+  through a FIFO cursor (`055605e866c`); hosted pointer input suppresses
+  effectively disabled controls while preserving the first-legend exception
+  (`55a5e9552b2`); history traversal restores bounded serialized form state
+  while Reload rebuilds committed source (`d78e613f3d2`); pending JavaScript
+  timers use nextTick/deadline/creation-id heap order (`cbb8027d556`); HTTPS
+  303 preserves GET/HEAD and rewrites other methods to GET
+  (`fb451aa9914`); bookmark-list mutations publish revision-qualified snapshot
+  identities while logical no-ops remain stable (`a95537545d3`); and logical
+  sizing maps through the final writing-mode axis before canonical Web layout,
+  Draw IR, and Engine2D (`08de37b0902`). All ten rows remain static/unexecuted;
+  no qualified runtime, docgen, performance, aggregate HTML/CSS, full-browser,
+  or goal PASS is claimed.
+- batch-20/21 held and rejected work: D3 generation-qualified DOM dispatch is
+  HELD/STOPPED/UNCOMMITTED on one remaining `document_route`
+  optional/non-optional type blocker; it has no accepted SSpec, manual, merge,
+  or PASS. Security candidate `921fd1` is REJECTED/P0 because renderer
+  authority is renewable rather than one-use; it is not pending or accepted.
+  Stage-4 admission remains NONE and no runtime claim is made.
