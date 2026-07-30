@@ -27,7 +27,8 @@ implemented, and what is not:
 **Real today** — the extension kernel lives in
 `src/lib/editor/extensions/` (not `src/app/ide/`): SDN manifests with typed
 decode and line/col diagnostics, `CommandRegistry` with typed handlers and
-first-wins conflict policy, lazy activation with once-per-activation hooks,
+first-wins conflict policy, lazy activation for disk-discovered extensions
+with once-per-activation hooks,
 Disposable lifecycles, default-deny permissions with canonical path
 containment, and the settings/menus/keybindings registries. Writer, Sheets and
 Slides route their toolbar/menu actions through `CommandRegistry` instead of
@@ -36,6 +37,14 @@ layouts/element kinds are extensible registries; Writer saves through a
 `DocumentCodec` and Sheets has a formula-preserving workbook codec. Fourteen
 builtin manifests are indexed, and `ide_capabilities_live()` reports each
 capability's real state (`declared → indexed → activatable → bound`).
+
+Caveat measured 2026-07-30: of those registries, only `CommandRegistry`,
+`LanguageIndex` and the event listeners have consumers outside the kernel. The
+`settings.spl` / `menus.spl` / `keybindings.spl` registries are imported by
+their own unit specs and **nothing else** — they exist and pass tests, but no
+app code reads them yet. Likewise the manifest decodes `keybindings` and
+`themes` contributions that no host code binds, and `custom_editors` that the
+Writer/Sheets/Slides builtins declare but the host never routes to.
 Authoring guide: `doc/07_guide/app/ide/extension_authoring.md`.
 
 **Not yet** — service tokens exist as a type but scoped DI is not wired
@@ -61,7 +70,10 @@ format work does not.
   `document`, `surface`, and `request`.
 - AOP is limited to declared hooks such as command, document-save, render,
   diagnostics, plugin lifecycle, and invalidation hooks.
-- Startup reads manifests and builds indexes; plugin activation stays lazy.
+- Startup reads manifests and builds indexes; plugin activation stays lazy —
+  **aspirational for builtins**, which are eagerly activated at host
+  construction (see §Implementation status and
+  `doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md`).
 
 ## Feature Check
 

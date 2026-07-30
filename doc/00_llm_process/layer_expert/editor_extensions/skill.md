@@ -57,7 +57,11 @@ runtime_security, activation_hook, settings, menus, keybindings),
 
 Run one spec at a time with `SIMPLE_TIMEOUT_SECONDS=900` (see the SPipe skill's
 loaded-box section). No source-text assertions in this layer's specs — that
-anti-pattern was removed here and must not return.
+anti-pattern must not return. It was **not** fully removed on the first pass:
+`extension_discovery_contract_spec.spl` still had 10 `read_text(...).contains(...)`
+assertions until 2026-07-30, and an untracked
+`.spipe_matchers_extension_discovery_contract_spec.spl` sitting beside it still
+does. Re-grep for `.contains("fn \|.contains("me ` before trusting this line.
 
 ## Known gaps (do not re-discover)
 
@@ -66,3 +70,13 @@ commands), SDN-typed dispatch payloads, `onLanguage:` activation for provider
 dispatch, hot-path dispatch cost (linear scan + event-log per call — keep
 per-keystroke assists direct), worker/WASM out-of-process host, symlink
 resolution on Windows.
+
+Measured 2026-07-30, do not re-derive:
+- **Builtins activate eagerly** at `extension_host_with_builtins()` (host.spl:712),
+  so `activate_language`/`activate_command` return 0 for them and every builtin
+  capability reports `bound`. Laziness holds only for the discovered path.
+  Filed: `doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md`.
+- **`settings.spl` / `menus.spl` / `keybindings.spl` have no consumers** outside
+  their own unit specs. Manifest `keybindings` and `themes` decode but nothing
+  binds them; `custom_editors` are declared by three builtins and routed by
+  none. Wire or delete before claiming these as working extension points.

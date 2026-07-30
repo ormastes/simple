@@ -71,6 +71,12 @@ functions, slide layouts, …) goes in an **activation hook** — it runs exactl
 once per activation, and a failing hook becomes a diagnostic plus crash-state,
 never a host crash:
 
+> **Builtins are not lazy.** `extension_host_with_builtins()` eagerly activates
+> every builtin at construction (`host.spl:712`), so a builtin's hook runs at
+> startup regardless of its `activation.events`. Laziness is real only for
+> disk-discovered extensions. Filed:
+> `doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md`.
+
 ```
 host.register_activation_hook("sheets", sheets_ext_activation_hook)
 ```
