@@ -34,8 +34,16 @@ raw `rt_*` shortcuts, a new dependency, or a fake device-success path.
 ## Active Stage 2 SimpleOS campaign — 2026-07-29
 
 This campaign follows the active override in the system-test plan. Its strongest
-mark is `SIMPLEOS_STAGE2_FONT: DIAGNOSTIC`; it cannot promote the broader
+mark is `SIMPLEOS_STAGE2_FONT: BLOCKED`; it cannot promote the broader
 cross-platform matrix or feature status.
+
+Current admission is complete through clean-checkpoint Stage2 attempt 23 and
+independently checked scoped-tool attempt 11. RV64 attempt 23 cleared the prior
+layout/startup and earlier runtime symbols but produced no ELF after lld
+surfaced 20 live freestanding-runtime symbols. The active owner must supply one
+coherent RV64 freestanding runtime before QEMU crop calibration, exact-ten
+attempt 11, and manual attempt 2 can run. Stage3/4 and the umbrella native-GPU
+matrix remain deferred.
 
 | Small lane | Owned result | Focused specs |
 |---|---|---|

@@ -67,14 +67,40 @@ Run only this scoped set:
 
 - [x] Fix the shared Rust assignment parser for an indented RHS after `=` and
   the inline-`if` deferred-Dedent owner, with focused red-to-green regressions.
-- [ ] Commit/push the final clean parser checkpoint and produce fresh canonical
-  Stage2 provenance. Attempts 15 and 16 are historical, not current evidence.
-- [ ] Run scoped-tool attempt 8 without concurrent source writers, then run
-  RV64 attempt 19 from the same accepted Stage2.
-- [ ] Independently review and pin the QEMU framebuffer crop, then run matching
-  exact-ten attempt 8 and generate ten zero-stub manuals.
+- [x] Produce and independently admit canonical Stage2 attempt 23 at clean
+  checkpoint `94370c71ae8`.
+- [x] Produce scoped-tool attempt 11 and pass its independent canonical
+  receipt checker.
+- [ ] Supply coherent RV64 freestanding runtime ownership and produce the
+  canonical desktop ELF. RV64 attempt 23 cleared the prior layout/startup
+  symbols but exposed 20 live runtime symbols before lld's error limit.
+- [ ] Independently review and pin the QEMU framebuffer crop, then run
+  exact-ten attempt 11 and generate ten zero-stub manuals.
 - [ ] Run the final guards and independent evidence/manual review before
   recording `SIMPLEOS_STAGE2_FONT: PASS`.
+
+Stage2 attempt 23 is
+`build/test-artifacts/shared_multilingual_gpu_fonts/stage2-bootstrap/attempt-23/`
+at checkpoint `94370c71ae81160cb4c3bd3c523092e5b12e855f`. Its admitted
+binary SHA-256 is
+`16bbd646fbb8281d2519db18112665759c8f2320b735cbf51f9071f8c6aa474f`
+and provenance SHA-256 is
+`0fcdb0177678a5ac21e7595a3ee16f755a9e89b80dec90e54d3ec07c6d29594b`;
+the producer and standalone manifest verifier exited zero in `35:06.28` at
+`2,439,392 KiB` maximum RSS. Scoped-tool attempt 11 is independently admitted
+with evidence-manifest SHA-256
+`63a5cc1641fd680ea672f73bb8b4129d22d6cc1fe77f7f59d4f717eaaa0c516f`
+and canonical checker marker `stage2_font_scoped_tools_status=pass`.
+
+RV64 attempt 23 is retained at
+`/tmp/simple-font-rv64-attempt23-stage/evidence/`. It exited 1 in `4:50.22` at
+`320,544 KiB` maximum RSS and produced no ELF. The explicit linker script
+cleared `_stack_top`, `_sbss`, `_ebss`, `spl_start`, `rt_string_data`,
+`rt_string_len`, `rt_process_run`, and `rt_riscv64_syscall`; the remaining
+freestanding-runtime closure reported 724 unexpected symbols, deferred 717 to
+the linker, and surfaced 20 live runtime symbols before lld stopped at its
+error limit. Therefore QEMU calibration, exact-ten, and manual generation
+remain blocked. Stage 3/4 and the umbrella native-GPU matrix remain deferred.
 
 ### Bounded Stage 2 tool producer
 

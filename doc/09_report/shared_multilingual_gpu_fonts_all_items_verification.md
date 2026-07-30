@@ -9,33 +9,35 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
-## Current RV64 Stage2 result — 2026-07-29
+## Current Stage2/RV64 result — 2026-07-30
 
-Canonical pure-Simple Stage2 attempt 6 passed at checkpoint
-`49673723101bfa3950254dbe8bf0008be003ec4b`; binary SHA-256 is
-`028f6ccb368a76a5911c07c87563980051418845647280ef7e575e3085043a64`
-and provenance SHA-256 is
-`8b705d957f084577dea82864e60605bac0088821059185e2b68d5d1d3eeebf82`.
-The RV64 desktop source now bypasses the management-console dependency graph,
-the unused reserved-name `process.spawn` wrapper is removed, and the DMA
-direction match uses Stage2-compatible syntax. The focused RV64 display ABI
-contract passes and independent P0/P1 review accepts those changes.
+Canonical pure-Simple Stage2 attempt 23 is admitted at clean checkpoint
+`94370c71ae81160cb4c3bd3c523092e5b12e855f`. Its binary is
+`build/test-artifacts/shared_multilingual_gpu_fonts/stage2-bootstrap/attempt-23/bootstrap/stage2/x86_64-unknown-linux-gnu/simple`
+with SHA-256
+`16bbd646fbb8281d2519db18112665759c8f2320b735cbf51f9071f8c6aa474f`;
+its provenance SHA-256 is
+`0fcdb0177678a5ac21e7595a3ee16f755a9e89b80dec90e54d3ec07c6d29594b`.
+The producer and standalone manifest verifier exited zero. Elapsed time was
+`35:06.28` and maximum RSS was `2,439,392 KiB`.
 
-The package `Result` initializer is resolved: attempt 7 advanced to the network
-source and attempt 8 advanced to the driver-error source. Attempt 9 parsed
-those repairs but Stage2 then terminated with
-`runtime error: field access on nil receiver`: retained wrapper exit `132`,
-signal `4`, elapsed `34.59s`, maximum RSS `486380 KiB`, cache file count `0`,
-and no RV64 ELF. Disassembly maps the `0x43c8ad` nil trap to `Config.set`;
-caller `0x8a40e0` is `CompilerDriver.parse_all_impl` line 693, which
-incorrectly assigned the `Dict.set` result and poisoned `entry_modules`. The
-one-line bracket mutation plus flipped existing source-contract assertions
-landed post-run and remain build-unverified. The post-run RV64 `syscall6` fix
-is also source-only and still requires fresh-session verification. The
-exhausted window and exact resume are tracked in
-`doc/08_tracking/bug/stage2_rv64_desktop_stage2_nil_receiver_2026-07-29.md`.
-RV64 crop/QEMU evidence, the exact-ten run, and manual publication remain
-pending.
+Scoped-tool attempt 11 is also admitted. The sealed evidence-manifest SHA-256
+is `63a5cc1641fd680ea672f73bb8b4129d22d6cc1fe77f7f59d4f717eaaa0c516f`;
+the independent canonical checker exited zero with
+`stage2_font_scoped_tools_status=pass`.
+
+RV64 attempt 23 used that Stage2 plus the explicit linker script. This cleared
+the prior `_stack_top`, `_sbss`, `_ebss`, `spl_start`, `rt_string_data`,
+`rt_string_len`, `rt_process_run`, and `rt_riscv64_syscall` failures. It then
+exited 1 in `4:50.22` at `320,544 KiB` maximum RSS: the freestanding precheck
+reported 724 unexpected symbols, deferred 717 candidates, and lld surfaced 20
+live runtime symbols before its error limit. No ELF exists. Evidence is
+retained at `/tmp/simple-font-rv64-attempt23-stage/evidence/`.
+
+The current blocker is coherent RV64 freestanding runtime ownership. Without
+the ELF, no QEMU crop calibration, independent crop pin, exact-ten execution,
+or canonical manual generation can run. Stage 3/4 and the umbrella
+cross-platform native-GPU matrix remain deferred from this scoped delivery.
 
 ## Current active delivery scope — SimpleOS Stage 2 (supersedes)
 
@@ -46,27 +48,24 @@ inventory is `0 missing / 9 stale / 1 source-current / 0 accepted receipts`.
 The source-current pair is `selected_arabic_spec`; source currency alone is not
 an accepted zero-stub docgen receipt.
 
-`build/native_probe/stage2-spipe-docgen` exists only as a diagnostic artifact.
-It has no fresh sealed command/stdout/stderr/exit and provenance receipt for
-this scope, so it does not promote any manual. Current source now closes the
+Stage2 attempt 23 and scoped-tool attempt 11 now satisfy the compiler,
+runner/docgen, calibration, provenance, and independent receipt gates. The
 transactional 53-file staging, exact 59-source pin-set, Arabic/Hindi batch
-identity, and native-safe fresh-device material gaps. A reviewed
-`--stop-after-stage2` and scoped runner/docgen producer bind canonical Stage 2
-provenance, source/tool stability, four calibrations, and immutable evidence;
-they have not executed. The next blockers are a clean checkpoint, one fresh
-canonical Stage 2, a sealed runner/docgen, followed by the ten focused
-executions, `bash scripts/check/build-stage2-font-scoped-tools.shs
-manuals-write <tool-attempt-root>
-build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2`,
-the corresponding independent `manuals-check`, and the
-x86/RV64 SimpleOS QEMU framebuffer/input evidence. Stage 3,
-Stage 4, non-SimpleOS native GPU hosts, and the broader cross-platform matrix
-are deferred from this active delivery scope.
+identity, and native-safe fresh-device material changes remain downstream
+behavioral claims until exact-ten runs. The next blocker is the coherent RV64
+freestanding runtime needed to link the canonical desktop ELF. After that,
+run and independently pin the QEMU crop, execute exact-ten attempt 11, then run
+`bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write
+build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-11
+build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2`
+and the corresponding independent `manuals-check`. Stage 3, Stage 4,
+non-SimpleOS native GPU hosts, and the broader cross-platform matrix remain
+deferred from this active delivery scope.
 
 The current exact-ten command remains pending:
 
 ```bash
-STAGE2_FONT_SPEC_ATTEMPT=2 \
+STAGE2_FONT_SPEC_ATTEMPT=11 \
 SIMPLE_FONT_HOST_TOOL_DIR=<absolute-validated-mtools-directory> \
 BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live \
 REPORT_PATH=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live/report.md \
@@ -74,20 +73,20 @@ RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf \
 RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img \
 RV64_WM_FONT_REGION_EXPECTED_SHA256=<independently-reviewed-rv64-crop-sha256> \
 bash scripts/check/run-stage2-font-scoped-specs.shs write \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-2
-STAGE2_FONT_SPEC_ATTEMPT=2 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-11
+STAGE2_FONT_SPEC_ATTEMPT=11 \
 bash scripts/check/run-stage2-font-scoped-specs.shs check \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-2
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-11
 ```
 
 After those ten receipts pass, the exact manual commands are:
 
 ```bash
 bash scripts/check/build-stage2-font-scoped-tools.shs manuals-write \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-2 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-11 \
   build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
 bash scripts/check/build-stage2-font-scoped-tools.shs manuals-check \
-  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-2 \
+  build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-11 \
   build/test-artifacts/shared_multilingual_gpu_fonts/simpleos-stage2-docgen/attempt-2
 ```
 

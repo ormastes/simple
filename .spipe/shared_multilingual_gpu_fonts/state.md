@@ -1564,3 +1564,20 @@ pixels, and performance evidence remain release-blocking.
   Next: clean commit/push, Stage2 attempt 17, scoped-tool attempt 8 without
   concurrent source writers, RV64 attempt 19, crop review, exact ten, manuals,
   and final audits. STATUS: FAIL.
+- simpleos-stage2-attempt23-rv64-attempt23-2026-07-30: Supersedes only the
+  current scoped blocker above. Clean checkpoint
+  `94370c71ae81160cb4c3bd3c523092e5b12e855f` produced admitted Stage2 attempt
+  23 (binary SHA-256
+  `16bbd646fbb8281d2519db18112665759c8f2320b735cbf51f9071f8c6aa474f`,
+  provenance SHA-256
+  `0fcdb0177678a5ac21e7595a3ee16f755a9e89b80dec90e54d3ec07c6d29594b`,
+  exit 0, `35:06.28`, `2,439,392 KiB` maximum RSS). Scoped-tool attempt 11
+  passed its independent canonical checker; evidence-manifest SHA-256 is
+  `63a5cc1641fd680ea672f73bb8b4129d22d6cc1fe77f7f59d4f717eaaa0c516f`.
+  RV64 attempt 23 cleared the prior linker/startup and earlier runtime symbols
+  but exited 1 after surfacing 20 live freestanding-runtime symbols before
+  lld's error limit; no ELF exists. Coherent RV64 freestanding runtime
+  ownership is now the blocker. QEMU crop calibration, exact-ten attempt 11,
+  and manual attempt 2 have not run. Stage3/4 and the umbrella native-GPU
+  matrix remain deferred; `SIMPLEOS_STAGE2_FONT: BLOCKED` and broader
+  `STATUS: FAIL` remain.

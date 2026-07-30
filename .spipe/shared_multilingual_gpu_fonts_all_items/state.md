@@ -107,18 +107,16 @@ The superseding delivery goal is `SIMPLEOS_STAGE2_FONT`: exactly ten focused
 SimpleOS specs and ten canonical manuals. The current manual inventory is
 `0 missing / 9 stale / 1 source-current / 0 accepted receipts`; only
 `selected_arabic_spec` has a source-current mirror, and that does not replace a
-sealed zero-stub receipt. The existing standalone Stage 2 docgen is diagnostic
-only. Current source now prevalidates all 53 image files before staging
-mutation, checks the exact 59-source pin set, uses native-safe staged
-FontRenderer material in fresh-device Draw IR, and provides a reviewed
-provenance-only `--stop-after-stage2` plus sealed scoped-tool producer. These
-changes remain execution-unverified. Completion is blocked on a clean
-checkpoint, fresh canonical Stage 2, sealed runner/docgen,
-followed by all ten focused executions and x86/RV64 SimpleOS QEMU
-framebuffer/input evidence. Stage 3, Stage 4, non-SimpleOS GPU hosts, and the
-broader cross-platform matrix are deferred from this delivery scope. Current
-status is `SIMPLEOS_STAGE2_FONT: BLOCKED`; the broader `STATUS: FAIL` is
-unchanged.
+sealed zero-stub receipt. Canonical Stage2 attempt 23 and scoped-tool attempt 11
+are now admitted at clean checkpoint `94370c71ae8`; the latter passed its
+independent canonical checker. The current blocker is RV64 attempt 23: the
+explicit linker script cleared the prior layout/startup and four earlier
+runtime symbols, but link still stopped at lld's error limit after surfacing 20
+live freestanding-runtime symbols. No ELF exists, so QEMU crop calibration,
+exact-ten execution, and the ten manual receipts have not run. Stage 3,
+Stage 4, non-SimpleOS GPU hosts, and the broader cross-platform matrix remain
+deferred from this delivery scope. Current status is
+`SIMPLEOS_STAGE2_FONT: BLOCKED`; the broader `STATUS: FAIL` is unchanged.
 
 ## Compiler-enablement boundary
 
@@ -240,3 +238,4 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
 - current-inventory-draw-ir-refresh-2026-07-29: Supersedes only the current 47-command/43-font-manual accounting above. The changed `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` adds one lane-C focused execution and one stale canonical mirror, yielding 48 commands (preflight, B6, C19, D13, E9) and 44 font manuals (19 missing, 25 stale, zero current; A1+B6+C18+D12+E7). The five compiler-prerequisite manuals remain separate and missing. No runtime or docgen command ran; phase and `STATUS: FAIL` are unchanged.
 - rv64-stage2-desktop-parser-window-2026-07-29: Canonical Stage2 attempt 6 passed at checkpoint `49673723101b` (binary SHA-256 `028f6ccb368a76a5911c07c87563980051418845647280ef7e575e3085043a64`; provenance SHA-256 `8b705d957f084577dea82864e60605bac0088821059185e2b68d5d1d3eeebf82`). Three bounded RV64 diagnostics removed the over-broad management-console closure, unused reserved-name `process.spawn`, and obsolete DMA match syntax, then stopped at `src/os/tools/pkg/pkg_repository.spl:158`, where Stage2 rejects an uninitialized `Result<text,text>`. Attempts 4–6 are retained and the exact resume is in `doc/08_tracking/bug/stage2_rv64_desktop_pkg_repository_result_initializer_2026-07-29.md`. No RV64 ELF, crop, exact-ten receipt, or manual was produced; `SIMPLEOS_STAGE2_FONT: BLOCKED` and broader `STATUS: FAIL` remain.
 - rv64-stage2-desktop-nil-receiver-window-2026-07-29: Supersedes only the current blocker in the preceding entry. The package initializer is resolved; attempts 7 and 8 advanced through the network and driver-error parser blockers. Attempt 9 parsed those repairs, then Stage2 terminated with `runtime error: field access on nil receiver` (wrapper exit `132`, signal `4`, elapsed `34.59s`, maximum RSS `486380 KiB`, cache file count `0`). No RV64 ELF exists. Disassembly maps the `0x43c8ad` nil trap to `Config.set`; caller `0x8a40e0` is `CompilerDriver.parse_all_impl` line 693, which incorrectly assigned the `Dict.set` result and poisoned `entry_modules`. A one-line bracket mutation plus flipped existing source-contract assertions landed post-run and remain build-unverified. The RV64 `syscall6` repair also landed after the failed run and needs fresh-session verification. Attempts 7–9 are exhausted; exact resume is in `doc/08_tracking/bug/stage2_rv64_desktop_stage2_nil_receiver_2026-07-29.md`. Crop/QEMU, exact-ten, and manual evidence remain absent; `SIMPLEOS_STAGE2_FONT: BLOCKED` and broader `STATUS: FAIL` remain.
+- simpleos-stage2-attempt23-rv64-attempt23-2026-07-30: Clean checkpoint `94370c71ae81160cb4c3bd3c523092e5b12e855f` produced admitted Stage2 attempt 23 (binary SHA-256 `16bbd646fbb8281d2519db18112665759c8f2320b735cbf51f9071f8c6aa474f`, provenance SHA-256 `0fcdb0177678a5ac21e7595a3ee16f755a9e89b80dec90e54d3ec07c6d29594b`, exit 0, elapsed `35:06.28`, maximum RSS `2,439,392 KiB`; standalone manifest verifier exit 0). Scoped-tool attempt 11 is independently admitted with evidence-manifest SHA-256 `63a5cc1641fd680ea672f73bb8b4129d22d6cc1fe77f7f59d4f717eaaa0c516f`; its canonical checker exited 0 with `stage2_font_scoped_tools_status=pass`. RV64 attempt 23 then used the explicit linker script and cleared `_stack_top`, `_sbss`, `_ebss`, `spl_start`, `rt_string_data`, `rt_string_len`, `rt_process_run`, and `rt_riscv64_syscall`, but exited 1 after `4:50.22` at `320,544 KiB` maximum RSS with 724 unexpected/717 deferred candidates and 20 live runtime symbols surfaced before lld's error limit. No ELF, QEMU crop, exact-ten receipt, or manual receipt exists. The remaining owner-level blocker is a coherent RV64 freestanding runtime; the deferred Stage3/4 and umbrella GPU matrix stay out of this scoped goal. `SIMPLEOS_STAGE2_FONT: BLOCKED` and broader `STATUS: FAIL` remain.
