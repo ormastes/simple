@@ -130,7 +130,7 @@ describe "Browser CSS animation target identity":
             "0%,".repeat(300) + "100% { opacity: 1; } }"
         expect(extract_keyframes(
             hostile_offsets
-        ).entries[0].frames.len()).to_equal(256)
+        ).entries[0].frames.len()).to_equal(1)
 
         val hostile_decls = "@keyframes declarations { from {" +
             "unused:value;".repeat(300) + "} }"
@@ -144,3 +144,46 @@ describe "Browser CSS animation target identity":
             hostile_rules = hostile_rules + "@keyframes k{index} { from { opacity: 0; } to { opacity: 1; } }"
             index = index + 1
         expect(extract_keyframes(hostile_rules).entries.len()).to_equal(1024)
+
+    it "cascades duplicate keyframe offsets in source order":
+        val registry = extract_keyframes("""
+            @keyframes duplicate-offset {
+                0% { background-color: #ef4444; opacity: 0; }
+                50% { background-color: #2563eb; opacity: 0.5; }
+                50% { background-color: #22c55e; }
+                100% { background-color: #000000; opacity: 1; }
+            }
+        """)
+        expect(registry.entries[0].frames.len()).to_equal(3)
+        val midpoint_properties = registry.entries[0].frames[1].properties
+        expect(midpoint_properties.len()).to_equal(2)
+        expect(midpoint_properties[0].property).to_equal("opacity")
+        match midpoint_properties[0].value:
+            CSSValue.Number(v):
+                expect(v).to_equal(0.5)
+            _:
+                fail("Expected earlier same-offset opacity to survive")
+        expect(midpoint_properties[1].property).to_equal("background-color")
+        match midpoint_properties[1].value:
+            CSSValue.Color(color):
+                expect(color.r).to_equal(34)
+                expect(color.g).to_equal(197)
+                expect(color.b).to_equal(94)
+            _:
+                fail("Expected later same-offset background color to win")
+        val updates = sample_keyframes(
+            42, registry.entries[0].frames, 0.5
+        )
+        expect(updates.len()).to_equal(2)
+        match updates[0].value:
+            CSSValue.Color(color):
+                expect(color.r).to_equal(34)
+                expect(color.g).to_equal(197)
+                expect(color.b).to_equal(94)
+            _:
+                fail("Expected later duplicate-offset color")
+        match updates[1].value:
+            CSSValue.Number(v):
+                expect(v).to_equal(0.5)
+            _:
+                fail("Expected cascaded midpoint opacity")

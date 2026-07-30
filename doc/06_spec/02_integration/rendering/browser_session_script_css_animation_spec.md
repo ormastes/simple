@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,6 +47,67 @@ rendered from that exact composition.
 ## Scenarios
 
 ### BrowserSession script CSS animation rendering
+
+#### should cascade duplicate keyframe offsets into Draw IR pixels
+
+- Open CSS animation with duplicate keyframe offsets
+   - Artifact capture: after_step
+   - Expected: session.open_html(...) is true
+   - Expected: initial Draw IR/Engine2D frame satisfies `_expect_browser_animation_draw_ir_frame`
+   - Expected: initial.command.color equals `0xFFEF4444u32`
+- Advance to the duplicate keyframe offset
+   - Artifact capture: after_step
+   - Expected: session.advance_time(500) equals `0`
+   - Expected: midpoint.next_ms equals `516`
+- Select the later same-offset declaration in Draw IR
+   - Artifact capture: after_step
+   - Expected: midpoint.command.color equals `0xFF22C55Eu32`
+- Rasterize the cascaded frame through canonical Engine2D
+   - Artifact capture: after_step
+   - Expected: midpoint frame satisfies `_expect_browser_animation_draw_ir_frame`
+   - Evidence: exact 32×24 command-color pixels, zero matching pixels outside the command, and zero skipped commands
+
+Helper ownership is frozen to `_duplicate_offset_animation_html` for the
+fixture, `_browser_animation_draw_ir_trace` for canonical Draw IR lowering and
+Engine2D execution, and `_expect_browser_animation_draw_ir_frame` for exact
+geometry/pixel/source assertions.
+
+| Helper | Source |
+|--------|--------|
+| `_duplicate_offset_animation_html` | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl` |
+| `_browser_animation_draw_ir_trace` | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl` |
+| `_expect_browser_animation_draw_ir_frame` | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl` |
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Open CSS animation with duplicate keyframe offsets")
+var session = BrowserSession.new()
+expect(session.open_html(
+    "https://example.test/duplicate-keyframe-offset",
+    _duplicate_offset_animation_html()
+).is_ok()).to_be(true)
+val initial = _browser_animation_draw_ir_trace(session, 64, 48)
+_expect_browser_animation_draw_ir_frame(initial)
+expect(initial.command.color).to_equal(0xFFEF4444u32)
+
+step("Advance to the duplicate keyframe offset")
+expect(session.advance_time(500)).to_equal(0)
+val midpoint = _browser_animation_draw_ir_trace(session, 64, 48)
+expect(midpoint.next_ms).to_equal(516)
+
+step("Select the later same-offset declaration in Draw IR")
+expect(midpoint.command.color).to_equal(0xFF22C55Eu32)
+
+step("Rasterize the cascaded frame through canonical Engine2D")
+_expect_browser_animation_draw_ir_frame(midpoint)
+```
+
+</details>
 
 #### should trace JavaScript pause and resume through deterministic Draw IR frames
 
@@ -1238,8 +1299,8 @@ expect(_count_color(last.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

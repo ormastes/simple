@@ -69,18 +69,46 @@ fn _insert_keyframe_by_offset(
     var sorted: [Keyframe] = []
     var inserted = false
     for existing in frames:
-        if not inserted and frame.offset < existing.offset:
-            sorted.push(frame)
+        if not inserted and frame.offset == existing.offset:
+            sorted.push(Keyframe.create(
+                existing.offset,
+                _cascade_keyframe_declarations(
+                    existing.properties, frame.properties
+                )
+            ))
             inserted = true
-        sorted.push(existing)
+        else:
+            if not inserted and frame.offset < existing.offset:
+                sorted.push(frame)
+                inserted = true
+            sorted.push(existing)
     if not inserted:
         sorted.push(frame)
     sorted
 
+fn _cascade_keyframe_declarations(
+    earlier: [CSSDeclaration], later: [CSSDeclaration]
+) -> [CSSDeclaration]:
+    var cascaded: [CSSDeclaration] = []
+    for earlier_decl in earlier:
+        var overridden = false
+        for later_decl in later:
+            if later_decl.property == earlier_decl.property:
+                overridden = true
+        if not overridden:
+            cascaded.push(earlier_decl)
+    for later_decl in later:
+        cascaded.push(later_decl)
+    cascaded
+
 fn _parse_keyframe_body(body: text) -> [Keyframe]:
     var frames: [Keyframe] = []
     var pos = 0
-    while pos < body.len() and frames.len() < MAX_KEYFRAMES_PER_RULE:
+    var parsed_offset_count = 0
+    while (
+        pos < body.len() and
+        parsed_offset_count < MAX_KEYFRAMES_PER_RULE
+    ):
         val open = sb_find(body, "{", pos)
         if open >= 999999999:
             break
@@ -102,9 +130,13 @@ fn _parse_keyframe_body(body: text) -> [Keyframe]:
             ))
         val offsets = sb_split_selector_list(offset_text)
         var oi = 0
-        while oi < offsets.len() and frames.len() < MAX_KEYFRAMES_PER_RULE:
+        while (
+            oi < offsets.len() and
+            parsed_offset_count < MAX_KEYFRAMES_PER_RULE
+        ):
             val off_raw = offsets[oi]
             oi = oi + 1
+            parsed_offset_count = parsed_offset_count + 1
             val off = off_raw.trim()
             val offset_val = _parse_keyframe_offset(off)
             frames = _insert_keyframe_by_offset(

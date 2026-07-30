@@ -145,7 +145,45 @@ fn _open_raf_promise_microtask_frame() -> BrowserSession:
         Ok(_): session
         Err(reason): fail("Expected rAF Promise page to open: {reason}")
 
+fn _duplicate_offset_animation_html() -> text:
+    "<!DOCTYPE html><html><head><style>" +
+    "@keyframes DuplicateOffset {" +
+    "0% { background-color: #ef4444; }" +
+    "50% { background-color: #2563eb; }" +
+    "50% { background-color: #22c55e; }" +
+    "100% { background-color: #000000; }" +
+    "}" +
+    "#stage { width: 32px; height: 24px; " +
+    "animation: DuplicateOffset 1000ms linear forwards; }" +
+    "</style></head><body><div id='stage'></div></body></html>"
+
 describe "BrowserSession script CSS animation rendering":
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-006
+    it "should cascade duplicate keyframe offsets into Draw IR pixels":
+        step("Open CSS animation with duplicate keyframe offsets")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/duplicate-keyframe-offset",
+            _duplicate_offset_animation_html()
+        ).is_ok()).to_be(true)
+        val initial = _browser_animation_draw_ir_trace(session, 64, 48)
+        _expect_browser_animation_draw_ir_frame(initial)
+        expect(initial.command.color).to_equal(0xFFEF4444u32)
+
+        step("Advance to the duplicate keyframe offset")
+        expect(session.advance_time(500)).to_equal(0)
+        val midpoint = _browser_animation_draw_ir_trace(session, 64, 48)
+        expect(midpoint.next_ms).to_equal(516)
+
+        step("Select the later same-offset declaration in Draw IR")
+        expect(midpoint.command.color).to_equal(0xFF22C55Eu32)
+
+        step("Rasterize the cascaded frame through canonical Engine2D")
+        _expect_browser_animation_draw_ir_frame(midpoint)
 
     # @manual: show
     # @capture(html)
