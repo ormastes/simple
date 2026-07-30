@@ -2,22 +2,23 @@ use std.io.{file_read}
 use std.spec.{describe, it, expect}
 
 val SHELL = "src/os/desktop/shell.spl"
+val COMPOSITOR = "src/os/compositor/compositor.spl"
 
 describe "SimpleOS WM queued input drain contract":
-    it "drains queued receipts without requiring another hardware byte":
+    it "keeps the idle gate scalar and drains receipts in the hardware iteration":
         val shell = file_read(SHELL)
         expect(shell).to_contain(
-            "self.compositor.pending_wm_pointer_valid")
-        expect(shell).to_contain(
-            "self.compositor.pending_fullscreen_sequence > 0")
-        expect(shell).to_contain(
-            "self.compositor.pending_fullscreen_release_sequence > 0")
+            "var queued_input_active = false")
         expect(shell).to_contain(
             "if not ps2_byte_ready and not queued_input_active:\n" +
-            "                continue")
+            "                if remote_bootstrap_polls_left > 0 or remote_event_polls_left > 0:")
         expect(shell).to_contain(
             "if ps2_byte_ready:\n" +
             "                input_compositor.handle_input_baremetal_ps2()")
+        expect(shell).to_contain(
+            "queued_input_active = input_active")
+        expect(shell).to_contain(
+            "queued_input_active = false")
         expect(shell).to_contain(
             "if not input_active:\n" +
             "                # A partial PS/2 packet may not have produced a receipt yet,\n" +
@@ -25,8 +26,21 @@ describe "SimpleOS WM queued input drain contract":
             "                self.compositor = input_compositor\n" +
             "                continue")
         expect(shell.contains(
+            "val queued_input_active = (\n" +
+            "                self.compositor.pending_fullscreen_sequence")).to_equal(false)
+        expect(shell.contains(
             "if ((ps2_status as i32) & 1) == 0:\n" +
             "                continue")).to_equal(false)
+
+    it "captures the physical pointer target before focus or drag mutation":
+        val compositor = file_read(COMPOSITOR)
+        expect(compositor).to_contain("pending_wm_pointer_window_id: i32")
+        expect(compositor).to_contain("pending_wm_pointer_local_x: i32")
+        expect(compositor).to_contain("pending_wm_pointer_local_y: i32")
+        expect(compositor).to_contain(
+            "self.pending_wm_pointer_local_x = x - surface.x")
+        expect(compositor).to_contain(
+            "self.pending_wm_pointer_local_y = y - surface.y")
 
     it "retains passive-move frames and repaints state-changing pointer work":
         val shell = file_read(SHELL)

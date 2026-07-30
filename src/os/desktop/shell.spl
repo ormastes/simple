@@ -1017,6 +1017,10 @@ impl DesktopShell:
         var remote_event_polls_left: i64 = 0
         var remote_event_window_id: i64 = 0
         var remote_event_input_seq: i64 = 0
+        # Keep the idle hot-loop gate scalar. Projecting pending fields from
+        # the nested compositor materializes aggregate temporaries on the
+        # freestanding target and exhausted the bump heap while idle.
+        var queued_input_active = false
         while self.compositor.running:
             # Idle path must stay ALLOCATION-FREE: the baremetal bump
             # allocator never frees, revision/taskbar recomputation leaks
@@ -1036,18 +1040,8 @@ impl DesktopShell:
             # badly it never got back around to observe a QMP-injected key
             # inside the evidence wrapper's 10s correlation window (zero
             # [wm-input-irq]/[wm-state]/[wm-frame] markers ever fired).
-            # Skip the expensive copy only when the controller has no byte and
-            # the previous poll left no complete logical input to drain.
-            # Pointer, fullscreen, meta-key, and shortcut receipts can outlive
-            # the hardware byte that created them.
-            val queued_input_active = (
-                self.compositor.pending_fullscreen_sequence > 0 or
-                self.compositor.pending_fullscreen_release_sequence > 0 or
-                self.compositor.pending_meta_key > 0 or
-                self.compositor.pending_shortcut != "" or
-                self.compositor.pending_wm_pointer_valid or
-                self.compositor.pending_wm_key_valid or
-                self.compositor.pending_wm_text_valid)
+            # Skip the expensive copy when the controller has no byte and the
+            # prior hardware iteration left no logical receipt to drain.
             val ps2_status = port_inb(0x64)
             val ps2_byte_ready = ((ps2_status as i32) & 1) != 0
             if not ps2_byte_ready and not queued_input_active:
@@ -1114,10 +1108,12 @@ impl DesktopShell:
                 remote_event_input_seq = input_compositor.input_sequence
                 remote_bootstrap_poll_ticks = 0
             val input_active = (fullscreen_sequence > 0 or fullscreen_release_sequence > 0 or input_compositor.pending_meta_key > 0 or input_compositor.pending_shortcut != "" or input_compositor.pending_wm_pointer_valid or input_compositor.pending_wm_key_valid or input_compositor.pending_wm_text_valid)
+            queued_input_active = input_active
             if not input_active:
                 # A partial PS/2 packet may not have produced a receipt yet,
                 # but its decoder state must survive until the next byte.
                 self.compositor = input_compositor
+                queued_input_active = false
                 continue
             var fullscreen_action = ""
             var fullscreen_window_id: i32 = 0
@@ -1283,6 +1279,7 @@ impl DesktopShell:
                         state_height = state_surface.height
                 serial_println("[wm-state] input_seq={fullscreen_sequence} action={fullscreen_action} window={fullscreen_window_id} maximized={maximized_text} x={state_x} y={state_y} width={state_width} height={state_height}")
                 serial_println("[wm-frame] input_seq={fullscreen_sequence} generation={rendered_revision}")
+            queued_input_active = false
 
     fn runtime_scene_revision() -> i64:
         simpleos_runtime_scene_revision(self.compositor.surfaces, self.compositor.focused_idx)
