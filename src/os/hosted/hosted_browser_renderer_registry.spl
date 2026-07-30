@@ -1,7 +1,9 @@
 """Bounded secondary hosted-browser renderer ownership."""
 
 use common.ui.window_scene.{WmContentFrame}
-use common.ui.wm_chrome_theme.{active_wm_theme_id}
+use common.ui.wm_chrome_theme.{
+    active_wm_theme_id
+}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use std.gc_async_mut.web.browser_session_url.{
     normalize_network_navigation_url
@@ -13,7 +15,10 @@ use std.common.encoding.utf8.{text_without_last_codepoint}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.simple_web_window_renderer.{
     simple_web_content_revision_with_theme,
-    simple_web_external_content_frame
+    simple_web_content_revision_with_theme_receipt,
+    simple_web_content_full_html_with_install_wire,
+    simple_web_external_content_frame,
+    simple_web_external_content_frame_with_theme_receipt
 }
 use os.hosted.hosted_browser_renderer_process.{
     HOSTED_BROWSER_SITE_SWAP_REQUIRED,
@@ -21,6 +26,12 @@ use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererResult
 }
 use std.common.web.browser_renderer_protocol.{BROWSER_RENDERER_MAX_VIEWPORT}
+use os.hosted.hosted_theme_runtime.{
+    hosted_theme_id,
+    hosted_theme_material_sha256,
+    hosted_theme_source_manifest_sha256,
+    hosted_theme_wire_valid
+}
 
 extern fn rt_time_now_monotonic_ms() -> i64
 extern fn rt_text_to_bytes(value: text) -> [u8]
@@ -62,6 +73,10 @@ fn _empty_registry_frame() -> WmContentFrame:
         offset_x: 0,
         offset_y: 0
     )
+
+fn _active_or_default_wm_theme_id() -> text:
+    val active_theme = active_wm_theme_id()
+    if active_theme != "": active_theme else: default_theme_id()
 
 class HostedBrowserRendererEntry:
     window_id: i64
@@ -126,6 +141,12 @@ pub class HostedBrowserRendererRegistry:
     hsts: BrowserSession
     shared_hsts_dirty: bool
     shared_hsts_revision: i64
+    theme_enabled: bool
+    theme_revision: i64
+    theme_wire_text: text
+    theme_id: text
+    theme_source_manifest_sha256: text
+    theme_material_sha256: text
 
     static fn create(
         executable: text,
@@ -143,8 +164,42 @@ pub class HostedBrowserRendererRegistry:
             bookmark_revision: 0,
             hsts: BrowserSession.new_without_runtime(),
             shared_hsts_dirty: false,
-            shared_hsts_revision: 0
+            shared_hsts_revision: 0,
+            theme_enabled: false,
+            theme_revision: 0,
+            theme_wire_text: "",
+            theme_id: "",
+            theme_source_manifest_sha256: "",
+            theme_material_sha256: ""
         )
+
+    static fn create_with_theme(
+        executable: text,
+        home_url: text,
+        theme_revision: i64,
+        theme_wire_text: text
+    ) -> HostedBrowserRendererRegistry:
+        var registry = HostedBrowserRendererRegistry.create(
+            executable, home_url
+        )
+        registry.theme_enabled = true
+        registry.theme_revision = theme_revision
+        registry.theme_wire_text = theme_wire_text
+        if hosted_theme_wire_valid(theme_revision, theme_wire_text):
+            registry.theme_id = hosted_theme_id(
+                theme_revision, theme_wire_text
+            )
+            registry.theme_source_manifest_sha256 = (
+                hosted_theme_source_manifest_sha256(
+                    theme_revision, theme_wire_text
+                )
+            )
+            registry.theme_material_sha256 = (
+                hosted_theme_material_sha256(
+                    theme_revision, theme_wire_text
+                )
+            )
+        registry
 
     me set_bookmark_snapshot(snapshot: BrowserBookmarkSnapshot):
         self.bookmark_snapshot = snapshot
@@ -294,14 +349,45 @@ pub class HostedBrowserRendererRegistry:
             entry.renderer.provisional_document_origin
         )
         val home_url = entry.renderer.home_url
+        var restart_html = ""
+        if self.theme_enabled:
+            if not hosted_theme_wire_valid(
+                self.theme_revision, self.theme_wire_text
+            ):
+                self.entries[index] = entry
+                return self._fail(index, "invalid-theme-projection")
+            restart_html = (
+                simple_web_content_full_html_with_install_wire(
+                    self.theme_wire_text,
+                    self.theme_revision,
+                    "",
+                    "",
+                    entry.renderer.width,
+                    entry.renderer.height
+                )
+            )
+            if restart_html == "":
+                self.entries[index] = entry
+                return self._fail(
+                    index, "theme-parent-projection-mismatch"
+                )
         if not entry.renderer.close():
             self.entries[index] = entry
             return self._fail(index, "site-swap-close-failed")
         val generation = self.next_generation
         self.next_generation = self.next_generation + 1
-        var replacement = HostedBrowserRendererProcess.create(
-            generation, entry.renderer.width, entry.renderer.height
-        )
+        var replacement = if self.theme_enabled:
+            HostedBrowserRendererProcess.create_with_theme(
+                generation,
+                entry.renderer.width,
+                entry.renderer.height,
+                self.theme_revision,
+                self.theme_wire_text
+            )
+        else:
+            HostedBrowserRendererProcess.create(
+                generation, entry.renderer.width, entry.renderer.height
+            )
         replacement.network.cookie_store = cookie_store
         replacement.document_url = document_url
         replacement.document_origin = document_origin
@@ -337,7 +423,7 @@ pub class HostedBrowserRendererRegistry:
         entry.close_pending = false
         entry.close_retry_at_micros = 0
         entry.ready = false
-        entry.startup_html = ""
+        entry.startup_html = restart_html
         entry.bookmark_revision = -1
         val started = entry.renderer.begin_start(
             self.executable, 2000
@@ -371,28 +457,56 @@ pub class HostedBrowserRendererRegistry:
             result.composition_revision
         )
         entry.raster = raster
-        val active_theme = active_wm_theme_id()
-        val theme = if active_theme != "": active_theme else: default_theme_id()
-        val revision = simple_web_content_revision_with_theme(
-            theme,
-            title,
-            body_html,
-            entry.renderer.width,
-            entry.renderer.height,
-            0
-        )
-        val frame = simple_web_external_content_frame(
-            entry.window_id.to_text(),
-            revision,
-            theme,
-            entry.renderer.width,
-            entry.renderer.height,
-            rendered,
-            result.cpu_composited_count,
-            result.cpu_composited_sha256,
-            result.solid_material_count,
-            result.solid_material_sha256
-        )
+        val theme = if self.theme_enabled:
+            self.theme_id
+        else:
+            _active_or_default_wm_theme_id()
+        val revision = if self.theme_enabled:
+            simple_web_content_revision_with_theme_receipt(
+                self.theme_source_manifest_sha256,
+                title,
+                body_html,
+                entry.renderer.width,
+                entry.renderer.height,
+                0
+            )
+        else:
+            simple_web_content_revision_with_theme(
+                theme,
+                title,
+                body_html,
+                entry.renderer.width,
+                entry.renderer.height,
+                0
+            )
+        val frame = if self.theme_enabled:
+            simple_web_external_content_frame_with_theme_receipt(
+                entry.window_id.to_text(),
+                revision,
+                theme,
+                self.theme_source_manifest_sha256,
+                self.theme_material_sha256,
+                entry.renderer.width,
+                entry.renderer.height,
+                rendered,
+                result.cpu_composited_count,
+                result.cpu_composited_sha256,
+                result.solid_material_count,
+                result.solid_material_sha256
+            )
+        else:
+            simple_web_external_content_frame(
+                entry.window_id.to_text(),
+                revision,
+                theme,
+                entry.renderer.width,
+                entry.renderer.height,
+                rendered,
+                result.cpu_composited_count,
+                result.cpu_composited_sha256,
+                result.solid_material_count,
+                result.solid_material_sha256
+            )
         if frame.checksum == 0u64 or frame.pixels.len() == 0:
             self.entries[index] = entry
             return self._fail(index, "renderer-raster-rejected")
@@ -428,12 +542,42 @@ pub class HostedBrowserRendererRegistry:
             return "failed"
         val generation = self.next_generation
         self.next_generation = self.next_generation + 1
+        var startup_html = initial_html
+        if self.theme_enabled:
+            if not hosted_theme_wire_valid(
+                self.theme_revision, self.theme_wire_text
+            ):
+                return "failed"
+            startup_html = (
+                simple_web_content_full_html_with_install_wire(
+                    self.theme_wire_text,
+                    self.theme_revision,
+                    "",
+                    initial_html,
+                    width,
+                    height
+                )
+            )
+            if startup_html == "":
+                return "failed"
+        val process = if self.theme_enabled:
+            HostedBrowserRendererProcess.create_with_theme(
+                generation,
+                width,
+                height,
+                self.theme_revision,
+                self.theme_wire_text
+            )
+        else:
+            HostedBrowserRendererProcess.create(
+                generation, width, height
+            )
         var entry = HostedBrowserRendererEntry.create(
             window_id,
-            HostedBrowserRendererProcess.create(generation, width, height),
+            process,
             Engine2dCompositorBackend.create_from_env(width, height),
             now_micros,
-            initial_html
+            startup_html
         )
         val _ = entry.renderer.set_home_url(self.home_url)
         val snapshot = self.hsts_snapshot(wall_clock_ms)
@@ -490,6 +634,14 @@ pub class HostedBrowserRendererRegistry:
                 if result.reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
                     return self._begin_site_swap(index, wall_clock_ms)
                 return self._fail(index, result.reason)
+            if entry.renderer.state == "await-theme-init":
+                val theme_started = entry.renderer.begin_theme_init(2000)
+                self.entries[index] = entry
+                match theme_started:
+                    Err(reason):
+                        return self._fail(index, reason)
+                    Ok(_):
+                        return "none"
             if entry.renderer.state == "await-init":
                 val initialized = entry.renderer.begin_init(
                     entry.startup_html, 2000

@@ -29,10 +29,26 @@ use os.hosted.hosted_browser_renderer_worker.{
     hosted_browser_renderer_worker_main
 }
 use os.hosted.hosted_browser_renderer_policy.{
+    HostedBrowserNavigationPermit,
     hosted_browser_renderer_request_policy
 }
 use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererProcess
+}
+use os.hosted.hosted_theme_runtime.{
+    hosted_theme_init_encode,
+    hosted_theme_ready_payload_matches,
+    HOSTED_THEME_INIT_MAX_WIRE_BYTES
+}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_full_html_with_install_wire
+}
+use common.ui.generated.aetheric_dark_theme_snapshot.{
+    aetheric_dark_theme_render_snapshot
+}
+use common.ui.theme_package_wire.{
+    THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES,
+    theme_package_install_wire_v1_encode
 }
 
 extern fn rt_file_read_text(path: text) -> text
@@ -81,6 +97,178 @@ fn _worker_command_index(
     -1
 
 describe "hosted browser renderer worker":
+
+    it "orders accepted theme before canonical themed HTML":
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        val wire = theme_package_install_wire_v1_encode(
+            snapshot.id, snapshot.id, "active-wm-theme", snapshot
+        ).unwrap()
+        val themed_html = (
+            simple_web_content_full_html_with_install_wire(
+                wire, 1, "Worker", "<main>glass</main>", 64, 48
+            )
+        )
+        var before_theme = (
+            HostedBrowserRendererWorkerSession.create_for_theme_protocol(
+                64, 48
+            )
+        )
+        val raw_first = before_theme.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<main>raw</main>"
+        ))
+        expect(raw_first.ok).to_be(false)
+        expect(raw_first.reason).to_equal("expected-theme-init")
+        expect(raw_first.wire).to_equal("")
+
+        var themed = (
+            HostedBrowserRendererWorkerSession.create_for_theme_protocol(
+                64, 48
+            )
+        )
+        val theme_ready = themed.handle(BrowserRendererMessage(
+            kind: "theme_init", generation: 7, request_id: 2,
+            payload: hosted_theme_init_encode(1, wire).unwrap()
+        ))
+        expect(theme_ready.ok).to_be(true)
+        expect(theme_ready.initialized).to_be(false)
+        val ready_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), theme_ready.wire
+        ).message
+        expect(ready_message.kind).to_equal("theme_ready")
+        expect(hosted_theme_ready_payload_matches(
+            1, wire, ready_message.payload
+        )).to_be(true)
+        expect(hosted_theme_ready_payload_matches(
+            2, wire, ready_message.payload
+        )).to_be(false)
+        expect(hosted_theme_ready_payload_matches(
+            1,
+            wire,
+            ready_message.payload.replace(
+                snapshot.id, "wrong-theme"
+            )
+        )).to_be(false)
+        val raw_after_theme = themed.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 3,
+            payload: "<main>raw replay</main>"
+        ))
+        expect(raw_after_theme.ok).to_be(false)
+        expect(raw_after_theme.reason).to_equal(
+            "unthemed-init-rejected"
+        )
+        expect(raw_after_theme.wire).to_equal("")
+
+        var accepted = (
+            HostedBrowserRendererWorkerSession.create_for_theme_protocol(
+                64, 48
+            )
+        )
+        expect(accepted.handle(BrowserRendererMessage(
+            kind: "theme_init", generation: 7, request_id: 2,
+            payload: hosted_theme_init_encode(1, wire).unwrap()
+        )).ok).to_be(true)
+        val frame = accepted.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 3,
+            payload: themed_html
+        ))
+        expect(frame.ok).to_be(true)
+
+    it "restarts a themed generation before replaying saved navigation":
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        val wire = theme_package_install_wire_v1_encode(
+            snapshot.id, snapshot.id, "active-wm-theme", snapshot
+        ).unwrap()
+        val restart_html = (
+            simple_web_content_full_html_with_install_wire(
+                wire, 4, "", "", 64, 48
+            )
+        )
+        expect(restart_html).to_contain(
+            "data-wm-theme=\"{snapshot.id}\""
+        )
+
+        val target_url = "https://account.victim.test/private"
+        var replacement = HostedBrowserRendererProcess.create_with_theme(
+            8, 64, 48, 4, wire
+        )
+        replacement.navigation_permit = HostedBrowserNavigationPermit(
+            active: true,
+            url: target_url,
+            method: "GET",
+            headers: "",
+            body: "",
+            content_type: "",
+            redirect_count: 0
+        )
+        replacement.site_lock = "https://victim.test"
+        replacement.site_swap_pending = true
+        replacement.site_swap_site = "https://victim.test"
+        expect(replacement.generation).to_equal(8)
+        expect(replacement.requires_theme_handshake).to_be(true)
+        expect(replacement.theme_revision).to_equal(4)
+        expect(replacement.theme_wire_text).to_equal(wire)
+
+        var worker = (
+            HostedBrowserRendererWorkerSession.create_for_theme_protocol(
+                64, 48
+            )
+        )
+        val ready = worker.handle(BrowserRendererMessage(
+            kind: "theme_init",
+            generation: replacement.generation,
+            request_id: 2,
+            payload: hosted_theme_init_encode(4, wire).unwrap()
+        ))
+        expect(ready.ok).to_be(true)
+        expect(ready.initialized).to_be(false)
+        val ready_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(replacement.generation),
+            ready.wire
+        ).message
+        expect(hosted_theme_ready_payload_matches(
+            replacement.theme_revision,
+            replacement.theme_wire_text,
+            ready_message.payload
+        )).to_be(true)
+
+        val bootstrap = worker.handle(BrowserRendererMessage(
+            kind: "init",
+            generation: replacement.generation,
+            request_id: 3,
+            payload: restart_html
+        ))
+        expect(bootstrap.ok).to_be(true)
+        expect(bootstrap.initialized).to_be(true)
+
+        replacement.state = "active"
+        match replacement.begin_resume_site_swap(2000):
+            Err(reason):
+                fail("themed restart did not resume: {reason}")
+            Ok(started):
+                expect(started).to_be(true)
+        val resumed = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(replacement.generation),
+            replacement.pending_wire
+        )
+        expect(resumed.status).to_equal("message")
+        val navigation = browser_renderer_navigation_decode(
+            resumed.message
+        )
+        expect(navigation.ok).to_be(true)
+        expect(navigation.action).to_equal("open")
+        expect(navigation.url).to_equal(target_url)
+        expect(replacement.site_swap_pending).to_be(false)
+
+    it "reserves theme envelope bytes below the codec maximum":
+        expect(HOSTED_THEME_INIT_MAX_WIRE_BYTES).to_be_less_than(
+            THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES
+        )
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        val wire = theme_package_install_wire_v1_encode(
+            snapshot.id, snapshot.id, "active-wm-theme", snapshot
+        ).unwrap()
+        expect(hosted_theme_init_encode(1, wire).?).to_be(true)
 
     it "reuses an unchanged semantic frame without rerunning render stages":
         var worker = HostedBrowserRendererWorkerSession.create(64, 48)

@@ -29,12 +29,19 @@ use os.compositor.host_compositor_core.{
 use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend, hosted_winit_present_pure_simple_pixels}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.simple_web_window_renderer.{
-    simple_web_content_revision_with_theme,
-    simple_web_external_content_frame
+    simple_web_content_full_html_with_install_wire,
+    simple_web_content_revision_with_theme_receipt,
+    simple_web_external_content_frame_with_theme_receipt
 }
 use os.compositor.host_wm_theme_bootstrap.{install_default_host_wm_theme}
-use common.ui.theme_package.{default_theme_id}
-use common.ui.wm_chrome_theme.{active_wm_theme_id}
+use common.ui.theme_package_wire.{
+    theme_package_install_wire_v1_encode
+}
+use os.hosted.hosted_theme_runtime.{
+    hosted_theme_id,
+    hosted_theme_material_sha256,
+    hosted_theme_source_manifest_sha256
+}
 use os.compositor.shared_mdi_setup.{
     shared_mdi_surface_count, shared_mdi_surface_title,
     shared_mdi_surface_app_id, shared_mdi_surface_content,
@@ -231,7 +238,8 @@ fn _seed_host_compositor_shared_mdi(comp: HostCompositor) -> HostCompositor:
 
 fn main() -> i64:
     val args = sys_get_args() ?? []
-    if args.len() == 5 and args[1] == BROWSER_RENDERER_WORKER_ARG:
+    if ((args.len() == 5 or args.len() == 6) and
+        args[1] == BROWSER_RENDERER_WORKER_ARG):
         return hosted_browser_renderer_worker_main(args)
     if args.len() == 2 and args[1] == "--browser-render-evidence":
         val html_css_error = hosted_browser_html_css_evidence(args[0])
@@ -249,6 +257,17 @@ fn main() -> i64:
     print "Controls: drag titlebars, click focus, close X, Tab cycle, W close, M minimize, R restore, Esc quit"
 
     val theme_snapshot = install_default_host_wm_theme()
+    val theme_wire_text = match theme_package_install_wire_v1_encode(
+        theme_snapshot.id,
+        theme_snapshot.id,
+        "active-wm-theme",
+        theme_snapshot
+    ):
+        Err(reason):
+            print "ERROR: hosted theme projection rejected: {reason}"
+            return 1
+        Ok(value):
+            value
     print "[theme-evidence] id={theme_snapshot.id} source_manifest_sha256={theme_snapshot.source_manifest_sha256} material_sha256={theme_snapshot.material_sha256} backdrop_filter=requested fallback=solid-material"
 
     val el = rt_winit_event_loop_new()
@@ -269,7 +288,9 @@ fn main() -> i64:
     print "[hosted-wm] raster-backend=simple-2d-winit-buffer source=pure-simple-pixel-mirror"
     val comp = HostCompositor.new_headless(Size(width: WINDOW_WIDTH as u64, height: WINDOW_HEIGHT as u64))
     val raster = Engine2dCompositorBackend.create_from_env(WINDOW_WIDTH, WINDOW_HEIGHT)
-    _run_hosted_wm(comp, raster, backend, el, win, args[0])
+    _run_hosted_wm(
+        comp, raster, backend, el, win, args[0], theme_wire_text
+    )
 
 fn _save_hosted_browser_hsts(
     renderer_in: HostedBrowserRendererProcess,
@@ -355,7 +376,7 @@ fn _close_hosted_browser_resources(
 
 # Dependency-light production event loop. Pure Simple owns scene, Web/GUI/2D
 # raster, and the pixel mirror; winit only presents that final buffer.
-fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend, presenter: HostedWinitBufferBackend, el: i64, win: i64, executable: text) -> i64:
+fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend, presenter: HostedWinitBufferBackend, el: i64, win: i64, executable: text, theme_wire_text: text) -> i64:
     var comp = comp_in
     var raster = raster_in
     var surface = host_surface_state(_physical_surface_geometry(win))
@@ -382,6 +403,13 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var browser_content_height: i32 = 1
     var browser_initial_html = ""
     var browser_initial_title = ""
+    val browser_theme_id = hosted_theme_id(1, theme_wire_text)
+    val browser_theme_source_manifest_sha256 = (
+        hosted_theme_source_manifest_sha256(1, theme_wire_text)
+    )
+    val browser_theme_material_sha256 = (
+        hosted_theme_material_sha256(1, theme_wire_text)
+    )
     if browser_profile_window_id > 0:
         for window in comp.windows:
             if window.id == browser_profile_window_id:
@@ -391,8 +419,12 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 )
                 browser_initial_html = window.content
                 browser_initial_title = window.title
-    var browser_renderer = HostedBrowserRendererProcess.create(
-        1, browser_content_width, browser_content_height
+    var browser_renderer = HostedBrowserRendererProcess.create_with_theme(
+        1,
+        browser_content_width,
+        browser_content_height,
+        1,
+        theme_wire_text
     )
     var browser_raster = Engine2dCompositorBackend.create_from_env(
         browser_content_width, browser_content_height
@@ -446,10 +478,22 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         )
         val _ = browser_renderer.set_home_url(HOSTED_BROWSER_HOME_URL)
         if browser_frame_registered:
-            val started = browser_renderer.start(executable, 2000)
+            val themed_initial_html = (
+                simple_web_content_full_html_with_install_wire(
+                    theme_wire_text,
+                    1,
+                    browser_initial_title,
+                    browser_initial_html,
+                    browser_content_width,
+                    browser_content_height
+                )
+            )
+            val started = browser_renderer.start_with_theme(
+                executable, 2000
+            )
             if started.ok:
                 val initial = browser_renderer.render(
-                    "init", browser_initial_html, 2000
+                    "init", themed_initial_html, 2000
                 )
                 if initial.ok:
                     val rendered = browser_raster.render_draw_ir_composition_resources_revision(
@@ -457,19 +501,21 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         initial.producer_generation,
                         initial.composition_revision
                     )
-                    val active_theme = active_wm_theme_id()
-                    val theme = if active_theme != "":
-                        active_theme
-                    else:
-                        default_theme_id()
-                    val revision = simple_web_content_revision_with_theme(
-                        theme, browser_initial_title, browser_initial_html,
+                    val revision = (
+                        simple_web_content_revision_with_theme_receipt(
+                        browser_theme_source_manifest_sha256,
+                        browser_initial_title,
+                        browser_initial_html,
                         browser_content_width, browser_content_height, 0
+                        )
                     )
-                    val frame = simple_web_external_content_frame(
+                    val frame = (
+                        simple_web_external_content_frame_with_theme_receipt(
                         browser_profile_window_id.to_text(),
                         revision,
-                        theme,
+                        browser_theme_id,
+                        browser_theme_source_manifest_sha256,
+                        browser_theme_material_sha256,
                         browser_content_width,
                         browser_content_height,
                         rendered,
@@ -477,6 +523,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         initial.cpu_composited_sha256,
                         initial.solid_material_count,
                         initial.solid_material_sha256
+                        )
                     )
                     browser_renderer_ready = comp.set_external_web_frame(
                         browser_profile_window_id, frame
@@ -581,8 +628,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var window_move_events: i64 = 0
     var semantic_event_id: i64 = 0
     var web_sessions = HostedWebContentRegistry.create()
-    var browser_renderers = HostedBrowserRendererRegistry.create(
-        executable, HOSTED_BROWSER_HOME_URL
+    var browser_renderers = HostedBrowserRendererRegistry.create_with_theme(
+        executable, HOSTED_BROWSER_HOME_URL, 1, theme_wire_text
     )
     if browser_bookmark_revision > 0:
         browser_renderers.set_bookmark_snapshot(browser_bookmarks)
@@ -674,19 +721,21 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         if window.id == browser_profile_window_id:
                             current_title = window.title
                             current_html = window.content
-                    val active_theme = active_wm_theme_id()
-                    val theme = if active_theme != "":
-                        active_theme
-                    else:
-                        default_theme_id()
-                    val revision = simple_web_content_revision_with_theme(
-                        theme, current_title, current_html,
+                    val revision = (
+                        simple_web_content_revision_with_theme_receipt(
+                        browser_theme_source_manifest_sha256,
+                        current_title,
+                        current_html,
                         browser_content_width, browser_content_height, 0
+                        )
                     )
-                    val frame = simple_web_external_content_frame(
+                    val frame = (
+                        simple_web_external_content_frame_with_theme_receipt(
                         browser_profile_window_id.to_text(),
                         revision,
-                        theme,
+                        browser_theme_id,
+                        browser_theme_source_manifest_sha256,
+                        browser_theme_material_sha256,
                         browser_content_width,
                         browser_content_height,
                         rendered,
@@ -694,6 +743,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         browser_result.cpu_composited_sha256,
                         browser_result.solid_material_count,
                         browser_result.solid_material_sha256
+                        )
                     )
                     if comp.set_external_web_frame(
                         browser_profile_window_id, frame
