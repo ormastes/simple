@@ -13,7 +13,7 @@ do not replace source-matched native or prepared-host acceptance evidence.
 | CUDA | 3 smoke | 6,466,705,755 ns | 7,273,005,377 ns | FAIL; hit slower, source `device_identity_unknown`, handle `0`, identity `nil` |
 | Vulkan | 0 | n/a | n/a | FAIL before measurement; cached interpreter lacks `rt_is_interpreter_runtime` |
 | Metal | 0 | n/a | n/a | Postponed to prepared macOS host under TODO 588 |
-| process/pipe | 0 | n/a | n/a | FAIL before measurement; cached runtime parser rejects `hosted_browser_renderer_process.spl` |
+| process/pipe | 0 | n/a | n/a | FAIL before measurement; cached runtime parser progressed from the process module into `browser_session.spl` |
 
 The CUDA 21-pair run first reached the 300-second bound. The three-pair smoke
 mode then completed and failed the strict device-provenance gate. The process
@@ -24,6 +24,13 @@ The response SBRF7 route benchmark did not execute because the cached runtime
 reports a parser newline error while importing
 `hosted_browser_renderer_worker.spl`. Direct `check` of the same import passes,
 so this is not accepted as source or runtime evidence.
+
+The process/pipe smoke was retried after rebasing a remote conflict-marker
+repair. Grouping the process redirect condition moved parsing into
+`browser_session.spl`; normalizing split assignments and grouping its first
+ungrouped header condition did not clear the remaining newline error before the
+three-cycle cap. All three runs executed zero examples, so no timing, pipe, or
+GPU claim is admitted.
 
 ## Required Follow-up
 
