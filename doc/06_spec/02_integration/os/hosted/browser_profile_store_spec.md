@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -14,6 +14,59 @@
 ## Scenarios
 
 ### hosted browser profile store
+
+#### persists one validated Home through restart and hosted navigation
+
+- Set the home page
+- Restart the browser profile
+- Navigate away and return home
+- Verify visible Home state
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 34 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Set the home page")
+expect(_set_home_page_receipt()?).to_equal(
+    "legacy-default=https://example.com/; " +
+    "legacy-title=Legacy title; saved=https://home.test/start; " +
+    "corrupt-fallback=https://example.com/; empty-atomic=true; " +
+    "file-atomic=true; javascript-atomic=true; " +
+    "oversized-atomic=true"
+)
+
+step("Restart the browser profile")
+expect(_restart_home_profile_receipt()?).to_equal(
+    "reopened=https://home.test/start; " +
+    "registry=https://home.test/start"
+)
+
+step("Navigate away and return home")
+expect(_navigate_home_receipt()?).to_equal(
+    "primary-seeded=true; primary-started=true; " +
+    "primary-action=home; primary-method=GET; " +
+    "primary-url=https://home.test/start; primary-csp=''; " +
+    "primary-csp-ready=false; primary-title=''; " +
+    "primary-history=2; primary-index=1; " +
+    "secondary-seeded=true; secondary-started=true; " +
+    "secondary-action=home; secondary-method=GET; " +
+    "secondary-url=https://home.test/start; " +
+    "secondary-history=2; secondary-index=1"
+)
+
+step("Verify visible Home state")
+expect(_visible_home_receipt()?).to_equal(
+    "target=home; title=https://home.test/start; " +
+    "draw-ir=true; pixels=117600; home-pixel=true; " +
+    "address-pixel=true"
+)
+```
+
+</details>
 
 #### reopens bounded bookmark titles through public registry actions
 
@@ -547,8 +600,8 @@ Tests covering hosted browser profile store.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

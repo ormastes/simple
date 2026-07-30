@@ -14,11 +14,29 @@ use common.web.host_policy.{is_ip_host_literal}
 use common.web.public_suffix.{is_public_suffix}
 use std.nogc_sync_mut.env.platform.{get_data_dir}
 use std.sffi.io.{dir_create_all}
+use std.common.encoding.utf8.{text_byte_len}
 
 val BROWSER_PROFILE_SCHEMA_VERSION: i64 = 1
 val BROWSER_PROFILE_MAX_BOOKMARKS: i64 = 256
 val BROWSER_PROFILE_MAX_HSTS: i64 = 1024
 val BROWSER_PROFILE_MAX_HSTS_LIFETIME_MS: i64 = 315360000000
+val BROWSER_PROFILE_DEFAULT_HOME_URL: text = "https://example.com/"
+
+fn _browser_profile_home_url(raw_url: text) -> text:
+    if text_byte_len(raw_url) > 2048:
+        return ""
+    match normalize_network_navigation_url(raw_url):
+        Err(_):
+            ""
+        Ok(url):
+            if (
+                (url.starts_with("http://") or
+                 url.starts_with("https://")) and
+                text_byte_len(url) <= 2048
+            ):
+                url
+            else:
+                ""
 
 fn browser_profile_default_dir() -> text:
     get_data_dir() + "/simple/browser"
@@ -68,8 +86,23 @@ impl BrowserProfileStore:
         self.db.exec_sql(
             "CREATE TABLE IF NOT EXISTS browser_profile_meta (" +
             "id INTEGER PRIMARY KEY CHECK (id = 1)," +
-            "schema_version INTEGER NOT NULL)"
+            "schema_version INTEGER NOT NULL," +
+            "home_url TEXT NOT NULL DEFAULT " +
+            "'{BROWSER_PROFILE_DEFAULT_HOME_URL}')"
         )?
+        val meta_columns = self.db.query(
+            "PRAGMA table_info(browser_profile_meta)", []
+        )?
+        var has_home_url = false
+        for column in meta_columns:
+            if column.get_text("name") == "home_url":
+                has_home_url = true
+        if not has_home_url:
+            self.db.exec_sql(
+                "ALTER TABLE browser_profile_meta ADD COLUMN " +
+                "home_url TEXT NOT NULL DEFAULT " +
+                "'{BROWSER_PROFILE_DEFAULT_HOME_URL}'"
+            )?
         self.db.exec_sql(
             "CREATE TABLE IF NOT EXISTS browser_bookmarks (" +
             "position INTEGER PRIMARY KEY," +
@@ -104,6 +137,35 @@ impl BrowserProfileStore:
                 id: "browser-profile", reason: "unsupported schema version"
             ))
         Ok(())
+
+    me save_home_url(raw_url: text) -> Result<(), DbError>:
+        val home_url = _browser_profile_home_url(raw_url)
+        if home_url == "":
+            return Err(DbError.ConstraintViolation(
+                "invalid browser home URL"
+            ))
+        self.db.exec(
+            "UPDATE browser_profile_meta SET home_url = ? WHERE id = 1",
+            [DbValue.Text(value: home_url)]
+        )?
+        Ok(())
+
+    fn load_home_url() -> Result<text, DbError>:
+        val row = self.db.query_one(
+            "SELECT home_url FROM browser_profile_meta WHERE id = ?",
+            [DbValue.Integer(value: 1)]
+        )?
+        if row == nil:
+            return Ok(BROWSER_PROFILE_DEFAULT_HOME_URL)
+        val stored = row.unwrap().get_text("home_url")
+        if stored == nil:
+            return Ok(BROWSER_PROFILE_DEFAULT_HOME_URL)
+        val home_url = _browser_profile_home_url(stored.unwrap())
+        Ok(if home_url == "":
+            BROWSER_PROFILE_DEFAULT_HOME_URL
+        else:
+            home_url
+        )
 
     me save_bookmarks(snapshot: BrowserBookmarkSnapshot) -> Result<(), DbError>:
         if snapshot.entries.len() > BROWSER_PROFILE_MAX_BOOKMARKS:

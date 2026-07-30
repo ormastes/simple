@@ -1,5 +1,10 @@
 use std.spec.*
-use std.database.sql.types.{DbValue}
+use std.database.sql.connection.{Database}
+use std.database.sql.types.{DbError, DbValue}
+use std.common.web.browser_renderer_protocol.{
+    browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_navigation_decode
+}
 use std.js.types.pair.{Pair}
 use std.gc_async_mut.web.browser_session.{
     BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserHstsSnapshotEntry
@@ -8,9 +13,21 @@ use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
 use os.hosted.browser_profile_store.{
-    BrowserBookmarkStore, BrowserProfileStore
+    BROWSER_PROFILE_DEFAULT_HOME_URL, BrowserBookmarkStore,
+    BrowserProfileStore
+}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess
+}
+use os.hosted.hosted_browser_renderer_registry.{
+    HostedBrowserRendererRegistry
 }
 use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.host_compositor_core.{HostCompositor}
+use common.window_protocol.geometry.{Size}
+use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
     MockResponseRegistry, set_mock_registry
 }
@@ -112,7 +129,214 @@ fn check_in_process_registry_profile_reopen():
     set_mock_registry(MockResponseRegistry.create())
     remove_profile_files()
 
+fn _set_home_page_receipt() -> Result<text, DbError>:
+    remove_profile_files()
+    var legacy = Database.open(PROFILE_PATH)?
+    legacy.exec_sql(
+        "CREATE TABLE browser_profile_meta (" +
+        "id INTEGER PRIMARY KEY CHECK (id = 1)," +
+        "schema_version INTEGER NOT NULL)"
+    )?
+    legacy.exec_sql(
+        "INSERT INTO browser_profile_meta (id, schema_version) " +
+        "VALUES (1, 1)"
+    )?
+    legacy.exec_sql(
+        "CREATE TABLE browser_bookmarks (" +
+        "position INTEGER PRIMARY KEY," +
+        "url TEXT NOT NULL UNIQUE," +
+        "title TEXT NOT NULL)"
+    )?
+    legacy.exec_sql(
+        "INSERT INTO browser_bookmarks (position, url, title) VALUES " +
+        "(0, 'https://legacy.test/', 'Legacy title')"
+    )?
+    legacy.close()?
+    var profile = BrowserProfileStore.open(PROFILE_PATH)?
+    val legacy_default = profile.load_home_url()?
+    val legacy_title = profile.load_bookmarks()?.entries[0].second
+    profile.save_home_url("  HTTPS://home.test/start  ")?
+    val saved_home = profile.load_home_url()?
+    profile.db.exec(
+        "UPDATE browser_profile_meta SET home_url = ? WHERE id = 1",
+        [DbValue.Text(value: "javascript:corrupt")]
+    )?
+    val corrupt_fallback = profile.load_home_url()?
+    profile.save_home_url(saved_home)?
+    val empty_atomic = (
+        profile.save_home_url("").is_err() and
+        profile.load_home_url()? == saved_home
+    )
+    val file_atomic = (
+        profile.save_home_url("file:///etc/passwd").is_err() and
+        profile.load_home_url()? == saved_home
+    )
+    val javascript_atomic = (
+        profile.save_home_url("javascript:alert(1)").is_err() and
+        profile.load_home_url()? == saved_home
+    )
+    val oversized_atomic = (
+        profile.save_home_url(
+            "https://home.test/" + "x".repeat(2049)
+        ).is_err() and profile.load_home_url()? == saved_home
+    )
+    profile.close()?
+    Ok(
+        "legacy-default={legacy_default}; legacy-title={legacy_title}; " +
+        "saved={saved_home}; corrupt-fallback={corrupt_fallback}; " +
+        "empty-atomic={empty_atomic}; file-atomic={file_atomic}; " +
+        "javascript-atomic={javascript_atomic}; " +
+        "oversized-atomic={oversized_atomic}"
+    )
+
+fn _restart_home_profile_receipt() -> Result<text, DbError>:
+    var restarted = BrowserProfileStore.open(PROFILE_PATH)?
+    val home_url = restarted.load_home_url()?
+    restarted.close()?
+    val registry = HostedBrowserRendererRegistry.create(
+        "/unused/renderer", home_url
+    )
+    Ok("reopened={home_url}; registry={registry.home_url}")
+
+fn _navigate_home_receipt() -> Result<text, DbError>:
+    var profile = BrowserProfileStore.open(PROFILE_PATH)?
+    val home_url = profile.load_home_url()?
+    profile.close()?
+    var primary = HostedBrowserRendererProcess.create(80, 64, 48)
+    val primary_seeded = primary.set_home_url(home_url)
+    primary.state = "active"
+    primary.document_url = "https://away.test/page"
+    primary.document_origin = "https://away.test"
+    primary.document_csp_policy = "default-src 'none'"
+    primary.document_csp_ready = true
+    primary.document_title = "Away"
+    primary.document_title_url = primary.document_url
+    primary.document_title_generation = primary.generation
+    primary.document_title_reply_to_request_id = (
+        primary.expected_reply_to_request_id
+    )
+    primary.history_urls = [primary.document_url]
+    primary.history_csp_policies = [primary.document_csp_policy]
+    primary.history_csp_ready = [true]
+    primary.history_index = 0
+    val primary_started = primary.begin_go_home(2000).is_ok()
+    val primary_home = browser_renderer_navigation_decode(
+        browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(80), primary.pending_wire
+        ).message
+    )
+    primary._commit_document_url(primary_home.url)
+
+    var secondary = HostedBrowserRendererProcess.create(81, 64, 48)
+    val secondary_seeded = secondary.set_home_url(home_url)
+    secondary.state = "active"
+    secondary.document_url = "https://secondary.test/"
+    secondary.history_urls = [secondary.document_url]
+    secondary.history_csp_policies = [""]
+    secondary.history_csp_ready = [false]
+    secondary.history_index = 0
+    val secondary_started = secondary.begin_go_home(2000).is_ok()
+    val secondary_home = browser_renderer_navigation_decode(
+        browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(81), secondary.pending_wire
+        ).message
+    )
+    secondary._commit_document_url(secondary_home.url)
+    Ok(
+        "primary-seeded={primary_seeded}; " +
+        "primary-started={primary_started}; " +
+        "primary-action={primary_home.action}; " +
+        "primary-method={primary_home.method}; " +
+        "primary-url={primary.document_url}; " +
+        "primary-csp='{primary.document_csp_policy}'; " +
+        "primary-csp-ready={primary.document_csp_ready}; " +
+        "primary-title='{primary.document_title}'; " +
+        "primary-history={primary.history_urls.len()}; " +
+        "primary-index={primary.history_index}; " +
+        "secondary-seeded={secondary_seeded}; " +
+        "secondary-started={secondary_started}; " +
+        "secondary-action={secondary_home.action}; " +
+        "secondary-method={secondary_home.method}; " +
+        "secondary-url={secondary.document_url}; " +
+        "secondary-history={secondary.history_urls.len()}; " +
+        "secondary-index={secondary.history_index}"
+    )
+
+fn _visible_home_receipt() -> Result<text, DbError>:
+    var profile = BrowserProfileStore.open(PROFILE_PATH)?
+    val home_url = profile.load_home_url()?
+    profile.close()?
+    var comp = HostCompositor.new_headless(Size(
+        width: 420u64, height: 280u64
+    ))
+    comp.apply_bridge_request(
+        1, 0, COMP_CREATE_WINDOW.to_i64(), 0, home_url,
+        20, 48, 320, 180, "<p>Home</p>", 1, "browser"
+    )
+    val home_control = comp.browser_chrome_target(220, 90)
+    val target = if home_control.is_some():
+        home_control.unwrap().control
+    else:
+        ""
+    val title = comp.windows[0].title
+    val raster = Engine2dCompositorBackend.create_named(
+        420, 280, "software"
+    )
+    val rendered = comp.render_frame_engine2d(raster)
+    val pixels = comp.pure_simple_pixel_buffer()
+    val home_pixel = (
+        pixels.len() == 420 * 280 and
+        pixels[90 * 420 + 220] == wm_chrome_theme().title_unfocused
+    )
+    val address_pixel = (
+        pixels.len() == 420 * 280 and
+        pixels[90 * 420 + 300] == 0xFFFFFFFFu32
+    )
+    raster.shutdown()
+    remove_profile_files()
+    Ok(
+        "target={target}; title={title}; draw-ir={rendered}; " +
+        "pixels={pixels.len()}; home-pixel={home_pixel}; " +
+        "address-pixel={address_pixel}"
+    )
+
 describe "hosted browser profile store":
+    it "persists one validated Home through restart and hosted navigation":
+        step("Set the home page")
+        expect(_set_home_page_receipt()?).to_equal(
+            "legacy-default=https://example.com/; " +
+            "legacy-title=Legacy title; saved=https://home.test/start; " +
+            "corrupt-fallback=https://example.com/; empty-atomic=true; " +
+            "file-atomic=true; javascript-atomic=true; " +
+            "oversized-atomic=true"
+        )
+
+        step("Restart the browser profile")
+        expect(_restart_home_profile_receipt()?).to_equal(
+            "reopened=https://home.test/start; " +
+            "registry=https://home.test/start"
+        )
+
+        step("Navigate away and return home")
+        expect(_navigate_home_receipt()?).to_equal(
+            "primary-seeded=true; primary-started=true; " +
+            "primary-action=home; primary-method=GET; " +
+            "primary-url=https://home.test/start; primary-csp=''; " +
+            "primary-csp-ready=false; primary-title=''; " +
+            "primary-history=2; primary-index=1; " +
+            "secondary-seeded=true; secondary-started=true; " +
+            "secondary-action=home; secondary-method=GET; " +
+            "secondary-url=https://home.test/start; " +
+            "secondary-history=2; secondary-index=1"
+        )
+
+        step("Verify visible Home state")
+        expect(_visible_home_receipt()?).to_equal(
+            "target=home; title=https://home.test/start; " +
+            "draw-ir=true; pixels=117600; home-pixel=true; " +
+            "address-pixel=true"
+        )
+
     it "reopens bounded bookmark titles through public registry actions":
         check_in_process_registry_profile_reopen()
 

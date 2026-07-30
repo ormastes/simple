@@ -74,7 +74,8 @@ use os.hosted.hosted_browser_render_evidence.{
     hosted_browser_animation_evidence
 }
 use os.hosted.browser_profile_store.{
-    BrowserProfileStore, hosted_browser_parent_toggle_bookmark
+    BROWSER_PROFILE_DEFAULT_HOME_URL, BrowserProfileStore,
+    hosted_browser_parent_toggle_bookmark
 }
 use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
 use os.hosted.hosted_wm_evidence.{
@@ -157,7 +158,6 @@ val KEY_R: i64 = 82
 val KEY_W: i64 = 87
 val KEY_F11: i64 = 122
 val HOSTED_CREATE_WEB_WINDOW: i64 = 14
-val HOSTED_BROWSER_HOME_URL: text = "https://example.com/"
 
 fn _live_proof_mode() -> bool:
     (rt_env_get("SIMPLE_HOSTED_WM_LIVE_PROOF") ?? "") == "1"
@@ -439,6 +439,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var browser_address_replace_on_text = false
     var browser_pressed_control = ""
     var browser_profile: BrowserProfileStore? = nil
+    var browser_home_url = BROWSER_PROFILE_DEFAULT_HOME_URL
     var browser_bookmarks = BrowserBookmarkSnapshot.create([])
     var browser_hsts = BrowserHstsSnapshot.create([])
     var browser_primary_hsts_revision: i64 = 0
@@ -448,37 +449,44 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var browser_renderer_close_pending = false
     var browser_renderer_close_retry_at_micros: i64 = 0
     var browser_hsts_save_retry_at_micros: i64 = 0
+    match BrowserProfileStore.open_default():
+        Ok(profile):
+            match profile.load_hsts(
+                rt_time_now_unix_micros() / 1000
+            ):
+                Ok(hsts):
+                    match profile.load_bookmarks():
+                        Err(error):
+                            var failed_profile = profile
+                            val _ = failed_profile.close()
+                            print "[hosted-wm] browser-profile-disabled reason={error.message()}"
+                        Ok(bookmarks):
+                            match profile.load_home_url():
+                                Err(error):
+                                    var failed_profile = profile
+                                    val _ = failed_profile.close()
+                                    print "[hosted-wm] browser-profile-disabled reason={error.message()}"
+                                Ok(home_url):
+                                    val _ = browser_renderer.load_hsts_snapshot(
+                                        hsts,
+                                        rt_time_now_unix_micros() / 1000
+                                    )
+                                    browser_home_url = home_url
+                                    browser_hsts = hsts
+                                    browser_bookmarks = bookmarks
+                                    browser_bookmark_revision = 1
+                                    browser_profile = Some(profile)
+                Err(error):
+                    var failed_profile = profile
+                    val _ = failed_profile.close()
+                    print "[hosted-wm] browser-profile-disabled reason={error.message()}"
+        Err(error):
+            print "[hosted-wm] browser-profile-disabled reason={error.message()}"
     if browser_profile_window_id > 0:
-        match BrowserProfileStore.open_default():
-            Ok(profile):
-                match profile.load_hsts(
-                    rt_time_now_unix_micros() / 1000
-                ):
-                    Ok(hsts):
-                        match profile.load_bookmarks():
-                            Err(error):
-                                var failed_profile = profile
-                                val _ = failed_profile.close()
-                                print "[hosted-wm] browser-profile-disabled reason={error.message()}"
-                            Ok(bookmarks):
-                                val _ = browser_renderer.load_hsts_snapshot(
-                                    hsts,
-                                    rt_time_now_unix_micros() / 1000
-                                )
-                                browser_hsts = hsts
-                                browser_bookmarks = bookmarks
-                                browser_bookmark_revision = 1
-                                browser_profile = Some(profile)
-                    Err(error):
-                        var failed_profile = profile
-                        val _ = failed_profile.close()
-                        print "[hosted-wm] browser-profile-disabled reason={error.message()}"
-            Err(error):
-                print "[hosted-wm] browser-profile-disabled reason={error.message()}"
         val browser_frame_registered = comp.require_external_web_frame(
             browser_profile_window_id
         )
-        val _ = browser_renderer.set_home_url(HOSTED_BROWSER_HOME_URL)
+        val _ = browser_renderer.set_home_url(browser_home_url)
         if browser_frame_registered:
             val themed_initial_html = (
                 simple_web_content_full_html_with_install_wire(
@@ -634,7 +642,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var semantic_event_id: i64 = 0
     var web_sessions = HostedWebContentRegistry.create()
     var browser_renderers = HostedBrowserRendererRegistry.create_with_theme(
-        executable, HOSTED_BROWSER_HOME_URL, 1, theme_wire_text
+        executable, browser_home_url, 1, theme_wire_text
     )
     if browser_bookmark_revision > 0:
         browser_renderers.set_bookmark_snapshot(browser_bookmarks)
