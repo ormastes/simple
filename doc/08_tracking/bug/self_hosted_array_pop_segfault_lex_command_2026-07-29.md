@@ -34,14 +34,26 @@ across loop iterations" to "struct field across separate method calls" to
 match `indent_stack`'s real usage shape, tested at up to 444 pushes across 12
 alternating push/pop bursts, with a struct layout mirroring `CoreLexer`'s 15
 fields — **also negative, both seeds, byte-identical output, no
-corruption.** **The causal link therefore remains INFERRED. Ten real
-build-and-run experiments across two structurally distinct candidate root
-causes have now failed to reproduce the crash** — not just unconfirmed for
-lack of a full build, but with both leading hypotheses tested and found
-wanting at the scales/shapes triable outside the real CLI closure. Only a
-completed full-CLI build (or an equivalent debug-instrumented run against the
-real closure) can settle it now. See "2026-07-29 follow-up" below for full
-detail on each attempt and recommended
+corruption.** A ninth attempt then went straight at the actual crashed
+artifact with **static disassembly, no build required**: `objdump -d` on
+`CoreLexer_dot_scan_token` inside the real crashed binary shows its single
+`rt_array_pop` call site loads and calls the **real, correct**
+`rt_array_pop` address — **not** a competing symbol — and is
+**instruction-for-instruction structurally identical** to the same call site
+in a clean, exit-0 narrow-entry binary from retry 6. Frame #2's address from
+the original gdb backtrace (`0x3325530`) was also confirmed (via `readelf
+-l`) to fall **outside every `LOAD` segment** in the binary, i.e. not a valid
+static code address the call could have branched to. **This DISPROVES the
+theft/wrong-call-target hypothesis for the actual crashed artifact** (not
+merely "unreproduced" — the call site is provably correct) and **favors the
+data-corruption family instead: something corrupts the `indent_stack`
+receiver's runtime data before this identical, correct call executes.**
+**Practical conclusion for deployment: this session's `pop`/`push` allowlist
+fix should not be presented as the fix for the `lex` segfault** — it remains
+a real, separate, evidence-backed fix for the documented `push` theft victim,
+but the original crash needs its own root-cause work, now aimed specifically
+at data corruption rather than symbol resolution. See "2026-07-29
+follow-up" below for full detail on each attempt and recommended
 next steps.
 **Component:** `src/compiler/10.frontend/core/lexer_struct.spl` (`CoreLexer.scan_token`),
 runtime `rt_array_pop` / `spl_array_pop`,
@@ -670,3 +682,100 @@ moment, or (b) instrument `rt_array_pop`/`spl_array_pop` themselves (or the
 allocator) to log receiver-pointer provenance and reallocation events, then
 run that instrumented build specifically against the real closure. Both
 require tier (b) to be unblocked first; neither was attempted this pass.
+
+**Retry 9 (static disassembly of the actual crashed artifact — no build
+required, settles causation DIRECTION without tier (b)): DECISIVE — theft
+disproven, data-corruption family favored.**
+
+Re-verified (PROVED) the original crashed binary is unchanged:
+`/home/ormastes/dev/pub/simple_wt_secfix/release/x86_64-unknown-linux-gnu/simple`,
+42477824 bytes, mtime 2026-07-28 21:37:16, sha256
+`04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0` — exact
+match to the artifact diagnosed at the start of this doc.
+
+1. **Located and disassembled the crash-path symbol** —
+   `nm` found `frontend__core__lexer_struct__CoreLexer_dot_scan_token`
+   (0xc8dc57). `objdump -d --disassemble=<symbol>` found **exactly one**
+   `rt_array_pop` reference in the whole function (source has two
+   `self.indent_stack.pop()` call sites, lines 1037 and 1071 — codegen
+   apparently shares/reuses one call site for both, or only one materializes
+   a distinct symbol reference; not investigated further). The call site
+   (PROVED, at binary offset `c94a70`):
+   ```
+   c94a60: mov    $0x2b,%esi
+   c94a65: lea    ...,%rcx        # 2af2897 <rt_eprintln_str>
+   c94a6c: call   *%rcx
+   c94a6e: ud2
+   c94a70: lea    0x1e5ec13(%rip),%r8   # 2af368a <rt_array_pop>
+   c94a77: call   *%r8
+   c94a7a: mov    0x9b8(%rsp),%rdi
+   c94a82: mov    %rdi,%r8
+   c94a85: and    $0xfffffffffffffff8,%r8
+   c94a89: test   %r8,%r8
+   c94a8c: jne    c94c8d <...+0x7036>
+   ```
+   The call is an **indirect call through a register** (`call *%r8`), but the
+   register is loaded via a **RIP-relative `lea` whose disassembler-resolved
+   comment is `<rt_array_pop>`** — i.e. the loaded, called address IS the
+   real `rt_array_pop` symbol's address (0x2af368a, matching `nm`'s table
+   exactly), **not** any `_dot_pop`-suffixed competing symbol. **No theft is
+   visible at this call site, in the actual crashed binary.** The indirect
+   dispatch itself (rather than a direct `call rt_array_pop`) is simply this
+   codegen's normal calling convention for runtime helpers via `lea`+`call
+   *reg` — not evidence of a vtable/function-pointer mechanism gone wrong.
+2. **Frame #2's address (`0x3325530` from the original gdb backtrace) is
+   OUTSIDE every `LOAD` segment in the ELF** (PROVED via `readelf -l`): the
+   binary's `RW`/bss segment spans `VirtAddr 0x2afd468` through
+   `0x2afd468 + MemSiz 0x8180a0 = 0x3315508` — `0x3325530` is **~64 KB (0x10028
+   bytes) past that upper bound**, and no other `LOAD` segment comes close.
+   It is not a valid static code or rodata address in this binary's own
+   image. This is consistent with either a legitimately dynamic
+   (heap/allocator-managed, mapped at runtime beyond the static image) data
+   address being misread by gdb's non-DWARF, frame-pointer-less backtrace
+   heuristic as a return address (most likely, given point 1 shows no
+   register-indirect call ever targets an unresolved/wrong location), or with
+   genuinely corrupted stack content — **either reading favors "frame #2 is
+   not a real call frame / not a call-target problem" over "the call went to
+   a different symbol via that address."**
+3. **Cross-compared against a known-good binary**: same symbol (mangled as
+   `compiler__frontend__core__lexer_struct__CoreLexer_dot_scan_token` — this
+   build's module-prefix scheme differs cosmetically) in the clean,
+   exit-0 `narrow_patched/narrow_repro` artifact from retry 6 shows the
+   **structurally identical** instruction sequence at its own single
+   `rt_array_pop` call site: `mov $0x2b,%esi` → `lea`+`call *reg` to
+   `rt_eprintln_str` → `ud2` → `lea`+`call *reg` to `rt_array_pop` → load
+   from `(%rsp)` → `and $0xfffffffffffffff8` → `test`/`jne`. Same immediate
+   constants (`0x2b`, `0xfffffffffffffff8`), same instruction shapes, only
+   register allocation (`%rcx` vs `%r8`) and the stack-slot offset (`(%rsp)`
+   vs `0x9b8(%rsp)`, expected — different closure size means a different
+   frame layout) differ. **Binary-level proof: the call site is not a
+   call-target problem in either binary — the crashed binary's `scan_token`
+   compiles the pop call identically to a binary that runs it successfully.**
+
+**Verdict: theft/mis-linked-call-target is DISPROVEN, not merely
+unreproduced, for the actual crashed artifact.** The call site that crashes
+is object-code-identical to the call site that works. This settles causation
+*direction* without needing tier (b): whatever corrupts the call, it is not a
+wrong symbol being called — it must be the **receiver's runtime data**
+(the `indent_stack` array's backing pointer/length/capacity, or the stack
+memory feeding the call) that differs between the crashing and non-crashing
+runs, which **favors the data-corruption family (the sibling lanes'
+default-engine LIST MISCOMPILE root causes, or something adjacent to them)
+over the erased-receiver-bind theft family this session's fix targets.**
+
+**What this means for the fix and the deployment decision:** the `pop`/`push`
+allowlist fix landed this session (`fbb00ce4...`) is real, evidence-backed,
+and zero-collateral-risk for the *documented* `push` erased-receiver theft
+victim — but this static evidence indicates it is very likely **not** the
+fix for the original `lex` segfault. **Recommendation: do not present this
+fix as resolving the `spl_array_pop` crash when making the redeploy
+decision.** It should be kept (it closes a real, separate, already-documented
+defect) but the `lex` crash itself should be tracked as still-open, now
+pointed specifically at the data-corruption family. The ten negative
+synthetic experiments in retries 7-8 did not reproduce that family's known
+triggers either, so the *specific* trigger present in the real, large CLI
+closure remains unidentified — the debug-instrumented full-closure run (or
+an allocator/`rt_array_pop`-provenance instrumentation pass) is still the
+only remaining path to find it, as stated above, but the *kind* of thing it
+needs to find has now narrowed from "which symbol got linked" to "what
+corrupted this receiver's data before this call."
