@@ -1368,3 +1368,95 @@ Evidence commits (all in this pass, `origin/main`):
 site), `86c0202b897a1ffb865844cd351c19de7d20ac4d` (second trace,
 parent-element cascade + raw attrs), `3fa408bcc3ab6ca32746700f26ac90cd20bf0697`
 (dump-nodes helper + the correcting JIT-vs-interpreter control).
+
+### 16.2 Root cause found and fixed: `BeDomNode.element` overload collision -- but the web showcase is still blocked
+
+Authorized to chase the JIT struct-field-read defect into codegen,
+since (per instruction) it's the same subsystem worked in all session
+("more bounded than the module-init fix ... a 2-line repro with no
+rendering pipeline"). Reduced first, per instruction, before reading
+codegen:
+
+- A from-scratch synthetic class matching `HNode`'s exact field shape
+  (text/Dict/`[T]`/i64, `me` mutating methods, nested-struct-returning
+  helper) read correctly under both engines -- ruled out struct shape,
+  array storage, and mutating methods as the trigger on their own.
+- Bisecting the *real* pipeline instead: `html_tree_builder_flat_projection`
+  (bypasses `HNode` entirely) reproduced it. `html_tree_builder_build`
+  walked recursively via `.children[i]` (bypasses the stack-pop
+  traversal too) also reproduced it. Constructing `BeDomNode` by hand
+  via its own `.element`/`.text_node` static constructors + `set_attr`/
+  `add_child`, with **zero tokenizer involvement**, still reproduced it
+  -- pinning the defect to the `BeDomNode` type/constructors themselves,
+  not tokenizer volume or traversal style.
+- The isolating difference from the synthetic reproduction that finally
+  worked: `BeDomNode` has **two `static fn element` definitions in the
+  same `impl` block**, differing only in arity (`element(tag_name)` vs
+  `element(node_id, tag_name)`). A synthetic class with the identical
+  overload -- nothing else changed -- reproduced the corruption; renaming
+  the overload to a unique name and nothing else fixed it, in the same
+  15-line file, both directions confirmed.
+
+**This is a JIT overload-dispatch defect, not a new, disconnected bug.**
+It's the same mechanism already surfacing all session as the
+`compiler_cross_module_private_symbol_collision` warning ("2
+co-compiled definitions with 2 differing signatures ... falling back to
+the last definition when types are ambiguous") seen on every test run
+against `_apply_multiple`/`_clamp_byte`/`_coverage`/`_validate_context`
+in the font-shaping code -- just for same-class static methods rather
+than cross-module private functions, and manifesting as silent struct
+corruption (no warning printed) rather than a printed warning. It is
+also, now that it's found, the mechanism behind every layer of the
+`vector-font-evidence` misdiagnosis in 16.1: blank pixels (write-side,
+unrelated) -> wrong font -> "computed style never populated" -> "style
+attribute never parsed" were four masks worn by this one JIT defect,
+observed through JIT at every layer.
+
+**Fix**: `dom.spl`'s 2-arg `static fn element(node_id, tag_name)`
+renamed to `element_with_id` (the rare form, ~15 call sites) rather than
+the 1-arg `element(tag_name)` (~250+ call sites across the app and
+tests) -- minimizing blast radius, not correctness-relevant which side
+was renamed. All call sites updated (`html_tree_builder.spl`,
+`browser_renderer.spl`, `html_string_parser.spl`, 3 test spec files, and
+the new debug helper below).
+
+**Non-vacuous proof**: `scripts/check/check_jit_interpreter_differential.spl`
+gained a 10th fixture, `bedom_overload_style_attr.spl` -- the isolated,
+tokenizer-free repro, using a new permanent debug helper
+`be_dom_debug_manual_tree_dump()` (`dom.spl`). All 10 fixtures green, 0
+regressions. The real pipeline's `simple_web_layout_debug_attr_by_id`
+and `simple_web_layout_debug_dump_nodes` (from 16.1) now match
+interpreter exactly under JIT for the marker `<div>` case
+(`style_val=[font-family:Bungee;font-size:100px] len=34`).
+
+**Web showcase re-run: the CSS-level fix is confirmed live in the real
+pipeline, but `vector-font-evidence` still fails identically.** The
+`SIMPLE_TRACE_FONT_STYLE` trace against the real showcase now shows the
+marker `#text` node correctly resolving `font_family=Bungee
+font_size=100` (previously `sans-serif`/`16`) -- the CSS cascade fix is
+proven live, not just in isolation. But the showcase's printed result is
+**byte-for-byte identical to before the fix**:
+`reason=vector-font-evidence expected_identity=...;axes=static
+identity=sha256=a3041811a7...;axes=wght=100 expected_pixels=100
+pixels=16` -- still Noto Sans SC, still pixel size 16. This means the
+Draw-IR/glyph-rendering layer's font identity and pixel size
+(`Engine2dDrawIrAdvResult.font_identity`/`vector_font_pixel_size`) are
+**not** simply reading the now-correct `Style.resolved_font_identity` --
+there is a second, separate, not-yet-root-caused defect between CSS
+style resolution and Draw-IR text-command generation. Not chased further
+in this pass, given the scope already covered; a same-technique
+bisection (isolate the Draw-IR font-selection call with a synthetic
+repro, check for another overload/cross-module-name collision given the
+`_apply_multiple`/`_coverage`/`_validate_context` warnings already
+observed in that exact subsystem) is the natural next step.
+
+**Disposition, per instruction: do not report the cell green.** The
+`vector_fixture` overload fix is real, proven, and landed -- but
+`vector-font-evidence` still fails, unchanged in its exact values.
+Scoreboard remains 2 GREEN. A separate JIT run also hit the
+already-documented, unrelated `duck-typed virtual method call ... no
+vtable` crash (`bug jit_game2d_backend_method_dispatch_sigsegv_2026-07-02`)
+nondeterministically (2 of 3 attempts); the one clean completion is the
+result quoted above.
+
+Commit: `<pending, see final report>`.

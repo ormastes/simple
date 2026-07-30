@@ -240,6 +240,28 @@ pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
     val result = html_tree_builder_build_with_scripts(html_text)
     result.doc
 
+fn _debug_walk_bedom(node: BeDomNode, depth: i32, out: [text]):
+    val style_val: text = node.get_attr("style")
+    out.push(
+        depth.to_text() + "|" + node.tag_name + "|attrlen=" +
+        style_val.len().to_text() + "|childcount=" + node.children.len().to_text()
+    )
+    var i = 0
+    while i < node.children.len():
+        _debug_walk_bedom(node.children[i], depth + 1, out)
+        i = i + 1
+
+pub fn html_tree_builder_debug_dump_bedom(html_text: text) -> text:
+    """Permanent debug entry point: recursive tag_name/get_attr("style")/
+    children-count dump of the raw BeDomNode tree, bypassing the flat
+    stack-pop projection and HNode entirely. Used to bisect the JIT
+    struct-field-read defect chased in doc/08_tracking/bug/
+    jit_run_file_pipeline_gaps_2026-07-30.md section 16."""
+    val doc = html_tree_builder_build(html_text)
+    var out: [text] = []
+    _debug_walk_bedom(doc, 0, out)
+    out.join("\n")
+
 pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResult:
     html_tree_builder_build_with_scripts_limit(html_text, HTML_MAX_NODES)
 
@@ -280,16 +302,16 @@ pub fn html_tree_builder_build_with_parse_limits(
     # Stack: [#document, html, head] initially
     # We'll switch from head-mode to body-mode on first body content
     var next_node_id: i64 = 1
-    val doc_node = BeDomNode.element(next_node_id, "#document")
+    val doc_node = BeDomNode.element_with_id(next_node_id, "#document")
     next_node_id = next_node_id + 1
-    val html_el = BeDomNode.element(next_node_id, "html")
+    val html_el = BeDomNode.element_with_id(next_node_id, "html")
     next_node_id = next_node_id + 1
-    val head_el = BeDomNode.element(next_node_id, "head")
+    val head_el = BeDomNode.element_with_id(next_node_id, "head")
     next_node_id = next_node_id + 1
-    val body_el = BeDomNode.element(next_node_id, "body")
+    val body_el = BeDomNode.element_with_id(next_node_id, "body")
     next_node_id = next_node_id + 1
 
-    val empty_node = BeDomNode.element(0, "")
+    val empty_node = BeDomNode.element_with_id(0, "")
     val stack = _TreeStack(
         nodes: [empty_node; HTML_MAX_TREE_DEPTH],
         parent_indices: [-1; HTML_MAX_TREE_DEPTH],
@@ -358,13 +380,13 @@ pub fn html_tree_builder_build_with_parse_limits(
                         )
 
             elif t == "title":
-                val title_raw = BeDomNode.element(next_node_id, t)
+                val title_raw = BeDomNode.element_with_id(next_node_id, t)
                 next_node_id = next_node_id + 1
                 stack.push_open(_apply_attrs(title_raw, tok.attrs))
 
             elif t == "meta" or t == "link" or t == "base":
                 # head elements — add to top of stack as void children
-                val he_raw = BeDomNode.element(next_node_id, t)
+                val he_raw = BeDomNode.element_with_id(next_node_id, t)
                 next_node_id = next_node_id + 1
                 val he = _apply_attrs(he_raw, tok.attrs)
                 stack.append_child(he)
@@ -387,7 +409,7 @@ pub fn html_tree_builder_build_with_parse_limits(
                         script_src = attr.value
                     sa = sa + 1
                 # Push script element onto stack
-                val script_el = BeDomNode.element(next_node_id, "script")
+                val script_el = BeDomNode.element_with_id(next_node_id, "script")
                 next_node_id = next_node_id + 1
                 val script_node = _apply_attrs(script_el, tok.attrs)
                 stack.push_open(script_node)
@@ -425,7 +447,7 @@ pub fn html_tree_builder_build_with_parse_limits(
                 val is_table_content = _is_table_content(t)
 
                 if _is_void(t):
-                    val vn_raw = BeDomNode.element(next_node_id, t)
+                    val vn_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
                     val vnode = _apply_attrs(vn_raw, tok.attrs)
                     if in_table_ctx and not is_table_content:
@@ -434,12 +456,12 @@ pub fn html_tree_builder_build_with_parse_limits(
                         stack.append_child(vnode)
                 elif in_table_ctx and not is_table_content:
                     # Foster-parent non-table elements that appear inside table context
-                    val fp_raw = BeDomNode.element(next_node_id, t)
+                    val fp_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
                     val fp_el = _apply_attrs(fp_raw, tok.attrs)
                     stack.foster_push_open(fp_el)
                 else:
-                    val el_raw = BeDomNode.element(next_node_id, t)
+                    val el_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
                     val new_el = _apply_attrs(el_raw, tok.attrs)
                     stack.push_open(new_el)

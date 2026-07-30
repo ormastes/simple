@@ -239,6 +239,36 @@ fn be_dom_query_selector(node: BeDomNode, selector: text) -> BeDomNode?:
             return found
     nil
 
+pub fn be_dom_debug_manual_tree_dump() -> text:
+    """Permanent debug entry point: builds a tiny BeDomNode tree by hand
+    (BeDomNode.element/.text_node + set_attr + add_child), bypassing the
+    HTML tokenizer/tree-builder entirely, then reads it back. Used to
+    bisect the JIT struct-field-read defect chased in doc/08_tracking/
+    bug/jit_run_file_pipeline_gaps_2026-07-30.md section 16: isolates
+    whether the corruption is inherent to the BeDomNode shape/
+    constructors, or specific to the tokenizer's construction path."""
+    var div = BeDomNode.element_with_id(1, "div")
+    div.set_attr("id", "marker")
+    div.set_attr("style", "font-family:Bungee;font-size:100px")
+    val txt = BeDomNode.text_node(2, "hi")
+    div.add_child(txt)
+    var root = BeDomNode.element_with_id(0, "#root")
+    root.add_child(div)
+    var out: [text] = []
+    _debug_walk_bedom2(root, 0, out)
+    out.join("\n")
+
+fn _debug_walk_bedom2(node: BeDomNode, depth: i32, out: [text]):
+    val style_val: text = node.get_attr("style")
+    out.push(
+        depth.to_text() + "|" + node.tag_name + "|style_len=" +
+        style_val.len().to_text() + "|childcount=" + node.children.len().to_text()
+    )
+    var i = 0
+    while i < node.children.len():
+        _debug_walk_bedom2(node.children[i], depth + 1, out)
+        i = i + 1
+
 fn be_dom_get_text_content(node: BeDomNode) -> text:
     if node.tag_name == "#text":
         return node.data
@@ -263,7 +293,19 @@ impl BeDomNode:
             event_listener_capture: []
         )
 
-    static fn element(node_id: i64, tag_name: text) -> BeDomNode:
+    # Named distinctly from `element(tag_name)` above rather than
+    # overloaded on arity: two `static fn element` co-compiled definitions
+    # with differing signatures corrupt every subsequently constructed/
+    # stored BeDomNode's struct-field reads under JIT (mirrors the
+    # already-documented compiler_cross_module_private_symbol_collision
+    # warning class -- "JIT call sites resolve by exact arg-type match...
+    # falling back to the last definition when types are ambiguous"),
+    # while the interpreter reads the identical tree correctly. Root-caused
+    # with an isolated repro with no tokenizer/rendering involved -- see
+    # doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md
+    # section 16.2. This overload (not the single-arg one) was renamed
+    # since it has far fewer call sites (~15 vs ~250+).
+    static fn element_with_id(node_id: i64, tag_name: text) -> BeDomNode:
         """Construct an element node."""
         BeDomNode(
             node_id: node_id,
