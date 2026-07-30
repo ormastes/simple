@@ -114,6 +114,19 @@ lookup itself.
 Supporting evidence is linked from the three production specs but does not
 replace their live assertions.
 
+| Verified supporting check | Result | Narrow claim only |
+| --- | --- | --- |
+| `sh scripts/build/build_simple_runtime_sffi.shs` | PASS | runtime TLS provider builds and stages |
+| `cargo test --offline -p simple-runtime --lib --features runtime-tls 'value::net::platform_trust_tests::platform_verifier_initializes' -- --exact` | PASS | platform verifier initializes |
+| `cargo test --offline -p simple-runtime --lib --features runtime-tls 'value::net::browser_http_job_tests::silent_tls_peer_respects_job_deadline_and_retires_slot' -- --exact` | PASS | TLS deadline and slot retirement |
+| `node scripts/check/check-web-render-backend-chromium-sandbox.js` | PASS | mocked Chromium-helper contract |
+| `xvfb-run -a tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | trusted Electron form events only |
+| `cargo test --offline --manifest-path src/compiler_rust/runtime/Cargo.toml --lib --no-default-features public_address_policy_rejects_any_mixed_resolution_set` | PASS | mixed-resolution egress policy unit |
+
+These checks do not prove a live HTTPS certificate matrix, a Simple
+`BrowserSession`, or Chromium process sandboxing. They do not promote any
+TLS or SANDBOX production row.
+
 ## False-green repairs
 
 Before reuse, `test/03_system/gui/browser_interaction_spec.spl` must fail when
