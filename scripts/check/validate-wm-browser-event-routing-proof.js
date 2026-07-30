@@ -192,7 +192,9 @@ function proofSourceArtifact() {
     !source.includes('app.getGPUFeatureStatus()') ||
     !source.includes("result.gpu_feature_status.gpu_compositing === 'enabled'") ||
     !source.includes("result.gpu_feature_status.webgl === 'enabled'") ||
-    !source.includes("out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse'") ||
+    !source.includes('out.css_animation_motion_observed = animationMotionObserved') ||
+    !source.includes('finalAnimationCurrentTime > initialAnimationCurrentTime') ||
+    !source.includes('finalAnimationOpacity !== initialAnimationOpacity') ||
     !source.includes("result.font_frame_path = framePath") ||
     !source.includes("result.font_frame_pixel_checksum = frameChecksum")
   ) {
@@ -284,6 +286,39 @@ function eventSequenceText(value) {
 function sameEventSequence(value) {
   if (!Array.isArray(value) || value.length !== expectedEventSequence.length) return false;
   return expectedEventSequence.every((entry, index) => value[index] === entry);
+}
+
+function hasObservedAnimationMotion(proof) {
+  const timeAdvanced =
+    jsonNumberText(proof.css_animation_initial_current_time_ms) !== null &&
+    jsonNumberText(proof.css_animation_final_current_time_ms) !== null &&
+    proof.css_animation_final_current_time_ms > proof.css_animation_initial_current_time_ms;
+  const opacityChanged =
+    jsonNumberText(proof.css_animation_initial_opacity) !== null &&
+    jsonNumberText(proof.css_animation_final_opacity) !== null &&
+    proof.css_animation_final_opacity !== proof.css_animation_initial_opacity;
+  return boolTrue(proof.css_animation_motion_observed) &&
+    (timeAdvanced || opacityChanged);
+}
+
+if (process.argv[2] === '--self-check-motion') {
+  const metadataOnly = {
+    css_animation_initial_current_time_ms: 0,
+    css_animation_final_current_time_ms: 0,
+    css_animation_initial_opacity: 0.25,
+    css_animation_final_opacity: 0.25,
+    css_animation_motion_observed: true,
+  };
+  const currentMotion = {
+    ...metadataOnly,
+    css_animation_final_current_time_ms: 32,
+  };
+  if (hasObservedAnimationMotion(metadataOnly) ||
+      !hasObservedAnimationMotion(currentMotion)) {
+    process.exit(1);
+  }
+  console.log('wm_browser_event_routing_motion_self_check=pass');
+  process.exit(0);
 }
 
 const jsonPath = process.argv[2];
@@ -407,6 +442,11 @@ const rows = {
   input_to_paint_ms: jsonDecimalTextOrBlank(proof.input_to_paint_ms),
   animation_frame_available: jsonBoolTextOrBlank(proof.animation_frame_available),
   animation_frame_count: jsonIntegerTextOrBlank(proof.animation_frame_count),
+  css_animation_initial_opacity: jsonDecimalTextOrBlank(proof.css_animation_initial_opacity),
+  css_animation_final_opacity: jsonDecimalTextOrBlank(proof.css_animation_final_opacity),
+  css_animation_initial_current_time_ms: jsonDecimalTextOrBlank(proof.css_animation_initial_current_time_ms),
+  css_animation_final_current_time_ms: jsonDecimalTextOrBlank(proof.css_animation_final_current_time_ms),
+  css_animation_motion_observed: jsonBoolTextOrBlank(proof.css_animation_motion_observed),
   css_animation_probe: jsonBoolTextOrBlank(proof.css_animation_probe),
   title_text: proof.title_text,
   title_context_text: proof.title_context_text,
@@ -515,6 +555,7 @@ if (!boolTrue(proof.pass)) {
   !jsonDecimalAtMost(proof.performance_now_delta_ms, maxEventTimingMs) ||
   !boolTrue(proof.animation_frame_available) ||
   !jsonIntegerAtLeast(proof.animation_frame_count, 2) ||
+  !hasObservedAnimationMotion(proof) ||
   !boolTrue(proof.css_animation_probe)
 ) {
   reason = 'event-routing-performance-animation-contract-missing';

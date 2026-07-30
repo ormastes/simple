@@ -29,7 +29,7 @@ traced below.
 | Warm login plus authenticated WebSocket upgrade latency | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | measured locally with a 10s ceiling |
 | Live `/ui/login` fixed-window burst gate | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Live shared-WM `/ui/login` fixed-window burst gate | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
-| Renderer parity gate | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | passing |
+| Renderer parity gate | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | requires explicit current-source Stage4 receipt; static admission and motion self-tests updated, live rerun pending an admitted binary |
 | GPU environment matrix | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | Linux Vulkan/CUDA/OpenCL pass; Metal/ROCm/DirectX/WebGPU native device-readback still external/partial |
 
 ## Required Commands
@@ -39,7 +39,7 @@ bin/simple check src/app/ui.web/server.spl src/app/ui.web/tls_serve_loop.spl src
 bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean
 bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean
 bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360
-sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+SIMPLE_BIN=/absolute/path/to/stage4/simple sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
 jj --no-pager status
 jj --no-pager log -r 'conflicts()' --no-graph --template 'change_id.short() ++ " " ++ commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
 find doc/06_spec -name '*_spec.spl' | wc -l
@@ -73,7 +73,7 @@ ID tied to its current evidence artifact.
 | `REQ-WEB-HARD-010` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` child-process cleanup path | passing |
 | `REQ-WEB-HARD-011` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` normal and shared-WM burst scenarios | passing |
 | `REQ-WEB-HARD-012` | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; `src/app/ui.web/auth_params.spl` | passing for deprecated env non-authorization |
-| `REQ-WEB-HARD-013` | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`; `doc/09_report/simple_web_browser_production_hardening.md` | passing locally |
+| `REQ-WEB-HARD-013` | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs`; `test/03_system/check/production_gui_web_renderer_parity_evidence_spec.spl`; `test/03_system/check/wm_browser_event_routing_validator_spec.spl` | static gate coverage current; live renderer evidence requires a current-source Stage4 receipt |
 | `REQ-WEB-HARD-014` | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | partial: Linux local evidence recorded; Metal/ROCm/DirectX/WebGPU native device-readback requires external hosts |
 | `NFR-WEB-HARD-001` | `test/01_unit/app/ui/web_auth_hardening_spec.spl` | passing |
 | `NFR-WEB-HARD-002` | `test/01_unit/app/ui/web_auth_hardening_spec.spl`; TLS server check | passing |
@@ -83,7 +83,7 @@ ID tied to its current evidence artifact.
 | `NFR-WEB-HARD-006` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` process start/kill helpers | passing |
 | `NFR-WEB-HARD-007` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` warm auth latency scenario | measured locally with a 10s ceiling |
 | `NFR-WEB-HARD-008` | `test/01_unit/app/ui/ws_handler_spec.spl`; `test/03_system/gui/simple_web_browser_production_hardening_spec.spl`; generated manual | passing |
-| `NFR-WEB-HARD-009` | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | passing locally |
+| `NFR-WEB-HARD-009` | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | explicit current-source Stage4 admission required; live rerun pending |
 | `NFR-WEB-HARD-010` | `src/app/ui.web/wm.js`; `test/01_unit/app/ui/ws_handler_spec.spl`; live query-token rejection scenario | passing |
 | `NFR-WEB-HARD-011` | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passing |
 | `NFR-WEB-HARD-012` | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | partial: explicit status rows exist; native Metal/ROCm/DirectX/WebGPU device-readback requires external hosts |

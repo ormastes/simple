@@ -8,7 +8,7 @@ BUILD_ROOT="${BUILD_ROOT:-build/production_gui_web_renderer_parity_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/production_gui_web_renderer_parity_evidence_$(date -u +%F).md}"
 TIMEOUT_SECS="${ELECTRON_BITMAP_TIMEOUT_SECS:-20}"
 CHROME_SURFACE_TIMEOUT_SECS="${CHROME_LAYOUT_TIMEOUT_SECS:-60}"
-SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_SOURCE="explicit-stage4"
 SIMPLE_BIN_STATUS=pass
 SUBCHECK_TIMEOUT_SECS="${PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-180}"
 LAYOUT_SUBCHECK_TIMEOUT_SECS="${PRODUCTION_GUI_WEB_RENDERER_PARITY_LAYOUT_TIMEOUT_SECS:-${PRODUCTION_GUI_WEB_RENDERER_PARITY_SUBCHECK_TIMEOUT_SECS:-300}}"
@@ -64,93 +64,27 @@ current_source_revision() {
 
 SOURCE_REVISION="${SOURCE_REVISION:-$(current_source_revision)}"
 
-is_rust_seed_simple() {
-    # Identity probe, not just a path pattern (2026-07-28).
-    # This used to test ONLY for a src/compiler_rust/ path. The deployed Rust
-    # seed lives at bin/release/<triple>/simple, which matches none of those
-    # patterns, so the seed was classified "not a seed" and every self-hosted
-    # claim in this script was asserted against it. Ask the binary instead.
-    # Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
-    case "$1" in
-        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
-    esac
-    # Not runnable: leave it to the caller's own missing-binary branch, which
-    # already fails. Do not report "seed" for something we never ran.
-    [ -n "${1:-}" ] && [ -x "$1" ] || return 1
-    # Executable but unverifiable => treat as forbidden (fail closed). The seed
-    # self-identifies on stderr, so 2>&1 is required.
-    if command -v timeout >/dev/null 2>&1; then
-        _irss_v="$(timeout 10 "$1" --version 2>&1)" || return 0
-    else
-        _irss_v="$("$1" --version 2>&1)" || return 0
-    fi
-    [ -n "$_irss_v" ] || return 0
-    case "$_irss_v" in
-        *"bootstrap seed only"*|*"Rust-built"*|*"debug build"*) return 0 ;;
-    esac
-    return 1
-}
-
-is_host_compatible_simple() {
-    path="$1"
-    [ -x "$path" ] || return 1
-    if ! command -v file >/dev/null 2>&1; then
-        return 0
-    fi
-    description="$(file "$path" 2>/dev/null || true)"
-    case "$(uname -s 2>/dev/null || echo unknown)" in
-        Darwin)
-            case "$description" in
-                *ELF*|*PE32*) return 1 ;;
-            esac
-            ;;
-        Linux|FreeBSD)
-            case "$description" in
-                *Mach-O*|*PE32*) return 1 ;;
-            esac
-            ;;
-        CYGWIN*|MINGW*|MSYS*|Windows_NT)
-            case "$description" in
-                *ELF*|*Mach-O*) return 1 ;;
-            esac
-            ;;
-    esac
-    return 0
-}
-
-if [ -z "${SIMPLE_BIN+x}" ]; then
-    SIMPLE_BIN_SOURCE="default-missing"
-    for candidate in \
-        "bin/release"/*/simple \
-        "build/bootstrap/stage3/simple" \
-        "bin/simple" \
-        "./bin/simple" \
-        "release"/*/simple
-    do
-        if is_host_compatible_simple "$candidate"; then
-            SIMPLE_BIN="$candidate"
-            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
-            break
-        fi
-    done
-    if [ -z "${SIMPLE_BIN+x}" ] && command -v simple >/dev/null 2>&1; then
-        SIMPLE_BIN="$(command -v simple)"
-        SIMPLE_BIN_SOURCE="path-fallback"
-    fi
-fi
 if [ -z "${SIMPLE_BIN+x}" ] || [ "$SIMPLE_BIN" = "" ]; then
     SIMPLE_BIN=""
     SIMPLE_BIN_STATUS=missing
-    SIMPLE_BIN_SOURCE="missing-self-hosted"
-elif is_rust_seed_simple "$SIMPLE_BIN"; then
-    SIMPLE_BIN_STATUS=forbidden
-    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+    SIMPLE_BIN_SOURCE="missing-explicit-stage4"
 elif [ ! -x "$SIMPLE_BIN" ]; then
     SIMPLE_BIN_STATUS=missing
-    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
-elif ! is_host_compatible_simple "$SIMPLE_BIN"; then
-    SIMPLE_BIN_STATUS=incompatible
-    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-host-incompatible"
+    SIMPLE_BIN_SOURCE="explicit-stage4-missing"
+else
+    BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    STAGE4_PROVENANCE_HELPER_PATH="$ROOT_DIR/scripts/check/lib/stage4-candidate-provenance.shs"
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+    . "$STAGE4_PROVENANCE_HELPER_PATH"
+    if canonical_simple_bin="$(bootstrap_stage3_canonical_file "$SIMPLE_BIN")" &&
+        stage4_verify_candidate_provenance "${canonical_simple_bin}.provenance.env" \
+            "$canonical_simple_bin" "$ROOT_DIR"; then
+        SIMPLE_BIN="$canonical_simple_bin"
+    else
+        SIMPLE_BIN_STATUS=unprovenanced
+        SIMPLE_BIN_SOURCE="explicit-stage4-rejected"
+    fi
 fi
 export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
@@ -179,7 +113,7 @@ if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
         echo "- Simple binary status: $SIMPLE_BIN_STATUS"
     } >"$REPORT_PATH"
     cat "$BUILD_ROOT/evidence.env"
-    exit 0
+    exit 1
 fi
 
 field_of() {
@@ -1115,6 +1049,7 @@ run_event_routing() {
     input_to_paint_ms=""
     animation_frame_available=""
     animation_frame_count=""
+    css_animation_motion_observed=""
     css_animation_probe=""
     event_sequence=""
     title_text=""
@@ -1192,6 +1127,7 @@ run_event_routing() {
         input_to_paint_ms="$(field_of wm_browser_event_routing_input_to_paint_ms "$env_file")"
         animation_frame_available="$(field_of wm_browser_event_routing_animation_frame_available "$env_file")"
         animation_frame_count="$(field_of wm_browser_event_routing_animation_frame_count "$env_file")"
+        css_animation_motion_observed="$(field_of wm_browser_event_routing_css_animation_motion_observed "$env_file")"
         css_animation_probe="$(field_of wm_browser_event_routing_css_animation_probe "$env_file")"
         event_sequence="$(field_of wm_browser_event_routing_event_sequence "$env_file")"
         title_text="$(field_of wm_browser_event_routing_title_text "$env_file")"
@@ -1277,6 +1213,7 @@ run_event_routing() {
         echo "production_gui_web_renderer_parity_event_routing_input_to_paint_ms=$input_to_paint_ms"
         echo "production_gui_web_renderer_parity_event_routing_animation_frame_available=$animation_frame_available"
         echo "production_gui_web_renderer_parity_event_routing_animation_frame_count=$animation_frame_count"
+        echo "production_gui_web_renderer_parity_event_routing_css_animation_motion_observed=$css_animation_motion_observed"
         echo "production_gui_web_renderer_parity_event_routing_css_animation_probe=$css_animation_probe"
         echo "production_gui_web_renderer_parity_event_routing_event_sequence=$event_sequence"
         echo "production_gui_web_renderer_parity_event_routing_title_text=$title_text"
@@ -1348,6 +1285,7 @@ run_event_routing() {
         [ "$performance_now_available" = "true" ] && num_positive_at_most "$performance_now_delta_ms" 1000 && \
         num_positive_at_most "$input_to_paint_ms" 1000 && \
         [ "$animation_frame_available" = "true" ] && num_at_least "$animation_frame_count" 2 && \
+        [ "$css_animation_motion_observed" = "true" ] && \
         [ "$css_animation_probe" = "true" ] && \
         [ "$browser_engine" = "chromium" ] && \
         electron_chromium_user_agent "$electron_user_agent" && version_text "$electron_process_version" && version_text "$chrome_process_version" && \
@@ -1496,6 +1434,7 @@ event_performance_now_delta_ms_final="$(field_of production_gui_web_renderer_par
 event_input_to_paint_ms_final="$(field_of production_gui_web_renderer_parity_event_routing_input_to_paint_ms "$BUILD_ROOT/evidence.env")"
 event_animation_frame_available_final="$(field_of production_gui_web_renderer_parity_event_routing_animation_frame_available "$BUILD_ROOT/evidence.env")"
 event_animation_frame_count_final="$(field_of production_gui_web_renderer_parity_event_routing_animation_frame_count "$BUILD_ROOT/evidence.env")"
+event_css_animation_motion_observed_final="$(field_of production_gui_web_renderer_parity_event_routing_css_animation_motion_observed "$BUILD_ROOT/evidence.env")"
 event_css_animation_probe_final="$(field_of production_gui_web_renderer_parity_event_routing_css_animation_probe "$BUILD_ROOT/evidence.env")"
 event_sequence_final="$(field_of production_gui_web_renderer_parity_event_routing_event_sequence "$BUILD_ROOT/evidence.env")"
 event_title_text_final="$(field_of production_gui_web_renderer_parity_event_routing_title_text "$BUILD_ROOT/evidence.env")"
@@ -1621,6 +1560,7 @@ elif [ "$event_validation_status_final" != "pass" ] || [ "$event_proof_symlink_s
     [ "$event_performance_now_available_final" != "true" ] || ! num_positive_at_most "$event_performance_now_delta_ms_final" 1000 || \
     ! num_positive_at_most "$event_input_to_paint_ms_final" 1000 || \
     [ "$event_animation_frame_available_final" != "true" ] || ! num_at_least "$event_animation_frame_count_final" 2 || \
+    [ "$event_css_animation_motion_observed_final" != "true" ] || \
     [ "$event_css_animation_probe_final" != "true" ] || \
     [ "$event_browser_engine_final" != "chromium" ] || ! electron_chromium_user_agent "$event_electron_user_agent_final" || \
     ! version_text "$event_electron_process_version_final" || ! version_text "$event_chrome_process_version_final" || \
@@ -1702,7 +1642,7 @@ PARTIAL_FINALIZED=1
     echo "- Electron event routing: $(field_of production_gui_web_renderer_parity_event_routing_status "$BUILD_ROOT/evidence.env")"
     echo "- Electron event proof source: $event_proof_source_file_status_final / $event_proof_source_file_reason_final / $event_proof_source_artifact_status_final"
     echo "- Electron performance/animation: performance.now $(field_of production_gui_web_renderer_parity_event_routing_performance_now_available "$BUILD_ROOT/evidence.env") / input-to-paint $(field_of production_gui_web_renderer_parity_event_routing_input_to_paint_ms "$BUILD_ROOT/evidence.env") ms / requestAnimationFrame $(field_of production_gui_web_renderer_parity_event_routing_animation_frame_count "$BUILD_ROOT/evidence.env") / CSS animation $(field_of production_gui_web_renderer_parity_event_routing_css_animation_probe "$BUILD_ROOT/evidence.env")"
-    echo "- Electron performance/animation detail: perf=$event_performance_now_available_final delta_ms=$event_performance_now_delta_ms_final input_to_paint_ms=$event_input_to_paint_ms_final animation=$event_animation_frame_available_final frames=$event_animation_frame_count_final css=$event_css_animation_probe_final"
+    echo "- Electron performance/animation detail: perf=$event_performance_now_available_final delta_ms=$event_performance_now_delta_ms_final input_to_paint_ms=$event_input_to_paint_ms_final animation=$event_animation_frame_available_final frames=$event_animation_frame_count_final motion=$event_css_animation_motion_observed_final css=$event_css_animation_probe_final"
     echo "- blur/tolerance used: false"
     echo
     echo "## Raw Evidence"

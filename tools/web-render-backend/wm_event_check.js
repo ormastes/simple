@@ -314,6 +314,13 @@ async function main() {
     animationProbe.className = 'simple-wm-proof-animation';
     animationProbe.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:8px;height:8px;';
     document.body.appendChild(animationProbe);
+    const initialAnimationProbeStyle = getComputedStyle(animationProbe);
+    const probeAnimation = animationProbe.getAnimations()[0] || null;
+    const initialAnimationCurrentTime = probeAnimation &&
+      Number.isFinite(Number(probeAnimation.currentTime))
+      ? Number(probeAnimation.currentTime)
+      : -1;
+    const initialAnimationOpacity = Number.parseFloat(initialAnimationProbeStyle.opacity);
     if (animationFrameAvailable) {
       await new Promise(resolve => {
         requestAnimationFrame(() => {
@@ -332,13 +339,28 @@ async function main() {
     const minimizeStyle = getComputedStyle(minimizeButton);
     const maximizeStyle = getComputedStyle(maximizeButton);
     const animationProbeStyle = getComputedStyle(animationProbe);
+    const finalAnimationCurrentTime = probeAnimation &&
+      Number.isFinite(Number(probeAnimation.currentTime))
+      ? Number(probeAnimation.currentTime)
+      : -1;
+    const finalAnimationOpacity = Number.parseFloat(animationProbeStyle.opacity);
+    const animationMotionObserved =
+      finalAnimationCurrentTime > initialAnimationCurrentTime ||
+      finalAnimationOpacity !== initialAnimationOpacity;
     const productionWindowStyle = getComputedStyle(productionWindow);
     const productionTitlebarStyle = getComputedStyle(productionTitlebar);
     out.performance_now_available = performanceNowAvailable;
     out.performance_now_delta_ms = performanceNowAvailable ? Math.max(0, window.performance.now() - perfStart) : 0;
     out.animation_frame_available = animationFrameAvailable;
     out.animation_frame_count = animationFrameCount;
-    out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse';
+    out.css_animation_initial_opacity = initialAnimationOpacity;
+    out.css_animation_final_opacity = finalAnimationOpacity;
+    out.css_animation_initial_current_time_ms = initialAnimationCurrentTime;
+    out.css_animation_final_current_time_ms = finalAnimationCurrentTime;
+    out.css_animation_motion_observed = animationMotionObserved;
+    out.css_animation_probe =
+      animationProbeStyle.animationName === 'simple-wm-proof-pulse' &&
+      animationMotionObserved;
     out.title_text = title.textContent;
     out.title_context_text = eventTarget('.wm-title-context').textContent;
     out.traffic_button_count = document.querySelectorAll('.wm-traffic-lights button').length;
@@ -452,6 +474,7 @@ async function main() {
       out.input_to_paint_ms > 0 &&
       out.animation_frame_available === true &&
       out.animation_frame_count >= 2 &&
+      out.css_animation_motion_observed === true &&
       out.css_animation_probe === true &&
       out.theme_id === 'aetheric_dark' &&
       out.production_envelope_schema === 'aetheric-host-web-gui-v1' &&

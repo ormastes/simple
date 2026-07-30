@@ -1,10 +1,23 @@
 # WM browser event-routing proof validator
 
+## Current motion boundary
+
+Animation metadata is insufficient. The Electron proof records initial and
+final computed opacity plus Web Animations `currentTime` across at least two
+`requestAnimationFrame` callbacks. The validator recomputes whether either
+value changed; a forged `css_animation_motion_observed=true` row cannot replace
+the numeric samples.
+
+The motion self-test keeps these operator-visible steps stable:
+
+- `Reject animation metadata without motion`
+- `Accept current Stage4 motion evidence`
+
 > Validates the standalone WM browser event-routing proof validator. The validator consumes the raw Electron probe JSON and fails closed when a stale or forged `pass=true` row omits Chromium event, timing, animation, payload, or UI details.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 32 | 32 | 0 | 0 |
+| 33 | 33 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -328,6 +341,20 @@ expect(evidence).to_contain("wm_browser_event_routing_simple_composition_run_id=
 ```
 
 </details>
+
+#### rejects animation metadata without motion
+
+- `Reject animation metadata without motion`
+- Fixture: retains `animationName`, two animation frames, and caller-provided
+  motion booleans while making initial/final opacity and `currentTime` equal.
+- Expected: validator exits `1` with
+  `event-routing-performance-animation-contract-missing`.
+
+The accepted companion scenario above uses
+`expect_motion_evidence(evidence)` under the visible step
+`Accept current Stage4 motion evidence`. That helper checks the exact normalized
+initial/final opacity, initial/final `currentTime`, and
+`css_animation_motion_observed=true` rows.
 
 #### rejects a composition receipt from a different run
 
@@ -1583,8 +1610,8 @@ expect(evidence).to_contain("wm_browser_event_routing_font_frame_artifact_status
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 32 |
-| Active scenarios | 32 |
+| Total scenarios | 33 |
+| Active scenarios | 33 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

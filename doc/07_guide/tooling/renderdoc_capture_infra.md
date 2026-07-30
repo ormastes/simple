@@ -1448,13 +1448,18 @@ The current canonical evidence contract is:
   report `partial-production-parity-source-status`,
   `production_gui_web_renderer_parity_gate_source_partial_status=partial`, and
   `production_gui_web_renderer_parity_gate_refresh_command`; matrix-only
-  evidence is not live renderer parity evidence. The wrapper exports the
-  resolved self-hosted `SIMPLE_BIN` to nested parity checks and records
+  evidence is not live renderer parity evidence. The wrapper requires an
+  explicit `SIMPLE_BIN` with the adjacent canonical
+  `${SIMPLE_BIN}.provenance.env`, verifies it through
+  `stage4_verify_candidate_provenance`, then exports the admitted Stage4
+  binary to nested parity checks and records
   `production_gui_web_renderer_parity_simple_bin` plus
   `production_gui_web_renderer_parity_simple_bin_source` and
-  `production_gui_web_renderer_parity_simple_bin_status`. The Rust seed under
-  `src/compiler_rust/` is `forbidden` for this production evidence path and is
-  not executed; missing self-hosted binaries fail closed as `missing`. The nested
+  `production_gui_web_renderer_parity_simple_bin_status`. Missing binaries fail
+  as `missing`; absent, stale, or mismatched Stage4 receipts fail as
+  `unprovenanced`. Both cases exit nonzero. The parity, WM event-routing, and
+  Aetheric producer/checker entrypoints use this same Stage4 receipt gate before
+  renderer execution. The nested
   Electron generated-GUI matrix subcheck records the same contract as
   `electron_generated_gui_web_simple_bin`,
   `electron_generated_gui_web_simple_bin_source`, and
@@ -1471,11 +1476,8 @@ The current canonical evidence contract is:
   `production_gui_backend_simple_bin_source`, and
   `production_gui_backend_simple_bin_status`, and the parent parity evidence
   forwards those as `production_gui_web_renderer_parity_backend_simple_bin*`.
-  When `SIMPLE_BIN` is not set, the parent production wrapper chooses a
-  host-compatible self-hosted Simple binary and skips stale cross-host release
-  artifacts such as Linux ELF binaries on macOS; an explicit incompatible
-  `SIMPLE_BIN` is recorded as `simple-bin-incompatible` instead of being
-  executed by nested GUI probes.
+  The parent production wrapper never discovers a release, Stage3, repo, or
+  `PATH` fallback. Operators must supply the admitted Stage4 path explicitly.
   The nested Metal Engine2D framebuffer readback subcheck rejects the Rust seed
   the same way and records `metal_engine2d_framebuffer_readback_simple_bin`,
   `metal_engine2d_framebuffer_readback_simple_bin_source`, and
@@ -1614,8 +1616,12 @@ The current canonical evidence contract is:
   and the non-launching gate requires `status=pass`, `ready=true`,
   `wm_found=true`, counts of at least one for focus, move, maximize,
   title-command, text-input, pointer-down, and pointer-up, plus
-  `blur_or_tolerance_used=false`. Saved render/capture evidence without these
-  event-routing keys is no longer a production GUI/web pass claim.
+  `blur_or_tolerance_used=false`. CSS animation proof additionally records
+  initial/final computed opacity and Web Animations `currentTime`; at least one
+  must change across two or more `requestAnimationFrame` callbacks.
+  `animationName` metadata or a caller-provided motion boolean alone cannot
+  pass. Saved render/capture evidence without these event-routing keys is no
+  longer a production GUI/web pass claim.
 
 ## External Host Gate
 

@@ -19,10 +19,19 @@ matching substituted hash is rejected. Admission also parses the source
 manifest dependency, lock root dependency, lock installed-package row, and
 installed package version, all of which must equal `42.5.0`.
 
+Both the producer and checker require an explicit current-source Stage4
+`SIMPLE_BIN` and the mandatory adjacent `${SIMPLE_BIN}.provenance.env`. They
+source `scripts/check/lib/bootstrap-stage3-provenance.shs` and
+`scripts/check/lib/stage4-candidate-provenance.shs`, canonicalize the binary,
+and call `stage4_verify_candidate_provenance` before producing or admitting
+evidence. Missing, unreceipted, stale, source-mismatched, or hash-mismatched
+binaries fail nonzero; there is no release, Stage3, repository, or `PATH`
+fallback.
+
 Run after the exact-current binary is available:
 
 ```sh
-SIMPLE_BIN=/absolute/path/to/simple \
+SIMPLE_BIN=/absolute/path/to/current-stage4/simple \
 AETHERIC_HOST_WEB_GUI_PROOF=build/aetheric-host-web-gui-evidence/aetheric-host-web-gui.env \
 sh scripts/check/check-aetheric-host-web-gui-evidence.shs
 ```
