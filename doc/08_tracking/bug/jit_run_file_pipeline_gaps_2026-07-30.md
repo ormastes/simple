@@ -1459,4 +1459,133 @@ vtable` crash (`bug jit_game2d_backend_method_dispatch_sigsegv_2026-07-02`)
 nondeterministically (2 of 3 attempts); the one clean completion is the
 result quoted above.
 
-Commit: `<pending, see final report>`.
+Commit: `8ddaf9f40e1850f87a5c80400ef2c1cbafc57ba4`.
+
+### 16.3 Sweep for the same pattern elsewhere, before the next reduction pass
+
+Per instruction, swept for the `BeDomNode.element` collision pattern
+before chasing the second `vector-font-evidence` defect further.
+
+**Static impl-block arity-overload sweep -- no trustworthy count.** Wrote
+an indentation-aware scanner over `.spl` files. It flagged 11
+candidates; hand-checking the top hit showed the scanner cannot tell an
+impl-block-level method from a nested local/extern declaration inside a
+*different* method body (`RecordingSession`'s two `rt_time_millis` hits
+are `extern fn` declared locally inside two separate methods, not two
+definitions at the impl block's own level). That failure mode
+invalidates all 11 by the same mechanism. Not reporting a count --
+building a reliable one needs real block-nesting awareness, not
+text-column heuristics, which is the case for item 1 below rather than
+a hand-rolled script.
+
+**Item 1 -- detector gap (file as an enhancement, `BeDomNode.element` as
+motivating case).** `compiler_cross_module_private_symbol_collision`
+(`src/compiler_rust/compiler/src/pipeline/module_loader.rs`, ~line 1299)
+only checks bare top-level private functions across co-compiled
+modules; its own comment states methods are excluded "because
+qualified methods... cannot collide on a bare name." Today's bug
+disproves that assumption directly: `BeDomNode.element`, two
+`static fn element` in one `impl` block differing only in arity,
+corrupted every subsequently constructed/stored instance's struct
+fields under JIT, with zero warning at compile time (see section 16.2).
+Enhancement: extend this detector (or add a sibling pass) to flag
+same-name, differing-arity methods within a single `impl` block --
+same diagnostic shape, same fix (rename), but a compile-time warning
+instead of silent corruption. Motivating case: `dom.spl`'s
+`BeDomNode.element`/`element_with_id` split, commit
+`8ddaf9f40e1850f87a5c80400ef2c1cbafc57ba4`.
+
+**Item 2 -- 4 font-shaping collisions, noted as known-live, not fixed
+here.** `_apply_multiple`, `_clamp_byte`, `_coverage`,
+`_validate_context` all have 2 co-compiled definitions with differing
+signatures in `src/lib/skia/feature/shaper/` (`ot_layout_context.spl`,
+`ot_layout_apply.spl`, `selected_arabic.spl`, `ot_layout_gpos.spl`) --
+real, printed on every run that touches this subsystem, and the same
+class of hazard as `BeDomNode.element` (cross-module bare-function
+collision rather than same-impl-block overload). Judged out of scope
+for this task: checked directly (not assumed) whether they sit on the
+web showcase's marker-text code path -- they don't. They're reached
+only via `_resolve_selected_shaped_glyph_run`, gated by
+`if complex_script != 0`; the marker's text ("Simple Web 300 DPI") is
+plain ASCII/Latin, so `complex_script` is 0 and this path does not
+execute for this bug. Recorded here so they are not rediscovered as if
+new; the fix, when picked up, is the same rename pattern used in 16.2.
+
+### 16.4 Reduction pass on the font-identity path -- capped at one pass
+
+The remaining `vector-font-evidence` defect: CSS style resolution is
+now confirmed correct (16.2 -- the marker resolves `Bungee`/`100` live
+in the real pipeline), but `Engine2dDrawIrAdvResult.font_identity`/
+`vector_font_pixel_size` still report Noto Sans SC / 16, unchanged from
+before the fix. Checked directly (16.3) that this is not the same
+impl-block overload pattern in the direct code path
+(`font_renderer.spl`, `draw_ir_adv.spl`,
+`simple_web_layout_engine2d_fast.spl`, `font_registry.spl` -- zero
+scanner hits). Treated as new territory, not an instance of the same
+bug, per instruction.
+
+**Step 1 -- isolate `resolve_font_metrics_with_language` itself.** Added
+a permanent debug wrapper (`font_renderer_debug_resolve`,
+`font_renderer.spl`) and called it directly with the correct input,
+bypassing the whole HTML/CSS pipeline:
+
+```
+font_renderer_debug_resolve("Bungee", "Simple Web 300 DPI", 100, "en")
+jit:         valid=true family=Bungee identity=sha256=c4f5361ce1...axes=static reason=resolved
+interpreter: valid=true family=Bungee identity=sha256=c4f5361ce1...axes=static reason=resolved
+```
+
+Identical, correct, under both engines. **The font-resolution function
+itself is not the defect** -- ruling out font loading/caching
+(`_browser_default_for_family_cached`) as the cause.
+
+**Step 2 -- trace the value at the point Draw-IR consumes it.** Added a
+gated trace immediately before `eng.select_font_identity(font_identity)`
+in `draw_ir_adv.spl` (the `font_identity` read from the text command's
+own `computed_style`, via `_engine2d_draw_ir_style_value(command.
+computed_style, "font-identity")`). Re-ran the real showcase (3 of 4
+attempts hit the unrelated flaky `duck-typed virtual method call`
+crash noted in 16.2; one clean run):
+
+```
+[draw-ir-font-trace] font_identity=sha256=a3041811a7...;axes=wght=100   <- still Noto Sans SC
+web_standards_showcase status=fail reason=vector-font-evidence ... (unchanged)
+```
+
+**The wrong identity is already present in the Draw-IR command's
+`computed_style` before font selection runs at all.** This localizes
+the defect precisely: not `eng.select_font_identity`'s own lookup (ruled
+out -- the value handed to it is already wrong), and not
+`resolve_font_metrics_with_language`/CSS style resolution (ruled out in
+step 1 and in 16.2's live trace of this exact marker). The value comes
+from `draw_ir_style_prop("font-identity", st.resolved_font_identity)`
+in `simple_web_html_layout_renderer_paint_layout.spl:1152` -- meaning
+the specific `Style` object feeding *this* Draw-IR-generation call
+(reached via `simple_web_layout_engine2d_fast.spl`'s fast/no-mirror
+Draw-IR path, not necessarily the same call site instrumented in 16.2)
+still holds the pre-fix value, despite `compute_styles`/
+`compute_styles_with_material` being one shared implementation.
+`compute_styles(...)` has roughly a dozen call sites across
+`simple_web_html_layout_renderer.spl`, each computing its own `styles`
+array for a different render entry point; which one specifically feeds
+the fast Draw-IR path, and why its result still differs from the one
+traced live in 16.2, was not identified.
+
+**Stopping here, per instruction.** This is the fifth mask of the day
+and the returns on continuing were explicitly capped at one pass. The
+boundary: confirmed CSS resolution and the standalone font-metrics
+function are both correct; confirmed the wrong value is already baked
+into the Draw-IR command before font selection; not yet identified
+which of the ~12 `compute_styles` call sites (or which distinct code
+path through `simple_web_layout_engine2d_fast.spl`) produces that
+specific `Style` object, or why it differs from the correctly-computed
+one. Next step for whoever picks this up: instrument
+`draw_ir_style_prop("font-identity", st.resolved_font_identity)` at
+`simple_web_html_layout_renderer_paint_layout.spl:1152` directly (same
+`SIMPLE_TRACE_FONT_STYLE` gate, trivial to extend) to catch the value
+at the moment of its actual computation, one hop earlier than this
+pass's trace point.
+
+**Disposition: web showcase cell stays BLOCKED. Scoreboard: 2 GREEN.**
+Diagnostics only landed in this final step (`font_renderer_debug_resolve`,
+the `draw_ir_adv.spl` trace point); no fix attempted, per the cap.
