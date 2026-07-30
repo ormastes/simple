@@ -48,6 +48,10 @@ closure no longer reaches `vfs_init.spl`, `vfs_boot_init.spl`,
 runtime-selector gate passes 2/2, both direct-runtime guards pass, and
 `doc/06_spec` contains zero executable specs.
 
+Final P0 review also corrected tagged heap-handle address extraction and routed
+process-syscall byte copies through validated VMM translation. The focused
+RV64 syscall ABI/provider contract passes after those fixes.
+
 This is source/focused-gate evidence only. It does not close the bug until a
 fresh clean-checkpoint Stage2/tool admission and the single reserved RV64
 attempt 26 produce and validate the canonical ELF.

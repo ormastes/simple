@@ -1622,7 +1622,11 @@ void rt_volatile_write_u64(spl_i64 addr, spl_i64 value) {
     rt_mmio_write_u64(addr, value);
 }
 spl_u64 unsafe_addr_of(spl_i64 value) {
-    return (spl_u64)value;
+    spl_u64 raw = (spl_u64)value;
+    if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
+        return raw & ~RT_VALUE_TAG_MASK;
+    }
+    return raw;
 }
 spl_u8 rt_copy_user_byte(spl_u64 address) {
     return *(volatile const spl_u8 *)address;

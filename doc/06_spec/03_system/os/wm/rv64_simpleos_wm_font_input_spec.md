@@ -59,10 +59,10 @@ The same live scenario traces and rejects boundary failures with:
   byte count, and converts the guest BGRA8888 buffer to RGB. Admission remains
   blocked on a current live ELF, attached font media, and crop calibration.
 - The canonical RV64 entry now fails closed unless the legacy-PCI VirtIO-BLK
-  font medium mounts through `vfs_boot_init_riscv64_virtio_fat32()` and the
-  shared `simpleos_desktop_register_selected_fonts_from_vfs()` accepts every
-  pinned face. The RV64 adapter reuses `SharedFat32Driver`; it does not reuse
-  ARM's `rt_arm_virtio_blk_*` MMIO ABI or create a font cache.
+  font medium mounts through `riscv64_font_vfs_mount()` and
+  `simpleos_desktop_register_selected_fonts_from_riscv64_virtio_fat32()`
+  accepts every pinned face. The RV64 adapter reuses `SharedFat32Driver`; it
+  does not reuse ARM's `rt_arm_virtio_blk_*` MMIO ABI or create a font cache.
 - The canonical scenario builder creates
   `build/os/fat32-riscv64-desktop.img`, and both the scenario and live wrapper
   attach its legacy `virtio-blk-pci` view. Before launch, the wrapper extracts

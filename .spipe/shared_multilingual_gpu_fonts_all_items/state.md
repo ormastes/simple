@@ -269,3 +269,9 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   executable-spec layout count is zero. This is source evidence only; a fresh
   clean-checkpoint Stage2/tool admission and the single reserved RV64 attempt
   26 remain before QEMU/exact-ten/manual evidence. Status remains FAIL.
+- rv64-entry-closure-p0-review-2026-07-30: Final review corrected
+  `unsafe_addr_of` heap-tag removal and made process-syscall byte copying
+  validate the full range and use page-table-aware VMM translation. The RV64
+  syscall ABI/provider contract passes. Stage2 attempt 25 failed before
+  compilation from transient filesystem exhaustion; it is retained as a
+  failed receipt and does not consume the reserved RV64 attempt 26.

@@ -26,7 +26,7 @@ use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.loader_api.{loader_dynopen_bytes, loader_dynsym, loader_dynclose}
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.memory.vmm.{vmm_new_process_space, vmm_teardown_user_space, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_packed_string_vector, vmm_copyin_bytes_from_space, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values}
+use os.kernel.memory.vmm.{vmm_new_process_space, vmm_teardown_user_space, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_packed_string_vector, vmm_copyin_bytes_from_space, vmm_copy_bytes_result_ok, VmmCopyBytesResult, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values}
 use os.kernel.boot.mmio.{mmio_read16, mmio_read32, mmio_write16, mmio_write32}
 use os.kernel.ipc.capability.{register_task_vmspace, task_vmspace_of}
 use os.kernel.pipe_compat.{posix_pipe}
@@ -581,6 +581,15 @@ fn _copy_user_bytes(ptr_addr: u64, len: u64) -> Result<[u8], text>:
         return Err("empty path")
     if len > MAX_BINARY_PATH_LEN:
         return Err("path too long")
+    if not _is_user_read_range(ptr_addr, len):
+        return Err("bad user pointer")
+    if g_current_vmspace.pml4 != 0 as u64:
+        val copied: VmmCopyBytesResult = vmm_copyin_bytes_from_space(
+            g_current_vmspace, ptr_addr, len
+        )
+        if not vmm_copy_bytes_result_ok(copied):
+            return Err("bad user pointer")
+        return Ok(copied.bytes)
     var bytes: [u8] = []
     var i: u64 = 0
     while i < len:
