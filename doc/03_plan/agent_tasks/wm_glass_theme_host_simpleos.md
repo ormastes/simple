@@ -865,3 +865,24 @@ their geometry would otherwise land onscreen.
 This source increment is eligible for scoped static integration. Runtime and
 capture evidence remain unverified. The QEMU lane stays assigned separately
 and must not reuse an externally owned or stale live VM/artifact.
+
+### Hosted event-to-present receipt repair
+
+The 2026-07-30 current-history audit found an independent host production
+blocker: consolidation commit `f119f8b712` removed
+`host_wm_input_record_presented`, its receipt fields, and its behavior test,
+while `src/os/hosted/hosted_entry.spl` retained the import and live call after
+every accepted frame presentation. The hosted WM therefore could not build to
+the native event/capture boundary, and no semantic event could close with a
+truthful presentation receipt.
+
+The scoped repair restores accepted semantic-event to host-presentation
+correlation, including completion time, input-to-present latency, cumulative
+present count, and skipped-frame count. Failed, invalid, stale, or regressive
+updates must preserve the last accepted receipt. The focused unit owner is
+`test/01_unit/os/desktop/hosted_wm_evidence_spec.spl`.
+
+This is source repair only. Static review cannot promote host pixels, native
+events, timing, RSS, browser rendering, or either QEMU row. Host execution
+still requires one admitted exact-current pure-Simple CLI; QEMU remains owned
+by its delegated plan and is not executed by the merge owner.

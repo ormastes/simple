@@ -197,3 +197,14 @@ Focused unit owners:
 
 - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_box_effects_spec.spl`
 - `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_box_effects_spec.spl`
+
+### 2026-07-30 hosted event/presentation source gate
+
+`test/01_unit/os/desktop/hosted_wm_evidence_spec.spl` must prove that only an
+accepted, newer semantic event replaces the current receipt and that the next
+monotonic host presentation records completion time, input-to-present latency,
+present count, and skipped-frame count. Invalid semantic callbacks and
+regressive presentation counters/timestamps must leave the accepted receipt
+unchanged. This source gate repairs the live
+`src/os/hosted/hosted_entry.spl` import/call boundary; it does not substitute
+for a current native host event/capture run or delegated QEMU evidence.
