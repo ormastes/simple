@@ -13,11 +13,18 @@ dead-code bug: an undeclared local plus a final constructor that read the
 wrong field, so `<caption>`/`<th>` centering silently never applied under
 either engine). JIT now advances to a **fourth** gap
 (`Memory safety error [W1006]` in `_take`, `ot_layout_context.spl`) —
-found, precisely reported, deliberately **not** fixed (no established
-capability-annotation syntax to safely mirror, and an unresolved
-`_take`-vs-`_take_many` discrepancy). The JIT-enablement task is not fully
-complete, but has advanced past three real gaps with verified fixes and a
-regression pin.
+found, precisely reported, deliberately **not** fixed. **Gap 4's
+`_take`-vs-`_take_many` discrepancy is now RESOLVED (diagnostic, not a
+code fix): PROVED via direct code reading + an isolated single-function
+repro that the safety pass is NOT a hole and NOT a false positive — it
+correctly, uniformly flags class-field mutation via a non-`mut` parameter
+everywhere, but the whole-program lowering pass reports only the single
+earliest-accumulated violation and aborts immediately, so `_take_many`
+(and likely many more sites) are simply never reached.** Fix scope
+assessed as architectural (78+ call sites for `_take`/`gpos_data_take`
+alone) and deliberately not attempted this pass. The JIT-enablement task is
+not fully complete, but has advanced past three real gaps with verified
+fixes, a regression pin, and a fully-diagnosed (if unfixed) fourth gap.
 **Component:** `src/compiler_rust/driver/src/exec_core.rs` (`run_file_jit`),
 `src/compiler_rust/compiler/src/module_resolver/*`,
 `src/compiler_rust/compiler/src/hir/lower/type_registration.rs` (`register_trait`),
@@ -445,14 +452,134 @@ reason), and the parenthesized workaround's both branches (asserted
 correct). **Run via the real test runner (PROVED): 4 examples, 0
 failures.**
 
+## Gap 4 (`W1006` in `_take`) — discriminant found: NOT a pass hole, a report-first-warning-only artifact (2026-07-30, third follow-up pass)
+
+Per instruction, read the actual safety-pass code in `src/compiler_rust`
+rather than inferring from behavior, to determine which side of the
+`_take`-vs-`_take_many` discrepancy is wrong.
+
+**`check_mutation_capability`** (`hir/lower/memory_check.rs:186-223`) is
+called from `Node::Assignment` lowering (`hir/lower/stmt_lowering.rs:256-258`)
+for **every** assignment, unconditionally — `_take` and `_take_many` both go
+through the identical check. On a capability miss it does
+`self.memory_warnings.warn(...)` — **it only ever pushes onto an
+accumulating `Vec<MemoryWarning>`; it never itself returns an `Err` or
+inspects `strict_mode`.**
+
+**`Lowerer::with_module_resolver`** (`lowerer.rs:169-187`, `run_file_jit`'s
+actual constructor via `hir::lower_with_context_and_project_hint` →
+`lower_with_context`, `hir/lower/mod.rs:125-140`) initializes
+`memory_warnings: MemoryWarningCollector::strict()` — **`run_file_jit`'s
+lowering path is always strict, by construction, unconditionally.**
+
+The escalation from accumulated warnings to a hard `Err` happens in exactly
+**one** place, the "Eighth pass" at the very end of whole-program HIR
+lowering (`module_lowering/module_pass.rs:1538-1541`):
+
+```rust
+if self.memory_warnings.is_strict() && self.memory_warnings.has_warnings() {
+    let first_warning = self.memory_warnings.warnings().first().unwrap();
+    return Err(LowerError::MemorySafetyViolation { code: first_warning.code, ... });
+}
+```
+
+**This reports only `warnings().first()` — the single earliest-accumulated
+violation across the entire program — and aborts immediately.** It does not
+check whether other functions have the same or different violations; it
+cannot, because compilation stops at the first one.
+
+**Verified directly (PROVED, not inferred) that this is the actual
+mechanism, not a hole specific to `_take_many`:** built a **minimal,
+fully isolated, single-function repro** with no other code present —
+`class Budget: remaining: i64` / `fn take_one(budget: Budget) -> bool: ...
+budget.remaining = budget.remaining - 1 ...` — and ran it under
+`SIMPLE_EXECUTION_MODE=jit`. It produces the **identical** `W1006` error
+(`mutation without mut capability (field_0) ... while lowering take_one`).
+Since this trivial, isolated function — with zero relationship to
+`ot_layout_gpos_data.spl` or any pre-existing "hole" — triggers the exact
+same violation, **the check itself is universal and consistent: any
+class-field mutation via a non-`mut` parameter is flagged, every time,
+under strict lowering.** `_take_many`'s apparent "pass" is not because it
+satisfies some different rule — it is never reached, because `_take` (or
+whichever function is lowered earliest in whole-program order) already
+aborted the pipeline first.
+
+**Answer to the diagnostic question: neither "the pass has a hole" nor
+"`_take`'s flag is a false positive" — the pass is correctly and uniformly
+flagging a real capability violation that is pervasive throughout this
+codebase, not a discrepancy between two functions.** This matches the
+coordinator's own framing that the safety pass was recently made
+structurally live (mission-critical campaign) — it is now finding real,
+previously-invisible violations en masse, `_take`/`_take_many` being merely
+the first two encountered.
+
+**Scale check (PROVED — this changes the fix strategy):** `_take` /
+`gpos_data_take` alone are called at **78 sites** across
+`ot_layout_gpos.spl`, `ot_layout_context.spl`, `ot_layout_apply.spl`, and
+`ot_layout_gpos_data.spl` — every call site uses the guard-clause idiom
+`if not _take(budget, N): return <early-exit>`. The coordinator's suggested
+"source restructure... rebuild-and-return, or move the mutable state to a
+local" would require changing `_take`'s return shape (to also communicate
+the new `remaining` value back to the caller) and **updating all 78 call
+sites** to receive and thread that value through — and a narrower grep for
+just the literal `field.field = field.field ± expr` self-mutation shape
+across `src/lib/skia` alone (a strict undercount — it misses other
+mutation shapes) already finds **6 more files** beyond the two named in
+this doc. This is not a contained, single-function fix; it is a systemic
+idiom used throughout the OpenType-shaping subsystem.
+
+**Not attempted this pass — reasons:**
+1. Per the standing caution, adding `mut` was not attempted at all (no
+   working precedent for the syntax was found anywhere in this codebase in
+   the earlier pass, and the capability system has a documented history of
+   "adding `mut` demotes W1006-adjacent code paths" landmines elsewhere).
+2. The recommended restructure is real but not "contained" — 78+ call
+   sites for `_take`/`gpos_data_take` alone, with more of the same idiom
+   likely present at the 6+ other flagged files once each is individually
+   reached (the whole-program abort means the true count is unknown; only
+   the first violation is ever visible at a time).
+3. This is now assessed as **architectural in scope** (a systemic idiom
+   across a whole subsystem, not a single function), consistent with this
+   campaign's standing discipline: report precisely rather than attempt a
+   large, unverified multi-site refactor under severe time pressure.
+
+**No re-run of the JIT web repro this pass** — no fix was landed for gap 4,
+so the repro's outcome is unchanged from the prior pass (still blocks at
+`_take`); re-running would not surface new information. Gap 5 (whatever
+follows `_take`) remains unknown until gap 4 is actually resolved.
+
+### Recommended path for gap 4 (not attempted)
+
+1. Establish whether the language has *any* safe, established way to grant
+   mutation capability to a `class`-typed parameter without the known `mut`
+   landmine (the earlier pass's grep found zero precedent anywhere in
+   `src/lib/skia` — worth checking the language guide / other subsystems
+   directly rather than inferring from absence).
+2. If no safe annotation exists, the restructure is real work: change
+   `_take`'s signature to return `(bool, i64)` (success, new remaining) or
+   similar, and mechanically update all 78 call sites — large enough to
+   warrant its own dedicated pass, ideally with a scripted/semi-automated
+   rewrite given the call sites' near-uniform shape
+   (`if not _take(budget, N): return X`).
+3. Given the true scope is unknown until gap 4 is cleared (whole-program
+   abort hides how many more sites exist), budget for this being iterative:
+   fix one occurrence, re-run, discover the next, same as the `CastElse`
+   loop earlier in this campaign — but at 78+ call sites for just the first
+   function, this is a materially bigger undertaking than `CastElse` was.
+
 ## Validation performed this follow-up pass
 
 - `text_align_v` root cause and fix: PROVED (code reading, direct
   before/after repro against the real pipeline).
-- Fourth gap (`W1006` mutation-capability error in `_take`): PROVED to
-  exist and block; root cause NOT established (the `_take`-vs-`_take_many`
-  discrepancy is a real, unresolved puzzle, reported precisely rather than
-  guessed at).
+- Gap 4 (`W1006` mutation-capability error) discriminant: PROVED, not
+  inferred — read `memory_check.rs`, `memory_warning.rs`,
+  `module_pass.rs`, and `lowerer.rs` directly; confirmed the "report only
+  the first accumulated warning, whole-program strict-by-construction for
+  `run_file_jit`" mechanism with an isolated single-function repro that
+  reproduces the identical error with zero relationship to the original
+  files. Not a pass hole, not a false positive — a real, pervasive,
+  previously-invisible violation; fix scope (78+ call sites for the first
+  function alone) assessed as architectural, not attempted.
 - Pinning spec: PROVED — 4/4 passing via the real test runner, and its
   underlying assertions independently cross-checked against a raw
   interpreter run showing `nil` for the naked false-branch and `0` for the
