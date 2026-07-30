@@ -57,6 +57,12 @@ index-based allocation — one report, four allocator models.
   samples under both cranelift-native and interpreter.
 - Matrix documented in `bin/simple build --help`.
 
+## Status (2026-07-30)
+CLI flag wiring and capability-matrix resolver library landed (2026-07-30).
+Resolver spec `config_spec.spl` passes 12/12. Blocker: compiler does not
+currently build with llvm feature at all (LLVM codegen row blocked until
+resolved).
+
 ## Non-goals
 MSan (needs whole-world instrumentation — strict interpreter mode covers the
 uninit class), fleet eBPF profiling.

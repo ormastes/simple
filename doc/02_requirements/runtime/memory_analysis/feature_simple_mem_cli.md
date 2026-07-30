@@ -35,3 +35,13 @@ signal-triggered dump to a well-known path (`SIMPLE_MEM_DUMP_ON=USR2`).
 owners correctly; `diff` on before/after-leak snapshots surfaces the leak
 top-of-list; TUI works in a dumb terminal; all collectors off ⇒ measured
 zero overhead.
+
+## Status (2026-07-30)
+Verb dispatch COMPLETE (landed ef00d5e2094). Every help-listed verb
+dispatches explicitly; unknown verb prints help and exits 1; `top --once`
+renders one frame without entering the TUI loop. Spec test
+`mem_cli_spec.spl` passes 7/7. Earlier foundation (landed 0917eee9b93d):
+SIGUSR2 hook in `signal_handlers.spl`, `mem/dump.spl` v1 TSV snapshot,
+spec `mem_dump_spec.spl` 3/3. Remaining work: interactive TUI render,
+live-process polling (`top --pid` without MCP), `gpu` subcommand stub
+implementation.

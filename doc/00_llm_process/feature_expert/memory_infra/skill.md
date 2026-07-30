@@ -46,7 +46,7 @@ foundation: CowEnv dirty-tracking, byte-level heap counters — see
 ## Env gates
 | Env | Layer | Default | Status |
 |---|---|---|---|
-| `SIMPLE_MEM_ATTR=1` | M1 attribution | off | Landed (b44b07cd2869) |
+| `SIMPLE_MEM_ATTR=1` | M1 attribution | off | Landed (b44b07cd2869); +36.6% measured overhead on alloc-heavy probe, target <15%, OPEN for sharding |
 | `SIMPLE_MEM_HARDEN=1` | M2 quarantine+poison (hosted); also gates GC-sweep poison | off | Landed hosted path (0917eee9b93d); GC-sweep poison not applicable — GC tier is vestigial (see Known limits) |
 | `SIMPLE_MEM_GUARD_RATE=N` | M2 sampled guard pages (hosted) | disabled (unset) | Landed hosted path (0917eee9b93d); native C `rt_alloc` (`runtime_memory.c`) mirror not yet ported |
 | `SIMPLE_AST_GEN_CHECK=1` | L6 arena generation diagnostic | off | Landed (stage-4 L6), diagnosis-only |
@@ -67,7 +67,7 @@ bin/simple test test/01_unit/lib/mem/gen_arena_spec.spl              # M6: 5/5
 bin/simple test test/01_unit/lib/mem/mem_dump_spec.spl               # M8-prep: 3/3
 bin/simple test test/01_unit/compiler/ast_arena_generation_spec.spl  # L6: 5/5
 bin/simple test test/01_unit/lib/mem_infra/config_spec.spl           # M3 resolver: 12 its
-bin/simple test test/03_system/app/mem_cli_spec.spl                  # M8 CLI: 4 its
+bin/simple test test/03_system/app/mem_cli_spec.spl                  # M8 CLI: 7/7 (LANDED ef00d5e2094)
 cargo test -p simple_compiler interpreter_extern::mem_guard          # M2 guard: 10/0
 cargo test -p simple_compiler interpreter_extern::memory             # M2 harden: 7/0
 sh scripts/check/check-stage4-memory-gate.shs                        # PASS peak_rss_kb=71048 (observed)
@@ -94,12 +94,12 @@ sh scripts/check/check-stage4-memory-gate.shs                        # PASS peak
   serves the compiler pipeline's own internals, never a program `Value`. The
   GC row of the M1-M8 allocator-model matrix is satisfied trivially, not
   because GC instrumentation was built.
-- **LLVM lane (M4) blocked/unscheduled.** ASan build integration and
+- **LLVM lane (M4) does not compile.** ASan build integration and
   `-fmemory-profile` (memprof) emission are MED-cost and LLVM-backend-only
   by design; `src/lib/*/sanitizer/asan/` stubs exist per-tier but are not
-  wired into a `--mem-infra=asan` build path. Cranelift/interpreter resolve
-  `asan`/`memprof` rows to the M2 equivalents instead (see
-  `mem_infra_matrix()` in `config.spl`).
+  wired into a working `--mem-infra=asan` build path (M4 compiler build fails).
+  Cranelift/interpreter resolve `asan`/`memprof` rows to the M2 equivalents
+  instead (see `mem_infra_matrix()` in `config.spl`).
 - **+36.6% ON cost, M1 attribution, measured pre-any-lock-sharding.** The
   `SIMPLE_MEM_ATTR=1` path takes one global `Mutex<HashMap>` lock per heap
   alloc/free; on an allocation-heavy probe (90k-element array push+sum) the
@@ -109,6 +109,13 @@ sh scripts/check/check-stage4-memory-gate.shs                        # PASS peak
   lock/map ever touched) and is indistinguishable from a clean-env baseline.
   No sharded/lock-free map has been built; if a lower-overhead ON path is
   needed later, sharding the global lock/map is the first place to look.
+  **Current status: OPEN ITEM, target <15% still unmet.**
+- **Memory-extern parity incomplete in seed interpreter.** Three externs —
+  `rt_mem_attr_enabled`, `rt_mem_guard_stats`, `rt_mem_harden_check` — log
+  'unknown extern function' and silently return 0 when called from interpreted
+  code in the Rust seed. Pure-Simple interpreter has these defined correctly.
+  **Current status: OPEN ITEM, seed interpreter missing wiring for three
+  mem-infra externs.**
 
 ## Update Rule
 When a new M-phase lands, gains a design doc, or an env gate's status

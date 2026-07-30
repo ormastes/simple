@@ -48,6 +48,11 @@ Done this session (all cargo-verified, suite 27 pass / 2 pre-existing fails):
   authoritative arrays (env-first/array-fallback readers) so skips are
   semantics-preserving. Bootstrap rerun in flight with SIMPLE_AST_GEN_CHECK=1
   + SIMPLE_MEM_SNAPSHOT=1 + RSS sampler; multifile provenance guard after.
+  Memory admission (2026-07-30): whole-tree stage-2 build reports zero
+  stale-generation and zero OOB diagnostics under SIMPLE_AST_GEN_CHECK=1 —
+  MEMORY HALF PASSES. Remaining blocker: parser STATE defect in whole-tree
+  focused builds (doc/08_tracking/bug/stage3_whole_tree_parse_state_vhdl_helpers_2026-07-30.md),
+  NOT a memory defect and NOT a grammar gap.
 - Regression sweep (all lanes, post-land): 36/0, 1/0 vmm, 7/0 memory, 1/0 aux,
   4/0 ctor, 5/5 arena spec, 2/2 gate spec, gate PASS peak_rss_kb=71048.
 - INCIDENT: a stale parallel-session WC had silently reverted L3's
@@ -63,21 +68,24 @@ Both suite reds fixed by L2 (see above); bug doc updated by commit message.
 Successor plan: `doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md`.
 Feature-expert skill: `doc/00_llm_process/feature_expert/memory_infra/skill.md`.
 
-- **M1 (attribution) — DONE.** Landed b44b07cd2869 (per-owner byte
+- **M1 (attribution) — IMPLEMENTED, overhead open.** Landed b44b07cd2869 (per-owner byte
   accounting) + 630deb4571ee (JIT `rt_mem_attr_set_owner` text-arg fix,
   `(ptr,len)` span not C-string). Spec `mem_attr_report_spec.spl` 2/2.
+  Status: +36.6% in-process overhead on allocation-heavy probe (sharding in
+  progress; first attempt reverted for breaking 3 tests).
 - **M2 (guard+harden) — hosted DONE, arena/C-path open.** Landed 0917eee9b93d:
   hosted quarantine ring (`SIMPLE_MEM_HARDEN=1`) + sampled guard-page
   allocator (`SIMPLE_MEM_GUARD_RATE=N`) in `interpreter_extern/{memory,mem_guard}.rs`,
   cargo tests 10/0 + 7/0. Open: native C `rt_alloc` (`runtime_memory.c`)
   guard mirror, and the arena-generation harden extension
   (`SIMPLE_AST_GEN_HARDEN`, block-on-stale-read) — design done
-  (`m2_guard_and_harden_design.md`), not implemented.
-- **M3 (`--mem-infra=` interface) — resolver DONE, wiring open.**
+  (`m2_guard_and_harden_design.md`), not implemented. Parity gap (2026-07-30):
+  seed interpreter missing `rt_mem_attr_enabled`, `rt_mem_guard_stats`,
+  `rt_mem_harden_check` externs (silently return 0 / log unknown extern).
+- **M3 (`--mem-infra=` interface) — CLI flag wiring + resolver LANDED, LLVM blocked.**
   `src/lib/common/mem_infra/config.spl` capability-matrix resolver (7 rows x
-  3 backends), spec `config_spec.spl` 12 its. Open: not wired into CLI/build
-  plumbing — the individual envs (`SIMPLE_MEM_ATTR` etc.) are the
-  load-bearing mechanism today, `--mem-infra=` is not yet a real flag.
+  3 backends), spec `config_spec.spl` 12/12. CLI flag wiring landed (2026-07-30).
+  Blocker: compiler does not currently build with llvm feature at all.
 - **M5 (strict interpreter / Miri-lite) — design DONE, impl open.**
   `doc/05_design/compiler/interpreter/m5_strict_interpreter_mode_design.md`
   specifies `SIMPLE_STRICT_MEM=1` gate shape; no code landed.
@@ -92,12 +100,13 @@ Feature-expert skill: `doc/00_llm_process/feature_expert/memory_infra/skill.md`.
   covers both GC (verdict: vestigial, no tracing collector over program
   values — matrix row satisfied trivially) and GPU (compute-sanitizer wrapper
   + memory_viz-compatible snapshot plan). No code landed.
-- **M8 (`simple mem` CLI) — skeleton+SIGUSR2 DONE, TUI open.** Landed
-  0917eee9b93d (SIGUSR2 hook in `signal_handlers.spl`, `mem/dump.spl` v1 TSV
-  snapshot, spec `mem_dump_spec.spl` 3/3) + `src/app/mem/main.spl`
-  (`top`/`diff`/`help`, spec `mem_cli_spec.spl` 4 its). Open per
-  `m8_simple_mem_cli_design.md`: live-process polling via SIGUSR2 (`top --pid`),
-  interactive TUI render path (v1 falls back to fixed-width text rows), `gpu`
+- **M8 (`simple mem` CLI) — COMPLETE.** Landed ef00d5e2094: verb dispatch
+  complete (every help-listed verb dispatches explicitly, unknown verb prints
+  help + exits 1, `top --once` renders one frame without entering TUI loop).
+  Spec `mem_cli_spec.spl` 7/7. Earlier landing 0917eee9b93d: SIGUSR2 hook in
+  `signal_handlers.spl`, `mem/dump.spl` v1 TSV snapshot, spec
+  `mem_dump_spec.spl` 3/3. Open per `m8_simple_mem_cli_design.md`: interactive
+  TUI render path, live-process polling (`top --pid` without MCP), `gpu`
   subcommand is a stub.
 
 Overhead measurement on record (M1 ON path): +36.6% in-process /

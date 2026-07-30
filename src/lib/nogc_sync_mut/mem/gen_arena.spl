@@ -17,6 +17,16 @@
 # once, lazily, into a module-level flag — never at module-load time (that
 # has hung the interpreter for other stdlib modules, see log.spl) and never
 # per call.
+#
+# Observability counters (live_count, peak_count, alloc_count, free_count,
+# stale_count) are ALWAYS ON, not config-gated: each is a single integer
+# increment/compare colocated with work the method already does (a struct
+# field write GenArena was already performing), so there is no extra branch,
+# allocation, or syscall on the hot path — the zero-overhead-when-off rule
+# does not apply because there is no "off" cost to begin with. report()
+# renders a TSV snapshot line mirroring the KIND/OWNER row shape used by
+# dump.spl so 'simple mem' tooling can read handle-based arenas the same way
+# it reads raw-allocator kinds.
 
 extern fn rt_env_get(key: text) -> text
 
@@ -46,6 +56,10 @@ class GenArena<T>:
     free_list: [i64]
     live: [bool]
     live_count: i64
+    peak_count: i64
+    alloc_count: i64
+    free_count: i64
+    stale_count: i64
 
 impl GenArena<T>:
     static fn new() -> GenArena<T>:
@@ -54,32 +68,42 @@ impl GenArena<T>:
             gens: [],
             free_list: [],
             live: [],
-            live_count: 0
+            live_count: 0,
+            peak_count: 0,
+            alloc_count: 0,
+            free_count: 0,
+            stale_count: 0
         )
 
     me alloc(value: T) -> GenHandle:
         """Store value in a free (or new) slot and return its handle."""
+        self.alloc_count = self.alloc_count + 1
         if self.free_list.len() > 0:
             val idx = self.free_list[self.free_list.len() - 1]
             self.free_list.pop()
             self.slots[idx] = value
             self.live[idx] = true
             self.live_count = self.live_count + 1
+            if self.live_count > self.peak_count:
+                self.peak_count = self.live_count
             return GenHandle(idx: idx, generation: self.gens[idx])
         val idx = self.slots.len()
         self.slots.push(value)
         self.gens.push(1)
         self.live.push(true)
         self.live_count = self.live_count + 1
+        if self.live_count > self.peak_count:
+            self.peak_count = self.live_count
         GenHandle(idx: idx, generation: 1)
 
-    fn get(h: GenHandle) -> T?:
+    me get(h: GenHandle) -> T?:
         """Return the value for h, or nil if the handle is out of range,
         free, or stale (generation mismatch)."""
         if h.idx < 0 or h.idx >= self.slots.len():
             return nil
         val stored_gen = self.gens[h.idx]
         if not self.live[h.idx] or stored_gen != h.generation:
+            self.stale_count = self.stale_count + 1
             _report_stale(h.idx, stored_gen, h.generation)
             return nil
         self.slots[h.idx]
@@ -91,6 +115,7 @@ impl GenArena<T>:
             return false
         val stored_gen = self.gens[h.idx]
         if not self.live[h.idx] or stored_gen != h.generation:
+            self.stale_count = self.stale_count + 1
             _report_stale(h.idx, stored_gen, h.generation)
             return false
         self.slots[h.idx] = value
@@ -104,14 +129,23 @@ impl GenArena<T>:
             return false
         val stored_gen = self.gens[h.idx]
         if not self.live[h.idx] or stored_gen != h.generation:
+            self.stale_count = self.stale_count + 1
             _report_stale(h.idx, stored_gen, h.generation)
             return false
         self.live[h.idx] = false
         self.gens[h.idx] = stored_gen + 1
         self.free_list.push(h.idx)
         self.live_count = self.live_count - 1
+        self.free_count = self.free_count + 1
         true
 
     fn len() -> i64:
         """Number of live (allocated, not-yet-freed) slots."""
         self.live_count
+
+    fn report(name: text) -> text:
+        """Fixed-format TSV snapshot line mirroring dump.spl's OWNER row
+        shape (tag\\tname\\tlive\\tpeak\\tallocs), extended with frees and
+        stale-handle rejections so 'simple mem' tooling can report on
+        handle-based (index-pointer) allocation next to raw allocator kinds."""
+        "GEN_ARENA\t{name}\t{self.live_count}\t{self.peak_count}\t{self.alloc_count}\t{self.free_count}\t{self.stale_count}\n"

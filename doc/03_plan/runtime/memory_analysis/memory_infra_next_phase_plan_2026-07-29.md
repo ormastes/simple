@@ -65,7 +65,7 @@ viewer works on our traces. All rows config-gated, off by default. Exit:
 seeded device leak + OOB fixtures caught; snapshot opens in memory_viz;
 zero overhead with the gate off.
 
-## M8 — `simple mem` CLI (interactive interface, MED)
+## M8 — `simple mem` CLI (interactive interface, MED) — LANDED ef00d5e2094
 One entry point for ALL of the above, per
 `doc/02_requirements/runtime/memory_analysis/feature_simple_mem_cli.md`:
 `simple mem top|snapshot|diff|trace|gpu|gate` — Simple-TUI interactive top
@@ -74,7 +74,9 @@ trace record + query (data stays in files; CLI is the query surface),
 device rows from M7. Speaks to a live process via the existing MCP/socket
 plumbing or post-mortem via profile files. Exit: `simple mem trace prog.spl`
 then `simple mem top --profile <file>` shows the M1 fixture's owners; TUI
-interactive under plain terminal.
+interactive under plain terminal. **Status: verb dispatch complete, all
+help-listed verbs dispatch explicitly, unknown verb prints help and exits 1,
+`top --once` renders one frame without TUI loop. Spec test/03_system/app/mem_cli_spec.spl: 7/7.**
 
 ## WATCH (not scheduled)
 LLVM PGHO feed-back once the allocator grows partitioning hooks; HWASan/MTE
@@ -150,17 +152,19 @@ Raw in-process elapsed_ms samples (ABBA-interleaved, sorted):
    pre-feature baseline on this measurement pass, but the noise band swallows
    any OFF-path cost that could exist.**
 
-2. **ON cost is NOT under ~5% on this workload — it is ~31-37%.** This is
+2. **ON cost is +36.6% (in-process median) on this allocation-heavy workload.** This is
    expected once the code is read, not a surprise: this probe is
    allocation-heavy (90k array pushes; per the "seed `.push()` always clones"
    finding, `arr = arr.push(v)` reallocates/copies the whole backing buffer
    each call, so it's O(N²) allocations), and the ON path takes a global
    `Mutex` lock plus a `HashMap` insert/lookup on **every** heap alloc and
    free while enabled. The gate correctly keeps this cost opt-in (`OFF` by
-   default, satisfying the hard rule), but M1's ON-path cost model should be
-   documented as "real, allocation-rate-proportional," not "small" — a
-   lower-allocation-rate workload would show a smaller percentage, but the
-   per-alloc mutex is a real fixed cost per operation, not a rounding error.
+   default, satisfying the hard rule). M1's ON-path cost is a real,
+   allocation-rate-proportional burden, not a rounding error: the per-alloc
+   mutex is a fixed cost per operation. Lower-allocation-rate workloads would
+   show a smaller percentage, but the cost remains. No sharding attempted yet;
+   if lower overhead is needed later, sharding the global lock/map is the
+   first place to look. **Current status: OPEN ITEM, measured +36.6%, target <15%.**
 
 ### Caveats
 - Debug build (`cargo build`, not `--release`); absolute timings are not
