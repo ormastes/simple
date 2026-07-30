@@ -1318,3 +1318,200 @@ available," stated plainly rather than inferring a number.
 
 Blocked on gap 7, same as before — a correct-or-non-degenerate JIT result
 still does not exist for this example.
+
+
+## Ninth follow-up pass (2026-07-30) — gap 7 root-caused and FIXED; gap 8 found (module-level `val` via function call reads as 0 under JIT), still blocking the real repro
+
+### Baseline check (deployed-binary swap mid-session, PROVED)
+
+The deployed compiler at `bin/release/x86_64-unknown-linux-gnu/simple` was
+swapped mid-session (57 MB / 0 `llvm::` strings -> 154 MB / 617 `llvm::`
+strings, confirmed by direct `strings | grep -c` on the file). This
+investigation's own binary was never that one: it is a locally
+cargo-built `src/compiler_rust/target/release/simple` inside this
+session's dedicated worktree (`git status` confirms only source files are
+modified, no binary artifacts tracked), untouched by the swap or by the
+ENOSPC cleanup (verified present, 57 MB, non-LLVM, correctly timestamped).
+To rule out any doubt that the earlier gap-7 findings were an artifact of
+this one build, re-ran the 6-line minimal repro directly against the new
+deployed canonical (LLVM-having) binary before doing anything else — see
+below: identical bug, identical 32-byte-stride signature. The bug is real,
+present in the canonical toolchain, not specific to this worktree's build.
+
+### Address hypothesis: CONFIRMED (instruction 2, PROVED)
+
+```
+SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 simple run <6-line repro>
+```
+on the freshly-confirmed deployed canonical binary, 3 independent runs:
+```
+pw=4134852167713 ph=4134852167745
+pw=4716216256545 ph=4716216256577
+pw=4206591543329 ph=4206591543361
+```
+always exactly 32 apart. A 3-occurrence version on the same binary:
+```
+pw=2340663725633 ph=2340663725665 pz=2340663725697
+```
+in hex: `0x220fa6e0e41`, `0x220fa6e0e61`, `0x220fa6e0e81` — each exactly
+`0x20` (32) apart, landing at +32 and +64 from the first, precisely as
+predicted: "a third occurrence landing 64 from the first would essentially
+prove frame-slot addressing." Low, contiguous, fixed-stride hex deltas —
+the signature of adjacent frame-slot (or spill-slot) addresses, not
+decoded integers, confirming a missing load/deref rather than three
+unrelated garbage reads.
+
+### Root cause (instruction 3, PROVED by direct code reading — not the address arithmetic itself, but the trigger that produces it)
+
+Traced `to_i64()` end to end:
+- HIR (`hir/lower/expr/mod.rs`): `"trim" | "trim_start" | "trim_end" |
+  "appended" | "prepended"` (and `"concat"|"slice"|"replace"`, see below)
+  are typed `Some(TypeId::STRING)`, and `"to_i64"|"to_int"` are typed
+  `Some(TypeId::I64)` — both correctly, confirmed directly by a temporary
+  `eprintln!` showing `is_string=true` for the chained receiver
+  (`"480".trim()` as the receiver of `.to_i64()`) — HIR is NOT where this
+  breaks.
+- MIR lowering (`mir/lower/lowering_expr_method.rs`): the generic
+  (non-special-cased) method dispatch path lowers `to_i64` to
+  `MirInst::MethodCallStatic { dest, receiver: receiver_reg, func_name:
+  "text.to_i64", args }` via ordinary `self.lower_expr(receiver)` value
+  lowering — also not where this breaks; nothing here distinguishes a
+  chained vs. plain-Local receiver.
+- **Codegen (`codegen/instr/body.rs`): found it.** A pre-pass builds a
+  `types_map: HashMap<VReg, TypeId>` by walking every MIR instruction so
+  later codegen knows each dest VReg's static type. This map has explicit
+  arms for `MethodCallStatic` results of `to_text`/`to_string`/`str` and
+  `to_u8`..`to_i32` (each typing the dest correctly) — but **no arm for
+  `trim`/`trim_start`/`trim_end`/`appended`/`prepended`** (or `concat`/
+  `slice`/`replace`), despite HIR typing all of these `STRING`. Without an
+  entry, `.trim()`'s dest VReg falls through the catch-all `MirInst::
+  MethodCallStatic { .. } => {}` and stays untyped in `types_map`.
+
+This exactly matches the asymmetry (instruction 3's discriminator): a
+plain `Local` receiver (`val a = "480"; a.to_i64()`) gets its type from
+`MirInst::Load { dest, ty, .. } => types_map.insert(*dest, *ty)` — always
+present for a declared local — so `to_i64()`'s receiver IS typed there,
+correctly dispatching. A CHAINED receiver that is itself one of the
+un-typed `MethodCallStatic` results has no such entry, so the outer call's
+receiver type lookup misses, and (per an adjacent, already-fixed comment
+in the same file documenting the identical `arr.len().to_i64()` case)
+"falls through to name-based symbol resolution that mis-picks an unrelated
+`Type.to_i64`" elsewhere in the link — explaining both the wrong VALUE
+(reading whatever a mismatched-ABI callee left behind, consistent with the
+address-shaped garbage) and why it costs nothing to `SIMPLE_JIT_STRICT`
+(the wrong symbol still resolves and links; nothing is unresolved).
+
+This is a **types_map coverage gap**, the same class of bug this very file
+documents repeatedly having been fixed for `to_text`/`length`/`is_empty`/
+`bytes`/etc. — never previously extended to the plain STRING-returning
+transformation methods.
+
+### Fix (instruction 4, contained — PROVED correct, not forced)
+
+Added one new match arm to `codegen/instr/body.rs`'s `types_map` builder,
+directly mirroring the existing `to_text`/`to_string`/`str` arm, for
+`"trim" | "trim_start" | "trim_end" | "appended" | "prepended"` (both bare
+and `Type.`-qualified `func_name` forms) -> `TypeId::STRING`.
+
+**Deliberately excluded** `"concat"`/`"slice"`/`"replace"` even though
+HIR's own table types them STRING too: `"slice"` collides with a real
+ARRAY method of the same name (`"slice" | "filter" | "map" =>
+Some(receiver.ty)` in the same HIR file's array-methods table), and this
+`func_name`-only match has no receiver-type guard to disambiguate a
+string call from an array call. Widening to those three risks a new
+regression on chained array `.slice()`; correctly out of scope for a
+contained fix, left as future work with the collision explicitly
+documented in the code comment.
+
+**Verified correct, PROVED, via `simple run` before/after transcripts:**
+
+| Repro | Pre-fix (deployed canonical binary) | Post-fix (worktree binary) | Interpreter (oracle) |
+|---|---|---|---|
+| 6-line 2-occurrence | `pw=4134852167713 ph=4134852167745` (garbage, 32 apart) | `pw=480 ph=360` | `pw=480 ph=360` |
+| 3-occurrence | `pw=2340663725633 ph=...665 pz=...697` (32/64 apart) | `pw=480 ph=360 pz=240` | `pw=480 ph=360 pz=240` |
+| Exact `showcase_resolution_dims()` shape (struct, split+index+trim+to_i64, nil-guard) | `w=-796579551 h=-796579519` (garbage) | `w=480 h=360` | `w=480 h=360` |
+
+No regression, PROVED: re-ran `trim()`/`trim_start()`/`trim_end()`/
+`appended()`/`prepended()`/chained `.trim().to_string()` under JIT after
+the fix — output identical to the interpreter in every case.
+`.lower().to_i64()` (the earlier "generalizes beyond trim()" bisection
+result) is **still** broken post-fix, as expected — `.lower()`/`.upper()`
+aren't in HIR's STRING-typed table at all (a different, pre-existing,
+separate gap; correctly left untouched by this contained fix).
+
+Updated `test/01_unit/lib/language/chained_method_i64_conversion_spec.spl`
+to record the fix and restate, per instruction 5, that it still cannot
+detect the JIT bug either way — `simple test` does not route through
+cranelift regardless of `SIMPLE_EXECUTION_MODE`. The `simple run`
+transcripts above and in this doc are the only real evidence.
+
+### Gap 8 (new, NOT fixed — architectural, out of scope for this pass): module-level `val` initialized via a function call reads as `0` under JIT
+
+With the gap-7 fix landed, re-ran the assigned web-pipeline repro under
+`SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1` expecting the "prize" (gap
+7 was believed to be the last blocker for `RW`/`RH`). It still printed
+`web_standards_showcase status=fail reason=blank-or-uniform pixels=0
+nonzero=0 checksum=0` — **unchanged**. Instrumented the real file directly
+(`print "DEBUG-RW RW={RW} RH={RH}"` at the top of
+`run_web_standards_showcase`): still `RW=0 RH=0` even with the fix.
+
+Bisected with fresh minimal repros (PROVED, not inferred):
+
+```
+struct Dims: w: i32 / h: i32
+fn resolve_dims(raw: text) -> Dims: ...exact showcase_resolution_dims() body...
+val DIMS: Dims = resolve_dims("480x360")
+val RW: i32 = DIMS.w
+fn main(): print "RW={RW}"
+```
+-> `RW=0` under JIT even post-fix, vs. the IDENTICAL logic called from
+inside `main()` as a local `val` (previous table row) -> `RW=480`
+correctly. The only difference is **module-level vs. local scope**.
+
+Narrowed further:
+- `val DIMS: Dims = make_dims()` where `make_dims()` just returns a
+  hardcoded `Dims(w: 480, h: 360)` (**no** chained method call, **no**
+  trim/to_i64 anywhere) -> **still `RW=0`**. Not gap 7's mechanism at all.
+- `val RW: i32 = make_w()` where `make_w()` is `fn make_w() -> i32: 480`
+  (trivial, scalar, one-liner) -> **still `RW=0`**.
+- `val RW: i32 = 480` (literal, no function call) -> **`RW=480`, correct.**
+
+**So gap 8, precisely stated: a module-level `val` initialized by calling
+ANY function (regardless of what that function does) reads as `0` under
+JIT; a module-level `val` initialized by a literal does not.** This is
+unrelated to gap 7's chained-method/types_map mechanism — it reproduces
+with zero method chaining, zero string parsing, a function that returns a
+hardcoded literal. It is a different, and by symptom (clean `0`, not an
+address-shaped garbage value) probably differently-mechanismed bug in
+module/global initializer lowering under JIT — plausibly related to the
+"module-global MIR lowering" area flagged as historically fragile in
+project memory (array-typed globals were fixed there in an earlier pass;
+this is a function-call-initialized scalar/struct global, seemingly not
+covered by that fix). Not root-caused further and not fixed — this is a
+different, likely larger area (global/module init sequencing) than the
+"one contained fix" scope of this pass, per instruction 4's standing
+guidance to stop and document rather than force it. This is now gap 8's
+own open item, and it — not gap 7 — is what still blocks
+`web_render_file_gui.spl` from producing a non-degenerate JIT result.
+Minimal repro files (scratch, not committed):
+`gap7_global_repro.spl`, `gap7_global_simple.spl`,
+`gap7_global_scalar.spl`, `gap7_global_literal.spl` under
+`/tmp/.../scratchpad/`.
+
+### The prize: still not captured (instruction 5, PROVED)
+
+Machine load at capture time: 5.71 (1-min avg) — materially lower than the
+37.62 flagged in the prior two passes (host appears to have been
+rebooted/reset during the session interruption: `uptime` now reports "up
+55 min" versus many hours before), so this pass's timing conditions are
+cleaner, for whatever future run gets far enough to use them. `simple run`
+on the real web repro still exits in ~60 s with the same degenerate
+`pixels=0 nonzero=0 checksum=0` status line as every prior pass — gap 8
+(not gap 7, which is now fixed) is the reason. No partial per-node timing
+exists to extract: the failure is still upstream of any HTML
+parsing/rendering/styling, in resolving `RW`/`RH` before rendering starts.
+
+### Heuristic-flip question (instruction 5, unchanged): still not evaluated
+
+Blocked on gap 8, not gap 7 — a correct-or-non-degenerate JIT result for
+this example still does not exist.

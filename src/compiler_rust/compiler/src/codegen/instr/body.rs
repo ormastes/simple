@@ -165,6 +165,58 @@ pub(super) fn build_vreg_types(
                 {
                     types_map.insert(*d, TypeId::STRING);
                 }
+                // String-only transformation methods that return a fresh
+                // String (hir/lower/expr/mod.rs's `is_string` table:
+                // "trim" | "trim_start" | "trim_end" | "appended" |
+                // "prepended" => Some(TypeId::STRING)`) were missing from
+                // this types_map pre-pass, unlike their to_text/to_string/
+                // str sibling arm just above and the to_u8..to_i32 arms
+                // below. A CHAINED call directly off one of these (e.g.
+                // `s.trim().to_i64()`, no intermediate `val`) left the
+                // receiver untyped here, so the outer call took the
+                // untyped-receiver fallback path instead of the safe
+                // builtin/qualified dispatch (same failure class the
+                // `arr.len().to_i64()` comment below this documents and
+                // fixes for the `MirInst::Call` case) — silently
+                // mis-resolving to the wrong `Type.to_i64` symbol.
+                // Reproduced with a 6-line minimal repro under
+                // SIMPLE_EXECUTION_MODE=jit (gap 7,
+                // doc/08_tracking/bug/jit_drawirrendertarget_moduleresolver_gap_2026-07-30.md):
+                // interpreter gives the correct decoded ints, JIT prints
+                // large garbage that scales in fixed 32-byte steps per
+                // occurrence in the same function — consistent with reading
+                // an un-loaded slot/frame address for the receiver instead
+                // of its value. An intermediate `val t = s.trim(); t.to_i64()`
+                // was already correct (the Load arm below types `t`), which
+                // is why only the directly-chained form was affected.
+                //
+                // Deliberately NOT included here: "concat" / "slice" /
+                // "replace", which HIR's own table also types STRING for a
+                // string receiver, but "slice" collides with a real array
+                // method of the same name (`"slice" | "filter" | "map" =>
+                // Some(receiver.ty)` in the array-methods table just above
+                // in the same HIR file) that must NOT be typed STRING here.
+                // This `func_name`-only match has no receiver-type guard to
+                // disambiguate, so widening it to those three risks a new
+                // regression for chained array `.slice()`/`.concat()` — out
+                // of scope for this contained fix.
+                MirInst::MethodCallStatic {
+                    dest: Some(d),
+                    func_name,
+                    ..
+                } if func_name == "trim"
+                    || func_name == "trim_start"
+                    || func_name == "trim_end"
+                    || func_name == "appended"
+                    || func_name == "prepended"
+                    || func_name.ends_with(".trim")
+                    || func_name.ends_with(".trim_start")
+                    || func_name.ends_with(".trim_end")
+                    || func_name.ends_with(".appended")
+                    || func_name.ends_with(".prepended") =>
+                {
+                    types_map.insert(*d, TypeId::STRING);
+                }
                 MirInst::MethodCallStatic {
                     dest: Some(d),
                     func_name,
