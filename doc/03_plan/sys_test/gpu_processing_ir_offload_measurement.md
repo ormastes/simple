@@ -154,12 +154,25 @@ postponed-host phase. Neither host may promote it to a GPU result.
 - Discard warmups. Report the median of the measured samples for every field.
 - Use a monotonic microsecond clock for CPU, device, transfer, and total time.
 - Use identical input and output work for the CPU baseline and GPU path.
-- Keep batch sizes strictly increasing and choose sizes that bracket a measured
+- Emit equal `processing_ir_offload_cpu_workload_id` and
+  `processing_ir_offload_gpu_workload_id` values. Every row repeats that
+  workload as `workload_id`; the consumer rejects mixed CPU/GPU workloads.
+- Keep batch sizes nondecreasing, with at most one `batched` and one
+  `per_command` row for each size; choose sizes that bracket a measured
   transition from slower to faster GPU round-trip.
-- `total_us` is the median measured end-to-end round trip and is required to
-  equal `device_us + transfer_us` exactly for every row. The compatibility
-  field `transfer_us` is the non-device remainder, covering launch,
-  synchronization, and all host/device communication needed by the result.
+- Each raw sample measures separate `upload_us`, `device_us`, `readback_us`,
+  and end-to-end `total_us` phases with no overlap. Receipt fields are the
+  independent medians, so only `transfer_us = upload_us + readback_us` is
+  exact; medians of phases are not required to sum to median `total_us`.
+- Each row records positive `upload_bytes`, `readback_bytes`, and
+  `command_count`, plus `submission_mode=batched|per_command`.
+- The receipt must contain at least two transfer sizes, at least two command
+  counts, and both submission modes for the same workload. This makes transfer
+  and command communication overhead measurable instead of inferred from one
+  full-frame sample.
+- Every row records `readback_source=device_readback`,
+  `readback_exact=true`, and `readback_mismatch_count=0`; CPU mirrors cannot
+  satisfy the device-readback requirement.
 - The break-even batch is the smallest row whose measured `total_us` is less
   than `cpu_us`. At least one smaller row must be non-faster and choose CPU.
 - A row with `total_us >= cpu_us` must report `decision=cpu`; it is not allowed
@@ -174,11 +187,14 @@ processing_ir_offload_status=pass
 processing_ir_offload_schema=processing-ir-offload-v1
 processing_ir_offload_execution=processing_ir
 processing_ir_offload_backend=cuda|vulkan|cuda+vulkan
+processing_ir_offload_evidence_kind=live
+processing_ir_offload_cpu_workload_id=<non-empty workload id>
+processing_ir_offload_gpu_workload_id=<same workload id>
 processing_ir_offload_aggregate=median
 processing_ir_offload_timing_unit=us
 processing_ir_offload_warmup_samples=<integer >= 3>
 processing_ir_offload_measured_samples=<integer >= 5>
-processing_ir_offload_row_count=<integer >= 3>
+processing_ir_offload_row_count=<integer >= 4>
 processing_ir_offload_break_even_batch=<integer>
 processing_ir_offload_rss_source=procfs
 processing_ir_offload_cpu_rss_kb=<positive integer>
@@ -191,17 +207,33 @@ For each zero-based row index from `0` through `row_count - 1`, emit:
 
 ```text
 processing_ir_offload_row_N_batch=<positive integer>
+processing_ir_offload_row_N_workload_id=<same CPU/GPU workload id>
 processing_ir_offload_row_N_cpu_us=<positive integer>
+processing_ir_offload_row_N_upload_us=<positive integer>
 processing_ir_offload_row_N_device_us=<positive integer>
+processing_ir_offload_row_N_readback_us=<positive integer>
 processing_ir_offload_row_N_transfer_us=<positive integer>
 processing_ir_offload_row_N_total_us=<positive integer>
+processing_ir_offload_row_N_upload_bytes=<positive integer>
+processing_ir_offload_row_N_readback_bytes=<positive integer>
+processing_ir_offload_row_N_command_count=<positive integer>
+processing_ir_offload_row_N_submission_mode=batched|per_command
+processing_ir_offload_row_N_readback_source=device_readback
+processing_ir_offload_row_N_readback_exact=true
+processing_ir_offload_row_N_readback_mismatch_count=0
 processing_ir_offload_row_N_decision=cpu|gpu
 ```
 
-The consumer checks strictly increasing batch sizes, exact total accounting,
-CPU/GPU decision consistency, a slower row below the threshold, and a faster
-row at or above it. It does not impose an absolute speed target because GPU
-model, driver, power state, and memory topology vary by host.
+The consumer checks ordered batch-size pairs, equal CPU/GPU workload identity,
+raw-sample phase accounting, exact device readback, varied transfer sizes
+and command counts, both batched and per-command submission, CPU/GPU decision
+consistency, a slower row below the threshold, and a faster row at or above
+it. It does not impose an absolute speed target because GPU model, driver,
+power state, and memory topology vary by host.
+
+The shell validator's in-memory fixture uses
+`processing_ir_offload_evidence_kind=validator-self-test`; it exists only to
+exercise parser rejection/acceptance and is never live GPU evidence.
 
 ## Metrics and Acceptance
 
@@ -214,12 +246,17 @@ row's `total_us`. Preserve the raw receipt and command stdout with the run.
 Acceptance is `pass` only when all of the following hold:
 
 1. The existing helper self-test exits zero.
-2. At least three measured batch rows exist with warmup and sample counts above.
-3. Every row satisfies `total_us = device_us + transfer_us`.
+2. At least four measured rows exist with warmup and sample counts above,
+   including paired batched/per-command rows.
+3. Every raw sample has coherent phase accounting; receipt phase and total
+   fields are independently aggregated medians.
 4. The first GPU-faster row is the recorded break-even batch.
 5. At least one lower batch is non-faster and is assigned to CPU.
 6. RSS and communication fields are present and measured.
-7. An unavailable host has a typed `status=unavailable` receipt with a
+7. CPU/GPU workload IDs match; phase, transfer-size, command-count, and
+   submission-mode coverage is present; and every readback is exact device
+   readback.
+8. An unavailable host has a typed `status=unavailable` receipt with a
    non-empty reason, and it is never counted as a measurement pass.
 
 ## Ownership
@@ -227,9 +264,13 @@ Acceptance is `pass` only when all of the following hold:
 Linux owns the CUDA/Vulkan ProcessingIR producer, native receipt generation,
 and this system spec. Linux verification must run on the target host with its
 real driver and retain the receipt; CI without a device is a failure for this
-evidence lane, not a synthetic pass.
+evidence lane, not a synthetic pass. CUDA and Vulkan are executable only when
+their real host capability exists; otherwise the producer emits
+`status=unavailable` and the consumer does not pass.
 
 macOS owns the postponed Metal live producer and host execution. It should
 reuse this schema with `processing_ir_offload_backend=metal` only after the
-Metal shader/queue/readback gate is live. macOS source/host contracts may be
-checked separately, but they do not satisfy the Linux CUDA/Vulkan measurement.
+Metal shader/queue/readback gate is live. On Linux, Metal is prepared or
+unavailable only; it must never emit a synthetic pass. macOS source/host
+contracts may be checked separately, but they do not satisfy the Linux
+CUDA/Vulkan measurement.

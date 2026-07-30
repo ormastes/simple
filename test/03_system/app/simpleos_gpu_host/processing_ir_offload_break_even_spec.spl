@@ -2,7 +2,8 @@
 #
 # This is an evidence consumer, not a synthetic benchmark. The receipt must
 # be produced by a native CUDA/Vulkan ProcessingIR run. Missing evidence is a
-# failure on Linux; non-Linux hosts are explicitly postponed.
+# failure on Linux; non-Linux hosts are explicitly postponed. Every row must
+# use the same CPU/GPU workload and prove exact device readback.
 
 use std.spec.{describe, it, expect, pending, fail_test}
 use std.io_runtime.{file_exists, file_read, process_run}
@@ -62,6 +63,11 @@ describe "ProcessingIR GPU offload break-even evidence":
         if not file_exists(path):
             fail_test("missing native ProcessingIR offload receipt: " + path)
             return
+        val (_validator_out, _validator_err, validator_code) = process_run(
+            "/bin/sh",
+            [OFFLOAD_CHECK, "--validate", path]
+        )
+        expect(validator_code).to_equal(0)
         val receipt = file_read(path)
 
         expect(value_of(receipt, "processing_ir_offload_status")).to_equal("pass")
@@ -69,16 +75,22 @@ describe "ProcessingIR GPU offload break-even evidence":
         expect(value_of(receipt, "processing_ir_offload_execution")).to_equal("processing_ir")
         val backend = value_of(receipt, "processing_ir_offload_backend")
         expect(backend == "cuda" or backend == "vulkan" or backend == "cuda+vulkan").to_equal(true)
+        expect(value_of(receipt, "processing_ir_offload_evidence_kind")).to_equal("live")
         expect(value_of(receipt, "processing_ir_offload_aggregate")).to_equal("median")
         expect(value_of(receipt, "processing_ir_offload_timing_unit")).to_equal("us")
         expect(value_of(receipt, "processing_ir_offload_rss_source")).to_equal("procfs")
+
+        val cpu_workload = value_of(receipt, "processing_ir_offload_cpu_workload_id")
+        val gpu_workload = value_of(receipt, "processing_ir_offload_gpu_workload_id")
+        expect(cpu_workload.len()).to_be_greater_than(0)
+        expect(cpu_workload).to_equal(gpu_workload)
 
         val warmup = number_of(receipt, "processing_ir_offload_warmup_samples")
         val samples = number_of(receipt, "processing_ir_offload_measured_samples")
         val rows = number_of(receipt, "processing_ir_offload_row_count")
         expect(warmup).to_be_greater_than(2)
         expect(samples).to_be_greater_than(4)
-        expect(rows).to_be_greater_than(2)
+        expect(rows).to_be_greater_than(3)
 
         val cpu_rss = number_of(receipt, "processing_ir_offload_cpu_rss_kb")
         val gpu_rss = number_of(receipt, "processing_ir_offload_gpu_rss_kb")
@@ -93,21 +105,64 @@ describe "ProcessingIR GPU offload break-even evidence":
         var first_fast_batch: i64 = -1
         var slower_rows: i64 = 0
         var faster_rows: i64 = 0
+        var first_transfer_bytes: i64 = -1
+        var first_command_count: i64 = -1
+        var varied_transfer_size = false
+        var varied_command_count = false
+        var saw_batched = false
+        var saw_per_command = false
+        var previous_mode = ""
         var i: i64 = 0
         while i < rows:
             val batch = row_number(receipt, i, "batch")
+            val workload = row_text(receipt, i, "workload_id")
             val cpu = row_number(receipt, i, "cpu_us")
+            val upload = row_number(receipt, i, "upload_us")
             val device = row_number(receipt, i, "device_us")
+            val readback = row_number(receipt, i, "readback_us")
             val transfer = row_number(receipt, i, "transfer_us")
             val total = row_number(receipt, i, "total_us")
+            val upload_bytes = row_number(receipt, i, "upload_bytes")
+            val readback_bytes = row_number(receipt, i, "readback_bytes")
+            val command_count = row_number(receipt, i, "command_count")
             val decision = row_text(receipt, i, "decision")
+            val submission_mode = row_text(receipt, i, "submission_mode")
+            val readback_source = row_text(receipt, i, "readback_source")
+            val readback_exact = row_text(receipt, i, "readback_exact")
+            val mismatch_count = row_number(receipt, i, "readback_mismatch_count")
 
-            expect(batch).to_be_greater_than(previous_batch)
+            expect(workload).to_equal(cpu_workload)
             expect(cpu).to_be_greater_than(0)
+            expect(upload).to_be_greater_than(0)
             expect(device).to_be_greater_than(0)
+            expect(readback).to_be_greater_than(0)
             expect(transfer).to_be_greater_than(0)
             expect(total).to_be_greater_than(0)
-            expect(total).to_equal(device + transfer)
+            expect(upload_bytes).to_be_greater_than(0)
+            expect(readback_bytes).to_be_greater_than(0)
+            expect(command_count).to_be_greater_than(0)
+            expect(transfer).to_equal(upload + readback)
+            expect(submission_mode == "batched" or submission_mode == "per_command").to_equal(true)
+            expect(readback_source).to_equal("device_readback")
+            expect(readback_exact).to_equal("true")
+            expect(mismatch_count).to_equal(0)
+            if batch == previous_batch:
+                expect(submission_mode == previous_mode).to_equal(false)
+            else:
+                expect(batch).to_be_greater_than(previous_batch)
+
+            if first_transfer_bytes < 0:
+                first_transfer_bytes = upload_bytes + readback_bytes
+            elif first_transfer_bytes != upload_bytes + readback_bytes:
+                varied_transfer_size = true
+            if first_command_count < 0:
+                first_command_count = command_count
+            elif first_command_count != command_count:
+                varied_command_count = true
+            if submission_mode == "batched":
+                saw_batched = true
+            else:
+                saw_per_command = true
 
             if total >= cpu:
                 slower_rows = slower_rows + 1
@@ -118,16 +173,20 @@ describe "ProcessingIR GPU offload break-even evidence":
                     first_fast_batch = batch
                 expect(decision).to_equal("gpu")
             previous_batch = batch
+            previous_mode = submission_mode
             i = i + 1
 
         val measured_break_even = number_of(receipt, "processing_ir_offload_break_even_batch")
         expect(slower_rows).to_be_greater_than(0)
         expect(faster_rows).to_be_greater_than(0)
         expect(measured_break_even).to_equal(first_fast_batch)
+        expect(varied_transfer_size).to_equal(true)
+        expect(varied_command_count).to_equal(true)
+        expect(saw_batched).to_equal(true)
+        expect(saw_per_command).to_equal(true)
 
         # A policy must never choose GPU for a measured round-trip that is
-        # slower than its CPU baseline; the transfer_us compatibility field
-        # includes all non-device round-trip overhead in total_us.
+        # slower than its CPU baseline; total_us includes every measured phase.
         var below_threshold: i64 = 0
         i = 0
         while i < rows:

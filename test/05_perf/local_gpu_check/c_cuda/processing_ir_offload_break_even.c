@@ -11,13 +11,17 @@
 #include <string.h>
 #include <time.h>
 
-#define MAX_ROWS 8
+#define MAX_ROWS 16
+#define PER_COMMAND_COUNT 4
 
 struct sample {
     long long cpu_us;
+    long long upload_us;
     long long device_us;
+    long long readback_us;
     long long transfer_us;
     long long total_us;
+    long long readback_mismatch_count;
 };
 
 static long long now_ns(void) {
@@ -26,8 +30,7 @@ static long long now_ns(void) {
     return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
-static long long elapsed_us(long long start) {
-    long long end = now_ns();
+static long long elapsed_us(long long start, long long end) {
     if (start < 0 || end < start) return -1;
     return (end - start + 999LL) / 1000LL;
 }
@@ -47,6 +50,21 @@ static void cpu_alpha(const uint32_t *src, const uint32_t *dst, uint32_t *out,
 
 static int compare_u32(const uint32_t *left, const uint32_t *right, unsigned int count) {
     return memcmp(left, right, (size_t)count * sizeof(uint32_t)) == 0;
+}
+
+static int parse_int(const char *text, int minimum, int maximum, int *out) {
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (!text[0] || !end || *end || value < minimum || value > maximum) return 0;
+    *out = (int)value;
+    return 1;
+}
+
+static long long mismatch_u32(const uint32_t *left, const uint32_t *right, unsigned int count) {
+    unsigned int i;
+    long long mismatches = 0;
+    for (i = 0; i < count; i++) if (left[i] != right[i]) mismatches++;
+    return mismatches;
 }
 
 static int read_proc_kb(const char *name) {
@@ -85,8 +103,11 @@ static long long median(struct sample *samples, int count, int field) {
     if (count < 1 || count > 64) return -1;
     for (i = 0; i < count; i++) {
         values[i] = field == 0 ? samples[i].cpu_us :
-                    field == 1 ? samples[i].device_us :
-                    field == 2 ? samples[i].transfer_us : samples[i].total_us;
+                    field == 1 ? samples[i].upload_us :
+                    field == 2 ? samples[i].device_us :
+                    field == 3 ? samples[i].readback_us :
+                    field == 4 ? samples[i].transfer_us :
+                    field == 5 ? samples[i].total_us : samples[i].readback_mismatch_count;
     }
     sort_i64(values, count);
     return values[count / 2];
@@ -119,50 +140,58 @@ static void emit_failure(const char *reason) {
 
 static int run_gpu(CUfunction alpha_fn, CUdeviceptr src_device, CUdeviceptr dst_device,
                    const uint32_t *src, const uint32_t *dst, uint32_t *out,
-                   unsigned int count, uint32_t alpha, struct sample *sample) {
+                   unsigned int count, uint32_t alpha, int command_count,
+                   struct sample *sample) {
     CUresult result;
-    CUevent start_event = NULL, stop_event = NULL;
     unsigned int block = 256u;
-    unsigned int grid = (count + block - 1u) / block;
-    void *args[] = { &src_device, &dst_device, &alpha, &count };
     long long total_started = now_ns();
-    float device_ms = 0.0f;
+    long long upload_started = total_started;
+    long long upload_finished;
+    long long device_finished;
+    long long readback_started;
+    long long readback_finished;
     int ok = 0;
 
     if (total_started < 0) return 0;
-    if (sample && (cuEventCreate(&start_event, CU_EVENT_DEFAULT) != CUDA_SUCCESS ||
-                   cuEventCreate(&stop_event, CU_EVENT_DEFAULT) != CUDA_SUCCESS)) goto done;
     result = cuMemcpyHtoD(src_device, src, (size_t)count * sizeof(uint32_t));
     if (result != CUDA_SUCCESS) goto done;
     result = cuMemcpyHtoD(dst_device, dst, (size_t)count * sizeof(uint32_t));
     if (result != CUDA_SUCCESS) goto done;
-    if (sample && cuEventRecord(start_event, 0) != CUDA_SUCCESS) goto done;
-    result = cuLaunchKernel(alpha_fn, grid, 1, 1, block, 1, 1, 0, NULL, args, NULL);
-    if (result != CUDA_SUCCESS) goto done;
-    if (sample) {
-        long long total_us;
-        if (cuEventRecord(stop_event, 0) != CUDA_SUCCESS ||
-            cuEventSynchronize(stop_event) != CUDA_SUCCESS ||
-            cuEventElapsedTime(&device_ms, start_event, stop_event) != CUDA_SUCCESS) goto done;
-        sample->device_us = (long long)(device_ms * 1000.0f + 0.999f);
-        if (sample->device_us < 1) goto done;
-        result = cuMemcpyDtoH(out, dst_device, (size_t)count * sizeof(uint32_t));
-        if (result != CUDA_SUCCESS) goto done;
-        total_us = elapsed_us(total_started);
-        if (total_us <= sample->device_us) goto done;
-        sample->total_us = total_us;
-        sample->transfer_us = total_us - sample->device_us;
-        ok = 1;
-    } else {
-        if (cuCtxSynchronize() != CUDA_SUCCESS) goto done;
-        result = cuMemcpyDtoH(out, dst_device, (size_t)count * sizeof(uint32_t));
-        if (result != CUDA_SUCCESS) goto done;
-        ok = elapsed_us(total_started) > 0;
+    upload_finished = now_ns();
+    if (upload_finished < upload_started) goto done;
+
+    for (int command = 0; command < command_count; command++) {
+        unsigned int begin = (count * (unsigned int)command) / (unsigned int)command_count;
+        unsigned int end = (count * (unsigned int)(command + 1)) / (unsigned int)command_count;
+        unsigned int part_count = end - begin;
+        CUdeviceptr part_src = src_device + (CUdeviceptr)begin * sizeof(uint32_t);
+        CUdeviceptr part_dst = dst_device + (CUdeviceptr)begin * sizeof(uint32_t);
+        unsigned int grid = (part_count + block - 1u) / block;
+        void *args[] = { &part_src, &part_dst, &alpha, &part_count };
+        if (part_count == 0 || cuLaunchKernel(alpha_fn, grid, 1, 1, block, 1, 1,
+                                               0, NULL, args, NULL) != CUDA_SUCCESS) goto done;
     }
+    if (cuCtxSynchronize() != CUDA_SUCCESS) goto done;
+    device_finished = now_ns();
+    if (device_finished < upload_finished) goto done;
+
+    readback_started = device_finished;
+    result = cuMemcpyDtoH(out, dst_device, (size_t)count * sizeof(uint32_t));
+    if (result != CUDA_SUCCESS) goto done;
+    readback_finished = now_ns();
+    if (readback_finished < readback_started) goto done;
+
+    if (sample) {
+        sample->upload_us = elapsed_us(upload_started, upload_finished);
+        sample->device_us = elapsed_us(upload_finished, device_finished);
+        sample->readback_us = elapsed_us(readback_started, readback_finished);
+        sample->transfer_us = sample->upload_us + sample->readback_us;
+        sample->total_us = sample->transfer_us + sample->device_us;
+        if (sample->upload_us < 1 || sample->device_us < 1 || sample->readback_us < 1) goto done;
+    }
+    ok = 1;
 
 done:
-    if (stop_event) cuEventDestroy(stop_event);
-    if (start_event) cuEventDestroy(start_event);
     return ok;
 }
 
@@ -171,12 +200,15 @@ static int self_test(void) {
     uint32_t dst[] = { 0xff102030u, 0xff102031u };
     uint32_t out[2];
     struct sample values[5] = {
-        {9, 8, 7, 15}, {1, 2, 3, 5}, {7, 6, 5, 11}, {3, 4, 9, 13}, {5, 1, 1, 2}
+        {9, 1, 8, 1, 2, 10, 0}, {1, 2, 2, 1, 3, 6, 0},
+        {7, 2, 6, 2, 4, 12, 0}, {3, 4, 4, 2, 6, 14, 0},
+        {5, 1, 1, 1, 2, 4, 0}
     };
     cpu_alpha(src, dst, out, 2, 128u);
     if (out[0] != alpha_pixel(src[0], dst[0], 128u) || median(values, 5, 0) != 5 ||
-        median(values, 5, 1) != 4 || median(values, 5, 2) != 5 ||
-        median(values, 5, 3) != 11 ||
+        median(values, 5, 1) != 2 || median(values, 5, 2) != 4 ||
+        median(values, 5, 3) != 2 || median(values, 5, 4) != 4 ||
+        median(values, 5, 5) != 12 ||
         read_proc_kb("VmRSS") < 1 || read_proc_kb("VmHWM") < 1) return 1;
     puts("processing_ir_offload_harness_self_test=pass");
     return 0;
@@ -191,26 +223,30 @@ int main(int argc, char **argv) {
     CUmodule module = NULL;
     CUfunction alpha_fn = NULL;
     CUdeviceptr src_device = 0, dst_device = 0;
-    unsigned int batches[MAX_ROWS];
+    unsigned int batches[MAX_ROWS / 2];
     long long transfer_medians[MAX_ROWS];
-    int row_count, warmups, measured, row, sample_index;
+    int batch_count, row_count, warmups, measured, row, sample_index;
     int cpu_rss, gpu_rss, peak_rss;
     int first_fast = -1;
+    int saw_lower_slow = 0;
+    unsigned int largest_slow_batch = 0;
     FILE *samples_file = NULL;
     if (argc == 2 && strcmp(argv[1], "--self-test") == 0) return self_test();
     if (argc < 8 || argc > 13) { emit_failure("invalid-argv"); return 2; }
     ptx_path = argv[1];
-    warmups = atoi(argv[2]);
-    measured = atoi(argv[3]);
+    if (!parse_int(argv[2], 3, 64, &warmups) || !parse_int(argv[3], 5, 64, &measured)) {
+        emit_failure("invalid-sample-count"); return 2;
+    }
     samples_path = argv[4];
-    row_count = argc - 5;
-    if (warmups < 3 || measured < 5 || row_count < 3 || row_count > MAX_ROWS) {
+    batch_count = argc - 5;
+    row_count = batch_count * 2;
+    if (batch_count < 3 || row_count > MAX_ROWS) {
         emit_failure("invalid-sample-or-row-count"); return 2;
     }
-    for (row = 0; row < row_count; row++) {
+    for (row = 0; row < batch_count; row++) {
         char *end = NULL;
         unsigned long batch = strtoul(argv[row + 5], &end, 10);
-        if (!end || *end || batch == 0 || batch > 67108864UL ||
+        if (!end || *end || batch < PER_COMMAND_COUNT || batch > 67108864UL ||
             (row > 0 && batch <= batches[row - 1])) { emit_failure("invalid-batches"); return 2; }
         batches[row] = (unsigned int)batch;
     }
@@ -232,19 +268,20 @@ int main(int argc, char **argv) {
             free(ptx); fclose(samples_file); emit_failure("cuda-module-or-device-unavailable"); return 3;
         }
     }
-    fprintf(samples_file, "# batch sample cpu_us device_us transfer_us total_us\n");
+    fprintf(samples_file, "# batch mode sample cpu_us upload_us device_us readback_us transfer_us total_us mismatch_count\n");
     cpu_rss = 0;
     gpu_rss = 0;
     peak_rss = 0;
-    for (row = 0; row < row_count; row++) {
-        unsigned int count = batches[row];
+    for (int batch_row = 0; batch_row < batch_count; batch_row++) {
+        unsigned int count = batches[batch_row];
         size_t bytes = (size_t)count * sizeof(uint32_t);
         uint32_t *src = (uint32_t *)malloc(bytes);
         uint32_t *dst = (uint32_t *)malloc(bytes);
         uint32_t *cpu_out = (uint32_t *)malloc(bytes);
         uint32_t *gpu_out = (uint32_t *)malloc(bytes);
         struct sample values[64];
-        long long cpu_median, device_median, transfer_summary, total_median;
+        long long cpu_median, upload_median, device_median, readback_median;
+        long long transfer_summary, total_median, mismatch_summary;
         int rss;
         if (!src || !dst || !cpu_out || !gpu_out) {
             free(src); free(dst); free(cpu_out); free(gpu_out);
@@ -254,9 +291,6 @@ int main(int argc, char **argv) {
         for (sample_index = 0; sample_index < (int)count; sample_index++) {
             src[sample_index] = 0xff204060u + (uint32_t)sample_index;
             dst[sample_index] = 0xff102030u + (uint32_t)sample_index;
-        }
-        for (sample_index = 0; sample_index < warmups; sample_index++) {
-            cpu_alpha(src, dst, cpu_out, count, 128u);
         }
         rss = read_proc_kb("VmRSS");
         if (rss > cpu_rss) cpu_rss = rss;
@@ -268,50 +302,80 @@ int main(int argc, char **argv) {
             cuModuleUnload(module); cuDevicePrimaryCtxRelease(device); free(ptx); fclose(samples_file);
             emit_failure("device-allocation-failed"); return 3;
         }
-        for (sample_index = 0; sample_index < warmups; sample_index++) {
-            if (!run_gpu(alpha_fn, src_device, dst_device, src, dst, gpu_out, count, 128u, NULL) ||
-                !compare_u32(cpu_out, gpu_out, count)) {
+        for (int mode_index = 0; mode_index < 2; mode_index++) {
+            const char *mode = mode_index == 0 ? "batched" : "per_command";
+            int command_count = mode_index == 0 ? 1 : PER_COMMAND_COUNT;
+            for (sample_index = 0; sample_index < warmups; sample_index++) {
+                cpu_alpha(src, dst, cpu_out, count, 128u);
+                if (!run_gpu(alpha_fn, src_device, dst_device, src, dst, gpu_out,
+                             count, 128u, command_count, NULL) ||
+                    !compare_u32(cpu_out, gpu_out, count)) {
+                    cuMemFree(src_device); cuMemFree(dst_device); free(src); free(dst); free(cpu_out); free(gpu_out);
+                    cuModuleUnload(module); cuDevicePrimaryCtxRelease(device); free(ptx); fclose(samples_file);
+                    emit_failure("warmup-device-or-result-mismatch"); return 3;
+                }
+            }
+            rss = read_proc_kb("VmRSS");
+            if (rss > gpu_rss) gpu_rss = rss;
+            for (sample_index = 0; sample_index < measured; sample_index++) {
+                long long started = now_ns();
+                cpu_alpha(src, dst, cpu_out, count, 128u);
+                values[sample_index].cpu_us = elapsed_us(started, now_ns());
+                if (values[sample_index].cpu_us < 1 ||
+                    !run_gpu(alpha_fn, src_device, dst_device, src, dst, gpu_out,
+                             count, 128u, command_count, &values[sample_index]) ||
+                    !compare_u32(cpu_out, gpu_out, count)) {
+                    cuMemFree(src_device); cuMemFree(dst_device); free(src); free(dst); free(cpu_out); free(gpu_out);
+                    cuModuleUnload(module); cuDevicePrimaryCtxRelease(device); free(ptx); fclose(samples_file);
+                    emit_failure("measured-device-or-result-mismatch"); return 3;
+                }
+                values[sample_index].readback_mismatch_count = mismatch_u32(cpu_out, gpu_out, count);
+                fprintf(samples_file, "%u %s %d %lld %lld %lld %lld %lld %lld %lld\n", count, mode,
+                        sample_index, values[sample_index].cpu_us, values[sample_index].upload_us,
+                        values[sample_index].device_us, values[sample_index].readback_us,
+                        values[sample_index].transfer_us, values[sample_index].total_us,
+                        values[sample_index].readback_mismatch_count);
+            }
+            cpu_median = median(values, measured, 0);
+            upload_median = median(values, measured, 1);
+            device_median = median(values, measured, 2);
+            readback_median = median(values, measured, 3);
+            transfer_summary = upload_median + readback_median;
+            total_median = median(values, measured, 5);
+            mismatch_summary = median(values, measured, 6);
+            if (cpu_median < 1 || upload_median < 1 || device_median < 1 ||
+                readback_median < 1 || transfer_summary != upload_median + readback_median ||
+                mismatch_summary != 0) {
                 cuMemFree(src_device); cuMemFree(dst_device); free(src); free(dst); free(cpu_out); free(gpu_out);
                 cuModuleUnload(module); cuDevicePrimaryCtxRelease(device); free(ptx); fclose(samples_file);
-                emit_failure("warmup-device-or-result-mismatch"); return 3;
+                emit_failure("phase-timing-or-readback-contract-failed"); return 3;
             }
-        }
-        rss = read_proc_kb("VmRSS");
-        if (rss > gpu_rss) gpu_rss = rss;
-        for (sample_index = 0; sample_index < measured; sample_index++) {
-            long long started = now_ns();
-            cpu_alpha(src, dst, cpu_out, count, 128u);
-            values[sample_index].cpu_us = elapsed_us(started);
-            if (values[sample_index].cpu_us < 1 ||
-                !run_gpu(alpha_fn, src_device, dst_device, src, dst, gpu_out, count, 128u, &values[sample_index]) ||
-                !compare_u32(cpu_out, gpu_out, count)) {
-                cuMemFree(src_device); cuMemFree(dst_device); free(src); free(dst); free(cpu_out); free(gpu_out);
-                cuModuleUnload(module); cuDevicePrimaryCtxRelease(device); free(ptx); fclose(samples_file);
-                emit_failure("measured-device-or-result-mismatch"); return 3;
+            int output_row = batch_row * 2 + mode_index;
+            printf("processing_ir_offload_row_%d_batch=%u\n", output_row, count);
+            printf("processing_ir_offload_row_%d_workload_id=alpha_u32_v1\n", output_row);
+            printf("processing_ir_offload_row_%d_cpu_us=%lld\n", output_row, cpu_median);
+            printf("processing_ir_offload_row_%d_upload_us=%lld\n", output_row, upload_median);
+            printf("processing_ir_offload_row_%d_device_us=%lld\n", output_row, device_median);
+            printf("processing_ir_offload_row_%d_readback_us=%lld\n", output_row, readback_median);
+            printf("processing_ir_offload_row_%d_transfer_us=%lld\n", output_row, transfer_summary);
+            printf("processing_ir_offload_row_%d_total_us=%lld\n", output_row, total_median);
+            printf("processing_ir_offload_row_%d_upload_bytes=%zu\n", output_row, bytes * 2u);
+            printf("processing_ir_offload_row_%d_readback_bytes=%zu\n", output_row, bytes);
+            printf("processing_ir_offload_row_%d_command_count=%d\n", output_row, command_count);
+            printf("processing_ir_offload_row_%d_submission_mode=%s\n", output_row, mode);
+            printf("processing_ir_offload_row_%d_readback_source=device_readback\n", output_row);
+            printf("processing_ir_offload_row_%d_readback_exact=true\n", output_row);
+            printf("processing_ir_offload_row_%d_readback_mismatch_count=%lld\n", output_row, mismatch_summary);
+            printf("processing_ir_offload_row_%d_decision=%s\n", output_row,
+                   total_median < cpu_median ? "gpu" : "cpu");
+            if (total_median < cpu_median && first_fast < 0) {
+                first_fast = output_row;
+                saw_lower_slow = largest_slow_batch > 0 && largest_slow_batch < count;
+            } else if (total_median >= cpu_median && count > largest_slow_batch) {
+                largest_slow_batch = count;
             }
-            fprintf(samples_file, "%u %d %lld %lld %lld %lld\n", count, sample_index,
-                    values[sample_index].cpu_us, values[sample_index].device_us,
-                    values[sample_index].transfer_us, values[sample_index].total_us);
+            transfer_medians[output_row] = transfer_summary;
         }
-        cpu_median = median(values, measured, 0);
-        device_median = median(values, measured, 1);
-        total_median = median(values, measured, 3);
-        transfer_summary = total_median - device_median;
-        if (cpu_median < 1 || device_median < 1 || transfer_summary < 1) {
-            cuMemFree(src_device); cuMemFree(dst_device); free(src); free(dst); free(cpu_out); free(gpu_out);
-            cuModuleUnload(module); cuDevicePrimaryCtxRelease(device); free(ptx); fclose(samples_file);
-            emit_failure("non-monotonic-timing"); return 3;
-        }
-        printf("processing_ir_offload_row_%d_batch=%u\n", row, count);
-        printf("processing_ir_offload_row_%d_cpu_us=%lld\n", row, cpu_median);
-        printf("processing_ir_offload_row_%d_device_us=%lld\n", row, device_median);
-        /* Compatibility key: this is all non-device round-trip overhead, not DMA alone. */
-        printf("processing_ir_offload_row_%d_transfer_us=%lld\n", row, transfer_summary);
-        printf("processing_ir_offload_row_%d_total_us=%lld\n", row, total_median);
-        printf("processing_ir_offload_row_%d_decision=%s\n", row,
-               total_median < cpu_median ? "gpu" : "cpu");
-        if (total_median < cpu_median && first_fast < 0) first_fast = row;
-        transfer_medians[row] = transfer_summary;
         cuMemFree(src_device); src_device = 0;
         cuMemFree(dst_device); dst_device = 0;
         free(src); free(dst); free(cpu_out); free(gpu_out);
@@ -326,12 +390,17 @@ int main(int argc, char **argv) {
     if (cpu_rss < 1 || gpu_rss < 1 || peak_rss < 1) {
         emit_failure("procfs-rss-unavailable"); return 3;
     }
-    if (first_fast < 1) { emit_failure("no-measured-break-even"); return 4; }
+    if (first_fast < 1 || !saw_lower_slow) {
+        emit_failure("no-lower-slow-row-before-break-even"); return 4;
+    }
     printf("processing_ir_offload_status=pass\n");
     printf("processing_ir_offload_reason=measured-cuda-alpha-break-even\n");
     printf("processing_ir_offload_schema=processing-ir-offload-v1\n");
     printf("processing_ir_offload_execution=processing_ir\n");
     printf("processing_ir_offload_backend=cuda\n");
+    printf("processing_ir_offload_evidence_kind=live\n");
+    printf("processing_ir_offload_cpu_workload_id=alpha_u32_v1\n");
+    printf("processing_ir_offload_gpu_workload_id=alpha_u32_v1\n");
     printf("processing_ir_offload_aggregate=median\n");
     printf("processing_ir_offload_timing_unit=us\n");
     printf("processing_ir_offload_rss_source=procfs\n");
@@ -342,6 +411,6 @@ int main(int argc, char **argv) {
     printf("processing_ir_offload_gpu_rss_kb=%d\n", gpu_rss);
     printf("processing_ir_offload_peak_rss_kb=%d\n", peak_rss);
     printf("processing_ir_offload_communication_overhead_us=%lld\n", transfer_medians[first_fast]);
-    printf("processing_ir_offload_break_even_batch=%u\n", batches[first_fast]);
+    printf("processing_ir_offload_break_even_batch=%u\n", batches[first_fast / 2]);
     return 0;
 }
