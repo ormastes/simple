@@ -1515,3 +1515,217 @@ parsing/rendering/styling, in resolving `RW`/`RH` before rendering starts.
 
 Blocked on gap 8, not gap 7 — a correct-or-non-degenerate JIT result for
 this example still does not exist.
+
+
+## Tenth follow-up pass (2026-07-30) — gap 8 root-caused, contained fix built and PROVED to segfault on `val`, reverted; gap 9 found on re-run (CastElse, reproducible across 2 runs)
+
+### Bisection (instruction 1, PROVED) — the trigger is "any function call", not a type/arity/order/builtin-vs-user distinction
+
+Extended the four repros from the ninth pass with targeted variants, each
+changing exactly one variable:
+
+| Repro | Result under JIT | Result under interpreter |
+|---|---|---|
+| `val RW: i32 = 480` (literal) | `480` (correct) | `480` |
+| `val RW: i32 = make_w()` (trivial user fn, 0 args) | `0` | `480` |
+| `val S: text = make_s()` (text return) | `""` (empty) | `"hello"` |
+| `val B: bool = make_b()` (bool return) | `false` | `true` |
+| `val A: [i64] = make_a()` (array return) | `A.len()==0` | `A.len()==3` |
+| `val RW: i32 = make_w()`, `make_w` defined AFTER the global (order swapped) | `0` | `480` |
+| `val RW: i32 = make_w(480)` (1-arg fn vs. 0-arg) | `0` | `480` |
+| `val A: i64 = abs(-7)` (builtin, not user fn) | `0` | `7` |
+
+**Every function-call initializer reads as its type's zero value
+(`0`/`false`/`""`/empty array), regardless of return type, arg count,
+declaration order, or builtin-vs-user-defined.** This rules out a
+type-specific or arity-specific hole; the trigger is the mere presence of
+a runtime call in a module-level initializer.
+
+**Not the same machinery as the prior array-global fix.** Checked
+`project_module_global_mir_lowering_2026-07-25` (memory): that fix
+(`952d2ca34d7`) is in the **pure-Simple self-hosted compiler**
+(`src/compiler/50.mir/_MirLowering*`, part of the from-Simple-sources
+self-hosting bootstrap), an entirely different implementation from the
+Rust seed compiler (`src/compiler_rust/compiler/src/mir/...`) that
+`SIMPLE_EXECUTION_MODE=jit` actually runs. Different codebase, different
+language the compiler itself is written in — not reachable from this
+investigation, and its "array-typed OR cross-import" defect shape doesn't
+match gap 8's "any function call, any type, same-module or not" shape
+anyway.
+
+### Root cause (PROVED by direct code reading)
+
+`run_file_jit` (`driver/src/exec_core.rs`) compiles the MIR module and
+calls `em.execute("main", &[])` directly — it never calls
+`run_module_init`, the helper that the OTHER execution path
+(`execute_and_gc`, used for SMF-loaded/AOT modules) calls before `main`
+specifically to run a function named `__module_init` if present. The
+JIT-side execution machinery is already fully wired for this: `codegen/
+jit.rs`'s `call_i64_void` unconditionally calls `run_module_init_once()`
+before invoking any OTHER named function, and would correctly find and run
+`__module_init` if it existed in the compiled module's `func_ids` — the
+gap is purely that nothing ever *produces* that function for `run_file_jit`
+specifically.
+
+Traced where it IS produced: `inject_freestanding_module_global_init`
+(`pipeline/native_project/module_global_init.rs`) is an AST-rewrite pass
+that turns each non-literal module-level initializer into a runtime
+assignment inside a synthesized `__module_init_<prefix>_dynamic` (plus one
+`__module_init_<prefix>_dynamic_optional_<index>` per Optional-typed
+call-initialized global) function — but it is called from
+`pipeline/native_project/compiler.rs` **only `if is_freestanding`**
+(bare-metal/SimpleOS targets). `run_file_jit` always targets the host, so
+this pass is simply never invoked for it, hosted or not. The whole-program
+linker (`generate_init_caller` in `pipeline/native_project/linker.rs`)
+resolves the resulting multi-function naming scheme by collecting every
+`__module_init_*`-prefixed symbol across all linked objects, **sorting by
+name**, deduping, and calling each with no args — that convention is
+already shipping and tested, just never reused by the JIT path.
+
+### Contained fix attempted, PROVED to work for `var`, PROVED to segfault for `val` — reverted (instruction 2/4)
+
+Built the fix exactly as designed: widened `inject_freestanding_module_
+global_init` from `pub(super)` to `pub` (and its module from private to
+`pub`) so `run_file_jit` (a different crate) could call it; called it
+unconditionally on the already-import-flattened AST right after
+`load_module_with_imports` (freestanding was never the gate that mattered
+for a host JIT call site); after `compile_module`, collected every MIR
+function name starting with `__module_init_`, sorted (mirroring
+`generate_init_caller`'s exact convention), deduped, and called each via
+`em.execute(name, &[])` before `main`.
+
+**Result, PROVED via a same-shape `var`-vs-`val` A/B pair (only the
+declaration keyword differs):**
+
+```
+var B: bool = make_b()   ->  B=true   (correct, exit 0, no crash)
+val B: bool = make_b()   ->  Segmentation fault (core dumped), exit 139
+```
+
+Root cause of the segfault (INFERRED from the code path, not traced
+further): `inject_freestanding_module_global_init`'s non-Optional branch
+leaves the original declaration's initializer expression untouched and
+adds a **runtime assignment** to the same name in the synthesized init
+function — freestanding global storage is apparently always
+runtime-mutable regardless of `val`/`var`, so this is safe there, but
+hosted (non-freestanding) HIR/MIR lowering evidently treats a `val`
+module-level binding as a true immutable/read-only constant; writing to it
+from a separate function is undefined behavior in that lowering and
+crashes. This is a real semantic difference between freestanding and
+hosted global representation in this compiler, not a bug in the reused
+pass itself.
+
+**This is worse than the pre-fix bug for `val`-declared globals** (a
+silent wrong zero vs. a crash), and the real motivating case
+(`showcase_resolution_dims()` assigned to `val SHOWCASE_DIMS`/`val RW`/
+`val RH`) is exactly the `val` shape that crashes. Per instruction
+4/the standing "an open bug with a six-line repro beats a rushed codegen
+change" rule: **reverted all three files** (`exec_core.rs`,
+`pipeline/native_project/mod.rs`, `pipeline/native_project/
+module_global_init.rs`) back to HEAD, rebuilt, and confirmed the revert
+restores the safe (silently-wrong-but-non-crashing) pre-fix baseline —
+`val B: bool = make_b()` -> `B=false`, no crash, matching every prior
+pass's behavior exactly. Nothing from this attempt is landed. Making this
+safe for `val` requires either (a) making hosted module-level `val`
+globals genuinely runtime-mutable (a change to immutability enforcement
+in HIR/MIR global lowering, clearly out of "contained" scope) or (b) a
+different synthesis strategy that doesn't require writing to a `val` at
+all (not designed here) — flagged as the next concrete step for whoever
+picks this up, not attempted.
+
+### Gap 9 found on re-run (instruction 5: "do not report the web cell unblocked"; PROVED, reproducible)
+
+Per instruction, re-ran the real repro after the revert (nothing fixed,
+so no claim of unblocking is made). Two independent runs, both to
+completion of the 280 s watchdog, produced the **same, different**
+failure from every prior pass:
+
+```
+SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 SHOWCASE_RESOLUTION=480x360 \
+SIMPLE_WEB_RENDER_BUDGET_MS=120000 SIMPLE_TIMEOUT_SECONDS=280 \
+simple run examples/06_io/ui/web_render_file_gui.spl
+```
+```
+[INFO] JIT compilation failed, falling back to interpreter: HIR lowering error:
+Unsupported feature: CastElse { expr: Identifier("top_left"), target_type: Simple("i32"), fallback_fn: Integer(0) }
+...
+error: example timed out after 280s: examples/06_io/ui/web_render_file_gui.spl
+```
+
+This is the same `CastElse` defect class fixed at 6 sites earlier in this
+campaign (dedicated `<expr> as T else: fallback` postfix form, parser
+precedence swallows an enclosing `if`'s `else`), now hit at a 7th,
+previously-unseen site (`top_left`) — **not** gap 8's zero-value symptom;
+compilation itself fails here, before any of gap 8's code would even run,
+and `SIMPLE_JIT_STRICT` does not catch it because it's a HIR-lowering
+"Unsupported feature" error, not the "unresolved external symbol" class
+strict mode targets, so it silently falls back to the interpreter and then
+times out (the interpreted lane's well-documented ~4s/node cost exceeding
+the 280s budget for the module's overall script, not just the style loop).
+
+**Flagged, not chased further:** the immediately-prior pass, on
+byte-identical source and a functionally-equivalent binary (this pass's
+revert restores the exact prior state), produced a clean ~60s
+`pixels=0` compile-and-run with no CastElse error at all. Two consecutive
+runs THIS pass both hit the CastElse error consistently. Whether the
+difference between passes is genuine JIT non-determinism (a previously
+catalogued class of issue in this codebase, see project memory
+"flat_lane_nondeterminism_rootcause") or an artifact of this session's
+rebuild/restart was not determined — noted as an open question rather
+than asserted either way. Per instruction: **the web cell is NOT reported
+unblocked.** No non-zero pixels have been produced by any run in this
+entire chase.
+
+### The standing question: independent defects, or one structural weakness? (instruction: "say so if you see a common shape")
+
+**Not one weakness — two distinct, separately-evidenced shapes, plus one
+non-pattern:**
+
+1. **Shared MIR/codegen coverage gaps (gaps 6, 7).** Both are the SAME
+   shape: a specific expression form (bare `min`/`max`/`abs` calls; a
+   method call chained directly off certain STRING-returning methods)
+   falls through an incomplete lookup table in codegen that ALL backends
+   share (`mir/lower/lowering_expr_builtin.rs`'s `BuiltinCall` fallback;
+   `codegen/instr/body.rs`'s `types_map` pre-pass). Both reproduced
+   identically on the full canonical deployed binary (built via the
+   complete native-build toolchain, not just `run_file_jit`), confirming
+   these are backend-shared bugs, not pipeline-specific ones. Both fixed
+   with a small, additive table entry.
+2. **`run_file_jit` pipeline-completeness gaps (gap 4's W1006/lenient-mode
+   fix from earlier in this campaign, and now gap 8).** Both are the SAME
+   shape: `run_file_jit`'s simpler, single-file, no-whole-program-prescan
+   pipeline is missing a STEP that the whole-program `native_project`
+   pipeline already performs (there: `set_strict_mode(false)`/
+   `set_lenient_types(true)`; here: running non-literal global
+   initializers via a synthesized `__module_init`). Gap 8's fix direction
+   is even more literally the same pattern as gap 4's: reuse the
+   already-correct mechanism from the other pipeline, wire it into
+   `run_file_jit`. The `val`-immutability segfault is a NEW wrinkle this
+   pattern hadn't hit before (gap 4's fix was a pure flag flip with no
+   representation mismatch).
+3. **Gap 5 (`text.from_any`) is neither pattern** — a function that was
+   never implemented anywhere in the codebase, an ordinary unimplemented-
+   dead-code bug, not a systemic JIT weakness at all.
+
+**The single most actionable finding from this shape analysis:** every
+`run_file_jit`-only bug found in this campaign (gap 4, gap 8) has been
+"the whole-program pipeline already has this, `run_file_jit` just never
+calls it" — never a case where the correct mechanism didn't exist
+anywhere. A systematic, one-time diff of `run_file_jit`'s pipeline steps
+against `native_project::compiler.rs`'s pipeline steps would likely
+surface any REMAINING gaps of this shape in one pass, rather than one
+per bisection round. This is offered as the higher-value next step over
+continuing to chase individual symptoms through the real web repro.
+
+### The prize: still not captured
+
+No non-zero-pixel run has occurred in this entire chase. Gap 8 is
+root-caused and has a known-safe-for-`var`/known-unsafe-for-`val` partial
+fix (not landed). Gap 9 (CastElse at `top_left`, possibly non-deterministic
+in its appearance) is now the immediate next blocker, ahead of gap 8 in at
+least 2 of the last 2 runs.
+
+### Heuristic-flip question: still not evaluated
+
+Unchanged — no correct-or-non-degenerate JIT result exists for this
+example yet.
