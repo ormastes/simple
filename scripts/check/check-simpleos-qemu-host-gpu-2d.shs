@@ -12,6 +12,7 @@ NATIVE_BUILD_TIMEOUT=${SIMPLEOS_HOST_GPU_NATIVE_BUILD_TIMEOUT:-900}
 REQUIRE_CUDA=${SIMPLEOS_HOST_GPU_REQUIRE_CUDA:-0}
 PROCESSING_SELECTOR=${SIMPLEOS_HOST_GPU_PROCESSING_BACKEND:-auto}
 RSS_SAMPLE_INTERVAL=${SIMPLEOS_HOST_GPU_RSS_SAMPLE_INTERVAL:-0.1}
+DAEMON_READY_ATTEMPTS=${SIMPLEOS_HOST_GPU_DAEMON_READY_ATTEMPTS:-100}
 COMPILER_PROBE_TIMEOUT_SECONDS=5
 COMPILER_BUILD_TIMEOUT_SECONDS=60
 COMPILER_EXEC_TIMEOUT_SECONDS=5
@@ -39,6 +40,7 @@ HOST_GPU_WARM_SAMPLE_COUNT=$(sed -n 's/^val HOST_GPU_WARM_SAMPLE_COUNT: i64 = \(
 [ "$HOST_GPU_WARM_SAMPLE_COUNT" = 20 ] || exit 2
 RENDER_READBACK_P95_MAX_US=16700
 case "$NATIVE_BUILD_TIMEOUT" in ''|0|*[!0-9]*) exit 2 ;; esac
+case "$DAEMON_READY_ATTEMPTS" in ''|0|*[!0-9]*) exit 2 ;; esac
 
 case "$(uname -s)" in
     Linux) ACTIVE_HOST=linux ;;
@@ -672,6 +674,42 @@ processing_selector_evidence_valid() {
     [ "$selector" = auto ] && return 0
     [ -f "$log" ] &&
     [ "$(grep -ac "^HOST_GPU_DAEMON_SELECTOR processing_backend=$selector[[:space:]]*$" "$log")" -eq 1 ]
+}
+
+wait_for_daemon_selector() {
+    daemon_process=$1
+    daemon_log=$2
+    attempts=${3:-$DAEMON_READY_ATTEMPTS}
+    while [ "$attempts" -gt 0 ]; do
+        kill -0 "$daemon_process" 2>/dev/null || return 1
+        if grep -aq '^HOST_GPU_DAEMON_SELECTOR processing_backend=' "$daemon_log" 2>/dev/null; then
+            kill -0 "$daemon_process" 2>/dev/null && return 0
+            return 1
+        fi
+        sleep 0.1
+        attempts=$((attempts - 1))
+    done
+    return 1
+}
+
+daemon_ready_self_test() {
+    ready_log=$(mktemp)
+    ready_pid=
+    timeout_pid=
+    trap 'rm -f "$ready_log"; [ -z "${ready_pid:-}" ] || kill "$ready_pid" 2>/dev/null || true; [ -z "${timeout_pid:-}" ] || kill "$timeout_pid" 2>/dev/null || true' EXIT
+    (sleep 0.1; printf '%s\n' 'HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan' >"$ready_log"; sleep 0.2) &
+    ready_pid=$!
+    wait_for_daemon_selector "$ready_pid" "$ready_log" 5
+    wait "$ready_pid"
+    ready_pid=
+    : >"$ready_log"
+    sleep 1 &
+    timeout_pid=$!
+    ! wait_for_daemon_selector "$timeout_pid" "$ready_log" 1
+    kill "$timeout_pid" 2>/dev/null || true
+    wait "$timeout_pid" 2>/dev/null || true
+    timeout_pid=
+    echo "simpleos_qemu_host_gpu_daemon_ready_self_test=pass"
 }
 
 serial_processing_backend() {
@@ -2363,6 +2401,11 @@ if [ "${1:-}" = --self-test ]; then
     self_test
     exit 0
 fi
+if [ "${1:-}" = --self-test-daemon-ready ]; then
+    [ "$#" -eq 1 ] || exit 2
+    daemon_ready_self_test
+    exit $?
+fi
 if [ "${1:-}" = --self-test-metrics ]; then
     self_test_metrics
     exit 0
@@ -2614,6 +2657,10 @@ run_guest() {
     set -- "$@" --processing-verify-cpu
     "$daemon" "$@" >"$daemon_log" 2>&1 &
     daemon_pid=$!
+    if ! wait_for_daemon_selector "$daemon_pid" "$daemon_log"; then
+        cleanup_active_guest
+        return 1
+    fi
     case "$isa" in
         x86_64)
             set -- -machine q35 -accel "$qemu_accel" -m 512M -kernel "$kernel" -nographic -no-reboot \
