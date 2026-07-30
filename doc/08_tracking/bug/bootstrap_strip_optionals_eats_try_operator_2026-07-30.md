@@ -138,3 +138,51 @@ TYPES, which the rewrite legitimately strips). Current bootstrap
 artifacts therefore mis-execute `?` at exactly those 4 sites.
 Recommended shape is the same fallback-only pattern now used in
 module_loader: parse pristine first, rewrite only on parse failure.
+
+### LIVE gap CLOSED (2026-07-30, same session) + exposure count CORRECTED
+
+Fixed by applying the module_loader pattern to the native-build lane:
+`compile_file_to_object` now routes bootstrap normalization through a new
+`bootstrap_rewrite_if_unparseable(source, preserve)` helper that parses
+the pristine source FIRST and calls `apply_bootstrap_rewrite_for_target`
+only when that parse fails. The textual rewrite is left untouched — the
+`[u8]?`-type vs `xs[i]?`-try ambiguity is not resolvable textually, so
+the gate removes the need to resolve it.
+
+**Correction to the exposure count above:** genuine exposure is **2**
+sites, not 4. The two `src/os/crypto/ed25519_ops.spl` hits (lines 162,
+1025) are COMMENTS (`# Check: r^2 == u?`) — a `?` in a comment is
+semantically inert. The real sites are both in
+`src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl`:
+
+- **line 355 (plain-TCP path)** and **line 384 (TLS path)**:
+  `val raw_response = read_result?` where `read_result` comes from
+  `read_tcp_response_bytes(...)`. With `?` deleted, `raw_response` held
+  the whole `Result` wrapper, so (a) the `Err` from a failed/timed-out
+  TCP or TLS read was **never propagated — it was silently swallowed**,
+  and (b) the very next guard, `raw_response.len() == 0`, measured the
+  wrapper instead of the payload, so the "no response" check could not
+  fire either. This was a REAL defect in HTTP error handling under every
+  bootstrap native-build, not a latent one.
+
+PROVED (throwaway test against the real file, not landed):
+`PARSES=true`, gated output keeps both `= read_result?` occurrences
+(`GATED_KEEPS=2`) and is byte-identical to the source
+(`gated_eq_src=true`), while the raw rewrite keeps neither
+(`RAW_KEEPS=0`).
+
+Landed regression tests (`bootstrap_rewrite_try_operator_tests`):
+1. `parseable_source_keeps_all_try_operator_forms` — call, var and index
+   forms all survive the gate;
+2. `raw_textual_rewrite_still_eats_var_and_index_forms` — vacuity
+   anchor proving the gate is load-bearing (same inputs, raw function,
+   both eaten); if it ever passes it means the gate stopped mattering;
+3. `unparseable_legacy_source_still_gets_optional_type_stripping` — the
+   behavior the rewrite exists for is preserved: an unparseable legacy
+   source still gets `[u8]?` stripped.
+
+Regressions: all 8 pre-existing `bootstrap_rewrite_tests` still pass
+(11/11 in the module, including the pre-existing
+`dict_index_try_operator_currently_stripped_documented_gap`, which
+documents the raw function's behavior and is unaffected by the gate);
+`cargo build --release --bin simple` clean.

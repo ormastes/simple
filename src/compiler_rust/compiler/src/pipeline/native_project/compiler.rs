@@ -332,7 +332,21 @@ pub(crate) fn compile_file_to_object(
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
     let target = effective_target();
     let mut source = if is_bootstrap {
-        apply_bootstrap_rewrite_for_target(
+        // FALLBACK-ONLY (2026-07-30): `apply_bootstrap_rewrite` is a TEXTUAL
+        // rewrite and cannot distinguish an optional TYPE suffix (`[u8]?`)
+        // from the TRY OPERATOR on a variable/index (`r?`, `xs[i]?`). The
+        // 2026-07-16 root fix taught it to keep the `)?` call form, but the
+        // variable and index forms were still deleted, so `?` was a silent
+        // NO-OP at those sites in every bootstrap native-build — the same
+        // class of defect fixed for the run/test lane in module_loader
+        // (doc/08_tracking/bug/
+        // bootstrap_strip_optionals_eats_try_operator_2026-07-30.md).
+        //
+        // Parse the pristine source FIRST and only fall back to the legacy
+        // rewrite when that parse genuinely fails: a source the current
+        // parser accepts is never rewritten, which removes the ambiguity
+        // instead of trying (and failing) to resolve it textually.
+        bootstrap_rewrite_if_unparseable(
             source,
             matches!(
                 target.os,
@@ -788,6 +802,25 @@ fn find_balanced_gt(s: &str) -> Option<usize> {
 ///
 /// Handles: `?` stripping, `.?` -> `!= nil`, `fn()` types -> `any`,
 /// `impl<>` stripping, `cli` block commenting, etc.
+/// Bootstrap source normalization, applied ONLY when the pristine source
+/// does not parse.
+///
+/// `apply_bootstrap_rewrite` is textual and cannot distinguish an optional
+/// TYPE suffix (`[u8]?`) from the TRY OPERATOR on a variable or index
+/// (`r?`, `xs[i]?`) — it deletes both, making `?` a silent no-op at those
+/// sites. Gating on a real parse attempt sidesteps the ambiguity entirely:
+/// modern sources (which parse) are passed through byte-for-byte, and only
+/// genuinely-unparseable legacy sources get the lenient rewrite.
+///
+/// See doc/08_tracking/bug/
+/// bootstrap_strip_optionals_eats_try_operator_2026-07-30.md.
+fn bootstrap_rewrite_if_unparseable(source: &str, preserve_module_global_optional_calls: bool) -> String {
+    if simple_parser::Parser::new(source).parse().is_ok() {
+        return source.to_string();
+    }
+    apply_bootstrap_rewrite_for_target(source, preserve_module_global_optional_calls)
+}
+
 fn apply_bootstrap_rewrite(source: &str) -> String {
     apply_bootstrap_rewrite_for_target(source, false)
 }
@@ -1125,6 +1158,62 @@ fn apply_bootstrap_rewrite_for_target(source: &str, preserve_module_global_optio
     }
 
     s
+}
+
+#[cfg(test)]
+mod bootstrap_rewrite_try_operator_tests {
+    use super::{apply_bootstrap_rewrite, bootstrap_rewrite_if_unparseable};
+
+    /// All three try-operator forms must survive the bootstrap path for a
+    /// source the parser accepts. Regression test for the native-build half
+    /// of doc/08_tracking/bug/
+    /// bootstrap_strip_optionals_eats_try_operator_2026-07-30.md: the
+    /// 2026-07-16 fix taught the textual rewrite to keep `f(x)?`, but `r?`
+    /// and `xs[i]?` were still deleted, so `?` was a silent NO-OP there.
+    #[test]
+    fn parseable_source_keeps_all_try_operator_forms() {
+        let call = "fn f() -> Result<i64, text>:\n    val v = call(1)?\n    Ok(v)\n";
+        assert!(bootstrap_rewrite_if_unparseable(call, false).contains(")?"), "call form eaten");
+
+        let var = "fn f() -> Result<i64, text>:\n    val r = mk()\n    val h = r?\n    Ok(h)\n";
+        assert!(bootstrap_rewrite_if_unparseable(var, false).contains("r?"), "var form eaten");
+
+        let index = "fn f() -> Result<i64, text>:\n    val v = xs[0]?\n    Ok(v)\n";
+        assert!(bootstrap_rewrite_if_unparseable(index, false).contains("]?"), "index form eaten");
+    }
+
+    /// Vacuity anchor: the RAW textual rewrite really does eat the var and
+    /// index forms. If this ever starts passing, the gate above is no longer
+    /// load-bearing and the test above could pass vacuously.
+    #[test]
+    fn raw_textual_rewrite_still_eats_var_and_index_forms() {
+        let var = "fn f() -> Result<i64, text>:\n    val h = r?\n    Ok(h)\n";
+        assert!(
+            !apply_bootstrap_rewrite(var).contains("r?"),
+            "raw rewrite unexpectedly preserved the var form — re-check whether the parse-first gate is still needed"
+        );
+        let index = "fn f() -> i64:\n    val v = xs[0]?\n    v\n";
+        assert!(
+            !apply_bootstrap_rewrite(index).contains("]?"),
+            "raw rewrite unexpectedly preserved the index form"
+        );
+    }
+
+    /// The behavior the rewrite EXISTS for must keep working: a source the
+    /// current parser rejects still gets the lenient normalization, and
+    /// legitimate optional TYPE suffixes are still stripped.
+    #[test]
+    fn unparseable_legacy_source_still_gets_optional_type_stripping() {
+        // `fn f(x: i64) -> text?:` — optional return type the seed parser
+        // cannot handle; must be normalized (and `[u8]?` fields with it).
+        let legacy = "class C:\n    object_code: [u8]?\n\nfn f() -> text?:\n    ?\n";
+        let out = bootstrap_rewrite_if_unparseable(legacy, false);
+        assert!(
+            simple_parser::Parser::new(legacy).parse().is_err(),
+            "fixture must be unparseable for this test to exercise the fallback"
+        );
+        assert!(!out.contains("[u8]?"), "optional type suffix not stripped in fallback: {out}");
+    }
 }
 
 #[cfg(test)]
