@@ -50,12 +50,18 @@ a statement about this host at this tip.
 
 ## The two load-bearing claims, checked
 
-### (a) "Three host-WM cells unblocked, real window rendered at `54ed5df7c8b`" — REFUTED as stated
+### (a) "Three host-WM cells unblocked, real window rendered at `54ed5df7c8b`" — CLAIMED (real prior evidence, no artifact here)
 
-- `54ed5df7c8b` is **not a host-WM commit**: it is
+- `54ed5df7c8b` is, by its subject line,
   `fix(seed-interp): register rt_string_to_int + rt_raw_i64_to_string in
-  EXTERN_DISPATCH` (2026-07-28). PROVED by `git log -1`. The
-  window-rendered claim is **misattributed** to this hash.
+  EXTERN_DISPATCH` (2026-07-28) — PROVED by `git log -1`. Campaign memory
+  records that fix's *effect* as unblocking the host-WM cells, with
+  captured evidence (`WIN 2097154`, `windows=1 taskbar_items=1`, 550s
+  under Xvfb). Those are two linked facts, not a mislabeled commit: the
+  hash is the EXTERN_DISPATCH fix AND the window render is real prior
+  evidence. **The status point stands regardless: no artifact verifies it
+  on THIS host at THIS tip, so the correct status is CLAIMED** — the
+  earlier evidence is not discarded, it is simply not re-verified here.
 - The *real* named blocker for all three cells — a semantic-phase
   co-import failure where importing `common.ui.wm_app_process_contract`
   together with `std.nogc_sync_mut.ui.gui_renderer` gave
@@ -99,3 +105,64 @@ I ran (co-import, documented at ~14s) was chosen because it settles
 three cells at once; it completed in under a second. No expensive render
 or QEMU gate was run to manufacture a green, and every unverified row
 carries the exact command that would settle it.
+
+## Host-WM gate run (2026-07-30) — cells stay BLOCKED, now on a PROVISIONING gap
+
+`scripts/check/check-linux-hosted-wm-live-window-evidence.shs` (51KB,
+modified 2026-07-30 02:12) was run to settle cells #4-#6. **It cannot
+reach a pass on this host.** The gate is a provenance-attesting gate:
+every rejection below is an anti-fabrication guard, which is exactly why
+it cannot be cheaply faked — and why the prior macOS evidence came from a
+machine that had the assets.
+
+Gate contract (PROVED by reading): entry `src/os/hosted/hosted_entry.spl`
+native-built with `SIMPLE_LIB=src`; writes
+`build/linux-hosted-wm-live-window-evidence/` (`report.md`, `hosted-wm`,
+`build.log`, window PNG, framebuffer PPM, snapshot); ~25 sub-assertions
+(`framebuffer`, `live_window`, `glyph_crop`, `focus`, `pointer`,
+`keyboard`, `text`, `input_receipt`, `semantic`, `replay_rejection`,
+`move`, `maximize`, `restore`, deliberate-red calibration, ...) reduced
+to `linux_hosted_wm_live_window_status=pass|fail`. Budgets:
+`LINUX_HOSTED_WM_LIVE_TIMEOUT_SECS` default 60 (window wait),
+`LINUX_HOSTED_WM_BUILD_TIMEOUT_SECS` default 600 (native-build) — so a
+genuine full run is ~10 min, consistent with the 550s prior evidence.
+
+Wall chain, each PROVED by execution (every attempt ≤1s, so no timeout or
+kill-daemon interaction was possible; 4 daemon PIDs were live throughout):
+
+| # | `reason=` | Meaning | Satisfiable here? |
+|---|---|---|---|
+| 1 | `source-provenance-unavailable` | requires clean `src/os`+`src/lib`; the shared working copy had **29** uncommitted changes | YES — re-run in a clean worktree; `source_provenance_status=pass` confirmed |
+| 2 | `explicit-simple-bin-required` | `SIMPLE_BIN` must be passed explicitly | YES |
+| 3 | `rust-seed-forbidden` | rejects the Rust seed (correct per the pure-Simple standing rule) | YES — `build/redeploy_out/simple_stage2` (pure-Simple lineage) accepted |
+| 4 | `runtime-provider-explicit-required` | `SIMPLE_WM_RUNTIME_LIB` must be passed explicitly | YES |
+| 5 | `runtime-provider-sha` | caller must attest the provider's sha256 (`SIMPLE_WM_RUNTIME_LIB_SHA256`; no hardcoded pin) | YES — attesting the true sha is intended usage, not a bypass |
+| 6 | `runtime-provider-bootstrap-forbidden` | the **bootstrap** runtime `.so` is explicitly rejected | **NO** — the only self-hosted-lineage runtime lib on this host is the bootstrap one |
+| 7 | `pinned-font-asset-invalid` (unreached, but unreachable-to-pass) | hardcoded pin `FONT_ASSET_SHA256=2cb2adb3…` on `assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf` | **NO** — `assets/fonts/` holds **0 tracked files at tip** and the directory is absent from the working tree; the asset is not in the repo at all |
+
+**Verdict: cells #4-#6 remain BLOCKED — but the blocker is now precisely
+characterized and it is NOT a WM defect, NOT the co-import defect (proved
+gone above), and NOT Xvfb.** It is an **asset/runtime-provider
+provisioning gap**: two independent, deliberately-pinned prerequisites
+(a non-bootstrap self-hosted runtime provider `.so`; the pinned font
+asset) are simply not present on this host. Status vocabulary updated
+from UNKNOWN to BLOCKED for #4-#6 on that basis.
+
+Not fixed here, per brief: provisioning a pinned font asset and producing
+a non-bootstrap self-hosted runtime provider are neither one-liners nor
+this pass's scope, and the gate must not be weakened to accommodate their
+absence. Settling requirements for #4-#6 are therefore:
+1. provision `assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf`
+   matching sha256 `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`
+   (decide whether it belongs in-repo or in a fetch step — its absence
+   makes this gate unrunnable on any fresh checkout, which is a
+   reproducibility hole in the campaign's most load-bearing gate);
+2. produce a non-bootstrap self-hosted runtime provider `.so` and pass it
+   with its attested sha;
+3. then run the gate in a clean worktree (walls 1-5 are already known
+   satisfiable) and capture `window_id` + PNG/PPM + the ~25 statuses.
+
+**Revised scoreboard: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN** — no
+cell moved to GREEN, but three moved from UNKNOWN to BLOCKED-with-a-named
+cause and an actionable provisioning list, and the campaign now knows its
+top gate cannot run on a fresh Linux checkout as shipped.
