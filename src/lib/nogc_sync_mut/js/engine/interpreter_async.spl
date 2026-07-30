@@ -33,20 +33,29 @@ impl JsInterpreter:
 
     me _drain_pending_microtasks_up_to(callback_limit: i64) -> i64:
         var drain_count = 0
-        while self.pending_promise_tasks.len() > 0:
+        while self.pending_promise_task_head < self.pending_promise_tasks.len():
             if drain_count >= callback_limit:
                 self.logger.warn("Promise microtask drain limit reached")
+                self._compact_pending_promise_tasks()
                 return drain_count
             drain_count = drain_count + 1
-            val task = self.pending_promise_tasks[0]
-            var rest: [PendingPromiseTask] = []
-            var i = 1
-            while i < self.pending_promise_tasks.len():
-                rest.push(self.pending_promise_tasks[i])
-                i = i + 1
-            self.pending_promise_tasks = rest
+            val task = self.pending_promise_tasks[self.pending_promise_task_head]
+            self.pending_promise_task_head = self.pending_promise_task_head + 1
             self._run_promise_task(task.promise_id, task.handler_id)
+        self.pending_promise_tasks = []
+        self.pending_promise_task_head = 0
         drain_count
+
+    me _compact_pending_promise_tasks():
+        if self.pending_promise_task_head == 0:
+            return
+        var pending: [PendingPromiseTask] = []
+        var i = self.pending_promise_task_head
+        while i < self.pending_promise_tasks.len():
+            pending.push(self.pending_promise_tasks[i])
+            i = i + 1
+        self.pending_promise_tasks = pending
+        self.pending_promise_task_head = 0
 
     me drain_pending_microtasks() -> bool:
         self.execution_steps_remaining = MAX_SCRIPT_EXECUTION_STEPS
